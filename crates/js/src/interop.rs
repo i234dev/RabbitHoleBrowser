@@ -50,8 +50,11 @@ impl Realm {
                 }
             }
             ObjectKind::TypedArray(t) => {
-                if let Some(i) = key.as_array_index() {
-                    return crate::builtins::typed_array_get(self, t, i as usize).map(|v| Property::data(v, WRITABLE | ENUMERABLE));
+                // Integer-indexed exotic object: every canonical numeric key
+                // is an element access; out-of-range ones have no property.
+                if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(key) {
+                    let i = crate::builtins::typed_array::valid_integer_index(n, t.length)?;
+                    return crate::builtins::typed_array_get(self, t, i).map(|v| Property::data(v, WRITABLE | ENUMERABLE | CONFIGURABLE));
                 }
             }
             ObjectKind::Arguments => {}
@@ -256,10 +259,19 @@ impl Realm {
                     }
                 }
                 ObjectKind::TypedArray(t) => {
-                    if let Some(i) = key.as_array_index() {
+                    if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(&key) {
                         let t = TypedArrayData { kind: t.kind, buffer: t.buffer, byte_offset: t.byte_offset, length: t.length };
-                        let n = self.to_number(value)?;
-                        crate::builtins::typed_array_set(self, &t, i as usize, n);
+                        // Conversion happens even for out-of-range indices (it may throw).
+                        match crate::builtins::typed_array::valid_integer_index(n, t.length) {
+                            Some(i) => crate::builtins::typed_array::ta_set_value(self, &t, i, value)?,
+                            None => {
+                                if matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) {
+                                    crate::builtins::typed_array::to_bigint(self, value)?;
+                                } else {
+                                    self.to_number(value)?;
+                                }
+                            }
+                        }
                         return Ok(true);
                     }
                 }

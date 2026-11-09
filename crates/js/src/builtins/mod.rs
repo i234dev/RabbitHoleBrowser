@@ -4,9 +4,13 @@
 //! and call it from [`register_builtins`].
 
 pub mod array;
+pub mod collections;
+pub mod date;
 pub mod error;
+pub mod extras;
 pub mod function;
 pub mod global;
+pub mod intl;
 pub mod iterator;
 pub mod json;
 pub mod math;
@@ -17,6 +21,7 @@ pub mod reflect;
 pub mod regexp;
 pub mod string;
 pub mod symbol;
+pub mod typed_array;
 
 use crate::heap::*;
 use crate::interop::JsResult;
@@ -38,6 +43,11 @@ pub fn register_builtins(realm: &mut Realm) {
     reflect::register(realm);
     regexp::register(realm);
     global::register(realm);
+    date::register(realm);
+    collections::register(realm);
+    typed_array::register(realm);
+    intl::register(realm);
+    extras::register(realm);
 }
 
 /// `args[i]` or undefined.
@@ -110,7 +120,7 @@ pub fn typed_array_set(realm: &Realm, t: &TypedArrayData, index: usize, n: f64) 
     match t.kind {
         TypedArrayKind::Int8 => dst[0] = to_int32(n) as i8 as u8,
         TypedArrayKind::Uint8 => dst[0] = to_int32(n) as u8,
-        TypedArrayKind::Uint8Clamped => dst[0] = if n.is_nan() { 0 } else { n.round().clamp(0.0, 255.0) as u8 },
+        TypedArrayKind::Uint8Clamped => dst[0] = if n.is_nan() { 0 } else { n.clamp(0.0, 255.0).round_ties_even() as u8 },
         TypedArrayKind::Int16 => dst.copy_from_slice(&(to_int32(n) as i16).to_le_bytes()),
         TypedArrayKind::Uint16 => dst.copy_from_slice(&(to_int32(n) as u16).to_le_bytes()),
         TypedArrayKind::Int32 => dst.copy_from_slice(&to_int32(n).to_le_bytes()),

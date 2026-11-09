@@ -642,3 +642,344 @@ fn host_embedding() {
     let got = realm.eval("got", "hp2.js").unwrap();
     assert_eq!(realm.to_string(got).unwrap().to_rust_string(), "resolved");
 }
+
+// ------------------------------------------------------------------ Date
+
+#[test]
+fn date_basics() {
+    eq("new Date(Date.UTC(2026, 10, 9)).toISOString()", "2026-11-09T00:00:00.000Z");
+    eq("Date.UTC(2026, 10, 9, 12, 30, 15, 250)", "1794227415250");
+    eq("new Date('2026-11-09T12:30:15.250Z').getTime()", "1794227415250");
+    eq("new Date('2026-11-09').getTime()", "1794182400000");
+    eq("new Date(0).toISOString()", "1970-01-01T00:00:00.000Z");
+    eq("new Date(-1).toISOString()", "1969-12-31T23:59:59.999Z");
+    eq("new Date(8.64e15).toISOString()", "+275760-09-13T00:00:00.000Z");
+    eq("isNaN(new Date(8.64e15 + 1).getTime())", "true");
+    eq("new Date(NaN) + ''", "Invalid Date");
+    eq("String(new Date('garbage'))", "Invalid Date");
+    throws("new Date(NaN).toISOString()", "RangeError");
+    eq("new Date(NaN).toJSON()", "null");
+    eq("typeof Date()", "string");
+    eq("Date.prototype.toUTCString.call(new Date(Date.UTC(1994, 10, 6, 8, 49, 37)))", "Sun, 06 Nov 1994 08:49:37 GMT");
+    eq("new Date(Date.UTC(2024, 1, 29)).getUTCDate()", "29");
+    eq("new Date(Date.UTC(2023, 1, 29)).getUTCMonth()", "2"); // overflow into March
+    eq("new Date(Date.UTC(2026, 0, 1)).getUTCDay()", "4"); // Thursday
+    eq("new Date(Date.UTC(-1, 0, 1)).getUTCFullYear()", "-1");
+    eq("new Date(Date.UTC(99, 0, 1)).getUTCFullYear()", "1999");
+    eq("new Date(2026, 0, 15, 12).getHours()", "12");
+    eq("new Date(2026, 0, 15, 12).getFullYear() + '-' + new Date(2026, 0, 15, 12).getMonth() + '-' + new Date(2026, 0, 15, 12).getDate()", "2026-0-15");
+    eq("new Date(2026, 5, 15).getTimezoneOffset() === -new Date(2026, 5, 15).getTimezoneOffset() * -1", "true");
+    // Local round trip through setters.
+    eq("var d = new Date(2026, 10, 9, 10, 20, 30); d.setMonth(0); d.getMonth()", "0");
+    eq("var d = new Date(2026, 10, 9, 10, 20, 30); d.setDate(40); d.getMonth() + '/' + d.getDate()", "11/10");
+    eq("var d = new Date(2026, 10, 9); d.setFullYear(2000, 1, 29); d.getDate()", "29");
+    eq("var d = new Date(0); d.setUTCHours(25); d.toISOString()", "1970-01-02T01:00:00.000Z");
+    eq("var d = new Date(NaN); d.setFullYear(2020); d.getFullYear()", "2020");
+    eq("var d = new Date(2026, 0, 1); d.setYear(99); d.getFullYear()", "1999");
+    eq("new Date(2026, 0, 1).getYear()", "126");
+    eq("var d = new Date(0); d.setTime(1e12); d.getTime()", "1000000000000");
+    eq("new Date(1e12).valueOf()", "1000000000000");
+    eq("new Date(new Date(5)).getTime()", "5");
+    eq("new Date('1995-12-17T03:24:00Z') - new Date('1995-12-17T03:23:00Z')", "60000");
+    eq("`${new Date(0)}`.startsWith('Thu Jan 01 1970') || `${new Date(0)}`.startsWith('Wed Dec 31 1969')", "true");
+    eq("new Date(0)[Symbol.toPrimitive]('number')", "0");
+    eq("typeof new Date(0)[Symbol.toPrimitive]('default')", "string");
+    eq("new Date(0) + 1 === new Date(0).toString() + '1'", "true");
+    eq("Object.prototype.toString.call(new Date())", "[object Date]");
+    eq("JSON.stringify({d: new Date(Date.UTC(2026, 0, 2))})", "{\"d\":\"2026-01-02T00:00:00.000Z\"}");
+    eq("new Date(Date.UTC(2026, 10, 9, 15, 4, 5)).toISOString().length", "24");
+    eq("/^\\d{2}:\\d{2}:\\d{2} GMT[+-]\\d{4} \\(.+\\)$/.test(new Date(0).toTimeString())", "true");
+    eq("/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Dec) \\d{2} 19(69|70)$/.test(new Date(0).toDateString())", "true");
+    // Distance from the TZif-derived offset to toString's GMT offset must agree.
+    eq("(function(){ var d = new Date(2026, 6, 1); var m = /GMT([+-])(\\d{2})(\\d{2})/.exec(d.toString()); var off = (m[1] === '-' ? -1 : 1) * (+m[2] * 60 + +m[3]); return off === -d.getTimezoneOffset(); })()", "true");
+}
+
+#[test]
+fn date_parsing_forms() {
+    eq("Date.parse('2026')", "1767225600000");
+    eq("Date.parse('2026-11')", "1793491200000");
+    eq("Date.parse('2026-11-09T10:00:00+01:00')", "1794214800000");
+    eq("Date.parse('2026-11-09T10:00:00.5Z')", "1794218400500");
+    eq("Date.parse('2026-11-09T24:00:00Z')", "1794268800000");
+    eq("isNaN(Date.parse('2026-13-01'))", "true");
+    eq("isNaN(Date.parse('2026-11-09T25:00:00Z'))", "true");
+    eq("Date.parse('Sun, 06 Nov 1994 08:49:37 GMT')", "784111777000");
+    eq("Date.parse('Sunday, 06-Nov-94 08:49:37 GMT')", "784111777000");
+    eq("Date.parse('Sun Nov  6 08:49:37 1994 UTC')", "784111777000");
+    eq("Date.parse('Sun Nov 06 1994 08:49:37 GMT+0000 (Coordinated Universal Time)')", "784111777000");
+    eq("Date.parse('Nov 6, 1994 08:49:37 GMT')", "784111777000");
+    eq("Date.parse('6 Nov 1994 08:49:37 +0100')", "784108177000");
+    eq("Date.parse('11/6/1994 8:49:37 AM GMT')", "784111777000");
+    eq("Date.parse('11/6/1994 8:49:37 PM GMT')", "784154977000");
+    eq("Date.parse('1994/11/06 08:49:37 GMT')", "784111777000");
+    eq("Date.parse('November 6, 1994 UTC')", "784080000000");
+    eq("Date.parse('6 November 1994 00:00 Z')", "784080000000");
+    eq("Date.parse('Thu, 01 Jan 1970 00:00:00 GMT')", "0");
+    eq("Date.parse('1970-01-01T00:00:00.000+00:00')", "0");
+    eq("Date.parse('1970-01-01 00:00:00Z')", "0");
+    eq("Date.parse('2024-02-29T12:00Z') - Date.parse('2024-02-28T12:00Z')", "86400000");
+    // Local forms round-trip through the local getters.
+    eq("new Date('11/9/2026').getDate()", "9");
+    eq("new Date('11/9/2026 10:30').getHours()", "10");
+    eq("new Date('Nov 9, 2026').getMonth()", "10");
+    eq("new Date('2026-11-09T10:00:00').getHours()", "10");
+    eq("new Date(Date.parse(new Date(2026, 10, 9, 10, 20, 30).toString())).getTime() === new Date(2026, 10, 9, 10, 20, 30).getTime()", "true");
+    eq("new Date(new Date(1e12).toUTCString()).getTime()", "1000000000000");
+    eq("new Date(new Date(1e12).toISOString()).getTime()", "1000000000000");
+}
+
+#[test]
+fn date_time_zone_matches_tzif() {
+    // The engine's TZif reader and the libc-free `date` helper must agree
+    // with each other across DST (only meaningful outside UTC).
+    let out = run("(function(){ var jan = new Date(2026, 0, 15).getTimezoneOffset(); var jul = new Date(2026, 6, 15).getTimezoneOffset(); return jan + ',' + jul; })()").unwrap();
+    let parts: Vec<i64> = out.split(',').map(|p| p.parse().unwrap()).collect();
+    let tz = crate::builtins::date::tz();
+    let jan_off = tz.offset_at(crate::builtins::date::utc_from_local(crate::builtins::date::make_date(crate::builtins::date::make_day(2026.0, 0.0, 15.0), 0.0)) as i64 / 1000).0;
+    assert_eq!(parts[0], -(jan_off as i64) / 60);
+    if tz.name == "Europe/Madrid" {
+        assert_eq!(parts, vec![-60, -120]);
+        // DST starts 2026-03-29 at 02:00 local (01:00 UTC).
+        eq("new Date(Date.UTC(2026, 2, 29, 0, 59)).getTimezoneOffset()", "-60");
+        eq("new Date(Date.UTC(2026, 2, 29, 1, 0)).getTimezoneOffset()", "-120");
+        eq("new Date(2026, 2, 29, 2, 30).getHours()", "3"); // skipped hour
+        eq("new Date(2026, 6, 1).toString().includes('GMT+0200 (Central European Summer Time)')", "true");
+        eq("new Date(2026, 0, 1).toString().includes('GMT+0100 (Central European Standard Time)')", "true");
+    }
+}
+
+#[test]
+fn date_locale_formatting() {
+    eq("new Date(Date.UTC(2026, 10, 9, 10, 0, 0)).toLocaleString('en-US', {timeZone: 'UTC'})", "11/9/2026, 10:00:00 AM");
+    eq("new Date(Date.UTC(2026, 10, 9, 22, 5, 9)).toLocaleTimeString('en-US', {timeZone: 'UTC'})", "10:05:09 PM");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('en-US', {timeZone: 'UTC'})", "11/9/2026");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('en-US', {year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC'})", "November 9, 2026");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('en-US', {weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC'})", "Monday, November 9, 2026");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('en-US', {month: 'short', day: 'numeric', timeZone: 'UTC'})", "Nov 9");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('en-GB', {timeZone: 'UTC'})", "09/11/2026");
+    eq("new Date(Date.UTC(2026, 10, 9, 10)).toLocaleString('es-ES', {timeZone: 'UTC'})", "9/11/2026, 10:00:00");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('es', {weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC'})", "lunes, 9 de noviembre de 2026");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('de-DE', {timeZone: 'UTC'})", "9.11.2026");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('de', {day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC'})", "9. November 2026");
+    eq("new Date(Date.UTC(2026, 10, 9, 15, 7)).toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', timeZone: 'UTC'})", "03:07 PM");
+    eq("new Date(Date.UTC(2026, 10, 9, 15, 7)).toLocaleTimeString('en-US', {hour12: false, timeZone: 'UTC'})", "15:07:00");
+    eq("new Date(Date.UTC(2026, 10, 9, 15, 7)).toLocaleString('en-US', {dateStyle: 'full', timeStyle: 'short', timeZone: 'UTC'})", "Monday, November 9, 2026 at 3:07 PM");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('en-US', {dateStyle: 'medium', timeZone: 'UTC'})", "Nov 9, 2026");
+    eq("new Date(Date.UTC(2026, 10, 9)).toLocaleDateString('ja-JP', {timeZone: 'UTC'})", "2026/11/9");
+    eq("new Date(NaN).toLocaleString()", "Invalid Date");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'UTC'}).format(new Date(Date.UTC(2026, 10, 9)))", "11/9/2026");
+    eq("var f = new Intl.DateTimeFormat('en-US', {month: 'long', timeZone: 'UTC'}).format; [new Date(Date.UTC(2026, 0, 1))].map(f)[0]", "January");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'UTC'}).resolvedOptions().timeZone", "UTC");
+    eq("new Intl.DateTimeFormat('en-US', {timeZone: 'UTC', year: 'numeric', month: '2-digit'}).formatToParts(new Date(Date.UTC(2026, 10, 9))).map(p => p.type).join()", "month,literal,year");
+    throws("new Date().toLocaleString('en-US', {timeZone: 'Mars/Olympus'})", "RangeError");
+    if std::path::Path::new("/usr/share/zoneinfo/America/New_York").exists() {
+        eq("new Date(Date.UTC(2026, 6, 4, 16, 0)).toLocaleString('en-US', {timeZone: 'America/New_York'})", "7/4/2026, 12:00:00 PM");
+        eq("new Date(Date.UTC(2026, 0, 4, 16, 0)).toLocaleString('en-US', {timeZone: 'America/New_York', timeZoneName: 'short'})", "1/4/2026, 11:00:00 AM EST");
+        eq("new Date(Date.UTC(2026, 0, 4, 16, 0)).toLocaleTimeString('ja-JP', {timeZone: 'Asia/Tokyo'})", "1:00:00");
+        eq("new Intl.DateTimeFormat('en-US', {timeZone: 'Europe/Madrid'}).resolvedOptions().timeZone", "Europe/Madrid");
+    }
+}
+
+// ----------------------------------------------------------- Collections
+
+#[test]
+fn maps_and_sets() {
+    eq("var m = new Map([[1, 'a'], [2, 'b']]); m.set(3, 'c'); [m.size, m.get(2), m.has(4), m.delete(1), m.size].join()", "3,b,false,true,2");
+    eq("var m = new Map(); m.set(NaN, 1); m.set(-0, 2); [m.get(NaN), m.get(0), m.has(+0), [...m.keys()][1] === 0 && 1 / [...m.keys()][1] === Infinity].join()", "1,2,true,true");
+    eq("var m = new Map([['b', 1], ['a', 2]]); m.delete('b'); m.set('b', 3); [...m.keys()].join()", "a,b");
+    eq("[...new Map([[1, 2]]).entries()][0].join()", "1,2");
+    eq("var m = new Map([[1, 2], [3, 4]]); var out = []; m.forEach(function(v, k, mm){ out.push(k + ':' + v + ':' + (mm === m)); if (k === 1) { m.delete(3); m.set(5, 6); } }); out.join('|')", "1:2:true|5:6:true");
+    eq("var m = new Map([[1, 1], [2, 2]]); var it = m.keys(); it.next(); m.clear(); m.set(9, 9); JSON.stringify([it.next(), it.next()])", "[{\"value\":9,\"done\":false},{\"done\":true}]");
+    eq("Object.prototype.toString.call(new Map()) + Object.prototype.toString.call(new Set())", "[object Map][object Set]");
+    eq("Map.prototype[Symbol.iterator] === Map.prototype.entries && Set.prototype[Symbol.iterator] === Set.prototype.values && Set.prototype.keys === Set.prototype.values", "true");
+    throws("Map()", "TypeError");
+    throws("new Map([1])", "TypeError");
+    eq("var s = new Set([1, 2, 2, 3, NaN, NaN]); [s.size, s.has(NaN), s.add(4) === s, s.delete(1), [...s].join()].join('|')", "4|true|true|true|2,3,NaN,4");
+    eq("[...new Set('hello')].join('')", "helo");
+    eq("var out = []; var s = new Set([1, 2]); s.forEach(function(v, v2, ss){ out.push(v === v2 && ss === s); if (v === 1) s.add(3); }); out.join()", "true,true,true");
+    eq("[...new Set([1, 2, 3]).union(new Set([3, 4]))].join()", "1,2,3,4");
+    eq("[...new Set([1, 2, 3]).intersection(new Set([2, 3, 4]))].join()", "2,3");
+    eq("[...new Set([1, 2, 3]).difference(new Set([2]))].join()", "1,3");
+    eq("[...new Set([1, 2, 3]).symmetricDifference(new Set([3, 4]))].join()", "1,2,4");
+    eq("[new Set([1]).isSubsetOf(new Set([1, 2])), new Set([1, 2]).isSupersetOf(new Set([2])), new Set([1]).isDisjointFrom(new Set([2])), new Set([1]).isDisjointFrom(new Set([1]))].join()", "true,true,true,false");
+    eq("[...new Set([1, 2]).union(new Map([[2, 'x'], [3, 'y']]))].join()", "1,2,3");
+    throws("new Set([1]).union([1, 2])", "TypeError");
+    eq("var g = Map.groupBy([1, 2, 3, 4], n => n % 2 ? 'odd' : 'even'); g.get('odd').join() + '|' + g.get('even').join()", "1,3|2,4");
+    eq("var k = {}; var wm = new WeakMap([[k, 1]]); [wm.get(k), wm.has({}), wm.set(k, 2) === wm, wm.get(k), wm.delete(k), wm.has(k)].join()", "1,false,true,2,true,false");
+    throws("new WeakMap().set(1, 1)", "TypeError");
+    throws("new WeakSet().add('x')", "TypeError");
+    eq("var o = {}; var ws = new WeakSet([o]); [ws.has(o), ws.has({}), ws.delete(o), ws.has(o)].join()", "true,false,true,false");
+    eq("new WeakMap().set(Symbol('s'), 1).size", "undefined");
+    eq("class MyMap extends Map { constructor(it) { super(it); this.tag = 'x'; } } var mm = new MyMap([[1, 2]]); [mm instanceof Map, mm.get(1), mm.tag].join()", "true,2,x");
+}
+
+// ---------------------------------------------------------- Typed arrays
+
+#[test]
+fn typed_arrays() {
+    eq("new Uint8Array(4).length", "4");
+    eq("new Uint8Array([1, 2, 300]).join()", "1,2,44");
+    eq("new Uint8ClampedArray([-5, 300, 1.5, 2.5, NaN]).join()", "0,255,2,2,0");
+    eq("new Int8Array([200]).join() + ',' + new Int16Array([70000])[0] + ',' + new Uint32Array([-1])[0]", "-56,4464,4294967295");
+    eq("Float32Array.of(1.1)[0].toFixed(5)", "1.10000");
+    eq("new Float64Array([0.1, 0.2]).reduce((a, b) => a + b)", "0.30000000000000004");
+    eq("var b = new ArrayBuffer(8); var v = new DataView(b); v.setUint16(0, 258); v.setUint16(2, 258, true); [new Uint8Array(b).join(), v.getUint16(0), v.getUint16(0, true), v.getInt8(0)].join('|')", "1,2,2,1,0,0,0,0|258|513|1");
+    eq("var b = new ArrayBuffer(8); new DataView(b).setFloat64(0, Math.PI); new DataView(b).getFloat64(0) === Math.PI", "true");
+    eq("var b = new ArrayBuffer(8); new DataView(b).setBigInt64(0, -2n); new DataView(b).getBigUint64(0)", "18446744073709551614");
+    throws("new DataView(new ArrayBuffer(4)).getUint32(1)", "RangeError");
+    throws("new DataView(new ArrayBuffer(4), 5)", "RangeError");
+    eq("var buf = new ArrayBuffer(16); var a = new Int32Array(buf, 4, 2); a[0] = 7; a[1] = 8; [a.byteOffset, a.byteLength, a.length, new Int32Array(buf)[1], a.buffer === buf].join()", "4,8,2,7,true");
+    throws("new Int32Array(new ArrayBuffer(7))", "RangeError");
+    throws("new Int32Array(new ArrayBuffer(8), 2)", "RangeError");
+    eq("var a = new Uint8Array([1, 2, 3, 4]); var s = a.subarray(1, 3); s[0] = 9; [a.join(), s.join(), s.buffer === a.buffer, s.byteOffset].join('|')", "1,9,3,4|9,3|true|1");
+    eq("var a = new Uint8Array([1, 2, 3, 4]); var c = a.slice(1, 3); c[0] = 9; a.join() + '|' + c.join()", "1,2,3,4|9,3");
+    eq("var a = new Uint8Array(6); a.set([1, 2, 3]); a.set(new Uint8Array([7, 8]), 3); a.join()", "1,2,3,7,8,0");
+    eq("var a = new Uint8Array([1, 2, 3, 4, 5]); a.set(a.subarray(0, 3), 2); a.join()", "1,2,1,2,3");
+    throws("new Uint8Array(2).set([1, 2, 3])", "RangeError");
+    eq("new Float64Array([3, NaN, -0, 0, -1, 10]).sort().join()", "-1,0,0,3,10,NaN");
+    eq("var s = new Float64Array([3, NaN, -0, 0]).sort(); 1 / s[0] + ',' + 1 / s[1]", "-Infinity,Infinity");
+    eq("new Int16Array([5, 1, 4]).sort((a, b) => b - a).join()", "5,4,1");
+    eq("new Uint8Array([3, 1, 2]).toSorted().join() + '|' + new Uint8Array([3, 1, 2]).toReversed().join() + '|' + new Uint8Array([3, 1, 2]).with(0, 9).join()", "1,2,3|2,1,3|9,1,2");
+    eq("new Uint8Array([1, 2, 3]).map(x => x * 2).join() + '|' + new Uint8Array([1, 2, 3]).filter(x => x > 1).join()", "2,4,6|2,3");
+    eq("var a = new Uint8Array([1, 2, 3]); [a.at(-1), a.indexOf(2), a.includes(3), a.lastIndexOf(1), a.find(x => x > 1), a.findIndex(x => x > 1), a.findLast(x => x < 3), a.findLastIndex(x => x < 3), a.every(x => x > 0), a.some(x => x > 2)].join()", "3,1,true,0,2,1,2,1,true,true");
+    eq("[...new Uint8Array([1, 2]).entries()].map(e => e.join(':')).join() + '|' + [...new Uint8Array([5, 6]).keys()].join() + '|' + [...new Uint8Array([5, 6])].join()", "0:1,1:2|0,1|5,6");
+    eq("new Uint8Array([1, 2, 3, 4, 5]).copyWithin(0, 3).join()", "4,5,3,4,5");
+    eq("new Uint8Array(4).fill(7, 1, 3).join()", "0,7,7,0");
+    eq("new Uint8Array([1, 2, 3]).reverse().join()", "3,2,1");
+    eq("Uint8Array.from([1, 2, 3], x => x * 2).join() + '|' + Uint8Array.from(new Set([4, 5])).join() + '|' + Int8Array.of(1, -1).join()", "2,4,6|4,5|1,-1");
+    eq("var a = new Uint8Array(2); a[5] = 1; a[-1] = 2; a['1'] = 3; [a.length, a[5], a[-1], a[1], Object.keys(a).join(), 'x' in a, '-1' in a, '1' in a].join('|')", "2|||3|0,1|false|false|true");
+    eq("Object.prototype.toString.call(new Uint8Array()) + ',' + Uint8Array.BYTES_PER_ELEMENT + ',' + Float64Array.prototype.BYTES_PER_ELEMENT + ',' + new Uint8Array()[Symbol.toStringTag]", "[object Uint8Array],1,8,Uint8Array");
+    eq("Object.getPrototypeOf(Uint8Array) === Object.getPrototypeOf(Int32Array) && Object.getPrototypeOf(Uint8Array.prototype) === Object.getPrototypeOf(Int32Array.prototype)", "true");
+    eq("new BigInt64Array([1n, -1n]).join() + '|' + new BigUint64Array([-1n])[0]", "1,-1|18446744073709551615");
+    throws("new BigInt64Array([1])", "TypeError");
+    throws("new Uint8Array([1n])", "TypeError");
+    eq("ArrayBuffer.isView(new Uint8Array()) + ',' + ArrayBuffer.isView(new DataView(new ArrayBuffer(1))) + ',' + ArrayBuffer.isView([])", "true,true,false");
+    eq("var b = new ArrayBuffer(4); new Uint8Array(b).set([1, 2, 3, 4]); new Uint8Array(b.slice(1, 3)).join() + ',' + b.slice(-1).byteLength", "2,3,1");
+    eq("new Uint8Array(new Uint16Array([258, 3])).join()", "2,3");
+    eq("JSON.stringify(new Uint8Array([1, 2]))", "{\"0\":1,\"1\":2}");
+    eq("Array.from(new Uint8Array([1, 2])).concat([3]).join()", "1,2,3");
+    eq("new Uint8Array([1, 2]).toString() + '|' + new Uint8Array([1000]).toLocaleString('en-US')", "1,2|232");
+    eq("class U extends Uint8Array {} var u = new U(2); [u instanceof Uint8Array, u.map(x => x) instanceof U, u.length].join()", "true,true,2");
+    eq("new SharedArrayBuffer(4).byteLength", "4");
+    eq("var a = new Int32Array(2); [Atomics.add(a, 0, 5), Atomics.load(a, 0), Atomics.sub(a, 0, 2), Atomics.exchange(a, 0, 9), Atomics.compareExchange(a, 0, 9, 1), Atomics.load(a, 0), Atomics.store(a, 1, 7), Atomics.or(a, 1, 8), Atomics.and(a, 1, 12), Atomics.xor(a, 1, 1), a[1], Atomics.isLockFree(4), Atomics.notify(a, 0)].join()", "0,5,5,3,9,1,7,7,15,12,13,true,0");
+    throws("Atomics.add(new Float32Array(1), 0, 1)", "TypeError");
+}
+
+// ------------------------------------------------------------------ Intl
+
+#[test]
+fn intl_number_format() {
+    eq("(1234567.891).toLocaleString('en-US')", "1,234,567.891");
+    eq("(1234567.891).toLocaleString('es-ES')", "1.234.567,891");
+    eq("(1234).toLocaleString('es-ES') + '|' + (12345).toLocaleString('es-ES')", "1234|12.345");
+    eq("(1234567.891).toLocaleString('de-DE')", "1.234.567,891");
+    eq("(0.5).toLocaleString('en-US', {style: 'percent'})", "50%");
+    eq("(0.256).toLocaleString('en-US', {style: 'percent', maximumFractionDigits: 1})", "25.6%");
+    eq("(1234.5).toLocaleString('en-US', {style: 'currency', currency: 'USD'})", "$1,234.50");
+    eq("(1234.5).toLocaleString('es-ES', {style: 'currency', currency: 'EUR'})", "1234,50\u{a0}€");
+    eq("(12345.5).toLocaleString('de-DE', {style: 'currency', currency: 'EUR'})", "12.345,50\u{a0}€");
+    eq("(1234.5).toLocaleString('en-US', {style: 'currency', currency: 'EUR'})", "€1,234.50");
+    eq("(5000).toLocaleString('ja-JP', {style: 'currency', currency: 'JPY'})", "¥5,000");
+    eq("(1234.5).toLocaleString('en-US', {style: 'currency', currency: 'USD', currencyDisplay: 'code'})", "USD\u{a0}1,234.50");
+    eq("(1).toLocaleString('en-US', {style: 'currency', currency: 'USD', currencyDisplay: 'name'}) + '|' + (2).toLocaleString('en-US', {style: 'currency', currency: 'USD', currencyDisplay: 'name'})", "1.00 US dollar|2.00 US dollars");
+    eq("new Intl.NumberFormat('en-US', {minimumFractionDigits: 2}).format(3)", "3.00");
+    eq("new Intl.NumberFormat('en-US', {maximumFractionDigits: 0}).format(2.5) + ',' + new Intl.NumberFormat('en-US', {maximumFractionDigits: 0}).format(3.5) + ',' + new Intl.NumberFormat('en-US', {maximumFractionDigits: 2}).format(1.005)", "3,4,1.01");
+    eq("new Intl.NumberFormat('en-US', {notation: 'compact'}).format(1234) + ',' + new Intl.NumberFormat('en-US', {notation: 'compact'}).format(12345) + ',' + new Intl.NumberFormat('en-US', {notation: 'compact'}).format(1500000) + ',' + new Intl.NumberFormat('en-US', {notation: 'compact'}).format(999)", "1.2K,12K,1.5M,999");
+    eq("new Intl.NumberFormat('en-US', {notation: 'compact', compactDisplay: 'long'}).format(2500000)", "2.5 million");
+    eq("new Intl.NumberFormat('en-US', {minimumIntegerDigits: 3}).format(7)", "007");
+    eq("new Intl.NumberFormat('en-US', {useGrouping: false}).format(1234567)", "1234567");
+    eq("new Intl.NumberFormat('en-US', {signDisplay: 'always'}).format(5) + ',' + new Intl.NumberFormat('en-US', {signDisplay: 'exceptZero'}).format(0) + ',' + new Intl.NumberFormat('en-US').format(-5)", "+5,0,-5");
+    eq("new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3}).format(123456) + ',' + new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3}).format(0.00012345)", "123,000,0.000123");
+    eq("new Intl.NumberFormat('en-US', {style: 'unit', unit: 'kilometer'}).format(12) + '|' + new Intl.NumberFormat('en-US', {style: 'unit', unit: 'kilometer', unitDisplay: 'long'}).format(12)", "12 km|12 kilometers");
+    eq("new Intl.NumberFormat('en-US').format(Infinity) + ',' + new Intl.NumberFormat('en-US').format(NaN) + ',' + new Intl.NumberFormat('en-US').format(12345678901234567890n)", "∞,NaN,12,345,678,901,234,567,890");
+    eq("new Intl.NumberFormat('en-US').formatToParts(-1234.5).map(p => p.type + ':' + p.value).join('|')", "minusSign:-|integer:1|group:,|integer:234|decimal:.|fraction:5");
+    eq("var f = new Intl.NumberFormat('en-US').format; [1000, 2000].map(f).join('|')", "1,000|2,000");
+    eq("new Intl.NumberFormat('es-ES').resolvedOptions().locale + ',' + new Intl.NumberFormat('en-US', {style: 'currency', currency: 'usd'}).resolvedOptions().currency", "es-ES,USD");
+    throws("new Intl.NumberFormat('en-US', {style: 'currency'})", "TypeError");
+    throws("new Intl.NumberFormat('en-US', {maximumFractionDigits: 101})", "RangeError");
+    eq("(1234.5).toLocaleString() === (1234.5).toLocaleString('en-US')", "true");
+    eq("(255).toLocaleString(undefined, {minimumFractionDigits: 1})", "255.0");
+    eq("[1234.5, 6].toLocaleString('en-US')", "1,234.5,6");
+    eq("(12n).toLocaleString('en-US')", "12");
+}
+
+#[test]
+fn intl_collation_plural_relative_list() {
+    eq("['b', 'a', 'C', 'á'].sort(new Intl.Collator('en').compare).join()", "a,á,b,C");
+    eq("['z', 'a', 'Z', 'A'].sort((x, y) => x.localeCompare(y)).join()", "a,A,z,Z");
+    eq("'a'.localeCompare('A', 'en', {sensitivity: 'base'}) + ',' + 'a'.localeCompare('á', 'en', {sensitivity: 'base'}) + ',' + 'a'.localeCompare('á', 'en', {sensitivity: 'accent'}) + ',' + 'a'.localeCompare('b')", "0,0,-1,-1");
+    eq("['item10', 'item2', 'item1'].sort(new Intl.Collator('en', {numeric: true}).compare).join()", "item1,item2,item10");
+    eq("['item10', 'item2'].sort(new Intl.Collator('en').compare).join()", "item10,item2");
+    eq("new Intl.Collator('de', {sensitivity: 'base'}).compare('ä', 'a')", "0");
+    eq("new Intl.Collator().resolvedOptions().sensitivity", "variant");
+    eq("var pr = new Intl.PluralRules('en-US'); [pr.select(0), pr.select(1), pr.select(2), pr.select(1.5)].join()", "other,one,other,other");
+    eq("var pr = new Intl.PluralRules('en-US', {type: 'ordinal'}); [1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101].map(n => pr.select(n)).join()", "one,two,few,other,other,other,other,one,two,few,one");
+    eq("new Intl.PluralRules('fr').select(0) + ',' + new Intl.PluralRules('ru').select(5) + ',' + new Intl.PluralRules('ja').select(1)", "one,many,other");
+    eq("var rtf = new Intl.RelativeTimeFormat('en'); [rtf.format(3, 'day'), rtf.format(-1, 'day'), rtf.format(1, 'hour'), rtf.format(-2.5, 'hours')].join('|')", "in 3 days|1 day ago|in 1 hour|2.5 hours ago");
+    eq("var rtf = new Intl.RelativeTimeFormat('en', {numeric: 'auto'}); [rtf.format(-1, 'day'), rtf.format(1, 'day'), rtf.format(0, 'day'), rtf.format(-1, 'week'), rtf.format(0, 'second'), rtf.format(2, 'day')].join('|')", "yesterday|tomorrow|today|last week|now|in 2 days");
+    eq("var rtf = new Intl.RelativeTimeFormat('es', {numeric: 'auto'}); [rtf.format(-3, 'day'), rtf.format(1, 'month'), rtf.format(-1, 'day')].join('|')", "hace 3 días|dentro de 1 mes|ayer");
+    eq("new Intl.RelativeTimeFormat('en', {style: 'short'}).format(-5, 'minute')", "5 min. ago");
+    throws("new Intl.RelativeTimeFormat('en').format(1, 'fortnight')", "RangeError");
+    eq("new Intl.ListFormat('en').format(['a', 'b', 'c']) + '|' + new Intl.ListFormat('en').format(['a', 'b']) + '|' + new Intl.ListFormat('en', {type: 'disjunction'}).format(['a', 'b', 'c']) + '|' + new Intl.ListFormat('en', {type: 'unit'}).format(['a', 'b', 'c']) + '|' + new Intl.ListFormat('en').format(['solo']) + '|' + new Intl.ListFormat('en').format([])", "a, b, and c|a and b|a, b, or c|a, b, c|solo|");
+    eq("new Intl.ListFormat('es').format(['a', 'b', 'c']) + '|' + new Intl.ListFormat('es', {type: 'disjunction'}).format(['a', 'b'])", "a, b y c|a o b");
+    eq("new Intl.ListFormat('en').formatToParts(['a', 'b']).map(p => p.type).join()", "element,literal,element");
+    eq("Intl.getCanonicalLocales(['EN-us', 'es_es', 'zh-hant-tw']).join()", "en-US,es-ES,zh-Hant-TW");
+    throws("Intl.getCanonicalLocales('en-US-')", "RangeError");
+    eq("new Intl.Locale('en-US').language + ',' + new Intl.Locale('en-US').region + ',' + String(new Intl.Locale('es'))", "en,US,es");
+    eq("new Intl.DisplayNames(['en'], {type: 'region'}).of('ES') + ',' + new Intl.DisplayNames('es', {type: 'language'}).of('en')", "Spain,inglés");
+    eq("[...new Intl.Segmenter('en', {granularity: 'word'}).segment('Hello, world')].filter(s => s.isWordLike).map(s => s.segment).join()", "Hello,world");
+    eq("Intl.supportedValuesOf('calendar').join() + ',' + Intl.NumberFormat.supportedLocalesOf(['en-US', 'de']).join()", "gregory,en-US,de");
+    eq("Object.prototype.toString.call(Intl) + Object.prototype.toString.call(new Intl.NumberFormat())", "[object Intl][object Intl.NumberFormat]");
+}
+
+// ---------------------------------------------------------------- Extras
+
+#[test]
+fn es2023_surface_probe() {
+    let probes = [
+        "Array.prototype.at", "Array.prototype.flatMap", "Array.prototype.copyWithin", "Array.prototype.findLast", "Array.prototype.findLastIndex",
+        "Array.prototype.toSorted", "Array.prototype.toReversed", "Array.prototype.toSpliced", "Array.prototype.with", "Array.from", "Array.of",
+        "Array.fromAsync", "String.prototype.at", "String.prototype.normalize", "String.prototype.isWellFormed", "String.prototype.toWellFormed",
+        "String.prototype.localeCompare", "String.prototype.replaceAll", "String.prototype.matchAll", "String.prototype.padStart", "String.prototype.trimStart",
+        "String.prototype.anchor", "String.prototype.substr", "String.raw", "String.fromCodePoint", "Object.groupBy", "Object.fromEntries", "Object.hasOwn",
+        "Object.entries", "Object.getOwnPropertyDescriptors", "Object.prototype.__defineGetter__", "Object.prototype.__lookupGetter__",
+        "Promise.try", "Promise.allSettled", "Promise.any", "Promise.withResolvers", "Promise.prototype.finally", "Function.prototype[Symbol.hasInstance]",
+        "Error.captureStackTrace", "Error.prototype.toString", "AggregateError", "WeakRef", "WeakRef.prototype.deref", "FinalizationRegistry",
+        "FinalizationRegistry.prototype.register", "Atomics.add", "Atomics.load", "Atomics.store", "Atomics.wait", "escape", "unescape", "structuredClone",
+        "queueMicrotask", "Number.isSafeInteger", "Number.parseFloat", "Number.parseInt", "Math.fround", "Math.clz32", "Math.imul", "Math.hypot", "Math.cbrt",
+        "Math.expm1", "Math.log1p", "Math.sign", "Math.trunc", "Math.sinh", "Math.cosh", "Math.tanh", "Math.asinh", "Math.acosh", "Math.atanh", "Math.log2",
+        "Math.log10", "RegExp.prototype.compile", "RegExp.prototype[Symbol.matchAll]", "Date.prototype.getYear", "Date.prototype.toGMTString",
+        "Date.prototype[Symbol.toPrimitive]", "Symbol.asyncIterator", "Symbol('d').description === 'd' && Symbol", "BigInt.asIntN", "Map.groupBy", "Set.prototype.union",
+        "Set.prototype.isSubsetOf", "WeakMap.prototype.set", "WeakSet.prototype.add", "ArrayBuffer.isView", "ArrayBuffer.prototype.slice", "DataView.prototype.getFloat64",
+        "Uint8Array.from", "Uint8Array.prototype.subarray", "Uint8Array.prototype.toSorted", "Uint8Array.prototype.with", "Float64Array.prototype.set",
+        "Intl.DateTimeFormat", "Intl.NumberFormat", "Intl.Collator", "Intl.PluralRules", "Intl.RelativeTimeFormat", "Intl.ListFormat", "Intl.Locale",
+        "Intl.getCanonicalLocales", "Reflect.ownKeys", "Proxy.revocable", "JSON.stringify", "globalThis.Intl", "Date.now", "Date.parse", "Date.UTC",
+        "Date.prototype.toLocaleDateString", "Number.prototype.toLocaleString", "BigInt.prototype.toLocaleString", "Array.prototype.toLocaleString",
+    ];
+    let mut realm = Realm::new();
+    let mut missing = Vec::new();
+    for p in probes {
+        let src = format!("(function(){{ try {{ var v = {}; return typeof v === 'function' || typeof v === 'object' || typeof v === 'symbol'; }} catch (e) {{ return false; }} }})()", p);
+        match realm.eval(&src, "probe.js") {
+            Ok(Value::Bool(true)) => {}
+            _ => missing.push(p),
+        }
+    }
+    assert!(missing.is_empty(), "missing builtins: {:?}", missing);
+}
+
+#[test]
+fn extras_behaviour() {
+    eq("var o = {}; var w = new WeakRef(o); [w.deref() === o, Object.prototype.toString.call(w), w instanceof WeakRef].join()", "true,[object WeakRef],true");
+    throws("new WeakRef(1)", "TypeError");
+    throws("WeakRef({})", "TypeError");
+    eq("var fr = new FinalizationRegistry(() => {}); [fr.register({}, 'h'), fr.unregister({})].join()", ",false");
+    throws("new FinalizationRegistry(1)", "TypeError");
+    throws("new FinalizationRegistry(() => {}).register(1, 2)", "TypeError");
+    eq("var log = []; Promise.try(() => 1).then(v => log.push('ok:' + v)); Promise.try(() => { throw new Error('x'); }).catch(e => log.push('err:' + e.message)); Promise.try((a, b) => a + b, 2, 3).then(v => log.push('sum:' + v)); Promise.try(() => Promise.resolve(9)).then(v => log.push('nested:' + v)); 'queued'", "queued");
+    assert_eq!(logs("var log = []; Promise.try(() => 1).then(v => log.push('ok:' + v)); Promise.try(() => { throw new Error('x'); }).catch(e => log.push('err:' + e.message)); Promise.try((a, b) => a + b, 2, 3).then(v => log.push('sum:' + v)); Promise.try(() => Promise.resolve(9)).then(v => log.push('nested:' + v)); Promise.resolve().then(() => {}).then(() => {}).then(() => console.log(log.join('|')));"), "ok:1|err:x|sum:5|nested:9");
+    eq("/(\\d+)-(\\d+)/.exec('a 12-34 b'); [RegExp.$1, RegExp.$2, RegExp.$3, RegExp.lastMatch, RegExp['$&'], RegExp.input, RegExp.leftContext, RegExp.rightContext, RegExp.lastParen].join('|')", "12|34||12-34|12-34|a 12-34 b|a | b|34");
+    eq("var a = new Int32Array([1, 2, 3]); Atomics.store(a, 0, 10); Atomics.wait(a, 0, 10, 0) + ',' + Atomics.wait(a, 0, 11)", "timed-out,not-equal");
+    eq("Error.prototype.toString.call({name: 'X', message: 'm'})", "X: m");
+    eq("new Date(2026, 0, 1).toLocaleDateString('en-US') === new Intl.DateTimeFormat('en-US').format(new Date(2026, 0, 1))", "true");
+}
