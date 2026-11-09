@@ -1,9 +1,10 @@
 //! Resource fetching.
 
+use crate::cookies::CookieJar;
 use crate::url::{percent_decode, percent_encode_component, Url};
 use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,124 @@ pub struct Response {
     /// Charset parameter from Content-Type, lower-cased.
     pub charset: Option<String>,
     pub body: Vec<u8>,
+    /// All response headers (lower-cased names) of the final response.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Response {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_str())
+    }
+
+    /// File name suggested by `Content-Disposition`, if any.
+    pub fn suggested_filename(&self) -> Option<String> {
+        let cd = self.header("content-disposition")?;
+        for part in cd.split(';') {
+            let part = part.trim();
+            if let Some(v) = part.strip_prefix("filename*=") {
+                // RFC 5987: charset'lang'value
+                let v = v.rsplit('\'').next().unwrap_or(v);
+                return Some(crate::url::percent_decode(v));
+            }
+            if let Some(v) = part.strip_prefix("filename=") {
+                return Some(v.trim_matches('"').to_string());
+            }
+        }
+        None
+    }
+}
+
+/// HTTP request body for POST/PUT.
+#[derive(Debug, Clone)]
+pub struct Body {
+    pub content_type: String,
+    pub data: Vec<u8>,
+}
+
+impl Body {
+    /// `application/x-www-form-urlencoded` body from (name, value) pairs.
+    pub fn form(fields: &[(String, String)]) -> Body {
+        let data = fields
+            .iter()
+            .map(|(k, v)| format!("{}={}", form_encode(k), form_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        Body { content_type: "application/x-www-form-urlencoded".into(), data: data.into_bytes() }
+    }
+
+    /// `multipart/form-data` body; `files` are (field name, file name, mime, bytes).
+    pub fn multipart(fields: &[(String, String)], files: &[(String, String, String, Vec<u8>)]) -> Body {
+        let boundary = format!("----RabbitHoleBoundary{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        let mut data = Vec::new();
+        for (k, v) in fields {
+            data.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n", k.replace('"', "%22")).as_bytes());
+            data.extend_from_slice(v.as_bytes());
+            data.extend_from_slice(b"\r\n");
+        }
+        for (k, name, mime, bytes) in files {
+            data.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
+                    k.replace('"', "%22"),
+                    name.replace('"', "%22"),
+                    if mime.is_empty() { "application/octet-stream" } else { mime }
+                )
+                .as_bytes(),
+            );
+            data.extend_from_slice(bytes);
+            data.extend_from_slice(b"\r\n");
+        }
+        data.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        Body { content_type: format!("multipart/form-data; boundary={boundary}"), data }
+    }
+
+    pub fn text(content_type: &str, text: &str) -> Body {
+        Body { content_type: content_type.into(), data: text.as_bytes().to_vec() }
+    }
+}
+
+/// `application/x-www-form-urlencoded` encoding of one component
+/// (spaces become `+`).
+pub fn form_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => out.push(b as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// A request: method, URL, optional body, extra headers and referer.
+#[derive(Debug, Clone)]
+pub struct Request {
+    pub method: String,
+    pub url: Url,
+    pub body: Option<Body>,
+    pub headers: Vec<(String, String)>,
+    pub referer: Option<Url>,
+    /// Follow redirects (default true).
+    pub follow_redirects: bool,
+}
+
+impl Request {
+    pub fn get(url: Url) -> Request {
+        Request { method: "GET".into(), url, body: None, headers: Vec::new(), referer: None, follow_redirects: true }
+    }
+    pub fn post(url: Url, body: Body) -> Request {
+        Request { method: "POST".into(), url, body: Some(body), headers: Vec::new(), referer: None, follow_redirects: true }
+    }
+    pub fn with_referer(mut self, r: Url) -> Request {
+        self.referer = Some(r);
+        self
+    }
+    pub fn with_header(mut self, k: &str, v: &str) -> Request {
+        self.headers.push((k.into(), v.into()));
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +169,10 @@ pub struct Fetcher {
     pub max_body: usize,
     /// Extra request headers (name, value).
     pub headers: Vec<(String, String)>,
+    /// Shared cookie jar (None = cookies disabled).
+    pub cookies: Option<Arc<Mutex<CookieJar>>>,
+    /// `Accept-Language` value.
+    pub accept_language: String,
 }
 
 impl Default for Fetcher {
@@ -59,6 +182,8 @@ impl Default for Fetcher {
             timeout: Duration::from_secs(15),
             max_body: 32 * 1024 * 1024,
             headers: Vec::new(),
+            cookies: None,
+            accept_language: "en-US,en;q=0.9,es;q=0.8".into(),
         }
     }
 }
@@ -169,6 +294,7 @@ impl Fetcher {
                         content_type: "text/html".into(),
                         charset: Some("utf-8".into()),
                         body: Vec::new(),
+                        headers: Vec::new(),
                     })
                 } else {
                     Err(FetchError::UnsupportedScheme(url.to_string()))
@@ -178,56 +304,173 @@ impl Fetcher {
         }
     }
 
-    fn fetch_http(&self, url: &Url) -> Result<Response, FetchError> {
+    /// Perform an arbitrary HTTP request (GET/POST/...): manual redirect
+    /// handling (so cookies set on intermediate hops are kept, and 303 /
+    /// 301 / 302 on POST turn into GET per browsers), cookie jar, referer.
+    pub fn request(&self, req: &Request) -> Result<Response, FetchError> {
+        match req.url.scheme.as_str() {
+            "http" | "https" => {}
+            _ => return self.fetch(&req.url),
+        }
         let agent = ureq::AgentBuilder::new()
             .timeout(self.timeout)
             .user_agent(&self.user_agent)
-            .redirects(10)
+            .redirects(0)
             .build();
-        let target = url.without_fragment().to_string();
-        let mut req = agent
-            .get(&target)
-            .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-            .set("Accept-Language", "en,es;q=0.8");
-        for (k, v) in &self.headers {
-            req = req.set(k, v);
+        let mut method = req.method.clone();
+        let mut url = req.url.without_fragment();
+        let mut body = req.body.clone();
+        let mut referer = req.referer.clone();
+        for _hop in 0..12 {
+            let target = url.to_string();
+            let mut r = agent
+                .request(&method, &target)
+                .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+                .set("Accept-Language", &self.accept_language);
+            for (k, v) in &self.headers {
+                r = r.set(k, v);
+            }
+            for (k, v) in &req.headers {
+                r = r.set(k, v);
+            }
+            if let Some(rf) = &referer {
+                if rf.is_http() && !(rf.scheme == "https" && url.scheme == "http") {
+                    r = r.set("Referer", &rf.without_fragment().to_string());
+                }
+            }
+            if let Some(jar) = &self.cookies {
+                if let Some(h) = jar.lock().unwrap().header_for(&url) {
+                    r = r.set("Cookie", &h);
+                }
+            }
+            let result = match &body {
+                Some(b) => r.set("Content-Type", &b.content_type).send_bytes(&b.data),
+                None => r.call(),
+            };
+            let resp = match result {
+                Ok(r) => r,
+                Err(ureq::Error::Status(_, r)) => r,
+                Err(ureq::Error::Transport(t)) => {
+                    let msg = t.to_string();
+                    if msg.to_ascii_lowercase().contains("timed out") {
+                        return Err(FetchError::Timeout);
+                    }
+                    return Err(FetchError::Io(msg));
+                }
+            };
+            let status = resp.status();
+            let headers: Vec<(String, String)> = resp
+                .headers_names()
+                .into_iter()
+                .flat_map(|n| {
+                    let n_l = n.to_ascii_lowercase();
+                    resp.all(&n).into_iter().map(move |v| (n_l.clone(), v.to_string())).collect::<Vec<_>>()
+                })
+                .collect();
+            if let Some(jar) = &self.cookies {
+                let set: Vec<String> = headers.iter().filter(|(k, _)| k == "set-cookie").map(|(_, v)| v.clone()).collect();
+                if !set.is_empty() {
+                    jar.lock().unwrap().store_from_headers(&url, &set);
+                }
+            }
+            let is_redirect = matches!(status, 301 | 302 | 303 | 307 | 308);
+            if is_redirect && req.follow_redirects {
+                if let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) {
+                    if let Some(next) = url.join(loc.trim()) {
+                        if next.is_http() {
+                            // Drain the body of the redirect response.
+                            let _ = read_limited(resp.into_reader(), 1024 * 1024);
+                            if status == 303 || ((status == 301 || status == 302) && method == "POST") {
+                                method = "GET".into();
+                                body = None;
+                            }
+                            referer = Some(url.clone());
+                            url = next.without_fragment();
+                            continue;
+                        }
+                    }
+                }
+            }
+            let (content_type, charset) = parse_content_type(resp.header("Content-Type").unwrap_or(""));
+            let data = read_limited(resp.into_reader(), self.max_body)?;
+            if status >= 400 && data.is_empty() {
+                return Err(FetchError::Http(status));
+            }
+            return Ok(Response { url: url.clone(), status, content_type, charset, body: data, headers });
         }
-        let resp = match req.call() {
-            Ok(r) => r,
-            Err(ureq::Error::Status(code, r)) => {
-                let final_url = Url::parse_absolute(r.get_url()).unwrap_or_else(|| url.clone());
-                let (content_type, charset) = parse_content_type(r.header("Content-Type").unwrap_or(""));
-                let body = read_limited(r.into_reader(), self.max_body)?;
-                if body.is_empty() {
-                    return Err(FetchError::Http(code));
-                }
-                return Ok(Response {
-                    url: final_url,
-                    status: code,
-                    content_type,
-                    charset,
-                    body,
-                });
+        Err(FetchError::Other("too many redirects".into()))
+    }
+
+    fn fetch_http(&self, url: &Url) -> Result<Response, FetchError> {
+        self.request(&Request::get(url.clone()))
+    }
+
+    /// Stream a URL to a file, reporting progress as (bytes so far, total
+    /// if known). Returns the final response metadata (headers, no body).
+    /// Returns Err(FetchError::Other("cancelled")) when `progress` returns false.
+    pub fn download(&self, req: &Request, dest: &std::path::Path, mut progress: impl FnMut(u64, Option<u64>) -> bool) -> Result<Response, FetchError> {
+        use std::io::{Read, Write};
+        if !req.url.is_http() {
+            let resp = self.fetch(&req.url)?;
+            std::fs::write(dest, &resp.body).map_err(|e| FetchError::Io(e.to_string()))?;
+            progress(resp.body.len() as u64, Some(resp.body.len() as u64));
+            return Ok(Response { body: Vec::new(), ..resp });
+        }
+        // Resolve redirects/cookies with a HEAD-less approach: issue the
+        // request manually without body limits.
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(600)).user_agent(&self.user_agent).redirects(10).build();
+        let target = req.url.without_fragment().to_string();
+        let mut r = agent.request(&req.method, &target).set("Accept", "*/*").set("Accept-Language", &self.accept_language);
+        for (k, v) in &self.headers {
+            r = r.set(k, v);
+        }
+        for (k, v) in &req.headers {
+            r = r.set(k, v);
+        }
+        if let Some(rf) = &req.referer {
+            r = r.set("Referer", &rf.without_fragment().to_string());
+        }
+        if let Some(jar) = &self.cookies {
+            if let Some(h) = jar.lock().unwrap().header_for(&req.url) {
+                r = r.set("Cookie", &h);
             }
-            Err(ureq::Error::Transport(t)) => {
-                let msg = t.to_string();
-                if msg.to_ascii_lowercase().contains("timed out") {
-                    return Err(FetchError::Timeout);
-                }
-                return Err(FetchError::Io(msg));
-            }
+        }
+        let resp = match &req.body {
+            Some(b) => r.set("Content-Type", &b.content_type).send_bytes(&b.data),
+            None => r.call(),
         };
-        let final_url = Url::parse_absolute(resp.get_url()).unwrap_or_else(|| url.clone());
+        let resp = match resp {
+            Ok(r) => r,
+            Err(ureq::Error::Status(code, _)) => return Err(FetchError::Http(code)),
+            Err(ureq::Error::Transport(t)) => return Err(FetchError::Io(t.to_string())),
+        };
+        let final_url = Url::parse_absolute(resp.get_url()).unwrap_or_else(|| req.url.clone());
         let status = resp.status();
+        let headers: Vec<(String, String)> = resp
+            .headers_names()
+            .into_iter()
+            .map(|n| (n.to_ascii_lowercase(), resp.header(&n).unwrap_or("").to_string()))
+            .collect();
+        let total = headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.parse::<u64>().ok());
         let (content_type, charset) = parse_content_type(resp.header("Content-Type").unwrap_or(""));
-        let body = read_limited(resp.into_reader(), self.max_body)?;
-        Ok(Response {
-            url: final_url,
-            status,
-            content_type,
-            charset,
-            body,
-        })
+        let mut reader = resp.into_reader();
+        let mut file = std::fs::File::create(dest).map_err(|e| FetchError::Io(e.to_string()))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut done: u64 = 0;
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| FetchError::Io(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| FetchError::Io(e.to_string()))?;
+            done += n as u64;
+            if !progress(done, total) {
+                drop(file);
+                let _ = std::fs::remove_file(dest);
+                return Err(FetchError::Other("cancelled".into()));
+            }
+        }
+        Ok(Response { url: final_url, status, content_type, charset, body: Vec::new(), headers })
     }
 
     fn fetch_file(&self, url: &Url) -> Result<Response, FetchError> {
@@ -268,6 +511,7 @@ impl Fetcher {
                 content_type: "text/html".into(),
                 charset: Some("utf-8".into()),
                 body: html.into_bytes(),
+                headers: Vec::new(),
             });
         }
         if meta.len() as usize > self.max_body {
@@ -281,6 +525,7 @@ impl Fetcher {
             content_type: mime_for_extension(ext).into(),
             charset: None,
             body,
+            headers: Vec::new(),
         })
     }
 
@@ -342,6 +587,7 @@ fn fetch_data(url: &Url) -> Result<Response, FetchError> {
         content_type: mime.to_ascii_lowercase(),
         charset,
         body,
+        headers: Vec::new(),
     })
 }
 
