@@ -1,17 +1,24 @@
 //! The engine ties everything together: fetch → parse → style → layout →
-//! paint, plus hit testing and text extraction for CLI/MCP use.
+//! paint, plus hit testing, scrolling state and text extraction.
+//!
+//! Loading is split in two stages so a GUI can keep its event loop alive:
+//! a [`Loader`] (`Clone + Send`) fetches and decodes every resource on a
+//! background thread and yields a [`LoadedPage`] (plain data), and the
+//! [`Engine`] turns it into a [`Page`] (styles, layout, display list) on the
+//! thread that owns the fonts and paints.
 
 mod home;
 mod text;
 
-use rabbithole_css::{parse_media_query, MediaQuery, Rule};
-use rabbithole_dom::{Document, NodeData, NodeId};
+use rabbithole_css::{parse_media_query, MatchState, MediaQuery, PseudoElement, Rule};
+use rabbithole_dom::{Document, NodeId};
 use rabbithole_gfx::{Canvas, Color, FontContext, Image, Rect};
-use rabbithole_layout::{DisplayList, LayoutBox, LayoutContext, LayoutTree};
+use rabbithole_layout::{DisplayList, LayoutBox, LayoutContext, LayoutTree, ScrollInfo};
 use rabbithole_net::{decode_text, FetchError, Fetcher, Response, Url};
-use rabbithole_style::{MediaEnv, StyledTree, Stylesheet};
+use rabbithole_style::{FontFace, MediaEnv, StyleOptions, StyledTree, Stylesheet};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 pub use rabbithole_css as css;
 pub use rabbithole_dom as dom;
@@ -39,75 +46,104 @@ impl std::fmt::Display for EngineError {
 }
 impl std::error::Error for EngineError {}
 
+impl From<FetchError> for EngineError {
+    fn from(e: FetchError) -> Self {
+        EngineError::Fetch(e.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {
     pub width: f32,
     pub height: f32,
 }
 
-/// Shared, long-lived state: fonts, image cache, network settings.
-pub struct Engine {
-    pub fonts: Rc<FontContext>,
+// ================================================================== Loader
+
+/// Shared caches (thread-safe) for decoded images, stylesheet text and
+/// font files across page loads.
+#[derive(Default)]
+struct Caches {
+    images: HashMap<String, Option<Arc<Image>>>,
+    css: HashMap<String, Arc<str>>,
+    fonts: HashMap<String, Option<Arc<Vec<u8>>>>,
+}
+
+/// Resource loader: fetches a document and everything it references.
+/// Cheap to clone; safe to move to a background thread.
+#[derive(Clone)]
+pub struct Loader {
     pub fetcher: Fetcher,
     pub load_images: bool,
     pub load_stylesheets: bool,
-    /// Upper bound on `<img>` elements fetched per page.
+    pub load_fonts: bool,
+    pub load_scripts: bool,
     pub max_images: usize,
-    /// Upper bound on CSS background images fetched per page.
     pub max_background_images: usize,
-    image_cache: HashMap<String, Option<Rc<Image>>>,
-    css_cache: HashMap<String, Rc<str>>,
+    pub max_fonts: usize,
+    caches: Arc<Mutex<Caches>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Link {
-    pub text: String,
-    pub href: Url,
+/// An external or inline script in document order.
+#[derive(Debug, Clone)]
+pub struct ScriptSource {
+    pub node: NodeId,
+    pub url: Option<Url>,
+    pub source: String,
+    pub is_module: bool,
+    pub defer: bool,
+    pub is_async: bool,
 }
 
-/// A loaded, styled and laid out document.
-pub struct Page {
+/// A fetched web font (from `@font-face`).
+#[derive(Debug, Clone)]
+pub struct LoadedFont {
+    pub face: FontFace,
+    pub data: Arc<Vec<u8>>,
+}
+
+/// Everything needed to build a [`Page`]; plain data, `Send`.
+pub struct LoadedPage {
     pub url: Url,
-    /// Base for relative URLs (`<base href>` or the document URL).
     pub base_url: Url,
     pub doc: Document,
     pub title: String,
+    pub status: u16,
+    pub content_type: String,
     pub sheets: Vec<Stylesheet>,
-    pub styles: StyledTree,
-    pub layout: LayoutTree,
-    pub display_list: DisplayList,
-    pub images: HashMap<NodeId, Rc<Image>>,
-    pub background_images: HashMap<String, Rc<Image>>,
+    pub images: Vec<(NodeId, Arc<Image>)>,
+    pub background_images: Vec<(String, Arc<Image>)>,
+    pub fonts: Vec<LoadedFont>,
+    pub scripts: Vec<ScriptSource>,
+    /// Viewport used for media queries while discovering resources.
     pub viewport: Viewport,
-    /// Canvas background (propagated from `html`/`body`).
-    pub background: Color,
-}
-
-impl Default for Engine {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 const MAX_IMPORT_DEPTH: usize = 4;
 
-impl Engine {
-    pub fn new() -> Engine {
-        Engine {
-            fonts: Rc::new(FontContext::new()),
+impl Default for Loader {
+    fn default() -> Self {
+        Loader {
             fetcher: Fetcher::default(),
             load_images: true,
             load_stylesheets: true,
-            max_images: 80,
-            max_background_images: 24,
-            image_cache: HashMap::new(),
-            css_cache: HashMap::new(),
+            load_fonts: true,
+            load_scripts: true,
+            max_images: 120,
+            max_background_images: 40,
+            max_fonts: 16,
+            caches: Arc::new(Mutex::new(Caches::default())),
         }
     }
+}
 
-    /// Fetch and fully prepare a page. `url` may be anything a user would
-    /// type (bare domains get `https://`).
-    pub fn load(&mut self, url: &str, viewport: Viewport) -> Result<Page, EngineError> {
+impl Loader {
+    pub fn new() -> Loader {
+        Loader::default()
+    }
+
+    /// Fetch and prepare a page. `url` may be anything a user would type.
+    pub fn load(&self, url: &str, viewport: Viewport) -> Result<LoadedPage, EngineError> {
         let url = Url::parse(url).ok_or_else(|| EngineError::BadUrl(url.to_string()))?;
         if url.scheme == "about" {
             let html = match url.path.as_str() {
@@ -116,49 +152,47 @@ impl Engine {
             };
             return Ok(self.load_html(html, url, viewport));
         }
-        let resp = self
-            .fetcher
-            .fetch(&url)
-            .map_err(|e| EngineError::Fetch(e.to_string()))?;
+        let resp = self.fetcher.fetch(&url)?;
         Ok(self.load_response(resp, viewport))
     }
 
     /// Turn an HTTP(-like) response into a page based on its content type.
-    pub fn load_response(&mut self, resp: Response, viewport: Viewport) -> Page {
+    pub fn load_response(&self, resp: Response, viewport: Viewport) -> LoadedPage {
         let ct = resp.content_type.as_str();
         let url = resp.url.clone();
-        if ct.starts_with("text/html") || ct.starts_with("application/xhtml") || ct.is_empty() {
+        let mut page = if ct.starts_with("text/html") || ct.starts_with("application/xhtml") || ct.is_empty() {
             let html = decode_text(&resp.body, resp.charset.as_deref());
-            return self.load_html(&html, url, viewport);
-        }
-        if ct.starts_with("image/") {
+            self.load_html(&html, url, viewport)
+        } else if ct.starts_with("image/") {
             let html = format!(
-                "<html><head><title>{}</title></head><body style=\"margin:0;background:#222\"><img src=\"{}\" alt=\"image\"></body></html>",
-                escape_html(&url.to_string()),
+                "<html><head><title>{0}</title></head><body style=\"margin:0;background:#222;display:flex;align-items:center;justify-content:center;min-height:100vh\"><img src=\"{0}\" alt=\"image\"></body></html>",
                 escape_html(&url.to_string())
             );
-            return self.load_html(&html, url, viewport);
-        }
-        if ct.starts_with("text/") || ct.contains("json") || ct.contains("xml") || ct.contains("javascript") {
+            self.load_html(&html, url, viewport)
+        } else if ct.starts_with("text/") || ct.contains("json") || ct.contains("xml") || ct.contains("javascript") {
             let text = decode_text(&resp.body, resp.charset.as_deref());
             let html = format!(
-                "<html><head><title>{}</title></head><body><pre style=\"white-space:pre-wrap;word-wrap:break-word\">{}</pre></body></html>",
+                "<html><head><title>{}</title></head><body><pre style=\"white-space:pre-wrap;overflow-wrap:anywhere\">{}</pre></body></html>",
                 escape_html(&url.to_string()),
                 escape_html(&text)
             );
-            return self.load_html(&html, url, viewport);
-        }
-        let html = format!(
-            "<html><head><title>Unsupported content</title></head><body><h1>Cannot display this content</h1><p><code>{}</code> ({} bytes) is of type <code>{}</code>, which RabbitHole cannot render.</p></body></html>",
-            escape_html(&url.to_string()),
-            resp.body.len(),
-            escape_html(ct)
-        );
-        self.load_html(&html, url, viewport)
+            self.load_html(&html, url, viewport)
+        } else {
+            let html = format!(
+                "<html><head><title>Download</title></head><body><h1>Cannot display this content</h1><p><code>{}</code> ({} bytes) is of type <code>{}</code>.</p></body></html>",
+                escape_html(&url.to_string()),
+                resp.body.len(),
+                escape_html(ct)
+            );
+            self.load_html(&html, url, viewport)
+        };
+        page.status = resp.status;
+        page.content_type = resp.content_type;
+        page
     }
 
-    /// Prepare a page from HTML source with the given base URL.
-    pub fn load_html(&mut self, html: &str, url: Url, viewport: Viewport) -> Page {
+    /// Prepare a page from HTML source with the given document URL.
+    pub fn load_html(&self, html: &str, url: Url, viewport: Viewport) -> LoadedPage {
         let doc = rabbithole_html::parse(html);
         let title = doc.title().unwrap_or_default();
         let base_url = doc
@@ -169,85 +203,43 @@ impl Engine {
 
         let sheets = self.collect_stylesheets(&doc, &base_url);
         let env = media_env(viewport);
-        let styles = rabbithole_style::style_tree(&doc, &sheets, &env);
 
-        let images = if self.load_images {
-            self.load_images(&doc, &styles, &base_url)
-        } else {
-            HashMap::new()
+        // A throw-away cascade on this thread to discover referenced
+        // resources (background images, web fonts). Styles are recomputed
+        // by the engine on the UI thread.
+        let base_str = base_url.to_string();
+        let opts = StyleOptions {
+            state: &MatchState::default(),
+            resolve_url: &|base, raw| resolve_url(base, raw),
+            document_base: &base_str,
         };
-        let background_images = if self.load_images {
-            self.load_background_images(&styles, &base_url)
-        } else {
-            HashMap::new()
-        };
+        let styles = rabbithole_style::style_tree_with(&doc, &sheets, &env, &opts);
 
-        let (layout, display_list) = self.layout_page(&doc, &styles, &images, &background_images, viewport);
-        let background = canvas_background(&doc, &styles);
-        Page {
+        let images = if self.load_images { self.load_images(&doc, &styles, &base_url) } else { Vec::new() };
+        let background_images = if self.load_images { self.load_background_images(&styles) } else { Vec::new() };
+        let fonts = if self.load_fonts { self.load_fonts(&styles) } else { Vec::new() };
+        let scripts = if self.load_scripts { self.collect_scripts(&doc, &base_url) } else { Vec::new() };
+        drop(styles);
+
+        LoadedPage {
             url,
             base_url,
             doc,
             title,
+            status: 200,
+            content_type: "text/html".into(),
             sheets,
-            styles,
-            layout,
-            display_list,
             images,
             background_images,
+            fonts,
+            scripts,
             viewport,
-            background,
         }
-    }
-
-    /// Re-run style + layout (after a viewport change).
-    pub fn relayout(&mut self, page: &mut Page, viewport: Viewport) {
-        page.viewport = viewport;
-        let env = media_env(viewport);
-        page.styles = rabbithole_style::style_tree(&page.doc, &page.sheets, &env);
-        let (layout, display_list) =
-            self.layout_page(&page.doc, &page.styles, &page.images, &page.background_images, viewport);
-        page.layout = layout;
-        page.display_list = display_list;
-        page.background = canvas_background(&page.doc, &page.styles);
-    }
-
-    /// Paint the page region starting at (scroll_x, scroll_y) into `canvas`.
-    pub fn render(&self, page: &Page, canvas: &mut Canvas, scroll_x: f32, scroll_y: f32) {
-        canvas.clear(Color::WHITE);
-        if page.background.a > 0 {
-            let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
-            canvas.fill_rect(full, page.background);
-        }
-        rabbithole_layout::paint(&page.display_list, canvas, &self.fonts, scroll_x, scroll_y);
-    }
-
-    fn layout_page(
-        &self,
-        doc: &Document,
-        styles: &StyledTree,
-        images: &HashMap<NodeId, Rc<Image>>,
-        background_images: &HashMap<String, Rc<Image>>,
-        viewport: Viewport,
-    ) -> (LayoutTree, DisplayList) {
-        let ctx = LayoutContext {
-            doc,
-            styles,
-            fonts: &self.fonts,
-            images,
-            background_images,
-            viewport_width: viewport.width,
-            viewport_height: viewport.height,
-        };
-        let tree = rabbithole_layout::layout(&ctx);
-        let list = rabbithole_layout::build_display_list(&tree, &ctx);
-        (tree, list)
     }
 
     // ------------------------------------------------------------ styles
 
-    fn collect_stylesheets(&mut self, doc: &Document, base: &Url) -> Vec<Stylesheet> {
-        // Gather (source, media, origin url) in document order.
+    fn collect_stylesheets(&self, doc: &Document, base: &Url) -> Vec<Stylesheet> {
         enum Src {
             Inline(String, Option<String>),
             Link(Url, Option<String>),
@@ -275,13 +267,15 @@ impl Engine {
             }
         }
 
-        // Fetch external sheets in parallel (deduplicated, cached).
         let mut to_fetch: Vec<Url> = Vec::new();
-        for s in &sources {
-            if let Src::Link(u, _) = s {
-                let key = u.without_fragment().to_string();
-                if !self.css_cache.contains_key(&key) && !to_fetch.iter().any(|x| x.without_fragment().to_string() == key) {
-                    to_fetch.push(u.clone());
+        {
+            let caches = self.caches.lock().unwrap();
+            for s in &sources {
+                if let Src::Link(u, _) = s {
+                    let key = u.without_fragment().to_string();
+                    if !caches.css.contains_key(&key) && !to_fetch.iter().any(|x| x.without_fragment().to_string() == key) {
+                        to_fetch.push(u.clone());
+                    }
                 }
             }
         }
@@ -292,13 +286,16 @@ impl Engine {
             match s {
                 Src::Inline(text, media) => {
                     let mut sheet = rabbithole_css::parse_stylesheet(&text);
+                    sheet.base_url = Some(base.to_string());
                     self.resolve_imports(&mut sheet, base, 0);
                     sheets.push(wrap_media(sheet, media.as_deref()));
                 }
                 Src::Link(url, media) => {
                     let key = url.without_fragment().to_string();
-                    if let Some(text) = self.css_cache.get(&key).cloned() {
+                    let text = self.caches.lock().unwrap().css.get(&key).cloned();
+                    if let Some(text) = text {
                         let mut sheet = rabbithole_css::parse_stylesheet(&text);
+                        sheet.base_url = Some(url.to_string());
                         self.resolve_imports(&mut sheet, &url, 0);
                         sheets.push(wrap_media(sheet, media.as_deref()));
                     }
@@ -308,20 +305,21 @@ impl Engine {
         sheets
     }
 
-    fn fetch_css_into_cache(&mut self, urls: &[Url]) {
+    fn fetch_css_into_cache(&self, urls: &[Url]) {
         if urls.is_empty() {
             return;
         }
         let results = self.fetcher.fetch_many(urls, 6);
+        let mut caches = self.caches.lock().unwrap();
         for (u, r) in urls.iter().zip(results) {
             let key = u.without_fragment().to_string();
             match r {
                 Ok(resp) if resp.status < 400 => {
                     let text = decode_text(&resp.body, resp.charset.as_deref());
-                    self.css_cache.insert(key, Rc::from(text));
+                    caches.css.insert(key, Arc::from(text));
                 }
                 _ => {
-                    self.css_cache.insert(key, Rc::from(""));
+                    caches.css.insert(key, Arc::from(""));
                 }
             }
         }
@@ -329,7 +327,7 @@ impl Engine {
 
     /// Replace `@import` rules with the imported sheet's rules (wrapped in
     /// their media query), fetching as needed, up to a fixed depth.
-    fn resolve_imports(&mut self, sheet: &mut Stylesheet, sheet_url: &Url, depth: usize) {
+    fn resolve_imports(&self, sheet: &mut Stylesheet, sheet_url: &Url, depth: usize) {
         if depth >= MAX_IMPORT_DEPTH || !self.load_stylesheets {
             sheet.rules.retain(|r| !matches!(r, Rule::Import { .. }));
             return;
@@ -346,11 +344,14 @@ impl Engine {
         if imports.is_empty() {
             return;
         }
-        let to_fetch: Vec<Url> = imports
-            .iter()
-            .map(|(_, u, _)| u.clone())
-            .filter(|u| !self.css_cache.contains_key(&u.without_fragment().to_string()))
-            .collect();
+        let to_fetch: Vec<Url> = {
+            let caches = self.caches.lock().unwrap();
+            imports
+                .iter()
+                .map(|(_, u, _)| u.clone())
+                .filter(|u| !caches.css.contains_key(&u.without_fragment().to_string()))
+                .collect()
+        };
         self.fetch_css_into_cache(&to_fetch);
 
         let mut new_rules = Vec::with_capacity(sheet.rules.len());
@@ -359,12 +360,17 @@ impl Engine {
             if let Some((idx, url, query)) = import_iter.peek().cloned() {
                 if idx == i {
                     import_iter.next();
-                    if let Some(text) = self.css_cache.get(&url.without_fragment().to_string()).cloned() {
+                    let text = self.caches.lock().unwrap().css.get(&url.without_fragment().to_string()).cloned();
+                    if let Some(text) = text {
                         let mut imported = rabbithole_css::parse_stylesheet(&text);
+                        imported.base_url = Some(url.to_string());
                         self.resolve_imports(&mut imported, &url, depth + 1);
+                        // Nested sheets keep their own base URL through a
+                        // wrapper sheet: flatten rules but url() values were
+                        // not rewritten, so remember the base per rule group.
                         new_rules.push(Rule::Media {
                             query,
-                            rules: imported.rules,
+                            rules: rebase_rules(imported.rules, &url.to_string()),
                         });
                     }
                     continue;
@@ -379,10 +385,13 @@ impl Engine {
 
     // ------------------------------------------------------------ images
 
-    fn load_images(&mut self, doc: &Document, styles: &StyledTree, base: &Url) -> HashMap<NodeId, Rc<Image>> {
+    fn load_images(&self, doc: &Document, styles: &StyledTree, base: &Url) -> Vec<(NodeId, Arc<Image>)> {
         let mut wanted: Vec<(NodeId, Url)> = Vec::new();
         for n in doc.descendants(Document::ROOT) {
-            if !doc.is_element(n, "img") {
+            if !doc.is_element(n, "img") && !doc.is_element(n, "input") {
+                continue;
+            }
+            if doc.is_element(n, "input") && doc.attr(n, "type").map(|t| !t.eq_ignore_ascii_case("image")).unwrap_or(true) {
                 continue;
             }
             if styles.get(n).is_none() {
@@ -400,50 +409,64 @@ impl Engine {
         }
         let urls: Vec<Url> = wanted.iter().map(|(_, u)| u.clone()).collect();
         self.fetch_images_into_cache(&urls);
-        let mut out = HashMap::new();
-        for (n, u) in wanted {
-            if let Some(Some(img)) = self.image_cache.get(&u.to_string()) {
-                out.insert(n, img.clone());
-            }
-        }
-        out
+        let caches = self.caches.lock().unwrap();
+        wanted
+            .into_iter()
+            .filter_map(|(n, u)| caches.images.get(&u.to_string()).cloned().flatten().map(|img| (n, img)))
+            .collect()
     }
 
-    fn load_background_images(&mut self, styles: &StyledTree, base: &Url) -> HashMap<String, Rc<Image>> {
+    fn load_background_images(&self, styles: &StyledTree) -> Vec<(String, Arc<Image>)> {
         let mut keys: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
-        for s in styles.styles.iter().flatten() {
-            if let Some(bg) = &s.background_image {
-                if seen.insert(bg.clone()) {
-                    keys.push(bg.clone());
-                    if keys.len() >= self.max_background_images {
-                        break;
+        let mut consider = |s: &rabbithole_style::ComputedStyle| {
+            for layer in &s.background_layers {
+                if let rabbithole_style::BackgroundImage::Url(u) = &layer.image {
+                    if seen.insert(u.clone()) {
+                        keys.push(u.clone());
                     }
                 }
             }
+            if let rabbithole_style::Content::Items(items) = &s.content {
+                for it in items {
+                    if let rabbithole_style::ContentItem::Url(u) = it {
+                        if seen.insert(u.clone()) {
+                            keys.push(u.clone());
+                        }
+                    }
+                }
+            }
+        };
+        for s in styles.styles.iter().flatten() {
+            consider(s);
         }
+        for s in styles.before.iter().flatten().chain(styles.after.iter().flatten()) {
+            consider(s);
+        }
+        keys.truncate(self.max_background_images);
         let pairs: Vec<(String, Url)> = keys
             .into_iter()
-            .filter_map(|k| base.join(&k).map(|u| (k, u)))
+            .filter_map(|k| Url::parse_absolute(&k).map(|u| (k, u)))
             .filter(|(_, u)| u.scheme != "javascript")
             .collect();
         let urls: Vec<Url> = pairs.iter().map(|(_, u)| u.clone()).collect();
         self.fetch_images_into_cache(&urls);
-        let mut out = HashMap::new();
-        for (k, u) in pairs {
-            if let Some(Some(img)) = self.image_cache.get(&u.to_string()) {
-                out.insert(k, img.clone());
-            }
-        }
-        out
+        let caches = self.caches.lock().unwrap();
+        pairs
+            .into_iter()
+            .filter_map(|(k, u)| caches.images.get(&u.to_string()).cloned().flatten().map(|img| (k, img)))
+            .collect()
     }
 
-    fn fetch_images_into_cache(&mut self, urls: &[Url]) {
+    fn fetch_images_into_cache(&self, urls: &[Url]) {
         let mut to_fetch: Vec<Url> = Vec::new();
-        for u in urls {
-            let key = u.to_string();
-            if !self.image_cache.contains_key(&key) && !to_fetch.iter().any(|x| x.to_string() == key) {
-                to_fetch.push(u.clone());
+        {
+            let caches = self.caches.lock().unwrap();
+            for u in urls {
+                let key = u.to_string();
+                if !caches.images.contains_key(&key) && !to_fetch.iter().any(|x| x.to_string() == key) {
+                    to_fetch.push(u.clone());
+                }
             }
         }
         if to_fetch.is_empty() {
@@ -452,40 +475,491 @@ impl Engine {
         let mut fetcher = self.fetcher.clone();
         fetcher.max_body = 16 * 1024 * 1024;
         let results = fetcher.fetch_many(&to_fetch, 8);
+        let mut caches = self.caches.lock().unwrap();
         for (u, r) in to_fetch.iter().zip(results) {
             let decoded = match r {
-                Ok(resp) if resp.status < 400 => Image::decode(&resp.body).map(Rc::new),
+                Ok(resp) if resp.status < 400 => Image::decode(&resp.body).map(Arc::new),
                 _ => None,
             };
-            self.image_cache.insert(u.to_string(), decoded);
+            caches.images.insert(u.to_string(), decoded);
         }
     }
 
-    /// Drop cached images and stylesheets.
-    pub fn clear_caches(&mut self) {
-        self.image_cache.clear();
-        self.css_cache.clear();
+    // ------------------------------------------------------------- fonts
+
+    fn load_fonts(&self, styles: &StyledTree) -> Vec<LoadedFont> {
+        if styles.font_faces.is_empty() {
+            return Vec::new();
+        }
+        // Only fetch families that some element actually asks for.
+        let mut used: HashSet<String> = HashSet::new();
+        for s in styles
+            .styles
+            .iter()
+            .flatten()
+            .chain(styles.before.iter().flatten())
+            .chain(styles.after.iter().flatten())
+        {
+            for f in &s.font_family_list {
+                used.insert(f.to_ascii_lowercase());
+            }
+        }
+        let mut picked: Vec<(FontFace, Url)> = Vec::new();
+        for face in &styles.font_faces {
+            if !used.contains(&face.family.to_ascii_lowercase()) {
+                continue;
+            }
+            // Prefer woff2, then woff, then ttf/otf; skip eot/svg.
+            let mut best: Option<(u8, &str)> = None;
+            for src in &face.sources {
+                let fmt = src.format.as_deref().map(|f| f.to_ascii_lowercase()).unwrap_or_else(|| {
+                    let lower = src.url.to_ascii_lowercase();
+                    let path = lower.split('?').next().unwrap_or("");
+                    if path.ends_with(".woff2") {
+                        "woff2".into()
+                    } else if path.ends_with(".woff") {
+                        "woff".into()
+                    } else if path.ends_with(".ttf") || path.ends_with(".otf") {
+                        "truetype".into()
+                    } else {
+                        String::new()
+                    }
+                });
+                let rank = match fmt.as_str() {
+                    "woff2" | "woff2-variations" => 3,
+                    "woff" => 2,
+                    "truetype" | "opentype" | "truetype-variations" => 1,
+                    _ => 0,
+                };
+                if rank > 0 && best.map(|(r, _)| rank > r).unwrap_or(true) {
+                    best = Some((rank, src.url.as_str()));
+                }
+            }
+            if let Some((_, url)) = best {
+                if let Some(u) = Url::parse_absolute(url) {
+                    picked.push((face.clone(), u));
+                }
+            }
+            if picked.len() >= self.max_fonts {
+                break;
+            }
+        }
+        let urls: Vec<Url> = picked.iter().map(|(_, u)| u.clone()).collect();
+        let to_fetch: Vec<Url> = {
+            let caches = self.caches.lock().unwrap();
+            urls.iter().filter(|u| !caches.fonts.contains_key(&u.to_string())).cloned().collect()
+        };
+        if !to_fetch.is_empty() {
+            let mut fetcher = self.fetcher.clone();
+            fetcher.max_body = 8 * 1024 * 1024;
+            let results = fetcher.fetch_many(&to_fetch, 6);
+            let mut caches = self.caches.lock().unwrap();
+            for (u, r) in to_fetch.iter().zip(results) {
+                let data = match r {
+                    Ok(resp) if resp.status < 400 && !resp.body.is_empty() => Some(Arc::new(resp.body)),
+                    _ => None,
+                };
+                caches.fonts.insert(u.to_string(), data);
+            }
+        }
+        let caches = self.caches.lock().unwrap();
+        picked
+            .into_iter()
+            .filter_map(|(face, u)| caches.fonts.get(&u.to_string()).cloned().flatten().map(|data| LoadedFont { face, data }))
+            .collect()
+    }
+
+    // ----------------------------------------------------------- scripts
+
+    fn collect_scripts(&self, doc: &Document, base: &Url) -> Vec<ScriptSource> {
+        let mut out = Vec::new();
+        let mut external: Vec<(usize, Url)> = Vec::new();
+        for n in doc.descendants(Document::ROOT) {
+            let Some(el) = doc.element(n) else { continue };
+            if el.tag != "script" {
+                continue;
+            }
+            let ty = el.attr("type").map(|t| t.trim().to_ascii_lowercase()).unwrap_or_default();
+            let is_module = ty == "module";
+            let is_js = ty.is_empty()
+                || is_module
+                || matches!(
+                    ty.as_str(),
+                    "text/javascript" | "application/javascript" | "text/ecmascript" | "application/ecmascript" | "text/jscript" | "module"
+                );
+            if !is_js || el.attr("nomodule").is_some() {
+                continue;
+            }
+            let idx = out.len();
+            out.push(ScriptSource {
+                node: n,
+                url: None,
+                source: String::new(),
+                is_module,
+                defer: el.attr("defer").is_some() || is_module,
+                is_async: el.attr("async").is_some(),
+            });
+            match el.attr("src").map(str::trim).filter(|s| !s.is_empty()) {
+                Some(src) => match base.join(src) {
+                    Some(u) => {
+                        out[idx].url = Some(u.clone());
+                        external.push((idx, u));
+                    }
+                    None => {
+                        out.pop();
+                    }
+                },
+                None => out[idx].source = doc.text_content(n),
+            }
+        }
+        if !external.is_empty() {
+            let urls: Vec<Url> = external.iter().map(|(_, u)| u.clone()).collect();
+            let mut fetcher = self.fetcher.clone();
+            fetcher.max_body = 8 * 1024 * 1024;
+            let results = fetcher.fetch_many(&urls, 6);
+            for ((idx, _), r) in external.iter().zip(results) {
+                match r {
+                    Ok(resp) if resp.status < 400 => {
+                        out[*idx].source = decode_text(&resp.body, resp.charset.as_deref());
+                    }
+                    _ => out[*idx].source.clear(),
+                }
+            }
+        }
+        out
+    }
+
+    /// Drop cached images, stylesheets and fonts.
+    pub fn clear_caches(&self) {
+        *self.caches.lock().unwrap() = Caches::default();
     }
 }
 
-fn media_env(viewport: Viewport) -> MediaEnv {
-    MediaEnv {
-        width: viewport.width,
-        height: viewport.height,
-        screen: true,
+// ================================================================== Engine
+
+/// Owns the fonts and builds/paints pages. Single-threaded.
+pub struct Engine {
+    pub fonts: Rc<FontContext>,
+    pub loader: Loader,
+    registered_fonts: HashSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    pub text: String,
+    pub href: Url,
+}
+
+/// A loaded, styled and laid out document.
+pub struct Page {
+    pub url: Url,
+    /// Base for relative URLs (`<base href>` or the document URL).
+    pub base_url: Url,
+    pub doc: Document,
+    pub title: String,
+    pub status: u16,
+    pub sheets: Vec<Stylesheet>,
+    pub styles: StyledTree,
+    pub layout: LayoutTree,
+    pub display_list: DisplayList,
+    pub images: HashMap<NodeId, Arc<Image>>,
+    pub background_images: HashMap<String, Arc<Image>>,
+    pub scripts: Vec<ScriptSource>,
+    pub viewport: Viewport,
+    /// Canvas background (propagated from `html`/`body`).
+    pub background: Color,
+    /// Page scroll position used for sticky/fixed placement in the
+    /// current display list.
+    pub page_scroll: (f32, f32),
+    /// Scroll offsets of inner scroll containers.
+    pub scroll_offsets: HashMap<NodeId, (f32, f32)>,
+    /// Dynamic selector state (hover/focus/active/target).
+    pub state: MatchState,
+    /// Whether any stylesheet uses dynamic pseudo-classes (so hover
+    /// changes need a restyle).
+    pub has_dynamic_rules: bool,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
     }
+}
+
+impl Engine {
+    pub fn new() -> Engine {
+        let fonts = FontContext::new();
+        fonts.load_system_fonts();
+        Engine {
+            fonts: Rc::new(fonts),
+            loader: Loader::new(),
+            registered_fonts: HashSet::new(),
+        }
+    }
+
+    /// Engine without system font discovery (faster startup for tests/CLI).
+    pub fn new_bundled_fonts_only() -> Engine {
+        Engine {
+            fonts: Rc::new(FontContext::new()),
+            loader: Loader::new(),
+            registered_fonts: HashSet::new(),
+        }
+    }
+
+    /// Synchronous convenience: load + build.
+    pub fn load(&mut self, url: &str, viewport: Viewport) -> Result<Page, EngineError> {
+        let loaded = self.loader.load(url, viewport)?;
+        Ok(self.build_page(loaded, viewport))
+    }
+
+    /// Synchronous convenience for HTML source.
+    pub fn load_html(&mut self, html: &str, url: Url, viewport: Viewport) -> Page {
+        let loaded = self.loader.load_html(html, url, viewport);
+        self.build_page(loaded, viewport)
+    }
+
+    /// Turn loaded resources into a styled, laid out page.
+    pub fn build_page(&mut self, loaded: LoadedPage, viewport: Viewport) -> Page {
+        for f in &loaded.fonts {
+            let key = format!("{}|{}|{}", f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic);
+            if self.registered_fonts.insert(key) {
+                self.fonts.add_font_data(&f.face.family, f.face.weight.0, f.face.italic, &f.data);
+            }
+        }
+        let has_dynamic_rules = loaded.sheets.iter().any(sheet_has_dynamic_rules);
+        let mut page = Page {
+            url: loaded.url,
+            base_url: loaded.base_url,
+            doc: loaded.doc,
+            title: loaded.title,
+            status: loaded.status,
+            sheets: loaded.sheets,
+            styles: StyledTree { styles: Vec::new(), before: Vec::new(), after: Vec::new(), marker: Vec::new(), font_faces: Vec::new(), keyframes: HashMap::new(), root_font_size: 16.0 },
+            layout: empty_layout(),
+            display_list: DisplayList::default(),
+            images: loaded.images.into_iter().collect(),
+            background_images: loaded.background_images.into_iter().collect(),
+            scripts: loaded.scripts,
+            viewport,
+            background: Color::TRANSPARENT,
+            page_scroll: (0.0, 0.0),
+            scroll_offsets: HashMap::new(),
+            state: MatchState::default(),
+            has_dynamic_rules,
+        };
+        self.restyle(&mut page);
+        page
+    }
+
+    /// Re-run style + layout + display list (after DOM, viewport or
+    /// selector-state changes).
+    pub fn restyle(&self, page: &mut Page) {
+        let env = media_env(page.viewport);
+        let base_str = page.base_url.to_string();
+        let opts = StyleOptions {
+            state: &page.state,
+            resolve_url: &|base, raw| resolve_url(base, raw),
+            document_base: &base_str,
+        };
+        page.styles = rabbithole_style::style_tree_with(&page.doc, &page.sheets, &env, &opts);
+        page.background = canvas_background(&page.doc, &page.styles);
+        self.relayout_only(page);
+    }
+
+    /// Re-run layout + display list (styles unchanged).
+    pub fn relayout_only(&self, page: &mut Page) {
+        let ctx = self.layout_ctx(page);
+        page.layout = rabbithole_layout::layout(&ctx);
+        page.display_list = rabbithole_layout::build_display_list(&page.layout, &ctx);
+    }
+
+    /// Rebuild only the display list (after scrolling: sticky/fixed boxes
+    /// and inner scroll offsets).
+    pub fn rebuild_display_list(&self, page: &mut Page) {
+        let ctx = self.layout_ctx(page);
+        page.display_list = rabbithole_layout::build_display_list(&page.layout, &ctx);
+    }
+
+    fn layout_ctx<'a>(&'a self, page: &'a Page) -> LayoutContext<'a> {
+        LayoutContext {
+            doc: &page.doc,
+            styles: &page.styles,
+            fonts: &self.fonts,
+            images: &page.images,
+            background_images: &page.background_images,
+            viewport_width: page.viewport.width,
+            viewport_height: page.viewport.height,
+            scroll_offsets: &page.scroll_offsets,
+            page_scroll: page.page_scroll,
+        }
+    }
+
+    /// Change the viewport (window resize).
+    pub fn relayout(&mut self, page: &mut Page, viewport: Viewport) {
+        page.viewport = viewport;
+        self.restyle(page);
+    }
+
+    /// Update the page scroll position (sticky/fixed elements follow it).
+    /// Cheap: only the display list is rebuilt, and only when the page has
+    /// sticky or fixed boxes or inner scroll offsets.
+    pub fn set_page_scroll(&self, page: &mut Page, x: f32, y: f32) {
+        if page.page_scroll == (x, y) {
+            return;
+        }
+        page.page_scroll = (x, y);
+        if page.layout.has_sticky_or_fixed() {
+            self.rebuild_display_list(page);
+        }
+    }
+
+    /// Scroll the innermost scroll container under (x, y) (document
+    /// coordinates) by (dx, dy). Returns false when there is none (the
+    /// caller should scroll the page instead) or it is already at its limit.
+    pub fn scroll_at(&self, page: &mut Page, x: f32, y: f32, dx: f32, dy: f32) -> bool {
+        let Some(info) = page.layout.scroll_container_at(x, y) else {
+            return false;
+        };
+        let max_x = (info.content_width - info.viewport.w).max(0.0);
+        let max_y = (info.content_height - info.viewport.h).max(0.0);
+        let nx = (info.offset.0 + dx).clamp(0.0, max_x);
+        let ny = (info.offset.1 + dy).clamp(0.0, max_y);
+        if (nx, ny) == info.offset {
+            return false;
+        }
+        page.scroll_offsets.insert(info.node, (nx, ny));
+        self.relayout_only(page);
+        true
+    }
+
+    /// Set the hovered element (None = nothing). Restyles only when the
+    /// page has dynamic rules; returns true when a repaint is needed.
+    pub fn set_hover(&self, page: &mut Page, node: Option<NodeId>) -> bool {
+        if page.state.hovered == node {
+            return false;
+        }
+        page.state.hovered = node;
+        if page.has_dynamic_rules {
+            self.restyle(page);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_focus(&self, page: &mut Page, node: Option<NodeId>) -> bool {
+        if page.state.focused == node {
+            return false;
+        }
+        page.state.focused = node;
+        if page.has_dynamic_rules {
+            self.restyle(page);
+        }
+        true
+    }
+
+    /// Paint the page region starting at (scroll_x, scroll_y) into `canvas`.
+    pub fn render(&self, page: &Page, canvas: &mut Canvas, scroll_x: f32, scroll_y: f32) {
+        canvas.clear(Color::WHITE);
+        if page.background.a > 0 {
+            let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+            canvas.fill_rect(full, page.background);
+        }
+        rabbithole_layout::paint(&page.display_list, canvas, &self.fonts, scroll_x, scroll_y);
+    }
+}
+
+fn empty_layout() -> LayoutTree {
+    LayoutTree::empty()
+}
+
+fn media_env(viewport: Viewport) -> MediaEnv {
+    MediaEnv { width: viewport.width, height: viewport.height, screen: true }
+}
+
+fn resolve_url(base: &str, raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.starts_with("data:") {
+        return if raw.is_empty() { None } else { Some(raw.to_string()) };
+    }
+    let base = Url::parse_absolute(base)?;
+    base.join(raw).map(|u| u.to_string())
 }
 
 fn wrap_media(sheet: Stylesheet, media: Option<&str>) -> Stylesheet {
     match media.map(str::trim).filter(|m| !m.is_empty()) {
         None => sheet,
         Some(m) => Stylesheet {
-            rules: vec![Rule::Media {
-                query: parse_media_query(m),
-                rules: sheet.rules,
-            }],
+            base_url: sheet.base_url.clone(),
+            rules: vec![Rule::Media { query: parse_media_query(m), rules: sheet.rules }],
         },
     }
+}
+
+/// Imported sheets live inside the importing sheet, but their `url()`
+/// values must resolve against their own location: rewrite relative URLs
+/// in declarations to absolute ones.
+fn rebase_rules(rules: Vec<Rule>, base: &str) -> Vec<Rule> {
+    use rabbithole_css::Token;
+    fn rewrite(decls: &mut [rabbithole_css::Declaration], base: &str) {
+        for d in decls {
+            let mut i = 0;
+            while i < d.value.len() {
+                match &d.value[i] {
+                    Token::Url(u) => {
+                        if let Some(abs) = resolve_url(base, u) {
+                            d.value[i] = Token::Url(abs);
+                        }
+                    }
+                    Token::Function(f) if f.eq_ignore_ascii_case("url") => {
+                        if let Some(Token::String(s)) = d.value.get(i + 1) {
+                            if let Some(abs) = resolve_url(base, s) {
+                                d.value[i + 1] = Token::String(abs);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+    }
+    rules
+        .into_iter()
+        .map(|r| match r {
+            Rule::Style(mut s) => {
+                rewrite(&mut s.declarations, base);
+                Rule::Style(s)
+            }
+            Rule::Media { query, rules } => Rule::Media { query, rules: rebase_rules(rules, base) },
+            Rule::Supports { matches, rules } => Rule::Supports { matches, rules: rebase_rules(rules, base) },
+            Rule::FontFace(mut d) => {
+                rewrite(&mut d, base);
+                Rule::FontFace(d)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+fn sheet_has_dynamic_rules(sheet: &Stylesheet) -> bool {
+    use rabbithole_css::selector::{Compound, Pseudo};
+    fn compound_dynamic(c: &Compound) -> bool {
+        c.pseudos.iter().any(|p| match p {
+            Pseudo::Hover | Pseudo::Active | Pseudo::Focus | Pseudo::Target => true,
+            Pseudo::Not(l) | Pseudo::Is(l) | Pseudo::Where(l) => l.iter().any(|s| s.compounds.iter().any(compound_dynamic)),
+            Pseudo::Has(l) => l.iter().any(|(_, s)| s.compounds.iter().any(compound_dynamic)),
+            _ => false,
+        })
+    }
+    fn walk(rules: &[Rule]) -> bool {
+        rules.iter().any(|r| match r {
+            Rule::Style(s) => s.selectors.iter().any(|sel| sel.compounds.iter().any(compound_dynamic)),
+            Rule::Media { rules, .. } | Rule::Supports { rules, .. } => walk(rules),
+            _ => false,
+        })
+    }
+    walk(&sheet.rules)
 }
 
 /// Pick the URL an `<img>` should load: `src`, else the first `srcset`
@@ -559,14 +1033,30 @@ impl Page {
         self.layout.width
     }
 
-    /// Element at document coordinates.
+    /// Element at document coordinates (page-scrolled content only).
     pub fn node_at(&self, x: f32, y: f32) -> Option<NodeId> {
         self.layout.node_at(x, y)
     }
 
-    /// Resolved href of the link under the point, if any.
+    /// Element at viewport coordinates, checking fixed boxes first.
+    pub fn node_at_viewport(&self, vx: f32, vy: f32) -> Option<NodeId> {
+        self.layout.node_at_with_scroll(vx, vy, self.page_scroll)
+    }
+
+    /// Resolved href of the link under the document point, if any.
     pub fn link_at(&self, x: f32, y: f32) -> Option<Url> {
         let node = self.node_at(x, y)?;
+        self.link_of(node)
+    }
+
+    /// Resolved href of the link under the viewport point, if any.
+    pub fn link_at_viewport(&self, vx: f32, vy: f32) -> Option<Url> {
+        let node = self.node_at_viewport(vx, vy)?;
+        self.link_of(node)
+    }
+
+    /// The link (`a[href]` ancestor) of a node.
+    pub fn link_of(&self, node: NodeId) -> Option<Url> {
         let a = self.doc.ancestor_or_self(node, |n| {
             self.doc.element(n).map(|e| matches!(e.tag.as_str(), "a" | "area") && e.attr("href").is_some()).unwrap_or(false)
         })?;
@@ -583,8 +1073,7 @@ impl Page {
         self.base_url.join(href)
     }
 
-    /// Document-space rectangle of the element with `id` (or `<a name>`),
-    /// for fragment navigation.
+    /// Document-space rectangle of the element with `id` (or `<a name>`).
     pub fn anchor_rect(&self, id: &str) -> Option<Rect> {
         let id = id.trim_start_matches('#');
         if id.is_empty() {
@@ -595,7 +1084,12 @@ impl Page {
                 .descendants(Document::ROOT)
                 .find(|&n| self.doc.is_element(n, "a") && self.doc.attr(n, "name") == Some(id))
         })?;
-        // The element itself may be inline (no box); climb to a boxed ancestor.
+        self.rect_of(node)
+    }
+
+    /// Border-box rect of an element (document coordinates); climbs to a
+    /// boxed ancestor for elements without a box.
+    pub fn rect_of(&self, node: NodeId) -> Option<Rect> {
         let mut cur = Some(node);
         while let Some(n) = cur {
             if let Some(b) = find_box(&self.layout.root, n) {
@@ -604,6 +1098,11 @@ impl Page {
             cur = self.doc.parent(n);
         }
         None
+    }
+
+    /// Scroll container under a document point.
+    pub fn scroll_container_at(&self, x: f32, y: f32) -> Option<ScrollInfo> {
+        self.layout.scroll_container_at(x, y)
     }
 
     /// All links in document order (hidden ones excluded).
@@ -621,11 +1120,10 @@ impl Page {
             let Some(url) = self.resolve(href) else { continue };
             let mut text: String = self.doc.text_content(n).split_whitespace().collect::<Vec<_>>().join(" ");
             if text.is_empty() {
-                // Fall back to an image alt or title.
                 text = self
                     .doc
                     .descendants(n)
-                    .filter_map(|c| self.doc.attr(c, "alt").or_else(|| self.doc.attr(c, "title")))
+                    .filter_map(|c| self.doc.attr(c, "alt").or_else(|| self.doc.attr(c, "title")).or_else(|| self.doc.attr(c, "aria-label")))
                     .next()
                     .unwrap_or("")
                     .to_string();
@@ -635,8 +1133,7 @@ impl Page {
         out
     }
 
-    /// Readable text of the page as Markdown-ish plain text (headings,
-    /// paragraphs, lists, links), for CLI/MCP consumers.
+    /// Readable text of the page as Markdown-ish plain text.
     pub fn text(&self) -> String {
         text::extract(&self.doc, &self.styles, &self.base_url)
     }
@@ -649,21 +1146,39 @@ impl Page {
         self.layout.dump()
     }
 
-    /// Element node ids of all `<img>` elements that failed to load (for
-    /// diagnostics).
+    /// Style of a pseudo-element (helper for tooling).
+    pub fn pseudo_style(&self, node: NodeId, which: PseudoElement) -> Option<&Rc<rabbithole_style::ComputedStyle>> {
+        self.styles.pseudo(node, which)
+    }
+
+    /// `<img>` elements that failed to load (diagnostics).
     pub fn missing_images(&self) -> Vec<NodeId> {
         self.doc
             .descendants(Document::ROOT)
             .filter(|&n| self.doc.is_element(n, "img") && !self.images.contains_key(&n) && self.styles.get(n).is_some())
             .collect()
     }
-}
 
-impl From<FetchError> for EngineError {
-    fn from(e: FetchError) -> Self {
-        EngineError::Fetch(e.to_string())
+    /// Cursor hint for a document point: "pointer" over links/buttons,
+    /// "text" over selectable text, else "default".
+    pub fn cursor_at(&self, x: f32, y: f32) -> &'static str {
+        let Some(node) = self.node_at(x, y) else { return "default" };
+        if self.link_of(node).is_some() {
+            return "pointer";
+        }
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            if let Some(s) = self.styles.get(n) {
+                if s.cursor_pointer {
+                    return "pointer";
+                }
+                break;
+            }
+            cur = self.doc.parent(n);
+        }
+        if self.doc.is_text(node) {
+            return "text";
+        }
+        "default"
     }
 }
-
-#[allow(dead_code)]
-fn _assert_node_data_used(_: NodeData) {}
