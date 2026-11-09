@@ -461,3 +461,24 @@ fn stacking_context_detection() {
     assert!(one("will-change: transform").is_stacking_context());
     assert!(one("position: fixed").is_stacking_context());
 }
+
+#[test]
+fn wikipedia_grid_template_shorthand_and_areas() {
+    let html = r#"<div class="inner"><div class="notice">n</div><div class="content">c</div></div>"#;
+    let css = ".inner{display:grid;column-gap:24px;grid-template:min-content 1fr min-content / 12.25rem minmax(0,1fr);grid-template-areas:'siteNotice siteNotice' 'columnStart pageContent' 'footer footer'} .content{grid-area:pageContent} .notice{grid-area:siteNotice}";
+    let doc = rabbithole_html::parse(html);
+    let sheet = rabbithole_css::parse_stylesheet(css);
+    let env = MediaEnv { width: 1280.0, height: 800.0, screen: true };
+    let t = style_tree(&doc, &[sheet], &env);
+    let inner = doc.find_element("div").unwrap();
+    let s = t.get(inner).unwrap();
+    eprintln!("rows={:?}\ncols={:?}\nareas={:?}", s.grid_template_rows, s.grid_template_columns, s.grid_template_areas);
+    assert_eq!(s.grid_template_areas.len(), 3);
+    assert_eq!(s.grid_template_rows.len(), 3, "rows: {:?}", s.grid_template_rows);
+    assert_eq!(s.grid_template_columns.len(), 2, "cols: {:?}", s.grid_template_columns);
+    let content = doc.descendants(0).find(|&n| doc.element(n).map(|e| e.has_class("content")).unwrap_or(false)).unwrap();
+    let cs = t.get(content).unwrap();
+    eprintln!("content: rs={:?} re={:?} cs={:?} ce={:?}", cs.grid_row_start, cs.grid_row_end, cs.grid_column_start, cs.grid_column_end);
+    assert_eq!(cs.grid_row_start, GridLine::Named("pageContent".into(), false));
+    assert_eq!(cs.grid_column_end, GridLine::Named("pageContent".into(), false));
+}

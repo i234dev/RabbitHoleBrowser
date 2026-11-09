@@ -210,11 +210,13 @@ fn parse_grid_line(comps: &[&[Token]]) -> Option<GridLine> {
     let mut num: Option<i32> = None;
     let mut name: Option<String> = None;
     for c in comps {
-        if let Some(kw) = values::ident(c) {
-            match kw.as_str() {
+        // Custom identifiers (area / line names) are case-sensitive; only
+        // the keywords are matched case-insensitively.
+        if let [Token::Ident(raw)] = c {
+            match raw.to_ascii_lowercase().as_str() {
                 "auto" => return Some(GridLine::Auto),
                 "span" => span = true,
-                _ => name = Some(kw),
+                _ => name = Some(raw.clone()),
             }
         } else if let Some(n) = values::number(c) {
             num = Some(n as i32);

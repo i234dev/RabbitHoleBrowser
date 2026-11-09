@@ -37,6 +37,14 @@ fn main() {
         }
     };
     let t2 = std::time::Instant::now();
+    if std::env::var("RH_DEBUG_ITEMS").is_ok() {
+        for it in &page.display_list.items {
+            if let rabbithole_engine::layout::DisplayItem::Image { rect, src, image, opacity } = it {
+                eprintln!("Image item: dest={rect:?} src={src:?} image={}x{} opacity={opacity}", image.width, image.height);
+            }
+        }
+        eprintln!("images map: {}", page.images.len());
+    }
     let mut canvas = Canvas::new(w, h);
     engine.render(&page, &mut canvas, 0.0, 0.0);
     let t3 = std::time::Instant::now();
