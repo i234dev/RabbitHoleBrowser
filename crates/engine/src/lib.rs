@@ -9,7 +9,10 @@
 
 pub mod forms;
 mod home;
+pub mod select;
 mod text;
+
+pub use select::{Selection, TextRun};
 
 pub use forms::{ChosenFile, ControlKind};
 pub use rabbithole_net::{Body, Request, StreamedResponse};
@@ -907,12 +910,25 @@ impl Engine {
 
     /// Paint the page region starting at (scroll_x, scroll_y) into `canvas`.
     pub fn render(&self, page: &Page, canvas: &mut Canvas, scroll_x: f32, scroll_y: f32) {
+        self.render_scaled(page, canvas, scroll_x, scroll_y, 1.0);
+    }
+
+    /// Paint with a device scale (HiDPI / zoom): the page is laid out in
+    /// CSS pixels for a viewport of `canvas size / scale` and painted
+    /// magnified by `scale`. Scroll offsets are in CSS pixels.
+    pub fn render_scaled(&self, page: &Page, canvas: &mut Canvas, scroll_x: f32, scroll_y: f32, scale: f32) {
         canvas.clear(Color::WHITE);
         if page.background.a > 0 {
             let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
             canvas.fill_rect(full, page.background);
         }
-        rabbithole_layout::paint(&page.display_list, canvas, &self.fonts, scroll_x, scroll_y);
+        if (scale - 1.0).abs() > 1e-3 {
+            canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+            rabbithole_layout::paint(&page.display_list, canvas, &self.fonts, scroll_x, scroll_y);
+            canvas.pop_transform();
+        } else {
+            rabbithole_layout::paint(&page.display_list, canvas, &self.fonts, scroll_x, scroll_y);
+        }
     }
 }
 
