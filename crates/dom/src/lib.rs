@@ -119,6 +119,216 @@ impl Document {
         &self.nodes[id]
     }
 
+    pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
+        &mut self.nodes[id]
+    }
+
+    // ------------------------------------------------------------ mutation
+
+    /// Detach `child` from its parent (it stays allocated; `parent` becomes
+    /// None). No-op for the document node.
+    pub fn detach(&mut self, child: NodeId) {
+        let Some(parent) = self.nodes[child].parent else { return };
+        let prev = self.nodes[child].prev_sibling;
+        let next = self.nodes[child].next_sibling;
+        match prev {
+            Some(p) => self.nodes[p].next_sibling = next,
+            None => self.nodes[parent].first_child = next,
+        }
+        match next {
+            Some(n) => self.nodes[n].prev_sibling = prev,
+            None => self.nodes[parent].last_child = prev,
+        }
+        let c = &mut self.nodes[child];
+        c.parent = None;
+        c.prev_sibling = None;
+        c.next_sibling = None;
+    }
+
+    /// Insert `child` into `parent` before `reference` (append when None).
+    /// The child is detached from any previous position first.
+    pub fn insert_before(&mut self, parent: NodeId, child: NodeId, reference: Option<NodeId>) {
+        if child == parent || self.is_ancestor(child, parent) {
+            return;
+        }
+        self.detach(child);
+        match reference {
+            None => self.append_child(parent, child),
+            Some(r) => {
+                if self.nodes[r].parent != Some(parent) {
+                    self.append_child(parent, child);
+                    return;
+                }
+                let prev = self.nodes[r].prev_sibling;
+                self.nodes[child].parent = Some(parent);
+                self.nodes[child].prev_sibling = prev;
+                self.nodes[child].next_sibling = Some(r);
+                self.nodes[r].prev_sibling = Some(child);
+                match prev {
+                    Some(p) => self.nodes[p].next_sibling = Some(child),
+                    None => self.nodes[parent].first_child = Some(child),
+                }
+            }
+        }
+    }
+
+    /// Replace `old` with `new` in `old`'s parent.
+    pub fn replace_child(&mut self, old: NodeId, new: NodeId) {
+        let Some(parent) = self.nodes[old].parent else { return };
+        let next = self.nodes[old].next_sibling;
+        self.detach(old);
+        self.insert_before(parent, new, next);
+    }
+
+    /// Is `a` an ancestor of `b` (strict)?
+    pub fn is_ancestor(&self, a: NodeId, b: NodeId) -> bool {
+        let mut cur = self.nodes[b].parent;
+        while let Some(p) = cur {
+            if p == a {
+                return true;
+            }
+            cur = self.nodes[p].parent;
+        }
+        false
+    }
+
+    /// Deep-copy a subtree; the copy is detached.
+    pub fn clone_subtree(&mut self, root: NodeId, deep: bool) -> NodeId {
+        let data = self.nodes[root].data.clone();
+        let copy = self.create(data);
+        if deep {
+            let children: Vec<NodeId> = self.children(root).collect();
+            for c in children {
+                let cc = self.clone_subtree(c, true);
+                self.append_child(copy, cc);
+            }
+        }
+        copy
+    }
+
+    /// Remove all children of `parent` (detached, not freed).
+    pub fn clear_children(&mut self, parent: NodeId) {
+        let children: Vec<NodeId> = self.children(parent).collect();
+        for c in children {
+            self.detach(c);
+        }
+    }
+
+    /// Set (`Some`) or remove (`None`) an attribute on an element.
+    pub fn set_attr(&mut self, id: NodeId, name: &str, value: Option<&str>) {
+        let name = name.to_ascii_lowercase();
+        if let Some(el) = self.element_mut(id) {
+            match value {
+                Some(v) => match el.attrs.iter_mut().find(|(k, _)| *k == name) {
+                    Some(slot) => slot.1 = v.to_string(),
+                    None => el.attrs.push((name, v.to_string())),
+                },
+                None => el.attrs.retain(|(k, _)| *k != name),
+            }
+        }
+    }
+
+    /// Replace the text of a text node.
+    pub fn set_text(&mut self, id: NodeId, text: &str) {
+        if let NodeData::Text(t) = &mut self.nodes[id].data {
+            *t = text.to_string();
+        }
+    }
+
+    /// Is the node attached to the document (reachable from the root)?
+    pub fn is_connected(&self, id: NodeId) -> bool {
+        let mut cur = id;
+        loop {
+            if cur == Self::ROOT {
+                return true;
+            }
+            match self.nodes[cur].parent {
+                Some(p) => cur = p,
+                None => return false,
+            }
+        }
+    }
+
+    pub fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id].next_sibling
+    }
+
+    pub fn prev_sibling(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id].prev_sibling
+    }
+
+    pub fn first_child(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id].first_child
+    }
+
+    pub fn last_child(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id].last_child
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Serialize a subtree back to HTML (for `innerHTML`/`outerHTML`).
+    pub fn serialize(&self, id: NodeId, include_self: bool) -> String {
+        let mut out = String::new();
+        if include_self {
+            self.serialize_into(id, &mut out);
+        } else {
+            for c in self.children(id) {
+                self.serialize_into(c, &mut out);
+            }
+        }
+        out
+    }
+
+    fn serialize_into(&self, id: NodeId, out: &mut String) {
+        const VOID: &[&str] = &["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"];
+        match &self.nodes[id].data {
+            NodeData::Document => {
+                for c in self.children(id) {
+                    self.serialize_into(c, out);
+                }
+            }
+            NodeData::Element(e) => {
+                out.push('<');
+                out.push_str(&e.tag);
+                for (k, v) in &e.attrs {
+                    out.push(' ');
+                    out.push_str(k);
+                    out.push_str("=\"");
+                    out.push_str(&v.replace('&', "&amp;").replace('"', "&quot;"));
+                    out.push('"');
+                }
+                out.push('>');
+                if VOID.contains(&e.tag.as_str()) {
+                    return;
+                }
+                let raw = matches!(e.tag.as_str(), "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext");
+                for c in self.children(id) {
+                    if raw {
+                        if let NodeData::Text(t) = &self.nodes[c].data {
+                            out.push_str(t);
+                            continue;
+                        }
+                    }
+                    self.serialize_into(c, out);
+                }
+                out.push_str("</");
+                out.push_str(&e.tag);
+                out.push('>');
+            }
+            NodeData::Text(t) => {
+                out.push_str(&t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\u{a0}', "&nbsp;"));
+            }
+            NodeData::Comment(c) => {
+                out.push_str("<!--");
+                out.push_str(c);
+                out.push_str("-->");
+            }
+        }
+    }
+
     pub fn element(&self, id: NodeId) -> Option<&ElementData> {
         match &self.nodes[id].data {
             NodeData::Element(e) => Some(e),
@@ -349,5 +559,36 @@ mod tests {
         assert_eq!(d.element_by_id("b"), Some(body));
         assert_eq!(d.text_content(html), "hi");
         assert_eq!(d.descendants(Document::ROOT).count(), 4);
+    }
+
+    #[test]
+    fn mutation() {
+        let mut d = Document::new();
+        let html = d.create_element("html", vec![]);
+        d.append_child(Document::ROOT, html);
+        let a = d.create_element("a", vec![]);
+        let b = d.create_element("b", vec![]);
+        let c = d.create_element("c", vec![]);
+        d.append_child(html, a);
+        d.append_child(html, c);
+        d.insert_before(html, b, Some(c));
+        let tags: Vec<_> = d.children(html).map(|n| d.tag(n).unwrap().to_string()).collect();
+        assert_eq!(tags, ["a", "b", "c"]);
+        d.detach(b);
+        assert!(!d.is_connected(b));
+        let tags: Vec<_> = d.children(html).map(|n| d.tag(n).unwrap().to_string()).collect();
+        assert_eq!(tags, ["a", "c"]);
+        d.replace_child(c, b);
+        let tags: Vec<_> = d.children(html).map(|n| d.tag(n).unwrap().to_string()).collect();
+        assert_eq!(tags, ["a", "b"]);
+        d.set_attr(a, "ID", Some("x"));
+        assert_eq!(d.element_by_id("x"), Some(a));
+        let t = d.create_text("hi & <bye>");
+        d.append_child(a, t);
+        let copy = d.clone_subtree(html, true);
+        assert_eq!(d.serialize(copy, true), "<html><a id=\"x\">hi &amp; &lt;bye&gt;</a><b></b></html>");
+        // Cycles are refused.
+        d.insert_before(a, html, None);
+        assert_eq!(d.parent(html), Some(Document::ROOT));
     }
 }
