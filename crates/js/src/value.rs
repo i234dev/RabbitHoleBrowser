@@ -5,75 +5,145 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 /// An immutable JavaScript string stored as UTF-16 code units.
+///
+/// Concatenation of long strings builds a rope (no copying); the flat
+/// representation is produced lazily the first time the code units are
+/// needed and then cached, so `s += "x"` loops stay linear.
 #[derive(Clone)]
-pub struct JsStr(Rc<[u16]>);
+pub struct JsStr(Rc<StrInner>);
+
+enum StrInner {
+    Flat(Box<[u16]>),
+    Rope { left: JsStr, right: JsStr, len: usize, flat: std::cell::OnceCell<Box<[u16]>> },
+}
+
+impl Drop for StrInner {
+    fn drop(&mut self) {
+        // Unlink deep ropes iteratively to avoid recursive drops.
+        if let StrInner::Rope { left, right, .. } = self {
+            let mut stack = vec![std::mem::replace(left, JsStr::empty()), std::mem::replace(right, JsStr::empty())];
+            while let Some(s) = stack.pop() {
+                if let Ok(mut inner) = Rc::try_unwrap(s.0) {
+                    if let StrInner::Rope { left, right, .. } = &mut inner {
+                        stack.push(std::mem::replace(left, JsStr::empty()));
+                        stack.push(std::mem::replace(right, JsStr::empty()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+const ROPE_MIN: usize = 48;
 
 impl JsStr {
     pub fn new(s: &str) -> JsStr {
-        JsStr(s.encode_utf16().collect::<Vec<u16>>().into())
+        JsStr(Rc::new(StrInner::Flat(s.encode_utf16().collect::<Vec<u16>>().into())))
     }
     pub fn from_units(units: Vec<u16>) -> JsStr {
-        JsStr(units.into())
+        JsStr(Rc::new(StrInner::Flat(units.into())))
     }
     pub fn from_slice(units: &[u16]) -> JsStr {
-        JsStr(units.into())
+        JsStr(Rc::new(StrInner::Flat(units.into())))
     }
     pub fn empty() -> JsStr {
-        JsStr(Rc::from(Vec::<u16>::new()))
+        thread_local! {
+            static EMPTY: JsStr = JsStr(Rc::new(StrInner::Flat(Vec::new().into())));
+        }
+        EMPTY.with(|e| e.clone())
     }
+    /// The code units (flattening a rope on first use).
     pub fn as_units(&self) -> &[u16] {
-        &self.0
+        match &*self.0 {
+            StrInner::Flat(b) => b,
+            StrInner::Rope { flat, .. } => flat.get_or_init(|| self.flatten()),
+        }
+    }
+    fn flatten(&self) -> Box<[u16]> {
+        let mut out: Vec<u16> = Vec::with_capacity(self.len());
+        // Iterative in-order traversal (ropes can be very deep).
+        let mut stack: Vec<&JsStr> = vec![self];
+        while let Some(s) = stack.pop() {
+            match &*s.0 {
+                StrInner::Flat(b) => out.extend_from_slice(b),
+                StrInner::Rope { left, right, flat, .. } => {
+                    if let Some(f) = flat.get() {
+                        out.extend_from_slice(f);
+                    } else {
+                        stack.push(right);
+                        stack.push(left);
+                    }
+                }
+            }
+        }
+        out.into()
     }
     pub fn len(&self) -> usize {
-        self.0.len()
+        match &*self.0 {
+            StrInner::Flat(b) => b.len(),
+            StrInner::Rope { len, .. } => *len,
+        }
     }
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.len() == 0
     }
     /// Lossy conversion (lone surrogates become U+FFFD).
     pub fn to_rust_string(&self) -> String {
-        String::from_utf16_lossy(&self.0)
+        String::from_utf16_lossy(self.as_units())
     }
     pub fn concat(&self, other: &JsStr) -> JsStr {
-        let mut v = Vec::with_capacity(self.len() + other.len());
-        v.extend_from_slice(&self.0);
-        v.extend_from_slice(&other.0);
-        JsStr(v.into())
+        if other.is_empty() {
+            return self.clone();
+        }
+        if self.is_empty() {
+            return other.clone();
+        }
+        let len = self.len() + other.len();
+        if len < ROPE_MIN {
+            let mut v = Vec::with_capacity(len);
+            v.extend_from_slice(self.as_units());
+            v.extend_from_slice(other.as_units());
+            return JsStr(Rc::new(StrInner::Flat(v.into())));
+        }
+        JsStr(Rc::new(StrInner::Rope { left: self.clone(), right: other.clone(), len, flat: std::cell::OnceCell::new() }))
     }
     pub fn slice(&self, start: usize, end: usize) -> JsStr {
         let end = end.min(self.len());
         let start = start.min(end);
-        JsStr(self.0[start..end].into())
+        if start == 0 && end == self.len() {
+            return self.clone();
+        }
+        JsStr::from_slice(&self.as_units()[start..end])
     }
     pub fn starts_with(&self, other: &JsStr) -> bool {
-        self.0.starts_with(&other.0)
+        self.as_units().starts_with(other.as_units())
     }
     pub fn ends_with(&self, other: &JsStr) -> bool {
-        self.0.ends_with(&other.0)
+        self.as_units().ends_with(other.as_units())
     }
     /// Index of `needle` at or after `from`, in code units.
     pub fn index_of(&self, needle: &JsStr, from: usize) -> Option<usize> {
-        let h = &self.0;
-        let n = &needle.0;
+        let h = self.as_units();
+        let n = needle.as_units();
         if n.is_empty() {
             return if from <= h.len() { Some(from) } else { None };
         }
         if n.len() > h.len() {
             return None;
         }
-        (from..=h.len() - n.len()).find(|&i| &h[i..i + n.len()] == &n[..])
+        (from..=h.len() - n.len()).find(|&i| h[i..i + n.len()] == n[..])
     }
     pub fn last_index_of(&self, needle: &JsStr, from: usize) -> Option<usize> {
-        let h = &self.0;
-        let n = &needle.0;
+        let h = self.as_units();
+        let n = needle.as_units();
         if n.len() > h.len() {
             return None;
         }
         let max = (h.len() - n.len()).min(from);
-        (0..=max).rev().find(|&i| &h[i..i + n.len()] == &n[..])
+        (0..=max).rev().find(|&i| h[i..i + n.len()] == n[..])
     }
     pub fn eq_str(&self, s: &str) -> bool {
-        let mut it = self.0.iter();
+        let mut it = self.as_units().iter();
         for u in s.encode_utf16() {
             if it.next() != Some(&u) {
                 return false;
@@ -83,7 +153,7 @@ impl JsStr {
     }
     /// Canonical numeric array index (`"0"`, `"42"`, but not `"01"` or `"4294967295"`).
     pub fn as_array_index(&self) -> Option<u32> {
-        let u = &self.0;
+        let u = self.as_units();
         if u.is_empty() || u.len() > 10 {
             return None;
         }
@@ -111,10 +181,10 @@ impl JsStr {
         JsStr::new(&self.to_rust_string().to_lowercase())
     }
     pub fn chars_lossy(&self) -> std::char::DecodeUtf16<std::iter::Copied<std::slice::Iter<'_, u16>>> {
-        char::decode_utf16(self.0.iter().copied())
+        char::decode_utf16(self.as_units().iter().copied())
     }
     pub fn trim_js(&self, start: bool, end: bool) -> JsStr {
-        let u = &self.0;
+        let u = self.as_units();
         let mut s = 0;
         let mut e = u.len();
         if start {
@@ -130,15 +200,16 @@ impl JsStr {
         self.slice(s, e)
     }
     pub fn repeat(&self, n: usize) -> JsStr {
-        let mut v = Vec::with_capacity(self.len() * n);
+        let u = self.as_units();
+        let mut v = Vec::with_capacity(u.len() * n);
         for _ in 0..n {
-            v.extend_from_slice(&self.0);
+            v.extend_from_slice(u);
         }
-        JsStr(v.into())
+        JsStr::from_units(v)
     }
     /// Lexicographic comparison by code units (as JS `<` on strings).
     pub fn cmp_units(&self, other: &JsStr) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
+        self.as_units().cmp(other.as_units())
     }
     pub fn ptr_eq(&self, other: &JsStr) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
@@ -155,13 +226,13 @@ pub fn is_js_whitespace_unit(c: u16) -> bool {
 
 impl PartialEq for JsStr {
     fn eq(&self, other: &JsStr) -> bool {
-        Rc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+        Rc::ptr_eq(&self.0, &other.0) || (self.len() == other.len() && self.as_units() == other.as_units())
     }
 }
 impl Eq for JsStr {}
 impl Hash for JsStr {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state)
+        self.as_units().hash(state)
     }
 }
 impl fmt::Debug for JsStr {

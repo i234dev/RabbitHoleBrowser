@@ -85,7 +85,7 @@ enum ExitCtx {
     /// (whose handler ranges are suspended while the finalizer is inlined).
     Finally { body: Rc<Vec<Stmt>>, try_index: usize },
     /// Close the for-of iterator held in hidden slots.
-    IterClose { iter: (u16, u16), next: (u16, u16), is_async: bool },
+    IterClose { iter: (u16, u16), next: (u16, u16) },
 }
 
 #[derive(Debug)]
@@ -93,16 +93,19 @@ struct TryCtx {
     /// Completed ranges + an open start.
     ranges: Vec<(u32, u32)>,
     open_start: Option<u32>,
-    scope_depth: u32,
 }
 
 #[derive(Debug)]
 struct LoopCtx {
     label: Option<String>,
     is_loop: bool,
+    is_switch: bool,
     break_jumps: Vec<usize>,
     continue_jumps: Vec<usize>,
-    exit_depth: usize,
+    /// Exit-context depth to unwind to when breaking out.
+    break_depth: usize,
+    /// Exit-context depth to unwind to when continuing.
+    continue_depth: usize,
 }
 
 struct FnState {
@@ -113,6 +116,7 @@ struct FnState {
     functions: Vec<Rc<FunctionCode>>,
     handlers: Vec<Handler>,
     templates: Vec<(Vec<Option<JsStr>>, Vec<JsStr>)>,
+    block_names: Vec<Rc<Vec<JsStr>>>,
     scopes: Vec<CScope>,
     exits: Vec<ExitCtx>,
     tries: Vec<TryCtx>,
@@ -146,6 +150,7 @@ impl FnState {
             functions: Vec::new(),
             handlers: Vec::new(),
             templates: Vec::new(),
+            block_names: Vec::new(),
             scopes,
             exits: Vec::new(),
             tries: Vec::new(),
@@ -284,12 +289,6 @@ impl Compiler {
         scope.declare(name, kind)
     }
 
-    fn declare_in_function_scope(&mut self, name: &str, kind: BindKind) -> u16 {
-        let fs = self.fs();
-        let idx = fs.scopes.iter().rposition(|s| s.is_function).unwrap();
-        fs.scopes[idx].declare(name, kind)
-    }
-
     fn hidden_slot(&mut self, tag: &str) -> (u16, u16) {
         let fs = self.fs();
         fs.hidden_counter += 1;
@@ -405,8 +404,14 @@ impl Compiler {
         }
         let n = scope.slot_count;
         let tdz = scope.tdz_slots.clone();
+        let mut names = vec![JsStr::empty(); n as usize];
+        for (name, b) in &scope.names {
+            names[b.slot as usize] = JsStr::new(name);
+        }
         self.fs().scopes.push(scope);
-        self.emit(Op::PushScope(n));
+        let names_idx = self.fs_ref().block_names.len() as u16;
+        self.fs().block_names.push(Rc::new(names));
+        self.emit(Op::PushScope(n, names_idx));
         self.fs().scope_depth += 1;
         self.fs().exits.push(ExitCtx::Scope);
         for s in tdz {
@@ -545,6 +550,20 @@ impl Compiler {
         out
     }
 
+    /// SyntaxError for duplicate lexical declarations (and let/var clashes).
+    fn check_duplicates(&self, lex: &[(String, BindKind)], vars: &[String]) -> CResult<()> {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (n, k) in lex {
+            if !seen.insert(n.as_str()) && *k != BindKind::Function {
+                return self.err(&format!("Identifier '{}' has already been declared", n));
+            }
+            if *k != BindKind::Function && vars.iter().any(|v| v == n) {
+                return self.err(&format!("Identifier '{}' has already been declared", n));
+            }
+        }
+        Ok(())
+    }
+
     fn hoist_functions(&mut self, stmts: &[Stmt]) -> CResult<()> {
         for s in stmts {
             let s = match &s.kind {
@@ -600,11 +619,12 @@ impl Compiler {
         } else {
             let mut vars = Vec::new();
             Self::collect_var_names(&program.body, &mut vars);
-            for v in vars {
-                let i = self.const_str(&v);
+            for v in &vars {
+                let i = self.const_str(v);
                 self.emit(Op::DeclareGlobalVar(i));
             }
             let lex = Self::collect_lexical(&program.body, false);
+            self.check_duplicates(&lex, &vars)?;
             for (n, k) in lex {
                 // Track as script-level lexical for emit_init_var.
                 self.fs().scopes[0].names.insert(n.clone(), Binding { slot: 0, kind: k });
@@ -617,20 +637,14 @@ impl Compiler {
             self.fs().scopes[0].materialized = false;
         }
         self.hoist_functions(&program.body)?;
-        let n = program.body.len();
-        // Completion value: keep the last expression statement's value.
-        for (i, s) in program.body.iter().enumerate() {
-            if i + 1 == n {
-                if let StmtKind::Expr(e) = &s.kind {
-                    self.set_pos(s.pos);
-                    self.compile_expr(e)?;
-                    self.emit(Op::Return);
-                    continue;
-                }
-            }
+        for s in program.body.iter() {
             self.compile_stmt(s)?;
         }
-        self.emit(Op::Undefined);
+        if program.is_module {
+            self.emit(Op::Undefined);
+        } else {
+            self.emit(Op::LoadCompletion);
+        }
         self.emit(Op::Return);
         let fs = self.fns.pop().unwrap();
         Ok(Rc::new(finish(fs)))
@@ -765,13 +779,13 @@ impl Compiler {
     }
 
     /// Compile a function whose `FnState` flags need tweaking (class constructors, methods).
-    fn compile_function_with(&mut self, f: &Function, name: Option<&str>, tweak: impl FnOnce(&mut CodeFlags)) -> CResult<u32> {
+    fn compile_function_with(&mut self, f: &Function, name: Option<&str>, tweak: impl FnOnce(&mut CodeFlags) + 'static) -> CResult<u32> {
         // Compile normally then patch flags of the produced code.
         let idx = self.compile_function_inner(f, name, tweak)?;
         Ok(idx)
     }
 
-    fn compile_function_inner(&mut self, f: &Function, name: Option<&str>, tweak: impl FnOnce(&mut CodeFlags)) -> CResult<u32> {
+    fn compile_function_inner(&mut self, f: &Function, name: Option<&str>, tweak: impl FnOnce(&mut CodeFlags) + 'static) -> CResult<u32> {
         // Temporarily push a marker: we reuse compile_function but need the
         // flags set *before* the body compiles (InitFields emission). So we
         // replicate the prologue through a flag hook.
@@ -783,6 +797,7 @@ impl Compiler {
 
     fn compile_block(&mut self, stmts: &[Stmt]) -> CResult<()> {
         let decls = Self::collect_lexical(stmts, true);
+        self.check_duplicates(&decls, &[])?;
         let mat = self.push_block_scope(&decls);
         self.hoist_functions(stmts)?;
         for s in stmts {
@@ -798,7 +813,11 @@ impl Compiler {
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::Expr(e) => {
                 self.compile_expr(e)?;
-                self.emit(Op::Pop);
+                if self.fns.len() == 1 && self.fs_ref().is_script {
+                    self.emit(Op::StoreCompletion);
+                } else {
+                    self.emit(Op::Pop);
+                }
             }
             StmtKind::VarDecl(d) => self.compile_var_decl(d)?,
             StmtKind::FunctionDecl(_) => {} // hoisted
@@ -948,8 +967,21 @@ impl Compiler {
     }
 
     fn push_loop(&mut self, label: Option<String>, is_loop: bool) {
-        let exit_depth = self.fs_ref().exits.len();
-        self.fs().loops.push(LoopCtx { label, is_loop, break_jumps: Vec::new(), continue_jumps: Vec::new(), exit_depth });
+        let depth = self.fs_ref().exits.len();
+        self.fs().loops.push(LoopCtx { label, is_loop, is_switch: false, break_jumps: Vec::new(), continue_jumps: Vec::new(), break_depth: depth, continue_depth: depth });
+    }
+
+    fn push_switch(&mut self) {
+        let depth = self.fs_ref().exits.len();
+        self.fs().loops.push(LoopCtx { label: None, is_loop: false, is_switch: true, break_jumps: Vec::new(), continue_jumps: Vec::new(), break_depth: depth, continue_depth: depth });
+    }
+
+    /// Make `continue` in the innermost loop unwind only to the current depth.
+    fn set_continue_depth(&mut self) {
+        let depth = self.fs_ref().exits.len();
+        if let Some(l) = self.fs().loops.last_mut() {
+            l.continue_depth = depth;
+        }
     }
 
     fn patch_breaks(&mut self, lp: &LoopCtx) {
@@ -971,10 +1003,10 @@ impl Compiler {
             let l = &loops[i];
             let matches = match label {
                 Some(lb) => l.label.as_deref() == Some(lb) && (!is_continue || l.is_loop),
-                None => l.is_loop,
+                None => l.is_loop || (!is_continue && l.is_switch),
             };
             if matches {
-                return Ok((i, l.exit_depth));
+                return Ok((i, if is_continue { l.continue_depth } else { l.break_depth }));
             }
         }
         self.err(if is_continue { "Illegal continue statement" } else { "Illegal break statement" })
@@ -988,7 +1020,7 @@ impl Compiler {
                 ExitCtx::Scope => {
                     self.emit(Op::PopScope);
                 }
-                ExitCtx::IterClose { iter, next, .. } => {
+                ExitCtx::IterClose { iter, next } => {
                     self.emit(Op::GetLocal(iter.0, iter.1));
                     self.emit(Op::GetLocal(next.0, next.1));
                     self.emit(Op::IteratorClose);
@@ -1106,10 +1138,11 @@ impl Compiler {
         self.emit(Op::GetLocal(it.0, it.1));
         self.emit(Op::ForInNext);
         let exit = self.emit(Op::JumpIfTrue(0));
+        self.push_loop(label, true);
         let decls = Self::for_head_decls(left);
         let mat = self.push_block_scope(&decls);
+        self.set_continue_depth();
         self.compile_for_head_store(left)?;
-        self.push_loop(label, true);
         self.compile_stmt(body)?;
         let lp = self.fs().loops.pop().unwrap();
         let cont = self.here();
@@ -1119,7 +1152,7 @@ impl Compiler {
         self.patch_jump(exit);
         self.emit(Op::Pop); // leftover key (undefined) when done
         let after = self.emit(Op::Jump(0));
-        // breaks land here: scope already popped by exits
+        // breaks land here: their exits already popped the iteration scope
         for &j in &lp.break_jumps {
             self.patch_jump(j);
         }
@@ -1159,11 +1192,12 @@ impl Compiler {
     fn compile_for_of_body(&mut self, left: &ForHead, body: &Stmt, label: Option<String>, start: usize, iter: (u16, u16), next: (u16, u16), is_async: bool, exit: usize) -> CResult<()> {
         // Protect body with iterator close on throw.
         let try_start = self.here() as u32;
-        self.fs().exits.push(ExitCtx::IterClose { iter, next, is_async });
+        self.push_loop(label, true);
+        self.fs().exits.push(ExitCtx::IterClose { iter, next });
         let decls = Self::for_head_decls(left);
         let mat = self.push_block_scope(&decls);
+        self.set_continue_depth();
         self.compile_for_head_store(left)?;
-        self.push_loop(label, true);
         self.compile_stmt(body)?;
         let lp = self.fs().loops.pop().unwrap();
         let cont = self.here();
@@ -1181,11 +1215,8 @@ impl Compiler {
         self.emit(Op::Throw);
         self.fs().handlers.push(Handler { start: try_start, end: try_end, target: handler_pc, stack_depth: 0, scope_depth });
         self.patch_jump(exit);
-        if is_async {
-            self.emit(Op::Pop); // result object
-        } else {
-            self.emit(Op::Pop); // value (undefined)
-        }
+        self.emit(Op::Pop); // leftover value / result object
+        let _ = is_async;
         let after = self.emit(Op::Jump(0));
         for &j in &lp.break_jumps {
             self.patch_jump(j);
@@ -1218,7 +1249,7 @@ impl Compiler {
             }
         }
         let default_jump = self.emit(Op::Jump(0));
-        self.push_loop(None, false);
+        self.push_switch();
         let mut default_target = None;
         for (i, c) in cases.iter().enumerate() {
             let here = self.here() as u32;
@@ -1250,7 +1281,7 @@ impl Compiler {
         let try_index = self.fs_ref().tries.len();
         let scope_depth = self.fs_ref().scope_depth;
         let start = self.here() as u32;
-        self.fs().tries.push(TryCtx { ranges: Vec::new(), open_start: Some(start), scope_depth });
+        self.fs().tries.push(TryCtx { ranges: Vec::new(), open_start: Some(start) });
         if let Some(f) = &finalizer_rc {
             self.fs().exits.push(ExitCtx::Finally { body: f.clone(), try_index });
         }
@@ -1703,6 +1734,10 @@ impl Compiler {
                 }
                 let is_eval = matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval");
                 self.compile_callee(callee)?;
+                if let Some(desc) = callee_description(callee) {
+                    let i = self.const_str(&desc);
+                    self.emit(Op::CalleeDesc(i));
+                }
                 if *optional {
                     // stack: fn this
                     self.emit(Op::Swap);
@@ -2049,6 +2084,49 @@ impl Compiler {
 
     fn compile_assign(&mut self, op: AssignOp, target: &Pattern, value: &Expr) -> CResult<()> {
         if op == AssignOp::Assign {
+            // Member targets evaluate object/key before the value.
+            if let Pattern::Expr(e) = target {
+                if let ExprKind::Member { object, property, optional: false } = &e.kind {
+                    if !matches!(object.kind, ExprKind::Super) {
+                        self.compile_expr(object)?;
+                        match property {
+                            MemberProp::Identifier(name) => {
+                                self.compile_expr(value)?;
+                                let i = self.const_str(name);
+                                self.emit(Op::SetProp(i));
+                            }
+                            MemberProp::Private(name) => {
+                                self.emit_private_name(name)?;
+                                self.compile_expr(value)?;
+                                self.emit(Op::SetElem);
+                            }
+                            MemberProp::Computed(k) => {
+                                self.compile_expr(k)?;
+                                self.emit(Op::ToPropertyKey);
+                                self.compile_expr(value)?;
+                                self.emit(Op::SetElem);
+                            }
+                        }
+                        return Ok(());
+                    } else {
+                        match property {
+                            MemberProp::Identifier(name) => {
+                                self.compile_expr(value)?;
+                                let i = self.const_str(name);
+                                self.emit(Op::SetSuperProp(i));
+                            }
+                            MemberProp::Computed(k) => {
+                                self.compile_expr(k)?;
+                                self.emit(Op::ToPropertyKey);
+                                self.compile_expr(value)?;
+                                self.emit(Op::SetSuperElem);
+                            }
+                            MemberProp::Private(_) => return self.err("Unexpected private field"),
+                        }
+                        return Ok(());
+                    }
+                }
+            }
             let name = pattern_name(target);
             self.compile_expr_named(value, name)?;
             self.emit(Op::Dup);
@@ -2313,7 +2391,13 @@ impl Compiler {
             fl.is_derived = has_super;
         })?;
         self.emit(Op::MakeClass(ctor_idx));
-        // stack: ctor proto
+        // stack: ctor proto — initialise the inner class binding before static elements run
+        if let Some(n) = &c.name {
+            self.emit(Op::Swap);
+            self.emit(Op::Dup);
+            self.emit_init_var(n)?;
+            self.emit(Op::Swap);
+        }
         let mut instance_fields: Vec<(&PropertyKey, &Option<Expr>, usize)> = Vec::new();
         let mut computed_i = 0;
         let mut fi = 0;
@@ -2390,7 +2474,7 @@ impl Compiler {
             let mut stmts: Vec<Stmt> = Vec::new();
             let pos = c.pos;
             for (key, value, slot_idx) in &instance_fields {
-                let value_expr = value.clone().unwrap_or(Expr { pos, kind: ExprKind::Undefined });
+                let value_expr = (*value).clone().unwrap_or(Expr { pos, kind: ExprKind::Undefined });
                 let key_expr: ExprKind = match key {
                     PropertyKey::Identifier(n) | PropertyKey::String(n) => ExprKind::String(n.clone()),
                     PropertyKey::Number(n) => ExprKind::Number(*n),
@@ -2413,10 +2497,6 @@ impl Compiler {
             self.emit(Op::SetClassFields);
         }
         self.emit(Op::Pop); // drop proto
-        if let Some(n) = &c.name {
-            self.emit(Op::Dup);
-            self.emit_init_var(n)?;
-        }
         self.fs().class_depth -= 1;
         self.pop_block_scope(mat);
         Ok(())
@@ -2493,6 +2573,36 @@ fn binop_for_assign(op: AssignOp) -> Op {
     }
 }
 
+/// Short source-like description of a callee (`o.f`, `a[0]`, `f`).
+fn callee_description(e: &Expr) -> Option<String> {
+    fn describe(e: &Expr, depth: usize) -> Option<String> {
+        if depth > 3 {
+            return None;
+        }
+        match &e.kind {
+            ExprKind::Identifier(n) => Some(n.clone()),
+            ExprKind::This => Some("this".into()),
+            ExprKind::Member { object, property, .. } => {
+                let o = describe(object, depth + 1)?;
+                Some(match property {
+                    MemberProp::Identifier(n) => format!("{}.{}", o, n),
+                    MemberProp::Private(n) => format!("{}.#{}", o, n),
+                    MemberProp::Computed(k) => match &k.kind {
+                        ExprKind::Number(n) => format!("{}[{}]", o, crate::value::number_to_string(*n)),
+                        ExprKind::String(s) => format!("{}[\"{}\"]", o, s),
+                        ExprKind::Identifier(n) => format!("{}[{}]", o, n),
+                        _ => format!("{}[...]", o),
+                    },
+                })
+            }
+            ExprKind::OptionalChain(inner) => describe(inner, depth + 1),
+            ExprKind::Call { callee, .. } => Some(format!("{}(...)", describe(callee, depth + 1)?)),
+            _ => None,
+        }
+    }
+    describe(e, 0)
+}
+
 fn pattern_name(p: &Pattern) -> Option<&str> {
     match p {
         Pattern::Identifier(n) => Some(n.as_str()),
@@ -2556,6 +2666,7 @@ fn finish(fs: FnState) -> FunctionCode {
         self_slot: fs.self_slot,
         flags: fs.flags,
         slot_names,
+        block_names: fs.block_names,
         templates: fs.templates,
         source: fs.source,
         filename: fs.filename,

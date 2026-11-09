@@ -169,8 +169,9 @@ pub struct BoundFunction {
 pub struct ScopeData {
     pub slots: Vec<Value>,
     pub parent: Option<ObjectId>,
-    /// Bitmask-ish list of const slots (small; checked on SetLocalChecked).
-    pub consts: Vec<bool>,
+    /// Slot names (for TDZ error messages); `None` for function scopes,
+    /// whose names live on the `FunctionCode`.
+    pub names: Option<Rc<Vec<JsStr>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

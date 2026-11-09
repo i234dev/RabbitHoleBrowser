@@ -166,6 +166,8 @@ pub struct Realm {
     pub ops_executed: u64,
     /// The native function object currently executing (for captures).
     pub current_callee: Option<ObjectId>,
+    /// Arrays currently being joined (cycle guard for `Array.prototype.join`).
+    pub join_stack: Vec<ObjectId>,
 }
 
 impl Default for Realm {
@@ -245,6 +247,7 @@ impl Realm {
             extra_roots: Vec::new(),
             ops_executed: 0,
             current_callee: None,
+            join_stack: Vec::new(),
         };
         crate::builtins::register_builtins(&mut realm);
         realm

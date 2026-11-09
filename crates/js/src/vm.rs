@@ -24,6 +24,10 @@ pub struct Frame {
     pub is_construct: bool,
     /// Returning from this frame exits the run loop.
     pub entry: bool,
+    /// Script completion value (last expression statement).
+    pub completion: Value,
+    /// Constant index describing the callee of the next call (for errors).
+    pub callee_desc: Option<u32>,
 }
 
 impl std::fmt::Debug for Frame {
@@ -135,6 +139,7 @@ impl Realm {
 
     /// `[[Construct]]`.
     pub fn construct(&mut self, f: Value, args: &[Value], new_target: Value) -> JsResult<Value> {
+        let new_target = if new_target.is_undefined() { f.clone() } else { new_target };
         let id = match f {
             Value::Object(id) => id,
             _ => {
@@ -191,7 +196,7 @@ impl Realm {
     /// Run a compiled script in the global scope.
     pub fn run_script(&mut self, code: Rc<FunctionCode>) -> JsResult<Value> {
         let slots = code.scope_slots as usize;
-        let scope = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; slots], parent: None, consts: vec![] }))));
+        let scope = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; slots], parent: None, names: None }))));
         let this = if code.flags.is_script { Value::Object(self.global) } else { Value::Undefined };
         let frame = Frame {
             code,
@@ -208,6 +213,8 @@ impl Realm {
             generator: None,
             is_construct: false,
             entry: true,
+            completion: Value::Undefined,
+            callee_desc: None,
         };
         self.push_frame(frame, true)?;
         match self.run()? {
@@ -276,7 +283,7 @@ impl Realm {
         } else if flags.is_arrow {
             arguments_obj = arrow_args;
         }
-        let scope = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, consts: vec![] }))));
+        let scope = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))));
         Ok(Frame {
             code,
             pc: 0,
@@ -292,6 +299,8 @@ impl Realm {
             generator: None,
             is_construct,
             entry: false,
+            completion: Value::Undefined,
+            callee_desc: None,
         })
     }
 
@@ -730,9 +739,10 @@ impl Realm {
                     let c = self.global_lex.get(&name).map(|(_, c)| *c).unwrap_or(false);
                     self.global_lex.insert(name, (v, c));
                 }
-                Op::PushScope(n) => {
+                Op::PushScope(n, names_idx) => {
                     let parent = frame!().scope;
-                    let s = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; n as usize], parent: Some(parent), consts: vec![] }))));
+                    let names = frame!().code.block_names.get(names_idx as usize).cloned();
+                    let s = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; n as usize], parent: Some(parent), names }))));
                     frame!().scope = s;
                     frame!().scope_depth += 1;
                 }
@@ -747,11 +757,11 @@ impl Realm {
                 }
                 Op::CopyScope => {
                     let cur = frame!().scope;
-                    let (slots, parent) = match &self.heap.get(cur).kind {
-                        ObjectKind::Scope(s) => (s.slots.clone(), s.parent),
+                    let (slots, parent, names) = match &self.heap.get(cur).kind {
+                        ObjectKind::Scope(s) => (s.slots.clone(), s.parent, s.names.clone()),
                         _ => unreachable!(),
                     };
-                    let s = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent, consts: vec![] }))));
+                    let s = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent, names }))));
                     frame!().scope = s;
                 }
                 Op::GetProp(i) => {
@@ -826,6 +836,23 @@ impl Realm {
                     let key = pop!();
                     let obj = peek!().as_object().unwrap();
                     let key = self.to_property_key(key)?;
+                    // Anonymous functions take the computed key as their name.
+                    if let Value::Object(fid) = &v {
+                        let anonymous = match &self.obj(*fid).kind {
+                            ObjectKind::Function(c) => c.code.name.is_empty(),
+                            _ => false,
+                        };
+                        if anonymous {
+                            let has_name = self.obj(*fid).props.get(&PropertyKey::str("name")).map(|p| matches!(&p.value, Value::String(s) if !s.is_empty())).unwrap_or(false);
+                            if !has_name {
+                                let name = match &key {
+                                    PropertyKey::String(s) => Value::String(s.clone()),
+                                    PropertyKey::Symbol(sym) => Value::str(&format!("[{}]", self.symbol_description(*sym))),
+                                };
+                                self.define_property(*fid, "name", name, CONFIGURABLE);
+                            }
+                        }
+                    }
                     self.define_own(obj, key, Property::data(v, ALL))?;
                 }
                 Op::DefineMethod(flag) => {
@@ -916,12 +943,23 @@ impl Realm {
                     self.super_set(fi, key, v.clone())?;
                     push!(v);
                 }
+                Op::CalleeDesc(i) => {
+                    frame!().callee_desc = Some(i);
+                }
                 Op::Call(argc) | Op::CallEval(argc) => {
                     let n = frame!().stack.len();
                     let base = n - argc as usize - 2;
                     let args: Vec<Value> = frame!().stack.drain(base + 2..).collect();
                     let this = pop!();
                     let f = pop!();
+                    if !self.is_callable(&f) {
+                        if let Some(i) = frame!().callee_desc.take() {
+                            let desc = constant!(i);
+                            let desc = desc.as_str().map(|s| s.to_rust_string()).unwrap_or_default();
+                            return self.type_error(&format!("{} is not a function", desc));
+                        }
+                    }
+                    frame!().callee_desc = None;
                     if let Op::CallEval(_) = op {
                         if f.as_object() == Some(self.intrinsics.eval_fn) {
                             let strict = frame!().code.flags.is_strict;
@@ -1446,6 +1484,14 @@ impl Realm {
                     let f = self.frames.pop().unwrap();
                     return Ok(Exit::Await(v, Box::new(f)));
                 }
+                Op::StoreCompletion => {
+                    let v = pop!();
+                    frame!().completion = v;
+                }
+                Op::LoadCompletion => {
+                    let v = frame!().completion.clone();
+                    push!(v);
+                }
                 Op::Debugger | Op::Nop => {}
             }
         }
@@ -1455,10 +1501,19 @@ impl Realm {
 
     fn slot_name(&self, fi: usize, depth: u16, slot: u16) -> String {
         let frame = &self.frames[fi];
-        if depth as u32 == frame.scope_depth {
-            if let Some(n) = frame.code.slot_names.get(slot as usize) {
-                if !n.is_empty() {
-                    return n.to_rust_string();
+        let scope = self.scope_at(frame.scope, depth);
+        if let ObjectKind::Scope(sd) = &self.heap.get(scope).kind {
+            if let Some(names) = &sd.names {
+                if let Some(n) = names.get(slot as usize) {
+                    if !n.is_empty() {
+                        return n.to_rust_string();
+                    }
+                }
+            } else if depth as u32 == frame.scope_depth {
+                if let Some(n) = frame.code.slot_names.get(slot as usize) {
+                    if !n.is_empty() {
+                        return n.to_rust_string();
+                    }
                 }
             }
         }

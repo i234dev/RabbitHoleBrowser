@@ -43,8 +43,9 @@ pub enum Op {
     /// (name, is_const)
     DeclareGlobalLex(u32, bool),
     InitGlobalLex(u32),
-    /// Push a new declarative scope with n slots.
-    PushScope(u16),
+    /// Push a new declarative scope with n slots; second operand indexes
+    /// `FunctionCode::block_names` (for error messages).
+    PushScope(u16, u16),
     PopScope,
     /// Replace the current scope with a copy (per-iteration bindings).
     CopyScope,
@@ -94,6 +95,8 @@ pub enum Op {
     SuperCallSpread,
     /// Direct eval: func this args.. with special handling when func is the intrinsic eval
     CallEval(u16),
+    /// Remember a textual description of the next callee for error messages.
+    CalleeDesc(u32),
     Return,
     Throw,
     /// Throw a ReferenceError/TypeError with a constant message: (kind, msg const)
@@ -223,6 +226,10 @@ pub enum Op {
     AsyncYield,
 
     // --- misc
+    /// Script completion value tracking: value ->
+    StoreCompletion,
+    /// -> completion value
+    LoadCompletion,
     Debugger,
     Nop,
 }
@@ -281,6 +288,8 @@ pub struct FunctionCode {
     pub flags: CodeFlags,
     /// Names of each slot (debugging).
     pub slot_names: Vec<JsStr>,
+    /// Slot names of each block scope pushed by `PushScope`.
+    pub block_names: Vec<Rc<Vec<JsStr>>>,
     /// Template literal sites: (cooked strings, raw strings)
     pub templates: Vec<(Vec<Option<JsStr>>, Vec<JsStr>)>,
     /// Source text for `Function.prototype.toString`.
