@@ -314,7 +314,7 @@ impl<'a> Builder<'a> {
 
     fn build_replaced(&self, node: NodeId, tag: &str, style: &Rc<ComputedStyle>) -> Option<LayoutBox> {
         let doc = self.doc();
-        let image = if tag == "img" { self.ctx.images.get(&node).cloned() } else { None };
+        let image = if tag == "img" || tag == "svg" || tag == "input" { self.ctx.images.get(&node).cloned() } else { None };
         let attr_w = doc.attr(node, "width").and_then(parse_dimension_attr);
         let attr_h = doc.attr(node, "height").and_then(parse_dimension_attr);
         if tag == "img" && image.is_none() && attr_w.is_none() && style.width.is_auto() {

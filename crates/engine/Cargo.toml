@@ -15,3 +15,4 @@ rabbithole-style.workspace = true
 rabbithole-gfx.workspace = true
 rabbithole-net.workspace = true
 rabbithole-layout.workspace = true
+rabbithole-svg.workspace = true

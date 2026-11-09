@@ -6,6 +6,10 @@
 
 use crate::font::{FontContext, FontId, GlyphBitmap};
 use crate::image::Image;
+use crate::paint::Shader;
+use crate::path::{is_axis_aligned, is_identity, rect_path, transform_rect_aligned};
+use crate::raster::Mask;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Color {
@@ -100,9 +104,10 @@ impl Rect {
     }
 }
 
+
 /// Blend `src` (with 8-bit `alpha`) over an opaque 0x00RRGGBB pixel.
 #[inline(always)]
-fn blend(dst: u32, src: Color, alpha: u32) -> u32 {
+pub(crate) fn blend(dst: u32, src: Color, alpha: u32) -> u32 {
     if alpha >= 255 {
         return src.to_u32();
     }
@@ -121,8 +126,26 @@ fn blend(dst: u32, src: Color, alpha: u32) -> u32 {
 
 /// Coverage of the pixel span [p, p+1) by the interval [a, b), in 0..=1.
 #[inline(always)]
-fn span_coverage(p: f32, a: f32, b: f32) -> f32 {
+pub(crate) fn span_coverage(p: f32, a: f32, b: f32) -> f32 {
     (b.min(p + 1.0) - a.max(p)).clamp(0.0, 1.0)
+}
+
+/// One clip stack entry: a device-space rectangle and, for non-rectangular
+/// clips, a coverage mask covering (at least) that rectangle.
+#[derive(Clone)]
+pub(crate) struct ClipEntry {
+    pub rect: Rect,
+    pub mask: Option<Rc<Mask>>,
+}
+
+/// An offscreen layer: the saved pixels of a region, restored and blended
+/// with the layer's drawing on `end_layer`.
+pub(crate) struct Layer {
+    pub x0: i32,
+    pub y0: i32,
+    pub w: usize,
+    pub h: usize,
+    pub saved: Vec<u32>,
 }
 
 /// An RGB framebuffer. Pixels are `0x00RRGGBB` so the buffer can be handed
@@ -131,22 +154,41 @@ pub struct Canvas {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u32>,
-    clip_stack: Vec<Rect>,
+    pub(crate) clips: Vec<ClipEntry>,
+    pub(crate) transforms: Vec<Matrix>,
+    pub(crate) layers: Vec<Layer>,
 }
 
 /// Integer pixel bounds [x0, x1) × [y0, y1).
-#[derive(Clone, Copy)]
-struct Bounds {
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Bounds {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
 }
 
 impl Bounds {
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.x1 <= self.x0 || self.y1 <= self.y0
     }
+    pub fn tuple(&self) -> (i32, i32, i32, i32) {
+        (self.x0, self.y0, self.x1, self.y1)
+    }
+}
+
+/// Gamma lookup applied to glyph coverage for dark text (mild boost that
+/// brings thin stems closer to what GPU/Skia text looks like).
+fn text_gamma_lut() -> &'static [u8; 256] {
+    static LUT: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = [0u8; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let c = i as f32 / 255.0;
+            *v = (c.powf(1.0 / 1.43) * 255.0 + 0.5) as u8;
+        }
+        t
+    })
 }
 
 impl Canvas {
@@ -155,7 +197,9 @@ impl Canvas {
             width,
             height,
             data: vec![0xffffff; (width * height) as usize],
-            clip_stack: Vec::new(),
+            clips: Vec::new(),
+            transforms: Vec::new(),
+            layers: Vec::new(),
         }
     }
 
@@ -164,7 +208,9 @@ impl Canvas {
         self.height = height;
         self.data.clear();
         self.data.resize((width * height) as usize, 0xffffff);
-        self.clip_stack.clear();
+        self.clips.clear();
+        self.transforms.clear();
+        self.layers.clear();
     }
 
     pub fn clear(&mut self, color: Color) {
@@ -172,30 +218,65 @@ impl Canvas {
         self.data.fill(v);
     }
 
-    fn full_rect(&self) -> Rect {
+    pub(crate) fn full_rect(&self) -> Rect {
         Rect::new(0.0, 0.0, self.width as f32, self.height as f32)
     }
 
-    /// Current clip rectangle (whole canvas if none pushed).
+    /// Current clip rectangle in device space (whole canvas if none pushed).
     pub fn clip(&self) -> Rect {
-        match self.clip_stack.last() {
-            Some(r) => *r,
+        match self.clips.last() {
+            Some(c) => c.rect,
             None => self.full_rect(),
         }
     }
 
-    /// Push a clip that is intersected with the current one.
+    pub(crate) fn current_mask(&self) -> Option<Rc<Mask>> {
+        self.clips.last().and_then(|c| c.mask.clone())
+    }
+
+    /// Push a clip rectangle (in current user space) intersected with the
+    /// current clip. Under a rotating/skewing transform the rectangle
+    /// becomes a path clip.
     pub fn push_clip(&mut self, rect: Rect) {
-        let c = self.clip().intersect(&rect);
-        self.clip_stack.push(c);
+        let m = self.transform();
+        if is_identity(&m) || is_axis_aligned(&m) {
+            let dr = if is_identity(&m) { rect } else { transform_rect_aligned(&m, rect) };
+            let c = self.clip().intersect(&dr);
+            let mask = self.current_mask();
+            self.clips.push(ClipEntry { rect: c, mask });
+        } else {
+            self.push_clip_path(&rect_path(rect), FillRule::NonZero);
+        }
     }
 
     pub fn pop_clip(&mut self) {
-        self.clip_stack.pop();
+        self.clips.pop();
     }
 
-    /// Integer pixel bounds of `rect` intersected with the clip and canvas.
-    fn bounds(&self, rect: &Rect) -> Bounds {
+    /// Push a clip described by a device-space coverage mask (intersected
+    /// with the current clip rect and mask).
+    pub(crate) fn push_mask_clip(&mut self, mask: Mask) {
+        let rect = self.clip().intersect(&mask.rect());
+        let combined = match self.current_mask() {
+            None => mask,
+            Some(prev) => {
+                let mut m = mask;
+                for y in 0..m.height as i32 {
+                    for x in 0..m.width as i32 {
+                        let i = y as usize * m.width as usize + x as usize;
+                        let p = prev.get(m.x0 + x, m.y0 + y) as u32;
+                        m.data[i] = ((m.data[i] as u32 * p + 127) / 255) as u8;
+                    }
+                }
+                m
+            }
+        };
+        self.clips.push(ClipEntry { rect, mask: Some(Rc::new(combined)) });
+    }
+
+    /// Integer pixel bounds of the device-space `rect` intersected with the
+    /// clip and canvas.
+    pub(crate) fn bounds(&self, rect: &Rect) -> Bounds {
         let c = self.clip().intersect(&self.full_rect());
         let r = rect.intersect(&c);
         if r.is_empty() {
@@ -209,12 +290,32 @@ impl Canvas {
         }
     }
 
+    /// Clip ∩ canvas as integer bounds.
+    pub(crate) fn clip_bounds(&self) -> Bounds {
+        let full = self.full_rect();
+        self.bounds(&full)
+    }
+
     /// Fill an axis-aligned rect with alpha blending and anti-aliased
     /// fractional edges.
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
         if color.a == 0 || rect.is_empty() {
             return;
         }
+        let m = self.transform();
+        let rect = if is_identity(&m) {
+            rect
+        } else if is_axis_aligned(&m) {
+            transform_rect_aligned(&m, rect)
+        } else {
+            let path = rect_path(rect);
+            return self.fill_path(&path, FillRule::NonZero, &Paint::Solid(color));
+        };
+        self.fill_device_rect(rect, color);
+    }
+
+    /// Fill a device-space rect (no transform), honoring clip and mask.
+    pub(crate) fn fill_device_rect(&mut self, rect: Rect, color: Color) {
         let clip = self.clip().intersect(&self.full_rect());
         let r = rect.intersect(&clip);
         if r.is_empty() {
@@ -224,8 +325,9 @@ impl Canvas {
         if b.is_empty() {
             return;
         }
+        let mask = self.current_mask();
         let integer_aligned = r.x.fract() == 0.0 && r.y.fract() == 0.0 && r.right().fract() == 0.0 && r.bottom().fract() == 0.0;
-        if integer_aligned && color.a == 255 {
+        if integer_aligned && color.a == 255 && mask.is_none() {
             let v = color.to_u32();
             let w = self.width as usize;
             for y in b.y0..b.y1 {
@@ -244,10 +346,92 @@ impl Canvas {
             let row = y as usize * w;
             for x in b.x0..b.x1 {
                 let cx = span_coverage(x as f32, r.x, r.right());
-                let alpha = (a * cx * cy + 0.5) as u32;
+                let mut alpha = (a * cx * cy + 0.5) as u32;
+                if let Some(mk) = &mask {
+                    alpha = (alpha * mk.get(x, y) as u32 + 127) / 255;
+                }
                 if alpha > 0 {
                     let idx = row + x as usize;
                     self.data[idx] = blend(self.data[idx], color, alpha);
+                }
+            }
+        }
+    }
+
+    /// Composite a coverage mask with a shader, honoring clip and clip mask.
+    pub(crate) fn fill_mask(&mut self, cov: &Mask, shader: &Shader) {
+        if cov.is_empty() {
+            return;
+        }
+        let b = self.bounds(&cov.rect());
+        if b.is_empty() {
+            return;
+        }
+        let clipmask = self.current_mask();
+        let w = self.width as usize;
+        let solid = shader.is_solid();
+        let cw = cov.width as usize;
+        for y in b.y0..b.y1 {
+            let row = y as usize * w;
+            let mrow = (y - cov.y0) as usize * cw;
+            let covrow = &cov.data[mrow + (b.x0 - cov.x0) as usize..mrow + (b.x1 - cov.x0) as usize];
+            let dst = &mut self.data[row + b.x0 as usize..row + b.x1 as usize];
+            match (solid, &clipmask) {
+                (Some(color), None) => {
+                    let ca = color.a as u32;
+                    let v = color.to_u32();
+                    for (d, &c) in dst.iter_mut().zip(covrow) {
+                        if c == 0 {
+                            continue;
+                        }
+                        if c == 255 && ca == 255 {
+                            *d = v;
+                        } else {
+                            *d = blend(*d, color, (c as u32 * ca + 127) / 255);
+                        }
+                    }
+                }
+                (None, None) => {
+                    let linear = shader.row_params(b.x0, y);
+                    for (i, (d, &c)) in dst.iter_mut().zip(covrow).enumerate() {
+                        if c == 0 {
+                            continue;
+                        }
+                        let color = match linear {
+                            Some((t0, dt, repeat)) => shader.lut_color(t0 + dt * i as f32, repeat),
+                            None => shader.color_at(b.x0 + i as i32, y),
+                        };
+                        if color.a == 0 {
+                            continue;
+                        }
+                        if c == 255 && color.a == 255 {
+                            *d = color.to_u32();
+                        } else {
+                            *d = blend(*d, color, (c as u32 * color.a as u32 + 127) / 255);
+                        }
+                    }
+                }
+                (_, Some(mk)) => {
+                    let linear = shader.row_params(b.x0, y);
+                    for (i, (d, &c)) in dst.iter_mut().zip(covrow).enumerate() {
+                        if c == 0 {
+                            continue;
+                        }
+                        let x = b.x0 + i as i32;
+                        let color = match (solid, linear) {
+                            (Some(col), _) => col,
+                            (None, Some((t0, dt, repeat))) => shader.lut_color(t0 + dt * i as f32, repeat),
+                            (None, None) => shader.color_at(x, y),
+                        };
+                        if color.a == 0 {
+                            continue;
+                        }
+                        let alpha = (c as u32 * color.a as u32 + 127) / 255;
+                        let alpha = (alpha * mk.get(x, y) as u32 + 127) / 255;
+                        if alpha > 0 {
+                            *d = blend(*d, color, alpha);
+                        }
+                    }
                 }
             }
         }
@@ -255,178 +439,19 @@ impl Canvas {
 
     /// Fill a rect with rounded corners (radius clamped to half the size).
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, color: Color) {
-        let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0);
         if radius <= 0.5 {
             return self.fill_rect(rect, color);
         }
-        if color.a == 0 || rect.is_empty() {
-            return;
-        }
-        let b = self.bounds(&rect);
-        if b.is_empty() {
-            return;
-        }
-        let a = color.a as f32;
-        let w = self.width as usize;
-        let shape = RoundedRect::new(rect, radius);
-        for y in b.y0..b.y1 {
-            let row = y as usize * w;
-            for x in b.x0..b.x1 {
-                let cov = shape.coverage(x, y);
-                let alpha = (a * cov + 0.5) as u32;
-                if alpha > 0 {
-                    let idx = row + x as usize;
-                    self.data[idx] = blend(self.data[idx], color, alpha);
-                }
-            }
-        }
+        let r = (radius, radius);
+        self.fill_rounded_rect_radii(rect, [r; 4], &Paint::Solid(color));
     }
 
     /// Stroke a rect border given per-side widths (top, right, bottom, left)
     /// and colors, optionally with rounded corners. `styles` per side:
-    /// 0 = solid, 1 = dashed, 2 = dotted, 3 = double.
+    /// 0 = solid, 1 = dashed, 2 = dotted, 3 = double (4-7: 3D styles).
     pub fn stroke_rect(&mut self, rect: Rect, widths: [f32; 4], colors: [Color; 4], styles: [u8; 4], radius: f32) {
-        if rect.is_empty() || widths.iter().all(|w| *w <= 0.0) {
-            return;
-        }
-        let [wt, wr, wb, wl] = widths;
-        let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0);
-        if radius > 0.5 {
-            self.stroke_rounded(rect, widths, colors, radius);
-            return;
-        }
-        // Top
-        if wt > 0.0 {
-            self.stroke_side(Rect::new(rect.x, rect.y, rect.w, wt), colors[0], styles[0], wt, true, wl, wr);
-        }
-        if wb > 0.0 {
-            self.stroke_side(Rect::new(rect.x, rect.bottom() - wb, rect.w, wb), colors[2], styles[2], wb, true, wl, wr);
-        }
-        if wl > 0.0 {
-            self.stroke_side(Rect::new(rect.x, rect.y + wt, wl, rect.h - wt - wb), colors[3], styles[3], wl, false, 0.0, 0.0);
-        }
-        if wr > 0.0 {
-            self.stroke_side(Rect::new(rect.right() - wr, rect.y + wt, wr, rect.h - wt - wb), colors[1], styles[1], wr, false, 0.0, 0.0);
-        }
-    }
-
-    /// Draw one side of a border. `band` is the full strip; for dashed and
-    /// dotted styles the corner squares (where adjacent sides meet) are
-    /// always filled so corners look closed.
-    fn stroke_side(&mut self, band: Rect, color: Color, style: u8, width: f32, horizontal: bool, corner_a: f32, corner_b: f32) {
-        if color.a == 0 || band.is_empty() {
-            return;
-        }
-        match style {
-            1 | 2 => {
-                let (dash, gap) = if style == 1 { (width * 3.0, width * 1.5) } else { (width, width) };
-                let period = dash + gap;
-                if horizontal {
-                    let start = band.x + corner_a;
-                    let end = band.right() - corner_b;
-                    if corner_a > 0.0 {
-                        self.fill_rect(Rect::new(band.x, band.y, corner_a, band.h), color);
-                    }
-                    if corner_b > 0.0 {
-                        self.fill_rect(Rect::new(end, band.y, corner_b, band.h), color);
-                    }
-                    let mut x = start;
-                    while x < end {
-                        let w = dash.min(end - x);
-                        if style == 2 {
-                            self.fill_rounded_rect(Rect::new(x, band.y, w, band.h), width / 2.0, color);
-                        } else {
-                            self.fill_rect(Rect::new(x, band.y, w, band.h), color);
-                        }
-                        x += period;
-                    }
-                } else {
-                    let mut y = band.y;
-                    while y < band.bottom() {
-                        let h = dash.min(band.bottom() - y);
-                        if style == 2 {
-                            self.fill_rounded_rect(Rect::new(band.x, y, band.w, h), width / 2.0, color);
-                        } else {
-                            self.fill_rect(Rect::new(band.x, y, band.w, h), color);
-                        }
-                        y += period;
-                    }
-                }
-            }
-            3 => {
-                let t = (width / 3.0).max(1.0);
-                if horizontal {
-                    self.fill_rect(Rect::new(band.x, band.y, band.w, t), color);
-                    self.fill_rect(Rect::new(band.x, band.bottom() - t, band.w, t), color);
-                } else {
-                    self.fill_rect(Rect::new(band.x, band.y, t, band.h), color);
-                    self.fill_rect(Rect::new(band.right() - t, band.y, t, band.h), color);
-                }
-            }
-            _ => self.fill_rect(band, color),
-        }
-    }
-
-    fn stroke_rounded(&mut self, rect: Rect, widths: [f32; 4], colors: [Color; 4], radius: f32) {
-        let [wt, wr, wb, wl] = widths;
-        let outer = RoundedRect::new(rect, radius);
-        let inner_rect = rect.inset(wt, wr, wb, wl);
-        let inner_radius = (radius - widths.iter().cloned().fold(0.0, f32::max)).max(0.0);
-        let inner = if inner_rect.is_empty() { None } else { Some(RoundedRect::new(inner_rect, inner_radius)) };
-        let b = self.bounds(&rect);
-        if b.is_empty() {
-            return;
-        }
-        let w = self.width as usize;
-        for y in b.y0..b.y1 {
-            let row = y as usize * w;
-            let py = y as f32 + 0.5;
-            for x in b.x0..b.x1 {
-                let cov_outer = outer.coverage(x, y);
-                if cov_outer <= 0.0 {
-                    continue;
-                }
-                let cov_inner = inner.map(|i| i.coverage(x, y)).unwrap_or(0.0);
-                let cov = (cov_outer - cov_inner).clamp(0.0, 1.0);
-                if cov <= 0.0 {
-                    continue;
-                }
-                let px = x as f32 + 0.5;
-                // Pick the side color by the band the pixel centre falls in.
-                let side = if py < rect.y + wt && wt > 0.0 {
-                    // top band, unless clearly in the left/right band near corners
-                    if px < rect.x + wl && (px - rect.x) / wl.max(0.01) < (py - rect.y) / wt {
-                        3
-                    } else if px >= rect.right() - wr && (rect.right() - px) / wr.max(0.01) < (py - rect.y) / wt {
-                        1
-                    } else {
-                        0
-                    }
-                } else if py >= rect.bottom() - wb && wb > 0.0 {
-                    if px < rect.x + wl && (px - rect.x) / wl.max(0.01) < (rect.bottom() - py) / wb {
-                        3
-                    } else if px >= rect.right() - wr && (rect.right() - px) / wr.max(0.01) < (rect.bottom() - py) / wb {
-                        1
-                    } else {
-                        2
-                    }
-                } else if px < rect.x + wl {
-                    3
-                } else if px >= rect.right() - wr {
-                    1
-                } else if px - rect.x < rect.right() - px {
-                    3
-                } else {
-                    1
-                };
-                let color = colors[side];
-                let alpha = (color.a as f32 * cov + 0.5) as u32;
-                if alpha > 0 {
-                    let idx = row + x as usize;
-                    self.data[idx] = blend(self.data[idx], color, alpha);
-                }
-            }
-        }
+        let r = (radius.max(0.0), radius.max(0.0));
+        self.stroke_rect_radii(rect, widths, colors, styles, [r; 4]);
     }
 
     /// Anti-aliased line of given width.
@@ -435,41 +460,25 @@ impl Canvas {
             return;
         }
         let half = width / 2.0;
+        let aligned = is_identity(&self.transform()) || is_axis_aligned(&self.transform());
         // Axis-aligned lines are snapped to the pixel grid so 1px rules
         // (underlines, <hr>) stay crisp instead of smearing over two rows.
-        if (y0 - y1).abs() < 0.01 {
+        if aligned && (y0 - y1).abs() < 0.01 {
             let (a, b) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
             let top = (y0 - half).round();
             return self.fill_rect(Rect::new(a, top, b - a, width.round().max(1.0)), color);
         }
-        if (x0 - x1).abs() < 0.01 {
+        if aligned && (x0 - x1).abs() < 0.01 {
             let (a, b) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
             let left = (x0 - half).round();
             return self.fill_rect(Rect::new(left, a, width.round().max(1.0), b - a), color);
         }
-        // General case: walk along the major axis stamping small squares.
-        let dx = x1 - x0;
-        let dy = y1 - y0;
-        let len = (dx * dx + dy * dy).sqrt();
-        let steps = (len / (width.min(1.0) * 0.5)).ceil().max(1.0) as usize;
-        let stamp = width.max(1.0);
-        // Stamping overlaps; use full colour but avoid re-blending the same
-        // pixel many times by tracking the last stamped integer position.
-        let mut last = (i32::MIN, i32::MIN);
-        for i in 0..=steps {
-            let t = i as f32 / steps as f32;
-            let px = x0 + dx * t;
-            let py = y0 + dy * t;
-            let key = ((px * 2.0) as i32, (py * 2.0) as i32);
-            if key == last {
-                continue;
-            }
-            last = key;
-            self.fill_rect(Rect::new(px - stamp / 2.0, py - stamp / 2.0, stamp, stamp), color);
-        }
+        let path = [PathSeg::MoveTo(Point::new(x0, y0)), PathSeg::LineTo(Point::new(x1, y1))];
+        let style = StrokeStyle { width: width.max(0.75), ..Default::default() };
+        self.stroke_path(&path, &style, &Paint::Solid(color));
     }
 
-    /// Blit a glyph coverage mask with its top-left at (x, y).
+    /// Blit a glyph coverage mask with its top-left at device (x, y).
     pub fn draw_glyph(&mut self, bitmap: &GlyphBitmap, x: i32, y: i32, color: Color) {
         if color.a == 0 || bitmap.width == 0 || bitmap.height == 0 {
             return;
@@ -478,18 +487,27 @@ impl Canvas {
         if b.is_empty() {
             return;
         }
+        let mask = self.current_mask();
         let w = self.width as usize;
         let bw = bitmap.width as usize;
         let a = color.a as u32;
+        let luma = (color.r as u32 * 299 + color.g as u32 * 587 + color.b as u32 * 114) / 1000;
+        let lut = if luma < 140 { Some(text_gamma_lut()) } else { None };
         for py in b.y0..b.y1 {
             let srow = (py - y) as usize * bw;
             let drow = py as usize * w;
             for px in b.x0..b.x1 {
-                let cov = bitmap.coverage[srow + (px - x) as usize] as u32;
+                let mut cov = bitmap.coverage[srow + (px - x) as usize] as u32;
                 if cov == 0 {
                     continue;
                 }
-                let alpha = (cov * a + 127) / 255;
+                if let Some(l) = lut {
+                    cov = l[cov as usize] as u32;
+                }
+                let mut alpha = (cov * a + 127) / 255;
+                if let Some(mk) = &mask {
+                    alpha = (alpha * mk.get(px, py) as u32 + 127) / 255;
+                }
                 let idx = drow + px as usize;
                 self.data[idx] = blend(self.data[idx], color, alpha);
             }
@@ -498,61 +516,14 @@ impl Canvas {
 
     /// Draw `text` with its baseline at `baseline_y`, returns the advance.
     pub fn draw_text(&mut self, fonts: &FontContext, font: FontId, size: f32, text: &str, x: f32, baseline_y: f32, color: Color) -> f32 {
-        let glyphs = fonts.shape(font, size, text, 0.0);
-        let baseline = baseline_y.round() as i32;
-        let mut advance = 0.0;
-        for g in &glyphs {
-            advance = g.x + g.advance;
-            if g.glyph == crate::font::ZERO_WIDTH_GLYPH {
-                continue;
-            }
-            let bitmap = fonts.rasterize(g.font, g.glyph, size);
-            if bitmap.is_empty() {
-                continue;
-            }
-            let gx = (x + g.x).round() as i32 + bitmap.left;
-            let gy = baseline - bitmap.top;
-            self.draw_glyph(&bitmap, gx, gy, color);
-        }
-        advance
+        self.draw_text_ext(fonts, font, size, text, x, baseline_y, color, 0.0, false, false)
     }
 
     /// Draw an RGBA image scaled into `dest` (box filtered when downscaling,
     /// bilinear when upscaling), with alpha blending and `opacity`.
     pub fn draw_image(&mut self, image: &Image, dest: Rect, opacity: f32) {
-        if dest.is_empty() || image.width == 0 || image.height == 0 || opacity <= 0.0 {
-            return;
-        }
-        let b = self.bounds(&dest);
-        if b.is_empty() {
-            return;
-        }
-        let sx = image.width as f32 / dest.w;
-        let sy = image.height as f32 / dest.h;
-        let op = opacity.clamp(0.0, 1.0);
-        let w = self.width as usize;
-        let downscale = sx > 1.0 || sy > 1.0;
-        for py in b.y0..b.y1 {
-            let drow = py as usize * w;
-            // Source span covered by this destination row.
-            let v0 = (py as f32 - dest.y) * sy;
-            let v1 = (py as f32 + 1.0 - dest.y) * sy;
-            for px in b.x0..b.x1 {
-                let u0 = (px as f32 - dest.x) * sx;
-                let u1 = (px as f32 + 1.0 - dest.x) * sx;
-                let [r, g, bl, a] = if downscale {
-                    sample_box(image, u0, v0, u1, v1)
-                } else {
-                    sample_bilinear(image, (u0 + u1) * 0.5 - 0.5, (v0 + v1) * 0.5 - 0.5)
-                };
-                let alpha = (a * op + 0.5) as u32;
-                if alpha == 0 {
-                    continue;
-                }
-                let idx = drow + px as usize;
-                self.data[idx] = blend(self.data[idx], Color::rgb(r as u8, g as u8, bl as u8), alpha);
-            }
-        }
+        let src = Rect::new(0.0, 0.0, image.width as f32, image.height as f32);
+        self.draw_image_region(image, src, dest, opacity);
     }
 
     /// Copy of the pixels as tightly packed RGBA8 (for PNG export).
@@ -587,76 +558,10 @@ impl Canvas {
     }
 }
 
-/// Analytic-ish coverage for a rounded rectangle: straight edges use exact
-/// span coverage; pixels inside the corner squares are 4×4 supersampled.
-#[derive(Clone, Copy)]
-struct RoundedRect {
-    r: Rect,
-    radius: f32,
-}
-
-impl RoundedRect {
-    fn new(r: Rect, radius: f32) -> Self {
-        RoundedRect { r, radius }
-    }
-
-    #[inline]
-    fn inside(&self, px: f32, py: f32) -> bool {
-        let r = &self.r;
-        if px < r.x || py < r.y || px >= r.right() || py >= r.bottom() {
-            return false;
-        }
-        let rad = self.radius;
-        // Corner centres
-        let cx = if px < r.x + rad {
-            r.x + rad
-        } else if px > r.right() - rad {
-            r.right() - rad
-        } else {
-            return true;
-        };
-        let cy = if py < r.y + rad {
-            r.y + rad
-        } else if py > r.bottom() - rad {
-            r.bottom() - rad
-        } else {
-            return true;
-        };
-        let dx = px - cx;
-        let dy = py - cy;
-        dx * dx + dy * dy <= rad * rad
-    }
-
-    fn coverage(&self, x: i32, y: i32) -> f32 {
-        let r = &self.r;
-        let fx = x as f32;
-        let fy = y as f32;
-        let rad = self.radius;
-        let in_corner_x = fx + 1.0 > r.x && fx < r.x + rad || fx + 1.0 > r.right() - rad && fx < r.right();
-        let in_corner_y = fy + 1.0 > r.y && fy < r.y + rad || fy + 1.0 > r.bottom() - rad && fy < r.bottom();
-        if in_corner_x && in_corner_y {
-            // Supersample 4x4
-            let mut hits = 0;
-            for sy in 0..4 {
-                let py = fy + (sy as f32 + 0.5) / 4.0;
-                for sx in 0..4 {
-                    let px = fx + (sx as f32 + 0.5) / 4.0;
-                    if self.inside(px, py) {
-                        hits += 1;
-                    }
-                }
-            }
-            hits as f32 / 16.0
-        } else {
-            span_coverage(fx, r.x, r.right()) * span_coverage(fy, r.y, r.bottom())
-        }
-    }
-}
-
 /// Average of the source pixels covering [u0,u1)×[v0,v1) (premultiplied
 /// average so transparent pixels don't bleed colour). Returns straight RGBA
 /// as f32 0..255.
-fn sample_box(img: &Image, u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 4] {
+pub(crate) fn sample_box(img: &Image, u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 4] {
     let x0 = u0.floor().max(0.0) as u32;
     let y0 = v0.floor().max(0.0) as u32;
     let x1 = (u1.ceil() as u32).min(img.width).max(x0 + 1);
@@ -695,7 +600,7 @@ fn sample_box(img: &Image, u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 4] {
 
 /// Bilinear sample at source coordinates (u, v) in pixel units (centre at .5
 /// already subtracted by the caller). Returns straight RGBA 0..255.
-fn sample_bilinear(img: &Image, u: f32, v: f32) -> [f32; 4] {
+pub(crate) fn sample_bilinear(img: &Image, u: f32, v: f32) -> [f32; 4] {
     let maxx = (img.width - 1) as f32;
     let maxy = (img.height - 1) as f32;
     let u = u.clamp(0.0, maxx);

@@ -7,6 +7,13 @@ pub mod canvas_ext;
 pub mod font;
 pub mod font_ext;
 pub mod image;
+pub mod paint;
+pub mod path;
+pub mod raster;
+pub mod stroke;
+
+#[cfg(test)]
+mod tests_v02;
 
 pub use canvas::{Canvas, Color, ColorStop, FillRule, LineCap, LineJoin, Matrix, Paint, PathSeg, Point, Radii, Rect, StrokeStyle, IDENTITY};
 pub use canvas_ext::{ellipse_path, parse_svg_path, rounded_rect_path};

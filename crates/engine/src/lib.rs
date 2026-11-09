@@ -34,6 +34,7 @@ pub use rabbithole_html as html;
 pub use rabbithole_layout as layout;
 pub use rabbithole_net as net;
 pub use rabbithole_style as style;
+pub use rabbithole_svg as svg;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -527,7 +528,7 @@ impl Loader {
         let mut caches = self.caches.lock().unwrap();
         for (u, r) in to_fetch.iter().zip(results) {
             let decoded = match r {
-                Ok(resp) if resp.status < 400 => Image::decode(&resp.body).map(Arc::new),
+                Ok(resp) if resp.status < 400 => decode_image(&resp.body, &resp.content_type, &u.path).map(Arc::new),
                 _ => None,
             };
             caches.images.insert(u.to_string(), decoded);
@@ -813,6 +814,7 @@ impl Engine {
         };
         page.styles = rabbithole_style::style_tree_with(&page.doc, &page.sheets, &env, &opts);
         page.background = canvas_background(&page.doc, &page.styles);
+        rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images);
         self.relayout_only(page);
     }
 
@@ -942,6 +944,69 @@ impl Engine {
 
 fn empty_layout() -> LayoutTree {
     LayoutTree::empty()
+}
+
+/// Decode a raster image, or rasterize an SVG document at its intrinsic
+/// size (×2 for crispness when scaled, capped at 2048 px).
+fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
+    let looks_svg = content_type.contains("svg")
+        || path.to_ascii_lowercase().ends_with(".svg")
+        || (bytes.len() > 5 && bytes.iter().take(512).any(|&b| b == b'<') && std::str::from_utf8(&bytes[..bytes.len().min(2048)]).map(|s| s.contains("<svg")).unwrap_or(false));
+    if looks_svg {
+        let text = decode_text(bytes, None);
+        let tree = rabbithole_svg::SvgTree::parse(&text)?;
+        let (w, h) = tree.resolve_size(None, None);
+        let scale = if w.max(h) < 512.0 { 2.0 } else { 1.0 };
+        let (pw, ph) = ((w * scale).round().clamp(1.0, 2048.0) as u32, (h * scale).round().clamp(1.0, 2048.0) as u32);
+        let fonts = FontContext::new();
+        return Some(tree.rasterize(&fonts, pw, ph));
+    }
+    Image::decode(bytes)
+}
+
+/// Rasterize inline `<svg>` elements of a document into images keyed by
+/// node, so layout/paint treat them as replaced images.
+fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContext, images: &mut HashMap<NodeId, Arc<Image>>) {
+    let mut roots = Vec::new();
+    for n in doc.descendants(Document::ROOT) {
+        if doc.is_element(n, "svg") && styles.get(n).is_some() {
+            // Skip svg nested inside another svg.
+            let nested = doc.ancestor_or_self(n, |a| a != n && doc.is_element(a, "svg")).is_some();
+            if !nested {
+                roots.push(n);
+            }
+        }
+    }
+    for n in roots {
+        if images.contains_key(&n) {
+            continue;
+        }
+        let style_of = |node: NodeId, prop: &str| -> Option<String> {
+            let s = styles.get(node)?;
+            match prop {
+                "color" => Some(css_color(s.color)),
+                "opacity" if s.opacity < 1.0 => Some(format!("{}", s.opacity)),
+                "display" if s.display.is_none() => Some("none".into()),
+                "visibility" if s.visibility == rabbithole_style::Visibility::Hidden => Some("hidden".into()),
+                _ => None,
+            }
+        };
+        let Some(tree) = rabbithole_svg::SvgTree::from_dom(doc, n, &style_of) else { continue };
+        let st = styles.get(n).cloned();
+        let css_w = st.as_ref().and_then(|s| match s.width { rabbithole_style::Length::Px(v) => Some(v), _ => None });
+        let css_h = st.as_ref().and_then(|s| match s.height { rabbithole_style::Length::Px(v) => Some(v), _ => None });
+        let (w, h) = tree.resolve_size(css_w, css_h);
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        let scale = if w.max(h) < 256.0 { 2.0 } else { 1.0 };
+        let (pw, ph) = ((w * scale).round().clamp(1.0, 2048.0) as u32, (h * scale).round().clamp(1.0, 2048.0) as u32);
+        images.insert(n, Arc::new(tree.rasterize(fonts, pw, ph)));
+    }
+}
+
+fn css_color(c: Color) -> String {
+    format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a as f32 / 255.0)
 }
 
 fn media_env(viewport: Viewport) -> MediaEnv {

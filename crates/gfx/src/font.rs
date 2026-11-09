@@ -1,9 +1,11 @@
 //! Fonts: bundled DejaVu faces (so rendering is identical on every OS),
+//! web fonts (`@font-face`) and system fonts registered by family name,
 //! glyph shaping (advances + kerning, per-character font fallback) and a
 //! glyph bitmap cache.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,21 +67,50 @@ impl GlyphBitmap {
     }
 }
 
-const SANS: usize = 0;
-const SANS_BOLD: usize = 1;
-const SANS_ITALIC: usize = 2;
-const SANS_BOLD_ITALIC: usize = 3;
-const MONO: usize = 4;
-const SERIF: usize = 5;
-const SERIF_BOLD: usize = 6;
+pub(crate) const SANS: usize = 0;
+pub(crate) const SANS_BOLD: usize = 1;
+pub(crate) const SANS_ITALIC: usize = 2;
+pub(crate) const SANS_BOLD_ITALIC: usize = 3;
+pub(crate) const MONO: usize = 4;
+pub(crate) const SERIF: usize = 5;
+pub(crate) const SERIF_BOLD: usize = 6;
+pub(crate) const BUNDLED_COUNT: usize = 7;
 
-/// Fallback search order when a face lacks a glyph.
+/// Fallback search order among the bundled faces when a face lacks a glyph.
 const FALLBACK_ORDER: [usize; 7] = [SANS, SERIF, MONO, SANS_BOLD, SANS_ITALIC, SANS_BOLD_ITALIC, SERIF_BOLD];
 
+/// Where a face's bytes come from.
+pub(crate) enum FaceSource {
+    /// In-memory SFNT data (bundled or web font, already decoded).
+    Bytes(Rc<Vec<u8>>),
+    /// A system font file (parsed on first use); `index` selects a face in
+    /// a collection.
+    Path(PathBuf, u32),
+}
+
+/// One registered face.
+pub(crate) struct FaceSlot {
+    pub name: String,
+    pub family: String,
+    pub family_lower: String,
+    pub weight: u16,
+    pub italic: bool,
+    /// Generic family for bundled faces (used for fallback preference).
+    pub generic: Option<Family>,
+    pub source: FaceSource,
+    pub font: RefCell<Option<Rc<fontdue::Font>>>,
+    pub failed: Cell<bool>,
+}
+
 pub struct FontContext {
-    faces: Vec<fontdue::Font>,
-    names: Vec<String>,
-    cache: RefCell<HashMap<(usize, u16, u32), Rc<GlyphBitmap>>>,
+    pub(crate) faces: RefCell<Vec<FaceSlot>>,
+    /// Lower-cased family name → face indices.
+    pub(crate) by_family: RefCell<HashMap<String, Vec<usize>>>,
+    /// (face, glyph, size×4, subpixel quarter) → bitmap
+    cache: RefCell<HashMap<(usize, u16, u32, u8), Rc<GlyphBitmap>>>,
+    /// (primary face, char) → face that has the char (None = nowhere)
+    fallback_cache: RefCell<HashMap<(usize, char), Option<usize>>>,
+    pub(crate) system_loaded: Cell<bool>,
 }
 
 impl Default for FontContext {
@@ -95,37 +126,70 @@ fn is_zero_width(ch: char) -> bool {
     ) || (ch.is_control() && ch != '\t')
 }
 
+pub(crate) fn fontdue_settings() -> fontdue::FontSettings {
+    fontdue::FontSettings {
+        scale: 40.0,
+        ..Default::default()
+    }
+}
+
 impl FontContext {
-    /// Load the bundled fonts.
+    /// Load the bundled fonts (no system font scan; see
+    /// [`FontContext::load_system_fonts`] / [`FontContext::with_system_fonts`]).
     pub fn new() -> FontContext {
-        let sources: [(&str, &[u8]); 7] = [
-            ("DejaVu Sans", include_bytes!("../../../assets/fonts/DejaVuSans.ttf")),
-            ("DejaVu Sans Bold", include_bytes!("../../../assets/fonts/DejaVuSans-Bold.ttf")),
-            ("DejaVu Sans Oblique", include_bytes!("../../../assets/fonts/DejaVuSans-Oblique.ttf")),
-            ("DejaVu Sans Bold Oblique", include_bytes!("../../../assets/fonts/DejaVuSans-BoldOblique.ttf")),
-            ("DejaVu Sans Mono", include_bytes!("../../../assets/fonts/DejaVuSansMono.ttf")),
-            ("DejaVu Serif", include_bytes!("../../../assets/fonts/DejaVuSerif.ttf")),
-            ("DejaVu Serif Bold", include_bytes!("../../../assets/fonts/DejaVuSerif-Bold.ttf")),
+        let sources: [(&str, &str, u16, bool, Family, &[u8]); BUNDLED_COUNT] = [
+            ("DejaVu Sans", "DejaVu Sans", 400, false, Family::Sans, include_bytes!("../../../assets/fonts/DejaVuSans.ttf")),
+            ("DejaVu Sans Bold", "DejaVu Sans", 700, false, Family::Sans, include_bytes!("../../../assets/fonts/DejaVuSans-Bold.ttf")),
+            ("DejaVu Sans Oblique", "DejaVu Sans", 400, true, Family::Sans, include_bytes!("../../../assets/fonts/DejaVuSans-Oblique.ttf")),
+            ("DejaVu Sans Bold Oblique", "DejaVu Sans", 700, true, Family::Sans, include_bytes!("../../../assets/fonts/DejaVuSans-BoldOblique.ttf")),
+            ("DejaVu Sans Mono", "DejaVu Sans Mono", 400, false, Family::Mono, include_bytes!("../../../assets/fonts/DejaVuSansMono.ttf")),
+            ("DejaVu Serif", "DejaVu Serif", 400, false, Family::Serif, include_bytes!("../../../assets/fonts/DejaVuSerif.ttf")),
+            ("DejaVu Serif Bold", "DejaVu Serif", 700, false, Family::Serif, include_bytes!("../../../assets/fonts/DejaVuSerif-Bold.ttf")),
         ];
-        let settings = fontdue::FontSettings {
-            scale: 40.0,
-            ..Default::default()
-        };
-        let mut faces = Vec::with_capacity(sources.len());
-        let mut names = Vec::with_capacity(sources.len());
-        for (name, bytes) in sources {
-            let font = fontdue::Font::from_bytes(bytes, settings.clone()).expect("bundled font is valid");
-            faces.push(font);
-            names.push(name.to_string());
-        }
-        FontContext {
-            faces,
-            names,
+        let ctx = FontContext {
+            faces: RefCell::new(Vec::with_capacity(BUNDLED_COUNT)),
+            by_family: RefCell::new(HashMap::new()),
             cache: RefCell::new(HashMap::new()),
+            fallback_cache: RefCell::new(HashMap::new()),
+            system_loaded: Cell::new(false),
+        };
+        for (name, family, weight, italic, generic, bytes) in sources {
+            let font = fontdue::Font::from_bytes(bytes, fontdue_settings()).expect("bundled font is valid");
+            ctx.register(FaceSlot {
+                name: name.to_string(),
+                family: family.to_string(),
+                family_lower: family.to_ascii_lowercase(),
+                weight,
+                italic,
+                generic: Some(generic),
+                source: FaceSource::Bytes(Rc::new(bytes.to_vec())),
+                font: RefCell::new(Some(Rc::new(font))),
+                failed: Cell::new(false),
+            });
         }
+        ctx
     }
 
-    /// Choose a face for a family, CSS weight (100-900) and style.
+    /// Bundled fonts plus every font installed on the system.
+    pub fn with_system_fonts() -> FontContext {
+        let ctx = FontContext::new();
+        ctx.load_system_fonts();
+        ctx
+    }
+
+    /// Add a face to the registry; returns its id.
+    pub(crate) fn register(&self, slot: FaceSlot) -> FontId {
+        let key = slot.family_lower.clone();
+        let mut faces = self.faces.borrow_mut();
+        let idx = faces.len();
+        faces.push(slot);
+        self.by_family.borrow_mut().entry(key).or_default().push(idx);
+        self.fallback_cache.borrow_mut().clear();
+        FontId(idx)
+    }
+
+    /// Choose a bundled face for a generic family, CSS weight (100-900)
+    /// and style.
     pub fn select(&self, family: Family, weight: u16, italic: bool) -> FontId {
         let bold = weight >= 600;
         let idx = match family {
@@ -147,12 +211,55 @@ impl FontContext {
         FontId(idx)
     }
 
-    fn face(&self, font: FontId) -> &fontdue::Font {
-        &self.faces[font.0.min(self.faces.len() - 1)]
+    /// The parsed font for a face index, loading it on first use. Faces
+    /// that fail to load (or out-of-range ids) resolve to the bundled sans.
+    pub(crate) fn face(&self, idx: usize) -> Rc<fontdue::Font> {
+        match self.try_face(idx) {
+            Some(f) => f,
+            None => self.try_face(SANS).expect("bundled sans"),
+        }
+    }
+
+    /// Resolve a face index to one that can be loaded.
+    pub(crate) fn resolve_index(&self, idx: usize) -> usize {
+        if self.try_face(idx).is_some() {
+            idx
+        } else {
+            SANS
+        }
+    }
+
+    pub(crate) fn try_face(&self, idx: usize) -> Option<Rc<fontdue::Font>> {
+        let faces = self.faces.borrow();
+        let slot = faces.get(idx)?;
+        if let Some(f) = slot.font.borrow().as_ref() {
+            return Some(Rc::clone(f));
+        }
+        if slot.failed.get() {
+            return None;
+        }
+        let parsed = match &slot.source {
+            FaceSource::Bytes(b) => fontdue::Font::from_bytes(b.as_slice(), fontdue_settings()).ok(),
+            FaceSource::Path(p, index) => std::fs::read(p).ok().and_then(|data| {
+                let sfnt = crate::font_ext::sfnt::extract_face(&data, *index)?;
+                fontdue::Font::from_bytes(sfnt.as_slice(), fontdue_settings()).ok()
+            }),
+        };
+        match parsed {
+            Some(f) => {
+                let rc = Rc::new(f);
+                *slot.font.borrow_mut() = Some(Rc::clone(&rc));
+                Some(rc)
+            }
+            None => {
+                slot.failed.set(true);
+                None
+            }
+        }
     }
 
     pub fn metrics(&self, font: FontId, size: f32) -> LineMetrics {
-        match self.face(font).horizontal_line_metrics(size) {
+        match self.face(font.0).horizontal_line_metrics(size) {
             Some(m) => LineMetrics {
                 ascent: m.ascent.max(0.0),
                 descent: m.descent.abs(),
@@ -176,30 +283,102 @@ impl FontContext {
 
     /// Find a face that has `ch`: the primary face first, then fallbacks.
     fn lookup(&self, primary: usize, ch: char) -> (usize, u16) {
-        let g = self.faces[primary].lookup_glyph_index(ch);
+        let face = self.face(primary);
+        let g = face.lookup_glyph_index(ch);
         if g != 0 {
             return (primary, g);
         }
-        for &f in &FALLBACK_ORDER {
-            if f == primary {
-                continue;
+        match self.fallback_for_char(ch, FontId(primary)) {
+            Some(FontId(f)) => {
+                let g = self.face(f).lookup_glyph_index(ch);
+                (f, g)
             }
-            let g = self.faces[f].lookup_glyph_index(ch);
-            if g != 0 {
-                return (f, g);
+            None => (primary, 0),
+        }
+    }
+
+    /// Unicode-aware fallback used by `shape`: find a face containing `ch`,
+    /// preferring other styles of the same family, bundled faces of the
+    /// same generic family, then script-specific well-known system fonts,
+    /// then any registered face. Results are cached per (face, char).
+    pub fn fallback_for_char(&self, ch: char, prefer: FontId) -> Option<FontId> {
+        let primary = self.resolve_index(prefer.0);
+        if let Some(r) = self.fallback_cache.borrow().get(&(primary, ch)) {
+            return r.map(FontId);
+        }
+        let result = self.find_fallback(ch, primary);
+        self.fallback_cache.borrow_mut().insert((primary, ch), result);
+        result.map(FontId)
+    }
+
+    fn find_fallback(&self, ch: char, primary: usize) -> Option<usize> {
+        let has = |idx: usize| -> bool { self.try_face(idx).map(|f| f.lookup_glyph_index(ch) != 0).unwrap_or(false) };
+        if has(primary) {
+            return Some(primary);
+        }
+        let (family_lower, generic, prim_italic, prim_weight) = {
+            let faces = self.faces.borrow();
+            let s = &faces[primary];
+            (s.family_lower.clone(), s.generic, s.italic, s.weight)
+        };
+        // 1. Same family, other styles.
+        let same_family: Vec<usize> = self.by_family.borrow().get(&family_lower).cloned().unwrap_or_default();
+        for idx in same_family {
+            if idx != primary && has(idx) {
+                return Some(idx);
             }
         }
-        (primary, 0)
+        // 2. Bundled faces of the same generic, then all bundled.
+        let generic = generic.unwrap_or(Family::Sans);
+        let bundled_pref: Vec<usize> = match generic {
+            Family::Serif => vec![SERIF, SERIF_BOLD],
+            Family::Mono => vec![MONO],
+            Family::Sans => vec![SANS, SANS_BOLD, SANS_ITALIC, SANS_BOLD_ITALIC],
+        };
+        for idx in bundled_pref.into_iter().chain(FALLBACK_ORDER) {
+            if idx != primary && has(idx) {
+                return Some(idx);
+            }
+        }
+        // 3. Script-specific system fonts.
+        for fam in crate::font_ext::script_fallback_families(ch) {
+            if let Some(ids) = self.by_family.borrow().get(&fam.to_ascii_lowercase()).cloned() {
+                if let Some(idx) = self.best_of(&ids, prim_weight, prim_italic) {
+                    if has(idx) {
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        // 4. Any registered face (bounded scan: loading hundreds of system
+        //    fonts for one glyph is not worth it).
+        let n = self.faces.borrow().len();
+        let mut scanned = 0;
+        for idx in BUNDLED_COUNT..n {
+            if scanned >= 48 {
+                break;
+            }
+            let already_loaded = self.faces.borrow()[idx].font.borrow().is_some();
+            if !already_loaded {
+                scanned += 1;
+            }
+            if has(idx) {
+                return Some(idx);
+            }
+        }
+        None
     }
 
     /// Shape a run: positions for each char, with per-char font fallback
     /// when the primary face lacks the glyph. `letter_spacing` is added
     /// after every glyph.
     pub fn shape(&self, font: FontId, size: f32, text: &str, letter_spacing: f32) -> Vec<ShapedGlyph> {
-        let primary = font.0.min(self.faces.len() - 1);
+        let primary = self.resolve_index(font.0);
+        let primary_face = self.face(primary);
         let mut out = Vec::with_capacity(text.len());
         let mut x = 0.0f32;
         let mut prev: Option<(usize, u16)> = None;
+        let mut cur_face: (usize, Rc<fontdue::Font>) = (primary, Rc::clone(&primary_face));
         for (byte_index, ch) in text.char_indices() {
             if is_zero_width(ch) {
                 out.push(ShapedGlyph {
@@ -213,8 +392,8 @@ impl FontContext {
                 continue;
             }
             if ch == '\t' {
-                let space = self.faces[primary].lookup_glyph_index(' ');
-                let adv = self.faces[primary].metrics_indexed(space, size).advance_width * 4.0;
+                let space = primary_face.lookup_glyph_index(' ');
+                let adv = primary_face.metrics_indexed(space, size).advance_width * 4.0;
                 out.push(ShapedGlyph {
                     font: FontId(primary),
                     glyph: ZERO_WIDTH_GLYPH,
@@ -227,7 +406,10 @@ impl FontContext {
                 continue;
             }
             let (face_idx, glyph) = self.lookup(primary, ch);
-            let face = &self.faces[face_idx];
+            if cur_face.0 != face_idx {
+                cur_face = (face_idx, self.face(face_idx));
+            }
+            let face = &cur_face.1;
             if let Some((pf, pg)) = prev {
                 if pf == face_idx {
                     if let Some(k) = face.horizontal_kern_indexed(pg, glyph, size) {
@@ -251,8 +433,15 @@ impl FontContext {
 
     /// Rasterize (cached) a glyph at a given size.
     pub fn rasterize(&self, font: FontId, glyph: u16, size: f32) -> Rc<GlyphBitmap> {
-        let face_idx = font.0.min(self.faces.len() - 1);
-        let key = (face_idx, glyph, (size * 4.0).round().max(0.0) as u32);
+        self.rasterize_subpixel(font, glyph, size, 0)
+    }
+
+    /// Rasterize a glyph shifted right by `quarter`/4 px (subpixel
+    /// positioning; the coverage is resampled horizontally).
+    pub fn rasterize_subpixel(&self, font: FontId, glyph: u16, size: f32, quarter: u8) -> Rc<GlyphBitmap> {
+        let face_idx = self.resolve_index(font.0);
+        let quarter = quarter % 4;
+        let key = (face_idx, glyph, (size * 4.0).round().max(0.0) as u32, quarter);
         if let Some(b) = self.cache.borrow().get(&key) {
             return Rc::clone(b);
         }
@@ -265,13 +454,18 @@ impl FontContext {
                 coverage: Vec::new(),
             }
         } else {
-            let (m, coverage) = self.faces[face_idx].rasterize_indexed(glyph, size);
-            GlyphBitmap {
+            let (m, coverage) = self.face(face_idx).rasterize_indexed(glyph, size);
+            let base = GlyphBitmap {
                 width: m.width as u32,
                 height: m.height as u32,
                 left: m.xmin,
                 top: m.ymin + m.height as i32,
                 coverage,
+            };
+            if quarter == 0 || base.is_empty() {
+                base
+            } else {
+                shift_coverage(&base, quarter as f32 / 4.0)
             }
         };
         let rc = Rc::new(bitmap);
@@ -284,28 +478,85 @@ impl FontContext {
         if is_zero_width(ch) {
             return 0.0;
         }
-        let primary = font.0.min(self.faces.len() - 1);
+        let primary = self.resolve_index(font.0);
+        let face = self.face(primary);
         if ch == '\t' {
-            let space = self.faces[primary].lookup_glyph_index(' ');
-            return self.faces[primary].metrics_indexed(space, size).advance_width * 4.0;
+            let space = face.lookup_glyph_index(' ');
+            return face.metrics_indexed(space, size).advance_width * 4.0;
         }
         let (face_idx, glyph) = self.lookup(primary, ch);
-        self.faces[face_idx].metrics_indexed(glyph, size).advance_width
+        self.face(face_idx).metrics_indexed(glyph, size).advance_width
     }
 
-    pub fn face_name(&self, font: FontId) -> &str {
-        &self.names[font.0.min(self.names.len() - 1)]
+    pub fn face_name(&self, font: FontId) -> String {
+        let faces = self.faces.borrow();
+        faces.get(font.0).or(faces.first()).map(|s| s.name.clone()).unwrap_or_default()
     }
 
-    /// Number of loaded faces.
+    /// Number of registered faces.
     pub fn face_count(&self) -> usize {
-        self.faces.len()
+        self.faces.borrow().len()
     }
 
     /// Whether `font` has a real glyph for `ch` (no fallback considered).
     pub fn has_glyph(&self, font: FontId, ch: char) -> bool {
-        self.face(font).lookup_glyph_index(ch) != 0
+        self.face(font.0).lookup_glyph_index(ch) != 0
     }
+
+    /// Among candidate faces, the one best matching weight/style (CSS font
+    /// matching).
+    pub(crate) fn best_of(&self, ids: &[usize], weight: u16, italic: bool) -> Option<usize> {
+        let faces = self.faces.borrow();
+        let mut best: Option<(i32, usize)> = None;
+        for &idx in ids {
+            let Some(s) = faces.get(idx) else { continue };
+            if s.failed.get() {
+                continue;
+            }
+            let style_penalty = if s.italic == italic { 0 } else { 10_000 };
+            let w = s.weight as i32;
+            let d = weight as i32;
+            let weight_penalty = if d <= 500 {
+                // Prefer weights at or below, closest first; then above.
+                if w <= d {
+                    d - w
+                } else {
+                    1000 + (w - d)
+                }
+            } else {
+                if w >= d {
+                    w - d
+                } else {
+                    1000 + (d - w)
+                }
+            };
+            let score = style_penalty + weight_penalty;
+            if best.map(|(b, _)| score < b).unwrap_or(true) {
+                best = Some((score, idx));
+            }
+        }
+        best.map(|(_, i)| i)
+    }
+}
+
+/// Shift a coverage bitmap right by `frac` (0..1) pixels with linear
+/// resampling (adds one column).
+fn shift_coverage(b: &GlyphBitmap, frac: f32) -> GlyphBitmap {
+    let w = b.width as usize;
+    let h = b.height as usize;
+    let nw = w + 1;
+    let mut out = vec![0u8; nw * h];
+    let f = frac;
+    for y in 0..h {
+        let src = &b.coverage[y * w..(y + 1) * w];
+        let dst = &mut out[y * nw..(y + 1) * nw];
+        for x in 0..nw {
+            let left = if x < w { src[x] as f32 } else { 0.0 };
+            let prev = if x > 0 { src[x - 1] as f32 } else { 0.0 };
+            dst[x] = (left * (1.0 - f) + prev * f + 0.5) as u8;
+        }
+    }
+    GlyphBitmap { width: nw as u32, height: b.height, left: b.left, top: b.top, coverage: out }
 }
 
 #[cfg(test)]
@@ -374,9 +625,6 @@ mod tests {
     }
 }
 
-// ------------------------------------------------------------------ v0.2 API
-// Web fonts (@font-face), system fonts and family matching. Implemented in
-// `font_ext.rs`.
 
 /// A font face registered by name (web font or system font).
 #[derive(Debug, Clone, PartialEq)]
@@ -387,67 +635,3 @@ pub struct FaceInfo {
     pub id: FontId,
 }
 
-impl FontContext {
-    /// Register a font from raw bytes (TTF/OTF, WOFF, WOFF2) under
-    /// `family` with the given weight/style (from the `@font-face`
-    /// descriptors). Returns None when the data cannot be decoded.
-    pub fn add_font_data(&self, family: &str, weight: u16, italic: bool, data: &[u8]) -> Option<FontId> {
-        let _ = (family, weight, italic, data);
-        unimplemented!()
-    }
-
-    /// Scan the platform font directories (Windows: %WINDIR%\\Fonts and the
-    /// per-user fonts folder; macOS: /System/Library/Fonts, /Library/Fonts,
-    /// ~/Library/Fonts; Linux: /usr/share/fonts, /usr/local/share/fonts,
-    /// ~/.fonts, ~/.local/share/fonts) and register TTF/OTF/TTC faces by
-    /// their family name (parsed from the `name` table) lazily: only the
-    /// name tables are read up-front; glyph data is loaded on first use.
-    /// Returns the number of faces found.
-    pub fn load_system_fonts(&self) -> usize {
-        unimplemented!()
-    }
-
-    /// Pick the best face for a CSS family list: the first family (case
-    /// insensitive; generic names `sans-serif`, `serif`, `monospace`,
-    /// `system-ui`, `cursive`, `fantasy`, `emoji` map to platform defaults
-    /// or the bundled faces) that has a registered face, choosing the
-    /// closest weight (CSS font matching algorithm) and style (synthetic
-    /// oblique is left to the caller via `needs_synthetic_italic`). Falls
-    /// back to `select(generic, weight, italic)`.
-    pub fn select_family(&self, families: &[String], generic: Family, weight: u16, italic: bool) -> FontId {
-        let _ = (families, generic, weight, italic);
-        unimplemented!()
-    }
-
-    /// True when `font` is an upright face chosen for an italic request.
-    pub fn needs_synthetic_italic(&self, font: FontId, italic: bool) -> bool {
-        let _ = (font, italic);
-        unimplemented!()
-    }
-
-    /// True when `font` is a non-bold face chosen for a bold request
-    /// (caller may embolden synthetically).
-    pub fn needs_synthetic_bold(&self, font: FontId, weight: u16) -> bool {
-        let _ = (font, weight);
-        unimplemented!()
-    }
-
-    /// Registered faces (web + system + bundled).
-    pub fn faces(&self) -> Vec<FaceInfo> {
-        unimplemented!()
-    }
-
-    /// Does any registered face provide `family`?
-    pub fn has_family(&self, family: &str) -> bool {
-        let _ = family;
-        unimplemented!()
-    }
-
-    /// Unicode-aware fallback used by `shape`: find a face containing `ch`,
-    /// preferring faces of the same generic family, then any registered
-    /// face (so system CJK/emoji/symbol fonts are used when available).
-    pub fn fallback_for_char(&self, ch: char, prefer: FontId) -> Option<FontId> {
-        let _ = (ch, prefer);
-        unimplemented!()
-    }
-}
