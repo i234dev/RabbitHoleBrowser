@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/i234dev/RabbitHoleBrowser"
-authors = ["Sergio Gasca"]
+authors = ["i234dev"]
 
 [workspace.dependencies]
 rabbithole-dom = { path = "crates/dom" }
