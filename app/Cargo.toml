@@ -1,0 +1,20 @@
+[package]
+name = "rabbithole"
+description = "RabbitHole Browser: a web browser written from scratch, no Chromium/WebKit/Gecko"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rabbithole"
+path = "src/main.rs"
+
+[dependencies]
+rabbithole-engine.workspace = true
+rabbithole-gfx.workspace = true
+rabbithole-net.workspace = true
+winit = "0.30"
+softbuffer = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }

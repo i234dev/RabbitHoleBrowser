@@ -1,0 +1,13 @@
+[package]
+name = "rabbithole-css"
+description = "RabbitHole browser engine: css"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rabbithole-dom.workspace = true
+[dev-dependencies]
+rabbithole-html.workspace = true

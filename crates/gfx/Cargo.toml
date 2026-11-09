@@ -1,0 +1,12 @@
+[package]
+name = "rabbithole-gfx"
+description = "RabbitHole browser engine: gfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }

@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sergiogasca/RabbitHoleBrowser"
+authors = ["Sergio Gasca"]
+
+[workspace.dependencies]
+rabbithole-dom = { path = "crates/dom" }
+rabbithole-html = { path = "crates/html" }
+rabbithole-css = { path = "crates/css" }
+rabbithole-style = { path = "crates/style" }
+rabbithole-gfx = { path = "crates/gfx" }
+rabbithole-net = { path = "crates/net" }
+rabbithole-layout = { path = "crates/layout" }
+rabbithole-engine = { path = "crates/engine" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

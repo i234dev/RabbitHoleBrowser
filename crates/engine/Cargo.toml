@@ -1,0 +1,17 @@
+[package]
+name = "rabbithole-engine"
+description = "RabbitHole browser engine: engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rabbithole-dom.workspace = true
+rabbithole-html.workspace = true
+rabbithole-css.workspace = true
+rabbithole-style.workspace = true
+rabbithole-gfx.workspace = true
+rabbithole-net.workspace = true
+rabbithole-layout.workspace = true
