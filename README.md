@@ -11,7 +11,11 @@ It can be used three ways:
 - as a **command line tool** (headless screenshots, text extraction, link listing, tree dumps),
 - as an **MCP server** so LLM agents such as Claude can read and screenshot the web through it.
 
-> Screenshot: _coming soon_ (`rabbithole screenshot https://example.com -o docs/example.png`).
+![about:home rendered by RabbitHole](docs/about-home.png)
+
+![Wikipedia rendered by RabbitHole](docs/wikipedia.png)
+
+_Both images were produced by `rabbithole screenshot`: every pixel comes from RabbitHole's own rasterizer._
 
 ## Features
 

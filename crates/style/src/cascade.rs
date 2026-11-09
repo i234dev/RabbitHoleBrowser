@@ -809,9 +809,12 @@ fn family_of(comps: &[&[Token]]) -> Option<Family> {
             continue;
         }
         if n == "monospace" || n.contains("mono") || n.contains("courier") || n.contains("menlo") || n.contains("consolas")
-            || n.contains("code") || n.contains("fira") || n.contains("inconsolata") || n == "ui-monospace"
+            || n.contains("code") || n.contains("inconsolata") || n == "ui-monospace"
         {
             return Some(Family::Mono);
+        }
+        if n.contains("sans") {
+            return Some(Family::Sans);
         }
         if n == "serif" || n.contains("georgia") || n.contains("times") || n.contains("garamond") || n.contains("cambria")
             || n.contains("book") || n.contains("palatino") || n.contains("baskerville") || n.contains("merriweather")
