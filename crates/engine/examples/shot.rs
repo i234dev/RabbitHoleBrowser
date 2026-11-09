@@ -13,7 +13,8 @@ fn main() {
     let mut engine = Engine::new();
     engine.loader.load_fonts = std::env::var("RH_NO_FONTS").is_err();
     engine.loader.load_images = std::env::var("RH_NO_IMAGES").is_err();
-    engine.loader.load_scripts = false;
+    engine.loader.load_scripts = std::env::var("RH_NO_JS").is_err();
+    engine.scripting = engine.loader.load_scripts;
     let t1 = std::time::Instant::now();
     let vp = Viewport { width: w as f32, height: h as f32 };
     let loaded = match engine.loader.load(url, vp) {
@@ -57,6 +58,24 @@ fn main() {
                 _ => {}
             }
         }
+    }
+    // Let timers run for a bit (like a browser would) before painting.
+    let mut page = page;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(std::env::var("RH_JS_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(300));
+    while std::time::Instant::now() < deadline {
+        match page.next_script_due() {
+            Some(due) => {
+                let now = engine.start.elapsed().as_secs_f64() * 1000.0;
+                if due > now {
+                    std::thread::sleep(std::time::Duration::from_millis(((due - now) as u64).min(50)));
+                }
+                let _ = engine.tick(&mut page);
+            }
+            None => break,
+        }
+    }
+    for (level, msg) in page.take_console() {
+        eprintln!("[console.{level}] {msg}");
     }
     let mut canvas = Canvas::new(w, h);
     engine.render(&page, &mut canvas, 0.0, 0.0);

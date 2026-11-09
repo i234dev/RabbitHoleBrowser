@@ -8,7 +8,6 @@ use crate::tree::{BoxKind, DecorationInfo, Flow, FragmentKind, LayoutBox, Layout
 use crate::LayoutContext;
 use rabbithole_gfx::{Color, FontId, Image, Matrix, Paint, Point, Radii, Rect};
 use rabbithole_style::{BorderStyle, ObjectFit, Shadow, TextDecorationStyle, Visibility};
-use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum DisplayItem {

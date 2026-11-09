@@ -9,6 +9,7 @@
 
 pub mod forms;
 mod home;
+pub mod scripting;
 pub mod select;
 mod text;
 
@@ -35,6 +36,8 @@ pub use rabbithole_layout as layout;
 pub use rabbithole_net as net;
 pub use rabbithole_style as style;
 pub use rabbithole_svg as svg;
+pub use rabbithole_script as script;
+pub use scripting::{Dialog, LocalStorage, PendingNavigation, ScriptOutcome, ScriptState};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -730,6 +733,14 @@ impl Loader {
 pub struct Engine {
     pub fonts: Rc<FontContext>,
     pub loader: Loader,
+    /// Run page scripts (JavaScript) when building pages.
+    pub scripting: bool,
+    /// Echo `console.*` output and script errors to stderr.
+    pub console_to_stderr: bool,
+    /// Origin-scoped `localStorage` shared by all pages.
+    pub local_storage: std::cell::RefCell<LocalStorage>,
+    /// Monotonic clock origin for timers / `performance.now()`.
+    pub start: std::time::Instant,
     registered_fonts: HashSet<String>,
 }
 
@@ -767,6 +778,10 @@ pub struct Page {
     /// Whether any stylesheet uses dynamic pseudo-classes (so hover
     /// changes need a restyle).
     pub has_dynamic_rules: bool,
+    /// JavaScript state (host, pending navigation, console, ...).
+    pub script: ScriptState,
+    /// Scroll position requested by scripts (consumed by the UI).
+    pub requested_scroll: Option<(f32, f32)>,
 }
 
 impl Default for Engine {
@@ -782,6 +797,10 @@ impl Engine {
         Engine {
             fonts: Rc::new(fonts),
             loader: Loader::new(),
+            scripting: true,
+            console_to_stderr: std::env::var("RH_JS_LOG").is_ok(),
+            local_storage: std::cell::RefCell::new(LocalStorage::default()),
+            start: std::time::Instant::now(),
             registered_fonts: HashSet::new(),
         }
     }
@@ -791,8 +810,17 @@ impl Engine {
         Engine {
             fonts: Rc::new(FontContext::new()),
             loader: Loader::new(),
+            scripting: true,
+            console_to_stderr: std::env::var("RH_JS_LOG").is_ok(),
+            local_storage: std::cell::RefCell::new(LocalStorage::default()),
+            start: std::time::Instant::now(),
             registered_fonts: HashSet::new(),
         }
+    }
+
+    /// Persist `localStorage` to a file (loaded now, saved after script runs).
+    pub fn set_local_storage_path(&mut self, path: std::path::PathBuf) {
+        *self.local_storage.borrow_mut() = LocalStorage::load(path);
     }
 
     /// Synchronous convenience: load + build.
@@ -835,9 +863,14 @@ impl Engine {
             scroll_offsets: HashMap::new(),
             state: MatchState::default(),
             has_dynamic_rules,
+            script: ScriptState::default(),
+            requested_scroll: None,
         };
         page.snapshot_form_defaults();
         self.restyle(&mut page);
+        if self.scripting && !page.scripts.is_empty() {
+            let _ = self.run_page_scripts(&mut page);
+        }
         page
     }
 

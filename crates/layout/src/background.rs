@@ -11,7 +11,6 @@ use rabbithole_style::{
     GradientStop, Length, RadialShape, RadialSize, Shadow,
 };
 use std::collections::HashMap;
-use std::rc::Rc;
 
 /// The three boxes of an element plus its radii.
 #[derive(Debug, Clone, Copy)]

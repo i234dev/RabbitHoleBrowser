@@ -1,0 +1,510 @@
+//! JavaScript integration: the engine implements [`HostEnv`] for a page and
+//! drives the [`ScriptHost`] (script execution at load, timers, events).
+
+use crate::{Engine, Page};
+use rabbithole_dom::{Document, NodeId};
+use rabbithole_gfx::Rect;
+use rabbithole_net::{Request, Response, Url};
+use rabbithole_script::{DispatchResult, EventDetail, EventInit, HostEnv, ScriptHost};
+use rabbithole_style::ComputedStyle;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+/// A navigation requested by a script (`location.href = …`, `form.submit()`).
+#[derive(Debug, Clone)]
+pub struct PendingNavigation {
+    pub request: Request,
+    pub replace: bool,
+}
+
+/// A dialog a script asked for (`alert`, `confirm`, `prompt`).
+#[derive(Debug, Clone)]
+pub struct Dialog {
+    pub kind: &'static str,
+    pub message: String,
+}
+
+/// Script-related state kept on a page.
+#[derive(Default)]
+pub struct ScriptState {
+    pub host: Option<ScriptHost>,
+    /// DOM changed by scripts since the last style/layout.
+    pub dom_dirty: bool,
+    pub pending_navigation: Option<PendingNavigation>,
+    pub new_windows: Vec<Url>,
+    pub console: Vec<(String, String)>,
+    pub dialogs: Vec<Dialog>,
+    pub scripts_ran: bool,
+    /// Session storage for this page's origin (tab-scoped).
+    pub session_storage: HashMap<String, String>,
+}
+
+/// Origin-scoped `localStorage`, shared by all pages of an engine and
+/// optionally persisted to a file.
+#[derive(Default)]
+pub struct LocalStorage {
+    data: HashMap<String, HashMap<String, String>>,
+    path: Option<std::path::PathBuf>,
+    dirty: bool,
+}
+
+impl LocalStorage {
+    pub fn load(path: std::path::PathBuf) -> LocalStorage {
+        let mut ls = LocalStorage { path: Some(path.clone()), ..Default::default() };
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            for line in text.lines() {
+                let mut parts = line.splitn(3, '\t');
+                if let (Some(o), Some(k), Some(v)) = (parts.next(), parts.next(), parts.next()) {
+                    ls.data.entry(o.to_string()).or_default().insert(unescape(k), unescape(v));
+                }
+            }
+        }
+        ls
+    }
+
+    pub fn save(&mut self) {
+        let Some(path) = &self.path else { return };
+        if !self.dirty {
+            return;
+        }
+        let mut out = String::new();
+        for (o, m) in &self.data {
+            for (k, v) in m {
+                out.push_str(&format!("{}\t{}\t{}\n", o, escape(k), escape(v)));
+            }
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, out);
+        self.dirty = false;
+    }
+
+    pub fn get(&self, origin: &str, key: &str) -> Option<String> {
+        self.data.get(origin)?.get(key).cloned()
+    }
+
+    pub fn set(&mut self, origin: &str, key: &str, value: Option<&str>) {
+        let m = self.data.entry(origin.to_string()).or_default();
+        match value {
+            Some(v) => {
+                m.insert(key.to_string(), v.to_string());
+            }
+            None => {
+                m.remove(key);
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub fn keys(&self, origin: &str) -> Vec<String> {
+        self.data.get(origin).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    pub fn clear_origin(&mut self, origin: &str) {
+        self.data.remove(origin);
+        self.dirty = true;
+    }
+}
+
+fn escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n")
+}
+
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                Some(o) => out.push(o),
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The engine-side implementation of [`HostEnv`] for one page.
+pub struct EngineEnv<'a> {
+    pub engine: &'a Engine,
+    pub page: &'a mut Page,
+}
+
+impl HostEnv for EngineEnv<'_> {
+    fn doc(&mut self) -> &mut Document {
+        &mut self.page.doc
+    }
+    fn document_url(&self) -> Url {
+        self.page.url.clone()
+    }
+    fn base_url(&self) -> Url {
+        self.page.base_url.clone()
+    }
+    fn mark_dom_dirty(&mut self) {
+        self.page.script.dom_dirty = true;
+    }
+    fn ensure_layout(&mut self) {
+        if self.page.script.dom_dirty {
+            self.page.script.dom_dirty = false;
+            self.engine.restyle(self.page);
+        }
+    }
+    fn node_rect(&mut self, node: NodeId) -> Option<Rect> {
+        self.ensure_layout();
+        self.page.rect_of(node)
+    }
+    fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>> {
+        self.ensure_layout();
+        self.page.styles.get(node).cloned()
+    }
+    fn viewport(&self) -> (f32, f32) {
+        (self.page.viewport.width, self.page.viewport.height)
+    }
+    fn scroll(&self) -> (f32, f32) {
+        self.page.page_scroll
+    }
+    fn set_scroll(&mut self, x: f32, y: f32) {
+        self.page.requested_scroll = Some((x.max(0.0), y.max(0.0)));
+    }
+    fn fetch(&mut self, req: Request) -> Result<Response, String> {
+        if !req.url.is_http() && req.url.scheme != "data" && req.url.scheme != "file" {
+            return Err(format!("unsupported scheme {}", req.url.scheme));
+        }
+        self.engine.loader.fetcher.request(&req).map_err(|e| e.to_string())
+    }
+    fn navigate(&mut self, url: Url, replace: bool) {
+        self.page.script.pending_navigation = Some(PendingNavigation {
+            request: Request::get(url).with_referer(self.page.url.clone()),
+            replace,
+        });
+    }
+    fn submit_form(&mut self, form: NodeId, submitter: Option<NodeId>) {
+        if let Some(req) = self.page.submit_request(form, submitter, &|_| Vec::new()) {
+            self.page.script.pending_navigation = Some(PendingNavigation { request: req, replace: false });
+        }
+    }
+    fn cookies(&mut self) -> String {
+        match &self.engine.loader.fetcher.cookies {
+            Some(jar) => jar.lock().unwrap().script_cookies(&self.page.url),
+            None => String::new(),
+        }
+    }
+    fn set_cookie(&mut self, value: &str) {
+        if let Some(jar) = &self.engine.loader.fetcher.cookies {
+            jar.lock().unwrap().store_from_headers(&self.page.url, &[value.to_string()]);
+        }
+    }
+    fn storage_get(&mut self, local: bool, key: &str) -> Option<String> {
+        if local {
+            self.engine.local_storage.borrow().get(&self.page.url.origin(), key)
+        } else {
+            self.page.script.session_storage.get(key).cloned()
+        }
+    }
+    fn storage_set(&mut self, local: bool, key: &str, value: Option<&str>) {
+        if local {
+            self.engine.local_storage.borrow_mut().set(&self.page.url.origin(), key, value);
+        } else {
+            match value {
+                Some(v) => {
+                    self.page.script.session_storage.insert(key.to_string(), v.to_string());
+                }
+                None => {
+                    self.page.script.session_storage.remove(key);
+                }
+            }
+        }
+    }
+    fn storage_keys(&mut self, local: bool) -> Vec<String> {
+        if local {
+            self.engine.local_storage.borrow().keys(&self.page.url.origin())
+        } else {
+            self.page.script.session_storage.keys().cloned().collect()
+        }
+    }
+    fn log(&mut self, level: &str, msg: &str) {
+        if self.engine.console_to_stderr {
+            eprintln!("[js:{level}] {msg}");
+        }
+        if self.page.script.console.len() < 2000 {
+            self.page.script.console.push((level.to_string(), msg.to_string()));
+        }
+    }
+    fn alert(&mut self, msg: &str) {
+        self.page.script.dialogs.push(Dialog { kind: "alert", message: msg.to_string() });
+    }
+    fn confirm(&mut self, msg: &str) -> bool {
+        self.page.script.dialogs.push(Dialog { kind: "confirm", message: msg.to_string() });
+        true
+    }
+    fn prompt(&mut self, msg: &str, _default: &str) -> Option<String> {
+        self.page.script.dialogs.push(Dialog { kind: "prompt", message: msg.to_string() });
+        None
+    }
+    fn user_agent(&self) -> String {
+        self.engine.loader.fetcher.user_agent.clone()
+    }
+    fn title_changed(&mut self, title: &str) {
+        self.page.title = title.to_string();
+    }
+    fn now_ms(&self) -> f64 {
+        self.engine.start.elapsed().as_secs_f64() * 1000.0
+    }
+    fn random_bytes(&mut self, buf: &mut [u8]) {
+        fill_random(buf);
+    }
+    fn open_window(&mut self, url: Url) {
+        self.page.script.new_windows.push(url);
+    }
+    fn focus_node(&mut self, node: Option<NodeId>) {
+        self.page.state.focused = node;
+    }
+}
+
+/// Fill with pseudo-random bytes (OS entropy when available, else a
+/// time-seeded xorshift).
+pub fn fill_random(buf: &mut [u8]) {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(buf).is_ok() {
+                return;
+            }
+        }
+    }
+    thread_local! {
+        static STATE: std::cell::Cell<u64> = std::cell::Cell::new({
+            use std::hash::{BuildHasher, Hasher};
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(1));
+            h.finish() | 1
+        });
+    }
+    STATE.with(|s| {
+        let mut x = s.get();
+        for b in buf.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = (x >> 24) as u8;
+        }
+        s.set(x);
+    });
+}
+
+/// Result of a script-driven interaction step.
+#[derive(Debug, Default)]
+pub struct ScriptOutcome {
+    /// Styles/layout were recomputed (repaint needed).
+    pub relayout: bool,
+    /// A listener called `preventDefault()`.
+    pub default_prevented: bool,
+    /// A navigation requested by scripts.
+    pub navigation: Option<PendingNavigation>,
+    /// `window.open` requests.
+    pub new_windows: Vec<Url>,
+    /// Dialogs requested by scripts.
+    pub dialogs: Vec<Dialog>,
+    /// Scroll position requested by scripts.
+    pub scroll_to: Option<(f32, f32)>,
+}
+
+impl Engine {
+    /// Run the page's scripts after load (classic in order, deferred after,
+    /// async at the end), fire DOMContentLoaded/load and settle jobs.
+    pub fn run_page_scripts(&self, page: &mut Page) -> ScriptOutcome {
+        if !self.scripting || page.script.scripts_ran {
+            return ScriptOutcome::default();
+        }
+        page.script.scripts_ran = true;
+        let scripts = std::mem::take(&mut page.scripts);
+        let mut host = {
+            let mut env = EngineEnv { engine: self, page };
+            ScriptHost::new(&mut env)
+        };
+        let mut classic: Vec<&crate::ScriptSource> = Vec::new();
+        let mut deferred: Vec<&crate::ScriptSource> = Vec::new();
+        let mut asyncs: Vec<&crate::ScriptSource> = Vec::new();
+        for s in &scripts {
+            if s.source.trim().is_empty() {
+                continue;
+            }
+            if s.is_async && s.url.is_some() {
+                asyncs.push(s);
+            } else if s.defer && s.url.is_some() || s.is_module {
+                deferred.push(s);
+            } else {
+                classic.push(s);
+            }
+        }
+        {
+            let mut env = EngineEnv { engine: self, page };
+            for s in classic.iter().chain(deferred.iter()).chain(asyncs.iter()) {
+                let name = s.url.as_ref().map(|u| u.to_string()).unwrap_or_else(|| format!("{}#inline", env.page.url));
+                host.set_current_script(Some(s.node));
+                let _ = host.run_script(&mut env, &s.source, &name, s.is_module);
+                host.set_current_script(None);
+                host.run_jobs(&mut env);
+            }
+            host.document_ready(&mut env);
+            host.run_jobs(&mut env);
+        }
+        page.script.host = Some(host);
+        self.settle(page, false)
+    }
+
+    /// Run due timers, rAF callbacks and microtasks. Call from the UI loop;
+    /// `Page::next_script_due` says when the next call is needed.
+    pub fn tick(&self, page: &mut Page) -> ScriptOutcome {
+        let Some(mut host) = page.script.host.take() else {
+            return ScriptOutcome::default();
+        };
+        let now = self.start.elapsed().as_secs_f64() * 1000.0;
+        {
+            let mut env = EngineEnv { engine: self, page };
+            let ran = host.run_timers(&mut env, now);
+            if ran {
+                host.run_jobs(&mut env);
+            }
+        }
+        page.script.host = Some(host);
+        self.settle(page, false)
+    }
+
+    /// Dispatch a DOM event to scripts. Returns whether the default action
+    /// was prevented (plus any relayout/navigation side effects).
+    pub fn dispatch_event(&self, page: &mut Page, target: NodeId, event_type: &str, init: EventInit) -> ScriptOutcome {
+        let Some(mut host) = page.script.host.take() else {
+            return ScriptOutcome::default();
+        };
+        if !host.has_listeners(target, event_type) && !matches!(event_type, "click" | "submit" | "input" | "change" | "keydown" | "keyup" | "keypress" | "mousedown" | "mouseup" | "focus" | "blur") {
+            page.script.host = Some(host);
+            return ScriptOutcome::default();
+        }
+        let result: DispatchResult = {
+            let mut env = EngineEnv { engine: self, page };
+            let r = host.dispatch_event(&mut env, target, event_type, init);
+            host.run_jobs(&mut env);
+            r
+        };
+        page.script.host = Some(host);
+        let mut out = self.settle(page, result.default_prevented);
+        out.default_prevented = result.default_prevented;
+        out
+    }
+
+    /// Dispatch a window-level event (`resize`, `scroll`, `hashchange`, ...).
+    pub fn dispatch_window_event(&self, page: &mut Page, event_type: &str) -> ScriptOutcome {
+        let Some(mut host) = page.script.host.take() else {
+            return ScriptOutcome::default();
+        };
+        {
+            let mut env = EngineEnv { engine: self, page };
+            host.dispatch_window_event(&mut env, event_type);
+            host.run_jobs(&mut env);
+        }
+        page.script.host = Some(host);
+        self.settle(page, false)
+    }
+
+    /// Evaluate JavaScript in the page (devtools console / CLI).
+    pub fn eval_in_page(&self, page: &mut Page, src: &str) -> String {
+        let Some(mut host) = page.script.host.take() else {
+            // No scripts ran: create a host on demand.
+            let h = {
+                let mut env = EngineEnv { engine: self, page };
+                ScriptHost::new(&mut env)
+            };
+            page.script.host = Some(h);
+            return self.eval_in_page(page, src);
+        };
+        let out = {
+            let mut env = EngineEnv { engine: self, page };
+            let s = host.eval_for_console(&mut env, src);
+            host.run_jobs(&mut env);
+            s
+        };
+        page.script.host = Some(host);
+        let _ = self.settle(page, false);
+        out
+    }
+
+    /// After script activity: restyle if the DOM changed and collect
+    /// side effects.
+    fn settle(&self, page: &mut Page, default_prevented: bool) -> ScriptOutcome {
+        let mut out = ScriptOutcome { default_prevented, ..Default::default() };
+        let host_dirty = page.script.host.as_mut().map(|h| h.take_dirty()).unwrap_or(false);
+        if page.script.dom_dirty || host_dirty {
+            page.script.dom_dirty = false;
+            self.restyle(page);
+            out.relayout = true;
+        }
+        out.navigation = page.script.pending_navigation.take();
+        out.new_windows = std::mem::take(&mut page.script.new_windows);
+        out.dialogs = std::mem::take(&mut page.script.dialogs);
+        out.scroll_to = page.requested_scroll.take();
+        self.local_storage.borrow_mut().save();
+        out
+    }
+}
+
+impl Page {
+    /// Earliest time (engine ms) a timer or animation frame is due.
+    pub fn next_script_due(&self) -> Option<f64> {
+        self.script.host.as_ref().and_then(|h| h.next_due())
+    }
+
+    /// Does the page have any script listeners at all (hover/click
+    /// dispatch can be skipped otherwise)?
+    pub fn has_script_listeners(&self, node: NodeId) -> bool {
+        self.script.host.as_ref().map(|h| h.element_has_any_listener(node)).unwrap_or(false)
+    }
+
+    /// Console messages (level, text) produced so far; cleared on read.
+    pub fn take_console(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.script.console)
+    }
+
+    pub fn has_scripts(&self) -> bool {
+        self.script.host.is_some()
+    }
+}
+
+/// Build a mouse event init for a click at document coordinates.
+pub fn mouse_init(x: f32, y: f32, button: u8, ctrl: bool, shift: bool, alt: bool, meta: bool) -> EventInit {
+    EventInit {
+        bubbles: true,
+        cancelable: true,
+        detail: Some(EventDetail::Mouse { x, y, button, ctrl, shift, alt, meta }),
+    }
+}
+
+/// Build a keyboard event init.
+pub fn key_init(key: &str, code: &str, ctrl: bool, shift: bool, alt: bool, meta: bool, repeat: bool) -> EventInit {
+    EventInit {
+        bubbles: true,
+        cancelable: true,
+        detail: Some(EventDetail::Key { key: key.to_string(), code: code.to_string(), ctrl, shift, alt, meta, repeat }),
+    }
+}
+
+/// Build an input event init.
+pub fn input_init(data: Option<&str>) -> EventInit {
+    EventInit { bubbles: true, cancelable: false, detail: Some(EventDetail::Input { data: data.map(|d| d.to_string()) }) }
+}
+
+/// Plain bubbling event init (change, submit, ...).
+pub fn plain_init(cancelable: bool) -> EventInit {
+    EventInit { bubbles: true, cancelable, detail: None }
+}
+
+#[allow(dead_code)]
+fn _unused(_: &RefCell<()>) {}
