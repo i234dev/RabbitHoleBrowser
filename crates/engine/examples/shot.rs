@@ -45,6 +45,19 @@ fn main() {
         }
         eprintln!("images map: {}", page.images.len());
     }
+    if std::env::var("RH_DEBUG_DL").is_ok() {
+        use rabbithole_engine::layout::DisplayItem as D;
+        for (i, it) in page.display_list.items.iter().enumerate() {
+            match it {
+                D::PushTransform(m) => eprintln!("{i}: PushTransform {m:?}"),
+                D::PushFixed => eprintln!("{i}: PushFixed"),
+                D::PushLayer(r) => eprintln!("{i}: PushLayer {r:?}"),
+                D::PushClip(r) => eprintln!("{i}: PushClip {r:?}"),
+                D::PushClipRounded(r, _) => eprintln!("{i}: PushClipRounded {r:?}"),
+                _ => {}
+            }
+        }
+    }
     let mut canvas = Canvas::new(w, h);
     engine.render(&page, &mut canvas, 0.0, 0.0);
     let t3 = std::time::Instant::now();

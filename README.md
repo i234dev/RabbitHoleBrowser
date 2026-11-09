@@ -19,31 +19,65 @@ _Both images were produced by `rabbithole screenshot`: every pixel comes from Ra
 
 ## Features
 
+**Parsing & styling**
+
 - HTML5-style tokenizer and forgiving tree builder (implied tags, void elements,
-  raw text elements, character references, inline SVG/MathML nesting).
-- CSS parser: selectors (descendant/child/sibling combinators, attribute
-  operators, `:nth-child`, `:not`, `:is`), specificity, `!important`, `@media`
-  queries (width/height/orientation), `@import`, `@supports`.
-- Cascade and inheritance producing computed styles, with a built-in
-  user-agent stylesheet and presentational attribute support.
-- Block and inline layout: margins (with collapsing), padding, borders,
-  `inline-block`, line breaking, text alignment, lists with markers, images.
-- Software rasterizer with anti-aliased glyphs, rounded corners, borders,
-  image scaling and clipping. Bundled DejaVu fonts make rendering identical on
-  every platform.
-- Networking: own URL parser/resolver, HTTP/HTTPS with pure-Rust TLS (rustls),
-  gzip, redirects, `file:`, `data:` and `about:` URLs, charset detection.
-- Browser chrome drawn by the engine itself: back/forward/reload/home, URL bar
-  with search fallback, status bar, scrollbar, link hover and keyboard navigation.
+  raw text elements, character references, inline SVG/MathML nesting) plus DOM
+  mutation and serialization (`innerHTML`-ready).
+- CSS: full selector support (combinators, attribute operators, `:nth-*`,
+  `:not`/`:is`/`:where`/`:has`, `:hover`/`:focus`/`:checked`, `::before`/`::after`/
+  `::marker`), specificity, `!important`, `@media`, `@import`, `@supports`,
+  `@font-face`, `@keyframes`, custom properties (`var()`), `calc()`/`min()`/`max()`/
+  `clamp()`, and the whole property set used by real sites: flexbox, grid,
+  multi-layer backgrounds with gradients, border radii, box/text shadows,
+  transforms, outlines, `object-fit`, `aspect-ratio`, generated content with
+  counters and quotes, text-overflow, word-break, logical properties, and more.
+
+**Layout & painting**
+
+- Block, inline, float, table (auto column algorithm), **flexbox** (multi-line,
+  grow/shrink, alignment, gaps) and **CSS grid** (explicit/implicit tracks,
+  `repeat()`, `minmax()`, areas, auto-placement) layout.
+- Positioning: relative, absolute, fixed, sticky; scroll containers with inner
+  scrolling; stacking contexts and z-index painting order.
+- Own software rasterizer: anti-aliased paths, strokes, gradients, blurred
+  shadows, per-corner radii, transforms, opacity layers, image scaling and
+  tiling; glyphs rasterized from TrueType/OpenType, WOFF and WOFF2 web fonts and
+  the fonts installed on the system (DejaVu is bundled as the fallback).
+- Own SVG renderer (inline `<svg>` and `.svg` images): paths, shapes, text,
+  gradients, transforms, `use`/`symbol`, clip paths, CSS-styled icons.
+
+**JavaScript**
+
+- Own JavaScript engine (`crates/js`): ES2022 parser, bytecode compiler, VM
+  with generators and async/await, mark-and-sweep GC, the standard library
+  (Object/Array/String/Number/Math/JSON/Promise/RegExp/Symbol/Reflect/Proxy/
+  Error, Date, Map/Set, typed arrays, Intl basics) and an ECMAScript regular
+  expression engine.
+- Web platform bindings (`crates/script`, in progress): `window`, `document`,
+  DOM traversal and mutation, events, timers, `fetch`/`XMLHttpRequest`,
+  storage, CSSOM, observers.
+
+**Networking & the browser**
+
+- Own URL parser/resolver, HTTP/HTTPS with pure-Rust TLS, keep-alive connection
+  pool, gzip, manual redirects, cookies (RFC 6265, persisted), form submission
+  (GET/POST, urlencoded and multipart), streaming downloads, `file:`, `data:`
+  and `about:` URLs, charset detection.
+- Browser UI drawn entirely by the engine: tabs, address bar with history
+  suggestions, bookmarks, history, downloads, find in page, text selection and
+  clipboard, zoom and HiDPI, form controls (text fields, checkboxes, radios,
+  selects, buttons), context menu, asynchronous loading with progress.
 
 ## Limitations (for now)
 
-- **No JavaScript.** Pages render as the server sends them.
-- CSS coverage is partial: no grid; flexbox, floats, tables and positioning are
-  simplified (absolute/fixed elements are not rendered).
+- JavaScript bindings are being wired into pages; until then pages render as
+  the server sends them.
 - No complex text shaping (Latin/Cyrillic/Greek etc. render fine; Arabic and
-  Indic scripts do not), no emoji font.
-- No tabs, bookmarks, cookies or form submission yet.
+  Indic scripts do not), color emoji fonts render blank.
+- CSS animations/transitions are parsed but not run; `backdrop-filter`,
+  3D transforms and `mix-blend-mode` are ignored.
+- File uploads in forms are not supported yet.
 
 ## Building
 
