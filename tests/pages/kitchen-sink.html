@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kitchen sink</title>
+<style>
+  body { font-family: serif; margin: 20px; color: #222; background: #fff; }
+  h1 { color: #8a2be2; border-bottom: 3px solid #8a2be2; }
+  .note { background: #fff8dc; border: 1px solid #e0c060; padding: 10px; border-radius: 8px; margin: 12px 0; }
+  .row { display: flex; }
+  .col { background: #e8f0ff; margin: 4px; padding: 8px; width: 30%; }
+  .float { float: left; width: 120px; height: 80px; background: #ffd9d9; margin: 0 12px 8px 0; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #999; padding: 4px 8px; }
+  th { background: #eee; }
+  pre { background: #f4f4f4; padding: 8px; }
+  .inline-bg { background: #ffff99; padding: 0 4px; }
+  .abs { position: absolute; top: 30px; right: 30px; background: #ddffdd; padding: 6px; border: 1px solid green; }
+  .rel { position: relative; left: 40px; }
+  .nowrap { white-space: nowrap; }
+  ul.custom { list-style-type: square; }
+</style>
+</head>
+<body>
+<div class="abs">absolute box</div>
+<h1>Kitchen sink</h1>
+<p>This paragraph has <b>bold</b>, <i>italic</i>, <code>code</code>, <a href="https://example.com/">a link</a>, a <span class="inline-bg">highlighted span</span>, and an entity: &copy; &amp; &lt;tag&gt;. It is long enough to wrap onto several lines so that the inline layout algorithm gets exercised properly, including a very long unbreakable word: Supercalifragilisticexpialidociousandthensomemoretomakeitreallyreallylong.</p>
+<div class="note">A note box with padding, border and rounded corners.</div>
+<div class="float"></div>
+<p>Text next to a float. Text next to a float. Text next to a float. Text next to a float. Text next to a float. Text next to a float. Text next to a float. Text next to a float. Text next to a float.</p>
+<p style="clear: both" class="rel">Relative positioned paragraph shifted 40px right.</p>
+<div class="row"><div class="col">Flex column one</div><div class="col">Flex column two with more text inside it</div><div class="col">Three</div></div>
+<h2>Lists</h2>
+<ul><li>Alpha</li><li>Beta <ul class="custom"><li>nested</li><li>items</li></ul></li><li>Gamma</li></ul>
+<ol start="3"><li>three</li><li>four</li></ol>
+<h2>Table</h2>
+<table><tr><th>Name</th><th>Qty</th><th>Notes</th></tr><tr><td>Carrots</td><td>12</td><td>Orange, crunchy</td></tr><tr><td>Rabbits</td><td>2</td><td>They eat the carrots</td></tr></table>
+<h2>Pre</h2>
+<pre>fn main() {
+    println!("hello");   // preserved   spacing
+}</pre>
+<p class="nowrap">This line must not wrap even though it is quite long and would normally need to wrap around to a second line in a narrow viewport.</p>
+<hr>
+<p><small>small text</small> <sup>sup</sup> <sub>sub</sub> <s>strike</s> <u>under</u> <mark>mark</mark></p>
+<img src="missing.png" alt="[missing image alt]" width="100" height="50">
+</body>
+</html>
