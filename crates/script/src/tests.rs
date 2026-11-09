@@ -1,0 +1,813 @@
+//! Tests with a mock environment (no network, no layout engine).
+
+use crate::*;
+use rabbithole_dom::{Document, NodeId};
+use rabbithole_gfx::Rect;
+use rabbithole_net::{Request, Response, Url};
+use rabbithole_style::ComputedStyle;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+struct MockEnv {
+    doc: Document,
+    url: Url,
+    dirty: u32,
+    logs: Vec<(String, String)>,
+    fetches: HashMap<String, (u16, String, String)>,
+    navigations: Vec<(String, bool)>,
+    storage: HashMap<(bool, String), String>,
+    rects: HashMap<NodeId, Rect>,
+    scroll: (f32, f32),
+    cookies: String,
+    title: Option<String>,
+    submitted: Vec<(NodeId, Option<NodeId>)>,
+    focused: Option<NodeId>,
+    now: f64,
+    opened: Vec<String>,
+}
+
+impl MockEnv {
+    fn new(html: &str) -> MockEnv {
+        MockEnv {
+            doc: rabbithole_html::parse(html),
+            url: Url::parse_absolute("https://example.test/dir/page.html?q=1#frag").unwrap(),
+            dirty: 0,
+            logs: Vec::new(),
+            fetches: HashMap::new(),
+            navigations: Vec::new(),
+            storage: HashMap::new(),
+            rects: HashMap::new(),
+            scroll: (0.0, 0.0),
+            cookies: String::new(),
+            title: None,
+            submitted: Vec::new(),
+            focused: None,
+            now: 1000.0,
+            opened: Vec::new(),
+        }
+    }
+
+    fn errors(&self) -> Vec<String> {
+        self.logs.iter().filter(|(l, _)| l == "error").map(|(_, m)| m.clone()).collect()
+    }
+
+}
+
+impl HostEnv for MockEnv {
+    fn doc(&mut self) -> &mut Document {
+        &mut self.doc
+    }
+    fn document_url(&self) -> Url {
+        self.url.clone()
+    }
+    fn base_url(&self) -> Url {
+        self.url.clone()
+    }
+    fn mark_dom_dirty(&mut self) {
+        self.dirty += 1;
+    }
+    fn ensure_layout(&mut self) {}
+    fn node_rect(&mut self, node: NodeId) -> Option<Rect> {
+        self.rects.get(&node).copied()
+    }
+    fn computed_style(&mut self, _node: NodeId) -> Option<Rc<ComputedStyle>> {
+        let mut s = ComputedStyle::initial();
+        s.display = rabbithole_style::Display::Block;
+        s.color = rabbithole_gfx::Color::rgb(255, 0, 0);
+        Some(Rc::new(s))
+    }
+    fn viewport(&self) -> (f32, f32) {
+        (1000.0, 800.0)
+    }
+    fn scroll(&self) -> (f32, f32) {
+        self.scroll
+    }
+    fn set_scroll(&mut self, x: f32, y: f32) {
+        self.scroll = (x, y);
+    }
+    fn fetch(&mut self, req: Request) -> Result<Response, String> {
+        let key = req.url.to_string();
+        match self.fetches.get(&key) {
+            Some((status, ct, body)) => Ok(Response {
+                url: req.url.clone(),
+                status: *status,
+                content_type: ct.clone(),
+                charset: Some("utf-8".into()),
+                body: body.clone().into_bytes(),
+                headers: vec![("content-type".into(), ct.clone()), ("x-test".into(), "yes".into())],
+            }),
+            None => Err(format!("no mock for {key}")),
+        }
+    }
+    fn navigate(&mut self, url: Url, replace: bool) {
+        self.navigations.push((url.to_string(), replace));
+    }
+    fn cookies(&mut self) -> String {
+        self.cookies.clone()
+    }
+    fn set_cookie(&mut self, value: &str) {
+        self.cookies = value.split(';').next().unwrap_or("").to_string();
+    }
+    fn storage_get(&mut self, local: bool, key: &str) -> Option<String> {
+        self.storage.get(&(local, key.to_string())).cloned()
+    }
+    fn storage_set(&mut self, local: bool, key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => {
+                self.storage.insert((local, key.to_string()), v.to_string());
+            }
+            None => {
+                self.storage.remove(&(local, key.to_string()));
+            }
+        }
+    }
+    fn storage_keys(&mut self, local: bool) -> Vec<String> {
+        let mut k: Vec<String> = self.storage.keys().filter(|(l, _)| *l == local).map(|(_, k)| k.clone()).collect();
+        k.sort();
+        k
+    }
+    fn log(&mut self, level: &str, msg: &str) {
+        self.logs.push((level.to_string(), msg.to_string()));
+    }
+    fn alert(&mut self, msg: &str) {
+        self.logs.push(("alert".into(), msg.to_string()));
+    }
+    fn confirm(&mut self, _msg: &str) -> bool {
+        true
+    }
+    fn prompt(&mut self, _msg: &str, default: &str) -> Option<String> {
+        Some(default.to_string())
+    }
+    fn user_agent(&self) -> String {
+        "RabbitHole/test".into()
+    }
+    fn title_changed(&mut self, title: &str) {
+        self.title = Some(title.to_string());
+    }
+    fn now_ms(&self) -> f64 {
+        self.now
+    }
+    fn random_bytes(&mut self, buf: &mut [u8]) {
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = (i * 37 + 11) as u8;
+        }
+    }
+    fn open_window(&mut self, url: Url) {
+        self.opened.push(url.to_string());
+    }
+    fn focus_node(&mut self, node: Option<NodeId>) {
+        self.focused = node;
+    }
+    fn submit_form(&mut self, form: NodeId, submitter: Option<NodeId>) {
+        self.submitted.push((form, submitter));
+    }
+}
+
+fn setup(html: &str) -> (MockEnv, ScriptHost) {
+    let mut env = MockEnv::new(html);
+    let host = ScriptHost::new(&mut env);
+    (env, host)
+}
+
+/// Run a script and return the console.log lines it produced.
+fn run(env: &mut MockEnv, host: &mut ScriptHost, src: &str) -> Vec<String> {
+    let before = env.logs.len();
+    let r = host.run_script(env, src, "test.js", false);
+    if let Err(e) = &r {
+        panic!("script error: {e}\nlogs: {:?}", env.logs);
+    }
+    host.run_jobs(env);
+    env.logs[before..].iter().filter(|(l, _)| l == "log").map(|(_, m)| m.clone()).collect()
+}
+
+fn find(env: &MockEnv, tag: &str) -> NodeId {
+    env.doc.find_element(tag).unwrap()
+}
+
+#[test]
+fn query_and_basic_properties() {
+    let (mut env, mut host) = setup(r#"<div id="a" class="x y"><p class="p1">one</p><p class="p2" data-foo-bar="baz">two</p><span>three</span></div>"#);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const a = document.getElementById('a');
+        console.log(a.tagName, a.id, a.className, a.children.length, a.childElementCount);
+        console.log(document.querySelectorAll('#a > p').length, document.querySelector('p.p2').textContent);
+        console.log(document.querySelectorAll('p:not(.p1)').length, a.querySelector('span').nodeName);
+        console.log(document.querySelector('[data-foo-bar="baz"]').dataset.fooBar);
+        console.log(a.firstElementChild.nextElementSibling.className, a.lastChild.previousSibling.className);
+        console.log(a.classList.contains('y'), a.matches('div.x'), a.querySelector('p').closest('#a') === a);
+        console.log(a.textContent, document.body.innerText.includes('two'));
+        console.log(a instanceof HTMLDivElement, a instanceof Element, a instanceof Node, a instanceof EventTarget);
+        console.log(Object.prototype.toString.call(a), document.documentElement.tagName, document.head !== null);
+    "#,
+    );
+    assert_eq!(out[0], "DIV a x y 3 3");
+    assert_eq!(out[1], "2 two");
+    assert_eq!(out[2], "1 SPAN");
+    assert_eq!(out[3], "baz");
+    assert_eq!(out[4], "p2 p2");
+    assert_eq!(out[5], "true true true");
+    assert_eq!(out[6], "onetwothree true");
+    assert_eq!(out[7], "true true true true");
+    assert_eq!(out[8], "[object HTMLDivElement] HTML true");
+}
+
+#[test]
+fn mutation_and_inner_html() {
+    let (mut env, mut host) = setup(r#"<div id="root"></div>"#);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const root = document.getElementById('root');
+        const el = document.createElement('p');
+        el.textContent = 'hello';
+        el.setAttribute('title', 't');
+        root.appendChild(el);
+        const t = document.createTextNode(' world');
+        el.appendChild(t);
+        console.log(root.innerHTML);
+        root.innerHTML = '<ul><li>a</li><li>b</li></ul><script>window.ran = true</script>';
+        console.log(root.querySelectorAll('li').length, typeof window.ran, root.firstChild.tagName);
+        root.firstChild.insertAdjacentHTML('beforeend', '<li>c</li>');
+        root.firstChild.firstChild.remove();
+        console.log(root.innerHTML);
+        const frag = document.createDocumentFragment();
+        frag.appendChild(document.createElement('i'));
+        frag.append('txt', document.createElement('b'));
+        root.append(frag);
+        console.log(root.innerHTML, frag.childNodes.length);
+        root.replaceChildren();
+        console.log(root.childNodes.length, root.outerHTML);
+        const clone = el.cloneNode(true);
+        console.log(clone.outerHTML, clone.isConnected, el.contains(t), clone.contains(t));
+        console.log(document.body.contains(root), root.parentNode === document.body, root.ownerDocument === document);
+    "#,
+    );
+    assert_eq!(out[0], r#"<p title="t">hello world</p>"#);
+    assert_eq!(out[1], "2 undefined UL");
+    assert_eq!(out[2], "<ul><li>b</li><li>c</li></ul><script>window.ran = true</script>");
+    assert_eq!(out[3], "<ul><li>b</li><li>c</li></ul><script>window.ran = true</script><i></i>txt<b></b> 0");
+    assert_eq!(out[4], r#"0 <div id="root"></div>"#);
+    assert_eq!(out[5], r#"<p title="t">hello world</p> false true false"#);
+    assert_eq!(out[6], "true true true");
+    assert!(env.dirty > 0);
+    assert!(host.take_dirty());
+    assert!(!host.dirty());
+}
+
+#[test]
+fn class_list_style_and_attributes() {
+    let (mut env, mut host) = setup(r#"<div id="d" class="a" style="color: blue; margin-top: 2px"></div>"#);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const d = document.getElementById('d');
+        d.classList.add('b', 'c'); d.classList.remove('a'); d.classList.toggle('z'); d.classList.toggle('z');
+        console.log(d.getAttribute('class'), d.classList.length, d.classList.replace('b', 'q'), d.className);
+        d.style.color = 'red';
+        d.style.backgroundColor = 'green';
+        d.style.setProperty('--x', '1');
+        d.style.removeProperty('margin-top');
+        console.log(d.getAttribute('style'));
+        console.log(d.style.color, d.style.backgroundColor, d.style.getPropertyValue('background-color'), d.style.cssText);
+        d.hidden = true; d.tabIndex = 3; d.dataset.testValue = 'v';
+        console.log(d.hasAttribute('hidden'), d.getAttribute('tabindex'), d.getAttribute('data-test-value'), Object.keys(d.dataset).join(','));
+        delete d.dataset.testValue;
+        d.toggleAttribute('hidden');
+        console.log(d.hasAttribute('data-test-value'), d.hidden, d.getAttributeNames().join('|'));
+        const cs = getComputedStyle(d);
+        console.log(cs.color, cs.display, cs.getPropertyValue('display'));
+    "#,
+    );
+    assert_eq!(out[0], "b c 2 true q c");
+    assert_eq!(out[1], "color: red; background-color: green; --x: 1;");
+    assert_eq!(out[2], "red green green color: red; background-color: green; --x: 1;");
+    assert_eq!(out[3], "true 3 v testValue");
+    assert_eq!(out[4], "false false id|class|style|tabindex");
+    assert_eq!(out[5], "rgb(255, 0, 0) block block");
+}
+
+#[test]
+fn events_bubbling_capture_and_default() {
+    let (mut env, mut host) = setup(r#"<div id="outer"><div id="inner"><button id="btn" onclick="window.inlineRan = (window.inlineRan||0)+1">x</button></div></div>"#);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        window.order = [];
+        const outer = document.getElementById('outer'), inner = document.getElementById('inner'), btn = document.getElementById('btn');
+        outer.addEventListener('click', e => order.push('outer-capture:' + e.eventPhase), true);
+        outer.addEventListener('click', e => order.push('outer-bubble:' + e.eventPhase));
+        inner.addEventListener('click', e => { order.push('inner:' + e.eventPhase + ':' + (e.target === btn) + ':' + (e.currentTarget === inner)); });
+        btn.addEventListener('click', e => { order.push('btn:' + e.eventPhase); e.preventDefault(); }, { once: true });
+        btn.addEventListener('click', e => order.push('btn2'));
+        document.addEventListener('click', () => order.push('document'));
+        window.addEventListener('click', () => order.push('window'));
+        console.log('ready');
+    "#,
+    );
+    assert_eq!(out, vec!["ready"]);
+    let btn = find(&env, "button");
+    let r = host.dispatch_event(&mut env, btn, "click", EventInit { bubbles: true, cancelable: true, detail: Some(EventDetail::Mouse { x: 1.0, y: 2.0, button: 0, ctrl: false, shift: false, alt: false, meta: false }) });
+    assert!(r.default_prevented);
+    assert!(r.handled);
+    let order = run(&mut env, &mut host, "console.log(order.join(','), window.inlineRan)");
+    assert_eq!(order[0], "outer-capture:1,btn:2,btn2,inner:3:true:true,outer-bubble:3,document,window 1");
+    // Second dispatch: `once` listener gone, no preventDefault.
+    let r = host.dispatch_event(&mut env, btn, "click", EventInit::simple(true, true));
+    assert!(!r.default_prevented);
+    let order = run(&mut env, &mut host, "console.log(order.length, window.inlineRan)");
+    assert_eq!(order[0], "13 2");
+    // stopPropagation stops bubbling.
+    run(&mut env, &mut host, "order = []; inner.addEventListener('click', e => e.stopPropagation());");
+    host.dispatch_event(&mut env, btn, "click", EventInit::simple(true, true));
+    let order = run(&mut env, &mut host, "console.log(order.join(','))");
+    assert_eq!(order[0], "outer-capture:1,btn2,inner:3:true:true");
+    assert!(host.has_listeners(btn, "click"));
+    assert!(!host.has_listeners(btn, "keydown"));
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn dispatch_event_from_script_and_custom_events() {
+    let (mut env, mut host) = setup(r#"<div id="d"></div>"#);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const d = document.getElementById('d');
+        let got = null;
+        d.addEventListener('custom', e => { got = e.detail.x + ':' + e.bubbles + ':' + e.type + ':' + (e instanceof CustomEvent) + ':' + e.isTrusted; });
+        const r = d.dispatchEvent(new CustomEvent('custom', { detail: { x: 42 }, bubbles: true, cancelable: true }));
+        console.log(got, r);
+        const et = new EventTarget();
+        et.addEventListener('ping', e => console.log('ping', e.target === et));
+        et.dispatchEvent(new Event('ping'));
+        d.onclick = function (e) { console.log('onclick', this === d, e.clientX); return false; };
+        const me = new MouseEvent('click', { clientX: 7, bubbles: true, cancelable: true });
+        console.log(d.dispatchEvent(me), me.defaultPrevented, typeof d.onclick);
+        const ke = new KeyboardEvent('keydown', { key: 'Enter' });
+        console.log(ke.keyCode, ke.which, ke.key);
+    "#,
+    );
+    assert_eq!(out[0], "42:true:custom:true:false true");
+    assert_eq!(out[1], "ping true");
+    assert_eq!(out[2], "onclick true 7");
+    assert_eq!(out[3], "false true function");
+    assert_eq!(out[4], "13 13 Enter");
+}
+
+#[test]
+fn timers_intervals_and_microtasks() {
+    let (mut env, mut host) = setup("<div></div>");
+    run(
+        &mut env,
+        &mut host,
+        r#"
+        window.log = [];
+        setTimeout(() => log.push('t20'), 20);
+        const id = setTimeout(() => log.push('never'), 5);
+        clearTimeout(id);
+        setTimeout((a, b) => log.push('t0:' + a + b), 0, 'x', 'y');
+        let n = 0;
+        const iv = setInterval(() => { n++; log.push('iv' + n); if (n === 3) clearInterval(iv); }, 10);
+        Promise.resolve().then(() => log.push('micro'));
+        requestAnimationFrame(ts => log.push('raf:' + (ts >= 0)));
+        log.push('sync');
+    "#,
+    );
+    // After run (jobs drained): sync + micro.
+    let out = run(&mut env, &mut host, "console.log(log.join(','))");
+    assert_eq!(out[0], "sync,micro");
+    assert!(host.next_due().is_some());
+    env.now = 1000.0;
+    assert!(host.run_timers(&mut env, 1000.0)); // t0
+    env.now = 1016.0;
+    host.run_timers(&mut env, 1016.0); // iv1 at 1010, raf
+    env.now = 1030.0;
+    host.run_timers(&mut env, 1030.0); // t20, iv2 (1020)
+    env.now = 1050.0;
+    host.run_timers(&mut env, 1050.0); // iv3 (1030→ re-armed at 1026+10=1036... )
+    env.now = 1100.0;
+    host.run_timers(&mut env, 1100.0);
+    let out = run(&mut env, &mut host, "console.log(log.join(','))");
+    assert_eq!(out[0], "sync,micro,t0:xy,iv1,raf:true,t20,iv2,iv3");
+    assert!(host.next_due().is_none());
+}
+
+#[test]
+fn fetch_and_xhr() {
+    let (mut env, mut host) = setup("<div></div>");
+    env.fetches.insert("https://example.test/api/data.json".into(), (200, "application/json".into(), r#"{"ok":true,"n":3}"#.into()));
+    env.fetches.insert("https://example.test/dir/rel.txt".into(), (404, "text/plain".into(), "nope".into()));
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        fetch('/api/data.json').then(r => { console.log('status', r.status, r.ok, r.headers.get('X-Test')); return r.json(); }).then(j => console.log('json', j.ok, j.n));
+        fetch('rel.txt').then(r => r.text()).then(t => console.log('rel', t));
+        fetch('https://nowhere.test/').catch(e => console.log('err', e instanceof TypeError));
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/api/data.json', false);
+        xhr.send();
+        console.log('sync', xhr.status, xhr.readyState, JSON.parse(xhr.responseText).n, xhr.getResponseHeader('x-test'));
+        const ax = new XMLHttpRequest();
+        ax.open('POST', '/api/data.json');
+        ax.onload = () => console.log('async', ax.status, ax.response.length > 0);
+        ax.addEventListener('readystatechange', () => { if (ax.readyState === 4) console.log('rs4'); });
+        ax.send('a=1');
+        console.log('sent');
+        const u = new URL('../x/y?z=1#h', 'https://a.b/c/d/e');
+        console.log(u.href, u.pathname, u.search, u.hash, u.host, u.origin);
+        u.searchParams.set('q', 'a b'); u.hash = '';
+        console.log(u.toString(), [...new URLSearchParams('a=1&b=2&a=3').getAll('a')].join('|'), new URLSearchParams({x: 'y z'}).toString());
+        console.log(btoa('hi'), atob('aGk='), new TextDecoder().decode(new TextEncoder().encode('ñ')));
+    "#,
+    );
+    assert!(out.contains(&"status 200 true yes".to_string()), "{out:?}");
+    assert!(out.contains(&"json true 3".to_string()));
+    assert!(out.contains(&"rel nope".to_string()));
+    assert!(out.contains(&"err true".to_string()));
+    assert!(out.contains(&"sync 200 4 3 yes".to_string()));
+    let sent_pos = out.iter().position(|l| l == "sent").unwrap();
+    let async_pos = out.iter().position(|l| l == "async 200 true").unwrap();
+    assert!(async_pos > sent_pos);
+    assert!(out.contains(&"rs4".to_string()));
+    assert!(out.contains(&"https://a.b/c/x/y?z=1#h /c/x/y ?z=1 #h a.b https://a.b".to_string()));
+    assert!(out.contains(&"https://a.b/c/x/y?z=1&q=a+b 1|3 x=y+z".to_string()));
+    assert!(out.contains(&"aGk= hi ñ".to_string()));
+}
+
+#[test]
+fn storage_cookie_location_and_navigation() {
+    let (mut env, mut host) = setup(r#"<a id="l" href="/go?x=1">go</a><form id="f" action="/post" method="post"><input name="q" value="v"><button id="s">ok</button></form>"#);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        localStorage.setItem('k', 'v'); localStorage.other = 'w'; sessionStorage.setItem('s', '1');
+        console.log(localStorage.getItem('k'), localStorage.k, localStorage.length, Object.keys(localStorage).join(','), sessionStorage.length);
+        localStorage.removeItem('k'); delete localStorage.other;
+        console.log(localStorage.length, localStorage.getItem('k'));
+        document.cookie = 'a=1; path=/';
+        console.log(document.cookie);
+        console.log(location.href, location.pathname, location.search, location.hash, location.origin, location.hostname);
+        history.pushState({p: 1}, '', '/pushed?y=2');
+        console.log(location.pathname, history.state.p, history.length);
+        document.getElementById('l').click();
+        document.getElementById('s').click();
+        document.title = 'New title';
+        console.log(document.title, document.readyState, document.URL.includes('pushed'));
+        window.open('/popup');
+    "#,
+    );
+    assert_eq!(out[0], "v v 2 k,other 1");
+    assert_eq!(out[1], "0 null");
+    assert_eq!(out[2], "a=1");
+    assert_eq!(out[3], "https://example.test/dir/page.html?q=1#frag /dir/page.html ?q=1 #frag https://example.test example.test");
+    assert_eq!(out[4], "/pushed 1 2");
+    assert_eq!(env.navigations, vec![("https://example.test/go?x=1".to_string(), false)]);
+    assert_eq!(env.submitted.len(), 1);
+    assert_eq!(out[5], "New title loading true");
+    assert_eq!(env.title.as_deref(), Some("New title"));
+    assert_eq!(env.opened, vec!["https://example.test/popup".to_string()]);
+    assert_eq!(host.location_href(&mut env), "https://example.test/pushed?y=2");
+}
+
+#[test]
+fn forms_controls_reflect() {
+    let (mut env, mut host) = setup(r#"<form id="f"><input id="t" name="t" value="a"><input id="c" type="checkbox" name="c"><input type="radio" name="r" value="1" id="r1" checked><input type="radio" name="r" value="2" id="r2"><select id="sel"><option>one</option><option value="2" selected>two</option></select><textarea id="ta">hello</textarea></form>"#);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const t = document.getElementById('t'), c = document.getElementById('c'), sel = document.getElementById('sel'), ta = document.getElementById('ta');
+        t.value = 'b';
+        c.checked = true;
+        document.getElementById('r2').checked = true;
+        console.log(t.value, t.getAttribute('value'), c.checked, c.hasAttribute('checked'), document.getElementById('r1').checked, t.type, c.type, t.form.id);
+        console.log(sel.value, sel.selectedIndex, sel.options.length, sel.options[1].text, ta.value);
+        sel.value = 'one'; ta.value = 'changed';
+        console.log(sel.value, sel.selectedIndex, ta.value, ta.textContent);
+        const fd = new FormData(document.getElementById('f'));
+        console.log([...fd.entries()].map(e => e.join('=')).join('&'));
+        const f = document.getElementById('f');
+        console.log(f.elements.length, f.elements.t === t, f.method, f.action.endsWith('page.html?q=1#frag'));
+    "#,
+    );
+    assert_eq!(out[0], "b b true true false text checkbox f");
+    assert_eq!(out[1], "2 1 2 two hello");
+    assert_eq!(out[2], "one 0 changed hello");
+    assert_eq!(out[3], "t=b&c=on&r=2");
+    assert_eq!(out[4], "6 true get true");
+}
+
+#[test]
+fn mutation_observer_and_dynamic_scripts() {
+    let (mut env, mut host) = setup(r#"<div id="d"></div>"#);
+    env.fetches.insert("https://example.test/dir/ext.js".into(), (200, "application/javascript".into(), "window.ext = 'loaded'".into()));
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const d = document.getElementById('d');
+        const mo = new MutationObserver(records => {
+            console.log('mo', records.length, records[0].type, records[0].addedNodes.length, records[0].target === d, records.map(r => r.attributeName).join(','));
+        });
+        mo.observe(d, { childList: true, attributes: true, subtree: true });
+        d.appendChild(document.createElement('span'));
+        d.setAttribute('x', '1');
+        const s = document.createElement('script');
+        s.textContent = 'window.dyn = 5';
+        document.body.appendChild(s);
+        console.log('dyn', window.dyn);
+        const ext = document.createElement('script');
+        ext.src = 'ext.js';
+        ext.onload = () => console.log('ext load', window.ext);
+        document.head.appendChild(ext);
+        console.log('ext sync', window.ext);
+    "#,
+    );
+    assert_eq!(out[0], "dyn 5");
+    assert_eq!(out[1], "ext sync loaded");
+    assert!(out.contains(&"ext load loaded".to_string()), "{out:?}");
+    assert!(out.iter().any(|l| l.starts_with("mo 2 childList 1 true ,x")), "{out:?}");
+}
+
+#[test]
+fn document_ready_order_and_write() {
+    let (mut env, mut host) = setup(r#"<p id="p">x</p><script id="s"></script>"#);
+    let script_node = find(&env, "script");
+    host.set_current_script(Some(script_node));
+    run(
+        &mut env,
+        &mut host,
+        r#"
+        window.seq = [];
+        document.addEventListener('DOMContentLoaded', () => seq.push('dcl:' + document.readyState));
+        window.addEventListener('load', () => seq.push('load:' + document.readyState));
+        window.onload = () => seq.push('onload');
+        document.write('<b>written</b>');
+        seq.push('state:' + document.readyState);
+        console.log(document.currentScript.id);
+    "#,
+    );
+    host.set_current_script(None);
+    host.document_ready(&mut env);
+    let out = run(&mut env, &mut host, "console.log(seq.join(','), document.body.innerHTML)");
+    assert_eq!(out[0], r#"state:loading,dcl:interactive,load:complete,onload <p id="p">x</p><script id="s"></script><b>written</b>"#);
+}
+
+#[test]
+fn geometry_match_media_and_scroll() {
+    let (mut env, mut host) = setup(r#"<div id="d"></div><html>"#);
+    let d = find(&env, "div");
+    env.rects.insert(d, Rect::new(10.0, 500.0, 100.0, 50.0));
+    env.scroll = (0.0, 100.0);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const d = document.getElementById('d');
+        const r = d.getBoundingClientRect();
+        console.log(r.x, r.top, r.width, r.bottom, d.offsetWidth, d.offsetHeight, JSON.stringify(r.toJSON()).length > 10);
+        console.log(window.innerWidth, innerHeight, scrollY, matchMedia('(max-width: 1200px)').matches, matchMedia('(min-width: 1200px)').matches);
+        d.scrollIntoView();
+        console.log(window.scrollY);
+        window.scrollTo(0, 42); console.log(scrollY, document.documentElement.scrollTop, document.documentElement.clientWidth);
+        window.scrollBy({ top: 8 }); console.log(pageYOffset);
+    "#,
+    );
+    assert_eq!(out[0], "10 400 100 450 100 50 true");
+    assert_eq!(out[1], "1000 800 100 true false");
+    assert_eq!(out[2], "500");
+    assert_eq!(out[3], "42 42 1000");
+    assert_eq!(out[4], "50");
+}
+
+#[test]
+fn errors_are_logged_not_fatal() {
+    let (mut env, mut host) = setup("<div id='d'></div>");
+    assert!(host.run_script(&mut env, "null.x", "bad.js", false).is_err());
+    assert!(env.errors().iter().any(|e| e.contains("Cannot read properties of null")));
+    run(&mut env, &mut host, "document.getElementById('d').addEventListener('click', () => { throw new Error('boom'); }); Promise.reject(new Error('rej'));");
+    let div = find(&env, "div");
+    host.dispatch_event(&mut env, div, "click", EventInit::simple(true, true));
+    assert!(env.errors().iter().any(|e| e.contains("boom")));
+    assert!(env.errors().iter().any(|e| e.contains("rej")));
+    let out = host.eval_for_console(&mut env, "1 + 2");
+    assert_eq!(out, "3");
+    let out = host.eval_for_console(&mut env, "nope");
+    assert!(out.contains("nope is not defined"));
+}
+
+#[test]
+fn todo_app_end_to_end() {
+    let html = r#"
+    <div id="app">
+      <form id="form"><input id="new" name="new" placeholder="todo"><button type="submit" id="add">Add</button></form>
+      <ul id="list"></ul>
+      <p id="count">0 items</p>
+      <button id="clear">Clear done</button>
+    </div>"#;
+    let (mut env, mut host) = setup(html);
+    run(
+        &mut env,
+        &mut host,
+        r#"
+        (function () {
+          const form = document.getElementById('form');
+          const input = document.getElementById('new');
+          const list = document.getElementById('list');
+          const count = document.getElementById('count');
+          const todos = [];
+          function render() {
+            list.innerHTML = '';
+            todos.forEach((t, i) => {
+              const li = document.createElement('li');
+              li.className = t.done ? 'done' : '';
+              li.dataset.index = i;
+              const cb = document.createElement('input');
+              cb.type = 'checkbox'; cb.checked = t.done;
+              cb.addEventListener('change', () => { t.done = cb.checked; render(); });
+              li.appendChild(cb);
+              li.appendChild(document.createTextNode(' ' + t.text));
+              list.appendChild(li);
+            });
+            const n = todos.filter(t => !t.done).length;
+            count.textContent = n + (n === 1 ? ' item' : ' items') + ' left';
+          }
+          form.addEventListener('submit', e => {
+            e.preventDefault();
+            const text = input.value.trim();
+            if (!text) return;
+            todos.push({ text, done: false });
+            input.value = '';
+            render();
+          });
+          document.getElementById('clear').addEventListener('click', () => {
+            for (let i = todos.length - 1; i >= 0; i--) if (todos[i].done) todos.splice(i, 1);
+            render();
+          });
+          list.addEventListener('click', e => {
+            if (e.target.tagName === 'LI') { const t = todos[e.target.dataset.index]; t.done = !t.done; render(); }
+          });
+          render();
+        })();
+    "#,
+    );
+    let input = find(&env, "input");
+    let form = find(&env, "form");
+    for text in ["Buy carrots", "Feed rabbits", "Write browser"] {
+        env.doc.set_attr(input, "value", Some(text));
+        let r = host.dispatch_event(&mut env, form, "submit", EventInit::simple(true, true));
+        assert!(r.default_prevented);
+    }
+    let out = run(&mut env, &mut host, "console.log(document.querySelectorAll('#list li').length, document.getElementById('count').textContent, document.getElementById('new').value === '')");
+    assert_eq!(out[0], "3 3 items left true");
+    // Toggle the second one via a click on the li, then clear done.
+    let lis: Vec<NodeId> = env.doc.descendants(0).filter(|&n| env.doc.is_element(n, "li")).collect();
+    host.dispatch_event(&mut env, lis[1], "click", EventInit::simple(true, true));
+    let out = run(&mut env, &mut host, "console.log(document.querySelector('#list li.done') !== null, document.getElementById('count').textContent)");
+    assert_eq!(out[0], "true 2 items left");
+    // Checkbox change on the first item through the checkbox element.
+    let first_cb = env.doc.descendants(0).find(|&n| env.doc.is_element(n, "input") && env.doc.attr(n, "type") == Some("checkbox")).unwrap();
+    env.doc.set_attr(first_cb, "checked", Some(""));
+    host.dispatch_event(&mut env, first_cb, "change", EventInit::simple(true, false));
+    let out = run(&mut env, &mut host, "console.log(document.querySelectorAll('#list li.done').length)");
+    assert_eq!(out[0], "2");
+    let add_btn = find(&env, "button");
+    host.dispatch_event(&mut env, add_btn, "click", EventInit::simple(true, true)); // "Add" button – no-op (submit handled above)
+    let clear = env.doc.element_by_id("clear").unwrap();
+    host.dispatch_event(&mut env, clear, "click", EventInit::simple(true, true));
+    let out = run(&mut env, &mut host, "console.log(document.querySelectorAll('#list li').length, document.getElementById('count').textContent, document.getElementById('list').innerHTML)");
+    assert_eq!(out[0], r#"1 1 item left <li class="" data-index="0"><input type="checkbox"> Write browser</li>"#);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn misc_apis() {
+    let (mut env, mut host) = setup(r#"<div id="d"><p>a</p><!-- c --><p>b</p></div><template id="t"><span>tpl</span></template>"#);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const parsed = new DOMParser().parseFromString('<html><body><p class="x">hi</p></body></html>', 'text/html');
+        console.log(parsed.querySelector('p.x').textContent, parsed.body.children.length, new XMLSerializer().serializeToString(parsed.body));
+        const imported = document.importNode(parsed.querySelector('p'), true);
+        document.getElementById('d').appendChild(imported);
+        console.log(document.querySelectorAll('#d p').length);
+        const w = document.createTreeWalker(document.getElementById('d'), NodeFilter.SHOW_ELEMENT);
+        const names = []; let n; while ((n = w.nextNode())) names.push(n.tagName);
+        console.log(names.join(','));
+        const it = document.createNodeIterator(document.getElementById('d'), NodeFilter.SHOW_COMMENT);
+        console.log(it.nextNode().nodeValue.trim());
+        const tpl = document.getElementById('t');
+        console.log(tpl.content.firstChild.tagName, tpl.content.nodeType);
+        const ac = new AbortController();
+        document.addEventListener('x', () => console.log('never'), { signal: ac.signal });
+        ac.abort();
+        document.dispatchEvent(new Event('x'));
+        console.log(ac.signal.aborted, ac.signal.reason.name);
+        class MyEl extends HTMLElement { connectedCallback() { this.textContent = 'custom!'; } }
+        customElements.define('my-el', MyEl);
+        const el = document.createElement('my-el');
+        document.body.appendChild(el);
+        console.log(el.textContent, customElements.get('my-el') === MyEl);
+        console.log(typeof performance.now(), crypto.randomUUID().length, navigator.userAgent, typeof structuredClone({a:1}).a);
+        try { document.querySelector('p:::bad'); } catch (e) { console.log(e.name, e instanceof DOMException, e instanceof Error); }
+        const io = new IntersectionObserver(entries => console.log('io', entries.length, entries[0].isIntersecting));
+        io.observe(document.getElementById('d'));
+        console.log(CSS.supports('display', 'flex'), CSS.escape('1a'), document.compatMode, document.characterSet);
+    "#,
+    );
+    assert_eq!(out[0], r#"hi 1 <body><p class="x">hi</p></body>"#);
+    assert_eq!(out[1], "3");
+    assert_eq!(out[2], "P,P,P");
+    assert_eq!(out[3], "c");
+    assert_eq!(out[4], "SPAN 11");
+    assert_eq!(out[5], "true AbortError");
+    assert_eq!(out[6], "custom! true");
+    assert_eq!(out[7], "number 36 RabbitHole/test number");
+    assert_eq!(out[8], "SyntaxError true true");
+    assert!(out.contains(&"io 1 true".to_string()), "{out:?}");
+    assert!(out.contains(&"true \\31 a CSS1Compat UTF-8".to_string()), "{out:?}");
+}
+
+#[test]
+fn realistic_vanilla_script() {
+    let html = r##"<nav id="nav"><a href="#home" class="active">Home</a><a href="#about">About</a></nav>
+    <main><section id="home" class="page">Home page</section><section id="about" class="page" hidden>About page</section></main>
+    <div id="counter"><button id="inc">+</button><span id="n">0</span></div>
+    <ul id="items"></ul><input id="search" placeholder="search">"##;
+    let (mut env, mut host) = setup(html);
+    run(
+        &mut env,
+        &mut host,
+        r#"
+        'use strict';
+        const $ = sel => document.querySelector(sel);
+        const $$ = sel => Array.from(document.querySelectorAll(sel));
+        // Router via hashchange
+        function show(id) {
+          $$('.page').forEach(p => p.hidden = p.id !== id);
+          $$('#nav a').forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + id));
+        }
+        window.addEventListener('hashchange', () => show(location.hash.slice(1) || 'home'));
+        // Counter with closures and dataset
+        let n = 0;
+        $('#inc').addEventListener('click', () => { n++; $('#n').textContent = String(n); $('#inc').dataset.count = n; });
+        // List rendering with template literals + event delegation
+        const data = ['alpha', 'beta', 'gamma', 'delta'];
+        const items = $('#items');
+        function renderItems(filter = '') {
+          items.innerHTML = data.filter(d => d.includes(filter)).map((d, i) => `<li data-i="${i}" class="item">${d.toUpperCase()}</li>`).join('');
+        }
+        renderItems();
+        items.addEventListener('click', e => {
+          const li = e.target.closest('li.item');
+          if (li) li.classList.toggle('selected');
+        });
+        $('#search').addEventListener('input', e => renderItems(e.target.value));
+        // Async flow
+        window.asyncDone = false;
+        (async () => { await new Promise(r => setTimeout(r, 5)); await null; window.asyncDone = true; })();
+        // Map/Set/JSON/regex
+        const m = new Map([['a', 1]]); m.set('b', 2);
+        window.summary = JSON.stringify({ keys: [...m.keys()], ok: /^al/.test(data[0]), n: data.length });
+    "#,
+    );
+    let inc = env.doc.element_by_id("inc").unwrap();
+    for _ in 0..3 {
+        host.dispatch_event(&mut env, inc, "click", EventInit::simple(true, true));
+    }
+    let out = run(&mut env, &mut host, "console.log($('#n').textContent, $('#inc').dataset.count, window.summary, document.querySelectorAll('li.item').length)");
+    assert_eq!(out[0], r#"3 3 {"keys":["a","b"],"ok":true,"n":4} 4"#);
+    // Hash navigation from script fires hashchange and routes.
+    let out = run(&mut env, &mut host, "location.hash = '#about'; console.log($('#about').hidden, $('#home').hidden, $('#nav a.active').textContent)");
+    assert_eq!(out[0], "false true About");
+    // Delegated click.
+    let lis: Vec<NodeId> = env.doc.descendants(0).filter(|&n| env.doc.is_element(n, "li")).collect();
+    host.dispatch_event(&mut env, lis[2], "click", EventInit::simple(true, true));
+    let out = run(&mut env, &mut host, "console.log($$('li.selected').map(l => l.textContent).join())");
+    assert_eq!(out[0], "GAMMA");
+    // Input event filtering.
+    let search = env.doc.element_by_id("search").unwrap();
+    env.doc.set_attr(search, "value", Some("a"));
+    host.dispatch_event(&mut env, search, "input", EventInit { bubbles: true, cancelable: false, detail: Some(EventDetail::Input { data: Some("a".into()) }) });
+    let out = run(&mut env, &mut host, "console.log($$('li.item').map(l => l.textContent).join())");
+    assert_eq!(out[0], "ALPHA,BETA,GAMMA,DELTA");
+    env.doc.set_attr(search, "value", Some("et"));
+    host.dispatch_event(&mut env, search, "input", EventInit::simple(true, false));
+    let out = run(&mut env, &mut host, "console.log($$('li.item').map(l => l.textContent).join())");
+    assert_eq!(out[0], "BETA");
+    env.now = 2000.0;
+    host.run_timers(&mut env, 2000.0);
+    let out = run(&mut env, &mut host, "console.log(window.asyncDone)");
+    assert_eq!(out[0], "true");
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}

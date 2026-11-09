@@ -39,6 +39,50 @@ pub fn parse(input: &str) -> Document {
     builder.doc
 }
 
+/// Parse an HTML fragment as the children of a `context` element (as
+/// `innerHTML` does). The returned document's `body` holds the fragment
+/// nodes, in order.
+pub fn parse_fragment(input: &str, context: &str) -> Document {
+    let ctx = context.to_ascii_lowercase();
+    let (prefix, inner_tag) = match ctx.as_str() {
+        "tr" => ("<table><tbody><tr>", "tr"),
+        "tbody" | "thead" | "tfoot" => ("<table><tbody>", "tbody"),
+        "td" | "th" => ("<table><tbody><tr><td>", "td"),
+        "table" => ("<table>", "table"),
+        "colgroup" => ("<table><colgroup>", "colgroup"),
+        "select" => ("<select>", "select"),
+        "ul" | "ol" => ("<ul>", "ul"),
+        "dl" => ("<dl>", "dl"),
+        _ => ("", ""),
+    };
+    if prefix.is_empty() {
+        let mut doc = parse(input);
+        // Head-only elements (style/script/meta…) at the start of a
+        // fragment end up in <head>; move them in front of the body content.
+        if let (Some(head), Some(body)) = (doc.head(), doc.body()) {
+            let head_children: Vec<NodeId> = doc.children(head).collect();
+            let first_body = doc.first_child(body);
+            for c in head_children {
+                doc.insert_before(body, c, first_body);
+            }
+        }
+        return doc;
+    }
+    let mut doc = parse(&format!("{prefix}{input}"));
+    let Some(body) = doc.body() else { return doc };
+    let inner = doc.find_element(inner_tag);
+    let children: Vec<NodeId> = match inner {
+        Some(n) => doc.children(n).collect(),
+        None => Vec::new(),
+    };
+    doc.clear_children(body);
+    for c in children {
+        doc.detach(c);
+        doc.append_child(body, c);
+    }
+    doc
+}
+
 struct TreeBuilder {
     doc: Document,
     stack: Vec<NodeId>,

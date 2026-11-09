@@ -1656,6 +1656,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rabbithole-script"
+version = "0.1.0"
+dependencies = [
+ "rabbithole-css",
+ "rabbithole-dom",
+ "rabbithole-gfx",
+ "rabbithole-html",
+ "rabbithole-js",
+ "rabbithole-net",
+ "rabbithole-style",
+]
+
+[[package]]
 name = "rabbithole-style"
 version = "0.1.0"
 dependencies = [

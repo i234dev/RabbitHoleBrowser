@@ -206,6 +206,17 @@ impl Document {
         copy
     }
 
+    /// Deep-copy a subtree from another document into this one; the copy
+    /// is detached.
+    pub fn import_subtree(&mut self, other: &Document, root: NodeId) -> NodeId {
+        let copy = self.create(other.nodes[root].data.clone());
+        for c in other.children(root) {
+            let cc = self.import_subtree(other, c);
+            self.append_child(copy, cc);
+        }
+        copy
+    }
+
     /// Remove all children of `parent` (detached, not freed).
     pub fn clear_children(&mut self, parent: NodeId) {
         let children: Vec<NodeId> = self.children(parent).collect();
