@@ -671,7 +671,7 @@ fn apply_font_size(value: &[Token], style: &mut ComputedStyle, parent: &Computed
         match lv.resolve(ctx) {
             Length::Px(v) => style.font_size = v.max(0.0),
             Length::Percent(p) => style.font_size = (parent.font_size * p / 100.0).max(0.0),
-            Length::Auto => {}
+            _ => {}
         }
     }
 }
@@ -875,7 +875,7 @@ fn line_height_of(c: &[Token], font_size: f32, ctx: &LengthContext) -> Option<Op
     match values::parse_length(c)?.resolve(ctx) {
         Length::Px(v) => Some(Some(v.max(0.0))),
         Length::Percent(p) => Some(Some(font_size * p / 100.0)),
-        Length::Auto => None,
+        _ => None,
     }
 }
 
@@ -1488,7 +1488,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.vertical_align = match l {
                     Length::Px(v) => VerticalAlign::Length(v),
                     Length::Percent(p) => VerticalAlign::Length(style.line_height_px() * p / 100.0),
-                    Length::Auto => return,
+                    _ => return,
                 };
             }
         }

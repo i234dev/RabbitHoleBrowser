@@ -3,9 +3,12 @@
 //! No GPU, no system toolkit; the same code paints on every platform.
 
 pub mod canvas;
+pub mod canvas_ext;
 pub mod font;
+pub mod font_ext;
 pub mod image;
 
-pub use canvas::{Canvas, Color, Rect};
-pub use font::{Family, FontContext, FontId, GlyphBitmap, LineMetrics, ShapedGlyph};
+pub use canvas::{Canvas, Color, ColorStop, FillRule, LineCap, LineJoin, Matrix, Paint, PathSeg, Point, Radii, Rect, StrokeStyle, IDENTITY};
+pub use canvas_ext::{ellipse_path, parse_svg_path, rounded_rect_path};
+pub use font::{FaceInfo, Family, FontContext, FontId, GlyphBitmap, LineMetrics, ShapedGlyph};
 pub use image::Image;

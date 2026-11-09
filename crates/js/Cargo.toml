@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-js"
+description = "RabbitHole browser engine: a JavaScript engine written from scratch (parser, bytecode compiler, VM, GC, builtins, regex)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

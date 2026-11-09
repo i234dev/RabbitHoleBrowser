@@ -28,7 +28,7 @@ impl<'a> Layouter<'a> {
             let (imin, imax) = self.intrinsic(c);
             let adj = |v: f32| if c.style.box_sizing == BoxSizing::BorderBox { (v - pb).max(0.0) } else { v };
             match c.style.width {
-                Length::Auto => {
+                Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => {
                     base[i] = imax;
                     auto[i] = true;
                 }

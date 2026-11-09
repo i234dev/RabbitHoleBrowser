@@ -373,3 +373,81 @@ mod tests {
         assert!(z.is_empty());
     }
 }
+
+// ------------------------------------------------------------------ v0.2 API
+// Web fonts (@font-face), system fonts and family matching. Implemented in
+// `font_ext.rs`.
+
+/// A font face registered by name (web font or system font).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceInfo {
+    pub family: String,
+    pub weight: u16,
+    pub italic: bool,
+    pub id: FontId,
+}
+
+impl FontContext {
+    /// Register a font from raw bytes (TTF/OTF, WOFF, WOFF2) under
+    /// `family` with the given weight/style (from the `@font-face`
+    /// descriptors). Returns None when the data cannot be decoded.
+    pub fn add_font_data(&self, family: &str, weight: u16, italic: bool, data: &[u8]) -> Option<FontId> {
+        let _ = (family, weight, italic, data);
+        unimplemented!()
+    }
+
+    /// Scan the platform font directories (Windows: %WINDIR%\\Fonts and the
+    /// per-user fonts folder; macOS: /System/Library/Fonts, /Library/Fonts,
+    /// ~/Library/Fonts; Linux: /usr/share/fonts, /usr/local/share/fonts,
+    /// ~/.fonts, ~/.local/share/fonts) and register TTF/OTF/TTC faces by
+    /// their family name (parsed from the `name` table) lazily: only the
+    /// name tables are read up-front; glyph data is loaded on first use.
+    /// Returns the number of faces found.
+    pub fn load_system_fonts(&self) -> usize {
+        unimplemented!()
+    }
+
+    /// Pick the best face for a CSS family list: the first family (case
+    /// insensitive; generic names `sans-serif`, `serif`, `monospace`,
+    /// `system-ui`, `cursive`, `fantasy`, `emoji` map to platform defaults
+    /// or the bundled faces) that has a registered face, choosing the
+    /// closest weight (CSS font matching algorithm) and style (synthetic
+    /// oblique is left to the caller via `needs_synthetic_italic`). Falls
+    /// back to `select(generic, weight, italic)`.
+    pub fn select_family(&self, families: &[String], generic: Family, weight: u16, italic: bool) -> FontId {
+        let _ = (families, generic, weight, italic);
+        unimplemented!()
+    }
+
+    /// True when `font` is an upright face chosen for an italic request.
+    pub fn needs_synthetic_italic(&self, font: FontId, italic: bool) -> bool {
+        let _ = (font, italic);
+        unimplemented!()
+    }
+
+    /// True when `font` is a non-bold face chosen for a bold request
+    /// (caller may embolden synthetically).
+    pub fn needs_synthetic_bold(&self, font: FontId, weight: u16) -> bool {
+        let _ = (font, weight);
+        unimplemented!()
+    }
+
+    /// Registered faces (web + system + bundled).
+    pub fn faces(&self) -> Vec<FaceInfo> {
+        unimplemented!()
+    }
+
+    /// Does any registered face provide `family`?
+    pub fn has_family(&self, family: &str) -> bool {
+        let _ = family;
+        unimplemented!()
+    }
+
+    /// Unicode-aware fallback used by `shape`: find a face containing `ch`,
+    /// preferring faces of the same generic family, then any registered
+    /// face (so system CJK/emoji/symbol fonts are used when available).
+    pub fn fallback_for_char(&self, ch: char, prefer: FontId) -> Option<FontId> {
+        let _ = (ch, prefer);
+        unimplemented!()
+    }
+}

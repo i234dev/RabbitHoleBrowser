@@ -380,7 +380,7 @@ impl<'a> Layouter<'a> {
         match style.height {
             Length::Px(v) => Some(adj(v.max(0.0))),
             Length::Percent(p) => cb_h.map(|h| adj(h * p / 100.0)),
-            Length::Auto => None,
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         }
     }
 
@@ -390,7 +390,7 @@ impl<'a> Layouter<'a> {
         let max = match style.max_height {
             Length::Px(v) => Some(v),
             Length::Percent(p) => cb_h.map(|b| b * p / 100.0),
-            Length::Auto => None,
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         if let Some(m) = max {
             h = h.min(adj(m));
@@ -398,7 +398,7 @@ impl<'a> Layouter<'a> {
         let min = match style.min_height {
             Length::Px(v) => Some(v),
             Length::Percent(p) => cb_h.map(|b| b * p / 100.0),
-            Length::Auto => None,
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         if let Some(m) = min {
             h = h.max(adj(m));
@@ -419,12 +419,12 @@ impl<'a> Layouter<'a> {
         let sw = match style.width {
             Length::Px(v) => Some(adj_w(v)),
             Length::Percent(p) => cbw.map(|c| adj_w(c * p / 100.0)),
-            Length::Auto => b.attr_size.0.filter(|_| b.image.is_none() || true),
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => b.attr_size.0.filter(|_| b.image.is_none() || true),
         };
         let sh = match style.height {
             Length::Px(v) => Some(v),
             Length::Percent(p) => cb_h.map(|c| c * p / 100.0),
-            Length::Auto => b.attr_size.1,
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => b.attr_size.1,
         };
         let (mut w, mut h) = match (sw, sh) {
             (Some(w), Some(h)) => (w, h),
@@ -436,7 +436,7 @@ impl<'a> Layouter<'a> {
         if let Some(max) = match style.max_width {
             Length::Px(v) => Some(adj_w(v)),
             Length::Percent(p) => cbw.map(|c| adj_w(c * p / 100.0)),
-            Length::Auto => None,
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         } {
             if w > max {
                 if w > 0.0 {

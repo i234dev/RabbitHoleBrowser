@@ -8,6 +8,11 @@ pub enum Length {
     Px(f32),
     Percent(f32),
     Auto,
+    /// `min-content` / `max-content` / `fit-content` sizing keywords;
+    /// `resolve()` returns None for them, like `Auto`.
+    MinContent,
+    MaxContent,
+    FitContent,
 }
 
 impl Length {
@@ -16,12 +21,15 @@ impl Length {
     pub fn is_auto(&self) -> bool {
         matches!(self, Length::Auto)
     }
+    pub fn is_intrinsic(&self) -> bool {
+        matches!(self, Length::MinContent | Length::MaxContent | Length::FitContent)
+    }
     /// Resolve against `base` (the containing block dimension). `Auto` → None.
     pub fn resolve(&self, base: f32) -> Option<f32> {
         match *self {
             Length::Px(v) => Some(v),
             Length::Percent(p) => Some(base * p / 100.0),
-            Length::Auto => None,
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         }
     }
     pub fn resolve_or(&self, base: f32, default: f32) -> f32 {
@@ -268,6 +276,377 @@ impl Edges<f32> {
     }
 }
 
+
+// ------------------------------------------------------------ flexbox / grid
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexWrap {
+    NoWrap,
+    Wrap,
+    WrapReverse,
+}
+
+/// `justify-content` / `align-content` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentDistribution {
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+    Stretch,
+}
+
+/// `align-items` / `align-self` / `justify-items` / `justify-self` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemAlign {
+    /// `auto` (align-self / justify-self only): use the container's value.
+    Auto,
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Baseline,
+}
+
+/// One grid track size.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackSize {
+    /// `px` / `%` / `auto` / `min-content` / `max-content`
+    Length(Length),
+    /// `<n>fr`
+    Fr(f32),
+    /// `minmax(min, max)`
+    MinMax(Box<TrackSize>, Box<TrackSize>),
+    /// `fit-content(limit)`
+    FitContent(Length),
+}
+
+/// A track list entry: a sized track, optionally preceded by line names,
+/// or a `repeat()`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackListItem {
+    Track {
+        names: Vec<String>,
+        size: TrackSize,
+    },
+    Repeat {
+        /// `None` = `auto-fill`, `Some(false)` = `auto-fit` is encoded via `auto_fit`.
+        count: Option<u32>,
+        auto_fit: bool,
+        tracks: Vec<TrackListItem>,
+    },
+    /// Trailing line names after the last track.
+    Names(Vec<String>),
+}
+
+/// `grid-row-start` etc.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GridLine {
+    Auto,
+    /// `<integer>` (negative counts from the end)
+    Line(i32),
+    /// `span <n>`
+    Span(u32),
+    /// `<custom-ident>` or `span <ident>` (name, span)
+    Named(String, bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridAutoFlow {
+    Row,
+    Column,
+    RowDense,
+    ColumnDense,
+}
+
+// --------------------------------------------------------------- backgrounds
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientStop {
+    pub color: Color,
+    /// Position along the gradient line (percentage of its length or px);
+    /// `None` = evenly distributed.
+    pub position: Option<Length>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GradientDirection {
+    /// Angle in radians, 0 = to top, clockwise (CSS convention).
+    Angle(f32),
+    /// `to left top` etc. as (horizontal, vertical) in -1/0/1.
+    Corner(i8, i8),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RadialShape {
+    Circle,
+    Ellipse,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RadialSize {
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
+    Explicit(Length, Length),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundImage {
+    None,
+    /// Resolved-as-written URL string (the engine resolves it against the
+    /// stylesheet / document base).
+    Url(String),
+    LinearGradient {
+        direction: GradientDirection,
+        stops: Vec<GradientStop>,
+        repeating: bool,
+    },
+    RadialGradient {
+        shape: RadialShape,
+        size: RadialSize,
+        /// Center position (x, y) as lengths/percentages.
+        position: (Length, Length),
+        stops: Vec<GradientStop>,
+        repeating: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundSize {
+    Auto,
+    Cover,
+    Contain,
+    /// Explicit width/height; `Auto` keeps the aspect ratio.
+    Explicit(Length, Length),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundRepeat {
+    Repeat,
+    NoRepeat,
+    Space,
+    Round,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxArea {
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundLayer {
+    pub image: BackgroundImage,
+    pub size: BackgroundSize,
+    /// Position of the image inside the positioning area (x, y); percentages
+    /// use the CSS background-position formula.
+    pub position: (Length, Length),
+    pub repeat: (BackgroundRepeat, BackgroundRepeat),
+    pub origin: BoxArea,
+    pub clip: BoxArea,
+    /// `background-attachment: fixed`
+    pub fixed: bool,
+}
+
+impl Default for BackgroundLayer {
+    fn default() -> Self {
+        BackgroundLayer {
+            image: BackgroundImage::None,
+            size: BackgroundSize::Auto,
+            position: (Length::Percent(0.0), Length::Percent(0.0)),
+            repeat: (BackgroundRepeat::Repeat, BackgroundRepeat::Repeat),
+            origin: BoxArea::PaddingBox,
+            clip: BoxArea::BorderBox,
+            fixed: false,
+        }
+    }
+}
+
+// ------------------------------------------------------- shadows / transforms
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shadow {
+    pub x: f32,
+    pub y: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
+    pub inset: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransformOp {
+    Translate(Length, Length),
+    Scale(f32, f32),
+    /// radians
+    Rotate(f32),
+    /// radians (x, y)
+    Skew(f32, f32),
+    /// `matrix(a, b, c, d, e, f)`
+    Matrix([f32; 6]),
+}
+
+// --------------------------------------------------------------- text / misc
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextOverflow {
+    Clip,
+    Ellipsis,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordBreak {
+    Normal,
+    BreakAll,
+    KeepAll,
+    BreakWord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverflowWrap {
+    Normal,
+    Anywhere,
+    BreakWord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectFit {
+    Fill,
+    Contain,
+    Cover,
+    None,
+    ScaleDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Ltr,
+    Rtl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDecorationStyle {
+    Solid,
+    Double,
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerEvents {
+    Auto,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserSelect {
+    Auto,
+    None,
+    Text,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resize {
+    None,
+    Both,
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Appearance {
+    Auto,
+    None,
+}
+
+/// Items of the `content` property (for `::before` / `::after`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentItem {
+    String(String),
+    /// `attr(name)`
+    Attr(String),
+    /// `counter(name, style)`
+    Counter(String, ListStyleType),
+    /// `counters(name, separator, style)`
+    Counters(String, String, ListStyleType),
+    OpenQuote,
+    CloseQuote,
+    NoOpenQuote,
+    NoCloseQuote,
+    /// `url(...)` image
+    Url(String),
+}
+
+/// `content` value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Content {
+    /// `normal` (for pseudo-elements: no box is generated)
+    Normal,
+    None,
+    Items(Vec<ContentItem>),
+}
+
+/// Parsed `transition` entries (property, duration s, delay s, easing name).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transition {
+    pub property: String,
+    pub duration: f32,
+    pub delay: f32,
+    pub timing: String,
+}
+
+/// Parsed `animation` shorthand.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Animation {
+    pub name: String,
+    pub duration: f32,
+    pub delay: f32,
+    pub timing: String,
+    /// `None` = infinite
+    pub iterations: Option<f32>,
+    pub direction: String,
+    pub fill_mode: String,
+}
+
+/// Simple affine matrix helpers for transforms: [a, b, c, d, e, f] with
+/// x' = a·x + c·y + e, y' = b·x + d·y + f.
+pub fn transform_matrix(ops: &[TransformOp], width: f32, height: f32, font_size: f32) -> [f32; 6] {
+    let mut m = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    for op in ops {
+        let o = match op {
+            TransformOp::Translate(x, y) => {
+                let _ = font_size;
+                [1.0, 0.0, 0.0, 1.0, x.resolve_or_zero(width), y.resolve_or_zero(height)]
+            }
+            TransformOp::Scale(x, y) => [*x, 0.0, 0.0, *y, 0.0, 0.0],
+            TransformOp::Rotate(a) => [a.cos(), a.sin(), -a.sin(), a.cos(), 0.0, 0.0],
+            TransformOp::Skew(x, y) => [1.0, y.tan(), x.tan(), 1.0, 0.0, 0.0],
+            TransformOp::Matrix(mm) => *mm,
+        };
+        m = multiply_matrix(m, o);
+    }
+    m
+}
+
+/// `m × n` (apply `n` first, then `m`).
+pub fn multiply_matrix(m: [f32; 6], n: [f32; 6]) -> [f32; 6] {
+    [
+        m[0] * n[0] + m[2] * n[1],
+        m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3],
+        m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4],
+        m[1] * n[4] + m[3] * n[5] + m[5],
+    ]
+}
+
 /// Computed values for one element.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
@@ -326,6 +705,94 @@ pub struct ComputedStyle {
     pub visibility: Visibility,
     pub z_index: Option<i32>,
     pub cursor_pointer: bool,
+
+    // ---- flexbox
+    pub flex_grow: f32,
+    pub flex_shrink: f32,
+    pub flex_basis: Length,
+    pub flex_wrap: FlexWrap,
+    pub justify_content: ContentDistribution,
+    pub align_items: ItemAlign,
+    pub align_self: ItemAlign,
+    pub align_content: ContentDistribution,
+    pub order: i32,
+    pub row_gap: Length,
+    pub column_gap: Length,
+
+    // ---- grid
+    pub grid_template_columns: Vec<TrackListItem>,
+    pub grid_template_rows: Vec<TrackListItem>,
+    pub grid_auto_columns: Vec<TrackSize>,
+    pub grid_auto_rows: Vec<TrackSize>,
+    pub grid_auto_flow: GridAutoFlow,
+    /// Rows of area names (`.` for none).
+    pub grid_template_areas: Vec<Vec<String>>,
+    pub grid_row_start: GridLine,
+    pub grid_row_end: GridLine,
+    pub grid_column_start: GridLine,
+    pub grid_column_end: GridLine,
+    pub justify_items: ItemAlign,
+    pub justify_self: ItemAlign,
+
+    // ---- backgrounds, borders, effects
+    /// Background layers, first = topmost (CSS order). `background_color`
+    /// is painted beneath all layers.
+    pub background_layers: Vec<BackgroundLayer>,
+    /// Corner radii (top-left, top-right, bottom-right, bottom-left), each
+    /// (horizontal, vertical). `border_radius` keeps the largest for
+    /// compatibility with older code paths.
+    pub border_radii: [(Length, Length); 4],
+    pub box_shadow: Vec<Shadow>,
+    pub text_shadow: Vec<Shadow>,
+    pub transform: Vec<TransformOp>,
+    pub transform_origin: (Length, Length),
+    pub outline_width: f32,
+    pub outline_style: BorderStyle,
+    /// `None` = `invert`/currentcolor
+    pub outline_color: Option<Color>,
+    pub outline_offset: f32,
+    /// `filter: opacity()/blur()/grayscale()` — only opacity is applied (multiplied into `opacity`).
+    pub backdrop: bool,
+    pub clip_overflow_text: bool,
+
+    // ---- text
+    pub text_overflow: TextOverflow,
+    pub word_break: WordBreak,
+    pub overflow_wrap: OverflowWrap,
+    pub text_decoration_color: Option<Color>,
+    pub text_decoration_style: TextDecorationStyle,
+    pub text_decoration_thickness: Option<f32>,
+    pub direction: Direction,
+    pub tab_size: f32,
+    /// `-webkit-line-clamp`
+    pub line_clamp: Option<u32>,
+    /// Actual family names in order (e.g. `["Roboto", "Helvetica Neue"]`),
+    /// matched against `@font-face` and system fonts before the generic
+    /// `font_family` fallback.
+    pub font_family_list: Vec<String>,
+    pub font_variant_small_caps: bool,
+
+    // ---- replaced elements / sizing
+    pub object_fit: ObjectFit,
+    pub object_position: (Length, Length),
+    pub aspect_ratio: Option<f32>,
+
+    // ---- generated content & counters
+    pub content: Content,
+    pub counter_reset: Vec<(String, i32)>,
+    pub counter_increment: Vec<(String, i32)>,
+    pub quotes: Vec<(String, String)>,
+
+    // ---- interaction / misc
+    pub pointer_events: PointerEvents,
+    pub user_select: UserSelect,
+    pub resize: Resize,
+    pub appearance: Appearance,
+    pub transitions: Vec<Transition>,
+    pub animations: Vec<Animation>,
+    pub scroll_margin_top: f32,
+    /// `contain`/`isolation`/`will-change` imply a stacking context.
+    pub creates_stacking_context: bool,
 }
 
 impl ComputedStyle {
@@ -375,6 +842,67 @@ impl ComputedStyle {
             visibility: Visibility::Visible,
             z_index: None,
             cursor_pointer: false,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: Length::Auto,
+            flex_wrap: FlexWrap::NoWrap,
+            justify_content: ContentDistribution::FlexStart,
+            align_items: ItemAlign::Stretch,
+            align_self: ItemAlign::Auto,
+            align_content: ContentDistribution::Stretch,
+            order: 0,
+            row_gap: Length::ZERO,
+            column_gap: Length::ZERO,
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
+            grid_auto_columns: Vec::new(),
+            grid_auto_rows: Vec::new(),
+            grid_auto_flow: GridAutoFlow::Row,
+            grid_template_areas: Vec::new(),
+            grid_row_start: GridLine::Auto,
+            grid_row_end: GridLine::Auto,
+            grid_column_start: GridLine::Auto,
+            grid_column_end: GridLine::Auto,
+            justify_items: ItemAlign::Stretch,
+            justify_self: ItemAlign::Auto,
+            background_layers: Vec::new(),
+            border_radii: [(Length::ZERO, Length::ZERO); 4],
+            box_shadow: Vec::new(),
+            text_shadow: Vec::new(),
+            transform: Vec::new(),
+            transform_origin: (Length::Percent(50.0), Length::Percent(50.0)),
+            outline_width: 0.0,
+            outline_style: BorderStyle::None,
+            outline_color: None,
+            outline_offset: 0.0,
+            backdrop: false,
+            clip_overflow_text: false,
+            text_overflow: TextOverflow::Clip,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
+            text_decoration_color: None,
+            text_decoration_style: TextDecorationStyle::Solid,
+            text_decoration_thickness: None,
+            direction: Direction::Ltr,
+            tab_size: 8.0,
+            line_clamp: None,
+            font_family_list: Vec::new(),
+            font_variant_small_caps: false,
+            object_fit: ObjectFit::Fill,
+            object_position: (Length::Percent(50.0), Length::Percent(50.0)),
+            aspect_ratio: None,
+            content: Content::Normal,
+            counter_reset: Vec::new(),
+            counter_increment: Vec::new(),
+            quotes: Vec::new(),
+            pointer_events: PointerEvents::Auto,
+            user_select: UserSelect::Auto,
+            resize: Resize::None,
+            appearance: Appearance::Auto,
+            transitions: Vec::new(),
+            animations: Vec::new(),
+            scroll_margin_top: 0.0,
+            creates_stacking_context: false,
         }
     }
 
@@ -402,8 +930,55 @@ impl ComputedStyle {
             list_style_position: parent.list_style_position,
             visibility: parent.visibility,
             cursor_pointer: parent.cursor_pointer,
+            text_shadow: parent.text_shadow.clone(),
+            word_break: parent.word_break,
+            overflow_wrap: parent.overflow_wrap,
+            direction: parent.direction,
+            tab_size: parent.tab_size,
+            font_family_list: parent.font_family_list.clone(),
+            font_variant_small_caps: parent.font_variant_small_caps,
+            quotes: parent.quotes.clone(),
+            pointer_events: parent.pointer_events,
+            user_select: parent.user_select,
             ..ComputedStyle::initial()
         }
+    }
+
+    /// Resolved corner radii in px: [tl, tr, br, bl] × (h, v) for a box of
+    /// the given size, scaled down per CSS when they would overlap.
+    pub fn resolved_radii(&self, width: f32, height: f32) -> [(f32, f32); 4] {
+        let mut r = [(0.0f32, 0.0f32); 4];
+        for i in 0..4 {
+            let (h, v) = self.border_radii[i];
+            r[i] = (h.resolve_or_zero(width).max(0.0), v.resolve_or_zero(height).max(0.0));
+        }
+        let mut f: f32 = 1.0;
+        if width > 0.0 {
+            f = f.min(width / (r[0].0 + r[1].0).max(f32::EPSILON)).min(width / (r[3].0 + r[2].0).max(f32::EPSILON));
+        }
+        if height > 0.0 {
+            f = f.min(height / (r[0].1 + r[3].1).max(f32::EPSILON)).min(height / (r[1].1 + r[2].1).max(f32::EPSILON));
+        }
+        if f < 1.0 {
+            for c in &mut r {
+                c.0 *= f;
+                c.1 *= f;
+            }
+        }
+        r
+    }
+
+    pub fn has_transform(&self) -> bool {
+        !self.transform.is_empty()
+    }
+
+    /// Does this element establish a stacking context?
+    pub fn is_stacking_context(&self) -> bool {
+        self.opacity < 1.0
+            || self.has_transform()
+            || self.creates_stacking_context
+            || (matches!(self.position, Position::Absolute | Position::Relative | Position::Sticky) && self.z_index.is_some())
+            || self.position == Position::Fixed
     }
 
     /// Line height in px: explicit value or `normal` ≈ 1.2 × font-size.

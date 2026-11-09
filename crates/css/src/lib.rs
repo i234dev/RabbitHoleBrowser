@@ -4,7 +4,7 @@
 pub mod selector;
 pub mod tokenizer;
 
-pub use selector::{matches, Selector, Specificity};
+pub use selector::{matches, PseudoElement, Selector, Specificity};
 pub use tokenizer::{Token, Tokenizer};
 
 /// A parsed declaration. `value` is the raw component-value token list with
@@ -40,6 +40,20 @@ pub enum Rule {
         matches: bool,
         rules: Vec<Rule>,
     },
+    /// `@font-face { ... }` descriptors (font-family, src, font-weight, ...).
+    FontFace(Vec<Declaration>),
+    /// `@keyframes name { from {..} 50% {..} to {..} }`
+    Keyframes {
+        name: String,
+        frames: Vec<Keyframe>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct Keyframe {
+    /// Offsets in 0.0..=1.0 (`from` = 0, `to` = 1, percentages / 100).
+    pub offsets: Vec<f32>,
+    pub declarations: Vec<Declaration>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -147,11 +161,40 @@ impl Stylesheet {
                             walk(rules, env, out);
                         }
                     }
-                    Rule::Import { .. } => {}
+                    Rule::Import { .. } | Rule::FontFace(_) | Rule::Keyframes { .. } => {}
                 }
             }
         }
         walk(&self.rules, env, out);
+    }
+
+    /// All `@font-face` rules (inside active media blocks too).
+    pub fn font_faces<'a>(&'a self, env: &MediaEnv, out: &mut Vec<&'a [Declaration]>) {
+        fn walk<'a>(rules: &'a [Rule], env: &MediaEnv, out: &mut Vec<&'a [Declaration]>) {
+            for r in rules {
+                match r {
+                    Rule::FontFace(d) => out.push(d),
+                    Rule::Media { query, rules } if query.evaluate(env) => walk(rules, env, out),
+                    Rule::Supports { matches: true, rules } => walk(rules, env, out),
+                    _ => {}
+                }
+            }
+        }
+        walk(&self.rules, env, out);
+    }
+
+    /// All `@keyframes` rules as (name, frames).
+    pub fn keyframes<'a>(&'a self, out: &mut Vec<(&'a str, &'a [Keyframe])>) {
+        fn walk<'a>(rules: &'a [Rule], out: &mut Vec<(&'a str, &'a [Keyframe])>) {
+            for r in rules {
+                match r {
+                    Rule::Keyframes { name, frames } => out.push((name, frames)),
+                    Rule::Media { rules, .. } | Rule::Supports { rules, .. } => walk(rules, out),
+                    _ => {}
+                }
+            }
+        }
+        walk(&self.rules, out);
     }
 
     pub fn imports(&self) -> Vec<(String, MediaQuery)> {
@@ -292,7 +335,25 @@ impl<'a> Parser<'a> {
                                     let mut sub = Parser { toks: inner, pos: 0 };
                                     rules.extend(sub.parse_rules(false));
                                 }
-                                _ => {} // font-face, keyframes, page, ...
+                                "font-face" => {
+                                    let mut dp = Parser { toks: inner, pos: 0 };
+                                    rules.push(Rule::FontFace(dp.parse_declarations()));
+                                }
+                                "keyframes" | "-webkit-keyframes" => {
+                                    let kname = prelude
+                                        .iter()
+                                        .find_map(|t| match t {
+                                            Token::Ident(s) | Token::String(s) => Some(s.clone()),
+                                            _ => None,
+                                        })
+                                        .unwrap_or_default();
+                                    let mut kp = Parser { toks: inner, pos: 0 };
+                                    rules.push(Rule::Keyframes {
+                                        name: kname,
+                                        frames: kp.parse_keyframes(),
+                                    });
+                                }
+                                _ => {} // page, counter-style, property, ...
                             }
                         }
                         _ => {
@@ -330,6 +391,37 @@ impl<'a> Parser<'a> {
             }
         }
         rules
+    }
+
+    /// Parse the body of `@keyframes`: `selector-list { declarations }` blocks.
+    fn parse_keyframes(&mut self) -> Vec<Keyframe> {
+        let mut frames = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.peek().is_none() {
+                break;
+            }
+            let prelude = self.consume_until(false, true);
+            if self.peek() != Some(&Token::OpenBrace) {
+                break;
+            }
+            let inner = self.consume_block();
+            let mut offsets = Vec::new();
+            for t in prelude {
+                match t {
+                    Token::Ident(i) if i.eq_ignore_ascii_case("from") => offsets.push(0.0),
+                    Token::Ident(i) if i.eq_ignore_ascii_case("to") => offsets.push(1.0),
+                    Token::Percentage(p) => offsets.push((p / 100.0).clamp(0.0, 1.0)),
+                    _ => {}
+                }
+            }
+            let mut dp = Parser { toks: inner, pos: 0 };
+            let declarations = dp.parse_declarations();
+            if !offsets.is_empty() {
+                frames.push(Keyframe { offsets, declarations });
+            }
+        }
+        frames
     }
 
     fn parse_declarations(&mut self) -> Vec<Declaration> {

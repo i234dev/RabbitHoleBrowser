@@ -41,8 +41,27 @@ pub enum Pseudo {
     Not(Vec<Selector>),
     Is(Vec<Selector>),
     Where(Vec<Selector>),
-    /// Something we never match (:hover, :focus, :visited, ::before, ...)
+    NthLastOfType(i32, i32),
+    /// `:has(> a, b)` relative selectors.
+    Has(Vec<(Combinator, Selector)>),
+    Lang(String),
+    Enabled,
+    Disabled,
+    Checked,
+    /// Dynamic states; matched against `MatchState` (never when unset).
+    Hover,
+    Active,
+    Focus,
+    Visited,
+    Target,
+    /// Something we never match (unknown pseudo-classes/elements).
     Never,
+}
+
+/// Result of parsing one `:`/`::` suffix.
+enum PseudoParse {
+    Class(Pseudo),
+    Element(PseudoElement),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -52,6 +71,9 @@ pub struct Compound {
     pub classes: Vec<String>,
     pub attrs: Vec<AttrSelector>,
     pub pseudos: Vec<Pseudo>,
+    /// Set while parsing when a pseudo-element follows this compound; moved
+    /// to `Selector::pseudo_element` (only valid on the last compound).
+    pub pseudo_element: Option<PseudoElement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,12 +84,29 @@ pub enum Combinator {
     SubsequentSibling,
 }
 
+/// Pseudo-elements a selector can target. `matches()` only checks the
+/// element part; the cascade applies rules with a pseudo-element to that
+/// pseudo-element's style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PseudoElement {
+    Before,
+    After,
+    Marker,
+    FirstLine,
+    FirstLetter,
+    Placeholder,
+    Selection,
+    Backdrop,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selector {
     /// Left-to-right: compounds[0] is leftmost. combinators[i] links
     /// compounds[i] and compounds[i+1].
     pub compounds: Vec<Compound>,
     pub combinators: Vec<Combinator>,
+    /// `::before`, `::after`, ... attached to the rightmost compound.
+    pub pseudo_element: Option<PseudoElement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -78,6 +117,9 @@ impl Selector {
         let mut s = Specificity(0, 0, 0);
         for c in &self.compounds {
             add_compound_specificity(c, &mut s);
+        }
+        if self.pseudo_element.is_some() {
+            s.2 += 1;
         }
         s
     }
@@ -95,6 +137,13 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
     }
     for p in &c.pseudos {
         match p {
+            Pseudo::Has(list) => {
+                if let Some(m) = list.iter().map(|(_, x)| x.specificity()).max() {
+                    s.0 += m.0;
+                    s.1 += m.1;
+                    s.2 += m.2;
+                }
+            }
             Pseudo::Not(list) | Pseudo::Is(list) => {
                 if let Some(m) = list.iter().map(|x| x.specificity()).max() {
                     s.0 += m.0;
@@ -186,9 +235,18 @@ impl<'a> SelectorParser<'a> {
             compounds.push(c);
             combinators.push(comb);
         }
+        // A pseudo-element is only allowed on the rightmost compound.
+        let n = compounds.len();
+        for (i, c) in compounds.iter().enumerate() {
+            if c.pseudo_element.is_some() && i != n - 1 {
+                return None;
+            }
+        }
+        let pseudo_element = compounds.last_mut().and_then(|c| c.pseudo_element.take());
         Some(Selector {
             compounds,
             combinators,
+            pseudo_element,
         })
     }
 
@@ -242,8 +300,15 @@ impl<'a> SelectorParser<'a> {
                         self.pos += 1;
                         pseudo_element = true;
                     }
-                    let p = self.parse_pseudo(pseudo_element)?;
-                    c.pseudos.push(p);
+                    match self.parse_pseudo(pseudo_element)? {
+                        PseudoParse::Class(p) => c.pseudos.push(p),
+                        PseudoParse::Element(e) => {
+                            if c.pseudo_element.is_some() {
+                                return None;
+                            }
+                            c.pseudo_element = Some(e);
+                        }
+                    }
                 }
                 _ => break,
             }
@@ -316,13 +381,30 @@ impl<'a> SelectorParser<'a> {
         })
     }
 
-    fn parse_pseudo(&mut self, pseudo_element: bool) -> Option<Pseudo> {
+    fn parse_pseudo(&mut self, pseudo_element: bool) -> Option<PseudoParse> {
         match self.bump().cloned() {
             Some(Token::Ident(name)) => {
-                if pseudo_element {
-                    return Some(Pseudo::Never);
+                let lname = name.to_ascii_lowercase();
+                let element = match lname.as_str() {
+                    "before" => Some(PseudoElement::Before),
+                    "after" => Some(PseudoElement::After),
+                    "marker" => Some(PseudoElement::Marker),
+                    "first-line" => Some(PseudoElement::FirstLine),
+                    "first-letter" => Some(PseudoElement::FirstLetter),
+                    "placeholder" | "-webkit-input-placeholder" | "-moz-placeholder" => Some(PseudoElement::Placeholder),
+                    "selection" | "-moz-selection" => Some(PseudoElement::Selection),
+                    "backdrop" => Some(PseudoElement::Backdrop),
+                    _ => None,
+                };
+                if let Some(e) = element {
+                    // `:before`/`:after` (single colon) are accepted for compatibility.
+                    return Some(PseudoParse::Element(e));
                 }
-                Some(match name.to_ascii_lowercase().as_str() {
+                if pseudo_element {
+                    // Unknown pseudo-element (::-webkit-scrollbar, ...) never matches.
+                    return Some(PseudoParse::Class(Pseudo::Never));
+                }
+                Some(PseudoParse::Class(match lname.as_str() {
                     "root" => Pseudo::Root,
                     "first-child" => Pseudo::FirstChild,
                     "last-child" => Pseudo::LastChild,
@@ -333,9 +415,16 @@ impl<'a> SelectorParser<'a> {
                     "empty" => Pseudo::Empty,
                     "link" => Pseudo::Link,
                     "any-link" => Pseudo::AnyLink,
-                    "before" | "after" | "first-line" | "first-letter" => Pseudo::Never,
+                    "enabled" => Pseudo::Enabled,
+                    "disabled" => Pseudo::Disabled,
+                    "checked" => Pseudo::Checked,
+                    "hover" => Pseudo::Hover,
+                    "active" => Pseudo::Active,
+                    "focus" | "focus-visible" | "focus-within" => Pseudo::Focus,
+                    "visited" => Pseudo::Visited,
+                    "target" => Pseudo::Target,
                     _ => Pseudo::Never,
-                })
+                }))
             }
             Some(Token::Function(name)) => {
                 let lname = name.to_ascii_lowercase();
@@ -360,9 +449,9 @@ impl<'a> SelectorParser<'a> {
                     self.pos += 1;
                 }
                 if pseudo_element {
-                    return Some(Pseudo::Never);
+                    return Some(PseudoParse::Class(Pseudo::Never));
                 }
-                Some(match lname.as_str() {
+                Some(PseudoParse::Class(match lname.as_str() {
                     "not" | "is" | "where" | "matches" | "-webkit-any" | "-moz-any" => {
                         let mut sub = SelectorParser::new(inner);
                         // Forgiving selector list: drop invalid parts.
@@ -373,19 +462,79 @@ impl<'a> SelectorParser<'a> {
                             _ => Pseudo::Is(list),
                         }
                     }
-                    "nth-child" | "nth-last-child" | "nth-of-type" => {
+                    "nth-child" | "nth-last-child" | "nth-of-type" | "nth-last-of-type" => {
                         let (a, b) = parse_nth(inner)?;
                         match lname.as_str() {
                             "nth-child" => Pseudo::NthChild(a, b),
                             "nth-last-child" => Pseudo::NthLastChild(a, b),
-                            _ => Pseudo::NthOfType(a, b),
+                            "nth-of-type" => Pseudo::NthOfType(a, b),
+                            _ => Pseudo::NthLastOfType(a, b),
                         }
                     }
+                    "has" => {
+                        let mut sub = SelectorParser::new(inner);
+                        Pseudo::Has(sub.parse_relative_list())
+                    }
+                    "lang" => Pseudo::Lang(
+                        inner
+                            .iter()
+                            .find_map(|t| match t {
+                                Token::Ident(s) | Token::String(s) => Some(s.to_ascii_lowercase()),
+                                _ => None,
+                            })
+                            .unwrap_or_default(),
+                    ),
+                    "dir" => Pseudo::Never,
                     _ => Pseudo::Never,
-                })
+                }))
             }
             _ => None,
         }
+    }
+
+    /// `:has()` argument: a list of relative selectors (`> a`, `+ b`, `c`).
+    fn parse_relative_list(&mut self) -> Vec<(Combinator, Selector)> {
+        let mut list = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.peek().is_none() {
+                break;
+            }
+            let comb = match self.peek() {
+                Some(Token::Delim('>')) => {
+                    self.pos += 1;
+                    Combinator::Child
+                }
+                Some(Token::Delim('+')) => {
+                    self.pos += 1;
+                    Combinator::NextSibling
+                }
+                Some(Token::Delim('~')) => {
+                    self.pos += 1;
+                    Combinator::SubsequentSibling
+                }
+                _ => Combinator::Descendant,
+            };
+            self.skip_ws();
+            match self.parse_complex() {
+                Some(s) => list.push((comb, s)),
+                None => {
+                    while let Some(t) = self.peek() {
+                        if *t == Token::Comma {
+                            break;
+                        }
+                        self.pos += 1;
+                    }
+                }
+            }
+            self.skip_ws();
+            if self.peek() == Some(&Token::Comma) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        list
     }
 
     fn parse_list_forgiving(&mut self) -> Vec<Selector> {
@@ -616,6 +765,28 @@ pub fn match_compound(c: &Compound, doc: &Document, node: NodeId) -> bool {
             Pseudo::NthOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, false)),
             Pseudo::Not(list) => !list.iter().any(|s| matches(s, doc, node)),
             Pseudo::Is(list) | Pseudo::Where(list) => list.iter().any(|s| matches(s, doc, node)),
+            Pseudo::NthLastOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, true)),
+            Pseudo::Has(list) => list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node)),
+            Pseudo::Lang(lang) => {
+                let mut cur = Some(node);
+                let mut found = false;
+                while let Some(n) = cur {
+                    if let Some(l) = doc.attr(n, "lang") {
+                        let l = l.to_ascii_lowercase();
+                        found = l == *lang || l.starts_with(&format!("{lang}-"));
+                        break;
+                    }
+                    cur = doc.parent(n);
+                }
+                found
+            }
+            Pseudo::Enabled => {
+                matches!(el.tag.as_str(), "input" | "button" | "select" | "textarea" | "option" | "fieldset")
+                    && el.attr("disabled").is_none()
+            }
+            Pseudo::Disabled => el.attr("disabled").is_some(),
+            Pseudo::Checked => el.attr("checked").is_some() || (el.tag == "option" && el.attr("selected").is_some()),
+            Pseudo::Hover | Pseudo::Active | Pseudo::Focus | Pseudo::Visited | Pseudo::Target => false,
             Pseudo::Never => false,
         };
         if !ok {
@@ -623,6 +794,25 @@ pub fn match_compound(c: &Compound, doc: &Document, node: NodeId) -> bool {
         }
     }
     true
+}
+
+/// `:has()` support: does any element related to `node` by `comb` match `sel`?
+fn has_matches(comb: Combinator, sel: &Selector, doc: &Document, node: NodeId) -> bool {
+    match comb {
+        Combinator::Child => doc.child_elements(node).any(|c| matches(sel, doc, c)),
+        Combinator::Descendant => doc.descendants(node).skip(1).any(|d| matches(sel, doc, d)),
+        Combinator::NextSibling => next_element_sibling(doc, node).map(|s| matches(sel, doc, s)).unwrap_or(false),
+        Combinator::SubsequentSibling => {
+            let mut cur = next_element_sibling(doc, node);
+            while let Some(s) = cur {
+                if matches(sel, doc, s) {
+                    return true;
+                }
+                cur = next_element_sibling(doc, s);
+            }
+            false
+        }
+    }
 }
 
 #[cfg(test)]

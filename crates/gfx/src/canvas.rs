@@ -894,3 +894,111 @@ mod tests {
         assert_eq!(px(&dst, 1, 1), Color::WHITE);
     }
 }
+
+// ------------------------------------------------------------------ v0.2 API
+// Gradients, shadows, per-corner radii, transforms and paths. Implemented
+// in `canvas_ext.rs`.
+
+/// Corner radii as [top-left, top-right, bottom-right, bottom-left], each
+/// (horizontal, vertical) in px.
+pub type Radii = [(f32, f32); 4];
+
+/// One gradient color stop at `offset` ∈ 0..=1 along the gradient line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorStop {
+    pub offset: f32,
+    pub color: Color,
+}
+
+/// Affine transform [a, b, c, d, e, f]: x' = a·x + c·y + e, y' = b·x + d·y + f.
+pub type Matrix = [f32; 6];
+
+pub const IDENTITY: Matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// A 2-D point.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Path segments for `fill_path` / `stroke_path` (used by borders with
+/// radii, SVG and shapes). Curves are flattened by the rasterizer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathSeg {
+    MoveTo(Point),
+    LineTo(Point),
+    QuadTo(Point, Point),
+    CubicTo(Point, Point, Point),
+    /// Elliptical arc (SVG semantics): radii, x-axis rotation (rad),
+    /// large-arc, sweep, end point.
+    ArcTo {
+        rx: f32,
+        ry: f32,
+        rotation: f32,
+        large_arc: bool,
+        sweep: bool,
+        to: Point,
+    },
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillRule {
+    NonZero,
+    EvenOdd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineJoin {
+    Miter,
+    Round,
+    Bevel,
+}
+
+/// Stroke parameters for `stroke_path`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrokeStyle {
+    pub width: f32,
+    pub cap: LineCap,
+    pub join: LineJoin,
+    pub miter_limit: f32,
+    /// Dash lengths (on, off, ...); empty = solid.
+    pub dashes: Vec<f32>,
+    pub dash_offset: f32,
+}
+
+impl Default for StrokeStyle {
+    fn default() -> Self {
+        StrokeStyle { width: 1.0, cap: LineCap::Butt, join: LineJoin::Miter, miter_limit: 4.0, dashes: Vec::new(), dash_offset: 0.0 }
+    }
+}
+
+/// What to paint a shape with.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Paint {
+    Solid(Color),
+    /// Linear gradient from `start` to `end` (canvas coordinates after the
+    /// current transform), with `repeat` for repeating gradients.
+    Linear {
+        start: Point,
+        end: Point,
+        stops: Vec<ColorStop>,
+        repeat: bool,
+    },
+    /// Elliptical radial gradient centred at `center` with radii (rx, ry).
+    Radial {
+        center: Point,
+        rx: f32,
+        ry: f32,
+        stops: Vec<ColorStop>,
+        repeat: bool,
+    },
+}
