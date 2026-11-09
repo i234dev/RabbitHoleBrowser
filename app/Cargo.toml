@@ -20,3 +20,5 @@ softbuffer = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+arboard = { version = "3", default-features = false }
+dirs = "6"

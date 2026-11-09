@@ -1,8 +1,13 @@
-//! Headless command line subcommands: screenshot, text, links, dump.
+//! Headless command line subcommands: screenshot, text, links, dump, cookies.
 
-use rabbithole_engine::{Engine, Page, Viewport};
+use std::sync::{Arc, Mutex};
 
-/// Hard cap on the height of a full-page capture.
+use rabbithole_engine::net::{CookieJar, Request, Url};
+use rabbithole_engine::{Engine, Loaded, Page, Viewport};
+
+use crate::profile::Profile;
+
+/// Hard cap on the height of a full-page capture (CSS px).
 pub const MAX_FULL_HEIGHT: u32 = 20_000;
 
 /// Options for a headless capture.
@@ -10,6 +15,7 @@ pub const MAX_FULL_HEIGHT: u32 = 20_000;
 pub struct CaptureOptions {
     pub width: u32,
     pub height: u32,
+    pub scale: f32,
     pub full_page: bool,
     pub scroll_y: f32,
     pub images: bool,
@@ -17,13 +23,7 @@ pub struct CaptureOptions {
 
 impl Default for CaptureOptions {
     fn default() -> Self {
-        CaptureOptions {
-            width: 1280,
-            height: 800,
-            full_page: false,
-            scroll_y: 0.0,
-            images: true,
-        }
+        CaptureOptions { width: 1280, height: 800, scale: 1.0, full_page: false, scroll_y: 0.0, images: true }
     }
 }
 
@@ -36,63 +36,80 @@ pub struct Capture {
     pub url: String,
 }
 
+/// An engine wired to the persistent cookie jar of the profile.
+pub struct Session {
+    pub engine: Engine,
+    pub profile: Profile,
+    pub cookies: Arc<Mutex<CookieJar>>,
+}
+
+impl Session {
+    /// `system_fonts`: scan platform fonts (slower start; needed for
+    /// faithful screenshots).
+    pub fn new(system_fonts: bool) -> Session {
+        let profile = Profile::locate();
+        let cookies = profile.load_cookies();
+        let mut engine = if system_fonts { Engine::new() } else { Engine::new_bundled_fonts_only() };
+        engine.loader.fetcher.cookies = Some(cookies.clone());
+        Session { engine, profile, cookies }
+    }
+
+    pub fn save(&self) {
+        self.profile.save_cookies(&self.cookies);
+    }
+
+    /// Load a page with an arbitrary request; downloads are an error here.
+    pub fn load_request(&mut self, req: &Request, viewport: Viewport) -> Result<Page, String> {
+        let loaded = self.engine.loader.load_request(req, viewport).map_err(|e| e.to_string())?;
+        let page = match loaded {
+            Loaded::Page(p) => self.engine.build_page(p, viewport),
+            Loaded::Download(s) => return Err(format!("{} is a download ({}), not a page", s.url, s.content_type)),
+        };
+        self.save();
+        Ok(page)
+    }
+}
+
 /// Load `url` and render it into an RGBA buffer according to `opts`.
-pub fn capture(engine: &mut Engine, url: &str, opts: &CaptureOptions) -> Result<Capture, String> {
-    engine.load_images = opts.images;
+pub fn capture(session: &mut Session, url: &str, opts: &CaptureOptions) -> Result<Capture, String> {
+    session.engine.loader.load_images = opts.images;
+    let scale = if opts.scale.is_finite() && opts.scale > 0.0 { opts.scale } else { 1.0 };
     let width = opts.width.max(1);
     let viewport_h = opts.height.max(1);
-    let viewport = Viewport {
-        width: width as f32,
-        height: viewport_h as f32,
-    };
-    let page = engine.load(url, viewport).map_err(|e| e.to_string())?;
-    let height = if opts.full_page {
-        (page.content_height().ceil() as u32).clamp(1, MAX_FULL_HEIGHT)
-    } else {
-        viewport_h
-    };
-    let mut canvas = rabbithole_engine::gfx::Canvas::new(width, height);
-    canvas.clear(rabbithole_engine::gfx::Color::WHITE);
-    let max_scroll = (page.content_height() - height as f32).max(0.0);
+    let viewport = Viewport { width: width as f32, height: viewport_h as f32 };
+    let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
+    let page = session.load_request(&Request::get(parsed), viewport)?;
+    let css_height = if opts.full_page { (page.content_height().ceil() as u32).clamp(1, MAX_FULL_HEIGHT) } else { viewport_h };
+    let px_w = ((width as f32) * scale).round().max(1.0) as u32;
+    let px_h = ((css_height as f32) * scale).round().max(1.0) as u32;
+    let mut canvas = rabbithole_engine::gfx::Canvas::new(px_w, px_h);
+    let max_scroll = (page.content_height() - css_height as f32).max(0.0);
     let scroll_y = if opts.full_page { 0.0 } else { opts.scroll_y.clamp(0.0, max_scroll) };
-    engine.render(&page, &mut canvas, 0.0, scroll_y);
-    Ok(Capture {
-        rgba: canvas.to_rgba8(),
-        width,
-        height,
-        title: page.title.clone(),
-        url: page.url.to_string(),
-    })
+    session.engine.render_scaled(&page, &mut canvas, 0.0, scroll_y, scale);
+    Ok(Capture { rgba: canvas.to_rgba8(), width: px_w, height: px_h, title: page.title.clone(), url: page.url.to_string() })
 }
 
 /// Encode a capture as PNG bytes.
 pub fn encode_png(cap: &Capture) -> Result<Vec<u8>, String> {
     let mut out = std::io::Cursor::new(Vec::new());
-    image::write_buffer_with_format(
-        &mut out,
-        &cap.rgba,
-        cap.width,
-        cap.height,
-        image::ExtendedColorType::Rgba8,
-        image::ImageFormat::Png,
-    )
-    .map_err(|e| format!("PNG encoding failed: {e}"))?;
+    image::write_buffer_with_format(&mut out, &cap.rgba, cap.width, cap.height, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG encoding failed: {e}"))?;
     Ok(out.into_inner())
 }
 
+pub const TEXT_VIEWPORT: Viewport = Viewport { width: 1280.0, height: 800.0 };
+
 /// Load a page for text-oriented commands (images disabled).
-fn load_text_page(engine: &mut Engine, url: &str) -> Result<Page, String> {
-    engine.load_images = false;
-    let viewport = Viewport {
-        width: 1280.0,
-        height: 800.0,
-    };
-    engine.load(url, viewport).map_err(|e| e.to_string())
+pub fn load_text_page(session: &mut Session, url: &str) -> Result<Page, String> {
+    session.engine.loader.load_images = false;
+    session.engine.loader.load_fonts = false;
+    let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
+    session.load_request(&Request::get(parsed), TEXT_VIEWPORT)
 }
 
 /// Minimal option parser: returns the positional arguments and a list of
 /// (flag, value) pairs. Flags listed in `takes_value` consume the next arg.
-fn parse_args<'a>(args: &'a [String], takes_value: &[&str]) -> Result<(Vec<&'a str>, Vec<(&'a str, &'a str)>), String> {
+pub fn parse_args<'a>(args: &'a [String], takes_value: &[&str]) -> Result<(Vec<&'a str>, Vec<(&'a str, &'a str)>), String> {
     let mut positional = Vec::new();
     let mut flags = Vec::new();
     let mut i = 0;
@@ -138,28 +155,25 @@ fn parse_num<T: std::str::FromStr>(flags: &[(&str, &str)], name: &str, default: 
 }
 
 fn url_arg<'a>(positional: &[&'a str], cmd: &str) -> Result<&'a str, String> {
-    positional
-        .first()
-        .copied()
-        .ok_or_else(|| format!("usage: rabbithole {cmd} <URL> [options]"))
+    positional.first().copied().ok_or_else(|| format!("usage: rabbithole {cmd} <URL> [options]"))
 }
 
-/// `rabbithole screenshot <URL> [-o out.png] [--width W] [--height H] [--full] [--scroll Y] [--no-images]`
+/// `rabbithole screenshot <URL> [-o out.png] [--width W] [--height H] [--scale S] [--full] [--scroll Y] [--no-images]`
 pub fn screenshot(args: &[String]) -> Result<(), String> {
-    let (positional, flags) = parse_args(args, &["output", "width", "height", "scroll"])?;
+    let (positional, flags) = parse_args(args, &["output", "width", "height", "scroll", "scale"])?;
     let url = url_arg(&positional, "screenshot")?;
     let opts = CaptureOptions {
         width: parse_num(&flags, "width", 1280u32)?,
         height: parse_num(&flags, "height", 800u32)?,
+        scale: parse_num(&flags, "scale", 1.0f32)?,
         full_page: has_flag(&flags, "full"),
         scroll_y: parse_num(&flags, "scroll", 0.0f32)?,
         images: !has_flag(&flags, "no-images"),
     };
     let output = flag(&flags, "output").unwrap_or("screenshot.png");
-    let mut engine = Engine::new();
-    let cap = capture(&mut engine, url, &opts)?;
-    image::save_buffer(output, &cap.rgba, cap.width, cap.height, image::ExtendedColorType::Rgba8)
-        .map_err(|e| format!("could not write {output}: {e}"))?;
+    let mut session = Session::new(true);
+    let cap = capture(&mut session, url, &opts)?;
+    image::save_buffer(output, &cap.rgba, cap.width, cap.height, image::ExtendedColorType::Rgba8).map_err(|e| format!("could not write {output}: {e}"))?;
     eprintln!("{} ({}x{}) -> {output}", cap.title, cap.width, cap.height);
     Ok(())
 }
@@ -168,8 +182,8 @@ pub fn screenshot(args: &[String]) -> Result<(), String> {
 pub fn text(args: &[String]) -> Result<(), String> {
     let (positional, _flags) = parse_args(args, &[])?;
     let url = url_arg(&positional, "text")?;
-    let mut engine = Engine::new();
-    let page = load_text_page(&mut engine, url)?;
+    let mut session = Session::new(false);
+    let page = load_text_page(&mut session, url)?;
     emit(&page.text());
     Ok(())
 }
@@ -178,8 +192,8 @@ pub fn text(args: &[String]) -> Result<(), String> {
 pub fn links(args: &[String]) -> Result<(), String> {
     let (positional, _flags) = parse_args(args, &[])?;
     let url = url_arg(&positional, "links")?;
-    let mut engine = Engine::new();
-    let page = load_text_page(&mut engine, url)?;
+    let mut session = Session::new(false);
+    let page = load_text_page(&mut session, url)?;
     for link in page.links() {
         let text = link.text.split_whitespace().collect::<Vec<_>>().join(" ");
         emit(&format!("{text}\t{}", link.href));
@@ -194,8 +208,8 @@ pub fn dump(args: &[String]) -> Result<(), String> {
     let want_dom = has_flag(&flags, "dom");
     let want_layout = has_flag(&flags, "layout");
     let (want_dom, want_layout) = if !want_dom && !want_layout { (true, true) } else { (want_dom, want_layout) };
-    let mut engine = Engine::new();
-    let page = load_text_page(&mut engine, url)?;
+    let mut session = Session::new(false);
+    let page = load_text_page(&mut session, url)?;
     if want_dom {
         emit(&format!("=== DOM: {} ===", page.url));
         emit(&page.dom_dump());
@@ -205,6 +219,44 @@ pub fn dump(args: &[String]) -> Result<(), String> {
         emit(&page.layout_dump());
     }
     Ok(())
+}
+
+/// `rabbithole cookies <URL>`: the stored cookies that would be sent.
+pub fn cookies(args: &[String]) -> Result<(), String> {
+    let (positional, _flags) = parse_args(args, &[])?;
+    let url = url_arg(&positional, "cookies")?;
+    let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
+    let profile = Profile::locate();
+    let jar = profile.load_cookies();
+    let guard = jar.lock().map_err(|_| "cookie jar poisoned".to_string())?;
+    let lines = cookie_lines(&guard, &parsed);
+    if lines.is_empty() {
+        emit("(no cookies)");
+    }
+    for l in lines {
+        emit(&l);
+    }
+    Ok(())
+}
+
+/// Cookies of a jar that apply to `url`, one `name=value  (domain path flags)` per line.
+pub fn cookie_lines(jar: &CookieJar, url: &Url) -> Vec<String> {
+    let host = url.host.to_ascii_lowercase();
+    jar.cookies()
+        .iter()
+        .filter(|c| !c.is_expired() && (host == c.domain || host.ends_with(&format!(".{}", c.domain))))
+        .map(|c| {
+            let mut flags = Vec::new();
+            if c.secure {
+                flags.push("Secure");
+            }
+            if c.http_only {
+                flags.push("HttpOnly");
+            }
+            let exp = c.expires.map(|e| format!("expires={e}")).unwrap_or_else(|| "session".into());
+            format!("{}={}\t{} {} {} {}", c.name, c.value, c.domain, c.path, exp, flags.join(","))
+        })
+        .collect()
 }
 
 /// Write a line to stdout; a closed pipe (`| head`) ends the process
@@ -228,12 +280,13 @@ mod tests {
 
     #[test]
     fn parses_flags_and_positionals() {
-        let args = s(&["https://x", "-o", "a.png", "--width", "640", "--full", "--scroll=10"]);
-        let (pos, flags) = parse_args(&args, &["output", "width", "height", "scroll"]).unwrap();
+        let args = s(&["https://x", "-o", "a.png", "--width", "640", "--full", "--scroll=10", "--scale", "2"]);
+        let (pos, flags) = parse_args(&args, &["output", "width", "height", "scroll", "scale"]).unwrap();
         assert_eq!(pos, vec!["https://x"]);
         assert_eq!(flag(&flags, "output"), Some("a.png"));
         assert_eq!(parse_num(&flags, "width", 0u32).unwrap(), 640);
         assert_eq!(parse_num(&flags, "scroll", 0.0f32).unwrap(), 10.0);
+        assert_eq!(parse_num(&flags, "scale", 1.0f32).unwrap(), 2.0);
         assert!(has_flag(&flags, "full"));
         assert!(!has_flag(&flags, "no-images"));
     }
@@ -245,5 +298,16 @@ mod tests {
         assert!(parse_num(&flags, "width", 1u32).is_err());
         assert!(parse_args(&s(&["--width"]), &["width"]).is_err());
         assert!(parse_args(&s(&["-x"]), &[]).is_err());
+    }
+
+    #[test]
+    fn cookie_listing() {
+        let url = Url::parse("https://www.example.com/a").unwrap();
+        let mut jar = CookieJar::new();
+        jar.store(rabbithole_engine::net::Cookie::parse("a=1; Domain=example.com; Path=/; Secure", &url).unwrap());
+        jar.store(rabbithole_engine::net::Cookie::parse("b=2", &Url::parse("https://other.org/").unwrap()).unwrap());
+        let lines = cookie_lines(&jar, &url);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("a=1\texample.com / session Secure"));
     }
 }

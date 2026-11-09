@@ -1604,6 +1604,7 @@ version = "0.1.0"
 name = "rabbithole-engine"
 version = "0.1.0"
 dependencies = [
+ "image",
  "rabbithole-css",
  "rabbithole-dom",
  "rabbithole-gfx",

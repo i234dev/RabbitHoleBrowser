@@ -215,8 +215,8 @@ pub enum Op {
     // --- generators / async
     /// value -> received
     Yield,
-    /// Delegate: iterator next -> result  (full `yield*` protocol)
-    YieldDelegate,
+    /// iterator next received -> iterator next result  (used by `yield*`)
+    IteratorNextWith,
     /// value -> awaited
     Await,
     /// Async generator yield (awaits value first)
@@ -270,6 +270,10 @@ pub struct FunctionCode {
     pub param_count: u32,
     /// Slots in the function's own scope object.
     pub scope_slots: u32,
+    /// Scope slot of each positional parameter, in order.
+    pub param_slots: Vec<u16>,
+    /// Slot receiving the rest parameter array, if any.
+    pub rest_slot: Option<u16>,
     /// Slot holding the `arguments` object, if used.
     pub arguments_slot: Option<u32>,
     /// Slot holding a named function expression's self binding.

@@ -148,10 +148,6 @@ impl<'a> Lexer<'a> {
         self.src[self.pos..].chars().next()
     }
 
-    fn peek_char_at(&self, off: usize) -> Option<char> {
-        self.src.get(self.pos + off..).and_then(|s| s.chars().next())
-    }
-
     fn peek_byte(&self) -> Option<u8> {
         self.bytes.get(self.pos).copied()
     }
@@ -794,7 +790,7 @@ cont' '\101'"#),
     fn comments_and_newlines() {
         let mut lx = Lexer::new("#!/usr/bin/env node\na // c\n/* x\ny */ b <!-- h\n--> z\nc", false);
         let a = lx.next_token().unwrap();
-        assert!(a.is_ident("a") && !a.newline_before);
+        assert!(a.is_ident("a") && a.pos.line == 2);
         let b = lx.next_token().unwrap();
         assert!(b.is_ident("b") && b.newline_before);
         assert_eq!(b.pos.line, 4);

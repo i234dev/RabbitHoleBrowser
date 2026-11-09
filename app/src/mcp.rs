@@ -1,21 +1,23 @@
 //! Model Context Protocol server: JSON-RPC 2.0 over stdio, one JSON object
 //! per line. Exposes the engine as tools (`browse`, `links`, `screenshot`,
-//! `fetch_html`, `dom`) so LLM agents can read the web through RabbitHole.
+//! `fetch_html`, `dom`, `cookies`) so LLM agents can read the web through
+//! RabbitHole.
 
 use std::io::{BufRead, Write};
 
-use rabbithole_engine::net::{decode_text, Fetcher, Url};
-use rabbithole_engine::{Engine, Viewport};
+use rabbithole_engine::net::{decode_text, Body, Request, Url};
+use rabbithole_engine::Viewport;
 use serde_json::{json, Value};
 
-use crate::cli::{capture, encode_png, CaptureOptions};
+use crate::cli::{capture, cookie_lines, encode_png, CaptureOptions, Session};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "rabbithole";
 
-/// Long-lived server state (the engine keeps fonts and an image cache).
+/// Long-lived server state (the engine keeps fonts and caches; the cookie
+/// jar is the persistent profile jar).
 pub struct ServerState {
-    engine: Engine,
+    session: Option<Session>,
     initialized: bool,
 }
 
@@ -27,10 +29,13 @@ impl Default for ServerState {
 
 impl ServerState {
     pub fn new() -> ServerState {
-        ServerState {
-            engine: Engine::new(),
-            initialized: false,
-        }
+        ServerState { session: None, initialized: false }
+    }
+
+    /// The engine is created lazily so protocol-only interactions (and
+    /// tests) do not pay for font loading.
+    fn session(&mut self) -> &mut Session {
+        self.session.get_or_insert_with(|| Session::new(true))
     }
 }
 
@@ -53,6 +58,9 @@ pub fn serve() -> Result<(), String> {
                 .map_err(|e| format!("stdout error: {e}"))?;
         }
     }
+    if let Some(s) = &state.session {
+        s.save();
+    }
     Ok(())
 }
 
@@ -68,14 +76,13 @@ pub fn handle_message(state: &mut ServerState, line: &str) -> Option<String> {
         Some(m) => m.to_string(),
         None => {
             if msg.get("result").is_some() || msg.get("error").is_some() {
-                return None; // a response to something we sent; we never send requests
+                return None;
             }
             return Some(error_response(id, -32600, "invalid request: missing method").to_string());
         }
     };
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     let is_notification = msg.get("id").is_none();
-
     let result = dispatch(state, &method, &params);
     if is_notification {
         return None;
@@ -97,32 +104,23 @@ fn dispatch(state: &mut ServerState, method: &str, params: &Value) -> Result<Val
     match method {
         "initialize" => {
             state.initialized = true;
-            let requested = params
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or(PROTOCOL_VERSION);
+            let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
             Ok(json!({
                 "protocolVersion": requested,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "RabbitHole renders web pages with its own engine (no JavaScript). Use `browse` to read a page as text, `links` to list its links, `screenshot` to see it rendered, `fetch_html` for raw source and `dom` for the parsed tree."
+                "instructions": "RabbitHole renders web pages with its own engine. Use `browse` to read a page as text (GET, or POST a form with `method`/`form`), `links` to list its links, `screenshot` to see it rendered, `fetch_html` for raw source, `dom` for the parsed tree and `cookies` to inspect stored cookies. Cookies persist between calls."
             }))
         }
         "notifications/initialized" | "notifications/cancelled" => Ok(Value::Null),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
         "tools/call" => {
-            let name = params
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or((-32602, "missing tool name".to_string()))?;
+            let name = params.get("name").and_then(Value::as_str).ok_or((-32602, "missing tool name".to_string()))?;
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             Ok(match call_tool(state, name, &args) {
                 Ok(content) => json!({ "content": content, "isError": false }),
-                Err(message) => json!({
-                    "content": [{ "type": "text", "text": message }],
-                    "isError": true
-                }),
+                Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
             })
         }
         "resources/list" => Ok(json!({ "resources": [] })),
@@ -137,13 +135,15 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "browse",
-            "description": "Load a web page with the RabbitHole engine and return its readable text (title, final URL, headings, paragraphs, lists and links). No JavaScript is executed.",
+            "description": "Load a web page with the RabbitHole engine and return its readable text (title, final URL, headings, paragraphs, lists and links). Optionally submit a form with method POST and `form` fields.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "url": url_prop,
                     "max_chars": { "type": "integer", "description": "Truncate the text to this many characters (default 20000)", "default": 20000 },
-                    "images": { "type": "boolean", "description": "Download images while loading (default false)", "default": false }
+                    "images": { "type": "boolean", "description": "Download images while loading (default false)", "default": false },
+                    "method": { "type": "string", "description": "HTTP method: GET (default) or POST", "enum": ["GET", "POST"] },
+                    "form": { "type": "object", "description": "Form fields sent as application/x-www-form-urlencoded (POST) or as the query string (GET)", "additionalProperties": { "type": "string" } }
                 },
                 "required": ["url"]
             }
@@ -167,8 +167,9 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "url": url_prop,
-                    "width": { "type": "integer", "description": "Viewport width in px (default 1280)", "default": 1280 },
-                    "height": { "type": "integer", "description": "Viewport height in px (default 800)", "default": 800 },
+                    "width": { "type": "integer", "description": "Viewport width in CSS px (default 1280)", "default": 1280 },
+                    "height": { "type": "integer", "description": "Viewport height in CSS px (default 800)", "default": 800 },
+                    "scale": { "type": "number", "description": "Device scale factor (default 1)", "default": 1 },
                     "full_page": { "type": "boolean", "description": "Capture the entire page height (max 20000px)", "default": false },
                     "scroll_y": { "type": "number", "description": "Vertical scroll offset before capturing", "default": 0 }
                 },
@@ -199,20 +200,24 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["url"]
             }
         }),
+        json!({
+            "name": "cookies",
+            "description": "List the stored cookies that apply to a URL (name=value, domain, path, expiry, flags).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "url": url_prop },
+                "required": ["url"]
+            }
+        }),
     ]
 }
 
 fn arg_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
-    args.get(name)
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| format!("missing required argument `{name}`"))
+    args.get(name).and_then(Value::as_str).filter(|s| !s.trim().is_empty()).ok_or_else(|| format!("missing required argument `{name}`"))
 }
 
 fn arg_u64(args: &Value, name: &str, default: u64) -> u64 {
-    args.get(name)
-        .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f.max(0.0) as u64)))
-        .unwrap_or(default)
+    args.get(name).and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f.max(0.0) as u64))).unwrap_or(default)
 }
 
 fn arg_f64(args: &Value, name: &str, default: f64) -> f64 {
@@ -237,26 +242,57 @@ fn text_content(text: String) -> Vec<Value> {
     vec![json!({ "type": "text", "text": text })]
 }
 
-const DEFAULT_VIEWPORT: Viewport = Viewport {
-    width: 1280.0,
-    height: 800.0,
-};
+const DEFAULT_VIEWPORT: Viewport = Viewport { width: 1280.0, height: 800.0 };
+
+/// Build the request for `browse`: GET (optionally with form fields in the
+/// query) or POST with a urlencoded body.
+pub fn browse_request(url: &str, args: &Value) -> Result<Request, String> {
+    let mut parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
+    let method = args.get("method").and_then(Value::as_str).unwrap_or("GET").to_ascii_uppercase();
+    let fields: Vec<(String, String)> = args
+        .get("form")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), match v { Value::String(s) => s.clone(), other => other.to_string() }))
+                .collect()
+        })
+        .unwrap_or_default();
+    match method.as_str() {
+        "POST" => Ok(Request::post(parsed, Body::form(&fields))),
+        "GET" => {
+            if !fields.is_empty() {
+                let q = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", rabbithole_engine::net::form_encode(k), rabbithole_engine::net::form_encode(v)))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                parsed.query = Some(q);
+            }
+            Ok(Request::get(parsed))
+        }
+        other => Err(format!("unsupported method: {other}")),
+    }
+}
 
 fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Value>, String> {
     match name {
         "browse" => {
             let url = arg_str(args, "url")?;
             let max_chars = arg_u64(args, "max_chars", 20_000) as usize;
-            state.engine.load_images = arg_bool(args, "images", false);
-            let page = state.engine.load(url, DEFAULT_VIEWPORT).map_err(|e| e.to_string())?;
+            let req = browse_request(url, args)?;
+            let session = state.session();
+            session.engine.loader.load_images = arg_bool(args, "images", false);
+            session.engine.loader.load_fonts = false;
+            let page = session.load_request(&req, DEFAULT_VIEWPORT)?;
             let body = truncate(&page.text(), max_chars.max(1));
             Ok(text_content(format!("# {}\nURL: {}\n\n{}", page.title.trim(), page.url, body)))
         }
         "links" => {
             let url = arg_str(args, "url")?;
             let filter = args.get("filter").and_then(Value::as_str).map(|f| f.to_lowercase());
-            state.engine.load_images = false;
-            let page = state.engine.load(url, DEFAULT_VIEWPORT).map_err(|e| e.to_string())?;
+            let session = state.session();
+            let page = crate::cli::load_text_page(session, url)?;
             let mut lines = Vec::new();
             for link in page.links() {
                 let text = link.text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -282,11 +318,14 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
             let opts = CaptureOptions {
                 width: arg_u64(args, "width", 1280).clamp(1, 8192) as u32,
                 height: arg_u64(args, "height", 800).clamp(1, 8192) as u32,
+                scale: arg_f64(args, "scale", 1.0).clamp(0.25, 4.0) as f32,
                 full_page: arg_bool(args, "full_page", false),
                 scroll_y: arg_f64(args, "scroll_y", 0.0) as f32,
                 images: true,
             };
-            let cap = capture(&mut state.engine, url, &opts)?;
+            let session = state.session();
+            session.engine.loader.load_fonts = true;
+            let cap = capture(session, url, &opts)?;
             let png = encode_png(&cap)?;
             Ok(vec![
                 json!({ "type": "image", "data": base64_encode(&png), "mimeType": "image/png" }),
@@ -297,8 +336,9 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
             let url = arg_str(args, "url")?;
             let max_chars = arg_u64(args, "max_chars", 50_000) as usize;
             let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
-            let fetcher = Fetcher::default();
-            let response = fetcher.fetch(&parsed).map_err(|e| e.to_string())?;
+            let session = state.session();
+            let response = session.engine.loader.fetcher.request(&Request::get(parsed)).map_err(|e| e.to_string())?;
+            session.save();
             let text = decode_text(&response.body, response.charset.as_deref());
             Ok(text_content(format!(
                 "URL: {}\nStatus: {}\nContent-Type: {}\n\n{}",
@@ -311,9 +351,17 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
         "dom" => {
             let url = arg_str(args, "url")?;
             let max_chars = arg_u64(args, "max_chars", 50_000) as usize;
-            state.engine.load_images = false;
-            let page = state.engine.load(url, DEFAULT_VIEWPORT).map_err(|e| e.to_string())?;
+            let session = state.session();
+            let page = crate::cli::load_text_page(session, url)?;
             Ok(text_content(truncate(&page.dom_dump(), max_chars.max(1))))
+        }
+        "cookies" => {
+            let url = arg_str(args, "url")?;
+            let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
+            let session = state.session();
+            let jar = session.cookies.lock().map_err(|_| "cookie jar poisoned".to_string())?;
+            let lines = cookie_lines(&jar, &parsed);
+            Ok(text_content(if lines.is_empty() { "(no cookies)".to_string() } else { lines.join("\n") }))
         }
         other => Err(format!("unknown tool: {other}")),
     }
@@ -360,7 +408,6 @@ mod tests {
         assert_eq!(reply["result"]["serverInfo"]["name"], "rabbithole");
         assert!(reply["result"]["capabilities"]["tools"].is_object());
         assert!(s.initialized);
-        // notifications get no reply
         assert!(handle_message(&mut s, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
     }
 
@@ -371,7 +418,7 @@ mod tests {
         assert_eq!(reply["id"], "abc");
         let tools = reply["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["browse", "links", "screenshot", "fetch_html", "dom"]);
+        assert_eq!(names, vec!["browse", "links", "screenshot", "fetch_html", "dom", "cookies"]);
         for t in tools {
             assert_eq!(t["inputSchema"]["required"][0], "url");
             assert!(t["description"].as_str().unwrap().len() > 10);
@@ -395,7 +442,6 @@ mod tests {
     #[test]
     fn tool_call_argument_validation() {
         let mut s = state();
-        // Missing url: reported as a tool error, not a protocol error, and no network is touched.
         let reply = parse(handle_message(
             &mut s,
             r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"browse","arguments":{}}}"#,
@@ -407,6 +453,22 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"bogus","arguments":{"url":"x"}}}"#,
         ));
         assert_eq!(reply["result"]["isError"], true);
+        assert!(s.session.is_none(), "no engine should be created for invalid calls");
+    }
+
+    #[test]
+    fn browse_request_building() {
+        let args = json!({ "method": "POST", "form": { "q": "a b", "n": 1 } });
+        let req = browse_request("https://example.com/s", &args).unwrap();
+        assert_eq!(req.method, "POST");
+        let body = req.body.unwrap();
+        assert_eq!(body.content_type, "application/x-www-form-urlencoded");
+        let text = String::from_utf8(body.data).unwrap();
+        assert!(text.contains("q=a+b") && text.contains("n=1"));
+        let req = browse_request("https://example.com/s", &json!({ "form": { "q": "x" } })).unwrap();
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.url.query.as_deref(), Some("q=x"));
+        assert!(browse_request("https://example.com/", &json!({ "method": "PUT" })).is_err());
     }
 
     #[test]
