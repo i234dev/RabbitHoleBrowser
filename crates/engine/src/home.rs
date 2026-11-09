@@ -40,7 +40,7 @@ pub const HOME_HTML: &str = r#"<!DOCTYPE html>
     <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
     <li><a href="https://lite.duckduckgo.com/lite/">DuckDuckGo Lite</a> &ndash; search without JavaScript</li>
     <li><a href="https://www.gnu.org/">gnu.org</a></li>
-    <li><a href="https://github.com/sergiogasca/RabbitHoleBrowser">RabbitHole on GitHub</a></li>
+    <li><a href="https://github.com/i234dev/RabbitHoleBrowser">RabbitHole on GitHub</a></li>
   </ul>
 
   <h2>What is rendering this page</h2>

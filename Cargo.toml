@@ -6,7 +6,7 @@ members = ["crates/*", "app"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/sergiogasca/RabbitHoleBrowser"
+repository = "https://github.com/i234dev/RabbitHoleBrowser"
 authors = ["Sergio Gasca"]
 
 [workspace.dependencies]

@@ -55,7 +55,7 @@ pub struct Fetcher {
 impl Default for Fetcher {
     fn default() -> Self {
         Fetcher {
-            user_agent: "Mozilla/5.0 (compatible; RabbitHole/0.1; +https://github.com/sergiogasca/RabbitHoleBrowser)".into(),
+            user_agent: "Mozilla/5.0 (compatible; RabbitHole/0.1; +https://github.com/i234dev/RabbitHoleBrowser)".into(),
             timeout: Duration::from_secs(15),
             max_body: 32 * 1024 * 1024,
             headers: Vec::new(),
