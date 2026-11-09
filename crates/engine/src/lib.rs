@@ -251,7 +251,12 @@ impl Loader {
             .and_then(|h| url.join(h))
             .unwrap_or_else(|| url.clone());
 
+        let debug = std::env::var("RH_DEBUG_FETCH").is_ok();
+        let t = std::time::Instant::now();
         let sheets = self.collect_stylesheets(&doc, &base_url);
+        if debug {
+            eprintln!("[load] stylesheets {:?}", t.elapsed());
+        }
         let env = media_env(viewport);
 
         // A throw-away cascade on this thread to discover referenced
@@ -263,12 +268,31 @@ impl Loader {
             resolve_url: &|base, raw| resolve_url(base, raw),
             document_base: &base_str,
         };
+        let t = std::time::Instant::now();
         let styles = rabbithole_style::style_tree_with(&doc, &sheets, &env, &opts);
-
+        if debug {
+            eprintln!("[load] discovery cascade {:?}", t.elapsed());
+        }
+        let t = std::time::Instant::now();
         let images = if self.load_images { self.load_images(&doc, &styles, &base_url) } else { Vec::new() };
+        if debug {
+            eprintln!("[load] images {:?}", t.elapsed());
+        }
+        let t = std::time::Instant::now();
         let background_images = if self.load_images { self.load_background_images(&styles) } else { Vec::new() };
+        if debug {
+            eprintln!("[load] background images {:?}", t.elapsed());
+        }
+        let t = std::time::Instant::now();
         let fonts = if self.load_fonts { self.load_fonts(&styles) } else { Vec::new() };
+        if debug {
+            eprintln!("[load] fonts {:?}", t.elapsed());
+        }
+        let t = std::time::Instant::now();
         let scripts = if self.load_scripts { self.collect_scripts(&doc, &base_url) } else { Vec::new() };
+        if debug {
+            eprintln!("[load] scripts {:?}", t.elapsed());
+        }
         drop(styles);
 
         LoadedPage {
@@ -524,13 +548,28 @@ impl Loader {
         }
         let mut fetcher = self.fetcher.clone();
         fetcher.max_body = 16 * 1024 * 1024;
+        let debug = std::env::var("RH_DEBUG_FETCH").is_ok();
+        let t0 = std::time::Instant::now();
         let results = fetcher.fetch_many(&to_fetch, 8);
+        if debug {
+            eprintln!("[fetch] {} images in {:?}", to_fetch.len(), t0.elapsed());
+            for (u, r) in to_fetch.iter().zip(results.iter()) {
+                match r {
+                    Ok(resp) => eprintln!("[fetch]   {} -> {} {} {}B", u, resp.status, resp.content_type, resp.body.len()),
+                    Err(e) => eprintln!("[fetch]   {} -> ERROR {}", u, e),
+                }
+            }
+        }
         let mut caches = self.caches.lock().unwrap();
         for (u, r) in to_fetch.iter().zip(results) {
+            let td = std::time::Instant::now();
             let decoded = match r {
                 Ok(resp) if resp.status < 400 => decode_image(&resp.body, &resp.content_type, &u.path).map(Arc::new),
                 _ => None,
             };
+            if debug {
+                eprintln!("[decode] {:?} {} -> {}", td.elapsed(), u, decoded.as_ref().map(|i| format!("{}x{}", i.width, i.height)).unwrap_or_else(|| "none".into()));
+            }
             caches.images.insert(u.to_string(), decoded);
         }
     }
@@ -958,8 +997,10 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
         let (w, h) = tree.resolve_size(None, None);
         let scale = if w.max(h) < 512.0 { 2.0 } else { 1.0 };
         let (pw, ph) = ((w * scale).round().clamp(1.0, 2048.0) as u32, (h * scale).round().clamp(1.0, 2048.0) as u32);
-        let fonts = FontContext::new();
-        return Some(tree.rasterize(&fonts, pw, ph));
+        thread_local! {
+            static SVG_FONTS: FontContext = FontContext::new();
+        }
+        return Some(SVG_FONTS.with(|fonts| tree.rasterize(fonts, pw, ph)));
     }
     Image::decode(bytes)
 }

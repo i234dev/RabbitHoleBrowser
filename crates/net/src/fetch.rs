@@ -266,18 +266,47 @@ pub struct Fetcher {
     pub cookies: Option<Arc<Mutex<CookieJar>>>,
     /// `Accept-Language` value.
     pub accept_language: String,
+    /// Cached HTTP agent (connection pool + TLS config), rebuilt when the
+    /// settings it depends on change.
+    agent: Arc<Mutex<Option<(String, ureq::Agent)>>>,
 }
 
 impl Default for Fetcher {
     fn default() -> Self {
         Fetcher {
-            user_agent: "Mozilla/5.0 (compatible; RabbitHole/0.1; +https://github.com/i234dev/RabbitHoleBrowser)".into(),
+            user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 RabbitHole/0.2".into(),
             timeout: Duration::from_secs(15),
             max_body: 32 * 1024 * 1024,
             headers: Vec::new(),
             cookies: None,
             accept_language: "en-US,en;q=0.9,es;q=0.8".into(),
+            agent: Arc::new(Mutex::new(None)),
         }
+    }
+}
+
+impl Fetcher {
+    /// The shared agent for this fetcher's settings. Agents keep a pool of
+    /// open connections, so repeated requests to one host reuse TLS
+    /// sessions instead of handshaking every time.
+    fn agent(&self) -> ureq::Agent {
+        let sig = format!("{}|{}", self.user_agent, self.timeout.as_millis());
+        let mut guard = self.agent.lock().unwrap();
+        if let Some((s, a)) = guard.as_ref() {
+            if *s == sig {
+                return a.clone();
+            }
+        }
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(self.timeout)
+            .timeout_read(self.timeout)
+            .timeout_write(self.timeout)
+            .user_agent(&self.user_agent)
+            .redirects(0)
+            .max_idle_connections_per_host(6)
+            .build();
+        *guard = Some((sig, agent.clone()));
+        agent
     }
 }
 
@@ -405,11 +434,7 @@ impl Fetcher {
             "http" | "https" => {}
             _ => return self.fetch(&req.url),
         }
-        let agent = ureq::AgentBuilder::new()
-            .timeout(self.timeout)
-            .user_agent(&self.user_agent)
-            .redirects(0)
-            .build();
+        let agent = self.agent();
         let mut method = req.method.clone();
         let mut url = req.url.without_fragment();
         let mut body = req.body.clone();
@@ -515,12 +540,7 @@ impl Fetcher {
                 reader: Box::new(std::io::Cursor::new(r.body)),
             });
         }
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(self.timeout)
-            .timeout_read(std::time::Duration::from_secs(120))
-            .user_agent(&self.user_agent)
-            .redirects(0)
-            .build();
+        let agent = self.agent();
         let mut method = req.method.clone();
         let mut url = req.url.without_fragment();
         let mut body = req.body.clone();

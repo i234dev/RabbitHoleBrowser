@@ -44,7 +44,12 @@ impl<'a> Layouter<'a> {
                             continue;
                         }
                         let ex = extras_px(&c.style);
-                        let (cmin, cmax) = self.intrinsic(c);
+                        let (cmin, mut cmax) = self.intrinsic(c);
+                        if c.style.display == rabbithole_style::Display::TableCaption {
+                            // Captions wrap to the table's width: only their
+                            // min-content contributes to the container.
+                            cmax = cmin;
+                        }
                         if is_row {
                             min += cmin + ex;
                             max += cmax + ex;
@@ -66,9 +71,12 @@ impl<'a> Layouter<'a> {
                     let mut cmax = max;
                     for c in &mut b.children {
                         if c.is_in_flow() && c.style.display == rabbithole_style::Display::TableCaption {
-                            let (a, bb) = self.intrinsic(c);
+                            // A caption is as wide as the table: only its
+                            // min-content contributes (it wraps otherwise),
+                            // matching browsers (CSS 2.1 §17.4).
+                            let (a, _bb) = self.intrinsic(c);
                             cmin = cmin.max(a);
-                            cmax = cmax.max(bb);
+                            cmax = cmax.max(a);
                         }
                     }
                     (cmin, cmax)

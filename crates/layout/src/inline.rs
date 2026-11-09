@@ -163,7 +163,11 @@ impl<'a> Layouter<'a> {
                                 let is_space_word = w.chars().all(|c| c == ' ');
                                 for (part, continuation) in split_hyphens(&w) {
                                     let width = self.measurer.width(font, size, &part) + ls * part.chars().count() as f32;
-                                    let bb = wraps && (prev_break_opp || continuation);
+                                    // A break opportunity before a word comes from the
+                                    // preceding whitespace (owned by whatever element
+                                    // produced it); `nowrap` on this word only forbids
+                                    // breaks at its own spaces.
+                                    let bb = prev_break_opp || (wraps && continuation);
                                     pieces.push(Piece::Word {
                                         text: Rc::from(part.as_str()),
                                         width,
@@ -177,7 +181,7 @@ impl<'a> Layouter<'a> {
                             Seg::Space => {
                                 let width = self.measurer.space_width(font, size) + style.word_spacing;
                                 pieces.push(Piece::Space { width, item: i });
-                                prev_break_opp = true;
+                                prev_break_opp = wraps;
                             }
                             Seg::Break => {
                                 pieces.push(Piece::Break);
@@ -469,7 +473,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 return;
             }
             let fits = self.cur.x + self.pending_w() + width <= self.cur.right + 0.01;
-            if fits || !wraps || guard > 10_000 {
+            if fits || (!wraps && !break_before) || guard > 10_000 {
                 self.push_text(text, width, item, break_before);
                 return;
             }
@@ -484,7 +488,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     continue;
                 }
             }
-            if policy == BreakPolicy::Never {
+            if policy == BreakPolicy::Never || !wraps {
                 // The word may not be split: it overflows the line.
                 self.push_text(text, width, item, break_before);
                 return;
