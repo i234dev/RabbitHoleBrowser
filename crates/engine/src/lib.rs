@@ -7,8 +7,12 @@
 //! [`Engine`] turns it into a [`Page`] (styles, layout, display list) on the
 //! thread that owns the fonts and paints.
 
+pub mod forms;
 mod home;
 mod text;
+
+pub use forms::{ChosenFile, ControlKind};
+pub use rabbithole_net::{Body, Request, StreamedResponse};
 
 use rabbithole_css::{parse_media_query, MatchState, MediaQuery, PseudoElement, Rule};
 use rabbithole_dom::{Document, NodeId};
@@ -121,6 +125,27 @@ pub struct LoadedPage {
 
 const MAX_IMPORT_DEPTH: usize = 4;
 
+/// Result of navigating to a URL: a page to display, or a download.
+pub enum Loaded {
+    Page(LoadedPage),
+    /// The response is not displayable (binary, or `Content-Disposition:
+    /// attachment`); the body is still unread so it can be streamed to disk.
+    Download(StreamedResponse),
+}
+
+/// Can a response of this content type be rendered as a page?
+pub fn is_displayable(content_type: &str) -> bool {
+    let ct = content_type.trim().to_ascii_lowercase();
+    ct.is_empty()
+        || ct.starts_with("text/")
+        || ct.starts_with("image/")
+        || ct.starts_with("application/xhtml")
+        || ct.contains("json")
+        || ct.contains("xml")
+        || ct.contains("javascript")
+        || ct.contains("ecmascript")
+}
+
 impl Default for Loader {
     fn default() -> Self {
         Loader {
@@ -154,6 +179,27 @@ impl Loader {
         }
         let resp = self.fetcher.fetch(&url)?;
         Ok(self.load_response(resp, viewport))
+    }
+
+    /// Navigate with an arbitrary request (form POST, link with referer).
+    /// Distinguishes pages from downloads.
+    pub fn load_request(&self, req: &Request, viewport: Viewport) -> Result<Loaded, EngineError> {
+        if req.url.scheme == "about" {
+            return self.load(&req.url.to_string(), viewport).map(Loaded::Page);
+        }
+        let stream = self.fetcher.request_stream(req)?;
+        let attachment = stream
+            .header("content-disposition")
+            .map(|cd| cd.trim_start().to_ascii_lowercase().starts_with("attachment"))
+            .unwrap_or(false);
+        if attachment || !is_displayable(&stream.content_type) {
+            return Ok(Loaded::Download(stream));
+        }
+        let resp = stream.into_response(self.fetcher.max_body)?;
+        if resp.status >= 400 && resp.body.is_empty() {
+            return Err(EngineError::Fetch(format!("HTTP {}", resp.status)));
+        }
+        Ok(Loaded::Page(self.load_response(resp, viewport)))
     }
 
     /// Turn an HTTP(-like) response into a page based on its content type.
@@ -747,6 +793,7 @@ impl Engine {
             state: MatchState::default(),
             has_dynamic_rules,
         };
+        page.snapshot_form_defaults();
         self.restyle(&mut page);
         page
     }
