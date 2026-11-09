@@ -611,13 +611,53 @@ fn nth_matches(a: i32, b: i32, index: i32) -> bool {
 
 // --------------------------------------------------------------- matching
 
-pub fn matches(sel: &Selector, doc: &Document, node: NodeId) -> bool {
-    let n = sel.compounds.len();
-    match_from(sel, n - 1, doc, node)
+/// Dynamic document state used by `:hover`, `:active`, `:focus` and
+/// `:target`. With the default (empty) state those pseudo-classes never
+/// match.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MatchState {
+    /// The element under the pointer; `:hover` matches it and its ancestors.
+    pub hovered: Option<NodeId>,
+    /// The focused element; `:focus` matches it and its ancestors
+    /// (focus-within semantics).
+    pub focused: Option<NodeId>,
+    /// The element being activated (mouse button down); matches it and its
+    /// ancestors.
+    pub active: Option<NodeId>,
+    /// The id named by the URL fragment, for `:target`.
+    pub target_id: Option<String>,
 }
 
-fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId) -> bool {
-    if !match_compound(&sel.compounds[idx], doc, node) {
+impl MatchState {
+    fn is_or_contains(doc: &Document, ancestor: Option<NodeId>, node: NodeId) -> bool {
+        let Some(mut cur) = ancestor else { return false };
+        loop {
+            if cur == node {
+                return true;
+            }
+            match doc.parent(cur) {
+                Some(p) => cur = p,
+                None => return false,
+            }
+        }
+    }
+}
+
+/// Match a selector against an element without dynamic state.
+pub fn matches(sel: &Selector, doc: &Document, node: NodeId) -> bool {
+    matches_with(sel, doc, node, &MatchState::default())
+}
+
+/// Match a selector against an element with the given dynamic state. Only
+/// the element part of the selector is considered; a pseudo-element on the
+/// selector is the caller's business.
+pub fn matches_with(sel: &Selector, doc: &Document, node: NodeId, state: &MatchState) -> bool {
+    let n = sel.compounds.len();
+    match_from(sel, n - 1, doc, node, state)
+}
+
+fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId, state: &MatchState) -> bool {
+    if !match_compound_with(&sel.compounds[idx], doc, node, state) {
         return false;
     }
     if idx == 0 {
@@ -626,13 +666,13 @@ fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId) -> bool 
     let comb = sel.combinators[idx - 1];
     match comb {
         Combinator::Child => match element_parent(doc, node) {
-            Some(p) => match_from(sel, idx - 1, doc, p),
+            Some(p) => match_from(sel, idx - 1, doc, p, state),
             None => false,
         },
         Combinator::Descendant => {
             let mut cur = element_parent(doc, node);
             while let Some(p) = cur {
-                if match_from(sel, idx - 1, doc, p) {
+                if match_from(sel, idx - 1, doc, p, state) {
                     return true;
                 }
                 cur = element_parent(doc, p);
@@ -640,13 +680,13 @@ fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId) -> bool 
             false
         }
         Combinator::NextSibling => match prev_element_sibling(doc, node) {
-            Some(s) => match_from(sel, idx - 1, doc, s),
+            Some(s) => match_from(sel, idx - 1, doc, s, state),
             None => false,
         },
         Combinator::SubsequentSibling => {
             let mut cur = prev_element_sibling(doc, node);
             while let Some(s) = cur {
-                if match_from(sel, idx - 1, doc, s) {
+                if match_from(sel, idx - 1, doc, s, state) {
                     return true;
                 }
                 cur = prev_element_sibling(doc, s);
@@ -701,6 +741,10 @@ fn child_index(doc: &Document, node: NodeId, of_type: bool, from_end: bool) -> i
 }
 
 pub fn match_compound(c: &Compound, doc: &Document, node: NodeId) -> bool {
+    match_compound_with(c, doc, node, &MatchState::default())
+}
+
+pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &MatchState) -> bool {
     let el = match doc.element(node) {
         Some(e) => e,
         None => return false,
@@ -763,10 +807,10 @@ pub fn match_compound(c: &Compound, doc: &Document, node: NodeId) -> bool {
             Pseudo::NthChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, false)),
             Pseudo::NthLastChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, true)),
             Pseudo::NthOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, false)),
-            Pseudo::Not(list) => !list.iter().any(|s| matches(s, doc, node)),
-            Pseudo::Is(list) | Pseudo::Where(list) => list.iter().any(|s| matches(s, doc, node)),
+            Pseudo::Not(list) => !list.iter().any(|s| matches_with(s, doc, node, state)),
+            Pseudo::Is(list) | Pseudo::Where(list) => list.iter().any(|s| matches_with(s, doc, node, state)),
             Pseudo::NthLastOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, true)),
-            Pseudo::Has(list) => list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node)),
+            Pseudo::Has(list) => list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node, state)),
             Pseudo::Lang(lang) => {
                 let mut cur = Some(node);
                 let mut found = false;
@@ -786,7 +830,14 @@ pub fn match_compound(c: &Compound, doc: &Document, node: NodeId) -> bool {
             }
             Pseudo::Disabled => el.attr("disabled").is_some(),
             Pseudo::Checked => el.attr("checked").is_some() || (el.tag == "option" && el.attr("selected").is_some()),
-            Pseudo::Hover | Pseudo::Active | Pseudo::Focus | Pseudo::Visited | Pseudo::Target => false,
+            Pseudo::Hover => MatchState::is_or_contains(doc, state.hovered, node),
+            Pseudo::Active => MatchState::is_or_contains(doc, state.active, node),
+            Pseudo::Focus => MatchState::is_or_contains(doc, state.focused, node),
+            Pseudo::Target => match (&state.target_id, el.id()) {
+                (Some(t), Some(id)) => t == id,
+                _ => false,
+            },
+            Pseudo::Visited => false,
             Pseudo::Never => false,
         };
         if !ok {
@@ -797,15 +848,15 @@ pub fn match_compound(c: &Compound, doc: &Document, node: NodeId) -> bool {
 }
 
 /// `:has()` support: does any element related to `node` by `comb` match `sel`?
-fn has_matches(comb: Combinator, sel: &Selector, doc: &Document, node: NodeId) -> bool {
+fn has_matches(comb: Combinator, sel: &Selector, doc: &Document, node: NodeId, state: &MatchState) -> bool {
     match comb {
-        Combinator::Child => doc.child_elements(node).any(|c| matches(sel, doc, c)),
-        Combinator::Descendant => doc.descendants(node).skip(1).any(|d| matches(sel, doc, d)),
-        Combinator::NextSibling => next_element_sibling(doc, node).map(|s| matches(sel, doc, s)).unwrap_or(false),
+        Combinator::Child => doc.child_elements(node).any(|c| matches_with(sel, doc, c, state)),
+        Combinator::Descendant => doc.descendants(node).skip(1).any(|d| matches_with(sel, doc, d, state)),
+        Combinator::NextSibling => next_element_sibling(doc, node).map(|s| matches_with(sel, doc, s, state)).unwrap_or(false),
         Combinator::SubsequentSibling => {
             let mut cur = next_element_sibling(doc, node);
             while let Some(s) = cur {
-                if matches(sel, doc, s) {
+                if matches_with(sel, doc, s, state) {
                     return true;
                 }
                 cur = next_element_sibling(doc, s);
@@ -846,5 +897,13 @@ mod tests {
         assert!(matches(&parse("p + p")[0], &doc, ps[1]));
         assert!(matches(&parse("#main p:not(.intro)")[0], &doc, ps[1]));
         assert!(!matches(&parse("p:hover")[0], &doc, ps[1]));
+        let state = MatchState { hovered: Some(a), ..Default::default() };
+        assert!(matches_with(&parse("p:hover")[0], &doc, ps[0], &state));
+        assert!(matches_with(&parse("a:hover")[0], &doc, a, &state));
+        assert!(!matches_with(&parse("p:hover")[0], &doc, ps[1], &state));
+        assert!(matches_with(&parse("div:has(> p.intro)")[0], &doc, doc.find_element("div").unwrap(), &state));
+        let sel = parse("p::before");
+        assert_eq!(sel[0].pseudo_element, Some(PseudoElement::Before));
+        assert!(matches(&sel[0], &doc, ps[0]));
     }
 }

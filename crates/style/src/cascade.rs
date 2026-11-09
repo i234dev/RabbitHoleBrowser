@@ -3,10 +3,11 @@
 //! presentational attributes, and per-property value application.
 
 use crate::computed::*;
+use crate::props::{self, ApplyCtx};
 use crate::values::{self, ColorValue, LengthContext};
-use crate::{MediaEnv, StyledTree, Stylesheet};
+use crate::{FontFace, FontSource, MediaEnv, StyleOptions, StyledTree, Stylesheet};
 use rabbithole_css::selector::{Compound, Selector, Specificity};
-use rabbithole_css::{parse_declaration_list, parse_stylesheet, Declaration, StyleRule, Token};
+use rabbithole_css::{matches_with, parse_declaration_list, parse_stylesheet, Declaration, PseudoElement, StyleRule, Token};
 use rabbithole_dom::{Document, NodeId};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -31,6 +32,8 @@ struct IndexedRule<'a> {
     selector: &'a Selector,
     specificity: Specificity,
     decls: &'a [Declaration],
+    /// Base URL of the sheet the rule came from.
+    base: Option<&'a str>,
 }
 
 /// Rules bucketed by the key of their rightmost compound selector.
@@ -44,7 +47,7 @@ struct RuleIndex<'a> {
 }
 
 impl<'a> RuleIndex<'a> {
-    fn add_sheet(&mut self, rules: &[&'a StyleRule], is_ua: bool) {
+    fn add_sheet(&mut self, rules: &[&'a StyleRule], is_ua: bool, base: Option<&'a str>) {
         for rule in rules {
             for sel in &rule.selectors {
                 let idx = self.rules.len();
@@ -53,6 +56,7 @@ impl<'a> RuleIndex<'a> {
                     selector: sel,
                     specificity: sel.specificity(),
                     decls: &rule.declarations,
+                    base,
                 });
                 let last: &Compound = sel.compounds.last().expect("non-empty selector");
                 if let Some(id) = &last.id {
@@ -106,28 +110,52 @@ struct Matched<'a> {
     specificity: Specificity,
     order: u32,
     decl: &'a Declaration,
+    base: Option<&'a str>,
+    pseudo: Option<PseudoElement>,
 }
 
 type Vars = HashMap<String, Vec<Token>>;
 
-pub fn style_tree(doc: &Document, author: &[Stylesheet], env: &MediaEnv) -> StyledTree {
+pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> StyledTree {
     let mut ua_rules = Vec::new();
     ua_sheet().active_rules(env, &mut ua_rules);
-    let mut author_rules = Vec::new();
-    for sheet in author {
-        sheet.active_rules(env, &mut author_rules);
-    }
     let mut index = RuleIndex::default();
-    index.add_sheet(&ua_rules, true);
-    index.add_sheet(&author_rules, false);
+    index.add_sheet(&ua_rules, true, None);
+    let mut author_rules_store: Vec<Vec<&StyleRule>> = Vec::with_capacity(author.len());
+    for sheet in author {
+        let mut rules = Vec::new();
+        sheet.active_rules(env, &mut rules);
+        author_rules_store.push(rules);
+    }
+    for (sheet, rules) in author.iter().zip(&author_rules_store) {
+        index.add_sheet(rules, false, sheet.base_url.as_deref());
+    }
 
-    let mut styles: Vec<Option<Rc<ComputedStyle>>> = vec![None; doc.nodes.len()];
+    let mut tree = StyledTree::empty();
+    tree.font_faces = collect_font_faces(author, env, opts);
+    for sheet in author {
+        let mut kf = Vec::new();
+        sheet.keyframes(&mut kf);
+        for (name, frames) in kf {
+            tree.keyframes.insert(
+                name.to_string(),
+                frames.iter().map(|f| (f.offsets.clone(), f.declarations.clone())).collect(),
+            );
+        }
+    }
+
+    let n = doc.nodes.len();
+    tree.styles = vec![None; n];
+    tree.before = vec![None; n];
+    tree.after = vec![None; n];
+    tree.marker = vec![None; n];
+
     let root_style = Rc::new(ComputedStyle::initial());
     let empty_vars: Rc<Vars> = Rc::new(HashMap::new());
 
     let html = match doc.html_element() {
         Some(h) => h,
-        None => return StyledTree { styles },
+        None => return tree,
     };
 
     let mut candidates = Vec::new();
@@ -139,22 +167,38 @@ pub fn style_tree(doc: &Document, author: &[Stylesheet], env: &MediaEnv) -> Styl
         if doc.element(node).is_none() {
             continue;
         }
-        let (style, vars) = compute_element(doc, node, &parent, &parent_vars, root_fs, env, &index, &mut candidates, &mut matched);
+        let out = compute_element(doc, node, &parent, &parent_vars, root_fs, env, opts, &index, &mut candidates, &mut matched);
         let is_root = node == html;
-        let root_fs = if is_root { style.font_size } else { root_fs };
-        let style = Rc::new(style);
+        let root_fs = if is_root { out.style.font_size } else { root_fs };
+        if is_root {
+            tree.root_font_size = root_fs;
+        }
+        let style = Rc::new(out.style);
         let hidden = style.display.is_none();
-        styles[node] = Some(style.clone());
+        tree.styles[node] = Some(style.clone());
         if hidden {
             continue;
         }
+        tree.before[node] = out.before.map(Rc::new);
+        tree.after[node] = out.after.map(Rc::new);
+        tree.marker[node] = out.marker.map(Rc::new);
         // Push children in reverse so they are processed in document order.
         let kids: Vec<NodeId> = doc.child_elements(node).collect();
         for &k in kids.iter().rev() {
-            stack.push((k, style.clone(), vars.clone(), root_fs));
+            stack.push((k, style.clone(), out.vars.clone(), root_fs));
         }
     }
-    StyledTree { styles }
+    tree
+}
+
+/// Result of styling one element: its style, custom properties and any
+/// generated pseudo-element styles.
+struct ElementOut {
+    style: ComputedStyle,
+    vars: Rc<Vars>,
+    before: Option<ComputedStyle>,
+    after: Option<ComputedStyle>,
+    marker: Option<ComputedStyle>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -165,15 +209,16 @@ fn compute_element<'a>(
     parent_vars: &Rc<Vars>,
     root_font_size: f32,
     env: &MediaEnv,
+    opts: &StyleOptions,
     index: &'a RuleIndex<'a>,
     candidates: &mut Vec<usize>,
     matched: &mut Vec<Matched<'a>>,
-) -> (ComputedStyle, Rc<Vars>) {
+) -> ElementOut {
     matched.clear();
     index.candidates(doc, node, candidates);
     for &ci in candidates.iter() {
         let r = &index.rules[ci];
-        if rabbithole_css::matches(r.selector, doc, node) {
+        if matches_with(r.selector, doc, node, opts.state) {
             for d in r.decls {
                 let rank = match (r.is_ua, d.important) {
                     (true, false) => Rank::UaNormal,
@@ -181,7 +226,14 @@ fn compute_element<'a>(
                     (false, false) => Rank::AuthorNormal,
                     (false, true) => Rank::AuthorImportant,
                 };
-                matched.push(Matched { rank, specificity: r.specificity, order: ci as u32 + 1, decl: d });
+                matched.push(Matched {
+                    rank,
+                    specificity: r.specificity,
+                    order: ci as u32 + 1,
+                    decl: d,
+                    base: r.base,
+                    pseudo: r.selector.pseudo_element,
+                });
             }
         }
     }
@@ -190,14 +242,18 @@ fn compute_element<'a>(
     // Style attribute: beats every selector.
     let style_attr = doc.attr(node, "style").map(parse_declaration_list).unwrap_or_default();
 
-    // We need owned declarations to live as long as `matched`; collect them
-    // into a local vec and push references after the sort key assignment.
     let mut local: Vec<Matched> = Vec::with_capacity(matched.len() + presentational.len() + style_attr.len());
+    let mut pseudo_local: Vec<Matched> = Vec::new();
     for d in &presentational {
-        local.push(Matched { rank: Rank::AuthorNormal, specificity: Specificity(0, 0, 0), order: 0, decl: d });
+        local.push(Matched { rank: Rank::AuthorNormal, specificity: Specificity(0, 0, 0), order: 0, decl: d, base: None, pseudo: None });
     }
     for m in matched.iter() {
-        local.push(Matched { rank: m.rank, specificity: m.specificity, order: m.order, decl: m.decl });
+        let entry = Matched { rank: m.rank, specificity: m.specificity, order: m.order, decl: m.decl, base: m.base, pseudo: m.pseudo };
+        if m.pseudo.is_some() {
+            pseudo_local.push(entry);
+        } else {
+            local.push(entry);
+        }
     }
     for d in &style_attr {
         local.push(Matched {
@@ -205,6 +261,8 @@ fn compute_element<'a>(
             specificity: Specificity(u32::MAX, 0, 0),
             order: u32::MAX,
             decl: d,
+            base: None,
+            pseudo: None,
         });
     }
     local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
@@ -217,23 +275,70 @@ fn compute_element<'a>(
         }
     }
 
-    let mut style = ComputedStyle::inherit_from(parent);
     let el = doc.element(node).expect("element");
     let is_root = el.tag == "html";
+    let style = apply_declarations(&local, &vars, parent, root_font_size, env, opts, is_root, false);
+
+    let mut out = ElementOut { style, vars, before: None, after: None, marker: None };
+    if out.style.display.is_none() || pseudo_local.is_empty() {
+        return out;
+    }
+    pseudo_local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
+    for which in [PseudoElement::Before, PseudoElement::After, PseudoElement::Marker] {
+        let decls: Vec<Matched> = pseudo_local
+            .iter()
+            .filter(|m| m.pseudo == Some(which))
+            .map(|m| Matched { rank: m.rank, specificity: m.specificity, order: m.order, decl: m.decl, base: m.base, pseudo: m.pseudo })
+            .collect();
+        if decls.is_empty() {
+            continue;
+        }
+        let root_fs = if is_root { out.style.font_size } else { root_font_size };
+        let ps = apply_declarations(&decls, &out.vars, &out.style, root_fs, env, opts, false, true);
+        match which {
+            PseudoElement::Marker => out.marker = Some(ps),
+            PseudoElement::Before | PseudoElement::After => {
+                if matches!(ps.content, Content::Items(_)) && !ps.display.is_none() {
+                    if which == PseudoElement::Before {
+                        out.before = Some(ps);
+                    } else {
+                        out.after = Some(ps);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Apply sorted declarations on top of a style inherited from `parent`.
+#[allow(clippy::too_many_arguments)]
+fn apply_declarations(
+    local: &[Matched],
+    vars: &Vars,
+    parent: &ComputedStyle,
+    root_font_size: f32,
+    env: &MediaEnv,
+    opts: &StyleOptions,
+    is_root: bool,
+    pseudo: bool,
+) -> ComputedStyle {
+    let mut style = ComputedStyle::inherit_from(parent);
 
     // Substitute var() references up front (shared by both passes).
-    let mut resolved: Vec<(&str, std::borrow::Cow<[Token]>)> = Vec::with_capacity(local.len());
-    for m in &local {
+    let mut resolved: Vec<(&str, std::borrow::Cow<[Token]>, Option<&str>)> = Vec::with_capacity(local.len());
+    for m in local {
         if m.decl.name.starts_with("--") {
             continue;
         }
         if m.decl.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var"))) {
-            match substitute_vars(&m.decl.value, &vars, 0) {
-                Some(v) => resolved.push((m.decl.name.as_str(), std::borrow::Cow::Owned(v))),
+            match substitute_vars(&m.decl.value, vars, 0) {
+                Some(v) => resolved.push((m.decl.name.as_str(), std::borrow::Cow::Owned(v), m.base)),
                 None => continue,
             }
         } else {
-            resolved.push((m.decl.name.as_str(), std::borrow::Cow::Borrowed(&m.decl.value)));
+            resolved.push((m.decl.name.as_str(), std::borrow::Cow::Borrowed(&m.decl.value), m.base));
         }
     }
 
@@ -244,7 +349,7 @@ fn compute_element<'a>(
         viewport_w: env.width,
         viewport_h: env.height,
     };
-    for (name, value) in &resolved {
+    for (name, value, _) in &resolved {
         match *name {
             "font-size" => apply_font_size(value, &mut style, parent, &parent_ctx),
             "font" => {
@@ -259,16 +364,17 @@ fn compute_element<'a>(
     }
 
     // Pass 2: everything else.
-    let ctx = LengthContext {
+    let len = LengthContext {
         font_size: style.font_size,
         root_font_size: if is_root { style.font_size } else { root_font_size },
         viewport_w: env.width,
         viewport_h: env.height,
     };
-    for (name, value) in &resolved {
+    for (name, value, base) in &resolved {
         if *name == "font-size" {
             continue;
         }
+        let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
         apply_property(name, value, &mut style, parent, &ctx);
     }
 
@@ -286,7 +392,151 @@ fn compute_element<'a>(
             d => d,
         };
     }
-    (style, vars)
+    style
+}
+
+// ---------------------------------------------------------------- font-face
+
+fn collect_font_faces(author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> Vec<FontFace> {
+    let mut out = Vec::new();
+    for sheet in author {
+        let mut faces = Vec::new();
+        sheet.font_faces(env, &mut faces);
+        let base = sheet.base_url.as_deref().unwrap_or(opts.document_base);
+        for decls in faces {
+            if let Some(f) = parse_font_face(decls, base, opts) {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+fn parse_font_face(decls: &[Declaration], base: &str, opts: &StyleOptions) -> Option<FontFace> {
+    let mut family = None;
+    let mut sources = Vec::new();
+    let mut weight = (400u16, 400u16);
+    let mut italic = false;
+    let mut display = "auto".to_string();
+    let mut unicode_range = None;
+    for d in decls {
+        let comps = values::components(&d.value);
+        match d.name.as_str() {
+            "font-family" => {
+                let names = props::text::family_names(&comps);
+                family = names.into_iter().next().or_else(|| {
+                    comps.first().and_then(|c| match c {
+                        [Token::String(s)] | [Token::Ident(s)] => Some(s.clone()),
+                        _ => None,
+                    })
+                });
+            }
+            "src" => {
+                for item in values::split_commas(&comps) {
+                    let mut url = None;
+                    let mut format = None;
+                    let mut local = false;
+                    for c in &item {
+                        if let Some(u) = url_of(c) {
+                            url = Some(u);
+                        } else if let Some(f) = props::fn_name(c) {
+                            match f.as_str() {
+                                "local" => local = true,
+                                "format" | "tech" => {
+                                    if f == "format" {
+                                        format = props::fn_args(c).first().and_then(|a| a.first()).and_then(|t| match t {
+                                            [Token::String(s)] | [Token::Ident(s)] => Some(s.to_ascii_lowercase()),
+                                            _ => None,
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if local {
+                        continue;
+                    }
+                    if let Some(u) = url {
+                        let abs = (opts.resolve_url)(base, &u).unwrap_or(u);
+                        sources.push(FontSource { url: abs, format });
+                    }
+                }
+            }
+            "font-weight" => {
+                let ws: Vec<u16> = comps
+                    .iter()
+                    .filter_map(|c| {
+                        if let Some(n) = values::number(c) {
+                            Some((n.round() as i32).clamp(1, 1000) as u16)
+                        } else {
+                            match values::ident(c)?.as_str() {
+                                "normal" => Some(400),
+                                "bold" => Some(700),
+                                _ => None,
+                            }
+                        }
+                    })
+                    .collect();
+                match ws.len() {
+                    1 => weight = (ws[0], ws[0]),
+                    2 => weight = (ws[0].min(ws[1]), ws[0].max(ws[1])),
+                    _ => {}
+                }
+            }
+            "font-style" => {
+                italic = comps.iter().any(|c| matches!(values::ident(c).as_deref(), Some("italic" | "oblique")));
+            }
+            "font-display" => {
+                if let Some(k) = comps.first().and_then(|c| values::ident(c)) {
+                    display = k;
+                }
+            }
+            "unicode-range" => {
+                // Rebuild the text: the generic tokenizer splits `U+0000-00FF`
+                // into idents/numbers, so re-join and parse per comma item.
+                let mut text = String::new();
+                for t in &d.value {
+                    match t {
+                        Token::Ident(s) => text.push_str(s),
+                        Token::Number(n) => text.push_str(&format!("{n}")),
+                        Token::Dimension(v, u) => text.push_str(&format!("{v}{u}")),
+                        Token::Percentage(p) => text.push_str(&format!("{p}%")),
+                        Token::Delim(c) => text.push(*c),
+                        Token::Comma => text.push(','),
+                        _ => {}
+                    }
+                }
+                let ranges: Vec<(u32, u32)> = text.split(',').filter_map(parse_unicode_range).collect();
+                if !ranges.is_empty() {
+                    unicode_range = Some(ranges);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(FontFace { family: family?, sources, weight, italic, display, unicode_range })
+}
+
+/// `U+0025-00FF`, `U+4??`, `U+20AC` (also tolerates a missing `+`, which
+/// the tokenizer may have swallowed into a signed number).
+fn parse_unicode_range(text: &str) -> Option<(u32, u32)> {
+    let t = text.trim().to_ascii_uppercase();
+    let body = t.strip_prefix('U')?;
+    let body = body.strip_prefix('+').unwrap_or(body);
+    if body.is_empty() {
+        return None;
+    }
+    if let Some((a, b)) = body.split_once('-') {
+        return Some((u32::from_str_radix(a, 16).ok()?, u32::from_str_radix(b, 16).ok()?));
+    }
+    if body.contains('?') {
+        let lo = body.replace('?', "0");
+        let hi = body.replace('?', "F");
+        return Some((u32::from_str_radix(&lo, 16).ok()?, u32::from_str_radix(&hi, 16).ok()?));
+    }
+    let v = u32::from_str_radix(body, 16).ok()?;
+    Some((v, v))
 }
 
 // ------------------------------------------------------------ custom props
@@ -393,6 +643,62 @@ fn presentational_declarations(doc: &Document, node: NodeId) -> Vec<Declaration>
         if let Some(c) = el.attr("text") {
             css.push_str(&format!("color:{};", legacy_color(c)));
         }
+        if let Some(b) = el.attr("background") {
+            let b = b.trim().replace(['"', '\'', ')', '('], "");
+            if !b.is_empty() {
+                css.push_str(&format!("background-image:url(\"{b}\");"));
+            }
+        }
+    }
+    if tag == "a" {
+        // <body link=...> colors unvisited links.
+        if let Some(body) = doc.body() {
+            if let Some(c) = doc.attr(body, "link") {
+                if el.attr("href").is_some() {
+                    css.push_str(&format!("color:{};", legacy_color(c)));
+                }
+            }
+        }
+    }
+    if tag == "input" {
+        let ty = el.attr("type").map(|t| t.to_ascii_lowercase()).unwrap_or_default();
+        if matches!(ty.as_str(), "" | "text" | "search" | "password" | "email" | "url" | "tel" | "number") {
+            if let Some(sz) = el.attr("size").and_then(|v| v.trim().parse::<f32>().ok()) {
+                if sz > 0.0 {
+                    css.push_str(&format!("width:calc({sz}ch + 6px);"));
+                }
+            }
+        }
+    }
+    if tag == "textarea" {
+        if let Some(c) = el.attr("cols").and_then(|v| v.trim().parse::<f32>().ok()) {
+            if c > 0.0 {
+                css.push_str(&format!("width:calc({c}ch + 6px);"));
+            }
+        }
+        if let Some(r) = el.attr("rows").and_then(|v| v.trim().parse::<f32>().ok()) {
+            if r > 0.0 {
+                css.push_str(&format!("height:calc({}em + 6px);", r * 1.2));
+            }
+        }
+    }
+    if tag == "select" {
+        if let Some(sz) = el.attr("size").and_then(|v| v.trim().parse::<f32>().ok()) {
+            if sz > 1.0 {
+                css.push_str(&format!("height:calc({}em + 4px);", sz * 1.3));
+            }
+        }
+    }
+    if tag == "hr" {
+        if let Some(c) = el.attr("color") {
+            css.push_str(&format!("color:{0};border-color:{0};border-style:solid;", legacy_color(c)));
+        }
+        if let Some(w) = el.attr("width").and_then(dim) {
+            css.push_str(&format!("width:{w};"));
+        }
+    }
+    if tag == "marquee" {
+        css.push_str("display:block;overflow:hidden;white-space:nowrap;");
     }
     if tag == "font" {
         if let Some(c) = el.attr("color") {
@@ -467,11 +773,33 @@ fn presentational_declarations(doc: &Document, node: NodeId) -> Vec<Declaration>
         }
     }
     if matches!(tag, "td" | "th") {
-        // cellpadding from the enclosing table
+        // cellpadding / border from the enclosing table
         let table = doc.ancestor_or_self(node, |n| doc.is_element(n, "table"));
         if let Some(t) = table {
             if let Some(p) = doc.attr(t, "cellpadding").and_then(dim) {
                 css.push_str(&format!("padding:{p};"));
+            }
+            if let Some(b) = doc.attr(t, "border") {
+                if b.trim().parse::<f32>().map(|n| n > 0.0).unwrap_or(true) {
+                    css.push_str("border:1px inset #a0a0a0;");
+                }
+            }
+        }
+        if let Some(bg) = el.attr("background") {
+            let b = bg.trim().replace(['"', '\'', ')', '('], "");
+            if !b.is_empty() {
+                css.push_str(&format!("background-image:url(\"{b}\");"));
+            }
+        }
+    }
+    if tag == "table" {
+        if let Some(cs) = el.attr("cellspacing").and_then(dim) {
+            css.push_str(&format!("border-spacing:{cs};"));
+        }
+        if let Some(bg) = el.attr("background") {
+            let b = bg.trim().replace(['"', '\'', ')', '('], "");
+            if !b.is_empty() {
+                css.push_str(&format!("background-image:url(\"{b}\");"));
             }
         }
     }
@@ -552,6 +880,9 @@ fn is_inherited(name: &str) -> bool {
         "color" | "font" | "font-family" | "font-size" | "font-weight" | "font-style" | "line-height" | "letter-spacing"
             | "word-spacing" | "text-align" | "text-decoration" | "text-decoration-line" | "text-transform" | "text-indent"
             | "white-space" | "list-style" | "list-style-type" | "list-style-position" | "visibility" | "cursor"
+            | "border-collapse" | "border-spacing" | "direction" | "tab-size" | "word-break" | "overflow-wrap" | "word-wrap"
+            | "text-shadow" | "quotes" | "pointer-events" | "user-select" | "font-variant" | "font-variant-caps"
+            | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
     )
 }
 
@@ -584,7 +915,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.border_style = from.border_style;
             to.border_color = from.border_color;
         }
-        "border-radius" => to.border_radius = from.border_radius,
+        "border-radius" => {
+            to.border_radius = from.border_radius;
+            to.border_radii = from.border_radii;
+        }
         "box-sizing" => to.box_sizing = from.box_sizing,
         "top" => to.inset.top = from.inset.top,
         "right" => to.inset.right = from.inset.right,
@@ -595,18 +929,23 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "background" => {
             to.background_color = from.background_color;
             to.background_image = from.background_image.clone();
+            to.background_layers = from.background_layers.clone();
         }
         "background-color" => to.background_color = from.background_color,
-        "background-image" => to.background_image = from.background_image.clone(),
         "opacity" => to.opacity = from.opacity,
         "font" => {
             to.font_family = from.font_family;
+            to.font_family_list = from.font_family_list.clone();
             to.font_size = from.font_size;
             to.font_weight = from.font_weight;
             to.font_style = from.font_style;
             to.line_height = from.line_height;
+            to.font_variant_small_caps = from.font_variant_small_caps;
         }
-        "font-family" => to.font_family = from.font_family,
+        "font-family" => {
+            to.font_family = from.font_family;
+            to.font_family_list = from.font_family_list.clone();
+        }
         "font-size" => to.font_size = from.font_size,
         "font-weight" => to.font_weight = from.font_weight,
         "font-style" => to.font_style = from.font_style,
@@ -614,7 +953,13 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "letter-spacing" => to.letter_spacing = from.letter_spacing,
         "word-spacing" => to.word_spacing = from.word_spacing,
         "text-align" => to.text_align = from.text_align,
-        "text-decoration" | "text-decoration-line" => to.text_decoration = from.text_decoration,
+        "text-decoration" => {
+            to.text_decoration = from.text_decoration;
+            to.text_decoration_color = from.text_decoration_color;
+            to.text_decoration_style = from.text_decoration_style;
+            to.text_decoration_thickness = from.text_decoration_thickness;
+        }
+        "text-decoration-line" => to.text_decoration = from.text_decoration,
         "text-transform" => to.text_transform = from.text_transform,
         "text-indent" => to.text_indent = from.text_indent,
         "white-space" => to.white_space = from.white_space,
@@ -634,6 +979,105 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "visibility" => to.visibility = from.visibility,
         "z-index" => to.z_index = from.z_index,
         "cursor" => to.cursor_pointer = from.cursor_pointer,
+        "flex" => {
+            to.flex_grow = from.flex_grow;
+            to.flex_shrink = from.flex_shrink;
+            to.flex_basis = from.flex_basis;
+        }
+        "flex-grow" => to.flex_grow = from.flex_grow,
+        "flex-shrink" => to.flex_shrink = from.flex_shrink,
+        "flex-basis" => to.flex_basis = from.flex_basis,
+        "flex-wrap" => to.flex_wrap = from.flex_wrap,
+        "flex-flow" => {
+            to.flex_direction = from.flex_direction;
+            to.flex_wrap = from.flex_wrap;
+        }
+        "justify-content" => to.justify_content = from.justify_content,
+        "align-items" => to.align_items = from.align_items,
+        "align-self" => to.align_self = from.align_self,
+        "align-content" => to.align_content = from.align_content,
+        "justify-items" => to.justify_items = from.justify_items,
+        "justify-self" => to.justify_self = from.justify_self,
+        "order" => to.order = from.order,
+        "gap" | "grid-gap" => {
+            to.row_gap = from.row_gap;
+            to.column_gap = from.column_gap;
+        }
+        "row-gap" | "grid-row-gap" => to.row_gap = from.row_gap,
+        "column-gap" | "grid-column-gap" => to.column_gap = from.column_gap,
+        "grid-template-columns" => to.grid_template_columns = from.grid_template_columns.clone(),
+        "grid-template-rows" => to.grid_template_rows = from.grid_template_rows.clone(),
+        "grid-template-areas" => to.grid_template_areas = from.grid_template_areas.clone(),
+        "grid-template" | "grid" => {
+            to.grid_template_columns = from.grid_template_columns.clone();
+            to.grid_template_rows = from.grid_template_rows.clone();
+            to.grid_template_areas = from.grid_template_areas.clone();
+            to.grid_auto_flow = from.grid_auto_flow;
+            to.grid_auto_rows = from.grid_auto_rows.clone();
+            to.grid_auto_columns = from.grid_auto_columns.clone();
+        }
+        "grid-auto-columns" => to.grid_auto_columns = from.grid_auto_columns.clone(),
+        "grid-auto-rows" => to.grid_auto_rows = from.grid_auto_rows.clone(),
+        "grid-auto-flow" => to.grid_auto_flow = from.grid_auto_flow,
+        "grid-row" | "grid-area" | "grid-column" => {
+            to.grid_row_start = from.grid_row_start.clone();
+            to.grid_row_end = from.grid_row_end.clone();
+            to.grid_column_start = from.grid_column_start.clone();
+            to.grid_column_end = from.grid_column_end.clone();
+        }
+        "grid-row-start" => to.grid_row_start = from.grid_row_start.clone(),
+        "grid-row-end" => to.grid_row_end = from.grid_row_end.clone(),
+        "grid-column-start" => to.grid_column_start = from.grid_column_start.clone(),
+        "grid-column-end" => to.grid_column_end = from.grid_column_end.clone(),
+        "background-image" | "background-size" | "background-position" | "background-repeat" | "background-attachment"
+        | "background-origin" | "background-clip" => {
+            to.background_layers = from.background_layers.clone();
+            to.background_image = from.background_image.clone();
+        }
+        "border-top-left-radius" | "border-top-right-radius" | "border-bottom-right-radius" | "border-bottom-left-radius" => {
+            to.border_radii = from.border_radii;
+            to.border_radius = from.border_radius;
+        }
+        "box-shadow" => to.box_shadow = from.box_shadow.clone(),
+        "text-shadow" => to.text_shadow = from.text_shadow.clone(),
+        "transform" => to.transform = from.transform.clone(),
+        "transform-origin" => to.transform_origin = from.transform_origin,
+        "outline" | "outline-width" | "outline-style" | "outline-color" | "outline-offset" => {
+            to.outline_width = from.outline_width;
+            to.outline_style = from.outline_style;
+            to.outline_color = from.outline_color;
+            to.outline_offset = from.outline_offset;
+        }
+        "text-overflow" => to.text_overflow = from.text_overflow,
+        "word-break" => to.word_break = from.word_break,
+        "overflow-wrap" | "word-wrap" => to.overflow_wrap = from.overflow_wrap,
+        "text-decoration-color" => to.text_decoration_color = from.text_decoration_color,
+        "text-decoration-style" => to.text_decoration_style = from.text_decoration_style,
+        "text-decoration-thickness" => to.text_decoration_thickness = from.text_decoration_thickness,
+        "direction" => to.direction = from.direction,
+        "tab-size" => to.tab_size = from.tab_size,
+        "-webkit-line-clamp" | "line-clamp" => to.line_clamp = from.line_clamp,
+        "font-variant" | "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
+        "object-fit" => to.object_fit = from.object_fit,
+        "object-position" => to.object_position = from.object_position,
+        "aspect-ratio" => to.aspect_ratio = from.aspect_ratio,
+        "content" => to.content = from.content.clone(),
+        "counter-reset" | "counter-set" => to.counter_reset = from.counter_reset.clone(),
+        "counter-increment" => to.counter_increment = from.counter_increment.clone(),
+        "quotes" => to.quotes = from.quotes.clone(),
+        "pointer-events" => to.pointer_events = from.pointer_events,
+        "user-select" => to.user_select = from.user_select,
+        "resize" => to.resize = from.resize,
+        "appearance" | "-webkit-appearance" => to.appearance = from.appearance,
+        "transition" | "transition-property" | "transition-duration" | "transition-delay" | "transition-timing-function" => {
+            to.transitions = from.transitions.clone()
+        }
+        "animation" | "animation-name" | "animation-duration" | "animation-delay" | "animation-timing-function"
+        | "animation-iteration-count" | "animation-direction" | "animation-fill-mode" => to.animations = from.animations.clone(),
+        "border-collapse" => to.border_collapse = from.border_collapse,
+        "border-spacing" => to.border_spacing = from.border_spacing,
+        "scroll-margin-top" => to.scroll_margin_top = from.scroll_margin_top,
+        "filter" | "isolation" | "will-change" | "contain" | "mix-blend-mode" => to.creates_stacking_context = from.creates_stacking_context,
         _ => {}
     }
 }
@@ -789,7 +1233,7 @@ fn display_of(comps: &[&[Token]]) -> Option<Display> {
     })
 }
 
-fn family_of(comps: &[&[Token]]) -> Option<Family> {
+pub(crate) fn family_of(comps: &[&[Token]]) -> Option<Family> {
     let lists = values::split_commas(comps);
     for fam in lists {
         let mut name = String::new();
@@ -881,6 +1325,7 @@ fn line_height_of(c: &[Token], font_size: f32, ctx: &LengthContext) -> Option<Op
 
 struct FontShorthand {
     style: Option<FontStyle>,
+    small_caps: bool,
     weight: Option<Vec<Token>>,
     size: Option<Vec<Token>>,
     line_height: Option<Vec<Token>>,
@@ -899,7 +1344,7 @@ fn is_size_component(c: &[Token]) -> bool {
 
 fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
     let comps = values::components(value);
-    let mut out = FontShorthand { style: None, weight: None, size: None, line_height: None, family: Vec::new() };
+    let mut out = FontShorthand { style: None, small_caps: false, weight: None, size: None, line_height: None, family: Vec::new() };
     let mut i = 0;
     while i < comps.len() {
         let c = comps[i];
@@ -911,7 +1356,7 @@ fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
                 "italic" | "oblique" => out.style = Some(FontStyle::Italic),
                 "normal" => {}
                 "bold" | "bolder" | "lighter" => out.weight = Some(c.to_vec()),
-                "small-caps" => {}
+                "small-caps" => out.small_caps = true,
                 "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar" => return None,
                 _ => return None,
             }
@@ -944,7 +1389,7 @@ fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
     Some(out)
 }
 
-fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &LengthContext) {
+fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) {
     // Logical property aliases.
     let name = match name {
         "margin-inline-start" => "margin-left",
@@ -978,7 +1423,6 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         "border-start-start-radius" | "border-start-end-radius" | "border-end-start-radius" | "border-end-end-radius" => {
             "border-top-left-radius"
         }
-        "text-decoration-line" => "text-decoration",
         n => n,
     };
 
@@ -1072,9 +1516,14 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             let l = if let Some(kw) = values::ident(c0) {
                 match kw.as_str() {
                     "auto" => Length::Auto,
-                    "max-content" | "min-content" | "fit-content" | "-webkit-fill-available" | "fill-available" | "stretch" => Length::Auto,
+                    "max-content" | "-webkit-max-content" | "-moz-max-content" => Length::MaxContent,
+                    "min-content" | "-webkit-min-content" | "-moz-min-content" => Length::MinContent,
+                    "fit-content" | "-webkit-fit-content" | "-moz-fit-content" => Length::FitContent,
+                    "-webkit-fill-available" | "-moz-available" | "fill-available" | "stretch" => Length::Auto,
                     _ => return,
                 }
+            } else if props::fn_name(c0).as_deref() == Some("fit-content") {
+                Length::FitContent
             } else {
                 match resolve_len(c0, ctx) {
                     Some(l) => l,
@@ -1094,9 +1543,14 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
             let l = if let Some(kw) = values::ident(c0) {
                 match kw.as_str() {
-                    "none" | "max-content" | "min-content" | "fit-content" | "-webkit-fill-available" | "stretch" => Length::Auto,
+                    "none" | "-webkit-fill-available" | "-moz-available" | "stretch" => Length::Auto,
+                    "max-content" | "-webkit-max-content" | "-moz-max-content" => Length::MaxContent,
+                    "min-content" | "-webkit-min-content" | "-moz-min-content" => Length::MinContent,
+                    "fit-content" | "-webkit-fit-content" | "-moz-fit-content" => Length::FitContent,
                     _ => return,
                 }
+            } else if props::fn_name(c0).as_deref() == Some("fit-content") {
+                Length::FitContent
             } else {
                 match resolve_len_no_auto(c0, ctx) {
                     Some(l) => l,
@@ -1228,20 +1682,6 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 set_side(&mut style.border_color, side_index(name), c);
             }
         }
-        "border-radius" => {
-            // First value before any '/'
-            if let Some(Length::Px(v)) = resolve_len_no_auto(c0, ctx) {
-                style.border_radius = v.max(0.0);
-            } else if let Some(Length::Percent(p)) = resolve_len_no_auto(c0, ctx) {
-                // Percent radii: approximate against a typical control height.
-                style.border_radius = (p / 100.0 * ctx.font_size * 2.0).max(0.0);
-            }
-        }
-        "border-top-left-radius" | "border-top-right-radius" | "border-bottom-left-radius" | "border-bottom-right-radius" => {
-            if let Some(Length::Px(v)) = resolve_len_no_auto(c0, ctx) {
-                style.border_radius = style.border_radius.max(v);
-            }
-        }
         "box-sizing" => {
             if let Some(kw) = values::ident(c0) {
                 style.box_sizing = match kw.as_str() {
@@ -1277,27 +1717,6 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 }
             }
         }
-        "background" => {
-            // Layers separated by commas; color may appear in any layer
-            // (spec: only the last), url in any layer (we keep the first).
-            let mut color = None;
-            let mut image: Option<Option<String>> = None;
-            for layer in values::split_commas(&comps) {
-                for c in layer {
-                    if let Some(col) = color_of(c, style) {
-                        color = Some(col);
-                    } else if let Some(u) = url_of(c) {
-                        if image.is_none() {
-                            image = Some(Some(u));
-                        }
-                    } else if values::is_ident(c, "none") && image.is_none() {
-                        image = Some(None);
-                    }
-                }
-            }
-            style.background_color = color.unwrap_or(Color::TRANSPARENT);
-            style.background_image = image.unwrap_or(None);
-        }
         "background-color" => {
             if comps.len() == 1 {
                 if let Some(c) = color_of(c0, style) {
@@ -1305,26 +1724,11 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 }
             }
         }
-        "background-image" => {
-            if values::is_ident(c0, "none") {
-                style.background_image = None;
-            } else if let Some(u) = comps.iter().find_map(|c| url_of(c)) {
-                style.background_image = Some(u);
-            } else {
-                // gradients etc.: no image
-                style.background_image = None;
-            }
-        }
         "opacity" => {
             if let Some(n) = values::number(c0) {
                 style.opacity = n.clamp(0.0, 1.0);
             } else if let [Token::Percentage(p)] = c0 {
                 style.opacity = (p / 100.0).clamp(0.0, 1.0);
-            }
-        }
-        "font-family" => {
-            if let Some(f) = family_of(&comps) {
-                style.font_family = f;
             }
         }
         "font-weight" => {
@@ -1358,7 +1762,9 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     if let Some(fam) = family_of(&fam_comps) {
                         style.font_family = fam;
                     }
+                    style.font_family_list = props::text::family_names(&fam_comps);
                 }
+                style.font_variant_small_caps = f.small_caps;
             }
         }
         "line-height" => {
@@ -1392,38 +1798,6 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     "justify" | "justify-all" => TextAlign::Justify,
                     _ => return,
                 };
-            }
-        }
-        "text-decoration" => {
-            let mut dec = TextDecoration::default();
-            let mut any = false;
-            for c in &comps {
-                if let Some(kw) = values::ident(c) {
-                    match kw.as_str() {
-                        "underline" => {
-                            dec.underline = true;
-                            any = true;
-                        }
-                        "overline" => {
-                            dec.overline = true;
-                            any = true;
-                        }
-                        "line-through" => {
-                            dec.line_through = true;
-                            any = true;
-                        }
-                        "none" => any = true,
-                        "blink" | "solid" | "double" | "dotted" | "dashed" | "wavy" | "inherit" => {}
-                        _ => {
-                            if values::parse_color_component(c).is_none() {
-                                // unknown ident
-                            }
-                        }
-                    }
-                }
-            }
-            if any {
-                style.text_decoration = dec;
             }
         }
         "text-transform" => {
@@ -1575,7 +1949,9 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                 style.cursor_pointer = kw == "pointer";
             }
         }
-        _ => {}
+        _ => {
+            props::apply(name, &comps, value, style, parent, ctx);
+        }
     }
 }
 
@@ -1590,7 +1966,7 @@ fn two_values<T: Copy>(comps: &[&[Token]], f: impl Fn(&[Token]) -> Option<T>) ->
     }
 }
 
-fn url_of(c: &[Token]) -> Option<String> {
+pub(crate) fn url_of(c: &[Token]) -> Option<String> {
     match c {
         [Token::Url(u)] => Some(u.clone()),
         [Token::Function(f), rest @ ..] if f.eq_ignore_ascii_case("url") => rest.iter().find_map(|t| match t {
@@ -1612,7 +1988,7 @@ fn overflow_of(c: &[Token]) -> Option<Overflow> {
     })
 }
 
-fn list_style_type(kw: &str) -> Option<ListStyleType> {
+pub(crate) fn list_style_type(kw: &str) -> Option<ListStyleType> {
     Some(match kw {
         "none" => ListStyleType::None,
         "disc" => ListStyleType::Disc,
@@ -1653,6 +2029,7 @@ fn set_side<T: Copy>(e: &mut Edges<T>, side: usize, v: T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style_tree;
     use rabbithole_css::parse_stylesheet;
 
     fn env() -> MediaEnv {

@@ -1,0 +1,14 @@
+[package]
+name = "rabbithole-svg"
+description = "RabbitHole browser engine: a from-scratch SVG renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rabbithole-dom.workspace = true
+rabbithole-html.workspace = true
+rabbithole-css.workspace = true
+rabbithole-gfx.workspace = true

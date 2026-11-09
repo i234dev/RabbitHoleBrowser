@@ -24,7 +24,7 @@ blockquote, figure, dl, listing, plaintext, pre, xmp, ol, ul, menu, dir,
 h4, p { margin: 1em 0; }
 blockquote, figure { margin: 1em 40px; }
 address { font-style: italic; }
-listing, plaintext, pre, xmp { font-family: monospace; white-space: pre; }
+listing, plaintext, pre, xmp { font-family: monospace; white-space: pre; tab-size: 8; }
 dd { margin-left: 40px; }
 ol, ul, menu, dir { padding-left: 40px; }
 ol { list-style-type: decimal; }
@@ -66,9 +66,16 @@ br { display: inline; }
 
 a:any-link { color: #0000ee; text-decoration: underline; cursor: pointer; }
 a:any-link img { border-color: #0000ee; }
+q::before { content: open-quote; }
+q::after { content: close-quote; }
+abbr[title] { text-decoration: underline dotted; }
+blink { text-decoration: none; }
+[dir=rtl i] { direction: rtl; }
+[dir=ltr i] { direction: ltr; }
+bdo[dir=rtl i] { direction: rtl; }
 
 /* ---- tables ---- */
-table { display: table; box-sizing: border-box; text-indent: 0; }
+table { display: table; box-sizing: border-box; text-indent: 0; border-spacing: 2px; border-collapse: separate; }
 caption { display: table-caption; text-align: center; }
 colgroup, colgroup[hidden] { display: table-column-group; }
 col, col[hidden] { display: table-column; }
@@ -86,22 +93,33 @@ input, select, button, textarea, meter, progress {
   display: inline-block; font-family: sans-serif; font-size: 13.333px; font-style: normal;
   font-weight: normal; line-height: normal; letter-spacing: normal; word-spacing: normal;
   text-transform: none; text-indent: 0; text-align: left; text-decoration: none; color: initial;
-  white-space: nowrap; box-sizing: border-box; vertical-align: middle;
+  white-space: nowrap; box-sizing: border-box; vertical-align: middle; appearance: auto;
+  user-select: none; overflow: hidden; text-overflow: clip;
 }
-input, textarea, select { border: 1px solid #767676; padding: 1px 2px; background-color: white; }
-input { width: 20ch; height: 1.6em; }
-input[type=checkbox i], input[type=radio i] { width: 13px; height: 13px; padding: 0; margin: 3px 3px 3px 4px; }
-input[type=submit i], input[type=button i], input[type=reset i], button {
+input, textarea, select { border: 1px solid #767676; padding: 1px 2px; background-color: white; border-radius: 2px; }
+input { width: 20ch; height: 1.6em; user-select: text; }
+input[type=checkbox i], input[type=radio i] { width: 13px; height: 13px; padding: 0; margin: 3px 3px 3px 4px; border-radius: 2px; background-color: white; }
+input[type=radio i] { border-radius: 50%; }
+input[type=submit i], input[type=button i], input[type=reset i], button, input[type=file i]::file-selector-button {
   border: 1px solid #767676; background-color: #efefef; padding: 1px 6px; width: auto; height: auto;
-  text-align: center; cursor: pointer; border-radius: 2px;
+  text-align: center; cursor: pointer; border-radius: 2px; user-select: none;
 }
+button { white-space: normal; }
 input[type=range i], input[type=color i] { width: 129px; height: 1.6em; }
+input[type=file i] { width: auto; }
+input[type=image i] { border: none; padding: 0; background-color: transparent; width: auto; height: auto; }
 select { padding: 1px 4px; width: auto; min-width: 8ch; border-radius: 2px; }
-textarea { width: 20ch; height: 2.6em; white-space: pre-wrap; }
+textarea { width: 20ch; height: 2.6em; white-space: pre-wrap; user-select: text; resize: both; overflow: auto; }
 input::placeholder, textarea::placeholder { color: #757575; }
+input:disabled, textarea:disabled, select:disabled, button:disabled { color: #8a8a8a; background-color: #f5f5f5; cursor: default; }
+:focus-visible { outline: 2px solid #005fcc; outline-offset: 1px; }
+input:focus, textarea:focus, select:focus { outline: 2px solid #005fcc; outline-offset: -1px; }
 label { cursor: default; }
 optgroup, option { display: block; }
 select option { display: none; }
+progress { appearance: auto; }
+progress::-webkit-progress-bar { background-color: #e6e6e6; }
+meter { appearance: auto; }
 
 /* ---- embedded content ---- */
 img, video, audio, canvas, embed, object, iframe, svg, math, picture, source { display: inline-block; }
@@ -115,8 +133,15 @@ audio[controls] { display: inline-block; width: 300px; height: 54px; background-
 /* ---- misc ---- */
 details > summary:first-of-type { display: list-item; list-style-type: none; }
 details:not([open]) > :not(summary) { display: none; }
-progress, meter { width: 10em; height: 1em; border: 1px solid #767676; background-color: #e6e6e6; }
-marquee { display: block; overflow: hidden; }
+progress, meter { width: 10em; height: 1em; border: 1px solid #767676; background-color: #e6e6e6; border-radius: 3px; display: inline-block; }
+marquee { display: block; overflow: hidden; white-space: nowrap; }
+dialog[open] { display: block; position: absolute; left: 0; right: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 1em; background-color: white; color: black; }
+details > summary::marker { content: "\25B8 "; }
+details[open] > summary::marker { content: "\25BE "; }
+::marker { unicode-bidi: isolate; font-variant-numeric: tabular-nums; white-space: pre; }
+hr[color], hr[noshade] { border-style: solid; }
+textarea[cols] { width: auto; }
+textarea[rows] { height: auto; }
 ruby { display: inline; }
 rt { display: inline; font-size: 50%; }
 noscript { display: inline; }

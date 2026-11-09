@@ -59,7 +59,13 @@ fn is_collapsible_ws(c: char) -> bool {
 }
 
 /// Split `text` into segments according to `white-space`.
+#[cfg(test)]
 pub(crate) fn segment(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut Vec<Seg>) {
+    segment_tabs(text, ws, st, out, 8)
+}
+
+/// Like [`segment`], with the `tab-size` (in spaces) for preserved tabs.
+pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut Vec<Seg>, tab_size: usize) {
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut Vec<Seg>| {
         if !word.is_empty() {
@@ -90,7 +96,7 @@ pub(crate) fn segment(text: &str, ws: WhiteSpace, st: &mut Collapser, out: &mut 
             }
             '\t' if preserve_spaces => {
                 flush(&mut word, out);
-                out.push(Seg::Word("        ".into()));
+                out.push(Seg::Word(" ".repeat(tab_size.max(1))));
                 st.prev_space = false;
             }
             c if preserve_spaces && c == ' ' => {

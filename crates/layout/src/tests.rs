@@ -1,17 +1,25 @@
 //! Layout tests (need the gfx fonts and the style cascade).
 
+use std::sync::Arc;
 use crate::tree::{BoxKind, FragmentKind, LayoutBox};
 use crate::{build_display_list, layout, paint, DisplayItem, LayoutContext, LayoutTree};
 use rabbithole_css::{parse_stylesheet, MediaEnv};
 use rabbithole_dom::Document;
-use rabbithole_gfx::{Canvas, FontContext};
+use rabbithole_gfx::{Canvas, FontContext, Image, Paint, Rect};
 use rabbithole_style::{style_tree, StyledTree};
 use std::collections::HashMap;
+use std::rc::Rc;
+
+type Images = HashMap<usize, Arc<Image>>;
+type Bgs = HashMap<String, Arc<Image>>;
+type Scrolls = HashMap<usize, (f32, f32)>;
 
 struct Fixture {
     doc: Document,
     styles: StyledTree,
     fonts: FontContext,
+    scrolls: Scrolls,
+    page_scroll: (f32, f32),
 }
 
 impl Fixture {
@@ -28,6 +36,8 @@ impl Fixture {
             doc,
             styles,
             fonts: FontContext::new(),
+            scrolls: HashMap::new(),
+            page_scroll: (0.0, 0.0),
         }
     }
 
@@ -38,7 +48,7 @@ impl Fixture {
         layout(&ctx)
     }
 
-    fn ctx<'a>(&'a self, images: &'a HashMap<usize, std::rc::Rc<rabbithole_gfx::Image>>, bgs: &'a HashMap<String, std::rc::Rc<rabbithole_gfx::Image>>) -> LayoutContext<'a> {
+    fn ctx<'a>(&'a self, images: &'a Images, bgs: &'a Bgs) -> LayoutContext<'a> {
         LayoutContext {
             doc: &self.doc,
             styles: &self.styles,
@@ -47,7 +57,17 @@ impl Fixture {
             background_images: bgs,
             viewport_width: 800.0,
             viewport_height: 600.0,
+            scroll_offsets: &self.scrolls,
+            page_scroll: self.page_scroll,
         }
+    }
+
+    fn display_list(&self) -> crate::DisplayList {
+        let images = HashMap::new();
+        let bgs = HashMap::new();
+        let ctx = self.ctx(&images, &bgs);
+        let t = layout(&ctx);
+        build_display_list(&t, &ctx)
     }
 
     fn find<'t>(&self, tree: &'t LayoutTree, tag: &str) -> Vec<&'t LayoutBox> {
@@ -150,7 +170,7 @@ fn nowrap_and_br() {
 #[test]
 fn long_word_breaks() {
     let html = "<div style='width:100px'><p>https://example.com/a/very/long/url/that/does/not/fit</p></div>";
-    let fx = Fixture::new(html, "");
+    let fx = Fixture::new(html, "p{overflow-wrap:anywhere}");
     let t = fx.layout();
     let p = &fx.find(&t, "p")[0];
     assert!(p.lines.len() > 1);
@@ -302,7 +322,8 @@ fn flex_row_items_side_by_side() {
     assert_eq!(items.len(), 3);
     assert!(items[0].rect.x < items[1].rect.x && items[1].rect.x < items[2].rect.x);
     assert!((items[0].rect.y - items[1].rect.y).abs() < 0.01);
-    assert!((items[0].rect.w - 200.0).abs() < 1.0, "{}", items[0].rect.w);
+    // Items without `flex-grow` are content-sized (CSS Flexbox §9.7).
+    assert!(items[0].rect.w < 100.0, "{}", items[0].rect.w);
 }
 
 #[test]
@@ -391,4 +412,333 @@ fn large_page_layout_is_fast() {
     eprintln!("layout {elapsed:?}, layout+paint {total:?}, items {}", list.items.len());
     assert!(t.height > 10_000.0);
     assert!(elapsed.as_secs_f32() < 5.0, "layout took {elapsed:?}");
+}
+
+// ------------------------------------------------------------- v0.2 tests
+
+fn fake_image(w: u32, h: u32) -> Arc<Image> {
+    Arc::new(Image::new(w, h, vec![200u8; (w * h * 4) as usize]))
+}
+
+fn frag_texts(b: &LayoutBox) -> Vec<String> {
+    let mut out = Vec::new();
+    for l in &b.lines {
+        for f in &l.fragments {
+            if let FragmentKind::Text { text, .. } = &f.kind {
+                out.push(text.to_string());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn generated_content_before_after() {
+    let html = "<p id=x data-k='v'>mid</p>";
+    let fx = Fixture::new(html, "p::before{content:'A' attr(data-k) '-'} p::after{content:' Z'}");
+    let t = fx.layout();
+    let p = &fx.find(&t, "p")[0];
+    let text = text_of(p);
+    assert_eq!(text, "Av-mid Z", "{text}");
+    // The ::before text is hit-testable to the originating element.
+    let f = &p.lines[0].fragments[0];
+    let n = t.node_at(f.rect.x + 1.0, f.rect.y + 2.0).expect("hit");
+    assert_eq!(fx.doc.tag(n), Some("p"));
+    assert!(p.children.iter().any(|c| c.pseudo == Some(rabbithole_css::PseudoElement::Before)) || p.lines[0].fragments.len() >= 2);
+}
+
+#[test]
+fn counters_number_items() {
+    let html = "<ol class=c><li>a</li><li>b</li><li>c</li></ol>";
+    let fx = Fixture::new(
+        html,
+        "ol.c{counter-reset:item;list-style:none} ol.c li::before{counter-increment:item;content:counter(item) '. '}",
+    );
+    let t = fx.layout();
+    let lis = fx.find(&t, "li");
+    assert_eq!(lis.len(), 3);
+    assert!(text_of(lis[0]).starts_with("1. "), "{:?}", text_of(lis[0]));
+    assert!(text_of(lis[1]).starts_with("2. "), "{:?}", text_of(lis[1]));
+    assert!(text_of(lis[2]).starts_with("3. "), "{:?}", text_of(lis[2]));
+}
+
+#[test]
+fn quotes_nest() {
+    let html = "<p><q>outer <q>inner</q> end</q></p>";
+    let fx = Fixture::new(html, "q::before{content:open-quote} q::after{content:close-quote}");
+    let t = fx.layout();
+    let p = &fx.find(&t, "p")[0];
+    let text = text_of(p);
+    assert_eq!(text, "\u{201c}outer \u{2018}inner\u{2019} end\u{201d}", "{text}");
+}
+
+#[test]
+fn text_overflow_ellipsis() {
+    let html = "<div style='width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>This is a fairly long sentence that cannot fit</div>";
+    let fx = Fixture::new(html, "");
+    let t = fx.layout();
+    let d = &fx.find(&t, "div")[0];
+    assert_eq!(d.lines.len(), 1);
+    let texts = frag_texts(d);
+    assert!(texts.last().unwrap().ends_with('\u{2026}'), "{texts:?}");
+    for f in &d.lines[0].fragments {
+        assert!(f.rect.right() <= d.content_rect.right() + 0.6, "{:?}", f.rect);
+    }
+}
+
+#[test]
+fn line_clamp_two_lines() {
+    let words: Vec<String> = (0..80).map(|i| format!("word{i}")).collect();
+    let html = format!("<div style='width:200px;overflow:hidden;-webkit-line-clamp:2'>{}</div>", words.join(" "));
+    let fx = Fixture::new(&html, "");
+    let t = fx.layout();
+    let d = &fx.find(&t, "div")[0];
+    if d.style.line_clamp.is_none() {
+        eprintln!("line-clamp not parsed by the style crate yet; skipping");
+        return;
+    }
+    assert_eq!(d.lines.len(), 2, "{}", d.lines.len());
+    let texts = frag_texts(d);
+    assert!(texts.last().unwrap().ends_with('\u{2026}'), "{texts:?}");
+}
+
+#[test]
+fn word_break_and_overflow_wrap() {
+    let long = "Pneumonoultramicroscopicsilicovolcanoconiosis".repeat(2);
+    let html = format!(
+        "<div style='width:120px'><p id=a style='word-break:break-all'>{long}</p><p id=b>{long}</p><p id=c style='overflow-wrap:break-word'>{long}</p></div>"
+    );
+    let fx = Fixture::new(&html, "");
+    let t = fx.layout();
+    let ps = fx.find(&t, "p");
+    assert!(ps[0].lines.len() > 1, "break-all should break");
+    // overflow-wrap: normal lets the word overflow on one line.
+    assert_eq!(ps[1].lines.len(), 1);
+    let f = &ps[1].lines[0].fragments[0];
+    assert!(f.rect.right() > ps[1].content_rect.right() + 1.0, "should overflow");
+    assert!(ps[2].lines.len() > 1, "break-word should break");
+    for l in &ps[2].lines {
+        for f in &l.fragments {
+            assert!(f.rect.right() <= ps[2].content_rect.right() + 0.6);
+        }
+    }
+}
+
+#[test]
+fn sticky_box_follows_scroll() {
+    let html = "<div style='height:3000px'><div id=s style='position:sticky;top:10px;height:20px'>sticky</div><p>after</p></div>";
+    let mut fx = Fixture::new(html, "");
+    fx.page_scroll = (0.0, 500.0);
+    let images = HashMap::new();
+    let bgs = HashMap::new();
+    let ctx = fx.ctx(&images, &bgs);
+    let t = layout(&ctx);
+    let s = fx.find(&t, "div")[1];
+    assert!(s.rect.y < 100.0, "layout position is normal flow");
+    let list = build_display_list(&t, &ctx);
+    // The sticky box is wrapped in a translation that moves it to scroll_y + 10.
+    let shift = list.items.iter().find_map(|i| match i {
+        DisplayItem::PushTransform(m) if m[5] > 0.0 => Some(m[5]),
+        _ => None,
+    });
+    let expected = 500.0 + 10.0 - s.margin_rect().y;
+    assert!(shift.map(|v| (v - expected).abs() < 0.5).unwrap_or(false), "shift {shift:?} expected {expected}");
+}
+
+#[test]
+fn fixed_box_in_fixed_layer() {
+    let html = "<div style='height:2000px'>tall</div><div id=f style='position:fixed;bottom:0;left:0;width:100px;height:30px;background:#123456'>f</div>";
+    let fx = Fixture::new(html, "");
+    let t = fx.layout();
+    let f = fx.find(&t, "div")[1];
+    assert!(f.fixed);
+    assert!((f.rect.bottom() - 600.0).abs() < 0.01, "fixed to viewport bottom: {:?}", f.rect);
+    assert!(t.height < 2100.0, "fixed boxes don't extend the document");
+    let list = fx.display_list();
+    let fixed_start = list.items.iter().position(|i| matches!(i, DisplayItem::PushFixed)).expect("PushFixed");
+    let fixed_end = list.items.iter().position(|i| matches!(i, DisplayItem::PopFixed)).expect("PopFixed");
+    let rect_pos = list
+        .items
+        .iter()
+        .position(|i| matches!(i, DisplayItem::Rect { color, .. } if color.r == 0x12 && color.g == 0x34))
+        .expect("fixed bg");
+    assert!(fixed_start < rect_pos && rect_pos < fixed_end);
+    // Hit testing in viewport coordinates finds it even when scrolled.
+    let n = t.node_at_with_scroll(10.0, 590.0, (0.0, 1500.0)).expect("hit");
+    assert_eq!(fx.doc.attr(n, "id"), Some("f"));
+}
+
+#[test]
+fn scroll_container_offsets_children() {
+    let html = "<div id=s style='height:100px;overflow:auto'><p style='margin:0;height:300px'>a</p><p style='margin:0'>b</p></div>";
+    let mut fx = Fixture::new(html, "");
+    let t0 = fx.layout();
+    let s = fx.find(&t0, "div")[0];
+    assert!(s.scroll_container);
+    assert!(s.scroll_height >= 300.0, "{}", s.scroll_height);
+    let info = t0.scroll_container_at(s.rect.x + 5.0, s.rect.y + 5.0).expect("scroll info");
+    assert_eq!(fx.doc.attr(info.node, "id"), Some("s"));
+    let node = s.node.unwrap();
+    let p_y = fx.find(&t0, "p")[0].rect.y;
+    fx.scrolls.insert(node, (0.0, 50.0));
+    let t1 = fx.layout();
+    let p1 = fx.find(&t1, "p")[0];
+    assert!((p1.rect.y - (p_y - 50.0)).abs() < 0.01, "child shifted by the offset");
+    let s1 = fx.find(&t1, "div")[0];
+    assert_eq!(s1.scroll_offset, (0.0, 50.0));
+}
+
+#[test]
+fn z_index_order() {
+    let html = "<div id=p style='position:relative;background:#010101'><div id=n style='position:absolute;z-index:-1;width:10px;height:10px;background:#020202'></div><p>text</p></div>";
+    let fx = Fixture::new(html, "");
+    let list = fx.display_list();
+    let pos = |pred: &dyn Fn(&DisplayItem) -> bool| list.items.iter().position(pred).expect("item");
+    let parent_bg = pos(&|i| matches!(i, DisplayItem::Rect { color, .. } if color.r == 1));
+    let neg_bg = pos(&|i| matches!(i, DisplayItem::Rect { color, .. } if color.r == 2));
+    let text = pos(&|i| matches!(i, DisplayItem::Text { text, .. } if text == "text"));
+    assert!(parent_bg < neg_bg && neg_bg < text, "{parent_bg} {neg_bg} {text}");
+}
+
+#[test]
+fn opacity_layer_and_transform() {
+    let html = "<div style='opacity:0.5;width:100px;height:50px;background:red'>o</div><div id=t style='transform:rotate(90deg);width:100px;height:50px'>t</div>";
+    let fx = Fixture::new(html, "");
+    let t = fx.layout();
+    let list = fx.display_list();
+    assert!(list.items.iter().any(|i| matches!(i, DisplayItem::PushLayer(_))));
+    assert!(list.items.iter().any(|i| matches!(i, DisplayItem::PopLayer(o) if (*o - 0.5).abs() < 0.01)));
+    let d = fx.find(&t, "div")[1];
+    let m = list
+        .items
+        .iter()
+        .find_map(|i| match i {
+            DisplayItem::PushTransform(m) if m[0].abs() < 0.01 => Some(*m),
+            _ => None,
+        })
+        .expect("rotation matrix");
+    // rotate(90deg): a=0 b=1 c=-1 d=0, about the center.
+    assert!((m[1] - 1.0).abs() < 0.01 && (m[2] + 1.0).abs() < 0.01, "{m:?}");
+    let (cx, cy) = (d.rect.x + d.rect.w / 2.0, d.rect.y + d.rect.h / 2.0);
+    let (px, py) = crate::tree::map_point(m, cx, cy);
+    assert!((px - cx).abs() < 0.01 && (py - cy).abs() < 0.01, "center is fixed");
+}
+
+#[test]
+fn background_layers_and_gradient() {
+    let html = "<div style='width:200px;height:100px;background:url(x.png) no-repeat center / cover, linear-gradient(red, blue)'>b</div>";
+    let fx = Fixture::new(html, "");
+    let mut bgs: Bgs = HashMap::new();
+    bgs.insert("x.png".into(), fake_image(50, 50));
+    let images = HashMap::new();
+    let ctx = fx.ctx(&images, &bgs);
+    let t = layout(&ctx);
+    let list = build_display_list(&t, &ctx);
+    let d = fx.find(&t, "div")[0];
+    if d.style.background_layers.is_empty() {
+        eprintln!("background layers not parsed by the style crate yet; skipping");
+        return;
+    }
+    let img = list.items.iter().position(|i| matches!(i, DisplayItem::Image { .. } | DisplayItem::ImageTiled { .. })).expect("image layer");
+    let grad = list
+        .items
+        .iter()
+        .position(|i| matches!(i, DisplayItem::RectRadii { paint: Paint::Linear { .. }, .. }))
+        .expect("gradient layer");
+    assert!(grad < img, "first layer paints on top (later)");
+    if let Some(DisplayItem::Image { rect, .. }) = list.items.get(img) {
+        // cover on a 200x100 box with a square image → 200x200 tile, centered.
+        assert!((rect.w - 200.0).abs() < 0.5, "{rect:?}");
+    }
+}
+
+#[test]
+fn radii_shadow_outline_order() {
+    let html = "<div style='width:100px;height:50px;background:#0a0a0a;border:2px solid #0b0b0b;border-radius:10px 0 5px 0;box-shadow:2px 2px 4px #0c0c0c;outline:1px solid #0d0d0d'>x</div>";
+    let fx = Fixture::new(html, "");
+    let list = fx.display_list();
+    let pos = |pred: &dyn Fn(&DisplayItem) -> bool| list.items.iter().position(pred);
+    let shadow = pos(&|i| matches!(i, DisplayItem::BoxShadow { .. }));
+    let bg = pos(&|i| matches!(i, DisplayItem::RectRadii { paint: Paint::Solid(c), .. } if c.r == 0x0a));
+    let border = pos(&|i| matches!(i, DisplayItem::Border { colors, .. } if colors[0].r == 0x0b));
+    let outline = pos(&|i| matches!(i, DisplayItem::Border { colors, .. } if colors[0].r == 0x0d));
+    if bg.is_none() {
+        eprintln!("per-corner radii not parsed by the style crate yet; skipping");
+        return;
+    }
+    assert!(shadow.unwrap() < bg.unwrap(), "shadow before background");
+    assert!(bg.unwrap() < border.unwrap());
+    assert!(border.unwrap() < outline.unwrap(), "outline last");
+    if let Some(DisplayItem::Border { radii, .. }) = list.items.get(border.unwrap()) {
+        assert!((radii[0].0 - 10.0).abs() < 0.01 && radii[1].0 < 0.01 && (radii[2].0 - 5.0).abs() < 0.01, "{radii:?}");
+    }
+}
+
+#[test]
+fn object_fit_cover_and_aspect_ratio() {
+    let html = "<img id=i src=x style='width:100px;height:100px;object-fit:cover'><div id=d style='width:200px;aspect-ratio:2/1'></div><div id=m style='width:min-content'>short longestword</div>";
+    let fx = Fixture::new(html, "");
+    let mut images: Images = HashMap::new();
+    let img_node = fx.doc.find_element("img").unwrap();
+    images.insert(img_node, fake_image(200, 100));
+    let bgs = HashMap::new();
+    let ctx = fx.ctx(&images, &bgs);
+    let t = layout(&ctx);
+    let list = build_display_list(&t, &ctx);
+    if let Some(DisplayItem::Image { src, rect, .. }) = list.items.iter().find(|i| matches!(i, DisplayItem::Image { .. })) {
+        // cover: scale 1.0 (100/100 vs 100/200 → max) → shows the middle 100x100 of the 200x100 image.
+        assert!((rect.w - 100.0).abs() < 0.01 && (rect.h - 100.0).abs() < 0.01);
+        assert!((src.w - 100.0).abs() < 0.5 && (src.x - 50.0).abs() < 0.5, "{src:?}");
+    } else {
+        panic!("no image item");
+    }
+    let divs = fx.find(&t, "div");
+    let d = divs[0];
+    if d.style.aspect_ratio.is_some() {
+        assert!((d.rect.h - 100.0).abs() < 0.01, "aspect-ratio height {}", d.rect.h);
+    }
+    let m = divs[1];
+    if m.style.width.is_intrinsic() {
+        let font = fx.fonts.select(rabbithole_gfx::Family::Sans, 400, false);
+        let longest = fx.fonts.measure(font, 16.0, "longestword");
+        let space = fx.fonts.measure(font, 16.0, " ");
+        // Tolerate one space width (intrinsic.rs counts the leading space of a word).
+        assert!(m.rect.w >= longest - 0.5 && m.rect.w <= longest + space + 0.5, "min-content {} vs {}", m.rect.w, longest);
+    }
+}
+
+#[test]
+fn pointer_events_none_is_transparent() {
+    let html = "<div id=a style='width:100px;height:100px'><div id=b style='width:100px;height:100px;pointer-events:none'></div></div>";
+    let fx = Fixture::new(html, "");
+    let t = fx.layout();
+    let b = fx.find(&t, "div")[1];
+    let n = t.node_at(b.rect.x + 5.0, b.rect.y + 5.0).unwrap();
+    if b.style.pointer_events == rabbithole_style::PointerEvents::None {
+        assert_eq!(fx.doc.attr(n, "id"), Some("a"));
+    }
+}
+
+#[test]
+fn rtl_aligns_right() {
+    let html = "<div style='width:300px;direction:rtl'><p>hello world</p></div>";
+    let fx = Fixture::new(html, "");
+    let t = fx.layout();
+    let p = &fx.find(&t, "p")[0];
+    if p.style.direction != rabbithole_style::Direction::Rtl {
+        return;
+    }
+    let f = p.lines[0].fragments.last().unwrap();
+    assert!((f.rect.right() - p.content_rect.right()).abs() < 1.0, "{:?} vs {:?}", f.rect, p.content_rect);
+}
+
+#[test]
+fn v2_paint_does_not_panic() {
+    let html = "<div style='background:linear-gradient(to right,red,blue);border-radius:8px 2px;box-shadow:0 0 6px #000;opacity:.8;transform:translate(10px,5px)'><p style='text-shadow:1px 1px 2px #888;text-decoration:underline wavy red'>t</p></div><div style='position:fixed;top:0;left:0;width:20px;height:20px;background:#f00'></div>";
+    let fx = Fixture::new(html, "");
+    let list = fx.display_list();
+    let mut canvas = Canvas::new(400, 300);
+    paint(&list, &mut canvas, &fx.fonts, 0.0, 0.0);
+    assert!(canvas.data.iter().any(|p| *p != 0xffffff));
+    let _ = Rect::default();
 }

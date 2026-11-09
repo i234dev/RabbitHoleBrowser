@@ -2,12 +2,38 @@
 
 use crate::block::{Cb, Layouter};
 use crate::float::Bfc;
-use crate::text::{segment, transform, Collapser, Seg};
-use crate::tree::{Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
+use crate::text::{segment_tabs, transform, Collapser, Seg};
+use crate::tree::{DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{FontId, Rect};
-use rabbithole_style::{ComputedStyle, ListStylePosition, TextAlign, VerticalAlign, Visibility};
+use rabbithole_style::{
+    ComputedStyle, Direction, ListStylePosition, OverflowWrap, TextAlign, TextOverflow, VerticalAlign, Visibility, WordBreak,
+};
 use std::rc::Rc;
+
+/// How a word that does not fit on the line may be broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreakPolicy {
+    /// `overflow-wrap: normal` + `word-break: normal|keep-all`: never split
+    /// inside a word (it overflows).
+    Never,
+    /// `overflow-wrap: anywhere|break-word` / `word-break: break-word`:
+    /// split only when the word does not fit on a line of its own.
+    IfNeeded,
+    /// `word-break: break-all`: break between any two characters.
+    Anywhere,
+}
+
+fn break_policy(style: &ComputedStyle) -> BreakPolicy {
+    match style.word_break {
+        WordBreak::BreakAll => BreakPolicy::Anywhere,
+        WordBreak::BreakWord => BreakPolicy::IfNeeded,
+        _ => match style.overflow_wrap {
+            OverflowWrap::Normal => BreakPolicy::Never,
+            _ => BreakPolicy::IfNeeded,
+        },
+    }
+}
 
 /// Pseudo item index for the list marker rendered inside.
 pub(crate) const MARKER_ITEM: usize = usize::MAX;
@@ -88,7 +114,7 @@ fn split_hyphens(w: &str) -> Vec<(String, bool)> {
 }
 
 impl<'a> Layouter<'a> {
-    pub(crate) fn text_metrics(&self, style: &ComputedStyle) -> TextMetrics {
+    pub(crate) fn text_metrics(&mut self, style: &ComputedStyle) -> TextMetrics {
         let font = self.font_for(style);
         let size = style.font_size;
         let m = self.ctx.fonts.metrics(font, size);
@@ -129,7 +155,7 @@ impl<'a> Layouter<'a> {
                     let wraps = ws.wraps();
                     let t = transform(text, style.text_transform);
                     segs.clear();
-                    segment(&t, ws, &mut col, &mut segs);
+                    segment_tabs(&t, ws, &mut col, &mut segs, style.tab_size.max(1.0) as usize);
                     let ls = style.letter_spacing;
                     for seg in segs.drain(..) {
                         match seg {
@@ -215,6 +241,9 @@ impl<'a> Layouter<'a> {
         let content = b.content_rect;
         let strut = self.text_metrics(&cstyle);
         let indent = cstyle.text_indent.resolve_or_zero(cb.width);
+        let clips = cstyle.overflow_x.clips() || cstyle.overflow_y.clips();
+        let ellipsis = cstyle.text_overflow == TextOverflow::Ellipsis && clips;
+        let max_lines = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
         let mut lines = Vec::new();
         let height = {
             let mut il = InlineLayout {
@@ -233,6 +262,10 @@ impl<'a> Layouter<'a> {
                 pending_floats: Vec::new(),
                 first_line: true,
                 indent,
+                ellipsis,
+                max_lines,
+                final_flush: false,
+                done: false,
             };
             il.run(&pieces)
         };
@@ -306,6 +339,14 @@ struct InlineLayout<'l, 'a> {
     pending_floats: Vec<usize>,
     first_line: bool,
     indent: f32,
+    /// `text-overflow: ellipsis` applies (overflow clipped).
+    ellipsis: bool,
+    /// `-webkit-line-clamp`.
+    max_lines: Option<usize>,
+    /// Set for the last `finish_line` call (no content follows).
+    final_flush: bool,
+    /// Line clamp reached: remaining content is dropped.
+    done: bool,
 }
 
 impl<'l, 'a> InlineLayout<'l, 'a> {
@@ -338,6 +379,9 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     fn run(&mut self, pieces: &[Piece]) -> f32 {
         self.start_line(self.content_y);
         for p in pieces {
+            if self.done {
+                break;
+            }
             match p {
                 Piece::Word {
                     text,
@@ -361,7 +405,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 Piece::Break => self.finish_line(true),
             }
         }
-        self.finish_line(false);
+        if !self.done {
+            self.final_flush = true;
+            self.finish_line(false);
+        }
         // Floats still pending go at the current y.
         let pending = std::mem::take(&mut self.pending_floats);
         for c in pending {
@@ -411,18 +458,22 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
 
     fn place_word(&mut self, text: Rc<str>, width: f32, item: usize, break_before: bool) {
         let wraps = self.style(item).white_space.wraps();
+        let policy = break_policy(self.style(item));
         let mut text: String = text.to_string();
         let mut width = width;
         let mut break_before = break_before;
         let mut guard = 0;
         loop {
             guard += 1;
+            if self.done {
+                return;
+            }
             let fits = self.cur.x + self.pending_w() + width <= self.cur.right + 0.01;
             if fits || !wraps || guard > 10_000 {
                 self.push_text(text, width, item, break_before);
                 return;
             }
-            if self.cur.has_content {
+            if self.cur.has_content && policy != BreakPolicy::Anywhere {
                 if break_before {
                     self.finish_line(false);
                     break_before = false;
@@ -433,7 +484,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     continue;
                 }
             }
-            // No break opportunity: split the word by characters.
+            if policy == BreakPolicy::Never {
+                // The word may not be split: it overflows the line.
+                self.push_text(text, width, item, break_before);
+                return;
+            }
+            // Split the word by characters.
             let avail = self.cur.right - self.cur.x - self.pending_w();
             let (head, head_w, tail) = self.split_to_fit(&text, item, avail, !self.cur.has_content);
             if head.is_empty() {
@@ -690,6 +746,84 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
     }
 
+    /// Truncate the current line so that it ends with "…" within the line
+    /// box (`text-overflow: ellipsis` / line clamping).
+    fn ellipsize(&mut self) {
+        let cstyle = self.cstyle.clone();
+        let font = self.lay.font_for(&cstyle);
+        let size = cstyle.font_size;
+        let ell = "\u{2026}";
+        let ell_w = self.lay.measurer.width(font, size, ell);
+        let limit = self.cur.right - ell_w;
+        // Drop / trim fragments from the end until the text fits.
+        while let Some(last) = self.cur.frags.last() {
+            if last.x + last.w <= limit + 0.01 {
+                break;
+            }
+            let (x, item, text) = match &last.kind {
+                PFKind::Text { text, item } => (last.x, *item, text.clone()),
+                PFKind::Box(_) => {
+                    self.cur.frags.pop();
+                    continue;
+                }
+            };
+            let avail = limit - x;
+            let (head, head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, false);
+            if head.trim().is_empty() {
+                self.cur.frags.pop();
+                continue;
+            }
+            if let Some(PFKind::Text { text, .. }) = self.cur.frags.last_mut().map(|f| &mut f.kind) {
+                *text = head;
+            }
+            if let Some(f) = self.cur.frags.last_mut() {
+                f.w = head_w;
+            }
+            break;
+        }
+        let x = self.cur.frags.last().map(|f| f.x + f.w).unwrap_or(self.cur.left);
+        self.cur.frags.push(PF {
+            x,
+            w: ell_w,
+            kind: PFKind::Text {
+                text: ell.to_string(),
+                item: MARKER_ITEM,
+            },
+        });
+        self.cur.x = x + ell_w;
+        self.cur.has_content = true;
+        // Inline boxes still open end here.
+        for bg in &mut self.cur.bg {
+            if bg.x + bg.w > self.cur.x {
+                bg.w = (self.cur.x - bg.x).max(0.0);
+            }
+        }
+    }
+
+    /// Mirror the line's fragments for `direction: rtl` (visual order is
+    /// reversed; no bidi reordering of mixed-direction text).
+    fn mirror_line(&mut self) {
+        let (l, r) = (self.cur.left, self.cur.right);
+        let used = self.cur.x - l;
+        let mirror = |x: f32, w: f32| r - (x - l) - w;
+        for f in &mut self.cur.frags {
+            f.x = mirror(f.x, f.w);
+        }
+        for bg in &mut self.cur.bg {
+            bg.x = mirror(bg.x, bg.w);
+        }
+        for o in &mut self.cur.open {
+            if o.start_x <= self.cur.x + 0.01 {
+                // An open inline box spans to the line end: its mirrored
+                // start is the left edge of the used area.
+                o.start_x = r - used + (self.cur.x - o.start_x) - (self.cur.x - o.start_x);
+                o.start_x = r - used;
+            }
+        }
+        // Keep `cur.x` meaning "end of content" for the alignment maths.
+        self.cur.x = l + used;
+    }
+
     fn finish_line(&mut self, forced: bool) {
         if !self.cur.has_content && !forced {
             if self.cur.frags.is_empty() {
@@ -699,6 +833,20 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         self.cur.pending_space = None;
         self.trim_trailing_space();
         self.merge_frags();
+
+        // Line clamp: this is the last allowed line and content follows.
+        let more_follows = !self.final_flush;
+        let clamp_hit = matches!(self.max_lines, Some(n) if self.lines.len() + 1 >= n) && more_follows;
+        let overflows = self.cur.x > self.cur.right + 0.5;
+        if (self.ellipsis && overflows) || clamp_hit {
+            self.ellipsize();
+        }
+        if clamp_hit {
+            self.done = true;
+        }
+        if self.cstyle.direction == Direction::Rtl {
+            self.mirror_line();
+        }
 
         // Vertical metrics.
         struct FM {
@@ -797,10 +945,21 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         // Horizontal alignment.
         let used = self.cur.x - self.cur.left;
         let free = (self.cur.right - self.cur.left) - used;
-        let shift_x = match self.cstyle.text_align {
-            TextAlign::Right => free.max(0.0),
-            TextAlign::Center => (free / 2.0).max(0.0),
-            _ => 0.0,
+        let rtl = self.cstyle.direction == Direction::Rtl;
+        let shift_x = if rtl {
+            // Content was mirrored to the right edge (start); `right` means
+            // the end (left) edge.
+            match self.cstyle.text_align {
+                TextAlign::Right => -free.max(0.0),
+                TextAlign::Center => -(free / 2.0).max(0.0),
+                _ => 0.0,
+            }
+        } else {
+            match self.cstyle.text_align {
+                TextAlign::Right => free.max(0.0),
+                TextAlign::Center => (free / 2.0).max(0.0),
+                _ => 0.0,
+            }
         };
 
         let mut fragments: Vec<Fragment> = Vec::with_capacity(self.cur.frags.len() + self.cur.bg.len() + self.cur.open.len());
@@ -851,6 +1010,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     let tm = fm.tm.expect("text metrics");
                     let style = self.style(item).clone();
                     let bl = baseline - fm.shift;
+                    let oblique = self.lay.synthetic_oblique(tm.font, &style);
                     fragments.push(Fragment {
                         rect: Rect::new(f.x + shift_x, bl - tm.asc, f.w, tm.asc + tm.desc),
                         baseline: bl,
@@ -863,6 +1023,15 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             letter_spacing: style.letter_spacing,
                             decoration: style.text_decoration,
                             hidden: style.visibility == Visibility::Hidden,
+                            decoration_info: DecorationInfo {
+                                lines: style.text_decoration,
+                                color: style.text_decoration_color,
+                                style: style.text_decoration_style,
+                                thickness: style.text_decoration_thickness,
+                            },
+                            shadows: style.text_shadow.clone(),
+                            small_caps: style.font_variant_small_caps,
+                            oblique,
                         },
                     });
                 }
@@ -906,4 +1075,7 @@ fn needs_bg(style: &ComputedStyle) -> bool {
     !style.background_color.is_transparent()
         || style.has_visible_border()
         || style.background_image.is_some()
+        || !style.background_layers.is_empty()
+        || !style.box_shadow.is_empty()
+        || style.outline_width > 0.0
 }

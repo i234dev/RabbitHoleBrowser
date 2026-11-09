@@ -1,20 +1,130 @@
 //! Box tree construction from the styled DOM.
 
+use crate::counters::{format_counter, Counters, Quotes};
 use crate::tree::{BoxKind, Flow, Formatting, InlineItem, LayoutBox};
-use crate::LayoutContext;
+use crate::{pseudo_style, LayoutContext};
+use rabbithole_css::PseudoElement;
 use rabbithole_dom::{Document, NodeData, NodeId};
-use rabbithole_style::{ComputedStyle, Display, FlexDirection, Float, ListStyleType, Position};
+use rabbithole_style::{ComputedStyle, Content, ContentItem, Display, Float, ListStyleType, Position};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 const REPLACED: &[&str] = &["img", "svg", "video", "canvas", "iframe", "embed", "object", "audio"];
 
 pub(crate) struct Builder<'a> {
     ctx: &'a LayoutContext<'a>,
+    counters: RefCell<Counters>,
+    quotes: RefCell<Quotes>,
 }
 
 impl<'a> Builder<'a> {
     pub fn new(ctx: &'a LayoutContext<'a>) -> Self {
-        Builder { ctx }
+        Builder {
+            ctx,
+            counters: RefCell::new(Counters::new()),
+            quotes: RefCell::new(Quotes::default()),
+        }
+    }
+
+    /// Apply `counter-reset` / `counter-increment` of a style.
+    fn apply_counters(&self, style: &ComputedStyle) {
+        let mut c = self.counters.borrow_mut();
+        for (name, v) in &style.counter_reset {
+            c.reset(name, *v);
+        }
+        for (name, v) in &style.counter_increment {
+            c.increment(name, *v);
+        }
+    }
+
+    /// Build the `::before` / `::after` box of `node`, if it generates one.
+    fn build_pseudo(&self, node: NodeId, which: PseudoElement, in_table_row: bool) -> Option<LayoutBox> {
+        let style = pseudo_style(self.ctx.styles, node, which)?;
+        if style.display == Display::None {
+            return None;
+        }
+        let items = match &style.content {
+            Content::Items(items) => items.clone(),
+            _ => return None,
+        };
+        self.apply_counters(&style);
+        let doc = self.doc();
+        let mut children: Vec<LayoutBox> = Vec::new();
+        let mut text = String::new();
+        let flush_text = |text: &mut String, children: &mut Vec<LayoutBox>| {
+            if !text.is_empty() {
+                let mut t = LayoutBox::new(BoxKind::Text, Some(node), style.clone());
+                t.text = Some(Rc::from(text.as_str()));
+                children.push(t);
+                text.clear();
+            }
+        };
+        for item in &items {
+            match item {
+                ContentItem::String(s) => text.push_str(s),
+                ContentItem::Attr(name) => {
+                    if let Some(v) = doc.attr(node, name) {
+                        text.push_str(v);
+                    }
+                }
+                ContentItem::Counter(name, ls) => {
+                    let v = self.counters.borrow().value(name);
+                    text.push_str(&format_counter(v, *ls));
+                }
+                ContentItem::Counters(name, sep, ls) => {
+                    let vals = self.counters.borrow().values(name);
+                    let parts: Vec<String> = vals.iter().map(|v| format_counter(*v, *ls)).collect();
+                    text.push_str(&parts.join(sep));
+                }
+                ContentItem::OpenQuote => text.push_str(&self.quotes.borrow_mut().open(&style.quotes)),
+                ContentItem::CloseQuote => text.push_str(&self.quotes.borrow_mut().close(&style.quotes)),
+                ContentItem::NoOpenQuote => self.quotes.borrow_mut().no_open(),
+                ContentItem::NoCloseQuote => self.quotes.borrow_mut().no_close(),
+                ContentItem::Url(url) => {
+                    flush_text(&mut text, &mut children);
+                    if let Some(img) = self.ctx.background_images.get(url) {
+                        let mut b = LayoutBox::new(BoxKind::Image, Some(node), style.clone());
+                        b.image = Some(img.clone());
+                        b.bfc_root = true;
+                        children.push(b);
+                    }
+                }
+            }
+        }
+        flush_text(&mut text, &mut children);
+        let out_of_flow = matches!(style.position, Position::Absolute | Position::Fixed);
+        let floated = !out_of_flow && style.float != Float::None;
+        let kind = if out_of_flow || floated {
+            BoxKind::Block
+        } else if style.display == Display::Inline {
+            BoxKind::Inline
+        } else if style.display.is_inline_level() {
+            BoxKind::InlineBlock
+        } else {
+            BoxKind::Block
+        };
+        let mut b = LayoutBox::new(kind, Some(node), style.clone());
+        b.pseudo = Some(which);
+        b.flow = if out_of_flow {
+            Flow::Absolute
+        } else if floated {
+            match style.float {
+                Float::Right => Flow::FloatRight,
+                _ => Flow::FloatLeft,
+            }
+        } else {
+            Flow::InFlow
+        };
+        b.bfc_root = kind != BoxKind::Inline;
+        b.clips = style.overflow_x.clips() || style.overflow_y.clips();
+        let _ = in_table_row;
+        if kind == BoxKind::Inline {
+            b.children = children;
+            b.formatting = Formatting::Inline;
+        } else {
+            self.finish_container(&mut b, children, false);
+        }
+        Some(b)
     }
 
     fn doc(&self) -> &'a Document {
@@ -79,6 +189,7 @@ impl<'a> Builder<'a> {
         }
         let tag = doc.tag(node).unwrap_or("");
         let _ = parent_style;
+        self.apply_counters(&style);
 
         // Replaced elements.
         if REPLACED.contains(&tag) {
@@ -141,7 +252,11 @@ impl<'a> Builder<'a> {
             b.marker_text = list_marker_text(doc, node, &style);
         }
 
-        // Form controls get synthesized text content.
+        // Form controls get synthesized text content. Generated content
+        // (`::before` / `::after`) wraps the element's children; counters
+        // created by the children live in this element's scope.
+        self.counters.borrow_mut().enter();
+        let before = self.build_pseudo(node, PseudoElement::Before, kind == BoxKind::TableRow);
         let mut children = match tag {
             "input" => self.build_input(node, &style),
             "select" => self.build_select(node, &style),
@@ -152,6 +267,14 @@ impl<'a> Builder<'a> {
             }
             _ => self.build_children(node, &style, kind == BoxKind::TableRow),
         };
+        let after = self.build_pseudo(node, PseudoElement::After, kind == BoxKind::TableRow);
+        self.counters.borrow_mut().leave();
+        if let Some(bf) = before {
+            children.insert(0, bf);
+        }
+        if let Some(af) = after {
+            children.push(af);
+        }
 
         if kind == BoxKind::Inline {
             // Inline boxes keep their inline-level children as a tree; any
@@ -172,19 +295,15 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        let blockify = matches!(style.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid)
-            && style.flex_direction != FlexDirection::Column
-            && style.flex_direction != FlexDirection::ColumnReverse;
-        let is_flex_row = blockify;
+        // grid/flex hook: flex and grid containers blockify their children.
         match kind {
             BoxKind::Table => self.finish_table(&mut b, children),
             BoxKind::TableRow => self.finish_row(&mut b, children),
             _ => {
-                if is_flex_row {
+                if matches!(style.display, Display::Flex | Display::InlineFlex) {
                     self.finish_flex(&mut b, children);
-                } else if matches!(style.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid) {
-                    // Column flex / grid: every child becomes a block item.
-                    self.finish_container(&mut b, children, true);
+                } else if matches!(style.display, Display::Grid | Display::InlineGrid) {
+                    self.finish_grid(&mut b, children);
                 } else {
                     self.finish_container(&mut b, children, false);
                 }
@@ -367,11 +486,26 @@ impl<'a> Builder<'a> {
         out.push(anon);
     }
 
+    // grid/flex hook
     fn finish_flex(&self, b: &mut LayoutBox, children: Vec<LayoutBox>) {
         self.finish_container(b, children, true);
-        b.formatting = Formatting::FlexRow;
+        b.formatting = Formatting::Flex;
         for c in &mut b.children {
-            if c.flow.is_in_flow() {
+            if c.flow.is_in_flow() || c.flow.is_float() {
+                // Floats do not float inside flex containers.
+                c.flow = Flow::InFlow;
+                c.bfc_root = true;
+            }
+        }
+    }
+
+    // grid/flex hook
+    fn finish_grid(&self, b: &mut LayoutBox, children: Vec<LayoutBox>) {
+        self.finish_container(b, children, true);
+        b.formatting = Formatting::Grid;
+        for c in &mut b.children {
+            if c.flow.is_in_flow() || c.flow.is_float() {
+                c.flow = Flow::InFlow;
                 c.bfc_root = true;
             }
         }
@@ -570,54 +704,13 @@ fn list_marker_text(doc: &Document, node: NodeId, style: &ComputedStyle) -> Opti
     let s = match t {
         ListStyleType::Decimal => number.to_string(),
         ListStyleType::DecimalLeadingZero => format!("{number:02}"),
-        ListStyleType::LowerAlpha => alpha(number, false),
-        ListStyleType::UpperAlpha => alpha(number, true),
-        ListStyleType::LowerRoman => roman(number).to_lowercase(),
-        ListStyleType::UpperRoman => roman(number),
+        ListStyleType::LowerAlpha => crate::counters::alpha(number, false),
+        ListStyleType::UpperAlpha => crate::counters::alpha(number, true),
+        ListStyleType::LowerRoman => crate::counters::roman(number).to_lowercase(),
+        ListStyleType::UpperRoman => crate::counters::roman(number),
         _ => number.to_string(),
     };
     Some(Rc::from(format!("{s}.").as_str()))
 }
 
-fn alpha(mut n: i64, upper: bool) -> String {
-    if n <= 0 {
-        return n.to_string();
-    }
-    let mut s = Vec::new();
-    while n > 0 {
-        let r = ((n - 1) % 26) as u8;
-        s.push(if upper { b'A' + r } else { b'a' + r });
-        n = (n - 1) / 26;
-    }
-    s.reverse();
-    String::from_utf8(s).unwrap_or_default()
-}
 
-fn roman(mut n: i64) -> String {
-    if n <= 0 || n >= 4000 {
-        return n.to_string();
-    }
-    const TABLE: [(i64, &str); 13] = [
-        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
-        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
-    ];
-    let mut s = String::new();
-    for (v, r) in TABLE {
-        while n >= v {
-            s.push_str(r);
-            n -= v;
-        }
-    }
-    s
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn counters() {
-        assert_eq!(alpha(1, false), "a");
-        assert_eq!(alpha(27, true), "AA");
-        assert_eq!(roman(1994), "MCMXCIV");
-    }
-}

@@ -8,6 +8,7 @@ use crate::tree::{BoxKind, Flow, Formatting, LayoutBox, LayoutTree, Marker};
 use crate::LayoutContext;
 use rabbithole_gfx::{FontId, Rect};
 use rabbithole_style::{BoxSizing, Clear, ComputedStyle, Edges, Length, Position};
+use std::collections::HashMap;
 
 /// Containing block information passed down during layout.
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +35,14 @@ pub(crate) enum WidthMode {
 pub(crate) struct Layouter<'a> {
     pub ctx: &'a LayoutContext<'a>,
     pub measurer: Measurer<'a>,
+    /// grid/flex hook: when set, the next `layout_block` call uses this
+    /// content-box height as the box's definite height (stretched flex
+    /// items, grid items, definite flex main sizes in column flex).
+    pub forced_content_height: Option<f32>,
+    /// Whether `FontContext::select_family` & co. are implemented.
+    pub font_ext: bool,
+    /// Cache of family-list lookups: (families joined, weight, italic) → font.
+    font_cache: HashMap<(String, u16, bool), FontId>,
 }
 
 pub(crate) fn resolve_edges(e: &Edges<Length>, base: f32) -> Edges<f32> {
@@ -71,11 +80,30 @@ impl<'a> Layouter<'a> {
         Layouter {
             ctx,
             measurer: Measurer::new(ctx.fonts),
+            forced_content_height: None,
+            font_ext: crate::paint::font_ext_available(ctx.fonts),
+            font_cache: HashMap::new(),
         }
     }
 
-    pub fn font_for(&self, style: &ComputedStyle) -> FontId {
+    /// Font for a style: the first available family of `font-family`
+    /// (web fonts / system fonts) or the generic fallback.
+    pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
+        if self.font_ext && !style.font_family_list.is_empty() {
+            let key = (style.font_family_list.join(","), style.font_weight, style.is_italic());
+            if let Some(f) = self.font_cache.get(&key) {
+                return *f;
+            }
+            let f = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            self.font_cache.insert(key, f);
+            return f;
+        }
         self.ctx.fonts.select(style.font_family, style.font_weight, style.is_italic())
+    }
+
+    /// Does `font` need a synthetic slant for an italic request?
+    pub fn synthetic_oblique(&self, font: FontId, style: &ComputedStyle) -> bool {
+        style.is_italic() && self.font_ext && self.ctx.fonts.needs_synthetic_italic(font, true)
     }
 
     pub fn layout_document(&mut self) -> LayoutTree {
@@ -103,6 +131,7 @@ impl<'a> Layouter<'a> {
             root,
             width: vp_w.max(max_r.min(vp_w * 4.0)),
             height: doc_h,
+            viewport: (vp_w, vp_h),
         }
     }
 
@@ -131,6 +160,7 @@ impl<'a> Layouter<'a> {
 
     /// Lay out `b` as a block-level box whose border-box top is at `top`.
     pub fn layout_block(&mut self, b: &mut LayoutBox, cb: &Cb, top: f32, bfc: &mut Bfc, mode: WidthMode) {
+        let forced_h = self.forced_content_height.take(); // grid/flex hook
         let style = b.style.clone();
         let cbw = cb.width;
         let pad = resolve_edges(&style.padding, cbw);
@@ -201,7 +231,14 @@ impl<'a> Layouter<'a> {
         b.rect = Rect::new(x, y, content_w + pb_h, 0.0);
         b.content_rect = Rect::new(x + bw.left + pad.left, y + bw.top + pad.top, content_w, 0.0);
 
-        let explicit_h = replaced_h.or_else(|| self.resolve_height(&style, cb.height, pb_v));
+        let mut explicit_h = forced_h.or(replaced_h).or_else(|| self.resolve_height(&style, cb.height, pb_v)); // grid/flex hook
+        // `aspect-ratio` with an auto height derives it from the width.
+        if explicit_h.is_none() && b.kind != BoxKind::Image {
+            if let Some(ratio) = style.aspect_ratio.filter(|r| *r > 0.0) {
+                let (w, h_extra) = if style.box_sizing == BoxSizing::BorderBox { (content_w + pb_h, pb_v) } else { (content_w, 0.0) };
+                explicit_h = Some((w / ratio - h_extra).max(0.0));
+            }
+        }
         let inner_cb = Cb {
             x: b.content_rect.x,
             width: content_w,
@@ -245,13 +282,59 @@ impl<'a> Layouter<'a> {
             let padding_box = b.padding_rect();
             self.layout_abs_descendants(b, padding_box);
         }
+        b.fixed = style.position == Position::Fixed;
+        self.finish_scroll_container(b);
+    }
+
+    /// Record the scrollable content size of clipping boxes and apply the
+    /// scroll offset supplied by the engine.
+    fn finish_scroll_container(&mut self, b: &mut LayoutBox) {
+        if !b.clips {
+            return;
+        }
+        let style = b.style.clone();
+        b.scroll_container = matches!(style.overflow_x, rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Scroll)
+            || matches!(style.overflow_y, rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Scroll);
+        let pr = b.padding_rect();
+        let mut max_r = pr.right();
+        let mut max_b = pr.bottom();
+        for c in &b.children {
+            let r = content_bounds(c);
+            max_r = max_r.max(r.right());
+            max_b = max_b.max(r.bottom());
+        }
+        for line in &b.lines {
+            for f in &line.fragments {
+                max_r = max_r.max(f.rect.right());
+                max_b = max_b.max(f.rect.bottom());
+            }
+        }
+        // Padding at the end of the scrollable area (CSS Overflow 3).
+        let pad_r = b.content_rect.right() - pr.right();
+        let pad_b = b.content_rect.bottom() - pr.bottom();
+        b.scroll_width = (max_r - pr.x + pad_r.max(0.0)).max(pr.w);
+        b.scroll_height = (max_b - pr.y + pad_b.max(0.0)).max(pr.h);
+        if !b.scroll_container {
+            return;
+        }
+        let Some(node) = b.node else { return };
+        let Some(&(ox, oy)) = self.ctx.scroll_offsets.get(&node) else { return };
+        let max_x = (b.scroll_width - pr.w).max(0.0);
+        let max_y = (b.scroll_height - pr.h).max(0.0);
+        let ox = ox.clamp(0.0, max_x);
+        let oy = oy.clamp(0.0, max_y);
+        b.scroll_offset = (ox, oy);
+        if ox != 0.0 || oy != 0.0 {
+            crate::table::translate_contents(b, -ox, -oy);
+        }
     }
 
     fn layout_contents(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         match b.formatting {
             Formatting::Inline => self.layout_inline(b, cb, bfc),
             Formatting::Block => self.layout_block_children(b, cb, bfc, top_collapsible, bottom_collapsible),
-            Formatting::FlexRow => self.layout_flex(b, cb),
+            Formatting::Flex => self.layout_flex(b, cb), // grid/flex hook
+            Formatting::Grid => self.layout_grid(b, cb), // grid/flex hook
             Formatting::Table => self.layout_table(b, cb),
             Formatting::TableRow => {
                 // A row outside a table: lay out cells as blocks.
@@ -319,10 +402,29 @@ impl<'a> Layouter<'a> {
     /// (content width, margin-left, margin-right).
     fn compute_width(&mut self, b: &mut LayoutBox, cbw: f32, pb_h: f32, ml: Option<f32>, mr: Option<f32>, mode: WidthMode) -> (f32, f32, f32) {
         let style = b.style.clone();
-        let specified = style.width.resolve(cbw).map(|w| {
+        let mut specified = style.width.resolve(cbw).map(|w| {
             let w = if style.box_sizing == BoxSizing::BorderBox { w - pb_h } else { w };
             self.clamp_width(&style, w.max(0.0), cbw, pb_h)
         });
+        // Intrinsic sizing keywords.
+        if style.width.is_intrinsic() {
+            let (min, max) = self.intrinsic(b);
+            let ml0 = ml.unwrap_or(0.0);
+            let mr0 = mr.unwrap_or(0.0);
+            let avail = (cbw - ml0 - mr0 - pb_h).max(0.0);
+            let w = match style.width {
+                Length::MinContent => min,
+                Length::MaxContent => max,
+                _ => shrink_to_fit(min, max, avail),
+            };
+            specified = Some(self.clamp_width(&style, w, cbw, pb_h));
+        } else if style.width.is_auto() && b.kind != BoxKind::Image {
+            // `aspect-ratio` with a definite height and auto width.
+            if let (Some(ratio), Length::Px(h)) = (style.aspect_ratio.filter(|r| *r > 0.0), style.height) {
+                let w = if style.box_sizing == BoxSizing::BorderBox { h * ratio - pb_h } else { h * ratio };
+                specified = Some(self.clamp_width(&style, w.max(0.0), cbw, pb_h));
+            }
+        }
         match mode {
             WidthMode::Fixed(w) => (self.clamp_width(&style, w.max(0.0), cbw, pb_h), ml.unwrap_or(0.0), mr.unwrap_or(0.0)),
             WidthMode::ShrinkToFit => {
@@ -592,7 +694,11 @@ impl<'a> Layouter<'a> {
         if b.style.list_style_position == rabbithole_style::ListStylePosition::Inside && b.formatting == Formatting::Inline {
             return; // rendered as inline content
         }
-        let style = b.style.clone();
+        // `::marker` may override the marker's font and color.
+        let style = b
+            .node
+            .and_then(|n| crate::pseudo_style(self.ctx.styles, n, rabbithole_css::PseudoElement::Marker))
+            .unwrap_or_else(|| b.style.clone());
         let font = self.font_for(&style);
         let size = style.font_size;
         let width = self.measurer.width(font, size, &text);
@@ -616,8 +722,32 @@ impl<'a> Layouter<'a> {
     }
 }
 
+/// Union of a box's border box, its fragments and its descendants
+/// (respecting clips) — the area it occupies for scroll-size purposes.
+pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
+    let mut r = b.margin_rect();
+    if b.flow == Flow::Absolute && b.fixed {
+        return r;
+    }
+    if b.clips {
+        return r;
+    }
+    for line in &b.lines {
+        for f in &line.fragments {
+            r = r.union(&f.rect);
+        }
+    }
+    for c in &b.children {
+        r = r.union(&content_bounds(c));
+    }
+    r
+}
+
 /// Max right / bottom extents of the tree (border boxes and lines).
 fn bounds(b: &LayoutBox) -> (f32, f32) {
+    if b.fixed && b.flow == Flow::Absolute {
+        return (0.0, 0.0);
+    }
     let mut r = b.rect.right();
     let mut btm = b.rect.bottom();
     if b.clips {

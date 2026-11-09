@@ -4,7 +4,7 @@
 pub mod selector;
 pub mod tokenizer;
 
-pub use selector::{matches, PseudoElement, Selector, Specificity};
+pub use selector::{matches, matches_with, MatchState, PseudoElement, Selector, Specificity};
 pub use tokenizer::{Token, Tokenizer};
 
 /// A parsed declaration. `value` is the raw component-value token list with
@@ -59,6 +59,9 @@ pub struct Keyframe {
 #[derive(Debug, Clone, Default)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// Absolute URL of the sheet, used to resolve `url()` values and
+    /// `@import`s. `None` for inline `<style>` (document base applies).
+    pub base_url: Option<String>,
 }
 
 /// Simplified media query: a disjunction of conjunctions of features.
@@ -215,6 +218,7 @@ pub fn parse_stylesheet(src: &str) -> Stylesheet {
     let mut p = Parser { toks: &toks, pos: 0 };
     Stylesheet {
         rules: p.parse_rules(true),
+        base_url: None,
     }
 }
 

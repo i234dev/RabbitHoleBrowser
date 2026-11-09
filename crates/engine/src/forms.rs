@@ -3,7 +3,7 @@
 
 use crate::Page;
 use rabbithole_dom::{Document, NodeId};
-use rabbithole_net::{Body, Request, Url};
+use rabbithole_net::{Body, Request};
 
 /// A file chosen for an `<input type=file>` (kept outside the DOM).
 #[derive(Debug, Clone)]

@@ -818,30 +818,38 @@ impl Engine {
 
     /// Re-run layout + display list (styles unchanged).
     pub fn relayout_only(&self, page: &mut Page) {
-        let ctx = self.layout_ctx(page);
-        page.layout = rabbithole_layout::layout(&ctx);
-        page.display_list = rabbithole_layout::build_display_list(&page.layout, &ctx);
+        let Page { doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, .. } = page;
+        let ctx = LayoutContext {
+            doc,
+            styles,
+            fonts: &self.fonts,
+            images,
+            background_images,
+            viewport_width: viewport.width,
+            viewport_height: viewport.height,
+            scroll_offsets,
+            page_scroll: *page_scroll,
+        };
+        *layout = rabbithole_layout::layout(&ctx);
+        *display_list = rabbithole_layout::build_display_list(layout, &ctx);
     }
 
     /// Rebuild only the display list (after scrolling: sticky/fixed boxes
     /// and inner scroll offsets).
     pub fn rebuild_display_list(&self, page: &mut Page) {
-        let ctx = self.layout_ctx(page);
-        page.display_list = rabbithole_layout::build_display_list(&page.layout, &ctx);
-    }
-
-    fn layout_ctx<'a>(&'a self, page: &'a Page) -> LayoutContext<'a> {
-        LayoutContext {
-            doc: &page.doc,
-            styles: &page.styles,
+        let Page { doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, .. } = page;
+        let ctx = LayoutContext {
+            doc,
+            styles,
             fonts: &self.fonts,
-            images: &page.images,
-            background_images: &page.background_images,
-            viewport_width: page.viewport.width,
-            viewport_height: page.viewport.height,
-            scroll_offsets: &page.scroll_offsets,
-            page_scroll: page.page_scroll,
-        }
+            images,
+            background_images,
+            viewport_width: viewport.width,
+            viewport_height: viewport.height,
+            scroll_offsets,
+            page_scroll: *page_scroll,
+        };
+        *display_list = rabbithole_layout::build_display_list(layout, &ctx);
     }
 
     /// Change the viewport (window resize).

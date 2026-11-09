@@ -793,6 +793,10 @@ pub struct ComputedStyle {
     pub scroll_margin_top: f32,
     /// `contain`/`isolation`/`will-change` imply a stacking context.
     pub creates_stacking_context: bool,
+    /// `border-collapse: collapse` (inherited; tables).
+    pub border_collapse: bool,
+    /// `border-spacing` (horizontal, vertical) in px (inherited; tables).
+    pub border_spacing: (f32, f32),
 }
 
 impl ComputedStyle {
@@ -903,6 +907,8 @@ impl ComputedStyle {
             animations: Vec::new(),
             scroll_margin_top: 0.0,
             creates_stacking_context: false,
+            border_collapse: false,
+            border_spacing: (0.0, 0.0),
         }
     }
 
@@ -940,6 +946,8 @@ impl ComputedStyle {
             quotes: parent.quotes.clone(),
             pointer_events: parent.pointer_events,
             user_select: parent.user_select,
+            border_collapse: parent.border_collapse,
+            border_spacing: parent.border_spacing,
             ..ComputedStyle::initial()
         }
     }

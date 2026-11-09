@@ -18,6 +18,7 @@ rabbithole-gfx = { path = "crates/gfx" }
 rabbithole-net = { path = "crates/net" }
 rabbithole-layout = { path = "crates/layout" }
 rabbithole-engine = { path = "crates/engine" }
+rabbithole-svg = { path = "crates/svg" }
 
 [profile.release]
 opt-level = 3

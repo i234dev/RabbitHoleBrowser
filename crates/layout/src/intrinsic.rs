@@ -55,20 +55,8 @@ impl<'a> Layouter<'a> {
                     }
                     (min, max)
                 }
-                Formatting::FlexRow => {
-                    let mut min: f32 = 0.0;
-                    let mut max: f32 = 0.0;
-                    for c in &mut b.children {
-                        if !c.is_in_flow() {
-                            continue;
-                        }
-                        let ex = extras_px(&c.style);
-                        let (cmin, cmax) = self.intrinsic(c);
-                        min += cmin + ex;
-                        max += cmax + ex;
-                    }
-                    (min, max)
-                }
+                Formatting::Flex => self.flex_intrinsic(b),
+                Formatting::Grid => self.grid_intrinsic(b),
                 Formatting::Table => {
                     let cols = self.column_constraints(b);
                     let min: f32 = cols.iter().map(|c| c.0).sum();
