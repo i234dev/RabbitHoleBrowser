@@ -6,8 +6,19 @@ pub mod display_list;
 pub mod paint;
 pub mod tree;
 
+mod block;
+mod build;
+mod flex;
+mod float;
+mod inline;
+mod intrinsic;
+mod table;
+mod text;
+#[cfg(test)]
+mod tests;
+
 pub use display_list::{DisplayItem, DisplayList};
-pub use tree::{LayoutBox, LayoutTree};
+pub use tree::{BoxKind, Flow, Formatting, Fragment, FragmentKind, InlineItem, LayoutBox, LayoutTree, LineBox, Marker};
 
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_gfx::{Canvas, FontContext, Image};

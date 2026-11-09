@@ -12,6 +12,7 @@ pub fn extract(doc: &Document, styles: &StyledTree, base: &Url) -> String {
         out: String::new(),
         pre_depth: 0,
         list_stack: Vec::new(),
+        table_stack: Vec::new(),
         pending_space: false,
         at_line_start: true,
     };
@@ -47,6 +48,7 @@ struct Writer<'a> {
     out: String,
     pre_depth: usize,
     list_stack: Vec<Option<usize>>,
+    table_stack: Vec<bool>,
     pending_space: bool,
     at_line_start: bool,
 }
@@ -231,19 +233,54 @@ impl Writer<'_> {
                         self.pending_space = true;
                     }
                     "table" => {
+                        // Tables used for page layout (nested tables, or a
+                        // single column) read better as plain blocks.
+                        let nested = self
+                            .doc
+                            .descendants(id)
+                            .any(|n| n != id && self.doc.is_element(n, "table"));
+                        let has_header = self
+                            .doc
+                            .descendants(id)
+                            .any(|n| self.doc.is_element(n, "th") || self.doc.is_element(n, "thead"));
+                        let counts: Vec<usize> = self
+                            .doc
+                            .descendants(id)
+                            .filter(|&n| self.doc.is_element(n, "tr"))
+                            .map(|tr| self.doc.child_elements(tr).filter(|&c| self.doc.is_element(c, "td") || self.doc.is_element(c, "th")).count())
+                            .collect();
+                        let spans = self
+                            .doc
+                            .descendants(id)
+                            .any(|n| self.doc.attr(n, "colspan").is_some() || self.doc.attr(n, "rowspan").is_some());
+                        let regular = !counts.is_empty()
+                            && counts[0] >= 2
+                            && counts.iter().all(|&c| c == counts[0])
+                            && !spans;
+                        let is_layout = nested || !(has_header || regular);
                         self.blank_line();
+                        self.table_stack.push(is_layout);
                         self.walk_children(id);
+                        self.table_stack.pop();
                         self.blank_line();
                     }
                     "tr" => {
+                        let layout = self.table_stack.last().copied().unwrap_or(true);
                         self.newline();
-                        self.push_raw("| ");
+                        if !layout {
+                            self.push_raw("| ");
+                        }
                         self.walk_children(id);
                         self.newline();
                     }
                     "td" | "th" => {
+                        let layout = self.table_stack.last().copied().unwrap_or(true);
                         self.walk_children(id);
-                        self.push_raw(" | ");
+                        if layout {
+                            self.pending_space = true;
+                        } else {
+                            self.push_raw(" | ");
+                        }
                     }
                     "input" => {
                         if let Some(v) = el.attr("value") {

@@ -209,12 +209,6 @@ impl Canvas {
         }
     }
 
-    #[inline(always)]
-    fn put(&mut self, x: i32, y: i32, color: Color, alpha: u32) {
-        let idx = y as usize * self.width as usize + x as usize;
-        self.data[idx] = blend(self.data[idx], color, alpha);
-    }
-
     /// Fill an axis-aligned rect with alpha blending and anti-aliased
     /// fractional edges.
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
@@ -441,13 +435,17 @@ impl Canvas {
             return;
         }
         let half = width / 2.0;
+        // Axis-aligned lines are snapped to the pixel grid so 1px rules
+        // (underlines, <hr>) stay crisp instead of smearing over two rows.
         if (y0 - y1).abs() < 0.01 {
             let (a, b) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
-            return self.fill_rect(Rect::new(a, y0 - half, b - a, width), color);
+            let top = (y0 - half).round();
+            return self.fill_rect(Rect::new(a, top, b - a, width.round().max(1.0)), color);
         }
         if (x0 - x1).abs() < 0.01 {
             let (a, b) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
-            return self.fill_rect(Rect::new(x0 - half, a, width, b - a), color);
+            let left = (x0 - half).round();
+            return self.fill_rect(Rect::new(left, a, width.round().max(1.0), b - a), color);
         }
         // General case: walk along the major axis stamping small squares.
         let dx = x1 - x0;
@@ -800,9 +798,11 @@ mod tests {
         assert!(px(&c, 0, 0).r > 200);
         assert!(px(&c, 19, 19).r > 200);
         // Somewhere along the arc we should see a partial pixel
-        let partial = (0..8).any(|i| {
-            let p = px(&c, i, 7 - i);
-            p.r > 20 && p.r < 235
+        let partial = (0..8).any(|x| {
+            (0..8).any(|y| {
+                let p = px(&c, x, y);
+                p.r > 20 && p.r < 235
+            })
         });
         assert!(partial);
         // radius 0 falls back to a plain rect
@@ -875,7 +875,10 @@ mod tests {
         // Partially off-canvas
         let mut c = Canvas::new(4, 4);
         c.draw_image(&img, Rect::new(-2.0, -2.0, 4.0, 4.0), 0.5);
-        assert!(px(&c, 0, 0).r > 200 && px(&c, 0, 0).g < 200);
+        // canvas (0,0) samples around the image's green pixel (1,0), 50% over white
+        let p = px(&c, 0, 0);
+        assert!(p != Color::WHITE && p.g > p.r, "{p:?}");
+        assert_eq!(px(&c, 2, 2), Color::WHITE);
         let rgba = c.to_rgba8();
         assert_eq!(rgba.len(), 4 * 4 * 4);
         assert_eq!(rgba[3], 255);

@@ -170,7 +170,7 @@ pub fn text(args: &[String]) -> Result<(), String> {
     let url = url_arg(&positional, "text")?;
     let mut engine = Engine::new();
     let page = load_text_page(&mut engine, url)?;
-    println!("{}", page.text());
+    emit(&page.text());
     Ok(())
 }
 
@@ -182,7 +182,7 @@ pub fn links(args: &[String]) -> Result<(), String> {
     let page = load_text_page(&mut engine, url)?;
     for link in page.links() {
         let text = link.text.split_whitespace().collect::<Vec<_>>().join(" ");
-        println!("{text}\t{}", link.href);
+        emit(&format!("{text}\t{}", link.href));
     }
     Ok(())
 }
@@ -197,14 +197,25 @@ pub fn dump(args: &[String]) -> Result<(), String> {
     let mut engine = Engine::new();
     let page = load_text_page(&mut engine, url)?;
     if want_dom {
-        println!("=== DOM: {} ===", page.url);
-        println!("{}", page.dom_dump());
+        emit(&format!("=== DOM: {} ===", page.url));
+        emit(&page.dom_dump());
     }
     if want_layout {
-        println!("=== Layout ({}x{}) ===", page.content_width(), page.content_height());
-        println!("{}", page.layout_dump());
+        emit(&format!("=== Layout ({}x{}) ===", page.content_width(), page.content_height()));
+        emit(&page.layout_dump());
     }
     Ok(())
+}
+
+/// Write a line to stdout; a closed pipe (`| head`) ends the process
+/// quietly instead of panicking.
+fn emit(text: &str) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if out.write_all(text.as_bytes()).and_then(|_| out.write_all(b"\n")).and_then(|_| out.flush()).is_err() {
+        std::process::exit(0);
+    }
 }
 
 #[cfg(test)]

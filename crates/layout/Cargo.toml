@@ -14,3 +14,4 @@ rabbithole-gfx.workspace = true
 [dev-dependencies]
 rabbithole-html.workspace = true
 rabbithole-css.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }

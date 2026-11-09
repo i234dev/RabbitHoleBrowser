@@ -1502,6 +1502,7 @@ dependencies = [
 name = "rabbithole-layout"
 version = "0.1.0"
 dependencies = [
+ "image",
  "rabbithole-css",
  "rabbithole-dom",
  "rabbithole-gfx",
