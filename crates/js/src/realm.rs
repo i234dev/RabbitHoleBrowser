@@ -146,6 +146,8 @@ pub struct Realm {
     pub global: ObjectId,
     pub global_lex: HashMap<JsStr, (Value, bool)>,
     pub jobs: VecDeque<Job>,
+    /// Values of jobs currently running (popped from `jobs`), kept alive.
+    pub job_roots: Vec<Vec<Value>>,
     pub frames: Vec<Frame>,
     roots: Rc<RefCell<RootTable>>,
     pub console_sink: Option<ConsoleSink>,
@@ -234,6 +236,7 @@ impl Realm {
             global,
             global_lex: HashMap::new(),
             jobs: VecDeque::new(),
+            job_roots: Vec::new(),
             frames: Vec::new(),
             roots: Rc::new(RefCell::new(RootTable::default())),
             console_sink: None,
@@ -557,6 +560,9 @@ impl Realm {
         }
         tmp.extend(self.roots.borrow().values.values().cloned());
         tmp.extend(self.extra_roots.iter().cloned());
+        for roots in &self.job_roots {
+            tmp.extend(roots.iter().cloned());
+        }
         tmp.extend(self.new_target_stack.iter().cloned());
         tmp.extend(self.unhandled_rejections.iter().cloned());
         tmp.extend(self.template_cache.values().map(|o| Value::Object(*o)));
@@ -637,14 +643,13 @@ impl Realm {
                     job_roots.extend(args.iter().cloned());
                 }
             }
-            let mark = self.extra_roots.len();
-            self.extra_roots.extend(job_roots);
+            self.job_roots.push(job_roots);
             let r = match job {
                 Job::Reaction { reaction, argument } => self.run_reaction(reaction, argument),
                 Job::ResolveThenable { promise, thenable, then } => self.run_resolve_thenable(promise, thenable, then),
                 Job::Callback { func, this, args } => self.call(func, this, &args).map(|_| ()),
             };
-            self.extra_roots.truncate(mark);
+            self.job_roots.pop();
             if let Err(e) = r {
                 let msg = self.error_to_string(&e);
                 self.console_emit("error", format!("Uncaught (in job) {}", msg));

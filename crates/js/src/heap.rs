@@ -482,6 +482,11 @@ impl Object {
 }
 
 /// Mark-and-sweep garbage collected arena.
+thread_local! {
+    /// Debug aid (RH_DEBUG_GC): what each freed slot held.
+    static FREED_INFO: std::cell::RefCell<std::collections::HashMap<u32, String>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 pub struct Heap {
     objects: Vec<Option<Object>>,
     free: Vec<u32>,
@@ -514,7 +519,13 @@ impl Heap {
     }
 
     pub fn get(&self, id: ObjectId) -> &Object {
-        self.objects[id.0 as usize].as_ref().expect("use of freed object")
+        match self.objects[id.0 as usize].as_ref() {
+            Some(o) => o,
+            None => {
+                let info = FREED_INFO.with(|m| m.borrow().get(&id.0).cloned()).unwrap_or_default();
+                panic!("use of freed object #{} {}", id.0, info)
+            }
+        }
     }
 
     pub fn get_mut(&mut self, id: ObjectId) -> &mut Object {
@@ -555,8 +566,14 @@ impl Heap {
             }
         }
         let mut freed = 0;
+        let debug = std::env::var_os("RH_DEBUG_GC").is_some();
         for (i, slot) in self.objects.iter_mut().enumerate() {
             if slot.is_some() && !self.marks[i] {
+                if debug {
+                    let o = slot.as_ref().unwrap();
+                    let keys: Vec<String> = o.props.iter().take(6).map(|(k, _)| format!("{k:?}")).collect();
+                    FREED_INFO.with(|m| m.borrow_mut().insert(i as u32, format!("{} {:?} props={:?}", o.kind.name(), o.class_name, keys)));
+                }
                 *slot = None;
                 self.free.push(i as u32);
                 freed += 1;
@@ -696,4 +713,5 @@ pub fn trace_frame(f: &Frame, out: &mut Vec<Value>) {
         push_val(out, v);
     }
     push_id(out, f.generator);
+    push_val(out, &f.completion);
 }
