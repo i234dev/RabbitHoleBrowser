@@ -41,6 +41,8 @@ pub mod vm;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_vm;
 
 pub use heap::{NativeFn, ObjectKind, Property, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN, WRITABLE};
 pub use interop::JsResult;
