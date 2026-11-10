@@ -1240,12 +1240,43 @@ fn unicode_property_class(name: &str) -> Option<CharClass> {
             "Zp" | "Paragraph_Separator" => Box::new(|c: char| c == '\u{2029}'),
             "C" | "Other" => Box::new(|c: char| c.is_control() || (0xD800..=0xDFFF).contains(&(c as u32))),
             "Cc" | "Control" => Box::new(|c: char| c.is_control()),
-            "M" | "Mark" | "Mn" | "Nonspacing_Mark" => Box::new(|c: char| matches!(c as u32, 0x300..=0x36F | 0x483..=0x489 | 0x591..=0x5BD | 0x610..=0x61A | 0x64B..=0x65F | 0x900..=0x903 | 0x93A..=0x94F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)),
+            "Cf" | "Format" => Box::new(|c: char| matches!(c as u32, 0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB | 0xE0001 | 0xE0020..=0xE007F)),
+            "Co" | "Private_Use" => Box::new(|c: char| matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)),
+            "Cs" | "Surrogate" => Box::new(|c: char| (0xD800..=0xDFFF).contains(&(c as u32))),
+            "Cn" | "Unassigned" => Box::new(|c: char| matches!(c as u32, 0xFDD0..=0xFDEF) || (c as u32 & 0xFFFE) == 0xFFFE),
+            "Mc" | "Spacing_Mark" => Box::new(|c: char| matches!(c as u32, 0x903 | 0x93B | 0x93E..=0x940 | 0x949..=0x94C | 0x94E | 0x94F | 0x982 | 0x983 | 0x9BE..=0x9C0 | 0x9C7 | 0x9C8 | 0x9CB | 0x9CC | 0xA03 | 0xA3E..=0xA40 | 0xA83 | 0xABE..=0xAC0 | 0xB02 | 0xB03 | 0xBBE | 0xBBF | 0xC01..=0xC03 | 0xD02 | 0xD03 | 0xF3E | 0xF3F | 0x102B | 0x102C | 0x1031 | 0x1038 | 0x17B6 | 0x17BE..=0x17C5 | 0x1B04 | 0x302E | 0x302F | 0xA823 | 0xA824 | 0xA827 | 0xAAEB | 0x1D165 | 0x1D166)),
+            "Me" | "Enclosing_Mark" => Box::new(|c: char| matches!(c as u32, 0x488 | 0x489 | 0x1ABE | 0x20DD..=0x20E0 | 0x20E2..=0x20E4 | 0xA670..=0xA672)),
+            "Pc" | "Connector_Punctuation" => Box::new(|c: char| matches!(c as u32, 0x5F | 0x203F | 0x2040 | 0x2054 | 0xFE33 | 0xFE34 | 0xFE4D..=0xFE4F | 0xFF3F)),
+            "Pd" | "Dash_Punctuation" => Box::new(|c: char| matches!(c as u32, 0x2D | 0x58A | 0x5BE | 0x1400 | 0x1806 | 0x2010..=0x2015 | 0x2E17 | 0x2E1A | 0x2E3A | 0x2E3B | 0x2E40 | 0x301C | 0x3030 | 0x30A0 | 0xFE31 | 0xFE32 | 0xFE58 | 0xFE63 | 0xFF0D)),
+            "Ps" | "Open_Punctuation" => Box::new(|c: char| matches!(c, '(' | '[' | '{' | '\u{F3A}' | '\u{F3C}' | '\u{169B}' | '\u{201A}' | '\u{201E}' | '\u{2045}' | '\u{207D}' | '\u{208D}' | '\u{2308}' | '\u{230A}' | '\u{2329}' | '\u{2768}' | '\u{276A}' | '\u{27E6}' | '\u{2983}' | '\u{3008}' | '\u{300A}' | '\u{300C}' | '\u{300E}' | '\u{3010}' | '\u{FF08}' | '\u{FF3B}' | '\u{FF5B}')),
+            "Pe" | "Close_Punctuation" => Box::new(|c: char| matches!(c, ')' | ']' | '}' | '\u{F3B}' | '\u{F3D}' | '\u{169C}' | '\u{2046}' | '\u{207E}' | '\u{208E}' | '\u{2309}' | '\u{230B}' | '\u{232A}' | '\u{2769}' | '\u{276B}' | '\u{27E7}' | '\u{2984}' | '\u{3009}' | '\u{300B}' | '\u{300D}' | '\u{300F}' | '\u{3011}' | '\u{FF09}' | '\u{FF3D}' | '\u{FF5D}')),
+            "Pi" | "Initial_Punctuation" => Box::new(|c: char| matches!(c, '\u{AB}' | '\u{2018}' | '\u{201B}' | '\u{201C}' | '\u{201F}' | '\u{2039}' | '\u{2E02}' | '\u{2E04}' | '\u{2E09}' | '\u{2E0C}' | '\u{2E1C}' | '\u{2E20}')),
+            "Pf" | "Final_Punctuation" => Box::new(|c: char| matches!(c, '\u{BB}' | '\u{2019}' | '\u{201D}' | '\u{203A}' | '\u{2E03}' | '\u{2E05}' | '\u{2E0A}' | '\u{2E0D}' | '\u{2E1D}' | '\u{2E21}')),
+            "Po" | "Other_Punctuation" => Box::new(|c: char| matches!(c, '!' | '"' | '#' | '%' | '&' | '\'' | '*' | ',' | '.' | '/' | ':' | ';' | '?' | '@' | '\\') || (is_unicode_punct(c) && !matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '-' | '_' | '\u{AB}' | '\u{BB}' | '\u{2010}'..='\u{2015}' | '\u{2018}'..='\u{201F}'))),
+            "Sm" | "Math_Symbol" => Box::new(|c: char| matches!(c, '+' | '<' | '=' | '>' | '|' | '~' | '\u{AC}' | '\u{B1}' | '\u{D7}' | '\u{F7}' | '\u{3F6}' | '\u{2044}' | '\u{2052}' | '\u{2118}' | '\u{2140}'..='\u{2144}' | '\u{214B}' | '\u{2190}'..='\u{2194}' | '\u{2200}'..='\u{22FF}' | '\u{2320}' | '\u{2321}' | '\u{27C0}'..='\u{27FF}' | '\u{2900}'..='\u{2AFF}' | '\u{FB29}' | '\u{FE62}' | '\u{FE64}'..='\u{FE66}' | '\u{FF0B}' | '\u{FF1C}'..='\u{FF1E}' | '\u{FF5C}' | '\u{FF5E}' | '\u{FFE2}' | '\u{FFE9}'..='\u{FFEC}')),
+            "Sc" | "Currency_Symbol" => Box::new(|c: char| matches!(c, '$' | '\u{A2}'..='\u{A5}' | '\u{58F}' | '\u{60B}' | '\u{9F2}' | '\u{9F3}' | '\u{E3F}' | '\u{17DB}' | '\u{20A0}'..='\u{20C0}' | '\u{FDFC}' | '\u{FE69}' | '\u{FF04}' | '\u{FFE0}' | '\u{FFE1}' | '\u{FFE5}' | '\u{FFE6}')),
+            "Sk" | "Modifier_Symbol" => Box::new(|c: char| matches!(c, '^' | '`' | '\u{A8}' | '\u{AF}' | '\u{B4}' | '\u{B8}' | '\u{2C2}'..='\u{2C5}' | '\u{2D2}'..='\u{2DF}' | '\u{2E5}'..='\u{2EB}' | '\u{2ED}' | '\u{2EF}'..='\u{2FF}' | '\u{375}' | '\u{384}' | '\u{385}' | '\u{1FBD}' | '\u{1FBF}'..='\u{1FC1}' | '\u{1FCD}'..='\u{1FCF}' | '\u{1FDD}'..='\u{1FDF}' | '\u{1FED}'..='\u{1FEF}' | '\u{1FFD}' | '\u{1FFE}' | '\u{309B}' | '\u{309C}' | '\u{FF3E}' | '\u{FF40}' | '\u{FFE3}' | '\u{1F3FB}'..='\u{1F3FF}')),
+            "So" | "Other_Symbol" => Box::new(|c: char| is_unicode_symbol(c) && !matches!(c, '$' | '+' | '<' | '=' | '>' | '^' | '`' | '|' | '~')),
+            "M" | "Mark" | "Combining_Mark" | "Mn" | "Nonspacing_Mark" => Box::new(|c: char| matches!(c as u32, 0x300..=0x36F | 0x483..=0x489 | 0x591..=0x5BD | 0x610..=0x61A | 0x64B..=0x65F | 0x900..=0x903 | 0x93A..=0x94F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)),
             "Alphabetic" | "Alpha" => Box::new(|c: char| c.is_alphabetic()),
             "Uppercase" | "Upper" => Box::new(|c: char| c.is_uppercase()),
             "Lowercase" | "Lower" => Box::new(|c: char| c.is_lowercase()),
             "White_Space" | "space" => Box::new(|c: char| c.is_whitespace()),
             "Any" => Box::new(|_| true),
+            "Assigned" => Box::new(|c: char| !matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0x10FFFF)),
+            "Bidi_Control" | "Bidi_C" => Box::new(|c: char| matches!(c as u32, 0x61C | 0x200E | 0x200F | 0x202A..=0x202E | 0x2066..=0x2069)),
+            "Join_Control" | "Join_C" => Box::new(|c: char| matches!(c as u32, 0x200C | 0x200D)),
+            "Default_Ignorable_Code_Point" | "DI" => Box::new(|c: char| matches!(c as u32, 0xAD | 0x34F | 0x61C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFF8 | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)),
+            "Variation_Selector" | "VS" => Box::new(|c: char| matches!(c as u32, 0x180B..=0x180D | 0x180F | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)),
+            "Regional_Indicator" | "RI" => Box::new(|c: char| matches!(c as u32, 0x1F1E6..=0x1F1FF)),
+            "Emoji_Modifier" | "EMod" => Box::new(|c: char| matches!(c as u32, 0x1F3FB..=0x1F3FF)),
+            "Emoji_Component" | "EComp" => Box::new(|c: char| matches!(c as u32, 0x23 | 0x2A | 0x30..=0x39 | 0x200D | 0x20E3 | 0xFE0F | 0x1F1E6..=0x1F1FF | 0x1F3FB..=0x1F3FF | 0x1F9B0..=0x1F9B3 | 0xE0020..=0xE007F)),
+            "ID_Start" | "IDS" | "XID_Start" | "XIDS" => Box::new(|c: char| c.is_alphabetic()),
+            "ID_Continue" | "IDC" | "XID_Continue" | "XIDC" => Box::new(|c: char| c.is_alphanumeric() || c == '_' || matches!(c as u32, 0x300..=0x36F | 0x200C | 0x200D)),
+            "Cased" => Box::new(|c: char| c.is_uppercase() || c.is_lowercase()),
+            "Dash" => Box::new(|c: char| matches!(c as u32, 0x2D | 0x58A | 0x5BE | 0x1400 | 0x1806 | 0x2010..=0x2015 | 0x2053 | 0x207B | 0x208B | 0x2212 | 0x2E17 | 0x2E1A | 0x2E3A | 0x2E3B | 0x2E40 | 0x301C | 0x3030 | 0x30A0 | 0xFE31 | 0xFE32 | 0xFE58 | 0xFE63 | 0xFF0D)),
+            "Hex_Digit" | "Hex" | "ASCII_Hex_Digit" | "AHex" => Box::new(|c: char| c.is_ascii_hexdigit()),
+            "Ideographic" | "Ideo" => Box::new(|c: char| matches!(c as u32, 0x3006 | 0x3007 | 0x3021..=0x3029 | 0x3038..=0x303A | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAD9 | 0x20000..=0x323AF)),
             "ASCII" => Box::new(|c: char| c.is_ascii()),
             "Emoji" | "Emoji_Presentation" | "Extended_Pictographic" => Box::new(|c: char| matches!(c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF | 0x1F000..=0x1F2FF | 0x23 | 0x2A | 0x30..=0x39 | 0xA9 | 0xAE | 0x203C | 0x2049 | 0x2122 | 0x2139 | 0x2194..=0x21AA | 0x231A..=0x23FF | 0x25AA..=0x25FE | 0x2B05..=0x2B55 | 0x3030 | 0x303D | 0x3297 | 0x3299)),
             _ => return None,
@@ -2080,6 +2111,14 @@ mod tests {
         assert_eq!(whole("\\p{Script=Greek}+", "u", "abc αβγ").as_deref(), Some("αβγ"));
         assert_eq!(whole("\\p{N}+", "u", "x٣٤y").as_deref(), Some("٣٤"));
         assert_eq!(error("\\p{Nope}", "u"), "Invalid property name");
+        let bidi = Regex::new("[\\p{Bidi_Control}\\u0590-\\u08ff]", "u").unwrap();
+        assert!(bidi.is_match("a\u{202E}b"));
+        assert!(!bidi.is_match("abc"));
+        let marks = Regex::new("[\\p{Mn}\\p{Mc}\\p{Me}]", "u").unwrap();
+        assert!(marks.is_match("e\u{301}"));
+        for cat in ["Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "Sm", "Sc", "Sk", "So", "Cf", "Co", "Cs", "Cn"] {
+            assert!(Regex::new(&format!("\\p{{{cat}}}"), "u").is_ok(), "{cat}");
+        }
         assert_eq!(whole("\\p{L}", "", "p{L}").as_deref(), Some("p{L}"));
     }
 

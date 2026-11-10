@@ -720,12 +720,8 @@ fn ce_define(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         let doc = env.doc();
         doc.descendants(Document::ROOT).filter(|&n| doc.tag(n) == Some(name.as_str())).collect()
     });
-    let proto_v = realm.get_str(ctor.clone(), "prototype")?;
     for n in existing {
-        let el = wrap_main(realm, n);
-        if let (Value::Object(e), Value::Object(p)) = (&el, &proto_v) {
-            realm.obj_mut(*e).proto = Some(*p);
-        }
+        let el = crate::host::upgrade_custom_element(realm, NodeRef::main(n), &ctor);
         let cb = realm.get_str(el.clone(), "connectedCallback")?;
         if realm.is_callable(&cb) {
             call_logged(realm, &cb, el, &[], "connectedCallback");

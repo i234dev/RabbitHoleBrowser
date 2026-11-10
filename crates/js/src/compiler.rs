@@ -1252,6 +1252,54 @@ impl Compiler {
         }
     }
 
+    /// `{ [k]: a, b, ...rest } = obj`: computed keys are only known at run
+    /// time, so the excluded-key list is collected in a hidden array while
+    /// the properties are read (ES2023 §8.6.3 RestBindingInitialization).
+    /// Stack on entry: [obj]; consumed on exit.
+    fn compile_object_pattern_dynamic_rest(&mut self, properties: &[ObjectPatternProp], rest: &Pattern, is_decl: bool) -> CResult<()> {
+        let keys = self.hidden_slot("restkeys");
+        self.emit(Op::NewArray(0));
+        self.emit(Op::SetLocal(keys.0, keys.1));
+        for p in properties {
+            self.emit(Op::Dup); // [obj, obj]
+            match &p.key {
+                PropertyKey::Identifier(n) | PropertyKey::String(n) => {
+                    let i = self.const_str(n);
+                    self.emit(Op::GetLocal(keys.0, keys.1));
+                    self.emit(Op::Const(i));
+                    self.emit(Op::ArrayPush);
+                    self.emit(Op::Pop);
+                    self.emit(Op::GetProp(i));
+                }
+                PropertyKey::Number(n) => {
+                    let i = self.const_str(&crate::value::number_to_string(*n));
+                    self.emit(Op::GetLocal(keys.0, keys.1));
+                    self.emit(Op::Const(i));
+                    self.emit(Op::ArrayPush);
+                    self.emit(Op::Pop);
+                    self.emit(Op::GetProp(i));
+                }
+                PropertyKey::Computed(e) => {
+                    self.compile_expr(e)?;
+                    self.emit(Op::ToPropertyKey); // [obj, obj, key]
+                    self.emit(Op::Dup); // [obj, obj, key, key]
+                    self.emit(Op::GetLocal(keys.0, keys.1)); // [.., key, key, arr]
+                    self.emit(Op::Swap); // [.., key, arr, key]
+                    self.emit(Op::ArrayPush); // [.., key, arr]
+                    self.emit(Op::Pop); // [obj, obj, key]
+                    self.emit(Op::GetElem);
+                }
+                PropertyKey::Private(_) => return self.err("Unexpected private name"),
+            }
+            self.compile_pattern_store(&p.value, is_decl)?;
+        }
+        self.emit(Op::NewObject); // [obj, rest]
+        self.emit(Op::Swap); // [rest, obj]
+        self.emit(Op::GetLocal(keys.0, keys.1));
+        self.emit(Op::CopyDataPropsExcluding); // [rest]
+        self.compile_pattern_store(rest, is_decl)
+    }
+
     fn compile_for_head_store(&mut self, left: &ForHead) -> CResult<()> {
         match left {
             ForHead::VarDecl { target, .. } => self.compile_pattern_store(target, true),
@@ -1364,6 +1412,9 @@ impl Compiler {
             decls.extend(Self::collect_lexical(&c.body, true));
         }
         let mat = self.push_block_scope(&decls);
+        // The discriminant lives in the function scope; once the case block
+        // scope is materialized it is one scope further away.
+        let d = if mat { (d.0 + 1, d.1) } else { d };
         for c in cases {
             self.hoist_functions(&c.body)?;
         }
@@ -1396,13 +1447,13 @@ impl Compiler {
             Some(t) => self.patch_jump_to(default_jump, t),
             None => self.patch_jump(default_jump),
         }
-        self.pop_block_scope(mat);
-        // breaks exit after the scope pop (their exits already popped the scope)
-        let after = self.emit(Op::Jump(0));
+        // `break` is registered inside the case block scope, so its exit did
+        // not pop that scope: breaks land on the scope pop like fallthrough.
+        let pop_at = self.here() as u32;
         for &j in &lp.break_jumps {
-            self.patch_jump(j);
+            self.patch_jump_to(j, pop_at);
         }
-        self.patch_jump(after);
+        self.pop_block_scope(mat);
         Ok(())
     }
 
@@ -1544,8 +1595,11 @@ impl Compiler {
                 self.compile_pattern_store(target, is_decl)
             }
             Pattern::Object { properties, rest } => {
+                let has_computed = properties.iter().any(|p| matches!(p.key, PropertyKey::Computed(_)));
+                if rest.is_some() && has_computed {
+                    return self.compile_object_pattern_dynamic_rest(properties, rest.as_deref().unwrap(), is_decl);
+                }
                 let mut rest_keys: Vec<u32> = Vec::new();
-                let mut computed_rest = false;
                 for p in properties {
                     self.emit(Op::Dup);
                     match &p.key {
@@ -1563,16 +1617,12 @@ impl Compiler {
                             self.compile_expr(e)?;
                             self.emit(Op::ToPropertyKey);
                             self.emit(Op::GetElem);
-                            computed_rest = true;
                         }
                         PropertyKey::Private(_) => return self.err("Unexpected private name"),
                     }
                     self.compile_pattern_store(&p.value, is_decl)?;
                 }
                 if let Some(r) = rest {
-                    if computed_rest {
-                        return self.err("Rest with computed keys in object patterns is not supported");
-                    }
                     self.emit(Op::NewObject);
                     self.emit(Op::Swap);
                     for &k in &rest_keys {

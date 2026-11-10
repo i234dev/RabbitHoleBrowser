@@ -229,16 +229,13 @@ fn d_create_element(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
         }
         doc.create_element(&tag.to_ascii_lowercase(), attrs)
     });
-    let v = wrap(realm, NodeRef { doc: d, node });
-    // Custom element constructor upgrade for defined names.
+    // Defined custom elements are created by running their constructor.
     let tag_l = tag.to_ascii_lowercase();
     let ctor = state().borrow().custom_elements.get(&tag_l).cloned();
-    if let (Some(ctor), Value::Object(id)) = (ctor, &v) {
-        if let Ok(Value::Object(p)) = realm.get_str(ctor, "prototype") {
-            realm.obj_mut(*id).proto = Some(p);
-        }
+    if let Some(ctor) = ctor {
+        return Ok(crate::host::upgrade_custom_element(realm, NodeRef { doc: d, node }, &ctor));
     }
-    Ok(v)
+    Ok(wrap(realm, NodeRef { doc: d, node }))
 }
 
 fn d_create_element_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {

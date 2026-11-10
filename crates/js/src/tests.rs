@@ -1217,3 +1217,69 @@ mod modules {
         assert!(realm.error_to_string(&e).contains("mem:/bad.js"));
     }
 }
+
+#[test]
+fn object_rest_with_computed_keys() {
+    let mut realm = crate::Realm::new();
+    let v = realm
+        .eval(
+            r#"
+            const k = 'b', o = { a: 1, b: 2, c: 3, [Symbol.iterator]: 4 };
+            const { [k]: x, a, ...rest } = o;
+            let y, others;
+            ({ ['c']: y, ...others } = o);
+            function f({ [k + '']: z, ...r }) { return z + Object.keys(r).join(''); }
+            [x, a, Object.keys(rest).join(','), y, Object.keys(others).join(','), f(o)].join('|')
+            "#,
+            "t.js",
+        )
+        .unwrap();
+    assert_eq!(realm.to_rust_string(v).unwrap(), "2|1|c|3|a,b|2ac");
+}
+
+#[test]
+fn object_rest_computed_in_arrow_block() {
+    let mut realm = crate::Realm::new();
+    let v = realm
+        .eval(
+            r#"
+            const B = { sources: [1], a: 1, b: 2 };
+            const f = (e, _) => { let { [_]: r, ...n } = e; return n; };
+            const o = { x: 1, ...((e, _) => { let { [_]: r, ...n } = e; return n; })(B, "sources") };
+            Object.keys(f(B, "sources")).join(',') + '|' + Object.keys(o).join(',')
+            "#,
+            "t.js",
+        )
+        .unwrap();
+    assert_eq!(realm.to_rust_string(v).unwrap(), "a,b|x,a,b");
+}
+
+#[test]
+fn switch_case_let_and_shadowed_fn_name() {
+    let mut realm = crate::Realm::new();
+    let v = realm
+        .eval(
+            r#"
+            function m(e, t, n, l, u) {
+              var m;
+              switch (n.kind) {
+                case "scalar": e.push('s:' + t); break;
+                case "enum":
+                  let d = t * 2;
+                  if (n.open) e.push('o:' + d);
+                  else if ([1, 2, d].some(x => x === d)) e.push('v:' + d);
+                  break;
+                case "list":
+                  m = d => d + 1;
+                  e.push('l:' + m(t));
+                  break;
+              }
+              return e;
+            }
+            [m([], 1, { kind: 'scalar' }).join(), m([], 2, { kind: 'enum' }).join(), m([], 3, { kind: 'enum', open: true }).join(), m([], 4, { kind: 'list' }).join()].join('|')
+            "#,
+            "t.js",
+        )
+        .unwrap();
+    assert_eq!(realm.to_rust_string(v).unwrap(), "s:1|v:4|o:6|l:5");
+}

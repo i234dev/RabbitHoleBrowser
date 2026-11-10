@@ -563,7 +563,17 @@ impl Realm {
     fn slot_get(&self, scope: ObjectId, depth: u16, slot: u16) -> Value {
         let s = self.scope_at(scope, depth);
         match &self.heap.get(s).kind {
-            ObjectKind::Scope(sd) => sd.slots[slot as usize].clone(),
+            ObjectKind::Scope(sd) => match sd.slots.get(slot as usize) {
+                Some(v) => v.clone(),
+                None => {
+                    // A compiler scope bug must not take the whole browser
+                    // down; report it when debugging and read `undefined`.
+                    if std::env::var("RH_DEBUG_SLOTS").is_ok() {
+                        eprintln!("[slot] read d={depth} s={slot} len={} at\n{}", sd.slots.len(), self.build_stack_string("Debug", "slot"));
+                    }
+                    Value::Undefined
+                }
+            },
             _ => Value::Undefined,
         }
     }
@@ -572,7 +582,9 @@ impl Realm {
     fn slot_set(&mut self, scope: ObjectId, depth: u16, slot: u16, v: Value) {
         let s = self.scope_at(scope, depth);
         if let ObjectKind::Scope(sd) = &mut self.heap.get_mut(s).kind {
-            sd.slots[slot as usize] = v;
+            if let Some(dst) = sd.slots.get_mut(slot as usize) {
+                *dst = v;
+            }
         }
     }
 

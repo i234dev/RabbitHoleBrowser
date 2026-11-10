@@ -335,11 +335,7 @@ fn after_insert_connected(realm: &mut Realm, inserted: &[NodeRef]) -> JsResult<(
     for (node, tag) in customs {
         let ctor = state().borrow().custom_elements.get(&tag).cloned();
         if let Some(ctor) = ctor {
-            let el = wrap_main(realm, node);
-            let proto_v = realm.get_str(ctor.clone(), "prototype")?;
-            if let (Value::Object(elid), Value::Object(p)) = (&el, &proto_v) {
-                realm.obj_mut(*elid).proto = Some(*p);
-            }
+            let el = crate::host::upgrade_custom_element(realm, NodeRef::main(node), &ctor);
             let cb = realm.get_str(el.clone(), "connectedCallback")?;
             if realm.is_callable(&cb) {
                 call_logged(realm, &cb, el, &[], "connectedCallback");

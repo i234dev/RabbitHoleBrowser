@@ -114,6 +114,8 @@ impl ScriptHost {
             mutation_records: Vec::new(),
             mutation_scheduled: false,
             custom_elements: HashMap::new(),
+            ce_constructing: None,
+            ce_upgraded: std::collections::HashSet::new(),
             location_override: None,
             history_len: 1,
             history_state: Value::Null,

@@ -1836,7 +1836,7 @@ pub(crate) fn install(realm: &mut Realm) {
     }
     crate::events::install_handler_props(realm, el, EVENT_HANDLER_NAMES);
 
-    let html = define_class(realm, "HTMLElement", Some("Element"), illegal_ctor);
+    let html = define_class(realm, "HTMLElement", Some("Element"), crate::host::html_element_ctor);
     let hacc = |realm: &mut Realm, name: &str, g: rabbithole_js::NativeFn, s: Option<rabbithole_js::NativeFn>| realm.define_accessor(html, name, Some(g), s, ACC);
     hacc(realm, "innerText", e_inner_text_get, Some(e_inner_text_set));
     hacc(realm, "outerText", e_inner_text_get, Some(e_inner_text_set));
@@ -1868,7 +1868,7 @@ pub(crate) fn install(realm: &mut Realm) {
     for name in [
         "HTMLDivElement", "HTMLSpanElement", "HTMLParagraphElement", "HTMLUListElement", "HTMLOListElement", "HTMLLIElement", "HTMLBodyElement", "HTMLHtmlElement", "HTMLHeadElement", "HTMLTableElement", "HTMLTableRowElement", "HTMLTableCellElement", "HTMLTableSectionElement", "HTMLHeadingElement", "HTMLBRElement", "HTMLHRElement", "HTMLPreElement", "HTMLMetaElement", "HTMLTitleElement", "HTMLDListElement", "HTMLFieldSetElement", "HTMLLegendElement", "HTMLDetailsElement", "HTMLDialogElement", "HTMLSourceElement", "HTMLPictureElement", "HTMLObjectElement", "HTMLBaseElement", "HTMLAreaElement", "HTMLProgressElement", "HTMLTimeElement", "HTMLDataElement", "HTMLSlotElement", "HTMLMenuElement", "HTMLQuoteElement", "HTMLFontElement", "HTMLFrameElement", "HTMLModElement", "HTMLTableCaptionElement", "HTMLTableColElement", "HTMLOptGroupElement", "HTMLDataListElement", "HTMLTrackElement", "HTMLParamElement", "HTMLMarqueeElement", "HTMLUnknownElement",
     ] {
-        define_class(realm, name, Some("HTMLElement"), illegal_ctor);
+        define_class(realm, name, Some("HTMLElement"), crate::host::html_element_ctor);
     }
     let details = proto("HTMLDetailsElement");
     reflect(realm, details, "open", "open", Reflect::Bool);
@@ -1905,7 +1905,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(area, "href", Some(a_href_get), Some(a_href_set), ACC);
 
     // --- HTMLAnchorElement
-    let a = define_class(realm, "HTMLAnchorElement", Some("HTMLElement"), illegal_ctor);
+    let a = define_class(realm, "HTMLAnchorElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(a, "href", Some(a_href_get), Some(a_href_set), ACC);
     for (name, g) in [("protocol", a_protocol as rabbithole_js::NativeFn), ("host", a_host), ("hostname", a_hostname), ("port", a_port), ("pathname", a_pathname), ("search", a_search), ("hash", a_hash), ("origin", a_origin)] {
         realm.define_accessor(a, name, Some(g), None, ACC);
@@ -1918,7 +1918,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(a, "text", Some(e_inner_text_get), Some(n_text_set_alias), ACC);
 
     // --- HTMLInputElement
-    let input = define_class(realm, "HTMLInputElement", Some("HTMLElement"), illegal_ctor);
+    let input = define_class(realm, "HTMLInputElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(input, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(input, "defaultValue", Some(input_default_value_get), Some(input_value_set), ACC);
     realm.define_accessor(input, "checked", Some(input_checked_get), Some(input_checked_set), ACC);
@@ -1955,7 +1955,7 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, input, "size", "size", Reflect::Int(20));
 
     // --- HTMLTextAreaElement
-    let ta = define_class(realm, "HTMLTextAreaElement", Some("HTMLElement"), illegal_ctor);
+    let ta = define_class(realm, "HTMLTextAreaElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(ta, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(ta, "defaultValue", Some(input_default_value_get), Some(n_text_set_alias), ACC);
     realm.define_accessor(ta, "type", Some(input_type_get), None, ACC);
@@ -1981,7 +1981,7 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, ta, "maxLength", "maxlength", Reflect::Int(-1));
 
     // --- HTMLSelectElement / HTMLOptionElement
-    let sel = define_class(realm, "HTMLSelectElement", Some("HTMLElement"), illegal_ctor);
+    let sel = define_class(realm, "HTMLSelectElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(sel, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(sel, "type", Some(input_type_get), None, ACC);
     realm.define_accessor(sel, "options", Some(select_options), None, ACC);
@@ -2018,7 +2018,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_global("Option", opt_ctor);
 
     // --- HTMLFormElement
-    let form = define_class(realm, "HTMLFormElement", Some("HTMLElement"), illegal_ctor);
+    let form = define_class(realm, "HTMLFormElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(form, "elements", Some(form_elements), None, ACC);
     realm.define_accessor(form, "length", Some(form_length), None, ACC);
     realm.define_accessor(form, "action", Some(form_action_get), Some(form_action_set), ACC);
@@ -2052,7 +2052,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_global("Image", img_ctor);
 
     // --- HTMLScriptElement
-    let script = define_class(realm, "HTMLScriptElement", Some("HTMLElement"), illegal_ctor);
+    let script = define_class(realm, "HTMLScriptElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(script, "text", Some(script_text_get), Some(script_text_set), ACC);
     for (p, at) in [("type", "type"), ("charset", "charset"), ("crossOrigin", "crossorigin"), ("integrity", "integrity"), ("referrerPolicy", "referrerpolicy"), ("nonce", "nonce")] {
         reflect(realm, script, p, at, Reflect::Str);
@@ -2062,11 +2062,11 @@ pub(crate) fn install(realm: &mut Realm) {
         reflect(realm, script, p, at, Reflect::Bool);
     }
     // --- HTMLStyleElement / HTMLLinkElement
-    let style = define_class(realm, "HTMLStyleElement", Some("HTMLElement"), illegal_ctor);
+    let style = define_class(realm, "HTMLStyleElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(style, "sheet", Some(style_sheet), None, ACC);
     reflect(realm, style, "media", "media", Reflect::Str);
     reflect(realm, style, "disabled", "disabled", Reflect::Bool);
-    let link = define_class(realm, "HTMLLinkElement", Some("HTMLElement"), illegal_ctor);
+    let link = define_class(realm, "HTMLLinkElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(link, "sheet", Some(style_sheet), None, ACC);
     realm.define_accessor(link, "relList", Some(e_rel_list), None, ACC);
     reflect(realm, link, "href", "href", Reflect::Url);
@@ -2075,7 +2075,7 @@ pub(crate) fn install(realm: &mut Realm) {
     }
     reflect(realm, link, "disabled", "disabled", Reflect::Bool);
     // --- HTMLIFrameElement
-    let iframe = define_class(realm, "HTMLIFrameElement", Some("HTMLElement"), illegal_ctor);
+    let iframe = define_class(realm, "HTMLIFrameElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(iframe, "contentWindow", Some(iframe_content_window), None, ACC);
     realm.define_accessor(iframe, "contentDocument", Some(iframe_content_window), None, ACC);
     reflect(realm, iframe, "src", "src", Reflect::Url);
@@ -2084,7 +2084,7 @@ pub(crate) fn install(realm: &mut Realm) {
     }
     reflect(realm, iframe, "allowFullscreen", "allowfullscreen", Reflect::Bool);
     // --- HTMLCanvasElement
-    let canvas = define_class(realm, "HTMLCanvasElement", Some("HTMLElement"), illegal_ctor);
+    let canvas = define_class(realm, "HTMLCanvasElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_method(canvas, "getContext", 1, canvas_get_context);
     realm.define_method(canvas, "toDataURL", 0, canvas_to_data_url);
     realm.define_method(canvas, "toBlob", 1, e_noop);
@@ -2092,7 +2092,7 @@ pub(crate) fn install(realm: &mut Realm) {
     reflect(realm, canvas, "width", "width", Reflect::Int(300));
     reflect(realm, canvas, "height", "height", Reflect::Int(150));
     // --- HTMLButtonElement
-    let button = define_class(realm, "HTMLButtonElement", Some("HTMLElement"), illegal_ctor);
+    let button = define_class(realm, "HTMLButtonElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(button, "type", Some(input_type_get), Some(input_type_set), ACC);
     realm.define_accessor(button, "value", Some(input_value_get), Some(input_value_set), ACC);
     realm.define_accessor(button, "form", Some(input_form), None, ACC);
@@ -2108,15 +2108,15 @@ pub(crate) fn install(realm: &mut Realm) {
         reflect(realm, button, p, at, Reflect::Bool);
     }
     // --- HTMLLabelElement
-    let label = define_class(realm, "HTMLLabelElement", Some("HTMLElement"), illegal_ctor);
+    let label = define_class(realm, "HTMLLabelElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(label, "control", Some(label_control), None, ACC);
     realm.define_accessor(label, "form", Some(input_form), None, ACC);
     reflect(realm, label, "htmlFor", "for", Reflect::Str);
     // --- HTMLTemplateElement
-    let template = define_class(realm, "HTMLTemplateElement", Some("HTMLElement"), illegal_ctor);
+    let template = define_class(realm, "HTMLTemplateElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(template, "content", Some(template_content), None, ACC);
     // --- HTMLMediaElement
-    let media = define_class(realm, "HTMLMediaElement", Some("HTMLElement"), illegal_ctor);
+    let media = define_class(realm, "HTMLMediaElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_method(media, "play", 0, media_play);
     realm.define_method(media, "pause", 0, e_noop);
     realm.define_method(media, "load", 0, e_noop);

@@ -905,3 +905,37 @@ fn json_and_css_modules() {
     let (_, r) = run_module(&mut env, &mut host, "import bad from './bad.json' with { type: 'json' };");
     assert!(r.unwrap_err().contains("SyntaxError"));
 }
+
+#[test]
+fn custom_element_constructors_run() {
+    let mut env = MockEnv::new("<html><body><x-old></x-old></body></html>");
+    let mut host = ScriptHost::new(&mut env);
+    host.run_script(
+        &mut env,
+        r#"
+        const log = [];
+        const priv = new WeakMap();
+        class XEl extends HTMLElement {
+          static get observedAttributes() { return ['src']; }
+          #secret = 41;
+          constructor() { super(); this.delegate = { connect: () => log.push('connect:' + this.localName) }; priv.set(this, 1); }
+          connectedCallback() { this.delegate.connect(); log.push('secret:' + (this.#secret + 1)); }
+          attributeChangedCallback(n, o, v) { log.push('attr:' + n + '=' + v); }
+        }
+        document.querySelector('x-old').setAttribute('src', 'a.html');
+        customElements.define('x-old', XEl);
+        customElements.define('x-new', class extends XEl {});
+        const made = document.createElement('x-new');
+        log.push('made:' + (made instanceof XEl) + ':' + priv.has(made) + ':' + (typeof made.delegate));
+        document.body.appendChild(made);
+        const viaNew = new XEl();
+        log.push('new:' + (viaNew instanceof HTMLElement) + ':' + viaNew.localName);
+        window.result = log.join(',');
+        "#,
+        "t.js",
+        false,
+    )
+    .unwrap();
+    let out = host.eval_for_console(&mut env, "result");
+    assert_eq!(out, "'attr:src=a.html,connect:x-old,secret:42,made:true:true:object,connect:x-new,secret:42,new:true:x-old'");
+}

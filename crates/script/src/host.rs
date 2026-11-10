@@ -109,6 +109,11 @@ pub struct HostState {
     pub mutation_records: Vec<MutationRecord>,
     pub mutation_scheduled: bool,
     pub custom_elements: HashMap<String, Value>,
+    /// Element an `HTMLElement` super constructor must return (set while a
+    /// custom element is being created or upgraded).
+    pub ce_constructing: Option<NodeRef>,
+    /// Custom elements whose constructor already ran.
+    pub ce_upgraded: HashSet<NodeRef>,
     /// `pushState` overrides of the location.
     pub location_override: Option<String>,
     pub history_len: u32,
@@ -355,6 +360,90 @@ pub(crate) fn define_class(realm: &mut Realm, name: &'static str, parent: Option
 /// A constructor that refuses direct construction.
 pub(crate) fn illegal_ctor(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
     Err(realm.throw_type_error("Illegal constructor"))
+}
+
+/// Constructor of `HTMLElement` and the other HTML element classes: only
+/// valid as the `super()` of a defined custom element class (HTML §4.13.4
+/// "HTML element constructors"). Returns the element being upgraded, or a
+/// fresh element of the class's registered name.
+pub(crate) fn html_element_ctor(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+    let nt = realm.new_target();
+    let Value::Object(nt_id) = nt.clone() else {
+        return Err(realm.throw_type_error("Illegal constructor"));
+    };
+    let tag = state()
+        .borrow()
+        .custom_elements
+        .iter()
+        .find(|(_, c)| matches!(c, Value::Object(id) if *id == nt_id))
+        .map(|(t, _)| t.clone());
+    let Some(tag) = tag else {
+        return Err(realm.throw_type_error("Illegal constructor"));
+    };
+    let pending = state().borrow_mut().ce_constructing.take();
+    let n = match pending {
+        Some(n) => n,
+        None => {
+            let node = with_doc(0, |doc| doc.create_element(&tag, vec![]));
+            NodeRef::main(node)
+        }
+    };
+    state().borrow_mut().ce_upgraded.insert(n);
+    let el = wrap(realm, n);
+    if let (Value::Object(e), Ok(Value::Object(p))) = (&el, realm.get_str(nt, "prototype")) {
+        realm.obj_mut(*e).proto = Some(p);
+    }
+    Ok(el)
+}
+
+/// Run a custom element's constructor for an existing node (upgrade) if it
+/// has not run yet. Returns the element wrapper.
+pub(crate) fn upgrade_custom_element(realm: &mut Realm, n: NodeRef, ctor: &Value) -> Value {
+    if state().borrow().ce_upgraded.contains(&n) {
+        return wrap(realm, n);
+    }
+    state().borrow_mut().ce_constructing = Some(n);
+    let result = realm.construct(ctor.clone(), &[], ctor.clone());
+    state().borrow_mut().ce_constructing = None;
+    let el = wrap(realm, n);
+    match result {
+        Ok(_) => {
+            state().borrow_mut().ce_upgraded.insert(n);
+            // attributeChangedCallback for observed attributes already present.
+            if let Ok(obs) = realm.get_str(ctor.clone(), "observedAttributes") {
+                if let Ok(cb) = realm.get_str(el.clone(), "attributeChangedCallback") {
+                    if realm.is_callable(&cb) {
+                        let names: Vec<String> = match obs {
+                            Value::Object(arr) => {
+                                let len = realm.get_str(Value::Object(arr), "length").ok().and_then(|v| realm.to_number(v).ok()).unwrap_or(0.0) as usize;
+                                let mut names = Vec::new();
+                                for i in 0..len.min(64) {
+                                    if let Ok(v) = realm.get_str(Value::Object(arr), &i.to_string()) {
+                                        if let Ok(s) = realm.to_rust_string(v) {
+                                            names.push(s);
+                                        }
+                                    }
+                                }
+                                names
+                            }
+                            _ => Vec::new(),
+                        };
+                        for name in names {
+                            let val = with_doc(n.doc, |doc| doc.attr(n.node, &name.to_ascii_lowercase()).map(|s| s.to_string()));
+                            if let Some(v) = val {
+                                let _ = realm.call(cb.clone(), el.clone(), &[Value::str(&name), Value::Null, Value::str(&v)]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let msg = realm.error_to_string(&e);
+            with_env(|env| env.log("error", &format!("Uncaught {msg} (custom element constructor)")));
+        }
+    }
+    el
 }
 
 pub(crate) fn arg(args: &[Value], i: usize) -> Value {
