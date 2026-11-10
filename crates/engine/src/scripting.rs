@@ -25,6 +25,24 @@ pub struct Dialog {
     pub message: String,
 }
 
+/// How script dialogs are answered. The default (used by the GUI) accepts
+/// `confirm()` and cancels `prompt()`; embedders such as the agent
+/// interface set their own policy per page.
+#[derive(Debug, Clone)]
+pub struct DialogPolicy {
+    /// Return value of `confirm()`.
+    pub confirm: bool,
+    /// Answer to `prompt()`: `None` cancels, `Some("")` accepts the
+    /// default value, `Some(text)` answers `text`.
+    pub prompt: Option<String>,
+}
+
+impl Default for DialogPolicy {
+    fn default() -> Self {
+        DialogPolicy { confirm: true, prompt: None }
+    }
+}
+
 /// Script-related state kept on a page.
 #[derive(Default)]
 pub struct ScriptState {
@@ -38,6 +56,8 @@ pub struct ScriptState {
     pub scripts_ran: bool,
     /// Session storage for this page's origin (tab-scoped).
     pub session_storage: HashMap<String, String>,
+    /// Answers given to `confirm()` / `prompt()`.
+    pub dialog_policy: DialogPolicy,
 }
 
 /// Origin-scoped `localStorage`, shared by all pages of an engine and
@@ -299,11 +319,14 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn confirm(&mut self, msg: &str) -> bool {
         self.page.script.dialogs.push(Dialog { kind: "confirm", message: msg.to_string() });
-        true
+        self.page.script.dialog_policy.confirm
     }
-    fn prompt(&mut self, msg: &str, _default: &str) -> Option<String> {
+    fn prompt(&mut self, msg: &str, default: &str) -> Option<String> {
         self.page.script.dialogs.push(Dialog { kind: "prompt", message: msg.to_string() });
-        None
+        match &self.page.script.dialog_policy.prompt {
+            Some(t) if t.is_empty() => Some(default.to_string()),
+            other => other.clone(),
+        }
     }
     fn user_agent(&self) -> String {
         self.engine.loader.fetcher.user_agent.clone()

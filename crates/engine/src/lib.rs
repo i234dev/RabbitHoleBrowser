@@ -43,7 +43,7 @@ pub use rabbithole_style as style;
 pub use rabbithole_svg as svg;
 pub use rabbithole_script as script;
 pub use images::{choose_candidate, eval_sizes, media_matches, parse_srcset, select_image, ImageChoice, ImageInfo, SrcCandidate};
-pub use scripting::{Dialog, LocalStorage, PendingNavigation, ScriptOutcome, ScriptState};
+pub use scripting::{Dialog, DialogPolicy, LocalStorage, PendingNavigation, ScriptOutcome, ScriptState};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -873,6 +873,9 @@ pub struct Engine {
     pub start: std::time::Instant,
     /// Device pixels per CSS pixel (see [`Engine::set_device_pixel_ratio`]).
     pub device_pixel_ratio: f32,
+    /// How `confirm()`/`prompt()` are answered on newly built pages
+    /// (before their scripts run).
+    pub dialog_policy: scripting::DialogPolicy,
     registered_fonts: HashSet<String>,
 }
 
@@ -942,6 +945,7 @@ impl Engine {
             local_storage: Arc::new(Mutex::new(LocalStorage::default())),
             start: std::time::Instant::now(),
             device_pixel_ratio: 1.0,
+            dialog_policy: scripting::DialogPolicy::default(),
             registered_fonts: HashSet::new(),
         }
     }
@@ -956,6 +960,7 @@ impl Engine {
             local_storage: Arc::new(Mutex::new(LocalStorage::default())),
             start: std::time::Instant::now(),
             device_pixel_ratio: 1.0,
+            dialog_policy: scripting::DialogPolicy::default(),
             registered_fonts: HashSet::new(),
         }
     }
@@ -1029,6 +1034,7 @@ impl Engine {
             incr: incremental::IncrementalState::default(),
         };
         page.snapshot_form_defaults();
+        page.script.dialog_policy = self.dialog_policy.clone();
         page.sheet_signature = stylesheet_signature(&page.doc);
         self.restyle(&mut page);
         page

@@ -421,9 +421,23 @@ impl CookieJar {
 
     /// Serialize in Netscape `cookies.txt` format (persistent cookies only).
     pub fn to_netscape(&self) -> String {
+        self.netscape(false)
+    }
+
+    /// Netscape format including session cookies (expiry `0`, as curl
+    /// writes them): for saving a whole session.
+    pub fn to_netscape_with_session(&self) -> String {
+        self.netscape(true)
+    }
+
+    fn netscape(&self, session: bool) -> String {
         let mut out = String::from("# Netscape HTTP Cookie File\n# Written by RabbitHole\n\n");
         for c in &self.cookies {
-            let Some(exp) = c.expires else { continue };
+            let exp = match c.expires {
+                Some(e) => e,
+                None if session => 0,
+                None => continue,
+            };
             if c.is_expired() || c.partition_key.is_some() {
                 continue;
             }
@@ -458,7 +472,8 @@ impl CookieJar {
                 continue;
             }
             let host_only = f[1].eq_ignore_ascii_case("FALSE") && !f[0].starts_with('.');
-            let expires = f[4].parse::<u64>().ok();
+            // `0` marks a session cookie.
+            let expires = f[4].parse::<u64>().ok().filter(|&e| e != 0);
             let c = Cookie {
                 name: f[5].to_string(),
                 value: f[6].to_string(),
