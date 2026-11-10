@@ -172,6 +172,22 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// After the current token: is the next token `=>` on the same line?
+    /// `None` when that cannot be decided by a simple ASCII scan.
+    pub fn next_is_arrow(&self) -> Option<bool> {
+        let b = self.bytes;
+        let mut i = self.pos;
+        loop {
+            match b.get(i) {
+                Some(b' ') | Some(b'\t') => i += 1,
+                Some(b'=') => return Some(b.get(i + 1) == Some(&b'>')),
+                Some(b'\n') | Some(b'\r') => return Some(false),
+                Some(c) if *c >= 0x80 || *c == b'/' => return None,
+                _ => return Some(false),
+            }
+        }
+    }
+
     /// Skip whitespace and comments. Returns true if a line terminator was
     /// crossed.
     fn skip_trivia(&mut self) -> Result<bool, LexError> {
@@ -277,8 +293,9 @@ impl<'a> Lexer<'a> {
             let name = self.scan_identifier_name()?;
             return Ok(TokenKind::Ident(name));
         }
+        let b0 = self.bytes[self.pos];
         for p in PUNCTS {
-            if self.src[self.pos..].starts_with(p) {
+            if p.as_bytes()[0] == b0 && self.src[self.pos..].starts_with(p) {
                 // `?.` followed by a decimal digit is `?` then a number
                 // (`a ?.5 : b`), per OptionalChainingPunctuator.
                 if *p == "?." && self.src.as_bytes().get(self.pos + 2).map(|b| b.is_ascii_digit()).unwrap_or(false) {
@@ -292,6 +309,20 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_identifier_name(&mut self) -> Result<String, LexError> {
+        // ASCII fast path: the whole name is [A-Za-z0-9_$].
+        {
+            let b = self.bytes;
+            let start = self.pos;
+            let mut i = start;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
+                i += 1;
+            }
+            let at_end = i >= b.len() || (b[i] < 0x80 && b[i] != b'\\');
+            if i > start && at_end && !b[start].is_ascii_digit() {
+                self.pos = i;
+                return Ok(self.src[start..i].to_string());
+            }
+        }
         let mut name = String::new();
         let mut first = true;
         loop {

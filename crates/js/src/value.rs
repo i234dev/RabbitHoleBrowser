@@ -46,6 +46,30 @@ impl JsStr {
     pub fn from_slice(units: &[u16]) -> JsStr {
         JsStr(Rc::new(StrInner::Flat(units.into())))
     }
+    /// One-code-unit string (Latin-1 range cached).
+    pub fn from_unit(u: u16) -> JsStr {
+        thread_local! {
+            static UNITS: Vec<JsStr> = (0..256u16).map(|u| JsStr::from_units(vec![u])).collect();
+        }
+        if u < 256 {
+            return UNITS.with(|t| t[u as usize].clone());
+        }
+        JsStr::from_units(vec![u])
+    }
+    /// The code unit at `i` as a string (`s[i]`, `s.charAt(i)`).
+    pub fn char_at(&self, i: usize) -> JsStr {
+        JsStr::from_unit(self.as_units()[i])
+    }
+    /// Decimal string of an array index (small ones are cached).
+    pub fn from_index(i: u32) -> JsStr {
+        thread_local! {
+            static SMALL: Vec<JsStr> = (0..1024u32).map(|i| JsStr::new(&i.to_string())).collect();
+        }
+        if i < 1024 {
+            return SMALL.with(|t| t[i as usize].clone());
+        }
+        JsStr::new(&i.to_string())
+    }
     pub fn empty() -> JsStr {
         thread_local! {
             static EMPTY: JsStr = JsStr(Rc::new(StrInner::Flat(Vec::new().into())));
@@ -235,6 +259,86 @@ impl Hash for JsStr {
         self.as_units().hash(state)
     }
 }
+
+/// Small fast non-cryptographic hasher (multiply-rotate, as used by many
+/// compilers) for engine-internal maps keyed by property names.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ w).wrapping_mul(FX_SEED);
+    }
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(buf));
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+pub type FxBuild = std::hash::BuildHasherDefault<FxHasher>;
+
+thread_local! {
+    static INTERNED: std::cell::RefCell<std::collections::HashMap<Box<str>, JsStr, FxBuild>> = std::cell::RefCell::new(std::collections::HashMap::default());
+}
+
+impl JsStr {
+    /// A shared instance for short names (property keys, identifiers), so
+    /// that equal names compare by pointer in property lookups.
+    pub fn intern(s: &str) -> JsStr {
+        if s.len() > 32 {
+            return JsStr::new(s);
+        }
+        INTERNED.with(|m| {
+            if let Some(j) = m.borrow().get(s) {
+                return j.clone();
+            }
+            let j = JsStr::new(s);
+            m.borrow_mut().insert(s.into(), j.clone());
+            j
+        })
+    }
+}
 impl fmt::Debug for JsStr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.to_rust_string())
@@ -421,10 +525,10 @@ pub enum PropertyKey {
 
 impl PropertyKey {
     pub fn str(s: &str) -> PropertyKey {
-        PropertyKey::String(JsStr::new(s))
+        PropertyKey::String(JsStr::intern(s))
     }
     pub fn index(i: u32) -> PropertyKey {
-        PropertyKey::String(JsStr::new(&i.to_string()))
+        PropertyKey::String(JsStr::from_index(i))
     }
     pub fn as_array_index(&self) -> Option<u32> {
         match self {

@@ -31,12 +31,14 @@ pub mod bytecode;
 pub mod captures;
 pub mod compiler;
 pub mod heap;
+pub mod ic;
 pub mod interop;
 pub mod lexer;
 pub mod modules;
 pub mod parser;
 pub mod realm;
 pub mod regex;
+pub mod shape;
 pub mod value;
 pub mod vm;
 

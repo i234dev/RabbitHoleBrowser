@@ -243,6 +243,96 @@ impl Realm {
         Ok(())
     }
 
+    /// `Call(argc)` of a plain closure (no `arguments`, rest parameter,
+    /// generator/async or class constructor): builds the callee frame by
+    /// moving the arguments straight from the caller's operand stack.
+    /// Returns false (nothing done) when the general path is needed. The
+    /// caller's frame must be synced.
+    pub(crate) fn try_fast_call(&mut self, argc: usize) -> JsResult<bool> {
+        let fi = self.frames.len() - 1;
+        let n = self.frames[fi].stack.len();
+        let base = n - argc - 2;
+        let id = match &self.frames[fi].stack[base] {
+            Value::Object(id) => *id,
+            _ => return Ok(false),
+        };
+        let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
+        let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
+        let flags = c.code.flags;
+        if flags.is_generator || flags.is_async || flags.is_class_constructor || c.code.arguments_loc.is_some() || c.code.rest_loc.is_some() {
+            return Ok(false);
+        }
+        let this = if flags.is_arrow {
+            c.this_value.clone().unwrap_or(Value::Undefined)
+        } else if flags.is_strict {
+            self.frames[fi].stack[base + 1].clone()
+        } else {
+            match &self.frames[fi].stack[base + 1] {
+                Value::Undefined | Value::Null | Value::Empty => Value::Object(self.global),
+                v @ Value::Object(_) => v.clone(),
+                _ => return Ok(false),
+            }
+        };
+        if self.frames.len() >= self.max_frames {
+            return self.range_error("Maximum call stack size exceeded");
+        }
+        let code = c.code.clone();
+        let parent_scope = c.scope;
+        let home = c.home_object;
+        let new_target = if flags.is_arrow { c.new_target.clone().unwrap_or(Value::Undefined) } else { Value::Undefined };
+        let arguments_obj = if flags.is_arrow { c.arguments.clone() } else { None };
+        let nslots = code.scope_slots as usize;
+        let nregs = code.nregs as usize;
+        let mut stack = self.take_stack(nregs);
+        let mut slots = vec![Value::Undefined; nslots];
+        {
+            let caller = &mut self.frames[fi].stack;
+            let mut args = caller.drain(base..);
+            args.next(); // callee
+            args.next(); // this (already taken)
+            for &loc in code.param_locs.iter() {
+                let v = args.next().unwrap_or(Value::Undefined);
+                match loc {
+                    VarLoc::Reg(r) => stack[r as usize] = v,
+                    VarLoc::Slot(s) => slots[s as usize] = v,
+                }
+            }
+        }
+        if let Some(sl) = code.self_loc {
+            match sl {
+                VarLoc::Reg(r) => stack[r as usize] = Value::Object(id),
+                VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
+            }
+        }
+        let scope = if nslots > 0 {
+            self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
+        } else {
+            match parent_scope {
+                Some(p) => p,
+                None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
+            }
+        };
+        self.frames.push(Frame {
+            code,
+            pc: 0,
+            stack,
+            scope,
+            scope_depth: 0,
+            this,
+            func: Some(id),
+            new_target,
+            home_object: home,
+            args: Vec::new(),
+            arguments_obj,
+            generator: None,
+            is_construct: false,
+            entry: false,
+            completion: Value::Undefined,
+            callee_desc: None,
+        });
+        Ok(true)
+    }
+
     /// Build the frame for calling closure `id`.
     pub(crate) fn prepare_frame(&mut self, id: ObjectId, this: Value, args: &[Value], new_target: Value, is_construct: bool) -> JsResult<Frame> {
         let (code, parent_scope, this_value, arrow_nt, home, arrow_args) = match &self.obj(id).kind {
@@ -635,6 +725,7 @@ impl Realm {
     /// program counter and the operand stack pointer kept in locals;
     /// everything else goes through [`Realm::exec_op`] after the frame has
     /// been synced (`pc` and the stack length written back).
+    #[allow(unused_unsafe, unused_assignments)]
     fn run_inner(&mut self) -> JsResult<Exit> {
         'reload: loop {
             let fi = self.frames.len() - 1;
@@ -1066,7 +1157,149 @@ impl Realm {
                         }
                         continue 'reload;
                     }
-                    Op::Call(_) | Op::New(_) | Op::CallSpread | Op::NewSpread => {
+                    Op::GetProp(k, ic) | Op::GetPropKeep(k, ic) => {
+                        let rec = code.ics[ic as usize].get();
+                        let recv = top!();
+                        let hit = if rec.kind == crate::ic::IC_LENGTH {
+                            match &*recv {
+                                Value::String(s) => Some(Value::Number(s.len() as f64)),
+                                Value::Object(id) => match self.heap.try_get(*id).map(|o| &o.kind) {
+                                    Some(ObjectKind::Array { length, .. }) => Some(Value::Number(*length as f64)),
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        } else {
+                            match self.ic_get(&rec, recv) {
+                                Some(p) if p.flags & ACCESSOR == 0 => Some(p.value.clone()),
+                                _ => None,
+                            }
+                        };
+                        match hit {
+                            Some(v) => {
+                                if let Op::GetProp(..) = op {
+                                    *top!() = v;
+                                } else {
+                                    push!(v);
+                                }
+                            }
+                            None => {
+                                let _ = k;
+                                slow!(op);
+                            }
+                        }
+                    }
+                    Op::SetProp(k, ic) => {
+                        let rec = code.ics[ic as usize].get();
+                        if rec.kind != 0 {
+                            let key = match &consts[k as usize] {
+                                Value::String(s) => s,
+                                _ => unreachable!(),
+                            };
+                            // SAFETY: two operands are present.
+                            let recv = unsafe { &*sp.sub(2) };
+                            let v = top!().clone();
+                            match self.ic_set(&rec, recv, key, v) {
+                                Ok(()) => {
+                                    // obj v -> v
+                                    let v = pop!();
+                                    *top!() = v;
+                                    continue;
+                                }
+                                Err(v) => drop(v),
+                            }
+                        }
+                        slow!(op);
+                    }
+                    Op::DefineProp(k, ic) => {
+                        let rec = code.ics[ic as usize].get();
+                        if rec.kind == crate::ic::IC_ADD {
+                            let key = match &consts[k as usize] {
+                                Value::String(s) => s,
+                                _ => unreachable!(),
+                            };
+                            // SAFETY: two operands are present.
+                            let recv = unsafe { &*sp.sub(2) };
+                            let v = top!().clone();
+                            match self.ic_set(&rec, recv, key, v) {
+                                Ok(()) => {
+                                    pop!();
+                                    continue;
+                                }
+                                Err(v) => drop(v),
+                            }
+                        }
+                        slow!(op);
+                    }
+                    Op::GetGlobal(k, ic) => {
+                        let rec = code.ics[ic as usize].get();
+                        let key = match &consts[k as usize] {
+                            Value::String(s) => s,
+                            _ => unreachable!(),
+                        };
+                        match self.ic_get_global(&rec, key) {
+                            Some(v) => {
+                                let v = v.clone();
+                                push!(v);
+                            }
+                            None => slow!(op),
+                        }
+                    }
+                    Op::SetGlobal(k, ic) => {
+                        let rec = code.ics[ic as usize].get();
+                        let key = match &consts[k as usize] {
+                            Value::String(s) => s,
+                            _ => unreachable!(),
+                        };
+                        let v = top!().clone();
+                        match self.ic_set_global(&rec, key, v) {
+                            Ok(()) => {
+                                pop!();
+                            }
+                            Err(v) => {
+                                drop(v);
+                                slow!(op);
+                            }
+                        }
+                    }
+                    Op::GetElem => {
+                        // SAFETY: two operands are present.
+                        let (o, k) = unsafe { (&*sp.sub(2), &*sp.sub(1)) };
+                        match self.get_elem_fast(o, k) {
+                            Some(v) => {
+                                pop!();
+                                *top!() = v;
+                            }
+                            None => slow!(op),
+                        }
+                    }
+                    Op::SetElem => {
+                        // SAFETY: three operands are present.
+                        let (o, k) = unsafe { (&*sp.sub(3), &*sp.sub(2)) };
+                        let v = top!().clone();
+                        match self.set_elem_fast(o, k, v) {
+                            Ok(()) => {
+                                // obj key v -> v
+                                let v = pop!();
+                                pop!();
+                                *top!() = v;
+                            }
+                            Err(v) => {
+                                drop(v);
+                                slow!(op);
+                            }
+                        }
+                    }
+                    Op::Call(argc) => {
+                        tick!();
+                        sync!();
+                        if tri!(self.try_fast_call(argc as usize)) {
+                            fr!().callee_desc = None;
+                            continue 'reload;
+                        }
+                        slow!(op);
+                    }
+                    Op::New(_) | Op::CallSpread | Op::NewSpread => {
                         tick!();
                         slow!(op);
                     }
@@ -1274,16 +1507,20 @@ impl Realm {
                     let v = self.read_import_slot(v)?;
                     push!(v);
                 }
-                Op::GetGlobal(i) => {
+                Op::GetGlobal(i, ic) => {
                     let key = const_key!(i);
                     let v = self.get_global_binding(&key)?;
+                    let rec = self.ic_fill_global(key.as_str().unwrap());
+                    frame!().code.ics[ic as usize].set(rec);
                     push!(v);
                 }
-                Op::SetGlobal(i) => {
+                Op::SetGlobal(i, ic) => {
                     let v = pop!();
                     let key = const_key!(i);
                     let strict = frame!().code.flags.is_strict;
                     self.set_global_binding(&key, v, strict)?;
+                    let rec = self.ic_fill_global(key.as_str().unwrap());
+                    frame!().code.ics[ic as usize].set(rec);
                 }
                 Op::TypeofGlobal(i) => {
                     let key = const_key!(i);
@@ -1350,27 +1587,34 @@ impl Realm {
                     let s = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent, names }))));
                     frame!().scope = s;
                 }
-                Op::GetProp(i) => {
+                Op::GetProp(i, ic) => {
                     let obj = pop!();
                     let key = const_key!(i);
-                    let v = self.get(obj, key)?;
+                    let v = self.get(obj.clone(), key.clone())?;
+                    let rec = self.ic_fill_get(&obj, &key);
+                    frame!().code.ics[ic as usize].set(rec);
                     push!(v);
                 }
-                Op::GetPropKeep(i) => {
+                Op::GetPropKeep(i, ic) => {
                     let obj = peek!().clone();
                     let key = const_key!(i);
-                    let v = self.get(obj, key)?;
+                    let v = self.get(obj.clone(), key.clone())?;
+                    let rec = self.ic_fill_get(&obj, &key);
+                    frame!().code.ics[ic as usize].set(rec);
                     push!(v);
                 }
-                Op::SetProp(i) => {
+                Op::SetProp(i, ic) => {
                     let v = pop!();
                     let obj = pop!();
                     let key = const_key!(i);
-                    let ok = self.set(obj, key.clone(), v.clone())?;
+                    let before = self.ic_before_set(&obj, &key);
+                    let ok = self.set(obj.clone(), key.clone(), v.clone())?;
                     if !ok && frame!().code.flags.is_strict {
                         let k = self.key_display(&key);
                         return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
                     }
+                    let rec = if ok { self.ic_fill_set(&obj, &key, before, false) } else { Default::default() };
+                    frame!().code.ics[ic as usize].set(rec);
                     push!(v);
                 }
                 Op::GetElem => {
@@ -1411,11 +1655,15 @@ impl Realm {
                     let r = self.delete_elem(obj, key, frame!().code.flags.is_strict)?;
                     push!(Value::Bool(r));
                 }
-                Op::DefineProp(i) => {
+                Op::DefineProp(i, ic) => {
                     let v = pop!();
-                    let obj = peek!().as_object().unwrap();
+                    let objv = peek!().clone();
+                    let obj = objv.as_object().unwrap();
                     let key = const_key!(i);
-                    self.define_own(obj, key, Property::data(v, ALL))?;
+                    let before = self.ic_before_set(&objv, &key);
+                    self.define_own(obj, key.clone(), Property::data(v, ALL))?;
+                    let rec = self.ic_fill_set(&objv, &key, before, true);
+                    frame!().code.ics[ic as usize].set(rec);
                 }
                 Op::DefineElem => {
                     let v = pop!();
@@ -1535,7 +1783,7 @@ impl Realm {
                 Op::Call(argc) | Op::CallEval(argc) => {
                     let n = frame!().stack.len();
                     let base = n - argc as usize - 2;
-                    let args: Vec<Value> = frame!().stack.drain(base + 2..).collect();
+                    let args = self.take_args(fi, base + 2);
                     let this = pop!();
                     let f = pop!();
                     if !self.is_callable(&f) {
@@ -1554,27 +1802,29 @@ impl Realm {
                             return Ok(Flow::Next);
                         }
                     }
-                    self.do_call(f, this, args)?;
+                    self.do_call(f, this, &args)?;
+                    self.give_args(args);
                 }
                 Op::CallSpread => {
                     let arr = pop!();
                     let this = pop!();
                     let f = pop!();
                     let args = self.create_list_from_array_like(arr)?;
-                    self.do_call(f, this, args)?;
+                    self.do_call(f, this, &args)?;
                 }
                 Op::New(argc) => {
                     let n = frame!().stack.len();
                     let base = n - argc as usize - 1;
-                    let args: Vec<Value> = frame!().stack.drain(base + 1..).collect();
+                    let args = self.take_args(fi, base + 1);
                     let f = pop!();
-                    self.do_construct(f, args)?;
+                    self.do_construct(f, &args)?;
+                    self.give_args(args);
                 }
                 Op::NewSpread => {
                     let arr = pop!();
                     let f = pop!();
                     let args = self.create_list_from_array_like(arr)?;
-                    self.do_construct(f, args)?;
+                    self.do_construct(f, &args)?;
                 }
                 Op::SuperCall(argc) => {
                     let n = frame!().stack.len();
@@ -2169,25 +2419,69 @@ impl Realm {
     }
 
     fn get_elem(&mut self, obj: Value, key: Value) -> JsResult<Value> {
-        // Fast path: array[index]
-        if let (Value::Object(id), Value::Number(n)) = (&obj, &key) {
-            if *n >= 0.0 && n.fract() == 0.0 && *n < 4294967295.0 {
-                if let ObjectKind::Array { elements, .. } = &self.obj(*id).kind {
-                    let i = *n as usize;
-                    if i < elements.len() && !elements[i].is_empty() {
-                        return Ok(elements[i].clone());
+        if let Some(v) = self.get_elem_fast(&obj, &key) {
+            return Ok(v);
+        }
+        let key = match key {
+            // Integer keys: cached index strings, no number formatting.
+            Value::Number(n) if (n as u32) as f64 == n && n < 4294967295.0 => PropertyKey::index(n as u32),
+            other => self.to_property_key(other)?,
+        };
+        self.get(obj, key)
+    }
+
+    /// `obj[key]` for dense array elements and string characters.
+    #[inline]
+    pub(crate) fn get_elem_fast(&self, obj: &Value, key: &Value) -> Option<Value> {
+        let Value::Number(n) = key else { return None };
+        let i = *n as u32;
+        if i as f64 != *n {
+            return None;
+        }
+        match obj {
+            Value::Object(id) => match &self.heap.try_get(*id)?.kind {
+                ObjectKind::Array { elements, .. } => match elements.get(i as usize) {
+                    Some(v) if !v.is_empty() => Some(v.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            Value::String(s) if (i as usize) < s.len() => Some(Value::String(s.char_at(i as usize))),
+            _ => None,
+        }
+    }
+
+    /// `obj[key] = v` for an existing dense element or an append; gives `v`
+    /// back when not applicable.
+    #[inline]
+    pub(crate) fn set_elem_fast(&mut self, obj: &Value, key: &Value, v: Value) -> Result<(), Value> {
+        let (Value::Object(id), Value::Number(n)) = (obj, key) else { return Err(v) };
+        let i = *n as u32;
+        if i as f64 != *n || i >= (1 << 28) {
+            return Err(v);
+        }
+        let Some(o) = self.heap.try_get_mut(*id) else { return Err(v) };
+        let no_props = o.props.is_empty();
+        let extensible = o.extensible;
+        match &mut o.kind {
+            ObjectKind::Array { elements, length } => {
+                let i = i as usize;
+                if i < elements.len() {
+                    if elements[i].is_empty() {
+                        return Err(v);
                     }
+                    elements[i] = v;
+                    Ok(())
+                } else if i == elements.len() && *length as usize == i && no_props && extensible {
+                    elements.push(v);
+                    *length = (i + 1) as u32;
+                    Ok(())
+                } else {
+                    Err(v)
                 }
             }
+            _ => Err(v),
         }
-        if let (Value::String(s), Value::Number(n)) = (&obj, &key) {
-            if *n >= 0.0 && n.fract() == 0.0 && (*n as usize) < s.len() {
-                let i = *n as usize;
-                return Ok(Value::String(s.slice(i, i + 1)));
-            }
-        }
-        let key = self.to_property_key(key)?;
-        self.get(obj, key)
     }
 
     fn delete_elem(&mut self, obj: Value, key: PropertyKey, strict: bool) -> JsResult<bool> {
@@ -2204,33 +2498,59 @@ impl Realm {
         Ok(r)
     }
 
-    fn do_call(&mut self, f: Value, this: Value, args: Vec<Value>) -> JsResult<()> {
+    /// Move the operands from `from` up out of frame `fi` into the reusable
+    /// argument buffer.
+    #[inline]
+    fn take_args(&mut self, fi: usize, from: usize) -> Vec<Value> {
+        let mut buf = std::mem::take(&mut self.arg_buf);
+        buf.extend(self.frames[fi].stack.drain(from..));
+        buf
+    }
+
+    #[inline]
+    fn give_args(&mut self, mut buf: Vec<Value>) {
+        buf.clear();
+        if buf.capacity() <= 64 {
+            self.arg_buf = buf;
+        }
+    }
+
+    fn do_call(&mut self, f: Value, this: Value, args: &[Value]) -> JsResult<()> {
         if let Value::Object(id) = &f {
-            if let ObjectKind::Function(c) = &self.obj(*id).kind {
-                let flags = c.code.flags;
-                if !flags.is_generator && !flags.is_async && !flags.is_class_constructor {
-                    let frame = self.prepare_frame(*id, this, &args, Value::Undefined, false)?;
-                    self.push_frame(frame, false)?;
+            match &self.obj(*id).kind {
+                ObjectKind::Function(c) => {
+                    let flags = c.code.flags;
+                    if !flags.is_generator && !flags.is_async && !flags.is_class_constructor {
+                        let frame = self.prepare_frame(*id, this, args, Value::Undefined, false)?;
+                        self.push_frame(frame, false)?;
+                        return Ok(());
+                    }
+                }
+                ObjectKind::Native(n) => {
+                    let func = n.func;
+                    let v = self.call_native(*id, func, this, args, false)?;
+                    self.frames.last_mut().unwrap().stack.push(v);
                     return Ok(());
                 }
+                _ => {}
             }
         }
-        let v = self.call(f, this, &args)?;
+        let v = self.call(f, this, args)?;
         self.frames.last_mut().unwrap().stack.push(v);
         Ok(())
     }
 
-    fn do_construct(&mut self, f: Value, args: Vec<Value>) -> JsResult<()> {
+    fn do_construct(&mut self, f: Value, args: &[Value]) -> JsResult<()> {
         if let Value::Object(id) = &f {
             if let ObjectKind::Function(_) = &self.obj(*id).kind {
                 if self.is_constructor(&f) {
-                    let frame = self.prepare_frame(*id, Value::Empty, &args, f.clone(), true)?;
+                    let frame = self.prepare_frame(*id, Value::Empty, args, f.clone(), true)?;
                     self.push_frame(frame, false)?;
                     return Ok(());
                 }
             }
         }
-        let v = self.construct(f.clone(), &args, f)?;
+        let v = self.construct(f.clone(), args, f)?;
         self.frames.last_mut().unwrap().stack.push(v);
         Ok(())
     }

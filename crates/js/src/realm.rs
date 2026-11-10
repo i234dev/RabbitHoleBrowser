@@ -144,7 +144,7 @@ pub struct Realm {
     pub symbols: Vec<SymbolInfo>,
     symbol_registry: HashMap<JsStr, SymbolId>,
     pub global: ObjectId,
-    pub global_lex: HashMap<JsStr, (Value, bool)>,
+    pub global_lex: crate::ic::GlobalLex,
     pub jobs: VecDeque<Job>,
     /// Values of jobs currently running (popped from `jobs`), kept alive.
     pub job_roots: Vec<Vec<Value>>,
@@ -181,6 +181,8 @@ pub struct Realm {
     pub(crate) tick: u32,
     /// Recycled frame operand stacks.
     pub(crate) stack_pool: Vec<Vec<Value>>,
+    /// Reusable buffer for call arguments taken off the operand stack.
+    pub(crate) arg_buf: Vec<Value>,
 }
 
 impl Default for Realm {
@@ -243,7 +245,7 @@ impl Realm {
             symbols,
             symbol_registry: HashMap::new(),
             global,
-            global_lex: HashMap::new(),
+            global_lex: Default::default(),
             jobs: VecDeque::new(),
             job_roots: Vec::new(),
             frames: Vec::new(),
@@ -267,6 +269,7 @@ impl Realm {
             modules: Default::default(),
             tick: crate::vm::TICK_INTERVAL,
             stack_pool: Vec::new(),
+            arg_buf: Vec::new(),
         };
         crate::builtins::register_builtins(&mut realm);
         realm

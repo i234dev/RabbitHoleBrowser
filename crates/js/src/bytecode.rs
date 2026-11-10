@@ -45,8 +45,9 @@ pub enum Op {
     /// Read a module import binding: the slot holds a module binding
     /// reference (dereferenced live, with a TDZ check) or a namespace object.
     GetImport(u16, u16),
-    GetGlobal(u32),
-    SetGlobal(u32),
+    /// (name const, inline cache)
+    GetGlobal(u32, u32),
+    SetGlobal(u32, u32),
     /// `typeof ident` for unresolved identifiers (no ReferenceError).
     TypeofGlobal(u32),
     DeclareGlobalVar(u32),
@@ -62,18 +63,19 @@ pub enum Op {
     CopyScope,
     /// Mark slot as const (used by SetLocalChecked) — compile-time only; not an op.
     // --- properties
-    GetProp(u32),
-    SetProp(u32),
+    /// (name const, inline cache)
+    GetProp(u32, u32),
+    SetProp(u32, u32),
     GetElem,
     SetElem,
     /// obj key -> obj value  (keeps obj for compound assignment)
     GetElemKeep,
     /// obj -> obj value
-    GetPropKeep(u32),
+    GetPropKeep(u32, u32),
     DeleteProp(u32),
     DeleteElem,
     /// Object literal helpers: obj value -> obj
-    DefineProp(u32),
+    DefineProp(u32, u32),
     /// obj key value -> obj
     DefineElem,
     /// obj key fn -> obj  (also sets fn's home object)
@@ -255,6 +257,18 @@ pub enum Op {
     Nop,
 }
 
+/// Inline cache record of one property or global access site (see `ic.rs`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PropIc {
+    pub kind: u8,
+    pub shape: u32,
+    pub slot: u32,
+    pub holder: u32,
+    pub holder_shape: u32,
+    pub mid: u32,
+    pub mid_shape: u32,
+}
+
 /// Location of a parameter-like binding: frame register or function scope slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarLoc {
@@ -330,6 +344,8 @@ pub struct FunctionCode {
     pub filename: Rc<str>,
     /// Module this code belongs to (`None` for classic scripts / eval).
     pub module: Option<u32>,
+    /// Inline caches of the property / global instructions.
+    pub ics: Box<[std::cell::Cell<PropIc>]>,
 }
 
 impl FunctionCode {
@@ -418,7 +434,7 @@ pub fn peephole(ops: &mut Vec<Op>, positions: &mut Vec<crate::ast::Pos>, handler
             (Op::GetReg(a), Some(Op::Inc), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::IncReg(a)), 5),
             (Op::GetReg(a), Some(Op::Dec), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::DecReg(a)), 5),
             // Assignment whose value is discarded.
-            (Op::Dup, Some(st @ (Op::SetReg(_) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetGlobal(_) | Op::SetRegChecked(_) | Op::SetLocalChecked(..))), Some(Op::Pop), _, _) if free(i, 3) => (Some(st), 3),
+            (Op::Dup, Some(st @ (Op::SetReg(_) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetGlobal(..) | Op::SetRegChecked(_) | Op::SetLocalChecked(..))), Some(Op::Pop), _, _) if free(i, 3) => (Some(st), 3),
             // Compare and branch.
             (Op::Lt, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessLt(t)), 2),
             (Op::LtEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessLtEq(t)), 2),

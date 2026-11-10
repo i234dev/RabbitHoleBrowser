@@ -1350,6 +1350,9 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Ident(n) if !self.is_reserved(n) => {
+                if self.lx.next_is_arrow() == Some(false) {
+                    return Ok(None);
+                }
                 let name = n.clone();
                 let snap = self.snapshot();
                 self.advance()?;

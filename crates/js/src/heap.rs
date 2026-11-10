@@ -1,7 +1,7 @@
 //! Object model and garbage-collected heap.
 
 use crate::bytecode::FunctionCode;
-use crate::value::{BigInt, JsStr, ObjectId, PropertyKey, SymbolId, Value};
+use crate::value::{BigInt, JsStr, ObjectId, SymbolId, Value};
 use crate::vm::Frame;
 use std::any::Any;
 use std::collections::HashMap;
@@ -44,87 +44,7 @@ impl Property {
     }
 }
 
-/// Insertion-ordered property storage.
-#[derive(Default, Debug, Clone)]
-pub struct PropertyMap {
-    entries: Vec<Option<(PropertyKey, Property)>>,
-    index: HashMap<PropertyKey, usize>,
-}
-
-impl PropertyMap {
-    pub fn new() -> PropertyMap {
-        PropertyMap::default()
-    }
-    pub fn len(&self) -> usize {
-        self.index.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-    pub fn get(&self, key: &PropertyKey) -> Option<&Property> {
-        self.index.get(key).and_then(|&i| self.entries[i].as_ref().map(|(_, p)| p))
-    }
-    pub fn get_mut(&mut self, key: &PropertyKey) -> Option<&mut Property> {
-        match self.index.get(key) {
-            Some(&i) => self.entries[i].as_mut().map(|(_, p)| p),
-            None => None,
-        }
-    }
-    pub fn contains(&self, key: &PropertyKey) -> bool {
-        self.index.contains_key(key)
-    }
-    pub fn insert(&mut self, key: PropertyKey, prop: Property) {
-        if let Some(&i) = self.index.get(&key) {
-            self.entries[i] = Some((key, prop));
-        } else {
-            self.index.insert(key.clone(), self.entries.len());
-            self.entries.push(Some((key, prop)));
-        }
-    }
-    pub fn remove(&mut self, key: &PropertyKey) -> Option<Property> {
-        let i = self.index.remove(key)?;
-        let out = self.entries[i].take().map(|(_, p)| p);
-        if self.entries.len() > 32 && self.index.len() * 2 < self.entries.len() {
-            self.compact();
-        }
-        out
-    }
-    fn compact(&mut self) {
-        let old = std::mem::take(&mut self.entries);
-        self.index.clear();
-        for e in old.into_iter().flatten() {
-            self.index.insert(e.0.clone(), self.entries.len());
-            self.entries.push(Some(e));
-        }
-    }
-    /// Keys in spec order: integer indices ascending, then strings in
-    /// insertion order, then symbols in insertion order.
-    pub fn keys(&self) -> Vec<PropertyKey> {
-        let mut ints: Vec<(u32, PropertyKey)> = Vec::new();
-        let mut strs = Vec::new();
-        let mut syms = Vec::new();
-        for (k, _) in self.entries.iter().flatten() {
-            match k {
-                PropertyKey::Symbol(_) => syms.push(k.clone()),
-                PropertyKey::String(s) => match s.as_array_index() {
-                    Some(i) => ints.push((i, k.clone())),
-                    None => strs.push(k.clone()),
-                },
-            }
-        }
-        ints.sort_by_key(|(i, _)| *i);
-        let mut out: Vec<PropertyKey> = ints.into_iter().map(|(_, k)| k).collect();
-        out.extend(strs);
-        out.extend(syms);
-        out
-    }
-    pub fn iter(&self) -> impl Iterator<Item = (&PropertyKey, &Property)> {
-        self.entries.iter().flatten().map(|(k, p)| (k, p))
-    }
-    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Property> {
-        self.entries.iter_mut().flatten().map(|(_, p)| p)
-    }
-}
+pub use crate::shape::PropertyMap;
 
 pub type NativeFn = fn(&mut crate::realm::Realm, Value, &[Value]) -> Result<Value, Value>;
 
@@ -481,12 +401,12 @@ impl Object {
     }
 }
 
-/// Mark-and-sweep garbage collected arena.
 thread_local! {
     /// Debug aid (RH_DEBUG_GC): what each freed slot held.
     static FREED_INFO: std::cell::RefCell<std::collections::HashMap<u32, String>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// Mark-and-sweep garbage collected arena.
 pub struct Heap {
     objects: Vec<Option<Object>>,
     free: Vec<u32>,
@@ -532,6 +452,12 @@ impl Heap {
         self.objects[id.0 as usize].as_mut().expect("use of freed object")
     }
 
+    #[inline]
+    pub fn try_get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
+        self.objects.get_mut(id.0 as usize).and_then(|o| o.as_mut())
+    }
+
+    #[inline]
     pub fn try_get(&self, id: ObjectId) -> Option<&Object> {
         self.objects.get(id.0 as usize).and_then(|o| o.as_ref())
     }
@@ -614,11 +540,11 @@ fn push_id(out: &mut Vec<Value>, id: Option<ObjectId>) {
 /// Collect every value directly referenced by `obj`.
 pub fn trace_object(obj: &Object, out: &mut Vec<Value>) {
     push_id(out, obj.proto);
-    for (_, p) in obj.props.iter() {
+    obj.props.for_each_value(|p| {
         push_val(out, &p.value);
         push_opt(out, &p.getter);
         push_opt(out, &p.setter);
-    }
+    });
     match &obj.kind {
         ObjectKind::Array { elements, .. } => {
             for v in elements {

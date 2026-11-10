@@ -150,6 +150,7 @@ struct FnState {
     force_heap: bool,
     nregs: u16,
     reg_names: Vec<JsStr>,
+    ic_count: u32,
     cur_pos: Pos,
     /// Number of runtime scopes currently pushed within this function.
     scope_depth: u32,
@@ -191,6 +192,7 @@ impl FnState {
             force_heap: false,
             nregs: 0,
             reg_names: Vec::new(),
+            ic_count: 0,
             cur_pos: Pos::default(),
             scope_depth: 0,
             is_script,
@@ -300,6 +302,14 @@ impl Compiler {
         fs.ops.len() - 1
     }
 
+    /// Emit an instruction that owns a fresh inline cache.
+    fn emit_ic(&mut self, f: impl FnOnce(u32) -> Op) -> usize {
+        let fs = self.fs();
+        let ic = fs.ic_count;
+        fs.ic_count += 1;
+        self.emit(f(ic))
+    }
+
     fn here(&self) -> usize {
         self.fs_ref().ops.len()
     }
@@ -332,7 +342,7 @@ impl Compiler {
             return i;
         }
         let i = fs.constants.len() as u32;
-        fs.constants.push(Value::String(JsStr::new(s)));
+        fs.constants.push(Value::String(JsStr::intern(s)));
         fs.const_strings.insert(s.to_string(), i);
         i
     }
@@ -506,7 +516,7 @@ impl Compiler {
             }
             Resolved::Global => {
                 let i = self.const_str(name);
-                self.emit(Op::GetGlobal(i));
+                self.emit_ic(|ic| Op::GetGlobal(i, ic));
             }
         }
     }
@@ -546,7 +556,7 @@ impl Compiler {
             }
             Resolved::Global => {
                 let i = self.const_str(name);
-                self.emit(Op::SetGlobal(i));
+                self.emit_ic(|ic| Op::SetGlobal(i, ic));
             }
         }
         Ok(())
@@ -567,7 +577,7 @@ impl Compiler {
                 if self.fs_ref().is_script && self.is_global_lex(name) {
                     self.emit(Op::InitGlobalLex(i));
                 } else {
-                    self.emit(Op::SetGlobal(i));
+                    self.emit_ic(|ic| Op::SetGlobal(i, ic));
                 }
             }
         }
@@ -1465,7 +1475,7 @@ impl Compiler {
                     self.emit(Op::Const(i));
                     self.emit(Op::ArrayPush);
                     self.emit(Op::Pop);
-                    self.emit(Op::GetProp(i));
+                    self.emit_ic(|ic| Op::GetProp(i, ic));
                 }
                 PropertyKey::Number(n) => {
                     let i = self.const_str(&crate::value::number_to_string(*n));
@@ -1473,7 +1483,7 @@ impl Compiler {
                     self.emit(Op::Const(i));
                     self.emit(Op::ArrayPush);
                     self.emit(Op::Pop);
-                    self.emit(Op::GetProp(i));
+                    self.emit_ic(|ic| Op::GetProp(i, ic));
                 }
                 PropertyKey::Computed(e) => {
                     self.compile_expr(e)?;
@@ -1550,10 +1560,10 @@ impl Compiler {
             // result -> value done
             self.emit(Op::Dup);
             let d = self.const_str("done");
-            self.emit(Op::GetProp(d));
+            self.emit_ic(|ic| Op::GetProp(d, ic));
             let exit = self.emit(Op::JumpIfTrue(0));
             let v = self.const_str("value");
-            self.emit(Op::GetProp(v));
+            self.emit_ic(|ic| Op::GetProp(v, ic));
             self.compile_for_of_body(left, body, label, start, iter, next, is_await, exit)
         } else {
             self.emit(Op::IteratorNext);
@@ -1757,7 +1767,7 @@ impl Compiler {
                         MemberProp::Identifier(name) => {
                             self.emit(Op::Swap);
                             let i = self.const_str(name);
-                            self.emit(Op::SetProp(i));
+                            self.emit_ic(|ic| Op::SetProp(i, ic));
                             self.emit(Op::Pop);
                         }
                         MemberProp::Private(name) => {
@@ -1798,12 +1808,12 @@ impl Compiler {
                     match &p.key {
                         PropertyKey::Identifier(n) | PropertyKey::String(n) => {
                             let i = self.const_str(n);
-                            self.emit(Op::GetProp(i));
+                            self.emit_ic(|ic| Op::GetProp(i, ic));
                             rest_keys.push(i);
                         }
                         PropertyKey::Number(n) => {
                             let i = self.const_str(&crate::value::number_to_string(*n));
-                            self.emit(Op::GetProp(i));
+                            self.emit_ic(|ic| Op::GetProp(i, ic));
                             rest_keys.push(i);
                         }
                         PropertyKey::Computed(e) => {
@@ -2171,7 +2181,7 @@ impl Compiler {
                 match property {
                     MemberProp::Identifier(n) => {
                         let i = self.const_str(n);
-                        self.emit(Op::GetProp(i));
+                        self.emit_ic(|ic| Op::GetProp(i, ic));
                     }
                     MemberProp::Private(n) => {
                         self.emit_private_name(n)?;
@@ -2233,15 +2243,15 @@ impl Compiler {
                     // [iter next result]
                     self.emit(Op::Dup);
                     let d = self.const_str("done");
-                    self.emit(Op::GetProp(d));
+                    self.emit_ic(|ic| Op::GetProp(d, ic));
                     let exit = self.emit(Op::JumpIfTrue(0));
                     let v = self.const_str("value");
-                    self.emit(Op::GetProp(v));
+                    self.emit_ic(|ic| Op::GetProp(v, ic));
                     self.emit(if is_async { Op::AsyncYield } else { Op::Yield });
                     self.emit(Op::Jump(start as u32));
                     self.patch_jump(exit);
                     // [iter next result] -> value
-                    self.emit(Op::GetProp(v));
+                    self.emit_ic(|ic| Op::GetProp(v, ic));
                     self.emit(Op::Rot3);
                     self.emit(Op::Pop);
                     self.emit(Op::Swap);
@@ -2314,7 +2324,7 @@ impl Compiler {
                 match property {
                     MemberProp::Identifier(n) => {
                         let i = self.const_str(n);
-                        self.emit(Op::GetProp(i));
+                        self.emit_ic(|ic| Op::GetProp(i, ic));
                     }
                     MemberProp::Private(n) => {
                         self.emit_private_name(n)?;
@@ -2449,10 +2459,10 @@ impl Compiler {
                 match property {
                     MemberProp::Identifier(name) => {
                         let i = self.const_str(name);
-                        self.emit(Op::GetPropKeep(i));
+                        self.emit_ic(|ic| Op::GetPropKeep(i, ic));
                         self.emit(Op::ToNumeric);
                         self.emit(inc);
-                        self.emit(Op::SetProp(i));
+                        self.emit_ic(|ic| Op::SetProp(i, ic));
                     }
                     MemberProp::Private(name) => {
                         self.emit_private_name(name)?;
@@ -2490,7 +2500,7 @@ impl Compiler {
                             MemberProp::Identifier(name) => {
                                 self.compile_expr(value)?;
                                 let i = self.const_str(name);
-                                self.emit(Op::SetProp(i));
+                                self.emit_ic(|ic| Op::SetProp(i, ic));
                             }
                             MemberProp::Private(name) => {
                                 self.emit_private_name(name)?;
@@ -2570,7 +2580,7 @@ impl Compiler {
         match property {
             MemberProp::Identifier(name) => {
                 let i = self.const_str(name);
-                self.emit(Op::GetPropKeep(i));
+                self.emit_ic(|ic| Op::GetPropKeep(i, ic));
                 if logical {
                     let j = match op {
                         AssignOp::And => self.emit(Op::JumpIfFalseKeep(0)),
@@ -2581,7 +2591,7 @@ impl Compiler {
                         self.emit(Op::Pop);
                     }
                     self.compile_expr(value)?;
-                    self.emit(Op::SetProp(i));
+                    self.emit_ic(|ic| Op::SetProp(i, ic));
                     let end = self.emit(Op::Jump(0));
                     self.patch_jump(j);
                     // stack: obj val -> val
@@ -2591,7 +2601,7 @@ impl Compiler {
                 } else {
                     self.compile_expr(value)?;
                     self.emit(binop_for_assign(op));
-                    self.emit(Op::SetProp(i));
+                    self.emit_ic(|ic| Op::SetProp(i, ic));
                 }
             }
             MemberProp::Private(_) | MemberProp::Computed(_) => {
@@ -2668,7 +2678,7 @@ impl Compiler {
                                     let n = static_name.clone().unwrap();
                                     self.compile_expr_named(e, Some(&n))?;
                                     let i = self.const_str(&n);
-                                    self.emit(Op::DefineProp(i));
+                                    self.emit_ic(|ic| Op::DefineProp(i, ic));
                                 }
                             }
                         }
@@ -3073,6 +3083,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         slot_names,
         block_names: fs.block_names,
         templates: fs.templates,
+        ics: (0..fs.ic_count).map(|_| std::cell::Cell::new(crate::bytecode::PropIc::default())).collect(),
         source: fs.source,
         filename: fs.filename,
         module,
