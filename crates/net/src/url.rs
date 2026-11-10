@@ -236,7 +236,9 @@ impl Url {
             // A reference with a scheme is absolute.
             return Url::parse_absolute(reference);
         }
-        let hierarchical = !self.host.is_empty() || HIERARCHICAL.contains(&self.scheme.as_str());
+        // WHATWG: any base whose path is not opaque (starts with '/') can
+        // resolve relative references, even for unknown schemes (`x:/`).
+        let hierarchical = !self.host.is_empty() || HIERARCHICAL.contains(&self.scheme.as_str()) || self.path.starts_with('/');
         if !hierarchical {
             return None;
         }
@@ -497,5 +499,15 @@ mod tests {
     fn without_fragment() {
         let u = Url::parse_absolute("http://a/b#c").unwrap();
         assert_eq!(u.without_fragment().to_string(), "http://a/b");
+    }
+
+    #[test]
+    fn join_on_non_special_base_with_path() {
+        let base = Url::parse_absolute("x:/").unwrap();
+        let u = base.join("/static/client/a.svg?v=1#f").unwrap();
+        assert_eq!(u.to_string(), "x:/static/client/a.svg?v=1#f");
+        assert_eq!(u.path, "/static/client/a.svg");
+        let opaque = Url::parse_absolute("mailto:a@b.c").unwrap();
+        assert!(opaque.join("x").is_none());
     }
 }

@@ -823,13 +823,6 @@ impl Compiler {
         self.fs().param_count = param_count;
         self.fs().param_slots = param_slots;
         self.fs().rest_slot = rest_slot;
-        // Named function expression self-binding.
-        if let Some(n) = &f.name {
-            if !f.is_arrow && !self.fs_ref().scopes[0].names.contains_key(n) {
-                let slot = self.declare(n, BindKind::Hidden);
-                self.fs().self_slot = Some(slot as u32);
-            }
-        }
         // Vars and lexicals.
         let body_stmts: &[Stmt] = match &f.body {
             FunctionBody::Block(b) => b,
@@ -850,6 +843,16 @@ impl Compiler {
             Self::collect_pattern_names(&p.pattern, &mut names);
             for n in names {
                 self.declare(&n, BindKind::Var);
+            }
+        }
+        // Named function expression self-binding. It lives in an outer
+        // environment per spec, so any parameter, `var`, lexical or inner
+        // function declaration with the same name shadows it: only bind it
+        // when nothing in the body declares the name.
+        if let Some(n) = &f.name {
+            if !f.is_arrow && !self.fs_ref().scopes[0].names.contains_key(n) {
+                let slot = self.declare(n, BindKind::Hidden);
+                self.fs().self_slot = Some(slot as u32);
             }
         }
         let tdz = self.fs_ref().scopes[0].tdz_slots.clone();

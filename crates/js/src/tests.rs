@@ -1311,3 +1311,24 @@ fn bigint_arbitrary_precision() {
         "535646014752996758513987364113720867507400997927597611767125|446616|-1024|6cdb|-9223372036854775808|ffffffffffffffff|true|true|bigint|true"
     );
 }
+
+#[test]
+fn var_shadows_function_self_name() {
+    let mut realm = crate::Realm::new();
+    let v = realm
+        .eval(
+            r#"
+            function n(e, t, r) {
+              if (r || 2 == arguments.length) for (var n, o = 0, a = t.length; o < a; o++) !n && o in t || (n || (n = Array.prototype.slice.call(t, 0, o)), n[o] = t[o]);
+              return e.concat(n || Array.prototype.slice.call(t));
+            }
+            const g = function h() { var h; return typeof h; };
+            const k = function k2() { return typeof k2; };
+            function p() { function p() { return 1 } return p(); }
+            [JSON.stringify(n(n([], ["a"], !1), ["b"], !1)), JSON.stringify(n([0], [1, 2])), g(), k(), p()].join('|')
+            "#,
+            "t.js",
+        )
+        .unwrap();
+    assert_eq!(realm.to_rust_string(v).unwrap(), r#"["a","b"]|[0,1,2]|undefined|function|1"#);
+}
