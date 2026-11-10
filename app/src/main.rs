@@ -26,6 +26,7 @@ USAGE:
     rabbithole dump <URL> [--dom] [--layout]
                                            Print the DOM and/or layout tree
     rabbithole cookies <URL>               Print the stored cookies that would be sent to URL
+    rabbithole js <URL> <EXPRESSION>       Evaluate JavaScript in the loaded page and print the result
     rabbithole mcp                         Run as a Model Context Protocol server on stdio
     rabbithole --help | --version
 
@@ -37,6 +38,11 @@ SCREENSHOT OPTIONS:
     --full                Capture the whole page height (max 20000px)
     --scroll <PX>         Vertical scroll offset before capturing
     --no-images           Do not download images
+
+COMMON OPTIONS (screenshot, text, links, dump, js):
+    --no-js               Do not run page JavaScript
+    --wait <MS>           Let timers run this long after load (default 1000 with JS)
+    --verbose             Print the page's console output to stderr
 
 The profile (cookies, history, bookmarks, session) lives in the platform
 config directory under `rabbithole/` (override with RABBITHOLE_PROFILE).
@@ -70,6 +76,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("links") => cli::links(&args[1..]),
         Some("dump") => cli::dump(&args[1..]),
         Some("cookies") => cli::cookies(&args[1..]),
+        Some("js") => cli::js(&args[1..]),
         Some("mcp") => mcp::serve(),
         Some(url) if url.starts_with('-') => Err(format!("unknown option `{url}` (try --help)")),
         Some(_) => gui::run(args.to_vec()),

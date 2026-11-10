@@ -41,6 +41,29 @@ pub struct Session {
     pub engine: Engine,
     pub profile: Profile,
     pub cookies: Arc<Mutex<CookieJar>>,
+    /// How long to let timers run after load (ms) so script-rendered
+    /// content settles.
+    pub wait_ms: u64,
+    /// Print page console output to stderr.
+    pub verbose: bool,
+}
+
+/// Script-related command line options shared by all subcommands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JsOptions {
+    pub enabled: bool,
+    pub wait_ms: u64,
+    pub verbose: bool,
+}
+
+impl JsOptions {
+    /// From `--no-js`, `--wait <ms>` and `--verbose` (default wait when JS
+    /// is on: `default_wait`).
+    pub fn from_flags(flags: &[(&str, &str)], default_wait: u64) -> Result<JsOptions, String> {
+        let enabled = !has_flag(flags, "no-js");
+        let wait_ms = parse_num(flags, "wait", if enabled { default_wait } else { 0 })?;
+        Ok(JsOptions { enabled, wait_ms, verbose: has_flag(flags, "verbose") })
+    }
 }
 
 impl Session {
@@ -51,7 +74,17 @@ impl Session {
         let cookies = profile.load_cookies();
         let mut engine = if system_fonts { Engine::new() } else { Engine::new_bundled_fonts_only() };
         engine.loader.fetcher.cookies = Some(cookies.clone());
-        Session { engine, profile, cookies }
+        engine.set_local_storage_path(profile.local_storage_path());
+        Session { engine, profile, cookies, wait_ms: 1000, verbose: false }
+    }
+
+    /// Apply `--no-js` / `--wait` / `--verbose`.
+    pub fn with_js(mut self, js: JsOptions) -> Session {
+        self.engine.scripting = js.enabled;
+        self.engine.loader.load_scripts = js.enabled;
+        self.wait_ms = js.wait_ms;
+        self.verbose = js.verbose;
+        self
     }
 
     pub fn save(&self) {
@@ -61,12 +94,33 @@ impl Session {
     /// Load a page with an arbitrary request; downloads are an error here.
     pub fn load_request(&mut self, req: &Request, viewport: Viewport) -> Result<Page, String> {
         let loaded = self.engine.loader.load_request(req, viewport).map_err(|e| e.to_string())?;
-        let page = match loaded {
+        let mut page = match loaded {
             Loaded::Page(p) => self.engine.build_page(p, viewport),
             Loaded::Download(s) => return Err(format!("{} is a download ({}), not a page", s.url, s.content_type)),
         };
+        if page.has_scripts() && self.wait_ms > 0 {
+            // Script-driven redirects (`location.href = ...`) are followed once.
+            if let Some(nav) = crate::scripting::settle(&self.engine, &mut page, self.wait_ms) {
+                self.flush_console(&mut page);
+                let loaded = self.engine.loader.load_request(&nav.request, viewport).map_err(|e| e.to_string())?;
+                if let Loaded::Page(p) = loaded {
+                    page = self.engine.build_page(p, viewport);
+                    let _ = crate::scripting::settle(&self.engine, &mut page, self.wait_ms);
+                }
+            }
+        }
+        self.flush_console(&mut page);
         self.save();
         Ok(page)
+    }
+
+    /// Print (when verbose) and clear the page's console messages.
+    pub fn flush_console(&self, page: &mut Page) {
+        for (level, msg) in page.take_console() {
+            if self.verbose || level == "error" && std::env::var("RH_JS_LOG").is_ok() {
+                eprintln!("[console.{level}] {msg}");
+            }
+        }
     }
 }
 
@@ -102,6 +156,14 @@ pub const TEXT_VIEWPORT: Viewport = Viewport { width: 1280.0, height: 800.0 };
 /// Load a page for text-oriented commands (images disabled).
 pub fn load_text_page(session: &mut Session, url: &str) -> Result<Page, String> {
     session.engine.loader.load_images = false;
+    if url.trim_start().starts_with('<') {
+        // Inline HTML (handy for tests and quick experiments).
+        let base = Url::parse("about:blank").ok_or("bad base")?;
+        let mut page = session.engine.load_html(url, base, TEXT_VIEWPORT);
+        let _ = crate::scripting::settle(&session.engine, &mut page, session.wait_ms);
+        session.flush_console(&mut page);
+        return Ok(page);
+    }
     session.engine.loader.load_fonts = false;
     let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
     session.load_request(&Request::get(parsed), TEXT_VIEWPORT)
@@ -160,8 +222,9 @@ fn url_arg<'a>(positional: &[&'a str], cmd: &str) -> Result<&'a str, String> {
 
 /// `rabbithole screenshot <URL> [-o out.png] [--width W] [--height H] [--scale S] [--full] [--scroll Y] [--no-images]`
 pub fn screenshot(args: &[String]) -> Result<(), String> {
-    let (positional, flags) = parse_args(args, &["output", "width", "height", "scroll", "scale"])?;
+    let (positional, flags) = parse_args(args, &["output", "width", "height", "scroll", "scale", "wait"])?;
     let url = url_arg(&positional, "screenshot")?;
+    let js = JsOptions::from_flags(&flags, 1000)?;
     let opts = CaptureOptions {
         width: parse_num(&flags, "width", 1280u32)?,
         height: parse_num(&flags, "height", 800u32)?,
@@ -171,7 +234,7 @@ pub fn screenshot(args: &[String]) -> Result<(), String> {
         images: !has_flag(&flags, "no-images"),
     };
     let output = flag(&flags, "output").unwrap_or("screenshot.png");
-    let mut session = Session::new(true);
+    let mut session = Session::new(true).with_js(js);
     let cap = capture(&mut session, url, &opts)?;
     image::save_buffer(output, &cap.rgba, cap.width, cap.height, image::ExtendedColorType::Rgba8).map_err(|e| format!("could not write {output}: {e}"))?;
     eprintln!("{} ({}x{}) -> {output}", cap.title, cap.width, cap.height);
@@ -180,9 +243,9 @@ pub fn screenshot(args: &[String]) -> Result<(), String> {
 
 /// `rabbithole text <URL>`
 pub fn text(args: &[String]) -> Result<(), String> {
-    let (positional, _flags) = parse_args(args, &[])?;
+    let (positional, flags) = parse_args(args, &["wait"])?;
     let url = url_arg(&positional, "text")?;
-    let mut session = Session::new(false);
+    let mut session = Session::new(false).with_js(JsOptions::from_flags(&flags, 1000)?);
     let page = load_text_page(&mut session, url)?;
     emit(&page.text());
     Ok(())
@@ -190,9 +253,9 @@ pub fn text(args: &[String]) -> Result<(), String> {
 
 /// `rabbithole links <URL>`
 pub fn links(args: &[String]) -> Result<(), String> {
-    let (positional, _flags) = parse_args(args, &[])?;
+    let (positional, flags) = parse_args(args, &["wait"])?;
     let url = url_arg(&positional, "links")?;
-    let mut session = Session::new(false);
+    let mut session = Session::new(false).with_js(JsOptions::from_flags(&flags, 1000)?);
     let page = load_text_page(&mut session, url)?;
     for link in page.links() {
         let text = link.text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -203,12 +266,13 @@ pub fn links(args: &[String]) -> Result<(), String> {
 
 /// `rabbithole dump <URL> [--dom] [--layout]` (both when neither is given)
 pub fn dump(args: &[String]) -> Result<(), String> {
-    let (positional, flags) = parse_args(args, &[])?;
+    let (positional, flags) = parse_args(args, &["wait"])?;
     let url = url_arg(&positional, "dump")?;
+    let js = JsOptions::from_flags(&flags, 1000)?;
     let want_dom = has_flag(&flags, "dom");
     let want_layout = has_flag(&flags, "layout");
     let (want_dom, want_layout) = if !want_dom && !want_layout { (true, true) } else { (want_dom, want_layout) };
-    let mut session = Session::new(false);
+    let mut session = Session::new(false).with_js(js);
     let page = load_text_page(&mut session, url)?;
     if want_dom {
         emit(&format!("=== DOM: {} ===", page.url));
@@ -218,6 +282,25 @@ pub fn dump(args: &[String]) -> Result<(), String> {
         emit(&format!("=== Layout ({}x{}) ===", page.content_width(), page.content_height()));
         emit(&page.layout_dump());
     }
+    Ok(())
+}
+
+/// `rabbithole js <URL> <EXPRESSION> [--wait ms]`: evaluate JavaScript in
+/// the loaded page (after its own scripts ran) and print the result.
+pub fn js(args: &[String]) -> Result<(), String> {
+    let (positional, flags) = parse_args(args, &["wait"])?;
+    let (url, expr) = match positional.as_slice() {
+        [u, rest @ ..] if !rest.is_empty() => (*u, rest.join(" ")),
+        _ => return Err("usage: rabbithole js <URL> <EXPRESSION> [--wait ms] [--verbose]".into()),
+    };
+    let mut js = JsOptions::from_flags(&flags, 1000)?;
+    js.enabled = true;
+    let mut session = Session::new(false).with_js(js);
+    let mut page = load_text_page(&mut session, url)?;
+    let result = session.engine.eval_in_page(&mut page, &expr);
+    let _ = crate::scripting::settle(&session.engine, &mut page, 0);
+    session.flush_console(&mut page);
+    emit(&result);
     Ok(())
 }
 
