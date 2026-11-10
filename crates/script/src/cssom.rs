@@ -120,6 +120,16 @@ struct DeclList {
     items: Vec<(String, String, bool)>,
 }
 
+/// CSS property names are ASCII case-insensitive, except custom
+/// properties (`--fooBar`), which keep their case.
+fn prop_name(s: &str) -> String {
+    if s.starts_with("--") {
+        s.to_string()
+    } else {
+        s.to_ascii_lowercase()
+    }
+}
+
 fn parse_style(n: NodeRef) -> DeclList {
     let text = get_attribute(n, "style").unwrap_or_default();
     let decls: Vec<Declaration> = parse_declaration_list(&text);
@@ -214,7 +224,7 @@ fn style_own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
 
 fn style_set_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "setProperty")?;
-    let prop = arg_str(realm, args, 0)?.trim().to_ascii_lowercase();
+    let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let v = arg(args, 1);
     let value = if v.is_nullish() { String::new() } else { realm.to_rust_string(v)? };
     let prio = arg_str_opt(realm, args, 2)?.unwrap_or_default();
@@ -224,21 +234,21 @@ fn style_set_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
 
 fn style_get_property_value(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getPropertyValue")?;
-    let prop = arg_str(realm, args, 0)?.trim().to_ascii_lowercase();
+    let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
     Ok(Value::str(list.items.iter().rev().find(|(k, _, _)| *k == prop).map(|(_, v, _)| v.as_str()).unwrap_or("")))
 }
 
 fn style_get_property_priority(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getPropertyPriority")?;
-    let prop = arg_str(realm, args, 0)?.trim().to_ascii_lowercase();
+    let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
     Ok(Value::str(if list.items.iter().any(|(k, _, imp)| *k == prop && *imp) { "important" } else { "" }))
 }
 
 fn style_remove_property(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "removeProperty")?;
-    let prop = arg_str(realm, args, 0)?.trim().to_ascii_lowercase();
+    let prop = prop_name(arg_str(realm, args, 0)?.trim());
     let list = parse_style(n);
     let old = list.items.iter().rev().find(|(k, _, _)| *k == prop).map(|(_, v, _)| v.clone()).unwrap_or_default();
     set_style_prop(n, &prop, "", false);
@@ -525,7 +535,7 @@ fn cs_set(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> 
 
 fn cs_get_property_value(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getPropertyValue")?;
-    let prop = arg_str(realm, args, 0)?.trim().to_ascii_lowercase();
+    let prop = prop_name(arg_str(realm, args, 0)?.trim());
     Ok(Value::str(&computed_value(n, &prop).unwrap_or_default()))
 }
 

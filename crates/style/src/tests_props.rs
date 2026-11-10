@@ -386,6 +386,18 @@ fn var_in_new_properties_and_wide_keywords() {
     assert_eq!(style_of(&doc, &t, "td").border_spacing, (4.0, 6.0));
 }
 
+/// Custom property names are case-sensitive and must keep their case
+/// (google.com's `:root{--xhUGwc:#fff}` backgrounds were transparent).
+#[test]
+fn custom_property_names_keep_case() {
+    let (doc, t) = styled(
+        "<div>x</div><p>y</p>",
+        ":root { --xhUGwc: #fff; --xhugwc: #000 } div { background-color: var(--xhUGwc) } p { background-color: var(--xhugwc) }",
+    );
+    assert_eq!(style_of(&doc, &t, "div").background_color, Color::rgb(255, 255, 255));
+    assert_eq!(style_of(&doc, &t, "p").background_color, Color::rgb(0, 0, 0));
+}
+
 #[test]
 fn transitions_animations_misc() {
     let s = one("transition: opacity .3s ease-in 1s, transform 200ms; animation: spin 2s linear infinite alternate; pointer-events: none; user-select: none; appearance: none; resize: vertical; scroll-margin-top: 10px");

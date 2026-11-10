@@ -415,7 +415,13 @@ impl Loader {
                     let text = decode_text(&resp.body, resp.charset.as_deref());
                     caches.css.insert(key, Arc::from(text));
                 }
-                _ => {
+                other => {
+                    if std::env::var_os("RH_DEBUG_FETCH").is_some() {
+                        match &other {
+                            Ok(resp) => eprintln!("[fetch] css {u}: HTTP {}", resp.status),
+                            Err(e) => eprintln!("[fetch] css {u}: {e}"),
+                        }
+                    }
                     caches.css.insert(key, Arc::from(""));
                 }
             }

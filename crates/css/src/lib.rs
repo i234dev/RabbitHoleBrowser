@@ -444,7 +444,9 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 Some(Token::Ident(name)) => {
-                    let name = name.to_ascii_lowercase();
+                    // Custom property names are case-sensitive
+                    // (`--xhUGwc` and `--xhugwc` are different).
+                    let name = if name.starts_with("--") { name.clone() } else { name.to_ascii_lowercase() };
                     self.pos += 1;
                     self.skip_ws();
                     if self.peek() != Some(&Token::Colon) {
