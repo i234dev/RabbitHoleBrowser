@@ -40,7 +40,7 @@ fn main() {
     let t2 = std::time::Instant::now();
     if std::env::var("RH_DEBUG_ITEMS").is_ok() {
         for it in &page.display_list.items {
-            if let rabbithole_engine::layout::DisplayItem::Image { rect, src, image, opacity } = it {
+            if let rabbithole_engine::layout::DisplayItem::Image { rect, src, image, opacity, .. } = it {
                 eprintln!("Image item: dest={rect:?} src={src:?} image={}x{} opacity={opacity}", image.width, image.height);
             }
         }
@@ -99,6 +99,16 @@ fn main() {
             }
             None => break,
         }
+    }
+    // Then let background image loads (lazy, srcset, script-driven) land.
+    let img_deadline = std::time::Instant::now() + std::time::Duration::from_millis(std::env::var("RH_IMG_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(4000));
+    while page.images_in_flight() > 0 && std::time::Instant::now() < img_deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = engine.tick(&mut page);
+    }
+    let _ = engine.tick(&mut page);
+    if std::env::var("RH_DEBUG_ITEMS").is_ok() {
+        eprintln!("images after wait: {} (in flight {})", page.images.len(), page.images_in_flight());
     }
     for (level, msg) in page.take_console() {
         eprintln!("[console.{level}] {msg}");

@@ -295,6 +295,11 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 };
             }
         }
+        "image-rendering" => {
+            if let Some(kw) = values::ident(c0) {
+                style.image_rendering_pixelated = matches!(kw.as_str(), "pixelated" | "crisp-edges" | "-webkit-optimize-contrast" | "optimizespeed" | "-moz-crisp-edges");
+            }
+        }
         "object-position" => {
             if let Some(p) = super::parse_position(comps, ctx) {
                 style.object_position = p;
@@ -346,7 +351,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         | "scrollbar-color" | "scrollbar-gutter" | "columns" | "column-count" | "column-width" | "column-gap-x" | "column-rule"
         | "column-span" | "column-fill" | "break-inside" | "break-before" | "break-after" | "page-break-inside"
         | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color" | "accent-color" | "color-scheme"
-        | "image-rendering" | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"
+        | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"
         | "-ms-touch-action" | "speak" | "orphans" | "widows" | "page" | "size" | "marks" | "quotes-x" | "all-x"
         | "content-visibility" | "contain-intrinsic-size" | "container" | "container-type" | "container-name" | "view-transition-name"
         | "anchor-name" | "position-anchor" | "field-sizing" | "forced-color-adjust" | "interpolate-size" | "math-style"

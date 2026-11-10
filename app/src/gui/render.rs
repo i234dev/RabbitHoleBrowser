@@ -142,7 +142,12 @@ impl App {
             }
             let tab = &self.tabs[i];
             let close = chrome.tab_close_rect(*r);
-            let text_x = r.x + 10.0 * s;
+            let mut text_x = r.x + 10.0 * s;
+            if let Some(icon) = tab.page.as_ref().and_then(|p| p.favicon()).filter(|_| !tab.is_loading()) {
+                let d = 16.0 * s;
+                self.canvas.draw_image(&icon, Rect::new(text_x, r.y + (r.h - d) / 2.0, d, d), 1.0);
+                text_x += d + 6.0 * s;
+            }
             let max_w = (close.x - text_x - 6.0 * s).max(10.0);
             let title = if tab.is_loading() { format!("⟳ {}", tab.display_title()) } else { tab.display_title().to_string() };
             let label = ellipsize(&fonts, self.ui_font, size, &title, max_w);

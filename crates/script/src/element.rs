@@ -1588,18 +1588,56 @@ fn form_action_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
 
 // image ---------------------------------------------------------------------
 
+fn img_engine_state(n: NodeRef) -> Option<(u32, u32, bool, String)> {
+    if n.doc != 0 {
+        return None;
+    }
+    with_env(|env| env.image_state(n.node))
+}
+
 fn img_natural_width(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "naturalWidth")?;
+    if let Some((w, _, _, _)) = img_engine_state(n) {
+        return Ok(Value::Number(w as f64));
+    }
     Ok(Value::Number(node_rect(n).w.round() as f64))
 }
 
 fn img_natural_height(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "naturalHeight")?;
+    if let Some((_, h, _, _)) = img_engine_state(n) {
+        return Ok(Value::Number(h as f64));
+    }
     Ok(Value::Number(node_rect(n).h.round() as f64))
 }
 
-fn img_complete(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(true))
+fn img_complete(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "complete")?;
+    Ok(Value::Bool(img_engine_state(n).map(|s| s.2).unwrap_or(true)))
+}
+
+fn img_current_src(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "currentSrc")?;
+    match img_engine_state(n) {
+        Some((_, _, _, src)) if !src.is_empty() => Ok(Value::str(&src)),
+        _ => img_src_get(realm, this, args),
+    }
+}
+
+/// `srcset`/`sizes` setters: reflect, then let the engine reselect.
+fn img_srcset_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "srcset")?;
+    let v = arg_str(realm, args, 0)?;
+    set_attribute(n, "srcset", Some(&v));
+    if n.doc == 0 {
+        with_env(|env| env.image_src_changed(n.node));
+    }
+    Ok(Value::Undefined)
+}
+
+fn img_srcset_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "srcset")?;
+    Ok(Value::str(&get_attribute(n, "srcset").unwrap_or_default()))
 }
 
 fn img_decode(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1630,6 +1668,10 @@ fn img_src_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     let n = this_node(realm, &this, "src")?;
     let v = arg_str(realm, args, 0)?;
     set_attribute(n, "src", Some(&v));
+    // The engine fetches the image and fires `load`/`error` when done.
+    if n.doc == 0 && with_env(|env| env.image_src_changed(n.node)) {
+        return Ok(Value::Undefined);
+    }
     state().borrow_mut().pending_script_events.push((n, "load"));
     let f = state().borrow().protos.get("__deliver_script_events").copied();
     if let Some(f) = f {
@@ -1720,12 +1762,60 @@ fn canvas_to_data_url(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult
     Ok(Value::str("data:,"))
 }
 
-fn media_play(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+/// Queue media events (fired asynchronously, not bubbling).
+fn queue_media_events(realm: &mut Realm, n: NodeRef, events: &[&'static str]) {
+    for e in events {
+        state().borrow_mut().pending_script_events.push((n, e));
+    }
+    let f = state().borrow().protos.get("__deliver_script_events").copied();
+    if let Some(f) = f {
+        realm.enqueue_callback(Value::Object(f), Value::Undefined, Vec::new());
+    }
+}
+
+fn media_set_state(realm: &mut Realm, this: &Value, key: &str, v: Value) {
+    if let Value::Object(o) = this {
+        realm.define_property(*o, key, v, rabbithole_js::HIDDEN | ENUMERABLE);
+    }
+}
+
+/// `play()`: playback state flips to playing (`play`/`playing` events) and
+/// the returned promise resolves. There is no audio/video output; the
+/// element shows its poster and native controls.
+fn media_play(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let was_paused = realm.get_str(this.clone(), "paused").map(|v| v.truthy()).unwrap_or(true);
+    media_set_state(realm, &this, "paused", Value::Bool(false));
+    if was_paused {
+        if let Some(n) = node_of(realm, &this) {
+            queue_media_events(realm, n, &["play", "playing"]);
+        }
+    }
     let (p, resolve, _) = realm.new_promise();
     realm.call(Value::Object(resolve), Value::Undefined, &[Value::Undefined])?;
     Ok(Value::Object(p))
 }
 
+fn media_pause(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let was_paused = realm.get_str(this.clone(), "paused").map(|v| v.truthy()).unwrap_or(true);
+    media_set_state(realm, &this, "paused", Value::Bool(true));
+    if !was_paused {
+        if let Some(n) = node_of(realm, &this) {
+            queue_media_events(realm, n, &["pause"]);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn media_load(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    media_set_state(realm, &this, "paused", Value::Bool(true));
+    if let Some(n) = node_of(realm, &this) {
+        queue_media_events(realm, n, &["emptied", "loadstart"]);
+    }
+    Ok(Value::Undefined)
+}
+
+/// No audio/video codecs are available for playback: `""` for everything
+/// (scripts then fall back to posters / static content).
 fn media_can_play_type(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::str(""))
 }
@@ -2069,14 +2159,15 @@ pub(crate) fn install(realm: &mut Realm) {
     // --- HTMLImageElement
     let img = define_class(realm, "HTMLImageElement", Some("HTMLElement"), image_ctor);
     realm.define_accessor(img, "src", Some(img_src_get), Some(img_src_set), ACC);
-    realm.define_accessor(img, "currentSrc", Some(img_src_get), None, ACC);
+    realm.define_accessor(img, "currentSrc", Some(img_current_src), None, ACC);
+    realm.define_accessor(img, "srcset", Some(img_srcset_get), Some(img_srcset_set), ACC);
     realm.define_accessor(img, "naturalWidth", Some(img_natural_width), None, ACC);
     realm.define_accessor(img, "naturalHeight", Some(img_natural_height), None, ACC);
     realm.define_accessor(img, "complete", Some(img_complete), None, ACC);
     realm.define_accessor(img, "width", Some(e_offset_width), Some(img_width_set), ACC);
     realm.define_accessor(img, "height", Some(e_offset_height), Some(img_height_set), ACC);
     realm.define_method(img, "decode", 0, img_decode);
-    for (p, at) in [("alt", "alt"), ("srcset", "srcset"), ("sizes", "sizes"), ("crossOrigin", "crossorigin"), ("loading", "loading"), ("decoding", "decoding"), ("referrerPolicy", "referrerpolicy"), ("useMap", "usemap"), ("fetchPriority", "fetchpriority")] {
+    for (p, at) in [("alt", "alt"), ("sizes", "sizes"), ("crossOrigin", "crossorigin"), ("loading", "loading"), ("decoding", "decoding"), ("referrerPolicy", "referrerpolicy"), ("useMap", "usemap"), ("fetchPriority", "fetchpriority")] {
         reflect(realm, img, p, at, Reflect::Str);
     }
     reflect(realm, img, "isMap", "ismap", Reflect::Bool);
@@ -2150,8 +2241,9 @@ pub(crate) fn install(realm: &mut Realm) {
     // --- HTMLMediaElement
     let media = define_class(realm, "HTMLMediaElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_method(media, "play", 0, media_play);
-    realm.define_method(media, "pause", 0, e_noop);
-    realm.define_method(media, "load", 0, e_noop);
+    realm.define_method(media, "pause", 0, media_pause);
+    realm.define_method(media, "load", 0, media_load);
+    realm.define_method(media, "fastSeek", 1, e_noop);
     realm.define_method(media, "canPlayType", 1, media_can_play_type);
     realm.define_method(media, "addTextTrack", 1, node_null);
     reflect(realm, media, "src", "src", Reflect::Url);

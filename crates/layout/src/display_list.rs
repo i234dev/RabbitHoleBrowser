@@ -59,6 +59,8 @@ pub enum DisplayItem {
         src: Rect,
         image: Arc<Image>,
         opacity: f32,
+        /// Nearest-neighbour scaling (`image-rendering: pixelated`).
+        pixelated: bool,
     },
     /// An image tiled over `area` (CSS background-repeat).
     ImageTiled {
@@ -412,10 +414,171 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     }
 
     fn paint_image_box(&mut self, b: &LayoutBox) {
-        let Some(img) = &b.image else { return };
         if b.style.visibility == Visibility::Hidden || !self.visible(&b.content_rect) || b.content_rect.is_empty() {
             return;
         }
+        let tag = b.node.and_then(|n| self.ctx.doc.element(n)).map(|e| e.tag.as_str()).unwrap_or("");
+        let is_media = matches!(tag, "video" | "audio");
+        if tag == "video" {
+            // Letterbox like a real player before the poster is drawn.
+            self.list.push(DisplayItem::Rect { rect: b.content_rect, color: Color::rgb(0, 0, 0), radius: 0.0 });
+        }
+        match &b.image {
+            Some(img) if img.broken => self.paint_broken_image(b),
+            Some(img) => self.paint_image_content(b, img.clone()),
+            None => {}
+        }
+        if is_media {
+            let controls = b.node.map(|n| self.ctx.doc.attr(n, "controls").is_some()).unwrap_or(false);
+            if controls || tag == "audio" {
+                self.paint_media_controls(b, tag == "audio");
+            } else {
+                // No native controls: a centred play affordance so the
+                // element does not look like an empty black box.
+                self.paint_big_play(b);
+            }
+        }
+    }
+
+    /// Broken image: light frame, the broken-image icon and the alt text
+    /// (clipped to the box).
+    fn paint_broken_image(&mut self, b: &LayoutBox) {
+        let r = b.content_rect;
+        let alt = b.node.and_then(|n| self.ctx.doc.attr(n, "alt")).unwrap_or("").trim().to_string();
+        if r.w >= 20.0 && r.h >= 20.0 {
+            self.list.push(DisplayItem::Border {
+                rect: r,
+                widths: [1.0; 4],
+                colors: [Color::rgb(192, 192, 192); 4],
+                styles: [BorderStyle::Solid; 4],
+                radii: [(0.0, 0.0); 4],
+            });
+        }
+        self.list.push(DisplayItem::PushClip(r));
+        let inset = if r.w >= 20.0 && r.h >= 20.0 { 2.0 } else { 0.0 };
+        let (ix, iy) = (r.x + inset, r.y + inset);
+        if r.w >= 14.0 && r.h >= 16.0 {
+            self.paint_broken_icon(ix, iy);
+        }
+        if !alt.is_empty() {
+            let st = &b.style;
+            let font = self.ctx.fonts.select(st.font_family, st.font_weight, st.is_italic());
+            let size = st.font_size;
+            let x = if r.w >= 40.0 && r.h >= 16.0 { ix + 18.0 } else { r.x + 2.0 };
+            self.list.push(DisplayItem::Text {
+                x,
+                y: iy + size * 0.9,
+                font,
+                size,
+                color: st.color,
+                text: alt,
+                letter_spacing: 0.0,
+                shadows: Vec::new(),
+                small_caps: false,
+                oblique: false,
+            });
+        }
+        self.list.push(DisplayItem::PopClip);
+    }
+
+    /// 14×16 "broken picture" glyph built from rectangles.
+    fn paint_broken_icon(&mut self, x: f32, y: f32) {
+        let mut push = |rx: f32, ry: f32, w: f32, h: f32, c: Color| self.list.push(DisplayItem::Rect { rect: Rect::new(x + rx, y + ry, w, h), color: c, radius: 0.0 });
+        let frame = Color::rgb(140, 140, 140);
+        push(0.0, 0.0, 14.0, 16.0, Color::rgb(250, 250, 250));
+        push(0.0, 0.0, 14.0, 1.0, frame);
+        push(0.0, 15.0, 14.0, 1.0, frame);
+        push(0.0, 0.0, 1.0, 16.0, frame);
+        push(13.0, 0.0, 1.0, 16.0, frame);
+        // Sky, hill and sun.
+        push(2.0, 2.0, 10.0, 6.0, Color::rgb(168, 204, 240));
+        push(2.0, 8.0, 10.0, 5.0, Color::rgb(96, 168, 80));
+        push(8.0, 3.0, 2.0, 2.0, Color::rgb(240, 200, 40));
+        // The tear.
+        for i in 0..5 {
+            let fi = i as f32;
+            push(1.0 + fi * 2.4, 7.0 + if i % 2 == 0 { 0.0 } else { 1.5 }, 2.4, 1.5, Color::rgb(250, 250, 250));
+        }
+    }
+
+    /// Native media controls: a bar along the bottom with play button,
+    /// time, a timeline and a volume glyph.
+    fn paint_media_controls(&mut self, b: &LayoutBox, audio: bool) {
+        let r = b.content_rect;
+        let h = if audio { r.h.min(54.0) } else { 40.0f32.min(r.h) };
+        if h < 16.0 || r.w < 60.0 {
+            return;
+        }
+        let bar = Rect::new(r.x, r.bottom() - h, r.w, h);
+        let (bg, fg, track) = if audio {
+            (Color::rgb(241, 243, 244), Color::rgb(32, 33, 36), Color::rgb(190, 190, 190))
+        } else {
+            (Color::rgba(0, 0, 0, 140), Color::rgb(255, 255, 255), Color::rgba(255, 255, 255, 110))
+        };
+        self.list.push(DisplayItem::Rect { rect: bar, color: bg, radius: if audio { (h / 2.0).min(27.0) } else { 0.0 } });
+        let cy = bar.y + bar.h / 2.0;
+        // Play triangle.
+        let px = bar.x + 14.0;
+        self.push_triangle(px, cy, 12.0, fg);
+        // Time label.
+        let font = self.ctx.fonts.select(rabbithole_gfx::Family::Sans, 400, false);
+        let size = 12.0;
+        self.list.push(DisplayItem::Text {
+            x: px + 22.0,
+            y: cy + size * 0.35,
+            font,
+            size,
+            color: fg,
+            text: "0:00 / 0:00".into(),
+            letter_spacing: 0.0,
+            shadows: Vec::new(),
+            small_caps: false,
+            oblique: false,
+        });
+        // Timeline and volume.
+        let tl_x = px + 110.0;
+        let tl_end = bar.right() - 44.0;
+        if tl_end - tl_x > 20.0 {
+            self.list.push(DisplayItem::Rect { rect: Rect::new(tl_x, cy - 2.0, tl_end - tl_x, 4.0), color: track, radius: 2.0 });
+            self.list.push(DisplayItem::Rect { rect: Rect::new(tl_x - 5.0, cy - 5.0, 10.0, 10.0), color: fg, radius: 5.0 });
+        }
+        let vx = bar.right() - 30.0;
+        if vx > px + 30.0 {
+            self.list.push(DisplayItem::Rect { rect: Rect::new(vx, cy - 3.0, 4.0, 6.0), color: fg, radius: 0.0 });
+            for i in 0..5 {
+                let fi = i as f32;
+                self.list.push(DisplayItem::Rect { rect: Rect::new(vx + 4.0 + fi, cy - 3.0 - fi, 1.0, 6.0 + 2.0 * fi), color: fg, radius: 0.0 });
+            }
+        }
+    }
+
+    /// Centred round play button over a video without controls.
+    fn paint_big_play(&mut self, b: &LayoutBox) {
+        let r = b.content_rect;
+        let d = 56.0f32.min(r.w * 0.5).min(r.h * 0.5);
+        if d < 16.0 {
+            return;
+        }
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        self.list.push(DisplayItem::Rect { rect: Rect::new(cx - d / 2.0, cy - d / 2.0, d, d), color: Color::rgba(0, 0, 0, 150), radius: d / 2.0 });
+        self.push_triangle(cx - d * 0.15, cy, d * 0.4, Color::rgb(255, 255, 255));
+    }
+
+    /// Right-pointing triangle with its left edge at `x`, centred on `cy`.
+    fn push_triangle(&mut self, x: f32, cy: f32, size: f32, color: Color) {
+        let steps = size.ceil().max(2.0) as i32;
+        let w = size * 0.87;
+        let sw = w / steps as f32;
+        for i in 0..steps {
+            let t = (i as f32 + 0.5) / steps as f32;
+            // Slice height shrinks linearly towards the tip.
+            let sh = size * (1.0 - t);
+            self.list.push(DisplayItem::Rect { rect: Rect::new(x + i as f32 * sw, cy - sh / 2.0, sw + 0.3, sh), color, radius: 0.0 });
+        }
+    }
+
+    fn paint_image_content(&mut self, b: &LayoutBox, img: Arc<Image>) {
+        let img = &img;
         let (iw, ih) = (img.width as f32, img.height as f32);
         let dest = b.content_rect;
         let fit = b.style.object_fit;
@@ -465,6 +628,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             src,
             image: img.clone(),
             opacity: 1.0,
+            pixelated: b.style.image_rendering_pixelated,
         });
     }
 

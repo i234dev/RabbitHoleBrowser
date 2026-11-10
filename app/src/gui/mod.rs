@@ -701,6 +701,11 @@ impl App {
     /// Relayout the active tab for the current viewport if needed.
     pub(crate) fn relayout_if_needed(&mut self) {
         let vp = self.css_viewport();
+        // srcset / resolution media queries follow HiDPI scale and zoom.
+        let dpr = self.page_scale();
+        if (self.engine.device_pixel_ratio - dpr).abs() > 1e-3 {
+            self.engine.set_device_pixel_ratio(dpr);
+        }
         let idx = self.active;
         let Some(tab) = self.tabs.get_mut(idx) else { return };
         let needs = self.needs_relayout || tab.needs_relayout;

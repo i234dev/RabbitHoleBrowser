@@ -294,6 +294,15 @@ impl HostEnv for EngineEnv<'_> {
     fn open_window(&mut self, url: Url) {
         self.page.script.new_windows.push(url);
     }
+    fn image_src_changed(&mut self, node: NodeId) -> bool {
+        self.page.image_state.script_changed(node);
+        self.page.script.dom_dirty = true;
+        true
+    }
+    fn image_state(&mut self, node: NodeId) -> Option<(u32, u32, bool, String)> {
+        let i = self.page.image_info(node);
+        Some((i.natural_width, i.natural_height, i.complete, i.current_src))
+    }
     fn focus_node(&mut self, node: Option<NodeId>) {
         self.page.state.focused = node;
     }
@@ -410,6 +419,32 @@ impl Engine {
     /// Run due timers, rAF callbacks and microtasks. Call from the UI loop;
     /// `Page::next_script_due` says when the next call is needed.
     pub fn tick(&self, page: &mut Page) -> ScriptOutcome {
+        // Images first: install finished background loads, fire their
+        // events and advance animations.
+        let mut images_changed = self.poll_images(page);
+        let mut img_out = ScriptOutcome::default();
+        if images_changed {
+            self.relayout_only(page);
+            self.shrink_oversized_images(page);
+            img_out = self.fire_image_events(page);
+        }
+        if self.advance_animations(page) {
+            images_changed = true;
+        }
+        let mut out = self.tick_scripts(page);
+        out.relayout |= images_changed || img_out.relayout;
+        if out.navigation.is_none() {
+            out.navigation = img_out.navigation;
+        }
+        out.new_windows.extend(img_out.new_windows);
+        out.dialogs.extend(img_out.dialogs);
+        if out.scroll_to.is_none() {
+            out.scroll_to = img_out.scroll_to;
+        }
+        out
+    }
+
+    fn tick_scripts(&self, page: &mut Page) -> ScriptOutcome {
         let Some(mut host) = page.script.host.take() else {
             return ScriptOutcome::default();
         };
@@ -530,7 +565,11 @@ impl Engine {
 impl Page {
     /// Earliest time (engine ms) a timer or animation frame is due.
     pub fn next_script_due(&self) -> Option<f64> {
-        self.script.host.as_ref().and_then(|h| h.next_due())
+        let scripts = self.script.host.as_ref().and_then(|h| h.next_due());
+        match (scripts, self.image_due()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Does the page have any script listeners at all (hover/click

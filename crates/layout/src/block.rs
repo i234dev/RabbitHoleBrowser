@@ -512,21 +512,32 @@ impl<'a> Layouter<'a> {
     /// percentages are treated as auto (intrinsic sizing).
     pub(crate) fn replaced_size(&self, b: &LayoutBox, cbw: Option<f32>, cb_h: Option<f32>, pb_h: f32) -> (f32, f32) {
         let style = &b.style;
-        let (iw, ih) = match &b.image {
-            Some(img) => (img.width as f32, img.height as f32),
+        // Natural size: the decoded image (in CSS px), else the `width` /
+        // `height` attributes (which also give the aspect ratio before the
+        // image arrives, so loading causes no layout shift).
+        let (iw, ih) = match b.image.as_ref().filter(|i| !i.broken) {
+            Some(img) => img.natural_size(),
             None => (b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0)),
         };
-        let ratio = if ih > 0.0 && iw > 0.0 { Some(iw / ih) } else { None };
+        let ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()).or(if ih > 0.0 && iw > 0.0 { Some(iw / ih) } else { None });
         let adj_w = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
+        // `width`/`height` attributes arrive as presentational hints in the
+        // computed style; an explicit `auto` (e.g. `height: auto`) must
+        // keep the ratio instead of falling back to the attribute.
         let sw = match style.width {
             Length::Px(v) => Some(adj_w(v)),
             Length::Percent(p) => cbw.map(|c| adj_w(c * p / 100.0)),
-            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => b.attr_size.0.filter(|_| b.image.is_none() || true),
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         let sh = match style.height {
             Length::Px(v) => Some(v),
             Length::Percent(p) => cb_h.map(|c| c * p / 100.0),
-            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => b.attr_size.1,
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
+        };
+        let (iw, ih) = match (iw > 0.0, ih > 0.0, ratio) {
+            (true, false, Some(r)) => (iw, iw / r),
+            (false, true, Some(r)) => (ih * r, ih),
+            _ => (iw, ih),
         };
         let (mut w, mut h) = match (sw, sh) {
             (Some(w), Some(h)) => (w, h),

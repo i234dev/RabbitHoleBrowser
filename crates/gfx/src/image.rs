@@ -20,6 +20,9 @@ pub struct Image {
     pub natural_height: u32,
     /// Frames of an animated image (GIF / APNG / animated WebP).
     pub anim: Option<Arc<Animation>>,
+    /// Placeholder for a resource that failed to load or decode (layout
+    /// shows the broken-image icon / alt text instead).
+    pub broken: bool,
 }
 
 /// Frames of an animated image plus its playback position. The current
@@ -147,7 +150,16 @@ impl Image {
 
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         debug_assert_eq!(rgba.len(), (width * height * 4) as usize);
-        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None }
+        Image { width, height, rgba, natural_width: width, natural_height: height, anim: None, broken: false }
+    }
+
+    /// Marker image for a failed load (1×1 transparent, natural size 0).
+    pub fn broken() -> Image {
+        let mut i = Image::new(1, 1, vec![0; 4]);
+        i.natural_width = 0;
+        i.natural_height = 0;
+        i.broken = true;
+        i
     }
 
     /// Same pixels with a different intrinsic (CSS) size, e.g. a 2x
@@ -262,7 +274,7 @@ impl Image {
                 a.loop_count,
             ))
         });
-        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim }
+        Image { width: nw, height: nh, rgba, natural_width: self.natural_width, natural_height: self.natural_height, anim, broken: self.broken }
     }
 
     /// Encode the current frame as PNG.
@@ -522,6 +534,25 @@ mod tests {
         let img = Image::decode(include_bytes!("../fixtures/alpha.avif")).expect("avif alpha");
         assert!(img.width > 0 && img.height > 0);
         assert!(img.rgba.chunks(4).any(|p| p[3] < 255), "alpha plane applied");
+    }
+
+    #[test]
+    fn decode_ico_and_jpeg() {
+        let mut buf = image::RgbaImage::new(16, 16);
+        for p in buf.pixels_mut() {
+            *p = image::Rgba([0, 200, 0, 255]);
+        }
+        let mut ico = Vec::new();
+        buf.write_to(&mut std::io::Cursor::new(&mut ico), image::ImageFormat::Ico).unwrap();
+        assert_eq!(sniff(&ico), Format::Ico);
+        let img = Image::decode(&ico).unwrap();
+        assert_eq!((img.width, img.height), (16, 16));
+        assert_eq!(img.pixel(3, 3)[1], 200);
+        let rgb = image::DynamicImage::ImageRgba8(buf).to_rgb8();
+        let mut jpg = Vec::new();
+        rgb.write_to(&mut std::io::Cursor::new(&mut jpg), image::ImageFormat::Jpeg).unwrap();
+        let img = Image::decode(&jpg).unwrap();
+        assert!(img.pixel(8, 8)[1] > 180 && img.pixel(8, 8)[0] < 40);
     }
 
     #[test]

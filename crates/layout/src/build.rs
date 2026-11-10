@@ -314,11 +314,13 @@ impl<'a> Builder<'a> {
 
     fn build_replaced(&self, node: NodeId, tag: &str, style: &Rc<ComputedStyle>) -> Option<LayoutBox> {
         let doc = self.doc();
-        let image = if tag == "img" || tag == "svg" || tag == "input" { self.ctx.images.get(&node).cloned() } else { None };
+        // `<video>` shows its poster image (stored under the node too).
+        let image = if matches!(tag, "img" | "svg" | "input" | "video") { self.ctx.images.get(&node).cloned() } else { None };
         let attr_w = doc.attr(node, "width").and_then(parse_dimension_attr);
         let attr_h = doc.attr(node, "height").and_then(parse_dimension_attr);
-        if tag == "img" && image.is_none() && attr_w.is_none() && style.width.is_auto() {
-            // Missing image: render alt text inline instead.
+        let broken = image.as_ref().map(|i| i.broken).unwrap_or(false);
+        if tag == "img" && broken && attr_w.is_none() && attr_h.is_none() && style.width.is_auto() && style.height.is_auto() {
+            // Failed image without a size: render the alt text inline.
             let alt = doc.attr(node, "alt").unwrap_or("").trim();
             if !alt.is_empty() {
                 let mut t = LayoutBox::new(BoxKind::Text, Some(node), style.clone());
@@ -329,7 +331,12 @@ impl<'a> Builder<'a> {
         let mut b = LayoutBox::new(BoxKind::Image, Some(node), style.clone());
         b.image = image;
         b.attr_size = (attr_w, attr_h);
-        if tag == "iframe" || tag == "video" || tag == "object" || tag == "embed" {
+        if tag == "img" && broken && doc.attr(node, "alt").is_none() && b.attr_size == (None, None) {
+            // No alt at all: a 16×16 broken-image icon.
+            b.attr_size = (Some(16.0), Some(16.0));
+        }
+        let has_media = b.image.as_ref().map(|i| !i.broken).unwrap_or(false);
+        if matches!(tag, "iframe" | "video" | "object" | "embed" | "canvas") && !has_media {
             if b.attr_size.0.is_none() {
                 b.attr_size.0 = Some(300.0);
             }

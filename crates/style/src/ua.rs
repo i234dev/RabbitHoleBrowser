@@ -126,7 +126,7 @@ img, video, audio, canvas, embed, object, iframe, svg, math, picture, source { d
 picture, source { display: inline; }
 img { vertical-align: baseline; }
 iframe { border: 2px solid #c0c0c0; width: 300px; height: 150px; }
-video { width: 300px; height: 150px; }
+video { object-fit: contain; }
 audio { display: none; }
 audio[controls] { display: inline-block; width: 300px; height: 54px; background-color: #f1f3f4; }
 

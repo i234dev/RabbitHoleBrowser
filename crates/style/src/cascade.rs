@@ -1121,6 +1121,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
         "aspect-ratio" => to.aspect_ratio = from.aspect_ratio,
+        "image-rendering" => to.image_rendering_pixelated = from.image_rendering_pixelated,
         "content" => to.content = from.content.clone(),
         "counter-reset" | "counter-set" => to.counter_reset = from.counter_reset.clone(),
         "counter-increment" => to.counter_increment = from.counter_increment.clone(),

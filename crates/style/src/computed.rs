@@ -776,6 +776,9 @@ pub struct ComputedStyle {
     pub object_fit: ObjectFit,
     pub object_position: (Length, Length),
     pub aspect_ratio: Option<f32>,
+    /// `image-rendering: pixelated | crisp-edges` (nearest-neighbour
+    /// scaling). Inherited.
+    pub image_rendering_pixelated: bool,
 
     // ---- generated content & counters
     pub content: Content,
@@ -895,6 +898,7 @@ impl ComputedStyle {
             object_fit: ObjectFit::Fill,
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
             aspect_ratio: None,
+            image_rendering_pixelated: false,
             content: Content::Normal,
             counter_reset: Vec::new(),
             counter_increment: Vec::new(),
@@ -943,6 +947,7 @@ impl ComputedStyle {
             tab_size: parent.tab_size,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
+            image_rendering_pixelated: parent.image_rendering_pixelated,
             quotes: parent.quotes.clone(),
             pointer_events: parent.pointer_events,
             user_select: parent.user_select,

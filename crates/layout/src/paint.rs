@@ -348,7 +348,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                 draw_text_basic(canvas, fonts, *font, *size, text, px, py, *color, *letter_spacing);
             }
         }
-        DisplayItem::Image { rect, src, image, opacity } => {
+        DisplayItem::Image { rect, src, image, opacity, pixelated } => {
             let r = rect.translate(dx, dy);
             if r.intersect(&view).is_empty() {
                 return;
@@ -357,11 +357,13 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                 && src.y <= 0.0
                 && (src.w - image.width as f32).abs() < 0.5
                 && (src.h - image.height as f32).abs() < 0.5;
+            canvas.image_smoothing = !*pixelated;
             if full || !st.ext {
                 canvas.draw_image(image, r, *opacity);
             } else {
                 canvas.draw_image_region(image, *src, r, *opacity);
             }
+            canvas.image_smoothing = true;
         }
         DisplayItem::ImageTiled {
             image,

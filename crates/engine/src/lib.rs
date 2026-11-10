@@ -9,6 +9,7 @@
 
 pub mod forms;
 mod home;
+pub mod images;
 pub mod scripting;
 pub mod select;
 mod text;
@@ -37,6 +38,7 @@ pub use rabbithole_net as net;
 pub use rabbithole_style as style;
 pub use rabbithole_svg as svg;
 pub use rabbithole_script as script;
+pub use images::{choose_candidate, eval_sizes, media_matches, parse_srcset, select_image, ImageChoice, ImageInfo, SrcCandidate};
 pub use scripting::{Dialog, LocalStorage, PendingNavigation, ScriptOutcome, ScriptState};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -92,6 +94,8 @@ pub struct Loader {
     pub max_images: usize,
     pub max_background_images: usize,
     pub max_fonts: usize,
+    /// Device pixels per CSS pixel (picks `srcset` candidates).
+    pub device_pixel_ratio: f32,
     /// Page whose subresources are being fetched (referer / Sec-Fetch-Site).
     pub initiator: Option<Url>,
     caches: Arc<Mutex<Caches>>,
@@ -166,6 +170,7 @@ impl Default for Loader {
             max_images: 120,
             max_background_images: 40,
             max_fonts: 16,
+            device_pixel_ratio: 1.0,
             initiator: None,
             caches: Arc::new(Mutex::new(Caches::default())),
         }
@@ -284,7 +289,7 @@ impl Loader {
             eprintln!("[load] discovery cascade {:?}", t.elapsed());
         }
         let t = std::time::Instant::now();
-        let images = if self.load_images { self.load_images(&doc, &styles, &base_url) } else { Vec::new() };
+        let images = if self.load_images { self.load_images(&doc, &styles, &base_url, viewport) } else { Vec::new() };
         if debug {
             eprintln!("[load] images {:?}", t.elapsed());
         }
@@ -469,35 +474,43 @@ impl Loader {
 
     // ------------------------------------------------------------ images
 
-    fn load_images(&self, doc: &Document, styles: &StyledTree, base: &Url) -> Vec<(NodeId, Arc<Image>)> {
-        let mut wanted: Vec<(NodeId, Url)> = Vec::new();
+    fn load_images(&self, doc: &Document, styles: &StyledTree, base: &Url, viewport: Viewport) -> Vec<(NodeId, Arc<Image>)> {
+        let mut wanted: Vec<(NodeId, Url, f32)> = Vec::new();
         for n in doc.descendants(Document::ROOT) {
-            if !doc.is_element(n, "img") && !doc.is_element(n, "input") {
-                continue;
-            }
-            if doc.is_element(n, "input") && doc.attr(n, "type").map(|t| !t.eq_ignore_ascii_case("image")).unwrap_or(true) {
+            if !images::is_image_element(doc, n) {
                 continue;
             }
             if styles.get(n).is_none() {
                 continue; // display:none
             }
-            let Some(src) = image_source(doc, n) else { continue };
-            let Some(url) = base.join(&src) else { continue };
+            // `loading=lazy` waits for layout (the engine loads it when it
+            // comes near the viewport); without scripting it is eager.
+            if self.load_scripts && doc.attr(n, "loading").map(|l| l.trim().eq_ignore_ascii_case("lazy")).unwrap_or(false) {
+                continue;
+            }
+            let Some(choice) = images::select_image(doc, n, viewport, self.device_pixel_ratio, self.load_scripts, None) else { continue };
+            let Some(url) = base.join(&choice.url) else { continue };
             if url.scheme == "javascript" {
                 continue;
             }
-            wanted.push((n, url));
+            wanted.push((n, url, choice.density));
             if wanted.len() >= self.max_images {
                 break;
             }
         }
-        let urls: Vec<Url> = wanted.iter().map(|(_, u)| u.clone()).collect();
+        let urls: Vec<Url> = wanted.iter().map(|(_, u, _)| u.clone()).collect();
         self.fetch_images_into_cache(&urls);
         let caches = self.caches.lock().unwrap();
         wanted
             .into_iter()
-            .filter_map(|(n, u)| caches.images.get(&u.to_string()).cloned().flatten().map(|img| (n, img)))
+            .filter_map(|(n, u, d)| caches.images.get(&u.to_string()).cloned().flatten().map(|img| (n, images::apply_density(img, d))))
             .collect()
+    }
+
+    /// A finished fetch for `url` from the shared cache: `None` = not
+    /// fetched yet, `Some(None)` = failed / undecodable.
+    pub(crate) fn cached_image(&self, url: &str) -> Option<Option<Arc<Image>>> {
+        self.caches.lock().unwrap().images.get(url).cloned()
     }
 
     fn load_background_images(&self, styles: &StyledTree) -> Vec<(String, Arc<Image>)> {
@@ -542,7 +555,7 @@ impl Loader {
             .collect()
     }
 
-    fn fetch_images_into_cache(&self, urls: &[Url]) {
+    pub(crate) fn fetch_images_into_cache(&self, urls: &[Url]) {
         let mut to_fetch: Vec<Url> = Vec::new();
         {
             let caches = self.caches.lock().unwrap();
@@ -557,7 +570,7 @@ impl Loader {
             return;
         }
         let mut fetcher = self.fetcher.clone();
-        fetcher.max_body = 16 * 1024 * 1024;
+        fetcher.max_body = 32 * 1024 * 1024;
         let debug = std::env::var("RH_DEBUG_FETCH").is_ok();
         let t0 = std::time::Instant::now();
         let results = fetcher.fetch_many_for(&to_fetch, 8, Destination::Image, self.initiator.as_ref());
@@ -570,17 +583,29 @@ impl Loader {
                 }
             }
         }
-        let mut caches = self.caches.lock().unwrap();
-        for (u, r) in to_fetch.iter().zip(results) {
-            let td = std::time::Instant::now();
-            let decoded = match r {
-                Ok(resp) if resp.status < 400 => decode_image(&resp.body, &resp.content_type, &u.path).map(Arc::new),
-                _ => None,
-            };
-            if debug {
-                eprintln!("[decode] {:?} {} -> {}", td.elapsed(), u, decoded.as_ref().map(|i| format!("{}x{}", i.width, i.height)).unwrap_or_else(|| "none".into()));
+        // Decode in parallel without holding the cache lock (the UI thread
+        // polls the cache while background loads run).
+        let jobs: Vec<(Url, Option<Response>)> = to_fetch.into_iter().zip(results).map(|(u, r)| (u, r.ok().filter(|resp| resp.status < 400))).collect();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let decoded: Mutex<Vec<(String, Option<Arc<Image>>)>> = Mutex::new(Vec::with_capacity(jobs.len()));
+        std::thread::scope(|scope| {
+            for _ in 0..threads.min(jobs.len()) {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((u, resp)) = jobs.get(i) else { break };
+                    let td = std::time::Instant::now();
+                    let img = resp.as_ref().and_then(|r| decode_image(&r.body, &r.content_type, &u.path)).map(Arc::new);
+                    if debug {
+                        eprintln!("[decode] {:?} {} -> {}", td.elapsed(), u, img.as_ref().map(|i| format!("{}x{}{}", i.width, i.height, if i.is_animated() { " animated" } else { "" })).unwrap_or_else(|| "none".into()));
+                    }
+                    decoded.lock().unwrap().push((u.to_string(), img));
+                });
             }
-            caches.images.insert(u.to_string(), decoded);
+        });
+        let mut caches = self.caches.lock().unwrap();
+        for (k, img) in decoded.into_inner().unwrap() {
+            caches.images.insert(k, img);
         }
     }
 
@@ -748,6 +773,8 @@ pub struct Engine {
     pub local_storage: std::cell::RefCell<LocalStorage>,
     /// Monotonic clock origin for timers / `performance.now()`.
     pub start: std::time::Instant,
+    /// Device pixels per CSS pixel (see [`Engine::set_device_pixel_ratio`]).
+    pub device_pixel_ratio: f32,
     registered_fonts: HashSet<String>,
 }
 
@@ -791,6 +818,8 @@ pub struct Page {
     pub sheet_signature: u64,
     /// Scroll position requested by scripts (consumed by the UI).
     pub requested_scroll: Option<(f32, f32)>,
+    /// Image loading after the first layout (lazy, srcset, scripts).
+    pub image_state: images::ImageState,
 }
 
 impl Default for Engine {
@@ -810,6 +839,7 @@ impl Engine {
             console_to_stderr: std::env::var("RH_JS_LOG").is_ok(),
             local_storage: std::cell::RefCell::new(LocalStorage::default()),
             start: std::time::Instant::now(),
+            device_pixel_ratio: 1.0,
             registered_fonts: HashSet::new(),
         }
     }
@@ -823,6 +853,7 @@ impl Engine {
             console_to_stderr: std::env::var("RH_JS_LOG").is_ok(),
             local_storage: std::cell::RefCell::new(LocalStorage::default()),
             start: std::time::Instant::now(),
+            device_pixel_ratio: 1.0,
             registered_fonts: HashSet::new(),
         }
     }
@@ -875,6 +906,7 @@ impl Engine {
             script: ScriptState::default(),
             requested_scroll: None,
             sheet_signature: 0,
+            image_state: images::ImageState::default(),
         };
         page.snapshot_form_defaults();
         page.sheet_signature = stylesheet_signature(&page.doc);
@@ -892,6 +924,7 @@ impl Engine {
                 page.requested_scroll = out.scroll_to;
             }
         }
+        self.shrink_oversized_images(&mut page);
         // `<meta http-equiv="refresh" content="N; url=...">` (N <= 5 s is
         // followed right away; longer delays are left to the user).
         if page.script.pending_navigation.is_none() {
@@ -935,6 +968,11 @@ impl Engine {
         page.background = canvas_background(&page.doc, &page.styles);
         rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images);
         self.relayout_only(page);
+        // (Re)select image sources for the new viewport / DOM and start
+        // lazy or script-requested loads; cached results show right away.
+        if self.sync_images(page) {
+            self.relayout_only(page);
+        }
     }
 
     /// Current computed style of one element without a full restyle
@@ -1009,6 +1047,7 @@ impl Engine {
         if page.layout.has_sticky_or_fixed() {
             self.rebuild_display_list(page);
         }
+        self.sync_lazy_images(page);
     }
 
     /// Scroll the innermost scroll container under (x, y) (document
@@ -1099,7 +1138,8 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
         thread_local! {
             static SVG_FONTS: FontContext = FontContext::new();
         }
-        return Some(SVG_FONTS.with(|fonts| tree.rasterize(fonts, pw, ph)));
+        let img = SVG_FONTS.with(|fonts| tree.rasterize(fonts, pw, ph));
+        return Some(img.with_natural_size(w.round().max(1.0) as u32, h.round().max(1.0) as u32));
     }
     Image::decode(bytes)
 }
@@ -1310,28 +1350,6 @@ fn sheet_has_dynamic_rules(sheet: &Stylesheet) -> bool {
         })
     }
     walk(&sheet.rules)
-}
-
-/// Pick the URL an `<img>` should load: `src`, else the first `srcset`
-/// candidate, else common lazy-loading attributes.
-fn image_source(doc: &Document, n: NodeId) -> Option<String> {
-    let el = doc.element(n)?;
-    if let Some(src) = el.attr("src").map(str::trim).filter(|s| !s.is_empty() && !s.starts_with("data:image/svg")) {
-        return Some(src.to_string());
-    }
-    for attr in ["data-src", "data-lazy-src", "data-original"] {
-        if let Some(v) = el.attr(attr).map(str::trim).filter(|s| !s.is_empty()) {
-            return Some(v.to_string());
-        }
-    }
-    if let Some(srcset) = el.attr("srcset").or_else(|| el.attr("data-srcset")) {
-        let first = srcset.split(',').next()?.trim();
-        let url = first.split_ascii_whitespace().next()?;
-        if !url.is_empty() {
-            return Some(url.to_string());
-        }
-    }
-    None
 }
 
 /// The canvas background comes from `html`, or from `body` when `html`

@@ -172,7 +172,7 @@ fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLay
         },
         _ => None,
     };
-    let intrinsic = image.as_ref().map(|i| (i.width as f32, i.height as f32));
+    let intrinsic = image.as_ref().map(|i| i.natural_size());
     let (tw, th) = tile_size(layer.size, intrinsic, area);
     if tw <= 0.0 || th <= 0.0 {
         return;
@@ -244,6 +244,7 @@ fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLay
                         src,
                         image: img,
                         opacity: 1.0,
+                        pixelated: false,
                     });
                 }
             }

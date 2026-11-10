@@ -482,3 +482,11 @@ fn wikipedia_grid_template_shorthand_and_areas() {
     assert_eq!(cs.grid_row_start, GridLine::Named("pageContent".into(), false));
     assert_eq!(cs.grid_column_end, GridLine::Named("pageContent".into(), false));
 }
+
+#[test]
+fn image_set_picks_supported_1x() {
+    let s = one("background-image: image-set(url(a.jxl) type('image/jxl') 1x, url(b.avif) type('image/avif') 1x, url(c.png) 2x)");
+    assert_eq!(s.background_layers[0].image, BackgroundImage::Url("b.avif".into()));
+    let s = one("background-image: -webkit-image-set(url(hi.png) 2x, url(lo.png) 1x)");
+    assert_eq!(s.background_layers[0].image, BackgroundImage::Url("lo.png".into()));
+}

@@ -66,6 +66,17 @@ pub trait HostEnv {
     /// Submit a form (build the request and navigate); `submitter` is the
     /// button used, if any.
     fn submit_form(&mut self, form: NodeId, submitter: Option<NodeId>);
+    /// A script set an image element's `src`/`srcset`. Return true when the
+    /// engine loads it and fires `load`/`error` itself (the default fakes a
+    /// `load` event).
+    fn image_src_changed(&mut self, _node: NodeId) -> bool {
+        false
+    }
+    /// (naturalWidth, naturalHeight, complete, currentSrc) of an image
+    /// element, when the engine tracks it.
+    fn image_state(&mut self, _node: NodeId) -> Option<(u32, u32, bool, String)> {
+        None
+    }
 }
 
 type EnvPtr = *mut (dyn HostEnv + 'static);

@@ -186,7 +186,10 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
         return Some(g);
     }
     if let Some(f) = super::fn_name(c) {
-        if f.ends_with("image-set") || f == "image" || f == "cross-fade" {
+        if f.ends_with("image-set") {
+            return Some(parse_image_set(c, ctx).map(BackgroundImage::Url).unwrap_or(BackgroundImage::None));
+        }
+        if f == "image" || f == "cross-fade" {
             for arg in super::fn_args(c) {
                 for t in arg {
                     if let Some(u) = crate::cascade::url_of(t) {
@@ -201,6 +204,48 @@ pub fn parse_image(c: &[Token], current: Color, ctx: &ApplyCtx) -> Option<Backgr
         }
     }
     None
+}
+
+/// `image-set()`: drop candidates whose `type()` we cannot decode, then
+/// take the 1x one (the smallest resolution >= 1, else the densest).
+pub fn parse_image_set(c: &[Token], ctx: &ApplyCtx) -> Option<String> {
+    let mut best: Option<(f32, String)> = None;
+    let mut fallback: Option<(f32, String)> = None;
+    for arg in super::fn_args(c) {
+        let mut url = None;
+        let mut res = 1.0f32;
+        let mut supported = true;
+        for t in arg {
+            if let Some(u) = crate::cascade::url_of(t) {
+                url = Some(u);
+            } else if let [Token::String(s)] = t {
+                url = Some(s.clone());
+            } else if let [Token::Dimension(v, unit)] = t {
+                res = match unit.to_ascii_lowercase().as_str() {
+                    "x" | "dppx" => *v,
+                    "dpi" => *v / 96.0,
+                    "dpcm" => *v * 2.54 / 96.0,
+                    _ => *v,
+                };
+            } else if super::fn_name(t).as_deref() == Some("type") {
+                if let Some(Token::String(m)) = t.get(1) {
+                    supported = rabbithole_gfx::image::supports_mime(m);
+                }
+            }
+        }
+        let Some(u) = url else { continue };
+        if !supported {
+            continue;
+        }
+        if res + 1e-3 >= 1.0 {
+            if best.as_ref().map(|(r, _)| res < *r).unwrap_or(true) {
+                best = Some((res, u));
+            }
+        } else if fallback.as_ref().map(|(r, _)| res > *r).unwrap_or(true) {
+            fallback = Some((res, u));
+        }
+    }
+    best.or(fallback).map(|(_, u)| ctx.url(&u))
 }
 
 fn parse_size(comps: &[&[Token]], ctx: &LengthContext) -> Option<BackgroundSize> {
