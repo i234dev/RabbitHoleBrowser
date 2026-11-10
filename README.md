@@ -199,6 +199,18 @@ stylesheets → `style` computes a `ComputedStyle` per element → `layout`
 positions boxes and emits a display list → `gfx` rasterizes it → the app blits
 the canvas into the window (or a PNG, or an MCP response).
 
+Threads in the desktop browser: the UI thread owns the window, the chrome
+(tabs, address bar, menus, find bar, console) and presents frames; every tab's
+engine and page live on a content thread of its own (`app/src/gui/content`),
+fed with input/navigation messages and answering with rasterized frames,
+title, URL, cursor, console lines and navigation requests. Frames are painted
+taller than the viewport, so scrolling is instant even while a page runs a
+long script; a page busy for more than a few seconds gets a "not responding"
+bar (wait / stop) instead of freezing the window. Pages are shown as soon as
+the document and CSS are ready; images and scripts arrive afterwards.
+`RH_UI_STATS=1` logs UI-thread stalls, Ctrl+Shift+U shows them on screen, and
+`rabbithole ui-bench <URL> [--legacy]` measures them headlessly.
+
 External crates are limited to platform plumbing, not browser functionality:
 `winit` (windows/input), `softbuffer` (presenting pixels), `fontdue` (TrueType
 glyph rasterization), `image` (PNG/JPEG/GIF/WebP decoding), `ureq` + `rustls`
@@ -211,7 +223,6 @@ glyph rasterization), `image` (PNG/JPEG/GIF/WebP decoding), `ureq` + `rustls`
 - Background images, gradients, `border-radius` per corner, box shadows.
 - Text selection, find in page, zoom, tabs, bookmarks and history persistence.
 - Cookies and form submission (GET/POST).
-- Incremental/asynchronous loading and image decoding off the main thread.
 - A JavaScript engine (the long way down the rabbit hole).
 
 ## License

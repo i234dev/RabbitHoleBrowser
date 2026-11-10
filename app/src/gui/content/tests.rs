@@ -59,6 +59,7 @@ fn wait_for(rx: &Received, tab: u64, timeout: Duration, mut pred: impl FnMut(&Fr
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
             Ok((t, id, msg)) if id == tab && pred(&msg) => return Some((t, msg)),
+            Ok((_, id, msg)) if std::env::var_os("RH_TEST_TRACE").is_some() => eprintln!("[skip] tab {id}: {msg:?}"),
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => return None,
         }
@@ -263,7 +264,7 @@ fn serve(delay: Duration) -> String {
 
 #[test]
 fn page_is_painted_before_slow_scripts_arrive() {
-    let base = serve(Duration::from_millis(1500));
+    let base = serve(Duration::from_millis(3000));
     let (sink, rx) = sink();
     let h = spawn(1, &sink);
     let start = Instant::now();
@@ -272,9 +273,10 @@ fn page_is_painted_before_slow_scripts_arrive() {
     let (painted, _) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).expect("first paint");
     let (titled, t) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Title(_))).expect("title set by the script");
     assert!(matches!(t, FromContent::Title(ref s) if s == "scripted"), "{t:?}");
-    assert!(committed.duration_since(start) < Duration::from_millis(1200), "commit took {:?}", committed.duration_since(start));
-    assert!(painted.duration_since(start) < Duration::from_millis(1400), "first paint took {:?}", painted.duration_since(start));
-    assert!(titled.duration_since(start) >= Duration::from_millis(1400), "script ran before it arrived?");
+    assert!(committed.duration_since(start) < Duration::from_millis(2500), "commit took {:?}", committed.duration_since(start));
+    assert!(painted.duration_since(start) < Duration::from_millis(2800), "first paint took {:?}", painted.duration_since(start));
+    assert!(titled.duration_since(start) >= Duration::from_millis(2900), "script ran before it arrived?");
+    assert!(painted < titled);
     wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Loading(None))).expect("load finished");
 }
 

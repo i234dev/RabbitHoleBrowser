@@ -173,6 +173,7 @@ impl Worker {
                 },
             };
             self.busy.store(now_ms(), Ordering::Relaxed);
+            let timed_out = first.is_none();
             let mut batch: Vec<Inbox> = first.into_iter().collect();
             while let Ok(m) = rx.try_recv() {
                 batch.push(m);
@@ -186,7 +187,7 @@ impl Worker {
                     return;
                 }
             }
-            self.tick_if_due();
+            self.tick_if_due(timed_out);
             self.flush();
         }
     }
@@ -205,11 +206,13 @@ impl Worker {
         wait.map(|ms| Duration::from_micros((ms * 1000.0) as u64))
     }
 
-    fn tick_if_due(&mut self) {
+    /// Run timers and image polling when due (`woken`: the wait for the
+    /// due time ran out; image polls always report a time slightly ahead).
+    fn tick_if_due(&mut self, woken: bool) {
         let Some(page) = self.page.as_mut() else { return };
         let Some(due) = page.next_script_due() else { return };
         let now = self.engine.start.elapsed().as_secs_f64() * 1000.0;
-        if due > now + 0.5 {
+        if due > now + if woken { 30.0 } else { 0.5 } {
             return;
         }
         let out = self.engine.tick(page);
@@ -317,10 +320,11 @@ impl Worker {
                 }
             }
             ToContent::Eval(src) => {
-                let result = match self.page.as_mut() {
-                    Some(page) => self.engine.eval_in_page(page, &src),
-                    None => "(no page)".to_string(),
+                let (result, out) = match self.page.as_mut() {
+                    Some(page) => self.engine.eval_with_outcome(page, &src),
+                    None => ("(no page)".to_string(), ScriptOutcome::default()),
                 };
+                self.apply_outcome(out);
                 if let Some(page) = self.page.as_mut() {
                     let lines = page.take_console();
                     if !lines.is_empty() {
@@ -829,8 +833,8 @@ impl Worker {
         if link.is_some() {
             cursor = "pointer";
         }
-        if let Some(n) = node {
-            if matches!(page.control_kind(n), ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other) {
+        if let Some(c) = node.and_then(|n| page.control_of(n)) {
+            if matches!(page.control_kind(c), ControlKind::Text | ControlKind::Password | ControlKind::TextArea) {
                 cursor = "text";
             }
         }
@@ -1313,12 +1317,12 @@ impl Worker {
         self.find.current = self.find.current.min(matches.len().saturating_sub(1));
         self.find.matches = matches;
         self.dirty = true;
+        self.send(FromContent::FindResult { count: self.find.matches.len(), current: self.find.current });
         if scroll {
             if let Some(r) = self.find.matches.get(self.find.current).copied() {
                 self.scroll_into_view(r);
             }
         }
-        self.send(FromContent::FindResult { count: self.find.matches.len(), current: self.find.current });
     }
 
     fn find_step(&mut self, delta: isize) {
@@ -1328,9 +1332,9 @@ impl Worker {
         }
         self.find.current = ((self.find.current as isize + delta).rem_euclid(n as isize)) as usize;
         let r = self.find.matches[self.find.current];
+        self.send(FromContent::FindResult { count: n, current: self.find.current });
         self.scroll_into_view(r);
         self.dirty = true;
-        self.send(FromContent::FindResult { count: n, current: self.find.current });
     }
 }
 
