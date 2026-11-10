@@ -138,6 +138,8 @@ pub struct Fragment {
     pub baseline: f32,
     /// Element this fragment belongs to (for hit testing).
     pub node: Option<NodeId>,
+    /// `pointer-events: none` on the fragment's style (not hit-testable).
+    pub inert: bool,
     pub kind: FragmentKind,
 }
 

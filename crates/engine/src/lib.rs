@@ -336,6 +336,12 @@ impl Loader {
         let mut sources = Vec::new();
         for n in doc.descendants(Document::ROOT) {
             let Some(el) = doc.element(n) else { continue };
+            // With scripting enabled `<noscript>` content is inert raw text
+            // for a real HTML parser: its style sheets must not apply (sites
+            // like Google put `div,span{display:none}` there).
+            if matches!(el.tag.as_str(), "style" | "link") && self.load_scripts && in_noscript(doc, n) {
+                continue;
+            }
             match el.tag.as_str() {
                 "style" => {
                     let media = el.attr("media").map(|m| m.to_string());
@@ -1401,14 +1407,23 @@ impl Page {
         self.layout.width
     }
 
-    /// Element at document coordinates (page-scrolled content only).
+    /// Element at document coordinates (with the current page scroll, so
+    /// fixed boxes are found where they are painted).
     pub fn node_at(&self, x: f32, y: f32) -> Option<NodeId> {
-        self.layout.node_at(x, y)
+        self.node_at_viewport(x - self.page_scroll.0, y - self.page_scroll.1)
     }
 
-    /// Element at viewport coordinates, checking fixed boxes first.
+    /// Topmost element at viewport coordinates. Uses the hit regions
+    /// recorded with the display list, so stacking order (z-index,
+    /// positioned and fixed boxes), transforms, overflow clips,
+    /// `visibility` and `pointer-events` match what is painted.
     pub fn node_at_viewport(&self, vx: f32, vy: f32) -> Option<NodeId> {
-        self.layout.node_at_with_scroll(vx, vy, self.page_scroll)
+        self.display_list.hits.hit_test(vx, vy, self.page_scroll)
+    }
+
+    /// All elements under a viewport point, topmost first.
+    pub fn nodes_at_viewport(&self, vx: f32, vy: f32) -> Vec<NodeId> {
+        self.display_list.hits.hit_test_all(vx, vy, self.page_scroll)
     }
 
     /// Resolved href of the link under the document point, if any.

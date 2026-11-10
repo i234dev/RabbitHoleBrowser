@@ -22,7 +22,7 @@ mod tests;
 #[cfg(test)]
 mod tests_flexgrid;
 
-pub use display_list::{DisplayItem, DisplayList};
+pub use display_list::{DisplayItem, DisplayList, HitEntry, HitList, HitScope, HitScopeNode};
 pub use tree::{
     BoxKind, Flow, Formatting, Fragment, FragmentKind, InlineItem, LayoutBox, LayoutTree, LineBox, Marker, ScrollInfo,
 };

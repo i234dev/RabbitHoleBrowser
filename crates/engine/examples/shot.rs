@@ -136,7 +136,7 @@ fn main() {
                 D::PushClip(_) | D::PushClipRounded(..) | D::PopClip => "Clip", D::PushTransform(_) | D::PopTransform => "Transform",
                 D::PushLayer(_) | D::PopLayer(_) => "Layer", D::PushFixed | D::PopFixed => "Fixed",
             };
-            let single = DisplayList { items: vec![it.clone()] };
+            let single = DisplayList { items: vec![it.clone()], ..Default::default() };
             let t = std::time::Instant::now();
             if matches!(name, "Clip" | "Transform" | "Layer" | "Fixed") {
                 stack_items.push(it.clone());

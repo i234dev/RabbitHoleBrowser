@@ -6,8 +6,9 @@ use std::sync::Arc;
 use crate::background::{self, box_radii, BoxGeometry};
 use crate::tree::{BoxKind, DecorationInfo, Flow, FragmentKind, LayoutBox, LayoutTree};
 use crate::LayoutContext;
+use rabbithole_dom::NodeId;
 use rabbithole_gfx::{Color, FontId, Image, Matrix, Paint, Point, Radii, Rect};
-use rabbithole_style::{BorderStyle, ObjectFit, Shadow, TextDecorationStyle, Visibility};
+use rabbithole_style::{BorderStyle, ObjectFit, PointerEvents, Shadow, TextDecorationStyle, Visibility};
 
 #[derive(Debug, Clone)]
 pub enum DisplayItem {
@@ -98,6 +99,97 @@ pub enum DisplayItem {
 #[derive(Debug, Clone, Default)]
 pub struct DisplayList {
     pub items: Vec<DisplayItem>,
+    /// Hit-test regions recorded in paint order (what is painted on top is
+    /// hit first), so clicks land on what the user sees.
+    pub hits: HitList,
+}
+
+/// A clip / transform / fixed-layer scope enclosing hit regions.
+#[derive(Debug, Clone, Copy)]
+pub enum HitScope {
+    /// Points outside the rectangle (current local coordinates) miss.
+    Clip(Rect),
+    /// Maps parent coordinates into local ones (the *inverse* of the
+    /// paint transform); `None` for a singular transform (nothing hits).
+    Transform(Option<Matrix>),
+    /// Contents are in viewport coordinates (`position: fixed`).
+    Fixed,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HitScopeNode {
+    pub parent: Option<u32>,
+    pub scope: HitScope,
+}
+
+/// A hit-testable rectangle of an element.
+#[derive(Debug, Clone, Copy)]
+pub struct HitEntry {
+    pub rect: Rect,
+    pub node: NodeId,
+    pub scope: Option<u32>,
+}
+
+/// Hit regions in paint order plus their clip/transform scopes.
+#[derive(Debug, Clone, Default)]
+pub struct HitList {
+    pub scopes: Vec<HitScopeNode>,
+    pub entries: Vec<HitEntry>,
+}
+
+impl HitList {
+    /// Topmost element at viewport point `(vx, vy)` with the page scrolled
+    /// by `page_scroll` (document = viewport + scroll, except inside the
+    /// fixed layer).
+    pub fn hit_test(&self, vx: f32, vy: f32, page_scroll: (f32, f32)) -> Option<NodeId> {
+        self.hit_test_all(vx, vy, page_scroll).into_iter().next()
+    }
+
+    /// All elements under the point, topmost first (like
+    /// `document.elementsFromPoint`, without ancestors that were not hit).
+    pub fn hit_test_all(&self, vx: f32, vy: f32, page_scroll: (f32, f32)) -> Vec<NodeId> {
+        // Memoized point of each scope: None = not computed, Some(None) =
+        // clipped out, Some(Some(p)) = local point.
+        let mut memo: Vec<Option<Option<(f32, f32)>>> = vec![None; self.scopes.len()];
+        let doc = (vx + page_scroll.0, vy + page_scroll.1);
+        let mut out = Vec::new();
+        for e in self.entries.iter().rev() {
+            let p = match e.scope {
+                None => Some(doc),
+                Some(s) => self.scope_point(s, doc, (vx, vy), &mut memo),
+            };
+            if let Some((x, y)) = p {
+                if e.rect.contains(x, y) && !out.contains(&e.node) {
+                    out.push(e.node);
+                }
+            }
+        }
+        out
+    }
+
+    fn scope_point(&self, s: u32, doc: (f32, f32), view: (f32, f32), memo: &mut Vec<Option<Option<(f32, f32)>>>) -> Option<(f32, f32)> {
+        if let Some(p) = memo[s as usize] {
+            return p;
+        }
+        let node = self.scopes[s as usize];
+        let base = match node.parent {
+            None => Some(doc),
+            Some(p) => self.scope_point(p, doc, view, memo),
+        };
+        let r = base.and_then(|(x, y)| match node.scope {
+            HitScope::Fixed => Some(view),
+            HitScope::Clip(r) => {
+                if r.contains(x, y) {
+                    Some((x, y))
+                } else {
+                    None
+                }
+            }
+            HitScope::Transform(m) => m.map(|m| crate::tree::map_point(m, x, y)),
+        });
+        memo[s as usize] = Some(r);
+        r
+    }
 }
 
 impl DisplayList {
@@ -136,6 +228,8 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         fixed: Vec::new(),
         skip_root_bg: root_bg_painted,
         sticky_scrollport: Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height),
+        hits: HitList::default(),
+        scope: None,
     };
     p.paint_stacking_context(root, bounds);
     // Fixed boxes form the topmost layer (viewport coordinates).
@@ -143,12 +237,16 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
     if !fixed.is_empty() {
         fixed.sort_by_key(|b| b.style.z_index.unwrap_or(0));
         p.list.push(DisplayItem::PushFixed);
+        let saved = p.push_scope(HitScope::Fixed);
         let vp = Rect::new(0.0, 0.0, ctx.viewport_width, ctx.viewport_height);
         for b in fixed {
             p.paint_stacking_context(b, vp);
         }
+        p.scope = saved;
         p.list.push(DisplayItem::PopFixed);
     }
+    let hits = std::mem::take(&mut p.hits);
+    list.hits = hits;
     list
 }
 
@@ -161,6 +259,10 @@ struct Painter<'l, 't, 'a> {
     fixed: Vec<&'t LayoutBox>,
     skip_root_bg: bool,
     sticky_scrollport: Rect,
+    /// Hit regions recorded while painting.
+    hits: HitList,
+    /// Current hit scope (clip / transform / fixed layer).
+    scope: Option<u32>,
 }
 
 /// A positioned / stacking descendant deferred to its stacking context.
@@ -170,11 +272,48 @@ struct Deferred<'t> {
     b: &'t LayoutBox,
     /// Containing-block content rect for sticky offsets.
     cb: Rect,
+    /// Overflow clips (padding boxes) of ancestors between the stacking
+    /// context root and this box that apply to it.
+    clips: Vec<Rect>,
 }
 
 impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     fn visible(&self, r: &Rect) -> bool {
         !r.intersect(&self.bounds).is_empty() || r.is_empty()
+    }
+
+    /// Enter a hit scope; returns the scope to restore.
+    fn push_scope(&mut self, scope: HitScope) -> Option<u32> {
+        let saved = self.scope;
+        self.hits.scopes.push(HitScopeNode { parent: saved, scope });
+        self.scope = Some((self.hits.scopes.len() - 1) as u32);
+        saved
+    }
+
+    /// Record a hit region for `node` in the current scope.
+    fn record_hit(&mut self, rect: Rect, node: Option<NodeId>) {
+        if let Some(node) = node {
+            if rect.w > 0.0 && rect.h > 0.0 {
+                self.hits.entries.push(HitEntry { rect, node, scope: self.scope });
+            }
+        }
+    }
+
+    /// Push an overflow clip (paint + hit scope); returns the scope to
+    /// restore with `pop_clip`.
+    fn push_clip(&mut self, b: &LayoutBox, pr: Rect) -> Option<u32> {
+        let radii = background::inner_radii(box_radii(b), &b.style.border_width);
+        if radii.iter().any(|(h, v)| *h > 0.0 && *v > 0.0) {
+            self.list.push(DisplayItem::PushClipRounded(pr, radii));
+        } else {
+            self.list.push(DisplayItem::PushClip(pr));
+        }
+        self.push_scope(HitScope::Clip(pr))
+    }
+
+    fn pop_clip(&mut self, saved: Option<u32>) {
+        self.list.push(DisplayItem::PopClip);
+        self.scope = saved;
     }
 
     // ------------------------------------------------------ stacking contexts
@@ -184,32 +323,60 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if root.style.visibility == Visibility::Hidden && root.children.is_empty() && root.lines.is_empty() {
             return;
         }
+        let saved_scope = self.scope;
         // Sticky displacement, transform and opacity wrappers.
         let (sdx, sdy) = root.sticky_offset(self.sticky_scrollport, cb);
+        let start = self.list.items.len();
         let mut pushed_transform = false;
         if sdx != 0.0 || sdy != 0.0 {
             self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, 1.0, sdx, sdy]));
+            self.push_scope(HitScope::Transform(Some([1.0, 0.0, 0.0, 1.0, -sdx, -sdy])));
             pushed_transform = true;
         }
         let mut pushed_matrix = false;
         if let Some(m) = root.transform_matrix() {
             self.list.push(DisplayItem::PushTransform(m));
+            self.push_scope(HitScope::Transform(crate::tree::invert_matrix(m)));
             pushed_matrix = true;
         }
         let opacity = root.style.opacity.clamp(0.0, 1.0);
         let layer = opacity < 1.0;
+        if layer && opacity <= 0.0 {
+            // Invisible but still hit-testable (transparent overlays,
+            // styled file inputs, ...): record hits, drop the paint.
+            self.paint_stacking_context_inner(root);
+            self.list.items.truncate(start);
+            self.scope = saved_scope;
+            return;
+        }
         if layer {
-            if opacity <= 0.0 {
-                self.pop_wrappers(pushed_matrix, pushed_transform);
-                return;
-            }
             self.list.push(DisplayItem::PushLayer(root.subtree_bounds()));
         }
+        self.paint_stacking_context_inner(root);
+        if layer {
+            self.list.push(DisplayItem::PopLayer(opacity));
+        }
+        self.pop_wrappers(pushed_matrix, pushed_transform);
+        self.scope = saved_scope;
+    }
 
-        // Collect deferred descendants.
+    /// The contents of a stacking context in CSS 2.1 Appendix E order
+    /// (wrappers already pushed).
+    fn paint_stacking_context_inner(&mut self, root: &'t LayoutBox) {
+
+        // Collect deferred descendants. The root's own overflow clip
+        // applies to them, except to absolutely positioned ones whose
+        // containing block lies outside a non-positioned root.
         let mut deferred: Vec<Deferred<'t>> = Vec::new();
         let mut order = 0usize;
-        self.collect_deferred(root, root.content_rect, &mut deferred, &mut order);
+        let (flow_clips, abs_clips) = if root.clips && !root.rect.is_empty() && !std::ptr::eq(root, self.root) {
+            let pr = root.padding_rect();
+            let abs = if root.is_positioned() || root.transform_matrix().is_some() { vec![pr] } else { Vec::new() };
+            (vec![pr], abs)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        self.collect_deferred(root, root.content_rect, &mut deferred, &mut order, &flow_clips, &abs_clips);
         let mut negative: Vec<&Deferred<'t>> = deferred.iter().filter(|d| d.z < 0).collect();
         let mut zero: Vec<&Deferred<'t>> = deferred.iter().filter(|d| d.z == 0).collect();
         let mut positive: Vec<&Deferred<'t>> = deferred.iter().filter(|d| d.z > 0).collect();
@@ -224,25 +391,34 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         // 2. Negative z-index stacking contexts.
         for d in negative {
-            self.paint_stacking_context(d.b, d.cb);
+            self.paint_deferred(d);
         }
         // 3–5. In-flow content (block backgrounds, floats, inline content).
         self.paint_contents(root);
         // 6. Positioned descendants with z-index auto / 0, in tree order.
         for d in zero {
-            self.paint_stacking_context(d.b, d.cb);
+            self.paint_deferred(d);
         }
         // 7. Positive z-index stacking contexts.
         for d in positive {
-            self.paint_stacking_context(d.b, d.cb);
+            self.paint_deferred(d);
         }
         // Outline is painted above everything of the element.
         self.paint_outline(root);
+    }
 
-        if layer {
-            self.list.push(DisplayItem::PopLayer(opacity));
+    /// Paint a deferred box inside the overflow clips of its ancestors.
+    fn paint_deferred(&mut self, d: &Deferred<'t>) {
+        let saved = self.scope;
+        for r in &d.clips {
+            self.list.push(DisplayItem::PushClip(*r));
+            self.push_scope(HitScope::Clip(*r));
         }
-        self.pop_wrappers(pushed_matrix, pushed_transform);
+        self.paint_stacking_context(d.b, d.cb);
+        for _ in &d.clips {
+            self.list.push(DisplayItem::PopClip);
+        }
+        self.scope = saved;
     }
 
     fn pop_wrappers(&mut self, matrix: bool, translate: bool) {
@@ -257,7 +433,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// Walk `b`'s subtree collecting positioned boxes and stacking contexts
     /// that belong to the current stacking context. Does not enter boxes
     /// that are themselves deferred.
-    fn collect_deferred(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize) {
+    fn collect_deferred(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
         for c in &b.children {
             if c.fixed && c.flow == Flow::Absolute {
@@ -273,9 +449,17 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                     order: *order,
                     b: c,
                     cb: cb_rect,
+                    clips: if c.flow == Flow::Absolute { abs_clips.to_vec() } else { flow_clips.to_vec() },
                 });
+            } else if c.clips && !c.rect.is_empty() {
+                // A non-positioned clipping box clips in-flow (relative,
+                // sticky, stacking) descendants but not absolutely
+                // positioned ones (their containing block is outside it).
+                let mut fc = flow_clips.to_vec();
+                fc.push(c.padding_rect());
+                self.collect_deferred(c, cb_for_children, out, order, &fc, abs_clips);
             } else {
-                self.collect_deferred(c, cb_for_children, out, order);
+                self.collect_deferred(c, cb_for_children, out, order, flow_clips, abs_clips);
             }
         }
     }
@@ -307,15 +491,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.paint_image_box(b);
         }
         let clip = b.clips && !b.rect.is_empty();
-        if clip {
-            let pr = b.padding_rect();
-            let radii = background::inner_radii(box_radii(b), &b.style.border_width);
-            if radii.iter().any(|(h, v)| *h > 0.0 && *v > 0.0) {
-                self.list.push(DisplayItem::PushClipRounded(pr, radii));
-            } else {
-                self.list.push(DisplayItem::PushClip(pr));
-            }
-        }
+        let saved_scope = if clip { Some(self.push_clip(b, b.padding_rect())) } else { None };
         // Floats first (they sit below inline content).
         for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c)) {
             self.paint_float_or_atomic(c);
@@ -327,8 +503,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         } else {
             self.paint_lines(b);
         }
-        if clip {
-            self.list.push(DisplayItem::PopClip);
+        if let Some(saved) = saved_scope {
+            self.pop_clip(saved);
         }
     }
 
@@ -352,6 +528,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     // -------------------------------------------------------- backgrounds
 
     fn paint_background_and_border(&mut self, b: &LayoutBox, skip_bg: bool) {
+        if b.style.visibility != Visibility::Hidden && b.style.pointer_events != PointerEvents::None {
+            self.record_hit(b.rect, b.node);
+        }
         let style = &b.style;
         let rect = b.rect;
         if style.visibility == Visibility::Hidden || rect.is_empty() || !self.visible(&rect) {
@@ -651,6 +830,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         if style.visibility == Visibility::Hidden {
                             continue;
                         }
+                        if !f.inert {
+                            self.record_hit(f.rect, f.node);
+                        }
                         let bw = style.border_width;
                         let widths = [bw.top, if *right_edge { bw.right } else { 0.0 }, bw.bottom, if *left_edge { bw.left } else { 0.0 }];
                         let radii = style.resolved_radii(f.rect.w, f.rect.h);
@@ -690,7 +872,13 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         small_caps,
                         oblique,
                     } => {
-                        if *hidden || !self.visible(&f.rect) {
+                        if *hidden {
+                            continue;
+                        }
+                        if !f.inert {
+                            self.record_hit(f.rect, f.node);
+                        }
+                        if !self.visible(&f.rect) {
                             continue;
                         }
                         self.list.push(DisplayItem::Text {

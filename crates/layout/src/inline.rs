@@ -1000,6 +1000,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 rect: Rect::new(bg.x + shift_x, baseline - tm.asc - pt, bg.w, tm.asc + tm.desc + pt + pb),
                 baseline,
                 node: item_elem(self.items, bg.item),
+                inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                 kind: FragmentKind::InlineBox {
                     style,
                     left_edge: bg.left_edge,
@@ -1019,6 +1020,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         rect: Rect::new(f.x + shift_x, bl - tm.asc, f.w, tm.asc + tm.desc),
                         baseline: bl,
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
+                        inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                         kind: FragmentKind::Text {
                             text: Rc::from(text.as_str()),
                             font: tm.font,
@@ -1055,6 +1057,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         rect,
                         baseline,
                         node,
+                        inert: false,
                         kind: FragmentKind::Box(c),
                     });
                 }
