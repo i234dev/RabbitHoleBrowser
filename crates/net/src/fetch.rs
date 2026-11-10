@@ -1513,13 +1513,18 @@ fn fetch_data(url: &Url) -> Result<Response, FetchError> {
     } else {
         percent_decode_bytes(data)
     };
+    // Fetch §4.2 (data: URLs): the response carries Content-Type.
+    let header = match &charset {
+        Some(c) => format!("{};charset={}", mime.to_ascii_lowercase(), c),
+        None => mime.to_ascii_lowercase(),
+    };
     Ok(Response {
         url: url.clone(),
         status: 200,
         content_type: mime.to_ascii_lowercase(),
         charset,
         body,
-        headers: Vec::new(),
+        headers: vec![("content-type".into(), header)],
     })
 }
 
@@ -1581,6 +1586,7 @@ mod tests {
         assert_eq!(r.content_type, "text/html");
         assert_eq!(r.charset.as_deref(), Some("utf-8"));
         assert_eq!(r.body, b"<b>hi</b>");
+        assert_eq!(r.headers, vec![("content-type".to_string(), "text/html;charset=utf-8".to_string())]);
 
         let u = Url::parse_absolute("data:,Hello%2C%20World%21").unwrap();
         let r = fetch(&u).unwrap();

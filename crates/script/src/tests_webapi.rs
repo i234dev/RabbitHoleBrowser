@@ -859,6 +859,26 @@ fn canvas_2d_text_strokes_compositing_and_shadows() {
 }
 
 #[test]
+fn custom_element_failed_upgrade_gets_no_callbacks() {
+    let (mut env, mut host) = crate::tests::setup("<html><body><x-bad></x-bad><x-good></x-good></body></html>");
+    let out = crate::tests::run(
+        &mut env,
+        &mut host,
+        r#"
+        class Bad extends HTMLElement { constructor() { super(); throw new Error('boom'); } connectedCallback() { console.log('bad connected'); } }
+        class Good extends HTMLElement { constructor() { super(); this.ready = true; } connectedCallback() { console.log('good connected', this.ready); } }
+        customElements.define('x-bad', Bad);
+        customElements.define('x-good', Good);
+        const bad = document.querySelector('x-bad');
+        document.body.append(bad);
+        console.log('state', bad.matches(':defined'), document.querySelector('x-good').matches(':defined'));
+        "#,
+    );
+    assert_eq!(out, vec!["good connected true", "state false true"]);
+    assert!(env.logs.iter().any(|(l, m)| l == "error" && m.contains("boom")), "logs: {:?}", env.logs);
+}
+
+#[test]
 fn svg_dom_types_geometry_and_coordinates() {
     let out = logs_of(
         r#"<html><body><svg id=s width="200" height="100" viewBox="0 0 400 200">

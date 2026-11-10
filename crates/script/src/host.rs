@@ -116,6 +116,9 @@ pub struct HostState {
     pub ce_constructing: Option<NodeRef>,
     /// Custom elements whose constructor already ran.
     pub ce_upgraded: HashSet<NodeRef>,
+    /// Elements whose upgrade constructor threw ("failed" custom element
+    /// state): never upgraded again and given no callbacks.
+    pub ce_failed: HashSet<NodeRef>,
     /// `pushState` overrides of the location.
     pub location_override: Option<String>,
     pub history_len: u32,
@@ -487,7 +490,7 @@ pub(crate) fn html_element_ctor(realm: &mut Realm, _this: Value, _args: &[Value]
 /// Run a custom element's constructor for an existing node (upgrade) if it
 /// has not run yet. Returns the element wrapper.
 pub(crate) fn upgrade_custom_element(realm: &mut Realm, n: NodeRef, ctor: &Value) -> Value {
-    if state().borrow().ce_upgraded.contains(&n) {
+    if state().borrow().ce_upgraded.contains(&n) || state().borrow().ce_failed.contains(&n) {
         return wrap(realm, n);
     }
     state().borrow_mut().ce_constructing = Some(n);
@@ -531,6 +534,17 @@ pub(crate) fn upgrade_custom_element(realm: &mut Realm, n: NodeRef, ctor: &Value
             }
         }
         Err(e) => {
+            // HTMLElement's constructor already marked it upgraded when
+            // super() ran; the rest of the constructor failed, so the
+            // element is "failed" (spec: no reactions, never retried).
+            {
+                let st = state();
+                let mut st = st.borrow_mut();
+                st.ce_upgraded.remove(&n);
+                st.ce_failed.insert(n);
+                st.ce_constructing = None;
+            }
+            with_doc(n.doc, |doc| doc.defined_custom.remove(&n.node));
             let msg = realm.error_to_string(&e);
             with_env(|env| env.log("error", &format!("Uncaught {msg} (custom element constructor)")));
         }

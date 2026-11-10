@@ -147,6 +147,7 @@ impl ScriptHost {
             custom_elements: HashMap::new(),
             ce_constructing: None,
             ce_upgraded: std::collections::HashSet::new(),
+            ce_failed: std::collections::HashSet::new(),
             location_override: None,
             history_len: 1,
             history_state: Value::Null,
