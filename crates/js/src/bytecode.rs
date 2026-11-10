@@ -26,6 +26,14 @@ pub enum Op {
     Rot4,
 
     // --- variables
+    /// Push frame register `r` (bindings never captured by closures).
+    GetReg(u16),
+    /// Like GetReg but throws a ReferenceError when the register is in its TDZ.
+    GetRegChecked(u16),
+    /// Pop into register `r`.
+    SetReg(u16),
+    /// Pop into register `r`, throwing if it is still in its TDZ.
+    SetRegChecked(u16),
     GetLocal(u16, u16),
     /// Like GetLocal but throws a ReferenceError when the slot is in its TDZ.
     GetLocalChecked(u16, u16),
@@ -122,6 +130,16 @@ pub enum Op {
     JumpIfNotUndefined(u32),
     /// Jump if the two top values are strictly equal (pops both)
     JumpIfStrictEq(u32),
+    // Fused compare-and-branch (peephole): pop b, a; jump unless `a OP b`.
+    JumpUnlessLt(u32),
+    JumpUnlessLtEq(u32),
+    JumpUnlessGt(u32),
+    JumpUnlessGtEq(u32),
+    /// Pop b, a; jump unless `a === b`.
+    JumpIfStrictNotEq(u32),
+    /// `r = r + 1` / `r = r - 1` on a register (statement `i++` / `i--`).
+    IncReg(u16),
+    DecReg(u16),
 
     // --- operators
     Add,
@@ -237,13 +255,20 @@ pub enum Op {
     Nop,
 }
 
+/// Location of a parameter-like binding: frame register or function scope slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarLoc {
+    Reg(u16),
+    Slot(u16),
+}
+
 /// Exception handler table entry: protects `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Handler {
     pub start: u32,
     pub end: u32,
     pub target: u32,
-    /// Operand stack depth to restore before pushing the exception.
+    /// Operand stack depth (above the registers) to restore before pushing the exception.
     pub stack_depth: u32,
     /// Scope depth (number of PushScope above function scope) to restore.
     pub scope_depth: u32,
@@ -278,16 +303,21 @@ pub struct FunctionCode {
     pub handlers: Vec<Handler>,
     /// Number of formal parameters (for `length`).
     pub param_count: u32,
-    /// Slots in the function's own scope object.
+    /// Slots in the function's own scope object (0: no scope object is
+    /// created and the frame runs in the closure's scope).
     pub scope_slots: u32,
-    /// Scope slot of each positional parameter, in order.
-    pub param_slots: Vec<u16>,
-    /// Slot receiving the rest parameter array, if any.
-    pub rest_slot: Option<u16>,
-    /// Slot holding the `arguments` object, if used.
-    pub arguments_slot: Option<u32>,
-    /// Slot holding a named function expression's self binding.
-    pub self_slot: Option<u32>,
+    /// Frame registers (non-captured locals and temporaries).
+    pub nregs: u32,
+    /// Name of each register (TDZ error messages).
+    pub reg_names: Vec<JsStr>,
+    /// Location of each positional parameter, in order.
+    pub param_locs: Vec<VarLoc>,
+    /// Binding receiving the rest parameter array, if any.
+    pub rest_loc: Option<VarLoc>,
+    /// Binding holding the `arguments` object, if used.
+    pub arguments_loc: Option<VarLoc>,
+    /// Binding holding a named function expression's self binding.
+    pub self_loc: Option<VarLoc>,
     pub flags: CodeFlags,
     /// Names of each slot (debugging).
     pub slot_names: Vec<JsStr>,
@@ -306,4 +336,131 @@ impl FunctionCode {
     pub fn position_at(&self, pc: usize) -> Pos {
         self.positions.get(pc.min(self.positions.len().saturating_sub(1))).copied().unwrap_or_default()
     }
+}
+
+impl Op {
+    /// Branch target of a jump instruction.
+    pub fn jump_target(&self) -> Option<u32> {
+        match *self {
+            Op::Jump(t)
+            | Op::JumpIfFalse(t)
+            | Op::JumpIfTrue(t)
+            | Op::JumpIfNullish(t)
+            | Op::JumpIfNotNullishKeep(t)
+            | Op::JumpIfFalseKeep(t)
+            | Op::JumpIfTrueKeep(t)
+            | Op::JumpIfUndefined(t)
+            | Op::JumpIfNotUndefined(t)
+            | Op::JumpIfStrictEq(t)
+            | Op::JumpUnlessLt(t)
+            | Op::JumpUnlessLtEq(t)
+            | Op::JumpUnlessGt(t)
+            | Op::JumpUnlessGtEq(t)
+            | Op::JumpIfStrictNotEq(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The same jump with another target.
+    pub fn with_target(self, t: u32) -> Op {
+        match self {
+            Op::Jump(_) => Op::Jump(t),
+            Op::JumpIfFalse(_) => Op::JumpIfFalse(t),
+            Op::JumpIfTrue(_) => Op::JumpIfTrue(t),
+            Op::JumpIfNullish(_) => Op::JumpIfNullish(t),
+            Op::JumpIfNotNullishKeep(_) => Op::JumpIfNotNullishKeep(t),
+            Op::JumpIfFalseKeep(_) => Op::JumpIfFalseKeep(t),
+            Op::JumpIfTrueKeep(_) => Op::JumpIfTrueKeep(t),
+            Op::JumpIfUndefined(_) => Op::JumpIfUndefined(t),
+            Op::JumpIfNotUndefined(_) => Op::JumpIfNotUndefined(t),
+            Op::JumpIfStrictEq(_) => Op::JumpIfStrictEq(t),
+            Op::JumpUnlessLt(_) => Op::JumpUnlessLt(t),
+            Op::JumpUnlessLtEq(_) => Op::JumpUnlessLtEq(t),
+            Op::JumpUnlessGt(_) => Op::JumpUnlessGt(t),
+            Op::JumpUnlessGtEq(_) => Op::JumpUnlessGtEq(t),
+            Op::JumpIfStrictNotEq(_) => Op::JumpIfStrictNotEq(t),
+            other => other,
+        }
+    }
+}
+
+/// Peephole optimisation of a finished function: fuses common instruction
+/// sequences into superinstructions and removes redundant stack traffic.
+/// Sequences are only fused when no jump or handler boundary points into
+/// them; all targets are remapped afterwards.
+pub fn peephole(ops: &mut Vec<Op>, positions: &mut Vec<crate::ast::Pos>, handlers: &mut [Handler]) {
+    let n = ops.len();
+    let mut is_target = vec![false; n + 1];
+    for op in ops.iter() {
+        if let Some(t) = op.jump_target() {
+            if (t as usize) <= n {
+                is_target[t as usize] = true;
+            }
+        }
+    }
+    for h in handlers.iter() {
+        for x in [h.start, h.end, h.target] {
+            if (x as usize) <= n {
+                is_target[x as usize] = true;
+            }
+        }
+    }
+    let free = |i: usize, k: usize| -> bool { i + k <= n && (i + 1..i + k).all(|j| !is_target[j]) };
+    let mut out: Vec<Op> = Vec::with_capacity(n);
+    let mut out_pos = Vec::with_capacity(n);
+    let mut map = vec![0u32; n + 1];
+    let mut i = 0;
+    while i < n {
+        let here = out.len() as u32;
+        map[i] = here;
+        let (fused, len): (Option<Op>, usize) = match (ops[i], ops.get(i + 1).copied(), ops.get(i + 2).copied(), ops.get(i + 3).copied(), ops.get(i + 4).copied()) {
+            // i++ / ++i / i += 1 as a statement on a register.
+            (Op::GetReg(a), Some(Op::Inc), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::IncReg(a)), 5),
+            (Op::GetReg(a), Some(Op::Dec), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::DecReg(a)), 5),
+            // Assignment whose value is discarded.
+            (Op::Dup, Some(st @ (Op::SetReg(_) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetGlobal(_) | Op::SetRegChecked(_) | Op::SetLocalChecked(..))), Some(Op::Pop), _, _) if free(i, 3) => (Some(st), 3),
+            // Compare and branch.
+            (Op::Lt, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessLt(t)), 2),
+            (Op::LtEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessLtEq(t)), 2),
+            (Op::Gt, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessGt(t)), 2),
+            (Op::GtEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessGtEq(t)), 2),
+            (Op::StrictEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfStrictNotEq(t)), 2),
+            (Op::StrictNotEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfStrictEq(t)), 2),
+            (Op::StrictEq, Some(Op::JumpIfTrue(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfStrictEq(t)), 2),
+            (Op::StrictNotEq, Some(Op::JumpIfTrue(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfStrictNotEq(t)), 2),
+            (Op::Not, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfTrue(t)), 2),
+            (Op::Not, Some(Op::JumpIfTrue(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfFalse(t)), 2),
+            _ => (None, 1),
+        };
+        match fused {
+            Some(op) => {
+                out.push(op);
+                // Use the position of the last fused instruction (the one
+                // that can throw is never the leading Dup / GetReg).
+                out_pos.push(positions.get(i + len - 1).or(positions.get(i)).copied().unwrap_or_default());
+                for j in i + 1..i + len {
+                    map[j] = here;
+                }
+                i += len;
+            }
+            None => {
+                out.push(ops[i]);
+                out_pos.push(positions.get(i).copied().unwrap_or_default());
+                i += 1;
+            }
+        }
+    }
+    map[n] = out.len() as u32;
+    for op in out.iter_mut() {
+        if let Some(t) = op.jump_target() {
+            *op = op.with_target(map[(t as usize).min(n)]);
+        }
+    }
+    for h in handlers.iter_mut() {
+        h.start = map[(h.start as usize).min(n)];
+        h.end = map[(h.end as usize).min(n)];
+        h.target = map[(h.target as usize).min(n)];
+    }
+    *ops = out;
+    *positions = out_pos;
 }

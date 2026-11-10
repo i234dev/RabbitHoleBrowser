@@ -7,9 +7,10 @@
 //! continue / fall-through) plus a catch-all handler that rethrows.
 
 use crate::ast::*;
-use crate::bytecode::{CodeFlags, FunctionCode, Handler, Op};
+use crate::bytecode::{CodeFlags, FunctionCode, Handler, Op, VarLoc};
+use crate::captures::CaptureMap;
 use crate::value::{JsStr, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,40 +44,50 @@ enum BindKind {
     Import,
 }
 
+/// Where a binding lives: a frame register (never captured by a nested
+/// function) or a slot of the runtime scope object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Loc {
+    Reg(u16),
+    Slot(u16),
+}
+
+impl Loc {
+    fn to_var_loc(self) -> VarLoc {
+        match self {
+            Loc::Reg(r) => VarLoc::Reg(r),
+            Loc::Slot(s) => VarLoc::Slot(s),
+        }
+    }
+}
+
+/// Placeholder location of script-level lexical names (they are globals).
+const SCRIPT_LEX: Loc = Loc::Slot(u16::MAX);
+
 #[derive(Debug, Clone)]
 struct Binding {
-    slot: u16,
+    loc: Loc,
     kind: BindKind,
 }
 
 #[derive(Debug)]
 struct CScope {
     names: HashMap<String, Binding>,
+    /// Heap slots of the runtime scope object.
     slot_count: u16,
     /// Creates a runtime scope object.
     materialized: bool,
     is_function: bool,
-    consts: Vec<bool>,
-    /// Lexical slots needing TDZ initialisation at entry.
-    tdz_slots: Vec<u16>,
+    /// Every binding of this scope lives on the heap (class scopes, module
+    /// environments).
+    force_heap: bool,
+    /// Lexical bindings needing TDZ initialisation at entry.
+    tdz: Vec<Loc>,
 }
 
 impl CScope {
     fn new(materialized: bool, is_function: bool) -> CScope {
-        CScope { names: HashMap::new(), slot_count: 0, materialized, is_function, consts: Vec::new(), tdz_slots: Vec::new() }
-    }
-    fn declare(&mut self, name: &str, kind: BindKind) -> u16 {
-        if let Some(b) = self.names.get(name) {
-            return b.slot;
-        }
-        let slot = self.slot_count;
-        self.slot_count += 1;
-        self.consts.push(kind == BindKind::Const);
-        if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
-            self.tdz_slots.push(slot);
-        }
-        self.names.insert(name.to_string(), Binding { slot, kind });
-        slot
+        CScope { names: HashMap::new(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new() }
     }
 }
 
@@ -88,7 +99,7 @@ enum ExitCtx {
     /// (whose handler ranges are suspended while the finalizer is inlined).
     Finally { body: Rc<Vec<Stmt>>, try_index: usize },
     /// Close the for-of iterator held in hidden slots.
-    IterClose { iter: (u16, u16), next: (u16, u16) },
+    IterClose { iter: u16, next: u16 },
 }
 
 #[derive(Debug)]
@@ -127,11 +138,18 @@ struct FnState {
     flags: CodeFlags,
     name: JsStr,
     param_count: u32,
-    param_slots: Vec<u16>,
-    rest_slot: Option<u16>,
-    arguments_slot: Option<u32>,
-    self_slot: Option<u32>,
+    param_locs: Vec<Loc>,
+    rest_loc: Option<Loc>,
+    arguments_loc: Option<Loc>,
+    self_loc: Option<Loc>,
     hidden_counter: u32,
+    /// Names referenced from functions nested in this one: bindings with
+    /// these names live in heap scopes, all others in registers.
+    captured: Rc<HashSet<String>>,
+    /// All bindings on the heap (module environment).
+    force_heap: bool,
+    nregs: u16,
+    reg_names: Vec<JsStr>,
     cur_pos: Pos,
     /// Number of runtime scopes currently pushed within this function.
     scope_depth: u32,
@@ -164,11 +182,15 @@ impl FnState {
             flags,
             name: JsStr::new(name),
             param_count: 0,
-            param_slots: Vec::new(),
-            rest_slot: None,
-            arguments_slot: None,
-            self_slot: None,
+            param_locs: Vec::new(),
+            rest_loc: None,
+            arguments_loc: None,
+            self_loc: None,
             hidden_counter: 0,
+            captured: Rc::new(HashSet::new()),
+            force_heap: false,
+            nregs: 0,
+            reg_names: Vec::new(),
             cur_pos: Pos::default(),
             scope_depth: 0,
             is_script,
@@ -189,6 +211,11 @@ pub struct Compiler {
     loose_chain_exits: Vec<(usize, u32)>,
     /// Module id stamped on every produced `FunctionCode` (module mode).
     module: Option<u32>,
+    /// Captured-name sets of the program's functions.
+    captures: CaptureMap,
+    /// Set when the capture analysis missed a reference (a register binding
+    /// resolved from a nested function); reported as a compile error.
+    internal_error: Option<String>,
 }
 
 /// Name of the hidden binding initialised by `export default <expr>` and
@@ -211,6 +238,7 @@ pub struct CompiledModule {
 #[derive(Debug, Clone, Copy)]
 enum Resolved {
     Local { depth: u16, slot: u16, kind: BindKind },
+    Reg { reg: u16, kind: BindKind },
     Global,
 }
 
@@ -224,8 +252,12 @@ pub fn compile_program(program: &Program, filename: &str, source: &str) -> CResu
         chain_stack: Vec::new(),
         loose_chain_exits: Vec::new(),
         module: None,
+        captures: crate::captures::analyze_program(&program.body),
+        internal_error: None,
     };
-    c.compile_script(program)
+    let code = c.compile_script(program)?;
+    c.check_internal()?;
+    Ok(code)
 }
 
 /// Compile an ECMAScript module (see [`CompiledModule`]). `module_id` is
@@ -239,8 +271,12 @@ pub fn compile_module(program: &Program, filename: &str, source: &str, module_id
         chain_stack: Vec::new(),
         loose_chain_exits: Vec::new(),
         module: Some(module_id),
+        captures: crate::captures::analyze_program(&program.body),
+        internal_error: None,
     };
-    c.compile_module_program(program)
+    let m = c.compile_module_program(program)?;
+    c.check_internal()?;
+    Ok(m)
 }
 
 impl Compiler {
@@ -326,20 +362,71 @@ impl Compiler {
 
     // --------------------------------------------------------------- scopes
 
-    fn declare(&mut self, name: &str, kind: BindKind) -> u16 {
-        let scope = self.fs().scopes.last_mut().unwrap();
-        scope.declare(name, kind)
+    fn check_internal(&self) -> CResult<()> {
+        match &self.internal_error {
+            Some(m) => Err(CompileError { message: format!("internal compiler error: {}", m), pos: Pos::default() }),
+            None => Ok(()),
+        }
     }
 
-    fn hidden_slot(&mut self, tag: &str) -> (u16, u16) {
+    /// Declare `name` in scope `si` of function `fi`, choosing a register
+    /// unless a nested function may capture it.
+    fn declare_at(&mut self, fi: usize, si: usize, name: &str, kind: BindKind) -> Loc {
+        let fs = &mut self.fns[fi];
+        if let Some(b) = fs.scopes[si].names.get(name) {
+            return b.loc;
+        }
+        let heap = fs.force_heap || fs.scopes[si].force_heap || fs.captured.contains(name) || fs.nregs == u16::MAX;
+        let loc = if heap {
+            let scope = &mut fs.scopes[si];
+            let s = scope.slot_count;
+            scope.slot_count += 1;
+            Loc::Slot(s)
+        } else {
+            let r = fs.nregs;
+            fs.nregs += 1;
+            fs.reg_names.push(JsStr::new(name));
+            Loc::Reg(r)
+        };
+        let scope = &mut fs.scopes[si];
+        if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
+            scope.tdz.push(loc);
+        }
+        scope.names.insert(name.to_string(), Binding { loc, kind });
+        loc
+    }
+
+    fn declare(&mut self, name: &str, kind: BindKind) -> Loc {
+        let fi = self.fns.len() - 1;
+        let si = self.fns[fi].scopes.len() - 1;
+        self.declare_at(fi, si, name, kind)
+    }
+
+    /// A compiler temporary: always a register of the current function.
+    fn hidden_slot(&mut self, tag: &str) -> u16 {
         let fs = self.fs();
         fs.hidden_counter += 1;
         let name = format!("%{}{}", tag, fs.hidden_counter);
-        let idx = fs.scopes.iter().rposition(|s| s.is_function).unwrap();
-        let slot = fs.scopes[idx].declare(&name, BindKind::Hidden);
-        // depth = number of materialized scopes above the function scope
-        let depth = fs.scopes[idx + 1..].iter().filter(|s| s.materialized).count() as u16;
-        (depth, slot)
+        let r = fs.nregs;
+        fs.nregs += 1;
+        fs.reg_names.push(JsStr::new(&name));
+        r
+    }
+
+    /// Emit a load of a binding of the current function's top scope.
+    fn emit_load_loc(&mut self, loc: Loc) {
+        match loc {
+            Loc::Reg(r) => self.emit(Op::GetReg(r)),
+            Loc::Slot(s) => self.emit(Op::GetLocal(0, s)),
+        };
+    }
+
+    /// Emit an initialising store (pops) into a binding of the current top scope.
+    fn emit_init_loc(&mut self, loc: Loc) {
+        match loc {
+            Loc::Reg(r) => self.emit(Op::SetReg(r)),
+            Loc::Slot(s) => self.emit(Op::InitLocal(0, s)),
+        };
     }
 
     fn resolve(&mut self, name: &str) -> Resolved {
@@ -350,19 +437,46 @@ impl Compiler {
             for si in (0..nscopes).rev() {
                 let scope = &self.fns[fi].scopes[si];
                 if let Some(b) = scope.names.get(name) {
-                    if !scope.materialized {
-                        // Non-materialized block scopes never hold bindings
-                        // (bindings always force materialization).
-                        continue;
+                    match b.loc {
+                        Loc::Reg(reg) => {
+                            if fi != nfns - 1 {
+                                // The capture analysis guarantees this never
+                                // happens; fail loudly instead of miscompiling.
+                                let kind = b.kind;
+                                let _ = kind;
+                                self.internal_error.get_or_insert_with(|| format!("captured register binding '{}'", name));
+                                return Resolved::Global;
+                            }
+                            return Resolved::Reg { reg, kind: b.kind };
+                        }
+                        Loc::Slot(slot) => {
+                            if !scope.materialized {
+                                // Script-level lexical names (globals).
+                                continue;
+                            }
+                            return Resolved::Local { depth, slot, kind: b.kind };
+                        }
                     }
-                    return Resolved::Local { depth, slot: b.slot, kind: b.kind };
                 }
                 if scope.is_function && name == "arguments" && !self.fns[fi].flags.is_arrow && !self.fns[fi].is_script && !self.fns[fi].is_module_env {
                     // Implicit `arguments` binding.
-                    let slot = self.fns[fi].scopes[si].declare("arguments", BindKind::Hidden);
-                    self.fns[fi].arguments_slot = Some(slot as u32);
+                    let materialized = scope.materialized;
+                    let loc = self.declare_at(fi, si, "arguments", BindKind::Hidden);
+                    self.fns[fi].arguments_loc = Some(loc);
                     self.fns[fi].flags.uses_arguments = true;
-                    return Resolved::Local { depth, slot, kind: BindKind::Var };
+                    return match loc {
+                        Loc::Reg(reg) if fi == nfns - 1 => Resolved::Reg { reg, kind: BindKind::Var },
+                        Loc::Reg(_) => {
+                            self.internal_error.get_or_insert_with(|| "captured register 'arguments'".to_string());
+                            Resolved::Global
+                        }
+                        Loc::Slot(slot) => {
+                            if !materialized {
+                                self.internal_error.get_or_insert_with(|| "'arguments' in an unmaterialized scope".to_string());
+                            }
+                            Resolved::Local { depth, slot, kind: BindKind::Var }
+                        }
+                    };
                 }
                 if scope.materialized {
                     depth += 1;
@@ -381,6 +495,13 @@ impl Compiler {
                     self.emit(Op::GetLocalChecked(depth, slot));
                 } else {
                     self.emit(Op::GetLocal(depth, slot));
+                }
+            }
+            Resolved::Reg { reg, kind } => {
+                if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
+                    self.emit(Op::GetRegChecked(reg));
+                } else {
+                    self.emit(Op::GetReg(reg));
                 }
             }
             Resolved::Global => {
@@ -411,6 +532,18 @@ impl Compiler {
                     self.emit(Op::SetLocal(depth, slot));
                 }
             }
+            Resolved::Reg { reg, kind } => {
+                if kind == BindKind::Const {
+                    self.emit(Op::GetRegChecked(reg));
+                    self.emit(Op::Pop);
+                    let m = self.const_str("Assignment to constant variable.");
+                    self.emit(Op::ThrowConst(1, m));
+                } else if matches!(kind, BindKind::Let | BindKind::Class) {
+                    self.emit(Op::SetRegChecked(reg));
+                } else {
+                    self.emit(Op::SetReg(reg));
+                }
+            }
             Resolved::Global => {
                 let i = self.const_str(name);
                 self.emit(Op::SetGlobal(i));
@@ -424,6 +557,9 @@ impl Compiler {
         match self.resolve(name) {
             Resolved::Local { depth, slot, .. } => {
                 self.emit(Op::InitLocal(depth, slot));
+            }
+            Resolved::Reg { reg, .. } => {
+                self.emit(Op::SetReg(reg));
             }
             Resolved::Global => {
                 let i = self.const_str(name);
@@ -442,32 +578,44 @@ impl Compiler {
         self.fs_ref().scopes[0].names.get(name).map(|b| matches!(b.kind, BindKind::Let | BindKind::Const | BindKind::Class)).unwrap_or(false)
     }
 
+    /// Enter a block scope declaring `decls`. Bindings captured by nested
+    /// functions go to a runtime scope object (returns true when one was
+    /// pushed); the others are registers. TDZ bindings are reset to empty.
     fn push_block_scope(&mut self, decls: &[(String, BindKind)]) -> bool {
-        if decls.is_empty() {
-            self.fs().scopes.push(CScope::new(false, false));
-            return false;
-        }
-        let mut scope = CScope::new(true, false);
-        for (n, k) in decls {
-            scope.declare(n, *k);
-        }
-        let n = scope.slot_count;
-        let tdz = scope.tdz_slots.clone();
-        let mut names = vec![JsStr::empty(); n as usize];
-        for (name, b) in &scope.names {
-            names[b.slot as usize] = JsStr::new(name);
-        }
+        self.push_block_scope_with(decls, false)
+    }
+
+    fn push_block_scope_with(&mut self, decls: &[(String, BindKind)], force_heap: bool) -> bool {
+        let mut scope = CScope::new(false, false);
+        scope.force_heap = force_heap;
         self.fs().scopes.push(scope);
-        let names_idx = self.fs_ref().block_names.len() as u16;
-        self.fs().block_names.push(Rc::new(names));
-        self.emit(Op::PushScope(n, names_idx));
-        self.fs().scope_depth += 1;
-        self.fs().exits.push(ExitCtx::Scope);
-        for s in tdz {
-            self.emit(Op::Empty);
-            self.emit(Op::InitLocal(0, s));
+        for (n, k) in decls {
+            self.declare(n, *k);
         }
-        true
+        let fs = self.fs();
+        let scope = fs.scopes.last_mut().unwrap();
+        let n = scope.slot_count;
+        let tdz = scope.tdz.clone();
+        let materialized = n > 0;
+        scope.materialized = materialized;
+        if materialized {
+            let mut names = vec![JsStr::empty(); n as usize];
+            for (name, b) in &scope.names {
+                if let Loc::Slot(s) = b.loc {
+                    names[s as usize] = JsStr::new(name);
+                }
+            }
+            let names_idx = self.fs_ref().block_names.len() as u16;
+            self.fs().block_names.push(Rc::new(names));
+            self.emit(Op::PushScope(n, names_idx));
+            self.fs().scope_depth += 1;
+            self.fs().exits.push(ExitCtx::Scope);
+        }
+        for loc in tdz {
+            self.emit(Op::Empty);
+            self.emit_init_loc(loc);
+        }
+        materialized
     }
 
     fn pop_block_scope(&mut self, materialized: bool) {
@@ -628,6 +776,9 @@ impl Compiler {
                     Resolved::Local { depth, slot, .. } => {
                         self.emit(Op::InitLocal(depth, slot));
                     }
+                    Resolved::Reg { reg, .. } => {
+                        self.emit(Op::SetReg(reg));
+                    }
                     Resolved::Global => {
                         let i = self.const_str(&name);
                         self.emit(Op::DeclareGlobalFunction(i));
@@ -636,6 +787,26 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// Captured-name set for a function node: from the program-wide
+    /// analysis, or computed now for synthesized / cloned nodes (whose
+    /// nested functions are then registered until `release` is called).
+    fn captured_for(&mut self, f: &Function) -> (Rc<HashSet<String>>, Vec<*const Function>) {
+        let key = f as *const Function;
+        if let Some(set) = self.captures.get(&key) {
+            return (Rc::new(set.clone()), Vec::new());
+        }
+        let mut local = crate::captures::analyze_function(f);
+        let set = local.remove(&key).unwrap_or_default();
+        let mut added = Vec::new();
+        for (k, v) in local {
+            if !k.is_null() && !self.captures.contains_key(&k) {
+                self.captures.insert(k, v);
+                added.push(k);
+            }
+        }
+        (Rc::new(set), added)
     }
 
     // --------------------------------------------------------------- script
@@ -647,6 +818,8 @@ impl Compiler {
         let filename = self.filename.clone();
         let mut fs = FnState::new("", flags, !program.is_module, filename);
         fs.source = Some(self.source.clone());
+        fs.captured = Rc::new(self.captures.get(&std::ptr::null()).cloned().unwrap_or_default());
+        fs.force_heap = program.is_module;
         self.fns.push(fs);
 
         if program.is_module {
@@ -660,10 +833,10 @@ impl Compiler {
             for (n, k) in lex {
                 self.declare(&n, k);
             }
-            let tdz = self.fs_ref().scopes[0].tdz_slots.clone();
-            for s in tdz {
+            let tdz = self.fs_ref().scopes[0].tdz.clone();
+            for loc in tdz {
                 self.emit(Op::Empty);
-                self.emit(Op::InitLocal(0, s));
+                self.emit_init_loc(loc);
             }
         } else {
             let mut vars = Vec::new();
@@ -676,12 +849,12 @@ impl Compiler {
             self.check_duplicates(&lex, &vars)?;
             for (n, k) in lex {
                 // Track as script-level lexical for emit_init_var.
-                self.fs().scopes[0].names.insert(n.clone(), Binding { slot: 0, kind: k });
+                self.fs().scopes[0].names.insert(n.clone(), Binding { loc: SCRIPT_LEX, kind: k });
                 let i = self.const_str(&n);
                 self.emit(Op::DeclareGlobalLex(i, k == BindKind::Const));
             }
             // The script scope itself is not a runtime scope: resolution
-            // falls through to globals because names map to slot 0 of a
+            // falls through to globals because names map to a slot of a
             // non-materialized scope.
             self.fs().scopes[0].materialized = false;
         }
@@ -711,6 +884,7 @@ impl Compiler {
         let flags = CodeFlags { is_strict: true, ..Default::default() };
         let mut fs = FnState::new("<module>", flags, false, self.filename.clone());
         fs.is_module_env = true;
+        fs.force_heap = true;
         fs.source = Some(self.source.clone());
         self.fns.push(fs);
 
@@ -734,10 +908,10 @@ impl Compiler {
         for (n, k) in &lex {
             self.declare(n, *k);
         }
-        let tdz = self.fs_ref().scopes[0].tdz_slots.clone();
-        for s in tdz {
+        let tdz = self.fs_ref().scopes[0].tdz.clone();
+        for loc in tdz {
             self.emit(Op::Empty);
-            self.emit(Op::InitLocal(0, s));
+            self.emit_init_loc(loc);
         }
         self.hoist_functions(&program.body)?;
 
@@ -747,6 +921,8 @@ impl Compiler {
         let body_flags = CodeFlags { is_arrow: true, is_async: true, is_strict: true, has_simple_params: true, ..Default::default() };
         let mut body = FnState::new("<module>", body_flags, false, self.filename.clone());
         body.source = Some(self.source.clone());
+        body.captured = Rc::new(self.captures.get(&std::ptr::null()).cloned().unwrap_or_default());
+        body.scopes[0].materialized = false;
         self.fns.push(body);
         for s in &program.body {
             self.compile_stmt(s)?;
@@ -762,7 +938,15 @@ impl Compiler {
         self.emit(Op::Return);
 
         let env = self.fns.pop().unwrap();
-        let slots = env.scopes[0].names.iter().map(|(n, b)| (n.clone(), b.slot)).collect();
+        let slots = env
+            .scopes[0]
+            .names
+            .iter()
+            .filter_map(|(n, b)| match b.loc {
+                Loc::Slot(s) => Some((n.clone(), s)),
+                Loc::Reg(_) => None,
+            })
+            .collect();
         Ok(CompiledModule { code: Rc::new(finish(env, self.module)), slots })
     }
 
@@ -786,15 +970,17 @@ impl Compiler {
         let mut fs = FnState::new(name, flags, false, filename);
         fs.source = Some(self.source.clone());
         fs.class_depth = self.fs_ref().class_depth;
+        let (captured, temp_keys) = self.captured_for(f);
+        fs.captured = captured;
         self.fns.push(fs);
         self.set_pos(f.pos);
 
         // Parameters.
         let mut param_count = 0u32;
-        let mut complex: Vec<(u16, &Param)> = Vec::new();
+        let mut complex: Vec<(Loc, &Param)> = Vec::new();
         let mut seen_default = false;
-        let mut param_slots: Vec<u16> = Vec::new();
-        let mut rest_slot: Option<u16> = None;
+        let mut param_slots: Vec<Loc> = Vec::new();
+        let mut rest_slot: Option<Loc> = None;
         for p in &f.params {
             if !p.rest && !matches!(p.pattern, Pattern::Assign { .. }) && !seen_default {
                 param_count += 1;
@@ -821,8 +1007,8 @@ impl Compiler {
             }
         }
         self.fs().param_count = param_count;
-        self.fs().param_slots = param_slots;
-        self.fs().rest_slot = rest_slot;
+        self.fs().param_locs = param_slots;
+        self.fs().rest_loc = rest_slot;
         // Vars and lexicals.
         let body_stmts: &[Stmt] = match &f.body {
             FunctionBody::Block(b) => b,
@@ -851,25 +1037,30 @@ impl Compiler {
         // when nothing in the body declares the name.
         if let Some(n) = &f.name {
             if !f.is_arrow && !self.fs_ref().scopes[0].names.contains_key(n) {
-                let slot = self.declare(n, BindKind::Hidden);
-                self.fs().self_slot = Some(slot as u32);
+                let loc = self.declare(n, BindKind::Hidden);
+                self.fs().self_loc = Some(loc);
             }
         }
-        let tdz = self.fs_ref().scopes[0].tdz_slots.clone();
-        for s in tdz {
+        // An `arguments` object referenced from nested arrows must live in
+        // the heap scope: declare it now, before the scope layout is fixed.
+        if !f.is_arrow && self.fs_ref().captured.contains("arguments") && !self.fs_ref().scopes[0].names.contains_key("arguments") {
+            let loc = self.declare("arguments", BindKind::Hidden);
+            self.fs().arguments_loc = Some(loc);
+            self.fs().flags.uses_arguments = true;
+        }
+        // The function scope object exists only if some binding is captured.
+        let has_heap = self.fs_ref().scopes[0].slot_count > 0;
+        self.fs().scopes[0].materialized = has_heap;
+        let tdz = self.fs_ref().scopes[0].tdz.clone();
+        for loc in tdz {
             self.emit(Op::Empty);
-            self.emit(Op::InitLocal(0, s));
+            self.emit_init_loc(loc);
         }
         // Parameter destructuring / defaults.
-        for (slot, p) in complex {
-            if p.rest {
-                // The VM stores rest arguments as an array in the hidden slot.
-                self.emit(Op::GetLocal(0, slot));
-                self.compile_pattern_store(&p.pattern, true)?;
-            } else {
-                self.emit(Op::GetLocal(0, slot));
-                self.compile_pattern_store(&p.pattern, true)?;
-            }
+        for (loc, p) in complex {
+            // Rest arguments arrive as an array in the hidden binding.
+            self.emit_load_loc(loc);
+            self.compile_pattern_store(&p.pattern, true)?;
         }
         // Simple params with defaults: `function f(a = 1)`
         // (handled above since `Assign` patterns are complex).
@@ -891,6 +1082,9 @@ impl Compiler {
             }
         }
         let fs = self.fns.pop().unwrap();
+        for k in temp_keys {
+            self.captures.remove(&k);
+        }
         let code = Rc::new(finish(fs, self.module));
         let parent = self.fs();
         parent.functions.push(code);
@@ -931,11 +1125,11 @@ impl Compiler {
         match &s.kind {
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::Expr(e) => {
-                self.compile_expr(e)?;
                 if self.fns.len() == 1 && self.fs_ref().is_script {
+                    self.compile_expr(e)?;
                     self.emit(Op::StoreCompletion);
                 } else {
-                    self.emit(Op::Pop);
+                    self.compile_expr_discard(e)?;
                 }
             }
             StmtKind::VarDecl(d) => self.compile_var_decl(d)?,
@@ -1154,8 +1348,8 @@ impl Compiler {
                     self.emit(Op::PopScope);
                 }
                 ExitCtx::IterClose { iter, next } => {
-                    self.emit(Op::GetLocal(iter.0, iter.1));
-                    self.emit(Op::GetLocal(next.0, next.1));
+                    self.emit(Op::GetReg(*iter));
+                    self.emit(Op::GetReg(*next));
                     self.emit(Op::IteratorClose);
                 }
                 ExitCtx::Finally { body, try_index } => {
@@ -1231,8 +1425,7 @@ impl Compiler {
             self.emit(Op::CopyScope);
         }
         if let Some(u) = update {
-            self.compile_expr(u)?;
-            self.emit(Op::Pop);
+            self.compile_expr_discard(u)?;
         }
         self.emit(Op::Jump(start as u32));
         if let Some(j) = exit_jump {
@@ -1262,13 +1455,13 @@ impl Compiler {
     fn compile_object_pattern_dynamic_rest(&mut self, properties: &[ObjectPatternProp], rest: &Pattern, is_decl: bool) -> CResult<()> {
         let keys = self.hidden_slot("restkeys");
         self.emit(Op::NewArray(0));
-        self.emit(Op::SetLocal(keys.0, keys.1));
+        self.emit(Op::SetReg(keys));
         for p in properties {
             self.emit(Op::Dup); // [obj, obj]
             match &p.key {
                 PropertyKey::Identifier(n) | PropertyKey::String(n) => {
                     let i = self.const_str(n);
-                    self.emit(Op::GetLocal(keys.0, keys.1));
+                    self.emit(Op::GetReg(keys));
                     self.emit(Op::Const(i));
                     self.emit(Op::ArrayPush);
                     self.emit(Op::Pop);
@@ -1276,7 +1469,7 @@ impl Compiler {
                 }
                 PropertyKey::Number(n) => {
                     let i = self.const_str(&crate::value::number_to_string(*n));
-                    self.emit(Op::GetLocal(keys.0, keys.1));
+                    self.emit(Op::GetReg(keys));
                     self.emit(Op::Const(i));
                     self.emit(Op::ArrayPush);
                     self.emit(Op::Pop);
@@ -1286,7 +1479,7 @@ impl Compiler {
                     self.compile_expr(e)?;
                     self.emit(Op::ToPropertyKey); // [obj, obj, key]
                     self.emit(Op::Dup); // [obj, obj, key, key]
-                    self.emit(Op::GetLocal(keys.0, keys.1)); // [.., key, key, arr]
+                    self.emit(Op::GetReg(keys)); // [.., key, key, arr]
                     self.emit(Op::Swap); // [.., key, arr, key]
                     self.emit(Op::ArrayPush); // [.., key, arr]
                     self.emit(Op::Pop); // [obj, obj, key]
@@ -1298,7 +1491,7 @@ impl Compiler {
         }
         self.emit(Op::NewObject); // [obj, rest]
         self.emit(Op::Swap); // [rest, obj]
-        self.emit(Op::GetLocal(keys.0, keys.1));
+        self.emit(Op::GetReg(keys));
         self.emit(Op::CopyDataPropsExcluding); // [rest]
         self.compile_pattern_store(rest, is_decl)
     }
@@ -1314,9 +1507,9 @@ impl Compiler {
         let it = self.hidden_slot("forin");
         self.compile_expr(right)?;
         self.emit(Op::ForInStart);
-        self.emit(Op::SetLocal(it.0, it.1));
+        self.emit(Op::SetReg(it));
         let start = self.here();
-        self.emit(Op::GetLocal(it.0, it.1));
+        self.emit(Op::GetReg(it));
         self.emit(Op::ForInNext);
         let exit = self.emit(Op::JumpIfTrue(0));
         self.push_loop(label, true);
@@ -1346,11 +1539,11 @@ impl Compiler {
         let next = self.hidden_slot("next");
         self.compile_expr(right)?;
         self.emit(if is_await { Op::GetAsyncIterator } else { Op::GetIterator });
-        self.emit(Op::SetLocal(next.0, next.1));
-        self.emit(Op::SetLocal(iter.0, iter.1));
+        self.emit(Op::SetReg(next));
+        self.emit(Op::SetReg(iter));
         let start = self.here();
-        self.emit(Op::GetLocal(iter.0, iter.1));
-        self.emit(Op::GetLocal(next.0, next.1));
+        self.emit(Op::GetReg(iter));
+        self.emit(Op::GetReg(next));
         if is_await {
             self.emit(Op::IteratorNextResult);
             self.emit(Op::Await);
@@ -1370,7 +1563,7 @@ impl Compiler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn compile_for_of_body(&mut self, left: &ForHead, body: &Stmt, label: Option<String>, start: usize, iter: (u16, u16), next: (u16, u16), is_async: bool, exit: usize) -> CResult<()> {
+    fn compile_for_of_body(&mut self, left: &ForHead, body: &Stmt, label: Option<String>, start: usize, iter: u16, next: u16, is_async: bool, exit: usize) -> CResult<()> {
         // Protect body with iterator close on throw.
         let try_start = self.here() as u32;
         self.push_loop(label, true);
@@ -1390,8 +1583,8 @@ impl Compiler {
         // throw handler: close iterator, rethrow
         let handler_pc = self.here() as u32;
         let scope_depth = self.fs_ref().scope_depth;
-        self.emit(Op::GetLocal(iter.0, iter.1));
-        self.emit(Op::GetLocal(next.0, next.1));
+        self.emit(Op::GetReg(iter));
+        self.emit(Op::GetReg(next));
         self.emit(Op::IteratorClose);
         self.emit(Op::Throw);
         self.fs().handlers.push(Handler { start: try_start, end: try_end, target: handler_pc, stack_depth: 0, scope_depth });
@@ -1409,22 +1602,19 @@ impl Compiler {
     fn compile_switch(&mut self, discriminant: &Expr, cases: &[SwitchCase]) -> CResult<()> {
         let d = self.hidden_slot("switch");
         self.compile_expr(discriminant)?;
-        self.emit(Op::SetLocal(d.0, d.1));
+        self.emit(Op::SetReg(d));
         let mut decls = Vec::new();
         for c in cases {
             decls.extend(Self::collect_lexical(&c.body, true));
         }
         let mat = self.push_block_scope(&decls);
-        // The discriminant lives in the function scope; once the case block
-        // scope is materialized it is one scope further away.
-        let d = if mat { (d.0 + 1, d.1) } else { d };
         for c in cases {
             self.hoist_functions(&c.body)?;
         }
         let mut case_jumps = Vec::new();
         for c in cases {
             if let Some(t) = &c.test {
-                self.emit(Op::GetLocal(d.0, d.1));
+                self.emit(Op::GetReg(d));
                 self.compile_expr(t)?;
                 let j = self.emit(Op::JumpIfStrictEq(0));
                 case_jumps.push(Some(j));
@@ -1684,6 +1874,27 @@ impl Compiler {
             }
             _ => self.compile_expr(e),
         }
+    }
+
+    /// Compile an expression whose value is not used (leaves nothing).
+    fn compile_expr_discard(&mut self, e: &Expr) -> CResult<()> {
+        match &e.kind {
+            // The value of a postfix update is unused: the prefix form is
+            // cheaper (no ToNumeric of the old value, no undo).
+            ExprKind::Update { op, target, .. } => {
+                self.set_pos(e.pos);
+                self.compile_update(*op, true, target)?;
+            }
+            ExprKind::Sequence(list) => {
+                for x in list {
+                    self.compile_expr_discard(x)?;
+                }
+                return Ok(());
+            }
+            _ => self.compile_expr(e)?,
+        }
+        self.emit(Op::Pop);
+        Ok(())
     }
 
     fn compile_expr(&mut self, e: &Expr) -> CResult<()> {
@@ -2222,7 +2433,10 @@ impl Compiler {
         match &target.kind {
             ExprKind::Identifier(n) => {
                 self.emit_get_var(n);
-                self.emit(Op::ToNumeric);
+                if !prefix {
+                    // The old value (result of the postfix form) is numeric.
+                    self.emit(Op::ToNumeric);
+                }
                 self.emit(inc);
                 self.emit(Op::Dup);
                 self.emit_set_var(n)?;
@@ -2504,6 +2718,7 @@ impl Compiler {
     fn resolve_private(&mut self, name: &str) -> CResult<(u16, u16)> {
         match self.resolve(&format!("#{}", name)) {
             Resolved::Local { depth, slot, .. } => Ok((depth, slot)),
+            Resolved::Reg { .. } => self.err("internal compiler error: private name in a register"),
             Resolved::Global => self.err(&format!("Private field '#{}' must be declared in an enclosing class", name)),
         }
     }
@@ -2548,7 +2763,9 @@ impl Compiler {
             field_index += 1;
         }
         let _ = field_index;
-        let mat = self.push_block_scope(&decls);
+        // Class scope bindings are referenced from methods and synthesized
+        // field initializers: keep them all on the heap.
+        let mat = self.push_block_scope_with(&decls, true);
         self.fs().class_depth += 1;
         for pn in &private_names {
             let desc = self.const_str(pn);
@@ -2826,12 +3043,15 @@ fn set_flags(code: &mut Rc<FunctionCode>, flags: CodeFlags) {
     }
 }
 
-fn finish(fs: FnState, module: Option<u32>) -> FunctionCode {
+fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
+    crate::bytecode::peephole(&mut fs.ops, &mut fs.positions, &mut fs.handlers);
     let scope = &fs.scopes[0];
     let mut slot_names = vec![JsStr::empty(); scope.slot_count as usize];
     for (n, b) in &scope.names {
-        if (b.slot as usize) < slot_names.len() {
-            slot_names[b.slot as usize] = JsStr::new(n);
+        if let Loc::Slot(s) = b.loc {
+            if (s as usize) < slot_names.len() {
+                slot_names[s as usize] = JsStr::new(n);
+            }
         }
     }
     FunctionCode {
@@ -2843,10 +3063,12 @@ fn finish(fs: FnState, module: Option<u32>) -> FunctionCode {
         handlers: fs.handlers,
         param_count: fs.param_count,
         scope_slots: scope.slot_count as u32,
-        param_slots: fs.param_slots,
-        rest_slot: fs.rest_slot,
-        arguments_slot: fs.arguments_slot,
-        self_slot: fs.self_slot,
+        nregs: fs.nregs as u32,
+        reg_names: fs.reg_names,
+        param_locs: fs.param_locs.iter().map(|l| l.to_var_loc()).collect(),
+        rest_loc: fs.rest_loc.map(|l| l.to_var_loc()),
+        arguments_loc: fs.arguments_loc.map(|l| l.to_var_loc()),
+        self_loc: fs.self_loc.map(|l| l.to_var_loc()),
         flags: fs.flags,
         slot_names,
         block_names: fs.block_names,

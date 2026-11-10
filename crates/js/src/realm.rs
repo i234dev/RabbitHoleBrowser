@@ -177,6 +177,10 @@ pub struct Realm {
     pub join_stack: Vec<ObjectId>,
     /// ECMAScript module records and the host module hooks.
     pub modules: crate::modules::ModuleRegistry,
+    /// Countdown to the next GC / watchdog safe point in the VM loop.
+    pub(crate) tick: u32,
+    /// Recycled frame operand stacks.
+    pub(crate) stack_pool: Vec<Vec<Value>>,
 }
 
 impl Default for Realm {
@@ -261,6 +265,8 @@ impl Realm {
             current_callee: None,
             join_stack: Vec::new(),
             modules: Default::default(),
+            tick: crate::vm::TICK_INTERVAL,
+            stack_pool: Vec::new(),
         };
         crate::builtins::register_builtins(&mut realm);
         realm

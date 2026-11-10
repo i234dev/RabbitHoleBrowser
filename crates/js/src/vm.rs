@@ -1,6 +1,6 @@
 //! The bytecode interpreter: frames, calls, generators, async and exceptions.
 
-use crate::bytecode::{FunctionCode, Op};
+use crate::bytecode::{FunctionCode, Op, VarLoc};
 use crate::heap::*;
 use crate::interop::{Hint, JsResult};
 use crate::realm::*;
@@ -41,6 +41,15 @@ pub enum Exit {
     Return(Value),
     Yield(Value, Box<Frame>),
     Await(Value, Box<Frame>),
+}
+
+/// What the run loop does after an out-of-line instruction.
+pub(crate) enum Flow {
+    /// Continue with the current frame.
+    Next,
+    /// Frames were pushed or popped: reload the current frame.
+    Reload,
+    Exit(Exit),
 }
 
 /// Result of resuming a generator-like frame (frame kept inside the generator object).
@@ -198,10 +207,12 @@ impl Realm {
         let slots = code.scope_slots as usize;
         let scope = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; slots], parent: None, names: None }))));
         let this = if code.flags.is_script { Value::Object(self.global) } else { Value::Undefined };
+        let nregs = code.nregs as usize;
+        let stack = self.take_stack(nregs);
         let frame = Frame {
             code,
             pc: 0,
-            stack: Vec::with_capacity(16),
+            stack,
             scope,
             scope_depth: 0,
             this,
@@ -263,31 +274,48 @@ impl Realm {
         };
         let new_target = if flags.is_arrow { arrow_nt.unwrap_or(Value::Undefined) } else { new_target };
         let nslots = code.scope_slots as usize;
+        let nregs = code.nregs as usize;
         let mut slots = vec![Value::Undefined; nslots];
-        for (i, &slot) in code.param_slots.iter().enumerate() {
-            slots[slot as usize] = args.get(i).cloned().unwrap_or(Value::Undefined);
+        let mut stack = self.take_stack(nregs);
+        fn put(stack: &mut [Value], slots: &mut [Value], loc: VarLoc, v: Value) {
+            match loc {
+                VarLoc::Reg(r) => stack[r as usize] = v,
+                VarLoc::Slot(s) => slots[s as usize] = v,
+            }
+        }
+        for (i, &loc) in code.param_locs.iter().enumerate() {
+            let v = args.get(i).cloned().unwrap_or(Value::Undefined);
+            put(&mut stack, &mut slots, loc, v);
         }
         let mut arguments_obj = None;
-        if let Some(rs) = code.rest_slot {
-            let start = code.param_slots.len();
+        if let Some(rl) = code.rest_loc {
+            let start = code.param_locs.len();
             let rest: Vec<Value> = if args.len() > start { args[start..].to_vec() } else { Vec::new() };
-            slots[rs as usize] = self.new_array_value(rest);
+            let arr = self.new_array_value(rest);
+            put(&mut stack, &mut slots, rl, arr);
         }
-        if let Some(s) = code.self_slot {
-            slots[s as usize] = Value::Object(id);
+        if let Some(sl) = code.self_loc {
+            put(&mut stack, &mut slots, sl, Value::Object(id));
         }
-        if let Some(a) = code.arguments_slot {
+        if let Some(al) = code.arguments_loc {
             let ao = self.create_arguments_object(args, if flags.is_strict { None } else { Some(id) });
-            slots[a as usize] = ao.clone();
+            put(&mut stack, &mut slots, al, ao.clone());
             arguments_obj = Some(ao);
         } else if flags.is_arrow {
             arguments_obj = arrow_args;
         }
-        let scope = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))));
+        let scope = if nslots > 0 {
+            self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
+        } else {
+            match parent_scope {
+                Some(p) => p,
+                None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
+            }
+        };
         Ok(Frame {
             code,
             pc: 0,
-            stack: Vec::with_capacity(16),
+            stack,
             scope,
             scope_depth: 0,
             this,
@@ -513,7 +541,7 @@ impl Realm {
             // A watchdog timeout cannot be caught by the script.
             let handler = if self.terminating { None } else { frame.code.handlers.iter().find(|h| h.start <= pc && pc < h.end).copied() };
             if let Some(h) = handler {
-                frame.stack.truncate(h.stack_depth as usize);
+                frame.stack.truncate(frame.code.nregs as usize + h.stack_depth as usize);
                 while frame.scope_depth > h.scope_depth {
                     let parent = match &self.heap.get(frame.scope).kind {
                         ObjectKind::Scope(s) => s.parent,
@@ -589,26 +617,535 @@ impl Realm {
         }
     }
 
+    /// GC / watchdog safe point, reached every few hundred backward jumps
+    /// and calls.
+    #[inline(never)]
+    fn safepoint(&mut self) -> JsResult<()> {
+        self.maybe_gc();
+        if let Some(d) = self.deadline {
+            if self.terminating || std::time::Instant::now() >= d {
+                self.terminating = true;
+                return Err(self.new_error("RangeError", "Script execution timed out"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The interpreter loop. Hot instructions are handled inline with the
+    /// program counter and the operand stack pointer kept in locals;
+    /// everything else goes through [`Realm::exec_op`] after the frame has
+    /// been synced (`pc` and the stack length written back).
     fn run_inner(&mut self) -> JsResult<Exit> {
-        let mut counter: u32 = 0;
-        loop {
-            counter = counter.wrapping_add(1);
-            if counter & 0x3ff == 0 {
-                self.maybe_gc();
-                if let Some(d) = self.deadline {
-                    if self.terminating || std::time::Instant::now() >= d {
-                        self.terminating = true;
-                        return Err(self.new_error("RangeError", "Script execution timed out"));
+        'reload: loop {
+            let fi = self.frames.len() - 1;
+            // A clone of the code keeps the op slice alive independently of
+            // `self` borrows while this frame is current.
+            let code = self.frames[fi].code.clone();
+            let ops: &[Op] = &code.ops;
+            let consts: &[Value] = &code.constants;
+            let mut pc = self.frames[fi].pc;
+            // Operand stack as raw pointers: `base` (registers start),
+            // `sp` (next free slot) and `limit` (capacity end). The frame's
+            // Vec length is only correct after `sync!`.
+            let mut base: *mut Value;
+            let mut sp: *mut Value;
+            let mut limit: *mut Value;
+            macro_rules! fr {
+                () => {
+                    // SAFETY: `fi` is the last frame; frames only change in
+                    // instructions that then reload.
+                    unsafe { self.frames.get_unchecked_mut(fi) }
+                };
+            }
+            macro_rules! load_sp {
+                () => {{
+                    let st = &mut fr!().stack;
+                    base = st.as_mut_ptr();
+                    // SAFETY: within the Vec allocation.
+                    unsafe {
+                        sp = base.add(st.len());
+                        limit = base.add(st.capacity());
                     }
+                }};
+            }
+            macro_rules! save_sp {
+                () => {
+                    // SAFETY: every slot in [base, sp) is initialised.
+                    unsafe { fr!().stack.set_len(sp.offset_from(base) as usize) }
+                };
+            }
+            macro_rules! sync {
+                () => {{
+                    save_sp!();
+                    fr!().pc = pc;
+                }};
+            }
+            macro_rules! resume {
+                () => {{
+                    load_sp!();
+                    pc = fr!().pc;
+                }};
+            }
+            macro_rules! tri {
+                ($e:expr) => {
+                    match $e {
+                        Ok(v) => v,
+                        Err(e) => return Err(e),
+                    }
+                };
+            }
+            macro_rules! pop {
+                () => {
+                    // SAFETY: the compiler guarantees operands are present.
+                    unsafe {
+                        debug_assert!(sp > base);
+                        sp = sp.sub(1);
+                        std::ptr::read(sp)
+                    }
+                };
+            }
+            macro_rules! top {
+                () => {
+                    // SAFETY: as for pop.
+                    unsafe { &mut *sp.sub(1) }
+                };
+            }
+            macro_rules! push {
+                ($v:expr) => {{
+                    let v = $v;
+                    if sp == limit {
+                        save_sp!();
+                        fr!().stack.reserve(64);
+                        load_sp!();
+                    }
+                    // SAFETY: sp < limit.
+                    unsafe {
+                        std::ptr::write(sp, v);
+                        sp = sp.add(1);
+                    }
+                }};
+            }
+            macro_rules! reg {
+                ($r:expr) => {
+                    // SAFETY: registers occupy the first `nregs` slots.
+                    unsafe {
+                        debug_assert!(($r as usize) < code.nregs as usize);
+                        &mut *base.add($r as usize)
+                    }
+                };
+            }
+            macro_rules! tick {
+                () => {
+                    self.tick = self.tick.wrapping_sub(1);
+                    if self.tick == 0 {
+                        self.tick = TICK_INTERVAL;
+                        sync!();
+                        tri!(self.safepoint());
+                        resume!();
+                    }
+                };
+            }
+            macro_rules! jump {
+                ($t:expr) => {{
+                    let t = $t as usize;
+                    if t < pc {
+                        pc = t;
+                        tick!();
+                    } else {
+                        pc = t;
+                    }
+                }};
+            }
+            // Binary numeric op on the two top values when both are numbers.
+            macro_rules! num2 {
+                (|$x:ident, $y:ident| $e:expr) => {{
+                    // SAFETY: two operands are present.
+                    let (a, b) = unsafe { (&*sp.sub(2), &*sp.sub(1)) };
+                    if let (Value::Number($x), Value::Number($y)) = (a, b) {
+                        let ($x, $y) = (*$x, *$y);
+                        let r = $e;
+                        // SAFETY: both slots hold numbers (no destructor).
+                        unsafe {
+                            sp = sp.sub(1);
+                            std::ptr::write(sp.sub(1), r);
+                        }
+                        continue;
+                    }
+                }};
+            }
+            // Out-of-line instruction.
+            macro_rules! slow {
+                ($op:expr) => {{
+                    sync!();
+                    match self.exec_op(fi, $op) {
+                        Ok(Flow::Next) => {}
+                        Ok(Flow::Reload) => continue 'reload,
+                        Ok(Flow::Exit(e)) => return Ok(e),
+                        Err(e) => return Err(e),
+                    }
+                    if self.frames.len() != fi + 1 {
+                        continue 'reload;
+                    }
+                    resume!();
+                }};
+            }
+            load_sp!();
+            loop {
+                let op = ops[pc];
+                pc += 1;
+                match op {
+                    Op::GetReg(r) => {
+                        let v = match reg!(r) {
+                            Value::Empty => Value::Undefined,
+                            v => v.clone(),
+                        };
+                        push!(v);
+                    }
+                    Op::GetRegChecked(r) => {
+                        let v = reg!(r).clone();
+                        if v.is_empty() {
+                            sync!();
+                            let name = self.reg_name(fi, r);
+                            return Err(self.new_error("ReferenceError", &format!("Cannot access '{}' before initialization", name)));
+                        }
+                        push!(v);
+                    }
+                    Op::SetReg(r) => {
+                        let v = pop!();
+                        *reg!(r) = v;
+                    }
+                    Op::SetRegChecked(r) => {
+                        if reg!(r).is_empty() {
+                            sync!();
+                            let name = self.reg_name(fi, r);
+                            return Err(self.new_error("ReferenceError", &format!("Cannot access '{}' before initialization", name)));
+                        }
+                        let v = pop!();
+                        *reg!(r) = v;
+                    }
+                    Op::IncReg(r) | Op::DecReg(r) => {
+                        let d = if matches!(op, Op::IncReg(_)) { 1.0 } else { -1.0 };
+                        if let Value::Number(n) = reg!(r) {
+                            *n += d;
+                        } else {
+                            sync!();
+                            let v = match reg!(r) {
+                                Value::Empty => Value::Undefined,
+                                v => v.clone(),
+                            };
+                            let nv = tri!(self.inc_value(v, d));
+                            resume!();
+                            *reg!(r) = nv;
+                        }
+                    }
+                    Op::Const(i) => push!(consts[i as usize].clone()),
+                    Op::Undefined => push!(Value::Undefined),
+                    Op::Null => push!(Value::Null),
+                    Op::True => push!(Value::Bool(true)),
+                    Op::False => push!(Value::Bool(false)),
+                    Op::Empty => push!(Value::Empty),
+                    Op::Pop => {
+                        pop!();
+                    }
+                    Op::Dup => {
+                        let v = top!().clone();
+                        push!(v);
+                    }
+                    Op::Swap => {
+                        // SAFETY: two operands are present.
+                        unsafe { std::ptr::swap(sp.sub(1), sp.sub(2)) };
+                    }
+                    Op::GetLocal(d, s) => {
+                        let scope = fr!().scope;
+                        let v = self.slot_get(scope, d, s);
+                        push!(if v.is_empty() { Value::Undefined } else { v });
+                    }
+                    Op::SetLocal(d, s) | Op::InitLocal(d, s) => {
+                        let v = pop!();
+                        let scope = fr!().scope;
+                        self.slot_set(scope, d, s, v);
+                    }
+                    Op::Jump(t) => jump!(t),
+                    Op::JumpIfFalse(t) => {
+                        if !pop!().truthy() {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpIfTrue(t) => {
+                        if pop!().truthy() {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpIfFalseKeep(t) => {
+                        if !top!().truthy() {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpIfTrueKeep(t) => {
+                        if top!().truthy() {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpIfNullish(t) => {
+                        if pop!().is_nullish() {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpIfUndefined(t) => {
+                        if pop!().is_undefined() {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpIfNotUndefined(t) => {
+                        if !pop!().is_undefined() {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpIfStrictEq(t) => {
+                        let b = pop!();
+                        let a = pop!();
+                        if self.strict_equals(&a, &b) {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpIfStrictNotEq(t) => {
+                        let b = pop!();
+                        let a = pop!();
+                        if !self.strict_equals(&a, &b) {
+                            jump!(t);
+                        }
+                    }
+                    Op::JumpUnlessLt(t) | Op::JumpUnlessLtEq(t) | Op::JumpUnlessGt(t) | Op::JumpUnlessGtEq(t) => {
+                        // SAFETY: two operands are present.
+                        let (a, b) = unsafe { (&*sp.sub(2), &*sp.sub(1)) };
+                        let c = if let (Value::Number(x), Value::Number(y)) = (a, b) {
+                            let (x, y) = (*x, *y);
+                            // SAFETY: both slots hold numbers (no destructor).
+                            unsafe { sp = sp.sub(2) };
+                            match op {
+                                Op::JumpUnlessLt(_) => x < y,
+                                Op::JumpUnlessLtEq(_) => x <= y,
+                                Op::JumpUnlessGt(_) => x > y,
+                                _ => x >= y,
+                            }
+                        } else {
+                            sync!();
+                            let c = tri!(self.compare_top(op));
+                            resume!();
+                            c
+                        };
+                        if !c {
+                            jump!(t);
+                        }
+                    }
+                    Op::Add => {
+                        num2!(|x, y| Value::Number(x + y));
+                        let both_str = matches!(unsafe { (&*sp.sub(2), &*sp.sub(1)) }, (Value::String(_), Value::String(_)));
+                        if both_str {
+                            let b = pop!();
+                            let a = top!();
+                            if let (Value::String(x), Value::String(y)) = (&*a, &b) {
+                                *a = Value::String(x.concat(y));
+                            }
+                        } else {
+                            sync!();
+                            tri!(self.binop_slow(op));
+                            resume!();
+                        }
+                    }
+                    Op::Sub => {
+                        num2!(|x, y| Value::Number(x - y));
+                        slow!(op);
+                    }
+                    Op::Mul => {
+                        num2!(|x, y| Value::Number(x * y));
+                        slow!(op);
+                    }
+                    Op::Div => {
+                        num2!(|x, y| Value::Number(x / y));
+                        slow!(op);
+                    }
+                    Op::Mod => {
+                        num2!(|x, y| Value::Number(js_mod(x, y)));
+                        slow!(op);
+                    }
+                    Op::BitAnd => {
+                        num2!(|x, y| Value::Number((to_int32(x) & to_int32(y)) as f64));
+                        slow!(op);
+                    }
+                    Op::BitOr => {
+                        num2!(|x, y| Value::Number((to_int32(x) | to_int32(y)) as f64));
+                        slow!(op);
+                    }
+                    Op::BitXor => {
+                        num2!(|x, y| Value::Number((to_int32(x) ^ to_int32(y)) as f64));
+                        slow!(op);
+                    }
+                    Op::Shl => {
+                        num2!(|x, y| Value::Number(to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64));
+                        slow!(op);
+                    }
+                    Op::Shr => {
+                        num2!(|x, y| Value::Number((to_int32(x) >> (to_uint32(y) & 31)) as f64));
+                        slow!(op);
+                    }
+                    Op::UShr => {
+                        num2!(|x, y| Value::Number((to_uint32(x) >> (to_uint32(y) & 31)) as f64));
+                        slow!(op);
+                    }
+                    Op::Lt => {
+                        num2!(|x, y| Value::Bool(x < y));
+                        slow!(op);
+                    }
+                    Op::LtEq => {
+                        num2!(|x, y| Value::Bool(x <= y));
+                        slow!(op);
+                    }
+                    Op::Gt => {
+                        num2!(|x, y| Value::Bool(x > y));
+                        slow!(op);
+                    }
+                    Op::GtEq => {
+                        num2!(|x, y| Value::Bool(x >= y));
+                        slow!(op);
+                    }
+                    Op::StrictEq | Op::StrictNotEq => {
+                        let b = pop!();
+                        let a = top!();
+                        let r = self.strict_equals(a, &b);
+                        *a = Value::Bool(if matches!(op, Op::StrictEq) { r } else { !r });
+                    }
+                    Op::Not => {
+                        let a = top!();
+                        let r = !a.truthy();
+                        *a = Value::Bool(r);
+                    }
+                    Op::Inc | Op::Dec => {
+                        if let Value::Number(n) = top!() {
+                            *n += if matches!(op, Op::Inc) { 1.0 } else { -1.0 };
+                            continue;
+                        }
+                        slow!(op);
+                    }
+                    Op::ToNumeric => {
+                        if let Value::Number(_) = top!() {
+                            continue;
+                        }
+                        slow!(op);
+                    }
+                    Op::Return => {
+                        save_sp!();
+                        let mut v = match fr!().stack.pop() {
+                            Some(v) => v,
+                            None => stack_underflow(),
+                        };
+                        let f = match self.frames.pop() {
+                            Some(f) => f,
+                            None => stack_underflow(),
+                        };
+                        if f.is_construct && !v.is_object() {
+                            if f.this.is_empty() {
+                                return Err(self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
+                            }
+                            v = f.this.clone();
+                        }
+                        if f.entry {
+                            if let Some(g) = f.generator {
+                                if let ObjectKind::Generator(gd) = &mut self.obj_mut(g).kind {
+                                    gd.state = GeneratorState::Completed;
+                                    gd.frame = None;
+                                }
+                            }
+                            self.recycle_frame(f);
+                            return Ok(Exit::Return(v));
+                        }
+                        self.recycle_frame(f);
+                        match self.frames.last_mut() {
+                            Some(caller) => caller.stack.push(v),
+                            None => stack_underflow(),
+                        }
+                        continue 'reload;
+                    }
+                    Op::Call(_) | Op::New(_) | Op::CallSpread | Op::NewSpread => {
+                        tick!();
+                        slow!(op);
+                    }
+                    _ => slow!(op),
                 }
             }
-            let fi = self.frames.len() - 1;
-            let op = {
-                let frame = &mut self.frames[fi];
-                let op = frame.code.ops[frame.pc];
-                frame.pc += 1;
-                op
-            };
+        }
+    }
+
+    /// Relational comparison of the two top values (popped), for the fused
+    /// compare-and-branch instructions.
+    #[inline(never)]
+    fn compare_top(&mut self, op: Op) -> JsResult<bool> {
+        let fi = self.frames.len() - 1;
+        let b = self.frames[fi].stack.pop().unwrap();
+        let a = self.frames[fi].stack.pop().unwrap();
+        let cmp = match op {
+            Op::JumpUnlessLt(_) => Op::Lt,
+            Op::JumpUnlessLtEq(_) => Op::LtEq,
+            Op::JumpUnlessGt(_) => Op::Gt,
+            _ => Op::GtEq,
+        };
+        self.compare_slow(cmp, a, b)
+    }
+
+    /// `v + d` after ToNumeric (increment / decrement).
+    #[inline(never)]
+    fn inc_value(&mut self, v: Value, d: f64) -> JsResult<Value> {
+        Ok(match self.to_numeric(v)? {
+            Value::Number(n) => Value::Number(n + d),
+            Value::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
+            _ => unreachable!(),
+        })
+    }
+
+    /// Slow path of the numeric/comparison operators: operands on the stack.
+    #[inline(never)]
+    fn binop_slow(&mut self, op: Op) -> JsResult<()> {
+        let fi = self.frames.len() - 1;
+        let b = self.frames[fi].stack.pop().unwrap();
+        let a = self.frames[fi].stack.pop().unwrap();
+        let r = match op {
+            Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => Value::Bool(self.compare_slow(op, a, b)?),
+            Op::Add => self.add_slow(a, b)?,
+            _ => match (&a, &b) {
+                (Value::Number(x), Value::Number(y)) => Value::Number(num_binop(op, *x, *y)),
+                _ => self.numeric_binop(op, a, b)?,
+            },
+        };
+        self.frames[fi].stack.push(r);
+        Ok(())
+    }
+
+    /// Return a finished frame's operand stack to the pool.
+    #[inline]
+    pub(crate) fn recycle_frame(&mut self, f: Frame) {
+        let mut st = f.stack;
+        if st.capacity() <= 256 && self.stack_pool.len() < 64 {
+            st.clear();
+            self.stack_pool.push(st);
+        }
+    }
+
+    /// A cleared operand stack with room for `n` registers plus operands.
+    #[inline]
+    pub(crate) fn take_stack(&mut self, nregs: usize) -> Vec<Value> {
+        let mut st = match self.stack_pool.pop() {
+            Some(s) => s,
+            None => Vec::with_capacity(nregs + 16),
+        };
+        st.resize(nregs, Value::Undefined);
+        st
+    }
+
+    /// Execute one (non-hot) instruction of frame `fi`, whose `pc` already
+    /// points past it. The hot instructions live in [`Realm::run_inner`].
+    #[inline(never)]
+    fn exec_op(&mut self, fi: usize, op: Op) -> JsResult<Flow> {
+        {
             macro_rules! frame {
                 () => {
                     self.frames[fi]
@@ -644,6 +1181,30 @@ impl Realm {
                 };
             }
             match op {
+                Op::GetReg(r) => {
+                    let v = frame!().stack[r as usize].clone();
+                    push!(if v.is_empty() { Value::Undefined } else { v });
+                }
+                Op::GetRegChecked(r) => {
+                    let v = frame!().stack[r as usize].clone();
+                    if v.is_empty() {
+                        let name = self.reg_name(fi, r);
+                        return Err(self.new_error("ReferenceError", &format!("Cannot access '{}' before initialization", name)));
+                    }
+                    push!(v);
+                }
+                Op::SetReg(r) => {
+                    let v = pop!();
+                    frame!().stack[r as usize] = v;
+                }
+                Op::SetRegChecked(r) => {
+                    let v = pop!();
+                    if frame!().stack[r as usize].is_empty() {
+                        let name = self.reg_name(fi, r);
+                        return Err(self.new_error("ReferenceError", &format!("Cannot access '{}' before initialization", name)));
+                    }
+                    frame!().stack[r as usize] = v;
+                }
                 Op::Const(i) => push!(constant!(i)),
                 Op::Undefined => push!(Value::Undefined),
                 Op::Null => push!(Value::Null),
@@ -990,7 +1551,7 @@ impl Realm {
                             let strict = frame!().code.flags.is_strict;
                             let v = self.direct_eval(args.first().cloned().unwrap_or(Value::Undefined), strict)?;
                             push!(v);
-                            continue;
+                            return Ok(Flow::Next);
                         }
                     }
                     self.do_call(f, this, args)?;
@@ -1044,7 +1605,7 @@ impl Realm {
                                 gd.frame = None;
                             }
                         }
-                        return Ok(Exit::Return(v));
+                        return Ok(Flow::Exit(Exit::Return(v)));
                     }
                     self.frames.last_mut().unwrap().stack.push(v);
                 }
@@ -1135,13 +1696,13 @@ impl Realm {
                     let b = pop!();
                     let a = pop!();
                     let r = self.loose_equals(a, b)?;
-                    push!(Value::Bool(if op == Op::Eq { r } else { !r }));
+                    push!(Value::Bool(if matches!(op, Op::Eq) { r } else { !r }));
                 }
                 Op::StrictEq | Op::StrictNotEq => {
                     let b = pop!();
                     let a = pop!();
                     let r = self.strict_equals(&a, &b);
-                    push!(Value::Bool(if op == Op::StrictEq { r } else { !r }));
+                    push!(Value::Bool(if matches!(op, Op::StrictEq) { r } else { !r }));
                 }
                 Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => {
                     let b = pop!();
@@ -1218,7 +1779,7 @@ impl Realm {
                 }
                 Op::Inc | Op::Dec => {
                     let v = pop!();
-                    let d = if op == Op::Inc { 1.0 } else { -1.0 };
+                    let d = if matches!(op, Op::Inc) { 1.0 } else { -1.0 };
                     let r = match v {
                         Value::Number(n) => Value::Number(n + d),
                         Value::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
@@ -1504,12 +2065,12 @@ impl Realm {
                 Op::Yield | Op::AsyncYield => {
                     let v = pop!();
                     let f = self.frames.pop().unwrap();
-                    return Ok(Exit::Yield(v, Box::new(f)));
+                    return Ok(Flow::Exit(Exit::Yield(v, Box::new(f))));
                 }
                 Op::Await => {
                     let v = pop!();
                     let f = self.frames.pop().unwrap();
-                    return Ok(Exit::Await(v, Box::new(f)));
+                    return Ok(Flow::Exit(Exit::Await(v, Box::new(f))));
                 }
                 Op::StoreCompletion => {
                     let v = pop!();
@@ -1520,11 +2081,22 @@ impl Realm {
                     push!(v);
                 }
                 Op::Debugger | Op::Nop => {}
+                Op::JumpUnlessLt(_) | Op::JumpUnlessLtEq(_) | Op::JumpUnlessGt(_) | Op::JumpUnlessGtEq(_) | Op::JumpIfStrictNotEq(_) | Op::IncReg(_) | Op::DecReg(_) => {
+                    unreachable!("handled by the hot loop")
+                }
             }
         }
+        Ok(Flow::Next)
     }
 
     // ------------------------------------------------------------ helpers
+
+    fn reg_name(&self, fi: usize, r: u16) -> String {
+        match self.frames[fi].code.reg_names.get(r as usize) {
+            Some(n) if !n.is_empty() => n.to_rust_string(),
+            _ => "variable".to_string(),
+        }
+    }
 
     fn slot_name(&self, fi: usize, depth: u16, slot: u16) -> String {
         let frame = &self.frames[fi];
@@ -1536,7 +2108,7 @@ impl Realm {
                         return n.to_rust_string();
                     }
                 }
-            } else if depth as u32 == frame.scope_depth {
+            } else if depth as u32 == frame.scope_depth && frame.code.scope_slots > 0 {
                 if let Some(n) = frame.code.slot_names.get(slot as usize) {
                     if !n.is_empty() {
                         return n.to_rust_string();
@@ -2019,13 +2591,7 @@ fn num_binop(op: Op, x: f64, y: f64) -> f64 {
         Op::Sub => x - y,
         Op::Mul => x * y,
         Op::Div => x / y,
-        Op::Mod => {
-            if y.is_infinite() && x.is_finite() {
-                x
-            } else {
-                x % y
-            }
-        }
+        Op::Mod => js_mod(x, y),
         Op::Exp => js_pow(x, y),
         Op::BitAnd => (to_int32(x) & to_int32(y)) as f64,
         Op::BitOr => (to_int32(x) | to_int32(y)) as f64,
@@ -2034,6 +2600,30 @@ fn num_binop(op: Op, x: f64, y: f64) -> f64 {
         Op::Shr => (to_int32(x) >> (to_uint32(y) & 31)) as f64,
         Op::UShr => (to_uint32(x) >> (to_uint32(y) & 31)) as f64,
         _ => f64::NAN,
+    }
+}
+
+/// Instructions (backward jumps and calls) between GC / watchdog checks.
+pub(crate) const TICK_INTERVAL: u32 = 1024;
+
+#[cold]
+#[inline(never)]
+fn stack_underflow() -> ! {
+    panic!("operand stack underflow")
+}
+
+/// `x % y` with an exact integer fast path.
+#[inline]
+pub fn js_mod(x: f64, y: f64) -> f64 {
+    let (xi, yi) = (x as i32, y as i32);
+    if yi > 0 && xi as f64 == x && yi as f64 == y && !(x == 0.0 && x.is_sign_negative()) {
+        let r = xi % yi;
+        return if r == 0 && xi < 0 { -0.0 } else { r as f64 };
+    }
+    if y.is_infinite() && x.is_finite() {
+        x
+    } else {
+        x % y
     }
 }
 
