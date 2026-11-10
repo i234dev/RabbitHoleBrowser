@@ -1375,3 +1375,21 @@ fn finally_inlined_after_block_scope_resolves_outer_names() {
     eq("var r = []; function g(x){ for (const k of [1, 2]) { try { let t = k; if (t === 2) break; } finally { r.push(x + k) } } return r.join() } g('a')", "a1,a2");
     eq("function h(){ let a = 'outer'; try { let a = 'inner'; return a } finally { a += '!' } } h()", "inner");
 }
+
+#[test]
+fn late_rejection_handlers_are_not_reported_unhandled() {
+    let mut realm = Realm::new();
+    realm
+        .eval(
+            "function f() { return Promise.reject(new Error('handled-late')); }\
+             f().then(() => 1, () => 2);\
+             (async () => { await null; const p = Promise.reject(7); p.catch(() => {}); })();\
+             Promise.reject(new Error('really-unhandled'));",
+            "t.js",
+        )
+        .unwrap();
+    realm.run_jobs();
+    let left: Vec<String> = realm.take_unhandled_rejections().iter().map(|v| realm.error_to_string(v)).collect();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].contains("really-unhandled"), "{left:?}");
+}

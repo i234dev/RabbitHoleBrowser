@@ -137,6 +137,8 @@ pub struct HostState {
     pub render: crate::natives::RenderState,
     /// JS factories used by natives (see `__rhNative.setFactory`).
     pub factories: HashMap<String, Value>,
+    /// `URL.createObjectURL` store: blob URL → (bytes, MIME type).
+    pub blob_urls: HashMap<String, (Vec<u8>, String)>,
 }
 
 thread_local! {

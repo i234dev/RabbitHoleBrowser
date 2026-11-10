@@ -159,6 +159,21 @@ fn perform_then(realm: &mut Realm, promise: ObjectId, on_fulfilled: Option<Value
 }
 
 fn attach_reactions(realm: &mut Realm, promise: ObjectId, fr: PromiseReaction, rr: PromiseReaction) {
+    // HostPromiseRejectionTracker "handle": a handler attached to an
+    // already-rejected, unhandled promise takes it off the unhandled list.
+    let late = match &realm.obj(promise).kind {
+        ObjectKind::Promise(pd) if pd.state == PromiseState::Rejected && !pd.handled => Some(pd.value.clone()),
+        _ => None,
+    };
+    if let Some(reason) = late {
+        let pos = realm.unhandled_rejections.iter().rposition(|v| match (v, &reason) {
+            (Value::Object(a), Value::Object(b)) => a == b,
+            (a, b) => !b.is_object() && realm.strict_equals(a, b),
+        });
+        if let Some(pos) = pos {
+            realm.unhandled_rejections.remove(pos);
+        }
+    }
     let (state, value) = match &mut realm.obj_mut(promise).kind {
         ObjectKind::Promise(pd) => {
             pd.handled = true;

@@ -44,9 +44,12 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:events.js", include_str!("js/events.js")),
     ("rabbithole:streams.js", include_str!("js/streams.js")),
     ("rabbithole:net.js", include_str!("js/net.js")),
+    ("rabbithole:perf.js", include_str!("js/perf.js")),
+    ("rabbithole:messaging.js", include_str!("js/messaging.js")),
     ("rabbithole:cssom.js", include_str!("js/cssom.js")),
     ("rabbithole:html.js", include_str!("js/html.js")),
     ("rabbithole:observers.js", include_str!("js/observers.js")),
+    ("rabbithole:platform.js", include_str!("js/platform.js")),
 ];
 
 /// Extra data carried by a dispatched event.
@@ -148,6 +151,7 @@ impl ScriptHost {
             shadow: Default::default(),
             render: Default::default(),
             factories: HashMap::new(),
+            blob_urls: HashMap::new(),
         }));
         {
             let root_array = state.borrow().root_array;

@@ -891,6 +891,12 @@ fn request_clone(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
 
 /// Perform a request through the environment synchronously.
 pub(crate) fn do_fetch(url: &str, method: &str, headers: &[(String, String)], body: &[u8]) -> Result<rabbithole_net::Response, String> {
+    if url.starts_with("blob:") {
+        return match (method, blob_url_response(url)) {
+            ("GET", Some(r)) => Ok(r),
+            _ => Err(format!("Failed to fetch: {url}")),
+        };
+    }
     let Some(u) = Url::parse_absolute(url) else {
         return Err(format!("Failed to fetch: invalid URL {url}"));
     };
@@ -1110,15 +1116,50 @@ fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
     Ok(make_blob(realm, bytes[start.min(end)..end].to_vec(), &ty))
 }
 
-fn url_create_object_url(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    let mut buf = [0u8; 8];
-    with_env(|env| env.random_bytes(&mut buf));
-    let _ = realm;
-    Ok(Value::str(&format!("blob:rabbithole/{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7])))
+/// `URL.createObjectURL(blob)`: `blob:<origin>/<uuid>` resolving to the
+/// blob's bytes for fetch / XHR / workers until revoked.
+fn url_create_object_url(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let v = arg(args, 0);
+    let (bytes, ty) = match &v {
+        Value::Object(o) if realm.host_data::<BodyData>(*o).is_some() => {
+            let b = realm.host_data::<BodyData>(*o).map(|b| b.bytes.clone()).unwrap_or_default();
+            let t = realm.get_str(v.clone(), "type").ok().and_then(|t| realm.to_rust_string(t).ok()).unwrap_or_default();
+            (b, t)
+        }
+        // MediaSource and other objects: an opaque URL.
+        Value::Object(_) => (Vec::new(), String::new()),
+        _ => return Err(realm.throw_type_error("Failed to execute 'createObjectURL' on 'URL': Overload resolution failed.")),
+    };
+    let mut b = [0u8; 16];
+    with_env(|env| env.random_bytes(&mut b));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let origin = with_env(|env| env.document_url()).origin();
+    let url = format!("blob:{origin}/{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]);
+    state().borrow_mut().blob_urls.insert(url.clone(), (bytes, ty));
+    Ok(Value::str(&url))
 }
 
-fn url_revoke_object_url(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+fn url_revoke_object_url(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let url = arg_str(realm, args, 0)?;
+    state().borrow_mut().blob_urls.remove(&url);
     Ok(Value::Undefined)
+}
+
+/// The response for a `blob:` URL from the object URL store.
+fn blob_url_response(url: &str) -> Option<rabbithole_net::Response> {
+    let key = url.split('#').next().unwrap_or(url);
+    let (bytes, ty) = state().borrow().blob_urls.get(key).cloned()?;
+    let u = Url::parse_absolute(url).or_else(|| Url::parse_absolute("about:blank"))?;
+    Some(rabbithole_net::Response {
+        url: u,
+        status: 200,
+        content_type: ty.clone(),
+        charset: None,
+        headers: vec![("content-type".into(), ty), ("content-length".into(), bytes.len().to_string())],
+        body: bytes,
+    })
 }
 
 // -------------------------------------------------------- TextEncoder/Decoder

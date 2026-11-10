@@ -4,7 +4,7 @@
 use crate::tests::{run, setup};
 
 /// Floor for `webapi_coverage` (raise it as coverage improves).
-const MIN_COVERAGE: f64 = 0.69;
+const MIN_COVERAGE: f64 = 0.79;
 
 /// Run tools/webapi/check.js against a fresh page and report coverage of
 /// tools/webapi/inventory.tsv. Set `RH_WEBAPI_REPORT=<path>` to write the
@@ -518,4 +518,100 @@ fn cssom_style_sheet_edits_reach_the_engine() {
     let style = env.doc.element_by_id("s").unwrap();
     let (_, text) = env.doc.sheet_overrides.get(&style).cloned().expect("sheet override");
     assert!(text.contains("p { color: blue; }") && text.contains("@media (min-width: 10px)"), "{text}");
+}
+
+#[test]
+fn messaging_workers_and_blob_urls() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const ch = new MessageChannel();
+        ch.port2.onmessage = (e) => console.log('port', JSON.stringify(e.data), e.ports.length);
+        ch.port1.postMessage({ a: [1, 2] });
+        const b1 = new BroadcastChannel('c'), b2 = new BroadcastChannel('c');
+        b2.onmessage = (e) => console.log('bc', e.data, b2.name);
+        b1.postMessage('hi');
+        window.addEventListener('message', (e) => console.log('win', e.data.n, e.source === window, e.origin));
+        window.postMessage({ n: 7 }, '*');
+        console.log('sync-first');
+        const url = URL.createObjectURL(new Blob(['onmessage = (e) => postMessage(e.data * 2);'], { type: 'text/javascript' }));
+        const w = new Worker(url);
+        w.onmessage = (e) => console.log('worker', e.data);
+        w.postMessage(21);
+        fetch(url).then((r) => r.text()).then((t) => console.log('blob-fetch', t.length > 10, url.startsWith('blob:https://example.test/')));
+        "#,
+    );
+    assert_eq!(out[0], "sync-first");
+    let mut rest = out[1..].to_vec();
+    rest.sort();
+    assert_eq!(rest, vec!["bc hi c", "blob-fetch true true", "port {\"a\":[1,2]} 0", "win 7 true https://example.test", "worker 42"]);
+}
+
+#[test]
+fn performance_timeline_and_idle_callbacks() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const po = new PerformanceObserver((list) => console.log('po', list.getEntries().map((e) => e.entryType + ':' + e.name).join()));
+        po.observe({ entryTypes: ['mark', 'measure'] });
+        performance.mark('a', { detail: { x: 1 } });
+        const m = performance.measure('a-to-now', 'a');
+        console.log('perf', performance.getEntriesByType('mark')[0].detail.x, m instanceof PerformanceMeasure, m instanceof PerformanceEntry, performance.getEntriesByType('navigation')[0] instanceof PerformanceNavigationTiming, PerformanceObserver.supportedEntryTypes.includes('mark'), typeof performance.timing.navigationStart, performance.toJSON().timeOrigin > 0);
+        requestIdleCallback((d) => console.log('idle', d instanceof IdleDeadline, d.timeRemaining() > 0, d.didTimeout));
+        "#,
+    );
+    assert_eq!(out, vec!["perf 1 true true true true number true", "po mark:a,measure:a-to-now", "idle true true false"]);
+}
+
+#[test]
+fn platform_apis() {
+    let out = logs_of(
+        "<html><body><div id=d></div></body></html>",
+        r#"
+        (async () => {
+          const st = await navigator.permissions.query({ name: 'geolocation' });
+          console.log('perm', st instanceof PermissionStatus, st.state, st.name);
+          await navigator.clipboard.writeText('copied');
+          console.log('clip', await navigator.clipboard.readText(), ClipboardItem.supports('text/plain'));
+          const order = [];
+          const p1 = navigator.locks.request('L', async (l) => { order.push('1:' + l.name + ':' + l.mode); await null; });
+          const p2 = navigator.locks.request('L', () => { order.push('2'); });
+          await Promise.all([p1, p2]);
+          console.log('locks', order.join());
+          const r = await scheduler.postTask(() => 5, { priority: 'background' });
+          const tc = new TaskController({ priority: 'user-blocking' });
+          console.log('sched', r, tc.signal.priority, tc.signal instanceof AbortSignal);
+          const pol = trustedTypes.createPolicy('p', { createHTML: (s) => s.replace(/</g, '&lt;') });
+          const h = pol.createHTML('<b>');
+          console.log('tt', String(h), trustedTypes.isHTML(h), h instanceof TrustedHTML);
+          const est = await navigator.storage.estimate();
+          console.log('storage', est.quota > 0, await navigator.storage.persisted());
+          const reg = await navigator.serviceWorker.register('/sw.js').then(() => 'ok', (e) => e.name);
+          const cache = await caches.open('v1');
+          await cache.put('/x', new Response('body!'));
+          const hit = await caches.match('/x');
+          console.log('sw', reg, await hit.text(), (await cache.keys()).length);
+          const dt = new DataTransfer();
+          dt.setData('text', 'drag');
+          console.log('dt', dt.getData('text/plain'), dt.types.join(), dt.items.length);
+          console.log('misc', navigator.plugins.length > 0, navigator.mimeTypes[0].type, typeof visualViewport.width, screen.orientation.type, document.fullscreenEnabled, Notification.permission, locationbar.visible, document.all);
+          navigator.geolocation.getCurrentPosition(() => {}, (e) => console.log('geo', e.code, e.code === GeolocationPositionError.PERMISSION_DENIED));
+        })().catch((e) => console.log('ERR ' + e + ' ' + e.stack));
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "perm true denied geolocation",
+            "clip copied true",
+            "locks 1:L:exclusive,2",
+            "sched 5 user-blocking true",
+            "tt &lt;b> true true",
+            "storage true true",
+            "sw NotSupportedError body! 1",
+            "dt drag text/plain 1",
+            "misc true application/pdf number landscape-primary false denied true undefined",
+            "geo 1 true",
+        ]
+    );
 }

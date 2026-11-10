@@ -359,6 +359,14 @@ pub(crate) fn run_script_element(realm: &mut Realm, n: NodeRef) {
         return;
     }
     let (source, url) = match src {
+        Some(s) if s.starts_with("blob:") => match crate::fetch::do_fetch(&s, "GET", &[], &[]) {
+            Ok(r) => (String::from_utf8_lossy(&r.body).into_owned(), s),
+            Err(_) => {
+                state().borrow_mut().pending_script_events.push((n, "error"));
+                schedule_script_events(realm);
+                return;
+            }
+        },
         Some(s) => {
             let Some(url) = resolve_url(&s) else {
                 state().borrow_mut().pending_script_events.push((n, "error"));
