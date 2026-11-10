@@ -96,8 +96,8 @@ pub fn typed_array_get(realm: &Realm, t: &TypedArrayData, index: usize) -> Optio
         TypedArrayKind::Uint32 => Value::Number(u32::from_le_bytes(bytes.try_into().unwrap()) as f64),
         TypedArrayKind::Float32 => Value::Number(f32::from_le_bytes(bytes.try_into().unwrap()) as f64),
         TypedArrayKind::Float64 => Value::Number(f64::from_le_bytes(bytes.try_into().unwrap())),
-        TypedArrayKind::BigInt64 => Value::BigInt(std::rc::Rc::new(BigInt(i64::from_le_bytes(bytes.try_into().unwrap()) as i128))),
-        TypedArrayKind::BigUint64 => Value::BigInt(std::rc::Rc::new(BigInt(u64::from_le_bytes(bytes.try_into().unwrap()) as i128))),
+        TypedArrayKind::BigInt64 => Value::BigInt(std::rc::Rc::new(BigInt::from_i64(i64::from_le_bytes(bytes.try_into().unwrap())))),
+        TypedArrayKind::BigUint64 => Value::BigInt(std::rc::Rc::new(BigInt::from_u64(u64::from_le_bytes(bytes.try_into().unwrap())))),
     })
 }
 

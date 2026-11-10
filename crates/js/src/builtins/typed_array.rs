@@ -447,10 +447,10 @@ dv_set!(dv_set_biguint64, u64, 8, "setBigUint64", conv_u64);
 pub fn to_bigint(realm: &mut Realm, v: Value) -> JsResult<i128> {
     let p = realm.to_primitive(v, crate::interop::Hint::Number)?;
     match p {
-        Value::BigInt(b) => Ok(b.0),
+        Value::BigInt(b) => Ok(b.to_i128_wrapping()),
         Value::Bool(b) => Ok(b as i128),
         Value::String(s) => match crate::value::BigInt::parse(s.to_rust_string().trim()) {
-            Some(b) => Ok(b.0),
+            Some(b) => Ok(b.to_i128_wrapping()),
             None => realm.type_error("Cannot convert string to a BigInt"),
         },
         Value::Number(_) => realm.type_error("Cannot convert a Number to a BigInt"),
@@ -1053,7 +1053,7 @@ fn sort_elements(realm: &mut Realm, t: &TypedArrayData, cmp: Value) -> JsResult<
             .into_iter()
             .map(|v| match &v {
                 Value::Number(n) => (*n, 0, v),
-                Value::BigInt(b) => (0.0, b.0, v),
+                Value::BigInt(b) => (0.0, b.to_i128_wrapping(), v),
                 _ => (0.0, 0, v),
             })
             .collect();

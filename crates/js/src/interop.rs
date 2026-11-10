@@ -1009,7 +1009,7 @@ impl Realm {
                 let n = string_to_number(s);
                 Ok(b.as_number() == Some(n))
             }
-            (Value::BigInt(x), Value::Number(y)) | (Value::Number(y), Value::BigInt(x)) => Ok((x.0 as f64) == *y),
+            (Value::BigInt(x), Value::Number(y)) | (Value::Number(y), Value::BigInt(x)) => Ok(x.eq_f64(*y)),
             (Value::BigInt(x), Value::String(s)) | (Value::String(s), Value::BigInt(x)) => Ok(BigInt::parse(&s.to_rust_string()).map(|b| b == **x).unwrap_or(false)),
             (Value::Bool(x), _) => {
                 let n = if *x { 1.0 } else { 0.0 };
@@ -1267,6 +1267,10 @@ impl Realm {
     }
 
     pub fn new_bigint(&mut self, v: i128) -> Value {
-        Value::BigInt(Rc::new(BigInt(v)))
+        Value::BigInt(Rc::new(BigInt::from_i128(v)))
+    }
+
+    pub fn new_bigint_value(&mut self, v: BigInt) -> Value {
+        Value::BigInt(Rc::new(v))
     }
 }

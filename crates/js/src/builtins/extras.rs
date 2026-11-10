@@ -237,7 +237,7 @@ fn atomics_rmw(realm: &mut Realm, args: &[Value], op: fn(i128, i128) -> i128) ->
     let old = ta_get(realm, &t, idx).unwrap_or(Value::Number(0.0));
     let operand = arg(args, 2);
     let (a, b, is_big) = match (&old, &operand) {
-        (Value::BigInt(o), _) => (o.0, super::typed_array::to_bigint(realm, operand.clone())?, true),
+        (Value::BigInt(o), _) => (o.to_i128_wrapping(), super::typed_array::to_bigint(realm, operand.clone())?, true),
         (Value::Number(o), _) => (*o as i128, to_integer(realm.to_number(operand.clone())?) as i128, false),
         _ => (0, 0, false),
     };
@@ -273,7 +273,7 @@ fn atomics_compare_exchange(realm: &mut Realm, _this: Value, args: &[Value]) -> 
     let expected = arg(args, 2);
     let replacement = arg(args, 3);
     let matches = match (&old, &expected) {
-        (Value::BigInt(o), e) => super::typed_array::to_bigint(realm, e.clone())? == o.0,
+        (Value::BigInt(o), e) => super::typed_array::to_bigint(realm, e.clone())? == o.to_i128_wrapping(),
         (Value::Number(o), e) => {
             let n = realm.to_number(e.clone())?;
             // Apply the element type's wrap-around before comparing.
@@ -322,7 +322,7 @@ fn atomics_wait(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     let expected = arg(args, 2);
     let eq = match (&cur, &expected) {
         (Value::Number(a), e) => realm.to_number(e.clone())? == *a,
-        (Value::BigInt(a), e) => super::typed_array::to_bigint(realm, e.clone())? == a.0,
+        (Value::BigInt(a), e) => super::typed_array::to_bigint(realm, e.clone())? == a.to_i128_wrapping(),
         _ => false,
     };
     // Single-threaded: nobody can wake us, so a matching wait times out.

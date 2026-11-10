@@ -1711,7 +1711,7 @@ impl Compiler {
             ExprKind::BigInt(s) => {
                 let fs = self.fs();
                 let i = fs.constants.len() as u32;
-                let b = crate::value::BigInt::parse(s).unwrap_or(crate::value::BigInt(0));
+                let b = crate::value::BigInt::parse(s).unwrap_or_default();
                 fs.constants.push(Value::BigInt(Rc::new(b)));
                 self.emit(Op::Const(i));
             }

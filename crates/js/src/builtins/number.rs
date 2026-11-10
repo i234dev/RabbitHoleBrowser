@@ -65,7 +65,7 @@ fn number_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         0.0
     } else {
         match realm.to_numeric(args[0].clone())? {
-            Value::BigInt(b) => b.0 as f64,
+            Value::BigInt(b) => b.to_f64(),
             Value::Number(n) => n,
             _ => unreachable!(),
         }
@@ -359,7 +359,7 @@ fn bigint_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
             if n.fract() != 0.0 || !n.is_finite() {
                 return realm.range_error("The number cannot be converted to a BigInt because it is not an integer");
             }
-            Ok(realm.new_bigint(n as i128))
+            Ok(realm.new_bigint_value(BigInt::from_f64(n).unwrap_or_default()))
         }
         Value::BigInt(_) => Ok(v),
         Value::Bool(b) => Ok(realm.new_bigint(b as i128)),
@@ -380,11 +380,11 @@ impl PipeErr for Value {
     }
 }
 
-fn this_bigint(realm: &mut Realm, this: &Value) -> JsResult<i128> {
+fn this_bigint(realm: &mut Realm, this: &Value) -> JsResult<BigInt> {
     match this {
-        Value::BigInt(b) => Ok(b.0),
+        Value::BigInt(b) => Ok((**b).clone()),
         Value::Object(id) => match &realm.obj(*id).kind {
-            ObjectKind::BigInt(b) => Ok(b.0),
+            ObjectKind::BigInt(b) => Ok((**b).clone()),
             _ => realm.type_error("BigInt.prototype method called on incompatible receiver"),
         },
         _ => realm.type_error("BigInt.prototype method called on incompatible receiver"),
@@ -403,43 +403,28 @@ fn bigint_to_string(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
             r as u32
         }
     };
-    Ok(Value::str(&BigInt(v).to_string_radix(radix)))
+    Ok(Value::str(&v.to_string_radix(radix)))
 }
 
 fn bigint_value_of(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let v = this_bigint(realm, &this)?;
-    Ok(realm.new_bigint(v))
+    Ok(realm.new_bigint_value(v))
 }
 
 fn as_int_n(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let bits = realm.to_index(arg(args, 0))?;
     let v = match arg(args, 1) {
-        Value::BigInt(b) => b.0,
+        Value::BigInt(b) => b,
         _ => return realm.type_error("Cannot convert value to a BigInt"),
     };
-    if bits == 0 {
-        return Ok(realm.new_bigint(0));
-    }
-    if bits >= 128 {
-        return Ok(realm.new_bigint(v));
-    }
-    let m = 1i128 << bits;
-    let mut r = v.rem_euclid(m);
-    if r >= m / 2 {
-        r -= m;
-    }
-    Ok(realm.new_bigint(r))
+    Ok(realm.new_bigint_value(v.as_int_n(bits as u64)))
 }
 
 fn as_uint_n(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let bits = realm.to_index(arg(args, 0))?;
     let v = match arg(args, 1) {
-        Value::BigInt(b) => b.0,
+        Value::BigInt(b) => b,
         _ => return realm.type_error("Cannot convert value to a BigInt"),
     };
-    if bits >= 127 {
-        return Ok(realm.new_bigint(v));
-    }
-    let m = 1i128 << bits;
-    Ok(realm.new_bigint(v.rem_euclid(m)))
+    Ok(realm.new_bigint_value(v.as_uint_n(bits as u64)))
 }

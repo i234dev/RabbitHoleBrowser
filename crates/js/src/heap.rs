@@ -237,7 +237,7 @@ pub enum ValueKey {
     Number(u64),
     String(JsStr),
     Symbol(SymbolId),
-    BigInt(i128),
+    BigInt(BigInt),
     Object(ObjectId),
 }
 
@@ -253,7 +253,7 @@ impl ValueKey {
             }
             Value::String(s) => ValueKey::String(s.clone()),
             Value::Symbol(s) => ValueKey::Symbol(*s),
-            Value::BigInt(b) => ValueKey::BigInt(b.0),
+            Value::BigInt(b) => ValueKey::BigInt((**b).clone()),
             Value::Object(o) => ValueKey::Object(*o),
         }
     }

@@ -262,47 +262,7 @@ pub struct SymbolId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ObjectId(pub u32);
 
-/// Arbitrary precision is not needed for web content; BigInt is backed by
-/// `i128` and throws `RangeError` on overflow.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BigInt(pub i128);
-
-impl BigInt {
-    pub fn parse(s: &str) -> Option<BigInt> {
-        let s = s.trim();
-        let (neg, s) = match s.strip_prefix('-') {
-            Some(r) => (true, r),
-            None => (false, s.strip_prefix('+').unwrap_or(s)),
-        };
-        let v = if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            i128::from_str_radix(h, 16).ok()?
-        } else if let Some(o) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
-            i128::from_str_radix(o, 8).ok()?
-        } else if let Some(b) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
-            i128::from_str_radix(b, 2).ok()?
-        } else if s.is_empty() {
-            0
-        } else {
-            s.parse::<i128>().ok()?
-        };
-        Some(BigInt(if neg { -v } else { v }))
-    }
-    pub fn to_string_radix(&self, radix: u32) -> String {
-        let mut n = self.0.unsigned_abs();
-        if n == 0 {
-            return "0".into();
-        }
-        let mut digits = Vec::new();
-        while n > 0 {
-            digits.push(std::char::from_digit((n % radix as u128) as u32, radix).unwrap());
-            n /= radix as u128;
-        }
-        if self.0 < 0 {
-            digits.push('-');
-        }
-        digits.iter().rev().collect()
-    }
-}
+pub use crate::bigint::BigInt;
 
 /// A JavaScript value.
 #[derive(Clone, Debug)]
@@ -380,7 +340,7 @@ impl Value {
             Value::Number(n) => !(*n == 0.0 || n.is_nan()),
             Value::String(s) => !s.is_empty(),
             Value::Symbol(_) => true,
-            Value::BigInt(b) => b.0 != 0,
+            Value::BigInt(b) => !b.is_zero(),
             Value::Object(_) => true,
         }
     }

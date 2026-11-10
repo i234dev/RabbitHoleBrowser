@@ -1175,7 +1175,7 @@ impl Realm {
                     let r = match v {
                         Value::Number(n) => Value::Number(-n),
                         other => match self.to_numeric(other)? {
-                            Value::BigInt(b) => Value::BigInt(Rc::new(BigInt(-b.0))),
+                            Value::BigInt(b) => Value::BigInt(Rc::new(b.neg())),
                             Value::Number(n) => Value::Number(-n),
                             _ => unreachable!(),
                         },
@@ -1194,7 +1194,7 @@ impl Realm {
                 Op::BitNot => {
                     let v = pop!();
                     let r = match self.to_numeric(v)? {
-                        Value::BigInt(b) => Value::BigInt(Rc::new(BigInt(!b.0))),
+                        Value::BigInt(b) => Value::BigInt(Rc::new(b.not())),
                         Value::Number(n) => Value::Number(!to_int32(n) as f64),
                         _ => unreachable!(),
                     };
@@ -1214,10 +1214,10 @@ impl Realm {
                     let d = if op == Op::Inc { 1.0 } else { -1.0 };
                     let r = match v {
                         Value::Number(n) => Value::Number(n + d),
-                        Value::BigInt(b) => Value::BigInt(Rc::new(BigInt(b.0 + d as i128))),
+                        Value::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
                         other => match self.to_numeric(other)? {
                             Value::Number(n) => Value::Number(n + d),
-                            Value::BigInt(b) => Value::BigInt(Rc::new(BigInt(b.0 + d as i128))),
+                            Value::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
                             _ => unreachable!(),
                         },
                     };
@@ -1910,10 +1910,7 @@ impl Realm {
         let nb = self.to_numeric(pb)?;
         match (na, nb) {
             (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x + y)),
-            (Value::BigInt(x), Value::BigInt(y)) => match x.0.checked_add(y.0) {
-                Some(r) => Ok(Value::BigInt(Rc::new(BigInt(r)))),
-                None => self.range_error("BigInt overflow"),
-            },
+            (Value::BigInt(x), Value::BigInt(y)) => Ok(Value::BigInt(Rc::new(x.add(&y)))),
             _ => self.type_error("Cannot mix BigInt and other types, use explicit conversions"),
         }
     }
@@ -1924,40 +1921,42 @@ impl Realm {
         match (na, nb) {
             (Value::Number(x), Value::Number(y)) => Ok(Value::Number(num_binop(op, x, y))),
             (Value::BigInt(x), Value::BigInt(y)) => {
-                let (x, y) = (x.0, y.0);
+                let shift_amount = |y: &BigInt| -> i64 { y.to_i128().map(|v| v.clamp(-(1 << 40), 1 << 40) as i64).unwrap_or(if y.is_negative() { -(1 << 40) } else { 1 << 40 }) };
                 let r = match op {
-                    Op::Sub => x.checked_sub(y),
-                    Op::Mul => x.checked_mul(y),
-                    Op::Div => {
-                        if y == 0 {
-                            return self.range_error("Division by zero");
-                        }
-                        x.checked_div(y)
-                    }
-                    Op::Mod => {
-                        if y == 0 {
-                            return self.range_error("Division by zero");
-                        }
-                        x.checked_rem(y)
-                    }
+                    Op::Sub => x.sub(&y),
+                    Op::Mul => x.mul(&y),
+                    Op::Div => match x.div(&y) {
+                        Some(v) => v,
+                        None => return self.range_error("Division by zero"),
+                    },
+                    Op::Mod => match x.rem(&y) {
+                        Some(v) => v,
+                        None => return self.range_error("Division by zero"),
+                    },
                     Op::Exp => {
-                        if y < 0 {
+                        if y.is_negative() {
                             return self.range_error("Exponent must be non-negative");
                         }
-                        x.checked_pow(y as u32)
+                        match x.pow(&y) {
+                            Some(v) => v,
+                            None => return self.range_error("Maximum BigInt size exceeded"),
+                        }
                     }
-                    Op::BitAnd => Some(x & y),
-                    Op::BitOr => Some(x | y),
-                    Op::BitXor => Some(x ^ y),
-                    Op::Shl => x.checked_shl(y as u32),
-                    Op::Shr => Some(x >> (y.clamp(0, 127) as u32)),
+                    Op::BitAnd => x.bitand(&y),
+                    Op::BitOr => x.bitor(&y),
+                    Op::BitXor => x.bitxor(&y),
+                    Op::Shl => {
+                        let n = shift_amount(&y);
+                        if n > (1 << 30) {
+                            return self.range_error("Maximum BigInt size exceeded");
+                        }
+                        x.shl(n)
+                    }
+                    Op::Shr => x.shr(shift_amount(&y)),
                     Op::UShr => return self.type_error("BigInts have no unsigned right shift, use >> instead"),
-                    _ => None,
+                    _ => return self.type_error("Unsupported BigInt operation"),
                 };
-                match r {
-                    Some(v) => Ok(Value::BigInt(Rc::new(BigInt(v)))),
-                    None => self.range_error("BigInt overflow"),
-                }
+                Ok(Value::BigInt(Rc::new(r)))
             }
             _ => self.type_error("Cannot mix BigInt and other types, use explicit conversions"),
         }
@@ -1977,11 +1976,23 @@ impl Realm {
         }
         let na = self.to_numeric(pa)?;
         let nb = self.to_numeric(pb)?;
+        let ord = match (&na, &nb) {
+            (Value::BigInt(x), Value::BigInt(y)) => Some(x.cmp(y)),
+            (Value::BigInt(x), Value::Number(y)) => x.cmp_f64(*y),
+            (Value::Number(x), Value::BigInt(y)) => y.cmp_f64(*x).map(|o| o.reverse()),
+            _ => None,
+        };
+        if let (Value::BigInt(_), _) | (_, Value::BigInt(_)) = (&na, &nb) {
+            let Some(o) = ord else { return Ok(false) };
+            return Ok(match op {
+                Op::Lt => o.is_lt(),
+                Op::LtEq => o.is_le(),
+                Op::Gt => o.is_gt(),
+                _ => o.is_ge(),
+            });
+        }
         let (x, y) = match (&na, &nb) {
             (Value::Number(x), Value::Number(y)) => (*x, *y),
-            (Value::BigInt(x), Value::BigInt(y)) => (x.0 as f64, y.0 as f64),
-            (Value::BigInt(x), Value::Number(y)) => (x.0 as f64, *y),
-            (Value::Number(x), Value::BigInt(y)) => (*x, y.0 as f64),
             _ => unreachable!(),
         };
         if x.is_nan() || y.is_nan() {

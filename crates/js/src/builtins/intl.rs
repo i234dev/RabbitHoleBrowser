@@ -1716,7 +1716,7 @@ fn nf_format_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult
 
 fn number_arg(realm: &mut Realm, v: Value) -> JsResult<f64> {
     match realm.to_numeric(v)? {
-        Value::BigInt(b) => Ok(b.0 as f64),
+        Value::BigInt(b) => Ok(b.to_f64()),
         Value::Number(n) => Ok(n),
         _ => Ok(f64::NAN),
     }
@@ -1725,7 +1725,7 @@ fn number_arg(realm: &mut Realm, v: Value) -> JsResult<f64> {
 /// Format any numeric value, keeping BigInts exact.
 fn format_numeric(realm: &mut Realm, v: Value, o: &NfOptions) -> JsResult<String> {
     match realm.to_numeric(v)? {
-        Value::BigInt(b) => Ok(format_bigint_parts(&b.0.abs().to_string(), b.0 < 0, o).to_string()),
+        Value::BigInt(b) => Ok(format_bigint_parts(&b.to_string_radix(10).trim_start_matches('-'), b.is_negative(), o).to_string()),
         Value::Number(n) => Ok(format_number(n, o)),
         _ => Ok("NaN".into()),
     }
@@ -1813,15 +1813,15 @@ fn number_to_locale(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 
 fn bigint_to_locale(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = match &this {
-        Value::BigInt(b) => b.0,
+        Value::BigInt(b) => (**b).clone(),
         Value::Object(id) => match &realm.obj(*id).kind {
-            ObjectKind::BigInt(b) => b.0,
+            ObjectKind::BigInt(b) => (**b).clone(),
             _ => return realm.type_error("BigInt.prototype.toLocaleString requires that 'this' be a BigInt"),
         },
         _ => return realm.type_error("BigInt.prototype.toLocaleString requires that 'this' be a BigInt"),
     };
     let o = read_nf_options(realm, arg(args, 0), arg(args, 1))?;
-    Ok(Value::str(&format_bigint_parts(&n.abs().to_string(), n < 0, &o).to_string()))
+    Ok(Value::str(&format_bigint_parts(n.to_string_radix(10).trim_start_matches('-'), n.is_negative(), &o).to_string()))
 }
 
 fn string_locale_compare(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {

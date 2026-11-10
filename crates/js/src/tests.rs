@@ -1283,3 +1283,31 @@ fn switch_case_let_and_shadowed_fn_name() {
         .unwrap();
     assert_eq!(realm.to_rust_string(v).unwrap(), "s:1|v:4|o:6|l:5");
 }
+
+#[test]
+fn bigint_arbitrary_precision() {
+    let mut realm = crate::Realm::new();
+    let v = realm
+        .eval(
+            r#"
+            const h = BigInt("0x00e9d3dca1328a49ad3403e4badda37a6a13610b608b5099839e1074e720f5a33b2ebd8c2ffd12c09be0015a4635aa9d2022d8f72f90ed11610c3742b0baef5b7da73d7e79aff6cdb");
+            const f = 2n ** 200n;
+            [
+              (f / 3n).toString(),
+              (f % 1000007n).toString(),
+              (-f >> 190n).toString(),
+              (h & 0xffffn).toString(16),
+              BigInt.asIntN(64, 2n ** 63n).toString(),
+              BigInt.asUintN(64, -1n).toString(16),
+              (f > 1e60).toString(), (f == 2 ** 200).toString(), typeof (12345678901234567890123n * 10n),
+              Number(2n ** 70n) === 2 ** 70,
+            ].join('|')
+            "#,
+            "t.js",
+        )
+        .unwrap();
+    assert_eq!(
+        realm.to_rust_string(v).unwrap(),
+        "535646014752996758513987364113720867507400997927597611767125|446616|-1024|6cdb|-9223372036854775808|ffffffffffffffff|true|true|bigint|true"
+    );
+}
