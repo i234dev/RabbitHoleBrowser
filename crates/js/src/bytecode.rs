@@ -143,6 +143,12 @@ pub enum Op {
     /// `r = r + 1` / `r = r - 1` on a register (statement `i++` / `i--`).
     IncReg(u16),
     DecReg(u16),
+    /// Push two registers.
+    GetReg2(u16, u16),
+    /// `top = top OP const` (OP: `BIN_*` index; peephole of `Const; OP`).
+    BinConst(u8, u32),
+    /// Pop a; jump unless `a < const` (peephole of `Const; Lt; JumpIfFalse`).
+    JumpUnlessLtConst(u32, u32),
 
     // --- operators
     Add,
@@ -270,6 +276,13 @@ pub struct PropIc {
     pub mid_shape: u32,
 }
 
+/// Binary operators usable in `BinConst`, by index.
+pub const BIN_OPS: [Op; 11] = [Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod, Op::BitAnd, Op::BitOr, Op::BitXor, Op::Shl, Op::Shr, Op::UShr];
+
+fn bin_index(op: Op) -> Option<u8> {
+    BIN_OPS.iter().position(|o| *o == op).map(|i| i as u8)
+}
+
 /// `Call` without a callee description.
 pub const NO_DESC: u32 = u32::MAX;
 
@@ -376,7 +389,8 @@ impl Op {
             | Op::JumpUnlessLtEq(t)
             | Op::JumpUnlessGt(t)
             | Op::JumpUnlessGtEq(t)
-            | Op::JumpIfStrictNotEq(t) => Some(t),
+            | Op::JumpIfStrictNotEq(t)
+            | Op::JumpUnlessLtConst(_, t) => Some(t),
             _ => None,
         }
     }
@@ -399,6 +413,7 @@ impl Op {
             Op::JumpUnlessGt(_) => Op::JumpUnlessGt(t),
             Op::JumpUnlessGtEq(_) => Op::JumpUnlessGtEq(t),
             Op::JumpIfStrictNotEq(_) => Op::JumpIfStrictNotEq(t),
+            Op::JumpUnlessLtConst(c, _) => Op::JumpUnlessLtConst(c, t),
             other => other,
         }
     }
@@ -437,6 +452,12 @@ pub fn peephole(ops: &mut Vec<Op>, positions: &mut Vec<crate::ast::Pos>, handler
             // i++ / ++i / i += 1 as a statement on a register.
             (Op::GetReg(a), Some(Op::Inc), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::IncReg(a)), 5),
             (Op::GetReg(a), Some(Op::Dec), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::DecReg(a)), 5),
+            // Loop test against a constant bound.
+            (Op::Const(c), Some(Op::Lt), Some(Op::JumpIfFalse(t)), _, _) if free(i, 3) => (Some(Op::JumpUnlessLtConst(c, t)), 3),
+            // Arithmetic with a constant operand.
+            (Op::Const(c), Some(b), _, _, _) if bin_index(b).is_some() && free(i, 2) => (Some(Op::BinConst(bin_index(b).unwrap(), c)), 2),
+            // Two register loads.
+            (Op::GetReg(a), Some(Op::GetReg(b)), _, _, _) if free(i, 2) => (Some(Op::GetReg2(a, b)), 2),
             // Method lookup for a call: obj -> method obj.
             (Op::Dup, Some(Op::GetProp(k, ic)), Some(Op::Swap), _, _) if free(i, 3) => (Some(Op::GetMethod(k, ic)), 3),
             // Assignment whose value is discarded.

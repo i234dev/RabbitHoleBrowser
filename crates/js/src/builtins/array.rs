@@ -199,7 +199,7 @@ fn set_i(realm: &mut Realm, id: ObjectId, i: usize, v: Value) -> JsResult<()> {
 }
 
 fn set_len(realm: &mut Realm, id: ObjectId, len: usize) -> JsResult<()> {
-    let ok = realm.set(Value::Object(id), PropertyKey::str("length"), Value::Number(len as f64))?;
+    let ok = realm.set(Value::Object(id), crate::value::names::length(), Value::Number(len as f64))?;
     if !ok {
         return realm.type_error("Cannot assign to read only property 'length' of object");
     }
@@ -650,7 +650,7 @@ fn pop(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
 
 fn push(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
-    let fast = realm.obj(id).extensible && !realm.obj(id).props.contains(&PropertyKey::str("length"));
+    let fast = realm.obj(id).extensible && !realm.obj(id).props.contains(&crate::value::names::length());
     if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
         if *length as usize == elements.len() && fast {
             elements.extend_from_slice(args);

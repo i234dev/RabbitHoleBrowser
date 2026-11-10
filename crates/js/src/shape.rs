@@ -232,7 +232,7 @@ impl PropertyMap {
     }
 
     /// Shape id (shape mode) or key-set id (dictionary mode).
-    #[inline]
+    #[inline(always)]
     pub fn shape_id(&self) -> u32 {
         match &self.repr {
             Repr::Shaped { shape, .. } => shape.id,
@@ -273,7 +273,7 @@ impl PropertyMap {
     }
 
     /// The property in `slot` (a slot obtained for the current shape id).
-    #[inline]
+    #[inline(always)]
     pub fn slot(&self, slot: u32) -> Option<&Property> {
         match &self.repr {
             Repr::Shaped { values, .. } => values.get(slot as usize),

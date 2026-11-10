@@ -33,7 +33,7 @@ impl Realm {
                     }
                 } else if let PropertyKey::String(s) = key {
                     if s.eq_str("length") {
-                        let frozen = obj.props.get(&PropertyKey::str("length")).map(|p| p.flags).unwrap_or(WRITABLE);
+                        let frozen = obj.props.get(&crate::value::names::length()).map(|p| p.flags).unwrap_or(WRITABLE);
                         return Some(Property::data(Value::Number(*length as f64), frozen & WRITABLE));
                     }
                 }
@@ -250,14 +250,14 @@ impl Realm {
                                 }
                             }
                         } else if i == elements.len() && obj.extensible && i < (1 << 28) && (*length as usize) <= i {
-                            let frozen_len = obj.props.get(&PropertyKey::str("length")).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
+                            let frozen_len = obj.props.get(&crate::value::names::length()).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
                             if !frozen_len {
                                 elements.push(value);
                                 *length = (i + 1) as u32;
                                 return Ok(true);
                             }
                         } else if i > elements.len() && i - elements.len() <= 4096 && obj.extensible && i < (1 << 28) {
-                            let frozen_len = obj.props.get(&PropertyKey::str("length")).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
+                            let frozen_len = obj.props.get(&crate::value::names::length()).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
                             if !frozen_len {
                                 // Fill holes (only if no sparse props exist in between).
                                 elements.resize(i, Value::Empty);
@@ -366,7 +366,7 @@ impl Realm {
         if len as f64 != n {
             return self.range_error("Invalid array length");
         }
-        let frozen = self.obj(id).props.get(&PropertyKey::str("length")).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
+        let frozen = self.obj(id).props.get(&crate::value::names::length()).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
         if frozen {
             return Ok(false);
         }
@@ -556,11 +556,11 @@ impl Realm {
             rest = others;
         }
         if matches!(obj.kind, ObjectKind::Array { .. }) {
-            out.push(PropertyKey::str("length"));
+            out.push(crate::value::names::length());
             rest.retain(|k| !matches!(k, PropertyKey::String(s) if s.eq_str("length")));
         }
         if matches!(obj.kind, ObjectKind::String(_)) {
-            out.push(PropertyKey::str("length"));
+            out.push(crate::value::names::length());
         }
         // private symbols are hidden
         let private: Vec<bool> = rest.iter().map(|k| matches!(k, PropertyKey::Symbol(s) if self.is_private_symbol(*s))).collect();
@@ -869,6 +869,7 @@ impl Realm {
             Value::Undefined | Value::Empty => JsStr::new("undefined"),
             Value::Null => JsStr::new("null"),
             Value::Bool(b) => JsStr::new(if b { "true" } else { "false" }),
+            Value::Number(n) if n >= 0.0 && n < 65536.0 && n == (n as u32) as f64 && !(n == 0.0 && n.is_sign_negative()) => JsStr::from_index(n as u32),
             Value::Number(n) => JsStr::new(&number_to_string(n)),
             Value::String(s) => s,
             Value::Symbol(_) => return self.type_error("Cannot convert a Symbol value to a string"),

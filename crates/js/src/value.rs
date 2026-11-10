@@ -628,6 +628,10 @@ pub fn number_to_string(x: f64) -> String {
     if x == 0.0 {
         return "0".into();
     }
+    // Integers below 2^53 print as plain decimal digits.
+    if x.abs() < 9007199254740992.0 && x == (x as i64) as f64 {
+        return (x as i64).to_string();
+    }
     if x.is_infinite() {
         return if x > 0.0 { "Infinity".into() } else { "-Infinity".into() };
     }

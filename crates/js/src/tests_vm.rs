@@ -181,3 +181,41 @@ fn calls_and_frames() {
     eq("function f() { 'use strict'; return this; } [f() === undefined, f.call(2)].join()", "true,2");
     eq("var o = {f: function() { return typeof this; }}; o.f()", "object");
 }
+
+#[test]
+fn superinstructions_and_fast_paths() {
+    // Constant operands with non-number left sides.
+    eq("var s = 'a'; s = s + 1; s += 2; s", "a12");
+    eq("var o = {valueOf() { return 4; }}; [o * 2, o - 1, o % 3, o | 1, o << 1].join()", "8,3,1,5,8");
+    eq("var b = 5n; (b * 2n).toString()", "10");
+    eq("var r = []; for (var i = '0'; i < 3; i++) r.push(typeof i); r.join()", "string,number,number");
+    eq("var r = []; var x = {valueOf() { r.push('v'); return 1; }}; for (var k = 0; x < 2 && k < 2; k++) r.push(k); r.join()", "v,0,v,1,v");
+    eq("(function() { var a = 3, b = 4; return a + b + a * b; })()", "19");
+    eq("(function() { var t = 0; for (var i = 0; i < 10; i++) { t += i & 3; t ^= 1; } return t; })()", "15");
+    // Completion values at script level.
+    eq("var x = 1; x + 1; for (var i = 0; i < 3; i++) { i * 10; }", "20");
+    // Number to string conversions.
+    eq("[String(0), String(-0), String(42), String(-7), String(1e21), String(123456789012), String(2 ** 53), String(0.5)].join()", "0,0,42,-7,1e+21,123456789012,9007199254740992,0.5");
+    eq("var o = {}; o[70000] = 1; o[5] = 2; Object.keys(o).join()", "5,70000");
+    eq("var a = []; a[70000] = 1; a.length + ',' + a[70000] + ',' + (70000 in a) + ',' + (69999 in a)", "70001,1,true,false");
+    // Constructors through the fast path.
+    eq("function P(x) { this.x = x; } P.prototype.m = function() { return this.x * 2; }; new P(4).m()", "8");
+    eq("function Q() { return {z: 1}; } new Q().z", "1");
+    eq("function R() { this.a = 1; return 5; } new R().a", "1");
+    eq("function S() {} S.prototype = 7; Object.getPrototypeOf(new S()) === Object.prototype", "true");
+    eq("function T(a, b) { this.s = a + (b === undefined ? 'u' : b); } new T('x').s + new T('x', 'y', 'z').s", "xuxy");
+    eq("function U() { this.n = new.target === U; } new U().n", "true");
+    eq("function V() { return arguments.length; } new V(1, 2, 3) instanceof V", "true");
+    eq("var calls = 0; function W() { calls++; if (calls < 3) new W(); } new W(); calls", "3");
+    throws("var A = () => {}; new A()", "is not a constructor");
+    throws("var o = { m() {} }; new o.m()", "is not a constructor");
+    // Method calls through GetMethod.
+    eq("var o = { v: 2, f() { return this.v; } }; var r = []; for (var i = 0; i < 3; i++) r.push(o.f()); r.join()", "2,2,2");
+    eq("'abc'.toUpperCase() + (5).toFixed(1) + true.toString()", "ABC5.0true");
+    throws("var o = {}; o.missing()", "o.missing is not a function");
+    throws("var o = {x: 1}; o.x()", "o.x is not a function");
+    // for-in with prototype enumerables and shadowing.
+    eq("var p = {a: 1, b: 2}; var o = Object.create(p); o.b = 3; Object.defineProperty(o, 'a', {value: 9, enumerable: false}); var k = []; for (var x in o) k.push(x); k.join()", "b");
+    eq("var p = {z: 1}; var o = Object.create(p); o.y = 2; var k = []; for (var x in o) k.push(x); k.join()", "y,z");
+    eq("var k = []; for (var x in [5, 6]) k.push(x); for (var y in 'ab') k.push(y); k.join()", "0,1,0,1");
+}

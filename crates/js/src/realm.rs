@@ -335,7 +335,7 @@ impl Realm {
     /// back-link) using `proto` as the prototype object's prototype.
     pub fn new_native_constructor(&mut self, name: &str, arity: u32, func: NativeFn, prototype: ObjectId) -> ObjectId {
         let f = self.new_native_function_full(name, arity, func, None, Vec::new(), true);
-        self.obj_mut(f).props.insert(PropertyKey::str("prototype"), Property::data(Value::Object(prototype), 0));
+        self.obj_mut(f).props.insert(names::prototype(), Property::data(Value::Object(prototype), 0));
         self.obj_mut(prototype).props.insert(PropertyKey::str("constructor"), Property::data(Value::Object(f), HIDDEN));
         f
     }
@@ -740,7 +740,7 @@ impl Realm {
     /// subclassing via `new.target.prototype`; falls back to `default`.
     pub fn proto_from_new_target(&mut self, default: ObjectId) -> ObjectId {
         if let Value::Object(nt) = self.new_target() {
-            if let Ok(Value::Object(p)) = self.get(Value::Object(nt), PropertyKey::str("prototype")) {
+            if let Ok(Value::Object(p)) = self.get(Value::Object(nt), names::prototype()) {
                 return p;
             }
         }

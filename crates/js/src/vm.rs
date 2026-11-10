@@ -334,6 +334,97 @@ impl Realm {
         Ok(true)
     }
 
+    /// `New(argc)` of a plain (non-derived, non-class-field) function
+    /// constructor: allocates `this` from the callee's own `prototype`
+    /// data property and builds the frame from the operand stack. Returns
+    /// false when the general path is needed. The caller must be synced.
+    pub(crate) fn try_fast_construct(&mut self, argc: usize) -> JsResult<bool> {
+        let fi = self.frames.len() - 1;
+        let n = self.frames[fi].stack.len();
+        let base = n - argc - 1;
+        let id = match &self.frames[fi].stack[base] {
+            Value::Object(id) => *id,
+            _ => return Ok(false),
+        };
+        let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
+        let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
+        let flags = c.code.flags;
+        if flags.is_arrow
+            || flags.is_method
+            || flags.is_generator
+            || flags.is_async
+            || flags.is_derived
+            || flags.is_class_constructor
+            || c.code.arguments_loc.is_some()
+            || c.code.rest_loc.is_some()
+        {
+            return Ok(false);
+        }
+        let proto = match obj.props.get(&names::prototype()) {
+            Some(p) if p.flags & ACCESSOR == 0 => match &p.value {
+                Value::Object(p) => *p,
+                _ => self.intrinsics.object_proto,
+            },
+            _ => return Ok(false),
+        };
+        if self.frames.len() >= self.max_frames {
+            return self.range_error("Maximum call stack size exceeded");
+        }
+        let code = c.code.clone();
+        let parent_scope = c.scope;
+        let home = c.home_object;
+        let nslots = code.scope_slots as usize;
+        let nregs = code.nregs as usize;
+        let this = Value::Object(self.alloc(Object::new(Some(proto), ObjectKind::Ordinary)));
+        let mut stack = self.take_stack(nregs);
+        let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
+        {
+            let caller = &mut self.frames[fi].stack;
+            let mut args = caller.drain(base..);
+            args.next(); // callee
+            for &loc in code.param_locs.iter() {
+                let v = args.next().unwrap_or(Value::Undefined);
+                match loc {
+                    VarLoc::Reg(r) => stack[r as usize] = v,
+                    VarLoc::Slot(s) => slots[s as usize] = v,
+                }
+            }
+        }
+        if let Some(sl) = code.self_loc {
+            match sl {
+                VarLoc::Reg(r) => stack[r as usize] = Value::Object(id),
+                VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
+            }
+        }
+        let scope = if nslots > 0 {
+            self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
+        } else {
+            match parent_scope {
+                Some(p) => p,
+                None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
+            }
+        };
+        self.frames.push(Frame {
+            code,
+            pc: 0,
+            stack,
+            scope,
+            scope_depth: 0,
+            this,
+            func: Some(id),
+            new_target: Value::Object(id),
+            home_object: home,
+            args: Vec::new(),
+            arguments_obj: None,
+            generator: None,
+            is_construct: true,
+            entry: false,
+            completion: Value::Undefined,
+            callee_desc: None,
+        });
+        Ok(true)
+    }
+
     /// Build the frame for calling closure `id`.
     pub(crate) fn prepare_frame(&mut self, id: ObjectId, this: Value, args: &[Value], new_target: Value, is_construct: bool) -> JsResult<Frame> {
         let (code, parent_scope, this_value, arrow_nt, home, arrow_args) = match &self.obj(id).kind {
@@ -348,7 +439,7 @@ impl Realm {
             if flags.is_derived {
                 Value::Empty
             } else {
-                let proto = match self.get(new_target.clone(), PropertyKey::str("prototype"))? {
+                let proto = match self.get(new_target.clone(), names::prototype())? {
                     Value::Object(p) => p,
                     _ => self.intrinsics.object_proto,
                 };
@@ -455,7 +546,7 @@ impl Realm {
         let is_gen = flags.is_generator;
         let proto = if is_gen {
             // generator object prototype = fn.prototype (if object) else intrinsic
-            match self.get(Value::Object(id), PropertyKey::str("prototype"))? {
+            match self.get(Value::Object(id), names::prototype())? {
                 Value::Object(p) => p,
                 _ => {
                     if is_async {
@@ -932,6 +1023,65 @@ impl Realm {
                         }
                     }
                     Op::Const(i) => push!(consts[i as usize].clone()),
+                    Op::GetReg2(a, b) => {
+                        let va = match reg!(a) {
+                            Value::Empty => Value::Undefined,
+                            v => v.clone(),
+                        };
+                        push!(va);
+                        let vb = match reg!(b) {
+                            Value::Empty => Value::Undefined,
+                            v => v.clone(),
+                        };
+                        push!(vb);
+                    }
+                    Op::BinConst(k, c) => {
+                        let bop = crate::bytecode::BIN_OPS[k as usize];
+                        if let (Value::Number(x), Value::Number(y)) = (&*top!(), &consts[c as usize]) {
+                            let (x, y) = (*x, *y);
+                            let r = match bop {
+                                Op::Add => x + y,
+                                Op::Sub => x - y,
+                                Op::Mul => x * y,
+                                Op::Div => x / y,
+                                Op::Mod => js_mod(x, y),
+                                Op::BitAnd => (to_int32(x) & to_int32(y)) as f64,
+                                Op::BitOr => (to_int32(x) | to_int32(y)) as f64,
+                                Op::BitXor => (to_int32(x) ^ to_int32(y)) as f64,
+                                Op::Shl => to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64,
+                                Op::Shr => (to_int32(x) >> (to_uint32(y) & 31)) as f64,
+                                _ => (to_uint32(x) >> (to_uint32(y) & 31)) as f64,
+                            };
+                            // SAFETY: the slot holds a number (no destructor).
+                            unsafe { std::ptr::write(sp.sub(1), Value::Number(r)) };
+                        } else {
+                            push!(consts[c as usize].clone());
+                            sync!();
+                            tri!(self.binop_slow(bop));
+                            resume!();
+                        }
+                    }
+                    Op::JumpUnlessLtConst(c, t) => {
+                        let lt = if let (Value::Number(x), Value::Number(y)) = (&*top!(), &consts[c as usize]) {
+                            let r = *x < *y;
+                            // SAFETY: the slot holds a number (no destructor).
+                            unsafe { sp = sp.sub(1) };
+                            r
+                        } else {
+                            push!(consts[c as usize].clone());
+                            sync!();
+                            let r = tri!(self.compare_top(Op::JumpUnlessLt(0)));
+                            resume!();
+                            r
+                        };
+                        if !lt {
+                            jump!(t);
+                        }
+                    }
+                    Op::StoreCompletion => {
+                        let v = pop!();
+                        fr!().completion = v;
+                    }
                     Op::Undefined => push!(Value::Undefined),
                     Op::Null => push!(Value::Null),
                     Op::True => push!(Value::Bool(true)),
@@ -1302,7 +1452,15 @@ impl Realm {
                         }
                         slow!(op);
                     }
-                    Op::New(_) | Op::CallSpread | Op::NewSpread => {
+                    Op::New(argc) => {
+                        tick!();
+                        sync!();
+                        if tri!(self.try_fast_construct(argc as usize)) {
+                            continue 'reload;
+                        }
+                        slow!(op);
+                    }
+                    Op::CallSpread | Op::NewSpread => {
                         tick!();
                         slow!(op);
                     }
@@ -2338,7 +2496,16 @@ impl Realm {
                     push!(v);
                 }
                 Op::Debugger | Op::Nop => {}
-                Op::JumpUnlessLt(_) | Op::JumpUnlessLtEq(_) | Op::JumpUnlessGt(_) | Op::JumpUnlessGtEq(_) | Op::JumpIfStrictNotEq(_) | Op::IncReg(_) | Op::DecReg(_) => {
+                Op::JumpUnlessLt(_)
+                | Op::JumpUnlessLtEq(_)
+                | Op::JumpUnlessGt(_)
+                | Op::JumpUnlessGtEq(_)
+                | Op::JumpIfStrictNotEq(_)
+                | Op::IncReg(_)
+                | Op::DecReg(_)
+                | Op::GetReg2(..)
+                | Op::BinConst(..)
+                | Op::JumpUnlessLtConst(..) => {
                     unreachable!("handled by the hot loop")
                 }
             }
@@ -2726,7 +2893,7 @@ impl Realm {
             Value::Empty => (Some(self.intrinsics.object_proto), self.intrinsics.function_proto),
             Value::Null => (None, self.intrinsics.function_proto),
             Value::Object(s) if self.is_constructor(&superclass) => {
-                let pp = self.get(superclass.clone(), PropertyKey::str("prototype"))?;
+                let pp = self.get(superclass.clone(), names::prototype())?;
                 let pp = match pp {
                     Value::Object(p) => Some(p),
                     Value::Null => None,
@@ -2995,7 +3162,7 @@ fn stack_underflow() -> ! {
 }
 
 /// `x % y` with an exact integer fast path.
-#[inline]
+#[inline(always)]
 pub fn js_mod(x: f64, y: f64) -> f64 {
     let (xi, yi) = (x as i32, y as i32);
     if yi > 0 && xi as f64 == x && yi as f64 == y && !(x == 0.0 && x.is_sign_negative()) {
