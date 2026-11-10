@@ -210,7 +210,9 @@ fn parallel_requests_respect_per_host_limit() {
     reqs.push(Request::get(srv.url("/style")).with_dest(Destination::Style));
     let _ = f.request_many(&reqs, 1);
     let pos = order.lock().unwrap().iter().position(|p| p == "/style").unwrap();
-    assert!(pos < 6, "CSS started at position {pos}");
+    // Up to 6 images may already be in flight (the per-host limit) before
+    // the CSS request is queued; it must be the next one to start.
+    assert!(pos <= 6, "CSS started at position {pos}");
 }
 
 #[test]
