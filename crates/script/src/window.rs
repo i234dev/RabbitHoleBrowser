@@ -229,7 +229,7 @@ fn nav_send_beacon(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<
     // Fire and forget.
     let url = arg_str(realm, args, 0)?;
     if let Some(u) = resolve_url(&url) {
-        let _ = with_env(|env| env.fetch(rabbithole_net::Request::post(u, rabbithole_net::Body::text("text/plain", ""))));
+        let _ = with_env(|env| env.fetch(rabbithole_net::Request::post(u, rabbithole_net::Body::text("text/plain", "")).with_dest(rabbithole_net::Destination::Empty).with_referer(env.document_url())));
     }
     Ok(Value::Bool(true))
 }

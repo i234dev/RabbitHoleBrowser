@@ -1119,8 +1119,15 @@ impl App {
                 match outcome {
                     Ok(LoadOutcome::Page(loaded)) => {
                         let viewport = if idx == self.active { self.css_viewport() } else { loaded.viewport };
-                        let page = self.engine.build_page(*loaded, viewport);
+                        let mut page = self.engine.build_page(*loaded, viewport);
+                        // Redirects requested by the page itself (script or
+                        // meta refresh), windows and dialogs from load time.
+                        let navigation = self.engine.take_page_navigation(&mut page);
+                        let new_windows = std::mem::take(&mut page.script.new_windows);
+                        let dialogs = std::mem::take(&mut page.script.dialogs);
                         self.install_page(idx, page, request_url, push_history);
+                        let out = rabbithole_engine::ScriptOutcome { navigation, new_windows, dialogs, ..Default::default() };
+                        self.apply_outcome(idx, out);
                     }
                     Ok(LoadOutcome::Download) => {
                         self.tabs[idx].loading = None;

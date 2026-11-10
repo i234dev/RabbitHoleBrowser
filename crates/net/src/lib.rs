@@ -8,5 +8,5 @@ pub mod cookies;
 
 pub use url::{percent_decode, percent_encode_component, Url};
 pub use cookies::{Cookie, CookieJar};
-pub use fetch::{base64_decode, fetch, fetch_many, form_encode, mime_for_extension, parse_content_type, sanitize_filename, Body, FetchError, Fetcher, Request, Response, StreamedResponse};
+pub use fetch::{base64_decode, fetch, fetch_many, form_encode, mime_for_extension, parse_content_type, sanitize_filename, Body, Destination, FetchError, Fetcher, Request, Response, StreamedResponse, browser_headers, default_user_agent};
 pub use charset::{decode_text, sniff_meta_charset};

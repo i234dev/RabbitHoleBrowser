@@ -911,7 +911,7 @@ pub(crate) fn do_fetch(url: &str, method: &str, headers: &[(String, String)], bo
         }
     }
     let referer = with_env(|env| env.document_url());
-    req = req.with_referer(referer);
+    req = req.with_referer(referer).with_dest(rabbithole_net::Destination::Empty);
     with_env(|env| env.fetch(req))
 }
 

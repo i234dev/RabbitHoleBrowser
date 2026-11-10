@@ -22,7 +22,7 @@ use rabbithole_css::{parse_media_query, MatchState, MediaQuery, PseudoElement, R
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_gfx::{Canvas, Color, FontContext, Image, Rect};
 use rabbithole_layout::{DisplayList, LayoutBox, LayoutContext, LayoutTree, ScrollInfo};
-use rabbithole_net::{decode_text, FetchError, Fetcher, Response, Url};
+use rabbithole_net::{decode_text, Destination, FetchError, Fetcher, Response, Url};
 use rabbithole_style::{FontFace, MediaEnv, StyleOptions, StyledTree, Stylesheet};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -92,6 +92,8 @@ pub struct Loader {
     pub max_images: usize,
     pub max_background_images: usize,
     pub max_fonts: usize,
+    /// Page whose subresources are being fetched (referer / Sec-Fetch-Site).
+    pub initiator: Option<Url>,
     caches: Arc<Mutex<Caches>>,
 }
 
@@ -164,6 +166,7 @@ impl Default for Loader {
             max_images: 120,
             max_background_images: 40,
             max_fonts: 16,
+            initiator: None,
             caches: Arc::new(Mutex::new(Caches::default())),
         }
     }
@@ -246,6 +249,10 @@ impl Loader {
 
     /// Prepare a page from HTML source with the given document URL.
     pub fn load_html(&self, html: &str, url: Url, viewport: Viewport) -> LoadedPage {
+        if self.initiator.as_ref() != Some(&url) {
+            let bound = Loader { initiator: Some(url.clone()), ..self.clone() };
+            return bound.load_html(html, url, viewport);
+        }
         let doc = rabbithole_html::parse(html);
         let title = doc.title().unwrap_or_default();
         let base_url = doc
@@ -386,7 +393,7 @@ impl Loader {
         if urls.is_empty() {
             return;
         }
-        let results = self.fetcher.fetch_many(urls, 6);
+        let results = self.fetcher.fetch_many_for(urls, 6, Destination::Style, self.initiator.as_ref());
         let mut caches = self.caches.lock().unwrap();
         for (u, r) in urls.iter().zip(results) {
             let key = u.without_fragment().to_string();
@@ -553,7 +560,7 @@ impl Loader {
         fetcher.max_body = 16 * 1024 * 1024;
         let debug = std::env::var("RH_DEBUG_FETCH").is_ok();
         let t0 = std::time::Instant::now();
-        let results = fetcher.fetch_many(&to_fetch, 8);
+        let results = fetcher.fetch_many_for(&to_fetch, 8, Destination::Image, self.initiator.as_ref());
         if debug {
             eprintln!("[fetch] {} images in {:?}", to_fetch.len(), t0.elapsed());
             for (u, r) in to_fetch.iter().zip(results.iter()) {
@@ -644,7 +651,7 @@ impl Loader {
         if !to_fetch.is_empty() {
             let mut fetcher = self.fetcher.clone();
             fetcher.max_body = 8 * 1024 * 1024;
-            let results = fetcher.fetch_many(&to_fetch, 6);
+            let results = fetcher.fetch_many_for(&to_fetch, 6, Destination::Font, self.initiator.as_ref());
             let mut caches = self.caches.lock().unwrap();
             for (u, r) in to_fetch.iter().zip(results) {
                 let data = match r {
@@ -708,7 +715,7 @@ impl Loader {
             let urls: Vec<Url> = external.iter().map(|(_, u)| u.clone()).collect();
             let mut fetcher = self.fetcher.clone();
             fetcher.max_body = 8 * 1024 * 1024;
-            let results = fetcher.fetch_many(&urls, 6);
+            let results = fetcher.fetch_many_for(&urls, 6, Destination::Script, self.initiator.as_ref());
             for ((idx, _), r) in external.iter().zip(results) {
                 match r {
                     Ok(resp) if resp.status < 400 => {
@@ -873,9 +880,35 @@ impl Engine {
         page.sheet_signature = stylesheet_signature(&page.doc);
         self.restyle(&mut page);
         if self.scripting && !page.scripts.is_empty() {
-            let _ = self.run_page_scripts(&mut page);
+            // Keep what the scripts asked for during load (redirects via
+            // `location`, `window.open`, dialogs) for the embedder to apply.
+            let out = self.run_page_scripts(&mut page);
+            if out.navigation.is_some() {
+                page.script.pending_navigation = out.navigation;
+            }
+            page.script.new_windows.extend(out.new_windows);
+            page.script.dialogs.extend(out.dialogs);
+            if out.scroll_to.is_some() {
+                page.requested_scroll = out.scroll_to;
+            }
+        }
+        // `<meta http-equiv="refresh" content="N; url=...">` (N <= 5 s is
+        // followed right away; longer delays are left to the user).
+        if page.script.pending_navigation.is_none() {
+            if let Some(target) = meta_refresh_target(&page) {
+                page.script.pending_navigation = Some(PendingNavigation {
+                    request: Request::get(target).with_referer(page.url.clone()),
+                    replace: true,
+                });
+            }
         }
         page
+    }
+
+    /// Take the navigation a page requested by itself (script redirect or
+    /// meta refresh), if any.
+    pub fn take_page_navigation(&self, page: &mut Page) -> Option<PendingNavigation> {
+        page.script.pending_navigation.take()
     }
 
     /// Re-run style + layout + display list (after DOM, viewport or
@@ -1164,6 +1197,36 @@ fn rebase_rules(rules: Vec<Rule>, base: &str) -> Vec<Rule> {
             other => other,
         })
         .collect()
+}
+
+/// Target of a `<meta http-equiv="refresh">` with a short delay.
+fn meta_refresh_target(page: &Page) -> Option<Url> {
+    let doc = &page.doc;
+    let head = doc.head()?;
+    for n in doc.descendants(head) {
+        let Some(el) = doc.element(n) else { continue };
+        if el.tag != "meta" || !el.attr("http-equiv").map(|h| h.eq_ignore_ascii_case("refresh")).unwrap_or(false) {
+            continue;
+        }
+        let content = el.attr("content")?.trim();
+        let (delay, rest) = match content.find(|c: char| c == ';' || c == ',') {
+            Some(i) => (&content[..i], content[i + 1..].trim()),
+            None => (content, ""),
+        };
+        let delay: f32 = delay.trim().parse().unwrap_or(0.0);
+        if delay > 5.0 || rest.is_empty() {
+            return None;
+        }
+        let url = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let url = if url.len() >= 4 && url[..4].eq_ignore_ascii_case("url=") { &url[4..] } else { url };
+        let url = url.trim().trim_matches(|c| c == '\'' || c == '"');
+        if url.is_empty() {
+            return None;
+        }
+        let target = page.resolve(url)?;
+        return (target.without_fragment() != page.url.without_fragment()).then_some(target);
+    }
+    None
 }
 
 /// Hash of every `<style>` text and stylesheet `<link>` (href + media) in

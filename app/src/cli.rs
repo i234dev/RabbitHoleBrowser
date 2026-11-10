@@ -98,15 +98,18 @@ impl Session {
             Loaded::Page(p) => self.engine.build_page(p, viewport),
             Loaded::Download(s) => return Err(format!("{} is a download ({}), not a page", s.url, s.content_type)),
         };
-        if page.has_scripts() && self.wait_ms > 0 {
-            // Script-driven redirects (`location.href = ...`) are followed once.
-            if let Some(nav) = crate::scripting::settle(&self.engine, &mut page, self.wait_ms) {
-                self.flush_console(&mut page);
-                let loaded = self.engine.loader.load_request(&nav.request, viewport).map_err(|e| e.to_string())?;
-                if let Loaded::Page(p) = loaded {
-                    page = self.engine.build_page(p, viewport);
-                    let _ = crate::scripting::settle(&self.engine, &mut page, self.wait_ms);
-                }
+        // Follow redirects requested by the page itself (script during load
+        // or timers, `<meta http-equiv=refresh>`), up to a few hops.
+        for _hop in 0..5 {
+            let mut nav = self.engine.take_page_navigation(&mut page);
+            if nav.is_none() && page.has_scripts() && self.wait_ms > 0 {
+                nav = crate::scripting::settle(&self.engine, &mut page, self.wait_ms);
+            }
+            let Some(nav) = nav else { break };
+            self.flush_console(&mut page);
+            match self.engine.loader.load_request(&nav.request, viewport).map_err(|e| e.to_string())? {
+                Loaded::Page(p) => page = self.engine.build_page(p, viewport),
+                Loaded::Download(s) => return Err(format!("{} is a download ({}), not a page", s.url, s.content_type)),
             }
         }
         self.flush_console(&mut page);

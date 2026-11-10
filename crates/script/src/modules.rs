@@ -255,7 +255,7 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
     if let Some(id) = state().borrow().modules.cache.get(&key) {
         return Ok(*id);
     }
-    let resp = with_env(|env| env.fetch(rabbithole_net::Request::get(url.clone())));
+    let resp = with_env(|env| env.fetch(rabbithole_net::Request::get(url.clone()).with_dest(rabbithole_net::Destination::Script).with_referer(env.document_url())));
     let (text, kind) = match resp {
         Ok(r) if r.status < 400 => (rabbithole_net::decode_text(&r.body, r.charset.as_deref()), module_kind(&url, &r.content_type)),
         other => {

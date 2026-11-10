@@ -376,7 +376,7 @@ pub(crate) fn run_script_element(realm: &mut Realm, n: NodeRef) {
                 schedule_script_events(realm);
                 return;
             };
-            let resp = with_env(|env| env.fetch(rabbithole_net::Request::get(url.clone())));
+            let resp = with_env(|env| env.fetch(rabbithole_net::Request::get(url.clone()).with_dest(rabbithole_net::Destination::Script).with_referer(env.document_url())));
             match resp {
                 Ok(r) if r.status < 400 => (rabbithole_net::decode_text(&r.body, r.charset.as_deref()), url.to_string()),
                 _ => {

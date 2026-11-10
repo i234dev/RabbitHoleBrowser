@@ -201,6 +201,20 @@ pub fn form_encode(s: &str) -> String {
     out
 }
 
+/// What a request is for (Fetch `destination`): selects the browser-like
+/// `Accept` and `Sec-Fetch-*` headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destination {
+    /// Top-level navigation (typed URL, link, form).
+    Document,
+    Image,
+    Style,
+    Script,
+    Font,
+    /// `fetch()` / `XMLHttpRequest`.
+    Empty,
+}
+
 /// A request: method, URL, optional body, extra headers and referer.
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -211,14 +225,19 @@ pub struct Request {
     pub referer: Option<Url>,
     /// Follow redirects (default true).
     pub follow_redirects: bool,
+    pub dest: Destination,
 }
 
 impl Request {
     pub fn get(url: Url) -> Request {
-        Request { method: "GET".into(), url, body: None, headers: Vec::new(), referer: None, follow_redirects: true }
+        Request { method: "GET".into(), url, body: None, headers: Vec::new(), referer: None, follow_redirects: true, dest: Destination::Document }
     }
     pub fn post(url: Url, body: Body) -> Request {
-        Request { method: "POST".into(), url, body: Some(body), headers: Vec::new(), referer: None, follow_redirects: true }
+        Request { method: "POST".into(), url, body: Some(body), headers: Vec::new(), referer: None, follow_redirects: true, dest: Destination::Document }
+    }
+    pub fn with_dest(mut self, d: Destination) -> Request {
+        self.dest = d;
+        self
     }
     pub fn with_referer(mut self, r: Url) -> Request {
         self.referer = Some(r);
@@ -274,12 +293,12 @@ pub struct Fetcher {
 impl Default for Fetcher {
     fn default() -> Self {
         Fetcher {
-            user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 RabbitHole/0.2".into(),
+            user_agent: default_user_agent().into(),
             timeout: Duration::from_secs(15),
             max_body: 32 * 1024 * 1024,
             headers: Vec::new(),
             cookies: None,
-            accept_language: "en-US,en;q=0.9,es;q=0.8".into(),
+            accept_language: "es-ES,es;q=0.9,en;q=0.8".into(),
             agent: Arc::new(Mutex::new(None)),
         }
     }
@@ -441,10 +460,10 @@ impl Fetcher {
         let mut referer = req.referer.clone();
         for _hop in 0..12 {
             let target = url.to_string();
-            let mut r = agent
-                .request(&method, &target)
-                .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-                .set("Accept-Language", &self.accept_language);
+            let mut r = agent.request(&method, &target);
+            for (k, v) in browser_headers(req.dest, &method, &url, referer.as_ref(), &self.accept_language) {
+                r = r.set(&k, &v);
+            }
             for (k, v) in &self.headers {
                 r = r.set(k, v);
             }
@@ -547,7 +566,10 @@ impl Fetcher {
         let mut referer = req.referer.clone();
         for _hop in 0..12 {
             let target = url.to_string();
-            let mut r = agent.request(&method, &target).set("Accept", "*/*").set("Accept-Language", &self.accept_language);
+            let mut r = agent.request(&method, &target);
+            for (k, v) in browser_headers(req.dest, &method, &url, referer.as_ref(), &self.accept_language) {
+                r = r.set(&k, &v);
+            }
             for (k, v) in &self.headers {
                 r = r.set(k, v);
             }
@@ -640,7 +662,10 @@ impl Fetcher {
         // request manually without body limits.
         let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(600)).user_agent(&self.user_agent).redirects(10).build();
         let target = req.url.without_fragment().to_string();
-        let mut r = agent.request(&req.method, &target).set("Accept", "*/*").set("Accept-Language", &self.accept_language);
+        let mut r = agent.request(&req.method, &target);
+        for (k, v) in browser_headers(req.dest, &req.method, &req.url, req.referer.as_ref(), &self.accept_language) {
+            r = r.set(&k, &v);
+        }
         for (k, v) in &self.headers {
             r = r.set(k, v);
         }
@@ -751,6 +776,45 @@ impl Fetcher {
 
     /// Fetch several URLs concurrently on a small thread pool, preserving
     /// order. Errors are per-item.
+    /// Like `fetch_many`, for subresources of a page: browser headers for
+    /// `dest`, with `initiator` as referer/initiator.
+    pub fn fetch_many_for(&self, urls: &[Url], parallelism: usize, dest: Destination, initiator: Option<&Url>) -> Vec<Result<Response, FetchError>> {
+        let reqs: Vec<Request> = urls
+            .iter()
+            .map(|u| {
+                let mut r = Request::get(u.clone()).with_dest(dest);
+                r.referer = initiator.cloned();
+                r
+            })
+            .collect();
+        self.request_many(&reqs, parallelism)
+    }
+
+    /// Perform several requests concurrently, preserving order.
+    pub fn request_many(&self, reqs: &[Request], parallelism: usize) -> Vec<Result<Response, FetchError>> {
+        let parallelism = parallelism.max(1).min(reqs.len().max(1));
+        let results: Mutex<Vec<Option<Result<Response, FetchError>>>> = Mutex::new((0..reqs.len()).map(|_| None).collect());
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..parallelism {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    if i >= reqs.len() {
+                        break;
+                    }
+                    let r = self.request(&reqs[i]);
+                    results.lock().unwrap()[i] = Some(r);
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err(FetchError::Other("not fetched".into()))))
+            .collect()
+    }
+
     pub fn fetch_many(&self, urls: &[Url], parallelism: usize) -> Vec<Result<Response, FetchError>> {
         let parallelism = parallelism.max(1).min(urls.len().max(1));
         let results: Mutex<Vec<Option<Result<Response, FetchError>>>> = Mutex::new((0..urls.len()).map(|_| None).collect());
@@ -774,6 +838,97 @@ impl Fetcher {
             .map(|r| r.unwrap_or_else(|| Err(FetchError::Other("not fetched".into()))))
             .collect()
     }
+}
+
+
+/// Chrome major version we present as.
+pub const CHROME_MAJOR: u32 = 142;
+
+/// A Chrome User-Agent string for the current OS (what Chromium-based
+/// browsers such as Edge or Brave also send).
+pub fn default_user_agent() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+    } else if cfg!(target_os = "macos") {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+    } else {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+    }
+}
+
+fn platform_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "\"Windows\""
+    } else if cfg!(target_os = "macos") {
+        "\"macOS\""
+    } else {
+        "\"Linux\""
+    }
+}
+
+/// Registrable domain (approximation of eTLD+1).
+fn site_of(host: &str) -> String {
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() <= 2 || host.parse::<std::net::IpAddr>().is_ok() {
+        return host.to_string();
+    }
+    let n = labels.len();
+    // Two-part public suffixes like co.uk, com.es, com.au.
+    let second = labels[n - 2];
+    let take = if matches!(second, "co" | "com" | "org" | "net" | "gov" | "edu" | "ac" | "gob" | "nom") && labels[n - 1].len() == 2 { 3 } else { 2 };
+    labels[n - take.min(n)..].join(".")
+}
+
+/// `Sec-Fetch-Site` for a request to `url` initiated from `initiator`.
+fn fetch_site(initiator: Option<&Url>, url: &Url) -> &'static str {
+    match initiator {
+        None => "none",
+        Some(i) if !i.is_http() => "none",
+        Some(i) if i.origin() == url.origin() => "same-origin",
+        Some(i) if i.scheme == url.scheme && site_of(&i.host) == site_of(&url.host) => "same-site",
+        Some(_) => "cross-site",
+    }
+}
+
+/// The headers Chrome sends for a request of `dest` to `url`.
+pub fn browser_headers(dest: Destination, method: &str, url: &Url, initiator: Option<&Url>, accept_language: &str) -> Vec<(String, String)> {
+    let mut h: Vec<(String, String)> = Vec::with_capacity(12);
+    let mut push = |k: &str, v: &str| h.push((k.to_string(), v.to_string()));
+    let brand = format!("\"Chromium\";v=\"{CHROME_MAJOR}\", \"Google Chrome\";v=\"{CHROME_MAJOR}\", \"Not_A Brand\";v=\"99\"");
+    push("sec-ch-ua", &brand);
+    push("sec-ch-ua-mobile", "?0");
+    push("sec-ch-ua-platform", platform_name());
+    let (accept, mode, dest_name) = match dest {
+        Destination::Document => (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "navigate",
+            "document",
+        ),
+        Destination::Image => ("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", "no-cors", "image"),
+        Destination::Style => ("text/css,*/*;q=0.1", "no-cors", "style"),
+        Destination::Script => ("*/*", "no-cors", "script"),
+        Destination::Font => ("*/*", "cors", "font"),
+        Destination::Empty => ("*/*", "cors", "empty"),
+    };
+    if dest == Destination::Document {
+        push("Upgrade-Insecure-Requests", "1");
+    }
+    push("Accept", accept);
+    let site = fetch_site(initiator, url);
+    push("Sec-Fetch-Site", site);
+    push("Sec-Fetch-Mode", mode);
+    if dest == Destination::Document {
+        push("Sec-Fetch-User", "?1");
+    }
+    push("Sec-Fetch-Dest", dest_name);
+    if mode == "cors" && (site != "same-origin" || method != "GET") {
+        if let Some(i) = initiator.filter(|i| i.is_http()) {
+            push("Origin", &i.origin());
+        }
+    }
+    push("Accept-Encoding", "gzip, br");
+    push("Accept-Language", accept_language);
+    h
 }
 
 fn fetch_data(url: &Url) -> Result<Response, FetchError> {

@@ -8,4 +8,4 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+ureq = { version = "2", default-features = false, features = ["tls", "gzip", "brotli"] }
