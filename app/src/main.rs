@@ -9,6 +9,8 @@ mod gui;
 mod history;
 mod mcp;
 mod profile;
+mod scripting;
+mod settings;
 
 use std::process::ExitCode;
 

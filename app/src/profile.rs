@@ -44,6 +44,12 @@ impl Profile {
     pub fn zoom_path(&self) -> PathBuf {
         self.dir.join("zoom.txt")
     }
+    pub fn settings_path(&self) -> PathBuf {
+        self.dir.join("settings.txt")
+    }
+    pub fn local_storage_path(&self) -> PathBuf {
+        self.dir.join("localstorage.txt")
+    }
 
     /// Load the persisted cookie jar (empty when missing).
     pub fn load_cookies(&self) -> Arc<Mutex<CookieJar>> {

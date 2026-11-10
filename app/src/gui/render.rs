@@ -55,6 +55,8 @@ impl App {
         self.draw_tab_bar();
         self.draw_toolbar();
         self.draw_find_bar();
+        self.draw_console();
+        self.draw_toasts(area);
         self.draw_status_bar();
         self.draw_popups();
 
@@ -232,6 +234,29 @@ impl App {
         draw_button(&mut self.canvas, &fonts, self.ui_font, s, chrome.find_close(), "×", true, false, None);
     }
 
+    /// Script dialogs (`alert`/`confirm`/`prompt`) shown as banners at the
+    /// top of the page area.
+    fn draw_toasts(&mut self, area: Rect) {
+        if self.toasts.is_empty() {
+            return;
+        }
+        let s = self.chrome().s;
+        let fonts = self.engine.fonts.clone();
+        let size = 13.0 * s;
+        let h = super::chrome::TOAST_H * s;
+        let mut y = area.y + 8.0 * s;
+        let texts: Vec<String> = self.toasts.iter().map(|(t, _)| t.clone()).collect();
+        for text in texts {
+            let w = (area.w - 32.0 * s).min(640.0 * s);
+            let r = Rect::new(area.x + (area.w - w) / 2.0, y, w, h);
+            self.canvas.fill_rounded_rect(r, 6.0 * s, rabbithole_engine::gfx::Color::rgb(0x30, 0x33, 0x36));
+            let baseline = baseline_in(&fonts, self.ui_font, size, r);
+            let label = ellipsize(&fonts, self.ui_font, size, &text, w - 24.0 * s);
+            self.canvas.draw_text(&fonts, self.ui_font, size, &label, r.x + 12.0 * s, baseline, rabbithole_engine::gfx::Color::WHITE);
+            y += h + 6.0 * s;
+        }
+    }
+
     fn draw_status_bar(&mut self) {
         let chrome = self.chrome();
         if chrome.fullscreen {
@@ -249,6 +274,7 @@ impl App {
             .or_else(|| self.downloads.status_text())
             .or(loading)
             .or(zoom)
+            .or_else(|| (!self.settings.javascript).then(|| "JavaScript disabled".to_string()))
             .unwrap_or_default();
         if text.is_empty() {
             return;

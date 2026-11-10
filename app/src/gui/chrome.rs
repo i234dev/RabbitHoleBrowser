@@ -10,6 +10,8 @@ pub const TAB_H: f32 = 34.0;
 pub const TOOLBAR_H: f32 = 44.0;
 pub const FIND_H: f32 = 36.0;
 pub const STATUS_H: f32 = 22.0;
+pub const CONSOLE_H: f32 = 200.0;
+pub const TOAST_H: f32 = 30.0;
 pub const PROGRESS_H: f32 = 3.0;
 pub const BUTTON: f32 = 32.0;
 pub const GAP: f32 = 4.0;
@@ -100,6 +102,9 @@ pub enum Action {
     SelectOption(NodeId, usize),
     ToggleBookmark,
     About,
+    ToggleJavaScript,
+    ToggleConsole,
+    ClearConsole,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +222,8 @@ pub struct Chrome {
     pub height: f32,
     pub find_open: bool,
     pub fullscreen: bool,
+    /// The JavaScript console pane is shown below the page.
+    pub console_open: bool,
 }
 
 impl Chrome {
@@ -251,9 +258,23 @@ impl Chrome {
         Rect::new(0.0, self.height - STATUS_H * self.s, self.width, STATUS_H * self.s)
     }
 
+    /// The console pane (zero height when closed), above the status bar.
+    pub fn console_pane(&self) -> Rect {
+        let h = if self.console_open { (CONSOLE_H * self.s).min(self.height * 0.6) } else { 0.0 };
+        let bottom = self.status_bar().y;
+        Rect::new(0.0, bottom - h, self.width, h)
+    }
+
+    /// The console input line at the bottom of the pane.
+    pub fn console_input(&self) -> Rect {
+        let p = self.console_pane();
+        let h = 26.0 * self.s;
+        Rect::new(p.x + 6.0 * self.s, p.bottom() - h - 4.0 * self.s, p.w - 12.0 * self.s, h)
+    }
+
     pub fn page_area(&self) -> Rect {
         let top = self.find_bar().bottom();
-        let bottom = self.status_bar().y;
+        let bottom = self.console_pane().y;
         Rect::new(0.0, top, self.width.max(1.0), (bottom - top).max(1.0))
     }
 
@@ -436,7 +457,7 @@ mod tests {
 
     #[test]
     fn geometry() {
-        let c = Chrome { s: 2.0, width: 1600.0, height: 1000.0, find_open: true, fullscreen: false };
+        let c = Chrome { s: 2.0, width: 1600.0, height: 1000.0, find_open: true, fullscreen: false, console_open: false };
         assert_eq!(c.tab_bar().h, 68.0);
         assert_eq!(c.toolbar().y, 68.0);
         assert_eq!(c.find_bar().h, 72.0);
@@ -450,5 +471,9 @@ mod tests {
         let fs = Chrome { fullscreen: true, ..c };
         assert_eq!(fs.page_area().y, 72.0);
         assert_eq!(fs.page_area().bottom(), 1000.0);
+        let co = Chrome { console_open: true, ..c };
+        assert_eq!(co.console_pane().h, 400.0);
+        assert_eq!(co.page_area().bottom(), 1000.0 - 44.0 - 400.0);
+        assert!(co.console_input().y > co.console_pane().y);
     }
 }

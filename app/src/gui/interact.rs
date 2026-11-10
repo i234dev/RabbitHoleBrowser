@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use rabbithole_engine::dom::NodeId;
 use rabbithole_engine::gfx::Rect;
 use rabbithole_engine::net::Url;
+use rabbithole_engine::scripting::{mouse_init, plain_init};
 use rabbithole_engine::ControlKind;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
@@ -103,6 +104,18 @@ impl App {
             if let Some(css) = self.to_css(self.cursor) {
                 let doc = self.to_doc(css);
                 let node = self.page().and_then(|p| p.node_at_viewport(css.0, css.1));
+                let prev = self.tabs.get(self.active).and_then(|t| t.hover_node);
+                if prev != node && self.page().map(|p| p.has_scripts()).unwrap_or(false) {
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.hover_node = node;
+                    }
+                    if let Some(p) = prev {
+                        self.page_mouse_event(p, "mouseout", css, 0);
+                    }
+                    if let Some(n) = node {
+                        self.page_mouse_event(n, "mouseover", css, 0);
+                    }
+                }
                 if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
                     if self.engine.set_hover(page, node) {
                         self.page_dirty = true;
@@ -270,8 +283,19 @@ impl App {
             return;
         }
 
+        // Console pane.
+        if chrome.console_open && chrome.console_pane().contains(x, y) {
+            self.blur_url_field();
+            self.ui_focus = UiFocus::Console;
+            self.request_redraw();
+            return;
+        }
+
         // Page.
         self.blur_url_field();
+        if self.ui_focus == UiFocus::Console {
+            self.ui_focus = UiFocus::Page;
+        }
         if self.ui_focus == UiFocus::Find {
             self.ui_focus = UiFocus::Page;
         }
@@ -280,12 +304,25 @@ impl App {
         let node = self.page().and_then(|p| p.node_at_viewport(css.0, css.1));
         let link = node.and_then(|n| self.page().and_then(|p| p.link_of(n)));
 
+        let button_code: u8 = match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            _ => 0,
+        };
+        if let Some(n) = node {
+            self.page_mouse_event(n, "mousedown", css, button_code);
+        }
         if button == MouseButton::Right {
-            self.open_context_menu(link, x, y);
+            let prevented = node.map(|n| self.page_mouse_event(n, "contextmenu", css, 2).default_prevented).unwrap_or(false);
+            if !prevented {
+                self.open_context_menu(link, x, y);
+            }
             return;
         }
         if button == MouseButton::Middle {
-            if let Some(l) = link {
+            let prevented = node.map(|n| self.page_mouse_event(n, "auxclick", css, 1).default_prevented).unwrap_or(false);
+            if let (Some(l), false) = (link, prevented) {
                 self.follow_link(l, true);
             }
             return;
@@ -293,6 +330,9 @@ impl App {
         if button != MouseButton::Left {
             return;
         }
+        // Scripts may have changed the page: hit-test again.
+        let node = self.page().and_then(|p| p.node_at_viewport(css.0, css.1));
+        let link = node.and_then(|n| self.page().and_then(|p| p.link_of(n)));
 
         // Double click → word selection.
         let now = Instant::now();
@@ -314,7 +354,10 @@ impl App {
                 }
                 ControlKind::Checkbox | ControlKind::Radio => {
                     self.end_edit();
-                    self.mutate_page(|p| p.toggle_control(c));
+                    self.page_mouse_event(c, "mouseup", css, 0);
+                    if !self.page_mouse_event(c, "click", css, 0).default_prevented {
+                        self.toggle_control_with_events(c);
+                    }
                     return;
                 }
                 ControlKind::Select => {
@@ -323,14 +366,22 @@ impl App {
                     return;
                 }
                 ControlKind::Submit => {
-                    self.submit_form(c, Some(c));
+                    self.page_mouse_event(c, "mouseup", css, 0);
+                    let out = self.page_mouse_event(c, "click", css, 0);
+                    if !out.default_prevented && out.navigation.is_none() {
+                        self.submit_form(c, Some(c));
+                    }
                     return;
                 }
                 ControlKind::Reset => {
                     self.end_edit();
-                    let form = self.page().and_then(|p| p.form_of(c));
-                    if let Some(f) = form {
-                        self.mutate_page(|p| p.reset_form(f));
+                    self.page_mouse_event(c, "mouseup", css, 0);
+                    if !self.page_mouse_event(c, "click", css, 0).default_prevented {
+                        let form = self.page().and_then(|p| p.form_of(c));
+                        if let Some(f) = form {
+                            self.mutate_page(|p| p.reset_form(f));
+                            self.dispatch_to(f, "reset", plain_init(true));
+                        }
                     }
                     return;
                 }
@@ -346,6 +397,9 @@ impl App {
             tab.focus = None;
         }
         if double {
+            if let Some(n) = node {
+                self.page_mouse_event(n, "dblclick", css, 0);
+            }
             let sel = self.page().map(|p| p.select_word_at(&self.engine.fonts, doc.0, doc.1));
             if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.selection = sel.filter(|s| !s.rects.is_empty());
@@ -354,6 +408,14 @@ impl App {
             return;
         }
         self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: Some(doc), link, dragged: false });
+        self.mouse_down_node = node;
+    }
+
+    /// Dispatch a mouse event to a page node (viewport CSS coordinates).
+    pub(crate) fn page_mouse_event(&mut self, node: NodeId, event_type: &str, css: (f32, f32), button: u8) -> rabbithole_engine::ScriptOutcome {
+        let m = self.modifiers;
+        let init = mouse_init(css.0, css.1, button, m.control_key(), m.shift_key(), m.alt_key(), m.super_key());
+        self.dispatch_to(node, event_type, init)
     }
 
     pub(crate) fn handle_mouse_up(&mut self, button: MouseButton) {
@@ -369,7 +431,15 @@ impl App {
                 self.request_redraw();
             }
         }
-        if let Some(link) = md.link {
+        // Click on a plain element: tell scripts first; a prevented click
+        // (or one that navigated by itself) skips the link default action.
+        let mut prevented = false;
+        if let (Some(node), Some(css)) = (self.mouse_down_node.take(), self.to_css(self.cursor)) {
+            self.page_mouse_event(node, "mouseup", css, 0);
+            let out = self.page_mouse_event(node, "click", css, 0);
+            prevented = out.default_prevented || out.navigation.is_some();
+        }
+        if let (Some(link), false) = (md.link, prevented) {
             let new_tab = self.modifiers.control_key() || self.modifiers.super_key();
             self.follow_link(link, new_tab);
         }
@@ -387,6 +457,11 @@ impl App {
                 self.request_redraw();
                 return;
             }
+        }
+        let chrome = self.chrome();
+        if chrome.console_open && chrome.console_pane().contains(x, y) {
+            self.scroll_console(dy);
+            return;
         }
         if self.modifiers.control_key() {
             let z = self.tab().map(|t| t.zoom).unwrap_or(1.0);
@@ -481,6 +556,8 @@ impl App {
             MenuItem::new("Reset zoom             Ctrl+0", Action::ZoomReset),
             MenuItem::new("Find in page       Ctrl+F", Action::Find).sep(),
             MenuItem::new("Page text", Action::ViewText),
+            MenuItem::new("JavaScript console  Ctrl+Shift+J", Action::ToggleConsole).sep(),
+            MenuItem::new(if self.settings.javascript { "Disable JavaScript" } else { "Enable JavaScript" }, Action::ToggleJavaScript),
             MenuItem::new("Clear cookies", Action::ClearCookies).sep(),
             MenuItem::new("About RabbitHole", Action::About),
             MenuItem::new("Quit               Ctrl+Q", Action::Quit).sep(),
@@ -589,15 +666,53 @@ impl App {
                     self.clipboard_set(&u);
                 }
             }
-            Action::SelectOption(node, i) => self.mutate_page(|p| p.select_option(node, i)),
+            Action::SelectOption(node, i) => self.select_option_with_events(node, i),
             Action::ToggleBookmark => self.toggle_bookmark(),
+            Action::ToggleJavaScript => self.toggle_javascript(),
+            Action::ToggleConsole => self.toggle_console(),
+            Action::ClearConsole => {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.console.clear();
+                    tab.console_scroll = 0;
+                }
+                self.request_redraw();
+            }
         }
     }
 
     // ------------------------------------------------------------- keyboard
 
+    /// Send `keydown`/`keyup` to the page (focused control, else `body`).
+    /// Returns true when a listener called `preventDefault()`.
+    fn page_key_event(&mut self, event: &KeyEvent) -> bool {
+        if self.ui_focus != UiFocus::Page || self.menu.is_some() || self.context_menu.is_some() || self.dropdown.is_some() {
+            return false;
+        }
+        let Some(page) = self.page() else { return false };
+        if !page.has_scripts() {
+            return false;
+        }
+        let target = self.tab().and_then(|t| t.focus).or_else(|| page.doc.body());
+        let Some(target) = target else { return false };
+        let key = key_name(&event.logical_key);
+        let code = format!("{:?}", event.physical_key).trim_start_matches("Code(").trim_end_matches(')').to_string();
+        let m = self.modifiers;
+        let init = rabbithole_engine::scripting::key_init(&key, &code, m.control_key(), m.shift_key(), m.alt_key(), m.super_key(), event.repeat);
+        let ty = if event.state == ElementState::Pressed { "keydown" } else { "keyup" };
+        let out = self.dispatch_to(target, ty, init);
+        out.default_prevented || out.navigation.is_some()
+    }
+
     pub(crate) fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
         if event.state != ElementState::Pressed {
+            self.page_key_event(event);
+            return;
+        }
+        // Browser-level shortcuts are never cancellable by pages.
+        let browser_shortcut = (self.modifiers.control_key() || self.modifiers.super_key())
+            && matches!(&event.logical_key, Key::Character(c) if matches!(c.to_lowercase().as_str(), "q" | "w" | "t" | "l" | "r" | "j" | "h"))
+            || matches!(&event.logical_key, Key::Named(NamedKey::F5 | NamedKey::F6 | NamedKey::F11));
+        if !browser_shortcut && self.page_key_event(event) {
             return;
         }
         let ctrl = self.modifiers.control_key() || self.modifiers.super_key();
@@ -656,6 +771,7 @@ impl App {
                     "f" => return self.open_find(),
                     "d" => return self.toggle_bookmark(),
                     "h" => return self.navigate_tab(idx, "about:history", true),
+                    "j" if shift => return self.toggle_console(),
                     "j" => return self.navigate_tab(idx, "about:downloads", true),
                     "o" if shift => return self.navigate_tab(idx, "about:bookmarks", true),
                     "+" | "=" => return self.set_zoom(self.tab().map(|t| t.zoom).unwrap_or(1.0) + 0.1),
@@ -704,6 +820,7 @@ impl App {
         match self.ui_focus {
             UiFocus::Url => self.handle_url_key(event, ctrl, shift),
             UiFocus::Find => self.handle_find_key(event, ctrl, shift),
+            UiFocus::Console => self.handle_console_key(event, ctrl, shift),
             UiFocus::Page => {
                 if self.tab().map(|t| t.edit.is_some()).unwrap_or(false) {
                     self.handle_control_key(event, ctrl, shift);
@@ -726,6 +843,12 @@ impl App {
                     tab.find.field.insert(text, None);
                 }
                 self.refresh_find();
+            }
+            UiFocus::Console => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.console_input.insert(text, None);
+                }
+                self.request_redraw();
             }
             UiFocus::Page => {
                 let editing = self.tab().map(|t| t.edit.is_some()).unwrap_or(false);
@@ -983,7 +1106,7 @@ impl App {
                     self.page().map(|p| matches!(p.control_kind(n), ControlKind::Checkbox | ControlKind::Radio)).unwrap_or(false)
                 });
                 if let Some(n) = focused_checkbox {
-                    self.mutate_page(|p| p.toggle_control(n));
+                    self.toggle_control_with_events(n);
                 } else {
                     self.scroll_by(0.0, if shift { -page_step } else { page_step });
                 }
@@ -1001,7 +1124,7 @@ impl App {
                     } else if let Some(kind) = self.page().map(|p| p.control_kind(n)) {
                         match kind {
                             ControlKind::Submit => self.submit_form(n, Some(n)),
-                            ControlKind::Checkbox | ControlKind::Radio => self.mutate_page(|p| p.toggle_control(n)),
+                            ControlKind::Checkbox | ControlKind::Radio => self.toggle_control_with_events(n),
                             ControlKind::Select => self.open_select_dropdown(n),
                             _ => {}
                         }
@@ -1126,5 +1249,21 @@ impl App {
         let r = tab.find.matches[tab.find.current];
         self.scroll_into_view(r);
         self.request_redraw();
+    }
+}
+
+/// DOM `KeyboardEvent.key` value for a winit key.
+fn key_name(key: &Key) -> String {
+    match key {
+        Key::Character(c) => c.to_string(),
+        Key::Named(n) => match n {
+            NamedKey::Space => " ".into(),
+            NamedKey::ArrowDown => "ArrowDown".into(),
+            NamedKey::ArrowUp => "ArrowUp".into(),
+            NamedKey::ArrowLeft => "ArrowLeft".into(),
+            NamedKey::ArrowRight => "ArrowRight".into(),
+            other => format!("{other:?}"),
+        },
+        _ => "Unidentified".into(),
     }
 }

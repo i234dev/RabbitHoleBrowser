@@ -3,6 +3,7 @@
 //! `render.rs`, input handling in `interact.rs`.
 
 pub mod chrome;
+pub mod console;
 pub mod downloads;
 pub mod input;
 mod interact;
@@ -20,6 +21,8 @@ use std::time::{Duration, Instant};
 use rabbithole_engine::dom::NodeId;
 use rabbithole_engine::gfx::{Canvas, Family, FontId, Rect};
 use rabbithole_engine::net::{CookieJar, Request, Url};
+use rabbithole_engine::script::EventInit;
+use rabbithole_engine::scripting::{input_init, plain_init, ScriptOutcome};
 use rabbithole_engine::{Engine, Page, Viewport};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -31,6 +34,7 @@ use winit::window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId};
 use crate::bookmarks::Bookmarks;
 use crate::history::History;
 use crate::profile::{clamp_zoom, Profile, Session, ZoomLevels};
+use crate::settings::Settings;
 use chrome::{Menu, ToolButton};
 use downloads::{DownloadItem, DownloadState, Downloads};
 use input::TextBuffer;
@@ -43,6 +47,7 @@ pub enum UiFocus {
     Page,
     Url,
     Find,
+    Console,
 }
 
 /// A pressed mouse button awaiting release.
@@ -103,6 +108,8 @@ pub struct App {
     pub(crate) cursor: PhysicalPosition<f64>,
     pub(crate) cursor_icon: CursorIcon,
     pub(crate) mouse_down: Option<MouseDown>,
+    /// Element under the pointer when the left button went down.
+    pub(crate) mouse_down_node: Option<NodeId>,
     pub(crate) last_click: Option<(Instant, PhysicalPosition<f64>)>,
     pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) start_urls: Vec<String>,
@@ -113,6 +120,15 @@ pub struct App {
     pub(crate) needs_relayout: bool,
     /// Fragment to scroll to after the next layout.
     pub(crate) pending_fragment: Option<String>,
+    pub(crate) settings: Settings,
+    /// The JavaScript console pane is open.
+    pub(crate) console_open: bool,
+    /// Transient banners for script dialogs (`alert`, ...).
+    pub(crate) toasts: Vec<(String, Instant)>,
+    /// Last time a `scroll` event was dispatched to scripts.
+    pub(crate) last_scroll_dispatch: Instant,
+    /// A page was rebuilt by scripts since the last draw (hit tests must be fresh).
+    pub(crate) script_relayout: bool,
 }
 
 impl App {
@@ -121,6 +137,11 @@ impl App {
         let cookies = profile.load_cookies();
         let mut engine = Engine::new();
         engine.loader.fetcher.cookies = Some(cookies.clone());
+        let settings = Settings::load(&profile.settings_path());
+        engine.scripting = settings.javascript;
+        engine.loader.load_scripts = settings.javascript;
+        engine.loader.load_images = settings.images;
+        engine.set_local_storage_path(profile.local_storage_path());
         let ui_font = engine.fonts.select(Family::Sans, 400, false);
         let ui_font_bold = engine.fonts.select(Family::Sans, 700, false);
         let history = History::load(&profile.history_path());
@@ -171,6 +192,12 @@ impl App {
             fullscreen: false,
             needs_relayout: false,
             pending_fragment: None,
+            settings,
+            console_open: false,
+            toasts: Vec::new(),
+            last_scroll_dispatch: Instant::now(),
+            script_relayout: false,
+            mouse_down_node: None,
         }
     }
 
@@ -193,6 +220,7 @@ impl App {
             height: size.height.max(1) as f32,
             find_open: self.tabs.get(self.active).map(|t| t.find.open).unwrap_or(false),
             fullscreen: self.fullscreen,
+            console_open: self.console_open,
         }
     }
 
@@ -395,7 +423,20 @@ impl App {
             return;
         }
         if url.scheme == "javascript" {
+            if let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) {
+                let result = crate::scripting::run_javascript_url(&self.engine, page, &url);
+                let _ = result;
+                self.after_script_activity(idx);
+            }
             return;
+        }
+        // Tell the old page it is going away.
+        if self.tabs.get(idx).and_then(|t| t.page.as_ref()).map(|p| p.has_scripts()).unwrap_or(false) {
+            for ev in ["beforeunload", "pagehide", "unload"] {
+                if let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) {
+                    let _ = self.engine.dispatch_window_event(page, ev);
+                }
+            }
         }
         let viewport = self.css_viewport();
         let tab = &mut self.tabs[idx];
@@ -508,6 +549,7 @@ impl App {
             tab.needs_relayout = true;
         }
         let _ = request_url;
+        self.drain_console(idx);
         self.history.add(&url_str, &title);
         self.history.flush(&self.profile.history_path());
         self.profile.save_cookies(&self.cookies);
@@ -583,6 +625,7 @@ impl App {
             }
             self.scroll_to_fragment(&fragment);
             self.sync_url_field();
+            self.dispatch_window("hashchange");
             return;
         }
         let idx = self.active;
@@ -614,6 +657,10 @@ impl App {
             }
             self.mark_page_dirty();
             self.update_hover();
+            if self.last_scroll_dispatch.elapsed() >= Duration::from_millis(16) {
+                self.last_scroll_dispatch = Instant::now();
+                self.dispatch_window("scroll");
+            }
         }
     }
 
@@ -658,12 +705,18 @@ impl App {
         let needs = self.needs_relayout || tab.needs_relayout;
         self.needs_relayout = false;
         tab.needs_relayout = false;
+        let mut resized = false;
         if let Some(page) = tab.page.as_mut() {
             if needs || page.viewport != vp {
+                resized = page.viewport != vp;
                 self.engine.relayout(page, vp);
                 self.page_dirty = true;
             }
         }
+        if resized {
+            self.dispatch_window("resize");
+        }
+        let Some(tab) = self.tabs.get(idx) else { return };
         let (x, y) = tab.scroll;
         let (mx, my) = (tab.max_scroll_x(vp.width), tab.max_scroll(vp.height));
         if x > mx || y > my {
@@ -703,22 +756,29 @@ impl App {
         let text = page.control_text(node);
         let max_len = page.max_length(node);
         self.engine.set_focus(page, Some(node));
-        tab.edit = Some(ControlEdit { node, buf: TextBuffer::new(&text), kind, max_len });
+        tab.edit = Some(ControlEdit { node, buf: TextBuffer::new(&text), kind, max_len, initial: text.clone() });
         tab.focus = Some(node);
         tab.selection = None;
         self.ui_focus = UiFocus::Page;
         self.mark_page_dirty();
+        self.dispatch_to(node, "focus", EventInit::simple(false, false));
+        self.dispatch_to(node, "focusin", EventInit::simple(true, false));
     }
 
     pub(crate) fn end_edit(&mut self) {
         let idx = self.active;
         let Some(tab) = self.tabs.get_mut(idx) else { return };
-        if tab.edit.take().is_some() {
+        if let Some(edit) = tab.edit.take() {
             if let Some(page) = tab.page.as_mut() {
                 self.engine.set_focus(page, None);
             }
             tab.focus = None;
             self.mark_page_dirty();
+            if edit.buf.text != edit.initial {
+                self.dispatch_to(edit.node, "change", plain_init(false));
+            }
+            self.dispatch_to(edit.node, "blur", EventInit::simple(false, false));
+            self.dispatch_to(edit.node, "focusout", EventInit::simple(true, false));
         }
     }
 
@@ -735,6 +795,7 @@ impl App {
             self.engine.set_page_scroll(page, x, y);
         }
         self.mark_page_dirty();
+        self.dispatch_to(node, "input", input_init(Some(&text)));
     }
 
     /// Submit the form containing `control` (or the control itself when it
@@ -747,9 +808,222 @@ impl App {
             return;
         };
         let submitter = submitter.or_else(|| page.default_submitter(form));
+        let out = self.dispatch_to(form, "submit", plain_init(true));
+        if out.default_prevented || out.navigation.is_some() {
+            return;
+        }
+        let Some(page) = self.tabs.get(idx).and_then(|t| t.page.as_ref()) else { return };
         let Some(req) = page.submit_request(form, submitter, &|_| Vec::new()) else { return };
         self.end_edit();
         self.navigate_request(idx, req, true);
+    }
+
+    /// Toggle a checkbox/radio and tell scripts.
+    pub(crate) fn toggle_control_with_events(&mut self, node: NodeId) {
+        self.mutate_page(|p| p.toggle_control(node));
+        self.dispatch_to(node, "input", input_init(None));
+        self.dispatch_to(node, "change", plain_init(false));
+    }
+
+    /// Choose a `<select>` option and tell scripts.
+    pub(crate) fn select_option_with_events(&mut self, node: NodeId, index: usize) {
+        self.mutate_page(|p| p.select_option(node, index));
+        self.dispatch_to(node, "input", input_init(None));
+        self.dispatch_to(node, "change", plain_init(false));
+    }
+
+    // ------------------------------------------------------------ scripting
+
+    /// Dispatch an event to a node of the active page and apply the outcome.
+    /// Returns the outcome (with `default_prevented`).
+    pub(crate) fn dispatch_to(&mut self, node: NodeId, event_type: &str, init: EventInit) -> ScriptOutcome {
+        let idx = self.active;
+        let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) else { return ScriptOutcome::default() };
+        if !page.has_scripts() {
+            return ScriptOutcome::default();
+        }
+        let out = self.engine.dispatch_event(page, node, event_type, init);
+        let prevented = out.default_prevented;
+        let navigated = out.navigation.is_some();
+        self.apply_outcome(idx, out);
+        ScriptOutcome { default_prevented: prevented, navigation: if navigated { Some(dummy_navigation()) } else { None }, ..Default::default() }
+    }
+
+    /// Dispatch a window-level event (`resize`, `scroll`, `hashchange`).
+    pub(crate) fn dispatch_window(&mut self, event_type: &str) {
+        let idx = self.active;
+        let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) else { return };
+        if !page.has_scripts() {
+            return;
+        }
+        let out = self.engine.dispatch_window_event(page, event_type);
+        self.apply_outcome(idx, out);
+    }
+
+    /// Apply what scripts asked for after an event/timer: relayout,
+    /// navigation, new tabs, dialogs, scrolling.
+    pub(crate) fn apply_outcome(&mut self, idx: usize, out: ScriptOutcome) {
+        self.drain_console(idx);
+        if out.relayout {
+            if let Some(tab) = self.tabs.get_mut(idx) {
+                let (x, y) = tab.scroll;
+                if let Some(page) = tab.page.as_mut() {
+                    self.engine.set_page_scroll(page, x, y);
+                }
+            }
+            if idx == self.active {
+                let vp = self.css_viewport();
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    let (x, y) = tab.scroll;
+                    let (mx, my) = (tab.max_scroll_x(vp.width), tab.max_scroll(vp.height));
+                    if x > mx || y > my {
+                        tab.scroll = (x.min(mx), y.min(my));
+                    }
+                    // Keep an edit buffer in sync when scripts changed the value.
+                    if let (Some(edit), Some(page)) = (tab.edit.as_mut(), tab.page.as_ref()) {
+                        let now = page.control_text(edit.node);
+                        if now != edit.buf.text {
+                            edit.buf.set_text(&now);
+                        }
+                    }
+                    if tab.find.open && !tab.find.field.is_empty() {
+                        self.refresh_find();
+                    }
+                }
+                self.script_relayout = true;
+                self.mark_page_dirty();
+            }
+        }
+        for (i, u) in out.new_windows.iter().enumerate() {
+            self.new_tab(Some(&u.to_string()), true);
+            let _ = i;
+        }
+        for d in out.dialogs {
+            let note = match d.kind {
+                "confirm" => format!("confirm: {}  (answered OK)", d.message),
+                "prompt" => format!("prompt: {}  (cancelled)", d.message),
+                _ => format!("alert: {}", d.message),
+            };
+            self.push_toast(note);
+        }
+        if let Some((x, y)) = out.scroll_to {
+            if idx == self.active {
+                self.set_scroll(x, y);
+            } else if let Some(tab) = self.tabs.get_mut(idx) {
+                tab.scroll = (x, y);
+            }
+        }
+        if let Some(nav) = out.navigation {
+            if idx == self.active {
+                self.end_edit();
+            }
+            self.navigate_request(idx, nav.request, !nav.replace);
+        }
+    }
+
+    /// Move the page's console output into the tab's log.
+    pub(crate) fn drain_console(&mut self, idx: usize) {
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let Some(page) = tab.page.as_mut() else { return };
+        let lines = page.take_console();
+        if lines.is_empty() {
+            return;
+        }
+        tab.console.extend(lines);
+        if self.console_open && idx == self.active {
+            self.request_redraw();
+        }
+    }
+
+    /// After scripts ran on a tab outside the event helpers (e.g. a
+    /// `javascript:` URL): restyle if needed and collect side effects.
+    pub(crate) fn after_script_activity(&mut self, idx: usize) {
+        let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) else { return };
+        let out = self.engine.tick(page);
+        self.apply_outcome(idx, out);
+    }
+
+    /// Run due timers of every tab with scripts.
+    pub(crate) fn tick_scripts(&mut self) {
+        for idx in 0..self.tabs.len() {
+            let due = self.tabs[idx].page.as_ref().and_then(|p| p.next_script_due());
+            let Some(due) = due else { continue };
+            let now = self.engine.start.elapsed().as_secs_f64() * 1000.0;
+            if due > now + 0.5 {
+                continue;
+            }
+            let Some(page) = self.tabs[idx].page.as_mut() else { continue };
+            let out = self.engine.tick(page);
+            self.apply_outcome(idx, out);
+        }
+    }
+
+    /// When the next script timer is due (any tab).
+    pub(crate) fn next_script_wakeup(&self) -> Option<Instant> {
+        let mut best: Option<f64> = None;
+        for t in &self.tabs {
+            if let Some(due) = t.page.as_ref().and_then(|p| p.next_script_due()) {
+                best = Some(best.map(|b: f64| b.min(due)).unwrap_or(due));
+            }
+        }
+        let due = best?;
+        let now = self.engine.start.elapsed().as_secs_f64() * 1000.0;
+        let delay = (due - now).max(1.0).min(1000.0);
+        Some(Instant::now() + Duration::from_millis(delay as u64))
+    }
+
+    pub(crate) fn push_toast(&mut self, text: String) {
+        self.toasts.push((text, Instant::now()));
+        if self.toasts.len() > 4 {
+            self.toasts.remove(0);
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn expire_toasts(&mut self) {
+        let before = self.toasts.len();
+        self.toasts.retain(|(_, t)| t.elapsed() < Duration::from_secs(5));
+        if self.toasts.len() != before {
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn toggle_console(&mut self) {
+        self.console_open = !self.console_open;
+        self.ui_focus = if self.console_open { UiFocus::Console } else { UiFocus::Page };
+        self.needs_relayout = true;
+        self.mark_page_dirty();
+    }
+
+    pub(crate) fn toggle_javascript(&mut self) {
+        self.settings.javascript = !self.settings.javascript;
+        self.engine.scripting = self.settings.javascript;
+        self.engine.loader.load_scripts = self.settings.javascript;
+        self.settings.save(&self.profile.settings_path());
+        self.set_status(if self.settings.javascript { "JavaScript enabled (reload to apply)" } else { "JavaScript disabled (reload to apply)" });
+    }
+
+    /// Evaluate the console input line in the active page.
+    pub(crate) fn console_eval(&mut self) {
+        let idx = self.active;
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let src = tab.console_input.text.trim().to_string();
+        if src.is_empty() {
+            return;
+        }
+        tab.console_input.set_text("");
+        tab.console.push("input", format!("> {src}"));
+        let result = match tab.page.as_mut() {
+            Some(page) => self.engine.eval_in_page(page, &src),
+            None => "(no page)".to_string(),
+        };
+        tab.console_scroll = 0;
+        self.drain_console(idx);
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.console.push("result", result);
+        }
+        self.after_script_activity(idx);
+        self.request_redraw();
     }
 
     // ------------------------------------------------------------ clipboard
@@ -952,19 +1226,28 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            self.tick_scripts();
+            self.expire_toasts();
             self.request_redraw();
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let animating = self.tabs.get(self.active).map(|t| t.is_loading()).unwrap_or(false) || self.downloads.active().next().is_some();
-        let transient = self.status.as_ref().map(|(_, t)| t.elapsed() < Duration::from_secs(4)).unwrap_or(false);
-        if animating {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50)));
+        let transient = self.status.as_ref().map(|(_, t)| t.elapsed() < Duration::from_secs(4)).unwrap_or(false) || !self.toasts.is_empty();
+        let mut wake = if animating {
+            Some(Instant::now() + Duration::from_millis(50))
         } else if transient {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(500)));
+            Some(Instant::now() + Duration::from_millis(500))
         } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            None
+        };
+        if let Some(t) = self.next_script_wakeup() {
+            wake = Some(wake.map(|w| w.min(t)).unwrap_or(t));
+        }
+        match wake {
+            Some(t) => event_loop.set_control_flow(ControlFlow::WaitUntil(t)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
@@ -1017,6 +1300,12 @@ impl App {
 }
 
 // ------------------------------------------------------------------ helpers
+
+/// Placeholder navigation marker returned by `dispatch_to` once the real
+/// request has been handed to `navigate_request`.
+fn dummy_navigation() -> rabbithole_engine::PendingNavigation {
+    rabbithole_engine::PendingNavigation { request: Request::get(about_url()), replace: false }
+}
 
 pub(crate) fn about_url() -> Url {
     about_page("blank")

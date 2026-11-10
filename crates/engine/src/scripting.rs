@@ -385,7 +385,11 @@ impl Engine {
         let Some(mut host) = page.script.host.take() else {
             return ScriptOutcome::default();
         };
-        if !host.has_listeners(target, event_type) && !matches!(event_type, "click" | "submit" | "input" | "change" | "keydown" | "keyup" | "keypress" | "mousedown" | "mouseup" | "focus" | "blur") {
+        // Skip the dispatch entirely when no listener for this type exists
+        // anywhere (the event could bubble to any ancestor or the window).
+        // Clicks always go through so inline `onclick` attributes and
+        // default-action bookkeeping (`element.click()`) work.
+        if !host.any_listener_for(event_type) && !host.has_listeners(target, event_type) && !matches!(event_type, "click" | "submit") {
             page.script.host = Some(host);
             return ScriptOutcome::default();
         }

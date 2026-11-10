@@ -46,6 +46,32 @@ fn main() {
         }
         eprintln!("images map: {}", page.images.len());
     }
+    if let Ok(needle) = std::env::var("RH_DEBUG_TEXT") {
+        use rabbithole_engine::layout::DisplayItem as D;
+        let items = &page.display_list.items;
+        for (i, it) in items.iter().enumerate() {
+            if let D::Text { x, y, text, .. } = it {
+                if text.contains(&needle) {
+                    eprintln!("{i}: Text {text:?} at ({x}, {y})");
+                    // Print the open stack above it.
+                    let mut depth: i32 = 0;
+                    for j in (0..i).rev() {
+                        match &items[j] {
+                            D::PopClip | D::PopTransform | D::PopLayer(_) | D::PopFixed => depth += 1,
+                            D::PushClip(_) | D::PushClipRounded(..) | D::PushTransform(_) | D::PushLayer(_) | D::PushFixed => {
+                                if depth == 0 {
+                                    eprintln!("   open at {j}: {:?}", items[j]);
+                                } else {
+                                    depth -= 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
     if std::env::var("RH_DEBUG_DL").is_ok() {
         use rabbithole_engine::layout::DisplayItem as D;
         for (i, it) in page.display_list.items.iter().enumerate() {
@@ -78,6 +104,63 @@ fn main() {
         eprintln!("[console.{level}] {msg}");
     }
     let mut canvas = Canvas::new(w, h);
+    if std::env::var("RH_PROFILE").is_ok() {
+        let t = std::time::Instant::now();
+        engine.restyle(&mut page);
+        eprintln!("[profile] restyle+layout+display list {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        engine.relayout_only(&mut page);
+        eprintln!("[profile] layout+display list {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        engine.rebuild_display_list(&mut page);
+        eprintln!("[profile] display list {:?}", t.elapsed());
+        // Per-item-kind paint cost.
+        use rabbithole_engine::layout::{DisplayItem as D, DisplayList};
+        let mut kinds: std::collections::BTreeMap<&'static str, (usize, std::time::Duration)> = Default::default();
+        let mut c2 = Canvas::new(w, h);
+        let mut stack_items = Vec::new();
+        for it in &page.display_list.items {
+            let name = match it {
+                D::Rect { .. } => "Rect", D::RectRadii { .. } => "RectRadii", D::Border { .. } => "Border", D::BoxShadow { .. } => "BoxShadow",
+                D::Text { .. } => "Text", D::Image { .. } => "Image", D::ImageTiled { .. } => "ImageTiled", D::Line { .. } => "Line",
+                D::PushClip(_) | D::PushClipRounded(..) | D::PopClip => "Clip", D::PushTransform(_) | D::PopTransform => "Transform",
+                D::PushLayer(_) | D::PopLayer(_) => "Layer", D::PushFixed | D::PopFixed => "Fixed",
+            };
+            let single = DisplayList { items: vec![it.clone()] };
+            let t = std::time::Instant::now();
+            if matches!(name, "Clip" | "Transform" | "Layer" | "Fixed") {
+                stack_items.push(it.clone());
+                continue;
+            }
+            rabbithole_engine::layout::paint(&single, &mut c2, &engine.fonts, 0.0, 0.0);
+            let e = kinds.entry(name).or_insert((0, std::time::Duration::ZERO));
+            e.0 += 1;
+            e.1 += t.elapsed();
+        }
+        for (k, (n, d)) in &kinds {
+            eprintln!("[profile] paint {k}: {n} items {d:?}");
+        }
+        let mut flat = page.display_list.clone();
+        for it in &mut flat.items {
+            if let D::PushClipRounded(r, _) = it {
+                *it = D::PushClip(*r);
+            }
+        }
+        let mut c3 = Canvas::new(w, h);
+        let t = std::time::Instant::now();
+        rabbithole_engine::layout::paint(&flat, &mut c3, &engine.fonts, 0.0, 0.0);
+        eprintln!("[profile] full paint with no-rounded-clips {:?}", t.elapsed());
+        let mut c4 = Canvas::new(w, h);
+        let t = std::time::Instant::now();
+        rabbithole_engine::layout::paint(&page.display_list, &mut c4, &engine.fonts, 0.0, 0.0);
+        eprintln!("[profile] full paint {:?}", t.elapsed());
+        let mut nolayer = page.display_list.clone();
+        nolayer.items.retain(|it| !matches!(it, D::PushLayer(_) | D::PopLayer(_)));
+        let mut c5 = Canvas::new(w, h);
+        let t = std::time::Instant::now();
+        rabbithole_engine::layout::paint(&nolayer, &mut c5, &engine.fonts, 0.0, 0.0);
+        eprintln!("[profile] full paint without layers {:?}", t.elapsed());
+    }
     engine.render(&page, &mut canvas, 0.0, 0.0);
     let t3 = std::time::Instant::now();
     image::save_buffer(out, &canvas.to_rgba8(), w, h, image::ExtendedColorType::Rgba8).expect("write png");

@@ -1,6 +1,7 @@
 //! Per-tab state.
 
 use crate::gui::input::TextBuffer;
+use crate::scripting::ConsoleLog;
 use rabbithole_engine::dom::NodeId;
 use rabbithole_engine::gfx::Rect;
 use rabbithole_engine::net::Url;
@@ -22,6 +23,8 @@ pub struct ControlEdit {
     pub buf: TextBuffer,
     pub kind: ControlKind,
     pub max_len: Option<usize>,
+    /// Value when editing started (a `change` event fires if it differs on blur).
+    pub initial: String,
 }
 
 pub struct Tab {
@@ -45,6 +48,14 @@ pub struct Tab {
     pub focus: Option<NodeId>,
     /// The page was laid out for a different viewport.
     pub needs_relayout: bool,
+    /// JavaScript console messages of the current page.
+    pub console: ConsoleLog,
+    /// Console input line.
+    pub console_input: TextBuffer,
+    /// Console scroll offset in lines from the bottom.
+    pub console_scroll: usize,
+    /// Element the mouse was last over (for `mouseover`/`mouseout`).
+    pub hover_node: Option<NodeId>,
 }
 
 impl Tab {
@@ -65,6 +76,10 @@ impl Tab {
             edit: None,
             focus: None,
             needs_relayout: false,
+            console: ConsoleLog::default(),
+            console_input: TextBuffer::default(),
+            console_scroll: 0,
+            hover_node: None,
         }
     }
 
@@ -127,6 +142,9 @@ impl Tab {
         self.find.matches.clear();
         self.find.current = 0;
         self.scroll = (0.0, 0.0);
+        self.console.clear();
+        self.console_scroll = 0;
+        self.hover_node = None;
     }
 }
 
