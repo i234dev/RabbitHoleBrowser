@@ -4,7 +4,7 @@
 use crate::tests::{run, setup};
 
 /// Floor for `webapi_coverage` (raise it as coverage improves).
-const MIN_COVERAGE: f64 = 0.86;
+const MIN_COVERAGE: f64 = 0.92;
 
 /// Run tools/webapi/check.js against a fresh page and report coverage of
 /// tools/webapi/inventory.tsv. Set `RH_WEBAPI_REPORT=<path>` to write the
@@ -768,4 +768,65 @@ fn canvas_2d_rasterizes_and_encodes() {
             "bitmap 1 1",
         ]
     );
+}
+
+#[test]
+fn history_traversal_and_navigation_api() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        window.addEventListener('popstate', (e) => console.log('popstate', JSON.stringify(e.state), location.pathname));
+        navigation.addEventListener('currententrychange', (e) => console.log('change', e.navigationType, e.from.url.split('/').pop()));
+        history.pushState({ p: 1 }, '', '/a');
+        history.pushState({ p: 2 }, '', '/b');
+        console.log('entries', navigation.entries().length, navigation.currentEntry.index, navigation.canGoBack, location.pathname);
+        navigation.addEventListener('navigate', (e) => {
+          console.log('navigate', e.navigationType, e.destination.url.split('/').pop(), e.canIntercept);
+          e.intercept({ handler: () => Promise.resolve() });
+        });
+        navigation.navigate('/c', { state: { s: 3 } }).finished.then((entry) => console.log('finished', entry.getState().s, location.pathname));
+        setTimeout(() => history.back(), 0);
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "change push page.html?q=1#frag",
+            "change push a",
+            "entries 3 2 true /b",
+            "navigate push c true",
+            "change push b",
+            "finished 3 /c",
+            "change traverse c",
+            "popstate {\"p\":2} /b",
+        ]
+    );
+}
+
+#[test]
+fn web_animations_and_font_loading() {
+    let out = logs_of(
+        "<html><body><div id=d></div></body></html>",
+        r#"
+        const d = document.getElementById('d');
+        const a = d.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 50, fill: 'forwards' });
+        console.log('anim', a instanceof Animation, a.effect instanceof KeyframeEffect, a.effect.getKeyframes().length, a.effect.getTiming().duration, d.getAnimations().length, document.timeline instanceof DocumentTimeline);
+        a.finished.then(() => console.log('finished', a.playState, a.effect.getComputedTiming().progress));
+        a.onfinish = (e) => console.log('onfinish', e instanceof AnimationPlaybackEvent);
+        const b = d.animate({ transform: ['none', 'scale(2)'] }, 1000);
+        b.cancel();
+        b.finished.catch((e) => console.log('cancelled', e.name, b.playState));
+        const face = new FontFace('Test', 'url(/font.woff2)', { weight: '700' });
+        document.fonts.add(face);
+        console.log('fonts', document.fonts.has(face), document.fonts.size, face.status, face.weight, document.fonts.check('12px Test'), document.fonts.status);
+        const bin = new FontFace('Bin', new Uint8Array([0, 1, 0, 0]));
+        bin.loaded.then((f) => console.log('binary', f.status));
+        "#,
+    );
+    let mut sorted = out.clone();
+    sorted.sort();
+    assert_eq!(out[0], "anim true true 2 50 1 true");
+    assert_eq!(out[1], "fonts true 1 unloaded 700 false loaded");
+    assert!(sorted.contains(&"binary loaded".to_string()), "{out:?}");
+    assert!(sorted.contains(&"cancelled AbortError idle".to_string()), "{out:?}");
 }

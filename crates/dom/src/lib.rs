@@ -81,6 +81,9 @@ impl Default for Document {
 
 impl Document {
     pub const ROOT: NodeId = 0;
+    /// `adopted_styles` key of the `@font-face` rules for fonts added
+    /// through `document.fonts` (CSS Font Loading).
+    pub const SCRIPT_FONT_FACES: NodeId = usize::MAX;
 
     pub fn new() -> Self {
         Document {

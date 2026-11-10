@@ -399,6 +399,11 @@ impl Loader {
             }
         };
         scan(Document::ROOT, None, &mut sources);
+        if let Some(list) = doc.adopted_styles.get(&Document::SCRIPT_FONT_FACES) {
+            for text in list {
+                sources.push((Src::Inline(text.clone(), None), None));
+            }
+        }
         for root in doc.connected_shadow_roots() {
             scan(root, Some(root), &mut sources);
         }
@@ -1432,6 +1437,7 @@ fn meta_refresh_target(page: &Page, scripting: bool) -> Option<Url> {
 fn stylesheet_signature(doc: &Document) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    doc.adopted_styles.get(&Document::SCRIPT_FONT_FACES).hash(&mut h);
     let mut roots = vec![Document::ROOT];
     roots.extend(doc.connected_shadow_roots());
     for root in roots {

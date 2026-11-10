@@ -235,8 +235,23 @@ fn image_pixels(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     }
 }
 
+/// `setScriptFontFaces(cssText)`: @font-face rules of `document.fonts`.
+fn set_script_font_faces(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let text = arg_str(realm, args, 0)?;
+    with_doc(0, |doc| {
+        if text.is_empty() {
+            doc.adopted_styles.remove(&Document::SCRIPT_FONT_FACES);
+        } else {
+            doc.adopted_styles.insert(Document::SCRIPT_FONT_FACES, vec![text]);
+        }
+    });
+    mark_dirty();
+    Ok(Value::Undefined)
+}
+
 pub(crate) fn install(realm: &mut Realm) {
     let o = realm.new_object();
+    realm.define_method(o, "setScriptFontFaces", 1, set_script_font_faces);
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
     realm.define_method(o, "imagePixels", 1, image_pixels);
     realm.define_method(o, "installHandlers", 2, install_handlers);

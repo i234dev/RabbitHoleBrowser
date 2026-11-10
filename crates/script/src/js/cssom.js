@@ -247,6 +247,9 @@
     deleteRule(index) { deleteFrom(this, this[S].children, index); }
   }
   tag(CSSGroupingRule, 'CSSGroupingRule');
+  // CSS Nesting: style rules are grouping rules.
+  Object.setPrototypeOf(CSSStyleRule.prototype, CSSGroupingRule.prototype);
+  Object.setPrototypeOf(CSSStyleRule, CSSGroupingRule);
   class CSSConditionRule extends CSSGroupingRule {
     get conditionText() { return this[S].condition; }
   }
