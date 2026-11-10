@@ -9,6 +9,7 @@
 
 pub mod diff;
 pub mod forms;
+pub mod frames;
 mod home;
 pub mod images;
 pub mod incremental;
@@ -876,7 +877,12 @@ pub struct Engine {
     /// How `confirm()`/`prompt()` are answered on newly built pages
     /// (before their scripts run).
     pub dialog_policy: scripting::DialogPolicy,
-    registered_fonts: HashSet<String>,
+    registered_fonts: std::cell::RefCell<HashSet<String>>,
+    /// Frame tree of all pages (what scripts see of other frames) and
+    /// queued cross-frame messages.
+    pub frames: std::cell::RefCell<frames::FrameRegistry>,
+    /// Set while a frame's page is being built.
+    pub(crate) frame_context: std::cell::RefCell<Option<frames::FrameContext>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -925,6 +931,16 @@ pub struct Page {
     pub pointer: pointer::PointerState,
     /// Incremental style/layout state (see [`incremental`]).
     pub incr: incremental::IncrementalState,
+    /// Engine-wide id of this document's browsing context.
+    pub frame_id: u64,
+    /// Nesting depth (0 = top-level page).
+    pub frame_depth: u32,
+    /// `window.name` from the hosting iframe's `name` attribute.
+    pub frame_name: Option<String>,
+    /// Inherited origin (about:blank / srcdoc frames).
+    pub frame_origin: Option<String>,
+    /// Documents of this page's `<iframe>` elements.
+    pub frames: frames::Frames,
 }
 
 impl Default for Engine {
@@ -946,7 +962,9 @@ impl Engine {
             start: std::time::Instant::now(),
             device_pixel_ratio: 1.0,
             dialog_policy: scripting::DialogPolicy::default(),
-            registered_fonts: HashSet::new(),
+            registered_fonts: Default::default(),
+            frames: Default::default(),
+            frame_context: Default::default(),
         }
     }
 
@@ -961,7 +979,9 @@ impl Engine {
             start: std::time::Instant::now(),
             device_pixel_ratio: 1.0,
             dialog_policy: scripting::DialogPolicy::default(),
-            registered_fonts: HashSet::new(),
+            registered_fonts: Default::default(),
+            frames: Default::default(),
+            frame_context: Default::default(),
         }
     }
 
@@ -999,14 +1019,15 @@ impl Engine {
     /// display list, without running scripts, so the page can be painted
     /// right away (progressive rendering). Call [`Engine::finish_page_load`]
     /// next (after filling `page.scripts` when they were deferred).
-    pub fn build_page_unscripted(&mut self, loaded: LoadedPage, viewport: Viewport) -> Page {
+    pub fn build_page_unscripted(&self, loaded: LoadedPage, viewport: Viewport) -> Page {
         for f in &loaded.fonts {
             let key = format!("{}|{}|{}", f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic);
-            if self.registered_fonts.insert(key) {
+            if self.registered_fonts.borrow_mut().insert(key) {
                 self.fonts.add_font_data(&f.face.family, f.face.weight.0, f.face.italic, &f.data);
             }
         }
         let has_dynamic_rules = loaded.sheets.iter().any(sheet_has_dynamic_rules);
+        let frame = self.frame_context.borrow_mut().take();
         let mut page = Page {
             url: loaded.url,
             base_url: loaded.base_url,
@@ -1032,6 +1053,11 @@ impl Engine {
             sheet_signature: 0,
             image_state: images::ImageState::default(),
             incr: incremental::IncrementalState::default(),
+            frame_id: frame.as_ref().map(|f| f.id).unwrap_or_else(frames::new_frame_id),
+            frame_depth: frame.as_ref().map(|f| f.depth).unwrap_or(0),
+            frame_name: frame.as_ref().and_then(|f| f.name.clone()),
+            frame_origin: frame.and_then(|f| f.origin),
+            frames: frames::Frames::default(),
         };
         page.snapshot_form_defaults();
         page.script.dialog_policy = self.dialog_policy.clone();
@@ -1044,7 +1070,7 @@ impl Engine {
     /// events included), then apply `<meta http-equiv=refresh>`. What the
     /// scripts asked for (navigation, windows, dialogs, scrolling) is left
     /// on the page for the embedder.
-    pub fn finish_page_load(&mut self, page: &mut Page) {
+    pub fn finish_page_load(&self, page: &mut Page) {
         if self.scripting && (!page.scripts.is_empty() || has_inline_handlers(&page.doc)) {
             // Keep what the scripts asked for during load (redirects via
             // `location`, `window.open`, dialogs) for the embedder to apply.
@@ -1095,6 +1121,7 @@ impl Engine {
         if (page.incr.generation() != before || page.incr.take_dpr_change(self.device_pixel_ratio)) && self.sync_images(page) {
             self.relayout_only(page);
         }
+        self.sync_frames(page);
     }
 
     /// Current computed style of one element: flushes pending style
@@ -1157,6 +1184,9 @@ impl Engine {
     /// coordinates) by (dx, dy). Returns false when there is none (the
     /// caller should scroll the page instead) or it is already at its limit.
     pub fn scroll_at(&self, page: &mut Page, x: f32, y: f32, dx: f32, dy: f32) -> bool {
+        if let Some(scrolled) = self.frame_scroll_at(page, x, y, dx, dy) {
+            return scrolled;
+        }
         let Some(info) = page.layout.scroll_container_at(x, y) else {
             return false;
         };
@@ -1198,6 +1228,7 @@ impl Engine {
             return false;
         }
         page.state.focused = node;
+        page.state.focus_visible = node.map(|n| page.focus_should_be_visible(n)).unwrap_or(false);
         if page.has_dynamic_rules {
             self.restyle(page);
         }
@@ -1474,7 +1505,7 @@ fn sheet_has_dynamic_rules(sheet: &Stylesheet) -> bool {
     use rabbithole_css::selector::{Compound, Pseudo};
     fn compound_dynamic(c: &Compound) -> bool {
         c.pseudos.iter().any(|p| match p {
-            Pseudo::Hover | Pseudo::Active | Pseudo::Focus | Pseudo::Target => true,
+            Pseudo::Hover | Pseudo::Active | Pseudo::Focus | Pseudo::FocusVisible | Pseudo::FocusWithin | Pseudo::Target => true,
             Pseudo::Not(l) | Pseudo::Is(l) | Pseudo::Where(l) => l.iter().any(|s| s.compounds.iter().any(compound_dynamic)),
             Pseudo::Has(l) => l.iter().any(|(_, s)| s.compounds.iter().any(compound_dynamic)),
             _ => false,
@@ -1533,6 +1564,14 @@ impl Page {
     /// Forget cached layout: the next relayout lays out everything.
     pub fn invalidate_layout(&mut self) {
         self.incr.invalidate_layout();
+    }
+
+    /// Should focus moving to `node` match `:focus-visible`? Like
+    /// browsers: always for text-entry controls, otherwise only when the
+    /// last user input was not a pointer press (keyboard navigation, or
+    /// script focus before any click).
+    pub fn focus_should_be_visible(&self, node: NodeId) -> bool {
+        !self.pointer.pointer_modality || pointer::is_text_entry(&self.doc, node)
     }
 
     pub fn content_height(&self) -> f32 {

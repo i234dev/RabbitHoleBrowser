@@ -192,9 +192,16 @@ impl<'a> Builder<'a> {
     fn build_children(&self, node: NodeId, parent_style: &Rc<ComputedStyle>, in_table_row: bool) -> Vec<LayoutBox> {
         let doc = self.doc();
         let mut out = Vec::new();
+        // A closed `<details>` renders only its summary: the rest sits in a
+        // hidden slot of its shadow tree, so no author `display` can show it.
+        let closed_details = doc.is_element(node, "details") && doc.attr(node, "open").is_none() && doc.shadow_root(node).is_none();
+        let summary = if closed_details { doc.child_elements(node).find(|&c| doc.is_element(c, "summary")) } else { None };
         // Flat tree: shadow trees replace their host's children and slots
         // render their assigned nodes.
         for child in doc.flat_children(node) {
+            if closed_details && Some(child) != summary {
+                continue;
+            }
             match &doc.node(child).data {
                 NodeData::Text(t) => {
                     if t.is_empty() {
@@ -371,7 +378,13 @@ impl<'a> Builder<'a> {
             "select" => self.build_select(node, &style),
             "textarea" => {
                 let mut t = LayoutBox::new(BoxKind::Text, None, style.clone());
-                t.text = Some(Rc::from(doc.text_content(node).as_str()));
+                // The edited ("dirty") value lives in the `value`
+                // attribute; the children are only the default value.
+                let mut value = doc.attr(node, "value").map(str::to_string).unwrap_or_else(|| doc.text_content(node));
+                if value.is_empty() {
+                    value = doc.attr(node, "placeholder").unwrap_or("").to_string();
+                }
+                t.text = Some(Rc::from(value.as_str()));
                 vec![t]
             }
             _ => self.build_children(node, &style, kind == BoxKind::TableRow),
@@ -437,7 +450,7 @@ impl<'a> Builder<'a> {
     fn build_replaced(&self, node: NodeId, tag: &str, style: &Rc<ComputedStyle>) -> Option<LayoutBox> {
         let doc = self.doc();
         // `<video>` shows its poster image (stored under the node too).
-        let image = if matches!(tag, "img" | "svg" | "input" | "video" | "canvas" | "object") { self.ctx.images.get(&node).cloned() } else { None };
+        let image = if matches!(tag, "img" | "svg" | "input" | "video" | "canvas" | "object" | "iframe") { self.ctx.images.get(&node).cloned() } else { None };
         let attr_w = doc.attr(node, "width").and_then(parse_dimension_attr);
         let attr_h = doc.attr(node, "height").and_then(parse_dimension_attr);
         let broken = image.as_ref().map(|i| i.broken).unwrap_or(false);

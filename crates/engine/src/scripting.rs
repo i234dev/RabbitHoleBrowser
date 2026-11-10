@@ -363,8 +363,49 @@ impl HostEnv for EngineEnv<'_> {
         let i = self.page.image_info(node);
         Some((i.natural_width, i.natural_height, i.complete, i.current_src))
     }
+    fn frame_id(&self) -> u64 {
+        self.page.frame_id
+    }
+    fn frame_parent(&self, id: u64) -> Option<u64> {
+        self.engine.frames.borrow().parent(id)
+    }
+    fn frame_children(&self, id: u64) -> Vec<u64> {
+        if id == self.page.frame_id {
+            return self.page.frames.children.iter().map(|c| c.id).collect();
+        }
+        self.engine.frames.borrow().children(id)
+    }
+    fn frame_exists(&self, id: u64) -> bool {
+        id == self.page.frame_id || self.engine.frames.borrow().exists(id)
+    }
+    fn frame_url(&self, id: u64) -> Option<String> {
+        if id == self.page.frame_id {
+            return Some(self.page.url.to_string());
+        }
+        self.engine.frames.borrow().url(id)
+    }
+    fn navigate_frame(&mut self, id: u64, url: &str) {
+        if let Some(u) = self.page.resolve(url) {
+            if id == self.page.frame_id {
+                self.navigate(u, false);
+            } else {
+                self.engine.frames.borrow_mut().navigations.push((id, u));
+                crate::frames::set_mail_pending();
+            }
+        }
+    }
+    fn frame_of_element(&self, node: NodeId) -> Option<u64> {
+        self.page.frames.get(node).map(|c| c.id)
+    }
+    fn frame_name(&self) -> Option<String> {
+        self.page.frame_name.clone()
+    }
+    fn post_message(&mut self, target: u64, data: String, target_origin: String) {
+        self.queue_message(target, data, target_origin);
+    }
     fn focus_node(&mut self, node: Option<NodeId>) {
         self.page.state.focused = node;
+        self.page.state.focus_visible = node.map(|n| self.page.focus_should_be_visible(n)).unwrap_or(false);
     }
 }
 
@@ -492,6 +533,8 @@ impl Engine {
             images_changed = true;
         }
         let mut out = self.tick_scripts(page);
+        let frames_out = self.tick_frames(page);
+        out.merge(frames_out);
         out.relayout |= images_changed || img_out.relayout;
         if out.navigation.is_none() {
             out.navigation = img_out.navigation;
@@ -604,7 +647,7 @@ impl Engine {
 
     /// After script activity: restyle if the DOM changed and collect
     /// side effects.
-    fn settle(&self, page: &mut Page, default_prevented: bool) -> ScriptOutcome {
+    pub(crate) fn settle(&self, page: &mut Page, default_prevented: bool) -> ScriptOutcome {
         let mut out = ScriptOutcome { default_prevented, ..Default::default() };
         let host_dirty = page.script.host.as_mut().map(|h| h.take_dirty()).unwrap_or(false);
         if page.script.dom_dirty || host_dirty {
@@ -638,10 +681,15 @@ impl Page {
     /// Earliest time (engine ms) a timer or animation frame is due.
     pub fn next_script_due(&self) -> Option<f64> {
         let scripts = self.script.host.as_ref().and_then(|h| h.next_due());
-        match (scripts, self.image_due()) {
+        let mut due = match (scripts, self.image_due()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
+        };
+        let frames = if crate::frames::mail_pending() { Some(0.0) } else { self.frames_next_due() };
+        if let Some(f) = frames {
+            due = Some(due.map(|d| d.min(f)).unwrap_or(f));
         }
+        due
     }
 
     /// Does the page have any script listeners at all (hover/click

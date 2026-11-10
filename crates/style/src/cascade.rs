@@ -892,11 +892,7 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
                 css.push_str(&format!("width:calc({c}ch + 6px);"));
             }
         }
-        if let Some(r) = el.attr("rows").and_then(|v| v.trim().parse::<f32>().ok()) {
-            if r > 0.0 {
-                css.push_str(&format!("height:calc({}em + 6px);", r * 1.2));
-            }
-        }
+        // `rows` gives the intrinsic (auto) height, applied by layout.
     }
     if tag == "select" {
         if let Some(sz) = el.attr("size").and_then(|v| v.trim().parse::<f32>().ok()) {

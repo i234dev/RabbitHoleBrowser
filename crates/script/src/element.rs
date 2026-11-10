@@ -1830,7 +1830,18 @@ fn media_can_play_type(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResul
     Ok(Value::str(""))
 }
 
-fn iframe_content_window(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+fn iframe_content_window(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &this) else { return Ok(Value::Null) };
+    if n.doc != 0 {
+        return Ok(Value::Null);
+    }
+    let id = with_env(|env| env.frame_of_element(n.node));
+    crate::frames::window_for(realm, id)
+}
+
+/// The frame's document is in another realm: `contentDocument` is null
+/// (as for a cross-origin frame).
+fn iframe_content_document(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Null)
 }
 
@@ -2213,7 +2224,7 @@ pub(crate) fn install(realm: &mut Realm) {
     // --- HTMLIFrameElement
     let iframe = define_class(realm, "HTMLIFrameElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(iframe, "contentWindow", Some(iframe_content_window), None, ACC);
-    realm.define_accessor(iframe, "contentDocument", Some(iframe_content_window), None, ACC);
+    realm.define_accessor(iframe, "contentDocument", Some(iframe_content_document), None, ACC);
     reflect(realm, iframe, "src", "src", Reflect::Url);
     for (p, at) in [("name", "name"), ("allow", "allow"), ("sandbox", "sandbox"), ("srcdoc", "srcdoc"), ("loading", "loading"), ("referrerPolicy", "referrerpolicy"), ("width", "width"), ("height", "height"), ("title", "title")] {
         reflect(realm, iframe, p, at, Reflect::Str);

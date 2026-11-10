@@ -226,7 +226,7 @@ impl InvalidationMap {
             match p {
                 Pseudo::Hover => self.hover.add(c, rel),
                 Pseudo::Active => self.active.add(c, rel),
-                Pseudo::Focus => self.focus.add(c, rel),
+                Pseudo::Focus | Pseudo::FocusVisible | Pseudo::FocusWithin => self.focus.add(c, rel),
                 Pseudo::Target => self.target |= rel,
                 Pseudo::FirstChild
                 | Pseudo::LastChild

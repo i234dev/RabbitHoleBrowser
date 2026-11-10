@@ -51,7 +51,13 @@ pub enum Pseudo {
     /// Dynamic states; matched against `MatchState` (never when unset).
     Hover,
     Active,
+    /// `:focus`: the focused element only.
     Focus,
+    /// `:focus-visible`: the focused element when the focus should be
+    /// indicated (keyboard focus, text-entry controls).
+    FocusVisible,
+    /// `:focus-within`: the focused element and its ancestors.
+    FocusWithin,
     Visited,
     Target,
     /// `:host` / `:host(<compound>)`: matches a shadow host (from rules of
@@ -440,7 +446,9 @@ impl<'a> SelectorParser<'a> {
                     "checked" => Pseudo::Checked,
                     "hover" => Pseudo::Hover,
                     "active" => Pseudo::Active,
-                    "focus" | "focus-visible" | "focus-within" => Pseudo::Focus,
+                    "focus" => Pseudo::Focus,
+                    "focus-visible" => Pseudo::FocusVisible,
+                    "focus-within" => Pseudo::FocusWithin,
                     "visited" => Pseudo::Visited,
                     "target" => Pseudo::Target,
                     "host" => Pseudo::Host(Vec::new()),
@@ -653,9 +661,12 @@ fn nth_matches(a: i32, b: i32, index: i32) -> bool {
 pub struct MatchState {
     /// The element under the pointer; `:hover` matches it and its ancestors.
     pub hovered: Option<NodeId>,
-    /// The focused element; `:focus` matches it and its ancestors
-    /// (focus-within semantics).
+    /// The focused element: `:focus` matches it, `:focus-within` matches
+    /// it and its ancestors.
     pub focused: Option<NodeId>,
+    /// The focused element also matches `:focus-visible` (it was focused
+    /// from the keyboard, or it is a text-entry control).
+    pub focus_visible: bool,
     /// The element being activated (mouse button down); matches it and its
     /// ancestors.
     pub active: Option<NodeId>,
@@ -910,7 +921,9 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
             Pseudo::Checked => el.attr("checked").is_some() || (el.tag == "option" && el.attr("selected").is_some()),
             Pseudo::Hover => MatchState::is_or_contains(doc, state.hovered, node),
             Pseudo::Active => MatchState::is_or_contains(doc, state.active, node),
-            Pseudo::Focus => MatchState::is_or_contains(doc, state.focused, node),
+            Pseudo::Focus => state.focused == Some(node),
+            Pseudo::FocusVisible => state.focus_visible && state.focused == Some(node),
+            Pseudo::FocusWithin => MatchState::is_or_contains(doc, state.focused, node),
             Pseudo::Target => match (&state.target_id, el.id()) {
                 (Some(t), Some(id)) => t == id,
                 _ => false,

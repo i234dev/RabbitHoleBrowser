@@ -437,6 +437,14 @@ impl<'a> Layouter<'a> {
         b.content_rect = Rect::new(x + bw.left + pad.left, y + bw.top + pad.top, content_w, 0.0);
 
         let mut explicit_h = forced_h.or(replaced_h).or_else(|| self.resolve_height(&style, cb.height, pb_v)); // grid/flex hook
+        // A `<textarea>` with an auto height is `rows` lines tall (2 by
+        // default), whatever its value.
+        if explicit_h.is_none() && b.pseudo.is_none() {
+            if let Some(n) = b.node.filter(|&n| self.ctx.doc.is_element(n, "textarea")) {
+                let rows = self.ctx.doc.attr(n, "rows").and_then(|r| r.trim().parse::<f32>().ok()).filter(|r| *r >= 1.0).unwrap_or(2.0);
+                explicit_h = Some(rows.floor() * style.line_height_px());
+            }
+        }
         // `aspect-ratio` with an auto height derives it from the width.
         if explicit_h.is_none() && b.kind != BoxKind::Image {
             if let Some(ratio) = style.aspect_ratio.filter(|r| *r > 0.0) {

@@ -92,6 +92,44 @@ pub trait HostEnv {
     fn image_state(&mut self, _node: NodeId) -> Option<(u32, u32, bool, String)> {
         None
     }
+
+    // ------------------------------------------------ nested browsing contexts
+    // Frames are identified by engine-wide ids; the defaults describe a
+    // single top-level window with no frames.
+
+    /// Id of this document's frame.
+    fn frame_id(&self) -> u64 {
+        0
+    }
+    /// Parent frame of frame `id` (None for a top-level window).
+    fn frame_parent(&self, _id: u64) -> Option<u64> {
+        None
+    }
+    /// Child frames of frame `id`, in document order.
+    fn frame_children(&self, _id: u64) -> Vec<u64> {
+        Vec::new()
+    }
+    /// Does frame `id` still exist (`closed` is its negation)?
+    fn frame_exists(&self, id: u64) -> bool {
+        id == self.frame_id()
+    }
+    /// URL of the document in frame `id`.
+    fn frame_url(&self, _id: u64) -> Option<String> {
+        None
+    }
+    /// Navigate frame `id` (`frame.location = url`).
+    fn navigate_frame(&mut self, _id: u64, _url: &str) {}
+    /// The frame an `<iframe>` element of this document hosts.
+    fn frame_of_element(&self, _node: NodeId) -> Option<u64> {
+        None
+    }
+    /// Initial `window.name` (the `name` attribute of the hosting iframe).
+    fn frame_name(&self) -> Option<String> {
+        None
+    }
+    /// Queue a `postMessage` to frame `target` (`data` is the serialized
+    /// structured clone, `target_origin` as given to `postMessage`).
+    fn post_message(&mut self, _target: u64, _data: String, _target_origin: String) {}
 }
 
 type EnvPtr = *mut (dyn HostEnv + 'static);

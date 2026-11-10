@@ -37,6 +37,14 @@ pub struct PointerState {
     /// `pointerdown` was cancelled: compatibility mouse events
     /// (`mousedown`/`mouseup`) are suppressed until release.
     pub suppress_mouse: bool,
+    /// The last user input was a pointer press (not the keyboard): focus
+    /// it moves matches `:focus-visible` only on text-entry controls.
+    /// Embedders clear it on key presses.
+    pub pointer_modality: bool,
+    /// Iframe under the pointer (its document got the last move).
+    pub frame_hover: Option<NodeId>,
+    /// Iframe the press in progress started in.
+    pub frame_press: Option<NodeId>,
 }
 
 /// What the embedder should do after a click.
@@ -130,6 +138,19 @@ pub fn is_focusable(doc: &Document, n: NodeId) -> bool {
     }
 }
 
+/// Does the element take typed text (so focusing it by any means shows a
+/// focus indicator, `:focus-visible`)?
+pub fn is_text_entry(doc: &Document, n: NodeId) -> bool {
+    match doc.tag(n) {
+        Some("textarea") => true,
+        Some("input") => !matches!(
+            doc.attr(n, "type").map(|t| t.to_ascii_lowercase()).as_deref(),
+            Some("button" | "submit" | "reset" | "checkbox" | "radio" | "image" | "file" | "hidden" | "range" | "color")
+        ),
+        _ => doc.attr(n, "contenteditable").map(|v| !v.eq_ignore_ascii_case("false")).unwrap_or(false),
+    }
+}
+
 /// The control a `<label>` is for (`for` attribute or first labelable
 /// descendant).
 pub fn labeled_control(doc: &Document, label: NodeId) -> Option<NodeId> {
@@ -211,6 +232,7 @@ impl Engine {
     /// target changed) and `pointermove`/`mousemove`.
     pub fn pointer_move(&self, page: &mut Page, x: f32, y: f32, m: Modifiers) -> ScriptOutcome {
         let mut out = ScriptOutcome::default();
+        self.frame_pointer_move(page, x, y, m, &mut out);
         let target = page.node_at_viewport(x, y);
         let old = page.pointer.hover.filter(|&o| page.doc.is_connected(o));
         if old != target {
@@ -248,6 +270,10 @@ impl Engine {
     /// `mousedown`, then (unless cancelled, primary button) focus moves to
     /// the nearest focusable ancestor of the target, or is cleared.
     pub fn pointer_down(&self, page: &mut Page, x: f32, y: f32, button: u8, m: Modifiers) -> PointerDown {
+        page.pointer.frame_press = None;
+        if let Some(d) = self.frame_pointer_down(page, x, y, button, m) {
+            return d;
+        }
         let mut out = ScriptOutcome::default();
         let Some(target) = page.node_at_viewport(x, y) else {
             page.pointer.down = None;
@@ -255,6 +281,7 @@ impl Engine {
         };
         let disabled = chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n));
         let mut prevented = false;
+        page.pointer.pointer_modality = true;
         page.pointer.suppress_mouse = false;
         if self.dispatch_into(page, &mut out, target, "pointerdown", mouse(x, y, button, m, true, true)) {
             page.pointer.suppress_mouse = true;
@@ -283,6 +310,9 @@ impl Engine {
     /// the common ancestor of the press and release targets, followed by
     /// the activation behaviour when not cancelled.
     pub fn pointer_up(&self, page: &mut Page, x: f32, y: f32, button: u8, m: Modifiers) -> PointerUp {
+        if let Some(up) = self.frame_pointer_up(page, x, y, button, m) {
+            return up;
+        }
         let mut out = ScriptOutcome::default();
         let target = page.node_at_viewport(x, y);
         let down = page.pointer.down.take();

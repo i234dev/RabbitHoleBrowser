@@ -110,6 +110,45 @@ fn main() {
     if std::env::var("RH_DEBUG_ITEMS").is_ok() {
         eprintln!("images after wait: {} (in flight {})", page.images.len(), page.images_in_flight());
     }
+    // RH_CLICK=<css selector> clicks the element's center like the GUI
+    // does; RH_TYPE=<text> then types into the focused control.
+    if let Ok(sel) = std::env::var("RH_CLICK") {
+        let js = format!("(()=>{{const e=document.querySelector({sel:?}); if(!e) return ''; const r=e.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2)}})()");
+        let at = engine.eval_in_page(&mut page, &js);
+        let at = at.trim_matches(|c| c == '\'' || c == '"');
+        if let Some((x, y)) = at.split_once(',').and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?))) {
+            eprintln!("click {sel} at ({x}, {y})");
+            let up = engine.click_at(&mut page, x, y, Default::default());
+            eprintln!("click action {:?}", up.action);
+            if let Ok(text) = std::env::var("RH_TYPE") {
+                if let Some(f) = page.state.focused {
+                    page.set_control_text(f, &text);
+                    engine.restyle(&mut page);
+                }
+            }
+        } else {
+            eprintln!("click target {sel} not found ({at})");
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(std::env::var("RH_JS_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(300));
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let _ = engine.tick(&mut page);
+        }
+    }
+    if let Ok(needle) = std::env::var("RH_DEBUG_TEXT") {
+        use rabbithole_engine::layout::DisplayItem as D;
+        for (i, it) in page.display_list.items.iter().enumerate() {
+            if let D::Text { x, y, text, color, .. } = it {
+                if text.contains(&needle) {
+                    eprintln!("after: {i}: Text {text:?} at ({x}, {y}) color {color:?}");
+                }
+            }
+        }
+        eprintln!("layout:\n{}", page.layout_dump().lines().filter(|l| l.contains(&needle) || l.contains("textarea")).collect::<Vec<_>>().join("\n"));
+    }
+    if let Ok(js) = std::env::var("RH_EVAL") {
+        eprintln!("eval: {}", engine.eval_in_page(&mut page, &js));
+    }
     for (level, msg) in page.take_console() {
         eprintln!("[console.{level}] {msg}");
     }

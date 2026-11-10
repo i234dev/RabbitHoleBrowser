@@ -10,6 +10,7 @@ mod element;
 mod env;
 mod events;
 mod fetch;
+mod frames;
 mod host;
 mod misc;
 mod modules;
@@ -188,6 +189,7 @@ impl ScriptHost {
             element::install(realm);
             document::install(realm);
             window::install(realm);
+            frames::install(realm);
             cssom::install(realm);
             fetch::install(realm);
             misc::install(realm);
@@ -288,6 +290,18 @@ impl ScriptHost {
             self.state.borrow_mut().render.dirty = true;
         }
         self.enter(env, |realm| events::dispatch(realm, TargetKey::Window, event_type, EventInit::simple(false, false), true))
+    }
+
+    /// Deliver a message another frame posted to this window (`data` is
+    /// the serialized structured clone, `origin` the sender's origin,
+    /// `source` the sender's frame id).
+    pub fn deliver_message(&mut self, env: &mut dyn HostEnv, data: &str, origin: &str, source: u64) {
+        self.enter(env, |realm| {
+            if let Err(e) = frames::deliver(realm, data, origin, source) {
+                let msg = realm.error_to_string(&e);
+                host::log("error", &format!("Uncaught {msg} (message event)"));
+            }
+        });
     }
 
     /// Dispatch an event on `document`.

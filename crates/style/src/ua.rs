@@ -110,7 +110,7 @@ input[type=range i], input[type=color i] { width: 129px; height: 1.6em; }
 input[type=file i] { width: auto; }
 input[type=image i] { border: none; padding: 0; background-color: transparent; width: auto; height: auto; }
 select { padding: 1px 4px; width: auto; min-width: 8ch; border-radius: 2px; }
-textarea { width: 20ch; height: 2.6em; white-space: pre-wrap; user-select: text; resize: both; overflow: auto; }
+textarea { width: 20ch; white-space: pre-wrap; user-select: text; resize: both; overflow: auto; }
 input::placeholder, textarea::placeholder { color: #757575; }
 input:disabled, textarea:disabled, select:disabled, button:disabled { color: #8a8a8a; background-color: #f5f5f5; cursor: default; }
 :focus-visible { outline: 2px solid #005fcc; outline-offset: 1px; }

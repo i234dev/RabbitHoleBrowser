@@ -1353,6 +1353,12 @@ impl Worker {
     /// Send `keydown`/`keyup` to the page (focused element, else `body`).
     /// Returns true when a listener called `preventDefault()`.
     fn page_key_event(&mut self, k: &KeyInput) -> bool {
+        // Keys go into a focused iframe's document.
+        let routed = self.page.as_mut().and_then(|page| self.engine.frame_key_event(page, &k.key, &k.code, k.pressed, k.mods));
+        if let Some(out) = routed {
+            self.apply_outcome(out);
+            return k.key != "Tab";
+        }
         let Some(page) = self.page.as_ref() else { return false };
         if !page.has_scripts() {
             return false;
@@ -1368,6 +1374,12 @@ impl Worker {
         if !k.pressed {
             self.page_key_event(k);
             return;
+        }
+        // Keyboard input: focus moved from now on matches `:focus-visible`.
+        if !(k.mods.ctrl || k.mods.alt || k.mods.meta) {
+            if let Some(page) = self.page.as_mut() {
+                page.pointer.pointer_modality = false;
+            }
         }
         if self.page_key_event(k) {
             return;
