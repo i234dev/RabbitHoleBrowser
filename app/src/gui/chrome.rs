@@ -103,6 +103,7 @@ pub enum Action {
     ToggleBookmark,
     About,
     ToggleJavaScript,
+    ToggleTrackerBlocking,
     ToggleConsole,
     ClearConsole,
 }

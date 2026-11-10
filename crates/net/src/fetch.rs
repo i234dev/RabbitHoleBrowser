@@ -251,6 +251,8 @@ impl Request {
 
 #[derive(Debug, Clone)]
 pub enum FetchError {
+    /// Blocked by the built-in ad/tracker blocker.
+    Blocked(String),
     UnsupportedScheme(String),
     Io(String),
     Http(u16),
@@ -262,6 +264,7 @@ pub enum FetchError {
 impl std::fmt::Display for FetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            FetchError::Blocked(h) => write!(f, "blocked ad/tracker host: {h}"),
             FetchError::UnsupportedScheme(s) => write!(f, "unsupported URL scheme: {s}"),
             FetchError::Io(e) => write!(f, "I/O error: {e}"),
             FetchError::Http(code) => write!(f, "HTTP error {code}"),
@@ -285,6 +288,8 @@ pub struct Fetcher {
     pub cookies: Option<Arc<Mutex<CookieJar>>>,
     /// `Accept-Language` value.
     pub accept_language: String,
+    /// Block requests to known ad/tracker domains (subresources only).
+    pub block_trackers: bool,
     /// Cached HTTP agent (connection pool + TLS config), rebuilt when the
     /// settings it depends on change.
     agent: Arc<Mutex<Option<(String, ureq::Agent)>>>,
@@ -299,6 +304,7 @@ impl Default for Fetcher {
             headers: Vec::new(),
             cookies: None,
             accept_language: "es-ES,es;q=0.9,en;q=0.8".into(),
+            block_trackers: true,
             agent: Arc::new(Mutex::new(None)),
         }
     }
@@ -449,6 +455,9 @@ impl Fetcher {
     /// handling (so cookies set on intermediate hops are kept, and 303 /
     /// 301 / 302 on POST turn into GET per browsers), cookie jar, referer.
     pub fn request(&self, req: &Request) -> Result<Response, FetchError> {
+        if self.block_trackers && req.dest != Destination::Document && is_tracker_host(&req.url.host) {
+            return Err(FetchError::Blocked(req.url.host.clone()));
+        }
         match req.url.scheme.as_str() {
             "http" | "https" => {}
             _ => return self.fetch(&req.url),
@@ -841,6 +850,27 @@ impl Fetcher {
 }
 
 
+/// Ad and tracker domains blocked when `Fetcher::block_trackers` is on
+/// (a small built-in list in the spirit of Brave / uBlock's defaults).
+const TRACKER_DOMAINS: &[&str] = &[
+    "doubleclick.net", "googlesyndication.com", "googleadservices.com", "google-analytics.com", "googletagmanager.com",
+    "googletagservices.com", "adservice.google.com", "pagead2.googlesyndication.com", "amazon-adsystem.com", "adsrvr.org",
+    "criteo.com", "criteo.net", "taboola.com", "outbrain.com", "scorecardresearch.com", "quantserve.com", "quantcount.com",
+    "hotjar.com", "hotjar.io", "facebook.net", "connect.facebook.net", "fuseplatform.net", "publift.com", "adnxs.com",
+    "rubiconproject.com", "pubmatic.com", "openx.net", "casalemedia.com", "indexww.com", "smartadserver.com", "teads.tv",
+    "yieldmo.com", "sharethrough.com", "33across.com", "moatads.com", "adsafeprotected.com", "doubleverify.com",
+    "chartbeat.com", "chartbeat.net", "newrelic.com", "nr-data.net", "segment.io", "segment.com", "mixpanel.com",
+    "cloudflareinsights.com", "clarity.ms", "bat.bing.com", "ads-twitter.com", "analytics.tiktok.com", "snap.licdn.com",
+    "adform.net", "bidswitch.net", "media.net", "imasdk.googleapis.com", "securepubads.g.doubleclick.net", "seedtag.com",
+    "richaudience.com", "permutive.com", "permutive.app", "lijit.com", "sovrn.com", "gumgum.com", "id5-sync.com",
+];
+
+/// Is `host` a known ad/tracker domain (or a subdomain of one)?
+pub fn is_tracker_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    TRACKER_DOMAINS.iter().any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
 /// Chrome major version we present as.
 pub const CHROME_MAJOR: u32 = 142;
 
@@ -1099,5 +1129,16 @@ mod tests {
         assert_eq!(mime_for_extension("HTM"), "text/html");
         assert_eq!(mime_for_extension("svg"), "image/svg+xml");
         assert_eq!(mime_for_extension("bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn tracker_blocking() {
+        assert!(super::is_tracker_host("www.googletagmanager.com"));
+        assert!(super::is_tracker_host("cdn.fuseplatform.net"));
+        assert!(!super::is_tracker_host("www.wikipedia.org"));
+        assert!(!super::is_tracker_host("notdoubleclick.net"));
+        let f = Fetcher::default();
+        let req = Request::get(Url::parse_absolute("https://www.google-analytics.com/analytics.js").unwrap()).with_dest(Destination::Script);
+        assert!(matches!(f.request(&req), Err(FetchError::Blocked(_))));
     }
 }

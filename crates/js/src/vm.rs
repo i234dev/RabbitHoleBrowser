@@ -510,7 +510,8 @@ impl Realm {
                 None => return Err(err),
             };
             let pc = frame.pc.saturating_sub(1) as u32;
-            let handler = frame.code.handlers.iter().find(|h| h.start <= pc && pc < h.end).copied();
+            // A watchdog timeout cannot be caught by the script.
+            let handler = if self.terminating { None } else { frame.code.handlers.iter().find(|h| h.start <= pc && pc < h.end).copied() };
             if let Some(h) = handler {
                 frame.stack.truncate(h.stack_depth as usize);
                 while frame.scope_depth > h.scope_depth {
@@ -594,6 +595,12 @@ impl Realm {
             counter = counter.wrapping_add(1);
             if counter & 0x3ff == 0 {
                 self.maybe_gc();
+                if let Some(d) = self.deadline {
+                    if self.terminating || std::time::Instant::now() >= d {
+                        self.terminating = true;
+                        return Err(self.new_error("RangeError", "Script execution timed out"));
+                    }
+                }
             }
             let fi = self.frames.len() - 1;
             let op = {

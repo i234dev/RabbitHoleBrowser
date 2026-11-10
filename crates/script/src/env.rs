@@ -26,6 +26,12 @@ pub trait HostEnv {
     fn set_scroll(&mut self, x: f32, y: f32);
     /// Synchronous resource fetch (same cookie jar / caches as the page).
     fn fetch(&mut self, req: Request) -> Result<Response, String>;
+    /// Start a fetch on a background thread; the result arrives on the
+    /// returned channel. `None` (the default) means "not supported": the
+    /// caller falls back to the synchronous `fetch`.
+    fn fetch_background(&mut self, _req: Request) -> Option<std::sync::mpsc::Receiver<Result<Response, String>>> {
+        None
+    }
     fn navigate(&mut self, url: Url, replace: bool);
     /// `document.cookie` getter.
     fn cookies(&mut self) -> String;

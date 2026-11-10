@@ -558,6 +558,7 @@ impl App {
             MenuItem::new("Page text", Action::ViewText),
             MenuItem::new("JavaScript console  Ctrl+Shift+J", Action::ToggleConsole).sep(),
             MenuItem::new(if self.settings.javascript { "Disable JavaScript" } else { "Enable JavaScript" }, Action::ToggleJavaScript),
+            MenuItem::new(if self.settings.block_trackers { "Allow ads & trackers" } else { "Block ads & trackers" }, Action::ToggleTrackerBlocking),
             MenuItem::new("Clear cookies", Action::ClearCookies).sep(),
             MenuItem::new("About RabbitHole", Action::About),
             MenuItem::new("Quit               Ctrl+Q", Action::Quit).sep(),
@@ -669,6 +670,7 @@ impl App {
             Action::SelectOption(node, i) => self.select_option_with_events(node, i),
             Action::ToggleBookmark => self.toggle_bookmark(),
             Action::ToggleJavaScript => self.toggle_javascript(),
+            Action::ToggleTrackerBlocking => self.toggle_tracker_blocking(),
             Action::ToggleConsole => self.toggle_console(),
             Action::ClearConsole => {
                 if let Some(tab) = self.tabs.get_mut(idx) {

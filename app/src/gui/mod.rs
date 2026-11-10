@@ -141,6 +141,7 @@ impl App {
         engine.scripting = settings.javascript;
         engine.loader.load_scripts = settings.javascript;
         engine.loader.load_images = settings.images;
+        engine.loader.fetcher.block_trackers = settings.block_trackers;
         engine.set_local_storage_path(profile.local_storage_path());
         let ui_font = engine.fonts.select(Family::Sans, 400, false);
         let ui_font_bold = engine.fonts.select(Family::Sans, 700, false);
@@ -1001,6 +1002,13 @@ impl App {
         self.engine.loader.load_scripts = self.settings.javascript;
         self.settings.save(&self.profile.settings_path());
         self.set_status(if self.settings.javascript { "JavaScript enabled (reload to apply)" } else { "JavaScript disabled (reload to apply)" });
+    }
+
+    pub(crate) fn toggle_tracker_blocking(&mut self) {
+        self.settings.block_trackers = !self.settings.block_trackers;
+        self.engine.loader.fetcher.block_trackers = self.settings.block_trackers;
+        self.settings.save(&self.profile.settings_path());
+        self.set_status(if self.settings.block_trackers { "Bloqueo de anuncios y rastreadores activado" } else { "Bloqueo de anuncios y rastreadores desactivado" });
     }
 
     /// Evaluate the console input line in the active page.

@@ -191,6 +191,63 @@ pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, op
     tree
 }
 
+/// Compute the style of a single element (and its ancestors) without
+/// styling the rest of the document. Used for `getComputedStyle()` while
+/// the DOM has pending changes, so script read/write loops stay cheap.
+/// Returns `None` when the element is not rendered (display:none ancestor).
+pub fn style_chain(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions, target: NodeId) -> Option<Rc<ComputedStyle>> {
+    let html = doc.html_element()?;
+    // Ancestor chain html → target (elements only).
+    let mut chain = Vec::new();
+    let mut cur = Some(target);
+    while let Some(n) = cur {
+        if doc.element(n).is_some() {
+            chain.push(n);
+        }
+        if n == html {
+            break;
+        }
+        cur = doc.parent(n);
+    }
+    if chain.last() != Some(&html) {
+        return None; // detached
+    }
+    chain.reverse();
+
+    let mut ua_rules = Vec::new();
+    ua_sheet().active_rules(env, &mut ua_rules);
+    let mut index = RuleIndex::default();
+    index.add_sheet(&ua_rules, true, None);
+    let mut author_rules_store: Vec<Vec<&StyleRule>> = Vec::with_capacity(author.len());
+    for sheet in author {
+        let mut rules = Vec::new();
+        sheet.active_rules(env, &mut rules);
+        author_rules_store.push(rules);
+    }
+    for (sheet, rules) in author.iter().zip(&author_rules_store) {
+        index.add_sheet(rules, false, sheet.base_url.as_deref());
+    }
+
+    let mut candidates = Vec::new();
+    let mut matched: Vec<Matched> = Vec::new();
+    let mut parent = Rc::new(ComputedStyle::initial());
+    let mut vars: Rc<Vars> = Rc::new(HashMap::new());
+    let mut root_fs = 16.0;
+    for &node in &chain {
+        let out = compute_element(doc, node, &parent, &vars, root_fs, env, opts, &index, &mut candidates, &mut matched);
+        if node == html {
+            root_fs = out.style.font_size;
+        }
+        let style = Rc::new(out.style);
+        if style.display.is_none() && node != target {
+            return None;
+        }
+        vars = out.vars;
+        parent = style;
+    }
+    Some(parent)
+}
+
 /// Result of styling one element: its style, custom properties and any
 /// generated pseudo-element styles.
 struct ElementOut {

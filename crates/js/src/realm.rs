@@ -157,6 +157,11 @@ pub struct Realm {
     /// `new.target` for the innermost native constructor call.
     pub new_target_stack: Vec<Value>,
     pub gc_threshold: usize,
+    /// When set, running JavaScript past this instant is interrupted with an
+    /// uncatchable "Script execution timed out" error (watchdog).
+    pub deadline: Option<std::time::Instant>,
+    /// A timeout is unwinding: `catch`/`finally` handlers are skipped.
+    pub(crate) terminating: bool,
     pub gc_enabled: bool,
     pub unhandled_rejections: Vec<Value>,
     pub max_frames: usize,
@@ -244,6 +249,8 @@ impl Realm {
             native_depth: 0,
             new_target_stack: Vec::new(),
             gc_threshold: 200_000,
+            deadline: None,
+            terminating: false,
             gc_enabled: true,
             unhandled_rejections: Vec::new(),
             max_frames: 10_000,
@@ -579,6 +586,17 @@ impl Realm {
     }
 
     /// Called by the VM at safe points.
+    /// Set (or clear) the execution deadline for subsequent JavaScript.
+    pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
+        self.deadline = deadline;
+        self.terminating = false;
+    }
+
+    /// Did the last run hit the deadline?
+    pub fn timed_out(&self) -> bool {
+        self.terminating
+    }
+
     pub(crate) fn maybe_gc(&mut self) {
         if self.gc_enabled && self.native_depth == 0 && self.heap.allocated_since_gc > self.gc_threshold && std::env::var_os("RH_NO_GC").is_none() {
             let freed = self.gc();

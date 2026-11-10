@@ -1339,3 +1339,17 @@ fn conditional_followed_by_decimal_fraction() {
     let v = realm.eval("const e = 80, o = null; [e>=75?.75:e>=50?.5:0, true?.001:1, o?.x, (o??{a:1})?.a].join()", "t.js").unwrap();
     assert_eq!(realm.to_rust_string(v).unwrap(), "0.75,0.001,,1");
 }
+
+#[test]
+fn watchdog_interrupts_infinite_loops() {
+    let mut realm = crate::Realm::new();
+    realm.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(200)));
+    let t = std::time::Instant::now();
+    let r = realm.eval("let n = 0; while (true) { try { n++; } catch (e) {} finally { } }", "t.js");
+    assert!(r.is_err());
+    assert!(realm.timed_out());
+    assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    realm.set_deadline(None);
+    let v = realm.eval("1 + 1", "t.js").unwrap();
+    assert_eq!(realm.to_rust_string(v).unwrap(), "2");
+}

@@ -329,12 +329,44 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     if n.doc != 0 {
         return None;
     }
-    let (style, rect) = with_env(|env| {
-        env.ensure_layout();
-        (env.computed_style(n.node), env.node_rect(n.node))
-    });
+    // Style first (cheap: computed on demand when the DOM changed); the
+    // layout box only when the value actually depends on it, so scripts
+    // that interleave style writes and reads don't force full layouts.
+    let style = with_env(|env| env.computed_style(n.node));
     let s: std::rc::Rc<ComputedStyle> = style?;
-    let r = rect.unwrap_or_default();
+    let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_));
+    let needs_box = match prop {
+        "width" | "height" | "inline-size" | "block-size" => true,
+        "transform" => !s.transform.is_empty(),
+        "margin-top" => pct(&s.margin.top),
+        "margin-right" => pct(&s.margin.right),
+        "margin-bottom" => pct(&s.margin.bottom),
+        "margin-left" => pct(&s.margin.left),
+        "padding-top" => pct(&s.padding.top),
+        "padding-right" => pct(&s.padding.right),
+        "padding-bottom" => pct(&s.padding.bottom),
+        "padding-left" => pct(&s.padding.left),
+        "top" => pct(&s.inset.top),
+        "left" => pct(&s.inset.left),
+        "right" => pct(&s.inset.right),
+        "bottom" => pct(&s.inset.bottom),
+        "min-width" => pct(&s.min_width),
+        "max-width" => pct(&s.max_width),
+        "min-height" => pct(&s.min_height),
+        "max-height" => pct(&s.max_height),
+        _ => false,
+    };
+    let s = if needs_box {
+        // Geometry needs an up-to-date layout (and the style it used).
+        let (st, _) = with_env(|env| {
+            env.ensure_layout();
+            (env.computed_style(n.node), ())
+        });
+        st.unwrap_or(s)
+    } else {
+        s
+    };
+    let r = if needs_box { with_env(|env| env.node_rect(n.node)).unwrap_or_default() } else { Default::default() };
     Some(match prop {
         "display" => display_css(s.display).to_string(),
         "position" => match s.position {

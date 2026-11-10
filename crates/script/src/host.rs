@@ -92,6 +92,8 @@ pub struct HostState {
     pub rafs: Vec<RafCallback>,
     pub next_timer_id: u32,
     pub last_frame: f64,
+    /// Time (ms) of the last `run_timers` call.
+    pub last_tick: f64,
     pub dirty: bool,
     pub ready_state: &'static str,
     pub loading: bool,
@@ -125,6 +127,9 @@ pub struct HostState {
     pub pending_intersections: Vec<(ObjectId, Vec<NodeRef>)>,
     pub pending_resizes: Vec<(ObjectId, Vec<NodeRef>)>,
     pub pending_script_events: Vec<(NodeRef, &'static str)>,
+    /// Dynamically inserted external scripts being downloaded in the
+    /// background: (element, url, is_module, result channel).
+    pub pending_script_fetches: Vec<(NodeRef, String, bool, std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>)>,
     pub deferred_natives: Vec<ObjectId>,
     /// Module cache and import map.
     pub modules: crate::modules::ModuleState,

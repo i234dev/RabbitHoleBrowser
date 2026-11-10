@@ -937,6 +937,25 @@ impl Engine {
         self.relayout_only(page);
     }
 
+    /// Current computed style of one element without a full restyle
+    /// (stylesheets are re-collected first if their sources changed).
+    pub fn computed_style_now(&self, page: &mut Page, node: NodeId) -> Option<Rc<rabbithole_style::ComputedStyle>> {
+        let sig = stylesheet_signature(&page.doc);
+        if sig != page.sheet_signature {
+            page.sheet_signature = sig;
+            page.sheets = self.loader.collect_stylesheets(&page.doc, &page.base_url);
+            page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
+        }
+        let env = media_env(page.viewport);
+        let base_str = page.base_url.to_string();
+        let opts = StyleOptions {
+            state: &page.state,
+            resolve_url: &|base, raw| resolve_url(base, raw),
+            document_base: &base_str,
+        };
+        rabbithole_style::style_chain(&page.doc, &page.sheets, &env, &opts, node)
+    }
+
     /// Re-run layout + display list (styles unchanged).
     pub fn relayout_only(&self, page: &mut Page) {
         let Page { doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, .. } = page;

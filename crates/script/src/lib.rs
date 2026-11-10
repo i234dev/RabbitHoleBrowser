@@ -99,6 +99,7 @@ impl ScriptHost {
             rafs: Vec::new(),
             next_timer_id: 1,
             last_frame: now,
+            last_tick: 0.0,
             dirty: false,
             ready_state: "loading",
             loading: true,
@@ -126,6 +127,7 @@ impl ScriptHost {
             pending_intersections: Vec::new(),
             pending_resizes: Vec::new(),
             pending_script_events: Vec::new(),
+            pending_script_fetches: Vec::new(),
             deferred_natives: Vec::new(),
             modules: Default::default(),
         }));
@@ -289,7 +291,8 @@ impl ScriptHost {
     /// whether anything ran.
     pub fn run_timers(&mut self, env: &mut dyn HostEnv, now_ms: f64) -> bool {
         self.enter(env, |realm| {
-            let mut ran = false;
+            state().borrow_mut().last_tick = now_ms;
+            let mut ran = node::run_ready_script_fetches(realm);
             // Timers due, in order of due time then id.
             loop {
                 let next = {
@@ -369,6 +372,11 @@ impl ScriptHost {
         if !st.rafs.is_empty() {
             let frame = st.last_frame + 16.0;
             due = Some(due.map(|d| d.min(frame)).unwrap_or(frame));
+        }
+        if !st.pending_script_fetches.is_empty() {
+            // Poll background script downloads every ~10 ms.
+            let soon = st.last_tick + 10.0;
+            due = Some(due.map(|d| d.min(soon)).unwrap_or(soon));
         }
         due
     }

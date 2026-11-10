@@ -376,7 +376,14 @@ pub(crate) fn run_script_element(realm: &mut Realm, n: NodeRef) {
                 schedule_script_events(realm);
                 return;
             };
-            let resp = with_env(|env| env.fetch(rabbithole_net::Request::get(url.clone()).with_dest(rabbithole_net::Destination::Script).with_referer(env.document_url())));
+            let req = with_env(|env| rabbithole_net::Request::get(url.clone()).with_dest(rabbithole_net::Destination::Script).with_referer(env.document_url()));
+            // Like browsers, download injected scripts without blocking the
+            // inserting script; they run when the download completes.
+            if let Some(rx) = with_env(|env| env.fetch_background(req.clone())) {
+                state().borrow_mut().pending_script_fetches.push((n, url.to_string(), is_module, rx));
+                return;
+            }
+            let resp = with_env(|env| env.fetch(req));
             match resp {
                 Ok(r) if r.status < 400 => (rabbithole_net::decode_text(&r.body, r.charset.as_deref()), url.to_string()),
                 _ => {
@@ -397,6 +404,53 @@ pub(crate) fn run_script_element(realm: &mut Realm, n: NodeRef) {
     }
     state().borrow_mut().pending_script_events.push((n, "load"));
     schedule_script_events(realm);
+}
+
+/// Run dynamically inserted scripts whose background download finished.
+/// Returns whether any ran.
+pub(crate) fn run_ready_script_fetches(realm: &mut Realm) -> bool {
+    let ready: Vec<(NodeRef, String, bool, Result<rabbithole_net::Response, String>)> = {
+        let st = state();
+        let mut st = st.borrow_mut();
+        let mut ready = Vec::new();
+        let mut i = 0;
+        while i < st.pending_script_fetches.len() {
+            match st.pending_script_fetches[i].3.try_recv() {
+                Ok(r) => {
+                    let (n, url, m, _) = st.pending_script_fetches.remove(i);
+                    ready.push((n, url, m, r));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let (n, url, m, _) = st.pending_script_fetches.remove(i);
+                    ready.push((n, url, m, Err("download failed".into())));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => i += 1,
+            }
+        }
+        ready
+    };
+    let any = !ready.is_empty();
+    for (n, url, is_module, r) in ready {
+        match r {
+            Ok(resp) if resp.status < 400 => {
+                let source = rabbithole_net::decode_text(&resp.body, resp.charset.as_deref());
+                let prev = state().borrow().current_script;
+                state().borrow_mut().current_script = Some(n);
+                let r = if is_module { realm.eval_module(&source, &url) } else { realm.eval(&source, &url) };
+                state().borrow_mut().current_script = prev;
+                if let Err(e) = r {
+                    report_error(realm, &e, &url);
+                }
+                state().borrow_mut().pending_script_events.push((n, "load"));
+            }
+            _ => state().borrow_mut().pending_script_events.push((n, "error")),
+        }
+        schedule_script_events(realm);
+    }
+    if any {
+        realm.run_jobs();
+    }
+    any
 }
 
 fn schedule_script_events(realm: &mut Realm) {

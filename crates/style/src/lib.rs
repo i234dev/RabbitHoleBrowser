@@ -120,3 +120,8 @@ pub fn style_tree(doc: &Document, author: &[Stylesheet], env: &MediaEnv) -> Styl
 pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> StyledTree {
     cascade::style_tree_with(doc, author, env, opts)
 }
+
+/// Style of one element computed on demand (see `cascade::style_chain`).
+pub fn style_chain(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions, node: NodeId) -> Option<Rc<ComputedStyle>> {
+    cascade::style_chain(doc, author, env, opts, node)
+}

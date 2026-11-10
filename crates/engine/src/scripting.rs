@@ -153,7 +153,11 @@ impl HostEnv for EngineEnv<'_> {
     fn ensure_layout(&mut self) {
         if self.page.script.dom_dirty {
             self.page.script.dom_dirty = false;
+            let t = std::time::Instant::now();
             self.engine.restyle(self.page);
+            if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                eprintln!("[layout] forced restyle+layout {:?}", t.elapsed());
+            }
         }
     }
     fn node_rect(&mut self, node: NodeId) -> Option<Rect> {
@@ -161,8 +165,18 @@ impl HostEnv for EngineEnv<'_> {
         self.page.rect_of(node)
     }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>> {
-        self.ensure_layout();
-        self.page.styles.get(node).cloned()
+        if !self.page.script.dom_dirty {
+            return self.page.styles.get(node).cloned();
+        }
+        // The DOM changed: compute just this element's chain instead of
+        // restyling and re-laying out the whole document (scripts often
+        // interleave style writes and reads).
+        let t = std::time::Instant::now();
+        let r = self.engine.computed_style_now(self.page, node);
+        if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+            eprintln!("[layout] style_chain {:?}", t.elapsed());
+        }
+        r
     }
     fn viewport(&self) -> (f32, f32) {
         (self.page.viewport.width, self.page.viewport.height)
@@ -178,6 +192,17 @@ impl HostEnv for EngineEnv<'_> {
             return Err(format!("unsupported scheme {}", req.url.scheme));
         }
         self.engine.loader.fetcher.request(&req).map_err(|e| e.to_string())
+    }
+    fn fetch_background(&mut self, req: Request) -> Option<std::sync::mpsc::Receiver<Result<Response, String>>> {
+        if !req.url.is_http() {
+            return None;
+        }
+        let fetcher = self.engine.loader.fetcher.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(fetcher.request(&req).map_err(|e| e.to_string()));
+        });
+        Some(rx)
     }
     fn navigate(&mut self, url: Url, replace: bool) {
         self.page.script.pending_navigation = Some(PendingNavigation {
@@ -347,15 +372,30 @@ impl Engine {
         }
         {
             let mut env = EngineEnv { engine: self, page };
+            // Watchdog: each script gets a few seconds and the whole load a
+            // bounded total, so a runaway script cannot freeze the browser.
+            let load_deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
             for s in classic.iter().chain(deferred.iter()).chain(asyncs.iter()) {
+                let per_script = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                host.realm().set_deadline(Some(per_script.min(load_deadline)));
                 let name = s.url.as_ref().map(|u| u.to_string()).unwrap_or_else(|| format!("{}#inline", env.page.url));
+                let debug = std::env::var_os("RH_DEBUG_SCRIPTS").is_some();
+                if debug {
+                    eprintln!("[script] start {} ({} bytes)", name, s.source.len());
+                }
+                let t = std::time::Instant::now();
                 host.set_current_script(Some(s.node));
                 let _ = host.run_script(&mut env, &s.source, &name, s.is_module);
                 host.set_current_script(None);
                 host.run_jobs(&mut env);
+                if debug {
+                    eprintln!("[script] done  {} in {:?}", name, t.elapsed());
+                }
             }
+            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_secs(2)));
             host.document_ready(&mut env);
             host.run_jobs(&mut env);
+            host.realm().set_deadline(None);
         }
         page.script.host = Some(host);
         self.settle(page, false)
@@ -370,10 +410,12 @@ impl Engine {
         let now = self.start.elapsed().as_secs_f64() * 1000.0;
         {
             let mut env = EngineEnv { engine: self, page };
+            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(1500)));
             let ran = host.run_timers(&mut env, now);
             if ran {
                 host.run_jobs(&mut env);
             }
+            host.realm().set_deadline(None);
         }
         page.script.host = Some(host);
         self.settle(page, false)
@@ -395,8 +437,10 @@ impl Engine {
         }
         let result: DispatchResult = {
             let mut env = EngineEnv { engine: self, page };
+            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(1500)));
             let r = host.dispatch_event(&mut env, target, event_type, init);
             host.run_jobs(&mut env);
+            host.realm().set_deadline(None);
             r
         };
         page.script.host = Some(host);
@@ -412,8 +456,10 @@ impl Engine {
         };
         {
             let mut env = EngineEnv { engine: self, page };
+            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(1500)));
             host.dispatch_window_event(&mut env, event_type);
             host.run_jobs(&mut env);
+            host.realm().set_deadline(None);
         }
         page.script.host = Some(host);
         self.settle(page, false)
@@ -432,8 +478,10 @@ impl Engine {
         };
         let out = {
             let mut env = EngineEnv { engine: self, page };
+            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_secs(10)));
             let s = host.eval_for_console(&mut env, src);
             host.run_jobs(&mut env);
+            host.realm().set_deadline(None);
             s
         };
         page.script.host = Some(host);
