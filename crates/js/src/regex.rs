@@ -22,6 +22,33 @@
 
 use std::collections::HashMap;
 
+thread_local! {
+    /// Watchdog deadline shared with the VM (see `Realm::set_deadline`):
+    /// a runaway match (catastrophic backtracking) gives up once it passes.
+    static DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    static EXPIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set the matcher deadline for this thread (None disables it).
+pub fn set_deadline(d: Option<std::time::Instant>) {
+    DEADLINE.with(|c| c.set(d));
+    EXPIRED.with(|c| c.set(false));
+}
+
+/// Check the deadline (cheap; call every few thousand steps).
+fn deadline_passed() -> bool {
+    if EXPIRED.with(|c| c.get()) {
+        return true;
+    }
+    match DEADLINE.with(|c| c.get()) {
+        Some(d) if std::time::Instant::now() >= d => {
+            EXPIRED.with(|c| c.set(true));
+            true
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Flags {
     pub global: bool,
@@ -221,7 +248,7 @@ impl Regex {
             if let Some(m) = machine.run_at(pos) {
                 return Some(m);
             }
-            if pos >= subject.len() {
+            if pos >= subject.len() || EXPIRED.with(|c| c.get()) {
                 return None;
             }
             // In unicode mode advance by whole code points.
@@ -1663,7 +1690,13 @@ impl Machine<'_> {
         let regex = self.regex;
         let prog = &regex.program;
         let flags = regex.flags;
+        let mut steps: u32 = 0;
         loop {
+            steps = steps.wrapping_add(1);
+            if steps & 0xffff == 0 && deadline_passed() {
+                self.stack.truncate(base);
+                return None;
+            }
             let ok = match &prog[pc] {
                 Inst::Match => return Some(pos),
                 Inst::Char { unit, back } => match self.read(pos, *back) {

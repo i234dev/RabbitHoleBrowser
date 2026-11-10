@@ -411,7 +411,13 @@ impl Engine {
         {
             let mut env = EngineEnv { engine: self, page };
             host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(1500)));
+            if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                eprintln!("[tick] run_timers start");
+            }
             let ran = host.run_timers(&mut env, now);
+            if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                eprintln!("[tick] run_timers done (ran={ran})");
+            }
             if ran {
                 host.run_jobs(&mut env);
             }
@@ -496,7 +502,14 @@ impl Engine {
         let host_dirty = page.script.host.as_mut().map(|h| h.take_dirty()).unwrap_or(false);
         if page.script.dom_dirty || host_dirty {
             page.script.dom_dirty = false;
+            let t = std::time::Instant::now();
+            if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                eprintln!("[settle-engine] restyle start");
+            }
             self.restyle(page);
+            if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                eprintln!("[settle-engine] restyle done in {:?}", t.elapsed());
+            }
             out.relayout = true;
         }
         out.navigation = page.script.pending_navigation.take();

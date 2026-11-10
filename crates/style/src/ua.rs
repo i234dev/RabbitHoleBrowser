@@ -145,4 +145,5 @@ textarea[rows] { height: auto; }
 ruby { display: inline; }
 rt { display: inline; font-size: 50%; }
 noscript { display: inline; }
+@media (scripting: enabled) { noscript { display: none !important; } }
 "#;

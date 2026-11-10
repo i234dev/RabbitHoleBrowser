@@ -7,7 +7,7 @@ use rabbithole_css::parse_stylesheet;
 use rabbithole_dom::Document;
 
 fn env() -> MediaEnv {
-    MediaEnv { width: 1000.0, height: 800.0, screen: true }
+    MediaEnv { width: 1000.0, height: 800.0, screen: true, scripting: true }
 }
 
 fn styled(html: &str, css: &str) -> (Document, StyledTree) {
@@ -468,7 +468,7 @@ fn wikipedia_grid_template_shorthand_and_areas() {
     let css = ".inner{display:grid;column-gap:24px;grid-template:min-content 1fr min-content / 12.25rem minmax(0,1fr);grid-template-areas:'siteNotice siteNotice' 'columnStart pageContent' 'footer footer'} .content{grid-area:pageContent} .notice{grid-area:siteNotice}";
     let doc = rabbithole_html::parse(html);
     let sheet = rabbithole_css::parse_stylesheet(css);
-    let env = MediaEnv { width: 1280.0, height: 800.0, screen: true };
+    let env = MediaEnv { width: 1280.0, height: 800.0, screen: true, scripting: true };
     let t = style_tree(&doc, &[sheet], &env);
     let inner = doc.find_element("div").unwrap();
     let s = t.get(inner).unwrap();

@@ -154,7 +154,7 @@ pub fn build(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) -> Op
             sheets.push(rabbithole_css::parse_stylesheet(&doc.text_content(n)));
         }
     }
-    let env = MediaEnv { width: 1000.0, height: 1000.0, screen: true };
+    let env = MediaEnv { width: 1000.0, height: 1000.0, screen: true, scripting: true };
     let mut rules = Vec::new();
     for s in &sheets {
         s.active_rules(&env, &mut rules);

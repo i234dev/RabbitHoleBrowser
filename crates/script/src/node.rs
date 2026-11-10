@@ -436,7 +436,15 @@ pub(crate) fn run_ready_script_fetches(realm: &mut Realm) -> bool {
                 let source = rabbithole_net::decode_text(&resp.body, resp.charset.as_deref());
                 let prev = state().borrow().current_script;
                 state().borrow_mut().current_script = Some(n);
+                let dbg = std::env::var_os("RH_DEBUG_SCRIPTS").is_some();
+                let t = std::time::Instant::now();
+                if dbg {
+                    eprintln!("[script] async start {url} ({} bytes)", source.len());
+                }
                 let r = if is_module { realm.eval_module(&source, &url) } else { realm.eval(&source, &url) };
+                if dbg {
+                    eprintln!("[script] async done  {url} in {:?}", t.elapsed());
+                }
                 state().borrow_mut().current_script = prev;
                 if let Err(e) = r {
                     report_error(realm, &e, &url);

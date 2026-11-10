@@ -95,6 +95,8 @@ pub struct MediaEnv {
     pub width: f32,
     pub height: f32,
     pub screen: bool,
+    /// Scripting is enabled (`@media (scripting: enabled)`).
+    pub scripting: bool,
 }
 
 impl MediaQuery {
@@ -132,6 +134,9 @@ impl MediaAlternative {
                 ("hover", "hover") => true,
                 ("pointer", "fine") => true,
                 ("color", _) => true,
+                ("scripting", "enabled") => env.scripting,
+                ("scripting", "none") => !env.scripting,
+                ("scripting", "initial-only") => false,
                 ("min-resolution", _) | ("max-resolution", _) | ("-webkit-min-device-pixel-ratio", _) => false,
                 _ => false,
             },
@@ -725,12 +730,12 @@ mod tests {
                    @font-face { font-family: X; src: url(x.woff) } bad { ; } a { }";
         let sheet = parse_stylesheet(css);
         assert_eq!(sheet.imports().len(), 1);
-        let env = MediaEnv { width: 500.0, height: 800.0, screen: true };
+        let env = MediaEnv { width: 500.0, height: 800.0, screen: true, scripting: true };
         let mut rules = Vec::new();
         sheet.active_rules(&env, &mut rules);
         assert_eq!(rules.len(), 3, "{:?}", rules);
         assert!(rules[0].declarations[1].important);
-        let env2 = MediaEnv { width: 900.0, height: 800.0, screen: true };
+        let env2 = MediaEnv { width: 900.0, height: 800.0, screen: true, scripting: true };
         let mut rules2 = Vec::new();
         sheet.active_rules(&env2, &mut rules2);
         assert_eq!(rules2.len(), 2);
@@ -746,9 +751,9 @@ mod tests {
     #[test]
     fn media_queries() {
         let q = parse_media_query("screen and (min-width: 600px) and (max-width: 900px), print");
-        let env = MediaEnv { width: 700.0, height: 800.0, screen: true };
+        let env = MediaEnv { width: 700.0, height: 800.0, screen: true, scripting: true };
         assert!(q.evaluate(&env));
-        let env = MediaEnv { width: 1000.0, height: 800.0, screen: true };
+        let env = MediaEnv { width: 1000.0, height: 800.0, screen: true, scripting: true };
         assert!(!q.evaluate(&env));
         let q = parse_media_query("not screen");
         assert!(!q.evaluate(&env));

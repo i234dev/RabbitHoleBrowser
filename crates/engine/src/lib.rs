@@ -267,7 +267,7 @@ impl Loader {
         if debug {
             eprintln!("[load] stylesheets {:?}", t.elapsed());
         }
-        let env = media_env(viewport);
+        let env = media_env(viewport, self.load_scripts);
 
         // A throw-away cascade on this thread to discover referenced
         // resources (background images, web fonts). Styles are recomputed
@@ -895,7 +895,7 @@ impl Engine {
         // `<meta http-equiv="refresh" content="N; url=...">` (N <= 5 s is
         // followed right away; longer delays are left to the user).
         if page.script.pending_navigation.is_none() {
-            if let Some(target) = meta_refresh_target(&page) {
+            if let Some(target) = meta_refresh_target(&page, self.scripting) {
                 page.script.pending_navigation = Some(PendingNavigation {
                     request: Request::get(target).with_referer(page.url.clone()),
                     replace: true,
@@ -924,7 +924,7 @@ impl Engine {
                 page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
             }
         }
-        let env = media_env(page.viewport);
+        let env = media_env(page.viewport, self.scripting);
         let base_str = page.base_url.to_string();
         let opts = StyleOptions {
             state: &page.state,
@@ -946,7 +946,7 @@ impl Engine {
             page.sheets = self.loader.collect_stylesheets(&page.doc, &page.base_url);
             page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
         }
-        let env = media_env(page.viewport);
+        let env = media_env(page.viewport, self.scripting);
         let base_str = page.base_url.to_string();
         let opts = StyleOptions {
             state: &page.state,
@@ -1149,8 +1149,8 @@ fn css_color(c: Color) -> String {
     format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a as f32 / 255.0)
 }
 
-fn media_env(viewport: Viewport) -> MediaEnv {
-    MediaEnv { width: viewport.width, height: viewport.height, screen: true }
+fn media_env(viewport: Viewport, scripting: bool) -> MediaEnv {
+    MediaEnv { width: viewport.width, height: viewport.height, screen: true, scripting }
 }
 
 fn resolve_url(base: &str, raw: &str) -> Option<String> {
@@ -1219,12 +1219,27 @@ fn rebase_rules(rules: Vec<Rule>, base: &str) -> Vec<Rule> {
 }
 
 /// Target of a `<meta http-equiv="refresh">` with a short delay.
-fn meta_refresh_target(page: &Page) -> Option<Url> {
+fn in_noscript(doc: &rabbithole_dom::Document, mut n: NodeId) -> bool {
+    while let Some(p) = doc.parent(n) {
+        if doc.element(p).map(|e| e.tag == "noscript").unwrap_or(false) {
+            return true;
+        }
+        n = p;
+    }
+    false
+}
+
+fn meta_refresh_target(page: &Page, scripting: bool) -> Option<Url> {
     let doc = &page.doc;
     let head = doc.head()?;
     for n in doc.descendants(head) {
         let Some(el) = doc.element(n) else { continue };
         if el.tag != "meta" || !el.attr("http-equiv").map(|h| h.eq_ignore_ascii_case("refresh")).unwrap_or(false) {
+            continue;
+        }
+        // With scripting on, `<noscript>` content is inert (the HTML parser
+        // would treat it as raw text), so its refreshes must not fire.
+        if scripting && in_noscript(doc, n) {
             continue;
         }
         let content = el.attr("content")?.trim();

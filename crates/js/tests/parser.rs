@@ -621,3 +621,22 @@ fn large_input_is_fast() {
     assert_eq!(p.body.len(), 20000);
     assert!(start.elapsed().as_secs() < 10, "parsing took {:?}", start.elapsed());
 }
+
+/// Deeply nested `(a=(b=(...` must not retry every level as arrow
+/// parameters (exponential time; seen in reCAPTCHA).
+#[test]
+fn nested_parens_parse_fast() {
+    let depth = 60;
+    let mut src = String::new();
+    for i in 0..depth {
+        src.push_str(&format!("(v{i}=", ));
+    }
+    src.push('1');
+    for _ in 0..depth {
+        src.push(')');
+    }
+    let t = std::time::Instant::now();
+    parse(&src);
+    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    parse("var f = (a, b = (c) => c) => a + b(1);");
+}

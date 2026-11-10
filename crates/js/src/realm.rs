@@ -590,6 +590,7 @@ impl Realm {
     pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
         self.deadline = deadline;
         self.terminating = false;
+        crate::regex::set_deadline(deadline);
     }
 
     /// Did the last run hit the deadline?

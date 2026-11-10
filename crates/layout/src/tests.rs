@@ -30,6 +30,7 @@ impl Fixture {
             width: 800.0,
             height: 600.0,
             screen: true,
+            scripting: true,
         };
         let styles = style_tree(&doc, &sheets, &env);
         Fixture {

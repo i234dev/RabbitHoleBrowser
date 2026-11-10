@@ -89,7 +89,15 @@ pub fn settle(engine: &Engine, page: &mut Page, wait_ms: u64) -> Option<PendingN
                 break;
             }
         }
+        let dbg = std::env::var_os("RH_DEBUG_SCRIPTS").is_some();
+        let t = Instant::now();
+        if dbg {
+            eprintln!("[settle] tick start due={due:.0} now={now_ms:.0}");
+        }
         let out = engine.tick(page);
+        if dbg {
+            eprintln!("[settle] tick done in {:?}", t.elapsed());
+        }
         if out.navigation.is_some() {
             navigation = out.navigation;
             break;

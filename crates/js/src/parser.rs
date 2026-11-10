@@ -94,6 +94,10 @@ pub struct Parser<'a> {
     ctx: Context,
     /// `in` is not a binary operator in a for-statement init.
     no_in: bool,
+    /// Byte offsets of `(` tokens already known not to start arrow
+    /// parameters. Without this, nested `(a=(b=(c=...` retries every level
+    /// as an arrow head and parsing becomes exponential in the depth.
+    not_arrow: std::collections::HashSet<usize>,
 }
 
 const RESERVED: &[&str] = &[
@@ -176,6 +180,7 @@ impl<'a> Parser<'a> {
                 super_prop_ok: false,
             },
             no_in: false,
+            not_arrow: std::collections::HashSet::new(),
         })
     }
 
@@ -1388,6 +1393,18 @@ impl<'a> Parser<'a> {
     /// Try `( params ) =>`. On any failure returns Ok(None) and the caller
     /// restores the snapshot.
     fn try_parse_arrow_params(&mut self) -> PResult<Option<Vec<Param>>> {
+        let start = self.tok.start;
+        if self.not_arrow.contains(&start) {
+            return Ok(None);
+        }
+        let r = self.try_parse_arrow_params_uncached()?;
+        if r.is_none() {
+            self.not_arrow.insert(start);
+        }
+        Ok(r)
+    }
+
+    fn try_parse_arrow_params_uncached(&mut self) -> PResult<Option<Vec<Param>>> {
         let result: PResult<Vec<Param>> = (|| {
             self.expect_punct("(")?;
             let params = self.parse_formal_params_until_paren()?;

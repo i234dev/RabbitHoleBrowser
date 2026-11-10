@@ -31,7 +31,7 @@ const SCOPE_BOUNDARY: &[&str] = &[
     "html", "table", "td", "th", "caption", "applet", "marquee", "object", "template", "svg", "math",
 ];
 
-const HEAD_ONLY: &[&str] = &["base", "basefont", "bgsound", "link", "meta", "title", "style", "script", "noframes", "template"];
+const HEAD_ONLY: &[&str] = &["base", "basefont", "bgsound", "link", "meta", "title", "style", "script", "noframes", "template", "noscript"];
 
 pub fn parse(input: &str) -> Document {
     let mut builder = TreeBuilder::new();
@@ -197,8 +197,9 @@ impl TreeBuilder {
                 }
                 return;
             }
+            let in_noscript = self.stack.iter().any(|&n| self.doc.element(n).map(|e| e.tag == "noscript").unwrap_or(false));
             let cur = self.current_tag().to_string();
-            if !HEAD_ONLY.contains(&cur.as_str()) {
+            if !HEAD_ONLY.contains(&cur.as_str()) && !in_noscript {
                 self.ensure_body();
             }
         }
@@ -322,6 +323,15 @@ impl TreeBuilder {
                 // nothing to pop
             }
             return raw;
+        }
+
+        // Anything inside a `<noscript>` in the head stays there (browsers
+        // with scripting on treat it as inert text), so tracking pixels and
+        // fallbacks don't leak into the body.
+        if self.body.is_none() && self.stack.iter().any(|&n| self.doc.element(n).map(|e| e.tag == "noscript").unwrap_or(false)) {
+            let is_void = VOID.contains(&name);
+            self.insert_element(name, attrs, !is_void && !self_closing);
+            return raw_kind(name);
         }
 
         // Everything else lives in the body.

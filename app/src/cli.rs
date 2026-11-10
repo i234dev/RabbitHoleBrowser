@@ -106,6 +106,9 @@ impl Session {
                 nav = crate::scripting::settle(&self.engine, &mut page, self.wait_ms);
             }
             let Some(nav) = nav else { break };
+            if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                eprintln!("[cli] following page navigation to {}", nav.request.url);
+            }
             self.flush_console(&mut page);
             match self.engine.loader.load_request(&nav.request, viewport).map_err(|e| e.to_string())? {
                 Loaded::Page(p) => page = self.engine.build_page(p, viewport),

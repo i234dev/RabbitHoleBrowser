@@ -563,7 +563,7 @@ fn mql_matches(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let media = realm.to_rust_string(media)?;
     let q = rabbithole_css::parse_media_query(&media);
     let (w, h) = with_env(|env| env.viewport());
-    Ok(Value::Bool(q.evaluate(&rabbithole_css::MediaEnv { width: w, height: h, screen: true })))
+    Ok(Value::Bool(q.evaluate(&rabbithole_css::MediaEnv { width: w, height: h, screen: true, scripting: true })))
 }
 
 fn mql_noop(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {

@@ -1353,3 +1353,14 @@ fn watchdog_interrupts_infinite_loops() {
     let v = realm.eval("1 + 1", "t.js").unwrap();
     assert_eq!(realm.to_rust_string(v).unwrap(), "2");
 }
+
+#[test]
+fn watchdog_interrupts_catastrophic_regex() {
+    let mut realm = crate::Realm::new();
+    realm.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(200)));
+    let t = std::time::Instant::now();
+    let r = realm.eval("/^(a+)+$/.test('a'.repeat(40) + 'b'); while (true) {}", "t.js");
+    assert!(r.is_err());
+    assert!(t.elapsed() < std::time::Duration::from_secs(3), "{:?}", t.elapsed());
+    realm.set_deadline(None);
+}

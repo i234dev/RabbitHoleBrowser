@@ -2093,7 +2093,7 @@ mod tests {
     use rabbithole_css::parse_stylesheet;
 
     fn env() -> MediaEnv {
-        MediaEnv { width: 1000.0, height: 800.0, screen: true }
+        MediaEnv { width: 1000.0, height: 800.0, screen: true, scripting: true }
     }
 
     fn styled(html: &str, css: &str) -> (Document, StyledTree) {
@@ -2217,8 +2217,8 @@ mod tests {
     fn media_queries_use_env() {
         let doc = rabbithole_html::parse("<p>x</p>");
         let sheets = vec![parse_stylesheet("@media (max-width: 600px) { p { color: red } } @media (min-width: 601px) { p { color: blue } }")];
-        let narrow = style_tree(&doc, &sheets, &MediaEnv { width: 500.0, height: 800.0, screen: true });
-        let wide = style_tree(&doc, &sheets, &MediaEnv { width: 900.0, height: 800.0, screen: true });
+        let narrow = style_tree(&doc, &sheets, &MediaEnv { width: 500.0, height: 800.0, screen: true, scripting: true });
+        let wide = style_tree(&doc, &sheets, &MediaEnv { width: 900.0, height: 800.0, screen: true, scripting: true });
         let p = doc.find_element("p").unwrap();
         assert_eq!(narrow.get(p).unwrap().color, Color::rgb(255, 0, 0));
         assert_eq!(wide.get(p).unwrap().color, Color::rgb(0, 0, 255));
