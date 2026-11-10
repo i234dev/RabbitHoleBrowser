@@ -1,10 +1,16 @@
-//! Resource fetching.
+//! Resource fetching: the request pipeline (redirects, cookies,
+//! referrer policy, Sec-Fetch-*, CORS for scripts) on top of the HTTP
+//! cache (`cache`) and the connection layer (`client`: HTTP/2 + HTTP/1.1).
 
-use crate::cookies::CookieJar;
-use crate::url::{percent_decode, percent_encode_component, Url};
+use crate::cache::{self, platform_cache_dir, CacheEntry, CacheMode, HttpCache, Lookup};
+use crate::client::{Client, ClientError, Priority, WireRequest};
+use crate::cookies::{CookieContext, CookieJar};
+use crate::cors::{self, CredentialsMode, PreflightCache, RedirectMode, ReferrerPolicy, RequestMode, ResponseType};
+use crate::url::{percent_decode, percent_encode_component, site_of, Url};
+use std::collections::HashSet;
 use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -202,7 +208,7 @@ pub fn form_encode(s: &str) -> String {
 }
 
 /// What a request is for (Fetch `destination`): selects the browser-like
-/// `Accept` and `Sec-Fetch-*` headers.
+/// `Accept` and `Sec-Fetch-*` headers and the default priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Destination {
     /// Top-level navigation (typed URL, link, form).
@@ -215,6 +221,33 @@ pub enum Destination {
     Empty,
 }
 
+impl Destination {
+    /// Default network priority, as in Chrome: document > CSS > (sync)
+    /// scripts > fonts > fetch/XHR > images.
+    pub fn priority(self) -> Priority {
+        match self {
+            Destination::Document => Priority::Highest,
+            Destination::Style => Priority::Highest,
+            Destination::Script => Priority::High,
+            Destination::Font => Priority::High,
+            Destination::Empty => Priority::Medium,
+            Destination::Image => Priority::Low,
+        }
+    }
+
+    /// Sort key for scheduling within one priority class.
+    fn rank(self) -> u8 {
+        match self {
+            Destination::Document => 0,
+            Destination::Style => 1,
+            Destination::Script => 2,
+            Destination::Font => 3,
+            Destination::Empty => 4,
+            Destination::Image => 5,
+        }
+    }
+}
+
 /// A request: method, URL, optional body, extra headers and referer.
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -222,18 +255,51 @@ pub struct Request {
     pub url: Url,
     pub body: Option<Body>,
     pub headers: Vec<(String, String)>,
+    /// The document that initiated the request (its URL is the source of
+    /// the `Referer` header, filtered by `referrer_policy`, and of the
+    /// request origin).
     pub referer: Option<Url>,
-    /// Follow redirects (default true).
+    /// Follow redirects (default true). `false` returns 3xx responses as
+    /// they are (same as `redirect = Manual`).
     pub follow_redirects: bool,
     pub dest: Destination,
+    /// Fetch-standard mode. `None` = a browser-internal load (no CORS
+    /// enforcement, full response); `Some(..)` = script semantics (see
+    /// `Fetcher::fetch_api`).
+    pub mode: Option<RequestMode>,
+    pub credentials: CredentialsMode,
+    pub redirect: RedirectMode,
+    pub referrer_policy: ReferrerPolicy,
+    pub cache: CacheMode,
+    /// Override the destination's default priority.
+    pub priority: Option<Priority>,
 }
 
 impl Request {
+    pub fn new(method: &str, url: Url) -> Request {
+        Request {
+            method: method.to_string(),
+            url,
+            body: None,
+            headers: Vec::new(),
+            referer: None,
+            follow_redirects: true,
+            dest: Destination::Document,
+            mode: None,
+            credentials: CredentialsMode::Include,
+            redirect: RedirectMode::Follow,
+            referrer_policy: ReferrerPolicy::default(),
+            cache: CacheMode::Default,
+            priority: None,
+        }
+    }
     pub fn get(url: Url) -> Request {
-        Request { method: "GET".into(), url, body: None, headers: Vec::new(), referer: None, follow_redirects: true, dest: Destination::Document }
+        Request::new("GET", url)
     }
     pub fn post(url: Url, body: Body) -> Request {
-        Request { method: "POST".into(), url, body: Some(body), headers: Vec::new(), referer: None, follow_redirects: true, dest: Destination::Document }
+        let mut r = Request::new("POST", url);
+        r.body = Some(body);
+        r
     }
     pub fn with_dest(mut self, d: Destination) -> Request {
         self.dest = d;
@@ -247,6 +313,32 @@ impl Request {
         self.headers.push((k.into(), v.into()));
         self
     }
+    /// Script (Fetch API) semantics with this mode and credentials.
+    pub fn with_mode(mut self, mode: RequestMode, credentials: CredentialsMode) -> Request {
+        self.mode = Some(mode);
+        self.credentials = credentials;
+        self
+    }
+    pub fn with_redirect(mut self, r: RedirectMode) -> Request {
+        self.redirect = r;
+        self
+    }
+    pub fn with_referrer_policy(mut self, p: ReferrerPolicy) -> Request {
+        self.referrer_policy = p;
+        self
+    }
+    pub fn with_cache_mode(mut self, c: CacheMode) -> Request {
+        self.cache = c;
+        self
+    }
+    pub fn with_priority(mut self, p: Priority) -> Request {
+        self.priority = Some(p);
+        self
+    }
+    /// Effective priority.
+    pub fn effective_priority(&self) -> Priority {
+        self.priority.unwrap_or_else(|| self.dest.priority())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +350,9 @@ pub enum FetchError {
     Http(u16),
     Timeout,
     TooLarge,
+    /// Blocked by the CORS / same-origin rules (a network error to
+    /// scripts).
+    Cors(String),
     Other(String),
 }
 
@@ -270,12 +365,79 @@ impl std::fmt::Display for FetchError {
             FetchError::Http(code) => write!(f, "HTTP error {code}"),
             FetchError::Timeout => write!(f, "request timed out"),
             FetchError::TooLarge => write!(f, "response body too large"),
+            FetchError::Cors(e) => write!(f, "CORS error: {e}"),
             FetchError::Other(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl std::error::Error for FetchError {}
+
+impl From<ClientError> for FetchError {
+    fn from(e: ClientError) -> Self {
+        match e {
+            ClientError::Timeout => FetchError::Timeout,
+            ClientError::Io(m) => FetchError::Io(m),
+        }
+    }
+}
+
+/// A response to a Fetch-API request, with its type and redirect info.
+#[derive(Debug, Clone)]
+pub struct ApiResponse {
+    /// Filtered per `kind`: opaque responses have status 0, no headers
+    /// and no body; cors responses only expose safelisted/exposed
+    /// headers.
+    pub response: Response,
+    pub kind: ResponseType,
+    /// More than one URL was involved.
+    pub redirected: bool,
+    pub url_list: Vec<Url>,
+}
+
+/// Shared network state: connection pools, HTTP cache, CORS preflight
+/// cache. One per browser profile; `Fetcher`s clone the `Arc`.
+pub struct NetContext {
+    pub client: Arc<Client>,
+    pub cache: Option<Arc<HttpCache>>,
+    pub preflight: PreflightCache,
+    revalidating: Mutex<HashSet<String>>,
+}
+
+impl std::fmt::Debug for NetContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NetContext({:?})", self.cache)
+    }
+}
+
+impl NetContext {
+    /// A fresh context with the given cache.
+    pub fn new(cache: Option<Arc<HttpCache>>) -> NetContext {
+        NetContext { client: Arc::new(Client::new(6)), cache, preflight: PreflightCache::default(), revalidating: Mutex::new(HashSet::new()) }
+    }
+
+    /// The process-wide default context: memory cache (64 MB) backed by
+    /// the platform cache directory (256 MB), unless `RH_DISK_CACHE=0`
+    /// (memory only) or `RH_HTTP_CACHE=0` (no cache).
+    pub fn shared() -> Arc<NetContext> {
+        static CTX: OnceLock<Arc<NetContext>> = OnceLock::new();
+        CTX.get_or_init(|| {
+            let off = |n: &str| std::env::var(n).map(|v| v == "0" || v.eq_ignore_ascii_case("off")).unwrap_or(false);
+            let cache = if off("RH_HTTP_CACHE") {
+                None
+            } else if off("RH_DISK_CACHE") {
+                Some(Arc::new(HttpCache::memory(64 << 20)))
+            } else {
+                match platform_cache_dir() {
+                    Some(dir) => Some(Arc::new(HttpCache::with_disk(64 << 20, &dir, 256 << 20))),
+                    None => Some(Arc::new(HttpCache::memory(64 << 20))),
+                }
+            };
+            Arc::new(NetContext::new(cache))
+        })
+        .clone()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Fetcher {
@@ -290,9 +452,8 @@ pub struct Fetcher {
     pub accept_language: String,
     /// Block requests to known ad/tracker domains (subresources only).
     pub block_trackers: bool,
-    /// Cached HTTP agent (connection pool + TLS config), rebuilt when the
-    /// settings it depends on change.
-    agent: Arc<Mutex<Option<(String, ureq::Agent)>>>,
+    /// Connection pools and caches (shared by clones).
+    pub net: Arc<NetContext>,
 }
 
 impl Default for Fetcher {
@@ -305,35 +466,43 @@ impl Default for Fetcher {
             cookies: None,
             accept_language: "es-ES,es;q=0.9,en;q=0.8".into(),
             block_trackers: true,
-            agent: Arc::new(Mutex::new(None)),
+            net: NetContext::shared(),
         }
     }
 }
 
 impl Fetcher {
-    /// The shared agent for this fetcher's settings. Agents keep a pool of
-    /// open connections, so repeated requests to one host reuse TLS
-    /// sessions instead of handshaking every time.
-    fn agent(&self) -> ureq::Agent {
-        let sig = format!("{}|{}", self.user_agent, self.timeout.as_millis());
-        let mut guard = self.agent.lock().unwrap();
-        if let Some((s, a)) = guard.as_ref() {
-            if *s == sig {
-                return a.clone();
-            }
-        }
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(self.timeout)
-            .timeout_read(self.timeout)
-            .timeout_write(self.timeout)
-            .user_agent(&self.user_agent)
-            .redirects(0)
-            .max_idle_connections_per_host(6)
-            .build();
-        *guard = Some((sig, agent.clone()));
-        agent
+    /// A fetcher with its own connection pool and a memory-only cache
+    /// (tests, private windows).
+    pub fn isolated() -> Fetcher {
+        Fetcher { net: Arc::new(NetContext::new(Some(Arc::new(HttpCache::memory(32 << 20))))), ..Fetcher::default() }
+    }
+
+    /// Replace the network context (e.g. a custom cache directory).
+    pub fn with_context(mut self, net: Arc<NetContext>) -> Fetcher {
+        self.net = net;
+        self
+    }
+
+    /// Counters (protocols, connections, cache hits).
+    pub fn stats(&self) -> String {
+        self.net.client.stats.snapshot()
+    }
+
+    /// Speak HTTP/2 with prior knowledge to a plain-http origin
+    /// (`http://host:port`). For tests against local h2c servers.
+    pub fn set_h2_prior_knowledge(&self, origin: &str) {
+        let u = Url::parse_absolute(origin).expect("origin URL");
+        let key = format!("{}://{}:{}", u.scheme, u.host.to_ascii_lowercase(), u.port.or(u.default_port()).unwrap_or(80));
+        self.net.client.h2c.lock().unwrap().insert(key);
+    }
+
+    /// Drop pooled connections (the cache is kept).
+    pub fn close_connections(&self) {
+        self.net.client.clear();
     }
 }
+
 
 /// Split a Content-Type header into (lower-cased mime, lower-cased charset).
 pub fn parse_content_type(header: &str) -> (String, Option<String>) {
@@ -425,12 +594,160 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+/// Wrap a body reader with the decoders for its `Content-Encoding`
+/// (gzip, deflate (zlib or raw), br, zstd; applied in reverse order).
+pub fn decode_content(headers: &[(String, String)], body: Box<dyn Read + Send>) -> Box<dyn Read + Send> {
+    let Some(ce) = headers.iter().find(|(k, _)| k == "content-encoding").map(|(_, v)| v.to_ascii_lowercase()) else {
+        return body;
+    };
+    let mut r = body;
+    for coding in ce.split(',').map(|c| c.trim().to_string()).rev() {
+        r = match coding.as_str() {
+            "gzip" | "x-gzip" | "deflate" | "br" | "zstd" => Box::new(LazyDecoder { coding, inner: Some(r), dec: None }),
+            _ => r, // identity / unknown: pass through
+        };
+    }
+    r
+}
+
+/// Defers building the decoder until the first read, so empty bodies
+/// (204, HEAD, redirects) labelled with a coding read as empty.
+struct LazyDecoder {
+    coding: String,
+    inner: Option<Box<dyn Read + Send>>,
+    dec: Option<Box<dyn Read + Send>>,
+}
+
+impl Read for LazyDecoder {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.dec.is_none() {
+            let Some(inner) = self.inner.take() else { return Ok(0) };
+            let mut br = std::io::BufReader::with_capacity(16 * 1024, inner);
+            let first = {
+                use std::io::BufRead;
+                let b = br.fill_buf()?;
+                if b.is_empty() {
+                    return Ok(0);
+                }
+                b.to_vec()
+            };
+            self.dec = Some(match self.coding.as_str() {
+                "gzip" | "x-gzip" => Box::new(flate2::read::MultiGzDecoder::new(br)),
+                "deflate" => {
+                    // RFC says zlib; some servers send raw deflate.
+                    let zlib = first.len() >= 2 && first[0] & 0x0f == 8 && ((first[0] as u16) << 8 | first[1] as u16) % 31 == 0;
+                    if zlib {
+                        Box::new(flate2::read::ZlibDecoder::new(br))
+                    } else {
+                        Box::new(flate2::read::DeflateDecoder::new(br))
+                    }
+                }
+                "br" => Box::new(brotli_decompressor::Decompressor::new(br, 64 * 1024)),
+                "zstd" => match ruzstd::decoding::StreamingDecoder::new(br) {
+                    Ok(d) => Box::new(d),
+                    Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("zstd: {e}"))),
+                },
+                _ => Box::new(br),
+            });
+        }
+        self.dec.as_mut().unwrap().read(buf)
+    }
+}
+
+/// Copies the body into the HTTP cache once it was read completely.
+struct CacheTee {
+    inner: Box<dyn Read + Send>,
+    buf: Option<Vec<u8>>,
+    cache: Arc<HttpCache>,
+    key: String,
+    status: u16,
+    req_headers: Vec<(String, String)>,
+    resp_headers: Vec<(String, String)>,
+    times: (u64, u64),
+}
+
+impl Read for CacheTee {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        match self.inner.read(out) {
+            Ok(0) => {
+                if let Some(body) = self.buf.take() {
+                    self.cache.store(&self.key, "GET", self.status, &self.req_headers, &self.resp_headers, body, self.times.0, self.times.1);
+                }
+                Ok(0)
+            }
+            Ok(n) => {
+                if let Some(b) = &mut self.buf {
+                    if b.len() + n > self.cache.max_entry {
+                        self.buf = None;
+                    } else {
+                        b.extend_from_slice(&out[..n]);
+                    }
+                }
+                Ok(n)
+            }
+            Err(e) => {
+                self.buf = None;
+                Err(e)
+            }
+        }
+    }
+}
+
+/// One HTTP exchange (after cache handling).
+struct Hop {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Box<dyn Read + Send>,
+    content_length: Option<u64>,
+}
+
+/// Outcome of the redirect loop.
+struct Outcome {
+    url: Url,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Box<dyn Read + Send>,
+    content_length: Option<u64>,
+    kind: ResponseType,
+    url_list: Vec<Url>,
+}
+
+fn has_header(h: &[(String, String)], name: &str) -> bool {
+    h.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
+}
+
+/// Combine Sec-Fetch-Site values along a redirect chain (worst wins).
+fn worse_site(a: &'static str, b: &'static str) -> &'static str {
+    let rank = |s: &str| match s {
+        "none" => 0,
+        "same-origin" => 1,
+        "same-site" => 2,
+        _ => 3,
+    };
+    if rank(b) > rank(a) {
+        b
+    } else {
+        a
+    }
+}
+
+fn cors_disabled() -> bool {
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("RH_NO_CORS").map(|v| v != "0").unwrap_or(false))
+}
+
+fn debug_net() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RH_DEBUG_NET").is_some())
+}
+
 impl Fetcher {
-    /// Fetch any supported URL: http/https (redirects followed, gzip
-    /// handled), file, data (base64 or percent-encoded), about.
+    /// Fetch any supported URL: http/https (redirects followed, content
+    /// codings decoded, HTTP cache), file, data (base64 or
+    /// percent-encoded), about.
     pub fn fetch(&self, url: &Url) -> Result<Response, FetchError> {
         match url.scheme.as_str() {
-            "http" | "https" => self.fetch_http(url),
+            "http" | "https" => self.request(&Request::get(url.clone())),
             "file" => self.fetch_file(url),
             "data" => fetch_data(url),
             "about" => {
@@ -451,109 +768,61 @@ impl Fetcher {
         }
     }
 
-    /// Perform an arbitrary HTTP request (GET/POST/...): manual redirect
-    /// handling (so cookies set on intermediate hops are kept, and 303 /
-    /// 301 / 302 on POST turn into GET per browsers), cookie jar, referer.
+    /// Perform an arbitrary request (GET/POST/...): redirects (303 and
+    /// 301/302 on POST become GET, as in browsers), cookies (SameSite
+    /// aware), referrer policy, HTTP cache, HTTP/2 when available.
     pub fn request(&self, req: &Request) -> Result<Response, FetchError> {
-        if self.block_trackers && req.dest != Destination::Document && is_tracker_host(&req.url.host) {
-            return Err(FetchError::Blocked(req.url.host.clone()));
+        if !req.url.is_http() {
+            return self.fetch(&req.url);
         }
-        match req.url.scheme.as_str() {
-            "http" | "https" => {}
-            _ => return self.fetch(&req.url),
+        let out = self.run(req)?;
+        let api = req.mode.is_some();
+        let (content_type, charset) = parse_content_type(out.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()).unwrap_or(""));
+        let body = if out.kind == ResponseType::Opaque || out.kind == ResponseType::OpaqueRedirect {
+            Vec::new()
+        } else {
+            read_limited(out.body, self.max_body)?
+        };
+        if !api && out.status >= 400 && body.is_empty() {
+            return Err(FetchError::Http(out.status));
         }
-        let agent = self.agent();
-        let mut method = req.method.clone();
-        let mut url = req.url.without_fragment();
-        let mut body = req.body.clone();
-        let mut referer = req.referer.clone();
-        for _hop in 0..12 {
-            let target = url.to_string();
-            let mut r = agent.request(&method, &target);
-            for (k, v) in browser_headers(req.dest, &method, &url, referer.as_ref(), &self.accept_language) {
-                r = r.set(&k, &v);
-            }
-            for (k, v) in &self.headers {
-                r = r.set(k, v);
-            }
-            for (k, v) in &req.headers {
-                r = r.set(k, v);
-            }
-            if let Some(rf) = &referer {
-                if rf.is_http() && !(rf.scheme == "https" && url.scheme == "http") {
-                    r = r.set("Referer", &rf.without_fragment().to_string());
-                }
-            }
-            if let Some(jar) = &self.cookies {
-                if let Some(h) = jar.lock().unwrap().header_for(&url) {
-                    r = r.set("Cookie", &h);
-                }
-            }
-            let result = match &body {
-                Some(b) => r.set("Content-Type", &b.content_type).send_bytes(&b.data),
-                None => r.call(),
-            };
-            let resp = match result {
-                Ok(r) => r,
-                Err(ureq::Error::Status(_, r)) => r,
-                Err(ureq::Error::Transport(t)) => {
-                    let msg = t.to_string();
-                    if msg.to_ascii_lowercase().contains("timed out") {
-                        return Err(FetchError::Timeout);
-                    }
-                    return Err(FetchError::Io(msg));
-                }
-            };
-            let status = resp.status();
-            let headers: Vec<(String, String)> = resp
-                .headers_names()
-                .into_iter()
-                .flat_map(|n| {
-                    let n_l = n.to_ascii_lowercase();
-                    resp.all(&n).into_iter().map(move |v| (n_l.clone(), v.to_string())).collect::<Vec<_>>()
-                })
-                .collect();
-            if let Some(jar) = &self.cookies {
-                let set: Vec<String> = headers.iter().filter(|(k, _)| k == "set-cookie").map(|(_, v)| v.clone()).collect();
-                if !set.is_empty() {
-                    jar.lock().unwrap().store_from_headers(&url, &set);
-                }
-            }
-            let is_redirect = matches!(status, 301 | 302 | 303 | 307 | 308);
-            if is_redirect && req.follow_redirects {
-                if let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) {
-                    if let Some(next) = url.join(loc.trim()) {
-                        if next.is_http() {
-                            // Drain the body of the redirect response.
-                            let _ = read_limited(resp.into_reader(), 1024 * 1024);
-                            if status == 303 || ((status == 301 || status == 302) && method == "POST") {
-                                method = "GET".into();
-                                body = None;
-                            }
-                            referer = Some(url.clone());
-                            url = next.without_fragment();
-                            continue;
-                        }
-                    }
-                }
-            }
-            let (content_type, charset) = parse_content_type(resp.header("Content-Type").unwrap_or(""));
-            let data = read_limited(resp.into_reader(), self.max_body)?;
-            if status >= 400 && data.is_empty() {
-                return Err(FetchError::Http(status));
-            }
-            return Ok(Response { url: url.clone(), status, content_type, charset, body: data, headers });
-        }
-        Err(FetchError::Other("too many redirects".into()))
+        Ok(Response { url: out.url, status: out.status, content_type, charset, body, headers: out.headers })
     }
 
-    fn fetch_http(&self, url: &Url) -> Result<Response, FetchError> {
-        self.request(&Request::get(url.clone()))
+    /// Fetch-API request (`fetch()` / `XMLHttpRequest`): `req.mode`
+    /// (default `cors`) and `req.credentials` apply; cross-origin
+    /// requests need CORS approval (with a preflight for non-simple
+    /// requests), `no-cors` cross-origin responses are opaque, redirect
+    /// modes are honoured. Errors are network errors for scripts.
+    pub fn fetch_api(&self, req: &Request) -> Result<ApiResponse, FetchError> {
+        let mut req = req.clone();
+        if req.mode.is_none() {
+            req.mode = Some(RequestMode::Cors);
+            req.credentials = CredentialsMode::SameOrigin;
+        }
+        if !req.url.is_http() {
+            if req.url.scheme == "data" || req.url.scheme == "about" || req.url.scheme == "file" {
+                let r = self.fetch(&req.url)?;
+                return Ok(ApiResponse { url_list: vec![r.url.clone()], response: r, kind: ResponseType::Basic, redirected: false });
+            }
+            return Err(FetchError::UnsupportedScheme(req.url.scheme.clone()));
+        }
+        let out = self.run(&req)?;
+        let (content_type, charset) = parse_content_type(out.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()).unwrap_or(""));
+        let opaque = matches!(out.kind, ResponseType::Opaque | ResponseType::OpaqueRedirect);
+        let body = if opaque { Vec::new() } else { read_limited(out.body, self.max_body)? };
+        let redirected = out.url_list.len() > 1;
+        Ok(ApiResponse {
+            response: Response { url: out.url, status: out.status, content_type, charset, body, headers: out.headers },
+            kind: out.kind,
+            redirected,
+            url_list: out.url_list,
+        })
     }
 
     /// Start a request and return the response headers plus a streaming
-    /// body reader (for downloads of arbitrary size). Redirects and cookies
-    /// are handled like `request`.
+    /// body reader (for downloads of arbitrary size). Redirects, cookies
+    /// and the cache are handled like `request`.
     pub fn request_stream(&self, req: &Request) -> Result<StreamedResponse, FetchError> {
         if !req.url.is_http() {
             let r = self.fetch(&req.url)?;
@@ -568,165 +837,502 @@ impl Fetcher {
                 reader: Box::new(std::io::Cursor::new(r.body)),
             });
         }
-        let agent = self.agent();
-        let mut method = req.method.clone();
-        let mut url = req.url.without_fragment();
-        let mut body = req.body.clone();
-        let mut referer = req.referer.clone();
-        for _hop in 0..12 {
-            let target = url.to_string();
-            let mut r = agent.request(&method, &target);
-            for (k, v) in browser_headers(req.dest, &method, &url, referer.as_ref(), &self.accept_language) {
-                r = r.set(&k, &v);
-            }
-            for (k, v) in &self.headers {
-                r = r.set(k, v);
-            }
-            for (k, v) in &req.headers {
-                r = r.set(k, v);
-            }
-            if let Some(rf) = &referer {
-                if rf.is_http() && !(rf.scheme == "https" && url.scheme == "http") {
-                    r = r.set("Referer", &rf.without_fragment().to_string());
-                }
-            }
-            if let Some(jar) = &self.cookies {
-                if let Some(h) = jar.lock().unwrap().header_for(&url) {
-                    r = r.set("Cookie", &h);
-                }
-            }
-            let result = match &body {
-                Some(b) => r.set("Content-Type", &b.content_type).send_bytes(&b.data),
-                None => r.call(),
-            };
-            let resp = match result {
-                Ok(r) => r,
-                Err(ureq::Error::Status(_, r)) => r,
-                Err(ureq::Error::Transport(t)) => {
-                    let msg = t.to_string();
-                    if msg.to_ascii_lowercase().contains("timed out") {
-                        return Err(FetchError::Timeout);
-                    }
-                    return Err(FetchError::Io(msg));
-                }
-            };
-            let status = resp.status();
-            let headers: Vec<(String, String)> = resp
-                .headers_names()
-                .into_iter()
-                .flat_map(|n| {
-                    let n_l = n.to_ascii_lowercase();
-                    resp.all(&n).into_iter().map(move |v| (n_l.clone(), v.to_string())).collect::<Vec<_>>()
-                })
-                .collect();
-            if let Some(jar) = &self.cookies {
-                let set: Vec<String> = headers.iter().filter(|(k, _)| k == "set-cookie").map(|(_, v)| v.clone()).collect();
-                if !set.is_empty() {
-                    jar.lock().unwrap().store_from_headers(&url, &set);
-                }
-            }
-            if matches!(status, 301 | 302 | 303 | 307 | 308) && req.follow_redirects {
-                if let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) {
-                    if let Some(next) = url.join(loc.trim()) {
-                        if next.is_http() {
-                            let _ = read_limited(resp.into_reader(), 1024 * 1024);
-                            if status == 303 || ((status == 301 || status == 302) && method == "POST") {
-                                method = "GET".into();
-                                body = None;
-                            }
-                            referer = Some(url.clone());
-                            url = next.without_fragment();
-                            continue;
-                        }
-                    }
-                }
-            }
-            let (content_type, charset) = parse_content_type(resp.header("Content-Type").unwrap_or(""));
-            let content_length = headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.trim().parse::<u64>().ok());
-            return Ok(StreamedResponse {
-                url: url.clone(),
-                status,
-                content_type,
-                charset,
-                headers,
-                content_length,
-                reader: Box::new(resp.into_reader()),
-            });
-        }
-        Err(FetchError::Other("too many redirects".into()))
+        let out = self.run(req)?;
+        let (content_type, charset) = parse_content_type(out.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()).unwrap_or(""));
+        Ok(StreamedResponse { url: out.url, status: out.status, content_type, charset, headers: out.headers, content_length: out.content_length, reader: out.body })
     }
 
     /// Stream a URL to a file, reporting progress as (bytes so far, total
     /// if known). Returns the final response metadata (headers, no body).
     /// Returns Err(FetchError::Other("cancelled")) when `progress` returns false.
     pub fn download(&self, req: &Request, dest: &std::path::Path, mut progress: impl FnMut(u64, Option<u64>) -> bool) -> Result<Response, FetchError> {
-        use std::io::{Read, Write};
         if !req.url.is_http() {
             let resp = self.fetch(&req.url)?;
             std::fs::write(dest, &resp.body).map_err(|e| FetchError::Io(e.to_string()))?;
             progress(resp.body.len() as u64, Some(resp.body.len() as u64));
             return Ok(Response { body: Vec::new(), ..resp });
         }
-        // Resolve redirects/cookies with a HEAD-less approach: issue the
-        // request manually without body limits.
-        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(600)).user_agent(&self.user_agent).redirects(10).build();
-        let target = req.url.without_fragment().to_string();
-        let mut r = agent.request(&req.method, &target);
-        for (k, v) in browser_headers(req.dest, &req.method, &req.url, req.referer.as_ref(), &self.accept_language) {
-            r = r.set(&k, &v);
+        let mut req = req.clone();
+        req.cache = CacheMode::NoStore;
+        let stream = self.request_stream(&req)?;
+        if stream.status >= 400 {
+            return Err(FetchError::Http(stream.status));
         }
-        for (k, v) in &self.headers {
-            r = r.set(k, v);
-        }
-        for (k, v) in &req.headers {
-            r = r.set(k, v);
-        }
-        if let Some(rf) = &req.referer {
-            r = r.set("Referer", &rf.without_fragment().to_string());
-        }
-        if let Some(jar) = &self.cookies {
-            if let Some(h) = jar.lock().unwrap().header_for(&req.url) {
-                r = r.set("Cookie", &h);
-            }
-        }
-        let resp = match &req.body {
-            Some(b) => r.set("Content-Type", &b.content_type).send_bytes(&b.data),
-            None => r.call(),
+        let meta = Response {
+            url: stream.url.clone(),
+            status: stream.status,
+            content_type: stream.content_type.clone(),
+            charset: stream.charset.clone(),
+            body: Vec::new(),
+            headers: stream.headers.clone(),
         };
-        let resp = match resp {
-            Ok(r) => r,
-            Err(ureq::Error::Status(code, _)) => return Err(FetchError::Http(code)),
-            Err(ureq::Error::Transport(t)) => return Err(FetchError::Io(t.to_string())),
-        };
-        let final_url = Url::parse_absolute(resp.get_url()).unwrap_or_else(|| req.url.clone());
-        let status = resp.status();
-        let headers: Vec<(String, String)> = resp
-            .headers_names()
-            .into_iter()
-            .map(|n| (n.to_ascii_lowercase(), resp.header(&n).unwrap_or("").to_string()))
-            .collect();
-        let total = headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.parse::<u64>().ok());
-        let (content_type, charset) = parse_content_type(resp.header("Content-Type").unwrap_or(""));
-        let mut reader = resp.into_reader();
-        let mut file = std::fs::File::create(dest).map_err(|e| FetchError::Io(e.to_string()))?;
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut done: u64 = 0;
-        loop {
-            let n = reader.read(&mut buf).map_err(|e| FetchError::Io(e.to_string()))?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buf[..n]).map_err(|e| FetchError::Io(e.to_string()))?;
-            done += n as u64;
-            if !progress(done, total) {
-                drop(file);
-                let _ = std::fs::remove_file(dest);
-                return Err(FetchError::Other("cancelled".into()));
-            }
-        }
-        Ok(Response { url: final_url, status, content_type, charset, body: Vec::new(), headers })
+        stream.save_to(dest, &mut progress)?;
+        Ok(meta)
     }
 
+    /// Build the request headers in Chrome's order. `origin_header` is the
+    /// `Origin` value to send, if any.
+    #[allow(clippy::too_many_arguments)]
+    fn build_headers(&self, req: &Request, _method: &str, _url: &Url, site: &'static str, origin_header: Option<String>, referer: Option<String>, body: Option<&Body>, cookie: Option<String>) -> Vec<(String, String)> {
+        let mut h: Vec<(String, String)> = Vec::with_capacity(20);
+        let mode = req.mode.map(|m| m.as_str()).unwrap_or(default_mode(req.dest));
+        let brand = format!("\"Chromium\";v=\"{CHROME_MAJOR}\", \"Google Chrome\";v=\"{CHROME_MAJOR}\", \"Not_A Brand\";v=\"99\"");
+        h.push(("sec-ch-ua".into(), brand));
+        h.push(("sec-ch-ua-mobile".into(), "?0".into()));
+        h.push(("sec-ch-ua-platform".into(), platform_name().into()));
+        if req.dest == Destination::Document {
+            h.push(("Upgrade-Insecure-Requests".into(), "1".into()));
+        }
+        if let Some(o) = origin_header {
+            h.push(("Origin".into(), o));
+        }
+        if let Some(b) = body {
+            h.push(("Content-Type".into(), b.content_type.clone()));
+        }
+        h.push(("User-Agent".into(), self.user_agent.clone()));
+        h.push(("Accept".into(), default_accept(req.dest).into()));
+        h.push(("Sec-Fetch-Site".into(), site.into()));
+        h.push(("Sec-Fetch-Mode".into(), mode.into()));
+        if req.dest == Destination::Document && mode == "navigate" {
+            h.push(("Sec-Fetch-User".into(), "?1".into()));
+        }
+        h.push(("Sec-Fetch-Dest".into(), dest_name(req.dest).into()));
+        if let Some(r) = referer {
+            h.push(("Referer".into(), r));
+        }
+        h.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
+        h.push(("Accept-Language".into(), self.accept_language.clone()));
+        if let Some(c) = cookie {
+            h.push(("Cookie".into(), c));
+        }
+        // Fetcher-level then request-level headers override defaults.
+        for (k, v) in self.headers.iter().chain(req.headers.iter()) {
+            if k.eq_ignore_ascii_case("content-type") && body.is_none() {
+                continue;
+            }
+            if req.mode.is_some() && cors::is_forbidden_request_header(k) {
+                continue;
+            }
+            match h.iter_mut().find(|(hk, _)| hk.eq_ignore_ascii_case(k)) {
+                Some(slot) => slot.1 = v.clone(),
+                None => h.push((k.clone(), v.clone())),
+            }
+        }
+        h
+    }
+
+    /// One exchange with the HTTP cache in front of the network.
+    #[allow(clippy::too_many_arguments)]
+    fn hop(&self, method: &str, url: &Url, headers: &[(String, String)], body: Option<&Body>, priority: Priority, incremental: bool, mode: CacheMode, allow_swr: bool) -> Result<Hop, FetchError> {
+        let key = url.without_fragment().to_string();
+        let user_conditional = ["if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "if-range", "range"].iter().any(|n| has_header(headers, n));
+        let cache = self.net.cache.clone().filter(|_| method == "GET" && !user_conditional && mode != CacheMode::NoStore);
+        let mut send_headers = headers.to_vec();
+        let mut stale: Option<Arc<CacheEntry>> = None;
+        if let Some(c) = &cache {
+            match c.lookup(&key, headers, mode) {
+                Lookup::Fresh(e) => {
+                    self.net.client.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    if debug_net() {
+                        eprintln!("[net] cache hit {key}");
+                    }
+                    return Ok(hop_from_entry(&e));
+                }
+                Lookup::StaleWhileRevalidate(e) if allow_swr => {
+                    self.net.client.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    self.revalidate_in_background(url, headers, priority);
+                    return Ok(hop_from_entry(&e));
+                }
+                Lookup::StaleWhileRevalidate(e) => {
+                    send_headers.extend(e.validators());
+                    stale = Some(e);
+                }
+                Lookup::Revalidate(e, validators) => {
+                    send_headers.extend(validators);
+                    stale = Some(e);
+                }
+                Lookup::Miss => {
+                    if mode == CacheMode::OnlyIfCached {
+                        return Err(FetchError::Other("only-if-cached: not in cache".into()));
+                    }
+                    self.net.client.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        let t_req = cache::now_secs();
+        let wire = WireRequest { method, url, headers: &send_headers, body: body.map(|b| b.data.as_slice()), priority, incremental };
+        let t0 = std::time::Instant::now();
+        let resp = self.net.client.send(&wire, self.timeout)?;
+        let t_resp = cache::now_secs();
+        if debug_net() {
+            eprintln!("[net] {} {} {} -> {} in {:?}", resp.protocol, method, url, resp.status, t0.elapsed());
+        }
+        if let (Some(c), Some(entry), 304) = (&cache, &stale, resp.status) {
+            self.net.client.stats.cache_revalidated.fetch_add(1, Ordering::Relaxed);
+            let mut b = resp.body;
+            let _ = std::io::copy(&mut b, &mut std::io::sink());
+            let fresh = c.freshen(entry, &resp.headers, t_req, t_resp);
+            return Ok(hop_from_entry(&fresh));
+        }
+        // Unsafe methods invalidate stored responses for the URL.
+        if !matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE") && resp.status < 400 {
+            if let Some(c) = &self.net.cache {
+                c.invalidate(&key);
+                for h in ["location", "content-location"] {
+                    if let Some(u) = resp.headers.iter().find(|(k, _)| k == h).and_then(|(_, v)| url.join(v.trim())) {
+                        if u.origin() == url.origin() {
+                            c.invalidate(&u.without_fragment().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let encoded = resp.headers.iter().any(|(k, v)| k == "content-encoding" && !v.trim().eq_ignore_ascii_case("identity"));
+        let content_length = if encoded { None } else { resp.headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.trim().parse::<u64>().ok()) };
+        let decoded = if method == "HEAD" { resp.body } else { decode_content(&resp.headers, resp.body) };
+        let body: Box<dyn Read + Send> = match &cache {
+            Some(c) if cache::storable(method, resp.status, headers, &resp.headers) => Box::new(CacheTee {
+                inner: decoded,
+                buf: Some(Vec::new()),
+                cache: c.clone(),
+                key,
+                status: resp.status,
+                req_headers: headers.to_vec(),
+                resp_headers: resp.headers.clone(),
+                times: (t_req, t_resp),
+            }),
+            _ => decoded,
+        };
+        Ok(Hop { status: resp.status, headers: resp.headers, body, content_length })
+    }
+
+    fn revalidate_in_background(&self, url: &Url, headers: &[(String, String)], priority: Priority) {
+        let key = url.without_fragment().to_string();
+        if !self.net.revalidating.lock().unwrap().insert(key.clone()) {
+            return;
+        }
+        let me = self.clone();
+        let url = url.clone();
+        let headers = headers.to_vec();
+        std::thread::spawn(move || {
+            if let Ok(mut h) = me.hop("GET", &url, &headers, None, priority.min(Priority::Low), false, CacheMode::Default, false) {
+                let _ = std::io::copy(&mut h.body, &mut std::io::sink());
+            }
+            me.net.revalidating.lock().unwrap().remove(&key);
+        });
+    }
+
+    /// CORS preflight for a non-simple cross-origin request.
+    fn preflight(&self, req: &Request, method: &str, url: &Url, origin: &str, include_creds: bool, unsafe_headers: &[String]) -> Result<(), FetchError> {
+        if let Some(p) = self.net.preflight.get(origin, url, include_creds) {
+            if p.allows(method, unsafe_headers, include_creds).is_ok() {
+                return Ok(());
+            }
+        }
+        let mut h: Vec<(String, String)> = vec![
+            ("Accept".into(), "*/*".into()),
+            ("Access-Control-Request-Method".into(), method.to_string()),
+        ];
+        if !unsafe_headers.is_empty() {
+            h.push(("Access-Control-Request-Headers".into(), unsafe_headers.join(",")));
+        }
+        h.push(("Origin".into(), origin.to_string()));
+        h.push(("User-Agent".into(), self.user_agent.clone()));
+        h.push(("Sec-Fetch-Mode".into(), "cors".into()));
+        h.push(("Sec-Fetch-Site".into(), fetch_site(req.referer.as_ref(), url).into()));
+        h.push(("Sec-Fetch-Dest".into(), "empty".into()));
+        if let Some(r) = req.referer.as_ref().and_then(|r| cors::referrer_for(r, url, req.referrer_policy)) {
+            h.push(("Referer".into(), r));
+        }
+        h.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
+        h.push(("Accept-Language".into(), self.accept_language.clone()));
+        let mut hop = self.hop("OPTIONS", url, &h, None, Priority::Highest, false, CacheMode::NoStore, false)?;
+        let _ = std::io::copy(&mut hop.body, &mut std::io::sink());
+        let r = cors::check_preflight(hop.status, &hop.headers, origin, include_creds, method, unsafe_headers).map_err(FetchError::Cors)?;
+        self.net.preflight.put(origin, url, include_creds, r);
+        Ok(())
+    }
+
+    /// The redirect loop with cookies, referrer policy, Sec-Fetch-* and
+    /// (for `req.mode = Some(..)`) the Fetch standard's CORS rules.
+    fn run(&self, req: &Request) -> Result<Outcome, FetchError> {
+        if self.block_trackers && req.dest != Destination::Document && is_tracker_host(&req.url.host) {
+            return Err(FetchError::Blocked(req.url.host.clone()));
+        }
+        let api = req.mode.is_some_and(|m| m != RequestMode::Navigate) && !cors_disabled();
+        let mode = req.mode.unwrap_or(RequestMode::Navigate);
+        let client_origin: Option<Url> = req.referer.clone().filter(|r| r.is_http());
+        let origin_str = client_origin.as_ref().map(|o| o.origin());
+        let priority = req.effective_priority();
+        let incremental = matches!(req.dest, Destination::Image | Destination::Document);
+        let mut method = req.method.to_ascii_uppercase();
+        let mut url = req.url.without_fragment();
+        let mut body = req.body.clone();
+        let mut policy = req.referrer_policy;
+        let mut url_list = vec![url.clone()];
+        let mut tainting = ResponseType::Basic;
+        let mut tainted_origin = false;
+        let mut site: &'static str = fetch_site(req.referer.as_ref(), &url);
+        let top_level = req.dest == Destination::Document && req.mode.is_none_or(|m| m == RequestMode::Navigate);
+        let mut cookie_ctx = CookieContext::new(req.referer.as_ref(), &url, top_level, &method);
+        let author_headers: Vec<(String, String)> = req.headers.iter().filter(|(k, _)| !(req.mode.is_some() && cors::is_forbidden_request_header(k))).cloned().collect();
+        for _hop in 0..20 {
+            let same_origin = origin_str.as_ref().map(|o| *o == url.origin()).unwrap_or(true);
+            if api {
+                if tainting == ResponseType::Basic && same_origin && !tainted_origin {
+                    // basic
+                } else {
+                    match mode {
+                        RequestMode::SameOrigin => return Err(FetchError::Cors(format!("{url} is cross-origin and the request mode is same-origin"))),
+                        RequestMode::NoCors => {
+                            if req.redirect != RedirectMode::Follow {
+                                return Err(FetchError::Cors("no-cors requests must follow redirects".into()));
+                            }
+                            if !cors::is_simple_method(&method) {
+                                return Err(FetchError::Cors(format!("method {method} is not allowed in no-cors mode")));
+                            }
+                            tainting = ResponseType::Opaque;
+                        }
+                        _ => tainting = ResponseType::Cors,
+                    }
+                }
+            }
+            let include_creds = match (api, req.credentials) {
+                (false, _) => true,
+                (true, CredentialsMode::Include) => true,
+                (true, CredentialsMode::SameOrigin) => tainting == ResponseType::Basic,
+                (true, CredentialsMode::Omit) => false,
+            };
+            let origin_value = if tainted_origin { "null".to_string() } else { origin_str.clone().unwrap_or_else(|| "null".into()) };
+            if tainting == ResponseType::Cors {
+                let mut probe = author_headers.clone();
+                if let Some(b) = &body {
+                    probe.push(("content-type".into(), b.content_type.clone()));
+                }
+                let unsafe_headers = cors::unsafe_request_header_names(&probe);
+                if !cors::is_simple_method(&method) || !unsafe_headers.is_empty() {
+                    self.preflight(req, &method, &url, &origin_value, req.credentials == CredentialsMode::Include, &unsafe_headers)?;
+                }
+            }
+            // Origin header: CORS requests, and unsafe methods.
+            let origin_header = if client_origin.is_none() {
+                None
+            } else if tainting == ResponseType::Cors {
+                Some(origin_value.clone())
+            } else if !matches!(method.as_str(), "GET" | "HEAD") && (api || req.dest == Destination::Document || req.dest == Destination::Empty) {
+                Some(if tainted_origin { "null".into() } else { cors::origin_for_unsafe_request(client_origin.as_ref().unwrap(), &url, policy) })
+            } else if !api && req.dest == Destination::Font && !same_origin {
+                // Fonts are CORS requests in browsers.
+                Some(origin_value.clone())
+            } else {
+                None
+            };
+            let referer = req.referer.as_ref().and_then(|r| cors::referrer_for(r, &url, policy));
+            let cookie = if include_creds {
+                self.cookies.as_ref().and_then(|jar| jar.lock().unwrap().header_for_context(&url, &cookie_ctx))
+            } else {
+                None
+            };
+            let headers = self.build_headers(req, &method, &url, site, origin_header, referer, body.as_ref(), cookie);
+            let mut hop = self.hop(&method, &url, &headers, body.as_ref(), priority, incremental, req.cache, true)?;
+            if include_creds {
+                if let Some(jar) = &self.cookies {
+                    let set: Vec<String> = hop.headers.iter().filter(|(k, _)| k == "set-cookie").map(|(_, v)| v.clone()).collect();
+                    if !set.is_empty() {
+                        jar.lock().unwrap().store_from_response(&url, &set, &cookie_ctx);
+                    }
+                }
+            }
+            if tainting == ResponseType::Cors {
+                cors::cors_check(&hop.headers, &origin_value, req.credentials == CredentialsMode::Include).map_err(FetchError::Cors)?;
+            }
+            let is_redirect = matches!(hop.status, 301 | 302 | 303 | 307 | 308);
+            let location = hop.headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.trim().to_string());
+            if let (true, Some(loc)) = (is_redirect, location) {
+                let redirect_mode = if !req.follow_redirects { RedirectMode::Manual } else { req.redirect };
+                match redirect_mode {
+                    RedirectMode::Error => return Err(FetchError::Other(format!("redirect to {loc} with redirect mode 'error'"))),
+                    RedirectMode::Manual => {
+                        let kind = if api { ResponseType::OpaqueRedirect } else { ResponseType::Basic };
+                        let (status, headers) = if kind == ResponseType::OpaqueRedirect { (0, Vec::new()) } else { (hop.status, hop.headers) };
+                        return Ok(Outcome { url, status, headers, body: hop.body, content_length: hop.content_length, kind, url_list });
+                    }
+                    RedirectMode::Follow => {}
+                }
+                if let Some(next) = url.join(&loc) {
+                    if next.is_http() {
+                        // Drain the redirect body so the connection is reused.
+                        let _ = read_limited(&mut hop.body, 256 * 1024);
+                        if hop.status == 303 && method != "GET" && method != "HEAD" || ((hop.status == 301 || hop.status == 302) && method == "POST") {
+                            method = "GET".into();
+                            body = None;
+                        }
+                        if let Some(p) = hop.headers.iter().find(|(k, _)| k == "referrer-policy").and_then(|(_, v)| ReferrerPolicy::parse(v)) {
+                            policy = p;
+                        }
+                        let next = next.without_fragment();
+                        if api && tainting == ResponseType::Cors && next.origin() != url.origin() && !same_origin {
+                            tainted_origin = true;
+                        }
+                        site = worse_site(site, fetch_site(req.referer.as_ref(), &next));
+                        cookie_ctx.same_site_chain = cookie_ctx.same_site_chain && cookie_ctx.is_same_site(&next);
+                        cookie_ctx.safe_method = matches!(method.as_str(), "GET" | "HEAD");
+                        url = next;
+                        url_list.push(url.clone());
+                        continue;
+                    }
+                }
+            }
+            let (status, headers, body, kind) = match tainting {
+                ResponseType::Opaque => (0, Vec::new(), Box::new(std::io::empty()) as Box<dyn Read + Send>, ResponseType::Opaque),
+                ResponseType::Cors => (hop.status, cors::filter_cors_headers(&hop.headers, req.credentials == CredentialsMode::Include), hop.body, ResponseType::Cors),
+                _ if api => (hop.status, cors::filter_basic_headers(&hop.headers), hop.body, ResponseType::Basic),
+                _ => (hop.status, hop.headers, hop.body, ResponseType::Basic),
+            };
+            return Ok(Outcome { url, status, headers, body, content_length: hop.content_length, kind, url_list });
+        }
+        Err(FetchError::Other("too many redirects".into()))
+    }
+
+    /// Like `fetch_many`, for subresources of a page: browser headers for
+    /// `dest`, with `initiator` as referer/initiator.
+    pub fn fetch_many_for(&self, urls: &[Url], parallelism: usize, dest: Destination, initiator: Option<&Url>) -> Vec<Result<Response, FetchError>> {
+        let reqs: Vec<Request> = urls
+            .iter()
+            .map(|u| {
+                let mut r = Request::get(u.clone()).with_dest(dest);
+                r.referer = initiator.cloned();
+                r
+            })
+            .collect();
+        self.request_many(&reqs, parallelism)
+    }
+
+    /// Perform several requests concurrently, preserving result order.
+    /// Requests are started by priority (document > CSS > scripts >
+    /// fonts > fetch > images); per-host connection limits and HTTP/2
+    /// multiplexing are handled by the connection pool, so `parallelism`
+    /// is only a lower bound on the number of workers.
+    pub fn request_many(&self, reqs: &[Request], parallelism: usize) -> Vec<Result<Response, FetchError>> {
+        if reqs.is_empty() {
+            return Vec::new();
+        }
+        let mut order: Vec<usize> = (0..reqs.len()).collect();
+        order.sort_by_key(|&i| (std::cmp::Reverse(reqs[i].effective_priority()), reqs[i].dest.rank()));
+        let workers = parallelism.max(1).max(reqs.len().min(24)).min(reqs.len());
+        let results: Mutex<Vec<Option<Result<Response, FetchError>>>> = Mutex::new((0..reqs.len()).map(|_| None).collect());
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let k = next.fetch_add(1, Ordering::SeqCst);
+                    if k >= order.len() {
+                        break;
+                    }
+                    let i = order[k];
+                    let r = self.request(&reqs[i]);
+                    results.lock().unwrap()[i] = Some(r);
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err(FetchError::Other("not fetched".into()))))
+            .collect()
+    }
+
+    /// Start a request on a background thread; the result arrives on the
+    /// returned channel.
+    pub fn request_async(&self, req: Request) -> std::sync::mpsc::Receiver<Result<Response, FetchError>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(me.request(&req));
+        });
+        rx
+    }
+
+    /// Fetch-API request on a background thread.
+    pub fn fetch_api_async(&self, req: Request) -> std::sync::mpsc::Receiver<Result<ApiResponse, FetchError>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(me.fetch_api(&req));
+        });
+        rx
+    }
+
+    pub fn fetch_many(&self, urls: &[Url], parallelism: usize) -> Vec<Result<Response, FetchError>> {
+        let parallelism = parallelism.max(1).min(urls.len().max(1));
+        let results: Mutex<Vec<Option<Result<Response, FetchError>>>> = Mutex::new((0..urls.len()).map(|_| None).collect());
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..parallelism {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    if i >= urls.len() {
+                        break;
+                    }
+                    let r = self.fetch(&urls[i]);
+                    results.lock().unwrap()[i] = Some(r);
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err(FetchError::Other("not fetched".into()))))
+            .collect()
+    }
+}
+
+fn hop_from_entry(e: &CacheEntry) -> Hop {
+    let len = e.body.len() as u64;
+    Hop { status: e.status, headers: e.headers.clone(), body: Box::new(std::io::Cursor::new(ArcBytes(e.body.clone()))), content_length: Some(len) }
+}
+
+/// `AsRef<[u8]>` over shared bytes (cache bodies are not copied).
+struct ArcBytes(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for ArcBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+fn default_mode(dest: Destination) -> &'static str {
+    match dest {
+        Destination::Document => "navigate",
+        Destination::Image | Destination::Style | Destination::Script => "no-cors",
+        Destination::Font | Destination::Empty => "cors",
+    }
+}
+
+fn default_accept(dest: Destination) -> &'static str {
+    match dest {
+        Destination::Document => "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        Destination::Image => "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        Destination::Style => "text/css,*/*;q=0.1",
+        Destination::Script | Destination::Font | Destination::Empty => "*/*",
+    }
+}
+
+fn dest_name(dest: Destination) -> &'static str {
+    match dest {
+        Destination::Document => "document",
+        Destination::Image => "image",
+        Destination::Style => "style",
+        Destination::Script => "script",
+        Destination::Font => "font",
+        Destination::Empty => "empty",
+    }
+}
+
+
+impl Fetcher {
     fn fetch_file(&self, url: &Url) -> Result<Response, FetchError> {
         let path = url.file_path().ok_or_else(|| FetchError::Other("invalid file URL".into()))?;
         let meta = std::fs::metadata(&path).map_err(|e| FetchError::Io(format!("{}: {e}", path.display())))?;
@@ -782,73 +1388,7 @@ impl Fetcher {
             headers: Vec::new(),
         })
     }
-
-    /// Fetch several URLs concurrently on a small thread pool, preserving
-    /// order. Errors are per-item.
-    /// Like `fetch_many`, for subresources of a page: browser headers for
-    /// `dest`, with `initiator` as referer/initiator.
-    pub fn fetch_many_for(&self, urls: &[Url], parallelism: usize, dest: Destination, initiator: Option<&Url>) -> Vec<Result<Response, FetchError>> {
-        let reqs: Vec<Request> = urls
-            .iter()
-            .map(|u| {
-                let mut r = Request::get(u.clone()).with_dest(dest);
-                r.referer = initiator.cloned();
-                r
-            })
-            .collect();
-        self.request_many(&reqs, parallelism)
-    }
-
-    /// Perform several requests concurrently, preserving order.
-    pub fn request_many(&self, reqs: &[Request], parallelism: usize) -> Vec<Result<Response, FetchError>> {
-        let parallelism = parallelism.max(1).min(reqs.len().max(1));
-        let results: Mutex<Vec<Option<Result<Response, FetchError>>>> = Mutex::new((0..reqs.len()).map(|_| None).collect());
-        let next = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..parallelism {
-                scope.spawn(|| loop {
-                    let i = next.fetch_add(1, Ordering::SeqCst);
-                    if i >= reqs.len() {
-                        break;
-                    }
-                    let r = self.request(&reqs[i]);
-                    results.lock().unwrap()[i] = Some(r);
-                });
-            }
-        });
-        results
-            .into_inner()
-            .unwrap()
-            .into_iter()
-            .map(|r| r.unwrap_or_else(|| Err(FetchError::Other("not fetched".into()))))
-            .collect()
-    }
-
-    pub fn fetch_many(&self, urls: &[Url], parallelism: usize) -> Vec<Result<Response, FetchError>> {
-        let parallelism = parallelism.max(1).min(urls.len().max(1));
-        let results: Mutex<Vec<Option<Result<Response, FetchError>>>> = Mutex::new((0..urls.len()).map(|_| None).collect());
-        let next = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..parallelism {
-                scope.spawn(|| loop {
-                    let i = next.fetch_add(1, Ordering::SeqCst);
-                    if i >= urls.len() {
-                        break;
-                    }
-                    let r = self.fetch(&urls[i]);
-                    results.lock().unwrap()[i] = Some(r);
-                });
-            }
-        });
-        results
-            .into_inner()
-            .unwrap()
-            .into_iter()
-            .map(|r| r.unwrap_or_else(|| Err(FetchError::Other("not fetched".into()))))
-            .collect()
-    }
 }
-
 
 /// Ad and tracker domains blocked when `Fetcher::block_trackers` is on
 /// (a small built-in list in the spirit of Brave / uBlock's defaults).
@@ -894,19 +1434,6 @@ fn platform_name() -> &'static str {
     } else {
         "\"Linux\""
     }
-}
-
-/// Registrable domain (approximation of eTLD+1).
-fn site_of(host: &str) -> String {
-    let labels: Vec<&str> = host.split('.').collect();
-    if labels.len() <= 2 || host.parse::<std::net::IpAddr>().is_ok() {
-        return host.to_string();
-    }
-    let n = labels.len();
-    // Two-part public suffixes like co.uk, com.es, com.au.
-    let second = labels[n - 2];
-    let take = if matches!(second, "co" | "com" | "org" | "net" | "gov" | "edu" | "ac" | "gob" | "nom") && labels[n - 1].len() == 2 { 3 } else { 2 };
-    labels[n - take.min(n)..].join(".")
 }
 
 /// `Sec-Fetch-Site` for a request to `url` initiated from `initiator`.
@@ -956,7 +1483,7 @@ pub fn browser_headers(dest: Destination, method: &str, url: &Url, initiator: Op
             push("Origin", &i.origin());
         }
     }
-    push("Accept-Encoding", "gzip, br");
+    push("Accept-Encoding", "gzip, deflate, br, zstd");
     push("Accept-Language", accept_language);
     h
 }

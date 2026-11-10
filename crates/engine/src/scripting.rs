@@ -204,6 +204,12 @@ impl HostEnv for EngineEnv<'_> {
         });
         Some(rx)
     }
+    fn open_websocket(&mut self, url: Url, protocols: Vec<String>) -> Option<Result<rabbithole_net::WebSocket, String>> {
+        Some(rabbithole_net::WebSocket::connect(&self.engine.loader.fetcher, &url, &protocols, Some(&self.page.url), None))
+    }
+    fn open_event_source(&mut self, url: Url, with_credentials: bool) -> Option<Result<rabbithole_net::EventSource, String>> {
+        Some(rabbithole_net::EventSource::connect(&self.engine.loader.fetcher, &url, with_credentials, Some(&self.page.url), None))
+    }
     fn navigate(&mut self, url: Url, replace: bool) {
         self.page.script.pending_navigation = Some(PendingNavigation {
             request: Request::get(url).with_referer(self.page.url.clone()),

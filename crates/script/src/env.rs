@@ -32,6 +32,16 @@ pub trait HostEnv {
     fn fetch_background(&mut self, _req: Request) -> Option<std::sync::mpsc::Receiver<Result<Response, String>>> {
         None
     }
+    /// Open a WebSocket (`new WebSocket(url, protocols)`); the bindings
+    /// poll it from the event loop. `None` (default) = unsupported.
+    fn open_websocket(&mut self, _url: Url, _protocols: Vec<String>) -> Option<Result<rabbithole_net::WebSocket, String>> {
+        None
+    }
+    /// Open an EventSource (`new EventSource(url, {withCredentials})`);
+    /// polled like WebSockets. `None` (default) = unsupported.
+    fn open_event_source(&mut self, _url: Url, _with_credentials: bool) -> Option<Result<rabbithole_net::EventSource, String>> {
+        None
+    }
     fn navigate(&mut self, url: Url, replace: bool);
     /// `document.cookie` getter.
     fn cookies(&mut self) -> String;

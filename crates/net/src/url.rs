@@ -364,6 +364,21 @@ impl fmt::Display for Url {
     }
 }
 
+/// Registrable domain (an approximation of eTLD+1 without the full
+/// public suffix list): `www.bbc.co.uk` -> `bbc.co.uk`.
+pub fn site_of(host: &str) -> String {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() <= 2 || host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
+        return host;
+    }
+    let n = labels.len();
+    // Two-part public suffixes like co.uk, com.es, com.au.
+    let second = labels[n - 2];
+    let take = if matches!(second, "co" | "com" | "org" | "net" | "gov" | "edu" | "ac" | "gob" | "nom") && labels[n - 1].len() == 2 { 3 } else { 2 };
+    labels[n - take.min(n)..].join(".")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

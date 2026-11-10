@@ -8,4 +8,10 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-ureq = { version = "2", default-features = false, features = ["tls", "gzip", "brotli"] }
+# Pure-Rust TLS (ring backend, which builds with zig as C compiler).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+# Content-Encoding decoders (pure Rust).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+brotli-decompressor = "4"
+ruzstd = "0.8"

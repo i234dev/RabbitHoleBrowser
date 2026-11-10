@@ -911,7 +911,9 @@ pub(crate) fn do_fetch(url: &str, method: &str, headers: &[(String, String)], bo
         }
     }
     let referer = with_env(|env| env.document_url());
-    req = req.with_referer(referer).with_dest(rabbithole_net::Destination::Empty);
+    // Fetch-standard semantics (CORS, credentials, opaque responses) are
+    // applied by the network layer for requests with a mode.
+    req = req.with_referer(referer).with_dest(rabbithole_net::Destination::Empty).with_mode(rabbithole_net::RequestMode::Cors, rabbithole_net::CredentialsMode::SameOrigin);
     with_env(|env| env.fetch(req))
 }
 

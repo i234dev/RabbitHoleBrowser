@@ -20,9 +20,58 @@ pub struct Cookie {
     pub http_only: bool,
     /// Unix seconds; `None` = session cookie.
     pub expires: Option<u64>,
-    /// `Lax` (default), `Strict`, `None`
+    /// `Lax`, `Strict`, `None`, or empty when unspecified (treated as
+    /// Lax, like Chrome, with the 2-minute top-level POST allowance).
     pub same_site: String,
     pub created: u64,
+    /// CHIPS: `Partitioned` cookies are keyed by the top-level site they
+    /// were set under and only sent in that context.
+    pub partition_key: Option<String>,
+}
+
+/// The context a request is made in, for SameSite and partitioning.
+#[derive(Debug, Clone, Default)]
+pub struct CookieContext {
+    /// URL of the initiating document (None = browser-initiated, e.g. a
+    /// typed URL: treated as same-site).
+    pub initiator: Option<Url>,
+    /// Top-level navigation (link click, form submission).
+    pub top_level_navigation: bool,
+    /// GET/HEAD/OPTIONS/TRACE.
+    pub safe_method: bool,
+    /// Every URL of the redirect chain so far is same-site with the
+    /// initiator.
+    pub same_site_chain: bool,
+}
+
+impl CookieContext {
+    /// Context for a request to `url`.
+    pub fn new(initiator: Option<&Url>, url: &Url, top_level_navigation: bool, method: &str) -> CookieContext {
+        let mut c = CookieContext {
+            initiator: initiator.filter(|i| i.is_http()).cloned(),
+            top_level_navigation,
+            safe_method: matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE"),
+            same_site_chain: true,
+        };
+        c.same_site_chain = c.is_same_site(url);
+        c
+    }
+
+    /// Schemeful same-site check of `url` against the initiator.
+    pub fn is_same_site(&self, url: &Url) -> bool {
+        match &self.initiator {
+            None => true,
+            Some(i) => i.scheme == url.scheme && crate::url::site_of(&i.host) == crate::url::site_of(&url.host),
+        }
+    }
+
+    /// The top-level site used as partition key.
+    pub fn partition_site(&self, url: &Url) -> String {
+        match (&self.initiator, self.top_level_navigation) {
+            (Some(i), false) => format!("{}://{}", i.scheme, crate::url::site_of(&i.host)),
+            _ => format!("{}://{}", url.scheme, crate::url::site_of(&url.host)),
+        }
+    }
 }
 
 fn now() -> u64 {
@@ -131,9 +180,11 @@ impl Cookie {
             secure: false,
             http_only: false,
             expires: None,
-            same_site: "Lax".into(),
+            same_site: String::new(),
             created: now(),
+            partition_key: None,
         };
+        let mut partitioned = false;
         let mut max_age: Option<i64> = None;
         let mut expires: Option<u64> = None;
         for attr in parts {
@@ -175,9 +226,36 @@ impl Cookie {
                         expires = Some(t);
                     }
                 }
-                "samesite" => c.same_site = v.to_string(),
+                "samesite" => {
+                    c.same_site = match v.to_ascii_lowercase().as_str() {
+                        "strict" => "Strict".into(),
+                        "lax" => "Lax".into(),
+                        "none" => "None".into(),
+                        _ => String::new(),
+                    }
+                }
+                "partitioned" => partitioned = true,
                 _ => {}
             }
+        }
+        let secure_origin = url.scheme == "https" || matches!(url.host.as_str(), "localhost" | "127.0.0.1" | "[::1]");
+        // Secure cookies only from secure origins; SameSite=None and
+        // Partitioned need Secure; cookie prefixes (RFC 6265bis 4.1.3).
+        if c.secure && !secure_origin {
+            return None;
+        }
+        if (c.same_site == "None" || partitioned) && !c.secure {
+            return None;
+        }
+        if c.name.starts_with("__Secure-") && !c.secure {
+            return None;
+        }
+        if c.name.starts_with("__Host-") && (!c.secure || !c.host_only || c.path != "/") {
+            return None;
+        }
+        if partitioned {
+            // Filled in by the jar from the request context.
+            c.partition_key = Some(String::new());
         }
         if let Some(n) = max_age {
             c.expires = Some(if n <= 0 { 0 } else { now() + n as u64 });
@@ -208,7 +286,7 @@ impl CookieJar {
     /// Store a cookie (replacing one with the same name/domain/path);
     /// expired cookies delete.
     pub fn store(&mut self, cookie: Cookie) {
-        self.cookies.retain(|c| !(c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path));
+        self.cookies.retain(|c| !(c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path && c.partition_key == cookie.partition_key));
         if !cookie.is_expired() {
             self.cookies.push(cookie);
         }
@@ -224,16 +302,66 @@ impl CookieJar {
         }
     }
 
+    /// Apply the `Set-Cookie` headers of a response, honouring SameSite
+    /// (cross-site subresource responses cannot set Lax/Strict cookies)
+    /// and keying `Partitioned` cookies by the top-level site.
+    pub fn store_from_response(&mut self, url: &Url, set_cookie_values: &[String], ctx: &CookieContext) {
+        let same_site = ctx.same_site_chain && ctx.is_same_site(url);
+        for v in set_cookie_values {
+            let Some(mut c) = Cookie::parse(v, url) else { continue };
+            if !same_site && !ctx.top_level_navigation && c.same_site != "None" {
+                continue;
+            }
+            if c.partition_key.is_some() {
+                c.partition_key = Some(ctx.partition_site(url));
+            }
+            self.store(c);
+        }
+    }
+
+    /// Cookies to send for a request to `url` made in `ctx` (SameSite
+    /// rules: Strict only same-site; Lax/unspecified also on top-level
+    /// safe navigations; unspecified cookies younger than two minutes
+    /// also on top-level POSTs).
+    pub fn header_for_context(&self, url: &Url, ctx: &CookieContext) -> Option<String> {
+        let same_site = ctx.same_site_chain && ctx.is_same_site(url);
+        let partition = ctx.partition_site(url);
+        let t = now();
+        self.header_filtered(url, |c| {
+            if let Some(p) = &c.partition_key {
+                if *p != partition {
+                    return false;
+                }
+            }
+            if same_site {
+                return true;
+            }
+            match c.same_site.as_str() {
+                "None" => true,
+                "Strict" => false,
+                "Lax" => ctx.top_level_navigation && ctx.safe_method,
+                _ => ctx.top_level_navigation && (ctx.safe_method || t.saturating_sub(c.created) < 120),
+            }
+        })
+    }
+
     /// Cookies to send for a request to `url`, as the `Cookie` header
-    /// value (`a=1; b=2`), or None when there are none.
+    /// value (`a=1; b=2`), or None when there are none (same-site
+    /// context).
     pub fn header_for(&self, url: &Url) -> Option<String> {
+        let partition = format!("{}://{}", url.scheme, crate::url::site_of(&url.host));
+        self.header_filtered(url, |c| c.partition_key.as_ref().map(|p| *p == partition).unwrap_or(true))
+    }
+
+    fn header_filtered(&self, url: &Url, keep: impl Fn(&Cookie) -> bool) -> Option<String> {
         let host = url.host.to_ascii_lowercase();
         let path = if url.path.is_empty() { "/" } else { url.path.as_str() };
-        let secure = url.scheme == "https";
+        let secure = url.scheme == "https" || matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]");
         let mut matched: Vec<&Cookie> = self
             .cookies
             .iter()
             .filter(|c| !c.is_expired())
+            .filter(|c| keep(c))
             .filter(|c| if c.host_only { c.domain == host } else { domain_matches(&c.domain, &host) })
             .filter(|c| path_matches(&c.path, path))
             .filter(|c| !c.secure || secure)
@@ -296,7 +424,7 @@ impl CookieJar {
         let mut out = String::from("# Netscape HTTP Cookie File\n# Written by RabbitHole\n\n");
         for c in &self.cookies {
             let Some(exp) = c.expires else { continue };
-            if c.is_expired() {
+            if c.is_expired() || c.partition_key.is_some() {
                 continue;
             }
             let domain = if c.host_only { c.domain.clone() } else { format!(".{}", c.domain) };
@@ -340,8 +468,9 @@ impl CookieJar {
                 secure: f[3].eq_ignore_ascii_case("TRUE"),
                 http_only,
                 expires,
-                same_site: "Lax".into(),
+                same_site: String::new(),
                 created: now(),
+                partition_key: None,
             };
             if !c.is_expired() {
                 jar.cookies.push(c);
@@ -416,6 +545,52 @@ mod tests {
         jar.store(Cookie::parse("x=1", &u).unwrap());
         jar.store(c);
         assert!(jar.is_empty());
+    }
+
+    #[test]
+    fn same_site_and_partitioned() {
+        let site = url("https://shop.example.com/");
+        let mut jar = CookieJar::new();
+        let first = CookieContext::new(None, &site, true, "GET");
+        jar.store_from_response(
+            &site,
+            &["s=1; SameSite=Strict".into(), "l=2; SameSite=Lax".into(), "n=3; SameSite=None; Secure".into(), "d=4".into(), "bad=5; SameSite=None".into()],
+            &first,
+        );
+        assert_eq!(jar.len(), 4, "SameSite=None without Secure is rejected");
+        let names = |h: Option<String>| h.unwrap_or_default();
+        // Same-site subresource from www.example.com: everything.
+        let www = url("https://www.example.com/page");
+        let ctx = CookieContext::new(Some(&www), &site, false, "GET");
+        assert_eq!(names(jar.header_for_context(&site, &ctx)).matches('=').count(), 4);
+        // Cross-site subresource: only SameSite=None.
+        let other = url("https://news.other.org/");
+        let ctx = CookieContext::new(Some(&other), &site, false, "GET");
+        assert_eq!(names(jar.header_for_context(&site, &ctx)), "n=3");
+        // Cross-site top-level GET navigation: Lax + unspecified + None.
+        let ctx = CookieContext::new(Some(&other), &site, true, "GET");
+        let h = names(jar.header_for_context(&site, &ctx));
+        assert!(h.contains("l=2") && h.contains("d=4") && h.contains("n=3") && !h.contains("s=1"), "{h}");
+        // Cross-site top-level POST: None + fresh unspecified (Lax+POST).
+        let ctx = CookieContext::new(Some(&other), &site, true, "POST");
+        let h = names(jar.header_for_context(&site, &ctx));
+        assert!(h.contains("d=4") && h.contains("n=3") && !h.contains("l=2"), "{h}");
+        // A cross-site subresource response cannot set Lax cookies.
+        let ctx = CookieContext::new(Some(&other), &site, false, "GET");
+        jar.store_from_response(&site, &["x=9".into(), "p=7; Secure; SameSite=None; Partitioned".into()], &ctx);
+        assert!(!jar.cookies().iter().any(|c| c.name == "x"));
+        // Partitioned cookie only under the same top-level site.
+        let h = names(jar.header_for_context(&site, &ctx));
+        assert!(h.contains("p=7"), "{h}");
+        let third = url("https://third.net/");
+        let ctx3 = CookieContext::new(Some(&third), &site, false, "GET");
+        assert!(!names(jar.header_for_context(&site, &ctx3)).contains("p=7"));
+        // Prefixes and insecure origins.
+        let http = url("http://shop.example.com/");
+        assert!(Cookie::parse("a=1; Secure", &http).is_none());
+        assert!(Cookie::parse("__Host-a=1; Secure; Path=/; Domain=example.com", &site).is_none());
+        assert!(Cookie::parse("__Host-a=1; Secure; Path=/", &site).is_some());
+        assert!(Cookie::parse("__Secure-a=1", &site).is_none());
     }
 
     #[test]
