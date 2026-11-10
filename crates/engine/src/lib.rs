@@ -316,7 +316,7 @@ impl Loader {
 
     // ------------------------------------------------------------ styles
 
-    fn collect_stylesheets(&self, doc: &Document, base: &Url) -> Vec<Stylesheet> {
+    pub(crate) fn collect_stylesheets(&self, doc: &Document, base: &Url) -> Vec<Stylesheet> {
         enum Src {
             Inline(String, Option<String>),
             Link(Url, Option<String>),
@@ -780,6 +780,8 @@ pub struct Page {
     pub has_dynamic_rules: bool,
     /// JavaScript state (host, pending navigation, console, ...).
     pub script: ScriptState,
+    /// Hash of the document's stylesheet sources (to detect changes).
+    pub sheet_signature: u64,
     /// Scroll position requested by scripts (consumed by the UI).
     pub requested_scroll: Option<(f32, f32)>,
 }
@@ -865,8 +867,10 @@ impl Engine {
             has_dynamic_rules,
             script: ScriptState::default(),
             requested_scroll: None,
+            sheet_signature: 0,
         };
         page.snapshot_form_defaults();
+        page.sheet_signature = stylesheet_signature(&page.doc);
         self.restyle(&mut page);
         if self.scripting && !page.scripts.is_empty() {
             let _ = self.run_page_scripts(&mut page);
@@ -877,6 +881,16 @@ impl Engine {
     /// Re-run style + layout + display list (after DOM, viewport or
     /// selector-state changes).
     pub fn restyle(&self, page: &mut Page) {
+        // Scripts may add/remove `<style>`/`<link>` elements or insert rules
+        // (CSS-in-JS): re-collect the sheets when their sources changed.
+        if page.script.host.is_some() || page.script.scripts_ran {
+            let sig = stylesheet_signature(&page.doc);
+            if sig != page.sheet_signature {
+                page.sheet_signature = sig;
+                page.sheets = self.loader.collect_stylesheets(&page.doc, &page.base_url);
+                page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
+            }
+        }
         let env = media_env(page.viewport);
         let base_str = page.base_url.to_string();
         let opts = StyleOptions {
@@ -1150,6 +1164,35 @@ fn rebase_rules(rules: Vec<Rule>, base: &str) -> Vec<Rule> {
             other => other,
         })
         .collect()
+}
+
+/// Hash of every `<style>` text and stylesheet `<link>` (href + media) in
+/// document order.
+fn stylesheet_signature(doc: &Document) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for n in doc.descendants(Document::ROOT) {
+        let Some(el) = doc.element(n) else { continue };
+        match el.tag.as_str() {
+            "style" => {
+                0u8.hash(&mut h);
+                el.attr("media").hash(&mut h);
+                for c in doc.children(n) {
+                    if let Some(t) = doc.text(c) {
+                        t.hash(&mut h);
+                    }
+                }
+            }
+            "link" if el.attr("rel").map(|r| r.to_ascii_lowercase().split_ascii_whitespace().any(|x| x == "stylesheet")).unwrap_or(false) => {
+                1u8.hash(&mut h);
+                el.attr("href").hash(&mut h);
+                el.attr("media").hash(&mut h);
+                el.attr("disabled").is_some().hash(&mut h);
+            }
+            _ => {}
+        }
+    }
+    h.finish()
 }
 
 fn sheet_has_dynamic_rules(sheet: &Stylesheet) -> bool {
