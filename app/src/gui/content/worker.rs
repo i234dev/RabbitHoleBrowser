@@ -402,7 +402,9 @@ impl Worker {
         match result {
             LoadResult::Loaded(Ok(LoadOutcome::Page(loaded))) => {
                 let push = self.pending.take().map(|(_, p)| p).unwrap_or(true);
+                let t = Instant::now();
                 let page = self.engine.build_page_unscripted(*loaded, self.view.viewport);
+                debug_time("build (style + layout)", t);
                 self.awaiting_scripts = true;
                 self.install(page, push);
                 // First paint now, before the scripts arrive and run.
@@ -426,7 +428,9 @@ impl Worker {
                 self.send(FromContent::Loading(Some("Running scripts")));
                 let Some(page) = self.page.as_mut() else { return };
                 page.scripts = scripts;
+                let t = Instant::now();
                 self.engine.finish_page_load(page);
+                debug_time("scripts", t);
                 let out = self.take_load_outcome();
                 self.dirty = true;
                 self.update_title();
@@ -625,6 +629,12 @@ impl Worker {
     // ------------------------------------------------------------ painting
 
     fn paint(&mut self) {
+        let t = Instant::now();
+        self.paint_frame();
+        debug_time("paint", t);
+    }
+
+    fn paint_frame(&mut self) {
         let Some(page) = self.page.as_mut() else { return };
         self.dirty = false;
         let s = self.view.scale;
@@ -1335,6 +1345,14 @@ impl Worker {
         self.send(FromContent::FindResult { count: n, current: self.find.current });
         self.scroll_into_view(r);
         self.dirty = true;
+    }
+}
+
+/// `RH_DEBUG_CONTENT=1`: log how long content-thread steps take.
+fn debug_time(what: &str, since: Instant) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("RH_DEBUG_CONTENT").is_some()) {
+        eprintln!("[content {:?}] {what}: {:.1} ms", std::thread::current().name().unwrap_or("?"), since.elapsed().as_secs_f64() * 1000.0);
     }
 }
 
