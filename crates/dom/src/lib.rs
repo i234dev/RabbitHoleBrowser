@@ -69,6 +69,8 @@ pub struct Document {
     /// element → (element source text when modified, sheet text to render).
     /// Ignored once the element's own text changes.
     pub sheet_overrides: HashMap<NodeId, (String, String)>,
+    /// Custom elements whose constructor ran (`:defined`).
+    pub defined_custom: std::collections::HashSet<NodeId>,
 }
 
 impl Default for Document {
@@ -94,6 +96,7 @@ impl Document {
             shadow_hosts: HashMap::new(),
             adopted_styles: HashMap::new(),
             sheet_overrides: HashMap::new(),
+            defined_custom: std::collections::HashSet::new(),
         }
     }
 
@@ -440,6 +443,14 @@ impl Document {
             }
         }
         out
+    }
+
+    /// `:defined`: not a custom element name, or an upgraded custom element.
+    pub fn is_defined(&self, id: NodeId) -> bool {
+        match self.tag(id) {
+            Some(t) if t.contains('-') => self.defined_custom.contains(&id),
+            _ => true,
+        }
     }
 
     /// Shadow roots whose host is connected, in creation order.

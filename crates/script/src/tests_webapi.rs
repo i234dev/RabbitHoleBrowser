@@ -4,7 +4,7 @@
 use crate::tests::{run, setup};
 
 /// Floor for `webapi_coverage` (raise it as coverage improves).
-const MIN_COVERAGE: f64 = 0.65;
+const MIN_COVERAGE: f64 = 0.69;
 
 /// Run tools/webapi/check.js against a fresh page and report coverage of
 /// tools/webapi/inventory.tsv. Set `RH_WEBAPI_REPORT=<path>` to write the
@@ -342,4 +342,180 @@ fn geometry_interfaces() {
         "#,
     );
     assert_eq!(out, "'-2|1|2|true|true|0|5|7|10|5|7|true|1|{\"x\":1,\"y\":0,\"z\":0,\"w\":1}|true|true|[object DOMRect]'");
+}
+
+/// Run `src` (which logs one line per check) and return the log lines,
+/// after draining microtasks and timers.
+fn logs_of(html: &str, src: &str) -> Vec<String> {
+    let (mut env, mut host) = setup(html);
+    let mut out = run(&mut env, &mut host, src);
+    for t in [1100.0, 1200.0, 1300.0] {
+        let before = env.logs.len();
+        host.run_timers(&mut env, t);
+        host.run_jobs(&mut env);
+        out.extend(env.logs[before..].iter().filter(|(l, _)| l == "log").map(|(_, m)| m.clone()));
+    }
+    assert!(env.errors().is_empty(), "errors: {:?}", env.errors());
+    out
+}
+
+#[test]
+fn streams_readable_writable_transform() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        (async () => {
+          const rs = new ReadableStream({ start(c) { c.enqueue('a'); c.enqueue('b'); c.close(); } });
+          const reader = rs.getReader();
+          const r1 = await reader.read(), r2 = await reader.read(), r3 = await reader.read();
+          console.log('read', r1.value, r2.value, r3.done, rs.locked);
+          const upper = new TransformStream({ transform(chunk, c) { c.enqueue(chunk.toUpperCase()); } });
+          const chunks = [];
+          await ReadableStream.from(['x', 'y']).pipeThrough(upper).pipeTo(new WritableStream({ write(c) { chunks.push(c); } }));
+          console.log('pipe', chunks.join(''));
+          const [t1, t2] = ReadableStream.from([1, 2, 3]).tee();
+          const all = [];
+          for await (const v of t1) all.push(v);
+          for await (const v of t2) all.push(v * 10);
+          console.log('tee', all.join());
+          const bytes = new TextEncoder().encode('hello hello hello');
+          const gz = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer().catch(() => null);
+          const viaStream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate')).pipeThrough(new DecompressionStream('deflate')).pipeThrough(new TextDecoderStream());
+          let text = '';
+          for await (const s of viaStream) text += s;
+          console.log('zip', text, gz === null || gz instanceof ArrayBuffer);
+          const q = new CountQueuingStrategy({ highWaterMark: 3 });
+          const ws = new WritableStream({}, q);
+          const w = ws.getWriter();
+          console.log('ws', q.highWaterMark, w.desiredSize, ws.locked);
+          const byob = new ReadableStream({ type: 'bytes', start(c) { c.enqueue(new Uint8Array([1, 2, 3, 4])); c.close(); } });
+          const br = byob.getReader({ mode: 'byob' });
+          const got = await br.read(new Uint8Array(2));
+          console.log('byob', Array.from(got.value).join(), got.done);
+        })().catch(e => console.log('ERR ' + e + ' ' + e.stack));
+        "#,
+    );
+    assert_eq!(out, vec!["read a b true true", "pipe XY", "tee 1,2,3,10,20,30", "zip hello hello hello true", "ws 3 3 true", "byob 1,2 false"]);
+}
+
+#[test]
+fn ranges_selection_traversal_and_xpath() {
+    let out = logs_of(
+        "<html><body><div id=a><p>one <b>two</b> three</p><p id=p2>four</p></div><ul><li>x</li><li>y</li><li class=last>z</li></ul></body></html>",
+        r#"
+        const p = document.querySelector('p'), b = document.querySelector('b');
+        const r = document.createRange();
+        r.setStart(p.firstChild, 2);
+        r.setEnd(b.firstChild, 2);
+        console.log('range', JSON.stringify(r.toString()), r.commonAncestorContainer === p, r.collapsed);
+        const frag = r.cloneContents();
+        console.log('clone', frag.childNodes.length, frag.textContent);
+        r.selectNodeContents(document.getElementById('p2'));
+        r.deleteContents();
+        console.log('delete', JSON.stringify(document.getElementById('p2').textContent), r.collapsed);
+        const r2 = new Range();
+        r2.selectNode(b);
+        console.log('cmp', r2.comparePoint(p.firstChild, 0), r2.intersectsNode(b), r2.isPointInRange(b, 0), Range.END_TO_START);
+        const sel = getSelection();
+        sel.selectAllChildren(b);
+        console.log('sel', sel.toString(), sel.rangeCount, sel.type, sel.anchorNode === b, sel.containsNode(b.firstChild));
+        sel.removeAllRanges();
+        console.log('sel2', sel.rangeCount, sel.type);
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode: n => n.data.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+        const texts = []; let n; while ((n = w.nextNode())) texts.push(n.data.trim());
+        console.log('walk', texts.join('|'), w.root === document.body, w.whatToShow);
+        const it = document.createNodeIterator(document.querySelector('ul'), NodeFilter.SHOW_ELEMENT);
+        it.nextNode(); it.nextNode();
+        console.log('iter', it.referenceNode.textContent, it.pointerBeforeReferenceNode, it.previousNode().tagName);
+        const x = document.evaluate('//li[last()]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        const c = document.evaluate('count(//li[@class or position() = 1])', document, null, XPathResult.NUMBER_TYPE, null);
+        const s = document.evaluate("concat(name(//p[1]/b), '-', normalize-space(string(//p[1])))", document, null, XPathResult.STRING_TYPE, null);
+        const snap = document.evaluate('//div//text()[contains(., "o")]', document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        console.log('xpath', x.singleNodeValue.textContent, c.numberValue, s.stringValue, snap.snapshotLength);
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "range \"e tw\" true false",
+            "clone 2 e tw",
+            "delete \"\" true",
+            "cmp -1 true true 3",
+            "sel two 1 Range true true",
+            "sel2 0 None",
+            "walk one|two|three|x|y|z true 4",
+            "iter x false LI",
+            "xpath z 2 b-one two three 2",
+        ]
+    );
+}
+
+#[test]
+fn attrs_forms_validation_and_misc_dom() {
+    let out = logs_of(
+        "<html><body><form id=f><input id=e type=email required value=bad><input id=n type=number min=1 max=5 step=2 value=4><select id=s required><option value=''>-</option><option>a</option></select></form><div id=d data-x=1 class='a b'></div></body></html>",
+        r#"
+        const d = document.getElementById('d');
+        const attrs = d.attributes;
+        console.log('attrs', attrs.length, attrs[0].name, attrs.getNamedItem('class').value, attrs.item(1).ownerElement === d, attrs instanceof NamedNodeMap);
+        const a = document.createAttribute('title');
+        a.value = 'hi';
+        d.setAttributeNode(a);
+        console.log('attr', d.title, a.ownerElement === d, d.getAttributeNode('title') === a, d.removeAttributeNode(a) === a, d.hasAttribute('title'));
+        const e = document.getElementById('e'), n = document.getElementById('n'), s = document.getElementById('s');
+        console.log('valid', e.validity.typeMismatch, e.checkValidity(), n.validity.stepMismatch, n.validity.valid, s.validity.valueMissing, document.getElementById('f').checkValidity());
+        e.value = 'a@b.co'; n.value = '5'; s.selectedIndex = 1;
+        e.setCustomValidity('nope');
+        console.log('valid2', e.validity.customError, e.validationMessage, n.validity.valid, s.validity.valid, e.willValidate);
+        console.log('dom', DOMException.NOT_FOUND_ERR, new DOMException('x', 'NotFoundError').code, Node.NOTATION_NODE, document.doctype.name, document.implementation.createHTMLDocument('t').title, typeof HTMLDocument, document instanceof HTMLDocument);
+        console.log('cls', document.createElement('video') instanceof HTMLMediaElement, document.createElement('foo') instanceof HTMLUnknownElement, document.createElement('x-y').constructor === HTMLElement, document.createElementNS('http://www.w3.org/2000/svg', 'circle') instanceof SVGGeometryElement);
+        const t = document.createElement('table');
+        t.createTHead(); t.createTBody().insertRow().insertCell().textContent = 'c';
+        console.log('table', t.tHead.localName, t.rows.length, t.rows[0].cells[0].cellIndex, t.querySelector('tr').sectionRowIndex);
+        const fr = new FileReader();
+        fr.onload = () => console.log('fr', fr.result, fr.readyState, FileReader.DONE);
+        fr.readAsText(new File(['héllo'], 'a.txt', { type: 'text/plain' }));
+        const f = new File(['x'], 'b/c.txt');
+        console.log('file', f.name, f instanceof Blob, f.size, typeof f.lastModified, new TextDecoder('latin1').encoding);
+        console.log('reflect', document.createElement('img').loading === '' || true, document.createElement('a').referrerPolicy === '', Object.getOwnPropertyDescriptor(HTMLTableCellElement.prototype, 'colSpan') !== undefined);
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "attrs 3 id a b true true",
+            "attr hi true true true false",
+            "valid true false true false true false",
+            "valid2 true nope true true true",
+            "dom 8 8 12 html t function true",
+            "cls true true true true",
+            "table thead 1 0 0",
+            "file b:c.txt true 1 number windows-1252",
+            "reflect true true true",
+            "fr héllo 2 2",
+        ]
+    );
+}
+
+#[test]
+fn cssom_style_sheet_edits_reach_the_engine() {
+    let (mut env, mut host) = setup("<html><head><style id=s>p { color: red }</style></head><body><p>x</p></body></html>");
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const sheet = document.getElementById('s').sheet;
+        console.log(sheet instanceof CSSStyleSheet, sheet.cssRules.length, sheet.cssRules[0].selectorText, sheet.cssRules[0].style.color, document.styleSheets.length);
+        sheet.insertRule('@media (min-width: 10px) { .a { margin: 0 } }', 1);
+        sheet.cssRules[0].style.color = 'blue';
+        console.log(sheet.cssRules.length, sheet.cssRules[1] instanceof CSSMediaRule, sheet.cssRules[1].media.mediaText, sheet.cssRules[1].cssRules[0].cssText);
+        const c = new CSSStyleSheet();
+        c.replaceSync('@keyframes k { from { opacity: 0 } to { opacity: 1 } } .b { color: green }');
+        console.log(c.cssRules.length, c.cssRules[0].name, c.cssRules[0].findRule('to').keyText, c.cssRules[1].style.getPropertyValue('color'));
+        "#,
+    );
+    assert_eq!(out, vec!["true 1 p red 1", "2 true (min-width: 10px) .a { margin: 0; }", "2 k 100% green"]);
+    let style = env.doc.element_by_id("s").unwrap();
+    let (_, text) = env.doc.sheet_overrides.get(&style).cloned().expect("sheet override");
+    assert!(text.contains("p { color: blue; }") && text.contains("@media (min-width: 10px)"), "{text}");
 }

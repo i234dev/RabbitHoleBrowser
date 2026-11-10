@@ -64,6 +64,8 @@ pub enum Pseudo {
     /// cascade matches these rules against slotted elements; ordinary
     /// matching never matches them.
     Slotted(Vec<Selector>),
+    /// `:defined` (custom elements once upgraded; every other element).
+    Defined,
     /// Something we never match (unknown pseudo-classes/elements).
     Never,
 }
@@ -442,6 +444,7 @@ impl<'a> SelectorParser<'a> {
                     "visited" => Pseudo::Visited,
                     "target" => Pseudo::Target,
                     "host" => Pseudo::Host(Vec::new()),
+                    "defined" => Pseudo::Defined,
                     _ => Pseudo::Never,
                 }))
             }
@@ -929,6 +932,7 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
                 }
             }
             Pseudo::Slotted(_) => false,
+            Pseudo::Defined => doc.is_defined(node),
             Pseudo::Never => false,
         };
         if !ok {

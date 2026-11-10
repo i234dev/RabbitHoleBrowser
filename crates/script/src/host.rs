@@ -470,6 +470,7 @@ pub(crate) fn html_element_ctor(realm: &mut Realm, _this: Value, _args: &[Value]
         }
     };
     state().borrow_mut().ce_upgraded.insert(n);
+    with_doc(n.doc, |doc| doc.defined_custom.insert(n.node));
     let el = wrap(realm, n);
     if let (Value::Object(e), Ok(Value::Object(p))) = (&el, realm.get_str(nt, "prototype")) {
         realm.obj_mut(*e).proto = Some(p);
@@ -490,6 +491,10 @@ pub(crate) fn upgrade_custom_element(realm: &mut Realm, n: NodeRef, ctor: &Value
     match result {
         Ok(_) => {
             state().borrow_mut().ce_upgraded.insert(n);
+            with_doc(n.doc, |doc| doc.defined_custom.insert(n.node));
+            if n.doc == 0 {
+                mark_dirty();
+            }
             // attributeChangedCallback for observed attributes already present.
             if let Ok(obs) = realm.get_str(ctor.clone(), "observedAttributes") {
                 if let Ok(cb) = realm.get_str(el.clone(), "attributeChangedCallback") {

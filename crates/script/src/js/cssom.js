@@ -103,7 +103,9 @@
   // Declarations of a rule: a Proxy so `style.color = ...` works like the
   // element.style object (whose prototype, CSSStyleDeclaration, it shares).
   function makeDecl(rule, text) {
-    const st = { decls: parseDecls(text || ''), rule };
+    // Parsed on first use: most rules are only serialized back.
+    const st = { raw: text || '', parsed: null, rule };
+    Object.defineProperty(st, 'decls', { get() { if (!this.parsed) this.parsed = parseDecls(this.raw); return this.parsed; }, set(v) { this.parsed = v; } });
     const changed = () => { if (st.rule) touch(st.rule); };
     const get = (p) => { for (let i = st.decls.length - 1; i >= 0; i--) if (st.decls[i][0] === p) return st.decls[i][1]; return ''; };
     const set = (p, v, imp) => {
@@ -112,7 +114,11 @@
       if (v !== '') st.decls.push([p, v, !!imp]);
       changed();
     };
-    const cssText = () => st.decls.map(([k, v, i]) => `${k}: ${v}${i ? ' !important' : ''};`).join(' ');
+    const cssText = () => {
+      if (st.parsed) return st.parsed.map(([k, v, i]) => `${k}: ${v}${i ? ' !important' : ''};`).join(' ');
+      const t = st.raw.trim();
+      return t && !t.endsWith(';') ? t + ';' : t;
+    };
     const methods = {
       getPropertyValue: (p) => get(String(p).startsWith('--') ? String(p) : String(p).toLowerCase()),
       getPropertyPriority: (p) => (st.decls.find((d) => d[0] === String(p).toLowerCase() && d[2]) ? 'important' : ''),
@@ -531,34 +537,56 @@
     replaceSync(text) {
       if (!this[S].constructed) throw domError("Failed to execute 'replaceSync' on 'CSSStyleSheet': Can't call replaceSync on non-constructed CSSStyleSheets.", 'NotAllowedError');
       // @import rules are ignored in constructed sheets.
-      this[S].rules = parseList(String(text), this, null).filter((r) => !(r instanceof CSSImportRule));
+      // Parsed lazily (cssRules / insertRule); the style engine gets the text.
+      this[S].rules = [];
+      this[S].source = String(text);
+      this[S].loaded = false;
       sheetChanged(this);
     }
   }
   tag(CSSStyleSheet, 'CSSStyleSheet');
 
-  const sheetText = (sheet) => sheet[S].rules.map((r) => r.cssText).join('\n');
+  const sheetText = (sheet) => (sheet[S].loaded ? sheet[S].rules.map((r) => r.cssText).join('\n') : sheet[S].source || '');
 
   function ensureLoaded(sheet) {
     const st = sheet[S];
     if (st.loaded) return;
     st.loaded = true;
-    let text = '';
+    let text = st.source || '';
     if (st.owner && st.owner.localName === 'link') {
       text = st.href ? (N.fetchText(st.href) || '') : '';
     }
     st.rules = parseList(text, sheet, null);
+    if (st.constructed) st.rules = st.rules.filter((r) => !(r instanceof CSSImportRule));
+    st.source = null;
   }
 
-  function sheetChanged(sheet) {
-    const st = sheet[S];
-    const text = st.disabled ? '' : sheetText(sheet);
-    if (st.owner) {
-      st.dirty = true;
-      N.setSheetText(st.owner, text);
+  // Changes are pushed to the style engine once per microtask (CSS-in-JS
+  // libraries insert many rules in a row), or right away before
+  // getComputedStyle.
+  const pendingSheets = new Set();
+  let flushQueued = false;
+  function flushSheets() {
+    flushQueued = false;
+    const list = Array.from(pendingSheets);
+    pendingSheets.clear();
+    const targets = new Set();
+    for (const sheet of list) {
+      const st = sheet[S];
+      if (st.owner) {
+        st.dirty = true;
+        N.setSheetText(st.owner, st.disabled ? '' : sheetText(sheet));
+      }
+      for (const t of st.adopters) targets.add(t);
     }
-    for (const t of st.adopters) syncAdopted(t);
+    for (const t of targets) syncAdopted(t);
   }
+  function sheetChanged(sheet) {
+    pendingSheets.add(sheet);
+    if (!flushQueued) { flushQueued = true; queueMicrotask(flushSheets); }
+  }
+  const gcs = g.getComputedStyle;
+  if (gcs) hidden(g, 'getComputedStyle', function getComputedStyle(el, pseudo) { if (pendingSheets.size) flushSheets(); return gcs.call(this, el, pseudo); });
 
   // `<style>.sheet` / `<link rel=stylesheet>.sheet` (cached per element,
   // re-parsed when the element's text changes).
@@ -578,7 +606,7 @@
       rules: [], owner: el, href: isLink ? el.href : null, constructed: false, disabled: false,
       media: el.getAttribute('media') || '', adopters: new Set(), loaded: false,
     });
-    if (!isLink) { sheet[S].rules = parseList(source, sheet, null); sheet[S].loaded = true; }
+    if (!isLink) sheet[S].source = source;
     if (rec && rec.sheet[S].dirty) N.setSheetText(el, null);
     ownerSheets.set(el, { source, sheet });
     return sheet;

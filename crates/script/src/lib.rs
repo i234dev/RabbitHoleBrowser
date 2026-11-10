@@ -42,6 +42,8 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:reflect_table.js", include_str!("js/reflect_table.js")),
     ("rabbithole:dom.js", include_str!("js/dom.js")),
     ("rabbithole:events.js", include_str!("js/events.js")),
+    ("rabbithole:streams.js", include_str!("js/streams.js")),
+    ("rabbithole:net.js", include_str!("js/net.js")),
     ("rabbithole:cssom.js", include_str!("js/cssom.js")),
     ("rabbithole:html.js", include_str!("js/html.js")),
     ("rabbithole:observers.js", include_str!("js/observers.js")),
