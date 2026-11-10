@@ -600,7 +600,7 @@ fn abort_controller_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResu
     Ok(Value::Object(o))
 }
 
-fn new_abort_signal(realm: &mut Realm) -> ObjectId {
+pub(crate) fn new_abort_signal(realm: &mut Realm) -> ObjectId {
     let p = proto("AbortSignal");
     let s = realm.new_object_with_proto(Some(p));
     realm.set_class_name(s, "AbortSignal");

@@ -448,6 +448,22 @@ pub(crate) fn set_text_content(n: NodeRef, text: &str) {
 /// Parse HTML and insert the resulting nodes as children of `n`.
 pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsResult<()> {
     let context = tag_of(n).unwrap_or_else(|| "div".into());
+    // Raw text (script, style, ...) and RCDATA (textarea, title) elements
+    // take the markup as text (HTML fragment parsing algorithm, §13.2.6.4).
+    let raw = matches!(context.as_str(), "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext");
+    let rcdata = matches!(context.as_str(), "textarea" | "title");
+    if raw || rcdata {
+        let text = if rcdata { rabbithole_html::entities::decode(html, false) } else { html.to_string() };
+        with_doc(n.doc, |doc| {
+            doc.clear_children(n.node);
+            if !text.is_empty() {
+                let t = doc.create_text(&text);
+                doc.append_child(n.node, t);
+            }
+        });
+        crate::host::mark_dirty();
+        return Ok(());
+    }
     let frag = rabbithole_html::parse_fragment(html, &context);
     let frag_body = frag.body().unwrap_or(Document::ROOT);
     let old = children_of(n);
@@ -1259,6 +1275,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(text, "wholeText", Some(text_whole), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     define_class(realm, "Comment", Some("CharacterData"), comment_ctor);
     define_class(realm, "CDATASection", Some("Text"), illegal_ctor);
+    define_class(realm, "DocumentType", Some("Node"), illegal_ctor);
     define_class(realm, "ProcessingInstruction", Some("CharacterData"), illegal_ctor);
     let frag = define_class(realm, "DocumentFragment", Some("Node"), fragment_ctor);
     realm.define_method(frag, "getElementById", 1, fragment_get_element_by_id);

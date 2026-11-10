@@ -816,7 +816,8 @@ pub(crate) fn make_request(realm: &mut Realm, url: &str, method: &str, headers: 
     realm.define_property(o, "cache", Value::str("default"), ACC);
     realm.define_property(o, "redirect", Value::str("follow"), ACC);
     realm.define_property(o, "referrer", Value::str("about:client"), ACC);
-    realm.define_property(o, "signal", Value::Null, ACC);
+    let signal = crate::misc::new_abort_signal(realm);
+    realm.define_property(o, "signal", Value::Object(signal), ACC);
     Value::Object(o)
 }
 
@@ -864,7 +865,23 @@ fn request_parts(realm: &mut Realm, input: &Value, init: &Value) -> JsResult<(St
 
 fn request_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let (url, method, headers, body) = request_parts(realm, &arg(args, 0), &arg(args, 1))?;
-    Ok(make_request(realm, &url, &method, headers, body))
+    let req = make_request(realm, &url, &method, headers, body);
+    // `signal` follows init.signal, else the input Request's signal.
+    let mut signal = Value::Undefined;
+    if let init @ Value::Object(_) = arg(args, 1) {
+        signal = realm.get_str(init, "signal")?;
+    }
+    if signal.is_nullish() {
+        if let input @ Value::Object(_) = arg(args, 0) {
+            if realm.get_str(input.clone(), "method").map(|m| !m.is_undefined()).unwrap_or(false) {
+                signal = realm.get_str(input, "signal")?;
+            }
+        }
+    }
+    if let (Value::Object(o), Value::Object(_)) = (&req, &signal) {
+        realm.define_property(*o, "signal", signal, ACC);
+    }
+    Ok(req)
 }
 
 fn request_clone(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {

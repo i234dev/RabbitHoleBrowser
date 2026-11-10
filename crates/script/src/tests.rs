@@ -959,3 +959,24 @@ fn dommatrix_meta_and_node_classes() {
     .unwrap();
     assert_eq!(host.eval_for_console(&mut env, "result"), "'matrix(2, 0, 0, 2, 10, 20)|12,22|true|true|object|function|theme=dark'");
 }
+
+#[test]
+fn inner_html_on_script_is_raw_text() {
+    let mut env = MockEnv::new("<html><head></head><body></body></html>");
+    let mut host = ScriptHost::new(&mut env);
+    host.run_script(
+        &mut env,
+        r#"
+        const s = document.createElement('script');
+        s.innerHTML = 'for (var r = 0; r < 3; r++) { window.count = (window.count || 0) + 1 } window.amp = 1 && 2;';
+        document.head.appendChild(s);
+        const t = document.createElement('textarea');
+        t.innerHTML = 'a &amp; <b>b</b>';
+        window.result = [window.count, window.amp, t.value, typeof DocumentType].join('|');
+        "#,
+        "t.js",
+        false,
+    )
+    .unwrap();
+    assert_eq!(host.eval_for_console(&mut env, "result"), "'3|2|a & <b>b</b>|function'");
+}
