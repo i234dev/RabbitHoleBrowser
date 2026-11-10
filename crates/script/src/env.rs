@@ -48,6 +48,16 @@ pub trait HostEnv {
         None
     }
     fn navigate(&mut self, url: Url, replace: bool);
+    /// Decoded pixels of a loaded image element: (width, height, RGBA).
+    fn image_pixels(&mut self, _node: NodeId) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+    /// A canvas bitmap to render for `node` (straight RGBA), or `None`.
+    fn set_canvas_image(&mut self, _node: NodeId, _width: u32, _height: u32, _rgba: Option<Vec<u8>>) {}
+    /// The engine's fonts (canvas text); `None` = bundled fonts.
+    fn font_context(&mut self) -> Option<std::rc::Rc<rabbithole_gfx::FontContext>> {
+        None
+    }
     /// `document.cookie` getter.
     fn cookies(&mut self) -> String;
     /// `document.cookie` setter (one `Set-Cookie`-like string).

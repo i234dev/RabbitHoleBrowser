@@ -204,8 +204,41 @@ fn register_proto(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
     Ok(Value::Undefined)
 }
 
+/// `setCanvasImage(canvas, width, height, rgbaBytes | null)`: the bitmap
+/// to render for a `<canvas>`.
+fn set_canvas_image(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = target_node(realm, &arg(args, 0))?;
+    if n.doc != 0 {
+        return Ok(Value::Undefined);
+    }
+    let w = realm.to_number(arg(args, 1))? as u32;
+    let h = realm.to_number(arg(args, 2))? as u32;
+    let data = arg(args, 3);
+    let rgba = if data.is_nullish() { None } else { Some(crate::fetch::body_bytes_from_value(realm, &data)?.0) };
+    let rgba = rgba.filter(|b| b.len() == (w as usize) * (h as usize) * 4 && w > 0 && h > 0);
+    with_env(|env| env.set_canvas_image(n.node, w, h, rgba));
+    Ok(Value::Undefined)
+}
+
+/// `imagePixels(img)` → `{ width, height, data: ArrayBuffer }` or null.
+fn image_pixels(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &arg(args, 0)) else { return Ok(Value::Null) };
+    if n.doc != 0 {
+        return Ok(Value::Null);
+    }
+    match with_env(|env| env.image_pixels(n.node)) {
+        Some((w, h, rgba)) => {
+            let ab = crate::fetch::make_array_buffer(realm, rgba);
+            Ok(object_from(realm, vec![("width", Value::Number(w as f64)), ("height", Value::Number(h as f64)), ("data", ab)]))
+        }
+        None => Ok(Value::Null),
+    }
+}
+
 pub(crate) fn install(realm: &mut Realm) {
     let o = realm.new_object();
+    realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
+    realm.define_method(o, "imagePixels", 1, image_pixels);
     realm.define_method(o, "installHandlers", 2, install_handlers);
     realm.define_method(o, "registerProto", 2, register_proto);
     realm.define_method(o, "setRenderHook", 1, set_render_hook);

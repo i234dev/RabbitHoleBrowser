@@ -354,7 +354,7 @@ impl Loader {
         }
         // (source, shadow root scope or None for the document)
         let mut sources: Vec<(Src, Option<NodeId>)> = Vec::new();
-        let mut scan = |root: NodeId, scope: Option<NodeId>, sources: &mut Vec<(Src, Option<NodeId>)>| {
+        let scan = |root: NodeId, scope: Option<NodeId>, sources: &mut Vec<(Src, Option<NodeId>)>| {
             for n in doc.descendants(root) {
                 let Some(el) = doc.element(n) else { continue };
                 // With scripting enabled `<noscript>` content is inert raw text

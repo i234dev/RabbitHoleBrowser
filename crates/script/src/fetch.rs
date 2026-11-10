@@ -561,7 +561,7 @@ pub(crate) struct BodyData {
     pub used: bool,
 }
 
-fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(Vec<u8>, Option<String>)> {
+pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(Vec<u8>, Option<String>)> {
     match v {
         Value::Undefined | Value::Null => Ok((Vec::new(), None)),
         Value::String(s) => Ok((s.to_rust_string().into_bytes(), Some("text/plain;charset=UTF-8".into()))),
@@ -703,7 +703,7 @@ fn body_json(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     }
 }
 
-pub(crate) fn make_array_buffer(realm: &mut Realm, bytes: Vec<u8>) -> Value {
+pub fn make_array_buffer(realm: &mut Realm, bytes: Vec<u8>) -> Value {
     let ctor = realm.get_str(Value::Object(realm.global()), "ArrayBuffer").unwrap_or(Value::Undefined);
     if realm.is_constructor(&ctor) {
         if let Ok(Value::Object(ab)) = realm.construct(ctor, &[Value::Number(bytes.len() as f64)], Value::Undefined) {

@@ -217,6 +217,23 @@ impl HostEnv for EngineEnv<'_> {
     fn open_event_source(&mut self, url: Url, with_credentials: bool) -> Option<Result<rabbithole_net::EventSource, String>> {
         Some(rabbithole_net::EventSource::connect(&self.engine.loader.fetcher, &url, with_credentials, Some(&self.page.url), None))
     }
+    fn image_pixels(&mut self, node: NodeId) -> Option<(u32, u32, Vec<u8>)> {
+        self.page.images.get(&node).filter(|img| !img.broken).map(|img| (img.width, img.height, img.pixels().to_vec()))
+    }
+    fn set_canvas_image(&mut self, node: NodeId, width: u32, height: u32, rgba: Option<Vec<u8>>) {
+        match rgba {
+            Some(rgba) => {
+                self.page.images.insert(node, std::sync::Arc::new(rabbithole_gfx::Image::new(width, height, rgba)));
+            }
+            None => {
+                self.page.images.remove(&node);
+            }
+        }
+        self.page.script.dom_dirty = true;
+    }
+    fn font_context(&mut self) -> Option<std::rc::Rc<rabbithole_gfx::FontContext>> {
+        Some(self.engine.fonts.clone())
+    }
     fn navigate(&mut self, url: Url, replace: bool) {
         self.page.script.pending_navigation = Some(PendingNavigation {
             request: Request::get(url).with_referer(self.page.url.clone()),

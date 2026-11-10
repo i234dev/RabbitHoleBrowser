@@ -4,7 +4,7 @@
 use crate::tests::{run, setup};
 
 /// Floor for `webapi_coverage` (raise it as coverage improves).
-const MIN_COVERAGE: f64 = 0.79;
+const MIN_COVERAGE: f64 = 0.86;
 
 /// Run tools/webapi/check.js against a fresh page and report coverage of
 /// tools/webapi/inventory.tsv. Set `RH_WEBAPI_REPORT=<path>` to write the
@@ -716,6 +716,56 @@ fn web_crypto_digest_hmac_aes_pbkdf2() {
             "gcm secret 22 A256GCM",
             "pbkdf2 ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957",
             "ec NotSupportedError true true true",
+        ]
+    );
+}
+
+#[test]
+fn canvas_2d_rasterizes_and_encodes() {
+    let out = logs_of(
+        "<html><body><canvas id=c width=20 height=10></canvas></body></html>",
+        r#"
+        const c = document.getElementById('c');
+        const ctx = c.getContext('2d');
+        const px = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data).join(',');
+        ctx.fillStyle = 'red';
+        ctx.fillRect(0, 0, 10, 10);
+        ctx.fillStyle = 'rgba(0, 0, 255, 0.5)';
+        ctx.beginPath(); ctx.arc(15, 5, 4, 0, Math.PI * 2); ctx.fill();
+        console.log('px', px(5, 5), px(15, 5), px(19, 0), ctx.fillStyle);
+        ctx.save(); ctx.translate(10, 0); ctx.clearRect(0, 0, 2, 2); ctx.restore();
+        console.log('clear', px(10, 0), px(9, 0), ctx.getTransform().isIdentity);
+        const id = ctx.createImageData(2, 1);
+        id.data.set([0, 255, 0, 255, 0, 255, 0, 255]);
+        ctx.putImageData(id, 0, 9);
+        console.log('put', px(1, 9), ctx.isPointInPath(15, 5), ctx.isPointInPath(1, 1));
+        const p = new Path2D('M0 0 L10 0 L10 10 Z');
+        console.log('path2d', ctx.isPointInPath(p, 8, 2), ctx.isPointInPath(p, 2, 8));
+        const g = ctx.createLinearGradient(0, 0, 20, 0); g.addColorStop(0, '#000'); g.addColorStop(1, '#fff');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, 20, 1);
+        const mid = ctx.getImageData(10, 0, 1, 1).data[0];
+        console.log('gradient', mid > 100 && mid < 160, ctx.measureText('hello').width > 0, ctx.lineWidth, ctx.canvas === c);
+        const url = c.toDataURL();
+        console.log('png', url.startsWith('data:image/png;base64,iVBORw0KGgo'), document.createElement('canvas').getContext('webgl'), c.getContext('2d') === ctx);
+        const off = new OffscreenCanvas(4, 4);
+        const octx = off.getContext('2d');
+        octx.fillStyle = '#0f0'; octx.fillRect(0, 0, 4, 4);
+        ctx.drawImage(off, 0, 0);
+        console.log('draw', px(3, 3), off.transferToImageBitmap() instanceof ImageBitmap);
+        createImageBitmap(new ImageData(new Uint8ClampedArray([1, 2, 3, 255]), 1)).then((b) => console.log('bitmap', b.width, b.height));
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "px 255,0,0,255 0,0,255,128 0,0,0,0 rgba(0, 0, 255, 0.5)",
+            "clear 0,0,0,0 255,0,0,255 true",
+            "put 0,255,0,255 true false",
+            "path2d true false",
+            "gradient true true 1 true",
+            "png true null true",
+            "draw 0,255,0,255 true",
+            "bitmap 1 1",
         ]
     );
 }

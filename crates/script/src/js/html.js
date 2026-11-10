@@ -790,6 +790,15 @@
   }
   if (g.HTMLCanvasElement) method(g.HTMLCanvasElement, 'transferControlToOffscreen', function () { return new g.OffscreenCanvas(this.width, this.height); });
   if (g.HTMLImageElement) {
+    // decode(): settles with the element's load / error.
+    method(g.HTMLImageElement, 'decode', function decode() {
+      const img = this;
+      if (img.complete) return img.naturalWidth || !img.getAttribute('src') ? Promise.resolve() : Promise.reject(domError('The source image cannot be decoded.', 'EncodingError'));
+      return new Promise((resolve, reject) => {
+        img.addEventListener('load', () => resolve(), { once: true });
+        img.addEventListener('error', () => reject(domError('The source image cannot be decoded.', 'EncodingError')), { once: true });
+      });
+    }, true);
     acc(g.HTMLImageElement, 'x', function () { return Math.round(this.getBoundingClientRect().left + scrollX); });
     acc(g.HTMLImageElement, 'y', function () { return Math.round(this.getBoundingClientRect().top + scrollY); });
   }
