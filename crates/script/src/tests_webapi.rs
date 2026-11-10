@@ -4,7 +4,7 @@
 use crate::tests::{run, setup};
 
 /// Floor for `webapi_coverage` (raise it as coverage improves).
-const MIN_COVERAGE: f64 = 0.92;
+const MIN_COVERAGE: f64 = 0.99;
 
 /// Run tools/webapi/check.js against a fresh page and report coverage of
 /// tools/webapi/inventory.tsv. Set `RH_WEBAPI_REPORT=<path>` to write the
@@ -854,6 +854,87 @@ fn canvas_2d_text_strokes_compositing_and_shadows() {
             "encode true true",
             "roundtrip 3 3",
             "blob image/png true",
+        ]
+    );
+}
+
+#[test]
+fn svg_dom_types_geometry_and_coordinates() {
+    let out = logs_of(
+        r#"<html><body><svg id=s width="200" height="100" viewBox="0 0 400 200">
+            <g id=g transform="translate(10 20) scale(2)">
+              <rect id=r x="5" y="6" width="10" height="20" rx="2"/>
+              <circle id=c cx="50" cy="50" r="10"/>
+            </g>
+            <path id=p d="M0 0 L30 0 L30 40 Z"/>
+            <polyline id=pl points="0,0 10,0 10,10"/>
+            <line id=l x1="0" y1="0" x2="3" y2="4"/>
+            <marker id=m orient="45deg"/>
+            <linearGradient id=lg gradientUnits="userSpaceOnUse" spreadMethod="reflect"/>
+            <text id=t x="10 20" y="30" rotate="5 6">Hello</text>
+          </svg></body></html>"#,
+        r#"
+        const $ = (id) => document.getElementById(id);
+        const r = $('r'), s = $('s'), g = $('g');
+        console.log('len', r.x === r.x, r.x.baseVal.value, r.width.baseVal.unitType, r.x.baseVal instanceof SVGLength, r.x instanceof SVGAnimatedLength);
+        r.x.baseVal.value = 7;
+        r.width.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_CM, 1);
+        console.log('write', r.getAttribute('x'), r.getAttribute('width'), Math.round(r.width.baseVal.value * 100) / 100);
+        try { r.x.animVal.value = 1; } catch (e) { console.log('ro', e.name); }
+        const tl = g.transform.baseVal;
+        console.log('transforms', tl.numberOfItems, tl.getItem(0).type, tl.getItem(1).matrix.a, tl[1].type);
+        const t = s.createSVGTransform(); t.setRotate(90, 0, 0); tl.appendItem(t);
+        console.log('append', g.getAttribute('transform'));
+        tl.consolidate();
+        console.log('consolidate', tl.numberOfItems, tl.getItem(0).type === SVGTransform.SVG_TRANSFORM_MATRIX);
+        g.setAttribute('transform', 'translate(10 20) scale(2)');
+        console.log('viewBox', s.viewBox.baseVal.width, s.preserveAspectRatio.baseVal.align, s.width.baseVal.value);
+        const pl = $('pl').points;
+        pl.appendItem(s.createSVGPoint());
+        console.log('points', pl.length, $('pl').getAttribute('points'), pl.getItem(1).x);
+        pl.getItem(0).x = 5;
+        console.log('livepoint', $('pl').getAttribute('points'));
+        console.log('geom', $('l').getTotalLength(), JSON.stringify($('l').getPointAtLength(2.5)), $('p').getTotalLength(), $('p').isPointInFill({ x: 25, y: 5 }), $('p').isPointInFill({ x: 5, y: 30 }), $('l').isPointInStroke({ x: 1.5, y: 2 }));
+        const cb = $('c').getBBox();
+        console.log('bbox', Math.round(cb.x), Math.round(cb.y), Math.round(cb.width), Math.round(cb.height), JSON.stringify(r.getBBox()));
+        const gb = g.getBBox();
+        console.log('gbbox', Math.round(gb.x), Math.round(gb.y), Math.round(gb.width), Math.round(gb.height));
+        const m = $('c').getCTM();
+        console.log('ctm', m.a, m.e, m.f, $('c').getScreenCTM() instanceof DOMMatrix);
+        console.log('enums', $('lg').gradientUnits.baseVal, $('lg').spreadMethod.baseVal, SVGUnitTypes.SVG_UNIT_TYPE_OBJECTBOUNDINGBOX);
+        const mk = $('m');
+        console.log('marker', mk.orientType.baseVal, mk.orientAngle.baseVal.value, mk.markerWidth.baseVal.value);
+        mk.setOrientToAuto();
+        console.log('auto', mk.orientType.baseVal, mk.getAttribute('orient'));
+        const tx = $('t');
+        console.log('text', tx.x.baseVal.numberOfItems, tx.x.baseVal.getItem(1).value, tx.rotate.baseVal.getItem(0).value, tx.getNumberOfChars(), tx.getComputedTextLength() > 0, tx.getSubStringLength(0, 2) < tx.getComputedTextLength());
+        const a = s.createSVGAngle(); a.valueAsString = '1rad';
+        console.log('angle', a.unitType, Math.round(a.value), s.getElementById('c') === $('c'), document.rootElement, s.viewportElement, r.viewportElement === s);
+        console.log('symbol', Object.getPrototypeOf(SVGSymbolElement.prototype) === SVGGraphicsElement.prototype, s.createSVGNumber().value, s.checkIntersection($('l'), new DOMRect(0, 0, 10, 10)));
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "len true 5 1 true true",
+            "write 7 1cm 37.8",
+            "ro NoModificationAllowedError",
+            "transforms 2 2 2 3",
+            "append translate(10 20) scale(2 2) rotate(90)",
+            "consolidate 1 true",
+            "viewBox 400 6 200",
+            "points 4 0,0 10,0 10,10 0,0 10",
+            "livepoint 5,0 10,0 10,10 0,0",
+            "geom 5 {\"x\":1.5,\"y\":2,\"z\":0,\"w\":1} 120 true false true",
+            "bbox 40 40 20 20 {\"x\":7,\"y\":6,\"width\":37.79527559055117,\"height\":20,\"top\":6,\"right\":44.79527559055117,\"bottom\":26,\"left\":7}",
+            "gbbox 7 6 53 54",
+            "ctm 1 5 10 true",
+            "enums 1 2 2",
+            "marker 2 45 3",
+            "auto 1 auto",
+            "text 2 20 5 5 true true",
+            "angle 3 57 true null null true",
+            "symbol true 0 true",
         ]
     );
 }

@@ -290,5 +290,18 @@
   define('AnimationEffect', AnimationEffect);
   define('KeyframeEffect', KeyframeEffect);
   define('Animation', Animation);
+  // An animation of a shadow-tree element's CSS animation projected onto a
+  // pseudo-element host (CSS Animations 2): mirrors its source animation.
+  class ShadowAnimation extends Animation {
+    constructor(source, newTarget) {
+      if (!(source instanceof Animation)) throw new TypeError("Failed to construct 'ShadowAnimation': parameter 1 is not of type 'Animation'.");
+      super(source.effect, source.timeline);
+      Object.defineProperty(this, SHADOW_SRC, { value: { source, target: newTarget } });
+    }
+    get sourceAnimation() { return this[SHADOW_SRC].source; }
+  }
+  const SHADOW_SRC = Symbol('shadowAnimation');
+  Object.defineProperty(ShadowAnimation.prototype, Symbol.toStringTag, { value: 'ShadowAnimation', configurable: true });
+  define('ShadowAnimation', ShadowAnimation);
   define('AnimationPlaybackEvent', AnimationPlaybackEvent);
 })();

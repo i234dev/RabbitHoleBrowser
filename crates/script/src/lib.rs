@@ -59,6 +59,7 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:animations.js", include_str!("js/animations.js")),
     ("rabbithole:fonts.js", include_str!("js/fonts.js")),
     ("rabbithole:extras.js", include_str!("js/extras.js")),
+    ("rabbithole:svg.js", include_str!("js/svg.js")),
 ];
 
 /// Extra data carried by a dispatched event.

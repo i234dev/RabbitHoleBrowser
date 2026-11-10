@@ -271,9 +271,13 @@
     get name() { return this[S].name; }
     createHTML(input, ...args) { const f = this[S].rules.createHTML; if (!f) throw new TypeError(`Failed to execute 'createHTML' on 'TrustedTypePolicy': Policy ${this[S].name}'s TrustedTypePolicyOptions did not specify a 'createHTML' member.`); return makeTrusted(TrustedHTML, f(String(input), ...args) ?? ''); }
     createScript(input, ...args) { const f = this[S].rules.createScript; if (!f) throw new TypeError(`Failed to execute 'createScript' on 'TrustedTypePolicy': Policy ${this[S].name}'s TrustedTypePolicyOptions did not specify a 'createScript' member.`); return makeTrusted(TrustedScript, f(String(input), ...args) ?? ''); }
+    createParserOptions(options = {}) { const o = Object.create(TrustedHTMLParserOptions.prototype); hidden(o, TT, Object.assign({}, options)); return o; }
     createScriptURL(input, ...args) { const f = this[S].rules.createScriptURL; if (!f) throw new TypeError(`Failed to execute 'createScriptURL' on 'TrustedTypePolicy': Policy ${this[S].name}'s TrustedTypePolicyOptions did not specify a 'createScriptURL' member.`); return makeTrusted(TrustedScriptURL, f(String(input), ...args) ?? ''); }
   }
   tag(TrustedTypePolicy, 'TrustedTypePolicy');
+  class TrustedHTMLParserOptions { constructor() { ILLEGAL(); } }
+  tag(TrustedHTMLParserOptions, 'TrustedHTMLParserOptions');
+  define('TrustedHTMLParserOptions', TrustedHTMLParserOptions);
   class TrustedTypePolicyFactory {
     constructor() { ILLEGAL(); }
     createPolicy(name, rules = {}) { const p = make(TrustedTypePolicy, { name: String(name), rules }); if (name === 'default') this[S].default = p; return p; }

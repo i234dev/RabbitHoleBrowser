@@ -275,6 +275,32 @@
     return false;
   }
 
+  // SVG geometry (svg.js): path data → flattened subpaths with a closed flag.
+  hidden(N, 'svgPathPolys', (d) => {
+    const ops = new Path2D(String(d))[S].ops;
+    const out = [];
+    let cur = null, last = [0, 0];
+    for (let i = 0; i < ops.length;) {
+      const op = ops[i];
+      if (op === 0) { cur = { pts: [[ops[i + 1], ops[i + 2]]], closed: false }; out.push(cur); last = cur.pts[0]; i += 3; }
+      else if (op === 1) { if (!cur) { cur = { pts: [last], closed: false }; out.push(cur); } last = [ops[i + 1], ops[i + 2]]; cur.pts.push(last); i += 3; }
+      else if (op === 2 || op === 3) {
+        const n = op === 2 ? 2 : 3;
+        const p = [last]; for (let j = 0; j < n; j++) p.push([ops[i + 1 + 2 * j], ops[i + 2 + 2 * j]]);
+        if (!cur) { cur = { pts: [last], closed: false }; out.push(cur); }
+        for (let s = 1; s <= 32; s++) {
+          const t = s / 32, u = 1 - t;
+          cur.pts.push(n === 2 ? [u * u * p[0][0] + 2 * u * t * p[1][0] + t * t * p[2][0], u * u * p[0][1] + 2 * u * t * p[1][1] + t * t * p[2][1]]
+            : [u * u * u * p[0][0] + 3 * u * u * t * p[1][0] + 3 * u * t * t * p[2][0] + t * t * t * p[3][0], u * u * u * p[0][1] + 3 * u * u * t * p[1][1] + 3 * u * t * t * p[2][1] + t * t * t * p[3][1]]);
+        }
+        last = p[n];
+        i += 1 + 2 * n;
+      } else { if (cur) { cur.closed = true; last = cur.pts[0]; cur = null; } i += 1; }
+    }
+    return out;
+  });
+  hidden(N, 'measureText', (text, font) => N.canvasMeasureText(String(text), String(font)));
+
   // ------------------------------------------------------------- ImageData
   class ImageData {
     constructor(a, b, c, d) {

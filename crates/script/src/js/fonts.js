@@ -16,13 +16,16 @@
   const domError = (msg, name) => new g.DOMException(msg, name);
   const make = (C, st) => { const o = Object.create(C.prototype); hidden(o, S, st); return o; };
 
-  const DESCRIPTORS = { style: 'normal', weight: 'normal', stretch: 'normal', unicodeRange: 'U+0-10FFFF', featureSettings: 'normal', variationSettings: 'normal', display: 'auto', ascentOverride: 'normal', descentOverride: 'normal', lineGapOverride: 'normal', sizeAdjust: '100%' };
+  const DESCRIPTORS = { style: 'normal', weight: 'normal', stretch: 'normal', width: 'normal', variant: 'normal', variations: 'normal', unicodeRange: 'U+0-10FFFF', featureSettings: 'normal', variationSettings: 'normal', display: 'auto', ascentOverride: 'normal', descentOverride: 'normal', lineGapOverride: 'normal', sizeAdjust: '100%' };
   const b64 = (bytes) => { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); return g.btoa(s); };
   class FontFaceFeatures { constructor() { ILLEGAL(); } }
   class FontFaceVariationAxis { constructor() { ILLEGAL(); } get name() { return this[S].name; } get axisTag() { return this[S].tag; } get minimumValue() { return this[S].min; } get maximumValue() { return this[S].max; } get defaultValue() { return this[S].def; } }
   class FontFaceVariations { constructor() { ILLEGAL(); } get size() { return 0; } has() { return false; } forEach() {} entries() { return [][Symbol.iterator](); } keys() { return [][Symbol.iterator](); } values() { return [][Symbol.iterator](); } [Symbol.iterator]() { return [][Symbol.iterator](); } }
+  // Iterable (value iterator) collections: no palettes from the font backend.
+  const ITER = { entries() { return [][Symbol.iterator](); }, keys() { return [][Symbol.iterator](); }, values() { return [][Symbol.iterator](); }, forEach() {} };
   class FontFacePalette { constructor() { ILLEGAL(); } get length() { return 0; } get usableWithLightBackground() { return true; } get usableWithDarkBackground() { return true; } [Symbol.iterator]() { return [][Symbol.iterator](); } }
   class FontFacePalettes { constructor() { ILLEGAL(); } get length() { return 0; } [Symbol.iterator]() { return [][Symbol.iterator](); } }
+  for (const C of [FontFacePalette, FontFacePalettes]) for (const [k, f] of Object.entries(ITER)) Object.defineProperty(C.prototype, k, { value: f, writable: true, configurable: true });
   for (const [C, n] of [[FontFaceFeatures, 'FontFaceFeatures'], [FontFaceVariationAxis, 'FontFaceVariationAxis'], [FontFaceVariations, 'FontFaceVariations'], [FontFacePalette, 'FontFacePalette'], [FontFacePalettes, 'FontFacePalettes']]) { tag(C, n); define(n, C); }
 
   class FontFace {
