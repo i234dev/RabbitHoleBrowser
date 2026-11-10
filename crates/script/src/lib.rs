@@ -156,6 +156,11 @@ impl ScriptHost {
             misc::install(realm);
             observers::install(realm);
             modules::install(realm);
+            // Web APIs written in JavaScript (DOMMatrix, ...).
+            if let Err(e) = realm.eval(include_str!("prelude.js"), "rabbithole:prelude.js") {
+                let msg = realm.error_to_string(&e);
+                eprintln!("[rabbithole] prelude failed: {msg}");
+            }
             // The document wrapper.
             let doc_obj = host::wrap_main(realm, Document::ROOT);
             if let Value::Object(d) = doc_obj {

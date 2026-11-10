@@ -1,0 +1,191 @@
+// Web APIs implemented in JavaScript on top of the native bindings.
+// Evaluated once per ScriptHost, before page scripts.
+(function () {
+  'use strict';
+  const g = globalThis;
+  const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
+
+  // ---------------------------------------------------------- DOMMatrix
+  const IDENT = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  // Column-major 4x4 like the spec's m11..m44 (m[i*4+j] = m(i+1)(j+1)).
+  function mul(a, b) {
+    const r = new Array(16).fill(0);
+    for (let i = 0; i < 4; i++)
+      for (let j = 0; j < 4; j++) {
+        let s = 0;
+        for (let k = 0; k < 4; k++) s += b[i * 4 + k] * a[k * 4 + j];
+        r[i * 4 + j] = s;
+      }
+    return r;
+  }
+  function angle(v) {
+    const m = /^(-?[\d.e+-]+)(deg|rad|grad|turn)?$/i.exec(String(v).trim());
+    if (!m) return 0;
+    const n = parseFloat(m[1]);
+    switch ((m[2] || 'deg').toLowerCase()) {
+      case 'rad': return n;
+      case 'grad': return n * Math.PI / 200;
+      case 'turn': return n * 2 * Math.PI;
+      default: return n * Math.PI / 180;
+    }
+  }
+  function len(v) { return parseFloat(v) || 0; }
+  function parseTransform(str) {
+    let m = IDENT();
+    let is2D = true;
+    str = String(str).trim();
+    if (str === '' || str === 'none') return { m, is2D };
+    const re = /([a-zA-Z0-9]+)\(([^)]*)\)/g;
+    let match, any = false;
+    while ((match = re.exec(str))) {
+      any = true;
+      const fn = match[1].toLowerCase();
+      const a = match[2].split(/\s*,\s*|\s+/).filter(Boolean);
+      let t = IDENT();
+      switch (fn) {
+        case 'matrix': t = [+a[0], +a[1], 0, 0, +a[2], +a[3], 0, 0, 0, 0, 1, 0, +a[4], +a[5], 0, 1]; break;
+        case 'matrix3d': t = a.map(Number); is2D = false; break;
+        case 'translate': t[12] = len(a[0]); t[13] = len(a[1] || 0); break;
+        case 'translatex': t[12] = len(a[0]); break;
+        case 'translatey': t[13] = len(a[0]); break;
+        case 'translatez': t[14] = len(a[0]); is2D = false; break;
+        case 'translate3d': t[12] = len(a[0]); t[13] = len(a[1]); t[14] = len(a[2]); is2D = false; break;
+        case 'scale': t[0] = +a[0]; t[5] = a[1] !== undefined ? +a[1] : +a[0]; break;
+        case 'scalex': t[0] = +a[0]; break;
+        case 'scaley': t[5] = +a[0]; break;
+        case 'scale3d': t[0] = +a[0]; t[5] = +a[1]; t[10] = +a[2]; is2D = false; break;
+        case 'rotate': case 'rotatez': { const r = angle(a[0]); t[0] = Math.cos(r); t[1] = Math.sin(r); t[4] = -Math.sin(r); t[5] = Math.cos(r); break; }
+        case 'skew': t[4] = Math.tan(angle(a[0])); t[1] = Math.tan(angle(a[1] || 0)); break;
+        case 'skewx': t[4] = Math.tan(angle(a[0])); break;
+        case 'skewy': t[1] = Math.tan(angle(a[0])); break;
+        default: throw new SyntaxError("Failed to parse '" + str + "'");
+      }
+      m = mul(m, t);
+    }
+    if (!any) throw new SyntaxError("Failed to parse '" + str + "'");
+    return { m, is2D };
+  }
+  const NAMES = ['m11', 'm12', 'm13', 'm14', 'm21', 'm22', 'm23', 'm24', 'm31', 'm32', 'm33', 'm34', 'm41', 'm42', 'm43', 'm44'];
+  class DOMMatrixReadOnly {
+    constructor(init) {
+      let m = IDENT(), is2D = true;
+      if (typeof init === 'string') ({ m, is2D } = parseTransform(init));
+      else if (init && typeof init.length === 'number') {
+        const a = Array.from(init, Number);
+        if (a.length === 6) m = [a[0], a[1], 0, 0, a[2], a[3], 0, 0, 0, 0, 1, 0, a[4], a[5], 0, 1];
+        else if (a.length === 16) { m = a; is2D = false; }
+        else throw new TypeError('DOMMatrix init array must have 6 or 16 elements');
+      }
+      Object.defineProperty(this, '_m', { value: m, writable: true });
+      Object.defineProperty(this, '_2d', { value: is2D, writable: true });
+    }
+    static fromMatrix(o) {
+      if (o instanceof DOMMatrixReadOnly) return new this(o._2d ? [o.a, o.b, o.c, o.d, o.e, o.f] : o._m.slice());
+      o = o || {};
+      return new this([o.a ?? o.m11 ?? 1, o.b ?? o.m12 ?? 0, o.c ?? o.m21 ?? 0, o.d ?? o.m22 ?? 1, o.e ?? o.m41 ?? 0, o.f ?? o.m42 ?? 0]);
+    }
+    static fromFloat32Array(a) { return new this(a); }
+    static fromFloat64Array(a) { return new this(a); }
+    get a() { return this._m[0]; } get b() { return this._m[1]; } get c() { return this._m[4]; }
+    get d() { return this._m[5]; } get e() { return this._m[12]; } get f() { return this._m[13]; }
+    get is2D() { return this._2d; }
+    get isIdentity() { const i = IDENT(); return this._m.every((v, k) => v === i[k]); }
+    multiply(o) { return new DOMMatrix(this._m.slice()).multiplySelf(o); }
+    translate(x = 0, y = 0, z = 0) { return new DOMMatrix(this._m.slice()).translateSelf(x, y, z); }
+    scale(sx = 1, sy = sx, sz = 1, ox = 0, oy = 0, oz = 0) { return new DOMMatrix(this._m.slice()).scaleSelf(sx, sy, sz, ox, oy, oz); }
+    scale3d(s = 1, ox = 0, oy = 0, oz = 0) { return this.scale(s, s, s, ox, oy, oz); }
+    rotate(rx = 0, ry, rz) { return new DOMMatrix(this._m.slice()).rotateSelf(rx, ry, rz); }
+    skewX(a = 0) { return this.multiply(new DOMMatrix([1, 0, Math.tan(a * Math.PI / 180), 1, 0, 0])); }
+    skewY(a = 0) { return this.multiply(new DOMMatrix([1, Math.tan(a * Math.PI / 180), 0, 1, 0, 0])); }
+    flipX() { return this.multiply(new DOMMatrix([-1, 0, 0, 1, 0, 0])); }
+    flipY() { return this.multiply(new DOMMatrix([1, 0, 0, -1, 0, 0])); }
+    inverse() { return new DOMMatrix(this._m.slice()).invertSelf(); }
+    transformPoint(p = {}) {
+      const x = p.x || 0, y = p.y || 0, z = p.z || 0, w = p.w ?? 1, m = this._m;
+      return new DOMPoint(m[0] * x + m[4] * y + m[8] * z + m[12] * w, m[1] * x + m[5] * y + m[9] * z + m[13] * w, m[2] * x + m[6] * y + m[10] * z + m[14] * w, m[3] * x + m[7] * y + m[11] * z + m[15] * w);
+    }
+    toFloat32Array() { return new Float32Array(this._m); }
+    toFloat64Array() { return new Float64Array(this._m); }
+    toString() {
+      return this._2d ? `matrix(${[this.a, this.b, this.c, this.d, this.e, this.f].join(', ')})` : `matrix3d(${this._m.join(', ')})`;
+    }
+    toJSON() {
+      const o = { a: this.a, b: this.b, c: this.c, d: this.d, e: this.e, f: this.f, is2D: this.is2D, isIdentity: this.isIdentity };
+      NAMES.forEach((n, i) => (o[n] = this._m[i]));
+      return o;
+    }
+  }
+  NAMES.forEach((n, i) => Object.defineProperty(DOMMatrixReadOnly.prototype, n, { get() { return this._m[i]; }, configurable: true }));
+  class DOMMatrix extends DOMMatrixReadOnly {
+    multiplySelf(o) { const other = o instanceof DOMMatrixReadOnly ? o : DOMMatrix.fromMatrix(o); this._m = mul(this._m, other._m); this._2d = this._2d && other._2d; return this; }
+    preMultiplySelf(o) { const other = o instanceof DOMMatrixReadOnly ? o : DOMMatrix.fromMatrix(o); this._m = mul(other._m, this._m); this._2d = this._2d && other._2d; return this; }
+    translateSelf(x = 0, y = 0, z = 0) { const t = IDENT(); t[12] = x; t[13] = y; t[14] = z; if (z) this._2d = false; this._m = mul(this._m, t); return this; }
+    scaleSelf(sx = 1, sy = sx, sz = 1, ox = 0, oy = 0, oz = 0) {
+      this.translateSelf(ox, oy, oz);
+      const t = IDENT(); t[0] = sx; t[5] = sy; t[10] = sz; if (sz !== 1) this._2d = false;
+      this._m = mul(this._m, t);
+      return this.translateSelf(-ox, -oy, -oz);
+    }
+    rotateSelf(rx = 0, ry, rz) {
+      if (ry === undefined && rz === undefined) { rz = rx; rx = 0; ry = 0; }
+      const r = (rz || 0) * Math.PI / 180, t = IDENT();
+      t[0] = Math.cos(r); t[1] = Math.sin(r); t[4] = -Math.sin(r); t[5] = Math.cos(r);
+      if (rx || ry) this._2d = false;
+      this._m = mul(this._m, t);
+      return this;
+    }
+    invertSelf() {
+      const m = this._m, inv = new Array(16);
+      inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+      inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+      inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+      inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+      inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+      inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+      inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+      inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+      inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+      inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+      inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+      inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+      inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+      inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+      inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+      inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+      const det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+      this._m = det === 0 ? new Array(16).fill(NaN) : inv.map(v => v / det);
+      if (det === 0) this._2d = false;
+      return this;
+    }
+    setMatrixValue(s) { const { m, is2D } = parseTransform(s); this._m = m; this._2d = is2D; return this; }
+  }
+  ['a', 'b', 'c', 'd', 'e', 'f'].forEach((n, i) => {
+    const idx = [0, 1, 4, 5, 12, 13][i];
+    Object.defineProperty(DOMMatrix.prototype, n, { get() { return this._m[idx]; }, set(v) { this._m[idx] = +v; }, configurable: true });
+  });
+  NAMES.forEach((n, i) => Object.defineProperty(DOMMatrix.prototype, n, { get() { return this._m[i]; }, set(v) { this._m[i] = +v; if (![0, 1, 4, 5, 12, 13, 10, 15].includes(i) && v !== 0) this._2d = false; }, configurable: true }));
+  class DOMPointReadOnly {
+    constructor(x = 0, y = 0, z = 0, w = 1) { Object.assign(this, { x: +x, y: +y, z: +z, w: +w }); }
+    static fromPoint(p = {}) { return new this(p.x, p.y, p.z, p.w ?? 1); }
+    matrixTransform(m) { return (m instanceof DOMMatrixReadOnly ? m : DOMMatrix.fromMatrix(m)).transformPoint(this); }
+    toJSON() { return { x: this.x, y: this.y, z: this.z, w: this.w }; }
+  }
+  class DOMPoint extends DOMPointReadOnly {}
+  if (!g.DOMMatrix) {
+    define('DOMMatrixReadOnly', DOMMatrixReadOnly);
+    define('DOMMatrix', DOMMatrix);
+    define('WebKitCSSMatrix', DOMMatrix);
+    define('DOMPointReadOnly', DOMPointReadOnly);
+    define('DOMPoint', DOMPoint);
+  }
+  if (!g.DOMQuad) {
+    define('DOMQuad', class DOMQuad {
+      constructor(p1 = new DOMPoint(), p2 = new DOMPoint(), p3 = new DOMPoint(), p4 = new DOMPoint()) { Object.assign(this, { p1, p2, p3, p4 }); }
+      getBounds() {
+        const xs = [this.p1.x, this.p2.x, this.p3.x, this.p4.x], ys = [this.p1.y, this.p2.y, this.p3.y, this.p4.y];
+        const x = Math.min(...xs), y = Math.min(...ys);
+        return new DOMRect(x, y, Math.max(...xs) - x, Math.max(...ys) - y);
+      }
+    });
+  }
+})();

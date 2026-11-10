@@ -939,3 +939,23 @@ fn custom_element_constructors_run() {
     let out = host.eval_for_console(&mut env, "result");
     assert_eq!(out, "'attr:src=a.html,connect:x-old,secret:42,made:true:true:object,connect:x-new,secret:42,new:true:x-old'");
 }
+
+#[test]
+fn dommatrix_meta_and_node_classes() {
+    let mut env = MockEnv::new(r#"<html><head><meta name="theme" content="dark"></head><body></body></html>"#);
+    let mut host = ScriptHost::new(&mut env);
+    host.run_script(
+        &mut env,
+        r#"
+        const m = new DOMMatrix('translate(10px, 20px) scale(2)');
+        const p = m.transformPoint({ x: 1, y: 1 });
+        const inv = m.inverse().multiply(m);
+        const meta = document.querySelector('meta');
+        window.result = [m.toString(), p.x + ',' + p.y, inv.isIdentity, new DOMMatrix().is2D, typeof CDATASection.prototype, typeof ProcessingInstruction, meta.name + '=' + meta.content].join('|');
+        "#,
+        "t.js",
+        false,
+    )
+    .unwrap();
+    assert_eq!(host.eval_for_console(&mut env, "result"), "'matrix(2, 0, 0, 2, 10, 20)|12,22|true|true|object|function|theme=dark'");
+}

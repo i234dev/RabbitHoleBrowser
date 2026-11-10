@@ -1870,6 +1870,38 @@ pub(crate) fn install(realm: &mut Realm) {
     ] {
         define_class(realm, name, Some("HTMLElement"), crate::host::html_element_ctor);
     }
+    // Reflected attributes of common elements.
+    let meta = proto("HTMLMetaElement");
+    reflect(realm, meta, "name", "name", Reflect::Str);
+    reflect(realm, meta, "content", "content", Reflect::Str);
+    reflect(realm, meta, "httpEquiv", "http-equiv", Reflect::Str);
+    reflect(realm, meta, "media", "media", Reflect::Str);
+    let base = proto("HTMLBaseElement");
+    reflect(realm, base, "href", "href", Reflect::Url);
+    reflect(realm, base, "target", "target", Reflect::Str);
+    let source = proto("HTMLSourceElement");
+    reflect(realm, source, "src", "src", Reflect::Url);
+    reflect(realm, source, "srcset", "srcset", Reflect::Str);
+    reflect(realm, source, "sizes", "sizes", Reflect::Str);
+    reflect(realm, source, "media", "media", Reflect::Str);
+    reflect(realm, source, "type", "type", Reflect::Str);
+    let time = proto("HTMLTimeElement");
+    reflect(realm, time, "dateTime", "datetime", Reflect::Str);
+    let data = proto("HTMLDataElement");
+    reflect(realm, data, "value", "value", Reflect::Str);
+    let cell = proto("HTMLTableCellElement");
+    reflect(realm, cell, "colSpan", "colspan", Reflect::Int(1));
+    reflect(realm, cell, "rowSpan", "rowspan", Reflect::Int(1));
+    reflect(realm, cell, "headers", "headers", Reflect::Str);
+    let ol = proto("HTMLOListElement");
+    reflect(realm, ol, "start", "start", Reflect::Int(1));
+    reflect(realm, ol, "reversed", "reversed", Reflect::Bool);
+    let li = proto("HTMLLIElement");
+    reflect(realm, li, "value", "value", Reflect::Int(0));
+    let quote = proto("HTMLQuoteElement");
+    reflect(realm, quote, "cite", "cite", Reflect::Url);
+    let progress = proto("HTMLProgressElement");
+    reflect(realm, progress, "max", "max", Reflect::Num);
     let details = proto("HTMLDetailsElement");
     reflect(realm, details, "open", "open", Reflect::Bool);
     let dialog = proto("HTMLDialogElement");

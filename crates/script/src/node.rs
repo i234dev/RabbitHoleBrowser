@@ -1258,6 +1258,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(text, "splitText", 1, text_split);
     realm.define_accessor(text, "wholeText", Some(text_whole), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     define_class(realm, "Comment", Some("CharacterData"), comment_ctor);
+    define_class(realm, "CDATASection", Some("Text"), illegal_ctor);
+    define_class(realm, "ProcessingInstruction", Some("CharacterData"), illegal_ctor);
     let frag = define_class(realm, "DocumentFragment", Some("Node"), fragment_ctor);
     realm.define_method(frag, "getElementById", 1, fragment_get_element_by_id);
 
