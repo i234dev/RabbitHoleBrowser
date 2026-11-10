@@ -814,8 +814,10 @@ fn web_animations_and_font_loading() {
         a.finished.then(() => console.log('finished', a.playState, a.effect.getComputedTiming().progress));
         a.onfinish = (e) => console.log('onfinish', e instanceof AnimationPlaybackEvent);
         const b = d.animate({ transform: ['none', 'scale(2)'] }, 1000);
+        const bf = b.finished;
         b.cancel();
-        b.finished.catch((e) => console.log('cancelled', e.name, b.playState));
+        bf.catch((e) => console.log('cancelled', e.name, b.playState));
+        a.finish();
         const face = new FontFace('Test', 'url(/font.woff2)', { weight: '700' });
         document.fonts.add(face);
         console.log('fonts', document.fonts.has(face), document.fonts.size, face.status, face.weight, document.fonts.check('12px Test'), document.fonts.status);
@@ -829,4 +831,6 @@ fn web_animations_and_font_loading() {
     assert_eq!(out[1], "fonts true 1 unloaded 700 false loaded");
     assert!(sorted.contains(&"binary loaded".to_string()), "{out:?}");
     assert!(sorted.contains(&"cancelled AbortError idle".to_string()), "{out:?}");
+    assert!(sorted.contains(&"finished finished 1".to_string()), "{out:?}");
+    assert!(sorted.contains(&"onfinish true".to_string()), "{out:?}");
 }

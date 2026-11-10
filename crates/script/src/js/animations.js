@@ -253,11 +253,11 @@
     st.holdTime = t;
     st.state = 'finished-resolved';
     live.delete(a);
-    const fire = () => {
-      st.finishedResolve(a);
-      a.dispatchEvent(new AnimationPlaybackEvent('finish', { currentTime: t, timelineTime: st.timeline ? st.timeline.currentTime : null }));
-    };
-    if (sync) fire(); else setTimeout(fire, 0);
+    const ev = new AnimationPlaybackEvent('finish', { currentTime: t, timelineTime: st.timeline ? st.timeline.currentTime : null });
+    // The promise resolves now (finish()) or at the end of the task; the
+    // event is always queued.
+    if (sync) st.finishedResolve(a); else Promise.resolve().then(() => st.finishedResolve(a));
+    setTimeout(() => a.dispatchEvent(ev), 0);
   }
   // playState treats the resolved state like running-at-end.
   const origPlayState = Object.getOwnPropertyDescriptor(Animation.prototype, 'playState').get;
