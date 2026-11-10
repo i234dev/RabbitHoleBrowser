@@ -1,0 +1,13 @@
+[package]
+name = "rabbithole-agent"
+description = "RabbitHole browser engine: agent interface (semantic snapshots, ref actions, read mode)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rabbithole-engine.workspace = true
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }

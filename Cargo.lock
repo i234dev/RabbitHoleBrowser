@@ -1523,6 +1523,7 @@ dependencies = [
  "arboard",
  "dirs",
  "image",
+ "rabbithole-agent",
  "rabbithole-engine",
  "rabbithole-gfx",
  "rabbithole-net",
@@ -1530,6 +1531,15 @@ dependencies = [
  "serde_json",
  "softbuffer",
  "winit",
+]
+
+[[package]]
+name = "rabbithole-agent"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "rabbithole-engine",
+ "serde_json",
 ]
 
 [[package]]
