@@ -71,8 +71,9 @@ _Both images were produced by `rabbithole screenshot`: every pixel comes from Ra
 
 ## Limitations (for now)
 
-- JavaScript bindings are being wired into pages; until then pages render as
-  the server sends them.
+- JavaScript: ES modules (`<script type="module">` with `import`) are not
+  supported yet, so module-based sites (e.g. GitHub) only partially work;
+  no `<canvas>` 2D context, no shadow DOM isolation.
 - No complex text shaping (Latin/Cyrillic/Greek etc. render fine; Arabic and
   Indic scripts do not), color emoji fonts render blank.
 - CSS animations/transitions are parsed but not run; `backdrop-filter`,
@@ -106,8 +107,10 @@ rabbithole https://example.com
 
 Keyboard: `Ctrl+L`/`F6` focus the URL bar, `Enter` navigate, `Esc` cancel,
 `F5`/`Ctrl+R` reload, `Alt+←`/`Alt+→` or `Backspace` history, arrows /
-`PageUp`/`PageDown`/`Space`/`Home`/`End` scroll, `Ctrl+Q` quit. Typing
-something that is not a URL searches DuckDuckGo.
+`PageUp`/`PageDown`/`Space`/`Home`/`End` scroll, `Ctrl+T`/`Ctrl+W` tabs,
+`Ctrl+F` find, `Ctrl+D` bookmark, `Ctrl+H` history, `Ctrl+J` downloads,
+`Ctrl+Shift+J` JavaScript console, `Ctrl+±` zoom, `F11` fullscreen, `Ctrl+Q`
+quit. Typing something that is not a URL searches DuckDuckGo.
 
 ### Command line
 
@@ -127,6 +130,12 @@ rabbithole links https://example.com
 rabbithole dump https://example.com --dom
 rabbithole dump https://example.com --layout
 
+# Evaluate JavaScript in the page after its own scripts ran
+rabbithole js https://news.ycombinator.com/ 'document.querySelectorAll(".titleline").length'
+
+# Every page command accepts --no-js, --wait <ms> and --verbose
+rabbithole text https://example.com --no-js
+
 rabbithole --help
 ```
 
@@ -141,6 +150,14 @@ rabbithole --help
 | `screenshot` | `url`, `width?`, `height?`, `full_page?`, `scroll_y?`| a PNG image plus a caption                |
 | `fetch_html` | `url`, `max_chars?`                                  | raw decoded HTML source                   |
 | `dom`        | `url`, `max_chars?`                                  | the parsed DOM tree                       |
+| `cookies`    | `url`                                                | stored cookies that apply to the URL      |
+| `evaluate`   | `expression`, `url?`, `reload?`                      | the result of the JavaScript expression   |
+| `click`      | `selector`, `url?`                                   | page text after the click (links/forms followed) |
+| `fill`       | `fields` (selector → value), `submit?`, `url?`       | page text after filling / submitting      |
+
+Page-loading tools also take `javascript?` (default true) and `wait_ms?`
+(default 1500). `evaluate`, `click` and `fill` keep a *current page*: omit
+`url` to keep interacting with the page left by the previous call.
 
 Claude Code:
 

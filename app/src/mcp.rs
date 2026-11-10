@@ -1,12 +1,12 @@
 //! Model Context Protocol server: JSON-RPC 2.0 over stdio, one JSON object
 //! per line. Exposes the engine as tools (`browse`, `links`, `screenshot`,
-//! `fetch_html`, `dom`, `cookies`) so LLM agents can read the web through
-//! RabbitHole.
+//! `fetch_html`, `dom`, `cookies`, and the interactive `evaluate`, `click`,
+//! `fill`) so LLM agents can read and use the web through RabbitHole.
 
 use std::io::{BufRead, Write};
 
 use rabbithole_engine::net::{decode_text, Body, Request, Url};
-use rabbithole_engine::Viewport;
+use rabbithole_engine::{Loaded, Page, Viewport};
 use serde_json::{json, Value};
 
 use crate::cli::{capture, cookie_lines, encode_png, CaptureOptions, Session};
@@ -19,6 +19,10 @@ const SERVER_NAME: &str = "rabbithole";
 pub struct ServerState {
     session: Option<Session>,
     initialized: bool,
+    /// The page the interactive tools (`evaluate`, `click`, `fill`) act on.
+    current: Option<Page>,
+    /// JavaScript options of the current call (`javascript`, `wait_ms`).
+    js: (bool, u64),
 }
 
 impl Default for ServerState {
@@ -29,13 +33,82 @@ impl Default for ServerState {
 
 impl ServerState {
     pub fn new() -> ServerState {
-        ServerState { session: None, initialized: false }
+        ServerState { session: None, initialized: false, current: None, js: (true, 1500) }
     }
 
     /// The engine is created lazily so protocol-only interactions (and
     /// tests) do not pay for font loading.
     fn session(&mut self) -> &mut Session {
-        self.session.get_or_insert_with(|| Session::new(true))
+        let (js, wait) = self.js;
+        let session = self.session.get_or_insert_with(|| Session::new(true));
+        session.engine.scripting = js;
+        session.engine.loader.load_scripts = js;
+        session.wait_ms = if js { wait } else { 0 };
+        session
+    }
+
+    /// Record the `javascript` / `wait_ms` tool arguments; they are applied
+    /// whenever the session is used.
+    fn configure_js(&mut self, args: &Value) {
+        self.js = (arg_bool(args, "javascript", true), arg_u64(args, "wait_ms", 1500).min(30_000));
+    }
+
+    /// The page for an interactive tool: `url` (loaded fresh when it differs
+    /// from the current page or when `reload` is true) or the current page.
+    fn page_for(&mut self, args: &Value) -> Result<(), String> {
+        let url = args.get("url").and_then(Value::as_str).map(str::to_string);
+        let reload = arg_bool(args, "reload", false);
+        let need_load = match (&url, &self.current) {
+            (Some(u), Some(p)) => reload || Url::parse(u).map(|u| u.without_fragment() != p.url.without_fragment()).unwrap_or(true),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return Err("no current page: pass `url`".into()),
+        };
+        if need_load {
+            let u = url.unwrap_or_default();
+            let session = self.session();
+            session.engine.loader.load_images = false;
+            session.engine.loader.load_fonts = false;
+            let page = crate::cli::load_text_page(session, &u)?;
+            self.current = Some(page);
+        }
+        Ok(())
+    }
+
+    /// Engine session and current page, borrowed together.
+    fn parts(&mut self) -> (&Session, &mut Page) {
+        self.session();
+        (self.session.as_ref().expect("session"), self.current.as_mut().expect("current page"))
+    }
+
+    /// Navigate the current page with a request (after a click/submit),
+    /// letting scripts settle.
+    fn navigate_current(&mut self, req: &Request) -> Result<(), String> {
+        let session = self.session();
+        let loaded = session.engine.loader.load_request(req, DEFAULT_VIEWPORT).map_err(|e| e.to_string())?;
+        let mut page = match loaded {
+            Loaded::Page(p) => session.engine.build_page(p, DEFAULT_VIEWPORT),
+            Loaded::Download(s) => return Err(format!("{} is a download ({}), not a page", s.url, s.content_type)),
+        };
+        let wait = session.wait_ms;
+        if let Some(nav) = crate::scripting::settle(&session.engine, &mut page, wait) {
+            if let Ok(Loaded::Page(p)) = session.engine.loader.load_request(&nav.request, DEFAULT_VIEWPORT) {
+                page = session.engine.build_page(p, DEFAULT_VIEWPORT);
+                let _ = crate::scripting::settle(&session.engine, &mut page, wait);
+            }
+        }
+        session.flush_console(&mut page);
+        session.save();
+        self.current = Some(page);
+        Ok(())
+    }
+
+    /// Text summary of the current page.
+    fn current_text(&mut self, max_chars: usize) -> String {
+        match &self.current {
+            Some(p) => format!("# {}\nURL: {}\n\n{}", p.title.trim(), p.url, truncate(&p.text(), max_chars.max(1))),
+            None => "(no page)".into(),
+        }
     }
 }
 
@@ -132,7 +205,9 @@ fn dispatch(state: &mut ServerState, method: &str, params: &Value) -> Result<Val
 /// JSON schemas of the exposed tools.
 fn tool_definitions() -> Vec<Value> {
     let url_prop = json!({ "type": "string", "description": "Absolute URL (http, https, file, data or about)" });
-    vec![
+    let js_prop = json!({ "type": "boolean", "description": "Run the page's JavaScript (default true)", "default": true });
+    let wait_prop = json!({ "type": "integer", "description": "Milliseconds to let page timers run after load so script-rendered content appears (default 1500)", "default": 1500 });
+    let mut tools = vec![
         json!({
             "name": "browse",
             "description": "Load a web page with the RabbitHole engine and return its readable text (title, final URL, headings, paragraphs, lists and links). Optionally submit a form with method POST and `form` fields.",
@@ -209,7 +284,59 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["url"]
             }
         }),
-    ]
+    ];
+    // Every page-loading tool accepts the JavaScript options.
+    for t in tools.iter_mut() {
+        if t["name"] != "cookies" && t["name"] != "fetch_html" {
+            t["inputSchema"]["properties"]["javascript"] = js_prop.clone();
+            t["inputSchema"]["properties"]["wait_ms"] = wait_prop.clone();
+        }
+    }
+    let url_opt = json!({ "type": "string", "description": "Page to load first. Omit to act on the current page (the one left by the previous evaluate/click/fill call)." });
+    tools.push(json!({
+        "name": "evaluate",
+        "description": "Evaluate a JavaScript expression in a page (after its own scripts ran) and return the result as text. The page becomes the current page for click/fill.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": url_opt,
+                "expression": { "type": "string", "description": "JavaScript to evaluate, e.g. `document.title` or `[...document.querySelectorAll('h2')].map(h => h.textContent)`" },
+                "reload": { "type": "boolean", "description": "Reload even if `url` is the current page", "default": false },
+                "wait_ms": wait_prop
+            },
+            "required": ["expression"]
+        }
+    }));
+    tools.push(json!({
+        "name": "click",
+        "description": "Click the first element matching a CSS selector (dispatching mousedown/mouseup/click to page scripts, then following links or submitting forms like a user would) and return the resulting page text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": url_opt,
+                "selector": { "type": "string", "description": "CSS selector of the element to click, e.g. `a[href*=login]` or `button.submit`" },
+                "max_chars": { "type": "integer", "description": "Truncate the returned text (default 20000)", "default": 20000 },
+                "wait_ms": wait_prop
+            },
+            "required": ["selector"]
+        }
+    }));
+    tools.push(json!({
+        "name": "fill",
+        "description": "Fill form fields (text inputs, textareas, checkboxes with true/false, selects by value or label) firing input/change events, optionally submit the form, and return the resulting page text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": url_opt,
+                "fields": { "type": "object", "description": "Map of CSS selector → value", "additionalProperties": { "type": "string" } },
+                "submit": { "type": "boolean", "description": "Submit the form of the first field afterwards (default false)", "default": false },
+                "max_chars": { "type": "integer", "description": "Truncate the returned text (default 20000)", "default": 20000 },
+                "wait_ms": wait_prop
+            },
+            "required": ["fields"]
+        }
+    }));
+    tools
 }
 
 fn arg_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
@@ -276,6 +403,9 @@ pub fn browse_request(url: &str, args: &Value) -> Result<Request, String> {
 }
 
 fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Value>, String> {
+    if name != "cookies" && name != "fetch_html" {
+        state.configure_js(args);
+    }
     match name {
         "browse" => {
             let url = arg_str(args, "url")?;
@@ -363,6 +493,83 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
             let lines = cookie_lines(&jar, &parsed);
             Ok(text_content(if lines.is_empty() { "(no cookies)".to_string() } else { lines.join("\n") }))
         }
+        "evaluate" => {
+            let expr = arg_str(args, "expression")?.to_string();
+            state.page_for(args)?;
+            let (session, page) = state.parts();
+            let result = session.engine.eval_in_page(page, &expr);
+            let _ = crate::scripting::settle(&session.engine, page, 0);
+            let console: Vec<String> = page.take_console().into_iter().map(|(l, m)| format!("[console.{l}] {m}")).collect();
+            let mut text = result;
+            if !console.is_empty() {
+                text.push_str("\n\n");
+                text.push_str(&console.join("\n"));
+            }
+            Ok(text_content(text))
+        }
+        "click" => {
+            let selector = arg_str(args, "selector")?.to_string();
+            let max_chars = arg_u64(args, "max_chars", 20_000) as usize;
+            state.page_for(args)?;
+            let (session, page) = state.parts();
+            let node = crate::scripting::query_selector(&page.doc, &selector)?.ok_or_else(|| format!("no element matches `{selector}`"))?;
+            let engine = &session.engine;
+            let wait = session.wait_ms;
+            let out = crate::scripting::click_node(engine, page, node);
+            let request = if let Some(nav) = out.navigation {
+                Some(nav.request)
+            } else if out.default_prevented {
+                None
+            } else {
+                crate::scripting::click_default_action(engine, page, node)
+            };
+            match request {
+                Some(req) => state.navigate_current(&req)?,
+                None => {
+                    let (session, page) = state.parts();
+                    if let Some(nav) = crate::scripting::settle(&session.engine, page, wait) {
+                        state.navigate_current(&nav.request)?;
+                    }
+                }
+            }
+            Ok(text_content(state.current_text(max_chars)))
+        }
+        "fill" => {
+            let max_chars = arg_u64(args, "max_chars", 20_000) as usize;
+            let fields = args.get("fields").and_then(Value::as_object).ok_or("`fields` must be an object of selector → value")?.clone();
+            let submit = arg_bool(args, "submit", false);
+            state.page_for(args)?;
+            let (session, page) = state.parts();
+            let engine = &session.engine;
+            let mut first = None;
+            for (selector, value) in &fields {
+                let value = match value {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let node = crate::scripting::query_selector(&page.doc, selector)?.ok_or_else(|| format!("no element matches `{selector}`"))?;
+                let control = page.control_of(node).unwrap_or(node);
+                crate::scripting::fill_control(engine, page, control, &value)?;
+                first.get_or_insert(control);
+            }
+            if submit {
+                let control = first.ok_or("no fields given")?;
+                let form = page.form_of(control).ok_or("the first field is not inside a form")?;
+                let out = engine.dispatch_event(page, form, "submit", rabbithole_engine::scripting::plain_init(true));
+                let req = match out.navigation {
+                    Some(nav) => Some(nav.request),
+                    None if out.default_prevented => None,
+                    None => {
+                        let submitter = page.default_submitter(form);
+                        page.submit_request(form, submitter, &|_| Vec::new())
+                    }
+                };
+                if let Some(req) = req {
+                    state.navigate_current(&req)?;
+                }
+            }
+            Ok(text_content(state.current_text(max_chars)))
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -418,8 +625,8 @@ mod tests {
         assert_eq!(reply["id"], "abc");
         let tools = reply["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["browse", "links", "screenshot", "fetch_html", "dom", "cookies"]);
-        for t in tools {
+        assert_eq!(names, vec!["browse", "links", "screenshot", "fetch_html", "dom", "cookies", "evaluate", "click", "fill"]);
+        for t in tools.iter().take(6) {
             assert_eq!(t["inputSchema"]["required"][0], "url");
             assert!(t["description"].as_str().unwrap().len() > 10);
         }
