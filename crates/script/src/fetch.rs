@@ -27,7 +27,13 @@ pub(crate) fn url_component(u: &Url, which: &str) -> String {
         }
         "search" => u.query.as_ref().filter(|q| !q.is_empty()).map(|q| format!("?{q}")).unwrap_or_default(),
         "hash" => u.fragment.as_ref().filter(|f| !f.is_empty()).map(|f| format!("#{f}")).unwrap_or_default(),
-        "origin" => u.origin(),
+        // Tuple origins for the special schemes with hosts (URL §4.5);
+        // blob: URLs take the origin of the URL they wrap.
+        "origin" => match u.scheme.as_str() {
+            "ws" | "wss" | "ftp" => format!("{}://{}", u.scheme, u.host_with_port()),
+            "blob" => rabbithole_net::Url::parse_absolute(&u.path).filter(|i| i.is_http()).map(|i| i.origin()).unwrap_or_else(|| "null".into()),
+            _ => u.origin(),
+        },
         _ => String::new(),
     }
 }

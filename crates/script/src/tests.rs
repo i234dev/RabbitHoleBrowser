@@ -24,6 +24,8 @@ pub(crate) struct MockEnv {
     pub(crate) focused: Option<NodeId>,
     pub(crate) now: f64,
     pub(crate) opened: Vec<String>,
+    /// Real network client for WebSocket / EventSource tests.
+    pub(crate) net: Option<rabbithole_net::Fetcher>,
 }
 
 impl MockEnv {
@@ -44,6 +46,7 @@ impl MockEnv {
             focused: None,
             now: 1000.0,
             opened: Vec::new(),
+            net: None,
         }
     }
 
@@ -56,6 +59,14 @@ impl MockEnv {
 impl HostEnv for MockEnv {
     fn doc(&mut self) -> &mut Document {
         &mut self.doc
+    }
+    fn open_websocket(&mut self, url: Url, protocols: Vec<String>) -> Option<Result<rabbithole_net::WebSocket, String>> {
+        let f = self.net.as_ref()?;
+        Some(rabbithole_net::WebSocket::connect(f, &url, &protocols, Some(&self.url), None))
+    }
+    fn open_event_source(&mut self, url: Url, with_credentials: bool) -> Option<Result<rabbithole_net::EventSource, String>> {
+        let f = self.net.as_ref()?;
+        Some(rabbithole_net::EventSource::connect(f, &url, with_credentials, Some(&self.url), None))
     }
     fn document_url(&self) -> Url {
         self.url.clone()

@@ -139,6 +139,10 @@ pub struct HostState {
     pub factories: HashMap<String, Value>,
     /// `URL.createObjectURL` store: blob URL → (bytes, MIME type).
     pub blob_urls: HashMap<String, (Vec<u8>, String)>,
+    /// WebSocket / EventSource connections.
+    pub sockets: crate::sockets::Sockets,
+    /// Canvas 2D surfaces.
+    pub canvases: crate::canvas2d::CanvasStore,
 }
 
 thread_local! {

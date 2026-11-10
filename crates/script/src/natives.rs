@@ -251,6 +251,8 @@ fn set_script_font_faces(realm: &mut Realm, _this: Value, args: &[Value]) -> JsR
 
 pub(crate) fn install(realm: &mut Realm) {
     let o = realm.new_object();
+    crate::sockets::install(realm, o);
+    crate::canvas2d::install(realm, o);
     realm.define_method(o, "setScriptFontFaces", 1, set_script_font_faces);
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
     realm.define_method(o, "imagePixels", 1, image_pixels);

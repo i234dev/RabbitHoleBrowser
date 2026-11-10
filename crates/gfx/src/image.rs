@@ -292,6 +292,29 @@ impl Image {
     }
 }
 
+/// Encode straight RGBA pixels as `image/png` (default) or `image/jpeg`
+/// (quality 0..=1), for `canvas.toDataURL` / `toBlob`. `None` when the
+/// buffer does not match the size.
+pub fn encode(width: u32, height: u32, rgba: &[u8], mime: &str, quality: f32) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || rgba.len() != (width as usize) * (height as usize) * 4 {
+        return None;
+    }
+    let mut out = Vec::new();
+    if mime.eq_ignore_ascii_case("image/jpeg") {
+        // JPEG has no alpha: composite onto black like browsers do.
+        let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| {
+            let a = p[3] as u16;
+            [(p[0] as u16 * a / 255) as u8, (p[1] as u16 * a / 255) as u8, (p[2] as u16 * a / 255) as u8]
+        }).collect();
+        let q = (quality.clamp(0.0, 1.0) * 100.0).round().max(1.0) as u8;
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q);
+        enc.encode(&rgb, width, height, image::ExtendedColorType::Rgb8).ok()?;
+        return Some(out);
+    }
+    image::write_buffer_with_format(&mut std::io::Cursor::new(&mut out), rgba, width, height, image::ExtendedColorType::Rgba8, image::ImageFormat::Png).ok()?;
+    Some(out)
+}
+
 impl Animation {
     pub fn new(frames: Vec<AnimFrame>, loop_count: u32) -> Animation {
         Animation { frames, loop_count, current: AtomicUsize::new(0), started: Mutex::new(None) }

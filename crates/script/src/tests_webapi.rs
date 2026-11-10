@@ -771,6 +771,200 @@ fn canvas_2d_rasterizes_and_encodes() {
 }
 
 #[test]
+fn canvas_2d_text_strokes_compositing_and_shadows() {
+    let out = logs_of(
+        "<html><body><canvas id=c width=60 height=30></canvas></body></html>",
+        r#"
+        const c = document.getElementById('c');
+        const ctx = c.getContext('2d');
+        const px = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data);
+        const inked = (x0, y0, x1, y1) => { const d = ctx.getImageData(x0, y0, x1 - x0, y1 - y0).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; };
+        ctx.font = '20px sans-serif';
+        const m = ctx.measureText('Hi');
+        ctx.fillStyle = '#000';
+        ctx.fillText('Hi', 2, 20);
+        console.log('text', m.width > 5, m.actualBoundingBoxAscent > 5, inked(0, 0, 30, 30) > 20);
+        ctx.clearRect(0, 0, 60, 30);
+        console.log('cleared', inked(0, 0, 60, 30));
+        // Anti-aliased diagonal stroke: partial coverage on edges.
+        ctx.strokeStyle = '#f00'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(29, 29); ctx.stroke();
+        const partial = Array.from(ctx.getImageData(0, 0, 30, 30).data).some((v, i) => i % 4 === 3 && v > 0 && v < 255);
+        console.log('stroke', px(10, 10).join(','), partial);
+        // Round caps / dashes.
+        ctx.clearRect(0, 0, 60, 30);
+        ctx.setLineDash([4, 4]); ctx.lineWidth = 2; ctx.strokeStyle = '#00f';
+        ctx.beginPath(); ctx.moveTo(0, 5); ctx.lineTo(40, 5); ctx.stroke();
+        console.log('dash', px(2, 5)[2], px(6, 5)[3], ctx.getLineDash().join(','));
+        ctx.setLineDash([]);
+        // Compositing: destination-out punches a hole; multiply darkens.
+        ctx.clearRect(0, 0, 60, 30);
+        ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, 20, 20);
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.fillRect(5, 5, 5, 5);
+        ctx.globalCompositeOperation = 'multiply';
+        ctx.fillStyle = '#808080'; ctx.fillRect(15, 0, 5, 5);
+        ctx.globalCompositeOperation = 'source-over';
+        console.log('composite', px(7, 7)[3], px(2, 2).join(','), px(17, 2).join(','));
+        // globalAlpha and shadows.
+        ctx.clearRect(0, 0, 60, 30);
+        ctx.globalAlpha = 0.5; ctx.fillStyle = '#00ff00'; ctx.fillRect(0, 0, 4, 4); ctx.globalAlpha = 1;
+        ctx.shadowColor = 'rgba(0,0,0,1)'; ctx.shadowOffsetX = 10; ctx.shadowOffsetY = 0; ctx.shadowBlur = 0;
+        ctx.fillStyle = '#00f'; ctx.fillRect(30, 10, 5, 5);
+        ctx.shadowColor = 'transparent';
+        console.log('alpha+shadow', px(1, 1).join(','), px(42, 12).join(','), px(32, 12).join(','));
+        // Clipping with save/restore.
+        ctx.clearRect(0, 0, 60, 30);
+        ctx.save(); ctx.beginPath(); ctx.rect(0, 0, 10, 10); ctx.clip();
+        ctx.fillStyle = '#f00'; ctx.fillRect(0, 0, 60, 30); ctx.restore();
+        ctx.fillStyle = '#0f0'; ctx.fillRect(20, 20, 2, 2);
+        console.log('clip', px(5, 5).join(','), px(15, 15)[3], px(20, 20).join(','));
+        // Scaled drawImage of a canvas source, patterns.
+        const src = document.createElement('canvas'); src.width = 2; src.height = 2;
+        const s = src.getContext('2d'); s.fillStyle = '#f00'; s.fillRect(0, 0, 1, 2); s.fillStyle = '#00f'; s.fillRect(1, 0, 1, 2);
+        ctx.clearRect(0, 0, 60, 30); ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(src, 0, 0, 20, 20);
+        console.log('drawImage', px(5, 5).join(','), px(15, 15).join(','));
+        ctx.fillStyle = ctx.createPattern(src, 'repeat'); ctx.fillRect(40, 0, 4, 1);
+        console.log('pattern', px(40, 0).join(','), px(41, 0).join(','), px(42, 0).join(','));
+        // Radial gradient centre colour, transforms.
+        const rg = ctx.createRadialGradient(50, 20, 0, 50, 20, 8); rg.addColorStop(0, '#fff'); rg.addColorStop(1, '#000');
+        ctx.fillStyle = rg; ctx.fillRect(42, 12, 16, 16);
+        ctx.setTransform(2, 0, 0, 2, 0, 0); ctx.fillStyle = '#ff0'; ctx.fillRect(10, 12, 1, 1); ctx.resetTransform();
+        console.log('radial+transform', px(50, 20)[0] > 200, px(21, 25).join(','));
+        // Encoders.
+        console.log('encode', c.toDataURL('image/jpeg', 0.8).startsWith('data:image/jpeg;base64,/9j/'), new OffscreenCanvas(0, 0).getContext('2d') !== null);
+        c.toBlob((b) => console.log('blob', b.type, b.size > 50));
+        new OffscreenCanvas(3, 3).convertToBlob().then((b) => createImageBitmap(b)).then((bm) => console.log('roundtrip', bm.width, bm.height));
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "text true true true",
+            "cleared 0",
+            "stroke 255,0,0,255 true",
+            "dash 255 0 4,4",
+            "composite 0 255,0,0,255 128,0,0,255",
+            "alpha+shadow 0,255,0,128 0,0,0,255 0,0,255,255",
+            "clip 255,0,0,255 0 0,255,0,255",
+            "drawImage 255,0,0,255 0,0,255,255",
+            "pattern 255,0,0,255 0,0,255,255 255,0,0,255",
+            "radial+transform true 255,255,0,255",
+            "encode true true",
+            "roundtrip 3 3",
+            "blob image/png true",
+        ]
+    );
+}
+
+/// A one-connection WebSocket echo server on 127.0.0.1 (text and binary
+/// frames echoed, close answered); returns the port.
+fn ws_echo_server() -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut req = Vec::new();
+        let mut b = [0u8; 1];
+        while !req.ends_with(b"\r\n\r\n") {
+            if s.read(&mut b).unwrap() == 0 {
+                return;
+            }
+            req.push(b[0]);
+        }
+        let req = String::from_utf8_lossy(&req).to_string();
+        let key = req.lines().find_map(|l| l.strip_prefix("Sec-WebSocket-Key: ").or_else(|| l.strip_prefix("sec-websocket-key: "))).unwrap().trim().to_string();
+        let accept = rabbithole_net::websocket::accept_key(&key);
+        write!(s, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: chat\r\n\r\n").unwrap();
+        loop {
+            let Ok(f) = rabbithole_net::websocket::read_frame(&mut s, 1 << 20) else { return };
+            let mut out = vec![0x80 | f.opcode, f.payload.len() as u8];
+            out.extend_from_slice(&f.payload);
+            s.write_all(&out).unwrap();
+            if f.opcode == 8 {
+                return;
+            }
+        }
+    });
+    port
+}
+
+#[test]
+fn websocket_over_network_client() {
+    let port = ws_echo_server();
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    env.net = Some(rabbithole_net::Fetcher::isolated());
+    let src = format!(
+        r#"
+        const ws = new WebSocket('ws://127.0.0.1:{port}/echo', ['chat']);
+        ws.binaryType = 'arraybuffer';
+        console.log('state', ws.readyState, ws.url);
+        ws.onopen = () => {{ console.log('open', ws.readyState, ws.protocol); ws.send('hello'); ws.send(new Uint8Array([1, 2, 3])); }};
+        let n = 0;
+        ws.onmessage = (e) => {{
+          console.log('message', typeof e.data === 'string' ? e.data : Array.from(new Uint8Array(e.data)).join(','), e.origin);
+          if (++n === 2) ws.close(1000, 'bye');
+        }};
+        ws.onerror = () => console.log('error');
+        ws.onclose = (e) => console.log('close', e.code, e.reason, e.wasClean, ws.readyState, e instanceof CloseEvent);
+        "#
+    );
+    let mut out = run(&mut env, &mut host, &src);
+    let mut t = 1100.0;
+    while !out.iter().any(|l| l.starts_with("close")) && t < 1100.0 + 5000.0 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let before = env.logs.len();
+        host.run_timers(&mut env, t);
+        host.run_jobs(&mut env);
+        out.extend(env.logs[before..].iter().filter(|(l, _)| l == "log").map(|(_, m)| m.clone()));
+        t += 16.0;
+    }
+    assert!(env.errors().is_empty(), "errors: {:?}", env.errors());
+    assert_eq!(
+        out,
+        vec![
+            format!("state 0 ws://127.0.0.1:{port}/echo"),
+            "open 1 chat".to_string(),
+            "message hello ws://127.0.0.1:".to_string() + &port.to_string(),
+            "message 1,2,3 ws://127.0.0.1:".to_string() + &port.to_string(),
+            "close 1000 bye true 3 true".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn websocket_and_event_source_without_network_fail_cleanly() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const ws = new WebSocket('wss://example.test/socket');
+        ws.onerror = () => console.log('ws error', ws.readyState);
+        ws.onclose = (e) => console.log('ws close', e.code, e.wasClean);
+        try { new WebSocket('ftp://x'); } catch (e) { console.log('scheme', e.name); }
+        try { ws.send('x'); } catch (e) { console.log('send', e.name); }
+        try { ws.close(1001); } catch (e) { console.log('code', e.name); }
+        const es = new EventSource('/events');
+        es.onerror = () => { console.log('es error', es.readyState); es.close(); };
+        console.log('es', es.url, es.readyState, es.withCredentials);
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "scheme SyntaxError",
+            "send InvalidStateError",
+            "code InvalidAccessError",
+            "es https://example.test/events 0 false",
+            "es error 0",
+            "ws error 3",
+            "ws close 1006 false",
+        ]
+    );
+}
+
+#[test]
 fn history_traversal_and_navigation_api() {
     let out = logs_of(
         "<html><body></body></html>",

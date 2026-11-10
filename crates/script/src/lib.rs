@@ -14,7 +14,9 @@ mod host;
 mod misc;
 mod modules;
 mod node;
+mod canvas2d;
 mod natives;
+mod sockets;
 mod observers;
 mod shadow;
 mod window;
@@ -159,6 +161,8 @@ impl ScriptHost {
             render: Default::default(),
             factories: HashMap::new(),
             blob_urls: HashMap::new(),
+            sockets: Default::default(),
+            canvases: Default::default(),
         }));
         {
             let root_array = state.borrow().root_array;
@@ -409,6 +413,12 @@ impl ScriptHost {
                     observers::deliver_mutations(realm);
                 }
             }
+            // Network connections (WebSocket / EventSource).
+            if sockets::has_connections() && sockets::poll(realm) {
+                ran = true;
+                shadow::flush(realm);
+                realm.run_jobs();
+            }
             // Update the rendering: Resize / Intersection observers.
             let origin = state().borrow().time_origin;
             if natives::update_rendering(realm, now_ms - origin) {
@@ -431,6 +441,11 @@ impl ScriptHost {
         if !st.rafs.is_empty() {
             let frame = st.last_frame + 16.0;
             due = Some(due.map(|d| d.min(frame)).unwrap_or(frame));
+        }
+        if !st.sockets_idle() {
+            // Poll open connections every ~16 ms.
+            let soon = st.last_tick + 16.0;
+            due = Some(due.map(|d| d.min(soon)).unwrap_or(soon));
         }
         if let Some(r) = natives::render_due(&st) {
             let r = r + st.time_origin;

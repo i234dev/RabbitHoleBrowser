@@ -274,46 +274,71 @@
   defaults(g.ProgressEvent, { lengthComputable: false, loaded: 0, total: 0 });
 
   // ------------------------------------------------------------ WebSocket
-  // No WebSocket transport in the network stack: connections fail the way
-  // an unreachable server does (error + close 1006), asynchronously.
-  class CloseEventShim {}
-  void CloseEventShim;
+  // Connections go through the network stack's WebSocket client
+  // (HostEnv::open_websocket); the event loop polls them and hands events
+  // to `socketEvent`. Without a client, connections fail the way an
+  // unreachable server does (error + close 1006), asynchronously.
   const WS_STATES = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
+  const byteLen = (data) => (typeof data === 'string' ? new TextEncoder().encode(data).length : (data.byteLength || data.size || 0));
+  function failSocket(ws) {
+    setTimeout(() => {
+      const st = ws[S];
+      if (st.state === 3) return;
+      st.state = 3;
+      ws.dispatchEvent(new Event('error'));
+      ws.dispatchEvent(new g.CloseEvent('close', { wasClean: false, code: 1006, reason: '' }));
+    }, 0);
+  }
   class WebSocket extends g.EventTarget {
     constructor(url, protocols = []) {
       super();
+      if (arguments.length < 1) throw new TypeError("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
       let u;
       try { u = new URL(url, document.baseURI); } catch (e) { throw domError(`Failed to construct 'WebSocket': The URL '${url}' is invalid.`, 'SyntaxError'); }
       if (u.protocol === 'http:') u.protocol = 'ws:';
       if (u.protocol === 'https:') u.protocol = 'wss:';
       if (u.protocol !== 'ws:' && u.protocol !== 'wss:') throw domError(`Failed to construct 'WebSocket': The URL's scheme must be either 'http', 'https', 'ws', or 'wss'. '${u.protocol}' is not allowed.`, 'SyntaxError');
       if (u.hash) throw domError("Failed to construct 'WebSocket': The URL contains a fragment identifier ('" + u.hash + "'). Fragment identifiers are not allowed in WebSocket URLs.", 'SyntaxError');
-      const list = typeof protocols === 'string' ? [protocols] : Array.from(protocols);
+      const list = typeof protocols === 'string' ? [protocols] : Array.from(protocols, String);
       if (new Set(list).size !== list.length) throw domError("Failed to construct 'WebSocket': The subprotocol is duplicated.", 'SyntaxError');
-      hidden(this, S, { url: u.href, state: 0, binaryType: 'blob', protocol: '', extensions: '', buffered: 0 });
-      setTimeout(() => {
-        if (this[S].state === 3) return;
-        this[S].state = 3;
-        this.dispatchEvent(new Event('error'));
-        this.dispatchEvent(new g.CloseEvent('close', { wasClean: false, code: 1006, reason: '' }));
-      }, 0);
+      for (const p of list) if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(p)) throw domError(`Failed to construct 'WebSocket': The subprotocol '${p}' is invalid.`, 'SyntaxError');
+      hidden(this, S, { url: u.href, state: 0, binaryType: 'blob', protocol: '', extensions: '', buffered: 0, id: null });
+      const id = N.wsOpen(this, u.href, list);
+      if (typeof id === 'number') this[S].id = id;
+      else failSocket(this);
     }
     get url() { return this[S].url; }
     get readyState() { return this[S].state; }
-    get bufferedAmount() { return this[S].buffered; }
+    get bufferedAmount() {
+      const st = this[S];
+      const info = st.id !== null && st.state === 1 ? N.connInfo(st.id) : null;
+      return st.buffered + (info ? info.bufferedAmount : 0);
+    }
     get extensions() { return this[S].extensions; }
     get protocol() { return this[S].protocol; }
     get binaryType() { return this[S].binaryType; }
     set binaryType(v) { if (v === 'blob' || v === 'arraybuffer') this[S].binaryType = v; }
     send(data) {
-      if (this[S].state === 0) throw domError("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", 'InvalidStateError');
-      if (this[S].state > 1) { this[S].buffered += typeof data === 'string' ? new TextEncoder().encode(data).length : (data.byteLength || data.size || 0); }
+      if (arguments.length < 1) throw new TypeError("Failed to execute 'send' on 'WebSocket': 1 argument required, but only 0 present.");
+      const st = this[S];
+      if (st.state === 0) throw domError("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", 'InvalidStateError');
+      const isText = !(data instanceof ArrayBuffer || ArrayBuffer.isView(data) || data instanceof g.Blob);
+      if (isText) data = String(data);
+      // After close() the data only counts towards bufferedAmount.
+      if (st.state > 1 || st.id === null) { st.buffered += byteLen(data); return; }
+      if (data instanceof DataView) data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      N.wsSend(st.id, data, isText);
     }
     close(code, reason) {
-      if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999)) throw domError(`Failed to execute 'close' on 'WebSocket': The code must be either 1000, or between 3000 and 4999. ${code} is neither.`, 'InvalidAccessError');
+      if (code !== undefined) {
+        code = Number(code) & 0xffff;
+        if (code !== 1000 && !(code >= 3000 && code <= 4999)) throw domError(`Failed to execute 'close' on 'WebSocket': The close code must be either 1000, or between 3000 and 4999. ${code} is neither.`, 'InvalidAccessError');
+      }
       if (reason !== undefined && new TextEncoder().encode(String(reason)).length > 123) throw domError("Failed to execute 'close' on 'WebSocket': The message must not be greater than 123 bytes.", 'SyntaxError');
-      if (this[S].state >= 2) return;
-      this[S].state = 2;
+      const st = this[S];
+      if (st.state >= 2) return;
+      st.state = 2;
+      if (st.id !== null) N.connClose(st.id, code === undefined ? null : code, reason === undefined ? '' : String(reason));
     }
   }
   for (const [k, v] of Object.entries(WS_STATES)) { Object.defineProperty(WebSocket, k, { value: v, enumerable: true }); Object.defineProperty(WebSocket.prototype, k, { value: v, enumerable: true }); }
@@ -322,25 +347,86 @@
   define('WebSocket', WebSocket);
 
   // ---------------------------------------------------------- EventSource
-  // Server-sent events over fetch: the response is parsed when it
-  // completes (streams that never end deliver nothing), then the
-  // connection is re-established after the retry delay.
+  // Server-sent events through the network stack's streaming client
+  // (HostEnv::open_event_source), which handles reconnection and
+  // Last-Event-ID. Without one, the stream is fetched: the response is
+  // parsed when it completes, then re-established after the retry delay.
   class EventSource extends g.EventTarget {
     constructor(url, init = {}) {
       super();
+      if (arguments.length < 1) throw new TypeError("Failed to construct 'EventSource': 1 argument required, but only 0 present.");
       let u;
       try { u = new URL(url, document.baseURI); } catch (e) { throw domError(`Failed to construct 'EventSource': Cannot open an EventSource to '${url}'. The URL is invalid.`, 'SyntaxError'); }
-      hidden(this, S, { url: u.href, state: 0, withCredentials: !!(init && init.withCredentials), lastId: '', retry: 3000, ctrl: null });
-      connect(this);
+      const creds = !!(init && init.withCredentials);
+      hidden(this, S, { url: u.href, state: 0, withCredentials: creds, lastId: '', retry: 3000, ctrl: null, id: null });
+      const id = N.sseOpen(this, u.href, creds);
+      if (typeof id === 'number') this[S].id = id;
+      else if (id === null) connect(this);
+      else setTimeout(() => { if (this[S].state !== 2) { this[S].state = 2; this.dispatchEvent(new Event('error')); } }, 0);
     }
     get url() { return this[S].url; }
     get withCredentials() { return this[S].withCredentials; }
     get readyState() { return this[S].state; }
-    close() { this[S].state = 2; if (this[S].ctrl) this[S].ctrl.abort(); }
+    close() {
+      const st = this[S];
+      st.state = 2;
+      if (st.ctrl) st.ctrl.abort();
+      if (st.id !== null) { N.connClose(st.id); st.id = null; }
+    }
   }
   for (const [k, v] of Object.entries({ CONNECTING: 0, OPEN: 1, CLOSED: 2 })) { Object.defineProperty(EventSource, k, { value: v, enumerable: true }); Object.defineProperty(EventSource.prototype, k, { value: v, enumerable: true }); }
   tag(EventSource, 'EventSource');
   N.installHandlers(EventSource.prototype, ['open', 'message', 'error']);
+
+  // Events from native connections: hook(obj, type, ...args).
+  function socketEvent(obj, type, a, b, c, d) {
+    const st = obj[S];
+    if (obj instanceof WebSocket) {
+      switch (type) {
+        case 'open':
+          if (st.state !== 0) return;
+          st.state = 1; st.protocol = a || ''; st.extensions = b || '';
+          obj.dispatchEvent(new Event('open'));
+          return;
+        case 'message':
+        case 'binary': {
+          if (st.state !== 1) return;
+          const data = type === 'message' ? a : st.binaryType === 'arraybuffer' ? a : new g.Blob([a]);
+          obj.dispatchEvent(new g.MessageEvent('message', { data, origin: new URL(st.url).origin }));
+          return;
+        }
+        case 'error':
+          if (st.state === 3) return;
+          obj.dispatchEvent(new Event('error'));
+          return;
+        case 'close':
+          st.state = 3; st.id = null;
+          obj.dispatchEvent(new g.CloseEvent('close', { wasClean: !!c, code: a, reason: b || '' }));
+          return;
+      }
+      return;
+    }
+    if (obj instanceof EventSource) {
+      if (st.state === 2) return;
+      switch (type) {
+        case 'open':
+          st.state = 1;
+          obj.dispatchEvent(new Event('open'));
+          return;
+        case 'sse':
+          st.lastId = c;
+          obj.dispatchEvent(new g.MessageEvent(a || 'message', { data: b, origin: d || new URL(st.url).origin, lastEventId: c }));
+          return;
+        case 'error':
+          // b: the client reconnects by itself.
+          st.state = b ? 0 : 2;
+          if (!b) st.id = null;
+          obj.dispatchEvent(new Event('error'));
+          return;
+      }
+    }
+  }
+  N.setSocketHook(socketEvent);
   function connect(es) {
     const st = es[S];
     if (st.state === 2) return;
