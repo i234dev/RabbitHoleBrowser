@@ -34,6 +34,9 @@ pub enum Op {
     InitLocal(u16, u16),
     /// Store with const check (slot flagged const at compile time → TypeError).
     SetLocalChecked(u16, u16),
+    /// Read a module import binding: the slot holds a module binding
+    /// reference (dereferenced live, with a TDZ check) or a namespace object.
+    GetImport(u16, u16),
     GetGlobal(u32),
     SetGlobal(u32),
     /// `typeof ident` for unresolved identifiers (no ReferenceError).
@@ -295,6 +298,8 @@ pub struct FunctionCode {
     /// Source text for `Function.prototype.toString`.
     pub source: Option<Rc<str>>,
     pub filename: Rc<str>,
+    /// Module this code belongs to (`None` for classic scripts / eval).
+    pub module: Option<u32>,
 }
 
 impl FunctionCode {

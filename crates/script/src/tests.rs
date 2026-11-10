@@ -811,3 +811,97 @@ fn realistic_vanilla_script() {
     assert_eq!(out[0], "true");
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
+
+/// Run a module script (inline, at the document URL) and return its
+/// console.log lines plus the result.
+fn run_module(env: &mut MockEnv, host: &mut ScriptHost, src: &str) -> (Vec<String>, Result<(), String>) {
+    let before = env.logs.len();
+    let url = env.url.to_string();
+    let r = host.run_script(env, src, &url, true);
+    host.run_jobs(env);
+    let logs = env.logs[before..].iter().filter(|(l, _)| l == "log").map(|(_, m)| m.clone()).collect();
+    (logs, r)
+}
+
+#[test]
+fn module_script_with_relative_imports() {
+    let (mut env, mut host) = setup("<div id=out></div>");
+    env.fetches.insert("https://example.test/dir/lib/util.js".into(), (200, "text/javascript".into(), "import { x } from '../shared.js'; export const greet = n => 'hi ' + n + ' ' + x; export default 7;".into()));
+    env.fetches.insert("https://example.test/dir/shared.js".into(), (200, "text/javascript".into(), "export let x = 'shared'; export function setX(v) { x = v; }".into()));
+    let (out, r) = run_module(
+        &mut env,
+        &mut host,
+        "import d, { greet } from './lib/util.js'; import { setX } from './shared.js';\n\
+         console.log(greet('mod'), d, this === undefined, typeof window.greet);\n\
+         setX('changed'); console.log(greet('again'));\n\
+         console.log(import.meta.url, import.meta.resolve('./lib/x.js'));\n\
+         import('./lib/util.js').then(ns => console.log('dynamic', ns.default));\n\
+         import('./nope.js').catch(e => console.log(e.name + ': ' + e.message));",
+    );
+    assert!(r.is_ok(), "{r:?} {:?}", env.logs);
+    assert_eq!(out[0], "hi mod shared 7 true undefined");
+    assert_eq!(out[1], "hi again changed");
+    assert_eq!(out[2], "https://example.test/dir/page.html?q=1#frag https://example.test/dir/lib/x.js");
+    assert!(out.contains(&"dynamic 7".to_string()), "{out:?}");
+    assert!(out.contains(&"TypeError: Failed to fetch dynamically imported module: https://example.test/dir/nope.js".to_string()), "{out:?}");
+
+    // A failing static import is logged with the specifier and URL.
+    let (_, r) = run_module(&mut env, &mut host, "import { y } from './missing.js';");
+    assert!(r.is_err());
+    let errors = env.errors();
+    assert!(errors.iter().any(|e| e.contains("\"./missing.js\"") && e.contains("https://example.test/dir/missing.js")), "{errors:?}");
+    // Missing export → SyntaxError naming the module and export.
+    let (_, r) = run_module(&mut env, &mut host, "import { nothing } from './shared.js';");
+    assert!(r.unwrap_err().contains("SyntaxError: The requested module './shared.js' does not provide an export named 'nothing'"));
+
+    // Dynamically inserted module scripts run through the same loader (and cache).
+    let out = run(
+        &mut env,
+        &mut host,
+        "const s = document.createElement('script'); s.type = 'module'; s.textContent = \"import d from './lib/util.js'; console.log('inserted', d);\"; document.body.appendChild(s);",
+    );
+    assert_eq!(out, vec!["inserted 7".to_string()]);
+}
+
+#[test]
+fn import_maps_resolve_bare_specifiers() {
+    let html = r#"<script type="importmap">{"imports":{"lodash":"/vendor/lodash.js","lib/":"./libs/"},"scopes":{"/dir/scoped/":{"lodash":"/vendor/lodash2.js"}}}</script><p>x</p>"#;
+    let (mut env, mut host) = setup(html);
+    env.fetches.insert("https://example.test/vendor/lodash.js".into(), (200, "text/javascript".into(), "export default 'lodash1';".into()));
+    env.fetches.insert("https://example.test/vendor/lodash2.js".into(), (200, "text/javascript".into(), "export default 'lodash2';".into()));
+    env.fetches.insert("https://example.test/dir/libs/a.js".into(), (200, "text/javascript".into(), "export const a = 'A';".into()));
+    env.fetches.insert("https://example.test/dir/scoped/m.js".into(), (200, "text/javascript".into(), "import l from 'lodash'; export default l;".into()));
+    let (out, r) = run_module(&mut env, &mut host, "import l from 'lodash'; import { a } from 'lib/a.js'; import s from './scoped/m.js'; console.log(l, a, s, import.meta.resolve('lodash'));");
+    assert!(r.is_ok(), "{r:?} {:?}", env.logs);
+    assert_eq!(out, vec!["lodash1 A lodash2 https://example.test/vendor/lodash.js".to_string()]);
+
+    let (_, r) = run_module(&mut env, &mut host, "import x from 'not-mapped';");
+    let e = r.unwrap_err();
+    assert!(e.contains(r#"TypeError: Failed to resolve module specifier "not-mapped". Relative references must start with either "/", "./", or "../"."#), "{e}");
+
+    // The embedder can install a map explicitly.
+    let (mut env, mut host) = setup("<p>x</p>");
+    env.fetches.insert("https://example.test/pkg/index.js".into(), (200, "text/javascript".into(), "export const v = 'pkg';".into()));
+    host.set_import_map(r#"{"imports":{"pkg":"https://example.test/pkg/index.js"}}"#).unwrap();
+    let (out, r) = run_module(&mut env, &mut host, "import { v } from 'pkg'; console.log(v);");
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, vec!["pkg".to_string()]);
+    assert!(host.set_import_map("not json").is_err());
+}
+
+#[test]
+fn json_and_css_modules() {
+    let (mut env, mut host) = setup("<p>x</p>");
+    env.fetches.insert("https://example.test/dir/data.json".into(), (200, "application/json".into(), r#"{"a":[1,2],"name":"data"}"#.into()));
+    env.fetches.insert("https://example.test/dir/s.css".into(), (200, "text/css".into(), "p { color: red }".into()));
+    env.fetches.insert("https://example.test/dir/bad.json".into(), (200, "application/json".into(), "{nope".into()));
+    let (out, r) = run_module(
+        &mut env,
+        &mut host,
+        "import data from './data.json' with { type: 'json' }; import sheet from './s.css' with { type: 'css' };\nconsole.log(data.a.length, data.name, typeof sheet);",
+    );
+    assert!(r.is_ok(), "{r:?} {:?}", env.logs);
+    assert_eq!(out, vec!["2 data object".to_string()]);
+    let (_, r) = run_module(&mut env, &mut host, "import bad from './bad.json' with { type: 'json' };");
+    assert!(r.unwrap_err().contains("SyntaxError"));
+}

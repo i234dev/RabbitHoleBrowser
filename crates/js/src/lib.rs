@@ -15,6 +15,10 @@
 //! realm.run_jobs(); // drain promise reactions
 //! ```
 //!
+//! Modules: install a loader with [`Realm::set_module_loader`], then
+//! [`Realm::compile_module`] → [`Realm::link_module`] →
+//! [`Realm::evaluate_module`] (or [`Realm::run_module`] for all three).
+//!
 //! Host objects: create them with [`Realm::new_object`], attach Rust state
 //! with [`Realm::set_host_data`], and expose behaviour through
 //! [`Realm::define_method`] / [`Realm::define_accessor`]. Values that the
@@ -27,6 +31,7 @@ pub mod compiler;
 pub mod heap;
 pub mod interop;
 pub mod lexer;
+pub mod modules;
 pub mod parser;
 pub mod realm;
 pub mod regex;
@@ -38,6 +43,7 @@ mod tests;
 
 pub use heap::{NativeFn, ObjectKind, Property, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN, WRITABLE};
 pub use interop::JsResult;
+pub use modules::{ImportMetaHook, ModuleId, ModuleLoader, ModuleStatus};
 pub use parser::{parse_program, ParseError};
 pub use realm::{Realm, Root};
 pub use value::{JsStr, ObjectId, PropertyKey, SymbolId, Value};

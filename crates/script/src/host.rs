@@ -121,6 +121,8 @@ pub struct HostState {
     pub pending_resizes: Vec<(ObjectId, Vec<NodeRef>)>,
     pub pending_script_events: Vec<(NodeRef, &'static str)>,
     pub deferred_natives: Vec<ObjectId>,
+    /// Module cache and import map.
+    pub modules: crate::modules::ModuleState,
 }
 
 thread_local! {

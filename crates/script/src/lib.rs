@@ -12,6 +12,7 @@ mod events;
 mod fetch;
 mod host;
 mod misc;
+mod modules;
 mod node;
 mod observers;
 mod window;
@@ -124,6 +125,7 @@ impl ScriptHost {
             pending_resizes: Vec::new(),
             pending_script_events: Vec::new(),
             deferred_natives: Vec::new(),
+            modules: Default::default(),
         }));
         {
             let root_array = state.borrow().root_array;
@@ -151,6 +153,7 @@ impl ScriptHost {
             fetch::install(realm);
             misc::install(realm);
             observers::install(realm);
+            modules::install(realm);
             // The document wrapper.
             let doc_obj = host::wrap_main(realm, Document::ROOT);
             if let Value::Object(d) = doc_obj {
@@ -168,9 +171,17 @@ impl ScriptHost {
     }
 
     /// Evaluate a classic script or module. Errors are logged and returned.
+    ///
+    /// Modules are compiled with `url` as their URL, linked (dependencies
+    /// fetched synchronously through [`HostEnv::fetch`], bare specifiers
+    /// resolved through the document's import maps) and evaluated; pending
+    /// jobs are drained afterwards.
     pub fn run_script(&mut self, env: &mut dyn HostEnv, source: &str, url: &str, is_module: bool) -> Result<(), String> {
+        if is_module {
+            return self.enter(env, |realm| modules::run_module_script(realm, source, url));
+        }
         self.enter(env, |realm| {
-            let r = if is_module { realm.eval_module(source, url) } else { realm.eval(source, url) };
+            let r = realm.eval(source, url);
             match r {
                 Ok(_) => Ok(()),
                 Err(e) => {
@@ -180,6 +191,18 @@ impl ScriptHost {
                 }
             }
         })
+    }
+
+    /// Install an import map (the JSON text of a `<script type="importmap">`).
+    /// Entries already defined by earlier maps win. Keys and addresses are
+    /// resolved against the document base URL when used.
+    pub fn set_import_map(&mut self, json: &str) -> Result<(), String> {
+        let map = match modules::parse_import_map(&mut self.realm, json) {
+            Ok(m) => m,
+            Err(e) => return Err(self.realm.error_to_string(&e)),
+        };
+        self.state.borrow_mut().modules.import_map.merge(map);
+        Ok(())
     }
 
     /// Mark a script element as the running one (`document.currentScript`)

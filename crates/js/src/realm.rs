@@ -168,6 +168,8 @@ pub struct Realm {
     pub current_callee: Option<ObjectId>,
     /// Arrays currently being joined (cycle guard for `Array.prototype.join`).
     pub join_stack: Vec<ObjectId>,
+    /// ECMAScript module records and the host module hooks.
+    pub modules: crate::modules::ModuleRegistry,
 }
 
 impl Default for Realm {
@@ -248,6 +250,7 @@ impl Realm {
             ops_executed: 0,
             current_callee: None,
             join_stack: Vec::new(),
+            modules: Default::default(),
         };
         crate::builtins::register_builtins(&mut realm);
         realm
@@ -557,6 +560,7 @@ impl Realm {
         tmp.extend(self.new_target_stack.iter().cloned());
         tmp.extend(self.unhandled_rejections.iter().cloned());
         tmp.extend(self.template_cache.values().map(|o| Value::Object(*o)));
+        self.modules.trace(&mut tmp);
         if let Some(c) = self.current_callee {
             tmp.push(Value::Object(c));
         }
@@ -585,9 +589,10 @@ impl Realm {
         self.run_script(code)
     }
 
+    /// Compile, link (through the installed module loader) and evaluate a
+    /// module; see [`Realm::run_module`]. Returns the evaluation promise.
     pub fn eval_module(&mut self, source: &str, filename: &str) -> Result<Value, Value> {
-        let code = self.compile(source, filename, true)?;
-        self.run_script(code)
+        self.run_module(source, filename)
     }
 
     pub fn compile(&mut self, source: &str, filename: &str, is_module: bool) -> Result<Rc<FunctionCode>, Value> {

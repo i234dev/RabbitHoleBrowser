@@ -398,6 +398,11 @@ pub enum ObjectKind {
     ForInIterator { keys: Vec<JsStr>, index: usize, object: Option<ObjectId> },
     /// Host-defined (DOM nodes etc.)
     Host(Box<dyn Any>),
+    /// Reference to a module's top-level binding (an import resolved at
+    /// link time). Never exposed to scripts: it lives in import slots and
+    /// in namespace getters, and is dereferenced on every read so imports
+    /// are live bindings.
+    ModuleBinding { scope: ObjectId, slot: u32, name: JsStr },
 }
 
 impl std::fmt::Debug for ObjectKind {
@@ -438,6 +443,7 @@ impl ObjectKind {
             ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
             ObjectKind::ForInIterator { .. } => "ForIn Iterator",
             ObjectKind::Host(_) => "Object",
+            ObjectKind::ModuleBinding { .. } => "ModuleBinding",
         }
     }
     pub fn is_callable(&self) -> bool {
@@ -659,6 +665,7 @@ pub fn trace_object(obj: &Object, out: &mut Vec<Value>) {
         ObjectKind::MapIterator { target, .. } => out.push(Value::Object(*target)),
         ObjectKind::RegExpStringIterator { regexp, .. } => out.push(Value::Object(*regexp)),
         ObjectKind::ForInIterator { object, .. } => push_id(out, *object),
+        ObjectKind::ModuleBinding { scope, .. } => out.push(Value::Object(*scope)),
         _ => {}
     }
 }

@@ -688,6 +688,12 @@ impl Realm {
                     }
                     self.slot_set(scope, d, s, v);
                 }
+                Op::GetImport(d, s) => {
+                    let scope = frame!().scope;
+                    let v = self.slot_get(scope, d, s);
+                    let v = self.read_import_slot(v)?;
+                    push!(v);
+                }
                 Op::GetGlobal(i) => {
                     let key = const_key!(i);
                     let v = self.get_global_binding(&key)?;
@@ -1360,14 +1366,16 @@ impl Realm {
                     push!(v);
                 }
                 Op::ImportMeta => {
-                    let o = self.new_object();
-                    push!(Value::Object(o));
+                    let v = match frame!().code.module {
+                        Some(m) => Value::Object(self.import_meta(crate::modules::ModuleId(m))),
+                        None => Value::Object(self.new_object()),
+                    };
+                    push!(v);
                 }
                 Op::DynamicImport => {
-                    pop!();
-                    let (p, _, reject) = self.new_promise();
-                    let e = self.new_error("TypeError", "Dynamic import is not supported");
-                    self.call(Value::Object(reject), Value::Undefined, &[e])?;
+                    let specifier = pop!();
+                    let referrer = frame!().code.filename.clone();
+                    let p = self.start_dynamic_import(specifier, &referrer);
                     push!(Value::Object(p));
                 }
                 Op::GetIterator => {

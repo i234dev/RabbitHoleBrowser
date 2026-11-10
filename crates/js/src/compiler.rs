@@ -38,6 +38,9 @@ enum BindKind {
     Hidden,
     /// Private name symbol.
     Private,
+    /// Module import binding: the slot holds a reference to the exporter's
+    /// binding (or a namespace object), written when the module is linked.
+    Import,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +136,9 @@ struct FnState {
     /// Number of runtime scopes currently pushed within this function.
     scope_depth: u32,
     is_script: bool,
+    /// The outer "environment" function of a module (holds the module
+    /// scope); it has no implicit `arguments` binding.
+    is_module_env: bool,
     filename: Rc<str>,
     source: Option<Rc<str>>,
     class_depth: u32,
@@ -166,6 +172,7 @@ impl FnState {
             cur_pos: Pos::default(),
             scope_depth: 0,
             is_script,
+            is_module_env: false,
             filename,
             source: None,
             class_depth: 0,
@@ -180,6 +187,25 @@ pub struct Compiler {
     pending_tweak: Option<Box<dyn FnOnce(&mut CodeFlags)>>,
     chain_stack: Vec<Vec<(usize, u32)>>,
     loose_chain_exits: Vec<(usize, u32)>,
+    /// Module id stamped on every produced `FunctionCode` (module mode).
+    module: Option<u32>,
+}
+
+/// Name of the hidden binding initialised by `export default <expr>` and
+/// anonymous `export default function/class`.
+pub const DEFAULT_EXPORT_BINDING: &str = "*default*";
+
+/// Output of [`compile_module`].
+#[derive(Debug)]
+pub struct CompiledModule {
+    /// The module "environment" function: run once (with `this` undefined)
+    /// it initialises TDZ slots, hoists top-level function declarations
+    /// into the module scope and returns the module body as an async arrow
+    /// closure over that scope.
+    pub code: Rc<FunctionCode>,
+    /// Module-scope slot of every top-level binding (locals, imports and
+    /// `*default*`), used to wire exports and imports at link time.
+    pub slots: HashMap<String, u16>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,8 +223,24 @@ pub fn compile_program(program: &Program, filename: &str, source: &str) -> CResu
         pending_tweak: None,
         chain_stack: Vec::new(),
         loose_chain_exits: Vec::new(),
+        module: None,
     };
     c.compile_script(program)
+}
+
+/// Compile an ECMAScript module (see [`CompiledModule`]). `module_id` is
+/// recorded on every function so `import.meta` can find its module.
+pub fn compile_module(program: &Program, filename: &str, source: &str, module_id: u32) -> CResult<CompiledModule> {
+    let mut c = Compiler {
+        fns: Vec::new(),
+        filename: Rc::from(filename),
+        source: Rc::from(source),
+        pending_tweak: None,
+        chain_stack: Vec::new(),
+        loose_chain_exits: Vec::new(),
+        module: Some(module_id),
+    };
+    c.compile_module_program(program)
 }
 
 impl Compiler {
@@ -315,7 +357,7 @@ impl Compiler {
                     }
                     return Resolved::Local { depth, slot: b.slot, kind: b.kind };
                 }
-                if scope.is_function && name == "arguments" && !self.fns[fi].flags.is_arrow && !self.fns[fi].is_script {
+                if scope.is_function && name == "arguments" && !self.fns[fi].flags.is_arrow && !self.fns[fi].is_script && !self.fns[fi].is_module_env {
                     // Implicit `arguments` binding.
                     let slot = self.fns[fi].scopes[si].declare("arguments", BindKind::Hidden);
                     self.fns[fi].arguments_slot = Some(slot as u32);
@@ -333,7 +375,9 @@ impl Compiler {
     fn emit_get_var(&mut self, name: &str) {
         match self.resolve(name) {
             Resolved::Local { depth, slot, kind } => {
-                if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
+                if kind == BindKind::Import {
+                    self.emit(Op::GetImport(depth, slot));
+                } else if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
                     self.emit(Op::GetLocalChecked(depth, slot));
                 } else {
                     self.emit(Op::GetLocal(depth, slot));
@@ -350,7 +394,12 @@ impl Compiler {
     fn emit_set_var(&mut self, name: &str) -> CResult<()> {
         match self.resolve(name) {
             Resolved::Local { depth, slot, kind } => {
-                if kind == BindKind::Const {
+                if kind == BindKind::Import {
+                    // Imports are immutable bindings.
+                    self.emit(Op::Pop);
+                    let m = self.const_str("Assignment to constant variable.");
+                    self.emit(Op::ThrowConst(1, m));
+                } else if kind == BindKind::Const {
                     // Still evaluate TDZ: reading first mirrors engines; then throw.
                     self.emit(Op::GetLocalChecked(depth, slot));
                     self.emit(Op::Pop);
@@ -438,7 +487,7 @@ impl Compiler {
         }
     }
 
-    fn collect_pattern_names(p: &Pattern, out: &mut Vec<String>) {
+    pub(crate) fn collect_pattern_names(p: &Pattern, out: &mut Vec<String>) {
         match p {
             Pattern::Identifier(n) => out.push(n.clone()),
             Pattern::Expr(_) => {}
@@ -534,16 +583,14 @@ impl Compiler {
                         }
                     }
                 }
-                StmtKind::ClassDecl(c) => {
-                    if let Some(n) = &c.name {
-                        out.push((n.clone(), BindKind::Class));
-                    }
-                }
-                StmtKind::FunctionDecl(f) if block_functions => {
-                    if let Some(n) = &f.name {
-                        out.push((n.clone(), BindKind::Function));
-                    }
-                }
+                StmtKind::ClassDecl(c) => match &c.name {
+                    Some(n) => out.push((n.clone(), BindKind::Class)),
+                    None => out.push((DEFAULT_EXPORT_BINDING.to_string(), BindKind::Class)),
+                },
+                StmtKind::FunctionDecl(f) if block_functions => match &f.name {
+                    Some(n) => out.push((n.clone(), BindKind::Function)),
+                    None => out.push((DEFAULT_EXPORT_BINDING.to_string(), BindKind::Function)),
+                },
                 _ => {}
             }
         }
@@ -572,8 +619,10 @@ impl Compiler {
                 _ => s,
             };
             if let StmtKind::FunctionDecl(f) = &s.kind {
-                let name = f.name.clone().unwrap_or_else(|| "default".to_string());
-                let idx = self.compile_function(f, Some(&name))?;
+                // Anonymous `export default function () {}` is named
+                // "default" but bound to the hidden `*default*` slot.
+                let name = f.name.clone().unwrap_or_else(|| DEFAULT_EXPORT_BINDING.to_string());
+                let idx = self.compile_function(f, Some(if f.name.is_some() { &name } else { "default" }))?;
                 self.emit(Op::MakeClosure(idx));
                 match self.resolve(&name) {
                     Resolved::Local { depth, slot, .. } => {
@@ -647,7 +696,74 @@ impl Compiler {
         }
         self.emit(Op::Return);
         let fs = self.fns.pop().unwrap();
-        Ok(Rc::new(finish(fs)))
+        Ok(Rc::new(finish(fs, self.module)))
+    }
+
+    // --------------------------------------------------------------- module
+
+    /// Module compilation: an outer environment function owning the module
+    /// scope (all top-level bindings, including imports) and an inner async
+    /// arrow holding the body. Splitting them lets the module loader create
+    /// the environment (and hoist functions) at link time, before any
+    /// module in the graph evaluates — which is what makes cyclic imports
+    /// of hoisted functions work.
+    fn compile_module_program(&mut self, program: &Program) -> CResult<CompiledModule> {
+        let flags = CodeFlags { is_strict: true, ..Default::default() };
+        let mut fs = FnState::new("<module>", flags, false, self.filename.clone());
+        fs.is_module_env = true;
+        fs.source = Some(self.source.clone());
+        self.fns.push(fs);
+
+        let mut vars = Vec::new();
+        Self::collect_var_names(&program.body, &mut vars);
+        let mut lex = Self::collect_lexical(&program.body, true);
+        for s in &program.body {
+            match &s.kind {
+                StmtKind::Import(d) => {
+                    let locals = d.default.iter().chain(d.namespace.iter()).chain(d.named.iter().map(|(_, local)| local));
+                    lex.extend(locals.map(|l| (l.clone(), BindKind::Import)));
+                }
+                StmtKind::Export(ExportDecl::DefaultExpr(_)) => lex.push((DEFAULT_EXPORT_BINDING.to_string(), BindKind::Let)),
+                _ => {}
+            }
+        }
+        self.check_duplicates(&lex, &vars)?;
+        for v in &vars {
+            self.declare(v, BindKind::Var);
+        }
+        for (n, k) in &lex {
+            self.declare(n, *k);
+        }
+        let tdz = self.fs_ref().scopes[0].tdz_slots.clone();
+        for s in tdz {
+            self.emit(Op::Empty);
+            self.emit(Op::InitLocal(0, s));
+        }
+        self.hoist_functions(&program.body)?;
+
+        // The body: an async arrow (so `this` is the environment's
+        // undefined `this`, there is no `arguments`, and top-level `await`
+        // works). Bodies without `await` complete synchronously.
+        let body_flags = CodeFlags { is_arrow: true, is_async: true, is_strict: true, has_simple_params: true, ..Default::default() };
+        let mut body = FnState::new("<module>", body_flags, false, self.filename.clone());
+        body.source = Some(self.source.clone());
+        self.fns.push(body);
+        for s in &program.body {
+            self.compile_stmt(s)?;
+        }
+        self.emit(Op::Undefined);
+        self.emit(Op::Return);
+        let body = self.fns.pop().unwrap();
+        let body_code = Rc::new(finish(body, self.module));
+        let env = self.fs();
+        env.functions.push(body_code);
+        let idx = (env.functions.len() - 1) as u32;
+        self.emit(Op::MakeClosure(idx));
+        self.emit(Op::Return);
+
+        let env = self.fns.pop().unwrap();
+        let slots = env.scopes[0].names.iter().map(|(n, b)| (n.clone(), b.slot)).collect();
+        Ok(CompiledModule { code: Rc::new(finish(env, self.module)), slots })
     }
 
     // ------------------------------------------------------------ functions
@@ -772,7 +888,7 @@ impl Compiler {
             }
         }
         let fs = self.fns.pop().unwrap();
-        let code = Rc::new(finish(fs));
+        let code = Rc::new(finish(fs, self.module));
         let parent = self.fs();
         parent.functions.push(code);
         Ok((parent.functions.len() - 1) as u32)
@@ -935,13 +1051,27 @@ impl Compiler {
                 }
             }
             StmtKind::With { .. } => return self.err("'with' statements are not supported"),
-            StmtKind::Import(_) => {} // modules: imports are resolved by the host (unsupported → ignored)
+            // Import bindings are wired by the module linker.
+            StmtKind::Import(_) => {}
             StmtKind::Export(e) => match e {
                 ExportDecl::DefaultExpr(ex) => {
-                    self.compile_expr(ex)?;
-                    self.emit(Op::Pop);
+                    self.compile_expr_named(ex, Some("default"))?;
+                    if self.module.is_some() {
+                        self.emit_init_var(DEFAULT_EXPORT_BINDING)?;
+                    } else {
+                        self.emit(Op::Pop);
+                    }
                 }
-                ExportDecl::DefaultDecl(d) | ExportDecl::Decl(d) => self.compile_stmt(d)?,
+                ExportDecl::DefaultDecl(d) => match &d.kind {
+                    StmtKind::ClassDecl(c) if c.name.is_none() => {
+                        let mut named = c.clone();
+                        named.name = Some("default".to_string());
+                        self.compile_class(&named)?;
+                        self.emit_init_var(DEFAULT_EXPORT_BINDING)?;
+                    }
+                    _ => self.compile_stmt(d)?,
+                },
+                ExportDecl::Decl(d) => self.compile_stmt(d)?,
                 ExportDecl::Named { .. } | ExportDecl::All { .. } => {}
             },
         }
@@ -2643,7 +2773,7 @@ fn set_flags(code: &mut Rc<FunctionCode>, flags: CodeFlags) {
     }
 }
 
-fn finish(fs: FnState) -> FunctionCode {
+fn finish(fs: FnState, module: Option<u32>) -> FunctionCode {
     let scope = &fs.scopes[0];
     let mut slot_names = vec![JsStr::empty(); scope.slot_count as usize];
     for (n, b) in &scope.names {
@@ -2670,5 +2800,6 @@ fn finish(fs: FnState) -> FunctionCode {
         templates: fs.templates,
         source: fs.source,
         filename: fs.filename,
+        module,
     }
 }

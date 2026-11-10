@@ -983,3 +983,237 @@ fn extras_behaviour() {
     eq("Error.prototype.toString.call({name: 'X', message: 'm'})", "X: m");
     eq("new Date(2026, 0, 1).toLocaleDateString('en-US') === new Intl.DateTimeFormat('en-US').format(new Date(2026, 0, 1))", "true");
 }
+
+// ------------------------------------------------------------------ modules
+
+mod modules {
+    use crate::modules::{ModuleId, ModuleStatus};
+    use crate::realm::Realm;
+    use crate::value::Value;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    /// Resolve `spec` against `referrer` for the in-memory `mem:/` scheme.
+    fn resolve(referrer: &str, spec: &str) -> Option<String> {
+        if spec.starts_with("mem:/") {
+            return Some(spec.to_string());
+        }
+        let rest = spec.strip_prefix("./")?;
+        let dir = match referrer.rfind('/') {
+            Some(i) if referrer.starts_with("mem:/") => &referrer[..=i],
+            _ => "mem:/",
+        };
+        Some(format!("{dir}{rest}"))
+    }
+
+    /// A realm with an in-memory module loader over `files` (name → source,
+    /// served at `mem:/<name>`) and console capture.
+    fn realm_with(files: &[(&str, &str)]) -> (Realm, Rc<RefCell<Vec<String>>>) {
+        let mut realm = Realm::new();
+        let logs = Rc::new(RefCell::new(Vec::<String>::new()));
+        let l2 = logs.clone();
+        realm.set_console_sink(Box::new(move |_lvl, text| l2.borrow_mut().push(text)));
+        let sources: HashMap<String, String> = files.iter().map(|(n, s)| (format!("mem:/{n}"), s.to_string())).collect();
+        let cache: Rc<RefCell<HashMap<String, ModuleId>>> = Rc::default();
+        realm.set_module_loader(Box::new(move |realm, referrer, spec| {
+            let Some(url) = resolve(referrer, spec) else {
+                return Err(realm.new_error("TypeError", &format!("Failed to resolve module specifier \"{spec}\"")));
+            };
+            if let Some(id) = cache.borrow().get(&url) {
+                return Ok(*id);
+            }
+            let Some(src) = sources.get(&url) else {
+                return Err(realm.new_error("TypeError", &format!("Failed to fetch dynamically imported module: {url}")));
+            };
+            let id = realm.compile_module(src, &url)?;
+            cache.borrow_mut().insert(url, id);
+            Ok(id)
+        }));
+        (realm, logs)
+    }
+
+    /// Load `entry` through the loader, link, evaluate and drain jobs.
+    /// Returns the console lines joined by `|`, or the error text.
+    fn run_entry(files: &[(&str, &str)], entry: &str) -> Result<String, String> {
+        let (mut realm, logs) = realm_with(files);
+        let r = run_in(&mut realm, entry);
+        realm.run_jobs();
+        let out = logs.borrow().join("|");
+        r.map(|_| out)
+    }
+
+    fn run_in(realm: &mut Realm, entry: &str) -> Result<ModuleId, String> {
+        let id = realm.load_imported_module("mem:/", &format!("./{entry}")).map_err(|e| realm.error_to_string(&e))?;
+        realm.link_module(id).map_err(|e| realm.error_to_string(&e))?;
+        let p = realm.evaluate_module(id).map_err(|e| realm.error_to_string(&e))?;
+        realm.run_jobs();
+        if let Some(e) = realm.module_error(id) {
+            return Err(realm.error_to_string(&e));
+        }
+        assert!(p.is_object());
+        Ok(id)
+    }
+
+    fn ok(files: &[(&str, &str)], entry: &str) -> String {
+        match run_entry(files, entry) {
+            Ok(s) => s,
+            Err(e) => panic!("module {entry} failed: {e}"),
+        }
+    }
+
+    fn err(files: &[(&str, &str)], entry: &str) -> String {
+        match run_entry(files, entry) {
+            Ok(s) => panic!("module {entry} should fail, logged {s:?}"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn named_default_and_namespace_imports() {
+        let files = [
+            ("a.js", "export const x = 1; export default function f() { return 'def'; } export function g() { return 'g'; } export let y = 2, z = 3;"),
+            ("main.js", "import f, { x, g as h, y, z } from './a.js'; import * as ns from './a.js';\nconsole.log(x, f(), h(), y + z, ns.x, ns.default === f, typeof ns.g);"),
+            ("anon.js", "export default class {}"),
+            ("expr.js", "export default 40 + 2;"),
+            ("fn.js", "export default function () { return 'anon'; }"),
+            ("alias.js", "const v = 'aliased'; export { v as default, v as other };"),
+            ("main2.js", "import C from './anon.js'; import n from './expr.js'; import fn from './fn.js'; import al, { other } from './alias.js';\nconsole.log(new C().constructor.name, n, fn(), fn.name, al, other);"),
+        ];
+        assert_eq!(ok(&files, "main.js"), "1 def g 5 1 true function");
+        assert_eq!(ok(&files, "main2.js"), "default 42 anon default aliased aliased");
+    }
+
+    #[test]
+    fn live_bindings_are_read_only() {
+        let files = [
+            ("counter.js", "export let count = 0; export function inc() { count++; }"),
+            ("main.js", "import { count, inc } from './counter.js'; import * as c from './counter.js';\nconsole.log(count); inc(); inc(); console.log(count, c.count);\ntry { count = 5; } catch (e) { console.log(e.constructor.name, e.message); }"),
+        ];
+        assert_eq!(ok(&files, "main.js"), "0|2 2|TypeError Assignment to constant variable.");
+    }
+
+    #[test]
+    fn re_exports_and_star_conflicts() {
+        let files = [
+            ("a.js", "export const a = 'a'; export const dup = 'a-dup'; export default 'a-default';"),
+            ("b.js", "export const b = 'b'; export const dup = 'b-dup';"),
+            ("re.js", "export * from './a.js'; export * from './b.js'; export { a as renamed } from './a.js'; export * as nsB from './b.js'; import { b } from './b.js'; export { b as default };"),
+            ("main.js", "import * as r from './re.js'; import def, { a, renamed, nsB } from './re.js';\nconsole.log(a, renamed, nsB.b, def, Object.keys(r).join(','), 'dup' in r);"),
+            ("conflict.js", "import { dup } from './re.js'; console.log(dup);"),
+            ("missing.js", "import { nope } from './a.js';"),
+            ("bad-reexport.js", "export { nope } from './b.js';"),
+        ];
+        assert_eq!(ok(&files, "main.js"), "a a b b a,b,default,nsB,renamed false");
+        assert!(err(&files, "conflict.js").contains("SyntaxError: The requested module './re.js' contains conflicting star exports for name 'dup'"));
+        assert!(err(&files, "missing.js").contains("SyntaxError: The requested module './a.js' does not provide an export named 'nope'"));
+        assert!(err(&files, "bad-reexport.js").contains("The requested module './b.js' does not provide an export named 'nope'"));
+    }
+
+    #[test]
+    fn cycles_hoist_functions_and_report_tdz() {
+        let files = [
+            ("even.js", "import { isOdd } from './odd.js'; export function isEven(n) { return n === 0 ? true : isOdd(n - 1); } console.log('even', isEven(3));"),
+            ("odd.js", "import { isEven } from './even.js'; export function isOdd(n) { return n === 0 ? false : isEven(n - 1); } console.log('odd', isEven(4));"),
+            ("a.js", "import { b } from './b.js'; export let a = 1; console.log('a', b);"),
+            ("b.js", "import { a } from './a.js'; export let b = 2; console.log('b', a);"),
+        ];
+        assert_eq!(ok(&files, "even.js"), "odd true|even false");
+        let (mut realm, logs) = realm_with(&files);
+        let e = run_in(&mut realm, "a.js").unwrap_err();
+        assert!(e.contains("ReferenceError: Cannot access 'a' before initialization"), "{e}");
+        assert!(logs.borrow().is_empty());
+        let b = realm.load_imported_module("mem:/", "./b.js").unwrap();
+        assert_eq!(realm.module_status(b), ModuleStatus::Errored);
+    }
+
+    #[test]
+    fn top_level_await_orders_dependents() {
+        let files = [
+            ("slow.js", "console.log('slow start'); export let v = 1; await Promise.resolve(); await null; v = 2; console.log('slow end');"),
+            ("fast.js", "console.log('fast');"),
+            ("main.js", "import { v } from './slow.js'; import './fast.js'; console.log('main', v); const r = await Promise.resolve(5); console.log('after', r);"),
+            ("boom.js", "await null; throw new Error('late');"),
+            ("uses-boom.js", "import './boom.js'; console.log('never');"),
+        ];
+        assert_eq!(ok(&files, "main.js"), "slow start|fast|slow end|main 2|after 5");
+        assert!(err(&files, "uses-boom.js").contains("Error: late"));
+    }
+
+    #[test]
+    fn dynamic_import_resolves_and_rejects() {
+        let files = [
+            ("a.js", "console.log('a runs'); export const x = 1;"),
+            ("main.js", "import('./a.js').then(ns => console.log('ok', ns.x, ns[Symbol.toStringTag]));\nimport('./missing.js').catch(e => console.log('err', e.constructor.name, e.message));\nconsole.log('sync');"),
+        ];
+        let out = ok(&files, "main.js");
+        let lines: Vec<&str> = out.split('|').collect();
+        assert_eq!(lines[0], "sync");
+        assert!(lines.contains(&"a runs") && lines.contains(&"ok 1 Module"), "{out}");
+        assert!(lines.contains(&"err TypeError Failed to fetch dynamically imported module: mem:/missing.js"), "{out}");
+
+        // From a classic script: the referrer is the script URL.
+        let (mut realm, logs) = realm_with(&files);
+        realm.eval("import('./a.js').then(ns => console.log('classic', ns.x))", "mem:/classic.js").unwrap();
+        realm.run_jobs();
+        assert_eq!(logs.borrow().join("|"), "a runs|classic 1");
+    }
+
+    #[test]
+    fn import_meta_and_module_scope() {
+        let files = [
+            ("dir/main.js", "console.log(import.meta.url, Object.getPrototypeOf(import.meta) === null, import.meta === import.meta);"),
+            ("scope.js", "var secret = 1; let s2 = 2; function fn() { return this; }\nconsole.log(this === undefined, typeof globalThis.secret, typeof globalThis.fn, typeof globalThis.s2, fn() === undefined);\ntry { undeclared = 1; } catch (e) { console.log(e.constructor.name); }\nconsole.log((() => this)() === undefined, typeof arguments === 'undefined');"),
+        ];
+        assert_eq!(ok(&files, "dir/main.js"), "mem:/dir/main.js true true");
+        assert_eq!(ok(&files, "scope.js"), "true undefined undefined undefined true|ReferenceError|true true");
+    }
+
+    #[test]
+    fn namespace_object_shape() {
+        let files = [
+            ("a.js", "export const z = 1, a = 2, m = 3; export default 4;"),
+            ("main.js", "import * as ns from './a.js';\nconsole.log(Object.prototype.toString.call(ns), Object.isExtensible(ns), Object.getPrototypeOf(ns), ns[Symbol.toStringTag], Object.keys(ns).join(','));\ntry { ns.a = 9; } catch (e) { console.log(e.constructor.name); }\ntry { ns.extra = 1; } catch (e) { console.log(e.constructor.name); }\nconsole.log(ns.a, 'extra' in ns, JSON.stringify(ns));"),
+        ];
+        assert_eq!(ok(&files, "main.js"), "[object Module] false null Module a,default,m,z|TypeError|TypeError|2 false {\"a\":2,\"default\":4,\"m\":3,\"z\":1}");
+    }
+
+    #[test]
+    fn webpack_style_chunks() {
+        let files = [
+            (
+                "wp-runtime-6b0851141170f516.js",
+                "const installed = {};\nexport const __webpack_require__ = { C(chunk) { for (const id of chunk.__rspack_esm_ids) installed[id] = true; Object.assign(installed, chunk.__webpack_modules__); globalThis.loaded = Object.keys(installed).join(','); } };",
+            ),
+            ("code-menu-1a2b.js", "export const __rspack_esm_ids=[\"cm\"];export const __webpack_modules__={X1(){}};"),
+            (
+                "entry.js",
+                "export const __rspack_esm_ids=[\"e3\"];export const __webpack_modules__={DZ8(){}};import{__webpack_require__ as e}from\"./wp-runtime-6b0851141170f516.js\";import*as o from\"./code-menu-1a2b.js\";e.C(o);import*as self from\"./entry.js\";e.C(self);console.log(globalThis.loaded);",
+            ),
+        ];
+        assert_eq!(ok(&files, "entry.js"), "cm,X1,e3,DZ8");
+    }
+
+    #[test]
+    fn synthetic_modules_and_eval_module() {
+        let (mut realm, logs) = realm_with(&[("main.js", "import data from './data.json'; console.log(data.k);")]);
+        let obj = realm.new_object();
+        realm.define_property(obj, "k", Value::str("v"), crate::heap::ALL);
+        let json = realm.create_synthetic_module("mem:/data.json", vec![("default".into(), Value::Object(obj))]);
+        let main = realm.load_imported_module("mem:/", "./main.js").unwrap();
+        // Pre-resolve the JSON request to the synthetic module through a fresh loader.
+        realm.set_module_loader(Box::new(move |_realm, _referrer, _spec| Ok(json)));
+        realm.link_module(main).unwrap();
+        realm.evaluate_module(main).unwrap();
+        realm.run_jobs();
+        assert_eq!(logs.borrow().join("|"), "v");
+        // `eval_module` runs a module through the installed loader.
+        let r = realm.eval_module("import d from './whatever.json'; console.log('again', d.k); export {};", "mem:/inline.js");
+        assert!(r.is_ok());
+        realm.run_jobs();
+        assert_eq!(logs.borrow().join("|"), "v|again v");
+        // Static syntax errors are SyntaxErrors with the URL.
+        let e = realm.compile_module("export const = 1;", "mem:/bad.js").unwrap_err();
+        assert!(realm.error_to_string(&e).contains("mem:/bad.js"));
+    }
+}

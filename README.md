@@ -71,8 +71,8 @@ _Both images were produced by `rabbithole screenshot`: every pixel comes from Ra
 
 ## Limitations (for now)
 
-- JavaScript: ES modules (`<script type="module">` with `import`) are not
-  supported yet, so module-based sites (e.g. GitHub) only partially work;
+- JavaScript: ES modules are supported; some rarer syntax (e.g. object rest
+  with computed keys) is not yet, so very large app bundles may partially fail;
   no `<canvas>` 2D context, no shadow DOM isolation.
 - No complex text shaping (Latin/Cyrillic/Greek etc. render fine; Arabic and
   Indic scripts do not), color emoji fonts render blank.
