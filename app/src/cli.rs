@@ -310,6 +310,71 @@ pub fn js(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `rabbithole click <URL> <X> <Y> [--scroll Y] [--width W] [--height H]
+/// [--hit-only] [--wait ms]`: hit-test the viewport point like the GUI does
+/// (same layout as `screenshot`), print what is under it, then click there
+/// (full pointer event sequence + default action) and report the result.
+pub fn click(args: &[String]) -> Result<(), String> {
+    let (positional, flags) = parse_args(args, &["width", "height", "scroll", "wait"])?;
+    let (url, x, y) = match positional.as_slice() {
+        [u, x, y] => (*u, x.parse::<f32>().map_err(|_| format!("bad x `{x}`"))?, y.parse::<f32>().map_err(|_| format!("bad y `{y}`"))?),
+        _ => return Err("usage: rabbithole click <URL> <X> <Y> [--scroll Y] [--width W] [--height H] [--hit-only]".into()),
+    };
+    let js = JsOptions::from_flags(&flags, 1000)?;
+    let viewport = Viewport { width: parse_num(&flags, "width", 1280u32)? as f32, height: parse_num(&flags, "height", 800u32)? as f32 };
+    let mut session = Session::new(true).with_js(js);
+    let mut page = if url.trim_start().starts_with('<') {
+        let base = Url::parse("about:blank").ok_or("bad base")?;
+        session.engine.load_html(url, base, viewport)
+    } else {
+        let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
+        session.load_request(&Request::get(parsed), viewport)?
+    };
+    let scroll = parse_num(&flags, "scroll", 0.0f32)?.clamp(0.0, (page.content_height() - viewport.height).max(0.0));
+    session.engine.set_page_scroll(&mut page, 0.0, scroll);
+    let hits = page.nodes_at_viewport(x, y);
+    if hits.is_empty() {
+        emit(&format!("nothing at ({x}, {y})"));
+        return Ok(());
+    }
+    let mut lines = vec![format!("at ({x}, {y}) scroll {scroll}: topmost first")];
+    for n in &hits {
+        lines.push(format!("  {}", crate::scripting::describe_node(&page.doc, *n)));
+    }
+    let top = hits[0];
+    let mut path = Vec::new();
+    let mut cur = Some(top);
+    while let Some(c) = cur {
+        if page.doc.element(c).is_some() {
+            path.push(crate::scripting::describe_node(&page.doc, c));
+        }
+        cur = page.doc.parent(c);
+    }
+    path.reverse();
+    lines.push(format!("path: {}", path.join(" > ")));
+    if let Some(link) = page.link_of(top) {
+        lines.push(format!("link: {link}"));
+    }
+    lines.push(format!("cursor: {}", page.cursor_at(x, y + scroll)));
+    if !has_flag(&flags, "hit-only") {
+        let (clicked, request) = crate::scripting::click_at(&session.engine, &mut page, x, y);
+        lines.push(format!("clicked: {}", clicked.map(|n| crate::scripting::describe_node(&page.doc, n)).unwrap_or_else(|| "-".into())));
+        match request {
+            Some(req) => lines.push(format!("navigates: {} {}", req.method, req.url)),
+            None => {
+                let nav = crate::scripting::settle(&session.engine, &mut page, session.wait_ms);
+                match nav {
+                    Some(n) => lines.push(format!("navigates (script): {}", n.request.url)),
+                    None => lines.push("no navigation".into()),
+                }
+            }
+        }
+        session.flush_console(&mut page);
+    }
+    emit(&lines.join("\n"));
+    Ok(())
+}
+
 /// `rabbithole cookies <URL>`: the stored cookies that would be sent.
 pub fn cookies(args: &[String]) -> Result<(), String> {
     let (positional, _flags) = parse_args(args, &[])?;

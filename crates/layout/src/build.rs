@@ -335,6 +335,7 @@ impl<'a> Builder<'a> {
             // No alt at all: a 16×16 broken-image icon.
             b.attr_size = (Some(16.0), Some(16.0));
         }
+        b.ratio_only = tag == "svg" && attr_w.is_none() && attr_h.is_none() && b.image.is_some() && (doc.attr(node, "viewBox").is_some() || doc.attr(node, "viewbox").is_some());
         let has_media = b.image.as_ref().map(|i| !i.broken).unwrap_or(false);
         if matches!(tag, "iframe" | "video" | "object" | "embed" | "canvas") && !has_media {
             if b.attr_size.0.is_none() {

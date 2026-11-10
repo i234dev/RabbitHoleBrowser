@@ -56,8 +56,9 @@ pub struct MouseDown {
     pub pos: PhysicalPosition<f64>,
     /// Document point under the press (if over the page).
     pub doc: Option<(f32, f32)>,
-    pub link: Option<Url>,
     pub dragged: bool,
+    /// Second press of a double click (word selection; `dblclick`).
+    pub double: bool,
 }
 
 /// Run the GUI. `start_urls` empty → restore the last session.
@@ -108,8 +109,6 @@ pub struct App {
     pub(crate) cursor: PhysicalPosition<f64>,
     pub(crate) cursor_icon: CursorIcon,
     pub(crate) mouse_down: Option<MouseDown>,
-    /// Element under the pointer when the left button went down.
-    pub(crate) mouse_down_node: Option<NodeId>,
     pub(crate) last_click: Option<(Instant, PhysicalPosition<f64>)>,
     pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) start_urls: Vec<String>,
@@ -198,7 +197,6 @@ impl App {
             toasts: Vec::new(),
             last_scroll_dispatch: Instant::now(),
             script_relayout: false,
-            mouse_down_node: None,
         }
     }
 
@@ -761,30 +759,40 @@ impl App {
         let kind = page.control_kind(node);
         let text = page.control_text(node);
         let max_len = page.max_length(node);
-        self.engine.set_focus(page, Some(node));
+        // Focus (with focus/focusin events) unless the press already did.
+        let out = self.engine.focus_element(page, Some(node));
         tab.edit = Some(ControlEdit { node, buf: TextBuffer::new(&text), kind, max_len, initial: text.clone() });
         tab.focus = Some(node);
         tab.selection = None;
         self.ui_focus = UiFocus::Page;
         self.mark_page_dirty();
-        self.dispatch_to(node, "focus", EventInit::simple(false, false));
-        self.dispatch_to(node, "focusin", EventInit::simple(true, false));
+        self.apply_outcome(idx, out);
+    }
+
+    /// Run an engine operation on the active page and apply its script
+    /// side effects (relayout, navigation, dialogs, ...).
+    pub(crate) fn page_op<R>(&mut self, f: impl FnOnce(&rabbithole_engine::Engine, &mut Page) -> (R, ScriptOutcome)) -> Option<R> {
+        let idx = self.active;
+        let page = self.tabs.get_mut(idx)?.page.as_mut()?;
+        let (r, out) = f(&self.engine, page);
+        self.apply_outcome(idx, out);
+        Some(r)
     }
 
     pub(crate) fn end_edit(&mut self) {
         let idx = self.active;
         let Some(tab) = self.tabs.get_mut(idx) else { return };
         if let Some(edit) = tab.edit.take() {
-            if let Some(page) = tab.page.as_mut() {
-                self.engine.set_focus(page, None);
-            }
             tab.focus = None;
             self.mark_page_dirty();
             if edit.buf.text != edit.initial {
                 self.dispatch_to(edit.node, "change", plain_init(false));
             }
-            self.dispatch_to(edit.node, "blur", EventInit::simple(false, false));
-            self.dispatch_to(edit.node, "focusout", EventInit::simple(true, false));
+            // Blur (blur/focusout) unless focus already moved elsewhere.
+            self.page_op(|engine, page| {
+                let out = if page.state.focused == Some(edit.node) { engine.focus_element(page, None) } else { ScriptOutcome::default() };
+                ((), out)
+            });
         }
     }
 

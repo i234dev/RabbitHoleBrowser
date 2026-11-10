@@ -9,8 +9,9 @@ use rabbithole_engine::css::selector::SelectorParser;
 use rabbithole_engine::css::{matches, Tokenizer};
 use rabbithole_engine::dom::{Document, NodeId};
 use rabbithole_engine::net::Url;
-use rabbithole_engine::scripting::{input_init, mouse_init, plain_init, PendingNavigation, ScriptOutcome};
-use rabbithole_engine::{ControlKind, Engine, Page};
+use rabbithole_engine::scripting::{input_init, plain_init, PendingNavigation};
+use rabbithole_engine::net::Request;
+use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page};
 
 /// Maximum number of console lines kept per page.
 pub const CONSOLE_CAPACITY: usize = 500;
@@ -106,56 +107,59 @@ pub fn settle(engine: &Engine, page: &mut Page, wait_ms: u64) -> Option<PendingN
     navigation
 }
 
-/// Dispatch `click` (preceded by `mousedown`/`mouseup`) at the centre of a
-/// node's box and report the outcome of the `click` dispatch.
-pub fn click_node(engine: &Engine, page: &mut Page, node: NodeId) -> ScriptOutcome {
-    let (x, y) = page.rect_of(node).map(|r| (r.x + r.w / 2.0, r.y + r.h / 2.0)).unwrap_or((0.0, 0.0));
-    let _ = engine.dispatch_event(page, node, "mousedown", mouse_init(x, y, 0, false, false, false, false));
-    let _ = engine.dispatch_event(page, node, "mouseup", mouse_init(x, y, 0, false, false, false, false));
-    engine.dispatch_event(page, node, "click", mouse_init(x, y, 0, false, false, false, false))
+/// Turn a click's outcome into the request to navigate with, if any: a
+/// script-requested navigation, a followed link, or a submitted form
+/// (dispatching `submit` first).
+pub fn click_request(engine: &Engine, page: &mut Page, action: ClickAction, navigation: Option<PendingNavigation>) -> Option<Request> {
+    if let Some(nav) = navigation {
+        return Some(nav.request);
+    }
+    match action {
+        ClickAction::Navigate { url, .. } => Some(Request::get(url).with_referer(page.url.clone())),
+        ClickAction::Submit { form, submitter } => {
+            let out = engine.dispatch_event(page, form, "submit", plain_init(true));
+            if out.default_prevented {
+                return None;
+            }
+            if let Some(nav) = out.navigation {
+                return Some(nav.request);
+            }
+            page.submit_request(form, submitter, &|_| Vec::new())
+        }
+        _ => None,
+    }
 }
 
-/// The default action of an uncancelled click on `node`: follow a link or
-/// submit a form. Returns the request to navigate with, if any. Other
-/// defaults (checkbox toggles) are applied in place.
-pub fn click_default_action(engine: &Engine, page: &mut Page, node: NodeId) -> Option<rabbithole_engine::net::Request> {
-    if let Some(control) = page.control_of(node) {
-        match page.control_kind(control) {
-            ControlKind::Checkbox | ControlKind::Radio => {
-                page.toggle_control(control);
-                engine.restyle(page);
-                let _ = engine.dispatch_event(page, control, "input", input_init(None));
-                let _ = engine.dispatch_event(page, control, "change", plain_init(false));
-                return None;
-            }
-            ControlKind::Submit => {
-                let form = page.form_of(control)?;
-                let out = engine.dispatch_event(page, form, "submit", plain_init(true));
-                if out.default_prevented {
-                    return None;
-                }
-                if let Some(nav) = out.navigation {
-                    return Some(nav.request);
-                }
-                return page.submit_request(form, Some(control), &|_| Vec::new());
-            }
-            ControlKind::Reset => {
-                if let Some(form) = page.form_of(control) {
-                    page.reset_form(form);
-                    engine.restyle(page);
-                }
-                return None;
-            }
-            _ => {}
+/// Click an element like a user would (event sequence at its centre,
+/// activation behaviour) and return the request to navigate with.
+pub fn click_element(engine: &Engine, page: &mut Page, node: NodeId) -> Option<Request> {
+    let (action, out) = engine.click_element(page, node, None, Modifiers::default());
+    click_request(engine, page, action, out.navigation)
+}
+
+/// Click at viewport coordinates (hit test + full pointer event sequence).
+/// Returns the clicked element and the request to navigate with.
+pub fn click_at(engine: &Engine, page: &mut Page, x: f32, y: f32) -> (Option<NodeId>, Option<Request>) {
+    let up = engine.click_at(page, x, y, Modifiers::default());
+    let clicked = up.clicked;
+    (clicked, click_request(engine, page, up.action, up.outcome.navigation))
+}
+
+/// Short description of an element for diagnostics: `tag#id.class`.
+pub fn describe_node(doc: &Document, node: NodeId) -> String {
+    let Some(el) = doc.element(node) else { return "#text".into() };
+    let mut s = el.tag.clone();
+    if let Some(id) = el.attr("id") {
+        s.push('#');
+        s.push_str(id);
+    }
+    if let Some(c) = el.attr("class") {
+        for c in c.split_whitespace().take(3) {
+            s.push('.');
+            s.push_str(c);
         }
     }
-    let link = page.link_of(node)?;
-    if link.scheme == "javascript" {
-        let code = rabbithole_engine::net::url::percent_decode(link.path.trim_start_matches("javascript:"));
-        let _ = engine.eval_in_page(page, &code);
-        return None;
-    }
-    Some(rabbithole_engine::net::Request::get(link).with_referer(page.url.clone()))
+    s
 }
 
 /// Set a control's value as a user would (typing, toggling, choosing an
@@ -242,8 +246,8 @@ mod tests {
         let logs = page.take_console();
         assert!(logs.iter().any(|(_, m)| m == "ready"), "{logs:?}");
         let button = query_selector(&page.doc, "#b").unwrap().unwrap();
-        let out = click_node(&engine, &mut page, button);
-        assert!(out.default_prevented);
+        // The listener cancels the click: no navigation, page updated.
+        assert!(click_element(&engine, &mut page, button).is_none());
         let p = query_selector(&page.doc, "#out").unwrap().unwrap();
         assert_eq!(page.doc.text_content(p), "after");
         settle(&engine, &mut page, 500);
@@ -271,7 +275,7 @@ mod tests {
         fill_control(&engine, &mut page, s, "Two").unwrap();
         assert_eq!(engine.eval_in_page(&mut page, "document.getElementById('s').value").trim(), "'2'");
         let go = query_selector(&page.doc, "#go").unwrap().unwrap();
-        let req = click_default_action(&engine, &mut page, go).expect("submission request");
+        let req = click_element(&engine, &mut page, go).expect("submission request");
         assert_eq!(req.method, "GET");
         assert!(req.url.query.as_deref().unwrap_or("").contains("q=rabbits"), "{:?}", req.url.query);
         assert!(req.url.query.as_deref().unwrap_or("").contains("s=2"));

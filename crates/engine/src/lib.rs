@@ -10,6 +10,7 @@
 pub mod forms;
 mod home;
 pub mod images;
+pub mod pointer;
 pub mod scripting;
 pub mod select;
 mod text;
@@ -17,6 +18,7 @@ mod text;
 pub use select::{Selection, TextRun};
 
 pub use forms::{ChosenFile, ControlKind};
+pub use pointer::{ClickAction, Modifiers};
 pub use rabbithole_net::{Body, Request, StreamedResponse};
 
 use rabbithole_css::{parse_media_query, MatchState, MediaQuery, PseudoElement, Rule};
@@ -826,6 +828,8 @@ pub struct Page {
     pub requested_scroll: Option<(f32, f32)>,
     /// Image loading after the first layout (lazy, srcset, scripts).
     pub image_state: images::ImageState,
+    /// Hover / pressed-button state for pointer events.
+    pub pointer: pointer::PointerState,
 }
 
 impl Default for Engine {
@@ -911,13 +915,14 @@ impl Engine {
             has_dynamic_rules,
             script: ScriptState::default(),
             requested_scroll: None,
+            pointer: pointer::PointerState::default(),
             sheet_signature: 0,
             image_state: images::ImageState::default(),
         };
         page.snapshot_form_defaults();
         page.sheet_signature = stylesheet_signature(&page.doc);
         self.restyle(&mut page);
-        if self.scripting && !page.scripts.is_empty() {
+        if self.scripting && (!page.scripts.is_empty() || has_inline_handlers(&page.doc)) {
             // Keep what the scripts asked for during load (redirects via
             // `location`, `window.open`, dialogs) for the embedder to apply.
             let out = self.run_page_scripts(&mut page);
@@ -1264,7 +1269,17 @@ fn rebase_rules(rules: Vec<Rule>, base: &str) -> Vec<Rule> {
         .collect()
 }
 
-/// Target of a `<meta http-equiv="refresh">` with a short delay.
+/// Does any element carry an inline event handler (`onclick="..."`)?
+/// Such pages need a script host even without `<script>` elements.
+fn has_inline_handlers(doc: &Document) -> bool {
+    doc.descendants(Document::ROOT).any(|n| {
+        doc.element(n)
+            .map(|e| e.attrs.iter().any(|(k, _)| k.len() > 2 && k.starts_with("on")))
+            .unwrap_or(false)
+    })
+}
+
+/// Is the node inside a `<noscript>` element?
 fn in_noscript(doc: &rabbithole_dom::Document, mut n: NodeId) -> bool {
     while let Some(p) = doc.parent(n) {
         if doc.element(p).map(|e| e.tag == "noscript").unwrap_or(false) {

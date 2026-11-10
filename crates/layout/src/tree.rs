@@ -199,6 +199,9 @@ pub struct LayoutBox {
     pub image: Option<Arc<Image>>,
     /// Intrinsic (attribute) size for replaced boxes without an image.
     pub attr_size: (Option<f32>, Option<f32>),
+    /// Replaced box with an intrinsic ratio but no intrinsic size (inline
+    /// `<svg>` without width/height attributes).
+    pub ratio_only: bool,
     pub marker: Option<Marker>,
     /// Marker text computed at build time (before positioning).
     pub marker_text: Option<Rc<str>>,
@@ -247,6 +250,7 @@ impl LayoutBox {
             text: None,
             image: None,
             attr_size: (None, None),
+            ratio_only: false,
             marker: None,
             marker_text: None,
             baseline: None,

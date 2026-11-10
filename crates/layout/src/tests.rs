@@ -136,6 +136,18 @@ fn percentage_and_auto_margins() {
     assert!((divs[1].rect.x - (8.0 + (784.0 - 200.0) / 2.0)).abs() < 0.01, "{}", divs[1].rect.x);
 }
 
+/// `width:auto` limited by `max-width` is centred by `margin:auto`
+/// (google.com's search box: `max-width:688px; margin:0 auto`).
+#[test]
+fn max_width_with_auto_margins_centres() {
+    let fx = Fixture::new("<div style='max-width:300px;margin:0 auto'></div><div style='max-width:300px;margin-left:auto'></div>", "");
+    let t = fx.layout();
+    let divs = fx.find(&t, "div");
+    assert!((divs[0].rect.w - 300.0).abs() < 0.01, "{}", divs[0].rect.w);
+    assert!((divs[0].rect.x - (8.0 + (784.0 - 300.0) / 2.0)).abs() < 0.01, "{}", divs[0].rect.x);
+    assert!((divs[1].rect.x - (8.0 + 784.0 - 300.0)).abs() < 0.01, "{}", divs[1].rect.x);
+}
+
 #[test]
 fn text_wraps_within_container() {
     let words: Vec<String> = (0..200).map(|i| format!("word{i}")).collect();

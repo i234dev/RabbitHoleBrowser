@@ -439,11 +439,21 @@ impl<'a> Layouter<'a> {
                 };
                 (w, ml, mr)
             }
-            WidthMode::Fill => match specified {
+            WidthMode::Fill => match specified.or_else(|| {
+                // Auto width fills the line; when min/max-width changes it,
+                // the result is used as the specified width so `auto`
+                // margins share the remaining space (CSS 2.1 §10.4).
+                let w = (cbw - ml.unwrap_or(0.0) - mr.unwrap_or(0.0) - pb_h).max(0.0);
+                let clamped = self.clamp_width(&style, w, cbw, pb_h);
+                if (clamped - w).abs() > 0.01 {
+                    Some(clamped)
+                } else {
+                    None
+                }
+            }) {
                 None => {
                     let (ml, mr) = (ml.unwrap_or(0.0), mr.unwrap_or(0.0));
                     let w = (cbw - ml - mr - pb_h).max(0.0);
-                    let w = self.clamp_width(&style, w, cbw, pb_h);
                     (w, ml, mr)
                 }
                 Some(w) => {
@@ -538,6 +548,14 @@ impl<'a> Layouter<'a> {
             (true, false, Some(r)) => (iw, iw / r),
             (false, true, Some(r)) => (ih * r, ih),
             _ => (iw, ih),
+        };
+        // An inline `<svg>` without width/height has only an intrinsic
+        // ratio: its auto width fills the containing block (300px when that
+        // is unknown, e.g. for intrinsic sizing); the height follows the
+        // ratio. (Its raster's pixel size is not its CSS size.)
+        let sw = match (sw, sh) {
+            (None, None) if b.ratio_only => Some(cbw.map(|c| (c - pb_h).max(0.0)).unwrap_or(300.0)),
+            _ => sw,
         };
         let (mut w, mut h) = match (sw, sh) {
             (Some(w), Some(h)) => (w, h),

@@ -375,6 +375,12 @@ fn d_element_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     }
     let x = realm.to_number(arg(args, 0))? as f32;
     let y = realm.to_number(arg(args, 1))? as f32;
+    if let Some(hits) = with_env(|env| {
+        env.ensure_layout();
+        env.elements_from_point(x, y)
+    }) {
+        return Ok(wrap_opt(realm, 0, hits.first().copied()));
+    }
     let (sx, sy) = with_env(|env| env.scroll());
     let (px, py) = (x + sx, y + sy);
     // Deepest element whose rect contains the point (document order, last wins).

@@ -322,6 +322,21 @@ fn tool_definitions() -> Vec<Value> {
         }
     }));
     tools.push(json!({
+        "name": "click_at",
+        "description": "Click at viewport coordinates (CSS pixels from the top-left of the visible page, as in a screenshot) like a real mouse: hit-tests what is painted there, dispatches pointer/mouse events and the click, then follows links or submits forms. Returns the clicked element and the resulting page text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": url_opt,
+                "x": { "type": "number", "description": "Viewport x in CSS pixels" },
+                "y": { "type": "number", "description": "Viewport y in CSS pixels" },
+                "max_chars": { "type": "integer", "description": "Truncate the returned text (default 20000)", "default": 20000 },
+                "wait_ms": wait_prop
+            },
+            "required": ["x", "y"]
+        }
+    }));
+    tools.push(json!({
         "name": "fill",
         "description": "Fill form fields (text inputs, textareas, checkboxes with true/false, selects by value or label) firing input/change events, optionally submit the form, and return the resulting page text.",
         "inputSchema": {
@@ -515,14 +530,7 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
             let node = crate::scripting::query_selector(&page.doc, &selector)?.ok_or_else(|| format!("no element matches `{selector}`"))?;
             let engine = &session.engine;
             let wait = session.wait_ms;
-            let out = crate::scripting::click_node(engine, page, node);
-            let request = if let Some(nav) = out.navigation {
-                Some(nav.request)
-            } else if out.default_prevented {
-                None
-            } else {
-                crate::scripting::click_default_action(engine, page, node)
-            };
+            let request = crate::scripting::click_element(engine, page, node);
             match request {
                 Some(req) => state.navigate_current(&req)?,
                 None => {
@@ -533,6 +541,30 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
                 }
             }
             Ok(text_content(state.current_text(max_chars)))
+        }
+        "click_at" => {
+            let x = args.get("x").and_then(Value::as_f64).ok_or("`x` must be a number")? as f32;
+            let y = args.get("y").and_then(Value::as_f64).ok_or("`y` must be a number")? as f32;
+            let max_chars = arg_u64(args, "max_chars", 20_000) as usize;
+            state.page_for(args)?;
+            let (session, page) = state.parts();
+            let engine = &session.engine;
+            let wait = session.wait_ms;
+            let (clicked, request) = crate::scripting::click_at(engine, page, x, y);
+            let what = match clicked {
+                Some(n) => format!("Clicked <{}>", crate::scripting::describe_node(&page.doc, n)),
+                None => format!("Nothing clickable at ({x}, {y})"),
+            };
+            match request {
+                Some(req) => state.navigate_current(&req)?,
+                None => {
+                    let (session, page) = state.parts();
+                    if let Some(nav) = crate::scripting::settle(&session.engine, page, wait) {
+                        state.navigate_current(&nav.request)?;
+                    }
+                }
+            }
+            Ok(text_content(format!("{what}\n\n{}", state.current_text(max_chars))))
         }
         "fill" => {
             let max_chars = arg_u64(args, "max_chars", 20_000) as usize;
@@ -625,7 +657,7 @@ mod tests {
         assert_eq!(reply["id"], "abc");
         let tools = reply["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["browse", "links", "screenshot", "fetch_html", "dom", "cookies", "evaluate", "click", "fill"]);
+        assert_eq!(names, vec!["browse", "links", "screenshot", "fetch_html", "dom", "cookies", "evaluate", "click", "click_at", "fill"]);
         for t in tools.iter().take(6) {
             assert_eq!(t["inputSchema"]["required"][0], "url");
             assert!(t["description"].as_str().unwrap().len() > 10);

@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use rabbithole_engine::dom::NodeId;
 use rabbithole_engine::gfx::Rect;
 use rabbithole_engine::net::Url;
-use rabbithole_engine::scripting::{mouse_init, plain_init};
-use rabbithole_engine::ControlKind;
+use rabbithole_engine::scripting::mouse_init;
+use rabbithole_engine::{ClickAction, ControlKind, Modifiers};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
@@ -103,24 +103,15 @@ impl App {
         if !popup_open {
             if let Some(css) = self.to_css(self.cursor) {
                 let doc = self.to_doc(css);
-                let node = self.page().and_then(|p| p.node_at_viewport(css.0, css.1));
-                let prev = self.tabs.get(self.active).and_then(|t| t.hover_node);
-                if prev != node && self.page().map(|p| p.has_scripts()).unwrap_or(false) {
-                    if let Some(tab) = self.tabs.get_mut(self.active) {
-                        tab.hover_node = node;
-                    }
-                    if let Some(p) = prev {
-                        self.page_mouse_event(p, "mouseout", css, 0);
-                    }
-                    if let Some(n) = node {
-                        self.page_mouse_event(n, "mouseover", css, 0);
-                    }
+                // Hover state + pointer/mouse over/enter/move/out/leave
+                // events, from the same paint-order hit test as clicks.
+                let m = self.pointer_modifiers();
+                self.page_op(|engine, page| ((), engine.pointer_move(page, css.0, css.1, m)));
+                let node = self.page().and_then(|p| p.pointer.hover);
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.hover_node = node;
                 }
                 if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
-                    if self.engine.set_hover(page, node) {
-                        self.page_dirty = true;
-                        redraw = true;
-                    }
                     link = node.and_then(|n| page.link_of(n));
                     icon = match page.cursor_at(doc.0, doc.1) {
                         "pointer" => CursorIcon::Pointer,
@@ -301,40 +292,53 @@ impl App {
         }
         let Some(css) = self.to_css(self.cursor) else { return };
         let doc = self.to_doc(css);
-        let node = self.page().and_then(|p| p.node_at_viewport(css.0, css.1));
-        let link = node.and_then(|n| self.page().and_then(|p| p.link_of(n)));
-
         let button_code: u8 = match button {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
             MouseButton::Right => 2,
             _ => 0,
         };
-        if let Some(n) = node {
-            self.page_mouse_event(n, "mousedown", css, button_code);
+        // Leaving a text control being edited: commit it (change + blur)
+        // before the press moves focus elsewhere.
+        let pre = self.page().and_then(|p| p.node_at_viewport(css.0, css.1));
+        let pre_control = pre.and_then(|n| self.page().and_then(|p| p.control_of(n)));
+        let editing = self.tab().and_then(|t| t.edit.as_ref().map(|e| e.node));
+        if editing.is_some() && editing != pre_control {
+            self.end_edit();
         }
+        // pointerdown / mousedown / focus, through the engine.
+        let m = self.pointer_modifiers();
+        let down = self
+            .page_op(|engine, page| {
+                let mut d = engine.pointer_down(page, css.0, css.1, button_code, m);
+                let out = std::mem::take(&mut d.outcome);
+                (d, out)
+            })
+            .unwrap_or_default();
+        let node = down.target;
+        let link = node.and_then(|n| self.page().and_then(|p| p.link_of(n)));
+
         if button == MouseButton::Right {
             let prevented = node.map(|n| self.page_mouse_event(n, "contextmenu", css, 2).default_prevented).unwrap_or(false);
+            // The release must not produce a click.
+            if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
+                page.pointer.down = None;
+            }
             if !prevented {
                 self.open_context_menu(link, x, y);
             }
             return;
         }
         if button == MouseButton::Middle {
-            let prevented = node.map(|n| self.page_mouse_event(n, "auxclick", css, 1).default_prevented).unwrap_or(false);
-            if let (Some(l), false) = (link, prevented) {
-                self.follow_link(l, true);
-            }
+            // auxclick (and opening the link in a new tab) on release.
+            self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: None, dragged: false, double: false });
             return;
         }
         if button != MouseButton::Left {
             return;
         }
-        // Scripts may have changed the page: hit-test again.
-        let node = self.page().and_then(|p| p.node_at_viewport(css.0, css.1));
-        let link = node.and_then(|n| self.page().and_then(|p| p.link_of(n)));
 
-        // Double click → word selection.
+        // Double click → word selection (click + dblclick on release).
         let now = Instant::now();
         let double = self
             .last_click
@@ -342,54 +346,32 @@ impl App {
             .unwrap_or(false);
         self.last_click = Some((now, self.cursor));
 
-        // Form controls.
+        // Form controls react on press (editing, dropdowns); activation
+        // (checkbox toggles, submit, reset) happens with the click.
         let control = node.and_then(|n| self.page().and_then(|p| p.control_of(n)));
         if let Some(c) = control {
             let kind = self.page().map(|p| p.control_kind(c)).unwrap_or(ControlKind::Other);
             match kind {
                 ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other => {
-                    self.begin_edit(c);
-                    self.place_caret_from_click(c, doc);
-                    return;
-                }
-                ControlKind::Checkbox | ControlKind::Radio => {
-                    self.end_edit();
-                    self.page_mouse_event(c, "mouseup", css, 0);
-                    if !self.page_mouse_event(c, "click", css, 0).default_prevented {
-                        self.toggle_control_with_events(c);
+                    if !down.prevented {
+                        self.begin_edit(c);
+                        self.place_caret_from_click(c, doc);
                     }
+                    self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: None, dragged: false, double: false });
                     return;
                 }
                 ControlKind::Select => {
                     self.end_edit();
-                    self.open_select_dropdown(c);
-                    return;
-                }
-                ControlKind::Submit => {
-                    self.page_mouse_event(c, "mouseup", css, 0);
-                    let out = self.page_mouse_event(c, "click", css, 0);
-                    if !out.default_prevented && out.navigation.is_none() {
-                        self.submit_form(c, Some(c));
+                    if !down.prevented {
+                        self.open_select_dropdown(c);
                     }
-                    return;
-                }
-                ControlKind::Reset => {
-                    self.end_edit();
-                    self.page_mouse_event(c, "mouseup", css, 0);
-                    if !self.page_mouse_event(c, "click", css, 0).default_prevented {
-                        let form = self.page().and_then(|p| p.form_of(c));
-                        if let Some(f) = form {
-                            self.mutate_page(|p| p.reset_form(f));
-                            self.dispatch_to(f, "reset", plain_init(true));
-                        }
-                    }
+                    self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: None, dragged: false, double: false });
                     return;
                 }
                 ControlKind::File => {
                     self.set_status("File uploads are not supported yet");
-                    return;
                 }
-                ControlKind::Button | ControlKind::Hidden => {}
+                _ => {}
             }
         }
         self.end_edit();
@@ -397,18 +379,20 @@ impl App {
             tab.focus = None;
         }
         if double {
-            if let Some(n) = node {
-                self.page_mouse_event(n, "dblclick", css, 0);
-            }
             let sel = self.page().map(|p| p.select_word_at(&self.engine.fonts, doc.0, doc.1));
             if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.selection = sel.filter(|s| !s.rects.is_empty());
             }
             self.request_redraw();
-            return;
         }
-        self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: Some(doc), link, dragged: false });
-        self.mouse_down_node = node;
+        let anchor = if down.prevented { None } else { Some(doc) };
+        self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: anchor, dragged: false, double });
+    }
+
+    /// Keyboard modifiers in the engine's form.
+    pub(crate) fn pointer_modifiers(&self) -> Modifiers {
+        let m = self.modifiers;
+        Modifiers { ctrl: m.control_key(), shift: m.shift_key(), alt: m.alt_key(), meta: m.super_key() }
     }
 
     /// Dispatch a mouse event to a page node (viewport CSS coordinates).
@@ -423,25 +407,54 @@ impl App {
         if md.button != button {
             return;
         }
+        let button_code: u8 = match button {
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            _ => 0,
+        };
+        // A drag-selection release still gets pointerup/mouseup, no click.
         if md.dragged {
-            return; // selection stays
-        }
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            if tab.selection.take().is_some() {
-                self.request_redraw();
+            if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
+                page.pointer.down = None;
+            }
+        } else if !md.double {
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                if tab.selection.take().is_some() {
+                    self.request_redraw();
+                }
             }
         }
-        // Click on a plain element: tell scripts first; a prevented click
-        // (or one that navigated by itself) skips the link default action.
-        let mut prevented = false;
-        if let (Some(node), Some(css)) = (self.mouse_down_node.take(), self.to_css(self.cursor)) {
-            self.page_mouse_event(node, "mouseup", css, 0);
-            let out = self.page_mouse_event(node, "click", css, 0);
-            prevented = out.default_prevented || out.navigation.is_some();
+        let Some(css) = self.to_css(self.cursor) else {
+            if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
+                page.pointer.down = None;
+                page.state.active = None;
+            }
+            return;
+        };
+        // pointerup / mouseup / click and the click's default action.
+        let m = self.pointer_modifiers();
+        let Some(up) = self.page_op(|engine, page| {
+            let mut u = engine.pointer_up(page, css.0, css.1, button_code, m);
+            let out = std::mem::take(&mut u.outcome);
+            (u, out)
+        }) else {
+            return;
+        };
+        match up.action {
+            ClickAction::Navigate { url, new_tab } => self.follow_link(url, new_tab),
+            ClickAction::Submit { form, submitter } => self.submit_form(submitter.unwrap_or(form), submitter),
+            ClickAction::FocusControl(c) => match self.page().map(|p| p.control_kind(c)) {
+                Some(ControlKind::Select) => self.open_select_dropdown(c),
+                Some(ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other) => self.begin_edit(c),
+                _ => {}
+            },
+            ClickAction::Changed => self.mark_page_dirty(),
+            ClickAction::None => {}
         }
-        if let (Some(link), false) = (md.link, prevented) {
-            let new_tab = self.modifiers.control_key() || self.modifiers.super_key();
-            self.follow_link(link, new_tab);
+        if md.double && button == MouseButton::Left {
+            if let Some(n) = up.clicked {
+                self.page_mouse_event(n, "dblclick", css, 0);
+            }
         }
     }
 

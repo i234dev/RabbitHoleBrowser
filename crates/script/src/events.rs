@@ -697,7 +697,28 @@ pub(crate) fn dispatch(realm: &mut Realm, key: TargetKey, event_type: &str, init
     }
     let class = event_class_for(event_type, &init);
     let eid = create_event(realm, class, event_type, &init, trusted);
+    set_mouse_offset(realm, key, eid, &init);
     dispatch_object(realm, key, eid, None)
+}
+
+/// `offsetX`/`offsetY` of a mouse event: the pointer relative to the
+/// target's padding edge.
+fn set_mouse_offset(realm: &mut Realm, key: TargetKey, eid: ObjectId, init: &EventInit) {
+    let Some(EventDetail::Mouse { x, y, .. }) = &init.detail else { return };
+    let TargetKey::Node(n) = key else { return };
+    if n.doc != 0 {
+        return;
+    }
+    let geo = with_env(|env| {
+        let r = env.node_rect(n.node)?;
+        let b = env.computed_style(n.node).map(|s| (s.border_width.left, s.border_width.top)).unwrap_or((0.0, 0.0));
+        let (sx, sy) = env.scroll();
+        Some((x + sx - r.x - b.0, y + sy - r.y - b.1))
+    });
+    if let Some((ox, oy)) = geo {
+        realm.define_property(eid, "offsetX", Value::Number(ox as f64), ACC);
+        realm.define_property(eid, "offsetY", Value::Number(oy as f64), ACC);
+    }
 }
 
 fn event_class_for(ty: &str, init: &EventInit) -> &'static str {

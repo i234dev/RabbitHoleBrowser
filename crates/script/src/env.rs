@@ -20,6 +20,11 @@ pub trait HostEnv {
     fn ensure_layout(&mut self);
     /// Border box of a node in document coordinates (after `ensure_layout`).
     fn node_rect(&mut self, node: NodeId) -> Option<Rect>;
+    /// Elements painted at a viewport point, topmost first (the engine's
+    /// paint-order hit test). `None` = not supported (geometric fallback).
+    fn elements_from_point(&mut self, _x: f32, _y: f32) -> Option<Vec<NodeId>> {
+        None
+    }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>>;
     fn viewport(&self) -> (f32, f32);
     fn scroll(&self) -> (f32, f32);

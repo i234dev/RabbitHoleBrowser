@@ -265,6 +265,14 @@ struct Painter<'l, 't, 'a> {
     scope: Option<u32>,
 }
 
+/// Painting phases of the in-flow content of a stacking context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Backgrounds,
+    Floats,
+    Content,
+}
+
 /// A positioned / stacking descendant deferred to its stacking context.
 struct Deferred<'t> {
     z: i32,
@@ -471,51 +479,63 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// Paint the in-flow contents of `b` (not its own background) in tree
     /// order, skipping deferred boxes.
     fn paint_contents(&mut self, b: &'t LayoutBox) {
-        if let Some(m) = &b.marker {
-            if b.style.visibility != Visibility::Hidden {
-                self.list.push(DisplayItem::Text {
-                    x: m.x,
-                    y: m.baseline,
-                    font: m.font,
-                    size: m.size,
-                    color: m.color,
-                    text: m.text.to_string(),
-                    letter_spacing: 0.0,
-                    shadows: Vec::new(),
-                    small_caps: false,
-                    oblique: false,
-                });
+        // CSS 2.1 Appendix E, steps 4-7 for the in-flow subtree: first the
+        // backgrounds of all block-level descendants, then floats, then
+        // inline content. (A later block's background must not cover an
+        // earlier float's content, e.g. a floated toolbar of links followed
+        // by a full-width sibling.)
+        self.paint_phase(b, Phase::Backgrounds);
+        self.paint_phase(b, Phase::Floats);
+        self.paint_phase(b, Phase::Content);
+    }
+
+    /// One painting phase over `b`'s in-flow, non-deferred subtree (`b`'s
+    /// own background is painted by the caller).
+    fn paint_phase(&mut self, b: &'t LayoutBox, phase: Phase) {
+        if phase == Phase::Content {
+            if let Some(m) = &b.marker {
+                if b.style.visibility != Visibility::Hidden {
+                    self.list.push(DisplayItem::Text {
+                        x: m.x,
+                        y: m.baseline,
+                        font: m.font,
+                        size: m.size,
+                        color: m.color,
+                        text: m.text.to_string(),
+                        letter_spacing: 0.0,
+                        shadows: Vec::new(),
+                        small_caps: false,
+                        oblique: false,
+                    });
+                }
             }
-        }
-        if b.kind == BoxKind::Image {
-            self.paint_image_box(b);
+            if b.kind == BoxKind::Image {
+                self.paint_image_box(b);
+            }
         }
         let clip = b.clips && !b.rect.is_empty();
         let saved_scope = if clip { Some(self.push_clip(b, b.padding_rect())) } else { None };
-        // Floats first (they sit below inline content).
-        for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c)) {
-            self.paint_float_or_atomic(c);
+        if phase == Phase::Floats {
+            for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c)) {
+                self.paint_float_or_atomic(c);
+            }
         }
         if b.lines.is_empty() {
             for c in b.children.iter().filter(|c| c.flow == Flow::InFlow && !Self::is_deferred(c)) {
-                self.paint_block_child(c);
+                if phase == Phase::Backgrounds && c.kind != BoxKind::Text {
+                    self.paint_background_and_border(c, false);
+                }
+                self.paint_phase(c, phase);
+                if phase == Phase::Content {
+                    self.paint_outline(c);
+                }
             }
-        } else {
+        } else if phase == Phase::Content {
             self.paint_lines(b);
         }
         if let Some(saved) = saved_scope {
             self.pop_clip(saved);
         }
-    }
-
-    /// An in-flow block-level (non-positioned) child: its background then its
-    /// contents, recursively.
-    fn paint_block_child(&mut self, c: &'t LayoutBox) {
-        if c.kind != BoxKind::Text {
-            self.paint_background_and_border(c, false);
-        }
-        self.paint_contents(c);
-        self.paint_outline(c);
     }
 
     /// Floats and atomic inline-level boxes paint atomically (as if they

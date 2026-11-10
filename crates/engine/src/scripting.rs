@@ -164,6 +164,13 @@ impl HostEnv for EngineEnv<'_> {
         self.ensure_layout();
         self.page.rect_of(node)
     }
+    fn elements_from_point(&mut self, x: f32, y: f32) -> Option<Vec<NodeId>> {
+        self.ensure_layout();
+        if x < 0.0 || y < 0.0 || x > self.page.viewport.width || y > self.page.viewport.height {
+            return Some(Vec::new());
+        }
+        Some(self.page.nodes_at_viewport(x, y))
+    }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>> {
         if !self.page.script.dom_dirty {
             return self.page.styles.get(node).cloned();
@@ -514,6 +521,12 @@ impl Engine {
 
     /// Evaluate JavaScript in the page (devtools console / CLI).
     pub fn eval_in_page(&self, page: &mut Page, src: &str) -> String {
+        self.eval_with_outcome(page, src).0
+    }
+
+    /// Evaluate JavaScript in the page and report its side effects
+    /// (navigation, relayout, ...), e.g. for `javascript:` links.
+    pub fn eval_with_outcome(&self, page: &mut Page, src: &str) -> (String, ScriptOutcome) {
         let Some(mut host) = page.script.host.take() else {
             // No scripts ran: create a host on demand.
             let h = {
@@ -521,7 +534,7 @@ impl Engine {
                 ScriptHost::new(&mut env)
             };
             page.script.host = Some(h);
-            return self.eval_in_page(page, src);
+            return self.eval_with_outcome(page, src);
         };
         let out = {
             let mut env = EngineEnv { engine: self, page };
@@ -532,8 +545,8 @@ impl Engine {
             s
         };
         page.script.host = Some(host);
-        let _ = self.settle(page, false);
-        out
+        let outcome = self.settle(page, false);
+        (out, outcome)
     }
 
     /// After script activity: restyle if the DOM changed and collect

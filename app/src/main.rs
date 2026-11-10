@@ -27,6 +27,8 @@ USAGE:
                                            Print the DOM and/or layout tree
     rabbithole cookies <URL>               Print the stored cookies that would be sent to URL
     rabbithole js <URL> <EXPRESSION>       Evaluate JavaScript in the loaded page and print the result
+    rabbithole click <URL> <X> <Y>         Show what is under a viewport point and click it like a mouse
+                                           (--scroll Y, --width/--height, --hit-only)
     rabbithole mcp                         Run as a Model Context Protocol server on stdio
     rabbithole --help | --version
 
@@ -77,6 +79,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("dump") => cli::dump(&args[1..]),
         Some("cookies") => cli::cookies(&args[1..]),
         Some("js") => cli::js(&args[1..]),
+        Some("click") => cli::click(&args[1..]),
         Some("mcp") => mcp::serve(),
         Some(url) if url.starts_with('-') => Err(format!("unknown option `{url}` (try --help)")),
         Some(_) => gui::run(args.to_vec()),
