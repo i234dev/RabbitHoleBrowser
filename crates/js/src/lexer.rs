@@ -279,6 +279,11 @@ impl<'a> Lexer<'a> {
         }
         for p in PUNCTS {
             if self.src[self.pos..].starts_with(p) {
+                // `?.` followed by a decimal digit is `?` then a number
+                // (`a ?.5 : b`), per OptionalChainingPunctuator.
+                if *p == "?." && self.src.as_bytes().get(self.pos + 2).map(|b| b.is_ascii_digit()).unwrap_or(false) {
+                    continue;
+                }
                 self.pos += p.len();
                 return Ok(TokenKind::Punct(p));
             }

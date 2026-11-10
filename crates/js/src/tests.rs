@@ -1332,3 +1332,10 @@ fn var_shadows_function_self_name() {
         .unwrap();
     assert_eq!(realm.to_rust_string(v).unwrap(), r#"["a","b"]|[0,1,2]|undefined|function|1"#);
 }
+
+#[test]
+fn conditional_followed_by_decimal_fraction() {
+    let mut realm = crate::Realm::new();
+    let v = realm.eval("const e = 80, o = null; [e>=75?.75:e>=50?.5:0, true?.001:1, o?.x, (o??{a:1})?.a].join()", "t.js").unwrap();
+    assert_eq!(realm.to_rust_string(v).unwrap(), "0.75,0.001,,1");
+}

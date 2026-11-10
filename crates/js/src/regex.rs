@@ -1289,6 +1289,29 @@ fn unicode_property_class(name: &str) -> Option<CharClass> {
             "Hiragana" | "Hira" => Box::new(|c: char| matches!(c as u32, 0x3041..=0x3096 | 0x309D..=0x309F)),
             "Katakana" | "Kana" => Box::new(|c: char| matches!(c as u32, 0x30A1..=0x30FA | 0x30FD..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9D)),
             "Arabic" | "Arab" => Box::new(|c: char| matches!(c as u32, 0x600..=0x604 | 0x606..=0x60B | 0x60D..=0x61A | 0x61C..=0x61E | 0x620..=0x63F | 0x641..=0x64A | 0x656..=0x66F | 0x671..=0x6DC | 0x6DE..=0x6FF | 0x750..=0x77F | 0x8A0..=0x8FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFC)),
+            "Syriac" | "Syrc" => Box::new(|c: char| matches!(c as u32, 0x700..=0x70D | 0x70F..=0x74A | 0x74D..=0x74F | 0x860..=0x86A)),
+            "Thaana" | "Thaa" => Box::new(|c: char| matches!(c as u32, 0x780..=0x7B1)),
+            "Mandaic" | "Mand" => Box::new(|c: char| matches!(c as u32, 0x840..=0x85B | 0x85E)),
+            "Nko" | "Nkoo" => Box::new(|c: char| matches!(c as u32, 0x7C0..=0x7FA | 0x7FD..=0x7FF)),
+            "Samaritan" | "Samr" => Box::new(|c: char| matches!(c as u32, 0x800..=0x82D | 0x830..=0x83E)),
+            "Armenian" | "Armn" => Box::new(|c: char| matches!(c as u32, 0x531..=0x556 | 0x559..=0x58A | 0x58D..=0x58F | 0xFB13..=0xFB17)),
+            "Georgian" | "Geor" => Box::new(|c: char| matches!(c as u32, 0x10A0..=0x10C5 | 0x10C7 | 0x10CD | 0x10D0..=0x10FA | 0x10FC..=0x10FF | 0x1C90..=0x1CBA | 0x1CBD..=0x1CBF | 0x2D00..=0x2D25)),
+            "Ethiopic" | "Ethi" => Box::new(|c: char| matches!(c as u32, 0x1200..=0x139F | 0x2D80..=0x2DDE | 0xAB01..=0xAB2E)),
+            "Bengali" | "Beng" => Box::new(|c: char| matches!(c as u32, 0x980..=0x9FE)),
+            "Gurmukhi" | "Guru" => Box::new(|c: char| matches!(c as u32, 0xA01..=0xA76)),
+            "Gujarati" | "Gujr" => Box::new(|c: char| matches!(c as u32, 0xA81..=0xAFF)),
+            "Tamil" | "Taml" => Box::new(|c: char| matches!(c as u32, 0xB82..=0xBFA | 0x11FC0..=0x11FFF)),
+            "Telugu" | "Telu" => Box::new(|c: char| matches!(c as u32, 0xC00..=0xC7F)),
+            "Kannada" | "Knda" => Box::new(|c: char| matches!(c as u32, 0xC80..=0xCF3)),
+            "Malayalam" | "Mlym" => Box::new(|c: char| matches!(c as u32, 0xD00..=0xD7F)),
+            "Sinhala" | "Sinh" => Box::new(|c: char| matches!(c as u32, 0xD81..=0xDF4 | 0x111E1..=0x111F4)),
+            "Lao" | "Laoo" => Box::new(|c: char| matches!(c as u32, 0xE81..=0xEDF)),
+            "Tibetan" | "Tibt" => Box::new(|c: char| matches!(c as u32, 0xF00..=0xFDA)),
+            "Myanmar" | "Mymr" => Box::new(|c: char| matches!(c as u32, 0x1000..=0x109F | 0xA9E0..=0xA9FE | 0xAA60..=0xAA7F)),
+            "Khmer" | "Khmr" => Box::new(|c: char| matches!(c as u32, 0x1780..=0x17F9 | 0x19E0..=0x19FF)),
+            "Mongolian" | "Mong" => Box::new(|c: char| matches!(c as u32, 0x1800..=0x18AA)),
+            "Bopomofo" | "Bopo" => Box::new(|c: char| matches!(c as u32, 0x2EA..=0x2EB | 0x3105..=0x312F | 0x31A0..=0x31BF)),
+            "Inherited" | "Zinh" | "Qaai" => Box::new(|c: char| matches!(c as u32, 0x300..=0x36F | 0x485 | 0x486 | 0x64B..=0x655 | 0x670 | 0x1AB0..=0x1ACE | 0x1DC0..=0x1DFF | 0x200C | 0x200D | 0x20D0..=0x20F0 | 0xFE00..=0xFE0F | 0xFE20..=0xFE2D | 0xE0100..=0xE01EF)),
             "Hebrew" | "Hebr" => Box::new(|c: char| matches!(c as u32, 0x591..=0x5C7 | 0x5D0..=0x5EA | 0x5EF..=0x5F4 | 0xFB1D..=0xFB4F)),
             "Devanagari" | "Deva" => Box::new(|c: char| matches!(c as u32, 0x900..=0x97F | 0xA8E0..=0xA8FF)),
             "Thai" => Box::new(|c: char| matches!(c as u32, 0xE01..=0xE3A | 0xE40..=0xE5B)),
@@ -2114,6 +2137,8 @@ mod tests {
         let bidi = Regex::new("[\\p{Bidi_Control}\\u0590-\\u08ff]", "u").unwrap();
         assert!(bidi.is_match("a\u{202E}b"));
         assert!(!bidi.is_match("abc"));
+        let rtl = Regex::new("[\\p{Script=Arabic}\\p{Script=Syriac}\\p{Script=Thaana}\\p{Script=Mandaic}]", "u").unwrap();
+        assert!(rtl.is_match("\u{0710}"));
         let marks = Regex::new("[\\p{Mn}\\p{Mc}\\p{Me}]", "u").unwrap();
         assert!(marks.is_match("e\u{301}"));
         for cat in ["Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "Sm", "Sc", "Sk", "So", "Cf", "Co", "Cs", "Cn"] {
