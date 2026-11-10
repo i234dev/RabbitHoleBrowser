@@ -503,3 +503,21 @@ fn sessions_and_contexts_are_isolated() {
     assert!(out.contains("cookie=sid=abc ls=v1"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn horizontal_menus_share_a_line_and_wrappers_are_not_buttons() {
+    let srv = serve(Box::new(|p| match p {
+        "/" => html(
+            r#"<html><body><nav><ul style="list-style:none;display:flex"><li><a href="/a">Uno</a></li><li><a href="/b">Dos</a></li><li><a href="/c">Tres</a></li></ul></nav>
+            <div id="w"><a href="/x">Dentro</a> <span class="vote" title="upvote"></span></div>
+            <a href="/up"><span title="upvote" style="display:inline-block;width:10px;height:10px"></span></a>
+            <script>document.getElementById('w').addEventListener('click', function(){});</script></body></html>"#,
+        ),
+        _ => None,
+    }));
+    let mut a = agent();
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    assert!(snap.lines().any(|l| l.contains("link \"Uno\"") && l.contains("link \"Dos\"") && l.contains("link \"Tres\"")), "{snap}");
+    assert!(!snap.contains("clickable"), "{snap}");
+    assert!(snap.contains("link \"upvote\" @e"), "icon link named by its tooltip: {snap}");
+}

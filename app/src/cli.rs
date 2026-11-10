@@ -42,7 +42,6 @@ pub struct Capture {
     pub width: u32,
     pub height: u32,
     pub title: String,
-    pub url: String,
 }
 
 /// An engine wired to the persistent cookie jar of the profile.
@@ -167,15 +166,7 @@ pub fn capture(session: &mut Session, url: &str, opts: &CaptureOptions) -> Resul
     let scroll_y = if opts.full_page { 0.0 } else { wanted.clamp(0.0, max_scroll) };
     session.engine.set_page_scroll(&mut page, 0.0, scroll_y);
     session.engine.render_scaled(&page, &mut canvas, 0.0, scroll_y, scale);
-    Ok(Capture { rgba: canvas.to_rgba8(), width: px_w, height: px_h, title: page.title.clone(), url: page.url.to_string() })
-}
-
-/// Encode a capture as PNG bytes.
-pub fn encode_png(cap: &Capture) -> Result<Vec<u8>, String> {
-    let mut out = std::io::Cursor::new(Vec::new());
-    image::write_buffer_with_format(&mut out, &cap.rgba, cap.width, cap.height, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)
-        .map_err(|e| format!("PNG encoding failed: {e}"))?;
-    Ok(out.into_inner())
+    Ok(Capture { rgba: canvas.to_rgba8(), width: px_w, height: px_h, title: page.title.clone() })
 }
 
 pub const TEXT_VIEWPORT: Viewport = Viewport { width: 1280.0, height: 800.0 };

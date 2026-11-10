@@ -355,7 +355,7 @@ impl Md<'_> {
                         let cells: Vec<String> = doc
                             .child_elements(*r)
                             .filter(|&x| matches!(doc.tag(x), Some("td" | "th")))
-                            .map(|x| clip_text(&self.inline(x).replace('|', "/"), 80))
+                            .map(|x| clip_text(&self.inline(x).replace('|', "/"), 240))
                             .collect();
                         if cells.is_empty() {
                             continue;

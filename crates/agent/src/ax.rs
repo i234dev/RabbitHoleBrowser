@@ -603,13 +603,21 @@ pub fn accessible_name(page: &Page, n: NodeId, role: &str) -> String {
             return collapse_ws(p);
         }
     }
-    // Links/buttons wrapping only an image without alt: use the file name
-    // as a last resort so the agent can tell them apart.
+    // Icon links/buttons: a tooltip or label on the icon inside.
+    if matches!(role, "link" | "button" | "clickable") {
+        let doc = &page.doc;
+        if let Some(t) = doc.descendants(n).skip(1).find_map(|d| doc.attr(d, "title").or(doc.attr(d, "aria-label")).filter(|t| !t.trim().is_empty())) {
+            return collapse_ws(t);
+        }
+    }
+    // Links wrapping only an image without alt: use the file name as a
+    // last resort so the agent can tell them apart.
     if role == "link" {
         if let Some(h) = el.attr("href") {
-            let h = h.trim_end_matches('/');
-            let last = h.rsplit('/').next().unwrap_or(h);
-            return format!("({})", clip_text(last, 40));
+            let t = h.trim_end_matches('/');
+            let last = t.rsplit('/').next().unwrap_or(t);
+            let last = if last.is_empty() || last.contains(':') { h } else { last };
+            return format!("(link to {})", clip_text(last, 40));
         }
     }
     String::new()
@@ -855,6 +863,10 @@ impl<'a> Builder<'a> {
     }
 
     fn push_text(&mut self, frame: usize, parent: NodeId, text: &str, ctx: Ctx, out: &mut Vec<Ax>) {
+        // Bare separators ("|", "·", "/") carry no meaning for an agent.
+        if text.chars().count() <= 2 && text.chars().all(|c| matches!(c, '|' | '·' | '•' | '/' | '-' | '–' | '—' | ',' | ':' | ';' | '(' | ')' | '[' | ']')) {
+            return;
+        }
         let page = self.frames[frame].page;
         let Some(style) = page.styles.get(parent) else { return };
         let hidden = self.hidden_reason(frame, parent, style, &ctx, true);
@@ -943,7 +955,11 @@ impl<'a> Builder<'a> {
         let role = role.or_else(|| {
             let clickable = el.attr("onclick").is_some()
                 || page.script.host.as_ref().map(|h| h.has_listeners(n, "click")).unwrap_or(false);
-            (clickable && !ctx.in_control && matches!(tag, "div" | "span" | "li" | "td" | "img" | "svg" | "i" | "p" | "label")).then(|| "clickable".to_string())
+            // Wrappers with real controls inside are containers, not buttons.
+            let wraps_controls = || {
+                doc.descendants(n).skip(1).any(|d| matches!(doc.tag(d), Some("a" | "button" | "input" | "select" | "textarea")))
+            };
+            (clickable && !ctx.in_control && matches!(tag, "div" | "span" | "li" | "td" | "img" | "svg" | "i" | "p" | "label") && !wraps_controls()).then(|| "clickable".to_string())
         });
         let block = is_block(style.display);
         let kind = role.as_deref().and_then(|r| if r == "clickable" { Some(Kind::Control) } else { kind_for_role(r) });

@@ -58,8 +58,11 @@ struct Piece {
     text: String,
     rect: Option<Rect>,
     joinable: bool,
-    /// Ends a visual block (nothing joins across it).
-    brk: bool,
+    /// Ends a visual block: 0 no, 1 soft (list item: controls on the same
+    /// row may still share a line), 2 hard.
+    brk: u8,
+    /// A control (link, button…).
+    control: bool,
 }
 
 fn landmark_label(role: &str) -> &str {
@@ -167,12 +170,22 @@ struct Renderer<'a, 'b> {
 
 impl Renderer<'_, '_> {
     fn push(&mut self, depth: usize, text: String, rect: Option<Rect>, joinable: bool) {
-        self.out.push(Piece { depth, text, rect, joinable, brk: false });
+        self.out.push(Piece { depth, text, rect, joinable, brk: 0, control: false });
+    }
+
+    fn push_control(&mut self, depth: usize, text: String, rect: Option<Rect>, joinable: bool) {
+        self.out.push(Piece { depth, text, rect, joinable, brk: 0, control: true });
     }
 
     fn brk(&mut self) {
         if let Some(l) = self.out.last_mut() {
-            l.brk = true;
+            l.brk = 2;
+        }
+    }
+
+    fn soft(&mut self) {
+        if let Some(l) = self.out.last_mut() {
+            l.brk = l.brk.max(1);
         }
     }
 
@@ -225,7 +238,7 @@ impl Renderer<'_, '_> {
             }
             Kind::Control => {
                 let t = leaf_text(a, self.detail.text_max, self.detail.urls);
-                self.push(depth, t, a.rect, a.children.is_empty());
+                self.push_control(depth, t, a.rect, a.children.is_empty());
                 if !a.children.is_empty() {
                     self.brk();
                     self.children(&a.children, depth + 1);
@@ -273,7 +286,7 @@ impl Renderer<'_, '_> {
                 if items.len() > keep.saturating_add(1) {
                     for it in items.iter().take(keep) {
                         self.node(it, depth);
-                        self.brk();
+                        self.soft();
                     }
                     let rest = &items[keep..];
                     let below = rest
@@ -291,14 +304,14 @@ impl Renderer<'_, '_> {
                 } else {
                     for it in items {
                         self.node(it, depth);
-                        self.brk();
+                        self.soft();
                     }
                 }
             }
             Kind::Item => {
-                self.brk();
+                self.soft();
                 self.children(&a.children, depth);
-                self.brk();
+                self.soft();
             }
         }
     }
@@ -328,13 +341,14 @@ impl Renderer<'_, '_> {
 fn assemble(pieces: Vec<Piece>) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut cur: Option<(usize, String, Option<Rect>, bool)> = None;
-    let mut prev_brk = true;
+    let mut prev_brk = 2u8;
+    let mut prev_control = false;
     for p in pieces {
         let can_join = match &cur {
             Some((d, text, rect, joinable)) => {
                 *joinable
                     && p.joinable
-                    && !prev_brk
+                    && (prev_brk == 0 || (prev_brk == 1 && prev_control && p.control))
                     && *d == p.depth
                     && text.chars().count() + p.text.chars().count() < 170
                     && match (rect, p.rect) {
@@ -359,6 +373,7 @@ fn assemble(pieces: Vec<Piece>) -> Vec<String> {
             cur = Some((p.depth, p.text, p.rect, p.joinable));
         }
         prev_brk = p.brk;
+        prev_control = p.control;
     }
     if let Some((d, text, _, _)) = cur.take() {
         lines.push(format!("{}{}", "  ".repeat(d), text));
@@ -525,7 +540,7 @@ mod tests {
 
     #[test]
     fn joins_same_row() {
-        let p = |t: &str, y: f32, x: f32| Piece { depth: 1, text: t.into(), rect: Some(Rect::new(x, y, 40.0, 16.0)), joinable: true, brk: false };
+        let p = |t: &str, y: f32, x: f32| Piece { depth: 1, text: t.into(), rect: Some(Rect::new(x, y, 40.0, 16.0)), joinable: true, brk: 0, control: false };
         let lines = assemble(vec![p("link \"a\" @e1", 0.0, 0.0), p("link \"b\" @e2", 0.0, 50.0), p("text \"c\"", 40.0, 0.0)]);
         assert_eq!(lines, vec!["  link \"a\" @e1  link \"b\" @e2", "  text \"c\""]);
     }

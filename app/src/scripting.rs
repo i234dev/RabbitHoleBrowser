@@ -60,6 +60,7 @@ impl ConsoleLog {
 }
 
 /// First element of `doc` matching the CSS selector list.
+#[allow(dead_code)]
 pub fn query_selector(doc: &Document, selector: &str) -> Result<Option<NodeId>, String> {
     let toks = Tokenizer::tokenize(selector);
     let list = SelectorParser::new(&toks).parse_list().ok_or_else(|| format!("invalid selector: {selector}"))?;
@@ -133,6 +134,7 @@ pub fn click_request(engine: &Engine, page: &mut Page, action: ClickAction, navi
 
 /// Click an element like a user would (event sequence at its centre,
 /// activation behaviour) and return the request to navigate with.
+#[allow(dead_code)]
 pub fn click_element(engine: &Engine, page: &mut Page, node: NodeId) -> Option<Request> {
     let (action, out) = engine.click_element(page, node, None, Modifiers::default());
     click_request(engine, page, action, out.navigation)
@@ -165,6 +167,7 @@ pub fn describe_node(doc: &Document, node: NodeId) -> String {
 
 /// Set a control's value as a user would (typing, toggling, choosing an
 /// option) and fire `input`/`change`.
+#[allow(dead_code)]
 pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &str) -> Result<(), String> {
     match page.control_kind(control) {
         ControlKind::Checkbox | ControlKind::Radio => {

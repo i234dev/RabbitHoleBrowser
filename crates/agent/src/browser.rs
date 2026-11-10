@@ -844,7 +844,7 @@ impl Agent {
         }
         let geo = GeoMap::build(page);
         let reach = if frame == 0 { overlay::reach(page, &geo, node) } else { Reach::Ancestor(0.0, 0.0) };
-        let mut outcome = ScriptOutcome::default();
+        let outcome;
         let mut request = None;
         let verb = if hover_only { "Hovered" } else { "Clicked" };
         match reach {
