@@ -394,6 +394,51 @@ fn referrer_policy_and_origin_on_navigation_post() {
     assert_eq!(r.header("sec-fetch-mode"), Some("navigate"));
 }
 
+#[test]
+fn bot_profile_robots_and_request_log() {
+    let srv = serve(Arc::new(|req: &Req| match req.path.as_str() {
+        "/robots.txt" => (200, hv(&[("content-type", "text/plain")]), b"User-agent: *\nDisallow: /\n\nUser-agent: RabbitHoleBot\nDisallow: /private\n".to_vec()),
+        "/api" => (200, hv(&[("content-type", "application/json")]), b"{\"a\":1}".to_vec()),
+        _ => (200, hv(&[("content-type", "text/html")]), b"<p>hi".to_vec()),
+    }));
+    // Browser profile (default): Chrome UA + client hints, robots ignored.
+    let f = fetcher();
+    f.request(&Request::get(srv.url("/private/x"))).unwrap();
+    let r = srv.requests().pop().unwrap();
+    assert!(r.header("user-agent").unwrap().contains("Chrome/"));
+    assert!(r.header("sec-ch-ua").is_some());
+    // Bot profile: honest UA, no client hints, robots.txt respected.
+    let mut f = fetcher();
+    f.set_header_profile(HeaderProfile::Bot);
+    let log = NetLog::new();
+    f.log = Some(log.clone());
+    f.request(&Request::get(srv.url("/public"))).unwrap();
+    let r = srv.requests().pop().unwrap();
+    let ua = r.header("user-agent").unwrap();
+    assert!(ua.starts_with("Mozilla/5.0 (compatible; RabbitHoleBot/") && ua.contains("RabbitHole/"), "{ua}");
+    assert!(r.headers.iter().all(|(k, _)| !k.starts_with("sec-ch-ua")));
+    let err = f.request(&Request::get(srv.url("/private/page"))).unwrap_err();
+    assert!(matches!(err, FetchError::Robots(_)), "{err}");
+    assert!(err.to_string().contains("robots.txt"));
+    // Subresources and API calls are not subject to robots.txt.
+    f.request(&Request::get(srv.url("/private/img")).with_dest(Destination::Image)).unwrap();
+    let robots_fetches = srv.requests().iter().filter(|r| r.path == "/robots.txt").count();
+    assert_eq!(robots_fetches, 1, "robots.txt is cached per origin");
+    // The log has method/url/status/type/size and keeps API bodies.
+    f.fetch_api(&Request::get(srv.url("/api")).with_referer(srv.url("/public"))).unwrap();
+    let entries = log.entries();
+    let api = entries.iter().find(|e| e.url.ends_with("/api")).unwrap();
+    assert_eq!(api.kind(), "fetch");
+    assert_eq!(api.status, Some(200));
+    assert_eq!(api.size, Some(7));
+    assert_eq!(api.body.as_deref().map(|b| b.as_slice()), Some(&b"{\"a\":1}"[..]));
+    assert!(entries.iter().any(|e| e.url.ends_with("/public") && e.kind() == "document"));
+    assert!(log.in_flight().is_empty());
+    // Switching back restores the browser identity.
+    f.set_header_profile(HeaderProfile::Browser);
+    f.request(&Request::get(srv.url("/private/page"))).unwrap();
+}
+
 // ------------------------------------------------------------ websocket
 
 fn ws_server() -> u16 {

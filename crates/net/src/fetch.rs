@@ -353,6 +353,8 @@ pub enum FetchError {
     /// Blocked by the CORS / same-origin rules (a network error to
     /// scripts).
     Cors(String),
+    /// The site's robots.txt disallows the URL for our bot user agent.
+    Robots(String),
     Other(String),
 }
 
@@ -366,6 +368,7 @@ impl std::fmt::Display for FetchError {
             FetchError::Timeout => write!(f, "request timed out"),
             FetchError::TooLarge => write!(f, "response body too large"),
             FetchError::Cors(e) => write!(f, "CORS error: {e}"),
+            FetchError::Robots(u) => write!(f, "blocked by robots.txt: {u} is disallowed for RabbitHoleBot (pass browser headers / disable robots to override)"),
             FetchError::Other(e) => write!(f, "{e}"),
         }
     }
@@ -401,6 +404,8 @@ pub struct NetContext {
     pub client: Arc<Client>,
     pub cache: Option<Arc<HttpCache>>,
     pub preflight: PreflightCache,
+    /// Parsed robots.txt per origin (bot profile).
+    pub robots: crate::robots::RobotsCache,
     revalidating: Mutex<HashSet<String>>,
 }
 
@@ -413,7 +418,7 @@ impl std::fmt::Debug for NetContext {
 impl NetContext {
     /// A fresh context with the given cache.
     pub fn new(cache: Option<Arc<HttpCache>>) -> NetContext {
-        NetContext { client: Arc::new(Client::new(6)), cache, preflight: PreflightCache::default(), revalidating: Mutex::new(HashSet::new()) }
+        NetContext { client: Arc::new(Client::new(6)), cache, preflight: PreflightCache::default(), robots: Default::default(), revalidating: Mutex::new(HashSet::new()) }
     }
 
     /// The process-wide default context: memory cache (64 MB) backed by
@@ -454,6 +459,29 @@ pub struct Fetcher {
     pub block_trackers: bool,
     /// Connection pools and caches (shared by clones).
     pub net: Arc<NetContext>,
+    /// Which identity the request headers present (see [`HeaderProfile`]).
+    pub header_profile: HeaderProfile,
+    /// Check robots.txt before top-level navigations (bot mode).
+    pub respect_robots: bool,
+    /// Optional request log (agent interface: network listing, waits).
+    pub log: Option<Arc<crate::netlog::NetLog>>,
+}
+
+/// The identity a [`Fetcher`] presents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeaderProfile {
+    /// Chrome-like headers (User-Agent, `sec-ch-ua*` client hints): the GUI.
+    #[default]
+    Browser,
+    /// An honest bot identity: [`bot_user_agent`] and no client hints
+    /// (MCP server, CLI, programmatic use).
+    Bot,
+}
+
+/// The User-Agent sent in [`HeaderProfile::Bot`] mode.
+pub fn bot_user_agent() -> String {
+    let v = env!("CARGO_PKG_VERSION");
+    format!("Mozilla/5.0 (compatible; RabbitHoleBot/{v}; +https://github.com/i234dev/RabbitHoleBrowser) RabbitHole/{v}")
 }
 
 impl Default for Fetcher {
@@ -467,6 +495,9 @@ impl Default for Fetcher {
             accept_language: "es-ES,es;q=0.9,en;q=0.8".into(),
             block_trackers: true,
             net: NetContext::shared(),
+            header_profile: HeaderProfile::Browser,
+            respect_robots: false,
+            log: None,
         }
     }
 }
@@ -482,6 +513,58 @@ impl Fetcher {
     pub fn with_context(mut self, net: Arc<NetContext>) -> Fetcher {
         self.net = net;
         self
+    }
+
+    /// Switch identity: [`HeaderProfile::Bot`] also sets the bot
+    /// User-Agent and turns robots.txt checks on; `Browser` restores the
+    /// Chrome-like User-Agent and turns them off.
+    pub fn set_header_profile(&mut self, profile: HeaderProfile) {
+        self.header_profile = profile;
+        match profile {
+            HeaderProfile::Bot => {
+                self.user_agent = bot_user_agent();
+                self.respect_robots = true;
+            }
+            HeaderProfile::Browser => {
+                self.user_agent = default_user_agent().into();
+                self.respect_robots = false;
+            }
+        }
+    }
+
+    /// Fail top-level navigations that the origin's robots.txt disallows
+    /// for `RabbitHoleBot` (fetched once per origin and cached).
+    fn check_robots(&self, req: &Request) -> Result<(), FetchError> {
+        let top_level = req.dest == Destination::Document && req.mode.is_none_or(|m| m == RequestMode::Navigate);
+        if !self.respect_robots || !top_level || !req.url.is_http() || req.url.path == "/robots.txt" {
+            return Ok(());
+        }
+        let origin = req.url.origin();
+        let robots = match self.net.robots.get(&origin) {
+            Some(r) => r,
+            None => {
+                let mut f = self.clone();
+                f.respect_robots = false;
+                f.log = None;
+                f.timeout = self.timeout.min(Duration::from_secs(8));
+                let parsed = Url::parse_absolute(&format!("{origin}/robots.txt"))
+                    .and_then(|u| f.request(&Request::get(u).with_dest(Destination::Empty)).ok())
+                    .filter(|r| r.status == 200)
+                    .map(|r| crate::robots::Robots::parse(&crate::charset::decode_text(&r.body, r.charset.as_deref()), crate::robots::BOT_TOKEN))
+                    .unwrap_or_default();
+                self.net.robots.put(&origin, parsed.clone());
+                parsed
+            }
+        };
+        let path = match &req.url.query {
+            Some(q) => format!("{}?{}", req.url.path, q),
+            None => req.url.path.clone(),
+        };
+        if robots.allows(&path) {
+            Ok(())
+        } else {
+            Err(FetchError::Robots(req.url.to_string()))
+        }
     }
 
     /// Counters (protocols, connections, cache hits).
@@ -775,6 +858,18 @@ impl Fetcher {
         if !req.url.is_http() {
             return self.fetch(&req.url);
         }
+        self.check_robots(req)?;
+        let Some(log) = self.log.clone() else { return self.request_inner(req) };
+        let id = log.begin(req);
+        let r = self.request_inner(req);
+        match &r {
+            Ok(resp) => log.finish(id, resp.status, &resp.content_type, Some(resp.body.len() as u64), Some(&resp.body)),
+            Err(e) => log.fail(id, &e.to_string()),
+        }
+        r
+    }
+
+    fn request_inner(&self, req: &Request) -> Result<Response, FetchError> {
         let out = self.run(req)?;
         let api = req.mode.is_some();
         let (content_type, charset) = parse_content_type(out.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()).unwrap_or(""));
@@ -807,7 +902,18 @@ impl Fetcher {
             }
             return Err(FetchError::UnsupportedScheme(req.url.scheme.clone()));
         }
-        let out = self.run(&req)?;
+        let Some(log) = self.log.clone() else { return self.fetch_api_inner(&req) };
+        let id = log.begin(&req);
+        let r = self.fetch_api_inner(&req);
+        match &r {
+            Ok(a) => log.finish(id, a.response.status, &a.response.content_type, Some(a.response.body.len() as u64), Some(&a.response.body)),
+            Err(e) => log.fail(id, &e.to_string()),
+        }
+        r
+    }
+
+    fn fetch_api_inner(&self, req: &Request) -> Result<ApiResponse, FetchError> {
+        let out = self.run(req)?;
         let (content_type, charset) = parse_content_type(out.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()).unwrap_or(""));
         let opaque = matches!(out.kind, ResponseType::Opaque | ResponseType::OpaqueRedirect);
         let body = if opaque { Vec::new() } else { read_limited(out.body, self.max_body)? };
@@ -837,8 +943,21 @@ impl Fetcher {
                 reader: Box::new(std::io::Cursor::new(r.body)),
             });
         }
-        let out = self.run(req)?;
+        self.check_robots(req)?;
+        let id = self.log.as_ref().map(|l| l.begin(req));
+        let out = match self.run(req) {
+            Ok(o) => o,
+            Err(e) => {
+                if let (Some(l), Some(id)) = (&self.log, id) {
+                    l.fail(id, &e.to_string());
+                }
+                return Err(e);
+            }
+        };
         let (content_type, charset) = parse_content_type(out.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()).unwrap_or(""));
+        if let (Some(l), Some(id)) = (&self.log, id) {
+            l.finish(id, out.status, &content_type, out.content_length, None);
+        }
         Ok(StreamedResponse { url: out.url, status: out.status, content_type, charset, headers: out.headers, content_length: out.content_length, reader: out.body })
     }
 
@@ -876,10 +995,12 @@ impl Fetcher {
     fn build_headers(&self, req: &Request, _method: &str, _url: &Url, site: &'static str, origin_header: Option<String>, referer: Option<String>, body: Option<&Body>, cookie: Option<String>) -> Vec<(String, String)> {
         let mut h: Vec<(String, String)> = Vec::with_capacity(20);
         let mode = req.mode.map(|m| m.as_str()).unwrap_or(default_mode(req.dest));
-        let brand = format!("\"Chromium\";v=\"{CHROME_MAJOR}\", \"Google Chrome\";v=\"{CHROME_MAJOR}\", \"Not_A Brand\";v=\"99\"");
-        h.push(("sec-ch-ua".into(), brand));
-        h.push(("sec-ch-ua-mobile".into(), "?0".into()));
-        h.push(("sec-ch-ua-platform".into(), platform_name().into()));
+        if self.header_profile == HeaderProfile::Browser {
+            let brand = format!("\"Chromium\";v=\"{CHROME_MAJOR}\", \"Google Chrome\";v=\"{CHROME_MAJOR}\", \"Not_A Brand\";v=\"99\"");
+            h.push(("sec-ch-ua".into(), brand));
+            h.push(("sec-ch-ua-mobile".into(), "?0".into()));
+            h.push(("sec-ch-ua-platform".into(), platform_name().into()));
+        }
         if req.dest == Destination::Document {
             h.push(("Upgrade-Insecure-Requests".into(), "1".into()));
         }
