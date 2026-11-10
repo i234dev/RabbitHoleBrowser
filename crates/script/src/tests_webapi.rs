@@ -615,3 +615,107 @@ fn platform_apis() {
         ]
     );
 }
+
+#[test]
+fn indexeddb_in_memory() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const open = indexedDB.open('shop', 2);
+        open.onupgradeneeded = (e) => {
+          const db = open.result;
+          console.log('upgrade', e.oldVersion, e.newVersion, open.transaction.mode);
+          const s = db.createObjectStore('items', { keyPath: 'id', autoIncrement: true });
+          s.createIndex('byTag', 'tags', { multiEntry: true });
+          s.createIndex('byName', 'name', { unique: true });
+          s.add({ name: 'apple', tags: ['fruit', 'red'] });
+          s.add({ name: 'cherry', tags: ['fruit', 'red'] });
+          s.add({ name: 'kale', tags: ['veg'] });
+        };
+        open.onsuccess = () => {
+          const db = open.result;
+          console.log('open', db.version, Array.from(db.objectStoreNames).join());
+          const tx = db.transaction('items', 'readwrite');
+          const s = tx.objectStore('items');
+          s.get(2).onsuccess = (e) => console.log('get', e.target.result.name);
+          s.index('byTag').getAll('red').onsuccess = (e) => console.log('index', e.target.result.map((x) => x.name).join());
+          s.count(IDBKeyRange.lowerBound(2)).onsuccess = (e) => console.log('count', e.target.result);
+          const dup = s.add({ name: 'apple', tags: [] });
+          dup.onerror = (e) => { console.log('dup', dup.error.name); e.preventDefault(); };
+          const names = [];
+          s.openCursor(null, 'prev').onsuccess = (e) => {
+            const c = e.target.result;
+            if (c) { names.push(c.value.name); if (c.key === 3) c.update(Object.assign(c.value, { name: 'KALE' })); c.continue(); }
+            else console.log('cursor', names.join());
+          };
+          tx.oncomplete = () => {
+            const t2 = db.transaction(['items']);
+            t2.objectStore('items').index('byName').get('KALE').onsuccess = (e) => console.log('updated', e.target.result.id);
+            t2.oncomplete = () => indexedDB.databases().then((l) => console.log('dbs', JSON.stringify(l)));
+          };
+        };
+        console.log('cmp', indexedDB.cmp([1, 'a'], [1, 'b']), indexedDB.cmp('a', 1), IDBKeyRange.bound(1, 5, true).includes(1));
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "cmp -1 1 false",
+            "upgrade 0 2 versionchange",
+            "open 2 items",
+            "get cherry",
+            "index apple,cherry",
+            "count 2",
+            "dup ConstraintError",
+            "cursor kale,cherry,apple",
+            "updated 3",
+            "dbs [{\"name\":\"shop\",\"version\":2}]",
+        ]
+    );
+}
+
+#[test]
+fn web_crypto_digest_hmac_aes_pbkdf2() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const hex = (b) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, '0')).join('');
+        const enc = new TextEncoder();
+        (async () => {
+          const s = crypto.subtle;
+          console.log('sha1', hex(await s.digest('SHA-1', enc.encode('abc'))));
+          console.log('sha256', hex(await s.digest('SHA-256', enc.encode('abc'))));
+          console.log('sha512', hex(await s.digest('SHA-512', enc.encode('abc'))).slice(0, 32));
+          const hk = await s.importKey('raw', enc.encode('key'), { name: 'HMAC', hash: 'SHA-256' }, true, ['sign', 'verify']);
+          const sig = await s.sign('HMAC', hk, enc.encode('The quick brown fox jumps over the lazy dog'));
+          console.log('hmac', hex(sig), await s.verify('HMAC', hk, sig, enc.encode('The quick brown fox jumps over the lazy dog')));
+          const key = await s.importKey('raw', Uint8Array.from({ length: 16 }, (_, i) => i), 'AES-CBC', true, ['encrypt', 'decrypt']);
+          const pt = Uint8Array.from([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+          const ct = await s.encrypt({ name: 'AES-CBC', iv: new Uint8Array(16) }, key, pt);
+          console.log('aes', hex(ct).slice(0, 32), hex(await s.decrypt({ name: 'AES-CBC', iv: new Uint8Array(16) }, key, ct)) === hex(pt));
+          const gk = await s.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+          const g1 = await s.encrypt({ name: 'AES-GCM', iv }, gk, enc.encode('secret'));
+          console.log('gcm', new TextDecoder().decode(await s.decrypt({ name: 'AES-GCM', iv }, gk, g1)), g1.byteLength, (await s.exportKey('jwk', gk)).alg);
+          const pk = await s.importKey('raw', enc.encode('password'), 'PBKDF2', false, ['deriveBits']);
+          const bits = await s.deriveBits({ name: 'PBKDF2', salt: enc.encode('salt'), iterations: 2, hash: 'SHA-1' }, pk, 160);
+          console.log('pbkdf2', hex(bits));
+          const bad = await s.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']).catch((e) => e.name);
+          console.log('ec', bad, crypto instanceof Crypto, crypto.subtle instanceof SubtleCrypto, gk instanceof CryptoKey);
+        })().catch((e) => console.log('ERR ' + e + ' ' + e.stack));
+        "#,
+    );
+    assert_eq!(
+        out,
+        vec![
+            "sha1 a9993e364706816aba3e25717850c26c9cd0d89d",
+            "sha256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "sha512 ddaf35a193617abacc417349ae204131",
+            "hmac f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8 true",
+            "aes 69c4e0d86a7b0430d8cdb78070b4c55a true",
+            "gcm secret 22 A256GCM",
+            "pbkdf2 ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957",
+            "ec NotSupportedError true true true",
+        ]
+    );
+}
