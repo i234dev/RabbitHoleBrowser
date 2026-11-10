@@ -19,4 +19,4 @@ rabbithole-svg.workspace = true
 rabbithole-script.workspace = true
 
 [dev-dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }

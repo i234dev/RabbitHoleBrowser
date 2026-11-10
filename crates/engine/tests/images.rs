@@ -120,6 +120,45 @@ fn aspect_ratio_from_attributes_before_load() {
 }
 
 #[test]
+fn animated_gif_advances_on_tick() {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    let path = std::env::temp_dir().join(format!("rh-anim-{}.gif", std::process::id()));
+    {
+        let mut bytes = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut bytes);
+            enc.set_repeat(Repeat::Infinite).unwrap();
+            for c in [[255u8, 0, 0, 255], [0, 0, 255, 255]] {
+                let mut b = image::RgbaImage::new(8, 8);
+                for p in b.pixels_mut() {
+                    *p = image::Rgba(c);
+                }
+                enc.encode_frame(image::Frame::from_parts(b, 0, 0, image::Delay::from_numer_denom_ms(60, 1))).unwrap();
+            }
+        }
+        std::fs::write(&path, bytes).unwrap();
+    }
+    let mut engine = Engine::new_bundled_fonts_only();
+    let html = format!(r#"<img id=g src="file://{}">"#, path.display());
+    let mut page = engine.load_html(&html, base(), VP);
+    let g = by_id(&page, "g");
+    let img = page.images.get(&g).cloned().expect("gif loaded");
+    assert!(img.is_animated());
+    let _ = engine.tick(&mut page);
+    assert!(page.next_script_due().is_some(), "animation schedules the next tick");
+    let first = img.current_frame();
+    let t0 = std::time::Instant::now();
+    let mut repaint = false;
+    while img.current_frame() == first && t0.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        repaint |= engine.tick(&mut page).relayout;
+    }
+    assert_ne!(img.current_frame(), first);
+    assert!(repaint, "frame change asks for a repaint");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn video_poster_and_picture_type() {
     let mut engine = Engine::new_bundled_fonts_only();
     let html = r#"<video id=v poster="blue_40x20.png" controls></video>
