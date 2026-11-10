@@ -1,7 +1,7 @@
 //! Canvas v0.2 operations: per-corner radii, gradients, shadows, transforms,
 //! paths, layers and image transforms.
 
-use crate::canvas::{blend, span_coverage, Bounds, Canvas, Color, FillRule, Layer, LineCap, Matrix, Paint, PathSeg, Point, Radii, Rect, StrokeStyle, IDENTITY};
+use crate::canvas::{blend, blend_image, span_coverage, Bounds, Canvas, Color, FillRule, Layer, LineCap, Matrix, Paint, PathSeg, Point, Radii, Rect, StrokeStyle, IDENTITY};
 use crate::font::{FontContext, FontId, ZERO_WIDTH_GLYPH};
 use crate::image::Image;
 use crate::paint::Shader;
@@ -293,9 +293,11 @@ impl Canvas {
                         0
                     }
                 } else if py >= dr.bottom() - wb && wb > 0.0 {
-                    if wl > 0.0 && px < dr.x + wl && (px - dr.x) / wl < (dr.bottom() - py) / wb {
+                    // Pixel centres exactly on a bottom corner's diagonal
+                    // belong to the side border (as in reference renderings).
+                    if wl > 0.0 && px < dr.x + wl && (px - dr.x) / wl <= (dr.bottom() - py) / wb {
                         3
-                    } else if wr > 0.0 && px >= dr.right() - wr && (dr.right() - px) / wr < (dr.bottom() - py) / wb {
+                    } else if wr > 0.0 && px >= dr.right() - wr && (dr.right() - px) / wr <= (dr.bottom() - py) / wb {
                         1
                     } else {
                         2
@@ -624,7 +626,7 @@ impl Canvas {
                         continue;
                     }
                     let idx = drow + px as usize;
-                    self.data[idx] = blend(self.data[idx], Color::rgb(r as u8, g as u8, bl as u8), alpha);
+                    self.data[idx] = blend_image(self.data[idx], [r, g, bl], alpha);
                 }
             }
             return;
@@ -673,7 +675,7 @@ impl Canvas {
                     continue;
                 }
                 let idx = drow + px as usize;
-                self.data[idx] = blend(self.data[idx], Color::rgb(r as u8, g as u8, bl as u8), alpha);
+                self.data[idx] = blend_image(self.data[idx], [r, g, bl], alpha);
             }
         }
     }

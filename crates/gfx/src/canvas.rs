@@ -124,6 +124,24 @@ pub(crate) fn blend(dst: u32, src: Color, alpha: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+/// Source-over for image pixels (`src` channels in 0..=255): truncating
+/// like other engines' image compositing, so semi-transparent image pixels
+/// match reference renderings exactly.
+#[inline]
+pub(crate) fn blend_image(dst: u32, src: [f32; 3], alpha: u32) -> u32 {
+    let s = src.map(|c| c.round().clamp(0.0, 255.0) as u32);
+    if alpha >= 255 {
+        return (s[0] << 16) | (s[1] << 8) | s[2];
+    }
+    if alpha == 0 {
+        return dst;
+    }
+    let inv = 255 - alpha;
+    let d = [(dst >> 16) & 0xff, (dst >> 8) & 0xff, dst & 0xff];
+    let c = |i: usize| (s[i] * alpha + d[i] * inv) / 255;
+    (c(0) << 16) | (c(1) << 8) | c(2)
+}
+
 /// Coverage of the pixel span [p, p+1) by the interval [a, b), in 0..=1.
 #[inline(always)]
 pub(crate) fn span_coverage(p: f32, a: f32, b: f32) -> f32 {
