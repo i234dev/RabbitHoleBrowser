@@ -2,6 +2,7 @@
 //! font loading + glyph rasterization (via `fontdue`), and image decoding.
 //! No GPU, no system toolkit; the same code paints on every platform.
 
+pub mod avif;
 pub mod canvas;
 pub mod canvas_ext;
 pub mod font;
