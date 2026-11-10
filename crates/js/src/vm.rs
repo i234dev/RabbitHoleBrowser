@@ -48,6 +48,7 @@ pub(crate) enum Flow {
     /// Continue with the current frame.
     Next,
     /// Frames were pushed or popped: reload the current frame.
+    #[allow(dead_code)]
     Reload,
     Exit(Exit),
 }
@@ -284,7 +285,7 @@ impl Realm {
         let nslots = code.scope_slots as usize;
         let nregs = code.nregs as usize;
         let mut stack = self.take_stack(nregs);
-        let mut slots = vec![Value::Undefined; nslots];
+        let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
         {
             let caller = &mut self.frames[fi].stack;
             let mut args = caller.drain(base..);
@@ -365,8 +366,9 @@ impl Realm {
         let new_target = if flags.is_arrow { arrow_nt.unwrap_or(Value::Undefined) } else { new_target };
         let nslots = code.scope_slots as usize;
         let nregs = code.nregs as usize;
-        let mut slots = vec![Value::Undefined; nslots];
+        let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
         let mut stack = self.take_stack(nregs);
+        #[inline(always)]
         fn put(stack: &mut [Value], slots: &mut [Value], loc: VarLoc, v: Value) {
             match loc {
                 VarLoc::Reg(r) => stack[r as usize] = v,
@@ -428,9 +430,9 @@ impl Realm {
         for (i, a) in args.iter().enumerate() {
             self.define_property(id, PropertyKey::index(i as u32), a.clone(), ALL);
         }
-        self.define_property(id, "length", Value::Number(args.len() as f64), HIDDEN);
+        self.define_property(id, names::length(), Value::Number(args.len() as f64), HIDDEN);
         if let Some(c) = callee {
-            self.define_property(id, "callee", Value::Object(c), HIDDEN);
+            self.define_property(id, names::callee(), Value::Object(c), HIDDEN);
         }
         if let Some(values) = self.intrinsics.others.get("ArrayProtoValues").copied() {
             self.define_property(id, PropertyKey::Symbol(SYM_ITERATOR), Value::Object(values), HIDDEN);
@@ -1157,7 +1159,7 @@ impl Realm {
                         }
                         continue 'reload;
                     }
-                    Op::GetProp(k, ic) | Op::GetPropKeep(k, ic) => {
+                    Op::GetProp(k, ic) | Op::GetPropKeep(k, ic) | Op::GetMethod(k, ic) => {
                         let rec = code.ics[ic as usize].get();
                         let recv = top!();
                         let hit = if rec.kind == crate::ic::IC_LENGTH {
@@ -1176,13 +1178,15 @@ impl Realm {
                             }
                         };
                         match hit {
-                            Some(v) => {
-                                if let Op::GetProp(..) = op {
-                                    *top!() = v;
-                                } else {
-                                    push!(v);
+                            Some(v) => match op {
+                                Op::GetProp(..) => *top!() = v,
+                                Op::GetPropKeep(..) => push!(v),
+                                _ => {
+                                    // obj -> method obj
+                                    let recv = std::mem::replace(top!(), v);
+                                    push!(recv);
                                 }
-                            }
+                            },
                             None => {
                                 let _ = k;
                                 slow!(op);
@@ -1290,11 +1294,10 @@ impl Realm {
                             }
                         }
                     }
-                    Op::Call(argc) => {
+                    Op::Call(argc, _) => {
                         tick!();
                         sync!();
                         if tri!(self.try_fast_call(argc as usize)) {
-                            fr!().callee_desc = None;
                             continue 'reload;
                         }
                         slow!(op);
@@ -1603,6 +1606,16 @@ impl Realm {
                     frame!().code.ics[ic as usize].set(rec);
                     push!(v);
                 }
+                Op::GetMethod(i, ic) => {
+                    let obj = peek!().clone();
+                    let key = const_key!(i);
+                    let v = self.get(obj.clone(), key.clone())?;
+                    let rec = self.ic_fill_get(&obj, &key);
+                    frame!().code.ics[ic as usize].set(rec);
+                    let o = pop!();
+                    push!(v);
+                    push!(o);
+                }
                 Op::SetProp(i, ic) => {
                     let v = pop!();
                     let obj = pop!();
@@ -1777,24 +1790,18 @@ impl Realm {
                     self.super_set(fi, key, v.clone())?;
                     push!(v);
                 }
-                Op::CalleeDesc(i) => {
-                    frame!().callee_desc = Some(i);
-                }
-                Op::Call(argc) | Op::CallEval(argc) => {
+                Op::Call(argc, desc) | Op::CallEval(argc, desc) => {
                     let n = frame!().stack.len();
                     let base = n - argc as usize - 2;
                     let args = self.take_args(fi, base + 2);
                     let this = pop!();
                     let f = pop!();
-                    if !self.is_callable(&f) {
-                        if let Some(i) = frame!().callee_desc.take() {
-                            let desc = constant!(i);
-                            let desc = desc.as_str().map(|s| s.to_rust_string()).unwrap_or_default();
-                            return self.type_error(&format!("{} is not a function", desc));
-                        }
+                    if desc != crate::bytecode::NO_DESC && !self.is_callable(&f) {
+                        let desc = constant!(desc);
+                        let desc = desc.as_str().map(|s| s.to_rust_string()).unwrap_or_default();
+                        return self.type_error(&format!("{} is not a function", desc));
                     }
-                    frame!().callee_desc = None;
-                    if let Op::CallEval(_) = op {
+                    if let Op::CallEval(..) = op {
                         if f.as_object() == Some(self.intrinsics.eval_fn) {
                             let strict = frame!().code.flags.is_strict;
                             let v = self.direct_eval(args.first().cloned().unwrap_or(Value::Undefined), strict)?;
@@ -2700,16 +2707,16 @@ impl Realm {
             self.intrinsics.function_proto
         };
         let id = self.alloc(Object::new(Some(proto), ObjectKind::Function(Box::new(closure))));
-        self.define_property(id, "length", Value::Number(code.param_count as f64), CONFIGURABLE);
-        self.define_property(id, "name", Value::String(code.name.clone()), CONFIGURABLE);
+        self.define_property(id, names::length(), Value::Number(code.param_count as f64), CONFIGURABLE);
+        self.define_property(id, names::name(), Value::String(code.name.clone()), CONFIGURABLE);
         if flags.is_generator {
             let gp = if flags.is_async { self.intrinsics.async_generator_proto } else { self.intrinsics.generator_proto };
             let p = self.alloc(Object::new(Some(gp), ObjectKind::Ordinary));
             self.define_property(id, "prototype", Value::Object(p), WRITABLE);
         } else if !flags.is_arrow && !flags.is_method && !flags.is_async && !flags.is_class_constructor {
             let p = self.new_object();
-            self.define_property(p, "constructor", Value::Object(id), HIDDEN);
-            self.define_property(id, "prototype", Value::Object(p), WRITABLE);
+            self.define_property(p, names::constructor(), Value::Object(id), HIDDEN);
+            self.define_property(id, names::prototype(), Value::Object(p), WRITABLE);
         }
         id
     }
@@ -2743,6 +2750,17 @@ impl Realm {
         Ok((ctor, proto))
     }
 
+    /// Is own property `k` of `c` enumerable (without cloning it)?
+    fn own_enumerable(&mut self, c: ObjectId, k: &PropertyKey) -> JsResult<bool> {
+        let obj = self.obj(c);
+        match &obj.kind {
+            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) => {
+                Ok(self.get_own_property_any(c, k)?.map(|p| p.enumerable()).unwrap_or(false))
+            }
+            _ => Ok(obj.props.get(k).map(|p| p.enumerable()).unwrap_or(false)),
+        }
+    }
+
     fn for_in_start(&mut self, v: Value) -> JsResult<ObjectId> {
         let mut keys: Vec<JsStr> = Vec::new();
         let object = match v {
@@ -2751,22 +2769,66 @@ impl Realm {
             prim => Some(self.to_object(prim)?),
         };
         if let Some(id) = object {
-            let mut seen: std::collections::HashSet<JsStr> = std::collections::HashSet::new();
+            // Names seen on objects already visited (shadowing, even by
+            // non-enumerable properties). Only materialised once a
+            // prototype contributes enumerable names, which is rare.
+            let mut seen: Option<std::collections::HashSet<JsStr, FxBuild>> = None;
+            let mut visited: Vec<Vec<PropertyKey>> = Vec::new();
             let mut cur = Some(id);
+            let mut first = true;
             while let Some(c) = cur {
                 let own = self.own_keys(c)?;
-                for k in own {
-                    if let PropertyKey::String(s) = &k {
-                        if seen.contains(s) {
-                            continue;
+                let mut en = Vec::with_capacity(own.len());
+                let mut any = false;
+                for k in &own {
+                    let e = match k {
+                        PropertyKey::Symbol(_) => false,
+                        PropertyKey::String(_) => self.own_enumerable(c, k)?,
+                    };
+                    any |= e;
+                    en.push(e);
+                }
+                if first {
+                    for (k, e) in own.iter().zip(&en) {
+                        if *e {
+                            if let PropertyKey::String(s) = k {
+                                keys.push(s.clone());
+                            }
                         }
-                        seen.insert(s.clone());
-                        let enumerable = self.get_own_property_any(c, &k)?.map(|p| p.enumerable()).unwrap_or(false);
-                        if enumerable {
-                            keys.push(s.clone());
+                    }
+                } else if any {
+                    let set = seen.get_or_insert_with(|| {
+                        let mut set = std::collections::HashSet::default();
+                        for ks in visited.drain(..) {
+                            for k in ks {
+                                if let PropertyKey::String(s) = k {
+                                    set.insert(s);
+                                }
+                            }
+                        }
+                        set
+                    });
+                    for (k, e) in own.iter().zip(&en) {
+                        if let PropertyKey::String(s) = k {
+                            if set.insert(s.clone()) && *e {
+                                keys.push(s.clone());
+                            }
                         }
                     }
                 }
+                if !any || first {
+                    match &mut seen {
+                        Some(set) => {
+                            for k in own {
+                                if let PropertyKey::String(s) = k {
+                                    set.insert(s);
+                                }
+                            }
+                        }
+                        None => visited.push(own),
+                    }
+                }
+                first = false;
                 cur = self.get_prototype_of(c)?;
             }
         }

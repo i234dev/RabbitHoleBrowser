@@ -162,11 +162,31 @@ fn dense(realm: &Realm, id: ObjectId) -> Option<Vec<Value>> {
     }
 }
 
+/// A present dense element of an array (no key string needed).
+#[inline]
+fn dense_get(realm: &Realm, id: ObjectId, i: usize) -> Option<Value> {
+    match &realm.obj(id).kind {
+        ObjectKind::Array { elements, .. } => match elements.get(i) {
+            Some(v) if !v.is_empty() => Some(v.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn get_i(realm: &mut Realm, id: ObjectId, i: usize) -> JsResult<Value> {
+    if let Some(v) = dense_get(realm, id, i) {
+        return Ok(v);
+    }
     realm.get(Value::Object(id), PropertyKey::index(i as u32))
 }
 
 fn has_i(realm: &mut Realm, id: ObjectId, i: usize) -> JsResult<bool> {
+    if let ObjectKind::Array { elements, .. } = &realm.obj(id).kind {
+        if matches!(elements.get(i), Some(v) if !v.is_empty()) {
+            return Ok(true);
+        }
+    }
     realm.has_property(id, &PropertyKey::index(i as u32))
 }
 
@@ -597,7 +617,7 @@ fn map(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         if has_i(realm, id, i)? {
             let v = get_i(realm, id, i)?;
             let r = realm.call(f.clone(), t.clone(), &[v, Value::Number(i as f64), Value::Object(id)])?;
-            realm.define_own(out, PropertyKey::index(i as u32), Property::data(r, ALL))?;
+            push_result(realm, out, i, r)?;
         }
     }
     if let ObjectKind::Array { length, .. } = &mut realm.obj_mut(out).kind {
@@ -798,7 +818,7 @@ fn slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     for i in start..end {
         if has_i(realm, id, i)? {
             let v = get_i(realm, id, i)?;
-            realm.define_own(out, PropertyKey::index(n as u32), Property::data(v, ALL))?;
+            push_result(realm, out, n, v)?;
         }
         n += 1;
     }
@@ -924,7 +944,7 @@ fn splice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     for i in 0..delete_count {
         if has_i(realm, id, start + i)? {
             let v = get_i(realm, id, start + i)?;
-            realm.define_own(removed_arr, PropertyKey::index(i as u32), Property::data(v, ALL))?;
+            push_result(realm, removed_arr, i, v)?;
         }
     }
     set_len(realm, removed_arr, delete_count)?;

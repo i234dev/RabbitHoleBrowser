@@ -72,6 +72,8 @@ pub enum Op {
     GetElemKeep,
     /// obj -> obj value
     GetPropKeep(u32, u32),
+    /// obj -> method obj (`Dup; GetProp; Swap` fused for method calls)
+    GetMethod(u32, u32),
     DeleteProp(u32),
     DeleteElem,
     /// Object literal helpers: obj value -> obj
@@ -95,8 +97,9 @@ pub enum Op {
     SetSuperElem,
 
     // --- calls
-    /// func this args.. -> result
-    Call(u16),
+    /// func this args.. -> result; second operand: constant describing the
+    /// callee for "is not a function" errors (`NO_DESC` when none).
+    Call(u16, u32),
     /// func this argsArray -> result
     CallSpread,
     /// func args.. -> result
@@ -107,9 +110,7 @@ pub enum Op {
     SuperCall(u16),
     SuperCallSpread,
     /// Direct eval: func this args.. with special handling when func is the intrinsic eval
-    CallEval(u16),
-    /// Remember a textual description of the next callee for error messages.
-    CalleeDesc(u32),
+    CallEval(u16, u32),
     Return,
     Throw,
     /// Throw a ReferenceError/TypeError with a constant message: (kind, msg const)
@@ -268,6 +269,9 @@ pub struct PropIc {
     pub mid: u32,
     pub mid_shape: u32,
 }
+
+/// `Call` without a callee description.
+pub const NO_DESC: u32 = u32::MAX;
 
 /// Location of a parameter-like binding: frame register or function scope slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,6 +437,8 @@ pub fn peephole(ops: &mut Vec<Op>, positions: &mut Vec<crate::ast::Pos>, handler
             // i++ / ++i / i += 1 as a statement on a register.
             (Op::GetReg(a), Some(Op::Inc), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::IncReg(a)), 5),
             (Op::GetReg(a), Some(Op::Dec), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::DecReg(a)), 5),
+            // Method lookup for a call: obj -> method obj.
+            (Op::Dup, Some(Op::GetProp(k, ic)), Some(Op::Swap), _, _) if free(i, 3) => (Some(Op::GetMethod(k, ic)), 3),
             // Assignment whose value is discarded.
             (Op::Dup, Some(st @ (Op::SetReg(_) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetGlobal(..) | Op::SetRegChecked(_) | Op::SetLocalChecked(..))), Some(Op::Pop), _, _) if free(i, 3) => (Some(st), 3),
             // Compare and branch.

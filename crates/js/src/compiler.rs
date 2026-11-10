@@ -9,8 +9,8 @@
 use crate::ast::*;
 use crate::bytecode::{CodeFlags, FunctionCode, Handler, Op, VarLoc};
 use crate::captures::CaptureMap;
-use crate::value::{JsStr, Value};
-use std::collections::{HashMap, HashSet};
+use crate::value::{FxBuild, JsStr, Value};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +72,7 @@ struct Binding {
 
 #[derive(Debug)]
 struct CScope {
-    names: HashMap<String, Binding>,
+    names: HashMap<String, Binding, FxBuild>,
     /// Heap slots of the runtime scope object.
     slot_count: u16,
     /// Creates a runtime scope object.
@@ -87,7 +87,7 @@ struct CScope {
 
 impl CScope {
     fn new(materialized: bool, is_function: bool) -> CScope {
-        CScope { names: HashMap::new(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new() }
+        CScope { names: HashMap::default(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new() }
     }
 }
 
@@ -126,7 +126,7 @@ struct FnState {
     ops: Vec<Op>,
     positions: Vec<Pos>,
     constants: Vec<Value>,
-    const_strings: HashMap<String, u32>,
+    const_strings: HashMap<String, u32, FxBuild>,
     functions: Vec<Rc<FunctionCode>>,
     handlers: Vec<Handler>,
     templates: Vec<(Vec<Option<JsStr>>, Vec<JsStr>)>,
@@ -145,7 +145,7 @@ struct FnState {
     hidden_counter: u32,
     /// Names referenced from functions nested in this one: bindings with
     /// these names live in heap scopes, all others in registers.
-    captured: Rc<HashSet<String>>,
+    captured: Rc<crate::captures::NameSet>,
     /// All bindings on the heap (module environment).
     force_heap: bool,
     nregs: u16,
@@ -171,7 +171,7 @@ impl FnState {
             ops: Vec::new(),
             positions: Vec::new(),
             constants: Vec::new(),
-            const_strings: HashMap::new(),
+            const_strings: HashMap::default(),
             functions: Vec::new(),
             handlers: Vec::new(),
             templates: Vec::new(),
@@ -188,7 +188,7 @@ impl FnState {
             arguments_loc: None,
             self_loc: None,
             hidden_counter: 0,
-            captured: Rc::new(HashSet::new()),
+            captured: Rc::new(crate::captures::NameSet::default()),
             force_heap: false,
             nregs: 0,
             reg_names: Vec::new(),
@@ -802,10 +802,10 @@ impl Compiler {
     /// Captured-name set for a function node: from the program-wide
     /// analysis, or computed now for synthesized / cloned nodes (whose
     /// nested functions are then registered until `release` is called).
-    fn captured_for(&mut self, f: &Function) -> (Rc<HashSet<String>>, Vec<*const Function>) {
+    fn captured_for(&mut self, f: &Function) -> (Rc<crate::captures::NameSet>, Vec<*const Function>) {
         let key = f as *const Function;
         if let Some(set) = self.captures.get(&key) {
-            return (Rc::new(set.clone()), Vec::new());
+            return (set.clone(), Vec::new());
         }
         let mut local = crate::captures::analyze_function(f);
         let set = local.remove(&key).unwrap_or_default();
@@ -816,7 +816,7 @@ impl Compiler {
                 added.push(k);
             }
         }
-        (Rc::new(set), added)
+        (set, added)
     }
 
     // --------------------------------------------------------------- script
@@ -828,7 +828,7 @@ impl Compiler {
         let filename = self.filename.clone();
         let mut fs = FnState::new("", flags, !program.is_module, filename);
         fs.source = Some(self.source.clone());
-        fs.captured = Rc::new(self.captures.get(&std::ptr::null()).cloned().unwrap_or_default());
+        fs.captured = self.captures.get(&std::ptr::null()).cloned().unwrap_or_default();
         fs.force_heap = program.is_module;
         self.fns.push(fs);
 
@@ -931,7 +931,7 @@ impl Compiler {
         let body_flags = CodeFlags { is_arrow: true, is_async: true, is_strict: true, has_simple_params: true, ..Default::default() };
         let mut body = FnState::new("<module>", body_flags, false, self.filename.clone());
         body.source = Some(self.source.clone());
-        body.captured = Rc::new(self.captures.get(&std::ptr::null()).cloned().unwrap_or_default());
+        body.captured = self.captures.get(&std::ptr::null()).cloned().unwrap_or_default();
         body.scopes[0].materialized = false;
         self.fns.push(body);
         for s in &program.body {
@@ -1963,7 +1963,7 @@ impl Compiler {
                 for ex in expressions {
                     self.compile_expr(ex)?;
                 }
-                self.emit(Op::Call((expressions.len() + 1) as u16));
+                self.emit(Op::Call((expressions.len() + 1) as u16, crate::bytecode::NO_DESC));
             }
             ExprKind::Regex { pattern, flags } => {
                 let p = self.const_str(pattern);
@@ -2137,11 +2137,11 @@ impl Compiler {
                     }
                 }
                 let is_eval = matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval");
+                let desc = match callee_description(callee) {
+                    Some(d) => self.const_str(&d),
+                    None => crate::bytecode::NO_DESC,
+                };
                 self.compile_callee(callee)?;
-                if let Some(desc) = callee_description(callee) {
-                    let i = self.const_str(&desc);
-                    self.emit(Op::CalleeDesc(i));
-                }
                 if *optional {
                     // stack: fn this
                     self.emit(Op::Swap);
@@ -2150,11 +2150,11 @@ impl Compiler {
                     self.emit(Op::Swap);
                     self.chain_exit(j, 2);
                 }
-                self.compile_args_and_call(args, is_eval, false)?;
+                self.compile_args_and_call(args, is_eval, false, desc)?;
             }
             ExprKind::New { callee, args } => {
                 self.compile_expr(callee)?;
-                self.compile_args_and_call(args, false, true)?;
+                self.compile_args_and_call(args, false, true, crate::bytecode::NO_DESC)?;
             }
             ExprKind::Member { object, property, optional } => {
                 if let ExprKind::Super = object.kind {
@@ -2368,7 +2368,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_args_and_call(&mut self, args: &[ArrayElement], is_eval: bool, is_new: bool) -> CResult<()> {
+    fn compile_args_and_call(&mut self, args: &[ArrayElement], is_eval: bool, is_new: bool, desc: u32) -> CResult<()> {
         let has_spread = args.iter().any(|a| matches!(a, ArrayElement::Spread(_)));
         if has_spread {
             self.emit(Op::NewArray(0));
@@ -2398,9 +2398,9 @@ impl Compiler {
             self.emit(if is_new {
                 Op::New(n)
             } else if is_eval {
-                Op::CallEval(n)
+                Op::CallEval(n, desc)
             } else {
-                Op::Call(n)
+                Op::Call(n, desc)
             });
         }
         Ok(())
@@ -2871,7 +2871,7 @@ impl Compiler {
                     let idx = self.compile_method(&f, Some(""), true)?;
                     self.emit(Op::MakeClosure(idx)); // proto ctor ctor fn
                     self.emit(Op::Swap); // proto ctor fn ctor
-                    self.emit(Op::Call(0)); // proto ctor result
+                    self.emit(Op::Call(0, crate::bytecode::NO_DESC)); // proto ctor result
                     self.emit(Op::Pop);
                     self.emit(Op::Swap); // ctor proto
                 }
@@ -2958,7 +2958,7 @@ impl Compiler {
         let idx = self.compile_method(&f, key_name.as_deref(), true)?;
         self.emit(Op::MakeClosure(idx)); // proto ctor ctor key fn
         self.emit(Op::Rot3); // proto ctor key fn ctor  -- wait: Rot3 a b c -> b c a : (ctor key fn) -> (key fn ctor)
-        self.emit(Op::Call(0)); // proto ctor key value
+        self.emit(Op::Call(0, crate::bytecode::NO_DESC)); // proto ctor key value
         self.emit(Op::DefineElem); // proto ctor
         self.emit(Op::Swap); // ctor proto
         Ok(())

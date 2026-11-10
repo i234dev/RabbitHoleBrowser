@@ -172,6 +172,22 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// First byte of the next token when only ASCII blanks separate it
+    /// (`Some(0)` at the end of input); `None` when a comment or non-ASCII
+    /// character makes a simple scan unreliable.
+    pub fn next_significant_byte(&self) -> Option<u8> {
+        let b = self.bytes;
+        let mut i = self.pos;
+        loop {
+            match b.get(i) {
+                None => return Some(0),
+                Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => i += 1,
+                Some(c) if *c >= 0x80 || *c == b'/' => return None,
+                Some(c) => return Some(*c),
+            }
+        }
+    }
+
     /// After the current token: is the next token `=>` on the same line?
     /// `None` when that cannot be decided by a simple ASCII scan.
     pub fn next_is_arrow(&self) -> Option<bool> {
@@ -194,6 +210,10 @@ impl<'a> Lexer<'a> {
         let mut newline = false;
         let mut at_line_start = self.pos == self.line_start || self.pos == 0;
         loop {
+            // ASCII blanks are by far the most common trivia.
+            while matches!(self.bytes.get(self.pos), Some(b' ') | Some(b'\t')) {
+                self.pos += 1;
+            }
             let Some(c) = self.peek_char() else { return Ok(newline) };
             match c {
                 '\n' | '\r' | '\u{2028}' | '\u{2029}' => {
@@ -293,6 +313,9 @@ impl<'a> Lexer<'a> {
             let name = self.scan_identifier_name()?;
             return Ok(TokenKind::Ident(name));
         }
+        if let Some(p) = self.scan_punct() {
+            return Ok(TokenKind::Punct(p));
+        }
         let b0 = self.bytes[self.pos];
         for p in PUNCTS {
             if p.as_bytes()[0] == b0 && self.src[self.pos..].starts_with(p) {
@@ -306,6 +329,184 @@ impl<'a> Lexer<'a> {
             }
         }
         Err(self.err(format!("Unexpected character '{c}'")))
+    }
+
+    /// Punctuator at the current position (longest match), decided on bytes.
+    fn scan_punct(&mut self) -> Option<&'static str> {
+        let b = self.bytes;
+        let p = self.pos;
+        let at = |i: usize| b.get(p + i).copied().unwrap_or(0);
+        let (c1, c2, c3) = (at(1), at(2), at(3));
+        let s: &'static str = match at(0) {
+            b'{' => "{",
+            b'}' => "}",
+            b'(' => "(",
+            b')' => ")",
+            b'[' => "[",
+            b']' => "]",
+            b';' => ";",
+            b',' => ",",
+            b'~' => "~",
+            b':' => ":",
+            b'@' => "@",
+            b'.' => {
+                if c1 == b'.' && c2 == b'.' {
+                    "..."
+                } else {
+                    "."
+                }
+            }
+            b'?' => {
+                if c1 == b'?' {
+                    if c2 == b'=' {
+                        "??="
+                    } else {
+                        "??"
+                    }
+                } else if c1 == b'.' && !c2.is_ascii_digit() {
+                    "?."
+                } else {
+                    "?"
+                }
+            }
+            b'=' => {
+                if c1 == b'=' {
+                    if c2 == b'=' {
+                        "==="
+                    } else {
+                        "=="
+                    }
+                } else if c1 == b'>' {
+                    "=>"
+                } else {
+                    "="
+                }
+            }
+            b'!' => {
+                if c1 == b'=' {
+                    if c2 == b'=' {
+                        "!=="
+                    } else {
+                        "!="
+                    }
+                } else {
+                    "!"
+                }
+            }
+            b'<' => {
+                if c1 == b'<' {
+                    if c2 == b'=' {
+                        "<<="
+                    } else {
+                        "<<"
+                    }
+                } else if c1 == b'=' {
+                    "<="
+                } else {
+                    "<"
+                }
+            }
+            b'>' => {
+                if c1 == b'>' {
+                    if c2 == b'>' {
+                        if c3 == b'=' {
+                            ">>>="
+                        } else {
+                            ">>>"
+                        }
+                    } else if c2 == b'=' {
+                        ">>="
+                    } else {
+                        ">>"
+                    }
+                } else if c1 == b'=' {
+                    ">="
+                } else {
+                    ">"
+                }
+            }
+            b'+' => {
+                if c1 == b'+' {
+                    "++"
+                } else if c1 == b'=' {
+                    "+="
+                } else {
+                    "+"
+                }
+            }
+            b'-' => {
+                if c1 == b'-' {
+                    "--"
+                } else if c1 == b'=' {
+                    "-="
+                } else {
+                    "-"
+                }
+            }
+            b'*' => {
+                if c1 == b'*' {
+                    if c2 == b'=' {
+                        "**="
+                    } else {
+                        "**"
+                    }
+                } else if c1 == b'=' {
+                    "*="
+                } else {
+                    "*"
+                }
+            }
+            b'/' => {
+                if c1 == b'=' {
+                    "/="
+                } else {
+                    "/"
+                }
+            }
+            b'%' => {
+                if c1 == b'=' {
+                    "%="
+                } else {
+                    "%"
+                }
+            }
+            b'&' => {
+                if c1 == b'&' {
+                    if c2 == b'=' {
+                        "&&="
+                    } else {
+                        "&&"
+                    }
+                } else if c1 == b'=' {
+                    "&="
+                } else {
+                    "&"
+                }
+            }
+            b'|' => {
+                if c1 == b'|' {
+                    if c2 == b'=' {
+                        "||="
+                    } else {
+                        "||"
+                    }
+                } else if c1 == b'=' {
+                    "|="
+                } else {
+                    "|"
+                }
+            }
+            b'^' => {
+                if c1 == b'=' {
+                    "^="
+                } else {
+                    "^"
+                }
+            }
+            _ => return None,
+        };
+        self.pos += s.len();
+        Some(s)
     }
 
     fn scan_identifier_name(&mut self) -> Result<String, LexError> {
@@ -408,6 +609,23 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 _ => {}
+            }
+        }
+        // Plain integer literal: digits only, no fraction/exponent/suffix.
+        {
+            let b = self.bytes;
+            let mut i = start;
+            let mut v: u64 = 0;
+            while i < b.len() && b[i].is_ascii_digit() {
+                v = v.wrapping_mul(10).wrapping_add((b[i] - b'0') as u64);
+                i += 1;
+            }
+            let n = i - start;
+            let next = b.get(i).copied().unwrap_or(0);
+            if n > 0 && n <= 15 && !(c0 == b'0' && n > 1) && !matches!(next, b'.' | b'e' | b'E' | b'n' | b'_') {
+                self.pos = i;
+                self.check_after_number()?;
+                return Ok(TokenKind::Number(v as f64));
             }
         }
         // Decimal
@@ -526,7 +744,23 @@ impl<'a> Lexer<'a> {
     fn scan_string(&mut self, quote: char) -> Result<TokenKind, LexError> {
         self.pos += 1;
         let mut out = String::new();
+        let q = quote as u8;
         loop {
+            // Copy the run of ordinary characters in one go.
+            let b = self.bytes;
+            let start = self.pos;
+            let mut i = start;
+            while i < b.len() {
+                let c = b[i];
+                if c == q || c == b'\\' || c == b'\n' || c == b'\r' {
+                    break;
+                }
+                i += 1;
+            }
+            if i > start {
+                out.push_str(&self.src[start..i]);
+                self.pos = i;
+            }
             let Some(c) = self.peek_char() else {
                 return Err(self.err("Unterminated string literal"));
             };

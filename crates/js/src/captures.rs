@@ -15,26 +15,29 @@
 //! upward walk stops at the first ancestor that already has it.
 
 use crate::ast::*;
+use crate::value::FxBuild;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 /// Captured-name sets keyed by the address of the `Function` node (the
 /// program root uses the null address).
-pub type CaptureMap = HashMap<*const Function, HashSet<String>>;
+pub type CaptureMap = HashMap<*const Function, Rc<NameSet>, FxBuild>;
+pub type NameSet = HashSet<String, FxBuild>;
 
 pub fn analyze_program(body: &[Stmt]) -> CaptureMap {
-    let mut a = Analyzer { stack: vec![std::ptr::null()], sets: vec![HashSet::new()], out: HashMap::new() };
+    let mut a = Analyzer { stack: vec![std::ptr::null()], sets: vec![NameSet::default()], out: HashMap::default() };
     for s in body {
         a.stmt(s);
     }
     let root = a.sets.pop().unwrap();
-    a.out.insert(std::ptr::null(), root);
+    a.out.insert(std::ptr::null(), Rc::new(root));
     a.out
 }
 
 /// Analyze a single function (used for synthesized or cloned function
 /// nodes that the program-wide pass did not see).
 pub fn analyze_function(f: &Function) -> CaptureMap {
-    let mut a = Analyzer { stack: vec![std::ptr::null()], sets: vec![HashSet::new()], out: HashMap::new() };
+    let mut a = Analyzer { stack: vec![std::ptr::null()], sets: vec![NameSet::default()], out: HashMap::default() };
     a.function(f);
     a.out
 }
@@ -42,7 +45,7 @@ pub fn analyze_function(f: &Function) -> CaptureMap {
 struct Analyzer {
     /// Enclosing function keys, outermost first.
     stack: Vec<*const Function>,
-    sets: Vec<HashSet<String>>,
+    sets: Vec<NameSet>,
     out: CaptureMap,
 }
 
@@ -64,7 +67,7 @@ impl Analyzer {
 
     fn function(&mut self, f: &Function) {
         self.stack.push(f as *const Function);
-        self.sets.push(HashSet::new());
+        self.sets.push(NameSet::default());
         if let Some(n) = &f.name {
             self.name(n);
         }
@@ -81,14 +84,14 @@ impl Analyzer {
         }
         let set = self.sets.pop().unwrap();
         let key = self.stack.pop().unwrap();
-        self.out.insert(key, set);
+        self.out.insert(key, Rc::new(set));
     }
 
     /// Code compiled into a synthetic function of its own (class field
     /// initializers, static blocks): a nested level without an AST node.
     fn synthetic<F: FnOnce(&mut Self)>(&mut self, f: F) {
         self.stack.push(std::ptr::null());
-        self.sets.push(HashSet::new());
+        self.sets.push(NameSet::default());
         f(self);
         self.sets.pop();
         self.stack.pop();

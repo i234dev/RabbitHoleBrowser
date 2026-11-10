@@ -67,7 +67,7 @@ pub struct Intrinsics {
     pub array_ctor: ObjectId,
     pub function_ctor: ObjectId,
     pub eval_fn: ObjectId,
-    pub others: HashMap<&'static str, ObjectId>,
+    pub others: HashMap<&'static str, ObjectId, FxBuild>,
 }
 
 impl Intrinsics {
@@ -233,7 +233,7 @@ impl Realm {
             array_ctor: object_proto,
             function_ctor: object_proto,
             eval_fn: object_proto,
-            others: HashMap::new(),
+            others: HashMap::default(),
         };
         let mut symbols = Vec::new();
         for (name, _) in WELL_KNOWN_SYMBOLS.iter() {
@@ -326,8 +326,8 @@ impl Realm {
         let proto = self.intrinsics.function_proto;
         let id = self.alloc(Object::new(Some(proto), ObjectKind::Native(Box::new(NativeFunction { func, name: JsStr::new(name), data, captures, is_constructor }))));
         let o = self.heap.get_mut(id);
-        o.props.insert(PropertyKey::str("length"), Property::data(Value::Number(arity as f64), CONFIGURABLE));
-        o.props.insert(PropertyKey::str("name"), Property::data(Value::str(name), CONFIGURABLE));
+        o.props.insert(names::length(), Property::data(Value::Number(arity as f64), CONFIGURABLE));
+        o.props.insert(names::name(), Property::data(Value::str(name), CONFIGURABLE));
         id
     }
 

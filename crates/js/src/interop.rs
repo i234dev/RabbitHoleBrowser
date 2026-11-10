@@ -141,17 +141,33 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         loop {
-            if let ObjectKind::Proxy { .. } = &self.obj(cur).kind {
-                return self.proxy_get(cur, key, receiver);
-            }
-            if let Some(p) = self.get_own_property(cur, key) {
-                if p.is_accessor() {
-                    return match p.getter {
-                        Some(g) => self.call(g, receiver, &[]),
-                        None => Ok(Value::Undefined),
-                    };
+            let obj = self.obj(cur);
+            match &obj.kind {
+                ObjectKind::Proxy { .. } => return self.proxy_get(cur, key, receiver),
+                ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) => {
+                    // Exotic own properties (elements, length).
+                    if let Some(p) = self.get_own_property(cur, key) {
+                        if p.is_accessor() {
+                            return match p.getter {
+                                Some(g) => self.call(g, receiver, &[]),
+                                None => Ok(Value::Undefined),
+                            };
+                        }
+                        return Ok(p.value);
+                    }
                 }
-                return Ok(p.value);
+                _ => {
+                    // Ordinary storage: no Property clone on the common path.
+                    if let Some(p) = obj.props.get(key) {
+                        if p.flags & ACCESSOR == 0 {
+                            return Ok(p.value.clone());
+                        }
+                        return match p.getter.clone() {
+                            Some(g) => self.call(g, receiver, &[]),
+                            None => Ok(Value::Undefined),
+                        };
+                    }
+                }
             }
             match self.obj(cur).proto {
                 Some(p) => cur = p,
@@ -1182,8 +1198,8 @@ impl Realm {
 
     pub fn create_iter_result(&mut self, value: Value, done: bool) -> Value {
         let o = self.new_object();
-        self.define_property(o, "value", value, ALL);
-        self.define_property(o, "done", Value::Bool(done), ALL);
+        self.define_property(o, names::value(), value, ALL);
+        self.define_property(o, names::done(), Value::Bool(done), ALL);
         Value::Object(o)
     }
 

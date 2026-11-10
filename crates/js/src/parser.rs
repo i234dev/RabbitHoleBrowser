@@ -97,7 +97,7 @@ pub struct Parser<'a> {
     /// Byte offsets of `(` tokens already known not to start arrow
     /// parameters. Without this, nested `(a=(b=(c=...` retries every level
     /// as an arrow head and parsing becomes exponential in the depth.
-    not_arrow: std::collections::HashSet<usize>,
+    not_arrow: std::collections::HashSet<usize, crate::value::FxBuild>,
 }
 
 const RESERVED: &[&str] = &[
@@ -157,6 +157,39 @@ fn assign_op(p: &str) -> Option<AssignOp> {
     })
 }
 
+/// The keyword an identifier token spells (as a static string), or "".
+/// Lets the parser dispatch on keywords without cloning token text.
+fn keyword(n: &str) -> &'static str {
+    match n {
+        "var" => "var",
+        "if" => "if",
+        "for" => "for",
+        "while" => "while",
+        "do" => "do",
+        "return" => "return",
+        "break" => "break",
+        "continue" => "continue",
+        "throw" => "throw",
+        "try" => "try",
+        "switch" => "switch",
+        "debugger" => "debugger",
+        "with" => "with",
+        "function" => "function",
+        "class" => "class",
+        "async" => "async",
+        "const" => "const",
+        "let" => "let",
+        "import" => "import",
+        "export" => "export",
+        "this" => "this",
+        "null" => "null",
+        "true" => "true",
+        "false" => "false",
+        "new" => "new",
+        _ => "",
+    }
+}
+
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str, is_module: bool) -> PResult<Parser<'a>> {
         let mut lx = Lexer::new(source, is_module);
@@ -180,7 +213,7 @@ impl<'a> Parser<'a> {
                 super_prop_ok: false,
             },
             no_in: false,
-            not_arrow: std::collections::HashSet::new(),
+            not_arrow: std::collections::HashSet::default(),
         })
     }
 
@@ -408,8 +441,8 @@ impl<'a> Parser<'a> {
 
     fn parse_statement_list_item(&mut self) -> PResult<Stmt> {
         let pos = self.tok.pos;
-        match self.tok.kind.clone() {
-            TokenKind::Ident(n) => match n.as_str() {
+        match &self.tok.kind {
+            TokenKind::Ident(n) => match keyword(n) {
                 "function" => {
                     let f = self.parse_function(false, false, true)?;
                     return Ok(Stmt { pos, kind: StmtKind::FunctionDecl(f) });
@@ -480,13 +513,13 @@ impl<'a> Parser<'a> {
 
     fn parse_statement(&mut self) -> PResult<Stmt> {
         let pos = self.tok.pos;
-        let kind = match self.tok.kind.clone() {
+        let kind = match &self.tok.kind {
             TokenKind::Punct("{") => StmtKind::Block(self.parse_block()?),
             TokenKind::Punct(";") => {
                 self.advance()?;
                 StmtKind::Empty
             }
-            TokenKind::Ident(name) => match name.as_str() {
+            TokenKind::Ident(name) => match keyword(name) {
                 "var" => {
                     let d = self.parse_var_decl(VarKind::Var)?;
                     self.consume_semicolon()?;
@@ -526,8 +559,8 @@ impl<'a> Parser<'a> {
                     self.consume_semicolon()?;
                     StmtKind::Return(arg)
                 }
-                "break" | "continue" => {
-                    let is_break = name == "break";
+                kw @ ("break" | "continue") => {
+                    let is_break = kw == "break";
                     self.advance()?;
                     let label = if !self.tok.newline_before {
                         match &self.tok.kind {
@@ -623,11 +656,18 @@ impl<'a> Parser<'a> {
                 "import" if self.ctx.is_module && !self.peek_is_punct_any(&["(", "."])? => return self.parse_import(),
                 "export" if self.ctx.is_module => return self.parse_export(),
                 _ => {
-                    // Labeled statement?
-                    if !self.is_reserved(&name) && self.peek_is_punct_any(&[":"])? {
-                        self.advance()?;
-                        self.advance()?; // ':'
-                        return self.parse_labeled(pos, name);
+                    // Labeled statement? (cheap byte peek first)
+                    let maybe_label = matches!(self.lx.next_significant_byte(), Some(b':') | None);
+                    if maybe_label {
+                        let name = match &self.tok.kind {
+                            TokenKind::Ident(n) => n.clone(),
+                            _ => unreachable!(),
+                        };
+                        if !self.is_reserved(&name) && self.peek_is_punct_any(&[":"])? {
+                            self.advance()?;
+                            self.advance()?; // ':'
+                            return self.parse_labeled(pos, name);
+                        }
                     }
                     self.parse_expression_statement()?
                 }
@@ -1257,7 +1297,7 @@ impl<'a> Parser<'a> {
         if let Some(arrow) = self.try_parse_arrow()? {
             return Ok(arrow);
         }
-        let start_tok = self.tok.clone();
+        let start_pos = self.tok.pos;
         let left = self.parse_conditional()?;
         let op = match &self.tok.kind {
             TokenKind::Punct(p) => assign_op(p),
@@ -1273,7 +1313,7 @@ impl<'a> Parser<'a> {
         } else {
             match left.kind {
                 ExprKind::Identifier(_) | ExprKind::Member { optional: false, .. } => self.expr_to_pattern(left, false)?,
-                _ => return Err(self.error_at(start_tok.pos, "Invalid left-hand side in assignment")),
+                _ => return Err(self.error_at(start_pos, "Invalid left-hand side in assignment")),
             }
         };
         self.advance()?;
@@ -1944,19 +1984,20 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> PResult<Expr> {
         let pos = self.tok.pos;
-        let kind = match self.tok.kind.clone() {
+        let kind = match &self.tok.kind {
             TokenKind::Number(n) => {
+                let n = *n;
                 self.advance()?;
                 ExprKind::Number(n)
             }
-            TokenKind::BigInt(s) => {
-                self.advance()?;
-                ExprKind::BigInt(s)
-            }
-            TokenKind::Str(s) => {
-                self.advance()?;
-                ExprKind::String(s)
-            }
+            TokenKind::BigInt(_) => match self.advance()?.kind {
+                TokenKind::BigInt(s) => ExprKind::BigInt(s),
+                _ => unreachable!(),
+            },
+            TokenKind::Str(_) => match self.advance()?.kind {
+                TokenKind::Str(s) => ExprKind::String(s),
+                _ => unreachable!(),
+            },
             TokenKind::Template { .. } => {
                 let (quasis, raws, expressions) = self.parse_template_parts(false)?;
                 ExprKind::Template {
@@ -1976,7 +2017,7 @@ impl<'a> Parser<'a> {
             TokenKind::Punct("(") => return self.parse_paren(),
             TokenKind::Punct("[") => return self.parse_array_literal(),
             TokenKind::Punct("{") => return self.parse_object_literal(),
-            TokenKind::Ident(name) => match name.as_str() {
+            TokenKind::Ident(name) => match keyword(name) {
                 "this" => {
                     self.advance()?;
                     ExprKind::This
@@ -2008,11 +2049,13 @@ impl<'a> Parser<'a> {
                 }
                 "new" => return self.parse_new(),
                 _ => {
-                    if self.is_reserved(&name) {
+                    if matches!(&self.tok.kind, TokenKind::Ident(n) if self.is_reserved(n)) {
                         return Err(self.unexpected());
                     }
-                    self.advance()?;
-                    ExprKind::Identifier(name)
+                    match self.advance()?.kind {
+                        TokenKind::Ident(name) => ExprKind::Identifier(name),
+                        _ => unreachable!(),
+                    }
                 }
             },
             _ => return Err(self.unexpected()),
@@ -2093,26 +2136,17 @@ impl<'a> Parser<'a> {
     /// Parses a property key. Also returns the identifier text when the key
     /// is a plain identifier (for shorthand detection).
     fn parse_property_key(&mut self) -> PResult<(PropertyKey, Option<String>)> {
-        Ok(match self.tok.kind.clone() {
-            TokenKind::Ident(n) => {
-                self.advance()?;
-                (PropertyKey::Identifier(n.clone()), Some(n))
-            }
-            TokenKind::Str(s) => {
-                self.advance()?;
-                (PropertyKey::String(s), None)
-            }
+        Ok(match &self.tok.kind {
+            TokenKind::Ident(_) | TokenKind::Str(_) | TokenKind::BigInt(_) | TokenKind::PrivateName(_) => match self.advance()?.kind {
+                TokenKind::Ident(n) => (PropertyKey::Identifier(n.clone()), Some(n)),
+                TokenKind::Str(s) | TokenKind::BigInt(s) => (PropertyKey::String(s), None),
+                TokenKind::PrivateName(n) => (PropertyKey::Private(n), None),
+                _ => unreachable!(),
+            },
             TokenKind::Number(n) => {
+                let n = *n;
                 self.advance()?;
                 (PropertyKey::Number(n), None)
-            }
-            TokenKind::BigInt(s) => {
-                self.advance()?;
-                (PropertyKey::String(s), None)
-            }
-            TokenKind::PrivateName(n) => {
-                self.advance()?;
-                (PropertyKey::Private(n), None)
             }
             TokenKind::Punct("[") => {
                 self.advance()?;

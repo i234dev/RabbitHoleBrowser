@@ -64,11 +64,35 @@ impl JsStr {
     pub fn from_index(i: u32) -> JsStr {
         thread_local! {
             static SMALL: Vec<JsStr> = (0..1024u32).map(|i| JsStr::new(&i.to_string())).collect();
+            // Larger indices are cached lazily (bounded).
+            static LARGE: std::cell::RefCell<Vec<Option<JsStr>>> = const { std::cell::RefCell::new(Vec::new()) };
         }
         if i < 1024 {
             return SMALL.with(|t| t[i as usize].clone());
         }
-        JsStr::new(&i.to_string())
+        if i < (1 << 16) {
+            return LARGE.with(|t| {
+                let mut t = t.borrow_mut();
+                if t.len() <= i as usize {
+                    t.resize(i as usize + 1, None);
+                }
+                t[i as usize].get_or_insert_with(|| JsStr::from_units(Self::index_units(i))).clone()
+            });
+        }
+        JsStr::from_units(Self::index_units(i))
+    }
+    fn index_units(mut i: u32) -> Vec<u16> {
+        let mut buf = [0u16; 10];
+        let mut n = 0;
+        loop {
+            buf[9 - n] = b'0' as u16 + (i % 10) as u16;
+            n += 1;
+            i /= 10;
+            if i == 0 {
+                break;
+            }
+        }
+        buf[10 - n..].to_vec()
     }
     pub fn empty() -> JsStr {
         thread_local! {
@@ -238,6 +262,28 @@ impl JsStr {
     pub fn ptr_eq(&self, other: &JsStr) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
+}
+
+/// Frequently used property names, interned once per thread (avoids an
+/// interner lookup on hot allocation paths).
+pub mod names {
+    use super::{JsStr, PropertyKey};
+    macro_rules! name {
+        ($f:ident, $s:expr) => {
+            #[inline]
+            pub fn $f() -> PropertyKey {
+                thread_local!(static S: JsStr = JsStr::intern($s));
+                PropertyKey::String(S.with(|s| s.clone()))
+            }
+        };
+    }
+    name!(length, "length");
+    name!(name, "name");
+    name!(callee, "callee");
+    name!(prototype, "prototype");
+    name!(constructor, "constructor");
+    name!(value, "value");
+    name!(done, "done");
 }
 
 /// JS WhiteSpace + LineTerminator code units.

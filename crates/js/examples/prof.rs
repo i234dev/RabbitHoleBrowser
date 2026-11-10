@@ -103,5 +103,8 @@ fn main() {
             out.push_str(&format!("{:x}\n", s));
         }
         std::fs::write("prof.out", out).unwrap();
+        if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+            std::fs::write("prof.maps", maps).unwrap();
+        }
     }
 }
