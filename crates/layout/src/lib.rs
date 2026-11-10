@@ -74,3 +74,9 @@ pub fn build_display_list(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList
 pub fn paint(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32) {
     paint::paint(list, canvas, fonts, scroll_x, scroll_y)
 }
+
+/// Rasterize with `position: fixed` content placed at `fixed_origin`
+/// (canvas coordinates of the viewport's top-left corner).
+pub fn paint_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, fixed_origin: (f32, f32)) {
+    paint::paint_with_fixed_origin(list, canvas, fonts, scroll_x, scroll_y, fixed_origin)
+}

@@ -173,3 +173,156 @@ fn negative_clearance_acid2_smile() {
     assert_px!(s.y, n.bottom() - 12.0, t);
     assert_px!(fx.rect(&t, "sd").y, s.y, t);
 }
+
+// ------------------------------------------------------------------ tables
+
+#[test]
+fn acid2_list_as_table_lays_cells_out_horizontally() {
+    let css = format!(
+        "{RESET} body {{ font-size: 12px }} ul {{ display: table; padding: 0; margin: 0; background: red; list-style: disc }} \
+         ul li {{ padding: 0; margin: 0; }} \
+         ul li.first-part {{ display: table-cell; height: 1em; width: 1em; background: black; }} \
+         ul li.second-part {{ display: table; height: 1em; width: 1em; background: black; }} \
+         ul li.third-part {{ display: table-cell; height: 0.5em; width: 1em; background: black; }} \
+         ul li.fourth-part {{ list-style: none; height: 1em; width: 1em; background: black; }}"
+    );
+    let fx = Fx::new(
+        "<ul id=ul>\n <li id=a class=first-part></li>\n <li id=b class=second-part></li>\n <li id=c class=third-part></li>\n <li id=d class=fourth-part></li>\n</ul>",
+        &css,
+    );
+    let t = fx.layout();
+    let ul = fx.rect(&t, "ul");
+    assert_px!(ul.w, 48.0, t);
+    assert_px!(ul.h, 12.0, t);
+    for (id, x) in [("a", 0.0), ("b", 12.0), ("c", 24.0), ("d", 36.0)] {
+        let r = fx.rect(&t, id);
+        assert_px!(r.x, x, t);
+        assert_px!(r.y, 0.0, t);
+        assert_px!(r.h, if id == "c" { 12.0 } else { 12.0 }, t);
+    }
+}
+
+#[test]
+fn colspan_rowspan_and_border_spacing() {
+    let fx = Fx::new(
+        "<table style='border-spacing:4px 2px'><tr><td id=a colspan=2><div style='width:50px;height:10px'></div></td><td id=b rowspan=2><div style='width:20px;height:40px'></div></td></tr>\
+         <tr><td id=c><div style='width:10px;height:10px'></div></td><td id=d><div style='width:30px;height:10px'></div></td></tr></table>",
+        &format!("{RESET} td {{ padding: 0 }} table {{ box-sizing: content-box }}"),
+    );
+    let t = fx.layout();
+    let (a, b, c, d) = (fx.rect(&t, "a"), fx.rect(&t, "b"), fx.rect(&t, "c"), fx.rect(&t, "d"));
+    assert_px!(c.x, 4.0, t);
+    assert_px!(d.x, c.right() + 4.0, t);
+    assert_px!(a.x, 4.0, t);
+    assert_px!(a.right(), d.right(), t);
+    assert_px!(a.y, 2.0, t);
+    assert_px!(c.y, a.bottom() + 2.0, t);
+    assert_px!(b.x, a.right() + 4.0, t);
+    // The row-spanning cell covers both rows (and makes them tall enough).
+    assert_px!(b.y, 2.0, t);
+    assert_px!(b.bottom(), c.bottom(), t);
+    assert!(b.h >= 40.0);
+    assert!(a.w >= 50.0 - 0.01, "{}", t.dump());
+}
+
+#[test]
+fn collapsed_borders_share_grid_lines() {
+    let fx = Fx::new(
+        "<table id=t><tr><td id=a>x</td><td id=b>y</td></tr></table>",
+        &format!("{RESET} table {{ border-collapse: collapse; border: 4px solid black; padding: 10px }} td {{ border: 2px solid red; padding: 0; width: 20px }}"),
+    );
+    let t = fx.layout();
+    let (tb, a, b) = (fx.rect(&t, "t"), fx.rect(&t, "a"), fx.rect(&t, "b"));
+    // Table border 4px wins at the outer edge: 2px outside the cells.
+    assert_px!(a.x - tb.x, 2.0, t);
+    // Cells touch: no spacing, the line between them is shared.
+    assert_px!(b.x, a.right(), t);
+    // Table padding is ignored in the collapsing model.
+    assert_px!(a.y - tb.y, 2.0, t);
+}
+
+#[test]
+fn fixed_table_layout_uses_first_row() {
+    let fx = Fx::new(
+        "<table style='table-layout:fixed;width:300px'><tr><td id=a style='width:100px'>x</td><td id=b>a-very-long-unbreakable-word-that-would-widen-an-auto-column-a-lot-more-than-two-hundred-pixels</td></tr></table>",
+        &format!("{RESET} table {{ border-spacing: 0 }} td {{ padding: 0 }}"),
+    );
+    let t = fx.layout();
+    assert_px!(fx.rect(&t, "a").w, 100.0, t);
+    assert_px!(fx.rect(&t, "b").w, 200.0, t);
+}
+
+#[test]
+fn captions_sit_outside_the_table_box() {
+    let fx = Fx::new(
+        "<table id=t><caption id=c>Cap</caption><tr><td id=a style='height:20px'>x</td></tr></table><table id=u><caption id=d style='caption-side:bottom'>Bottom</caption><tr><td id=e>x</td></tr></table>",
+        &format!("{RESET} table {{ border: 3px solid; margin: 5px }} td {{ padding: 0 }}"),
+    );
+    let t = fx.layout();
+    let (c, a) = (fx.rect(&t, "c"), fx.rect(&t, "a"));
+    assert!(c.h > 0.0);
+    // The wrapper carries the margins; the caption is above the table box.
+    assert_px!(c.y, 5.0, t);
+    fn find(b: &LayoutBox) -> Option<&LayoutBox> {
+        if b.formatting == crate::tree::Formatting::Table {
+            return Some(b);
+        }
+        b.children.iter().find_map(find)
+    }
+    let table_box = find(&t.root).unwrap().rect;
+    assert_px!(table_box.y, c.bottom(), t);
+    assert!(a.y >= table_box.y + 3.0);
+    let (d, e) = (fx.rect(&t, "d"), fx.rect(&t, "e"));
+    assert!(d.y > e.bottom(), "bottom caption below the cells\n{}", t.dump());
+}
+
+#[test]
+fn vertical_align_in_cells() {
+    let fx = Fx::new(
+        "<table><tr><td id=tall style='height:100px'></td><td id=top style='vertical-align:top'><div id=t1 style='height:10px'></div></td>\
+         <td style='vertical-align:middle'><div id=m1 style='height:10px'></div></td><td style='vertical-align:bottom'><div id=b1 style='height:10px'></div></td></tr></table>",
+        &format!("{RESET} table {{ border-spacing: 0 }} td {{ padding: 0; width: 10px }}"),
+    );
+    let t = fx.layout();
+    let tall = fx.rect(&t, "tall");
+    assert_px!(tall.h, 100.0, t);
+    assert_px!(fx.rect(&t, "t1").y, tall.y, t);
+    assert_px!(fx.rect(&t, "m1").y, tall.y + 45.0, t);
+    assert_px!(fx.rect(&t, "b1").y, tall.y + 90.0, t);
+}
+
+#[test]
+fn misparented_cells_get_anonymous_table() {
+    let fx = Fx::new(
+        "<div id=p><div id=a style='display:table-cell;width:30px'>A</div>  <div id=b style='display:table-cell;width:40px'>B</div></div>",
+        RESET,
+    );
+    let t = fx.layout();
+    let (a, b) = (fx.rect(&t, "a"), fx.rect(&t, "b"));
+    assert_px!(a.y, b.y, t);
+    assert_px!(b.x, a.right(), t);
+}
+
+#[test]
+fn table_height_is_shared_by_rows_and_is_a_minimum() {
+    let fx = Fx::new(
+        "<table style='height:100px'><tr><td id=a>x</td></tr><tr><td id=b>y</td></tr></table>",
+        &format!("{RESET} table {{ border-spacing: 0; box-sizing: content-box }} td {{ padding: 0 }}"),
+    );
+    let t = fx.layout();
+    let (a, b) = (fx.rect(&t, "a"), fx.rect(&t, "b"));
+    assert_px!(a.h + b.h, 100.0, t);
+    assert_px!(b.y, a.bottom(), t);
+}
+
+#[test]
+fn inline_table_flows_inline() {
+    let fx = Fx::new(
+        "<div>before <span id=it style='display:inline-table'><span style='display:table-cell'>c1</span><span style='display:table-cell'>c2</span></span> after</div>",
+        RESET,
+    );
+    let t = fx.layout();
+    let it = fx.rect(&t, "it");
+    assert!(it.x > 10.0, "{}", t.dump());
+    assert!(it.w > 10.0);
+}

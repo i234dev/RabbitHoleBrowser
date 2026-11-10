@@ -21,6 +21,8 @@ const HELP: &str = "RabbitHole Browser — a web browser written from scratch (n
 USAGE:
     rabbithole [URL...]                    Open the graphical browser (no URL: restore the last session)
     rabbithole screenshot <URL> [options]  Render a page headlessly to a PNG
+    rabbithole diff <URL-A> <URL-B|PNG> [--out diff.png] [--width W] [--height H] [--tolerance T] [--max-percent P]
+                                           Render two pages (or a page and a PNG) and compare them pixel by pixel
     rabbithole text <URL>                  Print the readable text of a page
     rabbithole links <URL>                 Print all links as `text<TAB>href`
     rabbithole dump <URL> [--dom] [--layout]
@@ -75,6 +77,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("screenshot") => cli::screenshot(&args[1..]),
+        Some("diff") => cli::diff(&args[1..]),
         Some("text") => cli::text(&args[1..]),
         Some("links") => cli::links(&args[1..]),
         Some("dump") => cli::dump(&args[1..]),

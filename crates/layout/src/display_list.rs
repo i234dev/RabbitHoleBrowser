@@ -225,26 +225,12 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         ctx,
         bounds,
         root,
-        fixed: Vec::new(),
         skip_root_bg: root_bg_painted,
         sticky_scrollport: Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height),
         hits: HitList::default(),
         scope: None,
     };
     p.paint_stacking_context(root, bounds);
-    // Fixed boxes form the topmost layer (viewport coordinates).
-    let mut fixed = std::mem::take(&mut p.fixed);
-    if !fixed.is_empty() {
-        fixed.sort_by_key(|b| b.style.z_index.unwrap_or(0));
-        p.list.push(DisplayItem::PushFixed);
-        let saved = p.push_scope(HitScope::Fixed);
-        let vp = Rect::new(0.0, 0.0, ctx.viewport_width, ctx.viewport_height);
-        for b in fixed {
-            p.paint_stacking_context(b, vp);
-        }
-        p.scope = saved;
-        p.list.push(DisplayItem::PopFixed);
-    }
     let hits = std::mem::take(&mut p.hits);
     list.hits = hits;
     list
@@ -255,8 +241,6 @@ struct Painter<'l, 't, 'a> {
     ctx: &'l LayoutContext<'a>,
     bounds: Rect,
     root: &'t LayoutBox,
-    /// Fixed-position boxes collected for the final layer.
-    fixed: Vec<&'t LayoutBox>,
     skip_root_bg: bool,
     sticky_scrollport: Rect,
     /// Hit regions recorded while painting.
@@ -418,6 +402,18 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// Paint a deferred box inside the overflow clips of its ancestors.
     fn paint_deferred(&mut self, d: &Deferred<'t>) {
         let saved = self.scope;
+        if d.b.fixed && d.b.flow == Flow::Absolute {
+            // `position: fixed`: painted in its stacking context's order,
+            // in viewport coordinates (not scrolled, not clipped by
+            // scrolling ancestors).
+            self.list.push(DisplayItem::PushFixed);
+            self.push_scope(HitScope::Fixed);
+            let vp = Rect::new(0.0, 0.0, self.ctx.viewport_width, self.ctx.viewport_height);
+            self.paint_stacking_context(d.b, vp);
+            self.list.push(DisplayItem::PopFixed);
+            self.scope = saved;
+            return;
+        }
         for r in &d.clips {
             self.list.push(DisplayItem::PushClip(*r));
             self.push_scope(HitScope::Clip(*r));
@@ -445,7 +441,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
         for c in &b.children {
             if c.fixed && c.flow == Flow::Absolute {
-                self.fixed.push(c);
+                *order += 1;
+                out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new() });
                 continue;
             }
             let deferred = c.is_positioned() || c.is_stacking_context() || c.flow == Flow::Absolute;

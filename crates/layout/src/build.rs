@@ -144,6 +144,7 @@ impl<'a> Builder<'a> {
             Some(h) => self.build_children(h, &root.style, false),
             None => Vec::new(),
         };
+        let children = self.fix_misparented(children, &root.style, false);
         self.finish_container(&mut root, children, false);
         root
     }
@@ -187,14 +188,33 @@ impl<'a> Builder<'a> {
             return;
         }
         if matches!(style.display, Display::TableColumn | Display::TableColumnGroup) {
+            // Columns only matter inside tables (widths, backgrounds); the
+            // fix-up drops them elsewhere. They have no borders or padding.
+            let mut b = LayoutBox::new(BoxKind::Block, Some(node), Rc::new(without_box_edges(&style)));
+            b.formatting = Formatting::None;
+            if style.display == Display::TableColumnGroup {
+                for c in doc.child_elements(node) {
+                    if let Some(cs) = self.ctx.styles.get(c) {
+                        if cs.display == Display::TableColumn {
+                            let mut col = LayoutBox::new(BoxKind::Block, Some(c), Rc::new(without_box_edges(cs)));
+                            col.formatting = Formatting::None;
+                            b.children.push(col);
+                        }
+                    }
+                }
+            }
+            out.push(b);
             return;
         }
         let tag = doc.tag(node).unwrap_or("");
         let _ = parent_style;
         self.apply_counters(&style);
 
-        // Replaced elements.
-        if REPLACED.contains(&tag) {
+        // Replaced elements. An `<object>` whose resource cannot be shown
+        // (unknown type, failed load, plugin content) renders its fallback
+        // content instead, as an ordinary element (HTML §4.8.7).
+        let object_fallback = tag == "object" && !self.ctx.images.get(&node).map(|i| !i.broken).unwrap_or(false);
+        if REPLACED.contains(&tag) && !object_fallback {
             if let Some(b) = self.build_replaced(node, tag, &style) {
                 out.push(b);
             }
@@ -214,13 +234,7 @@ impl<'a> Builder<'a> {
             match style.display {
                 Display::Inline => BoxKind::Inline,
                 Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::InlineTable => BoxKind::InlineBlock,
-                Display::TableCell => {
-                    if in_table_row {
-                        BoxKind::TableCell
-                    } else {
-                        BoxKind::InlineBlock
-                    }
-                }
+                Display::TableCell => BoxKind::TableCell,
                 Display::Table => BoxKind::Table,
                 Display::TableRow => BoxKind::TableRow,
                 _ => BoxKind::Block,
@@ -247,8 +261,15 @@ impl<'a> Builder<'a> {
             || style.overflow_y.clips()
             || matches!(style.display, Display::FlowRoot | Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid);
         b.clips = (style.overflow_x.clips() || style.overflow_y.clips()) && !matches!(tag, "html" | "body");
-        if let Some(cs) = doc.attr(node, "colspan").and_then(|v| v.trim().parse::<u32>().ok()) {
-            b.colspan = cs.clamp(1, 100);
+        if matches!(tag, "td" | "th") {
+            if let Some(cs) = doc.attr(node, "colspan").and_then(|v| v.trim().parse::<u32>().ok()) {
+                b.colspan = cs.clamp(1, 1000);
+            }
+        }
+        if kind == BoxKind::TableRow || matches!(style.display, Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup) && b.flow.is_in_flow() {
+            // Rows and row groups have no borders or padding (CSS 2.1 §17.6.1;
+            // collapsed borders read them from the cascaded style).
+            b.style = Rc::new(without_box_edges(&style));
         }
         if style.display == Display::ListItem {
             b.marker_text = list_marker_text(doc, node, &style);
@@ -277,6 +298,13 @@ impl<'a> Builder<'a> {
         if let Some(af) = after {
             children.push(af);
         }
+        let is_table_part = matches!(
+            style.display,
+            Display::Table | Display::InlineTable | Display::TableRow | Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
+        ) && !(out_of_flow || floated) || matches!(style.display, Display::Table);
+        if !is_table_part {
+            children = self.fix_misparented(children, &style, kind == BoxKind::Inline);
+        }
 
         if kind == BoxKind::Inline {
             // Inline boxes keep their inline-level children as a tree; any
@@ -298,14 +326,20 @@ impl<'a> Builder<'a> {
         }
 
         // grid/flex hook: flex and grid containers blockify their children.
+        if matches!(style.display, Display::Table | Display::InlineTable) {
+            let captions = self.finish_table(&mut b, children);
+            out.push(self.wrap_table(b, captions));
+            return;
+        }
         match kind {
-            BoxKind::Table => self.finish_table(&mut b, children),
             BoxKind::TableRow => self.finish_row(&mut b, children),
             _ => {
                 if matches!(style.display, Display::Flex | Display::InlineFlex) {
                     self.finish_flex(&mut b, children);
                 } else if matches!(style.display, Display::Grid | Display::InlineGrid) {
                     self.finish_grid(&mut b, children);
+                } else if crate::table::is_row_group(&b) {
+                    self.finish_row_group(&mut b, children);
                 } else {
                     self.finish_container(&mut b, children, false);
                 }
@@ -317,7 +351,7 @@ impl<'a> Builder<'a> {
     fn build_replaced(&self, node: NodeId, tag: &str, style: &Rc<ComputedStyle>) -> Option<LayoutBox> {
         let doc = self.doc();
         // `<video>` shows its poster image (stored under the node too).
-        let image = if matches!(tag, "img" | "svg" | "input" | "video" | "canvas") { self.ctx.images.get(&node).cloned() } else { None };
+        let image = if matches!(tag, "img" | "svg" | "input" | "video" | "canvas" | "object") { self.ctx.images.get(&node).cloned() } else { None };
         let attr_w = doc.attr(node, "width").and_then(parse_dimension_attr);
         let attr_h = doc.attr(node, "height").and_then(parse_dimension_attr);
         let broken = image.as_ref().map(|i| i.broken).unwrap_or(false);
@@ -521,64 +555,84 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn finish_table(&self, b: &mut LayoutBox, children: Vec<LayoutBox>) {
-        // Children: rows, row groups (blocks containing rows), captions and
-        // stray content. Stray content is wrapped in an anonymous row/cell.
+    /// Table box fix-up (CSS 2.1 §17.2.1): rows, row groups and columns
+    /// stay; runs of anything else get an anonymous row (with anonymous
+    /// cells). Captions are returned for the wrapper box.
+    fn finish_table(&self, b: &mut LayoutBox, children: Vec<LayoutBox>) -> Vec<LayoutBox> {
         let mut out = Vec::new();
+        let mut captions = Vec::new();
         let mut stray: Vec<LayoutBox> = Vec::new();
         for c in children {
-            let is_group = c.kind == BoxKind::Block
-                && matches!(
-                    c.style.display,
-                    Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
-                );
-            let is_caption = c.style.display == Display::TableCaption;
-            if c.kind == BoxKind::TableRow || is_group || is_caption || !c.flow.is_in_flow() {
-                self.flush_stray(&mut stray, &mut out, &b.style);
+            if crate::table::is_caption(&c) {
+                self.flush_stray_row(&mut stray, &mut out, &b.style);
+                captions.push(c);
+            } else if (c.kind == BoxKind::TableRow && c.flow.is_in_flow()) || crate::table::is_row_group(&c) || crate::table::is_column(&c) {
+                self.flush_stray_row(&mut stray, &mut out, &b.style);
                 out.push(c);
-            } else if c.kind == BoxKind::Text && c.text.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true) {
-                // whitespace between rows
             } else {
                 stray.push(c);
             }
         }
-        self.flush_stray(&mut stray, &mut out, &b.style);
+        self.flush_stray_row(&mut stray, &mut out, &b.style);
         b.children = out;
         b.formatting = Formatting::Table;
         b.bfc_root = true;
+        captions
     }
 
-    fn flush_stray(&self, stray: &mut Vec<LayoutBox>, out: &mut Vec<LayoutBox>, table_style: &Rc<ComputedStyle>) {
+    /// Row group fix-up: runs of non-rows get an anonymous row.
+    fn finish_row_group(&self, b: &mut LayoutBox, children: Vec<LayoutBox>) {
+        let mut out = Vec::new();
+        let mut stray: Vec<LayoutBox> = Vec::new();
+        for c in children {
+            if c.kind == BoxKind::TableRow && c.flow.is_in_flow() {
+                self.flush_stray_row(&mut stray, &mut out, &b.style);
+                out.push(c);
+            } else if crate::table::is_column(&c) {
+            } else {
+                stray.push(c);
+            }
+        }
+        self.flush_stray_row(&mut stray, &mut out, &b.style);
+        b.children = out;
+        b.formatting = Formatting::Block;
+    }
+
+    /// Wrap a run of non-row children of a table / row group in an
+    /// anonymous row (dropping white space only runs).
+    fn flush_stray_row(&self, stray: &mut Vec<LayoutBox>, out: &mut Vec<LayoutBox>, parent_style: &Rc<ComputedStyle>) {
         if stray.is_empty() {
             return;
         }
         let kids = std::mem::take(stray);
-        let style = Rc::new(ComputedStyle::inherit_from(table_style));
-        let mut cell = LayoutBox::new(BoxKind::TableCell, None, style.clone());
-        cell.bfc_root = true;
-        self.finish_container(&mut cell, kids, false);
+        if kids.iter().all(is_whitespace_text) {
+            return;
+        }
+        let style = Rc::new(anonymous_style(parent_style, Display::TableRow));
         let mut row = LayoutBox::new(BoxKind::TableRow, None, style);
-        row.formatting = Formatting::TableRow;
-        row.children = vec![cell];
+        self.finish_row(&mut row, kids);
         out.push(row);
     }
 
+    /// Row fix-up: runs of non-cells get an anonymous cell.
     fn finish_row(&self, b: &mut LayoutBox, children: Vec<LayoutBox>) {
         let mut out = Vec::new();
         let mut stray: Vec<LayoutBox> = Vec::new();
         for c in children {
-            if c.kind == BoxKind::TableCell || !c.flow.is_in_flow() {
+            if c.kind == BoxKind::TableCell && c.flow.is_in_flow() {
                 if !stray.is_empty() {
                     let kids = std::mem::take(&mut stray);
-                    out.push(self.anon_cell(kids, &b.style));
+                    if !kids.iter().all(is_whitespace_text) {
+                        out.push(self.anon_cell(kids, &b.style));
+                    }
                 }
                 out.push(c);
-            } else if c.kind == BoxKind::Text && c.text.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true) {
+            } else if crate::table::is_column(&c) {
             } else {
                 stray.push(c);
             }
         }
-        if !stray.is_empty() {
+        if !stray.is_empty() && !stray.iter().all(is_whitespace_text) {
             let kids = std::mem::take(&mut stray);
             out.push(self.anon_cell(kids, &b.style));
         }
@@ -587,12 +641,154 @@ impl<'a> Builder<'a> {
     }
 
     fn anon_cell(&self, kids: Vec<LayoutBox>, row_style: &Rc<ComputedStyle>) -> LayoutBox {
-        let style = Rc::new(ComputedStyle::inherit_from(row_style));
+        let style = Rc::new(anonymous_style(row_style, Display::TableCell));
         let mut cell = LayoutBox::new(BoxKind::TableCell, None, style);
         cell.bfc_root = true;
         self.finish_container(&mut cell, kids, false);
         cell
     }
+
+    /// Generate missing table parents (CSS 2.1 §17.2.1 step 2) for table
+    /// parts outside a table: consecutive cells get an anonymous row and
+    /// runs of rows / row groups / captions an anonymous table (inline
+    /// table inside inline boxes). Stray columns are dropped.
+    pub(crate) fn fix_misparented(&self, children: Vec<LayoutBox>, parent_style: &Rc<ComputedStyle>, inline_parent: bool) -> Vec<LayoutBox> {
+        let internal = |c: &LayoutBox| {
+            c.flow.is_in_flow()
+                && (c.kind == BoxKind::TableCell
+                    || c.kind == BoxKind::TableRow
+                    || crate::table::is_row_group(c)
+                    || crate::table::is_caption(c)
+                    || crate::table::is_column(c))
+        };
+        if !children.iter().any(|c| internal(c)) {
+            return children;
+        }
+        let mut out = Vec::new();
+        let mut run: Vec<LayoutBox> = Vec::new();
+        let mut pending_ws: Vec<LayoutBox> = Vec::new();
+        let flush = |run: &mut Vec<LayoutBox>, out: &mut Vec<LayoutBox>| {
+            if run.is_empty() {
+                return;
+            }
+            let kids = std::mem::take(run);
+            let display = if inline_parent { Display::InlineTable } else { Display::Table };
+            let style = Rc::new(anonymous_style(parent_style, display));
+            let kind = if inline_parent { BoxKind::InlineBlock } else { BoxKind::Table };
+            let mut table = LayoutBox::new(kind, None, style.clone());
+            table.bfc_root = true;
+            // Consecutive cells first get an anonymous row.
+            let mut grouped: Vec<LayoutBox> = Vec::new();
+            let mut cells: Vec<LayoutBox> = Vec::new();
+            for k in kids {
+                if k.kind == BoxKind::TableCell {
+                    cells.push(k);
+                } else {
+                    if !cells.is_empty() {
+                        let mut row = LayoutBox::new(BoxKind::TableRow, None, Rc::new(anonymous_style(&style, Display::TableRow)));
+                        self.finish_row(&mut row, std::mem::take(&mut cells));
+                        grouped.push(row);
+                    }
+                    if !crate::table::is_column(&k) {
+                        grouped.push(k);
+                    }
+                }
+            }
+            if !cells.is_empty() {
+                let mut row = LayoutBox::new(BoxKind::TableRow, None, Rc::new(anonymous_style(&style, Display::TableRow)));
+                self.finish_row(&mut row, cells);
+                grouped.push(row);
+            }
+            let captions = self.finish_table(&mut table, grouped);
+            out.push(self.wrap_table(table, captions));
+        };
+        for c in children {
+            if internal(&c) {
+                // White space between table parts is dropped.
+                pending_ws.clear();
+                run.push(c);
+            } else if is_whitespace_text(&c) && !run.is_empty() {
+                pending_ws.push(c);
+            } else {
+                flush(&mut run, &mut out);
+                out.append(&mut pending_ws);
+                out.push(c);
+            }
+        }
+        flush(&mut run, &mut out);
+        out.append(&mut pending_ws);
+        out
+    }
+
+    /// Put a table with captions inside a table wrapper box (CSS 2.1
+    /// §17.4): the wrapper takes the table's margins and positioning, the
+    /// table keeps borders, padding and backgrounds.
+    fn wrap_table(&self, mut table: LayoutBox, captions: Vec<LayoutBox>) -> LayoutBox {
+        if captions.is_empty() {
+            return table;
+        }
+        let ts = table.style.clone();
+        let mut ws = (*ts).clone();
+        ws.border_width = rabbithole_style::Edges::all(0.0);
+        ws.border_style = rabbithole_style::Edges::all(rabbithole_style::BorderStyle::None);
+        ws.padding = rabbithole_style::Edges::all(rabbithole_style::Length::ZERO);
+        ws.background_color = rabbithole_gfx::Color::TRANSPARENT;
+        ws.background_layers.clear();
+        ws.background_image = None;
+        ws.box_shadow.clear();
+        ws.outline_width = 0.0;
+        ws.outline_style = rabbithole_style::BorderStyle::None;
+        ws.width = rabbithole_style::Length::Auto;
+        ws.height = rabbithole_style::Length::Auto;
+        ws.min_width = rabbithole_style::Length::Auto;
+        ws.max_width = rabbithole_style::Length::Auto;
+        ws.min_height = rabbithole_style::Length::Auto;
+        ws.max_height = rabbithole_style::Length::Auto;
+        ws.box_sizing = rabbithole_style::BoxSizing::ContentBox;
+        ws.display = if ts.display == Display::InlineTable { Display::InlineBlock } else { Display::Block };
+        let mut inner = (*ts).clone();
+        inner.margin = rabbithole_style::Edges::all(rabbithole_style::Length::ZERO);
+        inner.position = Position::Static;
+        inner.inset = rabbithole_style::Edges::all(rabbithole_style::Length::Auto);
+        inner.float = Float::None;
+        inner.clear = rabbithole_style::Clear::None;
+        inner.z_index = None;
+        inner.transform.clear();
+        inner.opacity = 1.0;
+        let mut wrapper = LayoutBox::new(if table.kind == BoxKind::InlineBlock { BoxKind::InlineBlock } else { BoxKind::Block }, table.node, Rc::new(ws));
+        wrapper.flow = table.flow;
+        wrapper.bfc_root = true;
+        wrapper.formatting = Formatting::TableWrapper;
+        table.flow = Flow::InFlow;
+        table.kind = BoxKind::Table;
+        table.style = Rc::new(inner);
+        let (top, bottom): (Vec<LayoutBox>, Vec<LayoutBox>) = captions.into_iter().partition(|c| !c.style.caption_side_bottom);
+        wrapper.children.extend(top);
+        wrapper.children.push(table);
+        wrapper.children.extend(bottom);
+        wrapper
+    }
+}
+
+fn is_whitespace_text(c: &LayoutBox) -> bool {
+    c.kind == BoxKind::Text && c.text.as_deref().map(|t| t.chars().all(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c'))).unwrap_or(true)
+}
+
+/// Style of an anonymous table box: inherits from the parent, with the
+/// given display.
+fn anonymous_style(parent: &ComputedStyle, display: Display) -> ComputedStyle {
+    let mut s = ComputedStyle::inherit_from(parent);
+    s.display = display;
+    s
+}
+
+/// A copy of `style` without borders and padding (rows, row groups and
+/// columns cannot have them).
+fn without_box_edges(style: &ComputedStyle) -> ComputedStyle {
+    let mut s = style.clone();
+    s.border_width = rabbithole_style::Edges::all(0.0);
+    s.padding = rabbithole_style::Edges::all(rabbithole_style::Length::ZERO);
+    s
 }
 
 fn parent_style_node(_out: &[LayoutBox]) -> Option<NodeId> {

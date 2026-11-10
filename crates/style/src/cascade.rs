@@ -537,13 +537,27 @@ fn apply_declarations(
         }
     }
     // `border-*-color` is not inherited; its initial value is currentcolor.
+    // `border-*-width` starts as `medium`; the computed width is zero
+    // where the style is none/hidden (resolved after all declarations).
     style.border_color = Edges::all(style.color);
+    style.border_width = Edges::all(3.0);
     for (name, value, base) in &resolved {
         if *name == "font-size" || *name == "color" {
             continue;
         }
         let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
         apply_property(name, value, &mut style, parent, &ctx);
+    }
+
+    for (w, st) in [
+        (&mut style.border_width.top, style.border_style.top),
+        (&mut style.border_width.right, style.border_style.right),
+        (&mut style.border_width.bottom, style.border_style.bottom),
+        (&mut style.border_width.left, style.border_style.left),
+    ] {
+        if !st.is_visible() {
+            *w = 0.0;
+        }
     }
 
     // Blockification (CSS Display §2.7): the root, out-of-flow and floated
@@ -1081,11 +1095,14 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "padding-right" => to.padding.right = from.padding.right,
         "padding-bottom" => to.padding.bottom = from.padding.bottom,
         "padding-left" => to.padding.left = from.padding.left,
-        "border" | "border-width" | "border-style" | "border-color" => {
+        "border" => {
             to.border_width = from.border_width;
             to.border_style = from.border_style;
             to.border_color = from.border_color;
         }
+        "border-width" => to.border_width = from.border_width,
+        "border-style" => to.border_style = from.border_style,
+        "border-color" => to.border_color = from.border_color,
         "border-radius" => {
             to.border_radius = from.border_radius;
             to.border_radii = from.border_radii;
@@ -1838,7 +1855,6 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             let w = width.unwrap_or(3.0);
             let s = bstyle.unwrap_or(BorderStyle::None);
             let col = color.unwrap_or(style.color);
-            let w = if s.is_visible() { w } else { 0.0 };
             let sides: &[usize] = match name {
                 "border" => &[0, 1, 2, 3],
                 "border-top" => &[0],

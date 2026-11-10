@@ -7,6 +7,7 @@
 //! [`Engine`] turns it into a [`Page`] (styles, layout, display list) on the
 //! thread that owns the fonts and paints.
 
+pub mod diff;
 pub mod forms;
 mod home;
 pub mod images;

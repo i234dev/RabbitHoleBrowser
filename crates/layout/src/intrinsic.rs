@@ -26,7 +26,17 @@ impl<'a> Layouter<'a> {
         let style = b.style.clone();
         let pb = horizontal_extras(&style, 0.0);
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb).max(0.0) } else { v };
-        let mut result = if let Length::Px(w) = style.width {
+        let mut result = if b.formatting == Formatting::Table {
+            // A table is never narrower than its columns.
+            let (min, max) = self.table_intrinsic(b);
+            match style.width {
+                Length::Px(w) => {
+                    let w = adj(w).max(min);
+                    (w, w)
+                }
+                _ => (min, max),
+            }
+        } else if let Length::Px(w) = style.width {
             let w = adj(w);
             (w, w)
         } else if b.kind == BoxKind::Image {
@@ -62,24 +72,26 @@ impl<'a> Layouter<'a> {
                 }
                 Formatting::Flex => self.flex_intrinsic(b),
                 Formatting::Grid => self.grid_intrinsic(b),
-                Formatting::Table => {
-                    let cols = self.column_constraints(b);
-                    let min: f32 = cols.iter().map(|c| c.0).sum();
-                    let max: f32 = cols.iter().map(|c| c.1).sum();
-                    // Captions.
-                    let mut cmin = min;
-                    let mut cmax = max;
+                Formatting::Table => self.table_intrinsic(b),
+                Formatting::TableWrapper => {
+                    let mut min: f32 = 0.0;
+                    let mut max: f32 = 0.0;
                     for c in &mut b.children {
-                        if c.is_in_flow() && c.style.display == rabbithole_style::Display::TableCaption {
-                            // A caption is as wide as the table: only its
-                            // min-content contributes (it wraps otherwise),
-                            // matching browsers (CSS 2.1 §17.4).
-                            let (a, _bb) = self.intrinsic(c);
-                            cmin = cmin.max(a);
-                            cmax = cmax.max(a);
+                        if c.formatting == Formatting::Table {
+                            let ex = horizontal_extras(&c.style, 0.0);
+                            let (a, m) = self.intrinsic(c);
+                            min = min.max(a + ex);
+                            max = max.max(m + ex);
+                        } else if c.is_in_flow() {
+                            // Captions wrap to the table's width: only their
+                            // min-content contributes (CSS 2.1 §17.4).
+                            let ex = extras_px(&c.style);
+                            let (a, _) = self.intrinsic(c);
+                            min = min.max(a + ex);
+                            max = max.max(a + ex);
                         }
                     }
-                    (cmin, cmax)
+                    (min, max)
                 }
                 Formatting::None => (0.0, 0.0),
             }

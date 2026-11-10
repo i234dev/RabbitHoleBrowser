@@ -54,8 +54,10 @@ pub enum Formatting {
     Flex,
     /// Grid container (`grid.rs`).
     Grid,
-    /// `display: table` — children are rows / row groups / captions.
+    /// `display: table` — children are rows / row groups / columns.
     Table,
+    /// Table wrapper box (CSS 2.1 §17.4): the table plus its captions.
+    TableWrapper,
     /// A table row; children are cells.
     TableRow,
     /// Leaf (text, image, line break).
@@ -493,6 +495,7 @@ impl LayoutBox {
                 Formatting::Flex => "(flex)",
                 Formatting::Grid => "(grid)",
                 Formatting::Table => "(table)",
+                Formatting::TableWrapper => "(table-wrapper)",
                 Formatting::TableRow => "(row)",
                 _ => "",
             },

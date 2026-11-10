@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rabbithole_engine::dom::NodeId;
 use rabbithole_engine::gfx::{Canvas, Color, Rect};
-use rabbithole_engine::layout::{DisplayItem, DisplayList, LayoutBox};
+use rabbithole_engine::layout::LayoutBox;
 use rabbithole_engine::net::{Request, Url};
 use rabbithole_engine::script::EventInit;
 use rabbithole_engine::scripting::{input_init, key_init, mouse_init, plain_init};
@@ -649,24 +649,11 @@ impl Worker {
         if page.background.a > 0 {
             canvas.fill_rect(Rect::new(0.0, 0.0, w as f32, h as f32), page.background);
         }
-        // The fixed layer is painted where the viewport is inside the
-        // overscanned canvas.
-        let mut items = std::mem::take(&mut page.display_list.items);
-        let split = items.iter().position(|i| matches!(i, DisplayItem::PushFixed));
-        let fixed = split.map(|i| items.split_off(i));
-        let doc_list = DisplayList { items, hits: Default::default() };
+        // Fixed content (interleaved in stacking order) is painted where
+        // the viewport is inside the overscanned canvas.
         canvas.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
-        rabbithole_engine::layout::paint(&doc_list, &mut canvas, &self.engine.fonts, origin.0, origin.1);
+        rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut canvas, &self.engine.fonts, origin.0, origin.1, (sx - origin.0, sy - origin.1));
         canvas.pop_transform();
-        let mut items = doc_list.items;
-        if let Some(fixed) = fixed {
-            let fixed_list = DisplayList { items: fixed, hits: Default::default() };
-            canvas.push_transform([s, 0.0, 0.0, s, (sx - origin.0) * s, (sy - origin.1) * s]);
-            rabbithole_engine::layout::paint(&fixed_list, &mut canvas, &self.engine.fonts, 0.0, 0.0);
-            canvas.pop_transform();
-            items.extend(fixed_list.items);
-        }
-        page.display_list.items = items;
 
         self.paint_overlays(&mut canvas, origin);
 

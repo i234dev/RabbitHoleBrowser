@@ -125,10 +125,19 @@ struct State {
     layers: Vec<bool>,
     /// Saved translation while inside the fixed layer.
     fixed_saved: Option<(f32, f32)>,
+    /// Canvas offset of `position: fixed` content (the viewport origin).
+    fixed_origin: (f32, f32),
     ext: bool,
 }
 
 pub fn paint(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32) {
+    paint_with_fixed_origin(list, canvas, fonts, scroll_x, scroll_y, (0.0, 0.0))
+}
+
+/// Like [`paint`], with `position: fixed` content (viewport coordinates)
+/// painted at `fixed_origin` on the canvas — where the viewport lies in an
+/// overscanned canvas.
+pub fn paint_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, fixed_origin: (f32, f32)) {
     let view = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
     let mut st = State {
         dx: -scroll_x,
@@ -137,6 +146,7 @@ pub fn paint(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scrol
         clips: Vec::new(),
         layers: Vec::new(),
         fixed_saved: None,
+        fixed_origin,
         ext: gfx_ext_available(),
     };
     for item in &list.items {
@@ -227,8 +237,8 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
         DisplayItem::PushFixed => {
             // Fixed items are in viewport coordinates: drop the scroll.
             st.fixed_saved = Some((st.dx, st.dy));
-            st.dx = 0.0;
-            st.dy = 0.0;
+            st.dx = st.fixed_origin.0;
+            st.dy = st.fixed_origin.1;
         }
         DisplayItem::PopFixed => {
             if let Some((x, y)) = st.fixed_saved.take() {

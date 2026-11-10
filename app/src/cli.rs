@@ -138,13 +138,20 @@ pub fn capture(session: &mut Session, url: &str, opts: &CaptureOptions) -> Resul
     let viewport_h = opts.height.max(1);
     let viewport = Viewport { width: width as f32, height: viewport_h as f32 };
     let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
-    let page = session.load_request(&Request::get(parsed), viewport)?;
+    let mut page = session.load_request(&Request::get(parsed), viewport)?;
     let css_height = if opts.full_page { (page.content_height().ceil() as u32).clamp(1, MAX_FULL_HEIGHT) } else { viewport_h };
     let px_w = ((width as f32) * scale).round().max(1.0) as u32;
     let px_h = ((css_height as f32) * scale).round().max(1.0) as u32;
     let mut canvas = rabbithole_engine::gfx::Canvas::new(px_w, px_h);
     let max_scroll = (page.content_height() - css_height as f32).max(0.0);
-    let scroll_y = if opts.full_page { 0.0 } else { opts.scroll_y.clamp(0.0, max_scroll) };
+    // Without an explicit scroll, scroll to the URL's fragment like a
+    // browser navigating to it.
+    let wanted = match opts.scroll_y {
+        y if y != 0.0 => y,
+        _ => page.url.fragment.clone().and_then(|f| page.fragment_scroll(&f)).unwrap_or(0.0),
+    };
+    let scroll_y = if opts.full_page { 0.0 } else { wanted.clamp(0.0, max_scroll) };
+    session.engine.set_page_scroll(&mut page, 0.0, scroll_y);
     session.engine.render_scaled(&page, &mut canvas, 0.0, scroll_y, scale);
     Ok(Capture { rgba: canvas.to_rgba8(), width: px_w, height: px_h, title: page.title.clone(), url: page.url.to_string() })
 }
@@ -245,6 +252,84 @@ pub fn screenshot(args: &[String]) -> Result<(), String> {
     image::save_buffer(output, &cap.rgba, cap.width, cap.height, image::ExtendedColorType::Rgba8).map_err(|e| format!("could not write {output}: {e}"))?;
     eprintln!("{} ({}x{}) -> {output}", cap.title, cap.width, cap.height);
     Ok(())
+}
+
+/// `rabbithole diff <URL-A> <URL-B | image.png> [--out diff.png] [--width W] [--height H] [--tolerance T] [--max-percent P]`
+///
+/// Renders both pages (or the page and a PNG) and compares them pixel by
+/// pixel; prints the mismatch count/percentage and the changed regions.
+/// Fails when the mismatch exceeds `--max-percent` (default 0).
+pub fn diff(args: &[String]) -> Result<(), String> {
+    use rabbithole_engine::diff::{diff_frames_image, DiffOptions, Frame};
+    let (positional, flags) = parse_args(args, &["out", "output", "width", "height", "tolerance", "max-percent", "wait", "scale"])?;
+    let (Some(a), Some(b)) = (positional.first().copied(), positional.get(1).copied()) else {
+        return Err("usage: rabbithole diff <URL-A> <URL-B | image.png> [--out diff.png] [--width W] [--height H] [--tolerance T] [--max-percent P]".into());
+    };
+    let js = JsOptions::from_flags(&flags, 0)?;
+    let opts = CaptureOptions {
+        width: parse_num(&flags, "width", 800u32)?,
+        height: parse_num(&flags, "height", 600u32)?,
+        scale: parse_num(&flags, "scale", 1.0f32)?,
+        ..CaptureOptions::default()
+    };
+    let tolerance: u8 = parse_num(&flags, "tolerance", 0u8)?;
+    let max_percent: f64 = parse_num(&flags, "max-percent", 0.0f64)?;
+    let mut session = Session::new(true).with_js(js);
+    let mut frame_of = |src: &str| -> Result<Frame, String> {
+        let path = std::path::Path::new(src);
+        let is_image = matches!(path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"));
+        if is_image && path.exists() {
+            return Frame::load_png(path);
+        }
+        let url = to_url(src);
+        let cap = capture(&mut session, &url, &opts)?;
+        Ok(Frame { rgba: cap.rgba, width: cap.width, height: cap.height })
+    };
+    let fa = frame_of(a)?;
+    let fb = frame_of(b)?;
+    let (result, image) = diff_frames_image(&fa, &fb, &DiffOptions { tolerance, ..DiffOptions::default() });
+    if let Some(out) = flag(&flags, "out").or_else(|| flag(&flags, "output")) {
+        image.save_png(std::path::Path::new(out))?;
+    }
+    println!(
+        "{} of {} pixels differ ({:.4}%), max channel delta {}, {}x{}",
+        result.mismatched,
+        result.total,
+        result.percent(),
+        result.max_delta,
+        result.width,
+        result.height
+    );
+    for r in &result.regions {
+        println!("  region x={} y={} w={} h={} ({} px)", r.x, r.y, r.w, r.h, r.pixels);
+    }
+    if result.percent() > max_percent {
+        return Err(format!("images differ by {:.4}% (allowed {max_percent}%)", result.percent()));
+    }
+    Ok(())
+}
+
+/// A command line page argument as a URL: absolute URLs as is, existing
+/// local paths as `file://` URLs.
+fn to_url(src: &str) -> String {
+    if src.contains("://") || src.starts_with("about:") || src.starts_with("data:") {
+        return src.to_string();
+    }
+    let (path, frag) = match src.split_once('#') {
+        Some((p, f)) => (p, Some(f)),
+        None => (src, None),
+    };
+    match std::fs::canonicalize(path) {
+        Ok(abs) => {
+            let mut u = format!("file://{}", abs.to_string_lossy().replace('\\', "/"));
+            if let Some(f) = frag {
+                u.push('#');
+                u.push_str(f);
+            }
+            u
+        }
+        Err(_) => src.to_string(),
+    }
 }
 
 /// `rabbithole text <URL>`

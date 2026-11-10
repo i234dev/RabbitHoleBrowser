@@ -328,6 +328,10 @@ impl<'a> Layouter<'a> {
     /// Lay out `b` as a block-level box whose border-box top is at `top`.
     pub fn layout_block(&mut self, b: &mut LayoutBox, cb: &Cb, top: f32, bfc: &mut Bfc, mode: WidthMode) {
         let forced_h = self.forced_content_height.take(); // grid/flex hook
+        if b.formatting == Formatting::Table && b.style.border_collapse {
+            // Collapsed borders change the table's (and cells') border widths.
+            self.resolve_collapsed_borders(b);
+        }
         let style = b.style.clone();
         let cbw = cb.width;
         let pad = resolve_edges(&style.padding, cbw);
@@ -340,10 +344,22 @@ impl<'a> Layouter<'a> {
         let mb = style.margin.bottom.resolve_or_zero(cbw);
 
         let mut mode = mode;
-        if b.kind == BoxKind::Table && matches!(mode, WidthMode::Fill) && style.width.is_auto() {
+        if b.formatting == Formatting::Table && matches!(mode, WidthMode::Fill) && style.width.is_auto() {
             mode = WidthMode::ShrinkToFit;
         }
-        let (mut content_w, ml, mr, replaced_h) = if b.kind == BoxKind::Image {
+        let (mut content_w, ml, mr, replaced_h) = if b.formatting == Formatting::TableWrapper {
+            // The wrapper is as wide as its table; auto margins center it.
+            let avail = cbw - ml.unwrap_or(0.0) - mr.unwrap_or(0.0);
+            let w = self.wrapped_table_width(b, avail, mode);
+            let rem = cbw - w;
+            let (l, r) = match (mode, ml, mr) {
+                (WidthMode::Fill, None, None) if rem > 0.0 => (rem / 2.0, rem / 2.0),
+                (WidthMode::Fill, None, Some(r)) => ((rem - r).max(0.0), r),
+                (WidthMode::Fill, Some(l), _) => (l, rem - l),
+                (_, l, r) => (l.unwrap_or(0.0), r.unwrap_or(0.0)),
+            };
+            (w, l, r, None)
+        } else if b.kind == BoxKind::Image {
             let (w, h) = self.replaced_size(b, Some(cbw), cb.height, pb_h);
             let rem = cbw - w - pb_h;
             let (l, r) = match (ml, mr) {
@@ -427,7 +443,12 @@ impl<'a> Layouter<'a> {
             self.layout_contents(b, &inner_cb, bfc, top_collapsible, bottom_collapsible)
         };
 
-        let mut h = explicit_h.unwrap_or(content_h);
+        // A table's (or cell's) height is a minimum: content may exceed it.
+        let mut h = match explicit_h {
+            Some(e) if matches!(b.formatting, Formatting::Table) || b.kind == BoxKind::TableCell => e.max(content_h),
+            Some(e) => e,
+            None => content_h,
+        };
         if b.bfc_root && explicit_h.is_none() && !local_bfc.is_empty() {
             h = h.max(local_bfc.max_bottom() - b.content_rect.y);
         }
@@ -507,6 +528,7 @@ impl<'a> Layouter<'a> {
             Formatting::Flex => self.layout_flex(b, cb), // grid/flex hook
             Formatting::Grid => self.layout_grid(b, cb), // grid/flex hook
             Formatting::Table => self.layout_table(b, cb),
+            Formatting::TableWrapper => self.layout_table_wrapper(b, cb),
             Formatting::TableRow => {
                 // A row outside a table: lay out cells as blocks.
                 self.layout_block_children(b, cb, bfc, false, false)

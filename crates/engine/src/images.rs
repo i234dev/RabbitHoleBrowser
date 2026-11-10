@@ -477,8 +477,23 @@ pub fn select_image(doc: &Document, n: NodeId, vp: Viewport, dpr: f32, scripting
             }
             src_eff.map(|u| ImageChoice { url: u.to_string(), density: 1.0 })
         }
+        "object" => object_image_url(doc, n).map(|u| ImageChoice { url: u.to_string(), density: 1.0 }),
         _ => None,
     }
+}
+
+/// The resource of an `<object>` that could be displayed as an image: its
+/// `data` URL unless `type` names something that is not an image (HTML
+/// documents and plugin content render the fallback content instead).
+fn object_image_url<'d>(doc: &'d Document, n: NodeId) -> Option<&'d str> {
+    let data = non_empty(doc, n, "data")?;
+    if let Some(t) = non_empty(doc, n, "type") {
+        let t = t.to_ascii_lowercase();
+        if !t.starts_with("image/") {
+            return None;
+        }
+    }
+    Some(data)
 }
 
 /// Give an image the natural size implied by its `srcset` density.
@@ -497,6 +512,7 @@ pub(crate) fn is_image_element(doc: &Document, n: NodeId) -> bool {
         Some("img") => true,
         Some("video") => doc.attr(n, "poster").is_some(),
         Some("input") => doc.attr(n, "type").map(|t| t.eq_ignore_ascii_case("image")).unwrap_or(false),
+        Some("object") => object_image_url(doc, n).is_some(),
         _ => false,
     }
 }

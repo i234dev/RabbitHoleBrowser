@@ -363,7 +363,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 }
             }
         }
-        "table-layout" | "caption-side" | "empty-cells" | "list-style-image" | "overscroll-behavior" | "overscroll-behavior-x"
+        "list-style-image" | "overscroll-behavior" | "overscroll-behavior-x"
         | "overscroll-behavior-y" | "scroll-behavior" | "scroll-snap-type" | "scroll-snap-align" | "scroll-padding"
         | "scroll-padding-top" | "scroll-margin-bottom" | "scroll-margin-left" | "scroll-margin-right" | "scrollbar-width"
         | "scrollbar-color" | "scrollbar-gutter" | "columns" | "column-count" | "column-width" | "column-gap-x" | "column-rule"

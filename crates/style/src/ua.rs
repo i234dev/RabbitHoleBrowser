@@ -123,7 +123,7 @@ progress::-webkit-progress-bar { background-color: #e6e6e6; }
 meter { appearance: auto; }
 
 /* ---- embedded content ---- */
-img, video, audio, canvas, embed, object, iframe, svg, math, picture, source { display: inline-block; }
+img, video, audio, canvas, embed, iframe, svg, math, picture, source { display: inline-block; }
 picture, source { display: inline; }
 img { vertical-align: baseline; }
 iframe { border: 2px solid #c0c0c0; width: 300px; height: 150px; }
