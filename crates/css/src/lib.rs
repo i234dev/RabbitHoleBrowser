@@ -62,6 +62,9 @@ pub struct Stylesheet {
     /// Absolute URL of the sheet, used to resolve `url()` values and
     /// `@import`s. `None` for inline `<style>` (document base applies).
     pub base_url: Option<String>,
+    /// Shadow roots this sheet is scoped to (`<style>` inside a shadow tree
+    /// or adopted by a shadow root). Empty: a document stylesheet.
+    pub shadow_scopes: Vec<usize>,
 }
 
 /// Simplified media query: a disjunction of conjunctions of features.
@@ -224,6 +227,7 @@ pub fn parse_stylesheet(src: &str) -> Stylesheet {
     Stylesheet {
         rules: p.parse_rules(true),
         base_url: None,
+        shadow_scopes: Vec::new(),
     }
 }
 

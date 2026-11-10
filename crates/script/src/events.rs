@@ -650,38 +650,81 @@ fn et_ctor(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> 
 
 // --------------------------------------------------------------- dispatch
 
-/// The propagation path for a target: [target, parent, ..., document, window].
-fn build_path(realm: &mut Realm, key: TargetKey) -> Vec<(TargetKey, Value)> {
+/// DOM "get the parent" for event paths: a slotted node's parent is its
+/// assigned slot, a shadow root's parent is its host (unless the event is
+/// not composed and the shadow root is the root of the original target).
+pub(crate) fn event_parent(doc: &Document, node: NodeId, composed: bool, target_root: NodeId) -> Option<NodeId> {
+    if let Some(p) = doc.parent(node) {
+        if doc.shadow_root(p).is_some() {
+            // Slottables of a shadow host propagate through their slot.
+            if let Some(s) = doc.assigned_slot(node) {
+                return Some(s);
+            }
+        }
+        return Some(p);
+    }
+    let host = doc.shadow_host(node)?;
+    if !composed && node == target_root {
+        return None;
+    }
+    Some(host)
+}
+
+/// The propagation path for a target: [(key, invocation target,
+/// shadow-adjusted target)] from the target to the document and window.
+fn build_path(realm: &mut Realm, key: TargetKey, composed: bool) -> Vec<(TargetKey, Value, Value)> {
     let mut path = Vec::new();
     match key {
         TargetKey::Window => {
             let w = window_value(realm);
-            path.push((TargetKey::Window, w));
+            path.push((TargetKey::Window, w.clone(), w));
         }
-        TargetKey::Object(o) => path.push((key, Value::Object(o))),
+        TargetKey::Object(o) => path.push((key, Value::Object(o), Value::Object(o))),
         TargetKey::Node(n) => {
-            let mut cur = Some(n.node);
-            let mut chain: Vec<NodeId> = Vec::new();
+            let mut chain: Vec<(NodeId, NodeId)> = Vec::new();
+            let mut reaches_document = false;
             with_doc(n.doc, |doc| {
+                let target_root = doc.tree_root(n.node);
+                let mut cur = Some(n.node);
                 while let Some(c) = cur {
-                    chain.push(c);
-                    cur = doc.parent(c);
+                    let adjusted = if doc.shadow_hosts.is_empty() { n.node } else { crate::shadow::retarget(doc, n.node, c) };
+                    chain.push((c, adjusted));
+                    if c == Document::ROOT {
+                        reaches_document = true;
+                    }
+                    cur = event_parent(doc, c, composed, target_root);
+                    if chain.len() > 100_000 {
+                        break;
+                    }
                 }
             });
-            for c in chain {
+            for (c, adjusted) in chain {
                 let r = NodeRef { doc: n.doc, node: c };
                 let v = wrap(realm, r);
-                path.push((TargetKey::Node(r), v));
+                let t = if adjusted == c { v.clone() } else { wrap(realm, NodeRef { doc: n.doc, node: adjusted }) };
+                path.push((TargetKey::Node(r), v, t));
             }
-            // Only connected main-document nodes reach the window.
-            let connected = n.doc == 0 && with_doc(0, |doc| doc.is_connected(n.node));
-            if connected {
+            // Only main-document paths that reach the document reach the window.
+            if n.doc == 0 && reaches_document {
                 let w = window_value(realm);
-                path.push((TargetKey::Window, w));
+                let doc_target = path.last().map(|(_, _, t)| t.clone()).unwrap_or(Value::Null);
+                path.push((TargetKey::Window, w, doc_target));
             }
         }
     }
     path
+}
+
+/// Trusted UI events are composed (they cross shadow boundaries).
+fn is_composed_ui_event(ty: &str) -> bool {
+    matches!(
+        ty,
+        "click" | "auxclick" | "contextmenu" | "dblclick" | "mousedown" | "mouseup" | "mousemove" | "mouseover" | "mouseout" | "wheel"
+            | "pointerdown" | "pointerup" | "pointermove" | "pointerover" | "pointerout" | "pointercancel" | "gotpointercapture" | "lostpointercapture"
+            | "keydown" | "keyup" | "keypress" | "input" | "beforeinput" | "focus" | "blur" | "focusin" | "focusout"
+            | "touchstart" | "touchend" | "touchmove" | "touchcancel" | "compositionstart" | "compositionupdate" | "compositionend" | "select" | "selectionchange"
+            | "dragstart" | "drag" | "dragend" | "dragenter" | "dragleave" | "dragover" | "drop" | "copy" | "cut" | "paste"
+    )
 }
 
 pub(crate) fn window_value(realm: &mut Realm) -> Value {
@@ -698,6 +741,11 @@ pub(crate) fn dispatch(realm: &mut Realm, key: TargetKey, event_type: &str, init
     let class = event_class_for(event_type, &init);
     let eid = create_event(realm, class, event_type, &init, trusted);
     set_mouse_offset(realm, key, eid, &init);
+    if trusted && is_composed_ui_event(event_type) {
+        if let Some(d) = realm.host_data_mut::<EventData>(eid) {
+            d.composed = true;
+        }
+    }
     dispatch_object(realm, key, eid, None)
 }
 
@@ -762,31 +810,28 @@ fn any_listener_on_path(realm: &mut Realm, key: TargetKey, ty: &str) -> bool {
                 return true;
             }
             let attr = format!("on{ty}");
-            let found = with_doc_in_state(&st, n.doc, |doc| {
+            // Every node on the (composed, worst case) event path.
+            let chain: Vec<NodeId> = with_doc_in_state(&st, n.doc, |doc| {
+                let root = doc.tree_root(n.node);
+                let mut v = Vec::new();
                 let mut cur = Some(n.node);
                 while let Some(c) = cur {
-                    if has(TargetKey::Node(NodeRef { doc: n.doc, node: c })) {
-                        return true;
-                    }
-                    if doc.attr(c, &attr).is_some() {
-                        return true;
-                    }
-                    cur = doc.parent(c);
+                    v.push(c);
+                    cur = event_parent(doc, c, true, root);
                 }
-                false
+                v
             });
+            let found = with_doc_in_state(&st, n.doc, |doc| chain.iter().any(|&c| has(TargetKey::Node(NodeRef { doc: n.doc, node: c })) || doc.attr(c, &attr).is_some()));
             if found {
                 return true;
             }
             // IDL `onX` handlers stored on wrappers.
-            let mut cur = Some(n.node);
-            while let Some(c) = cur {
+            for &c in &chain {
                 if let Some(w) = st.wrappers.get(&NodeRef { doc: n.doc, node: c }) {
                     if realm.obj(*w).props.get(&PropertyKey::str(&handler_key)).map(|p| p.value.is_object()).unwrap_or(false) {
                         return true;
                     }
                 }
-                cur = with_doc_in_state(&st, n.doc, |doc| doc.parent(c));
             }
             if let Some(w) = st.protos.get("__window") {
                 if realm.obj(*w).props.get(&PropertyKey::str(&handler_key)).map(|p| p.value.is_object()).unwrap_or(false) {
@@ -817,6 +862,7 @@ fn default_action_for(realm: &mut Realm, key: TargetKey, ty: &str) -> DefaultAct
         return DefaultAction::None;
     }
     with_doc(0, |doc| {
+        let root = doc.tree_root(n.node);
         let mut cur = Some(n.node);
         while let Some(c) = cur {
             if let Some(el) = doc.element(c) {
@@ -844,7 +890,7 @@ fn default_action_for(realm: &mut Realm, key: TargetKey, ty: &str) -> DefaultAct
                     _ => {}
                 }
             }
-            cur = doc.parent(c);
+            cur = event_parent(doc, c, true, root);
         }
         DefaultAction::None
     })
@@ -892,44 +938,61 @@ pub(crate) fn run_default_action(realm: &mut Realm, n: NodeRef) {
 
 /// Dispatch an existing Event object.
 pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, target_override: Option<Value>) -> DispatchResult {
-    let path = build_path(realm, key);
-    let target_value = target_override.unwrap_or_else(|| path.first().map(|(_, v)| v.clone()).unwrap_or(Value::Null));
+    let composed = realm.host_data::<EventData>(eid).map(|d| d.composed).unwrap_or(false);
+    let mut path = build_path(realm, key, composed);
+    if let Some(t) = target_override {
+        // dispatchEvent on a non-node target object (keep its identity).
+        if !matches!(key, TargetKey::Node(_)) {
+            for p in path.iter_mut() {
+                p.2 = t.clone();
+            }
+        }
+    }
+    let target_value = path.first().map(|(_, _, t)| t.clone()).unwrap_or(Value::Null);
     let (ty, bubbles) = {
         let d = realm.host_data_mut::<EventData>(eid).expect("event data");
         d.dispatching = true;
         d.target = target_value.clone();
-        d.path = path.iter().map(|(_, v)| v.clone()).collect();
+        d.path = path.iter().map(|(_, v, _)| v.clone()).collect();
         (d.ty.clone(), d.bubbles)
     };
     let default_action = default_action_for(realm, key, &ty);
     state().borrow_mut().event_stack.push(eid);
     let mut handled = false;
 
-    // Capture phase: window → … → parent of target.
-    for (k, v) in path.iter().skip(1).rev() {
+    // An entry whose shadow-adjusted target is itself is "at target"
+    // (the target, or a shadow host the event was retargeted to).
+    let at_target = |p: &(TargetKey, Value, Value)| match (&p.1, &p.2) {
+        (Value::Object(a), Value::Object(b)) => a == b,
+        _ => false,
+    };
+    // Capture phase: window → … → target.
+    for (i, entry) in path.iter().enumerate().rev() {
         if stopped(realm, eid) {
             break;
         }
-        set_phase(realm, eid, 1, v.clone());
-        handled |= invoke_listeners(realm, *k, v, eid, &ty, true, false);
-    }
-    // Target phase.
-    if let Some((k, v)) = path.first() {
-        if !stopped(realm, eid) {
-            set_phase(realm, eid, 2, v.clone());
+        let (k, v, t) = entry;
+        let phase = if at_target(entry) { 2 } else { 1 };
+        if i != 0 && phase == 1 {
+            set_phase_target(realm, eid, 1, v.clone(), t.clone());
+            handled |= invoke_listeners(realm, *k, v, eid, &ty, true, false);
+        } else if phase == 2 {
+            set_phase_target(realm, eid, 2, v.clone(), t.clone());
             handled |= invoke_listeners(realm, *k, v, eid, &ty, true, true);
-            if !immediate_stopped(realm, eid) {
-                handled |= invoke_listeners(realm, *k, v, eid, &ty, false, true);
-            }
         }
     }
-    // Bubble phase.
-    if bubbles {
-        for (k, v) in path.iter().skip(1) {
-            if stopped(realm, eid) {
-                break;
-            }
-            set_phase(realm, eid, 3, v.clone());
+    // Target / bubble phase: target → … → window.
+    for (i, entry) in path.iter().enumerate() {
+        if stopped(realm, eid) {
+            break;
+        }
+        let (k, v, t) = entry;
+        let is_target = i == 0 || at_target(entry);
+        if is_target {
+            set_phase_target(realm, eid, 2, v.clone(), t.clone());
+            handled |= invoke_listeners(realm, *k, v, eid, &ty, false, true);
+        } else if bubbles {
+            set_phase_target(realm, eid, 3, v.clone(), t.clone());
             handled |= invoke_listeners(realm, *k, v, eid, &ty, false, false);
         }
     }
@@ -938,6 +1001,11 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
     d.dispatching = false;
     d.phase = 0;
     d.current_target = Value::Null;
+    // The target stays the one seen from the outermost tree.
+    if let Some((_, _, t)) = path.last() {
+        d.target = t.clone();
+    }
+    d.path.clear();
     let default_prevented = d.default_prevented;
     DispatchResult { default_prevented, handled, default_action: if default_prevented { DefaultAction::None } else { default_action } }
 }
@@ -950,10 +1018,11 @@ fn immediate_stopped(realm: &Realm, eid: ObjectId) -> bool {
     realm.host_data::<EventData>(eid).map(|d| d.immediate_stopped).unwrap_or(true)
 }
 
-fn set_phase(realm: &mut Realm, eid: ObjectId, phase: u8, current: Value) {
+fn set_phase_target(realm: &mut Realm, eid: ObjectId, phase: u8, current: Value, target: Value) {
     if let Some(d) = realm.host_data_mut::<EventData>(eid) {
         d.phase = phase;
         d.current_target = current;
+        d.target = target;
     }
 }
 

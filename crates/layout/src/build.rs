@@ -152,7 +152,9 @@ impl<'a> Builder<'a> {
     fn build_children(&self, node: NodeId, parent_style: &Rc<ComputedStyle>, in_table_row: bool) -> Vec<LayoutBox> {
         let doc = self.doc();
         let mut out = Vec::new();
-        for child in doc.children(node) {
+        // Flat tree: shadow trees replace their host's children and slots
+        // render their assigned nodes.
+        for child in doc.flat_children(node) {
             match &doc.node(child).data {
                 NodeData::Text(t) => {
                     if t.is_empty() {

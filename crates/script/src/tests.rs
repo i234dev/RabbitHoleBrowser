@@ -734,7 +734,10 @@ fn misc_apis() {
     assert_eq!(out[6], "custom! true");
     assert_eq!(out[7], "number 36 RabbitHole/test number");
     assert_eq!(out[8], "SyntaxError true true");
-    assert!(out.contains(&"io 1 true".to_string()), "{out:?}");
+    // IntersectionObserver delivers at the next rendering update; the mock
+    // has no layout box for #d, so it is not intersecting.
+    host.run_timers(&mut env, 1100.0);
+    assert!(env.logs.iter().any(|(l, m)| l == "log" && m == "io 1 false"), "{:?}", env.logs);
     assert!(out.contains(&"true \\31 a CSS1Compat UTF-8".to_string()), "{out:?}");
 }
 

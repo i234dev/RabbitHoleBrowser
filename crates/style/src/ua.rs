@@ -5,6 +5,7 @@ pub const UA_CSS: &str = r#"
 /* ---- hidden elements ---- */
 [hidden], area, base, basefont, datalist, head, link, meta, noembed, noframes,
 param, rp, script, style, template, title, dialog:not([open]) { display: none; }
+slot { display: contents; }
 input[type=hidden i] { display: none; }
 
 /* ---- the page ---- */

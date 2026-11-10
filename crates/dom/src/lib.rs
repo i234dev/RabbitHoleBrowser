@@ -3,6 +3,7 @@
 //! Nodes live in a `Vec` and reference each other by index (`NodeId`), which
 //! keeps the tree cheap to build and trivially `Send`.
 
+use std::collections::HashMap;
 use std::fmt;
 
 pub type NodeId = usize;
@@ -55,6 +56,19 @@ pub struct Node {
 #[derive(Clone)]
 pub struct Document {
     pub nodes: Vec<Node>,
+    /// Shadow host → its shadow root. A shadow root is an element node
+    /// tagged `#shadow-root` that has no parent (it is not a child of the
+    /// host); its children form the shadow tree.
+    pub shadow_roots: HashMap<NodeId, NodeId>,
+    /// Shadow root → its host.
+    pub shadow_hosts: HashMap<NodeId, NodeId>,
+    /// Texts of constructed stylesheets adopted by the document (key
+    /// `Document::ROOT`) or by a shadow root (`adoptedStyleSheets`).
+    pub adopted_styles: HashMap<NodeId, Vec<String>>,
+    /// CSSOM-modified sheets of `<style>` / `<link>` elements:
+    /// element → (element source text when modified, sheet text to render).
+    /// Ignored once the element's own text changes.
+    pub sheet_overrides: HashMap<NodeId, (String, String)>,
 }
 
 impl Default for Document {
@@ -76,6 +90,10 @@ impl Document {
                 next_sibling: None,
                 data: NodeData::Document,
             }],
+            shadow_roots: HashMap::new(),
+            shadow_hosts: HashMap::new(),
+            adopted_styles: HashMap::new(),
+            sheet_overrides: HashMap::new(),
         }
     }
 
@@ -246,7 +264,8 @@ impl Document {
         }
     }
 
-    /// Is the node attached to the document (reachable from the root)?
+    /// Is the node attached to the document (reachable from the root,
+    /// crossing from shadow roots to their hosts)?
     pub fn is_connected(&self, id: NodeId) -> bool {
         let mut cur = id;
         loop {
@@ -255,9 +274,179 @@ impl Document {
             }
             match self.nodes[cur].parent {
                 Some(p) => cur = p,
-                None => return false,
+                None => match self.shadow_hosts.get(&cur) {
+                    Some(&h) => cur = h,
+                    None => return false,
+                },
             }
         }
+    }
+
+    // ---------------------------------------------------------- shadow DOM
+
+    /// Attach a shadow root to `host` (or return the existing one).
+    pub fn attach_shadow(&mut self, host: NodeId) -> NodeId {
+        if let Some(&r) = self.shadow_roots.get(&host) {
+            return r;
+        }
+        let root = self.create_element("#shadow-root", vec![]);
+        self.shadow_roots.insert(host, root);
+        self.shadow_hosts.insert(root, host);
+        root
+    }
+
+    pub fn shadow_root(&self, host: NodeId) -> Option<NodeId> {
+        self.shadow_roots.get(&host).copied()
+    }
+
+    pub fn shadow_host(&self, root: NodeId) -> Option<NodeId> {
+        self.shadow_hosts.get(&root).copied()
+    }
+
+    pub fn is_shadow_root(&self, id: NodeId) -> bool {
+        self.shadow_hosts.contains_key(&id)
+    }
+
+    /// The root of the tree containing `id` (the document, a shadow root,
+    /// or the top of a detached subtree).
+    pub fn tree_root(&self, mut id: NodeId) -> NodeId {
+        while let Some(p) = self.nodes[id].parent {
+            id = p;
+        }
+        id
+    }
+
+    /// The shadow root `id` lives in, if any.
+    pub fn containing_shadow_root(&self, id: NodeId) -> Option<NodeId> {
+        if self.shadow_hosts.is_empty() {
+            return None;
+        }
+        let r = self.tree_root(id);
+        self.is_shadow_root(r).then_some(r)
+    }
+
+    /// Parent in the shadow-including tree: a shadow root's parent is its
+    /// host.
+    pub fn shadow_including_parent(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes[id].parent.or_else(|| self.shadow_host(id))
+    }
+
+    /// Is `a` a shadow-including inclusive ancestor of `b`?
+    pub fn is_shadow_including_inclusive_ancestor(&self, a: NodeId, b: NodeId) -> bool {
+        let mut cur = Some(b);
+        while let Some(c) = cur {
+            if c == a {
+                return true;
+            }
+            cur = self.shadow_including_parent(c);
+        }
+        false
+    }
+
+    /// The slot name of a slottable (`slot` attribute; "" for text and
+    /// elements without one).
+    pub fn slottable_name(&self, id: NodeId) -> &str {
+        self.attr(id, "slot").unwrap_or("")
+    }
+
+    fn is_slottable(&self, id: NodeId) -> bool {
+        matches!(self.nodes[id].data, NodeData::Element(_) | NodeData::Text(_))
+    }
+
+    /// The first `<slot>` in `root`'s tree (tree order) named `name`.
+    fn find_slot(&self, root: NodeId, name: &str) -> Option<NodeId> {
+        self.descendants(root).skip(1).find(|&n| self.is_element(n, "slot") && self.attr(n, "name").unwrap_or("") == name)
+    }
+
+    /// The slot a slottable is assigned to (its parent must be a shadow
+    /// host whose shadow tree has a matching slot).
+    pub fn assigned_slot(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.nodes[id].parent?;
+        let root = self.shadow_root(parent)?;
+        if !self.is_slottable(id) {
+            return None;
+        }
+        self.find_slot(root, self.slottable_name(id))
+    }
+
+    /// Nodes assigned to `slot` (empty when it is not in a shadow tree or
+    /// is not the first slot of its name).
+    pub fn assigned_nodes(&self, slot: NodeId) -> Vec<NodeId> {
+        let Some(root) = self.containing_shadow_root(slot) else { return Vec::new() };
+        let Some(host) = self.shadow_host(root) else { return Vec::new() };
+        let name = self.attr(slot, "name").unwrap_or("");
+        if self.find_slot(root, name) != Some(slot) {
+            return Vec::new();
+        }
+        self.children(host).filter(|&c| self.is_slottable(c) && self.slottable_name(c) == name).collect()
+    }
+
+    /// Children in the flat tree (what gets rendered): a shadow host's
+    /// shadow-root children, a slot's assigned nodes (or its fallback
+    /// children), otherwise the DOM children.
+    pub fn flat_children(&self, id: NodeId) -> Vec<NodeId> {
+        if !self.shadow_roots.is_empty() {
+            if let Some(root) = self.shadow_root(id) {
+                return self.children(root).collect();
+            }
+            if self.is_element(id, "slot") && self.containing_shadow_root(id).is_some() {
+                let assigned = self.assigned_nodes(id);
+                if !assigned.is_empty() {
+                    return assigned;
+                }
+            }
+        }
+        self.children(id).collect()
+    }
+
+    /// Element children in the flat tree.
+    pub fn flat_child_elements(&self, id: NodeId) -> Vec<NodeId> {
+        self.flat_children(id).into_iter().filter(|&c| matches!(self.nodes[c].data, NodeData::Element(_))).collect()
+    }
+
+    /// Parent in the flat tree: the assigned slot for children of a shadow
+    /// host (`None` when unassigned: not rendered), the host for top-level
+    /// nodes of a shadow tree, otherwise the DOM parent.
+    pub fn flat_parent(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.nodes[id].parent?;
+        if self.shadow_roots.is_empty() {
+            return Some(parent);
+        }
+        if self.shadow_roots.contains_key(&parent) {
+            return self.assigned_slot(id);
+        }
+        if let Some(h) = self.shadow_host(parent) {
+            return Some(h);
+        }
+        Some(parent)
+    }
+
+    /// Pre-order traversal that also enters shadow trees (a host's shadow
+    /// root and its subtree come right after the host).
+    pub fn shadow_including_descendants(&self, root: NodeId) -> Vec<NodeId> {
+        if self.shadow_roots.is_empty() {
+            return self.descendants(root).collect();
+        }
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(n) = stack.pop() {
+            out.push(n);
+            let kids: Vec<NodeId> = self.children(n).collect();
+            for &k in kids.iter().rev() {
+                stack.push(k);
+            }
+            if let Some(r) = self.shadow_root(n) {
+                stack.push(r);
+            }
+        }
+        out
+    }
+
+    /// Shadow roots whose host is connected, in creation order.
+    pub fn connected_shadow_roots(&self) -> Vec<NodeId> {
+        let mut v: Vec<NodeId> = self.shadow_hosts.iter().filter(|(_, &h)| self.is_connected(h)).map(|(&r, _)| r).collect();
+        v.sort_unstable();
+        v
     }
 
     pub fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
@@ -601,5 +790,48 @@ mod tests {
         // Cycles are refused.
         d.insert_before(a, html, None);
         assert_eq!(d.parent(html), Some(Document::ROOT));
+    }
+
+    #[test]
+    fn shadow_trees_and_slots() {
+        let mut d = Document::new();
+        let html = d.create_element("html", vec![]);
+        d.append_child(Document::ROOT, html);
+        let host = d.create_element("x-card", vec![]);
+        d.append_child(html, host);
+        let title = d.create_element("span", vec![("slot".into(), "title".into())]);
+        let text = d.create_text("body text");
+        let unassigned = d.create_element("i", vec![("slot".into(), "nope".into())]);
+        d.append_child(host, title);
+        d.append_child(host, text);
+        d.append_child(host, unassigned);
+        let root = d.attach_shadow(host);
+        assert_eq!(d.attach_shadow(host), root);
+        let header = d.create_element("header", vec![]);
+        let s_title = d.create_element("slot", vec![("name".into(), "title".into())]);
+        let s_default = d.create_element("slot", vec![]);
+        let fallback = d.create_text("fallback");
+        d.append_child(root, header);
+        d.append_child(header, s_title);
+        d.append_child(root, s_default);
+        d.append_child(s_default, fallback);
+        assert!(d.is_connected(s_title));
+        assert_eq!(d.parent(root), None);
+        assert_eq!(d.shadow_host(root), Some(host));
+        assert_eq!(d.containing_shadow_root(s_title), Some(root));
+        assert_eq!(d.assigned_slot(title), Some(s_title));
+        assert_eq!(d.assigned_slot(text), Some(s_default));
+        assert_eq!(d.assigned_slot(unassigned), None);
+        assert_eq!(d.assigned_nodes(s_default), vec![text]);
+        assert_eq!(d.flat_children(host), vec![header, s_default]);
+        assert_eq!(d.flat_children(s_title), vec![title]);
+        assert_eq!(d.flat_parent(title), Some(s_title));
+        assert_eq!(d.flat_parent(header), Some(host));
+        assert_eq!(d.flat_parent(unassigned), None);
+        assert!(d.is_shadow_including_inclusive_ancestor(html, s_title));
+        // With nothing assigned, a slot renders its fallback content.
+        d.detach(text);
+        assert_eq!(d.flat_children(s_default), vec![fallback]);
+        assert_eq!(d.connected_shadow_roots(), vec![root]);
     }
 }

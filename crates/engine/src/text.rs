@@ -311,7 +311,8 @@ impl Writer<'_> {
     }
 
     fn walk_children(&mut self, id: NodeId) {
-        for c in self.doc.children(id) {
+        // The rendered (flat) tree: shadow content and slotted nodes.
+        for c in self.doc.flat_children(id) {
             self.walk(c);
         }
     }

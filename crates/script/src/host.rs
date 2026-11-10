@@ -124,8 +124,6 @@ pub struct HostState {
     pub time_origin: f64,
     pub console_marks: HashMap<String, f64>,
     pub console_counts: HashMap<String, u32>,
-    pub pending_intersections: Vec<(ObjectId, Vec<NodeRef>)>,
-    pub pending_resizes: Vec<(ObjectId, Vec<NodeRef>)>,
     pub pending_script_events: Vec<(NodeRef, &'static str)>,
     /// Dynamically inserted external scripts being downloaded in the
     /// background: (element, url, is_module, result channel).
@@ -133,6 +131,12 @@ pub struct HostState {
     pub deferred_natives: Vec<ObjectId>,
     /// Module cache and import map.
     pub modules: crate::modules::ModuleState,
+    /// Shadow roots, slots and custom element registry / reactions.
+    pub shadow: crate::shadow::ShadowState,
+    /// "Update the rendering" hook state (observers).
+    pub render: crate::natives::RenderState,
+    /// JS factories used by natives (see `__rhNative.setFactory`).
+    pub factories: HashMap<String, Value>,
 }
 
 thread_local! {
@@ -175,7 +179,12 @@ pub(crate) fn with_doc<R>(doc: u32, f: impl FnOnce(&mut Document) -> R) -> R {
 
 /// Record that scripts changed the DOM / styles.
 pub(crate) fn mark_dirty() {
-    state().borrow_mut().dirty = true;
+    {
+        let st = state();
+        let mut st = st.borrow_mut();
+        st.dirty = true;
+        st.render.dirty = true;
+    }
     with_env(|env| env.mark_dom_dirty());
 }
 
@@ -184,86 +193,147 @@ pub(crate) fn proto(name: &str) -> ObjectId {
     let st = st.borrow();
     match st.protos.get(name) {
         Some(p) => *p,
+        None if name.starts_with("SVG") && st.protos.contains_key("SVGElement") => st.protos["SVGElement"],
         None => *st.protos.get("HTMLElement").expect("HTMLElement proto"),
     }
 }
 
-/// Lower-case tag → (prototype name, class name).
+/// Lower-case tag → (prototype name, class name) per the HTML element
+/// interface index (HTML §"Element interfaces"), SVG elements by tag.
 pub(crate) fn element_class(tag: &str, is_svg: bool) -> (&'static str, &'static str) {
     if is_svg {
-        return ("SVGElement", if tag == "svg" { "SVGSVGElement" } else { "SVGElement" });
+        let c = svg_class(tag);
+        return (c, c);
     }
+    let c = match tag {
+        "a" => "HTMLAnchorElement",
+        "area" => "HTMLAreaElement",
+        "audio" => "HTMLAudioElement",
+        "base" => "HTMLBaseElement",
+        "blockquote" | "q" => "HTMLQuoteElement",
+        "body" => "HTMLBodyElement",
+        "br" => "HTMLBRElement",
+        "button" => "HTMLButtonElement",
+        "canvas" => "HTMLCanvasElement",
+        "caption" => "HTMLTableCaptionElement",
+        "col" | "colgroup" => "HTMLTableColElement",
+        "data" => "HTMLDataElement",
+        "datalist" => "HTMLDataListElement",
+        "del" | "ins" => "HTMLModElement",
+        "details" => "HTMLDetailsElement",
+        "dialog" => "HTMLDialogElement",
+        "dir" => "HTMLDirectoryElement",
+        "div" => "HTMLDivElement",
+        "dl" => "HTMLDListElement",
+        "embed" => "HTMLEmbedElement",
+        "fieldset" => "HTMLFieldSetElement",
+        "font" => "HTMLFontElement",
+        "form" => "HTMLFormElement",
+        "frame" => "HTMLFrameElement",
+        "frameset" => "HTMLFrameSetElement",
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "HTMLHeadingElement",
+        "head" => "HTMLHeadElement",
+        "hr" => "HTMLHRElement",
+        "html" => "HTMLHtmlElement",
+        "iframe" => "HTMLIFrameElement",
+        "img" => "HTMLImageElement",
+        "input" => "HTMLInputElement",
+        "label" => "HTMLLabelElement",
+        "legend" => "HTMLLegendElement",
+        "li" => "HTMLLIElement",
+        "link" => "HTMLLinkElement",
+        "map" => "HTMLMapElement",
+        "marquee" => "HTMLMarqueeElement",
+        "menu" => "HTMLMenuElement",
+        "meta" => "HTMLMetaElement",
+        "meter" => "HTMLMeterElement",
+        "object" => "HTMLObjectElement",
+        "ol" => "HTMLOListElement",
+        "optgroup" => "HTMLOptGroupElement",
+        "option" => "HTMLOptionElement",
+        "output" => "HTMLOutputElement",
+        "p" => "HTMLParagraphElement",
+        "param" => "HTMLParamElement",
+        "picture" => "HTMLPictureElement",
+        "pre" | "listing" | "xmp" => "HTMLPreElement",
+        "progress" => "HTMLProgressElement",
+        "script" => "HTMLScriptElement",
+        "select" => "HTMLSelectElement",
+        "selectedcontent" => "HTMLSelectedContentElement",
+        "slot" => "HTMLSlotElement",
+        "source" => "HTMLSourceElement",
+        "span" => "HTMLSpanElement",
+        "style" => "HTMLStyleElement",
+        "table" => "HTMLTableElement",
+        "tbody" | "thead" | "tfoot" => "HTMLTableSectionElement",
+        "td" | "th" => "HTMLTableCellElement",
+        "template" => "HTMLTemplateElement",
+        "textarea" => "HTMLTextAreaElement",
+        "time" => "HTMLTimeElement",
+        "title" => "HTMLTitleElement",
+        "tr" => "HTMLTableRowElement",
+        "track" => "HTMLTrackElement",
+        "ul" => "HTMLUListElement",
+        "video" => "HTMLVideoElement",
+        "#fragment" => "DocumentFragment",
+        "#shadow-root" => "ShadowRoot",
+        "applet" | "bgsound" | "blink" | "isindex" | "keygen" | "multicol" | "nextid" | "spacer" => "HTMLUnknownElement",
+        t if t.contains('-') || is_known_html_element(t) => "HTMLElement",
+        _ => "HTMLUnknownElement",
+    };
+    (c, c)
+}
+
+/// Elements whose interface is plain `HTMLElement`.
+fn is_known_html_element(t: &str) -> bool {
+    matches!(
+        t,
+        "abbr" | "address" | "article" | "aside" | "b" | "bdi" | "bdo" | "cite" | "code" | "dd" | "dfn" | "dt" | "em" | "figcaption" | "figure" | "footer" | "header" | "hgroup" | "i" | "kbd" | "main" | "mark" | "nav" | "noscript" | "rp" | "rt" | "ruby" | "s" | "samp" | "search" | "section" | "small" | "strong" | "sub" | "summary" | "sup" | "u" | "var" | "wbr" | "acronym" | "basefont" | "big" | "center" | "nobr" | "noembed" | "noframes" | "plaintext" | "rb" | "rtc" | "strike" | "tt" | "math" | "image"
+    )
+}
+
+/// SVG element interfaces by tag.
+pub(crate) fn svg_class(tag: &str) -> &'static str {
     match tag {
-        "a" => ("HTMLAnchorElement", "HTMLAnchorElement"),
-        "input" => ("HTMLInputElement", "HTMLInputElement"),
-        "textarea" => ("HTMLTextAreaElement", "HTMLTextAreaElement"),
-        "select" => ("HTMLSelectElement", "HTMLSelectElement"),
-        "option" => ("HTMLOptionElement", "HTMLOptionElement"),
-        "form" => ("HTMLFormElement", "HTMLFormElement"),
-        "img" => ("HTMLImageElement", "HTMLImageElement"),
-        "script" => ("HTMLScriptElement", "HTMLScriptElement"),
-        "style" => ("HTMLStyleElement", "HTMLStyleElement"),
-        "link" => ("HTMLLinkElement", "HTMLLinkElement"),
-        "iframe" => ("HTMLIFrameElement", "HTMLIFrameElement"),
-        "canvas" => ("HTMLCanvasElement", "HTMLCanvasElement"),
-        "button" => ("HTMLButtonElement", "HTMLButtonElement"),
-        "label" => ("HTMLLabelElement", "HTMLLabelElement"),
-        "template" => ("HTMLTemplateElement", "HTMLTemplateElement"),
-        "video" => ("HTMLMediaElement", "HTMLVideoElement"),
-        "audio" => ("HTMLMediaElement", "HTMLAudioElement"),
-        "div" => ("HTMLDivElement", "HTMLDivElement"),
-        "span" => ("HTMLSpanElement", "HTMLSpanElement"),
-        "p" => ("HTMLParagraphElement", "HTMLParagraphElement"),
-        "ul" => ("HTMLUListElement", "HTMLUListElement"),
-        "ol" => ("HTMLOListElement", "HTMLOListElement"),
-        "li" => ("HTMLLIElement", "HTMLLIElement"),
-        "body" => ("HTMLBodyElement", "HTMLBodyElement"),
-        "html" => ("HTMLHtmlElement", "HTMLHtmlElement"),
-        "head" => ("HTMLHeadElement", "HTMLHeadElement"),
-        "table" => ("HTMLTableElement", "HTMLTableElement"),
-        "tr" => ("HTMLTableRowElement", "HTMLTableRowElement"),
-        "td" | "th" => ("HTMLTableCellElement", "HTMLTableCellElement"),
-        "tbody" | "thead" | "tfoot" => ("HTMLTableSectionElement", "HTMLTableSectionElement"),
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => ("HTMLHeadingElement", "HTMLHeadingElement"),
-        "br" => ("HTMLBRElement", "HTMLBRElement"),
-        "hr" => ("HTMLHRElement", "HTMLHRElement"),
-        "pre" => ("HTMLPreElement", "HTMLPreElement"),
-        "meta" => ("HTMLMetaElement", "HTMLMetaElement"),
-        "title" => ("HTMLTitleElement", "HTMLTitleElement"),
-        "dl" => ("HTMLDListElement", "HTMLDListElement"),
-        "fieldset" => ("HTMLFieldSetElement", "HTMLFieldSetElement"),
-        "legend" => ("HTMLLegendElement", "HTMLLegendElement"),
-        "details" => ("HTMLDetailsElement", "HTMLDetailsElement"),
-        "dialog" => ("HTMLDialogElement", "HTMLDialogElement"),
-        "source" => ("HTMLSourceElement", "HTMLSourceElement"),
-        "picture" => ("HTMLPictureElement", "HTMLPictureElement"),
-        "object" | "embed" => ("HTMLObjectElement", "HTMLObjectElement"),
-        "base" => ("HTMLBaseElement", "HTMLBaseElement"),
-        "map" | "area" => ("HTMLAreaElement", "HTMLAreaElement"),
-        "progress" | "meter" => ("HTMLProgressElement", "HTMLProgressElement"),
-        "time" => ("HTMLTimeElement", "HTMLTimeElement"),
-        "data" | "output" => ("HTMLDataElement", "HTMLDataElement"),
-        "slot" => ("HTMLSlotElement", "HTMLSlotElement"),
-        "menu" => ("HTMLMenuElement", "HTMLMenuElement"),
-        "quote" | "blockquote" | "q" => ("HTMLQuoteElement", "HTMLQuoteElement"),
-        "font" => ("HTMLFontElement", "HTMLFontElement"),
-        "frame" | "frameset" => ("HTMLFrameElement", "HTMLFrameElement"),
-        "mod" | "ins" | "del" => ("HTMLModElement", "HTMLModElement"),
-        "caption" => ("HTMLTableCaptionElement", "HTMLTableCaptionElement"),
-        "col" | "colgroup" => ("HTMLTableColElement", "HTMLTableColElement"),
-        "optgroup" => ("HTMLOptGroupElement", "HTMLOptGroupElement"),
-        "datalist" => ("HTMLDataListElement", "HTMLDataListElement"),
-        "track" => ("HTMLTrackElement", "HTMLTrackElement"),
-        "param" => ("HTMLParamElement", "HTMLParamElement"),
-        "marquee" => ("HTMLMarqueeElement", "HTMLMarqueeElement"),
-        "nav" | "header" | "footer" | "section" | "article" | "aside" | "main" => ("HTMLElement", "HTMLElement"),
-        "#fragment" => ("DocumentFragment", "DocumentFragment"),
-        _ => ("HTMLElement", "HTMLElement"),
+        "svg" => "SVGSVGElement",
+        "a" => "SVGAElement",
+        "circle" => "SVGCircleElement",
+        "clippath" | "clipPath" => "SVGClipPathElement",
+        "defs" => "SVGDefsElement",
+        "desc" => "SVGDescElement",
+        "ellipse" => "SVGEllipseElement",
+        "foreignobject" | "foreignObject" => "SVGForeignObjectElement",
+        "g" => "SVGGElement",
+        "image" => "SVGImageElement",
+        "line" => "SVGLineElement",
+        "lineargradient" | "linearGradient" => "SVGLinearGradientElement",
+        "marker" => "SVGMarkerElement",
+        "mask" => "SVGMaskElement",
+        "metadata" => "SVGMetadataElement",
+        "path" => "SVGPathElement",
+        "pattern" => "SVGPatternElement",
+        "polygon" => "SVGPolygonElement",
+        "polyline" => "SVGPolylineElement",
+        "radialgradient" | "radialGradient" => "SVGRadialGradientElement",
+        "rect" => "SVGRectElement",
+        "script" => "SVGScriptElement",
+        "stop" => "SVGStopElement",
+        "style" => "SVGStyleElement",
+        "switch" => "SVGSwitchElement",
+        "symbol" => "SVGSymbolElement",
+        "text" => "SVGTextElement",
+        "textpath" | "textPath" => "SVGTextPathElement",
+        "title" => "SVGTitleElement",
+        "tspan" => "SVGTSpanElement",
+        "use" => "SVGUseElement",
+        "view" => "SVGViewElement",
+        "filter" => "SVGFilterElement",
+        _ => "SVGElement",
     }
 }
 
 fn is_svg_node(doc: &Document, node: NodeId) -> bool {
-    doc.ancestor_or_self(node, |n| doc.is_element(n, "svg")).is_some()
+    doc.attr(node, "data-rh-ns") == Some("svg") || doc.is_element(node, "foreignobject") || doc.ancestor_or_self(node, |n| doc.is_element(n, "svg") || doc.is_element(n, "foreignobject")).map(|a| doc.is_element(a, "svg")).unwrap_or(false)
 }
 
 /// Wrapper object for a node (cached).
@@ -376,20 +446,26 @@ pub(crate) fn html_element_ctor(realm: &mut Realm, _this: Value, _args: &[Value]
     let Value::Object(nt_id) = nt.clone() else {
         return Err(realm.throw_type_error("Illegal constructor"));
     };
-    let tag = state()
+    let def = state()
         .borrow()
-        .custom_elements
-        .iter()
-        .find(|(_, c)| matches!(c, Value::Object(id) if *id == nt_id))
-        .map(|(t, _)| t.clone());
-    let Some(tag) = tag else {
+        .shadow
+        .definitions
+        .values()
+        .find(|d| matches!(d.ctor, Value::Object(id) if id == nt_id))
+        .map(|d| (d.name.clone(), d.extends.clone()));
+    let Some((name, extends)) = def else {
         return Err(realm.throw_type_error("Illegal constructor"));
     };
     let pending = state().borrow_mut().ce_constructing.take();
     let n = match pending {
         Some(n) => n,
         None => {
-            let node = with_doc(0, |doc| doc.create_element(&tag, vec![]));
+            // `new MyElement()`: a customized built-in is the extended
+            // element with an `is` attribute.
+            let node = with_doc(0, |doc| match &extends {
+                Some(ext) => doc.create_element(ext, vec![("is".to_string(), name.clone())]),
+                None => doc.create_element(&name, vec![]),
+            });
             NodeRef::main(node)
         }
     };

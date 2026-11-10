@@ -14,7 +14,9 @@ mod host;
 mod misc;
 mod modules;
 mod node;
+mod natives;
 mod observers;
+mod shadow;
 mod window;
 
 #[cfg(test)]
@@ -33,6 +35,17 @@ use rabbithole_net::Url;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+
+/// Web APIs implemented in JavaScript, evaluated in order at startup.
+const JS_APIS: &[(&str, &str)] = &[
+    ("rabbithole:prelude.js", include_str!("prelude.js")),
+    ("rabbithole:reflect_table.js", include_str!("js/reflect_table.js")),
+    ("rabbithole:dom.js", include_str!("js/dom.js")),
+    ("rabbithole:events.js", include_str!("js/events.js")),
+    ("rabbithole:cssom.js", include_str!("js/cssom.js")),
+    ("rabbithole:html.js", include_str!("js/html.js")),
+    ("rabbithole:observers.js", include_str!("js/observers.js")),
+];
 
 /// Extra data carried by a dispatched event.
 #[derive(Debug, Clone, PartialEq)]
@@ -126,12 +139,13 @@ impl ScriptHost {
             time_origin: now,
             console_marks: HashMap::new(),
             console_counts: HashMap::new(),
-            pending_intersections: Vec::new(),
-            pending_resizes: Vec::new(),
             pending_script_events: Vec::new(),
             pending_script_fetches: Vec::new(),
             deferred_natives: Vec::new(),
             modules: Default::default(),
+            shadow: Default::default(),
+            render: Default::default(),
+            factories: HashMap::new(),
         }));
         {
             let root_array = state.borrow().root_array;
@@ -159,17 +173,22 @@ impl ScriptHost {
             fetch::install(realm);
             misc::install(realm);
             observers::install(realm);
+            shadow::install(realm);
             modules::install(realm);
-            // Web APIs written in JavaScript (DOMMatrix, ...).
-            if let Err(e) = realm.eval(include_str!("prelude.js"), "rabbithole:prelude.js") {
-                let msg = realm.error_to_string(&e);
-                eprintln!("[rabbithole] prelude failed: {msg}");
-            }
-            // The document wrapper.
+            natives::install(realm);
+            // The document wrapper (the JS-implemented APIs use `document`).
             let doc_obj = host::wrap_main(realm, Document::ROOT);
             if let Value::Object(d) = doc_obj {
                 host.state.borrow_mut().document_obj = d;
             }
+            // Web APIs written in JavaScript (DOMMatrix, CSSOM, ...).
+            for (name, src) in JS_APIS {
+                if let Err(e) = realm.eval(src, name) {
+                    let msg = realm.error_to_string(&e);
+                    eprintln!("[rabbithole] {name} failed: {msg}");
+                }
+            }
+            let _ = realm.eval("delete globalThis.__rhNative", "rabbithole:cleanup");
         }
         host
     }
@@ -193,6 +212,7 @@ impl ScriptHost {
         }
         self.enter(env, |realm| {
             let r = realm.eval(source, url);
+            shadow::flush(realm);
             match r {
                 Ok(_) => Ok(()),
                 Err(e) => {
@@ -236,11 +256,18 @@ impl ScriptHost {
     /// window). Returns whether the default was prevented and the default
     /// action the embedder should perform.
     pub fn dispatch_event(&mut self, env: &mut dyn HostEnv, target: NodeId, event_type: &str, init: EventInit) -> DispatchResult {
-        self.enter(env, |realm| events::dispatch(realm, TargetKey::Node(NodeRef::main(target)), event_type, init, true))
+        self.enter(env, |realm| {
+            let r = events::dispatch(realm, TargetKey::Node(NodeRef::main(target)), event_type, init, true);
+            shadow::flush(realm);
+            r
+        })
     }
 
     /// Dispatch an event on `window` (`load`, `resize`, `scroll`, ...).
     pub fn dispatch_window_event(&mut self, env: &mut dyn HostEnv, event_type: &str) -> DispatchResult {
+        if matches!(event_type, "scroll" | "resize") {
+            self.state.borrow_mut().render.dirty = true;
+        }
         self.enter(env, |realm| events::dispatch(realm, TargetKey::Window, event_type, EventInit::simple(false, false), true))
     }
 
@@ -274,11 +301,16 @@ impl ScriptHost {
     pub fn run_jobs(&mut self, env: &mut dyn HostEnv) {
         self.enter(env, |realm| {
             for _ in 0..16 {
+                shadow::flush(realm);
                 realm.run_jobs();
                 if observers::has_pending_mutations() {
                     observers::deliver_mutations(realm);
                 }
-                if !realm.has_pending_jobs() && !observers::has_pending_mutations() {
+                if shadow::has_pending_reactions() || shadow::has_pending_slot_checks() {
+                    shadow::drain_ce_reactions(realm);
+                    shadow::check_slots(realm);
+                }
+                if !realm.has_pending_jobs() && !observers::has_pending_mutations() && !shadow::has_pending_reactions() && !shadow::has_pending_slot_checks() {
                     break;
                 }
             }
@@ -326,6 +358,7 @@ impl ScriptHost {
                 let Some((id, cb, args, interval)) = next else { break };
                 ran = true;
                 host::call_logged(realm, &cb, Value::Undefined, &args, "timer");
+                shadow::flush(realm);
                 if interval.is_none() {
                     host::unroot_value(realm, &cb);
                     for a in &args {
@@ -356,7 +389,18 @@ impl ScriptHost {
                     ran = true;
                     host::call_logged(realm, &r.callback, Value::Undefined, &[Value::Number(now_ms - origin)], "requestAnimationFrame");
                     host::unroot_value(realm, &r.callback);
+                    shadow::flush(realm);
                 }
+                realm.run_jobs();
+                if observers::has_pending_mutations() {
+                    observers::deliver_mutations(realm);
+                }
+            }
+            // Update the rendering: Resize / Intersection observers.
+            let origin = state().borrow().time_origin;
+            if natives::update_rendering(realm, now_ms - origin) {
+                ran = true;
+                shadow::flush(realm);
                 realm.run_jobs();
                 if observers::has_pending_mutations() {
                     observers::deliver_mutations(realm);
@@ -374,6 +418,10 @@ impl ScriptHost {
         if !st.rafs.is_empty() {
             let frame = st.last_frame + 16.0;
             due = Some(due.map(|d| d.min(frame)).unwrap_or(frame));
+        }
+        if let Some(r) = natives::render_due(&st) {
+            let r = r + st.time_origin;
+            due = Some(due.map(|d| d.min(r)).unwrap_or(r));
         }
         if !st.pending_script_fetches.is_empty() {
             // Poll background script downloads every ~10 ms.

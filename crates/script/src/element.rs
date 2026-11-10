@@ -86,6 +86,7 @@ pub(crate) fn set_attribute(n: NodeRef, name: &str, value: Option<&str>) {
         doc.set_attr(n.node, &name, value);
         old
     });
+    crate::shadow::on_attribute(n, &name, old.clone(), value);
     node::record_attribute(n, &name, old);
     if n.doc == 0 {
         mark_dirty();
@@ -730,6 +731,12 @@ pub(crate) fn node_rect(n: NodeRef) -> rabbithole_gfx::Rect {
 }
 
 pub(crate) fn dom_rect(realm: &mut Realm, x: f32, y: f32, w: f32, h: f32) -> Value {
+    let factory = state().borrow().factories.get("rect").cloned();
+    if let Some(f) = factory {
+        if let Ok(v) = realm.call(f, Value::Undefined, &[Value::Number(x as f64), Value::Number(y as f64), Value::Number(w as f64), Value::Number(h as f64)]) {
+            return v;
+        }
+    }
     let o = object_from(realm, vec![
         ("x", Value::Number(x as f64)),
         ("y", Value::Number(y as f64)),
@@ -772,10 +779,25 @@ fn e_get_bounding_client_rect(realm: &mut Realm, this: Value, _: &[Value]) -> Js
 }
 
 fn e_get_client_rects(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let r = e_get_bounding_client_rect(realm, this, &[])?;
-    let arr = realm.new_array(vec![r]);
-    realm.define_method(arr, "item", 1, node::define_hidden_method_item);
-    Ok(Value::Object(arr))
+    let n = this_node(realm, &this, "getClientRects")?;
+    // No box (display:none, detached): an empty list.
+    let has_box = n.doc == 0
+        && with_env(|env| {
+            env.ensure_layout();
+            env.node_rect(n.node).is_some()
+        });
+    let rects = if has_box { vec![e_get_bounding_client_rect(realm, this, &[])?] } else { Vec::new() };
+    rect_list(realm, rects)
+}
+
+/// A `DOMRectList` of the given rects.
+pub(crate) fn rect_list(realm: &mut Realm, rects: Vec<Value>) -> JsResult<Value> {
+    let arr = realm.new_array_value(rects);
+    let factory = state().borrow().factories.get("rectList").cloned();
+    match factory {
+        Some(f) => realm.call(f, Value::Undefined, &[arr]),
+        None => Ok(arr),
+    }
 }
 
 fn e_offset_width(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1072,18 +1094,6 @@ fn e_content_editable_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResu
 fn e_is_content_editable(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "isContentEditable")?;
     Ok(Value::Bool(get_attribute(n, "contenteditable").map(|v| v != "false").unwrap_or(false)))
-}
-
-fn e_shadow_root(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Null)
-}
-
-/// `attachShadow` returns the element itself (no shadow tree isolation): the
-/// content appended to the "shadow root" renders inline. Documented
-/// simplification.
-fn e_attach_shadow(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let _ = this_node(realm, &this, "attachShadow")?;
-    Ok(this)
 }
 
 fn e_animate(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1877,9 +1887,7 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "scrollHeight", e_scroll_height, None);
     acc(realm, "scrollTop", e_scroll_top_get, Some(e_scroll_top_set));
     acc(realm, "scrollLeft", e_scroll_left_get, Some(e_scroll_left_set));
-    acc(realm, "shadowRoot", e_shadow_root, None);
-    acc(realm, "assignedSlot", node_null, None);
-    acc(realm, "slot", slot_get, None);
+    reflect(realm, el, "slot", "slot", Reflect::Str);
     let m = |realm: &mut Realm, name: &str, arity: u32, f: rabbithole_js::NativeFn| {
         realm.define_method(el, name, arity, f);
     };
@@ -1910,7 +1918,6 @@ pub(crate) fn install(realm: &mut Realm) {
     m(realm, "scrollTo", 2, e_scroll_to);
     m(realm, "scroll", 2, e_scroll_to);
     m(realm, "scrollBy", 2, e_scroll_by);
-    m(realm, "attachShadow", 1, e_attach_shadow);
     m(realm, "animate", 2, e_animate);
     m(realm, "getAnimations", 0, e_get_animations);
     m(realm, "requestFullscreen", 0, e_rejected_promise);
@@ -1957,6 +1964,7 @@ pub(crate) fn install(realm: &mut Realm) {
 
     for name in [
         "HTMLDivElement", "HTMLSpanElement", "HTMLParagraphElement", "HTMLUListElement", "HTMLOListElement", "HTMLLIElement", "HTMLBodyElement", "HTMLHtmlElement", "HTMLHeadElement", "HTMLTableElement", "HTMLTableRowElement", "HTMLTableCellElement", "HTMLTableSectionElement", "HTMLHeadingElement", "HTMLBRElement", "HTMLHRElement", "HTMLPreElement", "HTMLMetaElement", "HTMLTitleElement", "HTMLDListElement", "HTMLFieldSetElement", "HTMLLegendElement", "HTMLDetailsElement", "HTMLDialogElement", "HTMLSourceElement", "HTMLPictureElement", "HTMLObjectElement", "HTMLBaseElement", "HTMLAreaElement", "HTMLProgressElement", "HTMLTimeElement", "HTMLDataElement", "HTMLSlotElement", "HTMLMenuElement", "HTMLQuoteElement", "HTMLFontElement", "HTMLFrameElement", "HTMLModElement", "HTMLTableCaptionElement", "HTMLTableColElement", "HTMLOptGroupElement", "HTMLDataListElement", "HTMLTrackElement", "HTMLParamElement", "HTMLMarqueeElement", "HTMLUnknownElement",
+        "HTMLEmbedElement", "HTMLFrameSetElement", "HTMLMapElement", "HTMLMeterElement", "HTMLOutputElement", "HTMLDirectoryElement", "HTMLSelectedContentElement",
     ] {
         define_class(realm, name, Some("HTMLElement"), crate::host::html_element_ctor);
     }
@@ -2258,8 +2266,9 @@ pub(crate) fn install(realm: &mut Realm) {
     for (p, v) in [("paused", Value::Bool(true)), ("ended", Value::Bool(false)), ("duration", Value::Number(f64::NAN)), ("currentTime", Value::Number(0.0)), ("volume", Value::Number(1.0)), ("playbackRate", Value::Number(1.0)), ("readyState", Value::Number(0.0)), ("networkState", Value::Number(0.0)), ("seeking", Value::Bool(false)), ("videoWidth", Value::Number(0.0)), ("videoHeight", Value::Number(0.0)), ("error", Value::Null)] {
         realm.define_property(media, p, v, rabbithole_js::HIDDEN | ENUMERABLE);
     }
-    state().borrow_mut().protos.insert("HTMLVideoElement", media);
-    state().borrow_mut().protos.insert("HTMLAudioElement", media);
+    let _ = media;
+    define_class(realm, "HTMLVideoElement", Some("HTMLMediaElement"), crate::host::html_element_ctor);
+    define_class(realm, "HTMLAudioElement", Some("HTMLMediaElement"), crate::host::html_element_ctor);
     // --- SVGElement
     let svg = define_class(realm, "SVGElement", Some("Element"), illegal_ctor);
     realm.define_accessor(svg, "ownerSVGElement", Some(svg_owner), None, ACC);
@@ -2270,7 +2279,49 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(svg, "getCTM", 0, node_null);
     realm.define_method(svg, "focus", 0, e_focus);
     realm.define_method(svg, "blur", 0, e_blur);
-    let svg_svg = define_class(realm, "SVGSVGElement", Some("SVGElement"), illegal_ctor);
+    // SVG element interfaces (SVG 2, CSS Masking, Filter Effects).
+    for (name, parent) in [
+        ("SVGGraphicsElement", "SVGElement"),
+        ("SVGGeometryElement", "SVGGraphicsElement"),
+        ("SVGPathElement", "SVGGeometryElement"),
+        ("SVGRectElement", "SVGGeometryElement"),
+        ("SVGCircleElement", "SVGGeometryElement"),
+        ("SVGEllipseElement", "SVGGeometryElement"),
+        ("SVGLineElement", "SVGGeometryElement"),
+        ("SVGPolylineElement", "SVGGeometryElement"),
+        ("SVGPolygonElement", "SVGGeometryElement"),
+        ("SVGGElement", "SVGGraphicsElement"),
+        ("SVGDefsElement", "SVGGraphicsElement"),
+        ("SVGUseElement", "SVGGraphicsElement"),
+        ("SVGImageElement", "SVGGraphicsElement"),
+        ("SVGForeignObjectElement", "SVGGraphicsElement"),
+        ("SVGSwitchElement", "SVGGraphicsElement"),
+        ("SVGAElement", "SVGGraphicsElement"),
+        ("SVGTextContentElement", "SVGGraphicsElement"),
+        ("SVGTextPositioningElement", "SVGTextContentElement"),
+        ("SVGTextElement", "SVGTextPositioningElement"),
+        ("SVGTSpanElement", "SVGTextPositioningElement"),
+        ("SVGTextPathElement", "SVGTextContentElement"),
+        ("SVGGradientElement", "SVGElement"),
+        ("SVGLinearGradientElement", "SVGGradientElement"),
+        ("SVGRadialGradientElement", "SVGGradientElement"),
+        ("SVGStopElement", "SVGElement"),
+        ("SVGDescElement", "SVGElement"),
+        ("SVGTitleElement", "SVGElement"),
+        ("SVGMetadataElement", "SVGElement"),
+        ("SVGMarkerElement", "SVGElement"),
+        ("SVGPatternElement", "SVGElement"),
+        ("SVGStyleElement", "SVGElement"),
+        ("SVGScriptElement", "SVGElement"),
+        ("SVGSymbolElement", "SVGElement"),
+        ("SVGViewElement", "SVGElement"),
+        ("SVGClipPathElement", "SVGElement"),
+        ("SVGMaskElement", "SVGElement"),
+        ("SVGFilterElement", "SVGElement"),
+    ] {
+        define_class(realm, name, Some(parent), illegal_ctor);
+    }
+    let svg_svg = define_class(realm, "SVGSVGElement", Some("SVGGraphicsElement"), illegal_ctor);
     realm.define_method(svg_svg, "createSVGPoint", 0, svg_create_point);
     realm.define_method(svg_svg, "createSVGMatrix", 0, svg_create_point);
     realm.define_method(svg_svg, "getBBox", 0, svg_get_bbox);
@@ -2298,10 +2349,10 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(nnm, "item", 1, node::define_hidden_method_item);
     state().borrow_mut().protos.insert("NamedNodeMap", nnm);
     define_class(realm, "Attr", Some("Node"), illegal_ctor);
+    // DOMRect / DOMRectReadOnly are defined in prelude.js; this native
+    // class is only the fallback before it runs.
     let rect = define_class(realm, "DOMRect", None, dom_rect_ctor);
     realm.define_method(rect, "toJSON", 0, dom_rect_to_json);
-    state().borrow_mut().protos.insert("DOMRectReadOnly", rect);
-    realm.define_global("DOMRectReadOnly", realm.obj(rect).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone()).unwrap_or(Value::Undefined));
 }
 
 fn dialog_show(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -2396,10 +2447,6 @@ fn id_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-fn slot_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let n = this_node(realm, &this, "slot")?;
-    Ok(Value::str(&get_attribute(n, "slot").unwrap_or_default()))
-}
 
 fn node_null(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Null)

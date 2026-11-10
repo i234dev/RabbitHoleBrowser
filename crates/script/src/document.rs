@@ -129,7 +129,8 @@ fn d_active_element(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
     let d = this_doc(realm, &this)?;
     let focused = state().borrow().focused;
     let n = match focused {
-        Some(f) if d == 0 && with_doc(0, |doc| doc.is_connected(f)) => Some(f),
+        // Focus inside a shadow tree is seen as its host by the document.
+        Some(f) if d == 0 && with_doc(0, |doc| doc.is_connected(f)) => Some(with_doc(0, |doc| crate::shadow::retarget(doc, f, Document::ROOT))),
         _ => with_doc(d, |doc| doc.body()),
     };
     Ok(wrap_opt(realm, d, n))
@@ -230,10 +231,10 @@ fn d_create_element(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
         doc.create_element(&tag.to_ascii_lowercase(), attrs)
     });
     // Defined custom elements are created by running their constructor.
-    let tag_l = tag.to_ascii_lowercase();
-    let ctor = state().borrow().custom_elements.get(&tag_l).cloned();
-    if let Some(ctor) = ctor {
-        return Ok(crate::host::upgrade_custom_element(realm, NodeRef { doc: d, node }, &ctor));
+    if let Some(def) = crate::shadow::definition_for(NodeRef { doc: d, node }) {
+        let el = crate::host::upgrade_custom_element(realm, NodeRef { doc: d, node }, &def.ctor);
+        crate::shadow::flush(realm);
+        return Ok(el);
     }
     Ok(wrap(realm, NodeRef { doc: d, node }))
 }
@@ -255,8 +256,10 @@ fn d_create_element_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResu
     let v = wrap(realm, NodeRef { doc: d, node });
     if ns.contains("svg") {
         if let Value::Object(id) = &v {
-            let p = proto("SVGElement");
+            let class = crate::host::svg_class(&local);
+            let p = proto(class);
             realm.obj_mut(*id).proto = Some(p);
+            realm.set_class_name(*id, class);
         }
     }
     Ok(v)
@@ -345,7 +348,10 @@ fn d_import_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Val
         }
         copy
     };
-    Ok(wrap(realm, NodeRef { doc: d, node: copy }))
+    let copy = NodeRef { doc: d, node: copy };
+    crate::shadow::queue_upgrades(copy);
+    crate::shadow::drain_ce_reactions(realm);
+    Ok(wrap(realm, copy))
 }
 
 fn d_adopt_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -375,16 +381,25 @@ fn d_element_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     }
     let x = realm.to_number(arg(args, 0))? as f32;
     let y = realm.to_number(arg(args, 1))? as f32;
+    // Shadow content is retargeted to its host for the document.
+    let best = hit_test(x, y).map(|n| with_doc(0, |doc| crate::shadow::retarget(doc, n, Document::ROOT)));
+    Ok(wrap_opt(realm, 0, best.or_else(|| with_doc(0, |doc| doc.body()))))
+}
+
+/// The topmost rendered element at the viewport point (x, y), shadow
+/// trees included: the engine's paint-order hit test, or the deepest
+/// element whose border box contains the point.
+pub(crate) fn hit_test(x: f32, y: f32) -> Option<NodeId> {
     if let Some(hits) = with_env(|env| {
         env.ensure_layout();
         env.elements_from_point(x, y)
     }) {
-        return Ok(wrap_opt(realm, 0, hits.first().copied()));
+        return hits.first().copied();
     }
     let (sx, sy) = with_env(|env| env.scroll());
     let (px, py) = (x + sx, y + sy);
-    // Deepest element whose rect contains the point (document order, last wins).
-    let candidates: Vec<NodeId> = with_doc(0, |doc| doc.descendants(Document::ROOT).filter(|&n| doc.element(n).is_some()).collect());
+    // Deepest element whose rect contains the point (tree order, last wins).
+    let candidates: Vec<NodeId> = with_doc(0, |doc| doc.shadow_including_descendants(Document::ROOT).into_iter().filter(|&n| doc.element(n).map(|e| !e.tag.starts_with('#')).unwrap_or(false)).collect());
     let mut best: Option<NodeId> = None;
     with_env(|env| {
         env.ensure_layout();
@@ -396,7 +411,7 @@ fn d_element_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
             }
         }
     });
-    Ok(wrap_opt(realm, 0, best.or_else(|| with_doc(0, |doc| doc.body()))))
+    best
 }
 
 fn d_elements_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {

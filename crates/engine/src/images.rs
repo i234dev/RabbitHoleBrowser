@@ -685,7 +685,8 @@ impl Engine {
         let scripting = self.scripting;
         let mut nodes: Vec<NodeId> = page
             .doc
-            .descendants(Document::ROOT)
+            .shadow_including_descendants(Document::ROOT)
+            .into_iter()
             .filter(|&n| is_image_element(&page.doc, n) && page.styles.get(n).is_some())
             .collect();
         let attached: HashSet<NodeId> = nodes.iter().copied().collect();

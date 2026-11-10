@@ -502,3 +502,44 @@ fn image_set_picks_supported_1x() {
     let s = one("background-image: -webkit-image-set(url(hi.png) 2x, url(lo.png) 1x)");
     assert_eq!(s.background_layers[0].image, BackgroundImage::Url("lo.png".into()));
 }
+
+#[test]
+fn shadow_tree_scoping_host_and_slotted() {
+    use rabbithole_gfx::Color;
+    let mut doc = rabbithole_html::parse("<html><body><x-card id=host><span class=t slot=title>T</span><em>body</em></x-card><p class=inner>doc p</p></body></html>");
+    let host = doc.element_by_id("host").unwrap();
+    let root = doc.attach_shadow(host);
+    let h1 = doc.create_element("h1", vec![]);
+    let slot_t = doc.create_element("slot", vec![("name".into(), "title".into())]);
+    let p = doc.create_element("p", vec![("class".into(), "inner".into())]);
+    let slot_d = doc.create_element("slot", vec![]);
+    doc.append_child(root, h1);
+    doc.append_child(h1, slot_t);
+    doc.append_child(root, p);
+    doc.append_child(root, slot_d);
+    let doc_sheet = parse_stylesheet("p.inner { color: rgb(0, 0, 255) } x-card { color: rgb(0, 128, 0) } span { font-weight: 700 }");
+    let mut shadow_sheet = parse_stylesheet(":host { display: block; color: rgb(255, 0, 0); padding-left: 3px } p { color: rgb(1, 2, 3) } ::slotted(em) { color: rgb(9, 9, 9) } h1 ::slotted(.t) { color: rgb(7, 7, 7) } :host(#host) h1 { margin-left: 5px }");
+    shadow_sheet.shadow_scopes = vec![root];
+    let state = MatchState::default();
+    let opts = StyleOptions { state: &state, resolve_url: &|_, r| Some(r.to_string()), document_base: "https://t.test/" };
+    let tree = style_tree_with(&doc, &[doc_sheet, shadow_sheet], &env(), &opts);
+    let host_s = tree.get(host).unwrap();
+    // Outer (document) normal rules beat :host rules; :host still applies.
+    assert_eq!(host_s.color, Color::rgb(0, 128, 0));
+    assert_eq!(host_s.display, Display::Block);
+    assert_eq!(host_s.padding.left, Length::Px(3.0));
+    // Document rules don't reach into the shadow tree, and vice versa.
+    assert_eq!(tree.get(p).unwrap().color, Color::rgb(1, 2, 3));
+    let doc_p = doc.descendants(Document::ROOT).find(|&n| doc.is_element(n, "p")).unwrap();
+    assert_eq!(tree.get(doc_p).unwrap().color, Color::rgb(0, 0, 255));
+    // ::slotted() with and without a slot-side compound; slotted content
+    // inherits through the slot (flat tree) and keeps document rules.
+    let span = doc.find_element("span").unwrap();
+    let em = doc.find_element("em").unwrap();
+    assert_eq!(tree.get(em).unwrap().color, Color::rgb(9, 9, 9));
+    assert_eq!(tree.get(span).unwrap().color, Color::rgb(7, 7, 7));
+    assert_eq!(tree.get(span).unwrap().font_weight, 700);
+    // :host(...) as an ancestor compound.
+    assert_eq!(tree.get(h1).unwrap().margin.left, Length::Px(5.0));
+    assert_eq!(tree.get(slot_t).unwrap().display, Display::Contents);
+}

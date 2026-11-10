@@ -690,66 +690,6 @@ fn abort_signal_any(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Va
     Ok(Value::Object(new_abort_signal(realm)))
 }
 
-// ------------------------------------------------------------ customElements
-
-fn ce_define(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let name = arg_str(realm, args, 0)?.to_ascii_lowercase();
-    let ctor = arg(args, 1);
-    if !name.contains('-') {
-        return Err(dom_exception(realm, "SyntaxError", &format!("\"{name}\" is not a valid custom element name")));
-    }
-    if !realm.is_constructor(&ctor) {
-        return Err(realm.throw_type_error("parameter 2 is not a constructor"));
-    }
-    if state().borrow().custom_elements.contains_key(&name) {
-        return Err(dom_exception(realm, "NotSupportedError", &format!("the name \"{name}\" has already been used with this registry")));
-    }
-    root_value(realm, &ctor);
-    state().borrow_mut().custom_elements.insert(name.clone(), ctor.clone());
-    // Resolve whenDefined promises.
-    let key = format!("__ce_wait_{name}");
-    let reg = state().borrow().protos.get("__customElements").copied();
-    if let Some(reg) = reg {
-        let waiter = get_hidden(realm, reg, &key);
-        if let Value::Object(resolve) = waiter {
-            realm.call(Value::Object(resolve), Value::Undefined, &[ctor.clone()])?;
-        }
-    }
-    // Upgrade existing elements.
-    let existing: Vec<NodeId> = crate::env::with_env(|env| {
-        let doc = env.doc();
-        doc.descendants(Document::ROOT).filter(|&n| doc.tag(n) == Some(name.as_str())).collect()
-    });
-    for n in existing {
-        let el = crate::host::upgrade_custom_element(realm, NodeRef::main(n), &ctor);
-        let cb = realm.get_str(el.clone(), "connectedCallback")?;
-        if realm.is_callable(&cb) {
-            call_logged(realm, &cb, el, &[], "connectedCallback");
-        }
-    }
-    Ok(Value::Undefined)
-}
-
-fn ce_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let name = arg_str(realm, args, 0)?.to_ascii_lowercase();
-    Ok(state().borrow().custom_elements.get(&name).cloned().unwrap_or(Value::Undefined))
-}
-
-fn ce_when_defined(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let name = arg_str(realm, args, 0)?.to_ascii_lowercase();
-    let (p, resolve, _) = realm.new_promise();
-    if let Some(c) = state().borrow().custom_elements.get(&name).cloned() {
-        realm.call(Value::Object(resolve), Value::Undefined, &[c])?;
-    } else if let Value::Object(reg) = this {
-        set_hidden(realm, reg, &format!("__ce_wait_{name}"), Value::Object(resolve));
-    }
-    Ok(Value::Object(p))
-}
-
-fn ce_upgrade(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Undefined)
-}
-
 // ----------------------------------------------------------- Notification
 
 fn notification_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -902,16 +842,6 @@ pub(crate) fn install(realm: &mut Realm) {
         realm.define_method(c, "any", 1, abort_signal_any);
     }
 
-    let reg_proto = define_class(realm, "CustomElementRegistry", None, illegal_ctor);
-    let reg = realm.new_object_with_proto(Some(reg_proto));
-    realm.define_method(reg, "define", 2, ce_define);
-    realm.define_method(reg, "get", 1, ce_get);
-    realm.define_method(reg, "whenDefined", 1, ce_when_defined);
-    realm.define_method(reg, "upgrade", 1, ce_upgrade);
-    realm.define_method(reg, "getName", 1, ce_get);
-    realm.define_global("customElements", Value::Object(reg));
-    realm.extra_roots.push(Value::Object(reg));
-    state().borrow_mut().protos.insert("__customElements", reg);
 
     let notif = define_class(realm, "Notification", Some("EventTarget"), notification_ctor);
     let notif_ctor = realm.obj(notif).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone());

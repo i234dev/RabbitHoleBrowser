@@ -7,6 +7,7 @@ use crate::props::{self, ApplyCtx};
 use crate::values::{self, ColorValue, LengthContext};
 use crate::{FontFace, FontSource, MediaEnv, StyleOptions, StyledTree, Stylesheet};
 use rabbithole_css::selector::{Compound, Selector, Specificity};
+use rabbithole_css::selector::{is_host_selector, is_slotted_selector, matches_slotted};
 use rabbithole_css::{matches_with, parse_declaration_list, parse_stylesheet, Declaration, PseudoElement, StyleRule, Token};
 use rabbithole_dom::{Document, NodeId};
 use std::collections::HashMap;
@@ -18,13 +19,18 @@ fn ua_sheet() -> &'static Stylesheet {
     UA.get_or_init(|| parse_stylesheet(crate::ua::UA_CSS))
 }
 
-/// Origin/importance rank. Higher wins.
+/// Origin/importance rank. Higher wins. `Shadow*` are author rules of a
+/// shadow tree applied to its host (`:host`) or to slotted elements
+/// (`::slotted`): the inner tree context loses to the outer one for normal
+/// declarations and wins for `!important` ones (CSS Cascade 4 §6.1).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Rank {
     UaNormal = 0,
-    AuthorNormal = 1,
-    AuthorImportant = 2,
-    UaImportant = 3,
+    ShadowNormal = 1,
+    AuthorNormal = 2,
+    AuthorImportant = 3,
+    ShadowImportant = 4,
+    UaImportant = 5,
 }
 
 struct IndexedRule<'a> {
@@ -44,6 +50,10 @@ struct RuleIndex<'a> {
     by_class: HashMap<String, Vec<usize>>,
     by_tag: HashMap<String, Vec<usize>>,
     universal: Vec<usize>,
+    /// Rules whose subject is `:host...` (applied to the shadow host).
+    host: Vec<usize>,
+    /// `::slotted(...)` rules (applied to elements assigned to slots).
+    slotted: Vec<usize>,
 }
 
 impl<'a> RuleIndex<'a> {
@@ -58,6 +68,14 @@ impl<'a> RuleIndex<'a> {
                     decls: &rule.declarations,
                     base,
                 });
+                if is_slotted_selector(sel) {
+                    self.slotted.push(idx);
+                    continue;
+                }
+                if is_host_selector(sel) {
+                    self.host.push(idx);
+                    continue;
+                }
                 let last: &Compound = sel.compounds.last().expect("non-empty selector");
                 if let Some(id) = &last.id {
                     self.by_id.entry(id.clone()).or_default().push(idx);
@@ -116,20 +134,79 @@ struct Matched<'a> {
 
 type Vars = HashMap<String, Vec<Token>>;
 
+/// Rule indices per tree scope: the document, and each shadow root (UA
+/// rules + the sheets scoped to it). Shadow roots with the same sheets
+/// share one index.
+struct ScopeIndex<'a> {
+    doc: RuleIndex<'a>,
+    ua_only: RuleIndex<'a>,
+    shadow: Vec<RuleIndex<'a>>,
+    by_root: HashMap<NodeId, usize>,
+}
+
+impl<'a> ScopeIndex<'a> {
+    fn build(ua_rules: &[&'a StyleRule], author: &'a [Stylesheet], author_rules: &'a [Vec<&'a StyleRule>]) -> ScopeIndex<'a> {
+        let mut doc = RuleIndex::default();
+        doc.add_sheet(ua_rules, true, None);
+        let mut per_root: std::collections::BTreeMap<NodeId, Vec<usize>> = std::collections::BTreeMap::new();
+        for (i, (sheet, rules)) in author.iter().zip(author_rules).enumerate() {
+            if sheet.shadow_scopes.is_empty() {
+                doc.add_sheet(rules, false, sheet.base_url.as_deref());
+            } else {
+                for &r in &sheet.shadow_scopes {
+                    per_root.entry(r).or_default().push(i);
+                }
+            }
+        }
+        let mut ua_only = RuleIndex::default();
+        if !per_root.is_empty() {
+            ua_only.add_sheet(ua_rules, true, None);
+        }
+        let mut shadow: Vec<RuleIndex<'a>> = Vec::new();
+        let mut groups: HashMap<Vec<usize>, usize> = HashMap::new();
+        let mut by_root = HashMap::new();
+        for (root, list) in per_root {
+            let gi = match groups.get(&list) {
+                Some(&g) => g,
+                None => {
+                    let mut ix = RuleIndex::default();
+                    ix.add_sheet(ua_rules, true, None);
+                    for &i in &list {
+                        ix.add_sheet(&author_rules[i], false, author[i].base_url.as_deref());
+                    }
+                    shadow.push(ix);
+                    groups.insert(list, shadow.len() - 1);
+                    shadow.len() - 1
+                }
+            };
+            by_root.insert(root, gi);
+        }
+        ScopeIndex { doc, ua_only, shadow, by_root }
+    }
+
+    /// The index for the tree rooted at `root` (`None`: the document).
+    fn for_scope(&self, root: Option<NodeId>) -> &RuleIndex<'a> {
+        match root {
+            None => &self.doc,
+            Some(r) => match self.by_root.get(&r) {
+                Some(&i) => &self.shadow[i],
+                None if self.ua_only.rules.is_empty() => &self.doc,
+                None => &self.ua_only,
+            },
+        }
+    }
+}
+
 pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> StyledTree {
     let mut ua_rules = Vec::new();
     ua_sheet().active_rules(env, &mut ua_rules);
-    let mut index = RuleIndex::default();
-    index.add_sheet(&ua_rules, true, None);
     let mut author_rules_store: Vec<Vec<&StyleRule>> = Vec::with_capacity(author.len());
     for sheet in author {
         let mut rules = Vec::new();
         sheet.active_rules(env, &mut rules);
         author_rules_store.push(rules);
     }
-    for (sheet, rules) in author.iter().zip(&author_rules_store) {
-        index.add_sheet(rules, false, sheet.base_url.as_deref());
-    }
+    let index = ScopeIndex::build(&ua_rules, author, &author_rules_store);
 
     let mut tree = StyledTree::empty();
     tree.font_faces = collect_font_faces(author, env, opts);
@@ -183,7 +260,7 @@ pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, op
         tree.after[node] = out.after.map(Rc::new);
         tree.marker[node] = out.marker.map(Rc::new);
         // Push children in reverse so they are processed in document order.
-        let kids: Vec<NodeId> = doc.child_elements(node).collect();
+        let kids: Vec<NodeId> = doc.flat_child_elements(node);
         for &k in kids.iter().rev() {
             stack.push((k, style.clone(), out.vars.clone(), root_fs));
         }
@@ -207,7 +284,7 @@ pub fn style_chain(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: 
         if n == html {
             break;
         }
-        cur = doc.parent(n);
+        cur = doc.flat_parent(n);
     }
     if chain.last() != Some(&html) {
         return None; // detached
@@ -216,17 +293,13 @@ pub fn style_chain(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: 
 
     let mut ua_rules = Vec::new();
     ua_sheet().active_rules(env, &mut ua_rules);
-    let mut index = RuleIndex::default();
-    index.add_sheet(&ua_rules, true, None);
     let mut author_rules_store: Vec<Vec<&StyleRule>> = Vec::with_capacity(author.len());
     for sheet in author {
         let mut rules = Vec::new();
         sheet.active_rules(env, &mut rules);
         author_rules_store.push(rules);
     }
-    for (sheet, rules) in author.iter().zip(&author_rules_store) {
-        index.add_sheet(rules, false, sheet.base_url.as_deref());
-    }
+    let index = ScopeIndex::build(&ua_rules, author, &author_rules_store);
 
     let mut candidates = Vec::new();
     let mut matched: Vec<Matched> = Vec::new();
@@ -267,11 +340,12 @@ fn compute_element<'a>(
     root_font_size: f32,
     env: &MediaEnv,
     opts: &StyleOptions,
-    index: &'a RuleIndex<'a>,
+    scopes: &'a ScopeIndex<'a>,
     candidates: &mut Vec<usize>,
     matched: &mut Vec<Matched<'a>>,
 ) -> ElementOut {
     matched.clear();
+    let index = scopes.for_scope(doc.containing_shadow_root(node));
     index.candidates(doc, node, candidates);
     for &ci in candidates.iter() {
         let r = &index.rules[ci];
@@ -291,6 +365,32 @@ fn compute_element<'a>(
                     base: r.base,
                     pseudo: r.selector.pseudo_element,
                 });
+            }
+        }
+    }
+    // `:host` rules of this element's own shadow tree.
+    if let Some(root) = doc.shadow_root(node) {
+        let ix = scopes.for_scope(Some(root));
+        for &hi in &ix.host {
+            let r = &ix.rules[hi];
+            if matches_with(r.selector, doc, node, opts.state) {
+                for d in r.decls {
+                    let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
+                    matched.push(Matched { rank, specificity: r.specificity, order: hi as u32 + 1, decl: d, base: r.base, pseudo: r.selector.pseudo_element });
+                }
+            }
+        }
+    }
+    // `::slotted()` rules of the shadow tree this element is slotted into.
+    if let Some(slot) = doc.assigned_slot(node) {
+        let ix = scopes.for_scope(doc.containing_shadow_root(slot));
+        for &si in &ix.slotted {
+            let r = &ix.rules[si];
+            if matches_slotted(r.selector, doc, node, slot, opts.state) {
+                for d in r.decls {
+                    let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
+                    matched.push(Matched { rank, specificity: r.specificity, order: si as u32 + 1, decl: d, base: r.base, pseudo: r.selector.pseudo_element });
+                }
             }
         }
     }

@@ -18,7 +18,7 @@ pub const DOCUMENT_FRAGMENT_NODE: f64 = 11.0;
 pub(crate) fn node_type(n: NodeRef) -> f64 {
     with_doc(n.doc, |doc| match &doc.node(n.node).data {
         NodeData::Document => DOCUMENT_NODE,
-        NodeData::Element(e) if e.tag == "#fragment" => DOCUMENT_FRAGMENT_NODE,
+        NodeData::Element(e) if e.tag == "#fragment" || e.tag == "#shadow-root" => DOCUMENT_FRAGMENT_NODE,
         NodeData::Element(_) => ELEMENT_NODE,
         NodeData::Text(_) => TEXT_NODE,
         NodeData::Comment(_) => COMMENT_NODE,
@@ -28,7 +28,7 @@ pub(crate) fn node_type(n: NodeRef) -> f64 {
 pub(crate) fn node_name(n: NodeRef) -> String {
     with_doc(n.doc, |doc| match &doc.node(n.node).data {
         NodeData::Document => "#document".into(),
-        NodeData::Element(e) if e.tag == "#fragment" => "#document-fragment".into(),
+        NodeData::Element(e) if e.tag == "#fragment" || e.tag == "#shadow-root" => "#document-fragment".into(),
         NodeData::Element(e) => {
             if doc.ancestor_or_self(n.node, |a| doc.is_element(a, "svg")).is_some() {
                 e.tag.clone()
@@ -180,6 +180,7 @@ impl SubtreeClone for Document {
 
 /// Record a childList mutation for observers watching `parent`.
 pub(crate) fn record_child_list(parent: NodeRef, added: Vec<NodeRef>, removed: Vec<NodeRef>) {
+    crate::shadow::on_child_list(parent, &added, &removed);
     let st = state();
     let mut st = st.borrow_mut();
     if st.observers.is_empty() {
@@ -303,44 +304,32 @@ pub(crate) fn insert_node(realm: &mut Realm, parent: NodeRef, child: NodeRef, be
             after_insert_connected(realm, &inserted)?;
         }
     }
+    crate::shadow::flush(realm);
     Ok(())
 }
 
-/// Run newly connected scripts and custom-element callbacks.
+/// Run newly connected scripts and custom-element reactions.
 fn after_insert_connected(realm: &mut Realm, inserted: &[NodeRef]) -> JsResult<()> {
     let mut scripts = Vec::new();
-    let mut customs = Vec::new();
     {
         let st = state();
         let st = st.borrow();
         with_env(|env| {
             let doc = env.doc();
             for n in inserted {
-                for d in doc.descendants(n.node) {
+                for d in doc.shadow_including_descendants(n.node) {
                     if doc.is_element(d, "script") && !st.ran_scripts.contains(&d) {
                         scripts.push(d);
-                    }
-                    if let Some(tag) = doc.tag(d) {
-                        if st.custom_elements.contains_key(tag) {
-                            customs.push((d, tag.to_string()));
-                        }
                     }
                 }
             }
         });
     }
+    // Custom element reactions (queued by record_child_list) run first:
+    // upgrades and connectedCallback in tree order.
+    crate::shadow::drain_ce_reactions(realm);
     for s in scripts {
         run_script_element(realm, NodeRef::main(s));
-    }
-    for (node, tag) in customs {
-        let ctor = state().borrow().custom_elements.get(&tag).cloned();
-        if let Some(ctor) = ctor {
-            let el = crate::host::upgrade_custom_element(realm, NodeRef::main(node), &ctor);
-            let cb = realm.get_str(el.clone(), "connectedCallback")?;
-            if realm.is_callable(&cb) {
-                call_logged(realm, &cb, el, &[], "connectedCallback");
-            }
-        }
     }
     Ok(())
 }
@@ -956,7 +945,10 @@ fn n_clone_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
     let n = this_node(realm, &this, "cloneNode")?;
     let deep = realm.to_boolean(&arg(args, 0));
     let copy = with_doc(n.doc, |doc| doc.clone_subtree(n.node, deep));
-    Ok(wrap(realm, NodeRef { doc: n.doc, node: copy }))
+    let copy = NodeRef { doc: n.doc, node: copy };
+    crate::shadow::queue_upgrades(copy);
+    crate::shadow::drain_ce_reactions(realm);
+    Ok(wrap(realm, copy))
 }
 
 fn n_contains(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1056,12 +1048,19 @@ fn n_normalize(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-fn n_get_root_node(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+fn n_get_root_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getRootNode")?;
+    let composed = dict_bool(realm, &arg(args, 0), "composed")?.unwrap_or(false);
     let root = with_doc(n.doc, |doc| {
         let mut cur = n.node;
-        while let Some(p) = doc.parent(cur) {
-            cur = p;
+        loop {
+            while let Some(p) = doc.parent(cur) {
+                cur = p;
+            }
+            match doc.shadow_host(cur) {
+                Some(h) if composed => cur = h,
+                _ => break,
+            }
         }
         cur
     });

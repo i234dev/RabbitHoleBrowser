@@ -164,28 +164,116 @@
     Object.defineProperty(DOMMatrix.prototype, n, { get() { return this._m[idx]; }, set(v) { this._m[idx] = +v; }, configurable: true });
   });
   NAMES.forEach((n, i) => Object.defineProperty(DOMMatrix.prototype, n, { get() { return this._m[i]; }, set(v) { this._m[i] = +v; if (![0, 1, 4, 5, 12, 13, 10, 15].includes(i) && v !== 0) this._2d = false; }, configurable: true }));
+  // Extra matrix operations (Geometry Interfaces §6).
+  const MR = DOMMatrixReadOnly.prototype, MW = DOMMatrix.prototype;
+  MW.scale3dSelf = function (s = 1, ox = 0, oy = 0, oz = 0) { return this.scaleSelf(s, s, s, ox, oy, oz); };
+  MW.skewXSelf = function (a = 0) { this._m = mul(this._m, [1, 0, 0, 0, Math.tan(a * Math.PI / 180), 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]); return this; };
+  MW.skewYSelf = function (a = 0) { this._m = mul(this._m, [1, Math.tan(a * Math.PI / 180), 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]); return this; };
+  MW.rotateFromVectorSelf = function (x = 0, y = 0) { return this.rotateSelf(x === 0 && y === 0 ? 0 : Math.atan2(y, x) * 180 / Math.PI); };
+  MW.rotateAxisAngleSelf = function (x = 0, y = 0, z = 0, angle = 0) {
+    const len = Math.hypot(x, y, z);
+    if (!len) return this;
+    x /= len; y /= len; z /= len;
+    const r = angle * Math.PI / 180, sc = Math.sin(r / 2) * Math.cos(r / 2), sq = Math.sin(r / 2) ** 2;
+    const t = [
+      1 - 2 * (y * y + z * z) * sq, 2 * (x * y * sq + z * sc), 2 * (x * z * sq - y * sc), 0,
+      2 * (x * y * sq - z * sc), 1 - 2 * (x * x + z * z) * sq, 2 * (y * z * sq + x * sc), 0,
+      2 * (x * z * sq + y * sc), 2 * (y * z * sq - x * sc), 1 - 2 * (x * x + y * y) * sq, 0,
+      0, 0, 0, 1];
+    if (x !== 0 || y !== 0) this._2d = false;
+    this._m = mul(this._m, t);
+    return this;
+  };
+  MR.scaleNonUniform = function (sx = 1, sy = 1) { return this.scale(sx, sy, 1, 0, 0, 0); };
+  MR.rotateFromVector = function (x, y) { return new DOMMatrix(this._m.slice()).rotateFromVectorSelf(x, y); };
+  MR.rotateAxisAngle = function (x, y, z, a) { return new DOMMatrix(this._m.slice()).rotateAxisAngleSelf(x, y, z, a); };
+  MR.skewX = function (a) { return new DOMMatrix(this._m.slice()).skewXSelf(a); };
+  MR.skewY = function (a) { return new DOMMatrix(this._m.slice()).skewYSelf(a); };
+  Object.defineProperty(DOMMatrixReadOnly.prototype, Symbol.toStringTag, { value: 'DOMMatrixReadOnly', configurable: true });
+  Object.defineProperty(DOMMatrix.prototype, Symbol.toStringTag, { value: 'DOMMatrix', configurable: true });
+
+  // ------------------------------------------------------------ DOMPoint
+  const P = Symbol('point');
   class DOMPointReadOnly {
-    constructor(x = 0, y = 0, z = 0, w = 1) { Object.assign(this, { x: +x, y: +y, z: +z, w: +w }); }
-    static fromPoint(p = {}) { return new this(p.x, p.y, p.z, p.w ?? 1); }
+    constructor(x = 0, y = 0, z = 0, w = 1) { Object.defineProperty(this, P, { value: [+x, +y, +z, +w] }); }
+    static fromPoint(p = {}) { return new this(p.x ?? 0, p.y ?? 0, p.z ?? 0, p.w ?? 1); }
+    get x() { return this[P][0]; } get y() { return this[P][1]; } get z() { return this[P][2]; } get w() { return this[P][3]; }
     matrixTransform(m) { return (m instanceof DOMMatrixReadOnly ? m : DOMMatrix.fromMatrix(m)).transformPoint(this); }
     toJSON() { return { x: this.x, y: this.y, z: this.z, w: this.w }; }
   }
-  class DOMPoint extends DOMPointReadOnly {}
-  if (!g.DOMMatrix) {
-    define('DOMMatrixReadOnly', DOMMatrixReadOnly);
-    define('DOMMatrix', DOMMatrix);
-    define('WebKitCSSMatrix', DOMMatrix);
-    define('DOMPointReadOnly', DOMPointReadOnly);
-    define('DOMPoint', DOMPoint);
+  class DOMPoint extends DOMPointReadOnly {
+    get x() { return this[P][0]; } set x(v) { this[P][0] = +v; }
+    get y() { return this[P][1]; } set y(v) { this[P][1] = +v; }
+    get z() { return this[P][2]; } set z(v) { this[P][2] = +v; }
+    get w() { return this[P][3]; } set w(v) { this[P][3] = +v; }
   }
-  if (!g.DOMQuad) {
-    define('DOMQuad', class DOMQuad {
-      constructor(p1 = new DOMPoint(), p2 = new DOMPoint(), p3 = new DOMPoint(), p4 = new DOMPoint()) { Object.assign(this, { p1, p2, p3, p4 }); }
-      getBounds() {
-        const xs = [this.p1.x, this.p2.x, this.p3.x, this.p4.x], ys = [this.p1.y, this.p2.y, this.p3.y, this.p4.y];
-        const x = Math.min(...xs), y = Math.min(...ys);
-        return new DOMRect(x, y, Math.max(...xs) - x, Math.max(...ys) - y);
-      }
-    });
+  Object.defineProperty(DOMPointReadOnly.prototype, Symbol.toStringTag, { value: 'DOMPointReadOnly', configurable: true });
+  Object.defineProperty(DOMPoint.prototype, Symbol.toStringTag, { value: 'DOMPoint', configurable: true });
+
+  // ------------------------------------------------------------- DOMRect
+  const R = Symbol('rect');
+  class DOMRectReadOnly {
+    constructor(x = 0, y = 0, width = 0, height = 0) { Object.defineProperty(this, R, { value: [+x, +y, +width, +height] }); }
+    static fromRect(o = {}) { return new this(o.x ?? 0, o.y ?? 0, o.width ?? 0, o.height ?? 0); }
+    get x() { return this[R][0]; } get y() { return this[R][1]; }
+    get width() { return this[R][2]; } get height() { return this[R][3]; }
+    get top() { const r = this[R]; return Math.min(r[1], r[1] + r[3]); }
+    get right() { const r = this[R]; return Math.max(r[0], r[0] + r[2]); }
+    get bottom() { const r = this[R]; return Math.max(r[1], r[1] + r[3]); }
+    get left() { const r = this[R]; return Math.min(r[0], r[0] + r[2]); }
+    toJSON() { return { x: this.x, y: this.y, width: this.width, height: this.height, top: this.top, right: this.right, bottom: this.bottom, left: this.left }; }
   }
+  class DOMRect extends DOMRectReadOnly {
+    get x() { return this[R][0]; } set x(v) { this[R][0] = +v; }
+    get y() { return this[R][1]; } set y(v) { this[R][1] = +v; }
+    get width() { return this[R][2]; } set width(v) { this[R][2] = +v; }
+    get height() { return this[R][3]; } set height(v) { this[R][3] = +v; }
+  }
+  Object.defineProperty(DOMRectReadOnly.prototype, Symbol.toStringTag, { value: 'DOMRectReadOnly', configurable: true });
+  Object.defineProperty(DOMRect.prototype, Symbol.toStringTag, { value: 'DOMRect', configurable: true });
+  class DOMRectList {
+    constructor() { throw new TypeError('Illegal constructor'); }
+    get length() { return this[R].length; }
+    item(i) { return this[R][i] ?? null; }
+    [Symbol.iterator]() { return this[R][Symbol.iterator](); }
+  }
+  Object.defineProperty(DOMRectList.prototype, Symbol.toStringTag, { value: 'DOMRectList', configurable: true });
+  function makeRectList(rects) {
+    const l = Object.create(DOMRectList.prototype);
+    Object.defineProperty(l, R, { value: rects });
+    rects.forEach((r, i) => Object.defineProperty(l, i, { value: r, enumerable: true }));
+    return l;
+  }
+
+  // ------------------------------------------------------------- DOMQuad
+  const Q = Symbol('quad');
+  class DOMQuad {
+    constructor(p1 = {}, p2 = {}, p3 = {}, p4 = {}) { Object.defineProperty(this, Q, { value: [p1, p2, p3, p4].map((p) => DOMPoint.fromPoint(p)) }); }
+    static fromRect(r = {}) { const x = r.x ?? 0, y = r.y ?? 0, w = r.width ?? 0, h = r.height ?? 0; return new DOMQuad({ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }); }
+    static fromQuad(q = {}) { return new DOMQuad(q.p1, q.p2, q.p3, q.p4); }
+    get p1() { return this[Q][0]; } get p2() { return this[Q][1]; } get p3() { return this[Q][2]; } get p4() { return this[Q][3]; }
+    getBounds() {
+      const xs = this[Q].map((p) => p.x), ys = this[Q].map((p) => p.y);
+      const x = Math.min(...xs), y = Math.min(...ys);
+      return new DOMRect(x, y, Math.max(...xs) - x, Math.max(...ys) - y);
+    }
+    toJSON() { return { p1: this.p1, p2: this.p2, p3: this.p3, p4: this.p4 }; }
+  }
+  Object.defineProperty(DOMQuad.prototype, Symbol.toStringTag, { value: 'DOMQuad', configurable: true });
+
+  define('DOMMatrixReadOnly', DOMMatrixReadOnly);
+  define('DOMMatrix', DOMMatrix);
+  define('WebKitCSSMatrix', DOMMatrix);
+  define('SVGMatrix', DOMMatrix);
+  define('DOMPointReadOnly', DOMPointReadOnly);
+  define('DOMPoint', DOMPoint);
+  define('SVGPoint', DOMPoint);
+  define('DOMRectReadOnly', DOMRectReadOnly);
+  define('DOMRect', DOMRect);
+  define('SVGRect', DOMRect);
+  define('DOMRectList', DOMRectList);
+  define('DOMQuad', DOMQuad);
+  // Natives build rects / rect lists through these.
+  g.__rhNative.setFactory('rect', (x, y, w, h) => new DOMRect(x, y, w, h));
+  g.__rhNative.setFactory('rectList', (rects) => makeRectList(Array.from(rects)));
 })();

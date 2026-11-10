@@ -347,43 +347,66 @@ impl Loader {
     // ------------------------------------------------------------ styles
 
     pub(crate) fn collect_stylesheets(&self, doc: &Document, base: &Url) -> Vec<Stylesheet> {
+        #[derive(Clone, PartialEq, Eq, Hash)]
         enum Src {
             Inline(String, Option<String>),
             Link(Url, Option<String>),
         }
-        let mut sources = Vec::new();
-        for n in doc.descendants(Document::ROOT) {
-            let Some(el) = doc.element(n) else { continue };
-            // With scripting enabled `<noscript>` content is inert raw text
-            // for a real HTML parser: its style sheets must not apply (sites
-            // like Google put `div,span{display:none}` there).
-            if matches!(el.tag.as_str(), "style" | "link") && self.load_scripts && in_noscript(doc, n) {
-                continue;
-            }
-            match el.tag.as_str() {
-                "style" => {
-                    let media = el.attr("media").map(|m| m.to_string());
-                    sources.push(Src::Inline(doc.text_content(n), media));
+        // (source, shadow root scope or None for the document)
+        let mut sources: Vec<(Src, Option<NodeId>)> = Vec::new();
+        let mut scan = |root: NodeId, scope: Option<NodeId>, sources: &mut Vec<(Src, Option<NodeId>)>| {
+            for n in doc.descendants(root) {
+                let Some(el) = doc.element(n) else { continue };
+                // With scripting enabled `<noscript>` content is inert raw text
+                // for a real HTML parser: its style sheets must not apply (sites
+                // like Google put `div,span{display:none}` there).
+                if matches!(el.tag.as_str(), "style" | "link") && self.load_scripts && in_noscript(doc, n) {
+                    continue;
                 }
-                "link" => {
-                    let rel = el.attr("rel").unwrap_or("").to_ascii_lowercase();
-                    let is_sheet = rel.split_ascii_whitespace().any(|r| r == "stylesheet");
-                    if !is_sheet || !self.load_stylesheets {
+                if let Some((source, text)) = doc.sheet_overrides.get(&n) {
+                    // Sheet modified through the CSSOM (insertRule, ...).
+                    if el.tag == "link" || *source == doc.text_content(n) {
+                        let media = el.attr("media").map(|m| m.to_string());
+                        sources.push((Src::Inline(text.clone(), media), scope));
                         continue;
                     }
-                    let Some(href) = el.attr("href") else { continue };
-                    let Some(url) = base.join(href) else { continue };
-                    let media = el.attr("media").map(|m| m.to_string());
-                    sources.push(Src::Link(url, media));
                 }
-                _ => {}
+                match el.tag.as_str() {
+                    "style" => {
+                        let media = el.attr("media").map(|m| m.to_string());
+                        sources.push((Src::Inline(doc.text_content(n), media), scope));
+                    }
+                    "link" => {
+                        let rel = el.attr("rel").unwrap_or("").to_ascii_lowercase();
+                        let is_sheet = rel.split_ascii_whitespace().any(|r| r == "stylesheet");
+                        if !is_sheet || !self.load_stylesheets {
+                            continue;
+                        }
+                        let Some(href) = el.attr("href") else { continue };
+                        let Some(url) = base.join(href) else { continue };
+                        let media = el.attr("media").map(|m| m.to_string());
+                        sources.push((Src::Link(url, media), scope));
+                    }
+                    _ => {}
+                }
             }
+            // Constructed sheets adopted by the document / shadow root
+            // come after its own sheets.
+            if let Some(list) = doc.adopted_styles.get(&root) {
+                for text in list {
+                    sources.push((Src::Inline(text.clone(), None), scope));
+                }
+            }
+        };
+        scan(Document::ROOT, None, &mut sources);
+        for root in doc.connected_shadow_roots() {
+            scan(root, Some(root), &mut sources);
         }
 
         let mut to_fetch: Vec<Url> = Vec::new();
         {
             let caches = self.caches.lock().unwrap();
-            for s in &sources {
+            for (s, _) in &sources {
                 if let Src::Link(u, _) = s {
                     let key = u.without_fragment().to_string();
                     if !caches.css.contains_key(&key) && !to_fetch.iter().any(|x| x.without_fragment().to_string() == key) {
@@ -394,25 +417,41 @@ impl Loader {
         }
         self.fetch_css_into_cache(&to_fetch);
 
-        let mut sheets = Vec::new();
-        for s in sources {
-            match s {
+        let mut sheets: Vec<Stylesheet> = Vec::new();
+        // Shadow trees of the same component share their sheets: parse each
+        // (source) once and list every shadow root it is scoped to.
+        let mut shadow_sheet_of: std::collections::HashMap<Src, usize> = std::collections::HashMap::new();
+        for (s, scope) in sources {
+            if let Some(root) = scope {
+                if let Some(&i) = shadow_sheet_of.get(&s) {
+                    sheets[i].shadow_scopes.push(root);
+                    continue;
+                }
+            }
+            let parsed = match &s {
                 Src::Inline(text, media) => {
-                    let mut sheet = rabbithole_css::parse_stylesheet(&text);
+                    let mut sheet = rabbithole_css::parse_stylesheet(text);
                     sheet.base_url = Some(base.to_string());
                     self.resolve_imports(&mut sheet, base, 0);
-                    sheets.push(wrap_media(sheet, media.as_deref()));
+                    Some(wrap_media(sheet, media.as_deref()))
                 }
                 Src::Link(url, media) => {
                     let key = url.without_fragment().to_string();
                     let text = self.caches.lock().unwrap().css.get(&key).cloned();
-                    if let Some(text) = text {
+                    text.map(|text| {
                         let mut sheet = rabbithole_css::parse_stylesheet(&text);
                         sheet.base_url = Some(url.to_string());
-                        self.resolve_imports(&mut sheet, &url, 0);
-                        sheets.push(wrap_media(sheet, media.as_deref()));
-                    }
+                        self.resolve_imports(&mut sheet, url, 0);
+                        wrap_media(sheet, media.as_deref())
+                    })
                 }
+            };
+            if let Some(mut sheet) = parsed {
+                if let Some(root) = scope {
+                    sheet.shadow_scopes = vec![root];
+                    shadow_sheet_of.insert(s, sheets.len());
+                }
+                sheets.push(sheet);
             }
         }
         sheets
@@ -506,7 +545,7 @@ impl Loader {
 
     fn load_images(&self, doc: &Document, styles: &StyledTree, base: &Url, viewport: Viewport) -> Vec<(NodeId, Arc<Image>)> {
         let mut wanted: Vec<(NodeId, Url, f32)> = Vec::new();
-        for n in doc.descendants(Document::ROOT) {
+        for n in doc.shadow_including_descendants(Document::ROOT) {
             if !images::is_image_element(doc, n) {
                 continue;
             }
@@ -1222,7 +1261,7 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
 /// node, so layout/paint treat them as replaced images.
 fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContext, images: &mut HashMap<NodeId, Arc<Image>>) {
     let mut roots = Vec::new();
-    for n in doc.descendants(Document::ROOT) {
+    for n in doc.shadow_including_descendants(Document::ROOT) {
         if doc.is_element(n, "svg") && styles.get(n).is_some() {
             // Skip svg nested inside another svg.
             let nested = doc.ancestor_or_self(n, |a| a != n && doc.is_element(a, "svg")).is_some();
@@ -1282,6 +1321,7 @@ fn wrap_media(sheet: Stylesheet, media: Option<&str>) -> Stylesheet {
         Some(m) => Stylesheet {
             base_url: sheet.base_url.clone(),
             rules: vec![Rule::Media { query: parse_media_query(m), rules: sheet.rules }],
+            shadow_scopes: sheet.shadow_scopes,
         },
     }
 }
@@ -1392,8 +1432,16 @@ fn meta_refresh_target(page: &Page, scripting: bool) -> Option<Url> {
 fn stylesheet_signature(doc: &Document) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    for n in doc.descendants(Document::ROOT) {
+    let mut roots = vec![Document::ROOT];
+    roots.extend(doc.connected_shadow_roots());
+    for root in roots {
+    root.hash(&mut h);
+    doc.adopted_styles.get(&root).hash(&mut h);
+    for n in doc.descendants(root) {
         let Some(el) = doc.element(n) else { continue };
+        if let Some(o) = doc.sheet_overrides.get(&n) {
+            o.hash(&mut h);
+        }
         match el.tag.as_str() {
             "style" => {
                 0u8.hash(&mut h);
@@ -1412,6 +1460,7 @@ fn stylesheet_signature(doc: &Document) -> u64 {
             }
             _ => {}
         }
+    }
     }
     h.finish()
 }
@@ -1569,7 +1618,7 @@ impl Page {
     /// All links in document order (hidden ones excluded).
     pub fn links(&self) -> Vec<Link> {
         let mut out = Vec::new();
-        for n in self.doc.descendants(Document::ROOT) {
+        for n in self.doc.shadow_including_descendants(Document::ROOT) {
             let Some(el) = self.doc.element(n) else { continue };
             if el.tag != "a" {
                 continue;
@@ -1615,7 +1664,8 @@ impl Page {
     /// `<img>` elements that failed to load (diagnostics).
     pub fn missing_images(&self) -> Vec<NodeId> {
         self.doc
-            .descendants(Document::ROOT)
+            .shadow_including_descendants(Document::ROOT)
+            .into_iter()
             .filter(|&n| self.doc.is_element(n, "img") && !self.images.contains_key(&n) && self.styles.get(n).is_some())
             .collect()
     }

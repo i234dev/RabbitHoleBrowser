@@ -54,6 +54,16 @@ pub enum Pseudo {
     Focus,
     Visited,
     Target,
+    /// `:host` / `:host(<compound>)`: matches a shadow host (from rules of
+    /// its shadow tree). An empty list is the bare `:host`.
+    Host(Vec<Selector>),
+    /// `:host-context(<compound>)`: a shadow host with a (shadow-including)
+    /// inclusive ancestor matching the argument.
+    HostContext(Vec<Selector>),
+    /// `::slotted(<compound>)` on the compound that selects the slot. The
+    /// cascade matches these rules against slotted elements; ordinary
+    /// matching never matches them.
+    Slotted(Vec<Selector>),
     /// Something we never match (unknown pseudo-classes/elements).
     Never,
 }
@@ -144,7 +154,15 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
                     s.2 += m.2;
                 }
             }
-            Pseudo::Not(list) | Pseudo::Is(list) => {
+            Pseudo::Not(list) | Pseudo::Is(list) | Pseudo::Host(list) | Pseudo::HostContext(list) | Pseudo::Slotted(list) => {
+                if !matches!(p, Pseudo::Not(_) | Pseudo::Is(_)) {
+                    // :host / ::slotted count as a pseudo-class / -element.
+                    if matches!(p, Pseudo::Slotted(_)) {
+                        s.2 += 1;
+                    } else {
+                        s.1 += 1;
+                    }
+                }
                 if let Some(m) = list.iter().map(|x| x.specificity()).max() {
                     s.0 += m.0;
                     s.1 += m.1;
@@ -423,6 +441,7 @@ impl<'a> SelectorParser<'a> {
                     "focus" | "focus-visible" | "focus-within" => Pseudo::Focus,
                     "visited" => Pseudo::Visited,
                     "target" => Pseudo::Target,
+                    "host" => Pseudo::Host(Vec::new()),
                     _ => Pseudo::Never,
                 }))
             }
@@ -449,9 +468,22 @@ impl<'a> SelectorParser<'a> {
                     self.pos += 1;
                 }
                 if pseudo_element {
+                    if lname == "slotted" {
+                        let mut sub = SelectorParser::new(inner);
+                        return Some(PseudoParse::Class(Pseudo::Slotted(sub.parse_list_forgiving())));
+                    }
                     return Some(PseudoParse::Class(Pseudo::Never));
                 }
                 Some(PseudoParse::Class(match lname.as_str() {
+                    "host" | "host-context" => {
+                        let mut sub = SelectorParser::new(inner);
+                        let list = sub.parse_list_forgiving();
+                        if lname == "host" {
+                            Pseudo::Host(list)
+                        } else {
+                            Pseudo::HostContext(list)
+                        }
+                    }
                     "not" | "is" | "where" | "matches" | "-webkit-any" | "-moz-any" => {
                         let mut sub = SelectorParser::new(inner);
                         // Forgiving selector list: drop invalid parts.
@@ -666,12 +698,17 @@ fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId, state: &
     let comb = sel.combinators[idx - 1];
     match comb {
         Combinator::Child => match element_parent(doc, node) {
-            Some(p) => match_from(sel, idx - 1, doc, p, state),
+            // Crossing from a shadow tree to its host: only `:host`
+            // compounds can match the (featureless) host.
+            Some((p, crossed)) => (!crossed || compound_is_host(&sel.compounds[idx - 1])) && match_from(sel, idx - 1, doc, p, state),
             None => false,
         },
         Combinator::Descendant => {
             let mut cur = element_parent(doc, node);
-            while let Some(p) = cur {
+            while let Some((p, crossed)) = cur {
+                if crossed {
+                    return compound_is_host(&sel.compounds[idx - 1]) && match_from(sel, idx - 1, doc, p, state);
+                }
                 if match_from(sel, idx - 1, doc, p, state) {
                     return true;
                 }
@@ -696,13 +733,51 @@ fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId, state: &
     }
 }
 
-fn element_parent(doc: &Document, node: NodeId) -> Option<NodeId> {
+/// The parent element for combinator matching, and whether it is reached
+/// by crossing from a shadow tree to its host. Fragments stop the walk.
+fn element_parent(doc: &Document, node: NodeId) -> Option<(NodeId, bool)> {
     let p = doc.parent(node)?;
-    if doc.element(p).is_some() {
-        Some(p)
-    } else {
-        None
+    let el = doc.element(p)?;
+    if el.tag.starts_with('#') {
+        return doc.shadow_host(p).map(|h| (h, true));
     }
+    Some((p, false))
+}
+
+fn compound_is_host(c: &Compound) -> bool {
+    c.pseudos.iter().any(|p| matches!(p, Pseudo::Host(_) | Pseudo::HostContext(_)))
+}
+
+/// Does `sel` (a rule of a shadow tree whose last compound carries
+/// `::slotted(...)`) match `node`, slotted into `slot`?
+pub fn matches_slotted(sel: &Selector, doc: &Document, node: NodeId, slot: NodeId, state: &MatchState) -> bool {
+    let Some(last) = sel.compounds.last() else { return false };
+    let Some(arg) = last.pseudos.iter().find_map(|p| match p {
+        Pseudo::Slotted(l) => Some(l),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if !arg.iter().any(|s| matches_with(s, doc, node, state)) {
+        return false;
+    }
+    let mut host_part = sel.clone();
+    if let Some(c) = host_part.compounds.last_mut() {
+        c.pseudos.retain(|p| !matches!(p, Pseudo::Slotted(_)));
+    }
+    host_part.pseudo_element = None;
+    matches_with(&host_part, doc, slot, state)
+}
+
+/// Is this selector's subject a shadow host (`:host...` in its last
+/// compound)?
+pub fn is_host_selector(sel: &Selector) -> bool {
+    sel.compounds.last().map(compound_is_host).unwrap_or(false)
+}
+
+/// Is this a `::slotted()` selector?
+pub fn is_slotted_selector(sel: &Selector) -> bool {
+    sel.compounds.last().map(|c| c.pseudos.iter().any(|p| matches!(p, Pseudo::Slotted(_)))).unwrap_or(false)
 }
 
 fn prev_element_sibling(doc: &Document, node: NodeId) -> Option<NodeId> {
@@ -838,6 +913,22 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
                 _ => false,
             },
             Pseudo::Visited => false,
+            Pseudo::Host(list) => doc.shadow_root(node).is_some() && (list.is_empty() || list.iter().any(|s| matches_with(s, doc, node, state))),
+            Pseudo::HostContext(list) => {
+                doc.shadow_root(node).is_some() && {
+                    let mut cur = Some(node);
+                    let mut found = false;
+                    while let Some(n) = cur {
+                        if doc.element(n).map(|e| !e.tag.starts_with('#')).unwrap_or(false) && list.iter().any(|s| matches_with(s, doc, n, state)) {
+                            found = true;
+                            break;
+                        }
+                        cur = doc.shadow_including_parent(n);
+                    }
+                    found
+                }
+            }
+            Pseudo::Slotted(_) => false,
             Pseudo::Never => false,
         };
         if !ok {
