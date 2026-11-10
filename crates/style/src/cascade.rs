@@ -378,8 +378,11 @@ fn apply_declarations(
         apply_property(name, value, &mut style, parent, &ctx);
     }
 
-    // Blockification.
-    if is_root || style.position == Position::Absolute || style.position == Position::Fixed || style.float != Float::None {
+    // Blockification (CSS Display §2.7): the root, out-of-flow and floated
+    // boxes, and the children of flex/grid containers (flex/grid items,
+    // including their ::before/::after).
+    let in_flex_or_grid = !is_root && matches!(parent.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid);
+    if is_root || in_flex_or_grid || style.position == Position::Absolute || style.position == Position::Fixed || style.float != Float::None {
         style.display = match style.display {
             Display::Inline | Display::InlineBlock | Display::TableCell | Display::TableRow | Display::TableRowGroup
             | Display::TableHeaderGroup | Display::TableFooterGroup | Display::TableCaption | Display::TableColumn
