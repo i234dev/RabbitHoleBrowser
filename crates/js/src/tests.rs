@@ -1364,3 +1364,14 @@ fn watchdog_interrupts_catastrophic_regex() {
     assert!(t.elapsed() < std::time::Duration::from_secs(3), "{:?}", t.elapsed());
     realm.set_deadline(None);
 }
+
+#[test]
+fn finally_inlined_after_block_scope_resolves_outer_names() {
+    // `return` from inside a block that declares `let` bindings pops that
+    // scope before the inlined finalizer runs; names in the finalizer must
+    // still resolve to the outer bindings (WordPress hooks.js pattern).
+    eq("function f(){ let c = {s: new Set([1])}; function h(){ try { let u = 1; return u } finally { c.s.delete(1) } } h(); return c.s.size } f()", "0");
+    eq("function h(c){ try { let u = 2; { let w = 3; return u + w } } finally { c.n++ } } var o = {n: 0}; h(o) + o.n", "6");
+    eq("var r = []; function g(x){ for (const k of [1, 2]) { try { let t = k; if (t === 2) break; } finally { r.push(x + k) } } return r.join() } g('a')", "a1,a2");
+    eq("function h(){ let a = 'outer'; try { let a = 'inner'; return a } finally { a += '!' } } h()", "inner");
+}

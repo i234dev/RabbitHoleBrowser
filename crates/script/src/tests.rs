@@ -8,26 +8,26 @@ use rabbithole_style::ComputedStyle;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-struct MockEnv {
-    doc: Document,
-    url: Url,
-    dirty: u32,
-    logs: Vec<(String, String)>,
-    fetches: HashMap<String, (u16, String, String)>,
-    navigations: Vec<(String, bool)>,
-    storage: HashMap<(bool, String), String>,
-    rects: HashMap<NodeId, Rect>,
-    scroll: (f32, f32),
-    cookies: String,
-    title: Option<String>,
-    submitted: Vec<(NodeId, Option<NodeId>)>,
-    focused: Option<NodeId>,
-    now: f64,
-    opened: Vec<String>,
+pub(crate) struct MockEnv {
+    pub(crate) doc: Document,
+    pub(crate) url: Url,
+    pub(crate) dirty: u32,
+    pub(crate) logs: Vec<(String, String)>,
+    pub(crate) fetches: HashMap<String, (u16, String, String)>,
+    pub(crate) navigations: Vec<(String, bool)>,
+    pub(crate) storage: HashMap<(bool, String), String>,
+    pub(crate) rects: HashMap<NodeId, Rect>,
+    pub(crate) scroll: (f32, f32),
+    pub(crate) cookies: String,
+    pub(crate) title: Option<String>,
+    pub(crate) submitted: Vec<(NodeId, Option<NodeId>)>,
+    pub(crate) focused: Option<NodeId>,
+    pub(crate) now: f64,
+    pub(crate) opened: Vec<String>,
 }
 
 impl MockEnv {
-    fn new(html: &str) -> MockEnv {
+    pub(crate) fn new(html: &str) -> MockEnv {
         MockEnv {
             doc: rabbithole_html::parse(html),
             url: Url::parse_absolute("https://example.test/dir/page.html?q=1#frag").unwrap(),
@@ -47,7 +47,7 @@ impl MockEnv {
         }
     }
 
-    fn errors(&self) -> Vec<String> {
+    pub(crate) fn errors(&self) -> Vec<String> {
         self.logs.iter().filter(|(l, _)| l == "error").map(|(_, m)| m.clone()).collect()
     }
 
@@ -163,14 +163,14 @@ impl HostEnv for MockEnv {
     }
 }
 
-fn setup(html: &str) -> (MockEnv, ScriptHost) {
+pub(crate) fn setup(html: &str) -> (MockEnv, ScriptHost) {
     let mut env = MockEnv::new(html);
     let host = ScriptHost::new(&mut env);
     (env, host)
 }
 
 /// Run a script and return the console.log lines it produced.
-fn run(env: &mut MockEnv, host: &mut ScriptHost, src: &str) -> Vec<String> {
+pub(crate) fn run(env: &mut MockEnv, host: &mut ScriptHost, src: &str) -> Vec<String> {
     let before = env.logs.len();
     let r = host.run_script(env, src, "test.js", false);
     if let Err(e) = &r {
@@ -180,7 +180,7 @@ fn run(env: &mut MockEnv, host: &mut ScriptHost, src: &str) -> Vec<String> {
     env.logs[before..].iter().filter(|(l, _)| l == "log").map(|(_, m)| m.clone()).collect()
 }
 
-fn find(env: &MockEnv, tag: &str) -> NodeId {
+pub(crate) fn find(env: &MockEnv, tag: &str) -> NodeId {
     env.doc.find_element(tag).unwrap()
 }
 

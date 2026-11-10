@@ -19,6 +19,8 @@ mod window;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_webapi;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};

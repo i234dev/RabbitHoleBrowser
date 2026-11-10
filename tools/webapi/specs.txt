@@ -1,0 +1,56 @@
+# Specs whose Window-exposed IDL forms the Web API inventory.
+# One webref shortname per line; the second column is the tier:
+#   core     - what real sites and frameworks depend on; must be complete
+#   extended - feature-detected APIs; present with spec-correct (possibly
+#              inert) behaviour
+dom                   core
+html                  core
+webidl                core
+uievents              core
+pointerevents4         core
+touch-events          core
+input-events-2           core
+cssom-1                core
+cssom-view-1            core
+css-conditional-3       core
+css-animations-1        core
+css-transitions-1       core
+css-font-loading-3      core
+web-animations-1        core
+fetch                 core
+xhr                   core
+url                   core
+encoding              core
+streams               core
+FileAPI               core
+geometry-1              core
+intersection-observer core
+resize-observer-1       core
+hr-time-3               core
+performance-timeline  core
+user-timing           core
+navigation-timing-2     core
+resource-timing       core
+paint-timing          core
+requestidlecallback   core
+selection-api         core
+clipboard-apis        core
+webcrypto-2             core
+websockets            core
+IndexedDB-3             core
+service-workers       core
+notifications         core
+permissions           core
+storage               core
+fullscreen            core
+beacon                core
+console               core
+SVG2                   extended
+geolocation           extended
+screen-orientation    extended
+trusted-types         extended
+scheduling-apis       extended
+compression           extended
+web-share             extended
+vibration             extended
+web-locks             extended

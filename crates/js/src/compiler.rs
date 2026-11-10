@@ -1381,8 +1381,24 @@ impl Compiler {
                     // Scopes popped by the exits above are reflected in scope_depth for handler bookkeeping.
                     let popped = exits[i + 1..].iter().filter(|e| matches!(e, ExitCtx::Scope)).count() as u32;
                     self.fs().scope_depth = saved_scope_depth - popped;
+                    // Those runtime scopes are gone while the finalizer runs:
+                    // hide their compile-time counterparts too, or names in
+                    // the finalizer would resolve one scope too deep.
+                    let mut hidden_scopes = Vec::new();
+                    let mut to_hide = popped;
+                    while to_hide > 0 {
+                        let Some(s) = self.fs().scopes.pop() else { break };
+                        if s.materialized {
+                            to_hide -= 1;
+                        }
+                        hidden_scopes.push(s);
+                    }
                     let body = body.clone();
-                    self.compile_block(&body)?;
+                    let r = self.compile_block(&body);
+                    while let Some(s) = hidden_scopes.pop() {
+                        self.fs().scopes.push(s);
+                    }
+                    r?;
                     self.fs().scope_depth = saved_scope_depth;
                     let here = self.here() as u32;
                     for &t in &suspended {
