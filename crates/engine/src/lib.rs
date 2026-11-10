@@ -100,6 +100,14 @@ pub struct Loader {
     pub device_pixel_ratio: f32,
     /// Page whose subresources are being fetched (referer / Sec-Fetch-Site).
     pub initiator: Option<Url>,
+    /// Fetch `<img>` and CSS background images before the page is built
+    /// (otherwise the engine loads them in the background after the first
+    /// layout, so the page can be shown sooner).
+    pub prefetch_images: bool,
+    /// Leave external scripts unfetched in [`LoadedPage::scripts`] (empty
+    /// `source`, `url` set) so the page can be painted before they arrive;
+    /// fetch them with [`Loader::fetch_script_sources`].
+    pub defer_scripts: bool,
     caches: Arc<Mutex<Caches>>,
 }
 
@@ -174,6 +182,8 @@ impl Default for Loader {
             max_fonts: 16,
             device_pixel_ratio: 1.0,
             initiator: None,
+            prefetch_images: true,
+            defer_scripts: false,
             caches: Arc::new(Mutex::new(Caches::default())),
         }
     }
@@ -291,12 +301,12 @@ impl Loader {
             eprintln!("[load] discovery cascade {:?}", t.elapsed());
         }
         let t = std::time::Instant::now();
-        let images = if self.load_images { self.load_images(&doc, &styles, &base_url, viewport) } else { Vec::new() };
+        let images = if self.load_images && self.prefetch_images { self.load_images(&doc, &styles, &base_url, viewport) } else { Vec::new() };
         if debug {
             eprintln!("[load] images {:?}", t.elapsed());
         }
         let t = std::time::Instant::now();
-        let background_images = if self.load_images { self.load_background_images(&styles) } else { Vec::new() };
+        let background_images = if self.load_images && self.prefetch_images { self.load_background_images(&styles) } else { Vec::new() };
         if debug {
             eprintln!("[load] background images {:?}", t.elapsed());
         }
@@ -306,7 +316,13 @@ impl Loader {
             eprintln!("[load] fonts {:?}", t.elapsed());
         }
         let t = std::time::Instant::now();
-        let scripts = if self.load_scripts { self.collect_scripts(&doc, &base_url) } else { Vec::new() };
+        let scripts = if !self.load_scripts {
+            Vec::new()
+        } else if self.defer_scripts {
+            self.plan_scripts(&doc, &base_url)
+        } else {
+            self.collect_scripts(&doc, &base_url)
+        };
         if debug {
             eprintln!("[load] scripts {:?}", t.elapsed());
         }
@@ -710,8 +726,42 @@ impl Loader {
     // ----------------------------------------------------------- scripts
 
     fn collect_scripts(&self, doc: &Document, base: &Url) -> Vec<ScriptSource> {
+        let mut out = self.plan_scripts(doc, base);
+        let initiator = self.initiator.clone().unwrap_or_else(|| base.clone());
+        self.fetch_script_sources(&initiator, &mut out);
+        out
+    }
+
+    /// Fetch the sources of external scripts planned without them (see
+    /// [`Loader::defer_scripts`]). `page_url` is the document's URL.
+    pub fn fetch_script_sources(&self, page_url: &Url, scripts: &mut [ScriptSource]) {
+        let external: Vec<(usize, Url)> = scripts
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.source.is_empty())
+            .filter_map(|(i, s)| s.url.clone().map(|u| (i, u)))
+            .collect();
+        if external.is_empty() {
+            return;
+        }
+        let urls: Vec<Url> = external.iter().map(|(_, u)| u.clone()).collect();
+        let mut fetcher = self.fetcher.clone();
+        fetcher.max_body = 8 * 1024 * 1024;
+        let results = fetcher.fetch_many_for(&urls, 6, Destination::Script, Some(page_url));
+        for ((idx, _), r) in external.iter().zip(results) {
+            match r {
+                Ok(resp) if resp.status < 400 => {
+                    scripts[*idx].source = decode_text(&resp.body, resp.charset.as_deref());
+                }
+                _ => scripts[*idx].source.clear(),
+            }
+        }
+    }
+
+    /// The document's scripts in order; inline ones with their source,
+    /// external ones with only their URL.
+    fn plan_scripts(&self, doc: &Document, base: &Url) -> Vec<ScriptSource> {
         let mut out = Vec::new();
-        let mut external: Vec<(usize, Url)> = Vec::new();
         for n in doc.descendants(Document::ROOT) {
             let Some(el) = doc.element(n) else { continue };
             if el.tag != "script" {
@@ -739,29 +789,12 @@ impl Loader {
             });
             match el.attr("src").map(str::trim).filter(|s| !s.is_empty()) {
                 Some(src) => match base.join(src) {
-                    Some(u) => {
-                        out[idx].url = Some(u.clone());
-                        external.push((idx, u));
-                    }
+                    Some(u) => out[idx].url = Some(u),
                     None => {
                         out.pop();
                     }
                 },
                 None => out[idx].source = doc.text_content(n),
-            }
-        }
-        if !external.is_empty() {
-            let urls: Vec<Url> = external.iter().map(|(_, u)| u.clone()).collect();
-            let mut fetcher = self.fetcher.clone();
-            fetcher.max_body = 8 * 1024 * 1024;
-            let results = fetcher.fetch_many_for(&urls, 6, Destination::Script, self.initiator.as_ref());
-            for ((idx, _), r) in external.iter().zip(results) {
-                match r {
-                    Ok(resp) if resp.status < 400 => {
-                        out[*idx].source = decode_text(&resp.body, resp.charset.as_deref());
-                    }
-                    _ => out[*idx].source.clear(),
-                }
             }
         }
         out
@@ -783,8 +816,9 @@ pub struct Engine {
     pub scripting: bool,
     /// Echo `console.*` output and script errors to stderr.
     pub console_to_stderr: bool,
-    /// Origin-scoped `localStorage` shared by all pages.
-    pub local_storage: std::cell::RefCell<LocalStorage>,
+    /// Origin-scoped `localStorage` shared by all pages (and by engines on
+    /// other threads via [`Engine::share_local_storage`]).
+    pub local_storage: Arc<Mutex<LocalStorage>>,
     /// Monotonic clock origin for timers / `performance.now()`.
     pub start: std::time::Instant,
     /// Device pixels per CSS pixel (see [`Engine::set_device_pixel_ratio`]).
@@ -853,7 +887,7 @@ impl Engine {
             loader: Loader::new(),
             scripting: true,
             console_to_stderr: std::env::var("RH_JS_LOG").is_ok(),
-            local_storage: std::cell::RefCell::new(LocalStorage::default()),
+            local_storage: Arc::new(Mutex::new(LocalStorage::default())),
             start: std::time::Instant::now(),
             device_pixel_ratio: 1.0,
             registered_fonts: HashSet::new(),
@@ -867,7 +901,7 @@ impl Engine {
             loader: Loader::new(),
             scripting: true,
             console_to_stderr: std::env::var("RH_JS_LOG").is_ok(),
-            local_storage: std::cell::RefCell::new(LocalStorage::default()),
+            local_storage: Arc::new(Mutex::new(LocalStorage::default())),
             start: std::time::Instant::now(),
             device_pixel_ratio: 1.0,
             registered_fonts: HashSet::new(),
@@ -876,7 +910,13 @@ impl Engine {
 
     /// Persist `localStorage` to a file (loaded now, saved after script runs).
     pub fn set_local_storage_path(&mut self, path: std::path::PathBuf) {
-        *self.local_storage.borrow_mut() = LocalStorage::load(path);
+        *self.local_storage.lock().unwrap() = LocalStorage::load(path);
+    }
+
+    /// Use another engine's `localStorage` (engines on several threads,
+    /// e.g. one per browser tab, then see the same data and file).
+    pub fn share_local_storage(&mut self, storage: Arc<Mutex<LocalStorage>>) {
+        self.local_storage = storage;
     }
 
     /// Synchronous convenience: load + build.
@@ -893,6 +933,16 @@ impl Engine {
 
     /// Turn loaded resources into a styled, laid out page.
     pub fn build_page(&mut self, loaded: LoadedPage, viewport: Viewport) -> Page {
+        let mut page = self.build_page_unscripted(loaded, viewport);
+        self.finish_page_load(&mut page);
+        page
+    }
+
+    /// First half of [`Engine::build_page`]: web fonts, style, layout and
+    /// display list, without running scripts, so the page can be painted
+    /// right away (progressive rendering). Call [`Engine::finish_page_load`]
+    /// next (after filling `page.scripts` when they were deferred).
+    pub fn build_page_unscripted(&mut self, loaded: LoadedPage, viewport: Viewport) -> Page {
         for f in &loaded.fonts {
             let key = format!("{}|{}|{}", f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic);
             if self.registered_fonts.insert(key) {
@@ -928,10 +978,18 @@ impl Engine {
         page.snapshot_form_defaults();
         page.sheet_signature = stylesheet_signature(&page.doc);
         self.restyle(&mut page);
+        page
+    }
+
+    /// Second half of [`Engine::build_page`]: run the page's scripts (load
+    /// events included), then apply `<meta http-equiv=refresh>`. What the
+    /// scripts asked for (navigation, windows, dialogs, scrolling) is left
+    /// on the page for the embedder.
+    pub fn finish_page_load(&mut self, page: &mut Page) {
         if self.scripting && (!page.scripts.is_empty() || has_inline_handlers(&page.doc)) {
             // Keep what the scripts asked for during load (redirects via
             // `location`, `window.open`, dialogs) for the embedder to apply.
-            let out = self.run_page_scripts(&mut page);
+            let out = self.run_page_scripts(page);
             if out.navigation.is_some() {
                 page.script.pending_navigation = out.navigation;
             }
@@ -941,18 +999,17 @@ impl Engine {
                 page.requested_scroll = out.scroll_to;
             }
         }
-        self.shrink_oversized_images(&mut page);
+        self.shrink_oversized_images(page);
         // `<meta http-equiv="refresh" content="N; url=...">` (N <= 5 s is
         // followed right away; longer delays are left to the user).
         if page.script.pending_navigation.is_none() {
-            if let Some(target) = meta_refresh_target(&page, self.scripting) {
+            if let Some(target) = meta_refresh_target(page, self.scripting) {
                 page.script.pending_navigation = Some(PendingNavigation {
                     request: Request::get(target).with_referer(page.url.clone()),
                     replace: true,
                 });
             }
         }
-        page
     }
 
     /// Take the navigation a page requested by itself (script redirect or

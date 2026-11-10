@@ -46,13 +46,19 @@ pub fn font_directories() -> Vec<PathBuf> {
     dirs
 }
 
-/// Scan all platform directories.
+/// Scan all platform directories. The result is cached for the process
+/// (every thread with its own font context, e.g. one per browser tab,
+/// reuses the first scan).
 pub fn scan_system_fonts() -> Vec<SystemFace> {
-    let mut out = Vec::new();
-    for d in font_directories() {
-        scan_dir(&d, 0, &mut out);
-    }
-    out
+    static SCAN: std::sync::OnceLock<Vec<SystemFace>> = std::sync::OnceLock::new();
+    SCAN.get_or_init(|| {
+        let mut out = Vec::new();
+        for d in font_directories() {
+            scan_dir(&d, 0, &mut out);
+        }
+        out
+    })
+    .clone()
 }
 
 fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<SystemFace>) {

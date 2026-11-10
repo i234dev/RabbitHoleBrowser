@@ -5,11 +5,12 @@ use std::time::Duration;
 
 use rabbithole_engine::gfx::{Color, Rect};
 
-use super::chrome::{self, baseline_in, draw_button, draw_centered, draw_field, draw_progress, draw_scrollbar, ellipsize, FieldView, ToolButton, ACCENT, CHROME_BG, FIND_CURRENT, FIND_MATCH, SELECTION, SEPARATOR, TAB_BAR_BG, TEXT, TEXT_MUTED, UI_FONT};
+use super::chrome::{self, baseline_in, draw_button, draw_centered, draw_field, draw_progress, draw_scrollbar, ellipsize, FieldView, ToolButton, ACCENT, CHROME_BG, SEPARATOR, TAB_BAR_BG, TEXT, TEXT_MUTED, UI_FONT};
 use super::{App, UiFocus};
 
 impl App {
-    /// Paint everything and present the frame.
+    /// Paint everything and present the frame. The page is the last frame
+    /// from the tab's content thread, shifted to the current scroll.
     pub(crate) fn redraw(&mut self) {
         let size = self.window_size();
         let (w, h) = (size.width, size.height);
@@ -22,42 +23,29 @@ impl App {
         }
         if self.canvas.width != w || self.canvas.height != h {
             self.canvas.resize(w, h);
-            self.page_dirty = true;
         }
-        self.relayout_if_needed();
+        let idx = self.active;
+        self.sync_view(idx);
         let chrome = self.chrome();
         let area = chrome.page_area();
-        let (pw, ph) = (area.w.max(1.0) as u32, area.h.max(1.0) as u32);
-        if self.page_canvas.width != pw || self.page_canvas.height != ph {
-            self.page_canvas.resize(pw, ph);
-            self.page_dirty = true;
-        }
-        if self.page_dirty {
-            self.page_canvas.clear(Color::WHITE);
-            let scale = self.page_scale();
-            if let Some(tab) = self.tabs.get(self.active) {
-                if let Some(page) = &tab.page {
-                    self.engine.render_scaled(page, &mut self.page_canvas, tab.scroll.0, tab.scroll.1, scale);
-                }
-            }
-            self.page_dirty = false;
-        }
         self.canvas.clear(CHROME_BG);
-        self.canvas.blit(&self.page_canvas, area.x as i32, area.y as i32);
-        self.canvas.push_clip(area);
-        self.draw_page_overlays(area);
-        self.canvas.pop_clip();
+        let scale = self.page_scale();
+        match self.tabs.get(self.active).and_then(|t| t.frame.as_ref().map(|f| (f, t.scroll))) {
+            Some((frame, scroll)) => frame.present(&mut self.canvas, area, scroll, scale),
+            None => self.canvas.fill_rect(area, Color::WHITE),
+        }
         if let Some(tab) = self.tabs.get(self.active) {
             let vp = self.css_viewport();
-            let content_h = tab.page.as_ref().map(|p| p.content_height()).unwrap_or(0.0);
-            draw_scrollbar(&mut self.canvas, area, chrome.s, content_h, vp.height, tab.scroll.1);
+            draw_scrollbar(&mut self.canvas, area, chrome.s, tab.content_size().1, vp.height, tab.scroll.1);
         }
+        self.draw_hang_bar();
         self.draw_tab_bar();
         self.draw_toolbar();
         self.draw_find_bar();
         self.draw_console();
         self.draw_toasts(area);
         self.draw_status_bar();
+        self.draw_stats(area);
         self.draw_popups();
 
         let Some(surface) = self.surface.as_mut() else { return };
@@ -68,54 +56,44 @@ impl App {
         }
     }
 
-    /// Selection, find highlights, focus ring and caret.
-    fn draw_page_overlays(&mut self, _area: Rect) {
-        let Some(tab) = self.tabs.get(self.active) else { return };
-        let Some(page) = tab.page.as_ref() else { return };
-        let s = self.page_scale();
-        let mut rects_sel = Vec::new();
-        if let Some(sel) = &tab.selection {
-            for r in &sel.rects {
-                rects_sel.push(self.doc_to_screen(*r));
-            }
+    /// "This page is not responding" with Wait / Stop buttons.
+    fn draw_hang_bar(&mut self) {
+        let Some((bar, wait, stop)) = self.hang_bar() else { return };
+        let s = self.chrome().s;
+        let fonts = self.engine.fonts.clone();
+        let size = UI_FONT * s;
+        self.canvas.fill_rect(bar, Color::rgb(0xfe, 0xf7, 0xe0));
+        self.canvas.fill_rect(Rect::new(bar.x, bar.bottom() - 1.0, bar.w, 1.0), SEPARATOR);
+        let secs = self.tab().and_then(|t| t.content.as_ref()).and_then(|c| c.busy_for()).map(|d| d.as_secs()).unwrap_or(0);
+        let text = format!("This page is not responding ({secs} s). You can wait for it or stop it.");
+        let baseline = baseline_in(&fonts, self.ui_font, size, bar);
+        let label = ellipsize(&fonts, self.ui_font, size, &text, (wait.x - bar.x - 24.0 * s).max(10.0));
+        self.canvas.draw_text(&fonts, self.ui_font, size, &label, bar.x + 12.0 * s, baseline, TEXT);
+        for (r, label) in [(wait, "Wait"), (stop, "Stop")] {
+            self.canvas.fill_rounded_rect(r, 4.0 * s, Color::WHITE);
+            self.canvas.stroke_rect(r, [1.0; 4], [SEPARATOR; 4], [0; 4], 4.0 * s);
+            draw_centered(&mut self.canvas, &fonts, self.ui_font, size, label, r, if label == "Stop" { ACCENT } else { TEXT });
         }
-        let mut finds = Vec::new();
-        if tab.find.open {
-            for (i, r) in tab.find.matches.iter().enumerate() {
-                finds.push((self.doc_to_screen(*r), i == tab.find.current));
-            }
+    }
+
+    /// Frame-time overlay (Ctrl+Shift+U).
+    fn draw_stats(&mut self, area: Rect) {
+        if !self.show_stats {
+            return;
         }
-        let mut focus_ring = None;
-        if let Some(n) = tab.focus {
-            if tab.edit.as_ref().map(|e| e.node != n).unwrap_or(true) {
-                if let Some(r) = page.rect_of(n) {
-                    focus_ring = Some(self.doc_to_screen(r));
-                }
-            }
+        let s = self.chrome().s;
+        let fonts = self.engine.fonts.clone();
+        let size = 12.0 * s;
+        let mut text = self.stats.overlay_text();
+        if let Some(d) = self.tab().and_then(|t| t.content.as_ref()).and_then(|c| c.busy_for()) {
+            text.push_str(&format!(" · page busy {} ms", d.as_millis()));
         }
-        let mut caret = None;
-        if let Some(edit) = &tab.edit {
-            if let Some(r) = page.rect_of(edit.node) {
-                let screen = self.doc_to_screen(r);
-                let rel = page.caret_x(&self.engine.fonts, edit.node, edit.buf.caret).unwrap_or(4.0);
-                let cx = screen.x + rel * s;
-                let pad = (3.0 * s).min(screen.h / 4.0);
-                caret = Some((Rect::new(cx, screen.y + pad, (1.0 * s).max(1.0), (screen.h - 2.0 * pad).max(2.0)), Rect::new(screen.x, screen.y, screen.w, screen.h)));
-            }
-        }
-        for r in rects_sel {
-            self.canvas.fill_rect(r, SELECTION);
-        }
-        for (r, current) in finds {
-            self.canvas.fill_rect(r, if current { FIND_CURRENT } else { FIND_MATCH });
-        }
-        if let Some(r) = focus_ring {
-            self.canvas.stroke_rect(Rect::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0), [2.0; 4], [ACCENT; 4], [0; 4], 3.0);
-        }
-        if let Some((c, field)) = caret {
-            self.canvas.stroke_rect(field, [1.5; 4], [ACCENT; 4], [0; 4], 2.0);
-            self.canvas.fill_rect(c, TEXT);
-        }
+        let w = (fonts.measure(self.ui_font, size, &text) + 16.0 * s).min(area.w);
+        let r = Rect::new(area.right() - w - 8.0 * s, area.bottom() - 30.0 * s, w, 22.0 * s);
+        self.canvas.fill_rounded_rect(r, 4.0 * s, Color::rgba(0x20, 0x21, 0x24, 220));
+        let baseline = baseline_in(&fonts, self.ui_font, size, r);
+        let label = ellipsize(&fonts, self.ui_font, size, &text, r.w - 16.0 * s);
+        self.canvas.draw_text(&fonts, self.ui_font, size, &label, r.x + 8.0 * s, baseline, Color::WHITE);
     }
 
     fn draw_tab_bar(&mut self) {
@@ -143,7 +121,7 @@ impl App {
             let tab = &self.tabs[i];
             let close = chrome.tab_close_rect(*r);
             let mut text_x = r.x + 10.0 * s;
-            if let Some(icon) = tab.page.as_ref().and_then(|p| p.favicon()).filter(|_| !tab.is_loading()) {
+            if let Some(icon) = tab.favicon.clone().filter(|_| !tab.is_loading()) {
                 let d = 16.0 * s;
                 self.canvas.draw_image(&icon, Rect::new(text_x, r.y + (r.h - d) / 2.0, d, d), 1.0);
                 text_x += d + 6.0 * s;
@@ -218,7 +196,7 @@ impl App {
         let fonts = self.engine.fonts.clone();
         let (text, caret, sel, n, cur) = self
             .tab()
-            .map(|t| (t.find.field.text.clone(), t.find.field.caret, t.find.field.selection(), t.find.matches.len(), t.find.current))
+            .map(|t| (t.find.field.text.clone(), t.find.field.caret, t.find.field.selection(), t.find.count, t.find.current))
             .unwrap_or_default();
         let focused = self.ui_focus == UiFocus::Find;
         let view = FieldView { rect: chrome.find_field(), text: &text, caret, selection: if focused { sel } else { None }, focused, placeholder: "Find in page" };
@@ -272,10 +250,15 @@ impl App {
         self.canvas.fill_rect(bar, CHROME_BG);
         self.canvas.fill_rect(Rect::new(0.0, bar.y, bar.w, 1.0), SEPARATOR);
         let transient = self.status.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_secs(4)).map(|(m, _)| m.clone());
-        let loading = self.tab().and_then(|t| t.loading.as_ref()).map(|u| format!("Loading {u}…"));
+        let loading = self.tab().and_then(|t| match (&t.loading, t.load_phase) {
+            (Some(u), _) => Some(format!("Loading {u}…")),
+            (None, Some(phase)) => Some(format!("{phase}…")),
+            _ => None,
+        });
+        let hover_link = self.tab().and_then(|t| t.hover_link.as_ref()).map(|u| u.to_string());
         let zoom = self.tab().map(|t| t.zoom).filter(|z| (z - 1.0).abs() > 0.01).map(|z| format!("Zoom {}%", (z * 100.0).round()));
         let text = transient
-            .or_else(|| self.hover_link.as_ref().map(|u| u.to_string()))
+            .or(hover_link)
             .or_else(|| self.downloads.status_text())
             .or(loading)
             .or(zoom)

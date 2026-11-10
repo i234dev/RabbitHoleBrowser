@@ -1,15 +1,20 @@
-//! The graphical browser: window, tabs, asynchronous navigation and the
-//! glue between winit events and the engine. Painting lives in
-//! `render.rs`, input handling in `interact.rs`.
+//! The graphical browser: window, tabs and chrome on the UI thread; every
+//! tab's page on a content thread of its own (`content`). The UI thread
+//! only handles input, chrome and presenting frames, so a page can never
+//! freeze the window. Painting lives in `render.rs`, input handling in
+//! `interact.rs`.
 
+pub mod bench;
 pub mod chrome;
 pub mod console;
+pub mod content;
 pub mod downloads;
 pub mod input;
 mod interact;
 pub mod loader;
 pub mod pages;
 mod render;
+pub mod stats;
 pub mod tab;
 
 use std::collections::HashSet;
@@ -18,12 +23,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rabbithole_engine::dom::NodeId;
 use rabbithole_engine::gfx::{Canvas, Family, FontId, Rect};
 use rabbithole_engine::net::{CookieJar, Request, Url};
-use rabbithole_engine::script::EventInit;
-use rabbithole_engine::scripting::{input_init, plain_init, ScriptOutcome};
-use rabbithole_engine::{Engine, Page, Viewport};
+use rabbithole_engine::{Engine, Viewport};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{MouseButton, StartCause, WindowEvent};
@@ -36,10 +38,12 @@ use crate::history::History;
 use crate::profile::{clamp_zoom, Profile, Session, ZoomLevels};
 use crate::settings::Settings;
 use chrome::{Menu, ToolButton};
+use content::{ContentConfig, ContentHandle, ContentSettings, FromContent, Sink, ToContent, ViewSize};
 use downloads::{DownloadItem, DownloadState, Downloads};
 use input::TextBuffer;
-use loader::{LoadJob, LoadOutcome, UserEvent};
-use tab::{ControlEdit, Tab};
+use loader::DownloadEvent;
+use stats::UiStats;
+use tab::Tab;
 
 /// Which text field receives keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,12 +58,18 @@ pub enum UiFocus {
 pub struct MouseDown {
     pub button: MouseButton,
     pub pos: PhysicalPosition<f64>,
-    /// Document point under the press (if over the page).
-    pub doc: Option<(f32, f32)>,
-    pub dragged: bool,
-    /// Second press of a double click (word selection; `dblclick`).
-    pub double: bool,
+    /// The press went to the page (its moves and release do too).
+    pub on_page: bool,
 }
+
+/// Events delivered to the UI thread's event loop.
+pub enum UserEvent {
+    /// A message from a tab's content thread.
+    Content { tab_id: u64, epoch: u64, msg: FromContent },
+}
+
+/// A busy content thread shows the "not responding" bar after this long.
+pub const HANG_AFTER: Duration = Duration::from_millis(2500);
 
 /// Run the GUI. `start_urls` empty → restore the last session.
 pub fn run(start_urls: Vec<String>) -> Result<(), String> {
@@ -73,6 +83,7 @@ pub fn run(start_urls: Vec<String>) -> Result<(), String> {
 }
 
 pub struct App {
+    /// UI fonts and the template loader (shared caches and cookies).
     pub(crate) engine: Engine,
     pub(crate) profile: Profile,
     pub(crate) cookies: Arc<Mutex<CookieJar>>,
@@ -84,12 +95,11 @@ pub struct App {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
     pub(crate) next_tab_id: u64,
+    pub(crate) next_epoch: u64,
     pub(crate) window: Option<Rc<Window>>,
     pub(crate) surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
-    pub(crate) proxy: EventLoopProxy<UserEvent>,
+    pub(crate) sink: Sink,
     pub(crate) canvas: Canvas,
-    pub(crate) page_canvas: Canvas,
-    pub(crate) page_dirty: bool,
     pub(crate) ui_focus: UiFocus,
     pub(crate) url_field: TextBuffer,
     /// The URL field shows user-typed text (not the page URL).
@@ -104,30 +114,28 @@ pub struct App {
     pub(crate) hover_tab_close: bool,
     pub(crate) hover_plus: bool,
     pub(crate) status: Option<(String, Instant)>,
-    pub(crate) hover_link: Option<Url>,
     pub(crate) modifiers: ModifiersState,
     pub(crate) cursor: PhysicalPosition<f64>,
     pub(crate) cursor_icon: CursorIcon,
     pub(crate) mouse_down: Option<MouseDown>,
     pub(crate) last_click: Option<(Instant, PhysicalPosition<f64>)>,
+    /// Where the next page context menu opens (physical px).
+    pub(crate) context_pos: (f32, f32),
     pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) start_urls: Vec<String>,
     pub(crate) ui_font: FontId,
     pub(crate) ui_font_bold: FontId,
     pub(crate) anim_start: Instant,
     pub(crate) fullscreen: bool,
-    pub(crate) needs_relayout: bool,
-    /// Fragment to scroll to after the next layout.
-    pub(crate) pending_fragment: Option<String>,
     pub(crate) settings: Settings,
     /// The JavaScript console pane is open.
     pub(crate) console_open: bool,
     /// Transient banners for script dialogs (`alert`, ...).
     pub(crate) toasts: Vec<(String, Instant)>,
-    /// Last time a `scroll` event was dispatched to scripts.
-    pub(crate) last_scroll_dispatch: Instant,
-    /// A page was rebuilt by scripts since the last draw (hit tests must be fresh).
-    pub(crate) script_relayout: bool,
+    /// UI thread frame/stall measurements.
+    pub(crate) stats: UiStats,
+    /// Show the frame-time overlay (Ctrl+Shift+U).
+    pub(crate) show_stats: bool,
 }
 
 impl App {
@@ -147,6 +155,12 @@ impl App {
         let history = History::load(&profile.history_path());
         let bookmarks = Bookmarks::load(&profile.bookmarks_path());
         let zoom_levels = ZoomLevels::load(&profile.zoom_path());
+        let proxy = Mutex::new(proxy);
+        let sink: Sink = Arc::new(move |tab_id, epoch, msg| {
+            if let Ok(p) = proxy.lock() {
+                let _ = p.send_event(UserEvent::Content { tab_id, epoch, msg });
+            }
+        });
         App {
             engine,
             profile,
@@ -159,12 +173,11 @@ impl App {
             tabs: Vec::new(),
             active: 0,
             next_tab_id: 1,
+            next_epoch: 1,
             window: None,
             surface: None,
-            proxy,
+            sink,
             canvas: Canvas::new(1, 1),
-            page_canvas: Canvas::new(1, 1),
-            page_dirty: true,
             ui_focus: UiFocus::Page,
             url_field: TextBuffer::default(),
             url_edited: false,
@@ -178,25 +191,23 @@ impl App {
             hover_tab_close: false,
             hover_plus: false,
             status: None,
-            hover_link: None,
             modifiers: ModifiersState::empty(),
             cursor: PhysicalPosition::new(0.0, 0.0),
             cursor_icon: CursorIcon::Default,
             mouse_down: None,
             last_click: None,
+            context_pos: (0.0, 0.0),
             clipboard: None,
             start_urls,
             ui_font,
             ui_font_bold,
             anim_start: Instant::now(),
             fullscreen: false,
-            needs_relayout: false,
-            pending_fragment: None,
             settings,
             console_open: false,
             toasts: Vec::new(),
-            last_scroll_dispatch: Instant::now(),
-            script_relayout: false,
+            stats: UiStats::new(std::env::var_os("RH_UI_STATS").is_some()),
+            show_stats: false,
         }
     }
 
@@ -230,9 +241,24 @@ impl App {
 
     /// CSS viewport of the active tab.
     pub(crate) fn css_viewport(&self) -> Viewport {
+        self.view_for(self.active).viewport
+    }
+
+    /// Page area size and scale of a tab.
+    pub(crate) fn view_for(&self, idx: usize) -> ViewSize {
         let area = self.chrome().page_area();
-        let s = self.page_scale();
-        Viewport { width: (area.w / s).max(1.0), height: (area.h / s).max(1.0) }
+        let zoom = self.tabs.get(idx).map(|t| t.zoom).unwrap_or(1.0);
+        ViewSize::new(area.w.max(1.0) as u32, area.h.max(1.0) as u32, self.ui_scale() * zoom)
+    }
+
+    /// Tell a tab's content thread about its view size when it changed.
+    pub(crate) fn sync_view(&mut self, idx: usize) {
+        let view = self.view_for(idx);
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        if tab.view != Some(view) {
+            tab.view = Some(view);
+            tab.send(ToContent::Resize(view));
+        }
     }
 
     /// Physical window position → CSS viewport coordinates (if over the page).
@@ -246,10 +272,14 @@ impl App {
         Some(((x - area.x) / s, (y - area.y) / s))
     }
 
-    /// CSS viewport coordinates → document coordinates.
-    pub(crate) fn to_doc(&self, css: (f32, f32)) -> (f32, f32) {
-        let scroll = self.tabs.get(self.active).map(|t| t.scroll).unwrap_or((0.0, 0.0));
-        (css.0 + scroll.0, css.1 + scroll.1)
+    /// CSS coordinates of a window position, clamped into the page area
+    /// (drags that leave the page).
+    pub(crate) fn to_css_clamped(&self, pos: PhysicalPosition<f64>) -> (f32, f32) {
+        let area = self.chrome().page_area();
+        let s = self.page_scale();
+        let x = (pos.x as f32).clamp(area.x, area.right() - 1.0);
+        let y = (pos.y as f32).clamp(area.y, area.bottom() - 1.0);
+        ((x - area.x) / s, (y - area.y) / s)
     }
 
     /// Document rect → physical window rect.
@@ -268,8 +298,15 @@ impl App {
         self.tabs.get_mut(self.active)
     }
 
-    pub(crate) fn page(&self) -> Option<&Page> {
-        self.tabs.get(self.active).and_then(|t| t.page.as_ref())
+    /// Send a message to the active tab's content thread.
+    pub(crate) fn send_active(&self, msg: ToContent) {
+        if let Some(t) = self.tab() {
+            t.send(msg);
+        }
+    }
+
+    pub(crate) fn tab_index(&self, tab_id: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == tab_id)
     }
 
     pub(crate) fn request_redraw(&self) {
@@ -278,14 +315,53 @@ impl App {
         }
     }
 
-    pub(crate) fn mark_page_dirty(&mut self) {
-        self.page_dirty = true;
-        self.request_redraw();
-    }
-
     pub(crate) fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), Instant::now()));
         self.request_redraw();
+    }
+
+    // ------------------------------------------------------- content threads
+
+    fn content_settings(&self) -> ContentSettings {
+        ContentSettings { javascript: self.settings.javascript, images: self.settings.images, block_trackers: self.settings.block_trackers }
+    }
+
+    /// Start a content thread for a tab.
+    fn spawn_content(&mut self, tab_id: u64, view: ViewSize) -> ContentHandle {
+        let epoch = self.next_epoch;
+        self.next_epoch += 1;
+        let config = ContentConfig {
+            loader: self.engine.loader.clone(),
+            settings: self.content_settings(),
+            local_storage: self.engine.local_storage.clone(),
+            download_dir: self.profile.downloads_dir(),
+            next_download_id: self.next_download_id.clone(),
+            view,
+            system_fonts: true,
+            console_to_stderr: self.engine.console_to_stderr,
+        };
+        ContentHandle::spawn(tab_id, epoch, config, self.sink.clone())
+    }
+
+    /// Replace a tab's content thread (it stopped responding): the old
+    /// thread is abandoned and exits when its task ends.
+    pub(crate) fn restart_content(&mut self, idx: usize, reason: &str) {
+        let Some(tab) = self.tabs.get(idx) else { return };
+        let (tab_id, url) = (tab.id, tab.current_url.clone());
+        let view = self.view_for(idx);
+        let handle = self.spawn_content(tab_id, view);
+        let active = idx == self.active;
+        let tab = &mut self.tabs[idx];
+        tab.content = Some(handle);
+        tab.view = Some(view);
+        tab.loading = None;
+        tab.load_phase = None;
+        tab.hang_dismissed = None;
+        tab.send(ToContent::SetActive(active));
+        let url = url.unwrap_or_else(about_url);
+        let html = pages::error_page(&url.to_string(), reason);
+        tab.send(ToContent::LoadHtml { html, url, push_history: false });
+        self.set_status(reason.to_string());
     }
 
     // ---------------------------------------------------------------- tabs
@@ -294,9 +370,16 @@ impl App {
     pub(crate) fn new_tab(&mut self, url: Option<&str>, background: bool) -> usize {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let tab = Tab::new(id);
+        let mut tab = Tab::new(id);
         let insert_at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
+        // Background tabs load for the active tab's view size.
+        let view = self.view_for(self.active.min(self.tabs.len().saturating_sub(1)));
+        tab.content = Some(self.spawn_content(id, view));
+        tab.view = Some(view);
         self.tabs.insert(insert_at, tab);
+        if insert_at <= self.active && self.tabs.len() > 1 {
+            self.active += 1;
+        }
         if !background || self.tabs.len() == 1 {
             self.activate_tab(insert_at);
         }
@@ -316,27 +399,37 @@ impl App {
         if idx >= self.tabs.len() {
             return;
         }
+        if idx != self.active {
+            if let Some(old) = self.tabs.get(self.active) {
+                old.send(ToContent::SetActive(false));
+            }
+        }
         self.active = idx;
+        self.tabs[idx].send(ToContent::SetActive(true));
+        self.sync_view(idx);
         self.close_popups();
         self.ui_focus = UiFocus::Page;
         self.url_edited = false;
         self.sync_url_field();
         self.update_title();
-        self.needs_relayout = true;
-        self.mark_page_dirty();
+        self.apply_cursor();
+        self.request_redraw();
     }
 
     pub(crate) fn close_tab(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
         if idx >= self.tabs.len() {
             return;
         }
+        // Dropping the tab's handle shuts its content thread down.
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
             self.shutdown(event_loop);
             return;
         }
-        let new_active = if idx <= self.active { self.active.saturating_sub(if idx < self.active { 1 } else { 0 }) } else { self.active };
-        self.activate_tab(new_active.min(self.tabs.len() - 1));
+        let new_active = if idx < self.active || (idx == self.active && idx >= self.tabs.len()) { self.active.saturating_sub(1) } else { self.active };
+        self.active = new_active.min(self.tabs.len() - 1);
+        let a = self.active;
+        self.activate_tab(a);
     }
 
     pub(crate) fn update_title(&self) {
@@ -403,7 +496,9 @@ impl App {
         self.navigate_request(idx, req, push_history);
     }
 
-    /// Navigate a tab with an arbitrary request (form submissions use POST).
+    /// Navigate a tab with an arbitrary request (form submissions use
+    /// POST). Internal schemes are handled here; documents load on the
+    /// tab's content thread.
     pub(crate) fn navigate_request(&mut self, idx: usize, req: Request, push_history: bool) {
         if idx >= self.tabs.len() {
             return;
@@ -422,70 +517,45 @@ impl App {
             return;
         }
         if url.scheme == "javascript" {
-            if let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) {
-                let result = crate::scripting::run_javascript_url(&self.engine, page, &url);
-                let _ = result;
-                self.after_script_activity(idx);
-            }
+            self.tabs[idx].send(ToContent::JavascriptUrl(url));
             return;
         }
-        // Tell the old page it is going away.
-        if self.tabs.get(idx).and_then(|t| t.page.as_ref()).map(|p| p.has_scripts()).unwrap_or(false) {
-            for ev in ["beforeunload", "pagehide", "unload"] {
-                if let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) {
-                    let _ = self.engine.dispatch_window_event(page, ev);
-                }
-            }
-        }
-        let viewport = self.css_viewport();
         let tab = &mut self.tabs[idx];
-        tab.generation += 1;
         tab.loading = Some(url.clone());
-        tab.find.matches.clear();
+        tab.load_phase = None;
+        tab.find.count = 0;
+        tab.send(ToContent::Navigate { request: req, push_history });
         if idx == self.active {
             self.ui_focus = UiFocus::Page;
             self.url_edited = false;
             self.url_field.set_text(&url.to_string());
             self.close_popups();
         }
-        let job = LoadJob {
-            loader: self.engine.loader.clone(),
-            request: req,
-            viewport,
-            tab_id: self.tabs[idx].id,
-            generation: self.tabs[idx].generation,
-            push_history,
-            download_dir: self.profile.downloads_dir(),
-            next_download_id: self.next_download_id.clone(),
-        };
-        loader::spawn(job, self.proxy.clone());
         self.anim_start = Instant::now();
         self.request_redraw();
     }
 
     /// Show generated HTML in a tab as if it were loaded from `url`.
     fn show_internal(&mut self, idx: usize, html: &str, url: &str, push_history: bool) {
-        if idx >= self.tabs.len() {
-            return;
-        }
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
         let parsed = Url::parse(url).unwrap_or_else(about_url);
-        let viewport = self.css_viewport();
-        let page = self.engine.load_html(html, parsed.clone(), viewport);
-        self.tabs[idx].generation += 1;
-        self.tabs[idx].loading = None;
-        self.install_page(idx, page, parsed, push_history);
+        tab.loading = None;
+        tab.send(ToContent::LoadHtml { html: html.to_string(), url: parsed, push_history });
     }
 
     fn show_about_page(&mut self, idx: usize, url: &Url, push_history: bool) {
+        if url.path == "text" {
+            // Built from the page on its content thread.
+            if let Some(t) = self.tabs.get(idx) {
+                t.send(ToContent::ShowText);
+            }
+            return;
+        }
         let html = match url.path.as_str() {
             "history" => pages::history_page(&self.history),
             "bookmarks" => pages::bookmarks_page(&self.bookmarks),
             "downloads" => pages::downloads_page(&self.downloads.rows()),
             "version" => pages::version_page(self.engine.fonts.face_count(), &self.profile, self.cookies.lock().map(|j| j.len()).unwrap_or(0)),
-            "text" => {
-                let (u, t) = self.tabs.get(idx).and_then(|t| t.page.as_ref()).map(|p| (p.url.to_string(), p.text())).unwrap_or_default();
-                pages::text_page(&u, &t)
-            }
             "blank" | "" => pages::blank_page(),
             other => pages::error_page(&format!("about:{other}"), "Unknown internal page."),
         };
@@ -523,56 +593,36 @@ impl App {
         }
     }
 
-    /// Finish a navigation: install the page in the tab and update state.
-    fn install_page(&mut self, idx: usize, page: Page, request_url: Url, push_history: bool) {
-        let host = page.url.host.clone();
-        let fragment = page.url.fragment.clone();
-        let title = if page.title.trim().is_empty() { page.url.to_string() } else { page.title.trim().to_string() };
-        let url_str = page.url.to_string();
+    /// A new document was committed on a tab's content thread.
+    fn on_committed(&mut self, idx: usize, url: Url, title: String, push_history: bool) {
+        let host = url.host.clone();
+        let url_str = url.to_string();
+        let zoom = self.zoom_levels.get(&host);
         {
             let tab = &mut self.tabs[idx];
             tab.reset_page_state();
             tab.title = title.clone();
-            tab.current_url = Some(page.url.clone());
+            tab.current_url = Some(url.clone());
             tab.loading = None;
-            if push_history {
-                tab.push_history(page.url.clone());
-            } else if tab.history.is_empty() {
-                tab.push_history(page.url.clone());
+            if push_history || tab.history.is_empty() {
+                tab.push_history(url.clone());
             } else if let Some(h) = tab.history.get_mut(tab.index) {
                 // Redirects: keep the final URL in the history entry.
-                *h = page.url.clone();
+                *h = url.clone();
             }
-            tab.zoom = self.zoom_levels.get(&host);
-            tab.page = Some(page);
-            tab.needs_relayout = true;
+            tab.zoom = zoom;
         }
-        let _ = request_url;
-        self.drain_console(idx);
-        self.history.add(&url_str, &title);
-        self.history.flush(&self.profile.history_path());
+        self.sync_view(idx);
+        if !url_str.starts_with("about:") || url_str == "about:home" {
+            self.history.add(&url_str, &title);
+            self.history.flush(&self.profile.history_path());
+        }
         self.profile.save_cookies(&self.cookies);
         if idx == self.active {
             self.sync_url_field();
             self.update_title();
-            self.needs_relayout = true;
-            if let Some(f) = fragment {
-                self.pending_fragment = Some(f);
-            }
-            self.mark_page_dirty();
-        }
-    }
-
-    /// Scroll so the element with `fragment` id is at the top.
-    pub(crate) fn scroll_to_fragment(&mut self, fragment: &str) {
-        let target = fragment.trim_start_matches('#');
-        if target.is_empty() || target == "top" {
-            self.set_scroll(0.0, 0.0);
-            return;
-        }
-        let rect = self.page().and_then(|p| p.anchor_rect(target));
-        if let Some(r) = rect {
-            self.set_scroll(0.0, r.y);
+            self.apply_cursor();
+            self.request_redraw();
         }
     }
 
@@ -600,31 +650,27 @@ impl App {
 
     pub(crate) fn stop_loading(&mut self) {
         let idx = self.active;
-        if let Some(tab) = self.tabs.get_mut(idx) {
-            if tab.loading.take().is_some() {
-                tab.generation += 1;
-                self.sync_url_field();
-                self.set_status("Stopped");
-            }
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        if !tab.is_loading() {
+            return;
         }
+        tab.loading = None;
+        tab.load_phase = None;
+        // A content thread stuck in a long task cannot read the request.
+        let stuck = tab.content.as_ref().and_then(|c| c.busy_for()).map(|d| d >= Duration::from_secs(1)).unwrap_or(false);
+        if stuck {
+            self.restart_content(idx, "Stopped: the page was busy and has been stopped.");
+        } else {
+            tab.send(ToContent::Stop);
+        }
+        self.sync_url_field();
+        self.set_status("Stopped");
     }
 
-    /// Follow a link from the active tab.
+    /// Follow a link from the UI (context menu).
     pub(crate) fn follow_link(&mut self, link: Url, new_tab: bool) {
         if new_tab {
             self.new_tab(Some(&link.to_string()), true);
-            return;
-        }
-        let same_doc = self.page().map(|p| p.url.without_fragment() == link.without_fragment()).unwrap_or(false);
-        if let (Some(fragment), true) = (&link.fragment, same_doc) {
-            let fragment = fragment.clone();
-            if let Some(tab) = self.tab_mut() {
-                tab.current_url = Some(link.clone());
-                tab.push_history(link.clone());
-            }
-            self.scroll_to_fragment(&fragment);
-            self.sync_url_field();
-            self.dispatch_window("hashchange");
             return;
         }
         let idx = self.active;
@@ -644,6 +690,8 @@ impl App {
 
     // ------------------------------------------------------------ scrolling
 
+    /// Scroll the active page (immediately on screen: the last frame is
+    /// shifted; the content thread repaints and catches up).
     pub(crate) fn set_scroll(&mut self, x: f32, y: f32) {
         let vp = self.css_viewport();
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
@@ -651,32 +699,15 @@ impl App {
         let ny = y.clamp(0.0, tab.max_scroll(vp.height));
         if (nx, ny) != tab.scroll {
             tab.scroll = (nx, ny);
-            if let Some(page) = tab.page.as_mut() {
-                self.engine.set_page_scroll(page, nx, ny);
-            }
-            self.mark_page_dirty();
+            tab.send(ToContent::Scroll { x: nx, y: ny });
+            self.request_redraw();
             self.update_hover();
-            if self.last_scroll_dispatch.elapsed() >= Duration::from_millis(16) {
-                self.last_scroll_dispatch = Instant::now();
-                self.dispatch_window("scroll");
-            }
         }
     }
 
     pub(crate) fn scroll_by(&mut self, dx: f32, dy: f32) {
         let (x, y) = self.tab().map(|t| t.scroll).unwrap_or((0.0, 0.0));
         self.set_scroll(x + dx, y + dy);
-    }
-
-    /// Ensure a document rect is visible (vertically).
-    pub(crate) fn scroll_into_view(&mut self, r: Rect) {
-        let vp = self.css_viewport();
-        let (sx, sy) = self.tab().map(|t| t.scroll).unwrap_or((0.0, 0.0));
-        if r.y < sy {
-            self.set_scroll(sx, r.y - 20.0);
-        } else if r.bottom() > sy + vp.height {
-            self.set_scroll(sx, r.bottom() - vp.height + 20.0);
-        }
     }
 
     pub(crate) fn set_zoom(&mut self, zoom: f32) {
@@ -686,305 +717,270 @@ impl App {
             return;
         }
         tab.zoom = zoom;
-        tab.needs_relayout = true;
         if let Some(host) = tab.current_url.as_ref().map(|u| u.host.clone()) {
             self.zoom_levels.set(&host, zoom);
             self.zoom_levels.save(&self.profile.zoom_path());
         }
-        self.needs_relayout = true;
+        let idx = self.active;
+        self.sync_view(idx);
         self.set_status(format!("Zoom {}%", (zoom * 100.0).round()));
-        self.mark_page_dirty();
     }
 
-    /// Relayout the active tab for the current viewport if needed.
-    pub(crate) fn relayout_if_needed(&mut self) {
-        let vp = self.css_viewport();
-        // srcset / resolution media queries follow HiDPI scale and zoom.
-        let dpr = self.page_scale();
-        if (self.engine.device_pixel_ratio - dpr).abs() > 1e-3 {
-            self.engine.set_device_pixel_ratio(dpr);
-        }
-        let idx = self.active;
-        let Some(tab) = self.tabs.get_mut(idx) else { return };
-        let needs = self.needs_relayout || tab.needs_relayout;
-        self.needs_relayout = false;
-        tab.needs_relayout = false;
-        let mut resized = false;
-        if let Some(page) = tab.page.as_mut() {
-            if needs || page.viewport != vp {
-                resized = page.viewport != vp;
-                self.engine.relayout(page, vp);
-                self.page_dirty = true;
-            }
-        }
-        if resized {
-            self.dispatch_window("resize");
-        }
-        let Some(tab) = self.tabs.get(idx) else { return };
-        let (x, y) = tab.scroll;
-        let (mx, my) = (tab.max_scroll_x(vp.width), tab.max_scroll(vp.height));
-        if x > mx || y > my {
-            self.set_scroll(x.min(mx), y.min(my));
-        }
-        if let Some(f) = self.pending_fragment.take() {
-            self.scroll_to_fragment(&f);
-        }
-        if let Some(tab) = self.tabs.get_mut(idx) {
-            if tab.find.open && !tab.find.field.is_empty() {
-                self.refresh_find();
-            }
-        }
-    }
+    // ------------------------------------------------------ content events
 
-    // ---------------------------------------------------------------- forms
-
-    /// Apply a DOM mutation on the active page and restyle.
-    pub(crate) fn mutate_page(&mut self, f: impl FnOnce(&mut Page)) {
-        let idx = self.active;
-        let Some(tab) = self.tabs.get_mut(idx) else { return };
-        if let Some(page) = tab.page.as_mut() {
-            f(page);
-            self.engine.restyle(page);
-            let (x, y) = tab.scroll;
-            self.engine.set_page_scroll(page, x, y);
-        }
-        self.mark_page_dirty();
-    }
-
-    /// Start editing a text control.
-    pub(crate) fn begin_edit(&mut self, node: NodeId) {
-        let idx = self.active;
-        let Some(tab) = self.tabs.get_mut(idx) else { return };
-        let Some(page) = tab.page.as_mut() else { return };
-        let kind = page.control_kind(node);
-        let text = page.control_text(node);
-        let max_len = page.max_length(node);
-        // Focus (with focus/focusin events) unless the press already did.
-        let out = self.engine.focus_element(page, Some(node));
-        tab.edit = Some(ControlEdit { node, buf: TextBuffer::new(&text), kind, max_len, initial: text.clone() });
-        tab.focus = Some(node);
-        tab.selection = None;
-        self.ui_focus = UiFocus::Page;
-        self.mark_page_dirty();
-        self.apply_outcome(idx, out);
-    }
-
-    /// Run an engine operation on the active page and apply its script
-    /// side effects (relayout, navigation, dialogs, ...).
-    pub(crate) fn page_op<R>(&mut self, f: impl FnOnce(&rabbithole_engine::Engine, &mut Page) -> (R, ScriptOutcome)) -> Option<R> {
-        let idx = self.active;
-        let page = self.tabs.get_mut(idx)?.page.as_mut()?;
-        let (r, out) = f(&self.engine, page);
-        self.apply_outcome(idx, out);
-        Some(r)
-    }
-
-    pub(crate) fn end_edit(&mut self) {
-        let idx = self.active;
-        let Some(tab) = self.tabs.get_mut(idx) else { return };
-        if let Some(edit) = tab.edit.take() {
-            tab.focus = None;
-            self.mark_page_dirty();
-            if edit.buf.text != edit.initial {
-                self.dispatch_to(edit.node, "change", plain_init(false));
-            }
-            // Blur (blur/focusout) unless focus already moved elsewhere.
-            self.page_op(|engine, page| {
-                let out = if page.state.focused == Some(edit.node) { engine.focus_element(page, None) } else { ScriptOutcome::default() };
-                ((), out)
-            });
-        }
-    }
-
-    /// Push the edit buffer into the DOM.
-    pub(crate) fn commit_edit(&mut self) {
-        let idx = self.active;
-        let Some(tab) = self.tabs.get_mut(idx) else { return };
-        let Some(edit) = tab.edit.as_ref() else { return };
-        let (node, text) = (edit.node, edit.buf.text.clone());
-        if let Some(page) = tab.page.as_mut() {
-            page.set_control_text(node, &text);
-            self.engine.restyle(page);
-            let (x, y) = tab.scroll;
-            self.engine.set_page_scroll(page, x, y);
-        }
-        self.mark_page_dirty();
-        self.dispatch_to(node, "input", input_init(Some(&text)));
-    }
-
-    /// Submit the form containing `control` (or the control itself when it
-    /// is a submit button).
-    pub(crate) fn submit_form(&mut self, control: NodeId, submitter: Option<NodeId>) {
-        let idx = self.active;
-        let Some(page) = self.tabs.get(idx).and_then(|t| t.page.as_ref()) else { return };
-        let Some(form) = page.form_of(control) else {
-            self.set_status("This control is not inside a form");
-            return;
-        };
-        let submitter = submitter.or_else(|| page.default_submitter(form));
-        let out = self.dispatch_to(form, "submit", plain_init(true));
-        if out.default_prevented || out.navigation.is_some() {
+    fn on_content(&mut self, tab_id: u64, epoch: u64, msg: FromContent) {
+        // Downloads outlive the tab that started them.
+        if let FromContent::Download(d) = msg {
+            self.on_download(d);
             return;
         }
-        let Some(page) = self.tabs.get(idx).and_then(|t| t.page.as_ref()) else { return };
-        let Some(req) = page.submit_request(form, submitter, &|_| Vec::new()) else { return };
-        self.end_edit();
-        self.navigate_request(idx, req, true);
-    }
-
-    /// Toggle a checkbox/radio and tell scripts.
-    pub(crate) fn toggle_control_with_events(&mut self, node: NodeId) {
-        self.mutate_page(|p| p.toggle_control(node));
-        self.dispatch_to(node, "input", input_init(None));
-        self.dispatch_to(node, "change", plain_init(false));
-    }
-
-    /// Choose a `<select>` option and tell scripts.
-    pub(crate) fn select_option_with_events(&mut self, node: NodeId, index: usize) {
-        self.mutate_page(|p| p.select_option(node, index));
-        self.dispatch_to(node, "input", input_init(None));
-        self.dispatch_to(node, "change", plain_init(false));
-    }
-
-    // ------------------------------------------------------------ scripting
-
-    /// Dispatch an event to a node of the active page and apply the outcome.
-    /// Returns the outcome (with `default_prevented`).
-    pub(crate) fn dispatch_to(&mut self, node: NodeId, event_type: &str, init: EventInit) -> ScriptOutcome {
-        let idx = self.active;
-        let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) else { return ScriptOutcome::default() };
-        if !page.has_scripts() {
-            return ScriptOutcome::default();
+        let Some(idx) = self.tab_index(tab_id) else { return };
+        if self.tabs[idx].content.as_ref().map(|c| c.epoch) != Some(epoch) {
+            return; // from a replaced content thread
         }
-        let out = self.engine.dispatch_event(page, node, event_type, init);
-        let prevented = out.default_prevented;
-        let navigated = out.navigation.is_some();
-        self.apply_outcome(idx, out);
-        ScriptOutcome { default_prevented: prevented, navigation: if navigated { Some(dummy_navigation()) } else { None }, ..Default::default() }
-    }
-
-    /// Dispatch a window-level event (`resize`, `scroll`, `hashchange`).
-    pub(crate) fn dispatch_window(&mut self, event_type: &str) {
-        let idx = self.active;
-        let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) else { return };
-        if !page.has_scripts() {
-            return;
-        }
-        let out = self.engine.dispatch_window_event(page, event_type);
-        self.apply_outcome(idx, out);
-    }
-
-    /// Apply what scripts asked for after an event/timer: relayout,
-    /// navigation, new tabs, dialogs, scrolling.
-    pub(crate) fn apply_outcome(&mut self, idx: usize, out: ScriptOutcome) {
-        self.drain_console(idx);
-        if out.relayout {
-            if let Some(tab) = self.tabs.get_mut(idx) {
-                let (x, y) = tab.scroll;
-                if let Some(page) = tab.page.as_mut() {
-                    self.engine.set_page_scroll(page, x, y);
-                }
-            }
-            if idx == self.active {
-                let vp = self.css_viewport();
-                if let Some(tab) = self.tabs.get_mut(idx) {
+        let active = idx == self.active;
+        match msg {
+            FromContent::Frame(frame) => {
+                self.tabs[idx].frame = Some(frame);
+                if active {
+                    // The document may have shrunk under the scroll position.
+                    let vp = self.css_viewport();
+                    let tab = &mut self.tabs[idx];
                     let (x, y) = tab.scroll;
                     let (mx, my) = (tab.max_scroll_x(vp.width), tab.max_scroll(vp.height));
                     if x > mx || y > my {
                         tab.scroll = (x.min(mx), y.min(my));
+                        tab.send(ToContent::Scroll { x: tab.scroll.0, y: tab.scroll.1 });
                     }
-                    // Keep an edit buffer in sync when scripts changed the value.
-                    if let (Some(edit), Some(page)) = (tab.edit.as_mut(), tab.page.as_ref()) {
-                        let now = page.control_text(edit.node);
-                        if now != edit.buf.text {
-                            edit.buf.set_text(&now);
-                        }
-                    }
-                    if tab.find.open && !tab.find.field.is_empty() {
-                        self.refresh_find();
+                    self.request_redraw();
+                }
+            }
+            FromContent::Committed { url, title, push_history } => self.on_committed(idx, url, title, push_history),
+            FromContent::Loading(phase) => {
+                let tab = &mut self.tabs[idx];
+                tab.load_phase = phase;
+                if phase.is_none() {
+                    tab.loading = None;
+                    if active {
+                        self.sync_url_field();
                     }
                 }
-                self.script_relayout = true;
-                self.mark_page_dirty();
+                self.request_redraw();
             }
-        }
-        for (i, u) in out.new_windows.iter().enumerate() {
-            self.new_tab(Some(&u.to_string()), true);
-            let _ = i;
-        }
-        for d in out.dialogs {
-            let note = match d.kind {
-                "confirm" => format!("confirm: {}  (answered OK)", d.message),
-                "prompt" => format!("prompt: {}  (cancelled)", d.message),
-                _ => format!("alert: {}", d.message),
-            };
-            self.push_toast(note);
-        }
-        if let Some((x, y)) = out.scroll_to {
-            if idx == self.active {
-                self.set_scroll(x, y);
-            } else if let Some(tab) = self.tabs.get_mut(idx) {
+            FromContent::Title(t) => {
+                self.tabs[idx].title = t.clone();
+                if let Some(u) = self.tabs[idx].current_url.as_ref().map(|u| u.to_string()) {
+                    if !u.starts_with("about:") {
+                        self.history.add(&u, &t);
+                    }
+                }
+                if active {
+                    self.update_title();
+                }
+                self.request_redraw();
+            }
+            FromContent::UrlChanged { url, push_history } => {
+                let tab = &mut self.tabs[idx];
+                tab.current_url = Some(url.clone());
+                if push_history {
+                    tab.push_history(url);
+                }
+                if active {
+                    self.sync_url_field();
+                    self.request_redraw();
+                }
+            }
+            FromContent::Favicon(f) => {
+                self.tabs[idx].favicon = f;
+                self.request_redraw();
+            }
+            FromContent::Hover { cursor, link } => {
+                let tab = &mut self.tabs[idx];
+                tab.cursor = cursor;
+                tab.hover_link = link;
+                if active {
+                    self.apply_cursor();
+                    self.request_redraw();
+                }
+            }
+            FromContent::State(s) => self.tabs[idx].state = s,
+            FromContent::Console(lines) => {
+                self.tabs[idx].console.extend(lines);
+                if self.console_open && active {
+                    self.request_redraw();
+                }
+            }
+            FromContent::EvalResult(r) => {
+                let tab = &mut self.tabs[idx];
+                tab.console.push("result", r);
+                tab.console_scroll = 0;
+                self.request_redraw();
+            }
+            FromContent::Navigate { request, push_history } => {
+                if active && self.tabs[idx].state.editing {
+                    self.ui_focus = UiFocus::Page;
+                }
+                self.navigate_request(idx, request, push_history);
+            }
+            FromContent::OpenTab(url) => {
+                self.new_tab(Some(&url.to_string()), true);
+            }
+            FromContent::Dialog(note) => self.push_toast(note),
+            FromContent::ScrollTo { x, y } => {
+                // Echo it so both sides agree after concurrent scrolls (a
+                // no-op for the content thread when nothing else moved).
+                let tab = &mut self.tabs[idx];
                 tab.scroll = (x, y);
+                tab.send(ToContent::Scroll { x, y });
+                if active {
+                    self.request_redraw();
+                }
             }
-        }
-        if let Some(nav) = out.navigation {
-            if idx == self.active {
-                self.end_edit();
+            FromContent::ScrollBy { dx, dy } => {
+                if active {
+                    self.scroll_by(dx, dy);
+                }
             }
-            self.navigate_request(idx, nav.request, !nav.replace);
+            FromContent::History(delta) => {
+                if active {
+                    self.go_history(delta);
+                }
+            }
+            FromContent::ContextMenu { link, has_selection } => {
+                if active {
+                    let (x, y) = self.context_pos;
+                    self.open_context_menu(link, has_selection, x, y);
+                }
+            }
+            FromContent::SelectDropdown { node, options, rect } => {
+                if active {
+                    self.open_select_dropdown(node, options, rect);
+                }
+            }
+            FromContent::Clipboard(text) => self.clipboard_set(&text),
+            FromContent::Status(s) => {
+                if active {
+                    self.set_status(s);
+                }
+            }
+            FromContent::FindResult { count, current } => {
+                let tab = &mut self.tabs[idx];
+                tab.find.count = count;
+                tab.find.current = current;
+                self.request_redraw();
+            }
+            FromContent::Download(_) => {}
         }
     }
 
-    /// Move the page's console output into the tab's log.
-    pub(crate) fn drain_console(&mut self, idx: usize) {
-        let Some(tab) = self.tabs.get_mut(idx) else { return };
-        let Some(page) = tab.page.as_mut() else { return };
-        let lines = page.take_console();
-        if lines.is_empty() {
-            return;
-        }
-        tab.console.extend(lines);
-        if self.console_open && idx == self.active {
-            self.request_redraw();
-        }
-    }
-
-    /// After scripts ran on a tab outside the event helpers (e.g. a
-    /// `javascript:` URL): restyle if needed and collect side effects.
-    pub(crate) fn after_script_activity(&mut self, idx: usize) {
-        let Some(page) = self.tabs.get_mut(idx).and_then(|t| t.page.as_mut()) else { return };
-        let out = self.engine.tick(page);
-        self.apply_outcome(idx, out);
-    }
-
-    /// Run due timers of every tab with scripts.
-    pub(crate) fn tick_scripts(&mut self) {
-        for idx in 0..self.tabs.len() {
-            let due = self.tabs[idx].page.as_ref().and_then(|p| p.next_script_due());
-            let Some(due) = due else { continue };
-            let now = self.engine.start.elapsed().as_secs_f64() * 1000.0;
-            if due > now + 0.5 {
-                continue;
+    fn on_download(&mut self, event: DownloadEvent) {
+        match event {
+            DownloadEvent::Started { id, url, filename, path, total, cancel } => {
+                self.downloads.items.push(DownloadItem { id, url, filename: filename.clone(), path, done: 0, total, state: DownloadState::InProgress, cancel });
+                self.set_status(format!("Downloading {filename}…"));
             }
-            let Some(page) = self.tabs[idx].page.as_mut() else { continue };
-            let out = self.engine.tick(page);
-            self.apply_outcome(idx, out);
-        }
-    }
-
-    /// When the next script timer is due (any tab).
-    pub(crate) fn next_script_wakeup(&self) -> Option<Instant> {
-        let mut best: Option<f64> = None;
-        for t in &self.tabs {
-            if let Some(due) = t.page.as_ref().and_then(|p| p.next_script_due()) {
-                best = Some(best.map(|b: f64| b.min(due)).unwrap_or(due));
+            DownloadEvent::Progress { id, done, total } => {
+                if let Some(d) = self.downloads.get_mut(id) {
+                    d.done = done;
+                    if total.is_some() {
+                        d.total = total;
+                    }
+                }
+                self.request_redraw();
+            }
+            DownloadEvent::Done { id, error } => {
+                let mut msg = String::new();
+                if let Some(d) = self.downloads.get_mut(id) {
+                    d.state = match error {
+                        None => {
+                            msg = format!("Download complete: {}", d.path.display());
+                            DownloadState::Done
+                        }
+                        Some(e) if e.contains("cancelled") => {
+                            msg = format!("Download cancelled: {}", d.filename);
+                            DownloadState::Cancelled
+                        }
+                        Some(e) => {
+                            msg = format!("Download failed: {e}");
+                            DownloadState::Failed(e)
+                        }
+                    };
+                }
+                self.profile.save_cookies(&self.cookies);
+                self.set_status(msg);
+                // Refresh an open about:downloads page.
+                let showing = self.tab().and_then(|t| t.current_url.as_ref()).map(|u| u.scheme == "about" && u.path == "downloads").unwrap_or(false);
+                if showing {
+                    let idx = self.active;
+                    self.show_about_page(idx, &about_page("downloads"), false);
+                }
             }
         }
-        let due = best?;
-        let now = self.engine.start.elapsed().as_secs_f64() * 1000.0;
-        let delay = (due - now).max(1.0).min(1000.0);
-        Some(Instant::now() + Duration::from_millis(delay as u64))
     }
+
+    /// The window cursor for the pointer position.
+    pub(crate) fn apply_cursor(&mut self) {
+        let over_page = self.to_css(self.cursor).is_some() && self.menu.is_none() && self.context_menu.is_none() && self.dropdown.is_none();
+        let chrome_icon = self.chrome_cursor();
+        let icon = if over_page && self.hang_bar().map(|(b, _, _)| !b.contains(self.cursor.x as f32, self.cursor.y as f32)).unwrap_or(true) {
+            match self.tab().map(|t| t.cursor).unwrap_or("default") {
+                "pointer" => CursorIcon::Pointer,
+                "text" => CursorIcon::Text,
+                _ => CursorIcon::Default,
+            }
+        } else {
+            chrome_icon
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            if let Some(w) = &self.window {
+                w.set_cursor(icon);
+            }
+        }
+    }
+
+    // ------------------------------------------------------ hanging pages
+
+    /// The active tab's content thread has been busy for a long time and
+    /// the user has not chosen to wait.
+    pub(crate) fn active_hanging(&self) -> bool {
+        let Some(tab) = self.tab() else { return false };
+        let Some(c) = &tab.content else { return false };
+        match (c.busy_for(), c.busy_since()) {
+            (Some(d), Some(since)) => d >= HANG_AFTER && tab.hang_dismissed != Some(since),
+            _ => false,
+        }
+    }
+
+    /// Geometry of the "not responding" bar: (bar, wait button, stop button).
+    pub(crate) fn hang_bar(&self) -> Option<(Rect, Rect, Rect)> {
+        if !self.active_hanging() {
+            return None;
+        }
+        let area = self.chrome().page_area();
+        let s = self.ui_scale();
+        let h = 40.0 * s;
+        let bar = Rect::new(area.x, area.y, area.w, h);
+        let bw = 76.0 * s;
+        let stop = Rect::new(bar.right() - bw - 10.0 * s, bar.y + 6.0 * s, bw, h - 12.0 * s);
+        let wait = Rect::new(stop.x - bw - 8.0 * s, stop.y, bw, stop.h);
+        Some((bar, wait, stop))
+    }
+
+    pub(crate) fn hang_wait(&mut self) {
+        let idx = self.active;
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.hang_dismissed = tab.content.as_ref().and_then(|c| c.busy_since());
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn hang_stop(&mut self) {
+        let idx = self.active;
+        self.restart_content(idx, "The page stopped responding and was stopped.");
+    }
+
+    // ------------------------------------------------------------- toasts
 
     pub(crate) fn push_toast(&mut self, text: String) {
         self.toasts.push((text, Instant::now()));
@@ -1005,8 +1001,14 @@ impl App {
     pub(crate) fn toggle_console(&mut self) {
         self.console_open = !self.console_open;
         self.ui_focus = if self.console_open { UiFocus::Console } else { UiFocus::Page };
-        self.needs_relayout = true;
-        self.mark_page_dirty();
+        self.request_redraw();
+    }
+
+    fn broadcast_settings(&self) {
+        let s = self.content_settings();
+        for t in &self.tabs {
+            t.send(ToContent::Settings(s));
+        }
     }
 
     pub(crate) fn toggle_javascript(&mut self) {
@@ -1014,6 +1016,7 @@ impl App {
         self.engine.scripting = self.settings.javascript;
         self.engine.loader.load_scripts = self.settings.javascript;
         self.settings.save(&self.profile.settings_path());
+        self.broadcast_settings();
         self.set_status(if self.settings.javascript { "JavaScript enabled (reload to apply)" } else { "JavaScript disabled (reload to apply)" });
     }
 
@@ -1021,29 +1024,21 @@ impl App {
         self.settings.block_trackers = !self.settings.block_trackers;
         self.engine.loader.fetcher.block_trackers = self.settings.block_trackers;
         self.settings.save(&self.profile.settings_path());
+        self.broadcast_settings();
         self.set_status(if self.settings.block_trackers { "Bloqueo de anuncios y rastreadores activado" } else { "Bloqueo de anuncios y rastreadores desactivado" });
     }
 
     /// Evaluate the console input line in the active page.
     pub(crate) fn console_eval(&mut self) {
-        let idx = self.active;
-        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let src = tab.console_input.text.trim().to_string();
         if src.is_empty() {
             return;
         }
         tab.console_input.set_text("");
         tab.console.push("input", format!("> {src}"));
-        let result = match tab.page.as_mut() {
-            Some(page) => self.engine.eval_in_page(page, &src),
-            None => "(no page)".to_string(),
-        };
         tab.console_scroll = 0;
-        self.drain_console(idx);
-        if let Some(tab) = self.tabs.get_mut(idx) {
-            tab.console.push("result", result);
-        }
-        self.after_script_activity(idx);
+        tab.send(ToContent::Eval(src));
         self.request_redraw();
     }
 
@@ -1096,6 +1091,8 @@ impl App {
         self.bookmarks.save(&self.profile.bookmarks_path());
         self.zoom_levels.save(&self.profile.zoom_path());
         self.profile.save_cookies(&self.cookies);
+        // Content threads exit when their handles are dropped.
+        self.tabs.clear();
         event_loop.exit();
     }
 
@@ -1128,83 +1125,20 @@ impl App {
         }
     }
 
-    // ---------------------------------------------------------- user events
-
-    fn on_user_event(&mut self, event: UserEvent) {
-        match event {
-            UserEvent::Loaded { tab_id, generation, request_url, push_history, outcome } => {
-                let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else { return };
-                if self.tabs[idx].generation != generation {
-                    return; // stale
-                }
-                match outcome {
-                    Ok(LoadOutcome::Page(loaded)) => {
-                        let viewport = if idx == self.active { self.css_viewport() } else { loaded.viewport };
-                        let mut page = self.engine.build_page(*loaded, viewport);
-                        // Redirects requested by the page itself (script or
-                        // meta refresh), windows and dialogs from load time.
-                        let navigation = self.engine.take_page_navigation(&mut page);
-                        let new_windows = std::mem::take(&mut page.script.new_windows);
-                        let dialogs = std::mem::take(&mut page.script.dialogs);
-                        self.install_page(idx, page, request_url, push_history);
-                        let out = rabbithole_engine::ScriptOutcome { navigation, new_windows, dialogs, ..Default::default() };
-                        self.apply_outcome(idx, out);
-                    }
-                    Ok(LoadOutcome::Download) => {
-                        self.tabs[idx].loading = None;
-                        if idx == self.active {
-                            self.sync_url_field();
-                        }
-                        self.profile.save_cookies(&self.cookies);
-                        self.set_status(format!("Downloading {request_url}"));
-                    }
-                    Err(e) => {
-                        let html = pages::error_page(&request_url.to_string(), &e);
-                        let viewport = self.css_viewport();
-                        let page = self.engine.load_html(&html, request_url.clone(), viewport);
-                        self.install_page(idx, page, request_url, push_history);
-                    }
-                }
-            }
-            UserEvent::DownloadStarted { id, url, filename, path, total, cancel } => {
-                self.downloads.items.push(DownloadItem { id, url, filename: filename.clone(), path, done: 0, total, state: DownloadState::InProgress, cancel });
-                self.set_status(format!("Downloading {filename}…"));
-            }
-            UserEvent::DownloadProgress { id, done, total } => {
-                if let Some(d) = self.downloads.get_mut(id) {
-                    d.done = done;
-                    if total.is_some() {
-                        d.total = total;
-                    }
-                }
-                self.request_redraw();
-            }
-            UserEvent::DownloadDone { id, error } => {
-                let mut msg = String::new();
-                if let Some(d) = self.downloads.get_mut(id) {
-                    d.state = match error {
-                        None => {
-                            msg = format!("Download complete: {}", d.path.display());
-                            DownloadState::Done
-                        }
-                        Some(e) if e.contains("cancelled") => {
-                            msg = format!("Download cancelled: {}", d.filename);
-                            DownloadState::Cancelled
-                        }
-                        Some(e) => {
-                            msg = format!("Download failed: {e}");
-                            DownloadState::Failed(e)
-                        }
-                    };
-                }
-                self.set_status(msg);
-                // Refresh an open about:downloads page.
-                let showing = self.tab().and_then(|t| t.current_url.as_ref()).map(|u| u.scheme == "about" && u.path == "downloads").unwrap_or(false);
-                if showing {
-                    let idx = self.active;
-                    self.show_about_page(idx, &about_page("downloads"), false);
-                }
-            }
+    /// Wake-up deadline for animations, banners and hang detection.
+    fn next_wakeup(&self) -> Option<Instant> {
+        let animating = self.tabs.get(self.active).map(|t| t.is_loading()).unwrap_or(false) || self.downloads.active().next().is_some();
+        let transient = self.status.as_ref().map(|(_, t)| t.elapsed() < Duration::from_secs(4)).unwrap_or(false) || !self.toasts.is_empty();
+        // Watch a busy content thread so the "not responding" bar shows up.
+        let busy = self.tab().and_then(|t| t.content.as_ref()).and_then(|c| c.busy_for()).is_some();
+        if animating || self.show_stats {
+            Some(Instant::now() + Duration::from_millis(50))
+        } else if busy {
+            Some(Instant::now() + Duration::from_millis(250))
+        } else if transient {
+            Some(Instant::now() + Duration::from_millis(500))
+        } else {
+            None
         }
     }
 }
@@ -1249,44 +1183,42 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        self.on_user_event(event);
+        let t = Instant::now();
+        match event {
+            UserEvent::Content { tab_id, epoch, msg } => self.on_content(tab_id, epoch, msg),
+        }
+        self.stats.record("content message", t.elapsed());
     }
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if matches!(cause, StartCause::ResumeTimeReached { .. }) {
-            self.tick_scripts();
             self.expire_toasts();
             self.request_redraw();
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let animating = self.tabs.get(self.active).map(|t| t.is_loading()).unwrap_or(false) || self.downloads.active().next().is_some();
-        let transient = self.status.as_ref().map(|(_, t)| t.elapsed() < Duration::from_secs(4)).unwrap_or(false) || !self.toasts.is_empty();
-        let mut wake = if animating {
-            Some(Instant::now() + Duration::from_millis(50))
-        } else if transient {
-            Some(Instant::now() + Duration::from_millis(500))
-        } else {
-            None
-        };
-        if let Some(t) = self.next_script_wakeup() {
-            wake = Some(wake.map(|w| w.min(t)).unwrap_or(t));
-        }
-        match wake {
+        self.stats.report();
+        match self.next_wakeup() {
             Some(t) => event_loop.set_control_flow(ControlFlow::WaitUntil(t)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let t = Instant::now();
+        let kind = match &event {
+            WindowEvent::RedrawRequested => "redraw",
+            WindowEvent::KeyboardInput { .. } => "key",
+            WindowEvent::MouseWheel { .. } => "wheel",
+            WindowEvent::CursorMoved { .. } => "mouse move",
+            WindowEvent::MouseInput { .. } => "click",
+            WindowEvent::Resized(_) => "resize",
+            _ => "window event",
+        };
         match event {
             WindowEvent::CloseRequested => self.shutdown(event_loop),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                self.needs_relayout = true;
-                self.page_dirty = true;
-                self.request_redraw();
-            }
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.request_redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(&event, event_loop),
@@ -1299,8 +1231,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.hover_button = None;
                 self.hover_tab = None;
                 self.hover_plus = false;
-                if self.hover_link.take().is_some() {
-                    self.request_redraw();
+                if let Some(tab) = self.tab_mut() {
+                    if tab.hover_link.take().is_some() {
+                        self.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => match state {
@@ -1313,6 +1247,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             _ => {}
         }
+        self.stats.record(kind, t.elapsed());
     }
 }
 
@@ -1322,18 +1257,11 @@ impl App {
         if let Some(w) = &self.window {
             w.set_fullscreen(if self.fullscreen { Some(Fullscreen::Borderless(None)) } else { None });
         }
-        self.needs_relayout = true;
-        self.mark_page_dirty();
+        self.request_redraw();
     }
 }
 
 // ------------------------------------------------------------------ helpers
-
-/// Placeholder navigation marker returned by `dispatch_to` once the real
-/// request has been handed to `navigate_request`.
-fn dummy_navigation() -> rabbithole_engine::PendingNavigation {
-    rabbithole_engine::PendingNavigation { request: Request::get(about_url()), replace: false }
-}
 
 pub(crate) fn about_url() -> Url {
     about_page("blank")

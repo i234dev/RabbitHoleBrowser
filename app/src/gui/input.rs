@@ -176,6 +176,7 @@ impl TextBuffer {
         self.caret = idx;
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }

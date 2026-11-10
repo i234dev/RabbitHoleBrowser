@@ -30,6 +30,7 @@ USAGE:
     rabbithole click <URL> <X> <Y>         Show what is under a viewport point and click it like a mouse
                                            (--scroll Y, --width/--height, --hit-only)
     rabbithole mcp                         Run as a Model Context Protocol server on stdio
+    rabbithole ui-bench <URL> [--legacy]   Measure UI-thread stalls while a page loads (developer tool)
     rabbithole --help | --version
 
 SCREENSHOT OPTIONS:
@@ -81,6 +82,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("js") => cli::js(&args[1..]),
         Some("click") => cli::click(&args[1..]),
         Some("mcp") => mcp::serve(),
+        Some("ui-bench") => gui::bench::run(&args[1..]),
         Some(url) if url.starts_with('-') => Err(format!("unknown option `{url}` (try --help)")),
         Some(_) => gui::run(args.to_vec()),
     }

@@ -241,14 +241,14 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn storage_get(&mut self, local: bool, key: &str) -> Option<String> {
         if local {
-            self.engine.local_storage.borrow().get(&self.page.url.origin(), key)
+            self.engine.local_storage.lock().unwrap().get(&self.page.url.origin(), key)
         } else {
             self.page.script.session_storage.get(key).cloned()
         }
     }
     fn storage_set(&mut self, local: bool, key: &str, value: Option<&str>) {
         if local {
-            self.engine.local_storage.borrow_mut().set(&self.page.url.origin(), key, value);
+            self.engine.local_storage.lock().unwrap().set(&self.page.url.origin(), key, value);
         } else {
             match value {
                 Some(v) => {
@@ -262,7 +262,7 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn storage_keys(&mut self, local: bool) -> Vec<String> {
         if local {
-            self.engine.local_storage.borrow().keys(&self.page.url.origin())
+            self.engine.local_storage.lock().unwrap().keys(&self.page.url.origin())
         } else {
             self.page.script.session_storage.keys().cloned().collect()
         }
@@ -570,7 +570,9 @@ impl Engine {
         out.new_windows = std::mem::take(&mut page.script.new_windows);
         out.dialogs = std::mem::take(&mut page.script.dialogs);
         out.scroll_to = page.requested_scroll.take();
-        self.local_storage.borrow_mut().save();
+        if let Ok(mut ls) = self.local_storage.lock() {
+            ls.save();
+        }
         out
     }
 }

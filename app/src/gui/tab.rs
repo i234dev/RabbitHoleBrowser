@@ -1,85 +1,93 @@
-//! Per-tab state.
+//! Per-tab state on the UI thread. The page itself lives on the tab's
+//! content thread; the UI keeps what it needs to draw and route input.
 
+use std::sync::Arc;
+
+use crate::gui::content::{ContentHandle, Frame, PageState, ToContent, ViewSize};
 use crate::gui::input::TextBuffer;
 use crate::scripting::ConsoleLog;
-use rabbithole_engine::dom::NodeId;
-use rabbithole_engine::gfx::Rect;
+use rabbithole_engine::gfx::Image;
 use rabbithole_engine::net::Url;
-use rabbithole_engine::{ControlKind, Page, Selection};
 
-/// Find-in-page state.
+/// Find-in-page state (the matches live on the content thread).
 #[derive(Debug, Default)]
 pub struct FindState {
     pub open: bool,
     pub field: TextBuffer,
-    pub matches: Vec<Rect>,
+    pub count: usize,
     pub current: usize,
-}
-
-/// A text control being edited.
-#[derive(Debug)]
-pub struct ControlEdit {
-    pub node: NodeId,
-    pub buf: TextBuffer,
-    pub kind: ControlKind,
-    pub max_len: Option<usize>,
-    /// Value when editing started (a `change` event fires if it differs on blur).
-    pub initial: String,
 }
 
 pub struct Tab {
     pub id: u64,
-    pub page: Option<Page>,
+    /// The tab's content thread (None only in unit tests).
+    pub content: Option<ContentHandle>,
+    /// Latest painted frame.
+    pub frame: Option<Frame>,
     pub title: String,
-    /// URL being shown or loaded (for the address bar).
+    /// URL being shown (for the address bar).
     pub current_url: Option<Url>,
     pub history: Vec<Url>,
     pub index: usize,
-    /// Scroll position in CSS px.
+    /// Scroll position in CSS px (the UI is the authority; the content
+    /// thread follows).
     pub scroll: (f32, f32),
     pub zoom: f32,
-    /// Incremented per navigation; stale load results are dropped.
-    pub generation: u64,
+    /// Navigation requested, document not committed yet.
     pub loading: Option<Url>,
-    pub selection: Option<Selection>,
+    /// Loading after the commit (scripts, images).
+    pub load_phase: Option<&'static str>,
     pub find: FindState,
-    pub edit: Option<ControlEdit>,
-    /// Keyboard-focused element (focus ring).
-    pub focus: Option<NodeId>,
-    /// The page was laid out for a different viewport.
-    pub needs_relayout: bool,
     /// JavaScript console messages of the current page.
     pub console: ConsoleLog,
     /// Console input line.
     pub console_input: TextBuffer,
     /// Console scroll offset in lines from the bottom.
     pub console_scroll: usize,
-    /// Element the mouse was last over (for `mouseover`/`mouseout`).
-    pub hover_node: Option<NodeId>,
+    pub favicon: Option<Arc<Image>>,
+    /// Input routing hints from the page.
+    pub state: PageState,
+    /// Cursor over the page ("default", "pointer", "text").
+    pub cursor: &'static str,
+    pub hover_link: Option<Url>,
+    /// View size last sent to the content thread.
+    pub view: Option<ViewSize>,
+    /// The "not responding" bar was dismissed for the busy period that
+    /// started at this time (content clock, ms).
+    pub hang_dismissed: Option<u64>,
 }
 
 impl Tab {
     pub fn new(id: u64) -> Tab {
         Tab {
             id,
-            page: None,
+            content: None,
+            frame: None,
             title: String::from("New tab"),
             current_url: None,
             history: Vec::new(),
             index: 0,
             scroll: (0.0, 0.0),
             zoom: 1.0,
-            generation: 0,
             loading: None,
-            selection: None,
+            load_phase: None,
             find: FindState::default(),
-            edit: None,
-            focus: None,
-            needs_relayout: false,
             console: ConsoleLog::default(),
             console_input: TextBuffer::default(),
             console_scroll: 0,
-            hover_node: None,
+            favicon: None,
+            state: PageState::default(),
+            cursor: "default",
+            hover_link: None,
+            view: None,
+            hang_dismissed: None,
+        }
+    }
+
+    /// Send a message to the content thread.
+    pub fn send(&self, msg: ToContent) {
+        if let Some(c) = &self.content {
+            c.send(msg);
         }
     }
 
@@ -108,18 +116,21 @@ impl Tab {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.loading.is_some()
+        self.loading.is_some() || self.load_phase.is_some()
+    }
+
+    /// Document size (CSS px) of the last frame.
+    pub fn content_size(&self) -> (f32, f32) {
+        self.frame.as_ref().map(|f| f.content).unwrap_or((0.0, 0.0))
     }
 
     /// Maximum vertical scroll for a CSS viewport height.
     pub fn max_scroll(&self, viewport_h: f32) -> f32 {
-        let content = self.page.as_ref().map(|p| p.content_height()).unwrap_or(0.0);
-        (content - viewport_h).max(0.0)
+        (self.content_size().1 - viewport_h).max(0.0)
     }
 
     pub fn max_scroll_x(&self, viewport_w: f32) -> f32 {
-        let content = self.page.as_ref().map(|p| p.content_width()).unwrap_or(0.0);
-        (content - viewport_w).max(0.0)
+        (self.content_size().0 - viewport_w).max(0.0)
     }
 
     /// Push a URL onto the history, truncating any forward entries.
@@ -134,17 +145,17 @@ impl Tab {
         self.index = self.history.len() - 1;
     }
 
-    /// Clear transient per-page UI state when a new page replaces the old one.
+    /// Clear per-page UI state when a new document replaces the old one.
     pub fn reset_page_state(&mut self) {
-        self.selection = None;
-        self.edit = None;
-        self.focus = None;
-        self.find.matches.clear();
+        self.find.count = 0;
         self.find.current = 0;
         self.scroll = (0.0, 0.0);
         self.console.clear();
         self.console_scroll = 0;
-        self.hover_node = None;
+        self.favicon = None;
+        self.state = PageState::default();
+        self.cursor = "default";
+        self.hover_link = None;
     }
 }
 

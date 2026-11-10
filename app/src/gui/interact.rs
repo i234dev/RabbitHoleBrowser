@@ -1,22 +1,30 @@
-//! Mouse and keyboard handling.
+//! Mouse and keyboard handling on the UI thread. Chrome input is handled
+//! here; page input is forwarded to the tab's content thread.
 
 use std::time::{Duration, Instant};
 
 use rabbithole_engine::dom::NodeId;
 use rabbithole_engine::gfx::Rect;
 use rabbithole_engine::net::Url;
-use rabbithole_engine::scripting::mouse_init;
-use rabbithole_engine::{ClickAction, ControlKind, Modifiers};
+use rabbithole_engine::Modifiers;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::CursorIcon;
 
 use super::chrome::{Action, Menu, MenuItem, ToolButton};
+use super::content::{KeyInput, ToContent};
 use super::{App, MouseDown, UiFocus};
 
 const LINE_SCROLL: f32 = 40.0;
-const DRAG_THRESHOLD: f64 = 4.0;
+
+fn button_code(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        _ => 0,
+    }
+}
 
 impl App {
     // ---------------------------------------------------------------- mouse
@@ -35,46 +43,39 @@ impl App {
         if popup_hover_changed {
             self.request_redraw();
         }
-        // Drag selection.
-        if let Some(md) = self.mouse_down.as_mut() {
-            if md.button == MouseButton::Left {
-                let dist = ((self.cursor.x - md.pos.x).powi(2) + (self.cursor.y - md.pos.y).powi(2)).sqrt();
-                if dist > DRAG_THRESHOLD {
-                    md.dragged = true;
-                }
-                if md.dragged {
-                    if let (Some(anchor), Some(css)) = (md.doc, self.to_css_clamped(self.cursor)) {
-                        let cur = self.to_doc(css);
-                        let sel = self.page().map(|p| p.select_between(&self.engine.fonts, anchor, cur));
-                        if let (Some(sel), Some(tab)) = (sel, self.tabs.get_mut(self.active)) {
-                            tab.selection = if sel.rects.is_empty() { None } else { Some(sel) };
-                        }
-                        self.request_redraw();
-                        return;
-                    }
-                }
-            }
+        // A press on the page: the page follows the pointer (drag selection).
+        if self.mouse_down.as_ref().map(|m| m.on_page).unwrap_or(false) {
+            let css = self.to_css_clamped(self.cursor);
+            let mods = self.pointer_modifiers();
+            self.send_active(ToContent::PointerMove { x: css.0, y: css.1, mods });
+            return;
         }
         self.update_hover();
     }
 
-    /// CSS coordinates of a window position, clamped into the page area
-    /// (for drag selection outside the page).
-    fn to_css_clamped(&self, pos: winit::dpi::PhysicalPosition<f64>) -> Option<(f32, f32)> {
-        let area = self.chrome().page_area();
-        let s = self.page_scale();
-        let x = (pos.x as f32).clamp(area.x, area.right() - 1.0);
-        let y = (pos.y as f32).clamp(area.y, area.bottom() - 1.0);
-        Some(((x - area.x) / s, (y - area.y) / s))
+    /// The cursor shape for the chrome under the pointer.
+    pub(crate) fn chrome_cursor(&self) -> CursorIcon {
+        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        let chrome = self.chrome();
+        let over_button = [ToolButton::Back, ToolButton::Forward, ToolButton::Reload, ToolButton::Home, ToolButton::Star, ToolButton::Menu].into_iter().any(|b| chrome.button_rect(b).contains(x, y));
+        let (tab_rects, plus) = chrome.tab_rects(self.tabs.len());
+        let over_tab = tab_rects.iter().any(|r| r.contains(x, y)) || plus.contains(x, y);
+        let over_hang_button = self.hang_bar().map(|(_, w, s)| w.contains(x, y) || s.contains(x, y)).unwrap_or(false);
+        if chrome.url_field().contains(x, y) || (chrome.find_open && chrome.find_field().contains(x, y)) {
+            CursorIcon::Text
+        } else if over_button || over_tab || over_hang_button {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        }
     }
 
-    /// Recompute hover state: toolbar buttons, tabs, page links/cursor.
+    /// Recompute hover state: toolbar buttons, tabs; the page hover is
+    /// computed on the content thread (its answer sets the cursor).
     pub(crate) fn update_hover(&mut self) {
         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
         let chrome = self.chrome();
-        let mut icon = CursorIcon::Default;
         let mut redraw = false;
-
         let button = [ToolButton::Back, ToolButton::Forward, ToolButton::Reload, ToolButton::Home, ToolButton::Star, ToolButton::Menu]
             .into_iter()
             .find(|b| chrome.button_rect(*b).contains(x, y));
@@ -92,53 +93,21 @@ impl App {
             self.hover_plus = hover_plus;
             redraw = true;
         }
-        if chrome.url_field().contains(x, y) || (chrome.find_open && chrome.find_field().contains(x, y)) {
-            icon = CursorIcon::Text;
-        } else if button.is_some() || hover_tab.is_some() || hover_plus {
-            icon = CursorIcon::Pointer;
-        }
-
         let popup_open = self.menu.is_some() || self.context_menu.is_some() || self.dropdown.is_some();
-        let mut link = None;
-        if !popup_open {
-            if let Some(css) = self.to_css(self.cursor) {
-                let doc = self.to_doc(css);
-                // Hover state + pointer/mouse over/enter/move/out/leave
-                // events, from the same paint-order hit test as clicks.
-                let m = self.pointer_modifiers();
-                self.page_op(|engine, page| ((), engine.pointer_move(page, css.0, css.1, m)));
-                let node = self.page().and_then(|p| p.pointer.hover);
-                if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.hover_node = node;
-                }
-                if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
-                    link = node.and_then(|n| page.link_of(n));
-                    icon = match page.cursor_at(doc.0, doc.1) {
-                        "pointer" => CursorIcon::Pointer,
-                        "text" => CursorIcon::Text,
-                        _ => CursorIcon::Default,
-                    };
-                    if link.is_some() {
-                        icon = CursorIcon::Pointer;
-                    }
-                    if let Some(n) = node {
-                        if matches!(page.control_kind(n), ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other) {
-                            icon = CursorIcon::Text;
-                        }
+        match self.to_css(self.cursor) {
+            Some(css) if !popup_open => {
+                let mods = self.pointer_modifiers();
+                self.send_active(ToContent::PointerMove { x: css.0, y: css.1, mods });
+            }
+            _ => {
+                if let Some(tab) = self.tab_mut() {
+                    if tab.hover_link.take().is_some() {
+                        redraw = true;
                     }
                 }
             }
         }
-        if icon != self.cursor_icon {
-            self.cursor_icon = icon;
-            if let Some(w) = &self.window {
-                w.set_cursor(icon);
-            }
-        }
-        if link != self.hover_link {
-            self.hover_link = link;
-            redraw = true;
-        }
+        self.apply_cursor();
         if redraw {
             self.request_redraw();
         }
@@ -282,111 +251,50 @@ impl App {
             return;
         }
 
+        // "Not responding" bar.
+        if let Some((bar, wait, stop)) = self.hang_bar() {
+            if bar.contains(x, y) {
+                if button == MouseButton::Left {
+                    if wait.contains(x, y) {
+                        self.hang_wait();
+                    } else if stop.contains(x, y) {
+                        self.hang_stop();
+                    }
+                }
+                return;
+            }
+        }
+
         // Page.
         self.blur_url_field();
-        if self.ui_focus == UiFocus::Console {
-            self.ui_focus = UiFocus::Page;
-        }
-        if self.ui_focus == UiFocus::Find {
+        if matches!(self.ui_focus, UiFocus::Console | UiFocus::Find) {
             self.ui_focus = UiFocus::Page;
         }
         let Some(css) = self.to_css(self.cursor) else { return };
-        let doc = self.to_doc(css);
-        let button_code: u8 = match button {
-            MouseButton::Left => 0,
-            MouseButton::Middle => 1,
-            MouseButton::Right => 2,
-            _ => 0,
-        };
-        // Leaving a text control being edited: commit it (change + blur)
-        // before the press moves focus elsewhere.
-        let pre = self.page().and_then(|p| p.node_at_viewport(css.0, css.1));
-        let pre_control = pre.and_then(|n| self.page().and_then(|p| p.control_of(n)));
-        let editing = self.tab().and_then(|t| t.edit.as_ref().map(|e| e.node));
-        if editing.is_some() && editing != pre_control {
-            self.end_edit();
-        }
-        // pointerdown / mousedown / focus, through the engine.
-        let m = self.pointer_modifiers();
-        let down = self
-            .page_op(|engine, page| {
-                let mut d = engine.pointer_down(page, css.0, css.1, button_code, m);
-                let out = std::mem::take(&mut d.outcome);
-                (d, out)
-            })
-            .unwrap_or_default();
-        let node = down.target;
-        let link = node.and_then(|n| self.page().and_then(|p| p.link_of(n)));
-
-        if button == MouseButton::Right {
-            let prevented = node.map(|n| self.page_mouse_event(n, "contextmenu", css, 2).default_prevented).unwrap_or(false);
-            // The release must not produce a click.
-            if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
-                page.pointer.down = None;
-            }
-            if !prevented {
-                self.open_context_menu(link, x, y);
-            }
+        if !matches!(button, MouseButton::Left | MouseButton::Middle | MouseButton::Right) {
             return;
         }
-        if button == MouseButton::Middle {
-            // auxclick (and opening the link in a new tab) on release.
-            self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: None, dragged: false, double: false });
-            return;
-        }
-        if button != MouseButton::Left {
-            return;
-        }
-
         // Double click → word selection (click + dblclick on release).
-        let now = Instant::now();
-        let double = self
-            .last_click
-            .map(|(t, p)| now.duration_since(t) < Duration::from_millis(400) && (p.x - self.cursor.x).abs() < 5.0 && (p.y - self.cursor.y).abs() < 5.0)
-            .unwrap_or(false);
-        self.last_click = Some((now, self.cursor));
-
-        // Form controls react on press (editing, dropdowns); activation
-        // (checkbox toggles, submit, reset) happens with the click.
-        let control = node.and_then(|n| self.page().and_then(|p| p.control_of(n)));
-        if let Some(c) = control {
-            let kind = self.page().map(|p| p.control_kind(c)).unwrap_or(ControlKind::Other);
-            match kind {
-                ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other => {
-                    if !down.prevented {
-                        self.begin_edit(c);
-                        self.place_caret_from_click(c, doc);
-                    }
-                    self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: None, dragged: false, double: false });
-                    return;
-                }
-                ControlKind::Select => {
-                    self.end_edit();
-                    if !down.prevented {
-                        self.open_select_dropdown(c);
-                    }
-                    self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: None, dragged: false, double: false });
-                    return;
-                }
-                ControlKind::File => {
-                    self.set_status("File uploads are not supported yet");
-                }
-                _ => {}
+        let mut click_count = 1;
+        if button == MouseButton::Left {
+            let now = Instant::now();
+            let double = self
+                .last_click
+                .map(|(t, p)| now.duration_since(t) < Duration::from_millis(400) && (p.x - self.cursor.x).abs() < 5.0 && (p.y - self.cursor.y).abs() < 5.0)
+                .unwrap_or(false);
+            self.last_click = Some((now, self.cursor));
+            if double {
+                click_count = 2;
             }
         }
-        self.end_edit();
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            tab.focus = None;
+        if button == MouseButton::Right {
+            self.context_pos = (x, y);
         }
-        if double {
-            let sel = self.page().map(|p| p.select_word_at(&self.engine.fonts, doc.0, doc.1));
-            if let Some(tab) = self.tabs.get_mut(self.active) {
-                tab.selection = sel.filter(|s| !s.rects.is_empty());
-            }
-            self.request_redraw();
+        let mods = self.pointer_modifiers();
+        self.send_active(ToContent::PointerDown { x: css.0, y: css.1, button: button_code(button), mods, click_count });
+        if button != MouseButton::Right {
+            self.mouse_down = Some(MouseDown { button, pos: self.cursor, on_page: true });
         }
-        let anchor = if down.prevented { None } else { Some(doc) };
-        self.mouse_down = Some(MouseDown { button, pos: self.cursor, doc: anchor, dragged: false, double });
     }
 
     /// Keyboard modifiers in the engine's form.
@@ -395,67 +303,16 @@ impl App {
         Modifiers { ctrl: m.control_key(), shift: m.shift_key(), alt: m.alt_key(), meta: m.super_key() }
     }
 
-    /// Dispatch a mouse event to a page node (viewport CSS coordinates).
-    pub(crate) fn page_mouse_event(&mut self, node: NodeId, event_type: &str, css: (f32, f32), button: u8) -> rabbithole_engine::ScriptOutcome {
-        let m = self.modifiers;
-        let init = mouse_init(css.0, css.1, button, m.control_key(), m.shift_key(), m.alt_key(), m.super_key());
-        self.dispatch_to(node, event_type, init)
-    }
-
     pub(crate) fn handle_mouse_up(&mut self, button: MouseButton) {
         let Some(md) = self.mouse_down.take() else { return };
-        if md.button != button {
+        if md.button != button || !md.on_page {
             return;
         }
-        let button_code: u8 = match button {
-            MouseButton::Middle => 1,
-            MouseButton::Right => 2,
-            _ => 0,
-        };
-        // A drag-selection release still gets pointerup/mouseup, no click.
-        if md.dragged {
-            if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
-                page.pointer.down = None;
-            }
-        } else if !md.double {
-            if let Some(tab) = self.tabs.get_mut(self.active) {
-                if tab.selection.take().is_some() {
-                    self.request_redraw();
-                }
-            }
-        }
-        let Some(css) = self.to_css(self.cursor) else {
-            if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
-                page.pointer.down = None;
-                page.state.active = None;
-            }
-            return;
-        };
-        // pointerup / mouseup / click and the click's default action.
-        let m = self.pointer_modifiers();
-        let Some(up) = self.page_op(|engine, page| {
-            let mut u = engine.pointer_up(page, css.0, css.1, button_code, m);
-            let out = std::mem::take(&mut u.outcome);
-            (u, out)
-        }) else {
-            return;
-        };
-        match up.action {
-            ClickAction::Navigate { url, new_tab } => self.follow_link(url, new_tab),
-            ClickAction::Submit { form, submitter } => self.submit_form(submitter.unwrap_or(form), submitter),
-            ClickAction::FocusControl(c) => match self.page().map(|p| p.control_kind(c)) {
-                Some(ControlKind::Select) => self.open_select_dropdown(c),
-                Some(ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other) => self.begin_edit(c),
-                _ => {}
-            },
-            ClickAction::Changed => self.mark_page_dirty(),
-            ClickAction::None => {}
-        }
-        if md.double && button == MouseButton::Left {
-            if let Some(n) = up.clicked {
-                self.page_mouse_event(n, "dblclick", css, 0);
-            }
-        }
+        let inside = self.to_css(self.cursor).is_some();
+        let css = self.to_css_clamped(self.cursor);
+        let mods = self.pointer_modifiers();
+        let _ = md.pos;
+        self.send_active(ToContent::PointerUp { x: css.0, y: css.1, button: button_code(button), mods, inside });
     }
 
     pub(crate) fn handle_wheel(&mut self, delta: MouseScrollDelta) {
@@ -482,41 +339,15 @@ impl App {
             return;
         }
         if let Some(css) = self.to_css(self.cursor) {
-            let doc = self.to_doc(css);
-            let scrolled_inner = match self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
-                Some(page) => self.engine.scroll_at(page, doc.0, doc.1, dx, dy),
-                None => false,
-            };
-            if scrolled_inner {
-                self.mark_page_dirty();
+            // Inner scroll containers scroll on the content thread; the
+            // page itself scrolls right here.
+            let over_container = self.tab().and_then(|t| t.frame.as_ref().map(|f| f.scroll_container_at(css, t.scroll))).unwrap_or(false);
+            if over_container {
+                self.send_active(ToContent::Wheel { x: css.0, y: css.1, dx, dy });
                 return;
             }
         }
         self.scroll_by(dx, dy);
-    }
-
-    fn place_caret_from_click(&mut self, control: NodeId, doc: (f32, f32)) {
-        let Some(page) = self.page() else { return };
-        let Some(rect) = page.rect_of(control) else { return };
-        let fonts = &self.engine.fonts;
-        let text = page.control_text(control);
-        let rel_x = doc.0 - rect.x;
-        // Measure prefixes with the control's own run positions via caret_x.
-        let mut best = text.len();
-        let mut best_d = f32::MAX;
-        for (i, _) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
-            if let Some(cx) = page.caret_x(fonts, control, i) {
-                let d = (cx - rel_x).abs();
-                if d < best_d {
-                    best_d = d;
-                    best = i;
-                }
-            }
-        }
-        if let Some(edit) = self.tabs.get_mut(self.active).and_then(|t| t.edit.as_mut()) {
-            edit.buf.set_caret(best, false);
-        }
-        self.request_redraw();
     }
 
     /// Origin x and horizontal shift of the URL field text (for hit testing).
@@ -582,9 +413,8 @@ impl App {
         self.request_redraw();
     }
 
-    fn open_context_menu(&mut self, link: Option<Url>, x: f32, y: f32) {
+    pub(crate) fn open_context_menu(&mut self, link: Option<Url>, has_sel: bool, x: f32, y: f32) {
         let chrome = self.chrome();
-        let has_sel = self.tab().map(|t| t.selection.is_some()).unwrap_or(false);
         let (back, fwd) = self.tab().map(|t| (t.can_go_back(), t.can_go_forward())).unwrap_or((false, false));
         let mut items = Vec::new();
         if let Some(l) = &link {
@@ -610,18 +440,18 @@ impl App {
         items.push(MenuItem::new("Bookmark this page", Action::ToggleBookmark));
         let win = self.window_size();
         self.context_menu = Some(Menu::new(x, y, items, chrome.s, &self.engine.fonts, self.ui_font, win.width as f32, win.height as f32));
+        self.apply_cursor();
         self.request_redraw();
     }
 
-    fn open_select_dropdown(&mut self, select: NodeId) {
+    /// Show a `<select>` popup for the page (`rect` in document px).
+    pub(crate) fn open_select_dropdown(&mut self, select: NodeId, options: Vec<(String, bool, bool)>, rect: Rect) {
         let chrome = self.chrome();
-        let Some(page) = self.page() else { return };
-        let options = page.select_options(select);
-        let rect = page.rect_of(select).map(|r| self.doc_to_screen(r)).unwrap_or(Rect::new(self.cursor.x as f32, self.cursor.y as f32, 0.0, 0.0));
+        let rect = if rect.w > 0.0 || rect.h > 0.0 { self.doc_to_screen(rect) } else { Rect::new(self.cursor.x as f32, self.cursor.y as f32, 0.0, 0.0) };
         let items: Vec<MenuItem> = options
             .iter()
             .enumerate()
-            .map(|(i, (label, _, selected, disabled))| {
+            .map(|(i, (label, selected, disabled))| {
                 let text = if *selected { format!("✓ {label}") } else { format!("   {label}") };
                 MenuItem::new(&text, Action::SelectOption(select, i)).disabled(*disabled)
             })
@@ -632,10 +462,8 @@ impl App {
         let win = self.window_size();
         let mut menu = Menu::new(rect.x, rect.bottom(), items, chrome.s, &self.engine.fonts, self.ui_font, win.width as f32, win.height as f32);
         menu.rect.w = menu.rect.w.max(rect.w);
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            tab.focus = Some(select);
-        }
         self.dropdown = Some(menu);
+        self.apply_cursor();
         self.request_redraw();
     }
 
@@ -669,18 +497,14 @@ impl App {
             Action::Quit => self.shutdown(event_loop),
             Action::OpenInNewTab(u) => self.follow_link(u, true),
             Action::CopyLink(u) => self.clipboard_set(&u.to_string()),
-            Action::CopySelection => {
-                if let Some(text) = self.tab().and_then(|t| t.selection.as_ref()).map(|s| s.text.clone()) {
-                    self.clipboard_set(&text);
-                }
-            }
+            Action::CopySelection => self.send_active(ToContent::CopySelection),
             Action::ViewText => self.navigate_tab(idx, "about:text", true),
             Action::CopyPageUrl => {
                 if let Some(u) = self.tab().and_then(|t| t.current_url.as_ref()).map(|u| u.to_string()) {
                     self.clipboard_set(&u);
                 }
             }
-            Action::SelectOption(node, i) => self.select_option_with_events(node, i),
+            Action::SelectOption(node, index) => self.send_active(ToContent::SelectOption { node, index }),
             Action::ToggleBookmark => self.toggle_bookmark(),
             Action::ToggleJavaScript => self.toggle_javascript(),
             Action::ToggleTrackerBlocking => self.toggle_tracker_blocking(),
@@ -697,37 +521,59 @@ impl App {
 
     // ------------------------------------------------------------- keyboard
 
-    /// Send `keydown`/`keyup` to the page (focused control, else `body`).
-    /// Returns true when a listener called `preventDefault()`.
-    fn page_key_event(&mut self, event: &KeyEvent) -> bool {
-        if self.ui_focus != UiFocus::Page || self.menu.is_some() || self.context_menu.is_some() || self.dropdown.is_some() {
-            return false;
-        }
-        let Some(page) = self.page() else { return false };
-        if !page.has_scripts() {
-            return false;
-        }
-        let target = self.tab().and_then(|t| t.focus).or_else(|| page.doc.body());
-        let Some(target) = target else { return false };
-        let key = key_name(&event.logical_key);
-        let code = format!("{:?}", event.physical_key).trim_start_matches("Code(").trim_end_matches(')').to_string();
+    /// The key event in the content thread's form.
+    fn key_input(&mut self, event: &KeyEvent) -> KeyInput {
         let m = self.modifiers;
-        let init = rabbithole_engine::scripting::key_init(&key, &code, m.control_key(), m.shift_key(), m.alt_key(), m.super_key(), event.repeat);
-        let ty = if event.state == ElementState::Pressed { "keydown" } else { "keyup" };
-        let out = self.dispatch_to(target, ty, init);
-        out.default_prevented || out.navigation.is_some()
+        let ctrl = m.control_key() || m.super_key();
+        let key = key_name(&event.logical_key);
+        // A paste reads the clipboard here (it belongs to the UI thread).
+        let clipboard = if ctrl && event.state == ElementState::Pressed && key.eq_ignore_ascii_case("v") { self.clipboard_get() } else { None };
+        KeyInput {
+            key,
+            code: format!("{:?}", event.physical_key).trim_start_matches("Code(").trim_end_matches(')').to_string(),
+            text: event.text.as_ref().map(|t| t.to_string()),
+            mods: self.pointer_modifiers(),
+            repeat: event.repeat,
+            pressed: event.state == ElementState::Pressed,
+            clipboard,
+        }
+    }
+
+    /// Scroll keys handled on the UI thread when the page cannot react
+    /// to them (no key listeners, nothing focused): instant even while
+    /// the page is busy.
+    fn ui_scroll_key(&mut self, event: &KeyEvent) -> bool {
+        let Some(tab) = self.tab() else { return false };
+        let st = tab.state;
+        let m = self.modifiers;
+        if st.editing || st.key_listeners || st.focused || m.control_key() || m.alt_key() || m.super_key() {
+            return false;
+        }
+        let vp = self.css_viewport();
+        let page_step = (vp.height - LINE_SCROLL).max(LINE_SCROLL);
+        let shift = m.shift_key();
+        match &event.logical_key {
+            Key::Named(NamedKey::ArrowDown) => self.scroll_by(0.0, LINE_SCROLL),
+            Key::Named(NamedKey::ArrowUp) => self.scroll_by(0.0, -LINE_SCROLL),
+            Key::Named(NamedKey::ArrowLeft) => self.scroll_by(-LINE_SCROLL, 0.0),
+            Key::Named(NamedKey::ArrowRight) => self.scroll_by(LINE_SCROLL, 0.0),
+            Key::Named(NamedKey::PageDown) => self.scroll_by(0.0, page_step),
+            Key::Named(NamedKey::PageUp) => self.scroll_by(0.0, -page_step),
+            Key::Named(NamedKey::Space) => self.scroll_by(0.0, if shift { -page_step } else { page_step }),
+            Key::Named(NamedKey::Home) => self.set_scroll(0.0, 0.0),
+            Key::Named(NamedKey::End) => self.set_scroll(0.0, f32::MAX),
+            _ => return false,
+        }
+        true
     }
 
     pub(crate) fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        let page_focus = self.ui_focus == UiFocus::Page && self.menu.is_none() && self.context_menu.is_none() && self.dropdown.is_none();
         if event.state != ElementState::Pressed {
-            self.page_key_event(event);
-            return;
-        }
-        // Browser-level shortcuts are never cancellable by pages.
-        let browser_shortcut = (self.modifiers.control_key() || self.modifiers.super_key())
-            && matches!(&event.logical_key, Key::Character(c) if matches!(c.to_lowercase().as_str(), "q" | "w" | "t" | "l" | "r" | "j" | "h"))
-            || matches!(&event.logical_key, Key::Named(NamedKey::F5 | NamedKey::F6 | NamedKey::F11));
-        if !browser_shortcut && self.page_key_event(event) {
+            if page_focus {
+                let k = self.key_input(event);
+                self.send_active(ToContent::Key(k));
+            }
             return;
         }
         let ctrl = self.modifiers.control_key() || self.modifiers.super_key();
@@ -771,7 +617,7 @@ impl App {
             return;
         }
 
-        // Global shortcuts.
+        // Browser shortcuts (handled here, never by the page).
         if ctrl {
             if let Key::Character(c) = &event.logical_key {
                 match c.to_lowercase().as_str() {
@@ -781,7 +627,7 @@ impl App {
                         self.new_tab(None, false);
                         return;
                     }
-                    "l" => return self.focus_url_field(),
+                    "l" if self.ui_focus != UiFocus::Console => return self.focus_url_field(),
                     "r" => return self.reload(shift),
                     "f" => return self.open_find(),
                     "d" => return self.toggle_bookmark(),
@@ -789,6 +635,11 @@ impl App {
                     "j" if shift => return self.toggle_console(),
                     "j" => return self.navigate_tab(idx, "about:downloads", true),
                     "o" if shift => return self.navigate_tab(idx, "about:bookmarks", true),
+                    "u" if shift => {
+                        self.show_stats = !self.show_stats;
+                        self.request_redraw();
+                        return;
+                    }
                     "+" | "=" => return self.set_zoom(self.tab().map(|t| t.zoom).unwrap_or(1.0) + 0.1),
                     "-" | "_" => return self.set_zoom(self.tab().map(|t| t.zoom).unwrap_or(1.0) - 0.1),
                     "0" => return self.set_zoom(1.0),
@@ -837,11 +688,18 @@ impl App {
             UiFocus::Find => self.handle_find_key(event, ctrl, shift),
             UiFocus::Console => self.handle_console_key(event, ctrl, shift),
             UiFocus::Page => {
-                if self.tab().map(|t| t.edit.is_some()).unwrap_or(false) {
-                    self.handle_control_key(event, ctrl, shift);
-                } else {
-                    self.handle_page_key(event, ctrl, shift, event_loop);
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    self.status = None;
+                    if self.tab().map(|t| t.is_loading()).unwrap_or(false) {
+                        self.stop_loading();
+                        return;
+                    }
                 }
+                if self.ui_scroll_key(event) {
+                    return;
+                }
+                let k = self.key_input(event);
+                self.send_active(ToContent::Key(k));
             }
         }
     }
@@ -865,16 +723,7 @@ impl App {
                 }
                 self.request_redraw();
             }
-            UiFocus::Page => {
-                let editing = self.tab().map(|t| t.edit.is_some()).unwrap_or(false);
-                if editing {
-                    if let Some(edit) = self.tabs.get_mut(self.active).and_then(|t| t.edit.as_mut()) {
-                        let max = edit.max_len;
-                        edit.buf.insert(text, max);
-                    }
-                    self.commit_edit();
-                }
-            }
+            UiFocus::Page => self.send_active(ToContent::Text(text.to_string())),
         }
         self.request_redraw();
     }
@@ -1022,205 +871,6 @@ impl App {
         self.request_redraw();
     }
 
-    fn handle_control_key(&mut self, event: &KeyEvent, ctrl: bool, shift: bool) {
-        let (node, kind) = match self.tab().and_then(|t| t.edit.as_ref()) {
-            Some(e) => (e.node, e.kind),
-            None => return,
-        };
-        let mut changed = false;
-        {
-            let edit = self.tabs.get_mut(self.active).and_then(|t| t.edit.as_mut()).unwrap();
-            match &event.logical_key {
-                Key::Named(NamedKey::Enter) => {
-                    if kind == ControlKind::TextArea && !ctrl {
-                        edit.buf.insert("\n", edit.max_len);
-                        changed = true;
-                    } else {
-                        self.submit_form(node, None);
-                        return;
-                    }
-                }
-                Key::Named(NamedKey::Escape) => {
-                    self.end_edit();
-                    return;
-                }
-                Key::Named(NamedKey::Tab) => {
-                    self.focus_next(!shift);
-                    return;
-                }
-                Key::Named(NamedKey::Backspace) => {
-                    edit.buf.backspace(ctrl);
-                    changed = true;
-                }
-                Key::Named(NamedKey::Delete) => {
-                    edit.buf.delete(ctrl);
-                    changed = true;
-                }
-                Key::Named(NamedKey::ArrowLeft) => edit.buf.move_left(shift, ctrl),
-                Key::Named(NamedKey::ArrowRight) => edit.buf.move_right(shift, ctrl),
-                Key::Named(NamedKey::Home) => edit.buf.home(shift),
-                Key::Named(NamedKey::End) => edit.buf.end(shift),
-                Key::Named(NamedKey::Space) => {
-                    edit.buf.insert(" ", edit.max_len);
-                    changed = true;
-                }
-                Key::Character(c) if ctrl => match c.to_lowercase().as_str() {
-                    "a" => edit.buf.select_all(),
-                    "c" => {
-                        if let Some(t) = edit.buf.selected_text().map(|s| s.to_string()) {
-                            self.clipboard_set(&t);
-                            return;
-                        }
-                    }
-                    "x" => {
-                        if let Some(t) = edit.buf.selected_text().map(|s| s.to_string()) {
-                            edit.buf.delete_selection();
-                            changed = true;
-                            self.clipboard_set(&t);
-                        }
-                    }
-                    "v" => {
-                        if let Some(t) = self.clipboard_get() {
-                            if let Some(edit) = self.tabs.get_mut(self.active).and_then(|t| t.edit.as_mut()) {
-                                let max = edit.max_len;
-                                edit.buf.insert(&t, max);
-                            }
-                            changed = true;
-                        }
-                    }
-                    _ => {}
-                },
-                _ => {
-                    if let Some(text) = event.text.as_ref() {
-                        if !ctrl {
-                            edit.buf.insert(text, edit.max_len);
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-        if changed {
-            self.commit_edit();
-        }
-        self.request_redraw();
-    }
-
-    fn handle_page_key(&mut self, event: &KeyEvent, ctrl: bool, shift: bool, _event_loop: &ActiveEventLoop) {
-        let vp = self.css_viewport();
-        let page_step = (vp.height - LINE_SCROLL).max(LINE_SCROLL);
-        match &event.logical_key {
-            Key::Named(NamedKey::ArrowDown) => self.scroll_by(0.0, LINE_SCROLL),
-            Key::Named(NamedKey::ArrowUp) => self.scroll_by(0.0, -LINE_SCROLL),
-            Key::Named(NamedKey::ArrowLeft) => self.scroll_by(-LINE_SCROLL, 0.0),
-            Key::Named(NamedKey::ArrowRight) => self.scroll_by(LINE_SCROLL, 0.0),
-            Key::Named(NamedKey::PageDown) => self.scroll_by(0.0, page_step),
-            Key::Named(NamedKey::PageUp) => self.scroll_by(0.0, -page_step),
-            Key::Named(NamedKey::Space) => {
-                let focused_checkbox = self.tab().and_then(|t| t.focus).filter(|&n| {
-                    self.page().map(|p| matches!(p.control_kind(n), ControlKind::Checkbox | ControlKind::Radio)).unwrap_or(false)
-                });
-                if let Some(n) = focused_checkbox {
-                    self.toggle_control_with_events(n);
-                } else {
-                    self.scroll_by(0.0, if shift { -page_step } else { page_step });
-                }
-            }
-            Key::Named(NamedKey::Home) => self.set_scroll(0.0, 0.0),
-            Key::Named(NamedKey::End) => self.set_scroll(0.0, f32::MAX),
-            Key::Named(NamedKey::Backspace) => self.go_history(if shift { 1 } else { -1 }),
-            Key::Named(NamedKey::Tab) => self.focus_next(!shift),
-            Key::Named(NamedKey::Enter) => {
-                let focused = self.tab().and_then(|t| t.focus);
-                if let Some(n) = focused {
-                    let link = self.page().and_then(|p| p.link_of(n));
-                    if let Some(l) = link {
-                        self.follow_link(l, ctrl);
-                    } else if let Some(kind) = self.page().map(|p| p.control_kind(n)) {
-                        match kind {
-                            ControlKind::Submit => self.submit_form(n, Some(n)),
-                            ControlKind::Checkbox | ControlKind::Radio => self.toggle_control_with_events(n),
-                            ControlKind::Select => self.open_select_dropdown(n),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            Key::Named(NamedKey::Escape) => {
-                if self.tab().map(|t| t.is_loading()).unwrap_or(false) {
-                    self.stop_loading();
-                } else if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.selection = None;
-                    tab.focus = None;
-                    self.status = None;
-                    self.request_redraw();
-                }
-            }
-            Key::Character(c) if ctrl => match c.to_lowercase().as_str() {
-                "c" => {
-                    if let Some(text) = self.tab().and_then(|t| t.selection.as_ref()).map(|s| s.text.clone()) {
-                        self.clipboard_set(&text);
-                    }
-                }
-                "a" => {
-                    // Select all text on the page.
-                    let sel = self.page().map(|p| {
-                        let h = p.content_height();
-                        let w = p.content_width();
-                        p.select_between(&self.engine.fonts, (0.0, 0.0), (w, h))
-                    });
-                    if let Some(tab) = self.tabs.get_mut(self.active) {
-                        tab.selection = sel.filter(|s| !s.rects.is_empty());
-                    }
-                    self.request_redraw();
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    /// Move keyboard focus to the next/previous link or control.
-    fn focus_next(&mut self, forward: bool) {
-        let Some(page) = self.page() else { return };
-        let doc = &page.doc;
-        let focusables: Vec<NodeId> = doc
-            .descendants(rabbithole_engine::dom::Document::ROOT)
-            .filter(|&n| page.styles.get(n).is_some())
-            .filter(|&n| {
-                rabbithole_engine::forms::is_interactive(doc, n) || (doc.is_element(n, "a") && doc.attr(n, "href").is_some())
-            })
-            .collect();
-        if focusables.is_empty() {
-            return;
-        }
-        let current = self.tab().and_then(|t| t.edit.as_ref().map(|e| e.node).or(t.focus));
-        let pos = current.and_then(|c| focusables.iter().position(|&n| n == c));
-        let next = match (pos, forward) {
-            (Some(p), true) => focusables[(p + 1) % focusables.len()],
-            (Some(p), false) => focusables[(p + focusables.len() - 1) % focusables.len()],
-            (None, true) => focusables[0],
-            (None, false) => focusables[focusables.len() - 1],
-        };
-        let kind = page.control_kind(next);
-        let rect = page.rect_of(next);
-        self.end_edit();
-        if matches!(kind, ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other) && rabbithole_engine::forms::is_interactive(&self.page().unwrap().doc, next) {
-            self.begin_edit(next);
-        } else {
-            if let Some(page) = self.tabs.get_mut(self.active).and_then(|t| t.page.as_mut()) {
-                self.engine.set_focus(page, Some(next));
-            }
-            if let Some(tab) = self.tabs.get_mut(self.active) {
-                tab.focus = Some(next);
-            }
-        }
-        if let Some(r) = rect {
-            self.scroll_into_view(r);
-        }
-        self.mark_page_dirty();
-    }
-
     // ----------------------------------------------------------------- find
 
     pub(crate) fn open_find(&mut self) {
@@ -1228,42 +878,34 @@ impl App {
         tab.find.open = true;
         tab.find.field.select_all();
         self.ui_focus = UiFocus::Find;
-        self.needs_relayout = true;
-        self.mark_page_dirty();
+        self.request_redraw();
     }
 
     pub(crate) fn close_find(&mut self) {
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.find.open = false;
-            tab.find.matches.clear();
+            tab.find.count = 0;
+            tab.send(ToContent::FindClose);
         }
         self.ui_focus = UiFocus::Page;
-        self.needs_relayout = true;
-        self.mark_page_dirty();
+        self.request_redraw();
     }
 
+    /// Search the page for the find field's text (on the content thread).
     pub(crate) fn refresh_find(&mut self) {
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let query = tab.find.field.text.clone();
-        let matches = tab.page.as_ref().map(|p| p.find_text(&self.engine.fonts, &query)).unwrap_or_default();
-        tab.find.current = tab.find.current.min(matches.len().saturating_sub(1));
-        tab.find.matches = matches;
-        if let Some(r) = tab.find.matches.get(tab.find.current).copied() {
-            self.scroll_into_view(r);
+        if query.is_empty() {
+            tab.find.count = 0;
+            tab.send(ToContent::FindClose);
+        } else {
+            tab.send(ToContent::Find(query));
         }
         self.request_redraw();
     }
 
     pub(crate) fn find_step(&mut self, delta: isize) {
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        let n = tab.find.matches.len();
-        if n == 0 {
-            return;
-        }
-        tab.find.current = ((tab.find.current as isize + delta).rem_euclid(n as isize)) as usize;
-        let r = tab.find.matches[tab.find.current];
-        self.scroll_into_view(r);
-        self.request_redraw();
+        self.send_active(ToContent::FindStep(delta));
     }
 }
 
