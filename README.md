@@ -141,23 +141,34 @@ rabbithole --help
 
 ### MCP server (Model Context Protocol)
 
-`rabbithole mcp` speaks JSON-RPC 2.0 over stdio and exposes these tools:
+`rabbithole mcp` speaks JSON-RPC 2.0 over stdio and exposes a browser built
+for agents (see [docs/AI_INTERFACE.md](docs/AI_INTERFACE.md) for the full
+specification): a compact semantic snapshot with stable refs (`@e12`) instead
+of HTML or screenshots, actions by ref that auto-wait and return a diff of
+what changed, read mode, forms as a unit, network log with API hints, events
+for dialogs/popups/downloads, iframes and shadow DOM flattened, hidden text
+removed, page content fenced against prompt injection.
 
-| Tool         | Arguments                                            | Returns                                   |
-|--------------|------------------------------------------------------|-------------------------------------------|
-| `browse`     | `url`, `max_chars?`, `images?`                       | title, final URL and the page text        |
-| `links`      | `url`, `filter?`                                     | `text — href` lines                       |
-| `screenshot` | `url`, `width?`, `height?`, `full_page?`, `scroll_y?`| a PNG image plus a caption                |
-| `fetch_html` | `url`, `max_chars?`                                  | raw decoded HTML source                   |
-| `dom`        | `url`, `max_chars?`                                  | the parsed DOM tree                       |
-| `cookies`    | `url`                                                | stored cookies that apply to the URL      |
-| `evaluate`   | `expression`, `url?`, `reload?`                      | the result of the JavaScript expression   |
-| `click`      | `selector`, `url?`                                   | page text after the click (links/forms followed) |
-| `fill`       | `fields` (selector → value), `submit?`, `url?`       | page text after filling / submitting      |
+| Tool         | Purpose                                                              |
+|--------------|----------------------------------------------------------------------|
+| `open`       | Load a URL (or back/forward/reload) and return a snapshot             |
+| `snapshot`   | Semantic tree with refs; expand one element; token budget             |
+| `read`       | Main content as Markdown, links as refs                               |
+| `find`       | Elements by text, role/name or CSS selector                           |
+| `click`      | Click/hover by ref; `ref="cookies"` rejects a cookie banner           |
+| `type`       | Type text with key events, press keys                                 |
+| `fill`       | List forms, fill fields by label/name, validate and submit            |
+| `scroll`     | Scroll, scroll until visible, load more                               |
+| `screenshot` | PNG with refs drawn over interactive elements (on demand)             |
+| `network`    | Requests, JSON response bodies, API hints                             |
+| `tabs`       | Tabs/popups, contexts, downloads, session save/load                   |
+| `debug`      | eval, console/errors, action log export, live view                    |
 
-Page-loading tools also take `javascript?` (default true) and `wait_ms?`
-(default 1500). `evaluate`, `click` and `fill` keep a *current page*: omit
-`url` to keep interacting with the page left by the previous call.
+The same tools work from a shell: `rabbithole agent -c "open https://example.com" -c "read"`
+or interactively (`rabbithole agent`). The MCP server and the headless
+subcommands identify as `RabbitHoleBot` and respect `robots.txt` by default;
+`--browser-headers` (or `open browser_headers=true`) sends normal browser
+headers instead. The GUI always sends normal headers.
 
 Claude Code:
 
@@ -192,6 +203,7 @@ A Cargo workspace; each stage of the pipeline is its own crate:
 | `crates/net`     | URL parsing/resolution, fetching (HTTP(S)/file/data/about), charsets.|
 | `crates/layout`  | Box tree, block/inline layout, display list, painting.               |
 | `crates/engine`  | Glue: load → parse → style → layout → paint, hit testing, text dump. |
+| `crates/agent`   | Agent interface: semantic snapshots, refs, actions, read mode, tools. |
 | `app`            | The `rabbithole` binary: GUI (winit + softbuffer), CLI and MCP server.|
 
 Pipeline: `net` fetches bytes → `html` builds a `dom::Document` → `css` parses

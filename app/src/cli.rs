@@ -7,6 +7,15 @@ use rabbithole_engine::{Engine, Loaded, Page, Viewport};
 
 use crate::profile::Profile;
 
+/// Whether CLI sessions send normal browser headers (`--browser-headers`)
+/// instead of the default bot identity.
+static BROWSER_HEADERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by `--browser-headers` (any subcommand).
+pub fn set_browser_headers(on: bool) {
+    BROWSER_HEADERS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Hard cap on the height of a full-page capture (CSS px).
 pub const MAX_FULL_HEIGHT: u32 = 20_000;
 
@@ -74,6 +83,11 @@ impl Session {
         let cookies = profile.load_cookies();
         let mut engine = if system_fonts { Engine::new() } else { Engine::new_bundled_fonts_only() };
         engine.loader.fetcher.cookies = Some(cookies.clone());
+        // Programmatic use identifies as a bot (and respects robots.txt)
+        // unless `--browser-headers` was given.
+        if !BROWSER_HEADERS.load(std::sync::atomic::Ordering::Relaxed) {
+            engine.loader.fetcher.set_header_profile(rabbithole_engine::net::HeaderProfile::Bot);
+        }
         engine.set_local_storage_path(profile.local_storage_path());
         Session { engine, profile, cookies, wait_ms: 1000, verbose: false }
     }
@@ -549,4 +563,161 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].starts_with("a=1\texample.com / session Secure"));
     }
+}
+
+/// `rabbithole agent [options] [-c CMD]... [--script FILE] [--replay FILE]`:
+/// the agent tools from a shell. Without `-c`/`--script`/`--replay`, a REPL
+/// reads one command per line from stdin (`open URL`, `click @e3`,
+/// `type @e5 "text" submit=true`, `fill @f1 values={...}`, `tool {json}`).
+pub fn agent(args: &[String]) -> Result<(), String> {
+    let (opts, rest) = crate::mcp::parse_options(args)?;
+    let mut commands: Vec<String> = Vec::new();
+    let mut script: Option<String> = None;
+    let mut replay: Option<String> = None;
+    let mut no_robots = false;
+    let mut out_png = String::from("screenshot.png");
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-c" | "--command" => {
+                i += 1;
+                commands.push(rest.get(i).cloned().ok_or("-c needs a command")?);
+            }
+            "--script" => {
+                i += 1;
+                script = Some(rest.get(i).cloned().ok_or("--script needs a file")?);
+            }
+            "--replay" => {
+                i += 1;
+                replay = Some(rest.get(i).cloned().ok_or("--replay needs a file")?);
+            }
+            "-o" | "--output" => {
+                i += 1;
+                out_png = rest.get(i).cloned().ok_or("-o needs a file")?;
+            }
+            "--no-robots" => no_robots = true,
+            other => return Err(format!("unknown agent option `{other}` (try --help)")),
+        }
+        i += 1;
+    }
+    let mut agent = rabbithole_agent::Agent::new(opts.cfg.clone());
+    if no_robots {
+        agent.set_robots(false);
+    }
+    if opts.live {
+        let l = rabbithole_agent::live::Live::start(0)?;
+        eprintln!("live view: {}", l.url);
+        agent.live = Some(l);
+    }
+    if let Some(file) = replay {
+        return replay_test(&mut agent, &file);
+    }
+    let run_line = |agent: &mut rabbithole_agent::Agent, line: &str| -> bool {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return true;
+        }
+        if matches!(line, "quit" | "exit") {
+            return false;
+        }
+        if line == "help" {
+            emit(&format!("tools: {}\nsyntax: <tool> [positional] [key=value ...] | <tool> {{json}}", rabbithole_agent::TOOLS.join(", ")));
+            return true;
+        }
+        match rabbithole_agent::parse_line(line) {
+            Ok((tool, mut args)) => {
+                let path = args.get("path").and_then(|v| v.as_str()).map(|s| s.to_string()).filter(|_| tool == "screenshot");
+                if tool == "screenshot" {
+                    if let Some(o) = args.as_object_mut() {
+                        o.remove("path");
+                    }
+                }
+                match rabbithole_agent::call(agent, &tool, &args) {
+                    Ok(out) => {
+                        if let Some(png) = out.png {
+                            let p = path.unwrap_or_else(|| out_png.clone());
+                            match std::fs::write(&p, png) {
+                                Ok(()) => emit(&format!("(PNG written to {p})")),
+                                Err(e) => emit(&format!("could not write {p}: {e}")),
+                            }
+                        }
+                        emit(&out.text);
+                    }
+                    Err(e) => emit(&format!("error: {e}")),
+                }
+            }
+            Err(e) => emit(&format!("error: {e}")),
+        }
+        true
+    };
+    if let Some(file) = script {
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {file}: {e}"))?;
+        for l in text.lines() {
+            if !run_line(&mut agent, l) {
+                break;
+            }
+        }
+        return Ok(());
+    }
+    if !commands.is_empty() {
+        for c in &commands {
+            if !run_line(&mut agent, c) {
+                break;
+            }
+        }
+        return Ok(());
+    }
+    use std::io::{BufRead, IsTerminal};
+    let tty = std::io::stdin().is_terminal();
+    if tty {
+        eprintln!("rabbithole agent — tools: {} (help, quit)", rabbithole_agent::TOOLS.join(", "));
+    }
+    let stdin = std::io::stdin();
+    loop {
+        if tty {
+            eprint!("> ");
+        }
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            break;
+        }
+        if !run_line(&mut agent, &line) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Replay a JSON test exported with `debug log=json`, checking that each
+/// step succeeds and lands on the expected URL.
+fn replay_test(agent: &mut rabbithole_agent::Agent, file: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("cannot read {file}: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("bad test file: {e}"))?;
+    let steps = v.get("steps").and_then(|s| s.as_array()).ok_or("test file has no steps")?;
+    let mut failures = 0;
+    for (i, st) in steps.iter().enumerate() {
+        let tool = st.get("tool").and_then(|t| t.as_str()).unwrap_or("");
+        let args = st.get("args").cloned().unwrap_or_default();
+        let expect = st.get("expect_url").and_then(|u| u.as_str()).unwrap_or("");
+        match rabbithole_agent::call(agent, tool, &args) {
+            Ok(_) => {
+                let url = agent.active.and_then(|t| agent.tabs[t].page().map(|p| p.url.to_string())).unwrap_or_default();
+                if !expect.is_empty() && url != expect {
+                    failures += 1;
+                    emit(&format!("step {}: {tool} → {url} (expected {expect})  FAIL", i + 1));
+                } else {
+                    emit(&format!("step {}: {tool} ok", i + 1));
+                }
+            }
+            Err(e) => {
+                failures += 1;
+                emit(&format!("step {}: {tool} error: {}  FAIL", i + 1, e.lines().next().unwrap_or("")));
+            }
+        }
+    }
+    if failures > 0 {
+        return Err(format!("{failures} of {} steps failed", steps.len()));
+    }
+    emit(&format!("all {} steps passed", steps.len()));
+    Ok(())
 }
