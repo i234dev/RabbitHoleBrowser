@@ -574,7 +574,7 @@ impl Realm {
 
     /// Called by the VM at safe points.
     pub(crate) fn maybe_gc(&mut self) {
-        if self.gc_enabled && self.native_depth == 0 && self.heap.allocated_since_gc > self.gc_threshold {
+        if self.gc_enabled && self.native_depth == 0 && self.heap.allocated_since_gc > self.gc_threshold && std::env::var_os("RH_NO_GC").is_none() {
             let freed = self.gc();
             // Adapt threshold to the live heap size.
             self.gc_threshold = (self.heap.live_count.max(50_000)).max(freed / 2);
@@ -618,11 +618,33 @@ impl Realm {
     /// to the console and do not stop the drain.
     pub fn run_jobs(&mut self) {
         while let Some(job) = self.jobs.pop_front() {
+            // Keep the running job's values alive: it is no longer in the
+            // queue, and the code it runs may trigger a collection.
+            let mut job_roots = Vec::new();
+            match &job {
+                Job::Reaction { reaction, argument } => {
+                    crate::heap::trace_reaction(reaction, &mut job_roots);
+                    job_roots.push(argument.clone());
+                }
+                Job::ResolveThenable { promise, thenable, then } => {
+                    job_roots.push(Value::Object(*promise));
+                    job_roots.push(thenable.clone());
+                    job_roots.push(then.clone());
+                }
+                Job::Callback { func, this, args } => {
+                    job_roots.push(func.clone());
+                    job_roots.push(this.clone());
+                    job_roots.extend(args.iter().cloned());
+                }
+            }
+            let mark = self.extra_roots.len();
+            self.extra_roots.extend(job_roots);
             let r = match job {
                 Job::Reaction { reaction, argument } => self.run_reaction(reaction, argument),
                 Job::ResolveThenable { promise, thenable, then } => self.run_resolve_thenable(promise, thenable, then),
                 Job::Callback { func, this, args } => self.call(func, this, &args).map(|_| ()),
             };
+            self.extra_roots.truncate(mark);
             if let Err(e) = r {
                 let msg = self.error_to_string(&e);
                 self.console_emit("error", format!("Uncaught (in job) {}", msg));
