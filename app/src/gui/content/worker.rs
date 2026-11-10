@@ -616,13 +616,9 @@ impl Worker {
     }
 
     fn scroll_to_fragment(&mut self, fragment: &str) {
-        let target = fragment.trim_start_matches('#');
-        if target.is_empty() || target == "top" {
-            self.set_scroll(0.0, 0.0);
-            return;
-        }
-        if let Some(r) = self.page.as_ref().and_then(|p| p.anchor_rect(target)) {
-            self.set_scroll(0.0, r.y);
+        // An element named by the fragment wins over the special `top`.
+        if let Some(y) = self.page.as_ref().and_then(|p| p.fragment_scroll(fragment)) {
+            self.set_scroll(0.0, y);
         }
     }
 

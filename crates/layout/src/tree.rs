@@ -211,6 +211,10 @@ pub struct LayoutBox {
     pub margin: Edges<f32>,
     /// Effective bottom margin after collapsing with descendants.
     pub collapsed_bottom_margin: f32,
+    /// The set of adjoining margins collapsed into the bottom margin, as
+    /// (largest positive, most negative) — needed to keep collapsing it with
+    /// the following sibling's margins (CSS 2.1 §8.3.1).
+    pub(crate) bottom_margins: (f32, f32),
     /// Static position hint for absolutely positioned boxes.
     pub static_pos: (f32, f32),
     pub colspan: u32,
@@ -256,6 +260,7 @@ impl LayoutBox {
             baseline: None,
             margin: Edges::all(0.0),
             collapsed_bottom_margin: 0.0,
+            bottom_margins: (0.0, 0.0),
             static_pos: (0.0, 0.0),
             colspan: 1,
             bfc_root: false,

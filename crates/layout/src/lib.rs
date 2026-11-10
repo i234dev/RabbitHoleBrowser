@@ -21,6 +21,8 @@ mod text;
 mod tests;
 #[cfg(test)]
 mod tests_flexgrid;
+#[cfg(test)]
+mod tests_css21;
 
 pub use display_list::{DisplayItem, DisplayList, HitEntry, HitList, HitScope, HitScopeNode};
 pub use tree::{

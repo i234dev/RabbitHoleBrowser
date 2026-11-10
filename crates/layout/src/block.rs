@@ -60,15 +60,100 @@ pub(crate) fn horizontal_extras(style: &ComputedStyle, cbw: f32) -> f32 {
     p.left + p.right + style.border_width.left + style.border_width.right
 }
 
-/// Collapse two vertical margins.
-pub(crate) fn collapse(a: f32, b: f32) -> f32 {
-    if a >= 0.0 && b >= 0.0 {
-        a.max(b)
-    } else if a < 0.0 && b < 0.0 {
-        a.min(b)
-    } else {
-        a + b
+/// A set of adjoining vertical margins being collapsed (CSS 2.1 §8.3.1):
+/// the result is the largest positive margin plus the most negative one.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Margins {
+    pos: f32,
+    neg: f32,
+}
+
+impl Margins {
+    pub fn of(m: f32) -> Margins {
+        Margins::default().add(m)
     }
+
+    pub fn from_pair((pos, neg): (f32, f32)) -> Margins {
+        Margins { pos, neg }
+    }
+
+    pub fn pair(self) -> (f32, f32) {
+        (self.pos, self.neg)
+    }
+
+    pub fn add(self, m: f32) -> Margins {
+        Margins {
+            pos: self.pos.max(m),
+            neg: self.neg.min(m),
+        }
+    }
+
+    pub fn join(self, o: Margins) -> Margins {
+        Margins {
+            pos: self.pos.max(o.pos),
+            neg: self.neg.min(o.neg),
+        }
+    }
+
+    pub fn resolve(self) -> f32 {
+        self.pos + self.neg
+    }
+}
+
+/// Does a length used for `height`/`min-height` resolve to zero or auto
+/// (percentages against an indefinite containing block are auto)?
+fn zero_or_auto_height(l: Length, cb_h: Option<f32>) -> bool {
+    match l {
+        Length::Px(v) => v == 0.0,
+        Length::Percent(p) => p == 0.0 || cb_h.map(|h| h * p == 0.0).unwrap_or(true),
+        Length::Auto => true,
+        Length::MinContent | Length::MaxContent | Length::FitContent => true,
+    }
+}
+
+fn is_zero_len(l: Length) -> bool {
+    match l {
+        Length::Px(v) => v == 0.0,
+        Length::Percent(p) => p == 0.0,
+        _ => true,
+    }
+}
+
+/// Would this inline content produce no line boxes (CSS 2.1 §9.4.2: lines
+/// with no text, no preserved white space, no inline boxes with non-zero
+/// margins/padding/borders and no other in-flow content are zero-height)?
+fn inline_content_is_empty(b: &LayoutBox) -> bool {
+    use crate::tree::InlineItem;
+    use rabbithole_style::WhiteSpace;
+    for it in &b.items {
+        match it {
+            InlineItem::Text { text, style, .. } => {
+                let preserve = matches!(style.white_space, WhiteSpace::Pre | WhiteSpace::PreWrap);
+                let preserve_newlines = style.white_space == WhiteSpace::PreLine;
+                for ch in text.chars() {
+                    let collapsible = matches!(ch, ' ' | '\t' | '\r' | '\x0c') && !preserve || ch == '\n' && !preserve && !preserve_newlines;
+                    if !collapsible {
+                        return false;
+                    }
+                }
+            }
+            InlineItem::Open { style, .. } => {
+                let s = style;
+                if s.border_width.left > 0.0
+                    || s.border_width.right > 0.0
+                    || !is_zero_len(s.padding.left)
+                    || !is_zero_len(s.padding.right)
+                    || !is_zero_len(s.margin.left)
+                    || !is_zero_len(s.margin.right)
+                {
+                    return false;
+                }
+            }
+            InlineItem::Close | InlineItem::Float(_) | InlineItem::Absolute(_) => {}
+            InlineItem::Atomic(_) | InlineItem::Break => return false,
+        }
+    }
+    true
 }
 
 pub(crate) fn shrink_to_fit(min: f32, max: f32, avail: f32) -> f32 {
@@ -137,17 +222,99 @@ impl<'a> Layouter<'a> {
 
     /// Top margin of a block after collapsing with its first descendants.
     pub fn effective_top_margin(&self, b: &LayoutBox, cbw: f32) -> f32 {
-        let mt = b.style.margin.top.resolve_or_zero(cbw);
-        if !b.flow.is_in_flow() || !self.top_collapsible(b, cbw) {
-            return mt;
-        }
+        self.top_margins(b, cbw, None).resolve()
+    }
+
+    /// Width of `b`'s content box for resolving its children's percentage
+    /// margins ahead of layout (approximate: ignores floats and shrink-to-fit).
+    fn inner_width_estimate(&self, b: &LayoutBox, cbw: f32) -> f32 {
         let inner_w = (cbw - horizontal_extras(&b.style, cbw) - b.style.margin.left.resolve_or_zero(cbw) - b.style.margin.right.resolve_or_zero(cbw)).max(0.0);
-        let inner_w = b.style.width.resolve(cbw).unwrap_or(inner_w);
-        match b.children.iter().find(|c| c.is_in_flow()) {
-            Some(first) if first.kind != BoxKind::AnonymousBlock && first.formatting != Formatting::None => {
-                collapse(mt, self.effective_top_margin(first, inner_w))
+        b.style.width.resolve(cbw).unwrap_or(inner_w)
+    }
+
+    /// Definite content height of `b` for its children's percentages.
+    fn inner_height_estimate(&self, b: &LayoutBox, cb_h: Option<f32>) -> Option<f32> {
+        match b.style.height {
+            Length::Px(v) => Some(v),
+            Length::Percent(p) => cb_h.map(|h| h * p / 100.0),
+            _ => None,
+        }
+    }
+
+    /// The margins adjoining `b`'s top margin from the inside: its own top
+    /// margin, its first in-flow child's (recursively, while no border,
+    /// padding or BFC boundary separates them) and the margins of empty
+    /// blocks collapsing through on the way (CSS 2.1 §8.3.1).
+    pub(crate) fn top_margins(&self, b: &LayoutBox, cbw: f32, cb_h: Option<f32>) -> Margins {
+        if self.collapses_through(b, cb_h) {
+            return self.all_margins(b, cbw, cb_h);
+        }
+        let m = Margins::of(b.style.margin.top.resolve_or_zero(cbw));
+        if !b.flow.is_in_flow() || !self.top_collapsible(b, cbw) {
+            return m;
+        }
+        let inner_w = self.inner_width_estimate(b, cbw);
+        let inner_h = self.inner_height_estimate(b, cb_h);
+        m.join(self.leading_child_margins(b, inner_w, inner_h))
+    }
+
+    /// Margins of `b`'s leading in-flow children that adjoin its content
+    /// top: empty blocks collapsing through, then the first non-empty one's
+    /// top margin chain.
+    fn leading_child_margins(&self, b: &LayoutBox, inner_w: f32, inner_h: Option<f32>) -> Margins {
+        let mut m = Margins::default();
+        for c in b.children.iter().filter(|c| c.is_in_flow()) {
+            if !matches!(c.kind, BoxKind::Block | BoxKind::AnonymousBlock | BoxKind::Table | BoxKind::Image) {
+                break;
             }
-            _ => mt,
+            if self.collapses_through(c, inner_h) {
+                if c.style.clear != Clear::None {
+                    break;
+                }
+                m = m.join(self.all_margins(c, inner_w, inner_h));
+                continue;
+            }
+            m = m.join(self.top_margins(c, inner_w, inner_h));
+            break;
+        }
+        m
+    }
+
+    /// All margins of a box whose margins collapse through it, including its
+    /// (empty) descendants'.
+    fn all_margins(&self, b: &LayoutBox, cbw: f32, cb_h: Option<f32>) -> Margins {
+        let mut m = Margins::of(b.style.margin.top.resolve_or_zero(cbw)).add(b.style.margin.bottom.resolve_or_zero(cbw));
+        if b.formatting == Formatting::Block {
+            let inner_w = self.inner_width_estimate(b, cbw);
+            let inner_h = self.inner_height_estimate(b, cb_h);
+            for c in b.children.iter().filter(|c| c.is_in_flow()) {
+                m = m.join(self.all_margins(c, inner_w, inner_h));
+            }
+        }
+        m
+    }
+
+    /// Is `b` an empty block whose top and bottom margins are adjoining
+    /// (zero/auto height, zero min-height, no borders/padding vertically,
+    /// no line boxes and only such children; not a BFC root)?
+    pub(crate) fn collapses_through(&self, b: &LayoutBox, cb_h: Option<f32>) -> bool {
+        if !b.flow.is_in_flow() || b.bfc_root || !matches!(b.kind, BoxKind::Block | BoxKind::AnonymousBlock) {
+            return false;
+        }
+        let s = &b.style;
+        if !zero_or_auto_height(s.height, cb_h) || !zero_or_auto_height(s.min_height, cb_h) {
+            return false;
+        }
+        if s.border_width.top > 0.0 || s.border_width.bottom > 0.0 || !is_zero_len(s.padding.top) || !is_zero_len(s.padding.bottom) {
+            return false;
+        }
+        match b.formatting {
+            Formatting::Inline => inline_content_is_empty(b),
+            Formatting::Block => {
+                let inner_h = self.inner_height_estimate(b, cb_h);
+                b.children.iter().filter(|c| c.is_in_flow()).all(|c| self.collapses_through(c, inner_h))
+            }
+            _ => false,
         }
     }
 
@@ -251,6 +418,7 @@ impl<'a> Layouter<'a> {
             && bw.bottom == 0.0;
         let top_collapsible = self.top_collapsible(b, cbw);
         b.collapsed_bottom_margin = mb;
+        b.bottom_margins = Margins::of(mb).pair();
 
         let mut local_bfc = Bfc::new();
         let content_h = if b.bfc_root {
@@ -266,8 +434,11 @@ impl<'a> Layouter<'a> {
         h = self.clamp_height(&style, h, cb.height, pb_v);
         b.rect.h = h + pb_v;
         b.content_rect.h = h;
-        if explicit_h.is_some() {
+        if explicit_h.is_some() || (h - content_h).abs() > 0.01 {
+            // A definite or clamped height separates the last child's
+            // bottom margin from ours.
             b.collapsed_bottom_margin = mb;
+            b.bottom_margins = Margins::of(mb).pair();
         }
 
         self.place_marker(b);
@@ -345,56 +516,76 @@ impl<'a> Layouter<'a> {
     }
 
     /// Lay out block-level children; returns the content height.
+    ///
+    /// Vertical margins collapse per CSS 2.1 §8.3.1: `pending` holds the
+    /// margins adjoining the current position (the previous sibling's
+    /// collapsed bottom margin plus those of empty blocks in between). While
+    /// `at_top`, the parent's top margin chain is still open — those margins
+    /// were already applied when the parent was positioned.
     fn layout_block_children(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         let content_y = b.content_rect.y;
         let content_x = b.content_rect.x;
         let mut cursor = content_y;
-        let mut prev_bottom: Option<f32> = None;
-        let mut last_in_flow: Option<usize> = None;
+        let mut pending = Margins::default();
+        let mut at_top = top_collapsible;
         let mb = b.margin.bottom;
         for i in 0..b.children.len() {
             match b.children[i].flow {
                 Flow::Absolute => {
-                    b.children[i].static_pos = (content_x, cursor + prev_bottom.unwrap_or(0.0).max(0.0));
+                    let off = if at_top { 0.0 } else { pending.resolve() };
+                    b.children[i].static_pos = (content_x, cursor + off);
                 }
                 Flow::FloatLeft | Flow::FloatRight => {
-                    let y = cursor + prev_bottom.unwrap_or(0.0).max(0.0);
-                    self.layout_float(&mut b.children[i], cb, y, bfc);
+                    let off = if at_top { 0.0 } else { pending.resolve() };
+                    self.layout_float(&mut b.children[i], cb, cursor + off, bfc);
                 }
                 Flow::InFlow => {
-                    let eff_top = self.effective_top_margin(&b.children[i], cb.width);
-                    let top = match prev_bottom {
-                        None => {
-                            if top_collapsible {
-                                content_y
-                            } else {
-                                content_y + eff_top
-                            }
+                    let empty = self.collapses_through(&b.children[i], cb.height);
+                    let child_top = self.top_margins(&b.children[i], cb.width, cb.height);
+                    // Hypothetical position of the border edge (no clearance).
+                    let mut top = if at_top { content_y } else { cursor + pending.join(child_top).resolve() };
+                    let mut clearance = false;
+                    let clear = b.children[i].style.clear;
+                    if clear != Clear::None {
+                        let cy = bfc.clear_y(clear);
+                        if cy > top + 0.001 {
+                            // Clearance (CSS 2.1 §9.5.2): the border edge goes
+                            // just below the floats; margins above no longer
+                            // collapse with the cleared box's top margin.
+                            top = cy;
+                            clearance = true;
                         }
-                        Some(pb) => cursor + collapse(pb, eff_top),
-                    };
+                    }
                     self.layout_block(&mut b.children[i], cb, top, bfc, WidthMode::Fill);
                     let child = &b.children[i];
-                    cursor = child.rect.bottom();
-                    prev_bottom = Some(child.collapsed_bottom_margin);
-                    last_in_flow = Some(i);
+                    if empty && !clearance && child.rect.h <= 0.001 {
+                        // Margins collapse through the empty box.
+                        if !at_top {
+                            pending = pending.join(child_top);
+                        }
+                    } else {
+                        at_top = false;
+                        cursor = child.rect.bottom();
+                        pending = if empty { Margins::of(child.margin.bottom) } else { Margins::from_pair(child.bottom_margins) };
+                    }
                 }
             }
         }
-        match (last_in_flow, prev_bottom) {
-            (Some(_), Some(pb)) => {
-                if bottom_collapsible {
-                    b.collapsed_bottom_margin = collapse(mb, pb);
-                    cursor - content_y
-                } else {
-                    b.collapsed_bottom_margin = mb;
-                    (cursor + pb - content_y).max(0.0)
-                }
-            }
-            _ => {
-                b.collapsed_bottom_margin = mb;
-                0.0
-            }
+        if at_top {
+            // No in-flow content separated the parent's margins.
+            b.collapsed_bottom_margin = mb;
+            b.bottom_margins = Margins::of(mb).pair();
+            return 0.0;
+        }
+        if bottom_collapsible {
+            let m = pending.add(mb);
+            b.collapsed_bottom_margin = m.resolve();
+            b.bottom_margins = m.pair();
+            cursor - content_y
+        } else {
+            b.collapsed_bottom_margin = mb;
+            b.bottom_margins = Margins::of(mb).pair();
+            (cursor + pending.resolve() - content_y).max(0.0)
         }
     }
 

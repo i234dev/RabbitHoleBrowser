@@ -800,6 +800,12 @@ pub struct ComputedStyle {
     pub border_collapse: bool,
     /// `border-spacing` (horizontal, vertical) in px (inherited; tables).
     pub border_spacing: (f32, f32),
+    /// `table-layout: fixed` (not inherited).
+    pub table_layout_fixed: bool,
+    /// `caption-side: bottom` (inherited).
+    pub caption_side_bottom: bool,
+    /// `empty-cells: hide` (inherited).
+    pub empty_cells_hide: bool,
 }
 
 impl ComputedStyle {
@@ -913,6 +919,9 @@ impl ComputedStyle {
             creates_stacking_context: false,
             border_collapse: false,
             border_spacing: (0.0, 0.0),
+            table_layout_fixed: false,
+            caption_side_bottom: false,
+            empty_cells_hide: false,
         }
     }
 
@@ -953,6 +962,8 @@ impl ComputedStyle {
             user_select: parent.user_select,
             border_collapse: parent.border_collapse,
             border_spacing: parent.border_spacing,
+            caption_side_bottom: parent.caption_side_bottom,
+            empty_cells_hide: parent.empty_cells_hide,
             ..ComputedStyle::initial()
         }
     }

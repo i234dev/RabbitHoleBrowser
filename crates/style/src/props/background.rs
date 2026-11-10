@@ -324,31 +324,56 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
     let mut out = BackgroundLayer::default();
     let mut col = None;
     let mut boxes: Vec<BoxArea> = Vec::new();
+    // Each component may appear at most once (`background: red pink` is
+    // invalid as a whole).
+    let (mut seen_image, mut seen_repeat, mut seen_attach, mut seen_pos) = (false, false, false, false);
     let mut i = 0;
     while i < layer.len() {
         let c = layer[i];
         if let Some(img) = parse_image(c, current, ctx) {
+            if seen_image {
+                return None;
+            }
+            seen_image = true;
             out.image = img;
             i += 1;
             continue;
         }
         if let Some(cc) = color(c, current) {
+            if col.is_some() {
+                return None;
+            }
             col = Some(cc);
             i += 1;
             continue;
         }
+        if is_repeat_kw(c) && seen_repeat {
+            return None;
+        }
+        if is_attachment_kw(c) && seen_attach {
+            return None;
+        }
+        if (is_position_kw(c) || super::len_no_auto(c, ctx).is_some()) && seen_pos {
+            return None;
+        }
+        if parse_box(c).is_some() && boxes.len() >= 2 {
+            return None;
+        }
         if is_repeat_kw(c) {
+            seen_repeat = true;
             let mut j = i + 1;
             if j < layer.len() && is_repeat_kw(layer[j]) && !matches!(values::ident(c).as_deref(), Some("repeat-x" | "repeat-y")) {
                 j += 1;
             }
-            if let Some(r) = parse_repeat(&layer[i..j]) {
-                out.repeat = r;
+            match parse_repeat(&layer[i..j]) {
+                Some(r) => out.repeat = r,
+                None => return None,
             }
             i = j;
             continue;
         }
         if is_attachment_kw(c) {
+            seen_attach = true;
             out.fixed = values::is_ident(c, "fixed");
             i += 1;
             continue;
@@ -379,6 +404,7 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
                 k -= 1;
             }
             let Some(p) = pos else { return None };
+            seen_pos = true;
             out.position = p;
             i = k;
             if i < layer.len() && matches!(layer[i], [Token::Delim('/')]) {
@@ -387,8 +413,9 @@ fn parse_layer(layer: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<(Ba
                 while j < layer.len() && j - i < 2 && (values::is_ident(layer[j], "auto") || values::is_ident(layer[j], "cover") || values::is_ident(layer[j], "contain") || super::len_no_auto(layer[j], ctx).is_some()) {
                     j += 1;
                 }
-                if let Some(s) = parse_size(&layer[i..j], ctx) {
-                    out.size = s;
+                match parse_size(&layer[i..j], ctx) {
+                    Some(s) => out.size = s,
+                    None => return None,
                 }
                 i = j;
             }
@@ -448,9 +475,12 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             let layers = values::split_commas(comps);
             let mut out = Vec::with_capacity(layers.len());
             let mut final_color = None;
-            for layer in &layers {
+            for (k, layer) in layers.iter().enumerate() {
                 let Some((l, col)) = parse_layer(layer, current, ctx) else { return true };
                 if let Some(c) = col {
+                    if k + 1 != layers.len() {
+                        return true; // a color is only allowed in the final layer
+                    }
                     final_color = Some(c);
                 }
                 out.push(l);

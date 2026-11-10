@@ -270,19 +270,37 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.scroll_margin_top = v;
             }
         }
-        "border-collapse" => {
-            if let Some(kw) = values::ident(c0) {
-                style.border_collapse = kw == "collapse";
-            }
-        }
+        "border-collapse" => match values::ident(c0).as_deref() {
+            Some("collapse") => style.border_collapse = true,
+            Some("separate") => style.border_collapse = false,
+            _ => {}
+        },
         "border-spacing" => {
-            let vals: Vec<f32> = comps.iter().filter_map(|c| super::px(c, ctx)).collect();
+            let vals: Vec<f32> = comps.iter().filter_map(|c| super::px(c, ctx)).filter(|v| *v >= 0.0).collect();
+            if vals.len() != comps.len() {
+                return true;
+            }
             match vals.len() {
                 1 => style.border_spacing = (vals[0], vals[0]),
                 2 => style.border_spacing = (vals[0], vals[1]),
                 _ => {}
             }
         }
+        "table-layout" => match values::ident(c0).as_deref() {
+            Some("fixed") => style.table_layout_fixed = true,
+            Some("auto") => style.table_layout_fixed = false,
+            _ => {}
+        },
+        "caption-side" => match values::ident(c0).as_deref() {
+            Some("bottom") | Some("block-end") => style.caption_side_bottom = true,
+            Some("top") | Some("block-start") => style.caption_side_bottom = false,
+            _ => {}
+        },
+        "empty-cells" => match values::ident(c0).as_deref() {
+            Some("hide") => style.empty_cells_hide = true,
+            Some("show") => style.empty_cells_hide = false,
+            _ => {}
+        },
         "object-fit" => {
             if let Some(kw) = values::ident(c0) {
                 style.object_fit = match kw.as_str() {

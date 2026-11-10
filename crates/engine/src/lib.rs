@@ -205,7 +205,9 @@ impl Loader {
             return Ok(self.load_html(html, url, viewport));
         }
         let resp = self.fetcher.fetch(&url)?;
-        Ok(self.load_response(resp, viewport))
+        let mut page = self.load_response(resp, viewport);
+        inherit_fragment(&mut page.url, &url);
+        Ok(page)
     }
 
     /// Navigate with an arbitrary request (form POST, link with referer).
@@ -226,7 +228,9 @@ impl Loader {
         if resp.status >= 400 && resp.body.is_empty() {
             return Err(EngineError::Fetch(format!("HTTP {}", resp.status)));
         }
-        Ok(Loaded::Page(self.load_response(resp, viewport)))
+        let mut page = self.load_response(resp, viewport);
+        inherit_fragment(&mut page.url, &req.url);
+        Ok(Loaded::Page(page))
     }
 
     /// Turn an HTTP(-like) response into a page based on its content type.
@@ -1237,6 +1241,14 @@ impl Engine {
     }
 }
 
+/// The response URL keeps the request's fragment unless a redirect gave
+/// it its own (Fetch: "location URL's fragment").
+fn inherit_fragment(url: &mut Url, requested: &Url) {
+    if url.fragment.is_none() {
+        url.fragment = requested.fragment.clone();
+    }
+}
+
 fn empty_layout() -> LayoutTree {
     LayoutTree::empty()
 }
@@ -1587,6 +1599,27 @@ impl Page {
             return None;
         }
         self.base_url.join(href)
+    }
+
+    /// Vertical scroll position for navigating to `fragment` (HTML "scroll
+    /// to the fragment"): the element with that id (or `<a name>`), else the
+    /// top of the document for an empty fragment or `top`. Clamped to the
+    /// scrollable range. `None` when the fragment names nothing.
+    pub fn fragment_scroll(&self, fragment: &str) -> Option<f32> {
+        let id = fragment.trim_start_matches('#');
+        let id = rabbithole_net::percent_decode(id);
+        let max = (self.content_height() - self.viewport.height).max(0.0);
+        if !id.is_empty() {
+            let node = self.doc.element_by_id(&id).or_else(|| {
+                self.doc
+                    .descendants(Document::ROOT)
+                    .find(|&n| self.doc.is_element(n, "a") && self.doc.attr(n, "name") == Some(id.as_str()))
+            });
+            if let Some(r) = node.and_then(|n| self.rect_of(n)) {
+                return Some(r.y.clamp(0.0, max));
+            }
+        }
+        (id.is_empty() || id.eq_ignore_ascii_case("top")).then_some(0.0)
     }
 
     /// Document-space rectangle of the element with `id` (or `<a name>`).

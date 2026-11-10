@@ -527,8 +527,19 @@ fn apply_declarations(
         viewport_w: env.width,
         viewport_h: env.height,
     };
+    // `color` first: `currentcolor` in every other property (borders,
+    // backgrounds, shadows...) is the element's final color, whatever the
+    // declaration order.
     for (name, value, base) in &resolved {
-        if *name == "font-size" {
+        if *name == "color" {
+            let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
+            apply_property(name, value, &mut style, parent, &ctx);
+        }
+    }
+    // `border-*-color` is not inherited; its initial value is currentcolor.
+    style.border_color = Edges::all(style.color);
+    for (name, value, base) in &resolved {
+        if *name == "font-size" || *name == "color" {
             continue;
         }
         let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
@@ -1237,6 +1248,9 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         | "animation-iteration-count" | "animation-direction" | "animation-fill-mode" => to.animations = from.animations.clone(),
         "border-collapse" => to.border_collapse = from.border_collapse,
         "border-spacing" => to.border_spacing = from.border_spacing,
+        "table-layout" => to.table_layout_fixed = from.table_layout_fixed,
+        "caption-side" => to.caption_side_bottom = from.caption_side_bottom,
+        "empty-cells" => to.empty_cells_hide = from.empty_cells_hide,
         "scroll-margin-top" => to.scroll_margin_top = from.scroll_margin_top,
         "filter" | "isolation" | "will-change" | "contain" | "mix-blend-mode" => to.creates_stacking_context = from.creates_stacking_context,
         _ => {}
@@ -1550,6 +1564,19 @@ fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
     Some(out)
 }
 
+/// Properties whose grammar is a single component value.
+const SINGLE_VALUE: &[&str] = &[
+    "position", "float", "clear", "flex-direction", "width", "height", "min-width", "min-height", "max-width", "max-height",
+    "margin-top", "margin-right", "margin-bottom", "margin-left", "padding-top", "padding-right", "padding-bottom",
+    "padding-left", "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
+    "border-top-style", "border-right-style", "border-bottom-style", "border-left-style", "border-top-color",
+    "border-right-color", "border-bottom-color", "border-left-color", "box-sizing", "top", "right", "bottom", "left",
+    "color", "background-color", "opacity", "font-weight", "font-style", "line-height", "letter-spacing", "word-spacing",
+    "text-align", "text-transform", "text-indent", "white-space", "vertical-align", "list-style-type",
+    "list-style-position", "overflow-x", "overflow-y", "visibility", "z-index", "font-size",
+    "border-collapse", "table-layout", "caption-side", "empty-cells",
+];
+
 fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) {
     // Logical property aliases.
     let name = match name {
@@ -1611,6 +1638,15 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
 
     let comps = values::components(value);
     if comps.is_empty() {
+        return;
+    }
+    // Values containing bad tokens or stray blocks never match a property
+    // grammar; single-value properties with extra components are invalid
+    // as a whole (CSS Syntax 3 / CSS 2.1 §4.2: drop the declaration).
+    if value.iter().any(|t| matches!(t, Token::BadString | Token::BadUrl | Token::OpenBrace | Token::CloseBrace)) {
+        return;
+    }
+    if SINGLE_VALUE.contains(&name) && comps.len() != 1 {
         return;
     }
     let c0 = comps[0];
@@ -1784,12 +1820,16 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             let mut width = None;
             let mut bstyle = None;
             let mut color = None;
+            if comps.len() > 3 {
+                return;
+            }
+            // Each of width / style / color at most once, in any order.
             for c in &comps {
-                if let Some(s) = border_style(c) {
+                if let Some(s) = border_style(c).filter(|_| bstyle.is_none()) {
                     bstyle = Some(s);
-                } else if let Some(w) = border_width(c, ctx) {
+                } else if let Some(w) = border_width(c, ctx).filter(|_| width.is_none()) {
                     width = Some(w);
-                } else if let Some(col) = color_of(c, style) {
+                } else if let Some(col) = color_of(c, style).filter(|_| color.is_none()) {
                     color = Some(col);
                 } else {
                     return;
@@ -2037,12 +2077,14 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                         "none" => none_seen = true,
                         "inside" => pos = Some(ListStylePosition::Inside),
                         "outside" => pos = Some(ListStylePosition::Outside),
-                        k => {
-                            if let Some(t) = list_style_type(k) {
-                                ty = Some(t);
-                            }
-                        }
+                        k => match list_style_type(k) {
+                            Some(t) => ty = Some(t),
+                            // Any other identifier names a counter style (decimal fallback).
+                            None => ty = Some(ListStyleType::Decimal),
+                        },
                     }
+                } else if url_of(c).is_none() && !matches!(c, [Token::String(_)]) && props::fn_name(c).is_none() {
+                    return;
                 }
             }
             style.list_style_type = ty.unwrap_or(if none_seen { ListStyleType::None } else { ListStyleType::Disc });
@@ -2066,6 +2108,9 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         }
         "overflow" => {
             let vals: Vec<Overflow> = comps.iter().filter_map(|c| overflow_of(c)).collect();
+            if vals.len() != comps.len() {
+                return;
+            }
             match vals.len() {
                 1 => {
                     style.overflow_x = vals[0];
@@ -2100,7 +2145,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         "z-index" => {
             if values::is_ident(c0, "auto") {
                 style.z_index = None;
-            } else if let Some(n) = values::number(c0) {
+            } else if let Some(n) = values::number(c0).filter(|n| n.fract() == 0.0) {
                 style.z_index = Some(n as i32);
             }
         }

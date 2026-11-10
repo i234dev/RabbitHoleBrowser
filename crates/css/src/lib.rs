@@ -470,14 +470,18 @@ impl<'a> Parser<'a> {
                     while value.last() == Some(&Token::Whitespace) {
                         value.pop();
                     }
-                    // !important
+                    // `!important` (CSS Syntax 3 §5.4.6: the last two
+                    // non-whitespace tokens are `!` and `important`).
                     let mut important = false;
-                    let n = value.len();
-                    if n >= 2 {
-                        if let (Token::Delim('!'), Token::Ident(i)) = (&value[n - 2], &value[n - 1]) {
-                            if i.eq_ignore_ascii_case("important") {
+                    if let Some(Token::Ident(i)) = value.last() {
+                        if i.eq_ignore_ascii_case("important") {
+                            let mut k = value.len() - 1;
+                            while k > 0 && value[k - 1] == Token::Whitespace {
+                                k -= 1;
+                            }
+                            if k > 0 && value[k - 1] == Token::Delim('!') {
                                 important = true;
-                                value.truncate(n - 2);
+                                value.truncate(k - 1);
                                 while value.last() == Some(&Token::Whitespace) {
                                     value.pop();
                                 }

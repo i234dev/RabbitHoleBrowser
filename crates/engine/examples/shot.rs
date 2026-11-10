@@ -171,7 +171,14 @@ fn main() {
         rabbithole_engine::layout::paint(&nolayer, &mut c5, &engine.fonts, 0.0, 0.0);
         eprintln!("[profile] full paint without layers {:?}", t.elapsed());
     }
-    engine.render(&page, &mut canvas, 0.0, 0.0);
+    // Scroll like a browser navigating to the URL's fragment (or RH_SCROLL).
+    let scroll_y = std::env::var("RH_SCROLL")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .or_else(|| page.url.fragment.clone().and_then(|f| page.fragment_scroll(&f)))
+        .unwrap_or(0.0);
+    engine.set_page_scroll(&mut page, 0.0, scroll_y);
+    engine.render(&page, &mut canvas, 0.0, scroll_y);
     let t3 = std::time::Instant::now();
     image::save_buffer(out, &canvas.to_rgba8(), w, h, image::ExtendedColorType::Rgba8).expect("write png");
     eprintln!(

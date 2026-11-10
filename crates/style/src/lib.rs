@@ -8,6 +8,8 @@ pub mod computed;
 pub mod props;
 #[cfg(test)]
 mod tests_props;
+#[cfg(test)]
+mod tests_errors;
 pub mod ua;
 pub mod values;
 
