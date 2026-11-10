@@ -859,6 +859,19 @@ fn canvas_2d_text_strokes_compositing_and_shadows() {
 }
 
 #[test]
+fn dynamic_import_of_blob_module() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const src = 'export const answer = 42; export default function hi() { return "hi"; }';
+        const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        import(url).then((m) => console.log('blob module', m.answer, m.default()), (e) => console.log('failed', e.message));
+        "#,
+    );
+    assert_eq!(out, vec!["blob module 42 hi"]);
+}
+
+#[test]
 fn custom_element_failed_upgrade_gets_no_callbacks() {
     let (mut env, mut host) = crate::tests::setup("<html><body><x-bad></x-bad><x-good></x-good></body></html>");
     let out = crate::tests::run(

@@ -1154,7 +1154,7 @@ fn url_revoke_object_url(realm: &mut Realm, _this: Value, args: &[Value]) -> JsR
 }
 
 /// The response for a `blob:` URL from the object URL store.
-fn blob_url_response(url: &str) -> Option<rabbithole_net::Response> {
+pub(crate) fn blob_url_response(url: &str) -> Option<rabbithole_net::Response> {
     let key = url.split('#').next().unwrap_or(url);
     let (bytes, ty) = state().borrow().blob_urls.get(key).cloned()?;
     let u = Url::parse_absolute(url).or_else(|| Url::parse_absolute("about:blank"))?;
