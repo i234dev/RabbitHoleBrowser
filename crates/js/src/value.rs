@@ -118,7 +118,11 @@ const ROPE_MIN: usize = 48;
 
 impl JsStr {
     pub fn new(s: &str) -> JsStr {
-        JsStr::from_inner(StrInner::Flat(s.encode_utf16().collect::<Vec<u16>>().into()))
+        // A UTF-8 string has at most as many UTF-16 units as bytes: one
+        // allocation, exact for ASCII (no growth, no shrink).
+        let mut v = Vec::with_capacity(s.len());
+        v.extend(s.encode_utf16());
+        JsStr::from_inner(StrInner::Flat(v.into()))
     }
     pub fn from_units(units: Vec<u16>) -> JsStr {
         JsStr::from_inner(StrInner::Flat(units.into()))

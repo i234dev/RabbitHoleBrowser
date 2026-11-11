@@ -10,7 +10,7 @@ use crate::host::*;
 use crate::node;
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_js::{JsResult, Realm, Value, CONFIGURABLE, ENUMERABLE};
-use std::collections::HashMap;
+use crate::host::HashMap;
 
 const ACC: u8 = CONFIGURABLE | ENUMERABLE;
 

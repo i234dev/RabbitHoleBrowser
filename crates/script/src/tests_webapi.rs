@@ -1321,3 +1321,12 @@ fn custom_element_attribute_reactions_run_before_the_method_returns() {
     );
     assert_eq!(out, "'a:in,a:in,id:in,class:in,hidden:in'");
 }
+
+#[test]
+fn child_nodes_is_one_refreshed_node_list() {
+    let r = result_of(
+        "<div id=d><b>1</b><i>2</i></div>",
+        "var d = document.getElementById('d'); var a = d.childNodes; var same = a === d.childNodes; d.appendChild(document.createElement('u')); var b = d.childNodes; var bl = b.length; d.removeChild(d.firstChild); var result = [same, a === b, bl, d.childNodes.length, d.childNodes[0].tagName, d.childNodes instanceof NodeList, d.firstChild.childNodes.length].join();",
+    );
+    assert_eq!(r, "'true,true,3,2,I,true,1'");
+}

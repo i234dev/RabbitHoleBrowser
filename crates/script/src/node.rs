@@ -64,6 +64,10 @@ pub(crate) fn element_children_of(n: NodeRef) -> Vec<NodeRef> {
 /// Build a NodeList (array with the NodeList prototype).
 pub(crate) fn node_list(realm: &mut Realm, nodes: Vec<NodeRef>) -> Value {
     let values: Vec<Value> = nodes.into_iter().map(|n| wrap(realm, n)).collect();
+    node_list_from_values(realm, values)
+}
+
+fn node_list_from_values(realm: &mut Realm, values: Vec<Value>) -> Value {
     let arr = realm.new_array(values);
     let p = proto("NodeList");
     realm.obj_mut(arr).set_proto(Some(p));
@@ -866,8 +870,32 @@ fn n_parent_element(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
 
 fn n_child_nodes(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "childNodes")?;
+    let epoch = with_doc(n.doc, |doc| doc.epoch());
+    let cached = state().borrow().child_lists.get(&n).copied();
+    if let Some((arr, e)) = cached {
+        if e == epoch {
+            return Ok(Value::Object(arr));
+        }
+    }
     let kids = children_of(n);
-    Ok(node_list(realm, kids))
+    let values: Vec<Value> = kids.into_iter().map(|k| wrap(realm, k)).collect();
+    let arr = match cached {
+        Some((arr, _)) => {
+            // The same NodeList object, refreshed.
+            if let rabbithole_js::ObjectKind::Array { elements, length } = &mut realm.obj_mut(arr).kind {
+                *length = values.len() as u32;
+                *elements = values;
+            }
+            arr
+        }
+        None => {
+            let Some(arr) = node_list_from_values(realm, values).as_object() else { unreachable!() };
+            realm.extra_roots.push(Value::Object(arr));
+            arr
+        }
+    };
+    state().borrow_mut().child_lists.insert(n, (arr, epoch));
+    Ok(Value::Object(arr))
 }
 
 fn n_children(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {

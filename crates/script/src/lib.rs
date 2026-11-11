@@ -40,7 +40,7 @@ use rabbithole_dom::{Document, NodeId};
 use rabbithole_js::{Realm, Value};
 use rabbithole_net::Url;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use crate::host::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Web APIs implemented in JavaScript, evaluated in order at startup.
@@ -167,10 +167,11 @@ impl ScriptHost {
         realm.set_task_budget(Some(task_budget()));
         let now = env.now_ms();
         let state = Rc::new(RefCell::new(HostState {
-            wrappers: HashMap::new(),
-            protos: HashMap::new(),
-            listeners: HashMap::new(),
-            listener_counts: HashMap::new(),
+            wrappers: HashMap::default(),
+            child_lists: HashMap::default(),
+            protos: HashMap::default(),
+            listeners: HashMap::default(),
+            listener_counts: HashMap::default(),
             timers: Vec::new(),
             rafs: Vec::new(),
             next_timer_id: 1,
@@ -185,22 +186,22 @@ impl ScriptHost {
             window: realm.global(),
             document_obj: realm.global(),
             root_array: realm.new_array(Vec::new()),
-            ran_scripts: HashSet::new(),
-            inline_handlers: HashMap::new(),
+            ran_scripts: HashSet::default(),
+            inline_handlers: HashMap::default(),
             observers: Vec::new(),
             mutation_records: Vec::new(),
             mutation_scheduled: false,
-            custom_elements: HashMap::new(),
+            custom_elements: HashMap::default(),
             ce_constructing: None,
-            ce_upgraded: std::collections::HashSet::new(),
-            ce_failed: std::collections::HashSet::new(),
+            ce_upgraded: std::collections::HashSet::default(),
+            ce_failed: std::collections::HashSet::default(),
             location_override: None,
             history_len: 1,
             history_state: Value::Null,
             event_stack: Vec::new(),
             time_origin: now,
-            console_marks: HashMap::new(),
-            console_counts: HashMap::new(),
+            console_marks: HashMap::default(),
+            console_counts: HashMap::default(),
             pending_script_events: Vec::new(),
             pending_script_fetches: Vec::new(),
             pending_fetches: Vec::new(),
@@ -208,8 +209,8 @@ impl ScriptHost {
             modules: Default::default(),
             shadow: Default::default(),
             render: Default::default(),
-            factories: HashMap::new(),
-            blob_urls: HashMap::new(),
+            factories: HashMap::default(),
+            blob_urls: HashMap::default(),
             sockets: Default::default(),
             canvases: Default::default(),
             workers: Default::default(),

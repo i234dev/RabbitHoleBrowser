@@ -6,7 +6,10 @@ use rabbithole_js::V;
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, HIDDEN};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+/// Maps of the host state hash with the engine's Fx hasher: node / id keys
+/// are looked up on every DOM call (SipHash was a tenth of DOM-heavy runs).
+pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, rabbithole_js::value::FxBuild>;
+pub(crate) type HashSet<K> = std::collections::HashSet<K, rabbithole_js::value::FxBuild>;
 use std::rc::Rc;
 
 /// Identifies a node in the main document (`doc == 0`) or in an auxiliary
@@ -87,6 +90,10 @@ pub struct ObserverReg {
 #[allow(dead_code)]
 pub struct HostState {
     pub wrappers: HashMap<NodeRef, ObjectId>,
+    /// `childNodes` lists by parent, with the document epoch they were
+    /// filled at (one NodeList per node, refreshed in place when the
+    /// document changed: `el.childNodes === el.childNodes`).
+    pub child_lists: HashMap<NodeRef, (ObjectId, u64)>,
     pub protos: HashMap<&'static str, ObjectId>,
     pub listeners: HashMap<TargetKey, Vec<Listener>>,
     /// Count of listeners per (node, type) for fast existence checks.
