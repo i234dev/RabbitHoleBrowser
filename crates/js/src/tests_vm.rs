@@ -421,3 +421,14 @@ fn lazy_compilation() {
     eq("new Function('a', 'b', 'function inner(x) { return x * a; } return inner(b);')(3, 4)", "12");
     eq("eval('(function(q) { return function() { return q + 1; }; })(1)()')", "2");
 }
+
+#[test]
+fn typed_array_element_fast_paths() {
+    eq("var a = new Uint8Array(4); for (var i = 0; i < 6; i++) a[i] = i * 100; a.join() + ',' + a[5] + ',' + a.length", "0,100,200,44,undefined,4");
+    eq("var f = new Float64Array(2); f[0] = 1.5; f[1] = '2.5'; f[0] + f[1]", "4");
+    eq("var c = new Uint8ClampedArray(3); c[0] = 300; c[1] = -5; c[2] = 1.5; c.join()", "255,0,2");
+    eq("var i32 = new Int32Array(2); i32[0] = 2 ** 31; i32[1] = -1; i32[0] + ',' + i32[1]", "-2147483648,-1");
+    eq("var b = new BigInt64Array(1); b[0] = 5n; typeof b[0] + b[0]", "bigint5");
+    eq("var u = new Uint16Array(2); u['1'] = 7; u['-0'] = 9; u['1.5'] = 3; u.foo = 4; u[1] + ',' + u[0] + ',' + u['1.5'] + ',' + u.foo + ',' + Object.keys(u).join()", "7,0,undefined,4,0,1,foo");
+    eq("var t = new Uint8Array([1, 2, 3]); var s = 0; for (var k = 0; k < t.length; k++) s += t[k]; s + ',' + ('Infinity' in t) + ',' + ('2' in t) + ',' + ('3' in t)", "6,false,true,false");
+}

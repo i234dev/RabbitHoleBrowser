@@ -464,6 +464,15 @@ pub fn to_bigint(realm: &mut Realm, v: Value) -> JsResult<i128> {
 /// is a string `s` with ToString(ToNumber(s)) == s, or "-0".
 pub fn canonical_numeric_index(key: &PropertyKey) -> Option<f64> {
     let s = key.as_str()?;
+    // Fast answers: array indices, and names that cannot be numeric
+    // (a canonical numeric string starts with a digit, '-', 'I' or 'N').
+    if let Some(i) = s.as_array_index() {
+        return Some(i as f64);
+    }
+    match s.as_units().first() {
+        Some(&c) if (b'0' as u16..=b'9' as u16).contains(&c) || c == b'-' as u16 || c == b'I' as u16 || c == b'N' as u16 => {}
+        _ => return None,
+    }
     if s.eq_str("-0") {
         return Some(-0.0);
     }

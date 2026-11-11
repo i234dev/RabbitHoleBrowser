@@ -3047,6 +3047,7 @@ impl Realm {
                     Some(v) if !v.is_empty() => Some(v.clone()),
                     _ => None,
                 },
+                ObjectKind::TypedArray(t) if !matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) => crate::builtins::typed_array_get(self, t, i as usize),
                 _ => None,
             },
             Value::String(s) if (i as usize) < s.len() => Some(Value::String(s.char_at(i as usize))),
@@ -3061,6 +3062,13 @@ impl Realm {
         let (Value::Object(id), Value::Number(n)) = (obj, key) else { return Err(v) };
         let i = *n as u32;
         if i as f64 != *n || i >= (1 << 28) {
+            return Err(v);
+        }
+        if let (Some(ObjectKind::TypedArray(t)), Value::Number(x)) = (self.heap.try_get(*id).map(|o| &o.kind), &v) {
+            if !matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) && (i as usize) < t.length {
+                crate::builtins::typed_array_set(self, t, i as usize, *x);
+                return Ok(());
+            }
             return Err(v);
         }
         let Some(o) = self.heap.try_get_mut(*id) else { return Err(v) };
