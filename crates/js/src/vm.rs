@@ -550,6 +550,19 @@ impl Realm {
         Ok(true)
     }
 
+    /// Call the native getter `g` with the value in slot `o` of frame `fi`
+    /// as receiver (an inline-cache hit on an accessor); `None` when `g` is
+    /// not a native function.
+    #[inline(never)]
+    fn call_native_getter(&mut self, g: ObjectId, o: usize, fi: usize) -> JsResult<Option<Value>> {
+        let f = match self.heap.try_get(g).map(|x| &x.kind) {
+            Some(ObjectKind::Native(n)) => n.func,
+            _ => return Ok(None),
+        };
+        let this = self.vstack[self.frames[fi].base as usize + o].clone();
+        self.call_native(g, f, this, &[], false).map(Some)
+    }
+
     /// A tagged built-in computed without the native call when its
     /// receiver / arguments (at `cb + 1`, `cb + 2`...) are the common case;
     /// `None` falls back to the native.
@@ -1554,29 +1567,23 @@ impl Realm {
                         } else {
                             match self.ic_get(&rec, recv) {
                                 Some(p) if p.flags & ACCESSOR == 0 => Some(p.value.clone()),
-                                Some(p) => match p.getter() {
-                                    // Cached accessor with a native getter
-                                    // (DOM attributes, `ta.length`, ...):
-                                    // call it directly.
-                                    Some(Value::Object(g)) => {
+                                Some(p) => {
+                                    // Cached accessor: a native getter (DOM
+                                    // attributes, `ta.length`, ...) is called
+                                    // directly, out of line.
+                                    if let Some(Value::Object(g)) = p.getter() {
                                         let g = *g;
-                                        match self.heap.try_get(g).map(|o| &o.kind) {
-                                            Some(ObjectKind::Native(n)) => {
-                                                let f = n.func;
-                                                let this = recv.clone();
-                                                sync!();
-                                                let r = tri!(self.call_native(g, f, this, &[], false));
-                                                // SAFETY: as in `slow`; the native may have run
-                                                // JavaScript (the value stack may have moved).
-                                                base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
-                                                *sl!(d) = r;
-                                                continue;
-                                            }
-                                            _ => None,
+                                        sync!();
+                                        if let Some(r) = tri!(self.call_native_getter(g, o as usize, fi)) {
+                                            // SAFETY: as in `slow`; the native may have run
+                                            // JavaScript (the value stack may have moved).
+                                            base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
+                                            *sl!(d) = r;
+                                            continue;
                                         }
                                     }
-                                    _ => None,
-                                },
+                                    None
+                                }
                                 None => None,
                             }
                         };
