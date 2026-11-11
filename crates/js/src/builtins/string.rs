@@ -292,7 +292,9 @@ fn match_(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     }
     let s = realm.to_string(this)?;
     let rx = regexp::regexp_create_from(realm, pat, Value::Undefined)?;
-    realm.invoke(rx, "[Symbol.match]", &[Value::String(s)]).or_else(|_| Ok(Value::Null))
+    // Invoke(rx, @@match, « S ») (ECMA-262 §22.1.3.13).
+    let m = realm.get(rx.clone(), PropertyKey::Symbol(SYM_MATCH))?;
+    realm.call(m, rx, &[Value::String(s)])
 }
 
 fn match_all(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {

@@ -129,6 +129,8 @@ fn strings_and_templates() {
     eq("'2020-01-02'.replace(/(\\d+)-(\\d+)-(\\d+)/, '$3/$2/$1')", "02/01/2020");
     eq("'a1b2'.replace(/\\d/g, d => d * 2)", "a2b4");
     eq("'x'.match(/(?<n>x)/).groups.n", "x");
+    // A string pattern is compiled to a RegExp and its @@match invoked.
+    eq("'a/k=xyz/b'.match('/k=([^/]+)')[1] + '|' + 'abc'.match('b').index + '|' + 'abc'.match('z') + '|' + 'aXbX'.match('X', 'g')[0]", "xyz|1|null|X");
     eq("'a,b;c'.split(/[,;]/).join('-')", "a-b-c");
     eq("[...'a1b2'.matchAll(/\\d/g)].map(m => m[0]).join('')", "12");
     eq("/a/.test('cat')", "true");
