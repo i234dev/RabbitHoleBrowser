@@ -68,6 +68,9 @@ pub struct IncrementalState {
     /// Element border boxes looked up since the last layout change
     /// (`offsetWidth` & co. read twice cost nothing).
     rects: std::cell::RefCell<HashMap<NodeId, Option<rabbithole_gfx::Rect>>>,
+    /// Border-box unions of the line fragments of every inline element
+    /// (built in one pass over the layout on first use).
+    inline_index: std::cell::RefCell<Option<HashMap<NodeId, rabbithole_gfx::Rect>>>,
     /// [`side_sheet_signature`] at the last style flush.
     side_sheets: u64,
     /// Device pixel ratio images were last selected for.
@@ -104,7 +107,7 @@ impl IncrementalState {
         self.layout_dirty = true;
         self.dl_dirty = true;
         self.stats.style_incremental += 1;
-        self.rects.borrow_mut().clear();
+        self.clear_rects();
     }
 
     /// Restyle and lay out everything on the next flush.
@@ -125,6 +128,18 @@ impl IncrementalState {
         *self.scroll_dep.get_or_insert_with(|| layout.depends_on_page_scroll())
     }
 
+    fn clear_rects(&self) {
+        self.rects.borrow_mut().clear();
+        *self.inline_index.borrow_mut() = None;
+    }
+
+    /// The rect of inline element `node` from the inline index, built with
+    /// `build` when the layout changed since the last use.
+    pub(crate) fn cached_inline_rect(&self, node: NodeId, build: impl FnOnce() -> HashMap<NodeId, rabbithole_gfx::Rect>) -> Option<rabbithole_gfx::Rect> {
+        let mut idx = self.inline_index.borrow_mut();
+        idx.get_or_insert_with(build).get(&node).copied()
+    }
+
     /// Cached element rectangle lookup.
     pub(crate) fn cached_rect(&self, node: NodeId, f: impl FnOnce() -> Option<rabbithole_gfx::Rect>) -> Option<rabbithole_gfx::Rect> {
         if let Some(r) = self.rects.borrow().get(&node) {
@@ -137,7 +152,7 @@ impl IncrementalState {
 
     /// An inner scroll container was scrolled by translation.
     pub(crate) fn scrolled(&mut self, node: NodeId, offset: (f32, f32)) {
-        self.rects.borrow_mut().clear();
+        self.clear_rects();
         self.scroll_seen.insert(node, offset);
     }
 
@@ -418,7 +433,7 @@ impl Engine {
         incr.layout_dirty = false;
         incr.dl_dirty = true;
         incr.scroll_dep = None;
-        incr.rects.borrow_mut().clear();
+        incr.clear_rects();
     }
 
     /// Rebuild the display list if layout or paint inputs changed.

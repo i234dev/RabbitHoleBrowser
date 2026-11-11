@@ -1758,7 +1758,7 @@ impl Page {
         self.incr.cached_rect(node, || {
             if self.layout.box_of(&self.doc, node).is_none() && self.doc.element(node).is_some() {
                 // Inline elements: the union of their line fragments.
-                if let Some(r) = self.layout.inline_rect(&self.doc, node) {
+                if let Some(r) = self.incr.cached_inline_rect(node, || self.layout.inline_rect_index(&self.doc)) {
                     return Some(r);
                 }
             }
