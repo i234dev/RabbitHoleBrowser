@@ -691,6 +691,16 @@ impl Value {
         debug_assert!(self.is_number());
         f64::from_bits(self.0)
     }
+
+    /// The string of a value known to be one.
+    ///
+    /// # Safety
+    /// `self` must be a string value.
+    #[inline(always)]
+    pub unsafe fn as_js_str_unchecked(&self) -> &JsStr {
+        debug_assert!(matches!(self.v(), V::String(_)));
+        &*(self as *const Value as *const JsStr)
+    }
     #[inline(always)]
     pub fn is_string(&self) -> bool {
         self.0 & TAG_MASK == TAG_STRING

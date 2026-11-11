@@ -716,10 +716,12 @@ impl Compiler {
             arguments_loc: None,
             self_loc: None,
             flags,
+            call_flags: 0,
             slot_names: Vec::new(),
             block_names: Vec::new(),
             templates: Vec::new(),
             ics: Box::new([]),
+            call_ics: Box::new([]),
             ic_keys: Box::new([]),
             depths: Vec::new(),
             max_depth: 0,
@@ -3547,6 +3549,17 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
             crate::regs::Translated { ops: vec![Op::ThrowConst(2, k)], positions: vec![Pos::default()], handlers: Vec::new(), depths: vec![0], max_depth: 1 }
         }
     };
+    let mut tr = tr;
+    // Number the call sites (each gets a cache).
+    let mut ncalls = 0usize;
+    for op in tr.ops.iter_mut() {
+        if let Op::CallR(_, _, cic, _) = op {
+            if ncalls < crate::bytecode::NO_CALL_IC as usize {
+                *cic = ncalls as u16;
+                ncalls += 1;
+            }
+        }
+    }
     let scope = &fs.scopes[0];
     let mut slot_names = vec![JsStr::empty(); scope.slot_count as usize];
     for (n, b) in &scope.names {
@@ -3556,7 +3569,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
             }
         }
     }
-    FunctionCode {
+    let mut code = FunctionCode {
         name: fs.name,
         ops: tr.ops,
         positions: tr.positions,
@@ -3572,10 +3585,12 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         arguments_loc: fs.arguments_loc.map(|l| l.to_var_loc()),
         self_loc: fs.self_loc.map(|l| l.to_var_loc()),
         flags: fs.flags,
+        call_flags: 0,
         slot_names,
         block_names: fs.block_names,
         templates: fs.templates,
         ics: (0..fs.ic_count).map(|_| std::cell::Cell::new(crate::bytecode::PropIc::default())).collect(),
+        call_ics: (0..ncalls).map(|_| std::cell::Cell::new(crate::bytecode::CallIc::default())).collect(),
         lazy: None,
         compiled: std::cell::OnceCell::new(),
         ic_keys: ic_keys.into(),
@@ -3585,7 +3600,9 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         source_span: fs.span,
         filename: fs.filename,
         module,
-    }
+    };
+    code.call_flags = code.compute_call_flags();
+    code
 }
 
 fn opt_ptr_eq(a: &Option<Rc<LazyScope>>, b: &Option<Rc<LazyScope>>) -> bool {

@@ -35,6 +35,8 @@ pub const IC_ADD: u8 = 6;
 pub const IC_GLOBAL_LEX: u8 = 7;
 /// Global object property: shaped (`holder_shape` = shape id) or dictionary
 /// (key-checked entry `slot`), valid while the lexical epoch is `shape`.
+/// The record also caches a pointer to the property (`mid`/`mid_shape`),
+/// usable while the prototype epoch is still `holder`.
 pub const IC_GLOBAL_OBJ: u8 = 8;
 
 /// Receiver with shape `shape` and prototype `mid` lacks the key; it is
@@ -674,9 +676,38 @@ impl Realm {
         ic
     }
 
-    /// Fast path of a cached global variable read.
-    #[inline]
-    pub(crate) fn ic_get_global(&self, ic: &PropIc, key: &JsStr) -> Option<&Value> {
+    /// Fast path of a cached global variable read: the record's cell
+    /// pointer (the binding's value) while it is valid, else the slot-based
+    /// check, which also refreshes the cell pointer.
+    #[inline(always)]
+    pub(crate) fn ic_get_global<'a>(&'a self, cell: &std::cell::Cell<PropIc>, key: &JsStr) -> Option<&'a Value> {
+        let ic = cell.get();
+        if ic.shape != self.global_lex.epoch {
+            return None;
+        }
+        if ic.kind == IC_GLOBAL_LEX {
+            // Lexical bindings are never removed: the slot stays valid.
+            return match self.global_lex.vals.get(ic.slot as usize) {
+                Some((v, _)) if !v.is_empty() => Some(v),
+                _ => None,
+            };
+        }
+        if ic.kind == IC_GLOBAL_OBJ && ic.holder == crate::shape::proto_epoch() {
+            // SAFETY: the pointer was taken from the global object's
+            // property storage, which has not moved since: key-set changes
+            // of the global object (marked as watched) advance the epoch.
+            let p = unsafe { &*(global_cell_ptr(&ic) as *const Property) };
+            if p.flags & ACCESSOR == 0 {
+                return Some(&p.value);
+            }
+            return None;
+        }
+        self.ic_get_global_slow(cell, key)
+    }
+
+    #[inline(never)]
+    fn ic_get_global_slow<'a>(&'a self, cell: &std::cell::Cell<PropIc>, key: &JsStr) -> Option<&'a Value> {
+        let mut ic = cell.get();
         if ic.shape != self.global_lex.epoch {
             return None;
         }
@@ -698,6 +729,10 @@ impl Realm {
                 if p.flags & ACCESSOR != 0 {
                     return None;
                 }
+                g.props.mark_in_chain();
+                set_global_cell_ptr(&mut ic, p as *const Property as usize);
+                ic.holder = crate::shape::proto_epoch();
+                cell.set(ic);
                 Some(&p.value)
             }
             _ => None,
@@ -705,15 +740,44 @@ impl Realm {
     }
 
     /// Fast path of a cached global variable store; gives `v` back on a miss.
-    #[inline]
-    pub(crate) fn ic_set_global(&mut self, ic: &PropIc, key: &JsStr, v: Value) -> Result<(), Value> {
+    #[inline(always)]
+    pub(crate) fn ic_set_global(&mut self, cell: &std::cell::Cell<PropIc>, key: &JsStr, v: Value) -> Result<(), Value> {
+        let ic = cell.get();
+        if ic.shape != self.global_lex.epoch {
+            return Err(v);
+        }
+        if ic.kind == IC_GLOBAL_LEX {
+            return match self.global_lex.vals.get_mut(ic.slot as usize) {
+                Some((cur, false)) if !cur.is_empty() => {
+                    *cur = v;
+                    Ok(())
+                }
+                _ => Err(v),
+            };
+        }
+        if ic.kind == IC_GLOBAL_OBJ && ic.holder == crate::shape::proto_epoch() {
+            // SAFETY: as in `ic_get_global`; nothing else borrows the
+            // property while this store runs.
+            let p = unsafe { &mut *(global_cell_ptr(&ic) as *mut Property) };
+            if p.flags & (ACCESSOR | WRITABLE) == WRITABLE {
+                p.value = v;
+                return Ok(());
+            }
+            return Err(v);
+        }
+        self.ic_set_global_slow(cell, key, v)
+    }
+
+    #[inline(never)]
+    fn ic_set_global_slow(&mut self, cell: &std::cell::Cell<PropIc>, key: &JsStr, v: Value) -> Result<(), Value> {
+        let mut ic = cell.get();
         if ic.shape != self.global_lex.epoch {
             return Err(v);
         }
         match ic.kind {
             IC_GLOBAL_LEX => match self.global_lex.vals.get_mut(ic.slot as usize) {
-                Some((cur, false)) if !cur.is_empty() => {
-                    *cur = v;
+                Some(e) if !e.1 && !e.0.is_empty() => {
+                    e.0 = v;
                     Ok(())
                 }
                 _ => Err(v),
@@ -721,6 +785,7 @@ impl Realm {
             IC_GLOBAL_OBJ => {
                 let gid = self.global;
                 let Some(g) = self.heap.try_get_mut(gid) else { return Err(v) };
+                g.props.mark_in_chain();
                 let p = if ic.holder_shape != 0 {
                     if g.props.shape_id() != ic.holder_shape {
                         return Err(v);
@@ -732,6 +797,9 @@ impl Realm {
                 match p {
                     Some(p) if p.flags & (ACCESSOR | WRITABLE) == WRITABLE => {
                         p.value = v;
+                        set_global_cell_ptr(&mut ic, p as *mut Property as usize);
+                        ic.holder = crate::shape::proto_epoch();
+                        cell.set(ic);
                         Ok(())
                     }
                     _ => Err(v),
@@ -758,7 +826,25 @@ impl Realm {
             ic.kind = IC_GLOBAL_OBJ;
             ic.slot = slot;
             ic.holder_shape = if g.props.is_dict() { 0 } else { g.props.shape_id() };
+            if let Some(p) = g.props.slot(slot) {
+                // Key-set changes of the global object must advance the
+                // prototype epoch: they may move its property storage.
+                g.props.mark_in_chain();
+                ic.holder = crate::shape::proto_epoch();
+                set_global_cell_ptr(&mut ic, p as *const Property as usize);
+            }
         }
         ic
     }
+}
+
+/// The binding pointer of a global inline cache record.
+#[inline(always)]
+fn global_cell_ptr(ic: &PropIc) -> usize {
+    ((ic.mid_shape as u64) << 32 | ic.mid as u64) as usize
+}
+
+fn set_global_cell_ptr(ic: &mut PropIc, p: usize) {
+    ic.mid = p as u32;
+    ic.mid_shape = ((p as u64) >> 32) as u32;
 }

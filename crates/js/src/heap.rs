@@ -465,6 +465,8 @@ pub struct Heap {
     marks: Vec<bool>,
     pub allocated_since_gc: usize,
     pub live_count: usize,
+    /// Collections run so far (object ids are only reused after one).
+    pub collections: u32,
 }
 
 impl Default for Heap {
@@ -475,7 +477,7 @@ impl Default for Heap {
 
 impl Heap {
     pub fn new() -> Heap {
-        Heap { objects: Vec::with_capacity(1024), free: Vec::new(), marks: Vec::new(), allocated_since_gc: 0, live_count: 0 }
+        Heap { objects: Vec::with_capacity(1024), free: Vec::new(), marks: Vec::new(), allocated_since_gc: 0, live_count: 0, collections: 1 }
     }
 
     pub fn alloc(&mut self, obj: Object) -> ObjectId {
@@ -525,6 +527,7 @@ impl Heap {
     /// Run a collection. `roots` must contain every externally reachable
     /// object id; everything else reachable is found by tracing.
     pub fn collect(&mut self, roots: &[ObjectId]) -> usize {
+        self.collections = self.collections.wrapping_add(1).max(1);
         self.marks.clear();
         self.marks.resize(self.objects.len(), false);
         let mut work: Vec<ObjectId> = Vec::with_capacity(roots.len());
@@ -691,7 +694,6 @@ pub fn trace_frame(f: &Frame, out: &mut Vec<Value>) {
     push_val(out, &f.this);
     push_id(out, f.func);
     push_val(out, &f.new_target);
-    push_id(out, f.home_object);
     if let Some(e) = &f.extra {
         push_opt(out, &e.arguments_obj);
         push_id(out, e.generator);

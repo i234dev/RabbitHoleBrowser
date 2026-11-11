@@ -98,9 +98,9 @@ impl Analyzer {
         self.stack.push(f as *const Function);
         self.arrow.push(f.is_arrow);
         self.sets.push(NameSet::default());
-        if let Some(n) = &f.name {
-            self.name(n);
-        }
+        // The function's own name is not a reference: a declaration binds it
+        // in the enclosing scope (where only actual references capture it)
+        // and an expression binds it inside itself.
         for p in &f.params {
             self.pattern(&p.pattern);
         }

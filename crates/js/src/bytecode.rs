@@ -342,8 +342,9 @@ pub enum Op {
     GetLocalR(u16, u16, u16),
     SetLocalR(u16, u16, u16),
     /// Call with the callee at slot `base`, `this` at `base + 1` and the
-    /// arguments after it; the result goes to `base`. (base, argc, desc)
-    CallR(u16, u16, u32),
+    /// arguments after it; the result goes to `base`. (base, argc, call
+    /// site cache index or [`NO_CALL_IC`], desc)
+    CallR(u16, u16, u16, u32),
     /// Construct with the callee at `base` and the arguments after it. (base, argc)
     NewR(u16, u16),
     ReturnR(u16),
@@ -382,6 +383,32 @@ pub const UN_OPS: [Op; 6] = [Op::Neg, Op::Plus, Op::BitNot, Op::Typeof, Op::ToSt
 
 /// `Call` without a callee description.
 pub const NO_DESC: u32 = u32::MAX;
+
+/// `CallR` without a call site cache (more sites than indices).
+pub const NO_CALL_IC: u16 = u16::MAX;
+
+/// Call site cache: the closure last called from a `CallR` site and what
+/// its frame needs, valid while that closure cannot have been freed (no
+/// collection since: object ids are only reused after a sweep).
+#[derive(Debug, Clone, Copy)]
+pub struct CallIc {
+    /// Value bits of the callee (0: empty).
+    pub callee: u64,
+    /// `Heap::collections` when filled.
+    pub epoch: u32,
+    /// The closure's scope (`u32::MAX`: none).
+    pub scope: u32,
+    /// The closure's compiled code (owned by the closure).
+    pub code: *const FunctionCode,
+    /// Strict mode code (no `this` coercion).
+    pub strict: bool,
+}
+
+impl Default for CallIc {
+    fn default() -> Self {
+        CallIc { callee: 0, epoch: 0, scope: u32::MAX, code: std::ptr::null(), strict: false }
+    }
+}
 
 /// Location of a parameter-like binding: frame register or function scope slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +477,9 @@ pub struct FunctionCode {
     /// Binding holding a named function expression's self binding.
     pub self_loc: Option<VarLoc>,
     pub flags: CodeFlags,
+    /// What the call fast paths need to know, decided once when the
+    /// function is compiled (`CALL_*` bits; 0 for lazy code).
+    pub call_flags: u8,
     /// Names of each slot (debugging).
     pub slot_names: Vec<JsStr>,
     /// Slot names of each block scope pushed by `PushScope`.
@@ -465,6 +495,8 @@ pub struct FunctionCode {
     pub module: Option<u32>,
     /// Inline caches of the property / global instructions.
     pub ics: Box<[std::cell::Cell<PropIc>]>,
+    /// Call site caches of the `CallR` instructions.
+    pub call_ics: Box<[std::cell::Cell<CallIc>]>,
     /// Key constant of each inline cache (register-form instructions
     /// carry only the cache index).
     pub ic_keys: Box<[u32]>,
@@ -480,7 +512,60 @@ pub struct FunctionCode {
     pub compiled: std::cell::OnceCell<Rc<FunctionCode>>,
 }
 
+/// `call_flags`: a plain function — not a generator, async function or
+/// class constructor, no `arguments` object, no rest parameter — whose
+/// frame can be built straight from the caller's slots.
+pub const CALL_PLAIN: u8 = 1;
+/// `call_flags`: positional parameter `i` lives in register `i` (one copy
+/// of the arguments sets them all).
+pub const CALL_PARAMS_IN_REGS: u8 = 2;
+/// `call_flags`: `new` can build the frame directly (plain, and not an
+/// arrow, method or derived constructor).
+pub const CALL_PLAIN_CONSTRUCT: u8 = 4;
+/// `call_flags`: the function keeps its actual arguments below its frame
+/// (`args_direct`).
+pub const CALL_ARGS_DIRECT: u8 = 8;
+/// `call_flags`: strict mode (no `this` coercion).
+pub const CALL_STRICT: u8 = 16;
+/// `call_flags`: an arrow function (lexical `this` / `new.target`).
+pub const CALL_ARROW: u8 = 32;
+/// `call_flags`: plain, parameters in registers, no scope object, no self
+/// binding and no kept arguments: the frame is just registers.
+pub const CALL_SIMPLE: u8 = 64;
+
 impl FunctionCode {
+    /// Compute [`FunctionCode::call_flags`] from the compiled code.
+    pub fn compute_call_flags(&self) -> u8 {
+        if self.lazy.is_some() {
+            return 0;
+        }
+        let f = &self.flags;
+        let mut out = 0;
+        let plain = !f.is_generator && !f.is_async && !f.is_class_constructor && self.arguments_loc.is_none() && self.rest_loc.is_none();
+        if plain {
+            out |= CALL_PLAIN;
+            if !f.is_arrow && !f.is_method && !f.is_derived {
+                out |= CALL_PLAIN_CONSTRUCT;
+            }
+        }
+        if self.param_locs.iter().enumerate().all(|(i, l)| *l == VarLoc::Reg(i as u16)) && (self.param_locs.len() as u32) <= self.nregs {
+            out |= CALL_PARAMS_IN_REGS;
+        }
+        if f.args_direct {
+            out |= CALL_ARGS_DIRECT;
+        }
+        if f.is_strict {
+            out |= CALL_STRICT;
+        }
+        if f.is_arrow {
+            out |= CALL_ARROW;
+        }
+        if out & (CALL_PLAIN | CALL_PARAMS_IN_REGS | CALL_ARGS_DIRECT) == CALL_PLAIN | CALL_PARAMS_IN_REGS && self.scope_slots == 0 && self.self_loc.is_none() {
+            out |= CALL_SIMPLE;
+        }
+        out
+    }
+
     /// Number of value slots of a frame running this code.
     #[inline]
     pub fn frame_size(&self) -> usize {

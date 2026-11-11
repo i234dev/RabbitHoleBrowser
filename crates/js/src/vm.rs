@@ -1,6 +1,6 @@
 //! The bytecode interpreter: frames, calls, generators, async and exceptions.
 
-use crate::bytecode::{FunctionCode, Op, VarLoc};
+use crate::bytecode::{FunctionCode, Op, VarLoc, CALL_ARGS_DIRECT, CALL_ARROW, CALL_PARAMS_IN_REGS, CALL_PLAIN, CALL_PLAIN_CONSTRUCT, CALL_SIMPLE, CALL_STRICT};
 use crate::value::V;
 use crate::heap::*;
 use crate::interop::{Hint, JsResult};
@@ -13,7 +13,12 @@ use std::rc::Rc;
 /// `arguments.length` / `arguments[i]` directly keeps the actual arguments
 /// in the `argc` values just below `base`.
 pub struct Frame {
-    pub code: Rc<FunctionCode>,
+    /// The running code, not reference counted (calls and returns cost no
+    /// count traffic): a function frame's code is owned by its closure
+    /// (`func`, which the frame keeps alive), any other frame's by
+    /// `extra.code`. A closure's code is only ever replaced while it is
+    /// still lazy, and lazy code never runs.
+    code: std::ptr::NonNull<FunctionCode>,
     pub pc: usize,
     pub base: u32,
     pub argc: u32,
@@ -22,7 +27,6 @@ pub struct Frame {
     pub this: Value,
     pub func: Option<ObjectId>,
     pub new_target: Value,
-    pub home_object: Option<ObjectId>,
     /// Caller slot receiving this frame's return value.
     pub ret_slot: u32,
     pub is_construct: bool,
@@ -35,6 +39,8 @@ pub struct Frame {
 /// The rarely used parts of a frame.
 #[derive(Default)]
 pub struct FrameExtra {
+    /// Owner of the code of a frame without a closure (scripts, eval).
+    pub code: Option<Rc<FunctionCode>>,
     pub arguments_obj: Option<Value>,
     pub generator: Option<ObjectId>,
     /// Script completion value (last expression statement).
@@ -46,6 +52,13 @@ pub struct FrameExtra {
 }
 
 impl Frame {
+    /// The code this frame runs.
+    #[inline(always)]
+    pub fn code(&self) -> &FunctionCode {
+        // SAFETY: see the `code` field: the code outlives the frame.
+        unsafe { self.code.as_ref() }
+    }
+
     /// First `vstack` index used by the frame (its kept arguments).
     #[inline]
     pub fn bottom(&self) -> usize {
@@ -61,6 +74,14 @@ impl Frame {
     }
 }
 
+/// Where [`Realm::push_closure_frame`] takes the arguments from.
+pub(crate) enum ArgSrc<'a> {
+    /// `vstack` slots from this index on (moved out, left undefined).
+    Stack(usize),
+    /// A slice outside the value stack (cloned).
+    Slice(&'a [Value]),
+}
+
 impl Default for Value {
     fn default() -> Value {
         Value::Undefined
@@ -69,7 +90,7 @@ impl Default for Value {
 
 impl std::fmt::Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Frame({} pc={})", self.code.name, self.pc)
+        write!(f, "Frame({} pc={})", self.code().name, self.pc)
     }
 }
 
@@ -118,11 +139,11 @@ impl Realm {
                     let native = self.current_callee.map(|n| self.function_name(n).to_rust_string()).unwrap_or_default();
                     eprintln!("[notfn] {d} called from native `{native}` at\n{}", self.build_stack_string("TypeError", "not a function"));
                     if let Some(f) = self.frames.last() {
-                        if let (Some(src), Some((a, b))) = (&f.code.source, f.code.source_span) {
+                        if let (Some(src), Some((a, b))) = (&f.code().source, f.code().source_span) {
                             let (a, b) = (a as usize, (b as usize).min(a as usize + 400));
                             eprintln!("[notfn] top function source: {}", src.get(a..b).unwrap_or("?"));
                         }
-                        eprintln!("[notfn] pc={} op={:?}", f.pc, f.code.ops.get(f.pc.saturating_sub(1)));
+                        eprintln!("[notfn] pc={} op={:?}", f.pc, f.code().ops.get(f.pc.saturating_sub(1)));
                     }
                 }
                 return self.type_error(&format!("{} is not a function", d));
@@ -265,7 +286,7 @@ impl Realm {
         let this = if code.flags.is_script { Value::Object(self.global) } else { Value::Undefined };
         let base = self.reserve_slots(code.frame_size());
         let frame = Frame {
-            code,
+            code: std::ptr::NonNull::from(&*code),
             pc: 0,
             base: base as u32,
             argc: 0,
@@ -274,11 +295,10 @@ impl Realm {
             this,
             func: None,
             new_target: Value::Undefined,
-            home_object: None,
             ret_slot: 0,
             is_construct: false,
             entry: true,
-            extra: Some(Box::default()),
+            extra: Some(Box::new(FrameExtra { code: Some(code), ..Default::default() })),
         };
         self.push_frame(frame, true)?;
         match self.run()? {
@@ -338,71 +358,139 @@ impl Realm {
     /// moving the arguments straight from the caller's operand stack.
     /// Returns false (nothing done) when the general path is needed. The
     /// caller's frame must be synced.
+    #[inline(always)]
     pub(crate) fn try_fast_call(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
-        let cb = self.frames[fi].base as usize + b;
+        // SAFETY: `fi` is the running frame.
+        let cb = unsafe { self.frames.get_unchecked(fi) }.base as usize + b;
         let id = match self.vstack[cb].v() {
             V::Object(id) => id,
             _ => return Ok(false),
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
-        if c.code.lazy.is_some() {
-            self.ensure_compiled(id)?;
-            return self.try_fast_call(fi, b, argc);
-        }
-        let flags = c.code.flags;
-        if flags.is_generator || flags.is_async || flags.is_class_constructor || c.code.arguments_loc.is_some() || c.code.rest_loc.is_some() || (flags.is_arrow && c.arguments.is_some()) {
+        let cf = c.code.call_flags;
+        if cf & CALL_PLAIN == 0 {
+            if c.code.lazy.is_some() {
+                self.ensure_compiled(id)?;
+                return self.try_fast_call(fi, b, argc);
+            }
             return Ok(false);
         }
-        let this = if flags.is_arrow {
-            c.this_value.clone().unwrap_or(Value::Undefined)
-        } else if flags.is_strict {
-            self.vstack[cb + 1].undef_if_empty()
+        let (this, new_target) = if cf & CALL_ARROW != 0 {
+            if c.arguments.is_some() {
+                return Ok(false);
+            }
+            (c.this_value.clone().unwrap_or(Value::Undefined), c.new_target.clone().unwrap_or(Value::Undefined))
+        } else if cf & CALL_STRICT != 0 {
+            (self.vstack[cb + 1].undef_if_empty(), Value::Undefined)
         } else {
             match self.vstack[cb + 1].v() {
-                V::Undefined | V::Null | V::Empty => Value::Object(self.global),
-                V::Object(o) => Value::Object(o),
+                V::Undefined | V::Null | V::Empty => (Value::Object(self.global), Value::Undefined),
+                V::Object(o) => (Value::Object(o), Value::Undefined),
                 _ => return Ok(false),
             }
         };
+        let code = std::ptr::NonNull::from(&*c.code);
+        let parent_scope = c.scope;
+        self.push_closure_frame(id, code, parent_scope, ArgSrc::Stack(cb + 2), argc, this, new_target, b as u32, false, false)?;
+        Ok(true)
+    }
+
+    /// Push the frame of a call to closure `id`, whose compiled `code` has
+    /// [`CALL_PLAIN`]: registers start undefined, parameters take the
+    /// arguments, the scope object is created when the function has one.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_closure_frame(
+        &mut self,
+        id: ObjectId,
+        code: std::ptr::NonNull<FunctionCode>,
+        parent_scope: Option<ObjectId>,
+        args: ArgSrc,
+        argc: usize,
+        this: Value,
+        new_target: Value,
+        ret_slot: u32,
+        is_construct: bool,
+        entry: bool,
+    ) -> JsResult<()> {
+        // SAFETY: the closure `id` owns the code and stays alive (it is
+        // in the caller's slots or argument list, then rooted by the frame).
+        let cr: &FunctionCode = unsafe { &*code.as_ptr() };
+        let cf = cr.call_flags;
+        if let (true, ArgSrc::Stack(src), Some(scope)) = (cf & CALL_SIMPLE != 0, &args, parent_scope) {
+            return self.push_simple_frame(id, cr, scope, *src, argc, this, new_target, ret_slot, is_construct, entry);
+        }
         if self.frames.len() >= self.max_frames {
             return self.range_error("Maximum call stack size exceeded");
         }
-        let code = c.code.clone();
-        let parent_scope = c.scope;
-        let home = c.home_object;
-        let new_target = if flags.is_arrow { c.new_target.clone().unwrap_or(Value::Undefined) } else { Value::Undefined };
-        let nslots = code.scope_slots as usize;
-        let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
-        let kept = if flags.args_direct { argc } else { 0 };
+        let fsize = cr.frame_size();
+        let kept = if cf & CALL_ARGS_DIRECT != 0 { argc } else { 0 };
+        // No reallocation below: source pointers into the stack stay valid.
+        self.vstack.reserve(kept + fsize);
         let bottom = self.vstack.len();
-        if kept > 0 {
-            self.vstack.extend_from_within(cb + 2..cb + 2 + argc);
-        }
-        let base = self.reserve_slots(code.frame_size());
-        for (i, &loc) in code.param_locs.iter().enumerate() {
-            let v = if i < argc { std::mem::replace(&mut self.vstack[cb + 2 + i], Value::Undefined) } else { Value::Undefined };
-            match loc {
-                VarLoc::Reg(r) => self.vstack[base + r as usize] = v,
-                VarLoc::Slot(s) => slots[s as usize] = v,
+        let base = bottom + kept;
+        let nslots = cr.scope_slots as usize;
+        let mut slots: Vec<Value> = Vec::new();
+        // SAFETY: capacity was reserved above; source slots (caller frame
+        // or an outside slice) do not overlap the new slots; every new slot
+        // is written before `set_len` makes it visible.
+        unsafe {
+            let p = self.vstack.as_mut_ptr();
+            let (src, take): (*mut Value, bool) = match args {
+                ArgSrc::Stack(i) => (p.add(i), true),
+                ArgSrc::Slice(s) => (s.as_ptr() as *mut Value, false),
+            };
+            for i in 0..kept {
+                std::ptr::write(p.add(bottom + i), (*src.add(i)).clone());
+            }
+            let regs = p.add(base);
+            for i in 0..fsize {
+                std::ptr::write(regs.add(i), Value::Undefined);
+            }
+            self.vstack.set_len(base + fsize);
+            let arg = |i: usize| -> Value {
+                if take {
+                    std::ptr::replace(src.add(i), Value::Undefined)
+                } else {
+                    (*src.add(i)).clone()
+                }
+            };
+            if cf & CALL_PARAMS_IN_REGS != 0 {
+                let n = argc.min(cr.param_locs.len());
+                for i in 0..n {
+                    std::ptr::write(regs.add(i), arg(i));
+                }
+            } else {
+                if nslots > 0 {
+                    slots = vec![Value::Undefined; nslots];
+                }
+                for (i, &loc) in cr.param_locs.iter().enumerate() {
+                    if i >= argc {
+                        break;
+                    }
+                    let v = arg(i);
+                    match loc {
+                        VarLoc::Reg(r) => *regs.add(r as usize) = v,
+                        VarLoc::Slot(s) => slots[s as usize] = v,
+                    }
+                }
             }
         }
-        if let Some(sl) = code.self_loc {
+        if nslots > 0 && slots.is_empty() {
+            slots = vec![Value::Undefined; nslots];
+        }
+        if let Some(sl) = cr.self_loc {
             match sl {
                 VarLoc::Reg(r) => self.vstack[base + r as usize] = Value::Object(id),
                 VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
             }
         }
-        let scope = if nslots > 0 {
-            self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
-        } else {
-            match parent_scope {
-                Some(p) => p,
-                None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
-            }
+        let scope = match parent_scope {
+            Some(p) if nslots == 0 => p,
+            _ => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None })))),
         };
-        debug_assert_eq!(base - bottom, kept);
-        self.frames.push(Frame {
+        let frame = Frame {
             code,
             pc: 0,
             base: base as u32,
@@ -412,13 +500,21 @@ impl Realm {
             this,
             func: Some(id),
             new_target,
-            home_object: home,
-            ret_slot: b as u32,
-            is_construct: false,
-            entry: false,
+            ret_slot,
+            is_construct,
+            entry,
             extra: None,
-        });
-        Ok(true)
+        };
+        if self.frames.len() == self.frames.capacity() {
+            self.frames.reserve(1);
+        }
+        // SAFETY: capacity checked just above.
+        unsafe {
+            let n = self.frames.len();
+            std::ptr::write(self.frames.as_mut_ptr().add(n), frame);
+            self.frames.set_len(n + 1);
+        }
+        Ok(())
     }
 
     /// `CallR` of `f.call(this, ...)`, `f.apply(this, array)` or a bound
@@ -483,6 +579,73 @@ impl Realm {
         ok
     }
 
+    /// [`Realm::push_closure_frame`] for [`CALL_SIMPLE`] code with the
+    /// arguments in the caller's slots: undefined registers, the arguments
+    /// moved into the parameter registers, the closure's scope.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn push_simple_frame(
+        &mut self,
+        id: ObjectId,
+        cr: &FunctionCode,
+        scope: ObjectId,
+        src: usize,
+        argc: usize,
+        this: Value,
+        new_target: Value,
+        ret_slot: u32,
+        is_construct: bool,
+        entry: bool,
+    ) -> JsResult<()> {
+        let n = self.frames.len();
+        if n >= self.max_frames {
+            return self.range_error("Maximum call stack size exceeded");
+        }
+        let fsize = cr.frame_size();
+        self.vstack.reserve(fsize);
+        if n == self.frames.capacity() {
+            self.frames.reserve(1);
+        }
+        let base = self.vstack.len();
+        let nargs = argc.min(cr.param_locs.len());
+        // SAFETY: capacities reserved above; the source slots (caller's
+        // operand stack, below `base`) and the new slots do not overlap;
+        // every new slot / the frame is written before the length grows.
+        unsafe {
+            let p = self.vstack.as_mut_ptr();
+            let regs = p.add(base);
+            let from = p.add(src);
+            for i in 0..nargs {
+                std::ptr::write(regs.add(i), std::ptr::read(from.add(i)));
+                std::ptr::write(from.add(i), Value::Undefined);
+            }
+            for i in nargs..fsize {
+                std::ptr::write(regs.add(i), Value::Undefined);
+            }
+            self.vstack.set_len(base + fsize);
+            std::ptr::write(
+                self.frames.as_mut_ptr().add(n),
+                Frame {
+                    code: std::ptr::NonNull::from(cr),
+                    pc: 0,
+                    base: base as u32,
+                    argc: 0,
+                    scope,
+                    scope_depth: 0,
+                    this,
+                    func: Some(id),
+                    new_target,
+                    ret_slot,
+                    is_construct,
+                    entry,
+                    extra: None,
+                },
+            );
+            self.frames.set_len(n + 1);
+        }
+        Ok(())
+    }
+
     /// Push the frame for calling plain closure `id` (no `arguments`
     /// object, rest parameter, generator / async or class constructor) with
     /// arguments from a slice, e.g. a callback called by a native function.
@@ -490,76 +653,31 @@ impl Realm {
     pub(crate) fn push_plain_call(&mut self, id: ObjectId, this: &Value, args: &[Value], ret_slot: u32, entry: bool) -> JsResult<bool> {
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
-        if c.code.lazy.is_some() {
-            self.ensure_compiled(id)?;
-            return self.push_plain_call(id, this, args, ret_slot, entry);
-        }
-        let flags = c.code.flags;
-        if flags.is_generator || flags.is_async || flags.is_class_constructor || c.code.arguments_loc.is_some() || c.code.rest_loc.is_some() || (flags.is_arrow && c.arguments.is_some()) {
+        let cf = c.code.call_flags;
+        if cf & CALL_PLAIN == 0 {
+            if c.code.lazy.is_some() {
+                self.ensure_compiled(id)?;
+                return self.push_plain_call(id, this, args, ret_slot, entry);
+            }
             return Ok(false);
         }
-        let this = if flags.is_arrow {
-            c.this_value.clone().unwrap_or(Value::Undefined)
-        } else if flags.is_strict {
-            this.undef_if_empty()
+        let (this, new_target) = if cf & CALL_ARROW != 0 {
+            if c.arguments.is_some() {
+                return Ok(false);
+            }
+            (c.this_value.clone().unwrap_or(Value::Undefined), c.new_target.clone().unwrap_or(Value::Undefined))
+        } else if cf & CALL_STRICT != 0 {
+            (this.undef_if_empty(), Value::Undefined)
         } else {
             match this.v() {
-                V::Undefined | V::Null | V::Empty => Value::Object(self.global),
-                V::Object(o) => Value::Object(o),
+                V::Undefined | V::Null | V::Empty => (Value::Object(self.global), Value::Undefined),
+                V::Object(o) => (Value::Object(o), Value::Undefined),
                 _ => return Ok(false),
             }
         };
-        if self.frames.len() >= self.max_frames {
-            return self.range_error("Maximum call stack size exceeded");
-        }
-        let code = c.code.clone();
+        let code = std::ptr::NonNull::from(&*c.code);
         let parent_scope = c.scope;
-        let home = c.home_object;
-        let new_target = if flags.is_arrow { c.new_target.clone().unwrap_or(Value::Undefined) } else { Value::Undefined };
-        let nslots = code.scope_slots as usize;
-        let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
-        let kept = if flags.args_direct { args.len() } else { 0 };
-        if kept > 0 {
-            self.vstack.extend_from_slice(args);
-        }
-        let base = self.reserve_slots(code.frame_size());
-        for (i, &loc) in code.param_locs.iter().enumerate() {
-            let Some(v) = args.get(i) else { break };
-            match loc {
-                VarLoc::Reg(r) => self.vstack[base + r as usize] = v.clone(),
-                VarLoc::Slot(s) => slots[s as usize] = v.clone(),
-            }
-        }
-        if let Some(sl) = code.self_loc {
-            match sl {
-                VarLoc::Reg(r) => self.vstack[base + r as usize] = Value::Object(id),
-                VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
-            }
-        }
-        let scope = if nslots > 0 {
-            self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
-        } else {
-            match parent_scope {
-                Some(p) => p,
-                None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
-            }
-        };
-        self.frames.push(Frame {
-            code,
-            pc: 0,
-            base: base as u32,
-            argc: kept as u32,
-            scope,
-            scope_depth: 0,
-            this,
-            func: Some(id),
-            new_target,
-            home_object: home,
-            ret_slot,
-            is_construct: false,
-            entry,
-            extra: None,
-        });
+        self.push_closure_frame(id, code, parent_scope, ArgSrc::Slice(args), args.len(), this, new_target, ret_slot, false, entry)?;
         Ok(true)
     }
 
@@ -689,20 +807,12 @@ impl Realm {
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
-        if c.code.lazy.is_some() {
-            self.ensure_compiled(id)?;
-            return self.try_fast_construct(fi, b, argc);
-        }
-        let flags = c.code.flags;
-        if flags.is_arrow
-            || flags.is_method
-            || flags.is_generator
-            || flags.is_async
-            || flags.is_derived
-            || flags.is_class_constructor
-            || c.code.arguments_loc.is_some()
-            || c.code.rest_loc.is_some()
-        {
+        let cf = c.code.call_flags;
+        if cf & CALL_PLAIN_CONSTRUCT == 0 {
+            if c.code.lazy.is_some() {
+                self.ensure_compiled(id)?;
+                return self.try_fast_construct(fi, b, argc);
+            }
             return Ok(false);
         }
         let proto = match obj.props.get(&names::prototype()) {
@@ -715,54 +825,10 @@ impl Realm {
         if self.frames.len() >= self.max_frames {
             return self.range_error("Maximum call stack size exceeded");
         }
-        let code = c.code.clone();
+        let code = std::ptr::NonNull::from(&*c.code);
         let parent_scope = c.scope;
-        let home = c.home_object;
-        let nslots = code.scope_slots as usize;
         let this = Value::Object(self.alloc(Object::new(Some(proto), ObjectKind::Ordinary)));
-        let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
-        let kept = if flags.args_direct { argc } else { 0 };
-        if kept > 0 {
-            self.vstack.extend_from_within(cb + 1..cb + 1 + argc);
-        }
-        let base = self.reserve_slots(code.frame_size());
-        for (i, &loc) in code.param_locs.iter().enumerate() {
-            let v = if i < argc { std::mem::replace(&mut self.vstack[cb + 1 + i], Value::Undefined) } else { Value::Undefined };
-            match loc {
-                VarLoc::Reg(r) => self.vstack[base + r as usize] = v,
-                VarLoc::Slot(s) => slots[s as usize] = v,
-            }
-        }
-        if let Some(sl) = code.self_loc {
-            match sl {
-                VarLoc::Reg(r) => self.vstack[base + r as usize] = Value::Object(id),
-                VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
-            }
-        }
-        let scope = if nslots > 0 {
-            self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
-        } else {
-            match parent_scope {
-                Some(p) => p,
-                None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
-            }
-        };
-        self.frames.push(Frame {
-            code,
-            pc: 0,
-            base: base as u32,
-            argc: kept as u32,
-            scope,
-            scope_depth: 0,
-            this,
-            func: Some(id),
-            new_target: Value::Object(id),
-            home_object: home,
-            ret_slot: b as u32,
-            is_construct: true,
-            entry: false,
-            extra: None,
-        });
+        self.push_closure_frame(id, code, parent_scope, ArgSrc::Stack(cb + 1), argc, this, Value::Object(id), b as u32, true, false)?;
         Ok(true)
     }
 
@@ -770,8 +836,8 @@ impl Realm {
     /// top of the value stack (push it next, or detach them).
     pub(crate) fn prepare_frame(&mut self, id: ObjectId, this: Value, args: &[Value], new_target: Value, is_construct: bool) -> JsResult<Frame> {
         self.ensure_compiled(id)?;
-        let (code, parent_scope, this_value, arrow_nt, home, arrow_args) = match &self.obj(id).kind {
-            ObjectKind::Function(c) => (c.code.clone(), c.scope, c.this_value.clone(), c.new_target.clone(), c.home_object, c.arguments.clone()),
+        let (code, parent_scope, this_value, arrow_nt, arrow_args) = match &self.obj(id).kind {
+            ObjectKind::Function(c) => (c.code.clone(), c.scope, c.this_value.clone(), c.new_target.clone(), c.arguments.clone()),
             _ => unreachable!(),
         };
         let flags = code.flags;
@@ -848,7 +914,7 @@ impl Realm {
             }
         };
         Ok(Frame {
-            code,
+            code: std::ptr::NonNull::from(&*code),
             pc: 0,
             base: base as u32,
             argc: kept as u32,
@@ -857,7 +923,6 @@ impl Realm {
             this,
             func: Some(id),
             new_target,
-            home_object: home,
             ret_slot: 0,
             is_construct,
             entry: false,
@@ -1079,9 +1144,9 @@ impl Realm {
             };
             let pc = frame.pc.saturating_sub(1) as u32;
             // A watchdog timeout cannot be caught by the script.
-            let handler = if self.terminating { None } else { frame.code.handlers.iter().find(|h| h.start <= pc && pc < h.end).copied() };
+            let handler = if self.terminating { None } else { frame.code().handlers.iter().find(|h| h.start <= pc && pc < h.end).copied() };
             if let Some(h) = handler {
-                let slot = frame.code.nregs as usize + h.stack_depth as usize;
+                let slot = frame.code().nregs as usize + h.stack_depth as usize;
                 while frame.scope_depth > h.scope_depth {
                     let parent = match &self.heap.get(frame.scope).kind {
                         ObjectKind::Scope(s) => s.parent,
@@ -1188,7 +1253,7 @@ impl Realm {
                 .iter()
                 .rev()
                 .take(12)
-                .map(|f| format!("{}@{}:{}", f.code.name, f.code.filename, f.code.positions.first().map(|p| p.line).unwrap_or(0)))
+                .map(|f| format!("{}@{}:{}", f.code().name, f.code().filename, f.code().positions.first().map(|p| p.line).unwrap_or(0)))
                 .collect();
             crate::sampler::js::sample(&frames);
         }
@@ -1224,10 +1289,11 @@ impl Realm {
             let fi = self.frames.len() - 1;
             // The frame's code, borrowed independently of `self` (no
             // reference count traffic per call / return).
-            // SAFETY: frame `fi` holds a strong reference to its code for as
-            // long as this loop runs it: every path that pops or replaces
-            // the frame leaves through `continue 'reload` or a return.
-            let code: &FunctionCode = unsafe { &*Rc::as_ptr(&self.frames[fi].code) };
+            // SAFETY: the code of frame `fi` lives as long as the frame (see
+            // `Frame::code`), and this loop runs it only while it is the
+            // last frame: every path that pops or replaces the frame leaves
+            // through `continue 'reload` or a return.
+            let code: &FunctionCode = unsafe { self.frames[fi].code.as_ref() };
             let ops: &[Op] = &code.ops;
             let consts: &[Value] = &code.constants;
             let mut pc = self.frames[fi].pc;
@@ -1776,12 +1842,10 @@ impl Realm {
                         slow!(op);
                     }
                     Op::GetGlobalR(d, ic) => {
-                        let rec = code.ics[ic as usize].get();
-                        let key = match k!(code.ic_keys[ic as usize]).v() {
-                            V::String(s) => s,
-                            _ => unreachable!(),
-                        };
-                        match self.ic_get_global(&rec, key) {
+                        let cell = &code.ics[ic as usize];
+                        // SAFETY: global caches always have a string key.
+                        let key = unsafe { k!(*code.ic_keys.get_unchecked(ic as usize)).as_js_str_unchecked() };
+                        match self.ic_get_global(cell, key) {
                             Some(v) => {
                                 let v = v.clone();
                                 *sl!(d) = v;
@@ -1790,15 +1854,13 @@ impl Realm {
                         }
                     }
                     Op::SetGlobalR(s, ic) => {
-                        let rec = code.ics[ic as usize].get();
+                        let cell = &code.ics[ic as usize];
                         let val = &*sl!(s);
                         if !val.is_empty() {
-                            let key = match k!(code.ic_keys[ic as usize]).v() {
-                                V::String(s) => s,
-                                _ => unreachable!(),
-                            };
+                            // SAFETY: global caches always have a string key.
+                            let key = unsafe { k!(*code.ic_keys.get_unchecked(ic as usize)).as_js_str_unchecked() };
                             let val = val.clone();
-                            match self.ic_set_global(&rec, key, val) {
+                            match self.ic_set_global(cell, key, val) {
                                 Ok(()) => continue,
                                 Err(v) => drop(v),
                             }
@@ -1836,10 +1898,38 @@ impl Realm {
                         // SAFETY: as in `sync`.
                         unsafe { self.frames.get_unchecked_mut(fi) }.extra_mut().completion = v;
                     }
-                    Op::CallR(b, argc, _) => {
+                    Op::CallR(b, argc, cic, _) => {
                         tick!();
                         sync!();
-                        if tri!(self.try_fast_call(fi, b as usize, argc as usize)) {
+                        if let Some(cell) = code.call_ics.get(cic as usize) {
+                            let rec = cell.get();
+                            let cb = fbase + b as usize;
+                            let callee = sl!(b).bits();
+                            if rec.callee == callee && rec.epoch == self.heap.collections {
+                                // Same closure as last time: no lookup or checks.
+                                let this = sl!(b + 1);
+                                let this = if rec.strict {
+                                    Some(this.undef_if_empty())
+                                } else {
+                                    match this.v() {
+                                        V::Undefined | V::Null | V::Empty => Some(Value::Object(self.global)),
+                                        V::Object(o) => Some(Value::Object(o)),
+                                        _ => None,
+                                    }
+                                };
+                                if let Some(this) = this {
+                                let scope = if rec.scope == u32::MAX { None } else { Some(ObjectId(rec.scope)) };
+                                // SAFETY: the closure owning the code is alive (it is in slot `b`).
+                                let code_ptr = unsafe { std::ptr::NonNull::new_unchecked(rec.code as *mut FunctionCode) };
+                                tri!(self.push_closure_frame(ObjectId(callee as u32), code_ptr, scope, ArgSrc::Stack(cb + 2), argc as usize, this, Value::Undefined, b as u32, false, false));
+                                continue 'reload;
+                                }
+                            }
+                            if tri!(self.try_fast_call(fi, b as usize, argc as usize)) {
+                                self.fill_call_ic(cell, callee);
+                                continue 'reload;
+                            }
+                        } else if tri!(self.try_fast_call(fi, b as usize, argc as usize)) {
                             continue 'reload;
                         }
                         if tri!(self.try_call_indirect(fi, b as usize, argc as usize)) {
@@ -1872,6 +1962,22 @@ impl Realm {
                                 return Err(self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
                             }
                             v = f.this.clone();
+                        }
+                        if !f.entry && fi > 0 {
+                            // Plain return to the calling frame: drop the
+                            // frame where it is (no move out of the vector).
+                            let (ret, bottom) = (f.ret_slot as usize, f.bottom());
+                            // SAFETY: `fi` is the last frame; it is dropped
+                            // exactly once after the length excludes it.
+                            unsafe {
+                                self.frames.set_len(fi);
+                                std::ptr::drop_in_place(self.frames.as_mut_ptr().add(fi));
+                            }
+                            self.vstack.truncate(bottom);
+                            // SAFETY: `fi - 1` is the caller (fi > 0).
+                            let at = unsafe { self.frames.get_unchecked(fi - 1) }.base as usize + ret;
+                            self.vstack[at] = v;
+                            continue 'reload;
                         }
                         let f = self.pop_frame();
                         if f.entry {
@@ -1921,7 +2027,7 @@ impl Realm {
         }
         // Anything else: an equivalent (unobservable) arguments object.
         let args = self.vstack[bottom..bottom + argc].to_vec();
-        let callee = if f.code.flags.is_strict { None } else { f.func };
+        let callee = if f.code().flags.is_strict { None } else { f.func };
         let ao = self.create_arguments_object(&args, callee);
         let key = self.to_property_key(key)?;
         self.get(ao, key)
@@ -1943,7 +2049,7 @@ impl Realm {
             let fb: usize = self.frames[fi].base as usize;
             let mut sp: usize = {
                 let f = &self.frames[fi];
-                fb + f.code.nregs as usize + f.code.depths[f.pc - 1] as usize
+                fb + f.code().nregs as usize + f.code().depths[f.pc - 1] as usize
             };
             macro_rules! pop {
                 () => {{
@@ -1986,8 +2092,8 @@ impl Realm {
             }
             macro_rules! ic_key {
                 ($ic:expr) => {{
-                    let k = frame!().code.ic_keys[$ic as usize];
-                    match (frame!().code.constants[k as usize]).v() {
+                    let k = frame!().code().ic_keys[$ic as usize];
+                    match (frame!().code().constants[k as usize]).v() {
                         V::String(s) => PropertyKey::String(s.clone()),
                         _ => unreachable!(),
                     }
@@ -1995,12 +2101,12 @@ impl Realm {
             }
             macro_rules! constant {
                 ($i:expr) => {
-                    frame!().code.constants[$i as usize].clone()
+                    frame!().code().constants[$i as usize].clone()
                 };
             }
             macro_rules! const_key {
                 ($i:expr) => {
-                    match (frame!().code.constants[$i as usize]).v() {
+                    match (frame!().code().constants[$i as usize]).v() {
                         V::String(s) => PropertyKey::String(s.clone()),
                         _ => unreachable!(),
                     }
@@ -2198,7 +2304,7 @@ impl Realm {
                     let key = ic_key!(ic);
                     let v = self.get(obj.clone(), key.clone())?;
                     let rec = self.ic_fill_get(&obj, &key);
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                     self.mega_put(&obj, &key, rec);
                     set!(d, v);
                 }
@@ -2208,7 +2314,7 @@ impl Realm {
                     let key = ic_key!(ic);
                     let before = self.ic_before_set(&obj, &key);
                     let ok = self.set(obj.clone(), key.clone(), val)?;
-                    if !ok && frame!().code.flags.is_strict {
+                    if !ok && frame!().code().flags.is_strict {
                         let k = self.key_display(&key);
                         return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
                     }
@@ -2216,7 +2322,7 @@ impl Realm {
                     if ok {
                         self.mega_put_set(&obj, &key, before, rec);
                     }
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                 }
                 Op::DefinePropR(o, v, ic) => {
                     let objv = rd!(o);
@@ -2226,7 +2332,7 @@ impl Realm {
                     let before = self.ic_before_set(&objv, &key);
                     self.define_own(obj, key.clone(), Property::data(val, ALL))?;
                     let rec = self.ic_fill_set(&objv, &key, before, true);
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                 }
                 Op::GetElemR(d, o, k) => {
                     let obj = rd!(o);
@@ -2240,7 +2346,7 @@ impl Realm {
                     let val = rd!(v);
                     let key = self.to_property_key(key)?;
                     let ok = self.set(obj, key.clone(), val)?;
-                    if !ok && frame!().code.flags.is_strict {
+                    if !ok && frame!().code().flags.is_strict {
                         let k = self.key_display(&key);
                         return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
                     }
@@ -2249,16 +2355,16 @@ impl Realm {
                     let key = ic_key!(ic);
                     let v = self.get_global_binding(&key)?;
                     let rec = self.ic_fill_global(key.as_str().unwrap());
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                     set!(d, v);
                 }
                 Op::SetGlobalR(s, ic) => {
                     let v = rd!(s);
                     let key = ic_key!(ic);
-                    let strict = frame!().code.flags.is_strict;
+                    let strict = frame!().code().flags.is_strict;
                     self.set_global_binding(&key, v, strict)?;
                     let rec = self.ic_fill_global(key.as_str().unwrap());
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                 }
                 Op::GetLocalR(d, dp, s) => {
                     let scope = frame!().scope;
@@ -2365,16 +2471,16 @@ impl Realm {
                     let key = const_key!(i);
                     let v = self.get_global_binding(&key)?;
                     let rec = self.ic_fill_global(key.as_str().unwrap());
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                     push!(v);
                 }
                 Op::SetGlobal(i, ic) => {
                     let v = pop!();
                     let key = const_key!(i);
-                    let strict = frame!().code.flags.is_strict;
+                    let strict = frame!().code().flags.is_strict;
                     self.set_global_binding(&key, v, strict)?;
                     let rec = self.ic_fill_global(key.as_str().unwrap());
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                 }
                 Op::TypeofGlobal(i) => {
                     let key = const_key!(i);
@@ -2418,7 +2524,7 @@ impl Realm {
                 }
                 Op::PushScope(n, names_idx) => {
                     let parent = frame!().scope;
-                    let names = frame!().code.block_names.get(names_idx as usize).cloned();
+                    let names = frame!().code().block_names.get(names_idx as usize).cloned();
                     let s = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; n as usize], parent: Some(parent), names }))));
                     frame!().scope = s;
                     frame!().scope_depth += 1;
@@ -2446,7 +2552,7 @@ impl Realm {
                     let key = const_key!(i);
                     let v = self.get(obj.clone(), key.clone())?;
                     let rec = self.ic_fill_get(&obj, &key);
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                     push!(v);
                 }
                 Op::GetPropKeep(i, ic) => {
@@ -2454,7 +2560,7 @@ impl Realm {
                     let key = const_key!(i);
                     let v = self.get(obj.clone(), key.clone())?;
                     let rec = self.ic_fill_get(&obj, &key);
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                     push!(v);
                 }
                 Op::GetMethod(i, ic) => {
@@ -2462,7 +2568,7 @@ impl Realm {
                     let key = const_key!(i);
                     let v = self.get(obj.clone(), key.clone())?;
                     let rec = self.ic_fill_get(&obj, &key);
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                     let o = pop!();
                     push!(v);
                     push!(o);
@@ -2473,12 +2579,12 @@ impl Realm {
                     let key = const_key!(i);
                     let before = self.ic_before_set(&obj, &key);
                     let ok = self.set(obj.clone(), key.clone(), v.clone())?;
-                    if !ok && frame!().code.flags.is_strict {
+                    if !ok && frame!().code().flags.is_strict {
                         let k = self.key_display(&key);
                         return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
                     }
                     let rec = if ok { self.ic_fill_set(&obj, &key, before, false) } else { Default::default() };
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                     push!(v);
                 }
                 Op::GetElem => {
@@ -2499,7 +2605,7 @@ impl Realm {
                     let obj = pop!();
                     let key = self.to_property_key(key)?;
                     let ok = self.set(obj, key.clone(), v.clone())?;
-                    if !ok && frame!().code.flags.is_strict {
+                    if !ok && frame!().code().flags.is_strict {
                         let k = self.key_display(&key);
                         return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
                     }
@@ -2508,14 +2614,14 @@ impl Realm {
                 Op::DeleteProp(i) => {
                     let obj = pop!();
                     let key = const_key!(i);
-                    let r = self.delete_elem(obj, key, frame!().code.flags.is_strict)?;
+                    let r = self.delete_elem(obj, key, frame!().code().flags.is_strict)?;
                     push!(Value::Bool(r));
                 }
                 Op::DeleteElem => {
                     let key = pop!();
                     let obj = pop!();
                     let key = self.to_property_key(key)?;
-                    let r = self.delete_elem(obj, key, frame!().code.flags.is_strict)?;
+                    let r = self.delete_elem(obj, key, frame!().code().flags.is_strict)?;
                     push!(Value::Bool(r));
                 }
                 Op::DefineProp(i, ic) => {
@@ -2526,7 +2632,7 @@ impl Realm {
                     let before = self.ic_before_set(&objv, &key);
                     self.define_own(obj, key.clone(), Property::data(v, ALL))?;
                     let rec = self.ic_fill_set(&objv, &key, before, true);
-                    frame!().code.ics[ic as usize].set(rec);
+                    frame!().code().ics[ic as usize].set(rec);
                 }
                 Op::DefineElem => {
                     let v = pop!();
@@ -2640,7 +2746,7 @@ impl Realm {
                     self.super_set(fi, key, v.clone())?;
                     push!(v);
                 }
-                Op::Call(argc, desc) | Op::CallEval(argc, desc) | Op::CallR(_, argc, desc) => {
+                Op::Call(argc, desc) | Op::CallEval(argc, desc) | Op::CallR(_, argc, _, desc) => {
                     if let Op::CallR(b, ..) = op {
                         sp = fb + b as usize + argc as usize + 2;
                     }
@@ -2656,7 +2762,7 @@ impl Realm {
                     }
                     if let Op::CallEval(..) = op {
                         if f.as_object() == Some(self.intrinsics.eval_fn) {
-                            let strict = frame!().code.flags.is_strict;
+                            let strict = frame!().code().flags.is_strict;
                             let v = self.direct_eval(args.first().cloned().unwrap_or(Value::Undefined), strict)?;
                             push!(v);
                             return Ok(Flow::Next);
@@ -3003,11 +3109,11 @@ impl Realm {
                     push!(r);
                 }
                 Op::TemplateObject(idx) => {
-                    let key = (Rc::as_ptr(&frame!().code) as usize, idx);
+                    let key = (frame!().code.as_ptr() as usize, idx);
                     let v = match self.template_cache.get(&key) {
                         Some(o) => Value::Object(*o),
                         None => {
-                            let (cooked, raws) = frame!().code.templates[idx as usize].clone();
+                            let (cooked, raws) = frame!().code().templates[idx as usize].clone();
                             let raw_arr = self.new_array(raws.into_iter().map(Value::String).collect());
                             self.obj_mut(raw_arr).extensible = false;
                             let arr = self.new_array(cooked.into_iter().map(|c| c.map(Value::String).unwrap_or(Value::Undefined)).collect());
@@ -3020,13 +3126,13 @@ impl Realm {
                     push!(v);
                 }
                 Op::MakeClosure(idx) => {
-                    let code = frame!().code.functions[idx as usize].clone();
+                    let code = frame!().code().functions[idx as usize].clone();
                     let f = self.make_closure(fi, code);
                     push!(Value::Object(f));
                 }
                 Op::MakeClass(idx) => {
                     let superclass = pop!();
-                    let code = frame!().code.functions[idx as usize].clone();
+                    let code = frame!().code().functions[idx as usize].clone();
                     let (ctor, proto) = self.make_class(fi, code, superclass)?;
                     push!(Value::Object(ctor));
                     push!(Value::Object(proto));
@@ -3087,7 +3193,7 @@ impl Realm {
                     push!(v);
                 }
                 Op::ImportMeta => {
-                    let v = match frame!().code.module {
+                    let v = match frame!().code().module {
                         Some(m) => Value::Object(self.import_meta(crate::modules::ModuleId(m))),
                         None => Value::Object(self.new_object()),
                     };
@@ -3095,7 +3201,7 @@ impl Realm {
                 }
                 Op::DynamicImport => {
                     let specifier = pop!();
-                    let referrer = frame!().code.filename.clone();
+                    let referrer = frame!().code().filename.clone();
                     let p = self.start_dynamic_import(specifier, &referrer);
                     push!(Value::Object(p));
                 }
@@ -3233,7 +3339,7 @@ impl Realm {
     // ------------------------------------------------------------ helpers
 
     fn reg_name(&self, fi: usize, r: u16) -> String {
-        match self.frames[fi].code.reg_names.get(r as usize) {
+        match self.frames[fi].code().reg_names.get(r as usize) {
             Some(n) if !n.is_empty() => n.to_rust_string(),
             _ => "variable".to_string(),
         }
@@ -3249,8 +3355,8 @@ impl Realm {
                         return n.to_rust_string();
                     }
                 }
-            } else if depth as u32 == frame.scope_depth && frame.code.scope_slots > 0 {
-                if let Some(n) = frame.code.slot_names.get(slot as usize) {
+            } else if depth as u32 == frame.scope_depth && frame.code().scope_slots > 0 {
+                if let Some(n) = frame.code().slot_names.get(slot as usize) {
                     if !n.is_empty() {
                         return n.to_rust_string();
                     }
@@ -3641,7 +3747,7 @@ impl Realm {
     fn super_get(&mut self, fi: usize, key: PropertyKey) -> JsResult<Value> {
         let (home, this) = {
             let f = &self.frames[fi];
-            (f.home_object, f.this.clone())
+            (self.frame_home_object(f), f.this.clone())
         };
         let home = match home {
             Some(h) => h,
@@ -3676,7 +3782,7 @@ impl Realm {
     fn super_set(&mut self, fi: usize, key: PropertyKey, v: Value) -> JsResult<()> {
         let (home, this) = {
             let f = &self.frames[fi];
-            (f.home_object, f.this.clone())
+            (self.frame_home_object(f), f.this.clone())
         };
         let home = match home {
             Some(h) => h,
@@ -3732,6 +3838,36 @@ impl Realm {
         }
     }
 
+    /// Remember the plain, non-arrow closure just called through a `CallR`
+    /// site (its frame is the last one).
+    #[inline(never)]
+    fn fill_call_ic(&self, cell: &std::cell::Cell<crate::bytecode::CallIc>, callee: u64) {
+        let Some(f) = self.frames.last() else { return };
+        let Some(id) = f.func else { return };
+        if id.0 as u64 != callee & 0xffff_ffff {
+            return;
+        }
+        let Some(ObjectKind::Function(c)) = self.heap.try_get(id).map(|o| &o.kind) else { return };
+        if c.code.call_flags & (CALL_PLAIN | CALL_ARROW) != CALL_PLAIN {
+            return;
+        }
+        cell.set(crate::bytecode::CallIc {
+            callee,
+            epoch: self.heap.collections,
+            scope: c.scope.map(|s| s.0).unwrap_or(u32::MAX),
+            code: &*c.code as *const FunctionCode,
+            strict: c.code.call_flags & CALL_STRICT != 0,
+        });
+    }
+
+    /// The `[[HomeObject]]` of the function a frame runs (`super` lookups).
+    pub(crate) fn frame_home_object(&self, f: &Frame) -> Option<ObjectId> {
+        match self.heap.try_get(f.func?).map(|o| &o.kind) {
+            Some(ObjectKind::Function(c)) => c.home_object,
+            _ => None,
+        }
+    }
+
     /// Create a function object for `code` in the context of frame `fi`.
     pub(crate) fn make_closure(&mut self, fi: usize, code: Rc<FunctionCode>) -> ObjectId {
         // A lazy function compiled through another closure: use its code.
@@ -3746,7 +3882,7 @@ impl Realm {
             scope: Some(frame.scope),
             this_value: if flags.is_arrow { Some(frame.this.clone()) } else { None },
             new_target: if flags.is_arrow { Some(frame.new_target.clone()) } else { None },
-            home_object: if flags.is_arrow { frame.home_object } else { None },
+            home_object: if flags.is_arrow { self.frame_home_object(frame) } else { None },
             fields: None,
             arguments: if flags.is_arrow { frame.extra.as_ref().and_then(|e| e.arguments_obj.clone()) } else { None },
         };

@@ -654,9 +654,9 @@ impl Realm {
     pub fn build_stack_string(&self, kind: &str, message: &str) -> String {
         let mut s = if message.is_empty() { kind.to_string() } else { format!("{}: {}", kind, message) };
         for f in self.frames.iter().rev().take(32) {
-            let pos = f.code.position_at(f.pc.saturating_sub(1));
-            let name = if f.code.name.is_empty() { "<anonymous>".to_string() } else { f.code.name.to_rust_string() };
-            s.push_str(&format!("\n    at {} ({}:{}:{})", name, f.code.filename, pos.line, pos.column));
+            let pos = f.code().position_at(f.pc.saturating_sub(1));
+            let name = if f.code().name.is_empty() { "<anonymous>".to_string() } else { f.code().name.to_rust_string() };
+            s.push_str(&format!("\n    at {} ({}:{}:{})", name, f.code().filename, pos.line, pos.column));
         }
         s
     }

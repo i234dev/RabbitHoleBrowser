@@ -664,7 +664,7 @@ impl Tr<'_> {
                 self.flush_top(argc as usize + 2);
                 let base = self.vs.len() - argc as usize - 2;
                 let b = self.slot(base);
-                self.emit(Op::CallR(b, argc, desc));
+                self.emit(Op::CallR(b, argc, crate::bytecode::NO_CALL_IC, desc));
                 self.vs.truncate(base);
                 self.vs.push(Ent::Slot { def: NO_DEF });
             }
