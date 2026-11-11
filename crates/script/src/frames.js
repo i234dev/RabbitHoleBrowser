@@ -137,6 +137,8 @@
       get closed() { return info(id, 'closed', 0); },
       get location() { return location; },
       get document() { return info(id, 'document', 0); },
+      // Same-origin frames: style queries of the frame's document.
+      getComputedStyle(el, pseudo) { return g.getComputedStyle(el, pseudo); },
       set location(v) { info(id, 'navigate', String(v)); },
     };
     Object.defineProperty(target, Symbol.toStringTag, { value: 'Window' });

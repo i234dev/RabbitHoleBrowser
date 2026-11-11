@@ -336,6 +336,12 @@ fn display_css(d: Display) -> &'static str {
 
 /// Computed value of `prop` for a node, as a CSS string.
 pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
+    if n.doc & crate::host::FRAME_DOC != 0 {
+        // A same-origin frame's document: style values (no layout boxes).
+        let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
+        let s = with_env(|env| env.frame_computed_style(frame, n.node))?;
+        return Some(computed_from_style(&s, prop, Default::default()));
+    }
     if n.doc != 0 {
         return None;
     }
@@ -377,7 +383,13 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         s
     };
     let r = if needs_box { with_env(|env| env.node_rect(n.node)).unwrap_or_default() } else { Default::default() };
-    Some(match prop {
+    Some(computed_from_style(&s, prop, r))
+}
+
+/// A computed value from the style (and the border box `r`, for values
+/// that depend on layout).
+fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect) -> String {
+    match prop {
         "display" => display_css(s.display).to_string(),
         "position" => match s.position {
             Position::Static => "static",
@@ -513,7 +525,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         "animation-name" | "transition-property" => "none".into(),
         "animation-duration" | "transition-duration" | "transition-delay" | "animation-delay" => "0s".into(),
         _ => String::new(),
-    })
+    }
 }
 
 fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {

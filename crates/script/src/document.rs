@@ -119,6 +119,10 @@ fn d_ready_state(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
 
 fn d_default_view(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
+    if d & crate::host::FRAME_DOC != 0 {
+        // A same-origin frame's document: its window proxy.
+        return crate::frames::window_for(realm, Some((d & !crate::host::FRAME_DOC) as u64));
+    }
     if d != 0 {
         return Ok(Value::Null);
     }

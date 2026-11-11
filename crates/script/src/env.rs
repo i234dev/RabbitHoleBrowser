@@ -128,6 +128,10 @@ pub trait HostEnv {
     fn frame_document(&mut self, _id: u64) -> Option<&mut Document> {
         None
     }
+    /// Computed style of a node of a same-origin frame's document.
+    fn frame_computed_style(&mut self, _id: u64, _node: NodeId) -> Option<Rc<ComputedStyle>> {
+        None
+    }
     /// The frame an `<iframe>` element hosts, creating its initial
     /// `about:blank` document right away when it has none yet (as browsers
     /// do on insertion).

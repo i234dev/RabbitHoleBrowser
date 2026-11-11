@@ -407,6 +407,17 @@ impl HostEnv for EngineEnv<'_> {
         child.script.dom_dirty = true;
         Some(&mut child.doc)
     }
+    fn frame_computed_style(&mut self, id: u64, node: NodeId) -> Option<Rc<ComputedStyle>> {
+        let origin = crate::frames::page_origin(self.page);
+        let child = crate::frames::find_frame_page_mut(self.page, id)?;
+        if crate::frames::page_origin(child) != origin {
+            return None;
+        }
+        if child.script.dom_dirty {
+            return self.engine.computed_style_now(child, node);
+        }
+        child.styles.get(node).cloned()
+    }
     fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
         if let Some(c) = self.page.frames.get(node) {
             return Some(c.id);
