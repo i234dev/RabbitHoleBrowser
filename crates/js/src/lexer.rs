@@ -111,11 +111,25 @@ const PUNCTS: &[&str] = &[
 ];
 
 fn is_id_start(c: char) -> bool {
-    c == '$' || c == '_' || c.is_alphabetic()
+    // ID_Start ~ Alphabetic, plus Other_ID_Start (U+2118 appears in
+    // minified bundles).
+    c == '$' || c == '_' || c.is_alphabetic() || matches!(c, '\u{1885}' | '\u{1886}' | '\u{2118}' | '\u{212e}' | '\u{309b}' | '\u{309c}')
 }
 
 fn is_id_part(c: char) -> bool {
-    c == '$' || c == '_' || c.is_alphanumeric() || c == '\u{200c}' || c == '\u{200d}'
+    c == '$'
+        || c == '_'
+        || c.is_alphanumeric()
+        || is_id_start(c)
+        || matches!(c,
+            '\u{200c}' | '\u{200d}'
+            // Other_ID_Continue.
+            | '\u{00b7}' | '\u{0387}' | '\u{1369}'..='\u{1371}' | '\u{19da}' | '\u{30fb}' | '\u{ff65}'
+            // Combining marks (Mn) of the common blocks.
+            | '\u{0300}'..='\u{036f}' | '\u{0483}'..='\u{0487}' | '\u{0591}'..='\u{05bd}' | '\u{0610}'..='\u{061a}' | '\u{064b}'..='\u{065f}'
+            | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}' | '\u{20d0}'..='\u{20dc}' | '\u{20e1}' | '\u{20e5}'..='\u{20f0}' | '\u{fe00}'..='\u{fe0f}' | '\u{fe20}'..='\u{fe2f}'
+            // Connector punctuation (Pc).
+            | '\u{203f}' | '\u{2040}' | '\u{2054}' | '\u{fe33}' | '\u{fe34}' | '\u{fe4d}'..='\u{fe4f}' | '\u{ff3f}')
 }
 
 fn is_line_terminator(c: char) -> bool {

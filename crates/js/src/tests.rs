@@ -1600,3 +1600,12 @@ fn regexp_literal_inside_promise_executor() {
     eq("var r; new Promise(function () { r = 'a1b2'.replace(/\\d/g, '#'); }); r", "a#b#");
     eq("class P extends Promise {} var r; new P(function () { r = /x/.exec('yx').index; }); r", "1");
 }
+
+/// Unicode identifiers: Other_ID_Start (U+2118, in ESPN's bundle),
+/// combining marks and connector punctuation inside names.
+#[test]
+fn unicode_identifier_characters() {
+    eq("var \u{2118} = 2; var a\u{2118} = 3; \u{2118} + a\u{2118}", "5");
+    eq("var e\u{301} = 4; var x\u{203f}y = 5; e\u{301} + x\u{203f}y", "9");
+    eq("var \u{212e}\u{b7} = 1; \u{212e}\u{b7}", "1");
+}
