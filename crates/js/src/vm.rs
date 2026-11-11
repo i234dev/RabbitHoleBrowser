@@ -1592,18 +1592,18 @@ impl Realm {
                         }
                     }
                     Op::JumpIfTrueR(s, t) => {
-                        if sl!(s).truthy() {
+                        if self.to_boolean(sl!(s)) {
                             jump!(t);
                         }
                     }
                     Op::JumpIfFalseR(s, t) => {
-                        if !sl!(s).truthy() {
+                        if !self.to_boolean(sl!(s)) {
                             jump!(t);
                         }
                     }
                     Op::Jump(t) => jump!(t),
                     Op::NotR(d, s) => {
-                        let r = !sl!(s).truthy();
+                        let r = !self.to_boolean(sl!(s));
                         *sl!(d) = Value::Bool(r);
                     }
                     Op::IncJumpIfLtRK(r, c, t) => {
@@ -2132,12 +2132,12 @@ impl Realm {
                     }
                 }
                 Op::JumpIfTrueR(s, t) => {
-                    if sl!(s).truthy() {
+                    if self.to_boolean(&sl!(s)) {
                         jmp!(t);
                     }
                 }
                 Op::JumpIfFalseR(s, t) => {
-                    if !sl!(s).truthy() {
+                    if !self.to_boolean(&sl!(s)) {
                         jmp!(t);
                     }
                 }
@@ -2720,12 +2720,12 @@ impl Realm {
                 }
                 Op::Jump(t) => frame!().pc = t as usize,
                 Op::JumpIfFalse(t) => {
-                    if !pop!().truthy() {
+                    if !{ let v = pop!(); self.to_boolean(&v) } {
                         frame!().pc = t as usize;
                     }
                 }
                 Op::JumpIfTrue(t) => {
-                    if pop!().truthy() {
+                    if { let v = pop!(); self.to_boolean(&v) } {
                         frame!().pc = t as usize;
                     }
                 }
@@ -2742,12 +2742,12 @@ impl Realm {
                     }
                 }
                 Op::JumpIfFalseKeep(t) => {
-                    if !peek!().truthy() {
+                    if !{ let v = peek!().clone(); self.to_boolean(&v) } {
                         frame!().pc = t as usize;
                     }
                 }
                 Op::JumpIfTrueKeep(t) => {
-                    if peek!().truthy() {
+                    if { let v = peek!().clone(); self.to_boolean(&v) } {
                         frame!().pc = t as usize;
                     }
                 }
@@ -2879,7 +2879,7 @@ impl Realm {
                 }
                 Op::Not => {
                     let v = pop!();
-                    push!(Value::Bool(!v.truthy()));
+                    push!(Value::Bool(!self.to_boolean(&v)));
                 }
                 Op::BitNot => {
                     let v = pop!();
@@ -3546,7 +3546,7 @@ impl Realm {
     /// A unary operator on a value.
     fn unary_value(&mut self, op: Op, v: Value) -> JsResult<Value> {
         Ok(match op {
-            Op::Not => Value::Bool(!v.truthy()),
+            Op::Not => Value::Bool(!self.to_boolean(&v)),
             Op::Inc => self.inc_value(v, 1.0)?,
             Op::Dec => self.inc_value(v, -1.0)?,
             Op::ToNumeric => match v.v() {

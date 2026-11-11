@@ -16,6 +16,12 @@ pub enum Hint {
     String,
 }
 
+
+thread_local! {
+    /// Some realm of this thread has an [[IsHTMLDDA]] object.
+    static HTMLDDA_EXISTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl Realm {
     // ------------------------------------------------------- property get
 
@@ -897,7 +903,22 @@ impl Realm {
     }
 
     pub fn to_boolean(&self, v: &Value) -> bool {
-        v.truthy()
+        v.truthy() && !self.is_htmldda(v)
+    }
+
+    /// Mark `id` as an [[IsHTMLDDA]] object (Annex B: `document.all`).
+    pub fn make_htmldda(&mut self, id: ObjectId) {
+        self.obj_mut(id).htmldda = true;
+        HTMLDDA_EXISTS.with(|e| e.set(true));
+    }
+
+    /// `v` is an [[IsHTMLDDA]] object (cheap when the thread has none).
+    #[inline]
+    pub fn is_htmldda(&self, v: &Value) -> bool {
+        match v.as_object() {
+            Some(o) if HTMLDDA_EXISTS.with(|e| e.get()) => self.heap.try_get(o).map(|x| x.htmldda).unwrap_or(false),
+            _ => false,
+        }
     }
 
     pub fn to_object(&mut self, v: Value) -> JsResult<ObjectId> {
@@ -1028,6 +1049,8 @@ impl Realm {
     pub fn loose_equals(&mut self, a: Value, b: Value) -> JsResult<bool> {
         match (a.v(), b.v()) {
             (V::Undefined | V::Null | V::Empty, V::Undefined | V::Null | V::Empty) => Ok(true),
+            (V::Undefined | V::Null | V::Empty, V::Object(_)) => Ok(self.is_htmldda(&b)),
+            (V::Object(_), V::Undefined | V::Null | V::Empty) => Ok(self.is_htmldda(&a)),
             (V::Undefined | V::Null | V::Empty, _) | (_, V::Undefined | V::Null | V::Empty) => Ok(false),
             (V::Number(_), V::String(s)) => {
                 let n = string_to_number(s);
@@ -1107,6 +1130,7 @@ impl Realm {
 
     pub fn type_of(&self, v: &Value) -> &'static str {
         match v.v() {
+            V::Object(_) if self.is_htmldda(v) => "undefined",
             V::Object(o) => {
                 if self.is_callable(v) {
                     "function"

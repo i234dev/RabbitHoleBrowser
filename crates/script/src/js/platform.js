@@ -506,9 +506,21 @@
   }
   tag(HTMLAllCollection, 'HTMLAllCollection');
   define('HTMLAllCollection', HTMLAllCollection);
-  // [LegacyFalsy] cannot be emulated: `document.all` reads as undefined so
-  // IE-detection code takes the standards path, as in other browsers.
-  acc(g.Document, 'all', function () { return undefined; });
+  // [LegacyFalsy] / [[IsHTMLDDA]]: `document.all` is an object that reads
+  // as falsy, has typeof "undefined" and == null, so IE-detection code
+  // takes the standards path while `x === document.all` stays false for
+  // undefined x (sanitizers such as YouTube's Trusted Types bridge rely
+  // on it).
+  const ALL = Symbol('all');
+  acc(g.Document, 'all', function () {
+    let a = this[ALL];
+    if (!a) {
+      a = Object.create(HTMLAllCollection.prototype);
+      hidden(this, ALL, a);
+      N.markHTMLDDA(a);
+    }
+    return a;
+  });
 
   // Legacy document colors / misc.
   for (const [k, attr] of [['fgColor', 'text'], ['linkColor', 'link'], ['vlinkColor', 'vlink'], ['alinkColor', 'alink'], ['bgColor', 'bgcolor']]) {

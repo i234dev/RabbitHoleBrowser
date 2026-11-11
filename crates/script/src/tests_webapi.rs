@@ -594,7 +594,7 @@ fn platform_apis() {
           const dt = new DataTransfer();
           dt.setData('text', 'drag');
           console.log('dt', dt.getData('text/plain'), dt.types.join(), dt.items.length);
-          console.log('misc', navigator.plugins.length > 0, navigator.mimeTypes[0].type, typeof visualViewport.width, screen.orientation.type, document.fullscreenEnabled, Notification.permission, locationbar.visible, document.all);
+          console.log('misc', navigator.plugins.length > 0, navigator.mimeTypes[0].type, typeof visualViewport.width, screen.orientation.type, document.fullscreenEnabled, Notification.permission, locationbar.visible, typeof document.all, document.all == null, document.all === undefined, !document.all, document.all.length > 0);
           navigator.geolocation.getCurrentPosition(() => {}, (e) => console.log('geo', e.code, e.code === GeolocationPositionError.PERMISSION_DENIED));
         })().catch((e) => console.log('ERR ' + e + ' ' + e.stack));
         "#,
@@ -610,7 +610,7 @@ fn platform_apis() {
             "storage true true",
             "sw NotSupportedError body! 1",
             "dt drag text/plain 1",
-            "misc true application/pdf number landscape-primary false denied true undefined",
+            "misc true application/pdf number landscape-primary false denied true undefined true false true true",
             "geo 1 true",
         ]
     );

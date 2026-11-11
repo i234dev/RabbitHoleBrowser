@@ -418,11 +418,14 @@ pub struct Object {
     pub kind: ObjectKind,
     /// `Object.prototype.toString` tag override for host objects.
     pub class_name: Option<&'static str>,
+    /// [[IsHTMLDDA]] (`document.all`): falsy, `typeof` "undefined", loosely
+    /// equal to null and undefined (see [`crate::Realm::make_htmldda`]).
+    pub htmldda: bool,
 }
 
 impl Object {
     pub fn new(proto: Option<ObjectId>, kind: ObjectKind) -> Object {
-        Object { proto, props: PropertyMap::new(), extensible: true, kind, class_name: None }
+        Object { proto, props: PropertyMap::new(), extensible: true, kind, class_name: None, htmldda: false }
     }
     /// Change the prototype (`[[SetPrototypeOf]]` without checks); keeps
     /// prototype-chain inline caches honest.

@@ -685,3 +685,23 @@ fn dynamic_names_in_the_shared_cache() {
     eq("var o = {aaaa: 1, bbbb: 2, cccc: 3}; var p = ['aa', 'bb', 'cc']; var s = ''; for (var i = 0; i < 300; i++) { var k = p[i % 3] + p[i % 3]; s += o[k]; } s.slice(0, 9) + ':' + s.length", "123123123:300");
     eq("var o = {}; for (var i = 0; i < 50; i++) o['k' + i] = i; var t = 0; for (var j = 0; j < 500; j++) t += o['k' + (j % 50)]; t", "12250");
 }
+
+#[test]
+fn htmldda_objects() {
+    let mut realm = Realm::new();
+    let o = realm.new_object();
+    realm.make_htmldda(o);
+    let g = realm.global;
+    realm.set_str(crate::value::Value::Object(g), "dda", crate::value::Value::Object(o)).unwrap();
+    let r = realm.eval("var u; [typeof dda, dda == null, dda == undefined, null == dda, dda === undefined, u === dda, !dda, dda ? 1 : 2, dda && 3, dda || 4, typeof {}, !{}].join()", "t.js").unwrap();
+    let s = realm.to_string(r).unwrap().to_rust_string();
+    assert_eq!(s, "undefined,true,true,true,false,false,true,2,[object Object],4,object,false");
+}
+
+#[test]
+fn proxies_never_match_property_caches() {
+    // A proxy has an empty own map like `{}` / Object.create(null): cache
+    // records for such receivers must not answer for it.
+    eq("function rd(o) { return o.x; } var a = Object.create(null), b = {}, h = { get(t, k) { return k === 'x' ? 'trap' : undefined; } }; var p = new Proxy(Object.create(null), h), q = new Proxy({}, h); [rd(a), rd(a), rd(p), rd(b), rd(b), rd(q), p.x, q['x']].map(String).join()", "undefined,undefined,trap,undefined,undefined,trap,trap,trap");
+    eq("function wr(o, v) { o.y = v; } var log = []; var h = { set(t, k, v) { log.push(k + '=' + v); return true; } }; var a = {}; wr(a, 1); wr({}, 2); var p = new Proxy({}, h); wr(p, 3); log.join() + ':' + Object.keys(p).length", "y=3:0");
+}

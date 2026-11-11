@@ -238,6 +238,14 @@ fn install_handlers(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     Ok(Value::Undefined)
 }
 
+/// `markHTMLDDA(object)`: give it [[IsHTMLDDA]] (`document.all`).
+fn mark_htmldda(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if let Some(o) = arg(args, 0).as_object() {
+        realm.make_htmldda(o);
+    }
+    Ok(Value::Undefined)
+}
+
 /// `registerProto(name, prototype)`: make a JS-defined interface the
 /// prototype natives use for `name` (wrappers, events).
 fn register_proto(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -303,6 +311,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
     realm.define_method(o, "imagePixels", 1, image_pixels);
     realm.define_method(o, "installHandlers", 2, install_handlers);
+    realm.define_method(o, "markHTMLDDA", 1, mark_htmldda);
     realm.define_method(o, "registerProto", 2, register_proto);
     realm.define_method(o, "setRenderHook", 1, set_render_hook);
     realm.define_method(o, "setRenderObservers", 1, set_render_observers);
