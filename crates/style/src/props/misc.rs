@@ -15,11 +15,25 @@ fn timing_name(c: &[Token]) -> Option<String> {
         }
         return None;
     }
-    match super::fn_name(c)?.as_str() {
-        "cubic-bezier" => Some("cubic-bezier".into()),
-        "steps" => Some("steps".into()),
-        _ => None,
+    // Keep the arguments: `cubic-bezier(0.4, 0, 0.2, 1)`, `steps(4, end)`.
+    let name = super::fn_name(c)?;
+    if name != "cubic-bezier" && name != "steps" {
+        return None;
     }
+    let args: Vec<String> = super::fn_args(c)
+        .iter()
+        .map(|arg| {
+            arg.iter()
+                .map(|comp| match comp {
+                    [Token::Number(n)] => format!("{n}"),
+                    [Token::Ident(i)] => i.to_ascii_lowercase(),
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    Some(format!("{name}({})", args.join(", ")))
 }
 
 fn parse_transitions(comps: &[&[Token]]) -> Vec<Transition> {

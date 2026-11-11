@@ -94,6 +94,16 @@ impl IncrementalState {
         std::mem::replace(&mut self.dpr_seen, Some(dpr)) != Some(dpr)
     }
 
+    /// `node`'s computed style was replaced outside the style engine (an
+    /// animation overlay): rebuild its box.
+    pub(crate) fn style_patched(&mut self, node: NodeId) {
+        self.box_dirty.insert(node);
+        self.layout_dirty = true;
+        self.dl_dirty = true;
+        self.stats.style_incremental += 1;
+        self.rects.borrow_mut().clear();
+    }
+
     /// Restyle and lay out everything on the next flush.
     pub fn invalidate_all(&mut self) {
         self.style = None;
@@ -225,6 +235,8 @@ impl Engine {
         };
         let incr = &mut page.incr;
         let fresh = !matches!(&incr.style, Some(se) if se.env_matches(&env));
+        let mut anim_changes: Vec<crate::animations::Change> = Vec::new();
+        let mut anim_full = fresh;
         if fresh {
             let mut se = StyleEngine::new(&page.sheets, &env);
             page.styles = se.full(&page.doc, &page.sheets, &opts);
@@ -240,6 +252,10 @@ impl Engine {
             let out = se.update(&page.doc, &mut page.styles, &log, &opts, &page.sheets);
             if debug_enabled() {
                 eprintln!("[incr] style: full={} recomputed={} changed={} mutations={}", out.full, out.recomputed, out.changes.len(), log.entries.len());
+            }
+            anim_full = out.full;
+            if !out.full && (!page.anim.is_idle() || out.changes.iter().any(|c| c.new.as_ref().map(|s| !s.transitions.is_empty() || !s.animations.is_empty()).unwrap_or(false))) {
+                anim_changes = out.changes.iter().map(|c| (c.node, c.old.clone(), c.new.clone())).collect();
             }
             if out.full {
                 incr.stats.style_full += 1;
@@ -274,6 +290,9 @@ impl Engine {
         page.background = canvas_background(&page.doc, &page.styles);
         if fresh || log.overflow || log.entries.iter().any(|m| matches!(m, Mutation::Children { .. } | Mutation::Node { .. })) {
             rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images);
+        }
+        if anim_full || !anim_changes.is_empty() {
+            self.animations_after_style(page, anim_changes, anim_full);
         }
     }
 

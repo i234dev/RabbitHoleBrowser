@@ -522,11 +522,32 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect) -
         },
         "user-select" => "auto".into(),
         "content" => "normal".into(),
-        "animation-name" | "transition-property" => "none".into(),
-        "animation-duration" | "transition-duration" | "transition-delay" | "animation-delay" => "0s".into(),
+        p if p.starts_with("transition-") || p.starts_with("animation-") => timing_css(s, p).unwrap_or_default(),
         _ => String::new(),
     }
 }
+
+/// Computed `transition-*` / `animation-*` longhands for `getComputedStyle`.
+fn timing_css(s: &ComputedStyle, prop: &str) -> Option<String> {
+    let secs = |v: f32| format!("{}s", (v * 1000.0).round() / 1000.0);
+    let list = |items: Vec<String>, empty: &str| if items.is_empty() { empty.to_string() } else { items.join(", ") };
+    Some(match prop {
+        "transition-property" => list(s.transitions.iter().map(|t| t.property.clone()).collect(), "all"),
+        "transition-duration" => list(s.transitions.iter().map(|t| secs(t.duration)).collect(), "0s"),
+        "transition-delay" => list(s.transitions.iter().map(|t| secs(t.delay)).collect(), "0s"),
+        "transition-timing-function" => list(s.transitions.iter().map(|t| t.timing.clone()).collect(), "ease"),
+        "animation-name" => list(s.animations.iter().map(|a| a.name.clone()).collect(), "none"),
+        "animation-duration" => list(s.animations.iter().map(|a| secs(a.duration)).collect(), "0s"),
+        "animation-delay" => list(s.animations.iter().map(|a| secs(a.delay)).collect(), "0s"),
+        "animation-timing-function" => list(s.animations.iter().map(|a| a.timing.clone()).collect(), "ease"),
+        "animation-iteration-count" => list(s.animations.iter().map(|a| a.iterations.map(|n| format!("{n}")).unwrap_or_else(|| "infinite".into())).collect(), "1"),
+        "animation-direction" => list(s.animations.iter().map(|a| a.direction.clone()).collect(), "normal"),
+        "animation-fill-mode" => list(s.animations.iter().map(|a| a.fill_mode.clone()).collect(), "none"),
+        "animation-play-state" => list(s.animations.iter().map(|_| "running".to_string()).collect(), "running"),
+        _ => return None,
+    })
+}
+
 
 fn cs_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = style_target(realm, args)?;

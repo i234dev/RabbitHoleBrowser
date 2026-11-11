@@ -122,6 +122,11 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             realm.define_property(id, "isComposing", Value::Bool(false), ACC);
             realm.define_property(id, "dataTransfer", Value::Null, ACC);
         }
+        Some(EventDetail::Animation { name, elapsed, pseudo, transition }) => {
+            realm.define_property(id, if *transition { "propertyName" } else { "animationName" }, Value::str(name), ACC);
+            realm.define_property(id, "elapsedTime", Value::Number(*elapsed as f64), ACC);
+            realm.define_property(id, "pseudoElement", Value::str(pseudo), ACC);
+        }
         Some(EventDetail::None) | None => {}
     }
     id
@@ -782,6 +787,8 @@ fn event_class_for(ty: &str, init: &EventInit) -> &'static str {
         }
         Some(EventDetail::Key { .. }) => "KeyboardEvent",
         Some(EventDetail::Input { .. }) => "InputEvent",
+        Some(EventDetail::Animation { transition: true, .. }) => "TransitionEvent",
+        Some(EventDetail::Animation { transition: false, .. }) => "AnimationEvent",
         _ => match ty {
             "focus" | "blur" | "focusin" | "focusout" => "FocusEvent",
             "submit" => "SubmitEvent",

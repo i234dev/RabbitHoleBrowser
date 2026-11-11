@@ -7,6 +7,7 @@
 //! [`Engine`] turns it into a [`Page`] (styles, layout, display list) on the
 //! thread that owns the fonts and paints.
 
+pub mod animations;
 pub mod diff;
 pub mod forms;
 pub mod frames;
@@ -957,6 +958,8 @@ pub struct Page {
     pub frame_origin: Option<String>,
     /// Documents of this page's `<iframe>` elements.
     pub frames: frames::Frames,
+    /// Running CSS transitions and animations.
+    pub anim: animations::AnimationState,
 }
 
 impl Default for Engine {
@@ -1074,6 +1077,7 @@ impl Engine {
             frame_name: frame.as_ref().and_then(|f| f.name.clone()),
             frame_origin: frame.and_then(|f| f.origin),
             frames: frames::Frames::default(),
+            anim: animations::AnimationState::default(),
         };
         page.snapshot_form_defaults();
         page.script.dialog_policy = self.dialog_policy.clone();
@@ -1688,6 +1692,12 @@ impl Page {
             return None;
         }
         self.incr.cached_rect(node, || {
+            if self.layout.box_of(&self.doc, node).is_none() && self.doc.element(node).is_some() {
+                // Inline elements: the union of their line fragments.
+                if let Some(r) = self.layout.inline_rect(&self.doc, node) {
+                    return Some(r);
+                }
+            }
             let mut cur = Some(node);
             while let Some(n) = cur {
                 if let Some(b) = self.layout.box_of(&self.doc, n) {

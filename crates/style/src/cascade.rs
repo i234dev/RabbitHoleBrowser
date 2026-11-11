@@ -612,6 +612,28 @@ fn apply_declarations(
     style
 }
 
+/// The style `base` with `decls` (e.g. one `@keyframes` frame) applied
+/// on top, as the cascade would apply them after the element's own
+/// declarations. `var()` references are left unresolved (dropped).
+pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declaration], root_font_size: f32, viewport: (f32, f32)) -> ComputedStyle {
+    let mut style = base.clone();
+    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1 };
+    let keep = |_: &str, raw: &str| Some(raw.to_string());
+    let ctx = ApplyCtx { len, pseudo: false, base: None, document_base: "", resolve: &keep };
+    for d in decls {
+        if d.name.starts_with("--") || d.value.iter().any(|t| matches!(t, Token::Function(f) if f.eq_ignore_ascii_case("var"))) {
+            continue;
+        }
+        if d.name == "font-size" {
+            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1 };
+            apply_font_size(&d.value, &mut style, parent, &pctx);
+            continue;
+        }
+        apply_property(&d.name, &d.value, &mut style, parent, &ctx);
+    }
+    style
+}
+
 // ---------------------------------------------------------------- font-face
 
 pub(crate) fn collect_font_faces(author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> Vec<FontFace> {
