@@ -26,6 +26,20 @@ pub trait HostEnv {
         None
     }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>>;
+    /// Scroll state of an element's box (after layout): (scroll offset,
+    /// scroll size). `None` = no box / not supported.
+    fn element_scroll(&mut self, _node: NodeId) -> Option<((f32, f32), (f32, f32))> {
+        None
+    }
+    /// Scroll an element's scroll container (clamped). Returns whether it moved.
+    fn set_element_scroll(&mut self, _node: NodeId, _x: f32, _y: f32) -> bool {
+        false
+    }
+    /// Scrollable size of the document (the root scroller's
+    /// scrollWidth / scrollHeight: at least the viewport).
+    fn document_scroll_size(&mut self) -> Option<(f32, f32)> {
+        None
+    }
     fn viewport(&self) -> (f32, f32);
     fn scroll(&self) -> (f32, f32);
     fn set_scroll(&mut self, x: f32, y: f32);

@@ -363,10 +363,23 @@ impl ScriptHost {
         })
     }
 
+    /// Something that observers depend on changed outside of scripts
+    /// (e.g. an inner scroll container scrolled): run the "update the
+    /// rendering" hook (IntersectionObserver / ResizeObserver) soon.
+    pub fn invalidate_rendering(&mut self) {
+        self.state.borrow_mut().render.dirty = true;
+    }
+
     /// Dispatch an event on `window` (`load`, `resize`, `scroll`, ...).
     pub fn dispatch_window_event(&mut self, env: &mut dyn HostEnv, event_type: &str) -> DispatchResult {
         if matches!(event_type, "scroll" | "resize") {
             self.state.borrow_mut().render.dirty = true;
+        }
+        if event_type == "scroll" {
+            // Viewport scrolling fires `scroll` at the Document, bubbling
+            // to the window (CSSOM View §13.1): `document.addEventListener
+            // ('scroll', ...)` must see it too.
+            return self.enter(env, |realm| events::dispatch(realm, TargetKey::Node(NodeRef::main(Document::ROOT)), event_type, EventInit::simple(true, false), true));
         }
         self.enter(env, |realm| events::dispatch(realm, TargetKey::Window, event_type, EventInit::simple(false, false), true))
     }

@@ -1282,14 +1282,48 @@ impl Engine {
         if (nx, ny) == info.offset {
             return false;
         }
-        page.scroll_offsets.insert(info.node, (nx, ny));
-        if !page.incr.dirty() && page.layout.set_scroll_offset(&page.doc, info.node, (nx, ny)) {
+        self.apply_scroll_offset(page, info.node, (nx, ny));
+        true
+    }
+
+    /// Move a scroll container's contents to `offset` (already clamped).
+    fn apply_scroll_offset(&self, page: &mut Page, node: NodeId, offset: (f32, f32)) {
+        page.scroll_offsets.insert(node, offset);
+        if !page.incr.dirty() && page.layout.set_scroll_offset(&page.doc, node, offset) {
             // Clean layout: scroll by translating the container's contents.
-            page.incr.scrolled(info.node, (nx, ny));
+            page.incr.scrolled(node, offset);
             self.rebuild_display_list(page);
         } else {
             self.relayout_only(page);
         }
+    }
+
+    /// Scroll state of an element's box: (scroll offset, scroll size). A
+    /// box that does not clip reports its padding box (nothing scrolled).
+    pub fn element_scroll(&self, page: &Page, node: NodeId) -> Option<((f32, f32), (f32, f32))> {
+        let b = page.layout.box_of(&page.doc, node)?;
+        if b.clips {
+            Some((b.scroll_offset, (b.scroll_width, b.scroll_height)))
+        } else {
+            let p = b.padding_rect();
+            Some(((0.0, 0.0), (p.w, p.h)))
+        }
+    }
+
+    /// Scroll an element's scroll container to `(x, y)` (clamped; e.g.
+    /// `element.scrollTop = ...`). Returns whether it moved.
+    pub fn set_element_scroll(&self, page: &mut Page, node: NodeId, x: f32, y: f32) -> bool {
+        let Some(b) = page.layout.box_of(&page.doc, node) else { return false };
+        if !b.scroll_container {
+            return false;
+        }
+        let p = b.padding_rect();
+        let max = ((b.scroll_width - p.w).max(0.0), (b.scroll_height - p.h).max(0.0));
+        let to = (x.clamp(0.0, max.0), y.clamp(0.0, max.1));
+        if to == b.scroll_offset {
+            return false;
+        }
+        self.apply_scroll_offset(page, node, to);
         true
     }
 

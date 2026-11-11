@@ -223,6 +223,22 @@ impl HostEnv for EngineEnv<'_> {
         }
         r
     }
+    fn element_scroll(&mut self, node: NodeId) -> Option<((f32, f32), (f32, f32))> {
+        self.ensure_layout();
+        self.engine.element_scroll(self.page, node)
+    }
+    fn set_element_scroll(&mut self, node: NodeId, x: f32, y: f32) -> bool {
+        self.ensure_layout();
+        let t = std::time::Instant::now();
+        let moved = self.engine.set_element_scroll(self.page, node, x, y);
+        rabbithole_script::exclude_from_watchdog(t.elapsed());
+        moved
+    }
+    fn document_scroll_size(&mut self) -> Option<(f32, f32)> {
+        self.ensure_layout();
+        let vp = self.page.viewport;
+        Some((self.page.content_width().max(vp.width), self.page.content_height().max(vp.height)))
+    }
     fn viewport(&self) -> (f32, f32) {
         (self.page.viewport.width, self.page.viewport.height)
     }
@@ -678,6 +694,11 @@ impl Engine {
         let Some(mut host) = page.script.host.take() else {
             return ScriptOutcome::default();
         };
+        if event_type == "scroll" {
+            // A scroll container moved: observers rooted in it (or whose
+            // targets it holds) must be checked again.
+            host.invalidate_rendering();
+        }
         // Skip the dispatch entirely when no listener for this type exists
         // anywhere (the event could bubble to any ancestor or the window).
         // Clicks always go through so inline `onclick` attributes and

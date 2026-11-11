@@ -903,22 +903,71 @@ fn e_zero(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Number(0.0))
 }
 
+/// Scroll size of an element: the document's for `<html>` (infinite
+/// scroll checks `scrollTop + clientHeight >= scrollHeight`), the
+/// scrollable overflow for scroll containers, else the padding box.
+fn scroll_size(n: NodeRef) -> (f32, f32) {
+    if n.doc == 0 {
+        let is_html = with_doc(0, |doc| doc.is_element(n.node, "html"));
+        let size = with_env(|env| if is_html { env.document_scroll_size() } else { env.element_scroll(n.node).map(|(_, s)| s) });
+        if let Some(s) = size {
+            return s;
+        }
+    }
+    let r = node_rect(n);
+    (r.w, r.h)
+}
+
+/// Scroll offset of an element's scroll container, from layout (what the
+/// user scrolled with the wheel too).
+fn element_scroll_offset(n: NodeRef) -> Option<(f32, f32)> {
+    if n.doc != 0 {
+        return None;
+    }
+    with_env(|env| env.element_scroll(n.node)).map(|(o, _)| o)
+}
+
+/// Scroll an element; a moved container re-runs observers (its `scroll`
+/// event follows from the embedder's next frame in browsers; observers
+/// must see the new position).
+fn set_element_scroll(realm: &mut Realm, this: &Value, n: NodeRef, x: Option<f64>, y: Option<f64>) {
+    let cur = element_scroll_offset(n);
+    let moved = match cur {
+        Some((cx, cy)) => with_env(|env| env.set_element_scroll(n.node, x.map(|v| v as f32).unwrap_or(cx), y.map(|v| v as f32).unwrap_or(cy))),
+        None => false,
+    };
+    if moved {
+        state().borrow_mut().render.dirty = true;
+    } else if cur.is_none() {
+        // No box (or no layout support): remember the values.
+        if let Value::Object(w) = this {
+            if let Some(x) = x {
+                set_hidden(realm, *w, "__scrollLeft", Value::Number(x.max(0.0)));
+            }
+            if let Some(y) = y {
+                set_hidden(realm, *w, "__scrollTop", Value::Number(y.max(0.0)));
+            }
+        }
+    }
+}
+
 fn e_scroll_width(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollWidth")?;
-    let r = node_rect(n);
-    Ok(Value::Number(r.w.round() as f64))
+    Ok(Value::Number(scroll_size(n).0.round() as f64))
 }
 
 fn e_scroll_height(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollHeight")?;
-    let r = node_rect(n);
-    Ok(Value::Number(r.h.round() as f64))
+    Ok(Value::Number(scroll_size(n).1.round() as f64))
 }
 
 fn e_scroll_top_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollTop")?;
     if is_root_scroller(n) {
         return Ok(Value::Number(with_env(|env| env.scroll().1) as f64));
+    }
+    if let Some((_, y)) = element_scroll_offset(n) {
+        return Ok(Value::Number(y as f64));
     }
     let Value::Object(w) = this else { unreachable!() };
     let v = get_hidden(realm, w, "__scrollTop");
@@ -935,8 +984,7 @@ fn e_scroll_top_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
         });
         return Ok(Value::Undefined);
     }
-    let Value::Object(w) = this else { unreachable!() };
-    set_hidden(realm, w, "__scrollTop", Value::Number(v.max(0.0)));
+    set_element_scroll(realm, &this, n, None, Some(v));
     Ok(Value::Undefined)
 }
 
@@ -944,6 +992,9 @@ fn e_scroll_left_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
     let n = this_node(realm, &this, "scrollLeft")?;
     if is_root_scroller(n) {
         return Ok(Value::Number(with_env(|env| env.scroll().0) as f64));
+    }
+    if let Some((x, _)) = element_scroll_offset(n) {
+        return Ok(Value::Number(x as f64));
     }
     let Value::Object(w) = this else { unreachable!() };
     let v = get_hidden(realm, w, "__scrollLeft");
@@ -960,8 +1011,7 @@ fn e_scroll_left_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
         });
         return Ok(Value::Undefined);
     }
-    let Value::Object(w) = this else { unreachable!() };
-    set_hidden(realm, w, "__scrollLeft", Value::Number(v.max(0.0)));
+    set_element_scroll(realm, &this, n, Some(v), None);
     Ok(Value::Undefined)
 }
 
@@ -1011,13 +1061,8 @@ fn e_scroll_to(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
             let (cx, cy) = env.scroll();
             env.set_scroll(x.map(|v| v as f32).unwrap_or(cx), y.map(|v| v as f32).unwrap_or(cy));
         });
-    } else if let Value::Object(w) = this {
-        if let Some(x) = x {
-            set_hidden(realm, w, "__scrollLeft", Value::Number(x));
-        }
-        if let Some(y) = y {
-            set_hidden(realm, w, "__scrollTop", Value::Number(y));
-        }
+    } else {
+        set_element_scroll(realm, &this, n, x, y);
     }
     Ok(Value::Undefined)
 }
@@ -1030,6 +1075,8 @@ fn e_scroll_by(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
             let (cx, cy) = env.scroll();
             env.set_scroll(cx + x.unwrap_or(0.0) as f32, cy + y.unwrap_or(0.0) as f32);
         });
+    } else if let Some((cx, cy)) = element_scroll_offset(n) {
+        set_element_scroll(realm, &this, n, Some(cx as f64 + x.unwrap_or(0.0)), Some(cy as f64 + y.unwrap_or(0.0)));
     }
     Ok(Value::Undefined)
 }

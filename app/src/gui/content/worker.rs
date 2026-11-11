@@ -26,6 +26,8 @@ const OVERSCAN: f32 = 0.5;
 /// Pointer travel (device px) that turns a press into a drag.
 const DRAG_THRESHOLD: f32 = 4.0;
 const LINE_SCROLL: f32 = 40.0;
+/// Minimum interval between `scroll` events (one per frame).
+const SCROLL_EVENT_INTERVAL: Duration = Duration::from_millis(16);
 
 /// A text control being edited.
 struct ControlEdit {
@@ -112,10 +114,16 @@ struct Worker {
     scroll: (f32, f32),
     selection: Option<Selection>,
     edit: Option<ControlEdit>,
+    /// Inside `end_edit`: don't let script focus sync restart the edit.
+    ending_edit: bool,
     focus: Option<NodeId>,
     press: Option<Press>,
     find: Find,
     last_scroll_dispatch: Instant,
+    /// A `scroll` event was throttled: fire it once the interval passes
+    /// (the last position of a gesture must reach scroll listeners and
+    /// IntersectionObservers).
+    scroll_event_pending: bool,
     dirty: bool,
     frame_seq: u64,
     painted: Option<Painted>,
@@ -159,10 +167,12 @@ impl Worker {
             scroll: (0.0, 0.0),
             selection: None,
             edit: None,
+            ending_edit: false,
             focus: None,
             press: None,
             find: Find::default(),
             last_scroll_dispatch: Instant::now(),
+            scroll_event_pending: false,
             dirty: false,
             frame_seq: 0,
             painted: None,
@@ -218,6 +228,7 @@ impl Worker {
                     return;
                 }
             }
+            self.flush_scroll_event();
             self.tick_if_due(timed_out);
             self.flush();
         }
@@ -233,6 +244,10 @@ impl Worker {
         if self.load_phase.is_some() && !self.awaiting_scripts {
             // Watch for the end of image loading.
             wait = Some(wait.map(|w| w.min(200.0)).unwrap_or(200.0));
+        }
+        if self.scroll_event_pending {
+            let left = SCROLL_EVENT_INTERVAL.saturating_sub(self.last_scroll_dispatch.elapsed()).as_secs_f64() * 1000.0;
+            wait = Some(wait.map(|w| w.min(left)).unwrap_or(left));
         }
         wait.map(|ms| Duration::from_micros((ms * 1000.0) as u64))
     }
@@ -312,12 +327,21 @@ impl Worker {
             ToContent::PointerUp { x, y, button, mods, inside } => self.pointer_up(x, y, button, mods, inside),
             ToContent::Wheel { x, y, dx, dy } => {
                 let doc = (x + self.scroll.0, y + self.scroll.1);
-                let scrolled = match self.page.as_mut() {
-                    Some(page) => self.engine.scroll_at(page, doc.0, doc.1, dx, dy),
-                    None => false,
+                let (scrolled, container) = match self.page.as_mut() {
+                    Some(page) => {
+                        let container = page.layout.scroll_container_at(doc.0, doc.1).map(|i| i.node);
+                        (self.engine.scroll_at(page, doc.0, doc.1, dx, dy), container)
+                    }
+                    None => (false, None),
                 };
                 if scrolled {
                     self.dirty = true;
+                    // The container fires `scroll` (not bubbling); its
+                    // IntersectionObservers re-check.
+                    if let Some(node) = container {
+                        self.dispatch_to(node, "scroll", EventInit::simple(false, false));
+                        self.after_script_activity();
+                    }
                 } else {
                     self.send(FromContent::ScrollBy { dx, dy });
                 }
@@ -707,9 +731,19 @@ impl Worker {
     }
 
     fn dispatch_scroll_event(&mut self) {
-        if self.last_scroll_dispatch.elapsed() >= Duration::from_millis(16) {
+        if self.last_scroll_dispatch.elapsed() >= SCROLL_EVENT_INTERVAL {
+            self.scroll_event_pending = false;
             self.last_scroll_dispatch = Instant::now();
             self.dispatch_window("scroll");
+        } else {
+            self.scroll_event_pending = true;
+        }
+    }
+
+    /// Fire a throttled `scroll` event when its time has come.
+    fn flush_scroll_event(&mut self) {
+        if self.scroll_event_pending && self.last_scroll_dispatch.elapsed() >= SCROLL_EVENT_INTERVAL {
+            self.dispatch_scroll_event();
         }
     }
 
@@ -1003,7 +1037,9 @@ impl Worker {
         if let Some(nav) = out.navigation {
             self.end_edit();
             self.send(FromContent::Navigate { request: nav.request, push_history: !nav.replace });
+            return;
         }
+        self.sync_script_focus();
     }
 
     // ------------------------------------------------------------- pointer
@@ -1229,6 +1265,7 @@ impl Worker {
         let Some(edit) = self.edit.take() else { return };
         self.focus = None;
         self.dirty = true;
+        self.ending_edit = true;
         if edit.buf.text != edit.initial {
             self.dispatch_to(edit.node, "change", plain_init(false));
         }
@@ -1237,6 +1274,49 @@ impl Worker {
             let out = if page.state.focused == Some(edit.node) { engine.focus_element(page, None) } else { ScriptOutcome::default() };
             ((), out)
         });
+        self.ending_edit = false;
+        self.sync_script_focus();
+    }
+
+    /// Follow focus moved by scripts (`el.focus()`, a click handler that
+    /// focuses the real `<input>` under a decorated field, `blur()`): a
+    /// focused text control takes the keyboard like a clicked one, and the
+    /// edit ends when scripts move focus away.
+    fn sync_script_focus(&mut self) {
+        if self.ending_edit {
+            return;
+        }
+        let Some(page) = self.page.as_ref() else { return };
+        let focused = page.state.focused;
+        let editing = self.edit.as_ref().map(|e| e.node);
+        if focused == editing {
+            return;
+        }
+        let editable = focused.filter(|&n| {
+            matches!(page.control_kind(n), ControlKind::Text | ControlKind::Password | ControlKind::TextArea)
+                && page.doc.attr(n, "disabled").is_none()
+                && page.doc.attr(n, "readonly").is_none()
+        });
+        if editing.is_some() {
+            // Focus already left the control: commit it (change) without
+            // another blur.
+            self.end_edit();
+            if self.edit.is_some() {
+                return;
+            }
+        }
+        let Some(page) = self.page.as_ref() else { return };
+        if let Some(n) = editable.filter(|&n| page.state.focused == Some(n)) {
+            let text = page.control_text(n);
+            let len = text.len();
+            self.edit = Some(ControlEdit { node: n, buf: TextBuffer::new(&text), kind: page.control_kind(n), max_len: page.max_length(n), initial: text });
+            if let Some(e) = self.edit.as_mut() {
+                e.buf.set_caret(len, false);
+            }
+            self.focus = Some(n);
+            self.selection = None;
+            self.dirty = true;
+        }
     }
 
     /// Push the edit buffer into the DOM.

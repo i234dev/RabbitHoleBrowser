@@ -245,3 +245,45 @@ fn inline_element_rect_is_its_fragments() {
     }
     assert!(found, "center of #b hits #b");
 }
+
+/// Viewport scrolling fires `scroll` at the document (bubbling to the
+/// window), so `document.addEventListener('scroll', ...)` feeds work.
+#[test]
+fn page_scroll_event_reaches_document_and_window_listeners() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        "<div style='height:3000px'></div><script>var log = [];\
+         document.addEventListener('scroll', function (ev) { log.push('d:' + (ev.target === document) + ':' + ev.bubbles + ':' + scrollY); });\
+         window.addEventListener('scroll', function (ev) { log.push('w:' + (ev.target === document) + ':' + scrollY); });\
+         window.onscroll = function () { log.push('on'); };</script>",
+    );
+    e.set_page_scroll(&mut page, 0.0, 700.0);
+    let _ = e.dispatch_window_event(&mut page, "scroll");
+    assert_eq!(e.eval_in_page(&mut page, "log.join(',')"), "'d:true:true:700,w:true:700,on'");
+}
+
+/// Scrolling an inner scroll container re-runs IntersectionObservers
+/// rooted in it (the `scroll` event invalidates the rendering).
+#[test]
+fn scroll_container_scroll_updates_intersection_observers() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        "<div id=box style='height:200px;overflow:auto'><div style='height:1000px'></div><div id=s style='height:10px'></div></div>\
+         <script>var log = []; new IntersectionObserver(function (es) { es.forEach(function (x) { log.push(x.isIntersecting); }); }, { root: document.getElementById('box') }).observe(document.getElementById('s'));</script>",
+    );
+    let tick = |e: &Engine, page: &mut Page| {
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let _ = e.tick(page);
+        }
+    };
+    tick(&e, &mut page);
+    assert_eq!(e.eval_in_page(&mut page, "log.join(',')"), "'false'");
+    assert!(e.scroll_at(&mut page, 50.0, 50.0, 0.0, 900.0));
+    let bx = by_id(&page, "box");
+    let _ = e.dispatch_event(&mut page, bx, "scroll", rabbithole_engine::script::EventInit::simple(false, false));
+    tick(&e, &mut page);
+    assert_eq!(e.eval_in_page(&mut page, "log.join(',')"), "'false,true'");
+}

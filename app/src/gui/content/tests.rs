@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use rabbithole_engine::net::{Request, Url};
 
+mod feeds;
+
 /// Messages received by the fake UI: (when, tab id, message).
 type Received = Receiver<(Instant, u64, FromContent)>;
 
