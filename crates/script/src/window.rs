@@ -225,6 +225,19 @@ fn nav_user_agent(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Val
     Ok(Value::str(&with_env(|env| env.user_agent())))
 }
 
+/// `navigator.appVersion`: the User-Agent without its `Mozilla/` prefix.
+fn nav_app_version(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    let ua = with_env(|env| env.user_agent());
+    Ok(Value::str(ua.strip_prefix("Mozilla/").unwrap_or(&ua)))
+}
+
+/// `navigator.vendor`: what Chromium-based engines report with a
+/// Chromium-compatible User-Agent, empty otherwise.
+fn nav_vendor(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    let ua = with_env(|env| env.user_agent());
+    Ok(Value::str(if chromium_major(&ua).is_some() { "Google Inc." } else { "" }))
+}
+
 fn nav_send_beacon(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     // Fire and forget.
     let url = arg_str(realm, args, 0)?;
@@ -257,11 +270,128 @@ fn nav_get_battery(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Val
     Ok(Value::Object(p))
 }
 
+/// Major version of a Chromium-based User-Agent (`Chrome/142.0…`), if the
+/// User-Agent is one.
+fn chromium_major(ua: &str) -> Option<String> {
+    let rest = &ua[ua.find("Chrome/")? + 7..];
+    let major: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    (!major.is_empty()).then_some(major)
+}
+
+fn ua_platform() -> &'static str {
+    if cfg!(windows) {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else {
+        "Linux"
+    }
+}
+
+/// `[{brand, version}]` in the order of the `Sec-CH-UA` request header.
+fn ua_brands(realm: &mut Realm, major: &str, full: bool) -> Value {
+    let v = if full { format!("{major}.0.0.0") } else { major.to_string() };
+    let nb = if full { "99.0.0.0" } else { "99" };
+    let mut list = Vec::new();
+    for (b, ver) in [("Chromium", v.as_str()), ("Google Chrome", v.as_str()), ("Not_A Brand", nb)] {
+        let o = object_from(realm, vec![("brand", Value::str(b)), ("version", Value::str(ver))]);
+        list.push(o);
+    }
+    realm.new_array_value(list)
+}
+
+fn current_ua_major() -> String {
+    chromium_major(&with_env(|env| env.user_agent())).unwrap_or_default()
+}
+
+/// `navigator.userAgentData` (User-Agent Client Hints): present when the
+/// User-Agent is the Chromium-compatible one (it then matches the
+/// `Sec-CH-UA*` headers sent with requests), absent for the bot identity.
+fn nav_user_agent_data(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    if chromium_major(&with_env(|env| env.user_agent())).is_none() {
+        return Ok(Value::Undefined);
+    }
+    let data = realm.current_native().and_then(|n| realm.native_captures(n).first().cloned()).unwrap_or(Value::Undefined);
+    Ok(data)
+}
+
+fn uad_brands(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    let major = current_ua_major();
+    Ok(ua_brands(realm, &major, false))
+}
+
+fn uad_mobile(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::Bool(false))
+}
+
+fn uad_platform(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::str(ua_platform()))
+}
+
+fn uad_low_entropy(realm: &mut Realm) -> Vec<(&'static str, Value)> {
+    let major = current_ua_major();
+    let brands = ua_brands(realm, &major, false);
+    vec![("brands", brands), ("mobile", Value::Bool(false)), ("platform", Value::str(ua_platform()))]
+}
+
+fn uad_to_json(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    let pairs = uad_low_entropy(realm);
+    Ok(object_from(realm, pairs))
+}
+
+/// `getHighEntropyValues(hints)`: the low-entropy values plus each
+/// requested hint we know.
+fn uad_high_entropy(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let mut hints: Vec<String> = Vec::new();
+    if let Some(Value::Object(arr)) = args.first() {
+        let len = realm.get_str(Value::Object(*arr), "length")?;
+        let n = realm.to_number(len)? as usize;
+        for i in 0..n.min(64) {
+            let v = realm.get(Value::Object(*arr), PropertyKey::index(i as u32))?;
+            hints.push(realm.to_rust_string(v)?);
+        }
+    }
+    let major = current_ua_major();
+    let mut pairs = uad_low_entropy(realm);
+    for h in &hints {
+        let v = match h.as_str() {
+            "architecture" => Value::str(if cfg!(target_arch = "aarch64") { "arm" } else { "x86" }),
+            "bitness" => Value::str(if cfg!(target_pointer_width = "64") { "64" } else { "32" }),
+            "model" => Value::str(""),
+            "platformVersion" => Value::str(if cfg!(windows) { "10.0.0" } else if cfg!(target_os = "macos") { "10.15.7" } else { "" }),
+            "uaFullVersion" => Value::str(&format!("{major}.0.0.0")),
+            "fullVersionList" => ua_brands(realm, &major, true),
+            "wow64" => Value::Bool(false),
+            "formFactors" => {
+                let d = Value::str("Desktop");
+                realm.new_array_value(vec![d])
+            }
+            _ => continue,
+        };
+        let key: &'static str = match h.as_str() {
+            "architecture" => "architecture",
+            "bitness" => "bitness",
+            "model" => "model",
+            "platformVersion" => "platformVersion",
+            "uaFullVersion" => "uaFullVersion",
+            "fullVersionList" => "fullVersionList",
+            "wow64" => "wow64",
+            _ => "formFactors",
+        };
+        pairs.push((key, v));
+    }
+    let o = object_from(realm, pairs);
+    let (p, resolve, _) = realm.new_promise();
+    realm.call(Value::Object(resolve), Value::Undefined, &[o])?;
+    Ok(Value::Object(p))
+}
+
 fn make_navigator(realm: &mut Realm) -> ObjectId {
     let p = define_class(realm, "Navigator", None, illegal_ctor);
     let o = realm.new_object_with_proto(Some(p));
     realm.define_accessor(o, "userAgent", Some(nav_user_agent), None, ACC);
-    realm.define_accessor(o, "appVersion", Some(nav_user_agent), None, ACC);
+    realm.define_accessor(o, "appVersion", Some(nav_app_version), None, ACC);
+    realm.define_accessor(o, "vendor", Some(nav_vendor), None, ACC);
     realm.define_accessor(o, "languages", Some(nav_languages), None, ACC);
     for (k, v) in [
         ("language", Value::str("en-US")),
@@ -270,7 +400,6 @@ fn make_navigator(realm: &mut Realm) -> ObjectId {
         ("appCodeName", Value::str("Mozilla")),
         ("product", Value::str("Gecko")),
         ("productSub", Value::str("20030107")),
-        ("vendor", Value::str("")),
         ("vendorSub", Value::str("")),
         ("onLine", Value::Bool(true)),
         ("cookieEnabled", Value::Bool(true)),
@@ -280,10 +409,18 @@ fn make_navigator(realm: &mut Realm) -> ObjectId {
         ("pdfViewerEnabled", Value::Bool(false)),
         ("webdriver", Value::Bool(false)),
         ("deviceMemory", Value::Number(8.0)),
-        ("userAgentData", Value::Undefined),
     ] {
         realm.define_property(o, k, v, ACC);
     }
+    let uad_proto = define_class(realm, "NavigatorUAData", None, illegal_ctor);
+    realm.define_accessor(uad_proto, "brands", Some(uad_brands), None, ACC);
+    realm.define_accessor(uad_proto, "mobile", Some(uad_mobile), None, ACC);
+    realm.define_accessor(uad_proto, "platform", Some(uad_platform), None, ACC);
+    realm.define_method(uad_proto, "getHighEntropyValues", 1, uad_high_entropy);
+    realm.define_method(uad_proto, "toJSON", 0, uad_to_json);
+    let uad = realm.new_object_with_proto(Some(uad_proto));
+    let getter = realm.new_native_function_full("get userAgentData", 0, nav_user_agent_data, None, vec![Value::Object(uad)], false);
+    realm.define_accessor_values(o, "userAgentData", Some(Value::Object(getter)), None, ACC);
     let plugins = realm.new_array_value(vec![]);
     realm.define_property(o, "plugins", plugins.clone(), ACC);
     realm.define_property(o, "mimeTypes", plugins, ACC);

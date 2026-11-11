@@ -186,6 +186,16 @@ fn url_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
+fn url_empty_credential(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    url_data(realm, &this)?;
+    Ok(Value::str(""))
+}
+
+fn url_set_credential(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    url_data(realm, &this)?;
+    Ok(Value::Undefined)
+}
+
 fn url_to_string(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let u = url_data(realm, &this)?;
     Ok(Value::str(&u.to_string()))
@@ -1592,6 +1602,10 @@ pub(crate) fn install(realm: &mut Realm) {
         let s = if comp == "origin" { None } else { Some(Value::Object(realm.new_native_function_full(&format!("set {comp}"), 1, url_set, Some(data), vec![], false))) };
         realm.define_accessor_values(url, comp, Some(Value::Object(g)), s, ACC);
     }
+    // Credentials are not kept in URLs (the network stack drops them):
+    // `username` / `password` read as empty and setting them is accepted.
+    realm.define_accessor(url, "username", Some(url_empty_credential), Some(url_set_credential), ACC);
+    realm.define_accessor(url, "password", Some(url_empty_credential), Some(url_set_credential), ACC);
     realm.define_accessor(url, "searchParams", Some(url_search_params), None, ACC);
     realm.define_method(url, "toString", 0, url_to_string);
     realm.define_method(url, "toJSON", 0, url_to_string);

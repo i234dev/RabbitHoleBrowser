@@ -289,7 +289,8 @@ impl Loader {
             let bound = Loader { initiator: Some(url.clone()), ..self.clone() };
             return bound.load_html(html, url, viewport);
         }
-        let doc = rabbithole_html::parse(html);
+        // With scripting on, `<noscript>` content is raw text (HTML spec).
+        let doc = rabbithole_html::parse_with_scripting(html, self.load_scripts);
         let title = doc.title().unwrap_or_default();
         let base_url = doc
             .find_element("base")

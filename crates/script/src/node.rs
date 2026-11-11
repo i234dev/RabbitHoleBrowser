@@ -659,7 +659,7 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
     }
     // A template's markup is its content's.
     let n = if context == "template" { NodeRef { doc: n.doc, node: with_doc(n.doc, |doc| doc.template_content(n.node)) } } else { n };
-    let frag = rabbithole_html::parse_fragment(html, &context);
+    let frag = rabbithole_html::parse_fragment_with_scripting(html, &context, scripting_doc(n.doc));
     let frag_body = frag.body().unwrap_or(Document::ROOT);
     let old = children_of(n);
     let added = with_doc(n.doc, |doc| {
@@ -695,11 +695,18 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
     Ok(())
 }
 
+/// Does the document run scripts? The page and its frames do; auxiliary
+/// documents (DOMParser, `createHTMLDocument`) have scripting disabled, so
+/// `<noscript>` parses as markup there and as raw text here.
+fn scripting_doc(doc: u32) -> bool {
+    doc == 0 || doc & crate::host::FRAME_DOC != 0
+}
+
 /// Nodes produced by parsing `html` in the context of `ctx`, imported into
 /// the document of `ctx` (detached, in order).
 pub(crate) fn parse_html_into(ctx: NodeRef, html: &str) -> Vec<NodeRef> {
     let context = tag_of(ctx).filter(|t| t != "#fragment").unwrap_or_else(|| "div".into());
-    let frag = rabbithole_html::parse_fragment(html, &context);
+    let frag = rabbithole_html::parse_fragment_with_scripting(html, &context, scripting_doc(ctx.doc));
     let frag_body = frag.body().unwrap_or(Document::ROOT);
     with_doc(ctx.doc, |doc| {
         let mut out = Vec::new();

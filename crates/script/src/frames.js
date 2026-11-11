@@ -137,6 +137,10 @@
         post(id, JSON.stringify({ t: 'msg', d: data, ports: ports.map((port) => bridgePort(port, id)) }), targetOriginOf(targetOrigin));
       },
       focus() {}, blur() {}, close() {},
+      // The frame's window lives in another realm: listeners registered
+      // from here are accepted (scripts must not throw) but not delivered.
+      addEventListener() {}, removeEventListener() {},
+      dispatchEvent() { return true; },
       get window() { return p; },
       get self() { return p; },
       get frames() { return p; },

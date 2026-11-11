@@ -209,6 +209,8 @@ fn same_origin_content_document_is_scriptable() {
     let mut page = load(&mut e, r#"<iframe id="f" srcdoc="<p id=p>child</p>"></iframe>"#);
     assert_eq!(eval(&e, &mut page, "document.getElementById('f').contentDocument.getElementById('p').textContent"), "child");
     assert_eq!(eval(&e, &mut page, "var f = document.getElementById('f'); f.contentWindow.document === f.contentDocument"), "true");
+    // Listener registration on another frame's WindowProxy must not throw.
+    assert_eq!(eval(&e, &mut page, "var w = document.getElementById('f').contentWindow; w.addEventListener('message', function () {}); w.removeEventListener('message', function () {}); typeof w.addEventListener"), "function");
     eval(&e, &mut page, "document.getElementById('f').contentDocument.body.innerHTML = '<b id=b>changed</b>'");
     settle(&e, &mut page);
     let html = eval(&e, &mut page, "document.getElementById('f').contentDocument.body.innerHTML");

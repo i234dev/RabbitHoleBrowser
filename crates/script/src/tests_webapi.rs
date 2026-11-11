@@ -1284,3 +1284,11 @@ fn templates_declarative_shadow_and_adoption() {
         ]
     );
 }
+
+/// `URL.username` / `password` exist and accept assignment in strict code
+/// (Apple's store script clears `url.password`).
+#[test]
+fn url_credentials_are_assignable() {
+    let r = result_of("<p>x</p>", "'use strict'; var u = new URL('https://www.example.test/a?b#c'); u.password = ''; u.username = ''; u.hash = ''; var result = [u.password, u.username, u.href].join('|');");
+    assert_eq!(r, "'||https://www.example.test/a?b'");
+}

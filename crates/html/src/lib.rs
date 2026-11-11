@@ -123,15 +123,27 @@ pub fn quirks_mode_for(d: &DoctypeData, force_quirks: bool) -> QuirksMode {
     QuirksMode::NoQuirks
 }
 
+/// Parse a document with the scripting flag off (DOMParser,
+/// `createHTMLDocument`, pages loaded without JavaScript): `<noscript>`
+/// content is parsed as markup.
 pub fn parse(input: &str) -> Document {
-    let mut doc = parse_tree(input);
+    parse_with_scripting(input, false)
+}
+
+/// Parse a document. With `scripting` on (a browsing context that runs
+/// scripts), `<noscript>` content is raw text, as the HTML parsing
+/// algorithm requires: its markup creates no elements, so its images,
+/// iframes, styles and overlays never exist in the DOM.
+pub fn parse_with_scripting(input: &str, scripting: bool) -> Document {
+    let mut doc = parse_tree(input, scripting);
     doc.adopt_template_contents(Document::ROOT, true);
     doc
 }
 
 /// Tree construction only (template children still in the tree).
-fn parse_tree(input: &str) -> Document {
+fn parse_tree(input: &str, scripting: bool) -> Document {
     let mut builder = TreeBuilder::new();
+    builder.scripting = scripting;
     builder.run(input);
     builder.doc
 }
@@ -140,6 +152,12 @@ fn parse_tree(input: &str) -> Document {
 /// `innerHTML` does). The returned document's `body` holds the fragment
 /// nodes, in order.
 pub fn parse_fragment(input: &str, context: &str) -> Document {
+    parse_fragment_with_scripting(input, context, false)
+}
+
+/// [`parse_fragment`] with the scripting flag of the context element's
+/// document (`innerHTML` on a scripted page: `<noscript>` is raw text).
+pub fn parse_fragment_with_scripting(input: &str, context: &str, scripting: bool) -> Document {
     let ctx = context.to_ascii_lowercase();
     let (prefix, inner_tag) = match ctx.as_str() {
         "tr" => ("<table><tbody><tr>", "tr"),
@@ -154,12 +172,15 @@ pub fn parse_fragment(input: &str, context: &str) -> Document {
     };
     // Fragment parsing (innerHTML) never creates declarative shadow roots.
     let parse = |s: &str| {
-        let mut d = parse_tree(s);
+        let mut d = parse_tree(s, scripting);
         d.adopt_template_contents(Document::ROOT, false);
         d
     };
     if prefix.is_empty() {
-        let mut doc = parse(input);
+        // Fragment parsing starts "in body": leading comments and
+        // whitespace belong to the fragment (Svelte's `<!---->` hydration
+        // anchors), not to the document node.
+        let mut doc = parse(&format!("<body>{input}"));
         // Head-only elements (style/script/meta…) at the start of a
         // fragment end up in <head>; move them in front of the body content.
         if let (Some(head), Some(body)) = (doc.head(), doc.body()) {
@@ -198,6 +219,8 @@ struct TreeBuilder {
     saw_body_content: bool,
     /// A DOCTYPE token was seen before the first element.
     saw_doctype: bool,
+    /// The scripting flag: `<noscript>` content is raw text.
+    scripting: bool,
 }
 
 impl TreeBuilder {
@@ -211,6 +234,7 @@ impl TreeBuilder {
             foreign_depth: 0,
             saw_body_content: false,
             saw_doctype: false,
+            scripting: false,
         }
     }
 
@@ -316,14 +340,14 @@ impl TreeBuilder {
                 // hydrating frameworks count those text nodes) and its raw
                 // elements like <title>.
                 let cur = self.current_tag().to_string();
-                if cur == "head" || HEAD_ONLY.contains(&cur.as_str()) {
+                if cur == "head" || HEAD_ONLY.contains(&cur.as_str()) || self.in_head_container() {
                     self.append_text(t);
                 }
                 return;
             }
-            let in_noscript = self.stack.iter().any(|&n| self.doc.element(n).map(|e| e.tag == "noscript").unwrap_or(false));
+            let in_container = self.in_head_container();
             let cur = self.current_tag().to_string();
-            if !HEAD_ONLY.contains(&cur.as_str()) && !in_noscript {
+            if !HEAD_ONLY.contains(&cur.as_str()) && !in_container {
                 self.ensure_body();
             }
         }
@@ -453,20 +477,20 @@ impl TreeBuilder {
             }
             let is_void = VOID.contains(&name);
             self.insert_element(name, attrs, !is_void);
-            let raw = raw_kind(name);
+            let raw = self.raw_kind(name);
             if raw.is_none() && is_void {
                 // nothing to pop
             }
             return raw;
         }
 
-        // Anything inside a `<noscript>` in the head stays there (browsers
-        // with scripting on treat it as inert text), so tracking pixels and
-        // fallbacks don't leak into the body.
-        if self.body.is_none() && self.stack.iter().any(|&n| self.doc.element(n).map(|e| e.tag == "noscript").unwrap_or(false)) {
+        // Anything inside a `<noscript>` (without scripting) or a
+        // `<template>` in the head stays there: tracking pixels and fallbacks
+        // don't leak into the body, and template content stays content.
+        if self.body.is_none() && self.in_head_container() {
             let is_void = VOID.contains(&name);
             self.insert_element(name, attrs, !is_void && !self_closing);
-            return raw_kind(name);
+            return self.raw_kind(name);
         }
 
         // Everything else lives in the body.
@@ -561,6 +585,20 @@ impl TreeBuilder {
             return None;
         }
 
+        self.raw_kind(name)
+    }
+
+    /// Is a `<noscript>` or `<template>` open (their content stays where
+    /// they are, also in the head)?
+    fn in_head_container(&self) -> bool {
+        self.stack.iter().any(|&n| self.doc.element(n).map(|e| e.tag == "noscript" || e.tag == "template").unwrap_or(false))
+    }
+
+    /// Tokenizer state after a start tag.
+    fn raw_kind(&self, name: &str) -> Option<RawKind> {
+        if name == "noscript" && self.scripting {
+            return Some(RawKind::RawText);
+        }
         raw_kind(name)
     }
 
