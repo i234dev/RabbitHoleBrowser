@@ -234,6 +234,11 @@ impl<'a> Lexer<'a> {
             while matches!(self.bytes.get(self.pos), Some(b' ') | Some(b'\t')) {
                 self.pos += 1;
             }
+            // Most tokens start right here: no trivia left to look at.
+            match self.bytes.get(self.pos) {
+                Some(&b) if b < 0x80 && !matches!(b, b'\n' | b'\r' | 0x0b | 0x0c | b'/' | b'<' | b'-') => return Ok(newline),
+                _ => {}
+            }
             let Some(c) = self.peek_char() else { return Ok(newline) };
             match c {
                 '\n' | '\r' | '\u{2028}' | '\u{2029}' => {
@@ -313,9 +318,15 @@ impl<'a> Lexer<'a> {
         let newline_before = self.skip_trivia()?;
         let start = self.pos;
         let pos = self.cur_pos();
-        let kind = match self.peek_char() {
+        let kind = match self.bytes.get(self.pos) {
             None => TokenKind::Eof,
-            Some(c) => self.scan_token(c)?,
+            // ASCII identifiers / keywords without decoding a char first.
+            Some(&b) if b.is_ascii_alphabetic() || b == b'_' || b == b'$' => TokenKind::Ident(self.scan_identifier_name()?),
+            Some(&b) if b < 0x80 => self.scan_token(b as char)?,
+            Some(_) => match self.peek_char() {
+                Some(c) => self.scan_token(c)?,
+                None => TokenKind::Eof,
+            },
         };
         Ok(Token {
             kind,
