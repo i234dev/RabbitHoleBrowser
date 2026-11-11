@@ -197,6 +197,14 @@ impl ScriptHost {
             shadow::install(realm);
             modules::install(realm);
             natives::install(realm);
+            // Prototypes and internal objects the bindings look up by name
+            // must survive GC even while nothing in JS references them
+            // (e.g. the NamedNodeMap prototype when no `attributes` object
+            // is alive).
+            let internals: Vec<rabbithole_js::ObjectId> = host.state.borrow().protos.values().copied().collect();
+            for id in internals {
+                realm.extra_roots.push(Value::Object(id));
+            }
             // The document wrapper (the JS-implemented APIs use `document`).
             let doc_obj = host::wrap_main(realm, Document::ROOT);
             if let Value::Object(d) = doc_obj {

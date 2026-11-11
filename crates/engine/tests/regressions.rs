@@ -202,6 +202,22 @@ fn message_channel_and_structured_clone() {
     assert_eq!(eval(&e, &mut page, "log.join(',')"), "sync,clone:true,p1:1:true,bc:hi");
 }
 
+/// Internal prototypes looked up by name (NamedNodeMap, NodeList, ...)
+/// survive garbage collection while no JS object uses them.
+#[test]
+fn internal_prototypes_survive_gc() {
+    let mut e = engine(true);
+    let mut page = load_doc(
+        &mut e,
+        "<p id=x class=a>x</p><script>
+           var junk = [];
+           for (var i = 0; i < 400000; i++) { junk.push({ i: i }); if (junk.length > 1000) junk = []; }
+           window.r = [typeof document.getElementById('x').attributes.getNamedItem, document.getElementById('x').attributes.getNamedItem('class').value, document.querySelectorAll('p').length].join();
+         </script>",
+    );
+    assert_eq!(eval(&e, &mut page, "r"), "function,a,1");
+}
+
 /// `navigator.serviceWorker.register()` resolves (SvelteKit / PWA
 /// bootstraps call it without a catch); other origins are refused.
 #[test]
