@@ -72,23 +72,68 @@ fn string_list(realm: &mut Realm, v: &Value) -> JsResult<Vec<String>> {
     let len = realm.to_number(len)? as usize;
     for i in 0..len.min(100_000) {
         let s = realm.get_str(v.clone(), &i.to_string())?;
-        out.push(realm.to_rust_string(s)?);
+        match &s {
+            Value::String(js) if js.len() >= CACHED_TEXT_MIN => out.push(cached_text(js)),
+            _ => out.push(realm.to_rust_string(s)?),
+        }
     }
     Ok(out)
+}
+
+/// Strings at least this long go through [`cached_text`].
+const CACHED_TEXT_MIN: usize = 1024;
+
+thread_local! {
+    /// Recently converted large strings (stylesheet texts handed over by
+    /// `adoptedStyleSheets` again and again), most recent last.
+    static TEXT_CACHE: std::cell::RefCell<Vec<(rabbithole_js::JsStr, std::rc::Rc<str>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The Rust form of a large string, converting each distinct JS string
+/// (by identity, then by contents) from UTF-16 only once.
+fn cached_text(js: &rabbithole_js::JsStr) -> String {
+    const MAX_ENTRIES: usize = 64;
+    const MAX_UNITS: usize = 16 << 20;
+    TEXT_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let hit = c.iter().rposition(|(k, _)| k.ptr_eq(js)).or_else(|| {
+            let units = js.as_units();
+            c.iter().rposition(|(k, _)| k.len() == units.len() && k.as_units() == units)
+        });
+        if let Some(i) = hit {
+            let e = c.remove(i);
+            let text = e.1.to_string();
+            c.push((js.clone(), e.1));
+            return text;
+        }
+        let text = js.to_rust_string();
+        c.push((js.clone(), std::rc::Rc::from(text.as_str())));
+        let mut total: usize = c.iter().map(|(k, _)| k.len()).sum();
+        while c.len() > MAX_ENTRIES || (total > MAX_UNITS && c.len() > 1) {
+            total -= c[0].0.len();
+            c.remove(0);
+        }
+        text
+    })
 }
 
 /// `setAdoptedStyles(documentOrShadowRoot, [cssText...])`
 fn set_adopted_styles(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = target_node(realm, &arg(args, 0))?;
     let texts = string_list(realm, &arg(args, 1))?;
-    with_doc(n.doc, |doc| {
+    let changed = with_doc(n.doc, |doc| {
         if texts.is_empty() {
-            doc.adopted_styles.remove(&n.node);
+            doc.adopted_styles.remove(&n.node).is_some()
+        } else if doc.adopted_styles.get(&n.node) == Some(&texts) {
+            // Same sheets again (frameworks re-adopt on every render):
+            // nothing to restyle.
+            false
         } else {
             doc.adopted_styles.insert(n.node, texts);
+            true
         }
     });
-    if n.doc == 0 {
+    if n.doc == 0 && changed {
         mark_dirty();
     }
     Ok(Value::Undefined)
