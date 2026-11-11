@@ -146,6 +146,10 @@ pub struct HostState {
     pub blob_urls: HashMap<String, (Vec<u8>, String)>,
     /// WebSocket / EventSource connections.
     pub sockets: crate::sockets::Sockets,
+    /// Workers started by this realm / this realm as a worker.
+    pub workers: crate::workers::WorkerState,
+    /// Set in worker realms: (name, shared, id).
+    pub worker_info: Option<(String, bool, u32)>,
     /// Canvas 2D surfaces.
     pub canvases: crate::canvas2d::CanvasStore,
 }

@@ -1142,3 +1142,88 @@ fn web_animations_and_font_loading() {
     assert!(sorted.contains(&"finished finished 1".to_string()), "{out:?}");
     assert!(sorted.contains(&"onfinish true".to_string()), "{out:?}");
 }
+
+/// Workers run in their own realm: own globals, no DOM, importScripts,
+/// structured-clone messages both ways, transferred MessagePorts, error
+/// events, terminate(), close(), and SharedWorker connections.
+#[test]
+fn workers_have_their_own_realm() {
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    let js = |s: &str| (200u16, "text/javascript".to_string(), s.to_string());
+    env.fetches.insert("https://example.test/dir/lib.js".into(), js("self.libValue = 40;"));
+    env.fetches.insert(
+        "https://example.test/dir/w.js".into(),
+        js(r#"
+        importScripts('lib.js');
+        var shared = typeof sharedFromPage;
+        onmessage = function (e) {
+          if (e.data === 'boom') { throw new Error('worker failed'); }
+          if (e.ports.length) { e.ports[0].postMessage('via port ' + e.data.k); return; }
+          postMessage({ got: e.data, sum: libValue + e.data.n, doc: typeof document, win: typeof window, self: self === globalThis,
+                       scope: self instanceof DedicatedWorkerGlobalScope && self instanceof WorkerGlobalScope, shared: shared,
+                       map: e.data.m instanceof Map && e.data.m.get('a'), loc: location.href });
+        };
+        setTimeout(function () { postMessage('timer'); }, 5);
+        "#),
+    );
+    env.fetches.insert("https://example.test/dir/closer.js".into(), js("postMessage('bye'); close(); postMessage('never');"));
+    env.fetches.insert(
+        "https://example.test/dir/sw.js".into(),
+        js("var n = 0; onconnect = function (e) { var p = e.ports[0]; var me = ++n; p.onmessage = function (m) { p.postMessage(m.data + ':' + me); }; };"),
+    );
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        window.sharedFromPage = 1;
+        var w = new Worker('w.js');
+        w.onmessage = function (e) {
+          if (e.data === 'timer') { console.log('timer'); return; }
+          var d = e.data;
+          console.log('msg', JSON.stringify(d.got.n), d.sum, d.doc, d.win, d.self, d.scope, d.shared, d.map, d.loc);
+        };
+        w.onerror = function (e) { console.log('error', e.message.indexOf('worker failed') >= 0); e.preventDefault(); };
+        w.postMessage({ n: 2, m: new Map([['a', 'A']]) });
+        var ch = new MessageChannel();
+        ch.port1.onmessage = function (e) { console.log('port', e.data); };
+        w.postMessage({ k: 'x' }, [ch.port2]);
+        w.postMessage('boom');
+        try { w.postMessage(function () {}); } catch (e) { console.log('clone', e.name); }
+        var c = new Worker('closer.js');
+        c.onmessage = function (e) { console.log('closer', e.data); };
+        var s1 = new SharedWorker('sw.js'), s2 = new SharedWorker('sw.js');
+        s1.port.onmessage = function (e) { console.log('shared', e.data); };
+        s2.port.onmessage = function (e) { console.log('shared', e.data); };
+        s1.port.postMessage('a'); s2.port.postMessage('b');
+        console.log('sync', typeof Worker, w instanceof EventTarget);
+        "#,
+    );
+    assert_eq!(out, vec!["clone DataCloneError", "sync function true"]);
+    let mut got = Vec::new();
+    for t in [1010.0, 1020.0, 1030.0, 1040.0, 1050.0] {
+        let before = env.logs.len();
+        host.run_timers(&mut env, t);
+        host.run_jobs(&mut env);
+        got.extend(env.logs[before..].iter().filter(|(l, _)| l == "log").map(|(_, m)| m.clone()));
+    }
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            "closer bye",
+            "error true",
+            "msg 2 42 undefined undefined true true undefined A https://example.test/dir/w.js",
+            "port via port x",
+            "shared a:1",
+            "shared b:2",
+            "timer",
+        ],
+        "logs: {:?}",
+        env.logs
+    );
+    // terminate(): nothing more arrives.
+    run(&mut env, &mut host, "w.terminate(); w.postMessage({ n: 1 }); w.onmessage = function () { console.log('after terminate'); };");
+    let before = env.logs.len();
+    host.run_timers(&mut env, 1100.0);
+    assert!(!env.logs[before..].iter().any(|(_, m)| m.contains("after terminate")));
+}

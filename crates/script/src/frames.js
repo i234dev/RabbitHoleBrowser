@@ -232,6 +232,10 @@
     });
   }
 
+  // The serializer, for the worker message routing (messaging.js,
+  // worker.js; removed from the global after startup).
+  Object.defineProperty(g, '__rhClone', { value: { serialize, deserialize }, configurable: true });
+
   // structuredClone with the same algorithm as postMessage.
   Object.defineProperty(g, 'structuredClone', {
     value: function structuredClone(value) { return deserialize(serialize(value)); },

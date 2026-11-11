@@ -1,7 +1,7 @@
 // Cross-context messaging: window.postMessage (as a task, with structured
 // cloning and transferable ports), MessageChannel / MessagePort,
-// BroadcastChannel, dedicated and shared workers (run in their own global
-// scope object inside this realm), Worklet.
+// BroadcastChannel, dedicated and shared workers (each in its own realm,
+// see workers.rs / worker.js), Worklet.
 (function () {
   'use strict';
   const g = globalThis;
@@ -107,10 +107,9 @@
   define('BroadcastChannel', BroadcastChannel);
 
   // ---------------------------------------------------------------- workers
-  // A worker runs its script (fetched synchronously) as a function whose
-  // `self`, `postMessage`, `onmessage`, `importScripts`, `close`, ... come
-  // from its own WorkerGlobalScope object; other globals are shared with the
-  // page (no thread or realm isolation).
+  // Each worker runs in its own realm (see workers.rs): messages are
+  // structured clones serialized to JSON; MessagePorts are bridged by id.
+  const C = g.__rhClone;
   function loadScript(url) {
     if (/^data:/i.test(url)) {
       const m = /^data:([^,]*?)(;base64)?,(.*)$/is.exec(url);
@@ -122,97 +121,86 @@
     try { xhr.send(); } catch (e) { return null; }
     return xhr.status >= 200 && xhr.status < 300 ? xhr.responseText : null;
   }
-  const WORKER_NAMES = ['self', 'postMessage', 'close', 'importScripts', 'addEventListener', 'removeEventListener', 'dispatchEvent', 'name', 'location'];
-  // Without `with`, assignments to the worker's global event handlers
-  // (`onmessage = ...`) are redirected to `self.onmessage = ...`.
-  const rewriteHandlers = (src) => src.replace(/(^|[^.\w$])(on(?:message|messageerror|error|connect))(\s*=)(?!=)/g, (m, pre, name, eq) => `${pre}self.${name}${eq}`);
-  function runWorker(url, scope, onError) {
-    const params = WORKER_NAMES.slice();
-    const run = (src) => {
-      try {
-        const fn = new Function(...params, rewriteHandlers(src));
-        const args = params.map((p) => (p === 'self' ? scope : typeof scope[p] === 'function' ? scope[p].bind(scope) : scope[p]));
-        fn.apply(scope, args);
-      } catch (e) {
-        onError(new g.ErrorEvent('error', { message: String(e && e.message || e), error: e, filename: url }));
-      }
-      scope[S].ready = true;
-      for (const m of scope[S].queue.splice(0)) scope.dispatchEvent(m());
-    };
-    const fail = () => onError(new g.ErrorEvent('error', { message: `Failed to load worker script at '${url}'` }));
-    if (/^data:/i.test(url)) { const src = loadScript(url); if (src === null) task(fail); else task(() => run(src)); return; }
-    g.fetch(url).then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status))))).then(run, fail);
+  const workerObjects = new Map();
+  const workerBridges = new Map();
+  let nextWorkerBridge = 0;
+  const send = (id, msg) => N.workerSend(id, JSON.stringify(msg));
+  function bridgeTo(id, port, b) {
+    workerBridges.set(b, port);
+    port.onmessage = (ev) => send(id, { t: 'port', b, d: C.serialize(ev.data) });
   }
-  // Deliver to a worker scope once its script ran.
-  function toScope(scope, makeEvent) {
-    if (scope[S].ready) task(() => { if (!scope[S].closed) scope.dispatchEvent(makeEvent()); });
-    else scope[S].queue.push(makeEvent);
+  function transferredPorts(transfer) {
+    const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
+    const ports = list.filter((t) => t instanceof MessagePort);
+    for (const p of ports) if (p[S].detached) throw domError('Port at index 0 is already neutered.', 'DataCloneError');
+    return ports;
   }
-  class WorkerGlobalScope extends g.EventTarget {
-    constructor() { super(); ILLEGAL(); }
-    get self() { return this; }
-    get location() { return this[S].location; }
-    get name() { return this[S].name; }
-    importScripts(...urls) {
-      for (const u of urls) {
-        const src = loadScript(new URL(u, this[S].location).href);
-        if (src === null) throw domError(`Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at '${u}' failed to load.`, 'NetworkError');
-        (0, eval)(src);
-      }
+  function baseURL() { return (g.document && g.document.baseURI) || g.location.href; }
+  N.registerProto('__worker_deliver', function deliver(id, text) {
+    let m;
+    try { m = JSON.parse(text); } catch (e) { return; }
+    if (m.t === 'port') {
+      const p = workerBridges.get(m.b);
+      if (p) p.postMessage(C.deserialize(m.d));
+      return;
     }
-    close() { this[S].closed = true; }
-  }
-  N.installHandlers(WorkerGlobalScope.prototype, ['error']);
-  class DedicatedWorkerGlobalScope extends WorkerGlobalScope {
-    postMessage(message, transfer) {
-      if (this[S].closed) return;
-      const { data, ports } = cloneWithPorts(message, transfer);
-      const w = this[S].worker;
-      task(() => { if (!w[S].terminated) w.dispatchEvent(new g.MessageEvent('message', { data, ports })); });
+    const w = workerObjects.get(id);
+    if (!w || w[S].terminated) return;
+    if (m.t === 'error') {
+      const ev = new g.ErrorEvent('error', { message: m.message, filename: m.filename, cancelable: true });
+      w.dispatchEvent(ev);
+      return;
     }
-  }
-  N.installHandlers(DedicatedWorkerGlobalScope.prototype, ['message', 'messageerror']);
-  tag(DedicatedWorkerGlobalScope, 'DedicatedWorkerGlobalScope');
+    if (m.t === 'msg') {
+      let data;
+      try { data = C.deserialize(m.d); } catch (e) { w.dispatchEvent(new g.MessageEvent('messageerror', {})); return; }
+      const ports = (m.ports || []).map((b) => { const ch = new MessageChannel(); bridgeTo(id, ch.port2, b); return ch.port1; });
+      w.dispatchEvent(new g.MessageEvent('message', { data, ports }));
+    }
+  });
   class Worker extends g.EventTarget {
     constructor(url, options = {}) {
       super();
       let u;
-      try { u = new URL(String(url), document.baseURI); } catch (e) { throw domError(`Failed to construct 'Worker': The URL '${url}' is invalid.`, 'SyntaxError'); }
-      const scope = Object.create(DedicatedWorkerGlobalScope.prototype);
-      g.EventTarget.call ? void 0 : void 0;
-      hidden(scope, S, { location: u.href, name: options.name || '', worker: this, closed: false, ready: false, queue: [] });
-      hidden(this, S, { scope, terminated: false });
-      runWorker(u.href, scope, (ev) => { if (!this[S].terminated) this.dispatchEvent(ev); });
+      try { u = new URL(String(url), baseURL()); } catch (e) { throw domError(`Failed to construct 'Worker': The URL '${url}' is invalid.`, 'SyntaxError'); }
+      options = options || {};
+      const id = N.workerStart(u.href, options.name === undefined ? '' : String(options.name), null, options.type === 'module');
+      hidden(this, S, { id, terminated: false });
+      workerObjects.set(id, this);
     }
     postMessage(message, transfer) {
       const st = this[S];
       if (st.terminated) return;
-      const { data, ports } = cloneWithPorts(message, transfer);
-      if (!st.scope[S].closed) toScope(st.scope, () => new g.MessageEvent('message', { data, ports }));
+      const d = C.serialize(message);
+      const ports = transferredPorts(transfer).map((p) => { const b = 'o' + nextWorkerBridge++; bridgeTo(st.id, p, b); return b; });
+      send(st.id, { t: 'msg', d, ports });
     }
-    terminate() { this[S].terminated = true; this[S].scope[S].closed = true; }
+    terminate() {
+      const st = this[S];
+      if (st.terminated) return;
+      st.terminated = true;
+      workerObjects.delete(st.id);
+      N.workerTerminate(st.id);
+    }
   }
   tag(Worker, 'Worker');
   N.installHandlers(Worker.prototype, ['message', 'messageerror', 'error']);
   define('Worker', Worker);
-  const shared = new Map();
   class SharedWorker extends g.EventTarget {
     constructor(url, options = {}) {
       super();
       if (typeof options === 'string') options = { name: options };
-      const u = new URL(String(url), document.baseURI).href;
-      const key = u + '\n' + (options.name || '');
+      options = options || {};
+      let u;
+      try { u = new URL(String(url), baseURL()).href; } catch (e) { throw domError(`Failed to construct 'SharedWorker': The URL '${url}' is invalid.`, 'SyntaxError'); }
+      const name = options.name === undefined ? '' : String(options.name);
+      const id = N.workerStart(u, name, u + '\n' + name, options.type === 'module');
       const ch = new MessageChannel();
-      hidden(this, S, { port: ch.port1 });
-      let scope = shared.get(key);
-      if (!scope) {
-        scope = Object.create(WorkerGlobalScope.prototype);
-        hidden(scope, S, { location: u, name: options.name || '', closed: false, ready: false, queue: [] });
-        N.installHandlers(scope, ['connect']);
-        shared.set(key, scope);
-        runWorker(u, scope, (ev) => this.dispatchEvent(ev));
-      }
-      toScope(scope, () => new g.MessageEvent('connect', { data: '', ports: [ch.port2], source: ch.port2 }));
+      hidden(this, S, { port: ch.port1, id, terminated: false });
+      workerObjects.set(id, this);
+      const b = 'o' + nextWorkerBridge++;
+      bridgeTo(id, ch.port2, b);
+      send(id, { t: 'connect', b });
     }
     get port() { return this[S].port; }
   }

@@ -21,6 +21,7 @@ mod sockets;
 mod observers;
 mod shadow;
 mod window;
+mod workers;
 
 #[cfg(test)]
 mod tests;
@@ -145,11 +146,21 @@ impl DispatchResult {
 pub struct ScriptHost {
     realm: Realm,
     state: Rc<RefCell<HostState>>,
+    /// Dedicated / shared workers this realm started (see [`workers`]).
+    workers: Vec<workers::WorkerInstance>,
 }
+
+/// Worker realms: the worker global scope (after the window APIs).
+const WORKER_JS: &str = include_str!("js/worker.js");
 
 impl ScriptHost {
     /// Create the realm and install `window`, `document` and all globals.
     pub fn new(env: &mut dyn HostEnv) -> ScriptHost {
+        Self::new_inner(env, None)
+    }
+
+    /// `worker`: (name, shared, id) for a worker realm.
+    pub(crate) fn new_inner(env: &mut dyn HostEnv, worker: Option<(String, bool, u32)>) -> ScriptHost {
         let mut realm = Realm::new();
         realm.set_task_budget(Some(task_budget()));
         let now = env.now_ms();
@@ -199,6 +210,8 @@ impl ScriptHost {
             blob_urls: HashMap::new(),
             sockets: Default::default(),
             canvases: Default::default(),
+            workers: Default::default(),
+            worker_info: worker.clone(),
         }));
         {
             let root_array = state.borrow().root_array;
@@ -212,7 +225,7 @@ impl ScriptHost {
                 eprintln!("[console.{level}] {text}");
             }
         }));
-        let mut host = ScriptHost { realm, state };
+        let mut host = ScriptHost { realm, state, workers: Vec::new() };
         {
             let _g = EnvGuard::enter(env);
             let _s = StateGuard::enter(host.state.clone());
@@ -250,7 +263,13 @@ impl ScriptHost {
                     eprintln!("[rabbithole] {name} failed: {msg}");
                 }
             }
-            let _ = realm.eval("delete globalThis.__rhNative", "rabbithole:cleanup");
+            if worker.is_some() {
+                if let Err(e) = realm.eval(WORKER_JS, "rabbithole:worker.js") {
+                    let msg = realm.error_to_string(&e);
+                    eprintln!("[rabbithole] worker.js failed: {msg}");
+                }
+            }
+            let _ = realm.eval("delete globalThis.__rhNative; delete globalThis.__rhClone", "rabbithole:cleanup");
         }
         host
     }
@@ -413,7 +432,7 @@ impl ScriptHost {
     /// [`TICK_SLICE`] of timer work the call yields; timers still due stay
     /// due and run on the next call.
     pub fn run_timers(&mut self, env: &mut dyn HostEnv, now_ms: f64) -> bool {
-        self.enter(env, |realm| {
+        let own = self.enter(env, |realm| {
             let slice_end = std::time::Instant::now() + TICK_SLICE;
             state().borrow_mut().last_tick = now_ms;
             realm.begin_task();
@@ -528,7 +547,9 @@ impl ScriptHost {
                 }
             }
             ran
-        })
+        });
+        let workers = !self.workers.is_empty() || self.has_worker_work();
+        own | (workers && self.pump_workers(env, now_ms))
     }
 
     /// Earliest time (ms, same clock as `now_ms`) at which a timer or
@@ -549,10 +570,21 @@ impl ScriptHost {
             let r = r + st.time_origin;
             due = Some(due.map(|d| d.min(r)).unwrap_or(r));
         }
+        if !st.workers.ops.is_empty() {
+            due = Some(st.last_tick);
+        }
         if !st.pending_script_fetches.is_empty() || !st.pending_fetches.is_empty() {
             // Poll background script downloads every ~10 ms.
             let soon = st.last_tick + 10.0;
             due = Some(due.map(|d| d.min(soon)).unwrap_or(soon));
+        }
+        drop(st);
+        if self.has_worker_work() {
+            let now = self.state.borrow().last_tick;
+            due = Some(due.map(|d| d.min(now)).unwrap_or(now));
+        }
+        if let Some(w) = self.workers_next_due() {
+            due = Some(due.map(|d| d.min(w)).unwrap_or(w));
         }
         due
     }
