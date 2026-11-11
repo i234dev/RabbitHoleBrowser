@@ -303,8 +303,65 @@ fn set_script_font_faces(realm: &mut Realm, _this: Value, args: &[Value]) -> JsR
     Ok(Value::Undefined)
 }
 
+/// Compression formats of `CompressionStream` / `DecompressionStream`.
+fn compression_format(realm: &mut Realm, v: &Value) -> JsResult<u8> {
+    match realm.to_rust_string(v.clone())?.as_str() {
+        "gzip" => Ok(0),
+        "deflate" => Ok(1),
+        "deflate-raw" => Ok(2),
+        f => Err(realm.throw_type_error(&format!("Unsupported compression format: '{f}'"))),
+    }
+}
+
+/// `__rhNative.inflate(bytes, format)`: the decompressed bytes as an
+/// ArrayBuffer (TypeError on corrupt or truncated data).
+fn native_inflate(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    use std::io::Read;
+    let (data, _) = crate::fetch::body_bytes_from_value(realm, &arg(args, 0))?;
+    let format = compression_format(realm, &arg(args, 1))?;
+    let mut out = Vec::new();
+    let r = match format {
+        0 => flate2::read::MultiGzDecoder::new(&data[..]).read_to_end(&mut out),
+        1 => flate2::read::ZlibDecoder::new(&data[..]).read_to_end(&mut out),
+        _ => flate2::read::DeflateDecoder::new(&data[..]).read_to_end(&mut out),
+    };
+    if let Err(e) = r {
+        return Err(realm.throw_type_error(&format!("Failed to decompress data: {e}")));
+    }
+    Ok(crate::fetch::make_array_buffer(realm, out))
+}
+
+/// `__rhNative.deflate(bytes, format)`: the compressed bytes as an
+/// ArrayBuffer.
+fn native_deflate(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    use std::io::Write;
+    let (data, _) = crate::fetch::body_bytes_from_value(realm, &arg(args, 0))?;
+    let format = compression_format(realm, &arg(args, 1))?;
+    let level = flate2::Compression::default();
+    let out = match format {
+        0 => {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), level);
+            e.write_all(&data).and_then(|_| e.finish())
+        }
+        1 => {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), level);
+            e.write_all(&data).and_then(|_| e.finish())
+        }
+        _ => {
+            let mut e = flate2::write::DeflateEncoder::new(Vec::new(), level);
+            e.write_all(&data).and_then(|_| e.finish())
+        }
+    };
+    match out {
+        Ok(bytes) => Ok(crate::fetch::make_array_buffer(realm, bytes)),
+        Err(e) => Err(realm.throw_type_error(&format!("Failed to compress data: {e}"))),
+    }
+}
+
 pub(crate) fn install(realm: &mut Realm) {
     let o = realm.new_object();
+    realm.define_method(o, "inflate", 2, native_inflate);
+    realm.define_method(o, "deflate", 2, native_deflate);
     crate::sockets::install(realm, o);
     crate::canvas2d::install(realm, o);
     realm.define_method(o, "setScriptFontFaces", 1, set_script_font_faces);

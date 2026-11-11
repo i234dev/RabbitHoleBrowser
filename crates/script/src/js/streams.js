@@ -603,87 +603,8 @@
   tag(TextDecoderStream, 'TextDecoderStream');
 
   // ------------------------------------------------- compression streams
-  const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
-  const crc32 = (data, crc = 0) => { crc ^= 0xffffffff; for (let i = 0; i < data.length; i++) crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8); return (crc ^ 0xffffffff) >>> 0; };
-  const adler32 = (data) => { let a = 1, b = 0; for (let i = 0; i < data.length; i++) { a = (a + data[i]) % 65521; b = (b + a) % 65521; } return ((b << 16) | a) >>> 0; };
-  // DEFLATE with stored (uncompressed) blocks: valid output, no compression.
-  function deflateStored(data) {
-    const blocks = Math.max(1, Math.ceil(data.length / 65535));
-    const out = new Uint8Array(data.length + blocks * 5);
-    let o = 0;
-    for (let b = 0; b < blocks; b++) {
-      const chunk = data.subarray(b * 65535, Math.min(data.length, (b + 1) * 65535));
-      out[o++] = b === blocks - 1 ? 1 : 0;
-      out[o++] = chunk.length & 0xff; out[o++] = chunk.length >> 8;
-      out[o++] = ~chunk.length & 0xff; out[o++] = (~chunk.length >> 8) & 0xff;
-      out.set(chunk, o); o += chunk.length;
-    }
-    return out;
-  }
-  // INFLATE (RFC 1951).
-  function inflate(src) {
-    let pos = 0, bit = 0;
-    const out = [];
-    const bits = (n) => { let v = 0; for (let i = 0; i < n; i++) { if (pos >= src.length) throw new TypeError('Junk found after end of compressed data.'); v |= ((src[pos] >> bit) & 1) << i; if (++bit === 8) { bit = 0; pos++; } } return v; };
-    const build = (lengths) => {
-      const counts = new Uint16Array(16), offs = new Uint16Array(16), symbols = new Uint16Array(lengths.length);
-      for (const l of lengths) counts[l]++;
-      counts[0] = 0;
-      for (let i = 1; i < 16; i++) offs[i] = offs[i - 1] + counts[i - 1];
-      lengths.forEach((l, s) => { if (l) symbols[offs[l]++] = s; });
-      return { counts, symbols };
-    };
-    const decode = (h) => { let code = 0, first = 0, index = 0; for (let len = 1; len < 16; len++) { code |= bits(1); const count = h.counts[len]; if (code - count < first) return h.symbols[index + (code - first)]; index += count; first += count; first <<= 1; code <<= 1; } throw new TypeError('invalid Huffman code'); };
-    const LBASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258], LEXT = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-    const DBASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577], DEXT = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
-    let fixedL, fixedD;
-    let last;
-    do {
-      last = bits(1);
-      const type = bits(2);
-      if (type === 0) {
-        if (bit) { bit = 0; pos++; }
-        const len = src[pos] | (src[pos + 1] << 8); pos += 4;
-        for (let i = 0; i < len; i++) out.push(src[pos++]);
-      } else {
-        let lh, dh;
-        if (type === 1) {
-          if (!fixedL) { const l = []; for (let i = 0; i < 288; i++) l.push(i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8); fixedL = build(l); fixedD = build(new Array(30).fill(5)); }
-          lh = fixedL; dh = fixedD;
-        } else if (type === 2) {
-          const hlit = bits(5) + 257, hdist = bits(5) + 1, hclen = bits(4) + 4;
-          const ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
-          const cl = new Array(19).fill(0);
-          for (let i = 0; i < hclen; i++) cl[ORDER[i]] = bits(3);
-          const ch = build(cl);
-          const lens = [];
-          while (lens.length < hlit + hdist) {
-            const sym = decode(ch);
-            if (sym < 16) lens.push(sym);
-            else if (sym === 16) { const p = lens[lens.length - 1]; for (let r = 3 + bits(2); r > 0; r--) lens.push(p); }
-            else if (sym === 17) for (let r = 3 + bits(3); r > 0; r--) lens.push(0);
-            else for (let r = 11 + bits(7); r > 0; r--) lens.push(0);
-          }
-          lh = build(lens.slice(0, hlit)); dh = build(lens.slice(hlit));
-        } else throw new TypeError('invalid block type');
-        for (;;) {
-          const sym = decode(lh);
-          if (sym < 256) out.push(sym);
-          else if (sym === 256) break;
-          else {
-            const i = sym - 257;
-            const len = LBASE[i] + bits(LEXT[i]);
-            const d = decode(dh);
-            const dist = DBASE[d] + bits(DEXT[d]);
-            const start = out.length - dist;
-            for (let k = 0; k < len; k++) out.push(out[start + k]);
-          }
-        }
-      }
-    } while (!last);
-    if (bit) pos++;
-    return { data: new Uint8Array(out), used: pos };
-  }
+  // Compression and decompression run natively (zlib / DEFLATE / gzip).
+  const N = g.__rhNative;
   const FORMATS = ['deflate', 'deflate-raw', 'gzip'];
   const toBytes = (chunk) => {
     if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
@@ -698,11 +619,7 @@
       hidden(this, S, new TransformStream({
         transform(chunk) { parts.push(toBytes(chunk).slice()); },
         flush(c) {
-          const data = concat(parts);
-          const body = deflateStored(data);
-          if (format === 'deflate-raw') c.enqueue(body);
-          else if (format === 'deflate') { const a = adler32(data); c.enqueue(concat([new Uint8Array([0x78, 0x01]), body, new Uint8Array([a >>> 24, (a >>> 16) & 255, (a >>> 8) & 255, a & 255])])); }
-          else { const crc = crc32(data), n = data.length; c.enqueue(concat([new Uint8Array([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255]), body, new Uint8Array([crc & 255, (crc >>> 8) & 255, (crc >>> 16) & 255, crc >>> 24, n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255])])); }
+          c.enqueue(new Uint8Array(N.deflate(concat(parts), format)));
         },
       }));
     }
@@ -717,21 +634,7 @@
       hidden(this, S, new TransformStream({
         transform(chunk) { parts.push(toBytes(chunk).slice()); },
         flush(c) {
-          let data = concat(parts);
-          if (format === 'gzip') {
-            if (data[0] !== 0x1f || data[1] !== 0x8b) throw new TypeError('incorrect header check');
-            const flg = data[3];
-            let p = 10;
-            if (flg & 4) p += 2 + (data[p] | (data[p + 1] << 8));
-            if (flg & 8) { while (data[p]) p++; p++; }
-            if (flg & 16) { while (data[p]) p++; p++; }
-            if (flg & 2) p += 2;
-            data = data.subarray(p);
-          } else if (format === 'deflate') {
-            if (((data[0] << 8) | data[1]) % 31 !== 0 || (data[0] & 15) !== 8) throw new TypeError('incorrect header check');
-            data = data.subarray(2);
-          }
-          c.enqueue(inflate(data).data);
+          c.enqueue(new Uint8Array(N.inflate(concat(parts), format)));
         },
       }));
     }
@@ -758,6 +661,6 @@
   define('TextDecoderStream', TextDecoderStream);
   define('CompressionStream', CompressionStream);
   define('DecompressionStream', DecompressionStream);
-  hidden(g, '__rhStreams', { isDisturbed: (s) => !!(s && s[S] && s[S].disturbed), inflate, crc32 });
+  hidden(g, '__rhStreams', { isDisturbed: (s) => !!(s && s[S] && s[S].disturbed) });
   void isAbort; void queueTask;
 })();
