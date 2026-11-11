@@ -608,6 +608,9 @@ impl Agent {
         body.push_str(&lines.join("\n"));
         let mut out = fence(&body);
         let mut notes = Vec::new();
+        if lines.is_empty() && focus.is_none() {
+            notes.push("The page shows no content: it may be rendered by scripts that failed or still load (debug console=true shows errors; read or network may still help).".to_string());
+        }
         if cut {
             notes.push(format!("Snapshot cut at max_tokens={max_tokens}: expand a section with snapshot ref=@eN, or use read for the main text."));
         }
