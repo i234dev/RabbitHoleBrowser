@@ -217,3 +217,31 @@ fn internal_prototypes_survive_gc() {
     );
     assert_eq!(eval(&e, &mut page, "r"), "function,a,1");
 }
+
+/// `getBoundingClientRect()` of an inline element is the box of its own
+/// text, not its block container's (links in a nav bar were reported as
+/// the full-width line, so a click at their "center" hit the wrong link).
+#[test]
+fn inline_element_rect_is_its_fragments() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        r#"<nav id=nav><a id=a href="/x">Home</a> <a id=b href="/y"><b>About</b> us</a></nav><p><span id=hidden style="display:none">x</span></p>"#,
+    );
+    let r = eval(&e, &mut page, "(function(){ var n = document.getElementById('nav').getBoundingClientRect(), a = document.getElementById('a').getBoundingClientRect(), b = document.getElementById('b').getBoundingClientRect(); return [n.width === 800, a.left === 0, a.width > 10 && a.width < 100, b.left > a.right, b.width > 10 && b.width < 200, a.height > 10 && a.height < 30].join(); })()");
+    assert_eq!(r, "true,true,true,true,true,true");
+    let (x, y) = {
+        let b = page.rect_of(by_id(&page, "b")).unwrap();
+        (b.x + b.w / 2.0, b.y + b.h / 2.0)
+    };
+    let hit = page.node_at_viewport(x, y).unwrap();
+    let mut cur = Some(hit);
+    let mut found = false;
+    while let Some(c) = cur {
+        if c == by_id(&page, "b") {
+            found = true;
+        }
+        cur = page.doc.parent(c);
+    }
+    assert!(found, "center of #b hits #b");
+}
