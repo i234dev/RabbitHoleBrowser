@@ -263,3 +263,20 @@ fn resized_frame_is_painted_whole() {
     assert_eq!((src.w.round(), src.h.round()), (image.width as f32, image.height as f32), "source covers the whole raster");
     assert_eq!(image.pixel(image.width / 2, image.height - 2), [0, 0, 255, 255]);
 }
+
+#[test]
+fn same_origin_child_scripts_its_parent() {
+    let mut e = engine();
+    let child_src = "<script>var d = parent.document; d.getElementById('out').textContent = 'from child:' + frameElement.id + ':' + (top.document === d) + ':' + d.title + ':' + (frameElement.ownerDocument === d); var s = d.createElement('span'); s.id = 'made'; d.body.appendChild(s);</script>";
+    let mut page = load(&mut e, &format!(r#"<title>T</title><p id="out">none</p><iframe id="f" srcdoc="{}"></iframe>"#, escape_attr(child_src)));
+    assert_eq!(eval(&e, &mut page, "document.getElementById('out').textContent"), "from child:f:true:T:true");
+    assert_eq!(eval(&e, &mut page, "!!document.getElementById('made')"), "true");
+    assert!(page.text().contains("from child"), "the parent was restyled: {}", page.text());
+    // Later, from a timer in the child.
+    let mut page2 = load(&mut e, &format!(r#"<p id="out">none</p><iframe srcdoc="{}"></iframe>"#, escape_attr("<script>setTimeout(function(){ parent.document.getElementById('out').textContent = 'timer'; }, 30);</script>")));
+    settle(&e, &mut page2);
+    assert_eq!(eval(&e, &mut page2, "document.getElementById('out').textContent"), "timer");
+    assert!(page2.text().contains("timer"));
+    // A top-level document has no frameElement.
+    assert_eq!(eval(&e, &mut page2, "String(window.frameElement)"), "null");
+}

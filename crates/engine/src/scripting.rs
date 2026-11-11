@@ -408,6 +408,15 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn frame_document(&mut self, id: u64) -> Option<&mut Document> {
         let origin = crate::frames::page_origin(self.page);
+        if let Some(anc) = crate::frames::ancestor_page(id) {
+            // The parent / top document (or a sibling frame's), reached
+            // while this frame runs detached from it.
+            if crate::frames::page_origin(anc) != origin {
+                return None;
+            }
+            anc.script.dom_dirty = true;
+            return Some(&mut anc.doc);
+        }
         let child = crate::frames::find_frame_page_mut(self.page, id)?;
         if crate::frames::page_origin(child) != origin {
             return None;
@@ -418,6 +427,15 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn frame_computed_style(&mut self, id: u64, node: NodeId) -> Option<Rc<ComputedStyle>> {
         let origin = crate::frames::page_origin(self.page);
+        if let Some(anc) = crate::frames::ancestor_page(id) {
+            if crate::frames::page_origin(anc) != origin {
+                return None;
+            }
+            if anc.script.dom_dirty {
+                return self.engine.computed_style_now(anc, node);
+            }
+            return anc.styles.get(node).cloned();
+        }
         let child = crate::frames::find_frame_page_mut(self.page, id)?;
         if crate::frames::page_origin(child) != origin {
             return None;
@@ -449,6 +467,17 @@ impl HostEnv for EngineEnv<'_> {
             return self.page.frames.children.iter().find(|c| self.page.doc.attr(c.node, "name") == Some(name)).map(|c| c.id);
         }
         self.engine.frames.borrow().named_child(id, name)
+    }
+    fn frame_element(&mut self) -> Option<(u64, NodeId)> {
+        // The parent is the nearest page on the ancestor stack.
+        let parent = crate::frames::ancestors().into_iter().next()?;
+        // SAFETY: live while this frame runs (see `frames::ancestor_page`).
+        let parent = unsafe { &*parent };
+        if crate::frames::page_origin(parent) != crate::frames::page_origin(self.page) {
+            return None;
+        }
+        let node = parent.frames.children.iter().find(|c| c.id == self.page.frame_id)?.node;
+        Some((parent.frame_id, node))
     }
     fn post_message(&mut self, target: u64, data: String, target_origin: String) {
         self.queue_message(target, data, target_origin);
@@ -581,7 +610,14 @@ impl Engine {
         if self.advance_animations(page) {
             images_changed = true;
         }
+        // CSS transitions / animations, then their events (before
+        // animation frame callbacks, as in "update the rendering").
+        if self.advance_css_animations(page) {
+            images_changed = true;
+        }
+        let anim_out = self.dispatch_animation_events(page);
         let mut out = self.tick_scripts(page);
+        out.merge(anim_out);
         let frames_out = self.tick_frames(page);
         out.merge(frames_out);
         out.relayout |= images_changed || img_out.relayout;
@@ -738,6 +774,9 @@ impl Page {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        if let Some(a) = self.anim.next_due() {
+            due = Some(due.map(|d| d.min(a)).unwrap_or(a));
+        }
         let frames = if crate::frames::mail_pending() { Some(0.0) } else { self.frames_next_due() };
         if let Some(f) = frames {
             due = Some(due.map(|d| d.min(f)).unwrap_or(f));

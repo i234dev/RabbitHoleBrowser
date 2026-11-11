@@ -38,6 +38,59 @@ thread_local! {
     static MAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+thread_local! {
+    /// Pages whose child frame is running scripts right now, outermost
+    /// first. The running child is detached from its owner (see
+    /// [`Engine::with_child`]), so the owner can be reached here without
+    /// aliasing: `parent.document`, `top.document`, `frameElement`.
+    static ANCESTORS: std::cell::RefCell<Vec<*mut Page>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keeps a page on the ancestor stack while one of its child frames runs.
+pub(crate) struct AncestorGuard;
+
+impl AncestorGuard {
+    pub(crate) fn push(page: &mut Page) -> AncestorGuard {
+        ANCESTORS.with(|a| a.borrow_mut().push(page as *mut Page));
+        AncestorGuard
+    }
+}
+
+impl Drop for AncestorGuard {
+    fn drop(&mut self) {
+        ANCESTORS.with(|a| {
+            a.borrow_mut().pop();
+        });
+    }
+}
+
+/// The ancestor pages of the running child, nearest first.
+pub(crate) fn ancestors() -> Vec<*mut Page> {
+    ANCESTORS.with(|a| a.borrow().iter().rev().copied().collect())
+}
+
+/// An ancestor page (or a frame below one, e.g. a sibling) with frame id
+/// `id`.
+///
+/// # Safety
+/// The pointers on the stack are live for the duration of the child's
+/// script run: each owner is only reachable through this stack while its
+/// child runs detached.
+pub(crate) fn ancestor_page(id: u64) -> Option<&'static mut Page> {
+    for p in ancestors() {
+        // SAFETY: see above; the returned borrow is used within the
+        // current host call and never stored.
+        let page = unsafe { &mut *p };
+        if page.frame_id == id {
+            return Some(page);
+        }
+        if let Some(found) = find_frame_page_mut(page, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 pub(crate) fn mail_pending() -> bool {
     MAIL.with(|m| m.get())
 }
@@ -194,6 +247,34 @@ fn find_box(b: &LayoutBox, node: NodeId) -> Option<&LayoutBox> {
         return Some(b);
     }
     b.children.iter().find_map(|c| find_box(c, node))
+}
+
+impl Engine {
+    /// Run `f` on the page of child frame `i`, detached from `page` and
+    /// with `page` on the ancestor stack (so scripts in the child can reach
+    /// their parent's document). The child is put back afterwards.
+    pub(crate) fn with_child<R>(&self, page: &mut Page, i: usize, f: impl FnOnce(&mut Page) -> R) -> Option<R> {
+        let mut child = page.frames.children.get_mut(i)?.page.take()?;
+        let r = {
+            let _g = AncestorGuard::push(page);
+            f(&mut child)
+        };
+        if let Some(c) = page.frames.children.get_mut(i) {
+            if c.page.is_none() {
+                c.page = Some(child);
+            }
+        }
+        // The child's scripts may have changed this document.
+        if page.script.dom_dirty && page.script.host.is_some() {
+            page.script.dom_dirty = false;
+            self.restyle(page);
+        }
+        Some(r)
+    }
+
+    fn child_index(page: &Page, node: NodeId) -> Option<usize> {
+        page.frames.children.iter().position(|c| c.node == node)
+    }
 }
 
 impl Page {
@@ -528,15 +609,14 @@ impl Engine {
                 installed = true;
                 self.install_frame(page, i, result, &mut out);
             }
-            let c = &mut page.frames.children[i];
-            if let Some(child) = c.page.as_mut() {
-                let due = child.next_script_due().map(|d| d <= self.start.elapsed().as_secs_f64() * 1000.0 + 0.5).unwrap_or(false);
-                if due || !child.frames.children.is_empty() {
-                    let o = self.tick(child);
+            let now = self.start.elapsed().as_secs_f64() * 1000.0 + 0.5;
+            let run = page.frames.children[i].page.as_ref().map(|child| child.next_script_due().map(|d| d <= now).unwrap_or(false) || !child.frames.children.is_empty()).unwrap_or(false);
+            if run {
+                if let Some(o) = self.with_child(page, i, |child| self.tick(child)) {
                     if o.relayout {
-                        c.dirty = true;
+                        page.frames.children[i].dirty = true;
                     }
-                    let node = c.node;
+                    let node = page.frames.children[i].node;
                     self.frame_side_effects(page, node, o, &mut out);
                 }
             }
@@ -585,7 +665,10 @@ impl Engine {
         if let Some(e) = self.frames.borrow_mut().entries.get_mut(&id) {
             e.url = child.url.to_string();
         }
-        self.finish_page_load(&mut child);
+        {
+            let _g = AncestorGuard::push(page);
+            self.finish_page_load(&mut child);
+        }
         let nav = child.script.pending_navigation.take();
         if let Some(old) = page.frames.children[i].page.replace(Box::new(child)) {
             let mut reg = self.frames.borrow_mut();
@@ -671,22 +754,20 @@ impl Engine {
         let hit = page.frame_at_viewport(x, y);
         let prev = page.pointer.frame_hover;
         if prev.is_some() && prev != hit.map(|h| h.0) {
-            if let Some(c) = prev.and_then(|n| page.frame_mut(n)) {
-                if let Some(child) = c.page.as_mut() {
-                    let o = self.pointer_move(child, -1.0, -1.0, m);
+            if let Some(i) = prev.and_then(|n| Self::child_index(page, n)) {
+                if let Some(o) = self.with_child(page, i, |child| self.pointer_move(child, -1.0, -1.0, m)) {
                     if o.relayout {
-                        c.dirty = true;
+                        page.frames.children[i].dirty = true;
                     }
                 }
             }
         }
         page.pointer.frame_hover = hit.map(|h| h.0);
         let Some((node, cx, cy)) = hit else { return false };
-        if let Some(c) = page.frame_mut(node) {
-            if let Some(child) = c.page.as_mut() {
-                let o = self.pointer_move(child, cx, cy, m);
+        if let Some(i) = Self::child_index(page, node) {
+            if let Some(o) = self.with_child(page, i, |child| self.pointer_move(child, cx, cy, m)) {
                 if o.relayout {
-                    c.dirty = true;
+                    page.frames.children[i].dirty = true;
                 }
                 self.frame_side_effects(page, node, o, out);
             }
@@ -707,11 +788,10 @@ impl Engine {
         }
         page.pointer.frame_press = Some(node);
         page.pointer.down = None;
-        let c = page.frame_mut(node)?;
-        let child = c.page.as_mut()?;
-        let mut d = self.pointer_down(child, cx, cy, button, m);
+        let i = Self::child_index(page, node)?;
+        let mut d = self.with_child(page, i, |child| self.pointer_down(child, cx, cy, button, m))?;
         let o = std::mem::take(&mut d.outcome);
-        c.dirty = true;
+        page.frames.children[i].dirty = true;
         self.frame_side_effects(page, node, o, &mut out);
         if self.paint_frames(page) {
             out.relayout = true;
@@ -726,11 +806,10 @@ impl Engine {
         let r = page.frame_content_rect(node)?;
         let (cx, cy) = (x + page.page_scroll.0 - r.x, y + page.page_scroll.1 - r.y);
         let mut out = ScriptOutcome::default();
-        let c = page.frame_mut(node)?;
-        let child = c.page.as_mut()?;
-        let mut up = self.pointer_up(child, cx, cy, button, m);
+        let i = Self::child_index(page, node)?;
+        let mut up = self.with_child(page, i, |child| self.pointer_up(child, cx, cy, button, m))?;
         let o = std::mem::take(&mut up.outcome);
-        c.dirty = true;
+        page.frames.children[i].dirty = true;
         let action = match up.action {
             crate::ClickAction::Navigate { url, new_tab: false } => {
                 self.navigate_frame_node(page, node, url);
@@ -799,14 +878,14 @@ impl Engine {
     /// edit a focused text control there. None when no frame has focus.
     pub fn frame_key_event(&self, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers) -> Option<ScriptOutcome> {
         let node = page.state.focused?;
-        let c = page.frame_mut(node)?;
-        let child = c.page.as_mut()?;
-        let mut o = match self.frame_key_event(child, key, code, pressed, m) {
+        let i = Self::child_index(page, node)?;
+        page.frames.children[i].page.as_ref()?;
+        let mut o = self.with_child(page, i, |child| match self.frame_key_event(child, key, code, pressed, m) {
             Some(o) => o,
             None => key_into_page(self, child, key, code, pressed, m),
-        };
+        })?;
         if o.relayout {
-            c.dirty = true;
+            page.frames.children[i].dirty = true;
         }
         let mut out = ScriptOutcome { default_prevented: o.default_prevented, ..Default::default() };
         let nav = o.navigation.take();
@@ -927,17 +1006,15 @@ fn deliver_in_tree(engine: &Engine, page: &mut Page, m: &FrameMessage) -> Option
     }
     for i in 0..page.frames.children.len() {
         let node = page.frames.children[i].node;
-        let r = {
-            let c = &mut page.frames.children[i];
-            let Some(child) = c.page.as_mut() else { continue };
-            let r = deliver_in_tree(engine, child, m);
-            if let Some(o) = &r {
-                if o.relayout {
-                    c.dirty = true;
-                }
+        if page.frames.children[i].page.is_none() {
+            continue;
+        }
+        let r = engine.with_child(page, i, |child| deliver_in_tree(engine, child, m)).flatten();
+        if let Some(o) = &r {
+            if o.relayout {
+                page.frames.children[i].dirty = true;
             }
-            r
-        };
+        }
         if let Some(mut o) = r {
             let nav = o.navigation.take();
             if let Some(nav) = nav {

@@ -128,6 +128,11 @@ pub trait HostEnv {
     fn frame_document(&mut self, _id: u64) -> Option<&mut Document> {
         None
     }
+    /// `window.frameElement`: (parent frame id, the hosting `<iframe>` in
+    /// the parent's document) when this document is a same-origin frame.
+    fn frame_element(&mut self) -> Option<(u64, NodeId)> {
+        None
+    }
     /// Computed style of a node of a same-origin frame's document.
     fn frame_computed_style(&mut self, _id: u64, _node: NodeId) -> Option<Rc<ComputedStyle>> {
         None

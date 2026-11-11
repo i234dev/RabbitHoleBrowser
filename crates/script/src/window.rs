@@ -956,7 +956,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_property(g, "closed", Value::Bool(false), ACC);
     realm.define_property(g, "length", Value::Number(0.0), ACC);
     realm.define_property(g, "opener", Value::Null, ALL);
-    realm.define_property(g, "frameElement", Value::Null, ACC);
+    realm.define_accessor(g, "frameElement", Some(win_frame_element), None, ACC);
     realm.define_property(g, "screenX", Value::Number(0.0), ACC);
     realm.define_property(g, "screenY", Value::Number(0.0), ACC);
     realm.define_property(g, "screenLeft", Value::Number(0.0), ACC);
@@ -1035,4 +1035,15 @@ impl CloneId for ObjectId {
     fn clone_id(&self) -> ObjectId {
         *self
     }
+}
+
+/// `window.frameElement`: the `<iframe>` hosting this document, as a node
+/// of the (same-origin) parent document; null for top-level and
+/// cross-origin frames.
+fn win_frame_element(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    let Some((parent, node)) = with_env(|env| env.frame_element()) else { return Ok(Value::Null) };
+    if parent >= crate::host::FRAME_DOC as u64 {
+        return Ok(Value::Null);
+    }
+    Ok(crate::host::wrap(realm, crate::host::NodeRef { doc: crate::host::FRAME_DOC | parent as u32, node }))
 }
