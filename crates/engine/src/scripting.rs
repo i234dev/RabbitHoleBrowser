@@ -420,7 +420,9 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
         if let Some(c) = self.page.frames.get(node) {
-            return Some(c.id);
+            if c.page.is_some() {
+                return Some(c.id);
+            }
         }
         self.engine.create_blank_frame(self.page, node)
     }

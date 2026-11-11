@@ -68,6 +68,8 @@ pub struct ChildFrame {
     pub source: FrameSource,
     pub page: Option<Box<Page>>,
     pending: Option<Receiver<Result<Loaded, String>>>,
+    /// The page shows a previous source; the current one must be loaded.
+    stale: bool,
     /// Content box size (CSS px) the child is laid out for.
     pub size: (f32, f32),
     /// The child must be repainted into `image`.
@@ -268,18 +270,16 @@ impl Engine {
             match page.frames.children.iter_mut().find(|c| c.node == node) {
                 Some(c) if c.source == source => {}
                 Some(c) => {
-                    // `src` changed: navigate the frame.
+                    // `src` changed: navigate the frame. The current
+                    // document stays until the new one arrives (scripts
+                    // keep seeing the initial about:blank document).
                     c.source = source;
                     c.pending = None;
-                    if let Some(old) = c.page.take() {
-                        for g in &old.frames.children {
-                            reg.remove_tree(g.id);
-                        }
-                    }
+                    c.stale = true;
                     changed = true;
                 }
                 None => {
-                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, size: attr_size(&page.doc, node), dirty: true, image: None });
+                    page.frames.children.push(ChildFrame { node, id: new_frame_id(), source, page: None, pending: None, stale: false, size: attr_size(&page.doc, node), dirty: true, image: None });
                     changed = true;
                 }
             }
@@ -333,7 +333,8 @@ impl Engine {
                     }
                 }
             }
-            if c.page.is_none() && c.pending.is_none() {
+            if (c.page.is_none() || c.stale) && c.pending.is_none() {
+                c.stale = false;
                 let vp = Viewport { width: c.size.0.max(1.0), height: c.size.1.max(1.0) };
                 let loader = base_loader.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -369,10 +370,11 @@ impl Engine {
     /// `contentWindow` right after inserting it). A `src` still loads on
     /// the next sync.
     pub(crate) fn create_blank_frame(&self, page: &mut Page, node: NodeId) -> Option<u64> {
-        if !page.doc.is_element(node, "iframe") || !page.doc.is_connected(node) || page.frame_depth >= MAX_DEPTH || page.frames.children.len() >= MAX_FRAMES_PER_PAGE {
+        let existing = page.frames.children.iter().position(|c| c.node == node);
+        if existing.is_none() && (!page.doc.is_element(node, "iframe") || !page.doc.is_connected(node) || page.frame_depth >= MAX_DEPTH || page.frames.children.len() >= MAX_FRAMES_PER_PAGE) {
             return None;
         }
-        let id = new_frame_id();
+        let id = existing.map(|i| page.frames.children[i].id).unwrap_or_else(new_frame_id);
         let size = page.frame_content_rect(node).map(|r| (r.w, r.h)).unwrap_or_else(|| attr_size(&page.doc, node));
         let vp = Viewport { width: size.0.max(1.0), height: size.1.max(1.0) };
         let loaded = self.loader.load_html("<!doctype html><html><head></head><body></body></html>", Url::parse("about:blank").expect("about:blank"), vp);
@@ -386,11 +388,19 @@ impl Engine {
             e.parent = Some(page.frame_id);
             e.url = child.url.to_string();
             let parent = reg.entries.entry(page.frame_id).or_default();
-            parent.children.push(id);
+            if !parent.children.contains(&id) {
+                parent.children.push(id);
+            }
+        }
+        if let Some(i) = existing {
+            // Its document is still loading: show about:blank meanwhile.
+            page.frames.children[i].page = Some(Box::new(child));
+            page.frames.children[i].dirty = true;
+            return Some(id);
         }
         // Source Blank: a `src` attribute shows up as a change on the next
         // sync and starts the real load.
-        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, size, dirty: true, image: None });
+        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, stale: false, size, dirty: true, image: None });
         Some(id)
     }
 
@@ -562,7 +572,12 @@ impl Engine {
         }
         self.finish_page_load(&mut child);
         let nav = child.script.pending_navigation.take();
-        page.frames.children[i].page = Some(Box::new(child));
+        if let Some(old) = page.frames.children[i].page.replace(Box::new(child)) {
+            let mut reg = self.frames.borrow_mut();
+            for g in &old.frames.children {
+                reg.remove_tree(g.id);
+            }
+        }
         page.frames.children[i].dirty = true;
         if let Some(nav) = nav {
             self.navigate_frame_node(page, node, nav.request.url);
@@ -596,13 +611,8 @@ impl Engine {
         let vp = Viewport { width: c.size.0.max(1.0), height: c.size.1.max(1.0) };
         let mut loader = self.loader.clone();
         loader.defer_scripts = false;
+        // The current document stays until the new one arrives.
         let referer = c.page.as_ref().map(|p| p.url.clone());
-        if let Some(old) = c.page.take() {
-            let mut reg = self.frames.borrow_mut();
-            for g in &old.frames.children {
-                reg.remove_tree(g.id);
-            }
-        }
         let (tx, rx) = std::sync::mpsc::channel();
         let mut req = Request::get(url);
         if let Some(r) = referer {
