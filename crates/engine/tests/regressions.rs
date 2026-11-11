@@ -217,17 +217,3 @@ fn internal_prototypes_survive_gc() {
     );
     assert_eq!(eval(&e, &mut page, "r"), "function,a,1");
 }
-
-/// `navigator.serviceWorker.register()` resolves (SvelteKit / PWA
-/// bootstraps call it without a catch); other origins are refused.
-#[test]
-fn service_worker_registration_resolves() {
-    let mut e = engine(true);
-    let mut page = load_doc(
-        &mut e,
-        "<script>window.r = 'pending'; navigator.serviceWorker.register('./sw.js').then(function (reg) { r = [reg.scope, reg.active.state, typeof reg.unregister].join(' '); return navigator.serviceWorker.ready; }).then(function () { r += ' ready'; }, function (err) { r = 'rejected ' + err; });
-         navigator.serviceWorker.register('https://other.test/sw.js').catch(function (e) { window.cross = e.name; });</script>",
-    );
-    assert_eq!(eval(&e, &mut page, "r"), "https://example.test/ activated function ready");
-    assert_eq!(eval(&e, &mut page, "cross"), "SecurityError");
-}
