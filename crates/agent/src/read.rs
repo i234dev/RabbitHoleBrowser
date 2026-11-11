@@ -183,7 +183,7 @@ impl Md<'_> {
 
     fn inline_into(&mut self, n: NodeId, s: &mut String) {
         let doc = &self.page.doc;
-        for c in doc.children(n).collect::<Vec<_>>() {
+        for c in doc.flat_children(n) {
             if let Some(t) = doc.text(c) {
                 s.push_str(&esc_md(t));
                 continue;
@@ -248,7 +248,7 @@ impl Md<'_> {
 
     fn block(&mut self, n: NodeId, list_depth: usize) {
         let doc = &self.page.doc;
-        for c in doc.children(n).collect::<Vec<_>>() {
+        for c in doc.flat_children(n) {
             if let Some(t) = doc.text(c) {
                 let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
                 if !t.is_empty() {
@@ -297,7 +297,7 @@ impl Md<'_> {
                         if self.has_block_child(li) {
                             // Inline part first, nested lists after.
                             let mut head = String::new();
-                            for cc in doc.children(li).collect::<Vec<_>>() {
+                            for cc in doc.flat_children(li) {
                                 if matches!(doc.tag(cc), Some("ul" | "ol")) {
                                     continue;
                                 }

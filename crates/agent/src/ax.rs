@@ -449,7 +449,7 @@ fn content_text_into(page: &Page, n: NodeId, out: &mut String, depth: usize) {
     if depth > 40 {
         return;
     }
-    for c in doc.children(n) {
+    for c in doc.flat_children(n) {
         if let Some(t) = doc.text(c) {
             out.push_str(t);
             continue;
@@ -852,7 +852,7 @@ impl<'a> Builder<'a> {
     fn children(&mut self, frame: usize, n: NodeId, ctx: Ctx, out: &mut Vec<Ax>) {
         let page = self.frames[frame].page;
         let doc = &page.doc;
-        let kids: Vec<NodeId> = doc.children(n).collect();
+        let kids: Vec<NodeId> = doc.flat_children(n);
         for c in kids {
             if let Some(t) = doc.text(c) {
                 let text = collapse_ws(t);
