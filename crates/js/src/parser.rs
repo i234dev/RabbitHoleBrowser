@@ -39,13 +39,72 @@ type PResult<T> = Result<T, ParseError>;
 /// Parse a script (or module when `is_module`).
 pub fn parse_program(source: &str, is_module: bool) -> Result<Program, ParseError> {
     let mut p = Parser::new(source, is_module)?;
-    p.parse_program()
+    match p.parse_program() {
+        Ok(program) => Ok(program),
+        Err(_) if p.skipped => {
+            // The pre-parser skipped function bodies: parse everything to
+            // report the error exactly where the full grammar finds it.
+            let mut p = Parser::new(source, is_module)?;
+            p.lazy = false;
+            p.parse_program()
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Lazy parsing of function bodies (on unless `RH_EAGER_PARSE` is set).
+fn lazy_parse_enabled() -> bool {
+    thread_local!(static LAZY: bool = std::env::var_os("RH_EAGER_PARSE").is_none());
+    LAZY.with(|l| *l)
+}
+
+/// Bodies shorter than this (in bytes) are parsed right away: skipping
+/// them saves little and parsing them later costs a parser setup.
+const LAZY_MIN_BODY: usize = 96;
+
+/// Parse the body of a function whose body the pre-parser skipped
+/// ([`FunctionBody::Lazy`]): its statements and resulting strictness.
+/// Functions nested in it are skipped in turn.
+pub fn parse_lazy_body(f: &Function, lb: &LazyBody) -> Result<(Vec<Stmt>, bool), ParseError> {
+    let mut lx = Lexer::new(&lb.source, lb.is_module);
+    lx.restore(&crate::lexer::LexerState::at(lb.start, lb.line, lb.line_start));
+    let tok = lx.next_token()?;
+    let mut p = Parser {
+        lx,
+        tok,
+        prev_end: lb.start,
+        prev_line: lb.line,
+        ctx: Context {
+            in_function: true,
+            in_generator: f.is_generator,
+            in_async: f.is_async,
+            in_loop: false,
+            in_switch: false,
+            strict: f.strict,
+            is_module: lb.is_module,
+            labels: Vec::new(),
+            in_class_body: lb.in_class_body,
+            super_call_ok: lb.super_call_ok,
+            super_prop_ok: lb.super_prop_ok,
+        },
+        no_in: false,
+        not_arrow: std::collections::HashSet::default(),
+        lazy: lazy_parse_enabled(),
+        skipped: false,
+        lazy_src: Some(lb.source.clone()),
+    };
+    let r = p.parse_function_body_block()?;
+    if p.prev_end != lb.end {
+        return Err(ParseError { message: "Invalid or unexpected token (lazily parsed function body)".into(), line: lb.line, column: (lb.start - lb.line_start) as u32 + 1 });
+    }
+    Ok(r)
 }
 
 /// Parse a standalone expression (used by the engine for `eval`-like
 /// helpers and tests).
 pub fn parse_expression(source: &str) -> Result<Expr, ParseError> {
     let mut p = Parser::new(source, false)?;
+    p.lazy = false;
     let e = p.parse_expression()?;
     if p.tok.kind != TokenKind::Eof {
         return Err(p.unexpected());
@@ -98,6 +157,12 @@ pub struct Parser<'a> {
     /// parameters. Without this, nested `(a=(b=(c=...` retries every level
     /// as an arrow head and parsing becomes exponential in the depth.
     not_arrow: std::collections::HashSet<usize, crate::value::FxBuild>,
+    /// Skip function bodies with the pre-parser (lazy parsing).
+    lazy: bool,
+    /// Some body was skipped.
+    skipped: bool,
+    /// The source, shared by the skipped bodies (made on first use).
+    lazy_src: Option<std::rc::Rc<str>>,
 }
 
 fn is_reserved_word(n: &str) -> bool {
@@ -215,6 +280,9 @@ impl<'a> Parser<'a> {
             },
             no_in: false,
             not_arrow: std::collections::HashSet::default(),
+            lazy: lazy_parse_enabled(),
+            skipped: false,
+            lazy_src: None,
         })
     }
 
@@ -1609,10 +1677,10 @@ impl<'a> Parser<'a> {
             super_prop_ok: self.ctx.super_prop_ok,
         };
         let no_in = self.no_in;
+        let simple = params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest);
         let (body, strict) = self.with_ctx(ctx, |p| {
             if p.is_punct("{") {
-                let (stmts, strict) = p.parse_function_body_block()?;
-                Ok((FunctionBody::Block(stmts), strict))
+                p.parse_function_body(simple, false)
             } else {
                 p.no_in = no_in;
                 let e = p.parse_assignment()?;
@@ -2413,11 +2481,12 @@ impl<'a> Parser<'a> {
                 Some(false) if params.len() != 1 || params[0].rest => return Err(p.error_at(pos, "Setter must have exactly one formal parameter")),
                 _ => {}
             }
-            let (body, strict) = p.parse_function_body_block()?;
+            let simple = params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest);
+            let (body, strict) = p.parse_function_body(simple, false)?;
             Ok(Function {
                 name: None,
                 params,
-                body: FunctionBody::Block(body),
+                body,
                 is_arrow: false,
                 is_async,
                 is_generator,
@@ -2426,6 +2495,57 @@ impl<'a> Parser<'a> {
                 span: (0, 0),
             })
         })
+    }
+
+    /// `{ body }` of a function: skipped by the pre-parser when lazy
+    /// parsing applies (see [`FunctionBody::Lazy`]), else parsed.
+    fn parse_function_body(&mut self, simple_params: bool, eager: bool) -> PResult<(FunctionBody, bool)> {
+        if self.lazy && !eager && self.is_punct("{") {
+            if let Some(r) = self.skip_function_body(simple_params)? {
+                return Ok(r);
+            }
+        }
+        let (stmts, strict) = self.parse_function_body_block()?;
+        Ok((FunctionBody::Block(stmts), strict))
+    }
+
+    fn skip_function_body(&mut self, simple_params: bool) -> PResult<Option<(FunctionBody, bool)>> {
+        let open_start = self.tok.start;
+        let open_pos = self.tok.pos;
+        let after_open = self.lx.state();
+        let Some(sk) = self.lx.skip_function_body() else { return Ok(None) };
+        if sk.end.pos() - open_start < LAZY_MIN_BODY || (sk.use_strict && !simple_params) {
+            // Small (or an early error to report): parse it now.
+            self.lx.restore(&after_open);
+            return Ok(None);
+        }
+        let source = match &self.lazy_src {
+            Some(s) => s.clone(),
+            None => {
+                let s: std::rc::Rc<str> = std::rc::Rc::from(self.lx.source());
+                self.lazy_src = Some(s.clone());
+                s
+            }
+        };
+        let body = LazyBody {
+            source,
+            start: open_start,
+            end: sk.end.pos(),
+            line: open_pos.line,
+            line_start: open_start - (open_pos.column as usize - 1),
+            names: sk.names.into_boxed_slice(),
+            eval: sk.eval,
+            is_module: self.ctx.is_module,
+            in_class_body: self.ctx.in_class_body,
+            super_call_ok: self.ctx.super_call_ok,
+            super_prop_ok: self.ctx.super_prop_ok,
+        };
+        self.skipped = true;
+        // Step past the closing `}` like `advance` would.
+        self.prev_end = sk.end.pos();
+        self.prev_line = sk.close_pos.line;
+        self.tok = self.lx.next_token()?;
+        Ok(Some((FunctionBody::Lazy(std::rc::Rc::new(body)), self.ctx.strict || sk.use_strict)))
     }
 
     /// `{ body }` of a function, handling the directive prologue. Returns
@@ -2448,6 +2568,9 @@ impl<'a> Parser<'a> {
     fn parse_function(&mut self, is_async: bool, is_expression: bool, is_declaration: bool) -> PResult<Function> {
         let pos = self.tok.pos;
         let start = self.tok.start as u32;
+        // Functions right after `(` or `!` are usually called at once
+        // (`(function(){...})()`, callbacks): parse them eagerly.
+        let eager = !is_async && self.prev_end > 0 && matches!(self.lx.source().as_bytes().get(self.prev_end - 1), Some(b'(') | Some(b'!'));
         self.expect_ident("function")?;
         let is_generator = self.eat_punct("*")?;
         let name = if self.is_punct("(") {
@@ -2483,11 +2606,12 @@ impl<'a> Parser<'a> {
         self.with_ctx(ctx, |p| {
             p.expect_punct("(")?;
             let params = p.parse_formal_params_until_paren()?;
-            let (body, strict) = p.parse_function_body_block()?;
+            let simple = params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest);
+            let (body, strict) = p.parse_function_body(simple, eager)?;
             Ok(Function {
                 name,
                 params,
-                body: FunctionBody::Block(body),
+                body,
                 is_arrow: false,
                 is_async,
                 is_generator,

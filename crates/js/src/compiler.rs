@@ -1239,6 +1239,12 @@ impl Compiler {
     // ------------------------------------------------------------ functions
 
     fn compile_function(&mut self, f: &Function, name: Option<&str>) -> CResult<u32> {
+        if let FunctionBody::Lazy(lb) = &f.body {
+            // Skipped by the pre-parser: parse the body now.
+            let (stmts, strict) = crate::parser::parse_lazy_body(f, lb).map_err(|e| CompileError { message: e.message, pos: Pos { line: e.line, column: e.column } })?;
+            let full = Function { body: FunctionBody::Block(stmts), strict: f.strict || strict, ..f.clone() };
+            return self.compile_function(&full, name);
+        }
         let name = f.name.as_deref().or(name).unwrap_or("");
         let mut flags = CodeFlags {
             is_arrow: f.is_arrow,
@@ -1299,7 +1305,7 @@ impl Compiler {
         // Vars and lexicals.
         let body_stmts: &[Stmt] = match &f.body {
             FunctionBody::Block(b) => b,
-            FunctionBody::Expr(_) => &[],
+            FunctionBody::Expr(_) | FunctionBody::Lazy(_) => &[],
         };
         let mut vars = Vec::new();
         Self::collect_var_names(body_stmts, &mut vars);
@@ -1367,6 +1373,7 @@ impl Compiler {
                 self.compile_expr(e)?;
                 self.emit(Op::Return);
             }
+            FunctionBody::Lazy(_) => unreachable!("lazy bodies are parsed first"),
         }
         let fs = self.fns.pop().unwrap();
         for k in temp_keys {

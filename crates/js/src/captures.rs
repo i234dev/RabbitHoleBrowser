@@ -104,6 +104,7 @@ impl Analyzer {
         for p in &f.params {
             self.pattern(&p.pattern);
         }
+        let mut known = true;
         match &f.body {
             FunctionBody::Block(b) => {
                 for s in b {
@@ -111,11 +112,31 @@ impl Analyzer {
                 }
             }
             FunctionBody::Expr(e) => self.expr(e),
+            FunctionBody::Lazy(lb) => {
+                // A skipped body: what it mentions is referenced from a
+                // nested function for every enclosing one. Its own set is
+                // computed when it is parsed (see `analyze_function`).
+                if lb.eval {
+                    for i in 1..self.sets.len() {
+                        self.sets[i].insert(ARGS_ESCAPE.to_string());
+                    }
+                }
+                if f.is_arrow && lb.names.iter().any(|n| n.as_str() == "arguments") {
+                    // It may write through the enclosing `arguments`.
+                    self.args_escape();
+                }
+                for n in lb.names.iter() {
+                    self.name(n);
+                }
+                known = false;
+            }
         }
         let set = self.sets.pop().unwrap();
         self.arrow.pop();
         let key = self.stack.pop().unwrap();
-        self.out.insert(key, Rc::new(set));
+        if known {
+            self.out.insert(key, Rc::new(set));
+        }
     }
 
     /// Code compiled into a synthetic function of its own (class field

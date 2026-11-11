@@ -8,6 +8,10 @@
 
 use crate::ast::{Name, Pos};
 
+#[path = "prescan.rs"]
+mod prescan;
+pub use prescan::SkippedBody;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     /// Identifier or keyword (keywords are classified by the parser).
@@ -65,6 +69,18 @@ pub struct LexerState {
     pos: usize,
     line: u32,
     line_start: usize,
+}
+
+impl LexerState {
+    /// The state at byte offset `pos` of line `line` (starting at byte
+    /// `line_start`).
+    pub fn at(pos: usize, line: u32, line_start: usize) -> LexerState {
+        LexerState { pos, line, line_start }
+    }
+
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
 }
 
 pub struct Lexer<'a> {

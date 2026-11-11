@@ -532,6 +532,34 @@ pub enum FunctionBody {
     Block(Vec<Stmt>),
     /// Arrow function with an expression body.
     Expr(Box<Expr>),
+    /// A block body skipped by the pre-parser: parsed when the function is
+    /// compiled (on its first call), see [`LazyBody`].
+    Lazy(std::rc::Rc<LazyBody>),
+}
+
+/// A function body the parser skipped (lazy parsing): where it is and
+/// what the enclosing code needs to know about it without its tree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LazyBody {
+    /// The whole source text the body is part of.
+    pub source: std::rc::Rc<str>,
+    /// Byte offset of the opening `{` and just past the closing `}`.
+    pub start: usize,
+    pub end: usize,
+    /// Line and line-start offset at `start` (for positions).
+    pub line: u32,
+    pub line_start: usize,
+    /// Every distinct identifier mentioned in the body (except property
+    /// names after `.`), private names as `#name`: the closure capture
+    /// analysis of enclosing functions is name based.
+    pub names: Box<[Name]>,
+    /// The body mentions `eval` (maybe a direct eval).
+    pub eval: bool,
+    /// Parse context of the body.
+    pub is_module: bool,
+    pub in_class_body: bool,
+    pub super_call_ok: bool,
+    pub super_prop_ok: bool,
 }
 
 // ------------------------------------------------------------------ classes

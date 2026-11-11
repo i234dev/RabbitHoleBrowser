@@ -443,3 +443,83 @@ fn lazy_methods() {
     eq("var o = { base: 1, m() { return [1, 2].map(x => x + this.base).join(); } }; o.m()", "2,3");
     eq("var p = { m() { return 'p'; } }; var q = { __proto__: p, m() { return super.m() + 'q'; } }; q.m()", "pq");
 }
+
+// ------------------------------------------------------------ lazy parsing
+
+/// Padding that makes a function body long enough to be skipped by the
+/// pre-parser (see `parser::LAZY_MIN_BODY`).
+const PAD: &str = "/* .................................................................................................... */";
+
+#[test]
+fn lazy_bodies_with_tricky_tokens() {
+    // Each body is skipped at load and parsed on its first call; the
+    // pre-parser must find the right end through literals and comments.
+    let cases: &[(&str, &str)] = &[
+        // Regular expressions vs division.
+        ("var a = 6, b = 2, g = 1; return a / b / g + '|' + /}/.source + /[/}]/.test('}') + (a) / 2;", "3|}true3"),
+        ("if (true) /x}/.test('x}') && (globalThis.r1 = 1); return globalThis.r1;", "1"),
+        ("var x = 4; x /= 2; return x + /\\/}/.source;", "2\\/}"),
+        ("let o = {a: 1}; return [o.a / 1, ({}) / 1].join() + typeof /a/;", "1,NaNobject"),
+        ("return [1].map((v) => { return v; })[0] / 1;", "1"),
+        ("var t = 0; for (var i = 0; i < 2; i++) /}/g.lastIndex = 0, t++; return t;", "2"),
+        ("label: { break label; } return /a{1}/.test('a');", "true"),
+        ("switch (1) { case 1: { } } return 1 / 1;", "1"),
+        ("var c = true ? {k: '}'} : {}; return c.k;", "}"),
+        // Strings, templates and comments containing braces.
+        ("var s = '}' + \"{\" + '\\'}'; return s;", "}{'}"),
+        ("var n = 2; return `a${ {v: n}.v }b${ `in${'}'}` }c` + `}`;", "a2bin}c}"),
+        ("// } closing brace in a comment\n return 1 /* } */ + 1;", "2"),
+        ("return `line1\n${ (() => { return '}'; })() }`.length;", "7"),
+        ("<!-- html comment }\n return 3;", "3"),
+        // Nested functions, classes and private names.
+        ("class K { #p = 5; get p() { return this.#p; } static s() { return '}'; } } return new K().p + K.s();", "5}"),
+        ("function inner() { return function () { return { a: [1, { b: '}' }] }; }; } return inner()().a[1].b;", "}"),
+        ("var f = async () => { await null; return 1; }; return typeof f;", "function"),
+        ("function* g() { yield /y/.source; } return g().next().value;", "y"),
+        ("return 0x1F + 1e-3 * 1000 + .5 + 1_000;", "1032.5"),
+        ("var q = 1 ?.5 : 2; var o = null; return q + '' + o?.x;", "0.5undefined"),
+    ];
+    for (body, expected) in cases {
+        let src = format!("function f() {{ {PAD}\n{body}\n}} String(f())");
+        eq(&src, expected);
+        // The same inside an arrow and a method.
+        let src = format!("const f = () => {{ {PAD}\n{body}\n}}; String(f())");
+        eq(&src, expected);
+        let src = format!("const o = {{ m() {{ {PAD}\n{body}\n}} }}; String(o.m())");
+        eq(&src, expected);
+    }
+}
+
+#[test]
+fn lazy_bodies_keep_closure_semantics() {
+    // A variable referenced only from a skipped body lives where the
+    // closure can see it.
+    eq(&format!("function outer() {{ let x = 1; function inner() {{ {PAD} return x + 1; }} x = 5; return inner(); }} outer()"), "6");
+    eq(&format!("function outer() {{ let x = 1; const inc = () => {{ {PAD} x++; }}; inc(); inc(); return x; }} outer()"), "3");
+    // `arguments` written through a skipped arrow.
+    eq(&format!("function f(a) {{ const g = () => {{ {PAD} arguments[0] = 9; }}; g(); return arguments[0]; }} f(1)"), "9");
+    // Private names used only in skipped methods.
+    eq(&format!("class C {{ #v = 7; read() {{ {PAD} return this.#v; }} }} new C().read()"), "7");
+    // Strictness from the body's directive.
+    eq(&format!("function f() {{ 'use strict'; {PAD} return this === undefined; }} f()"), "true");
+    eq(&format!("function f() {{ {PAD} return this === undefined; }} f()"), "false");
+    // Inherited strictness.
+    eq(&format!("'use strict'; function f() {{ {PAD} return this === undefined; }} f()"), "true");
+    // Skipped bodies inside skipped bodies.
+    eq(&format!("function a() {{ {PAD} function b() {{ {PAD} return function c() {{ {PAD} return 42; }}; }} return b()(); }} a()"), "42");
+    // Generators and async functions.
+    eq(&format!("function* g() {{ {PAD} yield 1; yield 2; }} [...g()].join()"), "1,2");
+    eq(&format!("var out; (async function () {{ {PAD} out = await Promise.resolve(5); }})(); out"), "undefined");
+    // super in skipped methods.
+    eq(&format!("class A {{ m() {{ return 1; }} }} class B extends A {{ m() {{ {PAD} return super.m() + 1; }} }} new B().m()"), "2");
+    eq(&format!("class A {{ constructor() {{ this.v = 1; }} }} class B extends A {{ constructor() {{ {PAD} super(); this.v++; }} }} new B().v"), "2");
+}
+
+#[test]
+fn lazy_body_errors() {
+    // A syntax error inside a skipped body is reported when the function
+    // is first called, as a SyntaxError.
+    throws(&format!("function f() {{ {PAD} return 1 +; }} f()"), "SyntaxError");
+    // Early errors outside any skipped body still fail the whole script.
+    throws(&format!("function f() {{ {PAD} return 1; }} let x = ;"), "SyntaxError");
+}
