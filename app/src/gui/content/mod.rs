@@ -277,7 +277,10 @@ impl ContentHandle {
         let _ = clock();
         let spawned = std::thread::Builder::new()
             .name(format!("rabbithole-tab-{tab_id}"))
-            .stack_size(64 * 1024 * 1024)
+            // Room for deep script recursion (~12k JS frames re-entering from
+            // native code); the JS stack guard throws a RangeError before the
+            // reservation runs out.
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || worker::run(tab_id, epoch, config, sink, rx, worker_tx, worker_busy));
         if let Err(e) = spawned {
             eprintln!("rabbithole: could not spawn content thread: {e}");

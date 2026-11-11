@@ -37,8 +37,10 @@ impl<'a> Parser<'a> {
         }
     }
     fn value(&mut self, realm: &mut Realm, depth: usize) -> JsResult<Value> {
-        if depth > 512 {
-            return self.err(realm, "Nesting too deep");
+        // Deep nesting is fine (browsers parse thousands of levels); only
+        // the native stack bounds it.
+        if crate::stack::exhausted() {
+            return realm.range_error("Maximum call stack size exceeded");
         }
         self.ws();
         match self.peek() {
@@ -323,6 +325,9 @@ fn quote(s: &JsStr, out: &mut String) {
 
 impl Stringifier {
     fn serialize_property(&mut self, realm: &mut Realm, holder: Value, key: PropertyKey, out: &mut String) -> JsResult<bool> {
+        if crate::stack::exhausted() {
+            return realm.range_error("Maximum call stack size exceeded");
+        }
         let mut value = realm.get(holder.clone(), key.clone())?;
         if let Value::Object(_) | Value::BigInt(_) = &value {
             let to_json = realm.get_str(value.clone(), "toJSON")?;

@@ -41,9 +41,12 @@ fn species(_realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> 
 }
 
 /// Create a RegExp object from literal pattern/flags.
+/// A regular expression literal: always the realm's %RegExp.prototype%.
+/// (Not `new.target`: a literal evaluated inside a native constructor's
+/// callback, e.g. a `new Promise(executor)`, must not pick up that
+/// constructor's prototype.)
 pub fn regexp_create(realm: &mut Realm, pattern: &str, flags: &str) -> JsResult<Value> {
-    let default_proto = realm.intrinsics.others["RegExpPrototype"];
-    let proto = realm.proto_from_new_target(default_proto);
+    let proto = realm.intrinsics.others["RegExpPrototype"];
     regexp_alloc(realm, pattern, flags, proto)
 }
 

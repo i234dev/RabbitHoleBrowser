@@ -38,6 +38,7 @@ pub mod modules;
 pub mod parser;
 pub mod realm;
 pub mod regex;
+pub mod stack;
 pub mod regs;
 pub mod sampler;
 pub mod shape;

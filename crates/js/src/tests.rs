@@ -1539,3 +1539,64 @@ fn finally_does_not_see_bindings_of_the_try_block() {
     eq("(function(){ var out=[]; function f(){ let r='o'; try { let r='i'; for (let k of [1]) { let r='loop'; return r; } } finally { out.push(r); } } return f() + out.join(); })()", "loopo");
     eq("(function(){ var out=[]; for (let i = 0; i < 2; i++) { let r = 'x' + i; try { let r = 'y'; if (i == 0) continue; break; } finally { out.push(r); } } return out.join(); })()", "x0,x1");
 }
+
+/// Run `f` on a thread with `stack` bytes of native stack (the browser runs
+/// page scripts on large-stack threads).
+fn on_stack<R: Send + 'static>(stack: usize, f: impl FnOnce() -> R + Send + 'static) -> R {
+    std::thread::Builder::new().stack_size(stack).spawn(f).unwrap().join().unwrap()
+}
+
+/// Legitimate deep recursion of ~10k frames works like in Chrome, also when
+/// every level re-enters the interpreter from native code (`call`,
+/// `apply`, `forEach`, getters, `valueOf`, Proxy traps, bound functions).
+#[test]
+fn deep_recursion_of_ten_thousand_frames() {
+    on_stack(256 << 20, || {
+        eq("function f(n) { return n === 0 ? 0 : 1 + f(n - 1); } f(10000)", "10000");
+        eq("function f(n) { return n === 0 ? 0 : 1 + f.call(null, n - 1); } f(10000)", "10000");
+        eq("function f(n) { return n === 0 ? 0 : 1 + f.apply(null, [n - 1]); } f(10000)", "10000");
+        eq("var g = function (n) { return n === 0 ? 0 : 1 + g(n - 1); }.bind(null); g(5000)", "5000");
+        eq("function f(n) { var r = 0; if (n > 0) [n - 1].forEach(function (m) { r = 1 + f(m); }); return r; } f(5000)", "5000");
+        eq("var o = { n: 5000, get d() { if (this.n === 0) return 0; this.n--; return 1 + this.d; } }; o.d", "5000");
+        eq("function V(n) { this.n = n; } V.prototype.valueOf = function () { return this.n === 0 ? 0 : 1 + +new V(this.n - 1); }; +new V(5000)", "5000");
+        eq("var p = new Proxy({}, { get: function (t, k) { var n = +k; return n === 0 ? 0 : 1 + p[n - 1]; } }); p[3000]", "3000");
+        eq("class A { constructor(n) { this.d = n === 0 ? 0 : 1 + new A(n - 1).d; } } new A(5000).d", "5000");
+        eq("JSON.stringify(JSON.parse('['.repeat(3000) + ']'.repeat(3000))).length", "6000");
+    });
+}
+
+/// Unbounded recursion through any re-entry path throws a catchable
+/// RangeError instead of overflowing the native stack, even on a small
+/// thread stack.
+#[test]
+fn runaway_recursion_is_a_range_error_not_a_crash() {
+    for stack in [2usize << 20, 64 << 20] {
+        on_stack(stack, || {
+            throws("function r() { return r(); } r()", "Maximum call stack size exceeded");
+            throws("function r() { return r.call(null); } r()", "Maximum call stack size exceeded");
+            throws("function r() { return r.apply(null, []); } r()", "Maximum call stack size exceeded");
+            throws("var o = { get x() { return this.x; } }; o.x", "Maximum call stack size exceeded");
+            throws("var o = { toString: function () { return '' + o; } }; '' + o", "Maximum call stack size exceeded");
+            throws("var o = { valueOf: function () { return +o; } }; +o", "Maximum call stack size exceeded");
+            throws("var p = new Proxy({}, { get: function (t, k) { return p[k]; } }); p.x", "Maximum call stack size exceeded");
+            throws("function r() { [1].forEach(r); } r()", "Maximum call stack size exceeded");
+            throws("class A { constructor() { new A(); } } new A()", "Maximum call stack size exceeded");
+            throws("JSON.parse('['.repeat(1e6) + ']'.repeat(1e6))", "Maximum call stack size exceeded");
+            throws("var o = {}; for (var i = 0; i < 1e6; i++) o = { o: o }; JSON.stringify(o)", "Maximum call stack size exceeded");
+            throws("var o = {}; Object.defineProperty(o, 'x', { get: function () { return Reflect.get(o, 'x'); } }); o.x", "Maximum call stack size exceeded");
+            // The realm stays usable afterwards.
+            eq("var depth = 0; function r() { depth++; r.call(null); } try { r(); } catch (e) { depth > 100 && e instanceof RangeError }", "true");
+        });
+    }
+}
+
+/// A regular expression literal evaluated inside a native constructor's
+/// callback (a Promise executor) is a RegExp, not an object with the
+/// constructor's prototype (Google's bar script ran `/re/.test(x)` from a
+/// Promise executor: "undefined is not a function").
+#[test]
+fn regexp_literal_inside_promise_executor() {
+    eq("var r; new Promise(function (res) { var re = /^\\s*-?0x/i; r = [re instanceof RegExp, typeof re.test, re.test(' 0x1f'), Object.getPrototypeOf(re) === RegExp.prototype].join(); res(); }); r", "true,function,true,true");
+    eq("var r; new Promise(function () { r = 'a1b2'.replace(/\\d/g, '#'); }); r", "a#b#");
+    eq("class P extends Promise {} var r; new P(function () { r = /x/.exec('yx').index; }); r", "1");
+}

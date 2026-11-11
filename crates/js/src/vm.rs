@@ -113,6 +113,17 @@ impl Realm {
             Value::Object(id) => id,
             _ => {
                 let d = self.describe_for_error(&f);
+                if std::env::var_os("RH_DEBUG_NOTFN").is_some() {
+                    let native = self.current_callee.map(|n| self.function_name(n).to_rust_string()).unwrap_or_default();
+                    eprintln!("[notfn] {d} called from native `{native}` at\n{}", self.build_stack_string("TypeError", "not a function"));
+                    if let Some(f) = self.frames.last() {
+                        if let (Some(src), Some((a, b))) = (&f.code.source, f.code.source_span) {
+                            let (a, b) = (a as usize, (b as usize).min(a as usize + 400));
+                            eprintln!("[notfn] top function source: {}", src.get(a..b).unwrap_or("?"));
+                        }
+                        eprintln!("[notfn] pc={} op={:?}", f.pc, f.code.ops.get(f.pc.saturating_sub(1)));
+                    }
+                }
                 return self.type_error(&format!("{} is not a function", d));
             }
         };
@@ -168,7 +179,7 @@ impl Realm {
     }
 
     fn call_native(&mut self, id: ObjectId, func: NativeFn, this: Value, args: &[Value], construct: bool) -> JsResult<Value> {
-        if self.native_depth >= self.max_native_depth {
+        if self.native_depth >= self.max_native_depth || crate::stack::exhausted() {
             return self.range_error("Maximum call stack size exceeded");
         }
         self.native_depth += 1;
@@ -1040,6 +1051,25 @@ impl Realm {
 
     /// Execute until the entry frame returns or suspends.
     pub(crate) fn run(&mut self) -> JsResult<Exit> {
+        // Each re-entry from Rust nests a new interpreter loop on the
+        // native stack: stop before it overflows (the error surfaces at
+        // the call site, before the callee runs).
+        if crate::stack::exhausted() {
+            let err = self.new_error("RangeError", "Maximum call stack size exceeded");
+            while let Some(f) = self.frames.last().map(|f| f.entry) {
+                let popped = self.pop_frame();
+                if let Some(g) = popped.generator() {
+                    if let ObjectKind::Generator(gd) = &mut self.obj_mut(g).kind {
+                        gd.state = GeneratorState::Completed;
+                        gd.frame = None;
+                    }
+                }
+                if f {
+                    break;
+                }
+            }
+            return Err(err);
+        }
         loop {
             match self.run_inner() {
                 Ok(exit) => return Ok(exit),

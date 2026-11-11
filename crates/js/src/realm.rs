@@ -167,7 +167,10 @@ pub struct Realm {
     pub(crate) terminating: bool,
     pub gc_enabled: bool,
     pub unhandled_rejections: Vec<Value>,
+    /// Maximum JS frames (Chrome allows roughly 10-13k simple frames).
     pub max_frames: usize,
+    /// Backstop on nested native calls; the real bound is the native
+    /// stack itself (see [`crate::stack`]).
     pub max_native_depth: usize,
     /// Host hook for `import()` / modules (unused by the core).
     pub host_data: Option<Box<dyn Any>>,
@@ -279,8 +282,8 @@ impl Realm {
             terminating: false,
             gc_enabled: true,
             unhandled_rejections: Vec::new(),
-            max_frames: 10_000,
-            max_native_depth: 180,
+            max_frames: 12_500,
+            max_native_depth: 100_000,
             host_data: None,
             extra_roots: Vec::new(),
             ops_executed: 0,
