@@ -510,7 +510,8 @@ fn forms_controls_reflect() {
         console.log(f.elements.length, f.elements.t === t, f.method, f.action.endsWith('page.html?q=1#frag'));
     "#,
     );
-    assert_eq!(out[0], "b b true true false text checkbox f");
+    // The value / checkedness changed; the attributes keep the defaults.
+    assert_eq!(out[0], "b a true false false text checkbox f");
     assert_eq!(out[1], "2 1 2 two hello");
     assert_eq!(out[2], "one 0 changed hello");
     assert_eq!(out[3], "t=b&c=on&r=2");
@@ -674,7 +675,7 @@ fn todo_app_end_to_end() {
     let input = find(&env, "input");
     let form = find(&env, "form");
     for text in ["Buy carrots", "Feed rabbits", "Write browser"] {
-        env.doc.set_attr(input, "value", Some(text));
+        env.doc.set_control_value(input, Some(text)); // the user types
         let r = host.dispatch_event(&mut env, form, "submit", EventInit::simple(true, true));
         assert!(r.default_prevented);
     }
@@ -687,7 +688,7 @@ fn todo_app_end_to_end() {
     assert_eq!(out[0], "true 2 items left");
     // Checkbox change on the first item through the checkbox element.
     let first_cb = env.doc.descendants(0).find(|&n| env.doc.is_element(n, "input") && env.doc.attr(n, "type") == Some("checkbox")).unwrap();
-    env.doc.set_attr(first_cb, "checked", Some(""));
+    env.doc.set_checked(first_cb, Some(true)); // the user checks it
     host.dispatch_event(&mut env, first_cb, "change", EventInit::simple(true, false));
     let out = run(&mut env, &mut host, "console.log(document.querySelectorAll('#list li.done').length)");
     assert_eq!(out[0], "2");
@@ -749,7 +750,8 @@ fn misc_apis() {
     // has no layout box for #d, so it is not intersecting.
     host.run_timers(&mut env, 1100.0);
     assert!(env.logs.iter().any(|(l, m)| l == "log" && m == "io 1 false"), "{:?}", env.logs);
-    assert!(out.contains(&"true \\31 a CSS1Compat UTF-8".to_string()), "{out:?}");
+    // No DOCTYPE: quirks mode.
+    assert!(out.contains(&"true \\31 a BackCompat UTF-8".to_string()), "{out:?}");
 }
 
 #[test]

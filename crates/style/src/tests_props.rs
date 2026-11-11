@@ -437,10 +437,10 @@ fn ua_form_controls_and_placeholder() {
     let b = style_of(&doc, &t, "button");
     assert_eq!(b.display, Display::InlineBlock);
     assert!(b.cursor_pointer());
-    let (doc, t) = styled("<p></p><span></span><em></em>", "p { cursor: url(x.cur), nw-resize } span { cursor: help; cursor: bogus } em { cursor: default }");
-    assert_eq!(style_of(&doc, &t, "p").cursor, "nw-resize");
-    assert_eq!(style_of(&doc, &t, "span").cursor, "help");
-    assert_eq!(style_of(&doc, &t, "em").cursor, "default");
+    let (cdoc, ct) = styled("<p></p><span></span><em></em>", "p { cursor: url(x.cur), nw-resize } span { cursor: help; cursor: bogus } em { cursor: default }");
+    assert_eq!(style_of(&cdoc, &ct, "p").cursor, "nw-resize");
+    assert_eq!(style_of(&cdoc, &ct, "span").cursor, "help");
+    assert_eq!(style_of(&cdoc, &ct, "em").cursor, "default");
     assert_eq!(b.border_radius, 2.0);
     let ta = style_of(&doc, &t, "textarea");
     assert_eq!(ta.white_space, WhiteSpace::PreWrap);

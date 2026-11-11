@@ -294,16 +294,16 @@ fn label_toggles_checkbox_and_cancel_reverts() {
     // Click on the label text (not the box).
     let up = e.click_at(&mut page, 150.0, 10.0, Modifiers::default());
     assert_eq!(up.action, ClickAction::Changed);
-    assert!(page.doc.attr(c, "checked").is_some());
+    assert!(page.doc.is_checked(c));
     assert_eq!(eval(&e, &mut page, "String(window.changes)"), "1");
     e.click_at(&mut page, 150.0, 10.0, Modifiers::default());
-    assert!(page.doc.attr(c, "checked").is_none());
+    assert!(!page.doc.is_checked(c));
     // A cancelled click sees the new state during dispatch, then reverts.
     let c2 = page.doc.element_by_id("c2").unwrap();
     let r = page.rect_of(c2).unwrap();
     e.click_at(&mut page, r.x + 5.0, r.y + 5.0, Modifiers::default());
     assert_eq!(eval(&e, &mut page, "String(window.during)"), "true");
-    assert!(page.doc.attr(c2, "checked").is_none());
+    assert!(!page.doc.is_checked(c2));
 }
 
 #[test]
