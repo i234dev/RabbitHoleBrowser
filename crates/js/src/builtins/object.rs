@@ -169,7 +169,7 @@ fn define_getter_legacy(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
         return realm.type_error("Getter must be a function");
     }
     let existing = realm.get_own_property(id, &key);
-    let setter = existing.and_then(|p| p.setter);
+    let setter = existing.and_then(|p| p.setter_cloned());
     realm.define_own(id, key, Property::accessor(Some(f), setter, ENUMERABLE | CONFIGURABLE))?;
     Ok(Value::Undefined)
 }
@@ -182,7 +182,7 @@ fn define_setter_legacy(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
         return realm.type_error("Setter must be a function");
     }
     let existing = realm.get_own_property(id, &key);
-    let getter = existing.and_then(|p| p.getter);
+    let getter = existing.and_then(|p| p.getter_cloned());
     realm.define_own(id, key, Property::accessor(getter, Some(f), ENUMERABLE | CONFIGURABLE))?;
     Ok(Value::Undefined)
 }
@@ -193,7 +193,7 @@ fn lookup_getter_legacy(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     let mut cur = Some(id);
     while let Some(c) = cur {
         if let Some(p) = realm.get_own_property(c, &key) {
-            return Ok(p.getter.unwrap_or(Value::Undefined));
+            return Ok(p.getter_cloned().unwrap_or(Value::Undefined));
         }
         cur = realm.obj(c).proto;
     }
@@ -206,7 +206,7 @@ fn lookup_setter_legacy(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     let mut cur = Some(id);
     while let Some(c) = cur {
         if let Some(p) = realm.get_own_property(c, &key) {
-            return Ok(p.setter.unwrap_or(Value::Undefined));
+            return Ok(p.setter_cloned().unwrap_or(Value::Undefined));
         }
         cur = realm.obj(c).proto;
     }

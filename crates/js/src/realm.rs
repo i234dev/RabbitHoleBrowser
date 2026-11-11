@@ -183,6 +183,8 @@ pub struct Realm {
     pub(crate) stack_pool: Vec<Vec<Value>>,
     /// Reusable buffer for call arguments taken off the operand stack.
     pub(crate) arg_buf: Vec<Value>,
+    /// Recycled `Frame::args` vectors.
+    pub(crate) args_pool: Vec<Vec<Value>>,
 }
 
 impl Default for Realm {
@@ -270,6 +272,7 @@ impl Realm {
             tick: crate::vm::TICK_INTERVAL,
             stack_pool: Vec::new(),
             arg_buf: Vec::new(),
+            args_pool: Vec::new(),
         };
         crate::builtins::register_builtins(&mut realm);
         realm

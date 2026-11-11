@@ -249,3 +249,57 @@ fn realm_dropped_during_thread_teardown() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn arguments_direct_reads() {
+    // `arguments.length` / `arguments[i]` served from the frame.
+    eq("function f() { return arguments.length + ':' + arguments[0] + ':' + arguments[1]; } f(7) + '|' + f(1, 2, 3) + '|' + f()", "1:7:undefined|3:1:2|0:undefined:undefined");
+    eq("function f(a) { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; } f(1, 2, 3, 4)", "10");
+    // Babel-style default parameters.
+    eq("function f() { var a = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : 5; return a; } f() + f(1) + f(undefined)", "11");
+    // Arguments are not mapped to parameters (same as the object path).
+    eq("function f(a, b) { a = 10; return arguments[0] + arguments[1]; } f(1, 2)", "3");
+    eq("function f(a) { a = 10; var o = arguments; return arguments[0] + o[0]; } f(1)", "2");
+    eq("function f(a) { 'use strict'; a = 10; return arguments[0]; } f(1)", "1");
+    eq("function f(a = 0) { a = 10; return arguments[0]; } f(1)", "1");
+    eq("function f(a, b) { b = 5; return arguments[1]; } String(f(1))", "undefined");
+    // Non-index keys and inherited properties.
+    eq("function f() { return arguments['length'] + typeof arguments[Symbol.iterator] + arguments['0']; } f('x')", "1functionx");
+    eq("Object.prototype[3] = 'p'; function f() { return arguments[3]; } var r = f(1); delete Object.prototype[3]; r", "p");
+    eq("function f() { return arguments[0.5] + ',' + arguments[-1]; } f(1)", "undefined,undefined");
+    // Escaping uses still get a real object.
+    eq("function f() { arguments[0] = 9; return arguments[0]; } f(1)", "9");
+    eq("function f() { var a = arguments; return a[0] + arguments[1] + a.length; } f(1, 2)", "5");
+    eq("function f() { delete arguments[0]; return String(arguments[0]); } f(1)", "undefined");
+    eq("function f() { arguments.length = 0; return arguments.length; } f(1, 2)", "0");
+    eq("function f() { return [].slice.call(arguments).concat(arguments.length).join(); } f(1, 2)", "1,2,2");
+    eq("function f() { var r = eval('1'); return arguments[0] + r; } f(1)", "2");
+    eq("function f() { return (() => arguments[0] + arguments.length)(); } f(4, 5)", "6");
+    eq("function f() { var arguments = [8]; return arguments[0] + arguments.length; } f(1, 2)", "9");
+    eq("function f(arguments) { return arguments[0]; } f('ab')", "a");
+    eq("function f() { { let arguments = 'q'; return arguments[0]; } } f(1)", "q");
+    // Constructors, generators and nested functions.
+    eq("function P() { this.n = arguments.length; this.a = arguments[1]; } var p = new P(1, 'b'); p.n + p.a", "2b");
+    eq("function* g() { yield arguments.length; yield arguments[1]; } var it = g(3, 4); it.next().value + it.next().value", "6");
+    eq("function f() { function g() { return arguments.length; } return g(1, 2, 3) + arguments.length; } f(1)", "4");
+    eq("var o = { m() { return arguments[0] * 2; } }; o.m(21)", "42");
+    eq("function f() { return arguments[0](); } f(function() { return 'called'; })", "called");
+}
+
+#[test]
+fn for_in_fast_path() {
+    eq("var o = {a: 1, b: 2, c: 3}; var k = []; for (var x in o) k.push(x); k.join()", "a,b,c");
+    eq("var o = {b: 1, 2: 1, a: 1, 1: 1}; var k = []; for (var x in o) k.push(x); k.join()", "1,2,b,a");
+    // Deletion during iteration skips the deleted key.
+    eq("var o = {a: 1, b: 2, c: 3}; var k = []; for (var x in o) { k.push(x); delete o.b; } k.join()", "a,c");
+    eq("var o = {a: 1, b: 2, c: 3}; var k = []; for (var x in o) { k.push(x); if (x == 'a') { delete o.c; o.c = 1; } } k.join()", "a,b,c");
+    // Arrays: holes, shrinking, extra properties.
+    eq("var a = [1, , 3]; a.x = 1; var k = []; for (var i in a) k.push(i); k.join()", "0,2,x");
+    eq("var a = [1, 2, 3]; var k = []; for (var i in a) { k.push(i); a.length = 1; } k.join()", "0");
+    // Non-enumerable own and inherited enumerables.
+    eq("var o = Object.defineProperty({a: 1}, 'h', {value: 1, enumerable: false}); var k = []; for (var x in o) k.push(x); k.join()", "a");
+    eq("function C() { this.own = 1; } C.prototype.inh = 2; var k = []; for (var x in new C()) k.push(x); k.join()", "own,inh");
+    eq("Object.prototype.zz = 1; var k = []; for (var x in {a: 1}) k.push(x); delete Object.prototype.zz; k.join()", "a,zz");
+    eq("var k = []; for (var x in null) k.push(x); for (var y in undefined) k.push(y); for (var z in 5) k.push(z); k.length", "0");
+    eq("var o = {a: 1}; var n = 0; for (var i = 0; i < 1000; i++) for (var x in o) n += o[x]; n", "1000");
+}

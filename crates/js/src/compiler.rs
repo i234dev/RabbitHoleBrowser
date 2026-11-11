@@ -439,6 +439,21 @@ impl Compiler {
         };
     }
 
+    /// Whether `arguments.length` / `arguments[i]` reads in the current
+    /// function can be served from the frame's actual arguments: a plain
+    /// (non-arrow) function whose `arguments` never escapes into writes,
+    /// deletes or direct eval, and that declares no `arguments` binding.
+    fn args_direct_ok(&self) -> bool {
+        let fs = self.fs_ref();
+        if fs.flags.is_arrow || fs.is_script || fs.is_module_env || fs.flags.is_field_init || fs.force_heap {
+            return false;
+        }
+        if fs.captured.contains(crate::captures::ARGS_ESCAPE) {
+            return false;
+        }
+        fs.scopes.iter().all(|sc| sc.names.get("arguments").is_none_or(|b| matches!(b.kind, BindKind::Hidden)))
+    }
+
     fn resolve(&mut self, name: &str) -> Resolved {
         let mut depth: u16 = 0;
         let nfns = self.fns.len();
@@ -2205,6 +2220,23 @@ impl Compiler {
                         MemberProp::Private(_) => return self.err("Unexpected private field"),
                     }
                     return Ok(());
+                }
+                if !*optional && matches!(&object.kind, ExprKind::Identifier(n) if n == "arguments") && self.args_direct_ok() {
+                    match property {
+                        MemberProp::Identifier(p) if p == "length" => {
+                            self.fs().flags.args_direct = true;
+                            self.emit(Op::ArgsLength);
+                            return Ok(());
+                        }
+                        MemberProp::Computed(k) => {
+                            self.fs().flags.args_direct = true;
+                            self.compile_expr(k)?;
+                            self.set_pos(e.pos);
+                            self.emit(Op::ArgsGet);
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                 }
                 self.compile_expr(object)?;
                 if *optional {

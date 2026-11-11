@@ -218,6 +218,10 @@ pub enum Op {
     NewTarget,
     /// Push the `arguments` object (created lazily per frame)
     Arguments,
+    /// `arguments.length` without an arguments object.
+    ArgsLength,
+    /// key -> `arguments[key]` without an arguments object.
+    ArgsGet,
     /// Push the current function object
     Callee,
     ImportMeta,
@@ -320,6 +324,9 @@ pub struct CodeFlags {
     /// Script top level (vars become globals)
     pub is_script: bool,
     pub is_field_init: bool,
+    /// `arguments.length` / `arguments[i]` reads are compiled to
+    /// `ArgsLength` / `ArgsGet`: the frame keeps the actual arguments.
+    pub args_direct: bool,
 }
 
 /// Compiled function.

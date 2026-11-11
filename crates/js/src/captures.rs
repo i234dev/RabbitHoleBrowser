@@ -24,8 +24,17 @@ use std::rc::Rc;
 pub type CaptureMap = HashMap<*const Function, Rc<NameSet>, FxBuild>;
 pub type NameSet = HashSet<String, FxBuild>;
 
+/// Marker in a function's own set: its `arguments` object may be written
+/// through, deleted from or reached by direct `eval`, so reads like
+/// `arguments[i]` / `arguments.length` cannot be served from the frame.
+pub const ARGS_ESCAPE: &str = "\u{0}args";
+
+fn is_arguments_member(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Member { object, .. } if matches!(&object.kind, ExprKind::Identifier(n) if n == "arguments"))
+}
+
 pub fn analyze_program(body: &[Stmt]) -> CaptureMap {
-    let mut a = Analyzer { stack: vec![std::ptr::null()], sets: vec![NameSet::default()], out: HashMap::default() };
+    let mut a = Analyzer { stack: vec![std::ptr::null()], arrow: vec![false], sets: vec![NameSet::default()], out: HashMap::default() };
     for s in body {
         a.stmt(s);
     }
@@ -37,7 +46,7 @@ pub fn analyze_program(body: &[Stmt]) -> CaptureMap {
 /// Analyze a single function (used for synthesized or cloned function
 /// nodes that the program-wide pass did not see).
 pub fn analyze_function(f: &Function) -> CaptureMap {
-    let mut a = Analyzer { stack: vec![std::ptr::null()], sets: vec![NameSet::default()], out: HashMap::default() };
+    let mut a = Analyzer { stack: vec![std::ptr::null()], arrow: vec![false], sets: vec![NameSet::default()], out: HashMap::default() };
     a.function(f);
     a.out
 }
@@ -45,11 +54,31 @@ pub fn analyze_function(f: &Function) -> CaptureMap {
 struct Analyzer {
     /// Enclosing function keys, outermost first.
     stack: Vec<*const Function>,
+    /// Whether each level is an arrow function.
+    arrow: Vec<bool>,
     sets: Vec<NameSet>,
     out: CaptureMap,
 }
 
 impl Analyzer {
+    /// The innermost non-arrow function's `arguments` escapes.
+    fn args_escape(&mut self) {
+        for i in (1..self.sets.len()).rev() {
+            if !self.arrow[i] {
+                self.sets[i].insert(ARGS_ESCAPE.to_string());
+                return;
+            }
+        }
+    }
+
+    /// A member expression used as a write target / delete operand.
+    fn target_expr(&mut self, e: &Expr) {
+        if is_arguments_member(e) {
+            self.args_escape();
+        }
+        self.expr(e);
+    }
+
     fn name(&mut self, n: &str) {
         // Every enclosing function except the innermost one sees `n` as
         // referenced from a nested function.
@@ -67,6 +96,7 @@ impl Analyzer {
 
     fn function(&mut self, f: &Function) {
         self.stack.push(f as *const Function);
+        self.arrow.push(f.is_arrow);
         self.sets.push(NameSet::default());
         if let Some(n) = &f.name {
             self.name(n);
@@ -83,6 +113,7 @@ impl Analyzer {
             FunctionBody::Expr(e) => self.expr(e),
         }
         let set = self.sets.pop().unwrap();
+        self.arrow.pop();
         let key = self.stack.pop().unwrap();
         self.out.insert(key, Rc::new(set));
     }
@@ -91,9 +122,11 @@ impl Analyzer {
     /// initializers, static blocks): a nested level without an AST node.
     fn synthetic<F: FnOnce(&mut Self)>(&mut self, f: F) {
         self.stack.push(std::ptr::null());
+        self.arrow.push(false);
         self.sets.push(NameSet::default());
         f(self);
         self.sets.pop();
+        self.arrow.pop();
         self.stack.pop();
     }
 
@@ -208,7 +241,7 @@ impl Analyzer {
     fn pattern(&mut self, p: &Pattern) {
         match p {
             Pattern::Identifier(n) => self.name(n),
-            Pattern::Expr(e) => self.expr(e),
+            Pattern::Expr(e) => self.target_expr(e),
             Pattern::Object { properties, rest } => {
                 for pr in properties {
                     self.prop_key(&pr.key);
@@ -317,8 +350,9 @@ impl Analyzer {
             }
             ExprKind::Function(f) | ExprKind::Arrow(f) => self.function(f),
             ExprKind::Class(c) => self.class(c),
+            ExprKind::Unary { op: UnaryOp::Delete, operand } => self.target_expr(operand),
             ExprKind::Unary { operand, .. } => self.expr(operand),
-            ExprKind::Update { target, .. } => self.expr(target),
+            ExprKind::Update { target, .. } => self.target_expr(target),
             ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);
@@ -333,6 +367,12 @@ impl Analyzer {
                 self.expr(alternate);
             }
             ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
+                if matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval") {
+                    // Direct eval may reach any enclosing `arguments`.
+                    for i in 1..self.sets.len() {
+                        self.sets[i].insert(ARGS_ESCAPE.to_string());
+                    }
+                }
                 self.expr(callee);
                 self.elements(args);
             }

@@ -286,6 +286,13 @@ impl Realm {
         let nregs = code.nregs as usize;
         let mut stack = self.take_stack(nregs);
         let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
+        let frame_args = if flags.args_direct {
+            let mut v = self.args_pool.pop().unwrap_or_default();
+            v.extend_from_slice(&self.frames[fi].stack[base + 2..]);
+            v
+        } else {
+            Vec::new()
+        };
         {
             let caller = &mut self.frames[fi].stack;
             let mut args = caller.drain(base..);
@@ -323,7 +330,7 @@ impl Realm {
             func: Some(id),
             new_target,
             home_object: home,
-            args: Vec::new(),
+            args: frame_args,
             arguments_obj,
             generator: None,
             is_construct: false,
@@ -378,6 +385,13 @@ impl Realm {
         let this = Value::Object(self.alloc(Object::new(Some(proto), ObjectKind::Ordinary)));
         let mut stack = self.take_stack(nregs);
         let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
+        let frame_args = if flags.args_direct {
+            let mut v = self.args_pool.pop().unwrap_or_default();
+            v.extend_from_slice(&self.frames[fi].stack[base + 1..]);
+            v
+        } else {
+            Vec::new()
+        };
         {
             let caller = &mut self.frames[fi].stack;
             let mut args = caller.drain(base..);
@@ -414,7 +428,7 @@ impl Realm {
             func: Some(id),
             new_target: Value::Object(id),
             home_object: home,
-            args: Vec::new(),
+            args: frame_args,
             arguments_obj: None,
             generator: None,
             is_construct: true,
@@ -505,7 +519,7 @@ impl Realm {
             func: Some(id),
             new_target,
             home_object: home,
-            args: if flags.is_generator || flags.is_async { Vec::new() } else { Vec::new() },
+            args: if flags.args_direct { self.take_args_vec(args) } else { Vec::new() },
             arguments_obj,
             generator: None,
             is_construct,
@@ -1517,11 +1531,42 @@ impl Realm {
     /// Return a finished frame's operand stack to the pool.
     #[inline]
     pub(crate) fn recycle_frame(&mut self, f: Frame) {
+        let mut a = f.args;
+        if a.capacity() != 0 && a.capacity() <= 64 && self.args_pool.len() < 64 {
+            a.clear();
+            self.args_pool.push(a);
+        }
         let mut st = f.stack;
         if st.capacity() <= 256 && self.stack_pool.len() < 64 {
             st.clear();
             self.stack_pool.push(st);
         }
+    }
+
+    /// A pooled vector holding a copy of `args` (frames of `args_direct` code).
+    pub(crate) fn take_args_vec(&mut self, args: &[Value]) -> Vec<Value> {
+        let mut v = self.args_pool.pop().unwrap_or_default();
+        v.extend_from_slice(args);
+        v
+    }
+
+    /// `arguments[key]` read of an `args_direct` frame.
+    fn args_get(&mut self, fi: usize, key: Value) -> JsResult<Value> {
+        let f = &self.frames[fi];
+        if let Value::Number(n) = key {
+            let i = n as usize;
+            // Like the arguments objects this engine creates, reads are
+            // not mapped to the parameters.
+            if i as f64 == n && i < f.args.len() {
+                return Ok(f.args[i].clone());
+            }
+        }
+        // Anything else: an equivalent (unobservable) arguments object.
+        let args = f.args.clone();
+        let callee = if f.code.flags.is_strict { None } else { f.func };
+        let ao = self.create_arguments_object(&args, callee);
+        let key = self.to_property_key(key)?;
+        self.get(ao, key)
     }
 
     /// A cleared operand stack with room for `n` registers plus operands.
@@ -1888,7 +1933,7 @@ impl Realm {
                     }
                     let existing = self.get_own_property(obj, &key);
                     let (mut g, mut s) = match &existing {
-                        Some(p) if p.is_accessor() => (p.getter.clone(), p.setter.clone()),
+                        Some(p) if p.is_accessor() => (p.getter_cloned(), p.setter_cloned()),
                         _ => (None, None),
                     };
                     if is_getter {
@@ -2225,7 +2270,9 @@ impl Realm {
                 Op::ToPropertyKey => {
                     let v = pop!();
                     let r = match v {
-                        Value::String(_) | Value::Symbol(_) => v,
+                        // Numbers stay numbers: every consumer canonicalizes keys, and
+                        // element fast paths want numeric indices.
+                        Value::String(_) | Value::Symbol(_) | Value::Number(_) => v,
                         other => self.to_property_key(other)?.to_value(),
                     };
                     push!(r);
@@ -2354,6 +2401,15 @@ impl Realm {
                 }
                 Op::Arguments => {
                     let v = frame!().arguments_obj.clone().unwrap_or(Value::Undefined);
+                    push!(v);
+                }
+                Op::ArgsLength => {
+                    let n = frame!().args.len();
+                    push!(Value::Number(n as f64));
+                }
+                Op::ArgsGet => {
+                    let key = pop!();
+                    let v = self.args_get(fi, key)?;
                     push!(v);
                 }
                 Op::Callee => {
@@ -2928,6 +2984,73 @@ impl Realm {
         }
     }
 
+    /// Enumerable string keys of a for-in over `id` when nothing exotic is
+    /// involved: an ordinary object or array whose prototypes contribute no
+    /// enumerable string keys (the common case). Returns the keys and the
+    /// receiver's shape id.
+    fn for_in_fast_keys(&self, id: ObjectId) -> Option<(Vec<JsStr>, u32)> {
+        let obj = self.heap.try_get(id)?;
+        let elements = match &obj.kind {
+            ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Error | ObjectKind::Arguments => None,
+            ObjectKind::Array { elements, length } if *length as usize == elements.len() => Some(elements),
+            _ => return None,
+        };
+        if obj.props.is_dict() {
+            return None;
+        }
+        let mut cur = obj.proto;
+        let mut depth = 0;
+        while let Some(p) = cur {
+            let po = self.heap.try_get(p)?;
+            match &po.kind {
+                ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Error => {}
+                ObjectKind::Array { elements, .. } if elements.is_empty() => {}
+                _ => return None,
+            }
+            let mut enumerable = false;
+            po.props.for_each_value(|pr| enumerable |= pr.flags & ENUMERABLE != 0);
+            if enumerable {
+                // Could be a symbol-keyed property: let the general path decide.
+                return None;
+            }
+            cur = po.proto;
+            depth += 1;
+            if depth > 64 {
+                return None;
+            }
+        }
+        let mut keys = Vec::with_capacity(obj.props.len() + elements.map_or(0, |e| e.len()));
+        if let Some(el) = elements {
+            for (i, v) in el.iter().enumerate() {
+                if !v.is_empty() {
+                    keys.push(JsStr::from_index(i as u32));
+                }
+            }
+        }
+        let mut ints: Vec<(u32, JsStr)> = Vec::new();
+        for (k, p) in obj.props.iter() {
+            if p.flags & ENUMERABLE == 0 {
+                continue;
+            }
+            if let PropertyKey::String(s) = k {
+                match s.as_array_index() {
+                    Some(i) => ints.push((i, s.clone())),
+                    None => keys.push(s.clone()),
+                }
+            }
+        }
+        if !ints.is_empty() {
+            if elements.is_some() {
+                return None;
+            }
+            ints.sort_by_key(|(i, _)| *i);
+            let mut all: Vec<JsStr> = ints.into_iter().map(|(_, s)| s).collect();
+            all.extend(keys);
+            keys = all;
+        }
+        Some((keys, obj.props.shape_id()))
+    }
+
     fn for_in_start(&mut self, v: Value) -> JsResult<ObjectId> {
         let mut keys: Vec<JsStr> = Vec::new();
         let object = match v {
@@ -2935,6 +3058,10 @@ impl Realm {
             Value::Object(id) => Some(id),
             prim => Some(self.to_object(prim)?),
         };
+        if let Some((keys, shape)) = object.and_then(|id| self.for_in_fast_keys(id)) {
+            let proto = self.intrinsics.object_proto;
+            return Ok(self.alloc(Object::new(Some(proto), ObjectKind::ForInIterator { keys, index: 0, object, shape })));
+        }
         if let Some(id) = object {
             // Names seen on objects already visited (shadowing, even by
             // non-enumerable properties). Only materialised once a
@@ -3000,24 +3127,32 @@ impl Realm {
             }
         }
         let proto = self.intrinsics.object_proto;
-        Ok(self.alloc(Object::new(Some(proto), ObjectKind::ForInIterator { keys, index: 0, object })))
+        Ok(self.alloc(Object::new(Some(proto), ObjectKind::ForInIterator { keys, index: 0, object, shape: 0 })))
     }
 
     fn for_in_next(&mut self, it: ObjectId) -> JsResult<Option<JsStr>> {
         loop {
-            let (key, object) = match &mut self.obj_mut(it).kind {
-                ObjectKind::ForInIterator { keys, index, object } => {
+            let (key, object, shape) = match &mut self.obj_mut(it).kind {
+                ObjectKind::ForInIterator { keys, index, object, shape } => {
                     if *index >= keys.len() {
                         return Ok(None);
                     }
                     let k = keys[*index].clone();
                     *index += 1;
-                    (k, *object)
+                    (k, *object, *shape)
                 }
                 _ => return Ok(None),
             };
-            // Skip keys deleted during iteration.
+            // Skip keys deleted during iteration (an unchanged shape proves
+            // none was; arrays may shrink, so their elements are checked).
             if let Some(o) = object {
+                if shape != 0 {
+                    if let Some(obj) = self.heap.try_get(o) {
+                        if obj.props.shape_id() == shape && !obj.is_array() {
+                            return Ok(Some(key));
+                        }
+                    }
+                }
                 if !self.has_property(o, &PropertyKey::String(key.clone()))? {
                     continue;
                 }

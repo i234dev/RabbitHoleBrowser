@@ -148,7 +148,7 @@ impl Realm {
                     // Exotic own properties (elements, length).
                     if let Some(p) = self.get_own_property(cur, key) {
                         if p.is_accessor() {
-                            return match p.getter {
+                            return match p.getter_cloned() {
                                 Some(g) => self.call(g, receiver, &[]),
                                 None => Ok(Value::Undefined),
                             };
@@ -162,7 +162,7 @@ impl Realm {
                         if p.flags & ACCESSOR == 0 {
                             return Ok(p.value.clone());
                         }
-                        return match p.getter.clone() {
+                        return match p.getter_cloned() {
                             Some(g) => self.call(g, receiver, &[]),
                             None => Ok(Value::Undefined),
                         };
@@ -216,7 +216,7 @@ impl Realm {
                 while let Some(c) = cur {
                     if let Some(p) = self.obj(c).props.get(&key).cloned() {
                         if p.is_accessor() {
-                            if let Some(s) = p.setter {
+                            if let Some(s) = p.setter_cloned() {
                                 self.call(s, target, &[value])?;
                                 return Ok(true);
                             }
@@ -319,7 +319,7 @@ impl Realm {
             }
             if let Some(p) = self.get_own_property(c, &key) {
                 if p.is_accessor() {
-                    return match p.setter {
+                    return match p.setter_cloned() {
                         Some(s) => {
                             self.call(s, receiver, &[value])?;
                             Ok(true)
@@ -765,8 +765,8 @@ impl Realm {
                 if ex.is_accessor() && !has_value && !has_writ {
                     p.flags |= ACCESSOR;
                     p.flags &= !WRITABLE;
-                    p.getter = ex.getter.clone();
-                    p.setter = ex.setter.clone();
+                    p.set_getter(ex.getter_cloned());
+                    p.set_setter(ex.setter_cloned());
                 } else {
                     if !has_writ && ex.writable() && !ex.is_accessor() {
                         p.flags |= WRITABLE;
@@ -777,10 +777,10 @@ impl Realm {
                 }
             } else {
                 if !has_get && ex.is_accessor() {
-                    p.getter = ex.getter.clone();
+                    p.set_getter(ex.getter_cloned());
                 }
                 if !has_set && ex.is_accessor() {
-                    p.setter = ex.setter.clone();
+                    p.set_setter(ex.setter_cloned());
                 }
             }
         }
@@ -790,8 +790,8 @@ impl Realm {
     pub fn from_property_descriptor(&mut self, p: &Property) -> Value {
         let o = self.new_object();
         if p.is_accessor() {
-            self.define_property(o, "get", p.getter.clone().unwrap_or(Value::Undefined), ALL);
-            self.define_property(o, "set", p.setter.clone().unwrap_or(Value::Undefined), ALL);
+            self.define_property(o, "get", p.getter_cloned().unwrap_or(Value::Undefined), ALL);
+            self.define_property(o, "set", p.setter_cloned().unwrap_or(Value::Undefined), ALL);
         } else {
             self.define_property(o, "value", p.value.clone(), ALL);
             self.define_property(o, "writable", Value::Bool(p.writable()), ALL);

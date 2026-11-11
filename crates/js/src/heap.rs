@@ -15,20 +15,48 @@ pub const ALL: u8 = WRITABLE | ENUMERABLE | CONFIGURABLE;
 /// Built-in methods: writable + configurable, not enumerable.
 pub const HIDDEN: u8 = WRITABLE | CONFIGURABLE;
 
+/// Getter / setter pair of an accessor property (boxed: rare).
+#[derive(Clone, Debug)]
+pub struct Accessors {
+    pub getter: Option<Value>,
+    pub setter: Option<Value>,
+}
+
+/// A property slot: 32 bytes (data value + flags; accessors are boxed).
 #[derive(Clone, Debug)]
 pub struct Property {
     pub value: Value,
-    pub getter: Option<Value>,
-    pub setter: Option<Value>,
+    acc: Option<Box<Accessors>>,
     pub flags: u8,
 }
 
 impl Property {
+    #[inline]
     pub fn data(value: Value, flags: u8) -> Property {
-        Property { value, getter: None, setter: None, flags: flags & !ACCESSOR }
+        Property { value, acc: None, flags: flags & !ACCESSOR }
     }
     pub fn accessor(getter: Option<Value>, setter: Option<Value>, flags: u8) -> Property {
-        Property { value: Value::Undefined, getter, setter, flags: (flags & !WRITABLE) | ACCESSOR }
+        Property { value: Value::Undefined, acc: Some(Box::new(Accessors { getter, setter })), flags: (flags & !WRITABLE) | ACCESSOR }
+    }
+    #[inline]
+    pub fn getter(&self) -> Option<&Value> {
+        self.acc.as_ref().and_then(|a| a.getter.as_ref())
+    }
+    #[inline]
+    pub fn setter(&self) -> Option<&Value> {
+        self.acc.as_ref().and_then(|a| a.setter.as_ref())
+    }
+    pub fn getter_cloned(&self) -> Option<Value> {
+        self.getter().cloned()
+    }
+    pub fn setter_cloned(&self) -> Option<Value> {
+        self.setter().cloned()
+    }
+    pub fn set_getter(&mut self, g: Option<Value>) {
+        self.acc.get_or_insert_with(|| Box::new(Accessors { getter: None, setter: None })).getter = g;
+    }
+    pub fn set_setter(&mut self, s: Option<Value>) {
+        self.acc.get_or_insert_with(|| Box::new(Accessors { getter: None, setter: None })).setter = s;
     }
     pub fn is_accessor(&self) -> bool {
         self.flags & ACCESSOR != 0
@@ -315,7 +343,10 @@ pub enum ObjectKind {
     StringIterator { string: JsStr, index: usize },
     RegExpStringIterator { regexp: ObjectId, string: JsStr, global: bool, unicode: bool, done: bool },
     /// For-in key enumeration state
-    ForInIterator { keys: Vec<JsStr>, index: usize, object: Option<ObjectId> },
+    /// `shape`: the receiver's shape id when the keys were collected by the
+    /// fast path (while it is unchanged no key can have been deleted); 0
+    /// means every key is re-checked with `[[HasProperty]]`.
+    ForInIterator { keys: Vec<JsStr>, index: usize, object: Option<ObjectId>, shape: u32 },
     /// Host-defined (DOM nodes etc.)
     Host(Box<dyn Any>),
     /// Reference to a module's top-level binding (an import resolved at
@@ -542,8 +573,12 @@ pub fn trace_object(obj: &Object, out: &mut Vec<Value>) {
     push_id(out, obj.proto);
     obj.props.for_each_value(|p| {
         push_val(out, &p.value);
-        push_opt(out, &p.getter);
-        push_opt(out, &p.setter);
+        if let Some(g) = p.getter() {
+            push_val(out, g);
+        }
+        if let Some(s) = p.setter() {
+            push_val(out, s);
+        }
     });
     match &obj.kind {
         ObjectKind::Array { elements, .. } => {
