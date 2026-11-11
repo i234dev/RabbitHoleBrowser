@@ -173,3 +173,31 @@ fn nested_frames_and_src_changes() {
     settle(&e, &mut page);
     assert!(page.frames.children.is_empty());
 }
+
+#[test]
+fn message_ports_can_be_transferred_between_frames() {
+    let mut e = engine();
+    let inner = r#"<script>
+        addEventListener('message', function (ev) {
+            var port = ev.ports[0];
+            port.onmessage = function (m) { port.postMessage('echo:' + m.data); };
+            port.postMessage('ready:' + ev.data);
+        });
+    </script>"#;
+    let mut page = load(
+        &mut e,
+        &format!(
+            r#"<script>
+                window.log = [];
+                function go() {{
+                    var ch = new MessageChannel();
+                    ch.port1.onmessage = function (m) {{ log.push(m.data); if (m.data.indexOf('ready') === 0) ch.port1.postMessage('ping'); }};
+                    document.getElementById('f').contentWindow.postMessage('hello', '*', [ch.port2]);
+                }}
+            </script><iframe id="f" onload="go()" srcdoc="{}"></iframe>"#,
+            escape_attr(inner)
+        ),
+    );
+    settle(&e, &mut page);
+    assert_eq!(eval(&e, &mut page, "log.join(',')"), "ready:hello,echo:ping");
+}

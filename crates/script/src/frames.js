@@ -120,8 +120,11 @@
       toString() { return info(id, 'href', 0); },
     };
     const target = {
-      postMessage(message, targetOrigin) {
-        post(id, serialize(message), targetOriginOf(targetOrigin));
+      postMessage(message, targetOrigin, transfer) {
+        const list = transfer || (targetOrigin && typeof targetOrigin === 'object' ? targetOrigin.transfer : null);
+        const ports = Array.isArray(list) ? list.filter((t) => typeof MessagePort === 'function' && t instanceof MessagePort) : [];
+        const data = serialize(message);
+        post(id, JSON.stringify({ t: 'msg', d: data, ports: ports.map((port) => bridgePort(port, id)) }), targetOriginOf(targetOrigin));
       },
       focus() {}, blur() {}, close() {},
       get window() { return p; },
@@ -138,7 +141,7 @@
     Object.defineProperty(target, Symbol.toStringTag, { value: 'Window' });
     p = new Proxy(target, {
       get(t, key) {
-        if (typeof key === 'string' && /^(0|[1-9][0-9]*)$/.test(key)) {
+        if (typeof key === 'string' && key !== '' && String(Number(key) >>> 0) === key) {
           const child = info(id, 'child', Number(key));
           return child < 0 ? undefined : windowFor(child);
         }
@@ -178,10 +181,39 @@
     writable: true, configurable: true,
   });
 
-  function deliver(data, origin, source) {
+  // ---- MessagePorts transferred to another frame: each end keeps a local
+  // port and the engine carries messages between the two realms.
+  const bridges = new Map();
+  let nextBridge = 0;
+  function forward(port, bridge, frame) {
+    port.onmessage = (ev) => post(frame, JSON.stringify({ t: 'port', id: bridge, d: serialize(ev.data) }), '*');
+  }
+  // `port` (ours) goes to frame `frame`: messages arriving on it are sent
+  // there; messages from there are posted into it.
+  function bridgePort(port, frame) {
+    const bridge = SELF + ':' + nextBridge++;
+    bridges.set(bridge, port);
+    forward(port, bridge, frame);
+    return bridge;
+  }
+
+  function deliver(text, origin, source) {
+    let env;
+    try { env = JSON.parse(text); } catch (e) { return; }
+    if (env && env.t === 'port') {
+      const port = bridges.get(env.id);
+      if (port) port.postMessage(deserialize(env.d));
+      return;
+    }
     let value;
-    try { value = deserialize(data); } catch (e) { value = null; }
-    const ev = new MessageEvent('message', { data: value, origin, source: windowFor(source), ports: [] });
+    try { value = deserialize(env.d); } catch (e) { value = null; }
+    const ports = (env.ports || []).map((bridge) => {
+      const ch = new MessageChannel();
+      bridges.set(bridge, ch.port2);
+      forward(ch.port2, bridge, source);
+      return ch.port1;
+    });
+    const ev = new MessageEvent('message', { data: value, origin, source: windowFor(source), ports });
     g.dispatchEvent(ev);
   }
 
