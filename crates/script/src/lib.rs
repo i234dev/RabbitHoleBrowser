@@ -97,6 +97,9 @@ pub enum EventDetail {
     Mouse { x: f32, y: f32, button: u8, ctrl: bool, shift: bool, alt: bool, meta: bool },
     Key { key: String, code: String, ctrl: bool, shift: bool, alt: bool, meta: bool, repeat: bool },
     Input { data: Option<String> },
+    /// `transition*` (TransitionEvent: `name` = propertyName) or
+    /// `animation*` (AnimationEvent: `name` = animationName) events.
+    Animation { name: String, elapsed: f32, pseudo: String, transition: bool },
     None,
 }
 
@@ -187,6 +190,7 @@ impl ScriptHost {
             console_counts: HashMap::new(),
             pending_script_events: Vec::new(),
             pending_script_fetches: Vec::new(),
+            pending_fetches: Vec::new(),
             deferred_natives: Vec::new(),
             modules: Default::default(),
             shadow: Default::default(),
@@ -414,6 +418,7 @@ impl ScriptHost {
             state().borrow_mut().last_tick = now_ms;
             realm.begin_task();
             let mut ran = node::run_ready_script_fetches(realm);
+            ran |= fetch::run_ready_fetches(realm);
             // Timers due, in order of due time then id.
             loop {
                 if ran && std::time::Instant::now() >= slice_end {
@@ -544,7 +549,7 @@ impl ScriptHost {
             let r = r + st.time_origin;
             due = Some(due.map(|d| d.min(r)).unwrap_or(r));
         }
-        if !st.pending_script_fetches.is_empty() {
+        if !st.pending_script_fetches.is_empty() || !st.pending_fetches.is_empty() {
             // Poll background script downloads every ~10 ms.
             let soon = st.last_tick + 10.0;
             due = Some(due.map(|d| d.min(soon)).unwrap_or(soon));

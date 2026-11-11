@@ -895,14 +895,21 @@ fn request_clone(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
     Ok(make_request(realm, &url, &method, headers, body))
 }
 
-/// Perform a request through the environment synchronously.
-pub(crate) fn do_fetch(url: &str, method: &str, headers: &[(String, String)], body: &[u8]) -> Result<rabbithole_net::Response, String> {
-    if url.starts_with("blob:") {
-        return match (method, blob_url_response(url)) {
-            ("GET", Some(r)) => Ok(r),
-            _ => Err(format!("Failed to fetch: {url}")),
-        };
-    }
+/// Where the result of a background request goes.
+pub(crate) enum FetchSink {
+    /// `fetch()`: settle the promise (resolve, reject functions; rooted).
+    Promise(Value, Value, String),
+    /// Asynchronous `XMLHttpRequest` (rooted).
+    Xhr(ObjectId),
+}
+
+pub(crate) struct PendingFetch {
+    pub rx: std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>,
+    pub sink: FetchSink,
+}
+
+/// Build the network request for a script-initiated fetch.
+fn build_request(url: &str, method: &str, headers: &[(String, String)], body: &[u8]) -> Result<Request, String> {
     let Some(u) = Url::parse_absolute(url) else {
         return Err(format!("Failed to fetch: invalid URL {url}"));
     };
@@ -923,9 +930,88 @@ pub(crate) fn do_fetch(url: &str, method: &str, headers: &[(String, String)], bo
         }
     }
     let referer = with_env(|env| env.document_url());
+    Ok(req.with_referer(referer).with_dest(rabbithole_net::Destination::Empty).with_mode(rabbithole_net::RequestMode::Cors, rabbithole_net::CredentialsMode::SameOrigin))
+}
+
+/// Start a request on a background thread when the environment can (http
+/// URLs); the caller polls the receiver. `None`: perform it synchronously.
+fn start_background(url: &str, method: &str, headers: &[(String, String)], body: &[u8]) -> Option<std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>> {
+    if url.starts_with("blob:") {
+        return None;
+    }
+    let req = build_request(url, method, headers, body).ok()?;
+    if !req.url.is_http() {
+        return None;
+    }
+    with_env(|env| env.fetch_background(req))
+}
+
+/// Deliver finished background requests (called from the timer loop).
+/// Returns whether any completed.
+pub(crate) fn run_ready_fetches(realm: &mut Realm) -> bool {
+    let ready: Vec<(FetchSink, Result<rabbithole_net::Response, String>)> = {
+        let st = state();
+        let mut st = st.borrow_mut();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < st.pending_fetches.len() {
+            match st.pending_fetches[i].rx.try_recv() {
+                Ok(r) => {
+                    let p = st.pending_fetches.remove(i);
+                    out.push((p.sink, r));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let p = st.pending_fetches.remove(i);
+                    out.push((p.sink, Err("network error".into())));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => i += 1,
+            }
+        }
+        out
+    };
+    let any = !ready.is_empty();
+    for (sink, r) in ready {
+        match sink {
+            FetchSink::Promise(resolve, reject, _url) => {
+                crate::host::unroot_value(realm, &resolve);
+                crate::host::unroot_value(realm, &reject);
+                match r {
+                    Ok(resp) => {
+                        let st = status_text(resp.status).to_string();
+                        let resp_obj = make_response(realm, &resp.url.to_string(), resp.status, &st, resp.headers.clone(), resp.body, "basic");
+                        let _ = realm.call(resolve, Value::Undefined, &[resp_obj]);
+                    }
+                    Err(e) => {
+                        let err = realm.new_error("TypeError", &format!("Failed to fetch: {e}"));
+                        let _ = realm.call(reject, Value::Undefined, &[err]);
+                    }
+                }
+            }
+            FetchSink::Xhr(o) => {
+                crate::host::unroot_value(realm, &Value::Object(o));
+                if !realm.host_data::<XhrData>(o).map(|d| d.sent).unwrap_or(false) {
+                    continue; // aborted meanwhile
+                }
+                xhr_store_result(realm, o, r);
+                xhr_finish_events(realm, o);
+            }
+        }
+        realm.run_jobs();
+    }
+    any
+}
+
+/// Perform a request through the environment synchronously.
+pub(crate) fn do_fetch(url: &str, method: &str, headers: &[(String, String)], body: &[u8]) -> Result<rabbithole_net::Response, String> {
+    if url.starts_with("blob:") {
+        return match (method, blob_url_response(url)) {
+            ("GET", Some(r)) => Ok(r),
+            _ => Err(format!("Failed to fetch: {url}")),
+        };
+    }
     // Fetch-standard semantics (CORS, credentials, opaque responses) are
     // applied by the network layer for requests with a mode.
-    req = req.with_referer(referer).with_dest(rabbithole_net::Destination::Empty).with_mode(rabbithole_net::RequestMode::Cors, rabbithole_net::CredentialsMode::SameOrigin);
+    let req = build_request(url, method, headers, body)?;
     with_env(|env| env.fetch(req))
 }
 
@@ -939,6 +1025,15 @@ fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
         }
     };
     let (p, resolve, reject) = realm.new_promise();
+    // Network requests run in the background; the promise settles from
+    // the event loop when the response arrives.
+    if let Some(rx) = start_background(&url, &method, &headers, &body) {
+        let (resolve, reject) = (Value::Object(resolve), Value::Object(reject));
+        crate::host::root_value(realm, &resolve);
+        crate::host::root_value(realm, &reject);
+        state().borrow_mut().pending_fetches.push(PendingFetch { rx, sink: FetchSink::Promise(resolve, reject, url.clone()) });
+        return Ok(Value::Object(p));
+    }
     match do_fetch(&url, &method, &headers, &body) {
         Ok(resp) => {
             let st = status_text(resp.status).to_string();
@@ -1332,7 +1427,13 @@ fn xhr_perform(realm: &mut Realm, o: ObjectId) {
         let d = realm.host_data::<XhrData>(o).unwrap();
         (d.url.clone(), d.method.clone(), d.headers.clone(), d.body.clone())
     };
-    match do_fetch(&url, &method, &headers, &body) {
+    let r = do_fetch(&url, &method, &headers, &body);
+    xhr_store_result(realm, o, r);
+}
+
+/// Fill the response fields of XHR `o` from a finished request.
+fn xhr_store_result(realm: &mut Realm, o: ObjectId, r: Result<rabbithole_net::Response, String>) {
+    match r {
         Ok(resp) => {
             let d = realm.host_data_mut::<XhrData>(o).unwrap();
             d.status = resp.status;
@@ -1370,6 +1471,15 @@ fn xhr_deliver(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> 
         let o = *o;
         if realm.host_data::<XhrData>(o).map(|d| d.sent).unwrap_or(false) {
             fire_xhr_event(realm, o, "loadstart");
+            let (url, method, headers, body) = {
+                let d = realm.host_data::<XhrData>(o).unwrap();
+                (d.url.clone(), d.method.clone(), d.headers.clone(), d.body.clone())
+            };
+            if let Some(rx) = start_background(&url, &method, &headers, &body) {
+                crate::host::root_value(realm, &Value::Object(o));
+                state().borrow_mut().pending_fetches.push(PendingFetch { rx, sink: FetchSink::Xhr(o) });
+                return Ok(Value::Undefined);
+            }
             xhr_perform(realm, o);
             xhr_finish_events(realm, o);
         }

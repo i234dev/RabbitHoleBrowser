@@ -131,6 +131,8 @@ pub struct HostState {
     /// Dynamically inserted external scripts being downloaded in the
     /// background: (element, url, is_module, result channel).
     pub pending_script_fetches: Vec<(NodeRef, String, bool, std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>)>,
+    /// `fetch()` / async XHR requests running in the background.
+    pub pending_fetches: Vec<crate::fetch::PendingFetch>,
     pub deferred_natives: Vec<ObjectId>,
     /// Module cache and import map.
     pub modules: crate::modules::ModuleState,
