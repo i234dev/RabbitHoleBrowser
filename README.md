@@ -165,10 +165,10 @@ removed, page content fenced against prompt injection.
 | `debug`      | eval, console/errors, action log export, live view                    |
 
 The same tools work from a shell: `rabbithole agent -c "open https://example.com" -c "read"`
-or interactively (`rabbithole agent`). The MCP server and the headless
-subcommands identify as `RabbitHoleBot` and respect `robots.txt` by default;
-`--browser-headers` (or `open browser_headers=true`) sends normal browser
-headers instead. The GUI always sends normal headers.
+or interactively (`rabbithole agent`). The MCP server, the headless
+subcommands and the agent API send the same standard browser headers as the
+GUI by default; `--bot` (or `open bot=true`) switches to the honest
+`RabbitHoleBot` identity, which also respects `robots.txt`.
 
 Claude Code:
 

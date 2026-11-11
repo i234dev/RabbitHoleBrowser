@@ -16,6 +16,7 @@ pub mod read;
 pub mod refs;
 pub mod shot;
 pub mod snapshot;
+pub mod summary;
 pub mod tools;
 pub mod wait;
 

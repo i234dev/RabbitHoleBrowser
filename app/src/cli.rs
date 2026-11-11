@@ -7,13 +7,20 @@ use rabbithole_engine::{Engine, Loaded, Page, Viewport};
 
 use crate::profile::Profile;
 
-/// Whether CLI sessions send normal browser headers (`--browser-headers`)
-/// instead of the default bot identity.
-static BROWSER_HEADERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether CLI sessions identify as RabbitHoleBot (`--bot`) instead of the
+/// default standard browser identity shared with the GUI.
+static BOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `--no-robots`: with `--bot`, skip the robots.txt checks.
+static NO_ROBOTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Set by `--browser-headers` (any subcommand).
-pub fn set_browser_headers(on: bool) {
-    BROWSER_HEADERS.store(on, std::sync::atomic::Ordering::Relaxed);
+/// Set by `--bot` (any headless subcommand).
+pub fn set_bot(on: bool) {
+    BOT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Set by `--no-robots` (any headless subcommand).
+pub fn set_no_robots(on: bool) {
+    NO_ROBOTS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Hard cap on the height of a full-page capture (CSS px).
@@ -82,10 +89,13 @@ impl Session {
         let cookies = profile.load_cookies();
         let mut engine = if system_fonts { Engine::new() } else { Engine::new_bundled_fonts_only() };
         engine.loader.fetcher.cookies = Some(cookies.clone());
-        // Programmatic use identifies as a bot (and respects robots.txt)
-        // unless `--browser-headers` was given.
-        if !BROWSER_HEADERS.load(std::sync::atomic::Ordering::Relaxed) {
+        // Same standard browser identity as the GUI unless `--bot` asked
+        // for the RabbitHoleBot identity (which also respects robots.txt).
+        if BOT.load(std::sync::atomic::Ordering::Relaxed) {
             engine.loader.fetcher.set_header_profile(rabbithole_engine::net::HeaderProfile::Bot);
+            if NO_ROBOTS.load(std::sync::atomic::Ordering::Relaxed) {
+                engine.loader.fetcher.respect_robots = false;
+            }
         }
         engine.set_local_storage_path(profile.local_storage_path());
         Session { engine, profile, cookies, wait_ms: 1000, verbose: false }

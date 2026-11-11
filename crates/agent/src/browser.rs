@@ -25,7 +25,8 @@ pub struct Config {
     /// Persistent profile of the default context (cookies, localStorage);
     /// `None` = in-memory only.
     pub profile_dir: Option<PathBuf>,
-    /// Identify as RabbitHoleBot and respect robots.txt (default true).
+    /// Identify as RabbitHoleBot and respect robots.txt (opt-in; default
+    /// false = the same standard browser identity as the GUI).
     pub bot: bool,
     pub viewport: Viewport,
     pub javascript: bool,
@@ -37,19 +38,23 @@ pub struct Config {
     pub allowlist: Vec<String>,
     /// Scan system fonts (faithful screenshots; slower startup).
     pub system_fonts: bool,
+    /// `open` and navigating actions return the full snapshot instead of
+    /// the short page summary (default false).
+    pub full_snapshot_on_open: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             profile_dir: None,
-            bot: true,
+            bot: false,
             viewport: Viewport { width: 1280.0, height: 800.0 },
             javascript: true,
             images: false,
             settle_cap: Duration::from_secs(5),
             allowlist: Vec::new(),
             system_fonts: false,
+            full_snapshot_on_open: false,
         }
     }
 }
@@ -243,7 +248,8 @@ impl Agent {
         a
     }
 
-    /// Switch identity: bot (default) or normal browser headers.
+    /// Switch identity: normal browser headers (default) or the opt-in
+    /// RabbitHoleBot identity (which also enforces robots.txt).
     pub fn set_bot(&mut self, bot: bool) {
         self.cfg.bot = bot;
         self.engine.loader.fetcher.set_header_profile(if bot { HeaderProfile::Bot } else { HeaderProfile::Browser });
@@ -648,6 +654,33 @@ impl Agent {
         Ok(out)
     }
 
+    /// The short page summary (default output of `open` and of actions
+    /// that navigate): landmarks, heading outline, forms, overlays, counts.
+    pub fn summary_text(&mut self, ti: usize) -> Result<String, String> {
+        let (root, _stats, overlays) = self.tree(ti, false);
+        let header = self.page_line(ti);
+        let tab = &mut self.tabs[ti];
+        let lines = crate::summary::render(&tab.frames[0].page, &root, &mut tab.refs, &overlays);
+        let empty = root.children.is_empty();
+        let mut body = header;
+        body.push('\n');
+        body.push_str(&lines.join("\n"));
+        let mut out = fence(&body);
+        let mut notes = Vec::new();
+        if empty {
+            notes.push("The page shows no content: it may be rendered by scripts that failed or still load (debug console=true shows errors; read or network may still help).".to_string());
+        }
+        if let Some(o) = overlays.iter().find(|o| o.covers >= 0.3) {
+            let r = self.tabs[ti].refs.lookup(0, o.node).map(|r| format!("@e{r}")).unwrap_or_default();
+            notes.push(format!("An overlay {r} covers the page: deal with it first{}.", if o.cookie { " (click ref=\"cookies\" rejects cookies)" } else { "" }));
+        }
+        notes.extend(self.page_notes(ti));
+        notes.push("Summary only: snapshot (or open … snapshot=true) shows the full tree, read the main text, find locates elements.".into());
+        out.push('\n');
+        out.push_str(&notes.join("\n"));
+        Ok(out)
+    }
+
     /// Captcha / login / error notes about the current page.
     fn page_notes(&mut self, ti: usize) -> Vec<String> {
         let mut notes = Vec::new();
@@ -764,7 +797,7 @@ impl Agent {
                 if !report.trim().is_empty() {
                     lines.push(report.trim().to_string());
                 }
-                let snap = self.snapshot_text(ti, 1500, None, false, false)?;
+                let snap = if self.cfg.full_snapshot_on_open { self.snapshot_text(ti, 1500, None, false, false)? } else { self.summary_text(ti)? };
                 lines.push(snap);
                 return Ok(lines.join("\n"));
             }

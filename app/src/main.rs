@@ -49,9 +49,10 @@ SCREENSHOT OPTIONS:
     --no-images           Do not download images
 
 AGENT / MCP OPTIONS:
-    --browser-headers     Send normal Chrome-like headers instead of the RabbitHoleBot identity
-                          (also skips robots.txt; accepted by every headless subcommand)
-    --no-robots           Keep the bot identity but do not check robots.txt
+    --bot                 Identify as RabbitHoleBot (honest bot User-Agent, no client hints) and
+                          respect robots.txt; accepted by every headless subcommand. By default
+                          every mode sends the same standard browser headers as the GUI
+    --no-robots           With --bot: keep the bot identity but do not check robots.txt
     --ephemeral           In-memory profile (default: <profile>/agent, persistent)
     --profile <DIR>       Profile directory for the default context
     --allow <D1,D2>       Only load these domains
@@ -69,12 +70,19 @@ config directory under `rabbithole/` (override with RABBITHOLE_PROFILE).
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    // Headless subcommands identify as a bot unless asked otherwise.
+    // Headless subcommands use the standard browser identity (like the
+    // GUI); `--bot` opts into the RabbitHoleBot identity + robots.txt.
     const HEADLESS: &[&str] = &["screenshot", "text", "links", "dump", "cookies", "js", "click"];
-    if args.first().map(|a| HEADLESS.contains(&a.as_str())).unwrap_or(false) {
-        if let Some(i) = args.iter().position(|a| a == "--browser-headers") {
+    if args.first().map(|a| HEADLESS.contains(&a.as_str()) || a == "diff" || a == "ui-bench").unwrap_or(false) {
+        // `--browser-headers` is the (now default) legacy spelling.
+        args.retain(|a| a != "--browser-headers");
+        if let Some(i) = args.iter().position(|a| a == "--bot") {
             args.remove(i);
-            cli::set_browser_headers(true);
+            cli::set_bot(true);
+        }
+        if let Some(i) = args.iter().position(|a| a == "--no-robots") {
+            args.remove(i);
+            cli::set_no_robots(true);
         }
     }
     let headless = args.first().map(|a| HEADLESS.contains(&a.as_str()) || a == "agent" || a == "mcp").unwrap_or(false);

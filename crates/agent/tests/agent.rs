@@ -136,7 +136,7 @@ fn snapshot_shape_names_refs_truncation() {
     let page = news_page();
     let srv = serve(Box::new(move |p| if p == "/" { html(page) } else { None }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     // Landmarks, main first, inline joining, heading → link.
     assert!(snap.contains("[page] \"Portada - Example News\""), "{snap}");
     let main_pos = snap.find("[main]").expect("main landmark");
@@ -177,7 +177,7 @@ fn click_returns_diff_and_keeps_refs() {
     let page = news_page();
     let srv = serve(Box::new(move |p| if p == "/" { html(page) } else { None }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     let vote = ref_of(&snap, "button \"votar\"");
     let out = ok(&mut a, "click", json!({ "ref": vote }));
     assert!(out.contains(&format!("~ button \"votar\" {vote}")), "{out}");
@@ -199,7 +199,7 @@ fn covered_element_and_cookie_reject() {
         _ => None,
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     assert!(snap.contains("[dialog"), "overlay shown as dialog: {snap}");
     assert!(snap.contains("covers the page"), "{snap}");
     let vote = ref_of(&snap, "button \"votar\"");
@@ -223,7 +223,7 @@ fn stale_ref_suggests_candidate() {
         _ => None,
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     let r = ref_of(&snap, "button \"votar\"");
     ok(&mut a, "click", json!({ "ref": r }));
     let e = err(&mut a, "click", json!({ "ref": r }));
@@ -313,7 +313,7 @@ fn dialogs_popups_downloads() {
         _ => None,
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     let del = ref_of(&snap, "button \"Borrar\"");
     let out = ok(&mut a, "click", json!({ "ref": del }));
     assert!(out.contains("Dialog confirm(\"¿Borrar?\") → dismissed"), "{out}");
@@ -357,7 +357,7 @@ fn network_log_and_api_hint() {
         _ => None,
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     let b = ref_of(&snap, "button \"Cargar\"");
     let out = ok(&mut a, "click", json!({ "ref": b }));
     assert!(out.contains("+ text \"Conejos en la nieve\""), "{out}");
@@ -385,7 +385,7 @@ fn iframes_and_shadow_dom_flattened() {
         _ => None,
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     assert!(snap.contains("[iframe \"Widget\"]"), "{snap}");
     assert!(snap.contains("button \"Dentro\" @e"), "{snap}");
     assert!(snap.contains("button \"Sombra\" @e"), "{snap}");
@@ -412,7 +412,7 @@ fn hidden_text_removed_and_injection_fenced() {
         _ => None,
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     assert!(snap.contains("Normal paragraph text."), "{snap}");
     for h in ["HIDDEN-DISPLAY", "HIDDEN-WHITE", "HIDDEN-ZERO", "HIDDEN-OFFSCREEN", "HIDDEN-ARIA", "HIDDEN-OPACITY"] {
         assert!(!snap.contains(h), "{h} leaked:\n{snap}");
@@ -434,16 +434,25 @@ fn bot_identity_and_robots() {
         _ => None,
     }));
     let mut a = agent();
-    ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    // Default: the standard browser identity, robots.txt not consulted.
+    ok(&mut a, "open", json!({ "url": srv.url("/private") }));
     let reqs = srv.requests();
-    let (_, h) = reqs.iter().find(|(p, _)| p == "/").unwrap();
+    let (_, h) = reqs.iter().find(|(p, _)| p == "/private").unwrap();
+    let ua = h.iter().find(|(k, _)| k == "user-agent").unwrap().1.clone();
+    assert!(ua.contains("Chrome/") && !ua.contains("RabbitHoleBot"), "{ua}");
+    assert!(h.iter().any(|(k, _)| k.starts_with("sec-ch-ua")));
+    assert!(!reqs.iter().any(|(p, _)| p == "/robots.txt"), "no robots.txt request in browser mode");
+    // Opt-in session option: bot identity + robots.txt.
+    ok(&mut a, "open", json!({ "url": srv.url("/"), "bot": true }));
+    let reqs = srv.requests();
+    let (_, h) = reqs.iter().rev().find(|(p, _)| p == "/").unwrap();
     let ua = h.iter().find(|(k, _)| k == "user-agent").unwrap().1.clone();
     assert!(ua.contains("RabbitHoleBot/"), "{ua}");
     assert!(!h.iter().any(|(k, _)| k.starts_with("sec-ch-ua")));
     let e = err(&mut a, "open", json!({ "url": srv.url("/private") }));
     assert!(e.contains("robots.txt"), "{e}");
-    // Opt-out: normal browser headers, robots not applied.
-    ok(&mut a, "open", json!({ "url": srv.url("/private"), "browser_headers": true }));
+    // Back to the default identity.
+    ok(&mut a, "open", json!({ "url": srv.url("/private"), "bot": false }));
     let reqs = srv.requests();
     let (_, h) = reqs.iter().rev().find(|(p, _)| p == "/private").unwrap();
     assert!(h.iter().find(|(k, _)| k == "user-agent").unwrap().1.contains("Chrome/"));
@@ -465,7 +474,7 @@ fn silent_click_type_enter_and_scroll() {
         None
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     let t = ref_of(&snap, "button \"nada\"");
     let out = ok(&mut a, "click", json!({ "ref": t }));
     assert!(out.contains("no visible effect") && out.contains("no event listeners"), "{out}");
@@ -489,10 +498,10 @@ fn sessions_and_contexts_are_isolated() {
     }));
     let mut a = agent();
     ok(&mut a, "open", json!({ "url": srv.url("/set") }));
-    let out = ok(&mut a, "open", json!({ "url": srv.url("/show") }));
+    let out = ok(&mut a, "open", json!({ "url": srv.url("/show"), "snapshot": true }));
     assert!(out.contains("cookie=sid=abc ls=v1"), "{out}");
     // Another context sees nothing.
-    let out = ok(&mut a, "open", json!({ "url": srv.url("/show"), "context": "other" }));
+    let out = ok(&mut a, "open", json!({ "url": srv.url("/show"), "snapshot": true, "context": "other" }));
     assert!(out.contains("cookie= ls=null"), "{out}");
     // Save the default context and restore it elsewhere.
     ok(&mut a, "tabs", json!({ "action": "switch", "id": 1 }));
@@ -501,7 +510,7 @@ fn sessions_and_contexts_are_isolated() {
     assert!(out.contains("1 cookies"), "{out}");
     let mut b = agent();
     ok(&mut b, "tabs", json!({ "action": "load", "path": dir.to_str().unwrap(), "context": "restored" }));
-    let out = ok(&mut b, "open", json!({ "url": srv.url("/show"), "context": "restored" }));
+    let out = ok(&mut b, "open", json!({ "url": srv.url("/show"), "snapshot": true, "context": "restored" }));
     assert!(out.contains("cookie=sid=abc ls=v1"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -518,7 +527,7 @@ fn horizontal_menus_share_a_line_and_wrappers_are_not_buttons() {
         _ => None,
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     assert!(snap.lines().any(|l| l.contains("link \"Uno\"") && l.contains("link \"Dos\"") && l.contains("link \"Tres\"")), "{snap}");
     assert!(!snap.contains("clickable"), "{snap}");
     assert!(snap.contains("link \"upvote\" @e"), "icon link named by its tooltip: {snap}");
@@ -534,9 +543,63 @@ fn style_only_change_is_reported_as_visual() {
         _ => None,
     }));
     let mut a = agent();
-    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     let b = ref_of(&snap, "button \"Resaltar\"");
     let out = ok(&mut a, "click", json!({ "ref": b }));
     assert!(out.contains("changed visually"), "{out}");
     assert!(!out.contains("no visible effect"), "{out}");
+}
+
+/// `open` returns a short summary (landmarks, outline, forms, overlays,
+/// counts) whose refs are the ones later snapshots and actions use; the
+/// full tree is opt-in. Navigations caused by actions also get a summary.
+#[test]
+fn open_returns_a_short_summary() {
+    let mut big = String::from(
+        r#"<!doctype html><html><head><title>Big page</title></head><body>
+<div id="cb" style="position:fixed;bottom:0;left:0;right:0;background:#eee">We use cookies to improve your experience.
+<button>Accept all</button> <button>Reject all</button></div>
+<header><nav aria-label="Primary"><a href="/a">A</a> <a href="/b">B</a></nav></header>
+<main><h1>Big page title</h1>
+<form action="/search" role="search"><label>Search the site <input name="q"></label><button>Go</button></form>"#,
+    );
+    for i in 0..40 {
+        big.push_str(&format!("<h2>Section {i}</h2><p>Paragraph {i} with a fair amount of text to make the page large enough.</p><ul>"));
+        for j in 0..10 {
+            big.push_str(&format!("<li><a href=\"/item/{i}/{j}\">Item {i}.{j}</a></li>"));
+        }
+        big.push_str("</ul>");
+    }
+    big.push_str("</main><footer><a href=\"/about\">About</a></footer></body></html>");
+    let big: &'static str = Box::leak(big.into_boxed_str());
+    let srv = serve(Box::new(move |p| match p {
+        "/" => html(big),
+        "/a" => html("<html><head><title>Page A</title></head><body><main><h1>Arrived at A</h1><p>done</p></main></body></html>"),
+        _ => None,
+    }));
+    let mut a = agent();
+    let summary = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    assert!(summary.contains("[page] \"Big page\""), "{summary}");
+    assert!(summary.contains("landmarks:") && summary.contains("[nav \"Primary\"] @e") && summary.contains("[main] @e"), "{summary}");
+    assert!(summary.contains("h1 \"Big page title\" @e") && summary.contains("h2 \"Section 0\" @e"), "{summary}");
+    assert!(summary.contains("more headings"), "{summary}");
+    assert!(summary.contains("forms:") && summary.contains("(GET /search)") && summary.contains("button \"Go\" @e"), "{summary}");
+    assert!(summary.contains("cookie"), "the cookie banner is reported: {summary}");
+    assert!(summary.contains("whole page:") && summary.contains("403 links"), "{summary}");
+    assert!(!summary.contains("Item 3.3"), "no full tree by default: {summary}");
+    let tokens = summary.chars().count() / 4;
+    assert!(tokens < 500, "summary too long ({tokens} tokens):\n{summary}");
+    // Refs agree with the full snapshot.
+    let q = ref_of(&summary, "textbox \"Search the site\"");
+    let snap = ok(&mut a, "snapshot", json!({}));
+    assert_eq!(ref_of(&snap, "textbox \"Search the site\""), q, "{snap}");
+    let full = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
+    assert!(full.contains("Item 0.0") && !full.contains("Summary only"), "{full}");
+    // A navigating click returns the summary of the new page.
+    let summary = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let link = ref_of(&summary, "[nav \"Primary\"]");
+    let snap = ok(&mut a, "snapshot", json!({ "ref": link }));
+    let la = ref_of(&snap, "link \"A\"");
+    let out = ok(&mut a, "click", json!({ "ref": la }));
+    assert!(out.contains("navigated to") && out.contains("h1 \"Arrived at A\" @e") && out.contains("Summary only"), "{out}");
 }

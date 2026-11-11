@@ -17,14 +17,15 @@ Design goals, in order:
 4. **Safe by default.** Page content is fenced and escaped so it can never
    look like tool output; hidden text is dropped; downloads are not saved;
    permissions are denied; cookie banners are rejected, never accepted.
-5. **Honest by default.** Programmatic use identifies as `RabbitHoleBot` and
-   respects `robots.txt` (see [Identity](#identity-and-robotstxt)).
+5. **One identity.** Programmatic use presents the same standard browser
+   identity as the GUI; the honest `RabbitHoleBot` identity with `robots.txt`
+   enforcement is an explicit opt-in (see [Identity](#identity-and-robotstxt)).
 
 ## Tools
 
 | Tool         | What it does |
 |--------------|--------------|
-| `open`       | Load a URL (or `back` / `forward` / `reload`) and return a snapshot. Options: `new_tab`, `context` (isolated cookies/storage), `max_tokens`, `browser_headers`, `robots`, `allowlist`, `javascript`, `dialog`. |
+| `open`       | Load a URL (or `back` / `forward` / `reload`) and return a short [page summary](#the-page-summary) (title, landmarks, heading outline, forms, overlays, counts). `snapshot=true` (alias `full=true`, or any `max_tokens`) returns the full snapshot instead. Options: `new_tab`, `context` (isolated cookies/storage), `snapshot`, `max_tokens`, `bot`, `robots`, `allowlist`, `javascript`, `dialog`. |
 | `snapshot`   | The semantic tree of the page. `ref` expands one element (a truncated list, a collapsed landmark); `max_tokens` (default 2500); `hidden=true` also lists hidden content, marked; `urls=true` shows link targets. |
 | `read`       | The main content as Markdown (Readability-style), links as `[text](@eN)`, without navigation, footers, related blocks or hidden text. `max_tokens` (default 4000), `offset` to continue, `ref` for one element. |
 | `find`       | Elements by `text`, by `role` + `name`, or by CSS `selector`. Returns refs (assigning them if needed) and whether each is above/below the viewport. |
@@ -63,10 +64,46 @@ possible) or `<tool> {json arguments}`. Positional arguments: `open URL`,
 `click REF`, `type REF TEXT`, `fill REF`, `find TEXT`, `scroll DIRECTION|REF`,
 `network ID`, `tabs ACTION ID`, `debug JS…`, `snapshot REF`, `read REF`.
 
-Options shared with `rabbithole mcp`: `--browser-headers`, `--no-robots`,
+Options shared with `rabbithole mcp`: `--bot`, `--no-robots`,
 `--ephemeral` (in-memory profile; the default profile is `<profile>/agent`),
 `--profile DIR`, `--allow d1,d2` (domain allowlist), `--live`, `--timeout MS`,
 `--width`/`--height`, `--no-js`, `--images`, `--system-fonts`.
+
+## The page summary
+
+`open`, and every action that navigates (a clicked link, a submitted form),
+return a short summary of the page instead of the full snapshot, within a few
+hundred tokens even on big pages:
+
+```
+⟦page 3f9a1c2b⟧
+[page] "Portada - Example News"  https://news.example.test/  status=200  scroll=0/4180
+⚠ [dialog] @e200 covers the page (62% of the viewport): "Rechazar" @e201, "Aceptar todo" @e202
+landmarks: [header] @e1  [nav "Secciones"] @e2  [main] @e9  [footer] @e99
+outline:
+  h1 "Portada" @e8
+    h2 "Título de la noticia 1" @e10
+    h2 "Título de la noticia 2" @e14
+  … +21 more headings
+forms:
+  @f1 form "Buscar" (GET /buscar): textbox "Buscar" @e6, button "Ir" @e7 (submit)
+  inputs outside forms: combobox "Sección" @e12
+main @e9: 120 links, 8 buttons, 1 inputs; whole page: 310 links, 14 buttons, 2 inputs
+⟦/page 3f9a1c2b⟧
+An overlay @e200 covers the page: deal with it first (click ref="cookies" rejects cookies).
+Summary only: snapshot (or open … snapshot=true) shows the full tree, read the main text, find locates elements.
+```
+
+* Overlays and dialogs come first (`⚠`), with their buttons.
+* `landmarks`: up to 10, with refs (use `snapshot ref=@eN` to expand one).
+* `outline`: the first 12 headings, indented by level, each with a ref (the
+  link's ref when the heading is a link).
+* `forms`: up to 3 forms with up to 6 fields each (label, type, ref, submit
+  button), plus text inputs outside any form; `fill` lists them all.
+* Counts of links, buttons and inputs in `main` and in the whole page.
+
+The refs are the same ones `snapshot`, `find` and the actions use.
+`open url=… snapshot=true` (or the `snapshot` tool) gives the full tree.
 
 ## The snapshot
 
@@ -207,7 +244,8 @@ If the cap is hit, the result says what was still pending:
 The result of an action is:
 
 * **Navigation:** `Clicked @e3 link "Nuevas" → navigated to URL (status 200)`
-  followed by a fresh snapshot (1500-token budget).
+  followed by the [page summary](#the-page-summary) of the new page (call
+  `snapshot` for the full tree).
 * **Same page:** a diff of the semantic tree, fenced:
 
   ```
@@ -348,23 +386,30 @@ written to disk unless `tabs action=download` asks for it.
 
 ## Identity and robots.txt
 
-The GUI sends normal Chrome-like headers. **The MCP server, the CLI and the
-programmatic API identify as a bot by default:**
+**By default every mode — the GUI, the MCP server, the CLI subcommands
+(`rabbithole js|text|links|screenshot|diff|agent…`) and the programmatic API
+(`rabbithole_agent::Config::default()`) — sends the same standard browser
+headers** (`HeaderProfile::Browser`: a Chrome-compatible User-Agent and client
+hints, as every modern engine sends), and does not consult `robots.txt`.
+
+The bot identity is an explicit opt-in:
 
 ```
 User-Agent: Mozilla/5.0 (compatible; RabbitHoleBot/0.1.0; +https://github.com/i234dev/RabbitHoleBrowser) RabbitHole/0.1.0
 ```
 
-with no Chrome client hints (`sec-ch-ua*`), and they respect `robots.txt`
+with no Chrome client hints (`sec-ch-ua*`), and it respects `robots.txt`
 (fetched once per origin and cached; the `RabbitHoleBot` group if present,
 otherwise `*`; longest match wins, `*` and `$` supported) for top-level
 navigations. A blocked URL fails with a clear `blocked by robots.txt` error.
 
 This is a `crates/net` setting: `Fetcher::set_header_profile(HeaderProfile::Bot
-| HeaderProfile::Browser)`, plus `Fetcher::respect_robots`. Opt-outs:
-`--browser-headers` (CLI subcommands, `rabbithole agent`, `rabbithole mcp`),
-`open browser_headers=true` (MCP session option), `--no-robots` / `open
-robots=false` to keep the bot identity without robots checks.
+| HeaderProfile::Browser)`, plus `Fetcher::respect_robots`. Opt-ins: `--bot`
+(CLI subcommands, `rabbithole agent`, `rabbithole mcp`), `open bot=true` (MCP
+session option; `bot=false` switches back), `Config { bot: true, .. }` (API).
+`--no-robots` / `open robots=false` keep the bot identity without robots
+checks. The legacy `--browser-headers` / `browser_headers=true` spellings are
+still accepted and mean the default.
 
 ## Debugging and reproducibility
 

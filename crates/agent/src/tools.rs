@@ -27,14 +27,16 @@ pub fn definitions() -> Vec<Value> {
     let r = json!({ "type": "string", "description": "Element ref from a snapshot, e.g. @e12 (forms: @f1)" });
     let dialog = json!({ "type": "string", "description": "Answer to alert/confirm/prompt raised during this call: accept, dismiss (default) or the prompt text" });
     vec![
-        json!({ "name": "open", "description": "Load a URL (or back/forward/reload) in the current tab and return a snapshot. Bot User-Agent and robots.txt by default.",
+        json!({ "name": "open", "description": "Load a URL (or back/forward/reload) in the current tab and return a short page summary (title, landmarks, heading outline, forms with field refs, overlays, counts); snapshot=true returns the full semantic snapshot instead (or call snapshot). Uses the standard browser identity by default; bot=true switches to the RabbitHoleBot identity with robots.txt.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "Absolute URL, or back | forward | reload" },
                 "new_tab": { "type": "boolean" },
                 "context": { "type": "string", "description": "Isolated context (cookies, storage) to use; created on demand" },
-                "max_tokens": { "type": "integer", "description": "Snapshot budget (default 2500)" },
-                "browser_headers": { "type": "boolean", "description": "Send normal Chrome-like headers instead of the bot identity (and skip robots.txt)" },
-                "robots": { "type": "boolean", "description": "Respect robots.txt (default true in bot mode)" },
+                "snapshot": { "type": "boolean", "description": "Return the full semantic snapshot instead of the short summary (alias: full)" },
+                "full": { "type": "boolean", "description": "Alias of snapshot" },
+                "max_tokens": { "type": "integer", "description": "Full-snapshot budget (default 2500; implies snapshot=true)" },
+                "bot": { "type": "boolean", "description": "Session option: identify as RabbitHoleBot (bot User-Agent, no client hints) and respect robots.txt (default false: standard browser headers)" },
+                "robots": { "type": "boolean", "description": "Respect robots.txt (default: on in bot mode, off otherwise)" },
                 "allowlist": { "type": "array", "items": { "type": "string" }, "description": "Only allow these domains from now on" },
                 "javascript": { "type": "boolean" },
                 "dialog": dialog
@@ -202,7 +204,10 @@ fn dispatch(agent: &mut Agent, name: &str, a: &Value) -> Result<Out, String> {
 
 fn open(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let url = s(a, "url").ok_or("open needs url")?.to_string();
-    if let Some(bh) = b(a, "browser_headers") {
+    if let Some(bot) = b(a, "bot") {
+        agent.set_bot(bot);
+    } else if let Some(bh) = b(a, "browser_headers") {
+        // Legacy option (browser headers are now the default).
         agent.set_bot(!bh);
     }
     if let Some(r) = b(a, "robots") {
@@ -255,8 +260,13 @@ fn open(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     if agent.tabs[ti].frames.is_empty() {
         return Ok(Out::text(text));
     }
-    let max = n(a, "max_tokens").map(|x| x as usize).unwrap_or(SNAPSHOT_TOKENS).max(100);
-    text.push_str(&agent.snapshot_text(ti, max, None, false, false)?);
+    let full = b(a, "snapshot").or(b(a, "full")).unwrap_or(agent.cfg.full_snapshot_on_open) || n(a, "max_tokens").is_some();
+    if full {
+        let max = n(a, "max_tokens").map(|x| x as usize).unwrap_or(SNAPSHOT_TOKENS).max(100);
+        text.push_str(&agent.snapshot_text(ti, max, None, false, false)?);
+    } else {
+        text.push_str(&agent.summary_text(ti)?);
+    }
     let hints = crate::netinfo::page_hints(&agent.tabs[ti]);
     for h in hints.into_iter().take(2) {
         text.push('\n');
