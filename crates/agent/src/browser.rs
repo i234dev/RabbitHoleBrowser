@@ -71,7 +71,7 @@ impl Out {
 pub struct Context {
     pub name: String,
     pub cookies: Arc<Mutex<CookieJar>>,
-    storage: LocalStorage,
+    storage: Arc<Mutex<LocalStorage>>,
     dir: PathBuf,
     persistent: bool,
 }
@@ -83,7 +83,7 @@ impl Context {
         if !persistent {
             let _ = std::fs::remove_file(dir.join("localstorage.txt"));
         }
-        let storage = LocalStorage::load(dir.join("localstorage.txt"));
+        let storage = Arc::new(Mutex::new(LocalStorage::load(dir.join("localstorage.txt"))));
         Context { name: name.to_string(), cookies: Arc::new(Mutex::new(jar)), storage, dir, persistent }
     }
 
@@ -253,11 +253,7 @@ impl Agent {
         if self.current_ctx == ci {
             return;
         }
-        if self.current_ctx < self.contexts.len() {
-            let prev = self.current_ctx;
-            std::mem::swap(&mut *self.engine.local_storage.borrow_mut(), &mut self.contexts[prev].storage);
-        }
-        std::mem::swap(&mut *self.engine.local_storage.borrow_mut(), &mut self.contexts[ci].storage);
+        self.engine.share_local_storage(self.contexts[ci].storage.clone());
         self.engine.loader.fetcher.cookies = Some(self.contexts[ci].cookies.clone());
         self.current_ctx = ci;
     }
@@ -968,7 +964,9 @@ impl Agent {
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let ci = self.active.map(|t| self.tabs[t].ctx).unwrap_or(0);
         self.activate_ctx(ci);
-        self.engine.local_storage.borrow_mut().save();
+        if let Ok(mut ls) = self.contexts[ci].storage.lock() {
+            ls.save();
+        }
         let jar = self.contexts[ci].cookies.lock().map_err(|_| "cookie jar poisoned")?.to_netscape_with_session();
         std::fs::write(dir.join("cookies.txt"), jar).map_err(|e| e.to_string())?;
         let ls = self.contexts[ci].dir.join("localstorage.txt");
@@ -982,15 +980,10 @@ impl Agent {
     pub fn load_session(&mut self, dir: &Path, ctx_name: &str) -> Result<(usize, Vec<String>), String> {
         let jar = CookieJar::load(&dir.join("cookies.txt")).map_err(|e| format!("cannot read {}: {e}", dir.join("cookies.txt").display()))?;
         let ci = self.context_index(ctx_name);
-        if self.current_ctx == ci {
-            // Put the current storage back before replacing the file.
-            self.current_ctx = usize::MAX;
-            std::mem::swap(&mut *self.engine.local_storage.borrow_mut(), &mut self.contexts[ci].storage);
-        }
         *self.contexts[ci].cookies.lock().map_err(|_| "poisoned")? = jar;
         let target = self.contexts[ci].dir.join("localstorage.txt");
         let _ = std::fs::copy(dir.join("localstorage.txt"), &target);
-        self.contexts[ci].storage = LocalStorage::load(target);
+        *self.contexts[ci].storage.lock().map_err(|_| "poisoned")? = LocalStorage::load(target);
         let urls = std::fs::read_to_string(dir.join("tabs.txt")).unwrap_or_default().lines().map(|s| s.to_string()).filter(|s| !s.is_empty()).collect();
         Ok((ci, urls))
     }
