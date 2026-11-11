@@ -179,12 +179,10 @@ pub struct Realm {
     pub modules: crate::modules::ModuleRegistry,
     /// Countdown to the next GC / watchdog safe point in the VM loop.
     pub(crate) tick: u32,
-    /// Recycled frame operand stacks.
-    pub(crate) stack_pool: Vec<Vec<Value>>,
+    /// Value slots of all active frames (see `vm::Frame`).
+    pub vstack: Vec<Value>,
     /// Reusable buffer for call arguments taken off the operand stack.
     pub(crate) arg_buf: Vec<Value>,
-    /// Recycled `Frame::args` vectors.
-    pub(crate) args_pool: Vec<Vec<Value>>,
 }
 
 impl Default for Realm {
@@ -270,9 +268,8 @@ impl Realm {
             join_stack: Vec::new(),
             modules: Default::default(),
             tick: crate::vm::TICK_INTERVAL,
-            stack_pool: Vec::new(),
+            vstack: Vec::with_capacity(1 << 14),
             arg_buf: Vec::new(),
-            args_pool: Vec::new(),
         };
         crate::builtins::register_builtins(&mut realm);
         realm
@@ -559,6 +556,7 @@ impl Realm {
         for f in &self.frames {
             trace_frame(f, &mut tmp);
         }
+        tmp.extend(self.vstack.iter().filter(|v| v.is_object()).cloned());
         for j in &self.jobs {
             match j {
                 Job::Reaction { reaction, argument } => {

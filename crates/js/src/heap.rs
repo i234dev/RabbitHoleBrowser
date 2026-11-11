@@ -660,19 +660,20 @@ pub fn trace_reaction(r: &PromiseReaction, out: &mut Vec<Value>) {
     }
 }
 
+/// Values referenced by a frame itself; the slots of an active frame are
+/// traced with the realm's value stack, those of a suspended one here.
 pub fn trace_frame(f: &Frame, out: &mut Vec<Value>) {
-    for v in &f.stack {
-        push_val(out, v);
-    }
     out.push(Value::Object(f.scope));
     push_val(out, &f.this);
     push_id(out, f.func);
     push_val(out, &f.new_target);
     push_id(out, f.home_object);
-    push_opt(out, &f.arguments_obj);
-    for v in &f.args {
-        push_val(out, v);
+    if let Some(e) = &f.extra {
+        push_opt(out, &e.arguments_obj);
+        push_id(out, e.generator);
+        push_val(out, &e.completion);
+        for v in &e.saved {
+            push_val(out, v);
+        }
     }
-    push_id(out, f.generator);
-    push_val(out, &f.completion);
 }

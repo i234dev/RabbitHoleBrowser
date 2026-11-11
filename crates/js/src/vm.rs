@@ -7,31 +7,63 @@ use crate::realm::*;
 use crate::value::*;
 use std::rc::Rc;
 
-/// An activation record.
+/// An activation record. Its value slots (registers, then the operand
+/// stack) live in [`Realm::vstack`] from `base` on; code using
+/// `arguments.length` / `arguments[i]` directly keeps the actual arguments
+/// in the `argc` values just below `base`.
 pub struct Frame {
     pub code: Rc<FunctionCode>,
     pub pc: usize,
-    pub stack: Vec<Value>,
+    pub base: u32,
+    pub argc: u32,
     pub scope: ObjectId,
     pub scope_depth: u32,
     pub this: Value,
     pub func: Option<ObjectId>,
     pub new_target: Value,
     pub home_object: Option<ObjectId>,
-    pub args: Vec<Value>,
-    pub arguments_obj: Option<Value>,
-    pub generator: Option<ObjectId>,
+    /// Caller slot receiving this frame's return value.
+    pub ret_slot: u32,
     pub is_construct: bool,
     /// Returning from this frame exits the run loop.
     pub entry: bool,
+    /// State only some frames need (boxed to keep calls cheap).
+    pub extra: Option<Box<FrameExtra>>,
+}
+
+/// The rarely used parts of a frame.
+#[derive(Default)]
+pub struct FrameExtra {
+    pub arguments_obj: Option<Value>,
+    pub generator: Option<ObjectId>,
     /// Script completion value (last expression statement).
     pub completion: Value,
-    /// Constant index describing the callee of the next call (for errors).
-    pub callee_desc: Option<u32>,
-    /// Caller slot receiving this frame's return value.
-    pub ret_slot: u32,
     /// Slot receiving the value a suspended (yield / await) frame resumes with.
     pub resume_slot: u32,
+    /// The value slots (and kept arguments) of a suspended frame.
+    pub saved: Vec<Value>,
+}
+
+impl Frame {
+    /// First `vstack` index used by the frame (its kept arguments).
+    #[inline]
+    pub fn bottom(&self) -> usize {
+        self.base as usize - self.argc as usize
+    }
+
+    pub fn generator(&self) -> Option<ObjectId> {
+        self.extra.as_ref().and_then(|e| e.generator)
+    }
+
+    fn extra_mut(&mut self) -> &mut FrameExtra {
+        self.extra.get_or_insert_with(Default::default)
+    }
+}
+
+impl Default for Value {
+    fn default() -> Value {
+        Value::Undefined
+    }
 }
 
 impl std::fmt::Debug for Frame {
@@ -212,26 +244,22 @@ impl Realm {
         let slots = code.scope_slots as usize;
         let scope = self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots: vec![Value::Undefined; slots], parent: None, names: None }))));
         let this = if code.flags.is_script { Value::Object(self.global) } else { Value::Undefined };
-        let stack = self.take_stack(code.frame_size());
+        let base = self.reserve_slots(code.frame_size());
         let frame = Frame {
             code,
             pc: 0,
-            stack,
+            base: base as u32,
+            argc: 0,
             scope,
             scope_depth: 0,
             this,
             func: None,
             new_target: Value::Undefined,
             home_object: None,
-            args: Vec::new(),
-            arguments_obj: None,
-            generator: None,
+            ret_slot: 0,
             is_construct: false,
             entry: true,
-            completion: Value::Undefined,
-            callee_desc: None,
-            ret_slot: 0,
-            resume_slot: 0,
+            extra: Some(Box::default()),
         };
         self.push_frame(frame, true)?;
         match self.run()? {
@@ -240,8 +268,11 @@ impl Realm {
         }
     }
 
+    /// Push a frame whose slots are already reserved on top of `vstack`
+    /// (on failure they are released).
     fn push_frame(&mut self, mut frame: Frame, entry: bool) -> JsResult<()> {
         if self.frames.len() >= self.max_frames {
+            self.vstack.truncate(frame.bottom());
             return self.range_error("Maximum call stack size exceeded");
         }
         frame.entry = entry;
@@ -249,31 +280,66 @@ impl Realm {
         Ok(())
     }
 
+    /// `n` fresh (undefined) slots on top of the value stack; returns the
+    /// index of the first.
+    #[inline]
+    pub(crate) fn reserve_slots(&mut self, n: usize) -> usize {
+        let base = self.vstack.len();
+        self.vstack.resize(base + n, Value::Undefined);
+        base
+    }
+
+    /// Pop the current frame and release its slots.
+    #[inline]
+    pub(crate) fn pop_frame(&mut self) -> Frame {
+        let f = self.frames.pop().expect("frame underflow");
+        self.vstack.truncate(f.bottom());
+        f
+    }
+
+    /// Move a frame's slots off the value stack (the frame suspends).
+    fn detach_slots(&mut self, f: &mut Frame) {
+        let bottom = f.bottom();
+        let extra = f.extra_mut();
+        extra.saved.clear();
+        extra.saved.extend(self.vstack.drain(bottom..));
+    }
+
+    /// Put a suspended frame's slots back on top of the value stack.
+    fn attach_slots(&mut self, f: &mut Frame) {
+        let bottom = self.vstack.len();
+        f.base = (bottom + f.argc as usize) as u32;
+        if let Some(e) = f.extra.as_mut() {
+            self.vstack.append(&mut e.saved);
+        }
+    }
+
     /// `Call(argc)` of a plain closure (no `arguments`, rest parameter,
     /// generator/async or class constructor): builds the callee frame by
     /// moving the arguments straight from the caller's operand stack.
     /// Returns false (nothing done) when the general path is needed. The
     /// caller's frame must be synced.
-    pub(crate) fn try_fast_call(&mut self, fi: usize, base: usize, argc: usize) -> JsResult<bool> {
-        let id = match &self.frames[fi].stack[base] {
+    pub(crate) fn try_fast_call(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
+        let cb = self.frames[fi].base as usize + b;
+        let id = match &self.vstack[cb] {
             Value::Object(id) => *id,
             _ => return Ok(false),
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
         let flags = c.code.flags;
-        if flags.is_generator || flags.is_async || flags.is_class_constructor || c.code.arguments_loc.is_some() || c.code.rest_loc.is_some() {
+        if flags.is_generator || flags.is_async || flags.is_class_constructor || c.code.arguments_loc.is_some() || c.code.rest_loc.is_some() || (flags.is_arrow && c.arguments.is_some()) {
             return Ok(false);
         }
         let this = if flags.is_arrow {
             c.this_value.clone().unwrap_or(Value::Undefined)
         } else if flags.is_strict {
-            match &self.frames[fi].stack[base + 1] {
+            match &self.vstack[cb + 1] {
                 Value::Empty => Value::Undefined,
                 v => v.clone(),
             }
         } else {
-            match &self.frames[fi].stack[base + 1] {
+            match &self.vstack[cb + 1] {
                 Value::Undefined | Value::Null | Value::Empty => Value::Object(self.global),
                 v @ Value::Object(_) => v.clone(),
                 _ => return Ok(false),
@@ -286,30 +352,24 @@ impl Realm {
         let parent_scope = c.scope;
         let home = c.home_object;
         let new_target = if flags.is_arrow { c.new_target.clone().unwrap_or(Value::Undefined) } else { Value::Undefined };
-        let arguments_obj = if flags.is_arrow { c.arguments.clone() } else { None };
         let nslots = code.scope_slots as usize;
-        let mut stack = self.take_stack(code.frame_size());
         let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
-        let frame_args = if flags.args_direct {
-            let mut v = self.args_pool.pop().unwrap_or_default();
-            v.extend_from_slice(&self.frames[fi].stack[base + 2..base + 2 + argc]);
-            v
-        } else {
-            Vec::new()
-        };
-        {
-            let caller = &mut self.frames[fi].stack;
-            for (i, &loc) in code.param_locs.iter().enumerate() {
-                let v = if i < argc { std::mem::replace(&mut caller[base + 2 + i], Value::Undefined) } else { Value::Undefined };
-                match loc {
-                    VarLoc::Reg(r) => stack[r as usize] = v,
-                    VarLoc::Slot(s) => slots[s as usize] = v,
-                }
+        let kept = if flags.args_direct { argc } else { 0 };
+        let bottom = self.vstack.len();
+        if kept > 0 {
+            self.vstack.extend_from_within(cb + 2..cb + 2 + argc);
+        }
+        let base = self.reserve_slots(code.frame_size());
+        for (i, &loc) in code.param_locs.iter().enumerate() {
+            let v = if i < argc { std::mem::replace(&mut self.vstack[cb + 2 + i], Value::Undefined) } else { Value::Undefined };
+            match loc {
+                VarLoc::Reg(r) => self.vstack[base + r as usize] = v,
+                VarLoc::Slot(s) => slots[s as usize] = v,
             }
         }
         if let Some(sl) = code.self_loc {
             match sl {
-                VarLoc::Reg(r) => stack[r as usize] = Value::Object(id),
+                VarLoc::Reg(r) => self.vstack[base + r as usize] = Value::Object(id),
                 VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
             }
         }
@@ -321,25 +381,22 @@ impl Realm {
                 None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
             }
         };
+        debug_assert_eq!(base - bottom, kept);
         self.frames.push(Frame {
             code,
             pc: 0,
-            stack,
+            base: base as u32,
+            argc: kept as u32,
             scope,
             scope_depth: 0,
             this,
             func: Some(id),
             new_target,
             home_object: home,
-            args: frame_args,
-            arguments_obj,
-            generator: None,
+            ret_slot: b as u32,
             is_construct: false,
             entry: false,
-            completion: Value::Undefined,
-            callee_desc: None,
-            ret_slot: base as u32,
-            resume_slot: 0,
+            extra: None,
         });
         Ok(true)
     }
@@ -347,10 +404,11 @@ impl Realm {
     /// `New(argc)` of a plain (non-derived, non-class-field) function
     /// constructor: allocates `this` from the callee's own `prototype`
     /// data property and builds the frame from the caller's slots (callee
-    /// at `base`, arguments after it). Returns false when the general path
-    /// is needed. The caller must be synced.
-    pub(crate) fn try_fast_construct(&mut self, fi: usize, base: usize, argc: usize) -> JsResult<bool> {
-        let id = match &self.frames[fi].stack[base] {
+    /// at `b`, arguments after it). Returns false when the general path is
+    /// needed. The caller must be synced.
+    pub(crate) fn try_fast_construct(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
+        let cb = self.frames[fi].base as usize + b;
+        let id = match &self.vstack[cb] {
             Value::Object(id) => *id,
             _ => return Ok(false),
         };
@@ -383,28 +441,22 @@ impl Realm {
         let home = c.home_object;
         let nslots = code.scope_slots as usize;
         let this = Value::Object(self.alloc(Object::new(Some(proto), ObjectKind::Ordinary)));
-        let mut stack = self.take_stack(code.frame_size());
         let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
-        let frame_args = if flags.args_direct {
-            let mut v = self.args_pool.pop().unwrap_or_default();
-            v.extend_from_slice(&self.frames[fi].stack[base + 1..base + 1 + argc]);
-            v
-        } else {
-            Vec::new()
-        };
-        {
-            let caller = &mut self.frames[fi].stack;
-            for (i, &loc) in code.param_locs.iter().enumerate() {
-                let v = if i < argc { std::mem::replace(&mut caller[base + 1 + i], Value::Undefined) } else { Value::Undefined };
-                match loc {
-                    VarLoc::Reg(r) => stack[r as usize] = v,
-                    VarLoc::Slot(s) => slots[s as usize] = v,
-                }
+        let kept = if flags.args_direct { argc } else { 0 };
+        if kept > 0 {
+            self.vstack.extend_from_within(cb + 1..cb + 1 + argc);
+        }
+        let base = self.reserve_slots(code.frame_size());
+        for (i, &loc) in code.param_locs.iter().enumerate() {
+            let v = if i < argc { std::mem::replace(&mut self.vstack[cb + 1 + i], Value::Undefined) } else { Value::Undefined };
+            match loc {
+                VarLoc::Reg(r) => self.vstack[base + r as usize] = v,
+                VarLoc::Slot(s) => slots[s as usize] = v,
             }
         }
         if let Some(sl) = code.self_loc {
             match sl {
-                VarLoc::Reg(r) => stack[r as usize] = Value::Object(id),
+                VarLoc::Reg(r) => self.vstack[base + r as usize] = Value::Object(id),
                 VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
             }
         }
@@ -419,27 +471,24 @@ impl Realm {
         self.frames.push(Frame {
             code,
             pc: 0,
-            stack,
+            base: base as u32,
+            argc: kept as u32,
             scope,
             scope_depth: 0,
             this,
             func: Some(id),
             new_target: Value::Object(id),
             home_object: home,
-            args: frame_args,
-            arguments_obj: None,
-            generator: None,
+            ret_slot: b as u32,
             is_construct: true,
             entry: false,
-            completion: Value::Undefined,
-            callee_desc: None,
-            ret_slot: base as u32,
-            resume_slot: 0,
+            extra: None,
         });
         Ok(true)
     }
 
-    /// Build the frame for calling closure `id`.
+    /// Build the frame for calling closure `id`; its slots are reserved on
+    /// top of the value stack (push it next, or detach them).
     pub(crate) fn prepare_frame(&mut self, id: ObjectId, this: Value, args: &[Value], new_target: Value, is_construct: bool) -> JsResult<Frame> {
         let (code, parent_scope, this_value, arrow_nt, home, arrow_args) = match &self.obj(id).kind {
             ObjectKind::Function(c) => (c.code.clone(), c.scope, c.this_value.clone(), c.new_target.clone(), c.home_object, c.arguments.clone()),
@@ -471,7 +520,25 @@ impl Realm {
         let new_target = if flags.is_arrow { arrow_nt.unwrap_or(Value::Undefined) } else { new_target };
         let nslots = code.scope_slots as usize;
         let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
-        let mut stack = self.take_stack(code.frame_size());
+        let mut arguments_obj = None;
+        let mut rest_arr = None;
+        if code.rest_loc.is_some() {
+            let start = code.param_locs.len();
+            let rest: Vec<Value> = if args.len() > start { args[start..].to_vec() } else { Vec::new() };
+            rest_arr = Some(self.new_array_value(rest));
+        }
+        if code.arguments_loc.is_some() {
+            arguments_obj = Some(self.create_arguments_object(args, if flags.is_strict { None } else { Some(id) }));
+        } else if flags.is_arrow {
+            arguments_obj = arrow_args;
+        }
+        // Slots last: nothing below may run script code that pushes frames.
+        let kept = if flags.args_direct { args.len() } else { 0 };
+        if kept > 0 {
+            self.vstack.extend_from_slice(args);
+        }
+        let base = self.reserve_slots(code.frame_size());
+        let stack = &mut self.vstack[base..];
         #[inline(always)]
         fn put(stack: &mut [Value], slots: &mut [Value], loc: VarLoc, v: Value) {
             match loc {
@@ -481,24 +548,16 @@ impl Realm {
         }
         for (i, &loc) in code.param_locs.iter().enumerate() {
             let v = args.get(i).cloned().unwrap_or(Value::Undefined);
-            put(&mut stack, &mut slots, loc, v);
+            put(stack, &mut slots, loc, v);
         }
-        let mut arguments_obj = None;
-        if let Some(rl) = code.rest_loc {
-            let start = code.param_locs.len();
-            let rest: Vec<Value> = if args.len() > start { args[start..].to_vec() } else { Vec::new() };
-            let arr = self.new_array_value(rest);
-            put(&mut stack, &mut slots, rl, arr);
+        if let (Some(rl), Some(arr)) = (code.rest_loc, rest_arr) {
+            put(stack, &mut slots, rl, arr);
         }
         if let Some(sl) = code.self_loc {
-            put(&mut stack, &mut slots, sl, Value::Object(id));
+            put(stack, &mut slots, sl, Value::Object(id));
         }
-        if let Some(al) = code.arguments_loc {
-            let ao = self.create_arguments_object(args, if flags.is_strict { None } else { Some(id) });
-            put(&mut stack, &mut slots, al, ao.clone());
-            arguments_obj = Some(ao);
-        } else if flags.is_arrow {
-            arguments_obj = arrow_args;
+        if let (Some(al), Some(ao)) = (code.arguments_loc, &arguments_obj) {
+            put(stack, &mut slots, al, ao.clone());
         }
         let scope = if nslots > 0 {
             self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
@@ -511,22 +570,18 @@ impl Realm {
         Ok(Frame {
             code,
             pc: 0,
-            stack,
+            base: base as u32,
+            argc: kept as u32,
             scope,
             scope_depth: 0,
             this,
             func: Some(id),
             new_target,
             home_object: home,
-            args: if flags.args_direct { self.take_args_vec(args) } else { Vec::new() },
-            arguments_obj,
-            generator: None,
+            ret_slot: 0,
             is_construct,
             entry: false,
-            completion: Value::Undefined,
-            callee_desc: None,
-            ret_slot: 0,
-            resume_slot: 0,
+            extra: arguments_obj.map(|a| Box::new(FrameExtra { arguments_obj: Some(a), ..Default::default() })),
         })
     }
 
@@ -557,6 +612,8 @@ impl Realm {
         };
         let flags = code.flags;
         let mut frame = self.prepare_frame(id, this, args, Value::Undefined, false)?;
+        // Suspended at its start: the slots wait inside the frame.
+        self.detach_slots(&mut frame);
         let is_async = flags.is_async;
         let is_gen = flags.is_generator;
         let proto = if is_gen {
@@ -579,7 +636,7 @@ impl Realm {
             Some(proto),
             ObjectKind::Generator(Box::new(GeneratorData { state: GeneratorState::SuspendedStart, frame: None, is_async, promise, queue: Default::default() })),
         ));
-        frame.generator = Some(gen);
+        frame.extra_mut().generator = Some(gen);
         if let ObjectKind::Generator(g) = &mut self.obj_mut(gen).kind {
             g.frame = Some(Box::new(frame));
         }
@@ -632,14 +689,16 @@ impl Realm {
             None => return self.type_error("Generator frame missing"),
         };
         set_state(self, GeneratorState::Executing, None);
+        self.attach_slots(&mut frame);
         if state == GeneratorState::SuspendedYield {
             match mode {
                 ResumeMode::Next => {
-                    let slot = frame.resume_slot as usize;
-                    frame.stack[slot] = value.clone();
+                    let slot = frame.base as usize + frame.extra.as_ref().map_or(0, |e| e.resume_slot as usize);
+                    self.vstack[slot] = value.clone();
                 }
                 ResumeMode::Return => {
                     // Finally blocks are not run (inline-finally compilation).
+                    self.vstack.truncate(frame.bottom());
                     set_state(self, GeneratorState::Completed, None);
                     return Ok(Step::Return(value));
                 }
@@ -751,12 +810,13 @@ impl Realm {
                     frame.scope = parent.expect("scope underflow");
                     frame.scope_depth -= 1;
                 }
-                frame.stack[slot] = err;
                 frame.pc = h.target as usize;
+                let at = frame.base as usize + slot;
+                self.vstack[at] = err;
                 return Ok(());
             }
-            let f = self.frames.pop().unwrap();
-            if let Some(g) = f.generator {
+            let f = self.pop_frame();
+            if let Some(g) = f.generator() {
                 if let ObjectKind::Generator(gd) = &mut self.obj_mut(g).kind {
                     gd.state = GeneratorState::Completed;
                     gd.frame = None;
@@ -848,10 +908,12 @@ impl Realm {
             let ops: &[Op] = &code.ops;
             let consts: &[Value] = &code.constants;
             let mut pc = self.frames[fi].pc;
-            // The frame's slots never move while it is current: the vector
-            // has its final length from frame creation on.
-            let base: *mut Value = self.frames[fi].stack.as_mut_ptr();
-            debug_assert!(self.frames[fi].stack.len() >= code.frame_size());
+            // The frame's slots: the value stack only grows on calls (which
+            // reload) and in out-of-line instructions (`slow!` reloads).
+            let fbase = self.frames[fi].base as usize;
+            debug_assert!(self.vstack.len() >= fbase + code.frame_size());
+            // SAFETY: `fbase` is within the vector.
+            let mut base: *mut Value = unsafe { self.vstack.as_mut_ptr().add(fbase) };
             macro_rules! sl {
                 ($i:expr) => {
                     // SAFETY: operands are slots below `frame_size` (checked
@@ -916,8 +978,9 @@ impl Realm {
                     if self.frames.len() != fi + 1 {
                         continue 'reload;
                     }
-                    // SAFETY: as in `sync`.
+                    // SAFETY: as in `sync`; the value stack may have moved.
                     pc = unsafe { self.frames.get_unchecked(fi) }.pc;
+                    base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
                 }};
             }
             macro_rules! num2 {
@@ -1370,7 +1433,7 @@ impl Realm {
                     Op::StoreCompletionR(s) => {
                         let v = sl!(s).clone();
                         // SAFETY: as in `sync`.
-                        unsafe { self.frames.get_unchecked_mut(fi) }.completion = v;
+                        unsafe { self.frames.get_unchecked_mut(fi) }.extra_mut().completion = v;
                     }
                     Op::CallR(b, argc, _) => {
                         tick!();
@@ -1393,31 +1456,30 @@ impl Realm {
                             Value::Empty => Value::Undefined,
                             v => v,
                         };
-                        let f = match self.frames.pop() {
-                            Some(f) => f,
-                            None => stack_underflow(),
-                        };
+                        // SAFETY: as in `sync`.
+                        let f = unsafe { self.frames.get_unchecked(fi) };
                         if f.is_construct && !v.is_object() {
                             if f.this.is_empty() {
-                                self.frames.push(f);
                                 return Err(self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
                             }
                             v = f.this.clone();
                         }
+                        let f = self.pop_frame();
                         if f.entry {
-                            if let Some(g) = f.generator {
+                            if let Some(g) = f.generator() {
                                 if let ObjectKind::Generator(gd) = &mut self.obj_mut(g).kind {
                                     gd.state = GeneratorState::Completed;
                                     gd.frame = None;
                                 }
                             }
-                            self.recycle_frame(f);
                             return Ok(Exit::Return(v));
                         }
                         let ret = f.ret_slot as usize;
-                        self.recycle_frame(f);
-                        match self.frames.last_mut() {
-                            Some(caller) => caller.stack[ret] = v,
+                        match self.frames.last() {
+                            Some(caller) => {
+                                let at = caller.base as usize + ret;
+                                self.vstack[at] = v;
+                            }
                             None => stack_underflow(),
                         }
                         continue 'reload;
@@ -1436,54 +1498,24 @@ impl Realm {
         })
     }
 
-    pub(crate) fn recycle_frame(&mut self, f: Frame) {
-        let mut a = f.args;
-        if a.capacity() != 0 && a.capacity() <= 64 && self.args_pool.len() < 64 {
-            a.clear();
-            self.args_pool.push(a);
-        }
-        let mut st = f.stack;
-        if st.capacity() <= 256 && self.stack_pool.len() < 64 {
-            st.clear();
-            self.stack_pool.push(st);
-        }
-    }
-
-    /// A pooled vector holding a copy of `args` (frames of `args_direct` code).
-    pub(crate) fn take_args_vec(&mut self, args: &[Value]) -> Vec<Value> {
-        let mut v = self.args_pool.pop().unwrap_or_default();
-        v.extend_from_slice(args);
-        v
-    }
-
     /// `arguments[key]` read of an `args_direct` frame.
     fn args_get(&mut self, fi: usize, key: Value) -> JsResult<Value> {
         let f = &self.frames[fi];
+        let (bottom, argc) = (f.bottom(), f.argc as usize);
         if let Value::Number(n) = key {
             let i = n as usize;
             // Like the arguments objects this engine creates, reads are
             // not mapped to the parameters.
-            if i as f64 == n && i < f.args.len() {
-                return Ok(f.args[i].clone());
+            if i as f64 == n && i < argc {
+                return Ok(self.vstack[bottom + i].clone());
             }
         }
         // Anything else: an equivalent (unobservable) arguments object.
-        let args = f.args.clone();
+        let args = self.vstack[bottom..bottom + argc].to_vec();
         let callee = if f.code.flags.is_strict { None } else { f.func };
         let ao = self.create_arguments_object(&args, callee);
         let key = self.to_property_key(key)?;
         self.get(ao, key)
-    }
-
-    /// The slots of a new frame (all undefined).
-    #[inline]
-    pub(crate) fn take_stack(&mut self, size: usize) -> Vec<Value> {
-        let mut st = match self.stack_pool.pop() {
-            Some(s) => s,
-            None => Vec::with_capacity(size.max(16)),
-        };
-        st.resize(size, Value::Undefined);
-        st
     }
 
     /// Execute one (non-hot) instruction of frame `fi`, whose `pc` already
@@ -1497,32 +1529,34 @@ impl Realm {
                     self.frames[fi]
                 };
             }
-            // Stack instructions find their operands below the static depth.
+            // Stack instructions find their operands below the static
+            // depth; `sp` and `fb` are value-stack indices.
+            let fb: usize = self.frames[fi].base as usize;
             let mut sp: usize = {
                 let f = &self.frames[fi];
-                f.code.nregs as usize + f.code.depths[f.pc - 1] as usize
+                fb + f.code.nregs as usize + f.code.depths[f.pc - 1] as usize
             };
             macro_rules! pop {
                 () => {{
                     sp -= 1;
-                    std::mem::replace(&mut frame!().stack[sp], Value::Undefined)
+                    std::mem::replace(&mut self.vstack[sp], Value::Undefined)
                 }};
             }
             macro_rules! push {
                 ($v:expr) => {{
                     let v = $v;
-                    frame!().stack[sp] = v;
+                    self.vstack[sp] = v;
                     sp += 1;
                 }};
             }
             macro_rules! peek {
                 () => {
-                    &frame!().stack[sp - 1]
+                    &self.vstack[sp - 1]
                 };
             }
             macro_rules! sl {
                 ($i:expr) => {
-                    frame!().stack[$i as usize]
+                    self.vstack[fb + $i as usize]
                 };
             }
             macro_rules! rd {
@@ -1824,14 +1858,14 @@ impl Realm {
                 }
                 Op::StoreCompletionR(s) => {
                     let v = sl!(s).clone();
-                    frame!().completion = v;
+                    frame!().extra_mut().completion = v;
                 }
                 Op::GetReg(r) => {
-                    let v = frame!().stack[r as usize].clone();
+                    let v = sl!(r).clone();
                     push!(if v.is_empty() { Value::Undefined } else { v });
                 }
                 Op::GetRegChecked(r) => {
-                    let v = frame!().stack[r as usize].clone();
+                    let v = sl!(r).clone();
                     if v.is_empty() {
                         let name = self.reg_name(fi, r);
                         return Err(self.new_error("ReferenceError", &format!("Cannot access '{}' before initialization", name)));
@@ -1840,15 +1874,15 @@ impl Realm {
                 }
                 Op::SetReg(r) => {
                     let v = pop!();
-                    frame!().stack[r as usize] = v;
+                    sl!(r) = v;
                 }
                 Op::SetRegChecked(r) => {
                     let v = pop!();
-                    if frame!().stack[r as usize].is_empty() {
+                    if sl!(r).is_empty() {
                         let name = self.reg_name(fi, r);
                         return Err(self.new_error("ReferenceError", &format!("Cannot access '{}' before initialization", name)));
                     }
-                    frame!().stack[r as usize] = v;
+                    sl!(r) = v;
                 }
                 Op::Const(i) => push!(constant!(i)),
                 Op::Undefined => push!(Value::Undefined),
@@ -1864,20 +1898,20 @@ impl Realm {
                     push!(v);
                 }
                 Op::Dup2 => {
-                    let a = frame!().stack[sp - 2].clone();
-                    let b = frame!().stack[sp - 1].clone();
+                    let a = self.vstack[sp - 2].clone();
+                    let b = self.vstack[sp - 1].clone();
                     push!(a);
                     push!(b);
                 }
                 Op::Swap => {
-                    frame!().stack.swap(sp - 1, sp - 2);
+                    self.vstack.swap(sp - 1, sp - 2);
                 }
                 Op::Rot3 => {
                     // a b c -> b c a
-                    frame!().stack[sp - 3..sp].rotate_left(1);
+                    self.vstack[sp - 3..sp].rotate_left(1);
                 }
                 Op::Rot4 => {
-                    frame!().stack[sp - 4..sp].rotate_left(1);
+                    self.vstack[sp - 4..sp].rotate_left(1);
                 }
                 Op::GetLocal(d, s) => {
                     let scope = frame!().scope;
@@ -2040,8 +2074,8 @@ impl Realm {
                     push!(v);
                 }
                 Op::GetElemKeep => {
-                    let key = frame!().stack[sp - 1].clone();
-                    let obj = frame!().stack[sp - 2].clone();
+                    let key = self.vstack[sp - 1].clone();
+                    let obj = self.vstack[sp - 2].clone();
                     let v = self.get_elem(obj, key)?;
                     push!(v);
                 }
@@ -2194,10 +2228,10 @@ impl Realm {
                 }
                 Op::Call(argc, desc) | Op::CallEval(argc, desc) | Op::CallR(_, argc, desc) => {
                     if let Op::CallR(b, ..) = op {
-                        sp = b as usize + argc as usize + 2;
+                        sp = fb + b as usize + argc as usize + 2;
                     }
                     let base = sp - argc as usize - 2;
-                    let args = self.take_args(fi, base + 2, sp);
+                    let args = self.take_args(base + 2, sp);
                     sp = base + 2;
                     let this = pop!();
                     let f = pop!();
@@ -2214,7 +2248,7 @@ impl Realm {
                             return Ok(Flow::Next);
                         }
                     }
-                    let r = self.do_call(f, this, &args, base);
+                    let r = self.do_call(f, this, &args, base - fb);
                     self.give_args(args);
                     r?;
                 }
@@ -2223,17 +2257,17 @@ impl Realm {
                     let this = pop!();
                     let f = pop!();
                     let args = self.create_list_from_array_like(arr)?;
-                    self.do_call(f, this, &args, sp)?;
+                    self.do_call(f, this, &args, sp - fb)?;
                 }
                 Op::New(argc) | Op::NewR(_, argc) => {
                     if let Op::NewR(b, _) = op {
-                        sp = b as usize + argc as usize + 1;
+                        sp = fb + b as usize + argc as usize + 1;
                     }
                     let base = sp - argc as usize - 1;
-                    let args = self.take_args(fi, base + 1, sp);
+                    let args = self.take_args(base + 1, sp);
                     sp = base + 1;
                     let f = pop!();
-                    let r = self.do_construct(f, &args, base);
+                    let r = self.do_construct(f, &args, base - fb);
                     self.give_args(args);
                     r?;
                 }
@@ -2241,11 +2275,11 @@ impl Realm {
                     let arr = pop!();
                     let f = pop!();
                     let args = self.create_list_from_array_like(arr)?;
-                    self.do_construct(f, &args, sp)?;
+                    self.do_construct(f, &args, sp - fb)?;
                 }
                 Op::SuperCall(argc) => {
                     let base = sp - argc as usize;
-                    let args: Vec<Value> = (base..sp).map(|i| std::mem::replace(&mut frame!().stack[i], Value::Undefined)).collect();
+                    let args: Vec<Value> = (base..sp).map(|i| std::mem::replace(&mut self.vstack[i], Value::Undefined)).collect();
                     sp = base;
                     let v = self.super_call(fi, args)?;
                     push!(v);
@@ -2490,7 +2524,7 @@ impl Realm {
                 }
                 Op::NewArray(n) => {
                     let start = sp - n as usize;
-                    let items: Vec<Value> = (start..sp).map(|i| std::mem::replace(&mut frame!().stack[i], Value::Undefined)).collect();
+                    let items: Vec<Value> = (start..sp).map(|i| std::mem::replace(&mut self.vstack[i], Value::Undefined)).collect();
                     sp = start;
                     let a = self.new_array(items);
                     push!(Value::Object(a));
@@ -2558,8 +2592,8 @@ impl Realm {
                 }
                 Op::SetClassFields => {
                     let f = pop!();
-                    let proto = frame!().stack[sp - 1].as_object().unwrap();
-                    let ctor = frame!().stack[sp - 2].as_object().unwrap();
+                    let proto = self.vstack[sp - 1].as_object().unwrap();
+                    let ctor = self.vstack[sp - 2].as_object().unwrap();
                     if let Value::Object(fid) = &f {
                         if let ObjectKind::Function(c) = &mut self.obj_mut(*fid).kind {
                             c.home_object = Some(proto);
@@ -2595,11 +2629,11 @@ impl Realm {
                     push!(v);
                 }
                 Op::Arguments => {
-                    let v = frame!().arguments_obj.clone().unwrap_or(Value::Undefined);
+                    let v = frame!().extra.as_ref().and_then(|e| e.arguments_obj.clone()).unwrap_or(Value::Undefined);
                     push!(v);
                 }
                 Op::ArgsLength => {
-                    let n = frame!().args.len();
+                    let n = frame!().argc;
                     push!(Value::Number(n as f64));
                 }
                 Op::ArgsGet => {
@@ -2658,8 +2692,8 @@ impl Realm {
                 }
                 Op::IteratorNextWith => {
                     let received = pop!();
-                    let next = frame!().stack[sp - 1].clone();
-                    let it = frame!().stack[sp - 2].clone();
+                    let next = self.vstack[sp - 1].clone();
+                    let it = self.vstack[sp - 2].clone();
                     let r = self.call(next, it, &[received])?;
                     if !r.is_object() {
                         return self.type_error("Iterator result is not an object");
@@ -2668,15 +2702,15 @@ impl Realm {
                 }
                 Op::IteratorStep => {
                     let n = sp;
-                    let next = frame!().stack[n - 1].clone();
+                    let next = self.vstack[n - 1].clone();
                     if next.is_empty() {
                         push!(Value::Undefined);
                     } else {
-                        let it = frame!().stack[n - 2].clone();
+                        let it = self.vstack[n - 2].clone();
                         match self.iterator_step(&it, &next)? {
                             Some(v) => push!(v),
                             None => {
-                                frame!().stack[n - 1] = Value::Empty;
+                                self.vstack[n - 1] = Value::Empty;
                                 push!(Value::Undefined);
                             }
                         }
@@ -2684,14 +2718,14 @@ impl Realm {
                 }
                 Op::IteratorRest => {
                     let n = sp;
-                    let next = frame!().stack[n - 1].clone();
+                    let next = self.vstack[n - 1].clone();
                     let mut items = Vec::new();
                     if !next.is_empty() {
-                        let it = frame!().stack[n - 2].clone();
+                        let it = self.vstack[n - 2].clone();
                         while let Some(v) = self.iterator_step(&it, &next)? {
                             items.push(v);
                         }
-                        frame!().stack[n - 1] = Value::Empty;
+                        self.vstack[n - 1] = Value::Empty;
                     }
                     let a = self.new_array(items);
                     push!(Value::Object(a));
@@ -2729,22 +2763,24 @@ impl Realm {
                 }
                 Op::Yield | Op::AsyncYield => {
                     let v = pop!();
-                    frame!().resume_slot = sp as u32;
-                    let f = self.frames.pop().unwrap();
+                    frame!().extra_mut().resume_slot = (sp - fb) as u32;
+                    let mut f = self.frames.pop().unwrap();
+                    self.detach_slots(&mut f);
                     return Ok(Flow::Exit(Exit::Yield(v, Box::new(f))));
                 }
                 Op::Await => {
                     let v = pop!();
-                    frame!().resume_slot = sp as u32;
-                    let f = self.frames.pop().unwrap();
+                    frame!().extra_mut().resume_slot = (sp - fb) as u32;
+                    let mut f = self.frames.pop().unwrap();
+                    self.detach_slots(&mut f);
                     return Ok(Flow::Exit(Exit::Await(v, Box::new(f))));
                 }
                 Op::StoreCompletion => {
                     let v = pop!();
-                    frame!().completion = v;
+                    frame!().extra_mut().completion = v;
                 }
                 Op::LoadCompletion => {
-                    let v = frame!().completion.clone();
+                    let v = frame!().extra.as_ref().map(|e| e.completion.clone()).unwrap_or(Value::Undefined);
                     push!(v);
                 }
                 Op::Debugger | Op::Nop => {}
@@ -2915,10 +2951,11 @@ impl Realm {
     /// Move the operands from `from` up out of frame `fi` into the reusable
     /// argument buffer.
     #[inline]
-    /// Move the values of slots `from..to` into a (pooled) argument buffer.
-    fn take_args(&mut self, fi: usize, from: usize, to: usize) -> Vec<Value> {
+    /// Move the values of value-stack slots `from..to` into a (pooled)
+    /// argument buffer.
+    fn take_args(&mut self, from: usize, to: usize) -> Vec<Value> {
         let mut buf = std::mem::take(&mut self.arg_buf);
-        for v in &mut self.frames[fi].stack[from..to] {
+        for v in &mut self.vstack[from..to] {
             buf.push(std::mem::replace(v, Value::Undefined));
         }
         buf
@@ -2949,15 +2986,22 @@ impl Realm {
                 ObjectKind::Native(n) => {
                     let func = n.func;
                     let v = self.call_native(*id, func, this, args, false)?;
-                    self.frames.last_mut().unwrap().stack[ret] = v;
+                    self.set_current_slot(ret, v);
                     return Ok(());
                 }
                 _ => {}
             }
         }
         let v = self.call(f, this, args)?;
-        self.frames.last_mut().unwrap().stack[ret] = v;
+        self.set_current_slot(ret, v);
         Ok(())
+    }
+
+    /// Write slot `slot` of the current frame.
+    #[inline]
+    fn set_current_slot(&mut self, slot: usize, v: Value) {
+        let at = self.frames.last().unwrap().base as usize + slot;
+        self.vstack[at] = v;
     }
 
     fn do_construct(&mut self, f: Value, args: &[Value], ret: usize) -> JsResult<()> {
@@ -2972,33 +3016,31 @@ impl Realm {
             }
         }
         let v = self.construct(f.clone(), args, f)?;
-        self.frames.last_mut().unwrap().stack[ret] = v;
+        self.set_current_slot(ret, v);
         Ok(())
     }
 
     /// Return `v` from the current frame.
     fn do_return(&mut self, mut v: Value) -> JsResult<Flow> {
-        let f = self.frames.pop().unwrap();
+        let f = self.frames.last().unwrap();
         if f.is_construct && !v.is_object() {
             if f.this.is_empty() {
-                self.frames.push(f);
                 return Err(self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
             }
             v = f.this.clone();
         }
+        let f = self.pop_frame();
         if f.entry {
-            if let Some(g) = f.generator {
+            if let Some(g) = f.generator() {
                 if let ObjectKind::Generator(gd) = &mut self.obj_mut(g).kind {
                     gd.state = GeneratorState::Completed;
                     gd.frame = None;
                 }
             }
-            self.recycle_frame(f);
             return Ok(Flow::Exit(Exit::Return(v)));
         }
         let ret = f.ret_slot as usize;
-        self.recycle_frame(f);
-        self.frames.last_mut().unwrap().stack[ret] = v;
+        self.set_current_slot(ret, v);
         Ok(Flow::Next)
     }
 
@@ -3208,7 +3250,7 @@ impl Realm {
             new_target: if flags.is_arrow { Some(frame.new_target.clone()) } else { None },
             home_object: if flags.is_arrow { frame.home_object } else { None },
             fields: None,
-            arguments: if flags.is_arrow { frame.arguments_obj.clone() } else { None },
+            arguments: if flags.is_arrow { frame.extra.as_ref().and_then(|e| e.arguments_obj.clone()) } else { None },
         };
         let proto = if flags.is_generator && flags.is_async {
             self.intrinsics.others.get("AsyncGeneratorFunctionPrototype").copied().unwrap_or(self.intrinsics.function_proto)
