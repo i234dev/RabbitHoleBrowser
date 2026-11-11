@@ -591,8 +591,9 @@ fn open_returns_a_short_summary() {
     assert!(tokens < 500, "summary too long ({tokens} tokens):\n{summary}");
     // Refs agree with the full snapshot.
     let q = ref_of(&summary, "textbox \"Search the site\"");
-    let snap = ok(&mut a, "snapshot", json!({}));
-    assert_eq!(ref_of(&snap, "textbox \"Search the site\""), q, "{snap}");
+    let found = ok(&mut a, "find", json!({ "text": "Search the site" }));
+    let same_ref = found.match_indices(q.as_str()).any(|(i, _)| !found[i + q.len()..].starts_with(|c: char| c.is_ascii_digit()));
+    assert!(same_ref, "{q} in {found}");
     let full = ok(&mut a, "open", json!({ "url": srv.url("/"), "snapshot": true }));
     assert!(full.contains("Item 0.0") && !full.contains("Summary only"), "{full}");
     // A navigating click returns the summary of the new page.

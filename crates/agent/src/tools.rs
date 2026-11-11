@@ -27,7 +27,7 @@ pub fn definitions() -> Vec<Value> {
     let r = json!({ "type": "string", "description": "Element ref from a snapshot, e.g. @e12 (forms: @f1)" });
     let dialog = json!({ "type": "string", "description": "Answer to alert/confirm/prompt raised during this call: accept, dismiss (default) or the prompt text" });
     vec![
-        json!({ "name": "open", "description": "Load a URL (or back/forward/reload) in the current tab and return a short page summary (title, landmarks, heading outline, forms with field refs, overlays, counts); snapshot=true returns the full semantic snapshot instead (or call snapshot). Uses the standard browser identity by default; bot=true switches to the RabbitHoleBot identity with robots.txt.",
+        json!({ "name": "open", "description": "Load a URL (or back/forward/reload) and return a short page summary: landmarks, outline, forms, overlays. snapshot=true: full tree. bot=true: RabbitHoleBot identity + robots.txt.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "Absolute URL, or back | forward | reload" },
                 "new_tab": { "type": "boolean" },
