@@ -33,22 +33,28 @@ enum Rank {
     UaImportant = 5,
 }
 
-struct IndexedRule<'a> {
-    is_ua: bool,
-    selector: &'a Selector,
-    specificity: Specificity,
-    decls: &'a [Declaration],
+pub(crate) struct IndexedRule {
+    pub(crate) is_ua: bool,
+    pub(crate) selector: Selector,
+    pub(crate) specificity: Specificity,
+    pub(crate) decls: Rc<[Declaration]>,
     /// Base URL of the sheet the rule came from.
-    base: Option<&'a str>,
+    pub(crate) base: Option<Rc<str>>,
+    /// Bloom-filter hashes of compounds that must match ancestors of the
+    /// subject (0 = unused slot); see [`crate::restyle::AncestorBloom`].
+    pub(crate) ancestor_hashes: [u32; 4],
 }
 
-/// Rules bucketed by the key of their rightmost compound selector.
+/// Rules bucketed by the key of their rightmost compound selector. Owns
+/// copies of the active rules so it can be kept across restyles.
 #[derive(Default)]
-struct RuleIndex<'a> {
-    rules: Vec<IndexedRule<'a>>,
+pub(crate) struct RuleIndex {
+    pub(crate) rules: Vec<IndexedRule>,
     by_id: HashMap<String, Vec<usize>>,
     by_class: HashMap<String, Vec<usize>>,
     by_tag: HashMap<String, Vec<usize>>,
+    /// Rightmost compound keyed only by an attribute selector.
+    by_attr: HashMap<String, Vec<usize>>,
     universal: Vec<usize>,
     /// Rules whose subject is `:host...` (applied to the shadow host).
     host: Vec<usize>,
@@ -56,17 +62,19 @@ struct RuleIndex<'a> {
     slotted: Vec<usize>,
 }
 
-impl<'a> RuleIndex<'a> {
-    fn add_sheet(&mut self, rules: &[&'a StyleRule], is_ua: bool, base: Option<&'a str>) {
+impl RuleIndex {
+    fn add_sheet(&mut self, rules: &[&StyleRule], is_ua: bool, base: Option<Rc<str>>) {
         for rule in rules {
+            let decls: Rc<[Declaration]> = Rc::from(rule.declarations.as_slice());
             for sel in &rule.selectors {
                 let idx = self.rules.len();
                 self.rules.push(IndexedRule {
                     is_ua,
-                    selector: sel,
+                    selector: sel.clone(),
                     specificity: sel.specificity(),
-                    decls: &rule.declarations,
-                    base,
+                    decls: decls.clone(),
+                    base: base.clone(),
+                    ancestor_hashes: crate::restyle::ancestor_hashes(sel),
                 });
                 if is_slotted_selector(sel) {
                     self.slotted.push(idx);
@@ -81,12 +89,10 @@ impl<'a> RuleIndex<'a> {
                     self.by_id.entry(id.clone()).or_default().push(idx);
                 } else if let Some(cls) = last.classes.first() {
                     self.by_class.entry(cls.clone()).or_default().push(idx);
-                } else if let Some(tag) = &last.tag {
-                    if tag != "*" {
-                        self.by_tag.entry(tag.clone()).or_default().push(idx);
-                    } else {
-                        self.universal.push(idx);
-                    }
+                } else if let Some(tag) = last.tag.as_ref().filter(|t| *t != "*") {
+                    self.by_tag.entry(tag.clone()).or_default().push(idx);
+                } else if let Some(a) = last.attrs.first() {
+                    self.by_attr.entry(a.name.clone()).or_default().push(idx);
                 } else {
                     self.universal.push(idx);
                 }
@@ -95,7 +101,7 @@ impl<'a> RuleIndex<'a> {
     }
 
     /// Candidate rule indices for an element, sorted ascending (= source order).
-    fn candidates(&self, doc: &Document, node: NodeId, out: &mut Vec<usize>) {
+    pub(crate) fn candidates(&self, doc: &Document, node: NodeId, out: &mut Vec<usize>) {
         out.clear();
         let el = match doc.element(node) {
             Some(e) => e,
@@ -117,13 +123,20 @@ impl<'a> RuleIndex<'a> {
                 }
             }
         }
+        if !self.by_attr.is_empty() {
+            for (name, _) in &el.attrs {
+                if let Some(v) = self.by_attr.get(name) {
+                    out.extend_from_slice(v);
+                }
+            }
+        }
         out.sort_unstable();
         out.dedup();
     }
 }
 
 /// A declaration that matched an element, with its cascade sort key.
-struct Matched<'a> {
+pub(crate) struct Matched<'a> {
     rank: Rank,
     specificity: Specificity,
     order: u32,
@@ -132,26 +145,36 @@ struct Matched<'a> {
     pseudo: Option<PseudoElement>,
 }
 
-type Vars = HashMap<String, Vec<Token>>;
+pub(crate) type Vars = HashMap<String, Vec<Token>>;
 
 /// Rule indices per tree scope: the document, and each shadow root (UA
 /// rules + the sheets scoped to it). Shadow roots with the same sheets
 /// share one index.
-struct ScopeIndex<'a> {
-    doc: RuleIndex<'a>,
-    ua_only: RuleIndex<'a>,
-    shadow: Vec<RuleIndex<'a>>,
+pub(crate) struct ScopeIndex {
+    pub(crate) doc: RuleIndex,
+    ua_only: RuleIndex,
+    pub(crate) shadow: Vec<RuleIndex>,
     by_root: HashMap<NodeId, usize>,
 }
 
-impl<'a> ScopeIndex<'a> {
-    fn build(ua_rules: &[&'a StyleRule], author: &'a [Stylesheet], author_rules: &'a [Vec<&'a StyleRule>]) -> ScopeIndex<'a> {
+impl ScopeIndex {
+    /// Index the UA sheet plus the active rules of `author` for `env`.
+    pub(crate) fn build(author: &[Stylesheet], env: &MediaEnv) -> ScopeIndex {
+        let mut ua_rules = Vec::new();
+        ua_sheet().active_rules(env, &mut ua_rules);
+        let mut author_rules: Vec<Vec<&StyleRule>> = Vec::with_capacity(author.len());
+        for sheet in author {
+            let mut rules = Vec::new();
+            sheet.active_rules(env, &mut rules);
+            author_rules.push(rules);
+        }
+        let base = |i: usize| -> Option<Rc<str>> { author[i].base_url.as_deref().map(Rc::from) };
         let mut doc = RuleIndex::default();
-        doc.add_sheet(ua_rules, true, None);
+        doc.add_sheet(&ua_rules, true, None);
         let mut per_root: std::collections::BTreeMap<NodeId, Vec<usize>> = std::collections::BTreeMap::new();
-        for (i, (sheet, rules)) in author.iter().zip(author_rules).enumerate() {
+        for (i, (sheet, rules)) in author.iter().zip(&author_rules).enumerate() {
             if sheet.shadow_scopes.is_empty() {
-                doc.add_sheet(rules, false, sheet.base_url.as_deref());
+                doc.add_sheet(rules, false, base(i));
             } else {
                 for &r in &sheet.shadow_scopes {
                     per_root.entry(r).or_default().push(i);
@@ -160,9 +183,9 @@ impl<'a> ScopeIndex<'a> {
         }
         let mut ua_only = RuleIndex::default();
         if !per_root.is_empty() {
-            ua_only.add_sheet(ua_rules, true, None);
+            ua_only.add_sheet(&ua_rules, true, None);
         }
-        let mut shadow: Vec<RuleIndex<'a>> = Vec::new();
+        let mut shadow: Vec<RuleIndex> = Vec::new();
         let mut groups: HashMap<Vec<usize>, usize> = HashMap::new();
         let mut by_root = HashMap::new();
         for (root, list) in per_root {
@@ -170,9 +193,9 @@ impl<'a> ScopeIndex<'a> {
                 Some(&g) => g,
                 None => {
                     let mut ix = RuleIndex::default();
-                    ix.add_sheet(ua_rules, true, None);
+                    ix.add_sheet(&ua_rules, true, None);
                     for &i in &list {
-                        ix.add_sheet(&author_rules[i], false, author[i].base_url.as_deref());
+                        ix.add_sheet(&author_rules[i], false, base(i));
                     }
                     shadow.push(ix);
                     groups.insert(list, shadow.len() - 1);
@@ -185,7 +208,7 @@ impl<'a> ScopeIndex<'a> {
     }
 
     /// The index for the tree rooted at `root` (`None`: the document).
-    fn for_scope(&self, root: Option<NodeId>) -> &RuleIndex<'a> {
+    fn for_scope(&self, root: Option<NodeId>) -> &RuleIndex {
         match root {
             None => &self.doc,
             Some(r) => match self.by_root.get(&r) {
@@ -198,159 +221,118 @@ impl<'a> ScopeIndex<'a> {
 }
 
 pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> StyledTree {
-    let mut ua_rules = Vec::new();
-    ua_sheet().active_rules(env, &mut ua_rules);
-    let mut author_rules_store: Vec<Vec<&StyleRule>> = Vec::with_capacity(author.len());
-    for sheet in author {
-        let mut rules = Vec::new();
-        sheet.active_rules(env, &mut rules);
-        author_rules_store.push(rules);
-    }
-    let index = ScopeIndex::build(&ua_rules, author, &author_rules_store);
-
-    let mut tree = StyledTree::empty();
-    tree.font_faces = collect_font_faces(author, env, opts);
-    for sheet in author {
-        let mut kf = Vec::new();
-        sheet.keyframes(&mut kf);
-        for (name, frames) in kf {
-            tree.keyframes.insert(
-                name.to_string(),
-                frames.iter().map(|f| (f.offsets.clone(), f.declarations.clone())).collect(),
-            );
-        }
-    }
-
-    let n = doc.nodes.len();
-    tree.styles = vec![None; n];
-    tree.before = vec![None; n];
-    tree.after = vec![None; n];
-    tree.marker = vec![None; n];
-
-    let root_style = Rc::new(ComputedStyle::initial());
-    let empty_vars: Rc<Vars> = Rc::new(HashMap::new());
-
-    let html = match doc.html_element() {
-        Some(h) => h,
-        None => return tree,
-    };
-
-    let mut candidates = Vec::new();
-    let mut matched: Vec<Matched> = Vec::new();
-    // (node, parent style, parent vars, root font size)
-    let mut stack: Vec<(NodeId, Rc<ComputedStyle>, Rc<Vars>, f32)> = vec![(html, root_style, empty_vars, 16.0)];
-
-    while let Some((node, parent, parent_vars, root_fs)) = stack.pop() {
-        if doc.element(node).is_none() {
-            continue;
-        }
-        let out = compute_element(doc, node, &parent, &parent_vars, root_fs, env, opts, &index, &mut candidates, &mut matched);
-        let is_root = node == html;
-        let root_fs = if is_root { out.style.font_size } else { root_fs };
-        if is_root {
-            tree.root_font_size = root_fs;
-        }
-        let style = Rc::new(out.style);
-        let hidden = style.display.is_none();
-        tree.styles[node] = Some(style.clone());
-        if hidden {
-            continue;
-        }
-        tree.before[node] = out.before.map(Rc::new);
-        tree.after[node] = out.after.map(Rc::new);
-        tree.marker[node] = out.marker.map(Rc::new);
-        // Push children in reverse so they are processed in document order.
-        let kids: Vec<NodeId> = doc.flat_child_elements(node);
-        for &k in kids.iter().rev() {
-            stack.push((k, style.clone(), out.vars.clone(), root_fs));
-        }
-    }
-    tree
+    let mut engine = crate::restyle::StyleEngine::new(author, env);
+    engine.full(doc, author, opts)
 }
 
 /// Compute the style of a single element (and its ancestors) without
-/// styling the rest of the document. Used for `getComputedStyle()` while
-/// the DOM has pending changes, so script read/write loops stay cheap.
-/// Returns `None` when the element is not rendered (display:none ancestor).
+/// styling the rest of the document. Returns `None` when the element is
+/// not rendered (display:none ancestor) or detached.
 pub fn style_chain(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions, target: NodeId) -> Option<Rc<ComputedStyle>> {
-    let html = doc.html_element()?;
-    // Ancestor chain html → target (elements only).
-    let mut chain = Vec::new();
-    let mut cur = Some(target);
-    while let Some(n) = cur {
-        if doc.element(n).is_some() {
-            chain.push(n);
-        }
-        if n == html {
-            break;
-        }
-        cur = doc.flat_parent(n);
-    }
-    if chain.last() != Some(&html) {
-        return None; // detached
-    }
-    chain.reverse();
-
-    let mut ua_rules = Vec::new();
-    ua_sheet().active_rules(env, &mut ua_rules);
-    let mut author_rules_store: Vec<Vec<&StyleRule>> = Vec::with_capacity(author.len());
-    for sheet in author {
-        let mut rules = Vec::new();
-        sheet.active_rules(env, &mut rules);
-        author_rules_store.push(rules);
-    }
-    let index = ScopeIndex::build(&ua_rules, author, &author_rules_store);
-
-    let mut candidates = Vec::new();
-    let mut matched: Vec<Matched> = Vec::new();
-    let mut parent = Rc::new(ComputedStyle::initial());
-    let mut vars: Rc<Vars> = Rc::new(HashMap::new());
-    let mut root_fs = 16.0;
-    for &node in &chain {
-        let out = compute_element(doc, node, &parent, &vars, root_fs, env, opts, &index, &mut candidates, &mut matched);
-        if node == html {
-            root_fs = out.style.font_size;
-        }
-        let style = Rc::new(out.style);
-        if style.display.is_none() && node != target {
-            return None;
-        }
-        vars = out.vars;
-        parent = style;
-    }
-    Some(parent)
+    let engine = crate::restyle::StyleEngine::new(author, env);
+    engine.style_chain(doc, opts, target)
 }
 
 /// Result of styling one element: its style, custom properties and any
 /// generated pseudo-element styles.
-struct ElementOut {
-    style: ComputedStyle,
-    vars: Rc<Vars>,
-    before: Option<ComputedStyle>,
-    after: Option<ComputedStyle>,
-    marker: Option<ComputedStyle>,
+#[derive(Clone)]
+pub(crate) struct ElementOut {
+    pub(crate) style: Rc<ComputedStyle>,
+    pub(crate) vars: Rc<Vars>,
+    pub(crate) before: Option<Rc<ComputedStyle>>,
+    pub(crate) after: Option<Rc<ComputedStyle>>,
+    pub(crate) marker: Option<Rc<ComputedStyle>>,
+    /// The element uses `inherit` for a non-inherited property, so it must
+    /// be restyled whenever its parent's style changes at all.
+    pub(crate) inherit_dep: bool,
+}
+
+/// Parsed `style` attributes and presentational hints, keyed by source
+/// text (many elements share the same few strings).
+#[derive(Default)]
+pub(crate) struct DeclCache {
+    map: HashMap<String, Rc<Vec<Declaration>>>,
+    empty: Option<Rc<Vec<Declaration>>>,
+}
+
+impl DeclCache {
+    fn none(&mut self) -> Rc<Vec<Declaration>> {
+        self.empty.get_or_insert_with(|| Rc::new(Vec::new())).clone()
+    }
+
+    pub(crate) fn parse(&mut self, src: &str) -> Rc<Vec<Declaration>> {
+        if let Some(d) = self.map.get(src) {
+            return d.clone();
+        }
+        if self.map.len() > 50_000 {
+            self.map.clear();
+        }
+        let d = Rc::new(parse_declaration_list(src));
+        self.map.insert(src.to_string(), d.clone());
+        d
+    }
+}
+
+/// Style sharing: elements with the same parent style, custom properties,
+/// matched rules and inline declarations get the same computed style
+/// (siblings in lists, table cells, paragraphs...).
+#[derive(Default)]
+pub(crate) struct ShareCache {
+    map: HashMap<ShareKey, (ElementOut, Rc<ComputedStyle>, Rc<Vec<Declaration>>, Rc<Vec<Declaration>>)>,
+    pub(crate) hits: usize,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct ShareKey {
+    parent: usize,
+    vars: usize,
+    root_fs: u32,
+    is_root: bool,
+    presentational: usize,
+    style_attr: usize,
+    /// Matched rules: (index identity, rule) pairs.
+    rules: Vec<(usize, u32)>,
+}
+
+/// Everything rule matching needs besides the element.
+pub(crate) struct MatchCtx<'a, 'b, 'o> {
+    pub(crate) scopes: &'a ScopeIndex,
+    pub(crate) env: &'b MediaEnv,
+    pub(crate) opts: &'b StyleOptions<'o>,
+    /// Ancestor bloom filter for the element being styled (fast rejection
+    /// of descendant/child selectors), when the traversal maintains one.
+    pub(crate) bloom: Option<&'b crate::restyle::AncestorBloom>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compute_element<'a>(
+pub(crate) fn compute_element<'a>(
     doc: &Document,
     node: NodeId,
-    parent: &ComputedStyle,
+    parent: &Rc<ComputedStyle>,
     parent_vars: &Rc<Vars>,
     root_font_size: f32,
-    env: &MediaEnv,
-    opts: &StyleOptions,
-    scopes: &'a ScopeIndex<'a>,
+    cx: &MatchCtx<'a, '_, '_>,
+    decls: &mut DeclCache,
+    share: Option<&mut ShareCache>,
     candidates: &mut Vec<usize>,
     matched: &mut Vec<Matched<'a>>,
 ) -> ElementOut {
+    let (env, opts, scopes) = (cx.env, cx.opts, cx.scopes);
+    let mut rules: Vec<(usize, u32)> = Vec::new();
     matched.clear();
     let index = scopes.for_scope(doc.containing_shadow_root(node));
+    let index_id = index as *const RuleIndex as usize;
     index.candidates(doc, node, candidates);
     for &ci in candidates.iter() {
         let r = &index.rules[ci];
-        if matches_with(r.selector, doc, node, opts.state) {
-            for d in r.decls {
+        if let Some(bloom) = cx.bloom {
+            if !bloom.may_match(&r.ancestor_hashes) {
+                continue;
+            }
+        }
+        if matches_with(&r.selector, doc, node, opts.state) {
+            rules.push((index_id, ci as u32));
+            for d in r.decls.iter() {
                 let rank = match (r.is_ua, d.important) {
                     (true, false) => Rank::UaNormal,
                     (true, true) => Rank::UaImportant,
@@ -362,7 +344,7 @@ fn compute_element<'a>(
                     specificity: r.specificity,
                     order: ci as u32 + 1,
                     decl: d,
-                    base: r.base,
+                    base: r.base.as_deref(),
                     pseudo: r.selector.pseudo_element,
                 });
             }
@@ -373,10 +355,11 @@ fn compute_element<'a>(
         let ix = scopes.for_scope(Some(root));
         for &hi in &ix.host {
             let r = &ix.rules[hi];
-            if matches_with(r.selector, doc, node, opts.state) {
-                for d in r.decls {
+            if matches_with(&r.selector, doc, node, opts.state) {
+                rules.push((ix as *const RuleIndex as usize | 1, hi as u32));
+                for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
-                    matched.push(Matched { rank, specificity: r.specificity, order: hi as u32 + 1, decl: d, base: r.base, pseudo: r.selector.pseudo_element });
+                    matched.push(Matched { rank, specificity: r.specificity, order: hi as u32 + 1, decl: d, base: r.base.as_deref(), pseudo: r.selector.pseudo_element });
                 }
             }
         }
@@ -386,22 +369,72 @@ fn compute_element<'a>(
         let ix = scopes.for_scope(doc.containing_shadow_root(slot));
         for &si in &ix.slotted {
             let r = &ix.rules[si];
-            if matches_slotted(r.selector, doc, node, slot, opts.state) {
-                for d in r.decls {
+            if matches_slotted(&r.selector, doc, node, slot, opts.state) {
+                rules.push((ix as *const RuleIndex as usize | 2, si as u32));
+                for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
-                    matched.push(Matched { rank, specificity: r.specificity, order: si as u32 + 1, decl: d, base: r.base, pseudo: r.selector.pseudo_element });
+                    matched.push(Matched { rank, specificity: r.specificity, order: si as u32 + 1, decl: d, base: r.base.as_deref(), pseudo: r.selector.pseudo_element });
                 }
             }
         }
     }
     // Presentational attributes: lowest author priority.
-    let presentational = presentational_declarations(doc, node);
+    let presentational = match presentational_css(doc, node) {
+        Some(css) => decls.parse(&css),
+        None => decls.none(),
+    };
     // Style attribute: beats every selector.
-    let style_attr = doc.attr(node, "style").map(parse_declaration_list).unwrap_or_default();
+    let style_attr = match doc.attr(node, "style") {
+        Some(v) => decls.parse(v),
+        None => decls.none(),
+    };
+    let is_root = doc.element(node).map(|e| e.tag == "html").unwrap_or(false);
+    let key = share.as_ref().map(|_| ShareKey {
+        parent: Rc::as_ptr(parent) as usize,
+        vars: Rc::as_ptr(parent_vars) as usize,
+        root_fs: root_font_size.to_bits(),
+        is_root,
+        presentational: Rc::as_ptr(&presentational) as usize,
+        style_attr: Rc::as_ptr(&style_attr) as usize,
+        rules,
+    });
+    if let (Some(cache), Some(k)) = (share.as_ref(), key.as_ref()) {
+        if let Some((out, ..)) = cache.map.get(k) {
+            let out = out.clone();
+            if let Some(c) = share {
+                c.hits += 1;
+            }
+            return out;
+        }
+    }
+    let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root);
+    if let (Some(cache), Some(k)) = (share, key) {
+        if cache.map.len() > 200_000 {
+            cache.map.clear();
+        }
+        cache.map.insert(k, (out.clone(), parent.clone(), presentational, style_attr));
+    }
+    out
+}
+
+/// The cascade proper for one element whose matching declarations are
+/// known.
+#[allow(clippy::too_many_arguments)]
+fn cascade_matched(
+    matched: &[Matched],
+    presentational: &[Declaration],
+    style_attr: &[Declaration],
+    parent: &ComputedStyle,
+    parent_vars: &Rc<Vars>,
+    root_font_size: f32,
+    env: &MediaEnv,
+    opts: &StyleOptions,
+    is_root: bool,
+) -> ElementOut {
 
     let mut local: Vec<Matched> = Vec::with_capacity(matched.len() + presentational.len() + style_attr.len());
     let mut pseudo_local: Vec<Matched> = Vec::new();
-    for d in &presentational {
+    for d in presentational.iter() {
         local.push(Matched { rank: Rank::AuthorNormal, specificity: Specificity(0, 0, 0), order: 0, decl: d, base: None, pseudo: None });
     }
     for m in matched.iter() {
@@ -412,7 +445,7 @@ fn compute_element<'a>(
             local.push(entry);
         }
     }
-    for d in &style_attr {
+    for d in style_attr.iter() {
         local.push(Matched {
             rank: if d.important { Rank::AuthorImportant } else { Rank::AuthorNormal },
             specificity: Specificity(u32::MAX, 0, 0),
@@ -432,11 +465,10 @@ fn compute_element<'a>(
         }
     }
 
-    let el = doc.element(node).expect("element");
-    let is_root = el.tag == "html";
-    let style = apply_declarations(&local, &vars, parent, root_font_size, env, opts, is_root, false);
+    let style = Rc::new(apply_declarations(&local, &vars, parent, root_font_size, env, opts, is_root, false));
 
-    let mut out = ElementOut { style, vars, before: None, after: None, marker: None };
+    let inherit_dep = local.iter().any(|m| !m.decl.name.starts_with("--") && (m.decl.name == "all" || !is_inherited(&m.decl.name)) && wide_keyword(&m.decl.value) == Some(Wide::Inherit));
+    let mut out = ElementOut { style, vars, before: None, after: None, marker: None, inherit_dep };
     if out.style.display.is_none() || pseudo_local.is_empty() {
         return out;
     }
@@ -453,13 +485,13 @@ fn compute_element<'a>(
         let root_fs = if is_root { out.style.font_size } else { root_font_size };
         let ps = apply_declarations(&decls, &out.vars, &out.style, root_fs, env, opts, false, true);
         match which {
-            PseudoElement::Marker => out.marker = Some(ps),
+            PseudoElement::Marker => out.marker = Some(Rc::new(ps)),
             PseudoElement::Before | PseudoElement::After => {
                 if matches!(ps.content, Content::Items(_)) && !ps.display.is_none() {
                     if which == PseudoElement::Before {
-                        out.before = Some(ps);
+                        out.before = Some(Rc::new(ps));
                     } else {
-                        out.after = Some(ps);
+                        out.after = Some(Rc::new(ps));
                     }
                 }
             }
@@ -582,7 +614,7 @@ fn apply_declarations(
 
 // ---------------------------------------------------------------- font-face
 
-fn collect_font_faces(author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> Vec<FontFace> {
+pub(crate) fn collect_font_faces(author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> Vec<FontFace> {
     let mut out = Vec::new();
     for sheet in author {
         let mut faces = Vec::new();
@@ -790,11 +822,10 @@ fn substitute_vars(value: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token
 
 // ------------------------------------------------------- presentational
 
-fn presentational_declarations(doc: &Document, node: NodeId) -> Vec<Declaration> {
-    let el = match doc.element(node) {
-        Some(e) => e,
-        None => return Vec::new(),
-    };
+/// Presentational hints of an element as CSS text (`None` when there are
+/// none); parsed through the cascade's declaration cache.
+fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
+    let el = doc.element(node)?;
     let mut css = String::new();
     let tag = el.tag.as_str();
     let dim = |v: &str| -> Option<String> {
@@ -1020,9 +1051,9 @@ fn presentational_declarations(doc: &Document, node: NodeId) -> Vec<Declaration>
         }
     }
     if css.is_empty() {
-        Vec::new()
+        None
     } else {
-        parse_declaration_list(&css)
+        Some(css)
     }
 }
 

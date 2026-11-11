@@ -11,6 +11,7 @@ pub mod diff;
 pub mod forms;
 mod home;
 pub mod images;
+pub mod incremental;
 pub mod pointer;
 pub mod scripting;
 pub mod select;
@@ -25,7 +26,7 @@ pub use rabbithole_net::{Body, Request, StreamedResponse};
 use rabbithole_css::{parse_media_query, MatchState, MediaQuery, PseudoElement, Rule};
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_gfx::{Canvas, Color, FontContext, Image, Rect};
-use rabbithole_layout::{DisplayList, LayoutBox, LayoutContext, LayoutTree, ScrollInfo};
+use rabbithole_layout::{DisplayList, LayoutContext, LayoutTree, ScrollInfo};
 use rabbithole_net::{decode_text, Destination, FetchError, Fetcher, Response, Url};
 use rabbithole_style::{FontFace, MediaEnv, StyleOptions, StyledTree, Stylesheet};
 use std::collections::{HashMap, HashSet};
@@ -919,6 +920,8 @@ pub struct Page {
     pub image_state: images::ImageState,
     /// Hover / pressed-button state for pointer events.
     pub pointer: pointer::PointerState,
+    /// Incremental style/layout state (see [`incremental`]).
+    pub incr: incremental::IncrementalState,
 }
 
 impl Default for Engine {
@@ -1023,6 +1026,7 @@ impl Engine {
             pointer: pointer::PointerState::default(),
             sheet_signature: 0,
             image_state: images::ImageState::default(),
+            incr: incremental::IncrementalState::default(),
         };
         page.snapshot_form_defaults();
         page.sheet_signature = stylesheet_signature(&page.doc);
@@ -1067,78 +1071,43 @@ impl Engine {
         page.script.pending_navigation.take()
     }
 
-    /// Re-run style + layout + display list (after DOM, viewport or
-    /// selector-state changes).
+    /// Bring style, layout and the display list up to date (after DOM,
+    /// viewport or selector-state changes). Incremental: only what changed
+    /// is restyled, rebuilt and laid out again (see [`incremental`]).
     pub fn restyle(&self, page: &mut Page) {
-        // Scripts may add/remove `<style>`/`<link>` elements or insert rules
-        // (CSS-in-JS): re-collect the sheets when their sources changed.
-        if page.script.host.is_some() || page.script.scripts_ran {
-            let sig = stylesheet_signature(&page.doc);
-            if sig != page.sheet_signature {
-                page.sheet_signature = sig;
-                page.sheets = self.loader.collect_stylesheets(&page.doc, &page.base_url);
-                page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
-            }
-        }
-        let env = media_env(page.viewport, self.scripting);
-        let base_str = page.base_url.to_string();
-        let opts = StyleOptions {
-            state: &page.state,
-            resolve_url: &|base, raw| resolve_url(base, raw),
-            document_base: &base_str,
-        };
-        page.styles = rabbithole_style::style_tree_with(&page.doc, &page.sheets, &env, &opts);
-        page.background = canvas_background(&page.doc, &page.styles);
-        rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images);
+        let before = page.incr.generation();
+        let t = std::time::Instant::now();
+        self.flush_style(page);
+        let t_style = t.elapsed();
         self.relayout_only(page);
+        if incremental::debug_enabled() {
+            eprintln!("[incr] restyle: style {:?}, layout+dl {:?}", t_style, t.elapsed() - t_style);
+        }
         // (Re)select image sources for the new viewport / DOM and start
         // lazy or script-requested loads; cached results show right away.
-        if self.sync_images(page) {
+        // Nothing changed: nothing to select (scrolling syncs lazy images).
+        if (page.incr.generation() != before || page.incr.take_dpr_change(self.device_pixel_ratio)) && self.sync_images(page) {
             self.relayout_only(page);
         }
     }
 
-    /// Current computed style of one element without a full restyle
-    /// (stylesheets are re-collected first if their sources changed).
+    /// Current computed style of one element: flushes pending style
+    /// changes only (layout stays dirty until a geometry query or paint).
     pub fn computed_style_now(&self, page: &mut Page, node: NodeId) -> Option<Rc<rabbithole_style::ComputedStyle>> {
-        let sig = stylesheet_signature(&page.doc);
-        if sig != page.sheet_signature {
-            page.sheet_signature = sig;
-            page.sheets = self.loader.collect_stylesheets(&page.doc, &page.base_url);
-            page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
-        }
-        let env = media_env(page.viewport, self.scripting);
-        let base_str = page.base_url.to_string();
-        let opts = StyleOptions {
-            state: &page.state,
-            resolve_url: &|base, raw| resolve_url(base, raw),
-            document_base: &base_str,
-        };
-        rabbithole_style::style_chain(&page.doc, &page.sheets, &env, &opts, node)
+        self.flush_style(page);
+        page.styles.get(node).cloned()
     }
 
-    /// Re-run layout + display list (styles unchanged).
+    /// Bring layout + display list up to date (images, scroll offsets or
+    /// styles changed); only damaged boxes are laid out again.
     pub fn relayout_only(&self, page: &mut Page) {
-        let Page { doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, .. } = page;
-        let ctx = LayoutContext {
-            doc,
-            styles,
-            fonts: &self.fonts,
-            images,
-            background_images,
-            viewport_width: viewport.width,
-            viewport_height: viewport.height,
-            scroll_offsets,
-            page_scroll: *page_scroll,
-        };
-        *layout = rabbithole_layout::layout(&ctx);
-        *display_list = rabbithole_layout::build_display_list(layout, &ctx);
+        self.flush_display_list(page);
     }
 
     /// Rebuild only the display list (after scrolling: sticky/fixed boxes
     /// and inner scroll offsets).
     pub fn rebuild_display_list(&self, page: &mut Page) {
-        let Page { doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, .. } = page;
+        let Page { doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, incr, .. } = page;
         let ctx = LayoutContext {
             doc,
             styles,
@@ -1150,7 +1119,9 @@ impl Engine {
             scroll_offsets,
             page_scroll: *page_scroll,
         };
-        *display_list = rabbithole_layout::build_display_list(layout, &ctx);
+        let old = std::mem::replace(display_list, rabbithole_layout::build_display_list(layout, &ctx));
+        incr.display_list_replaced(old);
+        incr.mark_display_list_clean();
     }
 
     /// Change the viewport (window resize).
@@ -1167,8 +1138,11 @@ impl Engine {
             return;
         }
         page.page_scroll = (x, y);
-        if page.layout.has_sticky_or_fixed() {
+        if page.incr.depends_on_page_scroll(&page.layout) {
             self.rebuild_display_list(page);
+        } else {
+            // Only sticky boxes move: patch their translations in place.
+            page.display_list.update_page_scroll((x, y), (page.viewport.width, page.viewport.height));
         }
         self.sync_lazy_images(page);
     }
@@ -1188,7 +1162,13 @@ impl Engine {
             return false;
         }
         page.scroll_offsets.insert(info.node, (nx, ny));
-        self.relayout_only(page);
+        if !page.incr.dirty() && page.layout.set_scroll_offset(&page.doc, info.node, (nx, ny)) {
+            // Clean layout: scroll by translating the container's contents.
+            page.incr.scrolled(info.node, (nx, ny));
+            self.rebuild_display_list(page);
+        } else {
+            self.relayout_only(page);
+        }
         true
     }
 
@@ -1538,14 +1518,17 @@ fn escape_html(s: &str) -> String {
     out
 }
 
-fn find_box<'a>(b: &'a LayoutBox, node: NodeId) -> Option<&'a LayoutBox> {
-    if b.node == Some(node) {
-        return Some(b);
-    }
-    b.children.iter().find_map(|c| find_box(c, node))
-}
-
 impl Page {
+    /// Forget incremental state: the next restyle recomputes everything.
+    pub fn invalidate_all(&mut self) {
+        self.incr.invalidate_all();
+    }
+
+    /// Forget cached layout: the next relayout lays out everything.
+    pub fn invalidate_layout(&mut self) {
+        self.incr.invalidate_layout();
+    }
+
     pub fn content_height(&self) -> f32 {
         self.layout.height
     }
@@ -1640,14 +1623,19 @@ impl Page {
     /// Border-box rect of an element (document coordinates); climbs to a
     /// boxed ancestor for elements without a box.
     pub fn rect_of(&self, node: NodeId) -> Option<Rect> {
-        let mut cur = Some(node);
-        while let Some(n) = cur {
-            if let Some(b) = find_box(&self.layout.root, n) {
-                return Some(b.rect);
-            }
-            cur = self.doc.parent(n);
+        if node >= self.doc.nodes.len() {
+            return None;
         }
-        None
+        self.incr.cached_rect(node, || {
+            let mut cur = Some(node);
+            while let Some(n) = cur {
+                if let Some(b) = self.layout.box_of(&self.doc, n) {
+                    return Some(b.rect);
+                }
+                cur = self.doc.parent(n);
+            }
+            None
+        })
     }
 
     /// Scroll container under a document point.

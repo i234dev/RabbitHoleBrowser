@@ -10,15 +10,64 @@ struct FloatInfo {
     left: bool,
 }
 
+/// Does a float's margin box overlap the band `[y, y+h)`? Touching edges
+/// (within float rounding noise, e.g. after translating a laid out
+/// subtree) do not count.
+fn overlaps(r: Rect, y: f32, h: f32) -> bool {
+    const EPS: f32 = 0.01;
+    r.y < y + h - EPS && r.bottom() > y + EPS
+}
+
 /// Floats placed in one block formatting context (document coordinates).
 #[derive(Debug, Default)]
 pub(crate) struct Bfc {
     floats: Vec<FloatInfo>,
 }
 
+/// A float relative to some origin: (x, y, w, h, left).
+pub(crate) type RelFloat = (f32, f32, f32, f32, bool);
+
+/// Same floats within rounding noise?
+pub(crate) fn same_floats(a: &[RelFloat], b: &[RelFloat]) -> bool {
+    const EPS: f32 = 0.01;
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(p, q)| {
+            p.4 == q.4 && (p.0 - q.0).abs() < EPS && (p.1 - q.1).abs() < EPS && (p.2 - q.2).abs() < EPS && (p.3 - q.3).abs() < EPS
+        })
+}
+
 impl Bfc {
     pub fn new() -> Self {
         Bfc::default()
+    }
+
+    /// Floats not entirely above `y`, relative to `origin`.
+    pub fn relative_from(&self, origin: (f32, f32), y: f32) -> Vec<RelFloat> {
+        self.floats
+            .iter()
+            .filter(|f| f.rect.bottom() > y + 0.01)
+            .map(|f| (f.rect.x - origin.0, f.rect.y - origin.1, f.rect.w, f.rect.h, f.left))
+            .collect()
+    }
+
+    /// Floats placed after the first `n`, relative to `origin`.
+    pub fn relative_since(&self, n: usize, origin: (f32, f32)) -> Vec<RelFloat> {
+        self.floats[n.min(self.floats.len())..]
+            .iter()
+            .map(|f| (f.rect.x - origin.0, f.rect.y - origin.1, f.rect.w, f.rect.h, f.left))
+            .collect()
+    }
+
+    /// Re-add floats recorded with [`Bfc::relative_since`] at `origin`.
+    pub fn extend_relative(&mut self, origin: (f32, f32), floats: &[RelFloat]) {
+        for &(x, y, w, h, left) in floats {
+            self.floats.push(FloatInfo { rect: Rect::new(x + origin.0, y + origin.1, w, h), left });
+        }
+    }
+
+    /// Number of floats placed so far.
+    pub fn len(&self) -> usize {
+        self.floats.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -31,7 +80,7 @@ impl Bfc {
         let mut l = cx;
         let mut r = cx + cw;
         for f in &self.floats {
-            if f.rect.y < y + h && f.rect.bottom() > y {
+            if overlaps(f.rect, y, h) {
                 if f.left {
                     l = l.max(f.rect.right());
                 } else {
@@ -44,7 +93,7 @@ impl Bfc {
 
     /// Does any float intersect the band?
     pub fn intersects(&self, y: f32, h: f32) -> bool {
-        self.floats.iter().any(|f| f.rect.y < y + h && f.rect.bottom() > y)
+        self.floats.iter().any(|f| overlaps(f.rect, y, h))
     }
 
     /// Next y (strictly below `y`) at which the set of active floats changes.

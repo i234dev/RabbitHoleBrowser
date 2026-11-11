@@ -102,6 +102,47 @@ pub struct DisplayList {
     /// Hit-test regions recorded in paint order (what is painted on top is
     /// hit first), so clicks land on what the user sees.
     pub hits: HitList,
+    /// Scroll-dependent translations of `position: sticky` boxes, patched in
+    /// place by [`DisplayList::update_page_scroll`] instead of rebuilding.
+    pub sticky: Vec<StickyPatch>,
+    /// Bounds of `position: fixed` boxes (viewport coordinates): what must
+    /// be repainted when the page scrolls under them.
+    pub fixed_bounds: Vec<Rect>,
+}
+
+/// Where a sticky box's displacement lives in the list.
+#[derive(Debug, Clone, Copy)]
+pub struct StickyPatch {
+    /// Index of its `PushTransform` item.
+    pub item: usize,
+    /// Index of its hit-test transform scope.
+    pub scope: u32,
+    pub margin_rect: Rect,
+    pub cb: Rect,
+    pub inset: rabbithole_style::Edges<rabbithole_style::Length>,
+    /// Painted bounds of the sticky subtree (document coordinates, before
+    /// the sticky displacement).
+    pub bounds: Rect,
+}
+
+impl StickyPatch {
+    /// Displacement for a scrollport (document coordinates).
+    pub fn offset(&self, port: Rect) -> (f32, f32) {
+        crate::tree::sticky_offset_for(&self.inset, self.margin_rect, port, self.cb)
+    }
+}
+
+impl DisplayList {
+    /// Re-position sticky boxes for a new page scroll position (the rest of
+    /// the list is in document coordinates and does not change).
+    pub fn update_page_scroll(&mut self, page_scroll: (f32, f32), viewport: (f32, f32)) {
+        let port = Rect::new(page_scroll.0, page_scroll.1, viewport.0, viewport.1);
+        for p in &self.sticky {
+            let (dx, dy) = p.offset(port);
+            self.items[p.item] = DisplayItem::PushTransform([1.0, 0.0, 0.0, 1.0, dx, dy]);
+            self.hits.scopes[p.scope as usize].scope = HitScope::Transform(Some([1.0, 0.0, 0.0, 1.0, -dx, -dy]));
+        }
+    }
 }
 
 /// A clip / transform / fixed-layer scope enclosing hit regions.
@@ -319,11 +360,24 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         // Sticky displacement, transform and opacity wrappers.
         let (sdx, sdy) = root.sticky_offset(self.sticky_scrollport, cb);
         let start = self.list.items.len();
+        let sticky_start = self.list.sticky.len();
         let mut pushed_transform = false;
-        if sdx != 0.0 || sdy != 0.0 {
+        let sticky = root.style.position == rabbithole_style::Position::Sticky;
+        if sdx != 0.0 || sdy != 0.0 || sticky {
+            // Sticky boxes always get the wrapper so scrolling can patch it.
             self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, 1.0, sdx, sdy]));
             self.push_scope(HitScope::Transform(Some([1.0, 0.0, 0.0, 1.0, -sdx, -sdy])));
             pushed_transform = true;
+            if sticky {
+                self.list.sticky.push(StickyPatch {
+                    item: start,
+                    scope: (self.hits.scopes.len() - 1) as u32,
+                    margin_rect: root.margin_rect(),
+                    cb,
+                    inset: root.style.inset,
+                    bounds: root.subtree_bounds(),
+                });
+            }
         }
         let mut pushed_matrix = false;
         if let Some(m) = root.transform_matrix() {
@@ -338,6 +392,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             // styled file inputs, ...): record hits, drop the paint.
             self.paint_stacking_context_inner(root);
             self.list.items.truncate(start);
+            self.list.sticky.truncate(sticky_start);
             self.scope = saved_scope;
             return;
         }
@@ -409,6 +464,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.push(DisplayItem::PushFixed);
             self.push_scope(HitScope::Fixed);
             let vp = Rect::new(0.0, 0.0, self.ctx.viewport_width, self.ctx.viewport_height);
+            self.list.fixed_bounds.push(d.b.subtree_bounds());
             self.paint_stacking_context(d.b, vp);
             self.list.push(DisplayItem::PopFixed);
             self.scope = saved;

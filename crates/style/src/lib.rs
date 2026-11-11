@@ -6,6 +6,7 @@
 pub mod cascade;
 pub mod computed;
 pub mod props;
+pub mod restyle;
 #[cfg(test)]
 mod tests_props;
 #[cfg(test)]
@@ -14,6 +15,7 @@ pub mod ua;
 pub mod values;
 
 pub use computed::*;
+pub use restyle::{RestyleOutcome, StyleChange, StyleEngine};
 pub use rabbithole_css::{Declaration, MatchState, MediaEnv, PseudoElement, Stylesheet};
 
 use rabbithole_dom::{Document, NodeId};

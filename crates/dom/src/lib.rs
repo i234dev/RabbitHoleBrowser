@@ -53,9 +53,48 @@ pub struct Node {
     pub data: NodeData,
 }
 
+/// One recorded DOM change (see [`Document::track_mutations`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Mutation {
+    /// Attribute `name` (lower-cased) of `node` changed; `old` is the value
+    /// before the change (`None` = absent).
+    Attr { node: NodeId, name: String, old: Option<String> },
+    /// `child` was inserted into or removed from `parent`.
+    Children { parent: NodeId, child: NodeId },
+    /// Character data of a text/comment node changed.
+    Text { node: NodeId },
+    /// Unknown change through `node_mut` / `element_mut` (treat the node as
+    /// completely changed).
+    Node { node: NodeId },
+}
+
+/// Change log consumed by the style/layout engine to restyle and relayout
+/// only what changed.
+#[derive(Debug, Clone, Default)]
+pub struct MutationLog {
+    pub entries: Vec<Mutation>,
+    /// More changes than [`MutationLog::CAP`] happened: treat everything as
+    /// changed.
+    pub overflow: bool,
+}
+
+impl MutationLog {
+    /// Beyond this many entries the log degrades to "everything changed".
+    pub const CAP: usize = 20_000;
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && !self.overflow
+    }
+}
+
 #[derive(Clone)]
 pub struct Document {
     pub nodes: Vec<Node>,
+    /// Incremented on every mutation made through the `Document` API.
+    epoch: u64,
+    /// Record mutations into `log` (off while parsing).
+    tracking: bool,
+    log: MutationLog,
     /// Shadow host → its shadow root. A shadow root is an element node
     /// tagged `#shadow-root` that has no parent (it is not a child of the
     /// host); its children form the shadow tree.
@@ -95,12 +134,62 @@ impl Document {
                 next_sibling: None,
                 data: NodeData::Document,
             }],
+            epoch: 0,
+            tracking: false,
+            log: MutationLog::default(),
             shadow_roots: HashMap::new(),
             shadow_hosts: HashMap::new(),
             adopted_styles: HashMap::new(),
             sheet_overrides: HashMap::new(),
             defined_custom: std::collections::HashSet::new(),
         }
+    }
+
+    // ------------------------------------------------------- change tracking
+
+    /// Mutation counter: changes whenever the tree, an attribute or text
+    /// changes through this API.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Start (or stop) recording mutations for [`Document::take_mutations`].
+    /// Starting clears any previous log.
+    pub fn track_mutations(&mut self, on: bool) {
+        self.tracking = on;
+        self.log = MutationLog::default();
+    }
+
+    pub fn is_tracking_mutations(&self) -> bool {
+        self.tracking
+    }
+
+    /// Are there recorded, not yet taken mutations?
+    pub fn has_mutations(&self) -> bool {
+        !self.log.is_empty()
+    }
+
+    /// The recorded mutations so far (not cleared).
+    pub fn mutations(&self) -> &MutationLog {
+        &self.log
+    }
+
+    /// Take (and clear) the recorded mutations.
+    pub fn take_mutations(&mut self) -> MutationLog {
+        std::mem::take(&mut self.log)
+    }
+
+    fn record(&mut self, m: Mutation) {
+        self.epoch += 1;
+        if !self.tracking || self.log.overflow {
+            return;
+        }
+        if self.log.entries.len() >= MutationLog::CAP {
+            self.log.entries.clear();
+            self.log.overflow = true;
+            return;
+        }
+        self.log.entries.push(m);
     }
 
     pub fn create(&mut self, data: NodeData) -> NodeId {
@@ -137,13 +226,16 @@ impl Document {
             None => self.nodes[parent].first_child = Some(child),
         }
         self.nodes[parent].last_child = Some(child);
+        self.record(Mutation::Children { parent, child });
     }
 
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id]
     }
 
+    /// Raw mutable access; recorded as an unknown change of the node.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
+        self.record(Mutation::Node { node: id });
         &mut self.nodes[id]
     }
 
@@ -167,6 +259,7 @@ impl Document {
         c.parent = None;
         c.prev_sibling = None;
         c.next_sibling = None;
+        self.record(Mutation::Children { parent, child });
     }
 
     /// Insert `child` into `parent` before `reference` (append when None).
@@ -192,6 +285,7 @@ impl Document {
                     Some(p) => self.nodes[p].next_sibling = Some(child),
                     None => self.nodes[parent].first_child = Some(child),
                 }
+                self.record(Mutation::Children { parent, child });
             }
         }
     }
@@ -252,21 +346,39 @@ impl Document {
     /// Set (`Some`) or remove (`None`) an attribute on an element.
     pub fn set_attr(&mut self, id: NodeId, name: &str, value: Option<&str>) {
         let name = name.to_ascii_lowercase();
-        if let Some(el) = self.element_mut(id) {
-            match value {
-                Some(v) => match el.attrs.iter_mut().find(|(k, _)| *k == name) {
-                    Some(slot) => slot.1 = v.to_string(),
-                    None => el.attrs.push((name, v.to_string())),
-                },
-                None => el.attrs.retain(|(k, _)| *k != name),
-            }
-        }
+        let NodeData::Element(el) = &mut self.nodes[id].data else { return };
+        let old = match value {
+            Some(v) => match el.attrs.iter_mut().find(|(k, _)| *k == name) {
+                Some(slot) => {
+                    if slot.1 == v {
+                        return; // unchanged: nothing to restyle
+                    }
+                    Some(std::mem::replace(&mut slot.1, v.to_string()))
+                }
+                None => {
+                    el.attrs.push((name.clone(), v.to_string()));
+                    None
+                }
+            },
+            None => match el.attrs.iter().position(|(k, _)| *k == name) {
+                Some(i) => {
+                    let old = el.attrs[i].1.clone();
+                    el.attrs.retain(|(k, _)| *k != name);
+                    Some(old)
+                }
+                None => return,
+            },
+        };
+        self.record(Mutation::Attr { node: id, name, old });
     }
 
     /// Replace the text of a text node.
     pub fn set_text(&mut self, id: NodeId, text: &str) {
         if let NodeData::Text(t) = &mut self.nodes[id].data {
-            *t = text.to_string();
+            if t != text {
+                *t = text.to_string();
+                self.record(Mutation::Text { node: id });
+            }
         }
     }
 
@@ -550,7 +662,11 @@ impl Document {
         }
     }
 
+    /// Raw mutable element access; recorded as an unknown change.
     pub fn element_mut(&mut self, id: NodeId) -> Option<&mut ElementData> {
+        if matches!(self.nodes[id].data, NodeData::Element(_)) {
+            self.record(Mutation::Node { node: id });
+        }
         match &mut self.nodes[id].data {
             NodeData::Element(e) => Some(e),
             _ => None,
@@ -795,7 +911,10 @@ mod tests {
         d.replace_child(c, b);
         let tags: Vec<_> = d.children(html).map(|n| d.tag(n).unwrap().to_string()).collect();
         assert_eq!(tags, ["a", "b"]);
+        d.track_mutations(true);
         d.set_attr(a, "ID", Some("x"));
+        d.set_attr(a, "id", Some("x"));
+        assert_eq!(d.take_mutations().entries, vec![Mutation::Attr { node: a, name: "id".into(), old: None }]);
         assert_eq!(d.element_by_id("x"), Some(a));
         let t = d.create_text("hi & <bye>");
         d.append_child(a, t);

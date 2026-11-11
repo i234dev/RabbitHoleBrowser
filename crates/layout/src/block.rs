@@ -192,8 +192,17 @@ impl<'a> Layouter<'a> {
     }
 
     pub fn layout_document(&mut self) -> LayoutTree {
-        let builder = Builder::new(self.ctx);
+        self.layout_document_with(None)
+    }
+
+    /// Lay out the document, taking unchanged boxes from `reuse`.
+    pub(crate) fn layout_document_with(&mut self, reuse: Option<&crate::incremental::Reuse>) -> LayoutTree {
+        let debug = crate::incremental::debug_timing();
+        let t0 = std::time::Instant::now();
+        let builder = Builder::new(self.ctx, reuse);
         let mut root = builder.build_root();
+        let t_build = t0.elapsed();
+        let uses_counters = builder.uses_counters();
         let vp_w = self.ctx.viewport_width.max(1.0);
         let vp_h = self.ctx.viewport_height.max(1.0);
         let cb = Cb {
@@ -204,6 +213,7 @@ impl<'a> Layouter<'a> {
         let mut bfc = Bfc::new();
         let top = self.effective_top_margin(&root, cb.width);
         self.layout_block(&mut root, &cb, top, &mut bfc, WidthMode::Fill);
+        let t_layout = t0.elapsed();
         let mut doc_h = (root.rect.bottom() + root.collapsed_bottom_margin.max(0.0)).max(vp_h);
         let icb = Rect::new(0.0, 0.0, vp_w, doc_h);
         if root.style.position == Position::Static {
@@ -212,11 +222,16 @@ impl<'a> Layouter<'a> {
         self.apply_relative(&mut root, vp_w, vp_h);
         let (max_r, max_b) = bounds(&root);
         doc_h = doc_h.max(max_b);
+        if debug {
+            let fresh = crate::incremental::BUILD_STATS.with(|c| c.replace(0));
+            eprintln!("[layout] build {:?} ({fresh} fresh elements), block layout {:?}, abs+relative+bounds {:?}", t_build, t_layout - t_build, t0.elapsed() - t_layout);
+        }
         LayoutTree {
             root,
             width: vp_w.max(max_r.min(vp_w * 4.0)),
             height: doc_h,
             viewport: (vp_w, vp_h),
+            uses_counters,
         }
     }
 
@@ -328,6 +343,13 @@ impl<'a> Layouter<'a> {
     /// Lay out `b` as a block-level box whose border-box top is at `top`.
     pub fn layout_block(&mut self, b: &mut LayoutBox, cb: &Cb, top: f32, bfc: &mut Bfc, mode: WidthMode) {
         let forced_h = self.forced_content_height.take(); // grid/flex hook
+        // Where the contents' origin is now (for reuse by translation): the
+        // current content box (it moved together with the contents, relative
+        // offsets included) plus the scroll offset applied to the contents.
+        let prev_cache = b.layout_cache.take();
+        let prev_origin = (b.content_rect.x + b.scroll_offset.0, b.content_rect.y + b.scroll_offset.1);
+        b.rel_applied = (0.0, 0.0);
+        b.scroll_offset = (0.0, 0.0);
         if b.formatting == Formatting::Table && b.style.border_collapse {
             // Collapsed borders change the table's (and cells') border widths.
             self.resolve_collapsed_borders(b);
@@ -437,10 +459,57 @@ impl<'a> Layouter<'a> {
         b.bottom_margins = Margins::of(mb).pair();
 
         let mut local_bfc = Bfc::new();
-        let content_h = if b.bfc_root {
-            self.layout_contents(b, &inner_cb, &mut local_bfc, top_collapsible, bottom_collapsible)
+        let content_y = b.content_rect.y;
+        let origin = (b.content_rect.x, content_y);
+        // Floats of the parent BFC that can reach into this box (relative to
+        // its content origin): the contents can be reused only next to the
+        // same floats.
+        let float_env = if b.bfc_root { Vec::new() } else { bfc.relative_from(origin, content_y) };
+        // Table cells are adjusted after layout (vertical-align), so their
+        // contents are not where the cache expects them.
+        let cacheable = b.kind != BoxKind::TableCell;
+        let had_cache = prev_cache.is_some();
+        let reuse = prev_cache.filter(|c| {
+            cacheable
+                && c.inner_w == inner_cb.width
+                && c.inner_h == inner_cb.height
+                && c.top_collapsible == top_collapsible
+                && c.bottom_collapsible == bottom_collapsible
+                && crate::float::same_floats(&c.float_env, &float_env)
+        });
+        crate::incremental::count(reuse.is_some(), had_cache);
+        b.reused_layout = reuse.is_some();
+        let (content_h, float_extent) = if let Some(c) = reuse {
+            // Same constraints as last time: move the old contents.
+            crate::table::translate_contents(b, b.content_rect.x - prev_origin.0, content_y - prev_origin.1);
+            b.collapsed_bottom_margin = c.collapsed_bottom_margin;
+            b.bottom_margins = c.bottom_margins;
+            // Floats inside that belong to the parent BFC are placed again.
+            bfc.extend_relative(origin, &c.escaped);
+            let out = (c.content_h, c.float_extent);
+            b.layout_cache = Some(c);
+            out
         } else {
-            self.layout_contents(b, &inner_cb, bfc, top_collapsible, bottom_collapsible)
+            let floats_before = bfc.len();
+            let content_h = if b.bfc_root {
+                self.layout_contents(b, &inner_cb, &mut local_bfc, top_collapsible, bottom_collapsible)
+            } else {
+                self.layout_contents(b, &inner_cb, bfc, top_collapsible, bottom_collapsible)
+            };
+            let float_extent = if b.bfc_root && !local_bfc.is_empty() { Some(local_bfc.max_bottom() - content_y) } else { None };
+            b.layout_cache = cacheable.then(|| crate::incremental::LayoutCache {
+                inner_w: inner_cb.width,
+                inner_h: inner_cb.height,
+                top_collapsible,
+                bottom_collapsible,
+                content_h,
+                collapsed_bottom_margin: b.collapsed_bottom_margin,
+                bottom_margins: b.bottom_margins,
+                float_extent,
+                float_env,
+                escaped: bfc.relative_since(floats_before, origin),
+            });
+            (content_h, float_extent)
         };
 
         // A table's (or cell's) height is a minimum: content may exceed it.
@@ -449,8 +518,10 @@ impl<'a> Layouter<'a> {
             Some(e) => e,
             None => content_h,
         };
-        if b.bfc_root && explicit_h.is_none() && !local_bfc.is_empty() {
-            h = h.max(local_bfc.max_bottom() - b.content_rect.y);
+        if explicit_h.is_none() {
+            if let Some(fe) = float_extent {
+                h = h.max(fe);
+            }
         }
         h = self.clamp_height(&style, h, cb.height, pb_v);
         b.rect.h = h + pb_v;
@@ -846,14 +917,22 @@ impl<'a> Layouter<'a> {
 
     /// Lay out the absolutely positioned descendants whose containing block
     /// is `b` (padding box `cb`).
-    pub(crate) fn layout_abs_descendants(&mut self, b: &mut LayoutBox, cb: Rect) {
+    /// Returns whether any such descendant exists.
+    pub(crate) fn layout_abs_descendants(&mut self, b: &mut LayoutBox, cb: Rect) -> bool {
+        let mut found = false;
         for i in 0..b.children.len() {
             if b.children[i].flow == Flow::Absolute {
                 self.layout_absolute(&mut b.children[i], cb);
-            } else if b.children[i].style.position == Position::Static {
-                self.layout_abs_descendants(&mut b.children[i], cb);
+                found = true;
+            } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below {
+                // Kept boxes remember having none (their subtree is
+                // unchanged), so large static subtrees are walked once.
+                let f = self.layout_abs_descendants(&mut b.children[i], cb);
+                b.children[i].no_abs_below = !f;
+                found |= f;
             }
         }
+        found
     }
 
     fn layout_absolute(&mut self, c: &mut LayoutBox, cb: Rect) {
@@ -900,15 +979,22 @@ impl<'a> Layouter<'a> {
         } else {
             c.static_pos.1 + mt
         };
+        // The static position is where the box would have been in flow; it
+        // must not move with the box (laying it out again would drift).
+        let static_pos = c.static_pos;
         c.translate(x - c.rect.x, y - c.rect.y);
+        c.static_pos = static_pos;
     }
 
     /// Apply `position: relative` offsets after layout.
     fn apply_relative(&mut self, b: &mut LayoutBox, cbw: f32, cbh: f32) {
         let (iw, ih) = (b.content_rect.w, b.content_rect.h);
-        for c in &mut b.children {
-            self.apply_relative(c, iw, ih);
+        if !b.reused_layout {
+            for c in &mut b.children {
+                self.apply_relative(c, iw, ih);
+            }
         }
+        let mut want = (0.0, 0.0);
         if b.style.position == Position::Relative {
             let s = &b.style;
             let dx = s
@@ -923,8 +1009,13 @@ impl<'a> Layouter<'a> {
                 .resolve(cbh)
                 .or_else(|| s.inset.bottom.resolve(cbh).map(|v| -v))
                 .unwrap_or(0.0);
-            b.translate(dx, dy);
+            want = (dx, dy);
         }
+        // Boxes reused from the previous layout may carry their offset
+        // already: apply only the difference.
+        let (ax, ay) = b.rel_applied;
+        b.translate(want.0 - ax, want.1 - ay);
+        b.rel_applied = want;
     }
 
     /// Position an outside list marker next to the first line.

@@ -15,19 +15,51 @@ pub(crate) struct Builder<'a> {
     ctx: &'a LayoutContext<'a>,
     counters: RefCell<Counters>,
     quotes: RefCell<Quotes>,
+    /// Boxes of the previous tree that may be reused.
+    reuse: Option<&'a crate::incremental::Reuse>,
+    /// Counters or quotes were used (document-order state).
+    used_counters: std::cell::Cell<bool>,
+    /// Number of counter / quote operations so far.
+    ops: std::cell::Cell<u64>,
+    /// Record counter state around element subtrees (for reuse).
+    snapshot: bool,
+}
+
+/// Counter and quote state around a box's subtree.
+#[derive(Debug)]
+pub(crate) struct CounterIo {
+    before: (Counters, Quotes),
+    after: (Counters, Quotes),
 }
 
 impl<'a> Builder<'a> {
-    pub fn new(ctx: &'a LayoutContext<'a>) -> Self {
+    pub fn new(ctx: &'a LayoutContext<'a>, reuse: Option<&'a crate::incremental::Reuse>) -> Self {
         Builder {
             ctx,
             counters: RefCell::new(Counters::new()),
             quotes: RefCell::new(Quotes::default()),
+            reuse,
+            used_counters: std::cell::Cell::new(false),
+            ops: std::cell::Cell::new(0),
+            snapshot: reuse.map(|r| r.uses_counters).unwrap_or(false),
         }
+    }
+
+    fn counter_state(&self) -> (Counters, Quotes) {
+        (self.counters.borrow().clone(), self.quotes.borrow().clone())
+    }
+
+    /// Did building use CSS counters or quotes?
+    pub fn uses_counters(&self) -> bool {
+        self.used_counters.get()
     }
 
     /// Apply `counter-reset` / `counter-increment` of a style.
     fn apply_counters(&self, style: &ComputedStyle) {
+        if !style.counter_reset.is_empty() || !style.counter_increment.is_empty() {
+            self.used_counters.set(true);
+            self.ops.set(self.ops.get() + 1);
+        }
         let mut c = self.counters.borrow_mut();
         for (name, v) in &style.counter_reset {
             c.reset(name, *v);
@@ -47,6 +79,10 @@ impl<'a> Builder<'a> {
             Content::Items(items) => items.clone(),
             _ => return None,
         };
+        if items.iter().any(|i| !matches!(i, ContentItem::String(_) | ContentItem::Attr(_) | ContentItem::Url(_))) {
+            self.used_counters.set(true);
+            self.ops.set(self.ops.get() + 1);
+        }
         self.apply_counters(&style);
         let doc = self.doc();
         let mut children: Vec<LayoutBox> = Vec::new();
@@ -138,6 +174,9 @@ impl<'a> Builder<'a> {
         let style = html
             .and_then(|h| self.ctx.styles.get(h).cloned())
             .unwrap_or_else(|| Rc::new(ComputedStyle::initial()));
+        if let (Some(r), Some(h)) = (self.reuse, html) {
+            r.open(h);
+        }
         let mut root = LayoutBox::new(BoxKind::Block, html, style);
         root.bfc_root = true;
         let children = match html {
@@ -174,7 +213,7 @@ impl<'a> Builder<'a> {
         out
     }
 
-    fn build_element(&self, node: NodeId, parent_style: &Rc<ComputedStyle>, in_table_row: bool, out: &mut Vec<LayoutBox>) {
+    fn build_element(&self, node: NodeId, _parent_style: &Rc<ComputedStyle>, in_table_row: bool, out: &mut Vec<LayoutBox>) {
         let doc = self.doc();
         let style = match self.ctx.styles.get(node) {
             Some(s) => s.clone(),
@@ -184,6 +223,9 @@ impl<'a> Builder<'a> {
             return;
         }
         if style.display == Display::Contents {
+            if let Some(r) = self.reuse {
+                r.open(node);
+            }
             out.extend(self.build_children(node, &style, in_table_row));
             return;
         }
@@ -206,8 +248,52 @@ impl<'a> Builder<'a> {
             out.push(b);
             return;
         }
+        if let Some(r) = self.reuse {
+            if let Some(b) = r.take(node, &style) {
+                if !b.counter_touch {
+                    out.push(b);
+                    return;
+                }
+                // The subtree uses counters: reusable when it would see the
+                // same counter state as when it was built.
+                let io = b.counter_io.clone();
+                if let Some(io) = io.filter(|io| io.before.0 == *self.counters.borrow() && io.before.1 == *self.quotes.borrow()) {
+                    *self.counters.borrow_mut() = io.after.0.clone();
+                    *self.quotes.borrow_mut() = io.after.1.clone();
+                    self.ops.set(self.ops.get() + 1);
+                    self.used_counters.set(true);
+                    out.push(b);
+                    return;
+                }
+                r.give_back(b);
+            }
+        }
+        let ops0 = self.ops.get();
+        if crate::incremental::debug_timing() {
+            crate::incremental::BUILD_STATS.with(|c| c.set(c.get() + 1));
+        }
+        let before = if self.snapshot { Some(self.counter_state()) } else { None };
+        let len0 = out.len();
+        self.build_element_inner(node, &style, in_table_row, out);
+        // Remember the computed style the box was built from (its own
+        // style may be adjusted: table wrappers, rows, collapsed borders).
+        for b in &mut out[len0..] {
+            b.built_from = Some(style.clone());
+        }
+        if self.ops.get() != ops0 {
+            let io = before.map(|before| Rc::new(CounterIo { before, after: self.counter_state() }));
+            for b in &mut out[len0..] {
+                b.counter_touch = true;
+                b.counter_io = io.clone();
+            }
+        }
+    }
+
+    /// Build a fresh box for an element (after the reuse check).
+    fn build_element_inner(&self, node: NodeId, style: &Rc<ComputedStyle>, _in_table_row: bool, out: &mut Vec<LayoutBox>) {
+        let doc = self.doc();
+        let style = style.clone();
         let tag = doc.tag(node).unwrap_or("");
-        let _ = parent_style;
         self.apply_counters(&style);
 
         // Replaced elements. An `<object>` whose resource cannot be shown
@@ -462,6 +548,9 @@ impl<'a> Builder<'a> {
                         // An inline element as a flex item becomes a block.
                         let mut blk = LayoutBox::new(BoxKind::Block, c.node, c.style.clone());
                         blk.bfc_root = true;
+                        blk.counter_touch = c.counter_touch;
+                        blk.built_from = c.built_from.take();
+                        blk.counter_io = c.counter_io.take();
                         let kids = std::mem::take(&mut c.children);
                         self.finish_container(&mut blk, kids, false);
                         out.push(blk);

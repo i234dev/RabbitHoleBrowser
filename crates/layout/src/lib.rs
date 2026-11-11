@@ -10,9 +10,11 @@ mod background;
 mod block;
 mod build;
 mod counters;
+mod damage;
 mod flex;
 mod float;
 mod grid;
+mod incremental;
 mod inline;
 mod intrinsic;
 mod table;
@@ -24,7 +26,9 @@ mod tests_flexgrid;
 #[cfg(test)]
 mod tests_css21;
 
-pub use display_list::{DisplayItem, DisplayList, HitEntry, HitList, HitScope, HitScopeNode};
+pub use damage::{damage as display_list_damage, merge_rects as merge_damage};
+pub use incremental::{layout_incremental, take_cache_stats, LayoutDamage};
+pub use display_list::{DisplayItem, DisplayList, StickyPatch, HitEntry, HitList, HitScope, HitScopeNode};
 pub use tree::{
     BoxKind, Flow, Formatting, Fragment, FragmentKind, InlineItem, LayoutBox, LayoutTree, LineBox, Marker, ScrollInfo,
 };
@@ -73,6 +77,11 @@ pub fn build_display_list(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList
 /// item, so the canvas shows the viewport starting at that document offset.
 pub fn paint(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32) {
     paint::paint(list, canvas, fonts, scroll_x, scroll_y)
+}
+
+/// Rasterize only `region` (device pixels) of a display list.
+pub fn paint_region(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, region: rabbithole_gfx::Rect) {
+    paint::paint_region(list, canvas, fonts, scroll_x, scroll_y, region)
 }
 
 /// Rasterize with `position: fixed` content placed at `fixed_origin`

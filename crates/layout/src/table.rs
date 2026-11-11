@@ -589,6 +589,7 @@ impl<'a> Layouter<'a> {
             row.rect = Rect::new(grid_x, row_y[r], grid_w, row_h[r]);
             row.content_rect = row.rect;
             row.margin = Edges::all(0.0);
+            row.rel_applied = (0.0, 0.0);
         }
         // Row groups span their rows.
         let mut cursor = content_y + if nrows > 0 { vs } else { 0.0 };
@@ -605,6 +606,7 @@ impl<'a> Layouter<'a> {
                 grp.rect = Rect::new(grid_x, top, grid_w, bottom - top);
                 grp.content_rect = grp.rect;
                 grp.margin = Edges::all(0.0);
+                grp.rel_applied = (0.0, 0.0);
             } else if b.children[i].kind == BoxKind::TableRow {
                 cursor = b.children[i].rect.bottom();
             }
@@ -624,6 +626,7 @@ impl<'a> Layouter<'a> {
             };
             bx.rect = r;
             bx.content_rect = r;
+            bx.rel_applied = (0.0, 0.0);
         }
         // Anything else (stray out-of-flow boxes) sits at the table origin.
         for c in b.children.iter_mut() {

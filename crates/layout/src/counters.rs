@@ -7,7 +7,7 @@ use rabbithole_style::ListStyleType;
 /// created by `counter-reset` on an element lives in its parent's frame so
 /// it is visible to the element, its descendants and its following
 /// siblings; it disappears when the parent is left.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Counters {
     frames: Vec<Vec<(String, i32)>>,
 }
@@ -31,7 +31,12 @@ impl Counters {
     /// `counter-reset: name value` on the current element.
     pub fn reset(&mut self, name: &str, value: i32) {
         if let Some(top) = self.frames.last_mut() {
-            top.push((name.to_string(), value));
+            // A sibling's reset of the same name replaces the earlier
+            // instance (its scope ends there).
+            match top.iter_mut().find(|(n, _)| n == name) {
+                Some(e) => e.1 = value,
+                None => top.push((name.to_string(), value)),
+            }
         }
     }
 
@@ -128,7 +133,7 @@ pub(crate) fn roman(mut n: i64) -> String {
 }
 
 /// Quote nesting depth for `open-quote` / `close-quote`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Quotes {
     pub depth: usize,
 }

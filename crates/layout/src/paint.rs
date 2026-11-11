@@ -139,6 +139,22 @@ pub fn paint(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scrol
 /// overscanned canvas.
 pub fn paint_with_fixed_origin(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, fixed_origin: (f32, f32)) {
     let view = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    paint_view(list, canvas, fonts, scroll_x, scroll_y, view, fixed_origin);
+}
+
+/// Paint only the device-space `region` (clipped; items outside it are
+/// skipped), e.g. the damage of a scroll or a style change.
+pub fn paint_region(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, region: Rect) {
+    let view = region.intersect(&Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32));
+    if view.is_empty() {
+        return;
+    }
+    canvas.push_clip(view);
+    paint_view(list, canvas, fonts, scroll_x, scroll_y, view, (0.0, 0.0));
+    canvas.pop_clip();
+}
+
+fn paint_view(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32, view: Rect, fixed_origin: (f32, f32)) {
     let mut st = State {
         dx: -scroll_x,
         dy: -scroll_y,
@@ -340,7 +356,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             oblique,
         } => {
             let (px, py) = (x + dx, y + dy);
-            if py + size < -2.0 || py - size * 1.5 > view.h + 2.0 || px > view.w {
+            if py + size < view.y - 2.0 || py - size * 1.5 > view.bottom() + 2.0 || px > view.right() {
                 return;
             }
             if st.ext {
@@ -429,7 +445,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             style,
         } => {
             let (ax, ay, bx, by) = (x0 + dx, y0 + dy, x1 + dx, y1 + dy);
-            if ay.max(by) + width < 0.0 || ay.min(by) - width > view.h || ax.max(bx) < 0.0 || ax.min(bx) > view.w {
+            if ay.max(by) + width < view.y || ay.min(by) - width > view.bottom() || ax.max(bx) < view.x || ax.min(bx) > view.right() {
                 return;
             }
             draw_decoration_line(canvas, ax, ay, bx, by, *width, *color, *style);

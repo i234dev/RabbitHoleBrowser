@@ -968,6 +968,42 @@ impl ComputedStyle {
         }
     }
 
+    /// Do two styles agree on every field [`ComputedStyle::inherit_from`]
+    /// copies (keep both lists in sync)? Children of an element whose
+    /// inherited part did not change need no restyle for inheritance.
+    pub fn inherited_eq(&self, o: &ComputedStyle) -> bool {
+        self.color == o.color
+            && self.font_family == o.font_family
+            && self.font_size == o.font_size
+            && self.font_weight == o.font_weight
+            && self.font_style == o.font_style
+            && self.line_height == o.line_height
+            && self.letter_spacing == o.letter_spacing
+            && self.word_spacing == o.word_spacing
+            && self.text_align == o.text_align
+            && self.text_decoration == o.text_decoration
+            && self.text_transform == o.text_transform
+            && self.text_indent == o.text_indent
+            && self.white_space == o.white_space
+            && self.list_style_type == o.list_style_type
+            && self.list_style_position == o.list_style_position
+            && self.visibility == o.visibility
+            && self.cursor_pointer == o.cursor_pointer
+            && self.text_shadow == o.text_shadow
+            && self.word_break == o.word_break
+            && self.overflow_wrap == o.overflow_wrap
+            && self.direction == o.direction
+            && self.tab_size == o.tab_size
+            && self.font_family_list == o.font_family_list
+            && self.font_variant_small_caps == o.font_variant_small_caps
+            && self.image_rendering_pixelated == o.image_rendering_pixelated
+            && self.quotes == o.quotes
+            && self.pointer_events == o.pointer_events
+            && self.user_select == o.user_select
+            && self.border_collapse == o.border_collapse
+            && self.border_spacing == o.border_spacing
+    }
+
     /// Resolved corner radii in px: [tl, tr, br, bl] × (h, v) for a box of
     /// the given size, scaled down per CSS when they would overlap.
     pub fn resolved_radii(&self, width: f32, height: f32) -> [(f32, f32); 4] {

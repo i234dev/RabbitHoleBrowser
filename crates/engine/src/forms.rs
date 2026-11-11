@@ -415,15 +415,8 @@ impl Page {
 
 /// Set (`Some`) or remove (`None`) an attribute.
 pub fn set_attr(doc: &mut Document, node: NodeId, name: &str, value: Option<&str>) {
-    if let Some(el) = doc.element_mut(node) {
-        match value {
-            Some(v) => match el.attrs.iter_mut().find(|(k, _)| k == name) {
-                Some(slot) => slot.1 = v.to_string(),
-                None => el.attrs.push((name.to_string(), v.to_string())),
-            },
-            None => el.attrs.retain(|(k, _)| k != name),
-        }
-    }
+    // Through the DOM API so the change is recorded for incremental restyle.
+    doc.set_attr(node, name, value);
 }
 
 #[cfg(test)]

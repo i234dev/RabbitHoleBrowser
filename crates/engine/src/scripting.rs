@@ -154,7 +154,8 @@ impl HostEnv for EngineEnv<'_> {
         if self.page.script.dom_dirty {
             self.page.script.dom_dirty = false;
             let t = std::time::Instant::now();
-            self.engine.restyle(self.page);
+            // Style + layout only; the display list waits for paint.
+            self.engine.flush_layout(self.page);
             if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
                 eprintln!("[layout] forced restyle+layout {:?}", t.elapsed());
             }
@@ -166,6 +167,7 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn elements_from_point(&mut self, x: f32, y: f32) -> Option<Vec<NodeId>> {
         self.ensure_layout();
+        self.engine.flush_display_list(self.page);
         if x < 0.0 || y < 0.0 || x > self.page.viewport.width || y > self.page.viewport.height {
             return Some(Vec::new());
         }
@@ -581,6 +583,10 @@ impl Engine {
             if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
                 eprintln!("[settle-engine] restyle done in {:?}", t.elapsed());
             }
+            out.relayout = true;
+        } else if page.incr.dirty() {
+            // Layout was flushed for a script query; finish the display list.
+            self.relayout_only(page);
             out.relayout = true;
         }
         out.navigation = page.script.pending_navigation.take();

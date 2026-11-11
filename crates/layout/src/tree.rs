@@ -238,6 +238,26 @@ pub struct LayoutBox {
     pub pseudo: Option<PseudoElement>,
     pub(crate) pieces: Option<Vec<crate::inline::Piece>>,
     pub(crate) intrinsic_cache: Option<(f32, f32)>,
+    /// Inputs and results of the box's last content layout, so a box kept
+    /// from the previous frame can be translated instead of laid out.
+    pub(crate) layout_cache: Option<crate::incremental::LayoutCache>,
+    /// `position: relative` offset currently applied to the box.
+    pub(crate) rel_applied: (f32, f32),
+    /// The last layout translated the contents from the cache (descendants
+    /// are as they were: relative offsets need no update below).
+    pub(crate) reused_layout: bool,
+    /// No absolutely positioned box is reachable through static descendants
+    /// (valid while the subtree is unchanged).
+    pub(crate) no_abs_below: bool,
+    /// Building the box's subtree used CSS counters / quotes.
+    pub(crate) counter_touch: bool,
+    /// Computed style of the element this box was built for (the box's own
+    /// style may differ); identifies reusable boxes.
+    pub(crate) built_from: Option<Rc<ComputedStyle>>,
+    /// Counter/quote state before and after building the subtree (only
+    /// recorded when the document uses counters), so the box can be reused
+    /// when it would see the same state.
+    pub(crate) counter_io: Option<Rc<crate::build::CounterIo>>,
 }
 
 impl LayoutBox {
@@ -275,6 +295,13 @@ impl LayoutBox {
             pseudo: None,
             pieces: None,
             intrinsic_cache: None,
+            layout_cache: None,
+            rel_applied: (0.0, 0.0),
+            reused_layout: false,
+            no_abs_below: false,
+            counter_touch: false,
+            built_from: None,
+            counter_io: None,
         }
     }
 
@@ -343,50 +370,56 @@ impl LayoutBox {
         if self.style.position != Position::Sticky {
             return (0.0, 0.0);
         }
-        let s = &self.style;
-        let mr = self.margin_rect();
-        let mut dy = 0.0;
-        if let Some(top) = s.inset.top.resolve(scrollport.h) {
-            let want = scrollport.y + top;
-            if mr.y < want {
-                dy = want - mr.y;
-                // Stay within the containing block.
-                let max = (cb.bottom() - mr.h - mr.y).max(0.0);
-                dy = dy.min(max);
-            }
-        }
-        if dy == 0.0 {
-            if let Some(bottom) = s.inset.bottom.resolve(scrollport.h) {
-                let want = scrollport.bottom() - bottom - mr.h;
-                if mr.y > want {
-                    dy = want - mr.y;
-                    let min = (cb.y - mr.y).min(0.0);
-                    dy = dy.max(min);
-                }
-            }
-        }
-        let mut dx = 0.0;
-        if let Some(left) = s.inset.left.resolve(scrollport.w) {
-            let want = scrollport.x + left;
-            if mr.x < want {
-                dx = want - mr.x;
-                let max = (cb.right() - mr.w - mr.x).max(0.0);
-                dx = dx.min(max);
-            }
-        }
-        if dx == 0.0 {
-            if let Some(right) = s.inset.right.resolve(scrollport.w) {
-                let want = scrollport.right() - right - mr.w;
-                if mr.x > want {
-                    dx = want - mr.x;
-                    let min = (cb.x - mr.x).min(0.0);
-                    dx = dx.max(min);
-                }
-            }
-        }
-        (dx, dy)
+        sticky_offset_for(&self.style.inset, self.margin_rect(), scrollport, cb)
     }
+}
 
+/// `position: sticky` displacement of a box with margin box `mr` and
+/// insets `inset`, for a scrollport and containing block content rect.
+pub(crate) fn sticky_offset_for(inset: &Edges<rabbithole_style::Length>, mr: Rect, scrollport: Rect, cb: Rect) -> (f32, f32) {
+    let mut dy = 0.0;
+    if let Some(top) = inset.top.resolve(scrollport.h) {
+        let want = scrollport.y + top;
+        if mr.y < want {
+            dy = want - mr.y;
+            // Stay within the containing block.
+            let max = (cb.bottom() - mr.h - mr.y).max(0.0);
+            dy = dy.min(max);
+        }
+    }
+    if dy == 0.0 {
+        if let Some(bottom) = inset.bottom.resolve(scrollport.h) {
+            let want = scrollport.bottom() - bottom - mr.h;
+            if mr.y > want {
+                dy = want - mr.y;
+                let min = (cb.y - mr.y).min(0.0);
+                dy = dy.max(min);
+            }
+        }
+    }
+    let mut dx = 0.0;
+    if let Some(left) = inset.left.resolve(scrollport.w) {
+        let want = scrollport.x + left;
+        if mr.x < want {
+            dx = want - mr.x;
+            let max = (cb.right() - mr.w - mr.x).max(0.0);
+            dx = dx.min(max);
+        }
+    }
+    if dx == 0.0 {
+        if let Some(right) = inset.right.resolve(scrollport.w) {
+            let want = scrollport.right() - right - mr.w;
+            if mr.x > want {
+                dx = want - mr.x;
+                let min = (cb.x - mr.x).min(0.0);
+                dx = dx.max(min);
+            }
+        }
+    }
+    (dx, dy)
+}
+
+impl LayoutBox {
     /// Move this box and everything inside it.
     pub fn translate(&mut self, dx: f32, dy: f32) {
         if dx == 0.0 && dy == 0.0 {
@@ -556,6 +589,9 @@ pub struct LayoutTree {
     pub height: f32,
     /// Viewport size used for layout (for fixed boxes and sticky).
     pub viewport: (f32, f32),
+    /// Box construction used CSS counters or quotes (document-order
+    /// state), so boxes cannot be rebuilt piecemeal.
+    pub(crate) uses_counters: bool,
 }
 
 impl LayoutTree {
@@ -566,6 +602,7 @@ impl LayoutTree {
             width: 0.0,
             height: 0.0,
             viewport: (0.0, 0.0),
+            uses_counters: true,
         }
     }
 
@@ -583,6 +620,61 @@ impl LayoutTree {
             b.children.iter().any(walk)
         }
         walk(&self.root)
+    }
+
+    /// Does painting depend on the page scroll position (sticky boxes or
+    /// `background-attachment: fixed`)? Fixed boxes and inner scroll
+    /// containers do not: they are painted in viewport / own coordinates.
+    ///
+    /// Sticky boxes alone can be handled by patching the display list
+    /// ([`crate::DisplayList::update_page_scroll`]); this reports only what
+    /// needs a rebuild (fixed backgrounds).
+    pub fn depends_on_page_scroll(&self) -> bool {
+        fn walk(b: &LayoutBox) -> bool {
+            if b.style.background_layers.iter().any(|l| l.fixed) {
+                return true;
+            }
+            b.children.iter().any(walk)
+        }
+        walk(&self.root)
+    }
+
+    /// The box generated by element `node`, found by following its DOM
+    /// ancestors down the box tree (no full-tree scan).
+    pub fn box_of(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<&LayoutBox> {
+        let path = guided_path(&self.root, doc, node)?;
+        let mut b = &self.root;
+        for i in path {
+            b = &b.children[i];
+        }
+        Some(b)
+    }
+
+    /// Mutable [`LayoutTree::box_of`].
+    pub fn box_of_mut(&mut self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<&mut LayoutBox> {
+        let path = guided_path(&self.root, doc, node)?;
+        let mut b = &mut self.root;
+        for i in path {
+            b = &mut b.children[i];
+        }
+        Some(b)
+    }
+
+    /// Scroll the contents of the scroll container generated by `node` to
+    /// `offset` by translating them (no layout). Returns false when the
+    /// box is not a laid out scroll container.
+    pub fn set_scroll_offset(&mut self, doc: &rabbithole_dom::Document, node: NodeId, offset: (f32, f32)) -> bool {
+        let Some(b) = self.box_of_mut(doc, node) else { return false };
+        if !b.scroll_container {
+            return false;
+        }
+        let pr = b.padding_rect();
+        let ox = offset.0.clamp(0.0, (b.scroll_width - pr.w).max(0.0));
+        let oy = offset.1.clamp(0.0, (b.scroll_height - pr.h).max(0.0));
+        let (dx, dy) = (b.scroll_offset.0 - ox, b.scroll_offset.1 - oy);
+        crate::table::translate_contents(b, dx, dy);
+        b.scroll_offset = (ox, oy);
+        true
     }
 
     /// Deepest element box containing the point (document coordinates).
@@ -773,4 +865,44 @@ impl Hit {
 pub fn layout_document(ctx: &LayoutContext) -> LayoutTree {
     let mut layouter = crate::block::Layouter::new(ctx);
     layouter.layout_document()
+}
+
+/// Child-index path from `root` to the box of `node`, descending only into
+/// anonymous boxes and boxes of `node`'s DOM ancestors.
+fn guided_path(root: &LayoutBox, doc: &rabbithole_dom::Document, node: NodeId) -> Option<Vec<usize>> {
+    if node >= doc.nodes.len() {
+        return None;
+    }
+    if root.node == Some(node) {
+        return Some(Vec::new());
+    }
+    let mut ancestors = std::collections::HashSet::new();
+    let mut cur = Some(node);
+    while let Some(c) = cur {
+        ancestors.insert(c);
+        cur = doc.parent(c);
+    }
+    fn walk(b: &LayoutBox, node: NodeId, anc: &std::collections::HashSet<NodeId>, path: &mut Vec<usize>) -> bool {
+        for (i, c) in b.children.iter().enumerate() {
+            if c.pseudo.is_some() {
+                continue;
+            }
+            match c.node {
+                Some(n) if n == node => {
+                    path.push(i);
+                    return true;
+                }
+                Some(n) if !anc.contains(&n) => continue,
+                _ => {}
+            }
+            path.push(i);
+            if walk(c, node, anc, path) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+    let mut path = Vec::new();
+    walk(root, node, &ancestors, &mut path).then_some(path)
 }
