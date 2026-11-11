@@ -323,7 +323,7 @@ fn tool_definitions() -> Vec<Value> {
     }));
     tools.push(json!({
         "name": "click_at",
-        "description": "Click at viewport coordinates (CSS pixels from the top-left of the visible page, as in a screenshot) like a real mouse: hit-tests what is painted there, dispatches pointer/mouse events and the click, then follows links or submits forms. Returns the clicked element and the resulting page text.",
+        "description": "Click at viewport coordinates (CSS pixels from the top-left of the visible page, as in a screenshot) like a real mouse: hit-tests what is painted there, dispatches pointer/mouse events and the click, then follows links or submits forms. Returns the clicked element, which viewport regions visibly changed (when the page did not navigate) and the resulting page text.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -530,17 +530,25 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
             let node = crate::scripting::query_selector(&page.doc, &selector)?.ok_or_else(|| format!("no element matches `{selector}`"))?;
             let engine = &session.engine;
             let wait = session.wait_ms;
+            let before = engine.snapshot(page);
             let request = crate::scripting::click_element(engine, page, node);
-            match request {
-                Some(req) => state.navigate_current(&req)?,
+            let change = match request {
+                Some(req) => {
+                    state.navigate_current(&req)?;
+                    String::new()
+                }
                 None => {
                     let (session, page) = state.parts();
-                    if let Some(nav) = crate::scripting::settle(&session.engine, page, wait) {
-                        state.navigate_current(&nav.request)?;
+                    match crate::scripting::settle(&session.engine, page, wait) {
+                        Some(nav) => {
+                            state.navigate_current(&nav.request)?;
+                            String::new()
+                        }
+                        None => visual_change(&before, &session.engine.snapshot(page)),
                     }
                 }
-            }
-            Ok(text_content(state.current_text(max_chars)))
+            };
+            Ok(text_content(format!("{change}{}", state.current_text(max_chars))))
         }
         "click_at" => {
             let x = args.get("x").and_then(Value::as_f64).ok_or("`x` must be a number")? as f32;
@@ -550,21 +558,29 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
             let (session, page) = state.parts();
             let engine = &session.engine;
             let wait = session.wait_ms;
+            let before = engine.snapshot(page);
             let (clicked, request) = crate::scripting::click_at(engine, page, x, y);
             let what = match clicked {
                 Some(n) => format!("Clicked <{}>", crate::scripting::describe_node(&page.doc, n)),
                 None => format!("Nothing clickable at ({x}, {y})"),
             };
-            match request {
-                Some(req) => state.navigate_current(&req)?,
+            let change = match request {
+                Some(req) => {
+                    state.navigate_current(&req)?;
+                    String::new()
+                }
                 None => {
                     let (session, page) = state.parts();
-                    if let Some(nav) = crate::scripting::settle(&session.engine, page, wait) {
-                        state.navigate_current(&nav.request)?;
+                    match crate::scripting::settle(&session.engine, page, wait) {
+                        Some(nav) => {
+                            state.navigate_current(&nav.request)?;
+                            String::new()
+                        }
+                        None => visual_change(&before, &session.engine.snapshot(page)),
                     }
                 }
-            }
-            Ok(text_content(format!("{what}\n\n{}", state.current_text(max_chars))))
+            };
+            Ok(text_content(format!("{what}\n{change}\n{}", state.current_text(max_chars))))
         }
         "fill" => {
             let max_chars = arg_u64(args, "max_chars", 20_000) as usize;
@@ -604,6 +620,19 @@ fn call_tool(state: &mut ServerState, name: &str, args: &Value) -> Result<Vec<Va
         }
         other => Err(format!("unknown tool: {other}")),
     }
+}
+
+/// Describe what changed on screen between two viewport snapshots (empty
+/// line when nothing did), so an agent knows whether its action had a
+/// visible effect and where.
+fn visual_change(before: &rabbithole_engine::diff::Frame, after: &rabbithole_engine::diff::Frame) -> String {
+    let regions = rabbithole_engine::diff::changed_regions(before, after);
+    if regions.is_empty() {
+        return "No visible change in the viewport.\n".to_string();
+    }
+    let list: Vec<String> = regions.iter().take(12).map(|r| format!("({}, {}, {}x{})", r.x, r.y, r.w, r.h)).collect();
+    let more = if regions.len() > 12 { format!(" and {} more", regions.len() - 12) } else { String::new() };
+    format!("Visible change in {} region(s) of the viewport (x, y, w×h): {}{more}\n", regions.len(), list.join(", "))
 }
 
 /// Standard base64 (RFC 4648) with padding.

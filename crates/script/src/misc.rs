@@ -319,9 +319,12 @@ fn range_insert_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
 struct WalkerData {
     doc: u32,
     root: NodeId,
+    /// TreeWalker: currentNode. NodeIterator: the reference node.
     current: NodeId,
     what: u32,
     filter: Value,
+    /// NodeIterator "pointer before reference" flag.
+    before: bool,
 }
 
 fn walker_data(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
@@ -343,7 +346,7 @@ pub(crate) fn new_tree_walker(realm: &mut Realm, args: &[Value], iterator: bool)
     root_value(realm, &filter);
     let p = proto(if iterator { "NodeIterator" } else { "TreeWalker" });
     let o = realm.new_object_with_proto(Some(p));
-    realm.set_host_data(o, Box::new(WalkerData { doc: root.doc, root: root.node, current: root.node, what, filter }));
+    realm.set_host_data(o, Box::new(WalkerData { doc: root.doc, root: root.node, current: root.node, what, filter, before: true }));
     let rv = wrap(realm, root);
     realm.define_property(o, "root", rv, ACC);
     realm.define_property(o, "whatToShow", Value::Number(what as f64), ACC);
@@ -435,6 +438,50 @@ fn walker_next_node(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
             return Ok(wrap(realm, NodeRef { doc, node: n }));
         }
     }
+}
+
+/// NodeIterator.nextNode / previousNode (DOM §6.1 "traverse"): the
+/// reference node itself is a candidate when the pointer is on the other
+/// side of it, and FILTER_REJECT does not skip descendants.
+fn iterator_traverse(realm: &mut Realm, this: Value, forward: bool) -> JsResult<Value> {
+    let o = walker_data(realm, &this)?;
+    let (doc, root, mut node, mut before) = {
+        let d = realm.host_data::<WalkerData>(o).unwrap();
+        (d.doc, d.root, d.current, d.before)
+    };
+    loop {
+        if forward {
+            if before {
+                before = false;
+            } else {
+                match with_doc(doc, |d| doc_order_next(d, root, node, false)) {
+                    Some(n) => node = n,
+                    None => return Ok(Value::Null),
+                }
+            }
+        } else if !before {
+            before = true;
+        } else {
+            match with_doc(doc, |d| doc_order_prev(d, root, node)) {
+                Some(n) => node = n,
+                None => return Ok(Value::Null),
+            }
+        }
+        if walker_accept(realm, o, node)? == 1 {
+            let d = realm.host_data_mut::<WalkerData>(o).unwrap();
+            d.current = node;
+            d.before = before;
+            return Ok(wrap(realm, NodeRef { doc, node }));
+        }
+    }
+}
+
+fn iterator_next_node(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    iterator_traverse(realm, this, true)
+}
+
+fn iterator_previous_node(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    iterator_traverse(realm, this, false)
 }
 
 fn walker_previous_node(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -808,8 +855,13 @@ pub(crate) fn install(realm: &mut Realm) {
 
     for name in ["TreeWalker", "NodeIterator"] {
         let w = define_class(realm, name, None, illegal_ctor);
-        realm.define_method(w, "nextNode", 0, walker_next_node);
-        realm.define_method(w, "previousNode", 0, walker_previous_node);
+        if name == "TreeWalker" {
+            realm.define_method(w, "nextNode", 0, walker_next_node);
+            realm.define_method(w, "previousNode", 0, walker_previous_node);
+        } else {
+            realm.define_method(w, "nextNode", 0, iterator_next_node);
+            realm.define_method(w, "previousNode", 0, iterator_previous_node);
+        }
         if name == "TreeWalker" {
             realm.define_method(w, "nextSibling", 0, walker_next_sibling);
             realm.define_method(w, "previousSibling", 0, walker_previous_sibling);

@@ -523,7 +523,25 @@ impl Compiler {
 
     /// Store top of stack (pops) into a variable (assignment semantics).
     fn emit_set_var(&mut self, name: &str) -> CResult<()> {
-        match self.resolve(name) {
+        // A named function expression's own name is an immutable binding:
+        // assigning to it is ignored (sloppy) or a TypeError (strict).
+        let resolved = self.resolve(name);
+        let is_self = match (&resolved, self.fs_ref().self_loc) {
+            (Resolved::Local { depth: 0, slot, kind: BindKind::Hidden }, Some(Loc::Slot(s))) => *slot == s,
+            (Resolved::Reg { reg, kind: BindKind::Hidden }, Some(Loc::Reg(r))) => *reg == r,
+            _ => false,
+        };
+        if is_self && name != "arguments" {
+            if self.fs_ref().flags.is_strict {
+                self.emit(Op::Pop);
+                let m = self.const_str("Assignment to constant variable.");
+                self.emit(Op::ThrowConst(1, m));
+            } else {
+                self.emit(Op::Pop);
+            }
+            return Ok(());
+        }
+        match resolved {
             Resolved::Local { depth, slot, kind } => {
                 if kind == BindKind::Import {
                     // Imports are immutable bindings.

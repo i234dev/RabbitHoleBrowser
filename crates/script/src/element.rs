@@ -1977,6 +1977,11 @@ pub(crate) fn install(realm: &mut Realm) {
     let base = proto("HTMLBaseElement");
     reflect(realm, base, "href", "href", Reflect::Url);
     reflect(realm, base, "target", "target", Reflect::Str);
+    let object = proto("HTMLObjectElement");
+    reflect(realm, object, "data", "data", Reflect::Url);
+    reflect(realm, object, "type", "type", Reflect::Str);
+    reflect(realm, object, "name", "name", Reflect::Str);
+    reflect(realm, object, "useMap", "usemap", Reflect::Str);
     let source = proto("HTMLSourceElement");
     reflect(realm, source, "src", "src", Reflect::Url);
     reflect(realm, source, "srcset", "srcset", Reflect::Str);

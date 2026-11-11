@@ -326,3 +326,72 @@ fn inline_table_flows_inline() {
     assert!(it.x > 10.0, "{}", t.dump());
     assert!(it.w > 10.0);
 }
+
+#[test]
+fn clearfix_div_contains_floats() {
+    let fx = Fx::new(
+        "<div id=p><div style='float:left;width:50px;height:80px'></div><div id=c style='clear:both'></div></div><div id=n style='height:5px'></div>",
+        RESET,
+    );
+    let t = fx.layout();
+    assert_px!(fx.rect(&t, "p").h, 80.0, t);
+    assert_px!(fx.rect(&t, "n").y, 80.0, t);
+}
+
+#[test]
+fn min_height_parent_keeps_child_bottom_margin_inside() {
+    let fx = Fx::new(
+        "<div id=p style='min-height:50px'><div style='height:10px;margin-bottom:30px'></div></div><div id=n style='height:5px'></div>",
+        RESET,
+    );
+    let t = fx.layout();
+    assert_px!(fx.rect(&t, "p").h, 50.0, t);
+    assert_px!(fx.rect(&t, "n").y, 50.0, t);
+}
+
+#[test]
+fn whitespace_only_block_collapses_through() {
+    let fx = Fx::new(
+        "<div style='height:10px;margin-bottom:20px'></div><div id=e style='margin:15px 0'>   </div><div id=n style='height:5px;margin-top:10px'></div>",
+        RESET,
+    );
+    let t = fx.layout();
+    assert_px!(fx.rect(&t, "n").y, 30.0, t);
+}
+
+#[test]
+fn fixed_box_paints_in_tree_order_with_positioned_siblings() {
+    // Acid2's `p.bad`: a fixed box earlier in the tree is covered by a
+    // later absolutely positioned one (same stacking level).
+    let fx = Fx::new(
+        "<div style='position:fixed;top:0;left:0;width:50px;height:50px;background:#f00'></div><div style='position:absolute;top:0;left:0;width:50px;height:50px;background:#0f0'></div>",
+        RESET,
+    );
+    let images = HashMap::new();
+    let bgs = HashMap::new();
+    let scrolls = HashMap::new();
+    let ctx = LayoutContext {
+        doc: &fx.doc,
+        styles: &fx.styles,
+        fonts: &fx.fonts,
+        images: &images,
+        background_images: &bgs,
+        viewport_width: 800.0,
+        viewport_height: 600.0,
+        scroll_offsets: &scrolls,
+        page_scroll: (0.0, 0.0),
+    };
+    let t = layout(&ctx);
+    let list = crate::build_display_list(&t, &ctx);
+    let pos = |c: rabbithole_gfx::Color| {
+        list.items
+            .iter()
+            .position(|i| matches!(i, crate::DisplayItem::Rect { color, .. } if *color == c))
+            .expect("rect")
+    };
+    let red = pos(rabbithole_gfx::Color::rgb(255, 0, 0));
+    let green = pos(rabbithole_gfx::Color::rgb(0, 255, 0));
+    assert!(red < green, "fixed box must paint below the later positioned box");
+    let fixed = list.items.iter().position(|i| matches!(i, crate::DisplayItem::PushFixed)).expect("fixed scope");
+    assert!(fixed < red);
+}

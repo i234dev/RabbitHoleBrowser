@@ -803,7 +803,11 @@ fn any_listener_on_path(realm: &mut Realm, key: TargetKey, ty: &str) -> bool {
     let has = |k: TargetKey| st.listener_counts.get(&(k, ty.to_string())).map(|c| *c > 0).unwrap_or(false);
     let handler_key = format!("__on_{ty}");
     match key {
-        TargetKey::Window => has(TargetKey::Window) || st.protos.get("__window").map(|w| realm.obj(*w).props.get(&PropertyKey::str(&handler_key)).map(|p| p.value.is_object()).unwrap_or(false)).unwrap_or(false),
+        TargetKey::Window => {
+            has(TargetKey::Window)
+                || st.protos.get("__window").map(|w| realm.obj(*w).props.get(&PropertyKey::str(&handler_key)).map(|p| p.value.is_object()).unwrap_or(false)).unwrap_or(false)
+                || with_doc_in_state(&st, 0, |doc| doc.body().map(|b| doc.attr(b, &format!("on{ty}")).is_some()).unwrap_or(false))
+        }
         TargetKey::Object(o) => has(key) || realm.obj(o).props.get(&PropertyKey::str(&handler_key)).map(|p| p.value.is_object()).unwrap_or(false),
         TargetKey::Node(n) => {
             if has(TargetKey::Window) {
@@ -1109,6 +1113,20 @@ fn inline_handler(realm: &mut Realm, key: TargetKey, current: &Value, ty: &str) 
             return None; // explicitly set to null
         }
     }
+    // `<body onload=...>` & co. are the window's handlers (HTML: "Window-
+    // reflecting body element event handler set").
+    let key = match key {
+        TargetKey::Window
+            if matches!(
+                ty,
+                "load" | "unload" | "beforeunload" | "resize" | "scroll" | "hashchange" | "popstate" | "message" | "pageshow" | "pagehide" | "storage" | "online" | "offline" | "focus" | "blur"
+            ) =>
+        {
+            let body = with_doc(0, |doc| doc.body())?;
+            TargetKey::Node(NodeRef { doc: 0, node: body })
+        }
+        k => k,
+    };
     let TargetKey::Node(n) = key else { return None };
     let attr = format!("on{ty}");
     let body = with_doc(n.doc, |doc| doc.attr(n.node, &attr).map(|s| s.to_string()))?;

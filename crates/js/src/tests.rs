@@ -1393,3 +1393,12 @@ fn late_rejection_handlers_are_not_reported_unhandled() {
     assert_eq!(left.len(), 1, "{left:?}");
     assert!(left[0].contains("really-unhandled"), "{left:?}");
 }
+
+#[test]
+fn named_function_expression_binding_is_immutable() {
+    // Acid3 test 93.
+    eq("var vartest = 0; var functest; var value = (function functest(arg) { if (arg) return 1; vartest = 1; functest = function (arg) { return 2; }; return functest(true); })(false); [vartest, value, typeof functest].join()", "1,1,undefined");
+    throws("(function f() { \"use strict\"; f = 1; })()", "constant");
+    // Shadowed by a var or parameter of the same name: an ordinary binding.
+    eq("(function f(f) { f = 3; return f; })(1)", "3");
+}

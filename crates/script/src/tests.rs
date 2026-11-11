@@ -994,3 +994,30 @@ fn inner_html_on_script_is_raw_text() {
     .unwrap();
     assert_eq!(host.eval_for_console(&mut env, "result"), "'3|2|a & <b>b</b>|function'");
 }
+
+#[test]
+fn body_onload_attribute_is_the_window_load_handler() {
+    // Acid3 starts from `<body onload="update()">`.
+    let (mut env, mut host) = setup(r#"<body onload="window.loaded = (window.loaded || 0) + 1; window.evType = event.type"><p>x</p></body>"#);
+    run(&mut env, &mut host, "window.loaded = 0;");
+    host.document_ready(&mut env);
+    let out = run(&mut env, &mut host, "console.log(window.loaded, window.evType)");
+    assert_eq!(out[0], "1 load");
+}
+
+#[test]
+fn node_iterator_starts_at_root_and_table_dom_api() {
+    let (mut env, mut host) = setup(r#"<div id="r"><b>x</b><i>y</i></div>"#);
+    let out = run(&mut env, &mut host, r#"
+        const it = document.createNodeIterator(document.getElementById('r'), NodeFilter.SHOW_ELEMENT, null, true);
+        const seq = [it.nextNode(), it.nextNode(), it.nextNode(), it.nextNode(), it.previousNode(), it.previousNode()].map((n) => n ? n.tagName : 'null');
+        const t = document.createElement('table');
+        const cap = t.createCaption(), th = t.createTHead(), tf = t.createTFoot();
+        const r1 = t.insertRow(0); const r2 = th.insertRow(0);
+        console.log(seq.join(','), t.caption === cap, t.tHead === th, t.tFoot === tf, t.rows.length, t.rows[0] === r2, r1.rowIndex, r1.sectionRowIndex, t.tBodies.length);
+        t.deleteCaption(); t.deleteTHead(); t.deleteTFoot();
+        console.log(t.childNodes.length, !!t.caption);
+    "#);
+    assert_eq!(out[0], "DIV,B,I,null,I,B true true true 2 true 1 0 1");
+    assert_eq!(out[1], "1 false");
+}

@@ -215,10 +215,21 @@ fn d_style_sheets(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
     Ok(realm.new_array_value(sheets))
 }
 
+/// XML `Name` production (simplified to the BMP ranges that matter).
+fn is_xml_name(s: &str) -> bool {
+    let start = |c: char| c.is_ascii_alphabetic() || c == '_' || c == ':' || (c as u32 >= 0xC0 && !matches!(c as u32, 0xD7 | 0xF7 | 0x37E | 0x2000..=0x200B | 0x200E..=0x206F | 0x2190..=0x2BFF | 0x2FF0..=0x3000 | 0xD800..=0xF8FF | 0xFDD0..=0xFDEF | 0xFFFE | 0xFFFF));
+    let rest = |c: char| start(c) || c.is_ascii_digit() || c == '-' || c == '.' || c as u32 == 0xB7 || (0x300..=0x36F).contains(&(c as u32)) || (0x203F..=0x2040).contains(&(c as u32));
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if start(c) => chars.all(rest),
+        _ => false,
+    }
+}
+
 fn d_create_element(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
     let tag = arg_str(realm, args, 0)?;
-    if tag.is_empty() || tag.contains(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '/') {
+    if !is_xml_name(&tag) {
         return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("The tag name provided ('{tag}') is not a valid name.")));
     }
     let options = arg(args, 1);
@@ -243,6 +254,16 @@ fn d_create_element_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResu
     let d = this_doc(realm, &this)?;
     let ns = arg_str_opt(realm, args, 0)?.unwrap_or_default();
     let qname = arg_str(realm, args, 1)?;
+    // DOM "validate and extract": a Name, then a QName (prefix needs a namespace).
+    if !is_xml_name(&qname) {
+        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("'{qname}' is not a valid name.")));
+    }
+    let parts: Vec<&str> = qname.split(':').collect();
+    let bad_qname = parts.len() > 2 || parts.iter().any(|p| p.is_empty()) || parts.len() == 2 && !parts[1].starts_with(|c: char| c.is_alphabetic() || c == '_');
+    let prefix_without_ns = parts.len() == 2 && ns.is_empty();
+    if bad_qname || prefix_without_ns || parts.len() == 2 && parts[0] == "xml" && ns != "http://www.w3.org/XML/1998/namespace" {
+        return Err(crate::misc::dom_exception(realm, "NamespaceError", &format!("'{qname}' is not a valid qualified name for this namespace.")));
+    }
     let local = qname.rsplit(':').next().unwrap_or(&qname).to_string();
     let node = with_doc(d, |doc| {
         let tag = if ns.contains("svg") { local.clone() } else { local.to_ascii_lowercase() };

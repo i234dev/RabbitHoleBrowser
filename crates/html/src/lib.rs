@@ -358,10 +358,10 @@ impl TreeBuilder {
                 }
             }
             "tr" => {
-                self.close_table_part(&["tr", "td", "th"], &["table", "thead", "tbody", "tfoot"]);
+                self.close_table_part(&["tr", "caption", "colgroup"], &["table", "thead", "tbody", "tfoot"]);
             }
             "td" | "th" => {
-                self.close_table_part(&["td", "th"], &["table", "tr"]);
+                self.close_table_part(&["td", "th", "caption", "colgroup"], &["table", "tr"]);
             }
             "thead" | "tbody" | "tfoot" => {
                 self.close_table_part(&["thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup"], &["table"]);
@@ -393,6 +393,25 @@ impl TreeBuilder {
 
         if name == "image" {
             return self.start_tag("img", attrs, self_closing);
+        }
+
+        // Implied table wrappers ("in table" / "in table body" insertion
+        // modes): rows live in a tbody, cells in a row, cols in a colgroup.
+        match (name, self.current_tag()) {
+            ("tr", "table") => {
+                self.insert_element("tbody", Vec::new(), true);
+            }
+            ("td" | "th", "table") => {
+                self.insert_element("tbody", Vec::new(), true);
+                self.insert_element("tr", Vec::new(), true);
+            }
+            ("td" | "th", "tbody" | "thead" | "tfoot") => {
+                self.insert_element("tr", Vec::new(), true);
+            }
+            ("col", "table") => {
+                self.insert_element("colgroup", Vec::new(), true);
+            }
+            _ => {}
         }
 
         let is_void = VOID.contains(&name);
@@ -558,6 +577,24 @@ mod tests {
         assert_eq!(trs, 2, "{d}");
         let tds = doc.descendants(table).filter(|&n| doc.is_element(n, "td")).count();
         assert_eq!(tds, 3, "{d}");
+    }
+
+    #[test]
+    fn implied_tbody_tr_and_colgroup() {
+        let doc = parse("<table><col><tr><td>1<td>2<tr><td>3</table><table><td>x</td></table><table><tr><td><p></tbody> </table>");
+        let d = doc.dump();
+        let tables: Vec<_> = doc.descendants(Document::ROOT).filter(|&n| doc.is_element(n, "table")).collect();
+        let kids = |n| doc.child_elements(n).map(|c| doc.tag(c).unwrap_or("").to_string()).collect::<Vec<_>>();
+        assert_eq!(kids(tables[0]), vec!["colgroup", "tbody"], "{d}");
+        let tbody = doc.child_elements(tables[0]).nth(1).unwrap();
+        assert_eq!(kids(tbody), vec!["tr", "tr"], "{d}");
+        assert_eq!(kids(tables[1]), vec!["tbody"], "{d}");
+        let tb = doc.child_elements(tables[1]).next().unwrap();
+        assert_eq!(kids(tb), vec!["tr"], "{d}");
+        // Acid3: whitespace after `</tbody>` stays a child of the table.
+        let last = doc.children(tables[2]).last().unwrap();
+        assert!(matches!(doc.node(last).data, NodeData::Text(ref t) if t == " "), "{d}");
+        assert_eq!(doc.children(tables[2]).count(), 2, "{d}");
     }
 
     #[test]

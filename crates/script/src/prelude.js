@@ -277,3 +277,184 @@
   g.__rhNative.setFactory('rect', (x, y, w, h) => new DOMRect(x, y, w, h));
   g.__rhNative.setFactory('rectList', (rects) => makeRectList(Array.from(rects)));
 })();
+
+// ------------------------------------------------- HTML table DOM API
+// (HTML §4.9: caption/tHead/tFoot, create*/delete*, rows in header /
+// body / footer order, insertRow/deleteRow, sectionRowIndex...)
+(function () {
+  'use strict';
+  const g = globalThis;
+  const T = g.HTMLTableElement && g.HTMLTableElement.prototype;
+  const S = g.HTMLTableSectionElement && g.HTMLTableSectionElement.prototype;
+  const R = g.HTMLTableRowElement && g.HTMLTableRowElement.prototype;
+  if (!T || !S || !R) return;
+  const tagOf = (n) => (n && n.nodeType === 1 ? String(n.localName || n.tagName).toLowerCase() : '');
+  const kids = (n, tag) => Array.prototype.filter.call(n.childNodes, (c) => tagOf(c) === tag);
+  const first = (n, tag) => kids(n, tag)[0] || null;
+  const coll = (list) => {
+    list.item = (i) => list[i] || null;
+    list.namedItem = (name) => list.find((e) => e.id === name || e.getAttribute('name') === name) || null;
+    return list;
+  };
+  const indexError = () => {
+    try { return new DOMException('Index out of range', 'IndexSizeError'); } catch (e) { const err = new Error('IndexSizeError'); err.code = 1; return err; }
+  };
+  const hierarchyError = () => {
+    try { return new DOMException('Wrong element type', 'HierarchyRequestError'); } catch (e) { const err = new Error('HierarchyRequestError'); err.code = 3; return err; }
+  };
+  const acc = (proto, name, get, set) => { try { Object.defineProperty(proto, name, { get, set, configurable: true, enumerable: true }); } catch (e) {} };
+  const tableRows = (t) => {
+    const out = [];
+    const head = first(t, 'thead');
+    const foot = first(t, 'tfoot');
+    if (head) out.push(...kids(head, 'tr'));
+    for (const c of t.childNodes) {
+      const tg = tagOf(c);
+      if (tg === 'tr') out.push(c);
+      else if (tg === 'tbody') out.push(...kids(c, 'tr'));
+    }
+    if (foot) out.push(...kids(foot, 'tr'));
+    return out;
+  };
+  acc(T, 'caption', function () { return first(this, 'caption'); }, function (v) {
+    const old = first(this, 'caption');
+    if (old === v) return;
+    if (old) this.removeChild(old);
+    if (v) {
+      if (tagOf(v) !== 'caption') throw hierarchyError();
+      this.insertBefore(v, this.firstChild);
+    }
+  });
+  const section = (tag) => [function () { return first(this, tag); }, function (v) {
+    const old = first(this, tag);
+    if (old === v) return;
+    if (v && tagOf(v) !== tag) throw hierarchyError();
+    if (old) this.removeChild(old);
+    if (!v) return;
+    if (tag === 'thead') {
+      const ref = Array.prototype.find.call(this.childNodes, (c) => c.nodeType === 1 && tagOf(c) !== 'caption' && tagOf(c) !== 'colgroup');
+      this.insertBefore(v, ref || null);
+    } else {
+      this.appendChild(v);
+    }
+  }];
+  acc(T, 'tHead', ...section('thead'));
+  acc(T, 'tFoot', ...section('tfoot'));
+  acc(T, 'tBodies', function () { return coll(kids(this, 'tbody')); });
+  acc(T, 'rows', function () { return coll(tableRows(this)); });
+  T.createCaption = function () {
+    let c = first(this, 'caption');
+    if (!c) {
+      c = this.ownerDocument.createElement('caption');
+      this.insertBefore(c, this.firstChild);
+    }
+    return c;
+  };
+  T.deleteCaption = function () { const c = first(this, 'caption'); if (c) this.removeChild(c); };
+  T.createTHead = function () {
+    let h = first(this, 'thead');
+    if (!h) {
+      h = this.ownerDocument.createElement('thead');
+      this.tHead = h;
+    }
+    return h;
+  };
+  T.deleteTHead = function () { const h = first(this, 'thead'); if (h) this.removeChild(h); };
+  T.createTFoot = function () {
+    let f = first(this, 'tfoot');
+    if (!f) {
+      f = this.ownerDocument.createElement('tfoot');
+      this.appendChild(f);
+    }
+    return f;
+  };
+  T.deleteTFoot = function () { const f = first(this, 'tfoot'); if (f) this.removeChild(f); };
+  T.createTBody = function () {
+    const b = this.ownerDocument.createElement('tbody');
+    const bodies = kids(this, 'tbody');
+    const last = bodies[bodies.length - 1];
+    this.insertBefore(b, last ? last.nextSibling : null);
+    return b;
+  };
+  T.insertRow = function (index) {
+    index = index === undefined ? -1 : Math.trunc(Number(index)) || 0;
+    const rows = tableRows(this);
+    if (index < -1 || index > rows.length) throw indexError();
+    const tr = this.ownerDocument.createElement('tr');
+    if (rows.length === 0) {
+      const bodies = kids(this, 'tbody');
+      if (bodies.length) bodies[bodies.length - 1].appendChild(tr);
+      else this.appendChild(this.ownerDocument.createElement('tbody')).appendChild(tr);
+    } else if (index === -1 || index === rows.length) {
+      const last = rows[rows.length - 1];
+      last.parentNode.insertBefore(tr, last.nextSibling);
+    } else {
+      rows[index].parentNode.insertBefore(tr, rows[index]);
+    }
+    return tr;
+  };
+  T.deleteRow = function (index) {
+    const rows = tableRows(this);
+    index = Math.trunc(Number(index)) || 0;
+    if (index === -1) index = rows.length - 1;
+    if (index < 0 || index >= rows.length) { if (index === -1 && rows.length === 0) return; throw indexError(); }
+    rows[index].parentNode.removeChild(rows[index]);
+  };
+  acc(S, 'rows', function () { return coll(kids(this, 'tr')); });
+  S.insertRow = function (index) {
+    index = index === undefined ? -1 : Math.trunc(Number(index)) || 0;
+    const rows = kids(this, 'tr');
+    if (index < -1 || index > rows.length) throw indexError();
+    const tr = this.ownerDocument.createElement('tr');
+    this.insertBefore(tr, index === -1 || index === rows.length ? null : rows[index]);
+    return tr;
+  };
+  S.deleteRow = function (index) {
+    const rows = kids(this, 'tr');
+    index = Math.trunc(Number(index)) || 0;
+    if (index === -1) index = rows.length - 1;
+    if (index < 0 || index >= rows.length) { if (rows.length === 0) return; throw indexError(); }
+    this.removeChild(rows[index]);
+  };
+  acc(R, 'cells', function () { return coll(Array.prototype.filter.call(this.childNodes, (c) => tagOf(c) === 'td' || tagOf(c) === 'th')); });
+  acc(R, 'rowIndex', function () {
+    let p = this.parentNode;
+    if (p && tagOf(p) !== 'table') p = p.parentNode;
+    if (!p || tagOf(p) !== 'table') return -1;
+    return tableRows(p).indexOf(this);
+  });
+  acc(R, 'sectionRowIndex', function () {
+    const p = this.parentNode;
+    if (!p) return -1;
+    return kids(p, 'tr').indexOf(this);
+  });
+  R.insertCell = function (index) {
+    index = index === undefined ? -1 : Math.trunc(Number(index)) || 0;
+    const cells = this.cells;
+    if (index < -1 || index > cells.length) throw indexError();
+    const td = this.ownerDocument.createElement('td');
+    this.insertBefore(td, index === -1 || index === cells.length ? null : cells[index]);
+    return td;
+  };
+  R.deleteCell = function (index) {
+    const cells = this.cells;
+    index = Math.trunc(Number(index)) || 0;
+    if (index === -1) index = cells.length - 1;
+    if (index < 0 || index >= cells.length) { if (cells.length === 0) return; throw indexError(); }
+    this.removeChild(cells[index]);
+  };
+})();
+
+// --------------------------------------------- legacy event initialisers
+(function () {
+  'use strict';
+  const g = globalThis;
+  const U = g.UIEvent && g.UIEvent.prototype;
+  if (U && !U.initUIEvent) {
+    U.initUIEvent = function (type, bubbles, cancelable, view, detail) {
+      this.initEvent(type, bubbles, cancelable);
+      Object.defineProperty(this, 'view', { value: view === undefined ? null : view, configurable: true });
+      Object.defineProperty(this, 'detail', { value: Number(detail) || 0, configurable: true });
+    };
+  }
+})();
