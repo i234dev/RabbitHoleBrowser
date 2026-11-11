@@ -107,7 +107,8 @@ fn frames_see_their_parent_and_exchange_messages() {
     assert_eq!(eval(&e, &mut page, "frames.length"), "2");
     assert_eq!(eval(&e, &mut page, "window[0] === document.getElementById('f').contentWindow"), "true");
     assert_eq!(eval(&e, &mut page, "window.parent === window && window.top === window"), "true");
-    assert_eq!(eval(&e, &mut page, "document.getElementById('f').contentDocument"), "null");
+    // srcdoc documents share the parent's origin: their document is scriptable.
+    assert_eq!(eval(&e, &mut page, "document.getElementById('f').contentDocument.nodeName"), "#document");
     let got = eval(&e, &mut page, "got.join(' | ')");
     assert!(got.contains(r#"{"hello":"from child","x":5,"m":"a"}"#), "{got}");
     assert!(got.contains(r#""pong":42"#), "{got}");
@@ -200,4 +201,24 @@ fn message_ports_can_be_transferred_between_frames() {
     );
     settle(&e, &mut page);
     assert_eq!(eval(&e, &mut page, "log.join(',')"), "ready:hello,echo:ping");
+}
+
+#[test]
+fn same_origin_content_document_is_scriptable() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<iframe id="f" srcdoc="<p id=p>child</p>"></iframe>"#);
+    assert_eq!(eval(&e, &mut page, "document.getElementById('f').contentDocument.getElementById('p').textContent"), "child");
+    assert_eq!(eval(&e, &mut page, "var f = document.getElementById('f'); f.contentWindow.document === f.contentDocument"), "true");
+    eval(&e, &mut page, "document.getElementById('f').contentDocument.body.innerHTML = '<b id=b>changed</b>'");
+    settle(&e, &mut page);
+    let html = eval(&e, &mut page, "document.getElementById('f').contentDocument.body.innerHTML");
+    let text = child(&mut page, 0).text();
+    assert!(text.contains("changed"), "child text {text:?}, innerHTML seen from the parent {html:?}, dom {}", child(&mut page, 0).dom_dump());
+    // An inserted iframe has its about:blank document right away.
+    let r = eval(
+        &e,
+        &mut page,
+        "var i = document.createElement('iframe'); document.body.appendChild(i); var d = i.contentDocument; var s = d.createElement('span'); s.textContent = 'dyn'; d.body.appendChild(s); [d.body.textContent, d.URL, i.contentWindow.parent === window].join()",
+    );
+    assert_eq!(r, "dyn,about:blank,true");
 }

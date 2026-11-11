@@ -175,9 +175,19 @@ pub(crate) fn state() -> Rc<RefCell<HostState>> {
 }
 
 /// Borrow the document a node belongs to.
+/// `NodeRef::doc` values with this bit name the document of a same-origin
+/// child frame (frame id in the low bits), owned by the engine.
+pub(crate) const FRAME_DOC: u32 = 0x8000_0000;
+
 pub(crate) fn with_doc<R>(doc: u32, f: impl FnOnce(&mut Document) -> R) -> R {
     if doc == 0 {
         with_env(|env| f(env.doc()))
+    } else if doc & FRAME_DOC != 0 {
+        with_env(|env| match env.frame_document((doc & !FRAME_DOC) as u64) {
+            Some(d) => f(d),
+            // The frame went away: an empty document.
+            None => f(&mut Document::new()),
+        })
     } else {
         let st = state();
         let mut st = st.borrow_mut();

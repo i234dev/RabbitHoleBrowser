@@ -123,7 +123,7 @@ pub(crate) fn element_matches(realm: &mut Realm, n: NodeRef, selectors: &str) ->
 // ---------------------------------------------------------------- mutation
 
 fn is_connected(n: NodeRef) -> bool {
-    n.doc == 0 && with_doc(0, |doc| doc.is_connected(n.node))
+    (n.doc == 0 || n.doc & crate::host::FRAME_DOC != 0) && with_doc(n.doc, |doc| doc.is_connected(n.node))
 }
 
 /// Adopt `child` into `target_doc` (copying when documents differ).
@@ -134,29 +134,10 @@ fn adopt(child: NodeRef, target_doc: u32) -> NodeRef {
     // Copy the subtree across documents. The original stays in its document
     // (detached); wrappers keep pointing at the original, which is an
     // accepted simplification.
-    let copied = if target_doc == 0 {
-        let st = state();
-        let st = st.borrow();
-        let src = &st.extra_docs[(child.doc - 1) as usize];
-        let src_clone = src.clone_subtree_readonly(child.node);
-        drop(st);
-        with_env(|env| env.doc().import_subtree(&src_clone, src_clone_root(&src_clone)))
-    } else {
-        let src_clone: Document = if child.doc == 0 {
-            with_env(|env| {
-                let d = env.doc();
-                d.clone_subtree_readonly(child.node)
-            })
-        } else {
-            let st = state();
-            let st = st.borrow();
-            st.extra_docs[(child.doc - 1) as usize].clone_subtree_readonly(child.node)
-        };
-        let st = state();
-        let mut st = st.borrow_mut();
-        let dst = &mut st.extra_docs[(target_doc - 1) as usize];
-        dst.import_subtree(&src_clone, src_clone_root(&src_clone))
-    };
+    // (Main document, script-created documents and same-origin frame
+    // documents all go through `with_doc`.)
+    let src_clone: Document = with_doc(child.doc, |d| d.clone_subtree_readonly(child.node));
+    let copied = with_doc(target_doc, |d| d.import_subtree(&src_clone, src_clone_root(&src_clone)));
     NodeRef { doc: target_doc, node: copied }
 }
 
@@ -266,6 +247,11 @@ pub(crate) fn record_character_data(target: NodeRef, old: Option<String>) {
 fn with_doc_in_state<R>(st: &HostState, doc: u32, f: impl FnOnce(&Document) -> R) -> R {
     if doc == 0 {
         with_env(|env| f(env.doc()))
+    } else if doc & crate::host::FRAME_DOC != 0 {
+        with_env(|env| match env.frame_document((doc & !crate::host::FRAME_DOC) as u64) {
+            Some(d) => f(d),
+            None => f(&Document::new()),
+        })
     } else {
         f(&st.extra_docs[(doc - 1) as usize])
     }

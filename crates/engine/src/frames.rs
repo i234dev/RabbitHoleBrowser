@@ -142,6 +142,26 @@ fn origin_of(page: &Page) -> String {
     page.frame_origin.clone().unwrap_or_else(|| page.url.origin())
 }
 
+pub(crate) fn page_origin(page: &Page) -> String {
+    origin_of(page)
+}
+
+/// The page of frame `id` anywhere below `page`.
+pub(crate) fn find_frame_page_mut(page: &mut Page, id: u64) -> Option<&mut Page> {
+    for c in page.frames.children.iter_mut() {
+        let Some(child) = c.page.as_mut() else { continue };
+        if child.frame_id == id {
+            c.dirty = true;
+            return Some(child);
+        }
+        if let Some(p) = find_frame_page_mut(child, id) {
+            c.dirty = true;
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// Iframe size from its attributes (the default 300×150 otherwise): the
 /// natural size of the frame raster, so layout sizes the box exactly as
 /// it would without content.
@@ -292,6 +312,14 @@ impl Engine {
             let node = page.frames.children[i].node;
             let size = page.frame_content_rect(node).map(|r| (r.w.max(0.0), r.h.max(0.0)));
             let c = &mut page.frames.children[i];
+            // Scripts of this document changed the frame's document.
+            if let Some(p) = c.page.as_mut() {
+                if p.script.dom_dirty {
+                    p.script.dom_dirty = false;
+                    self.restyle(p);
+                    c.dirty = true;
+                }
+            }
             if let Some(s) = size {
                 if (s.0 - c.size.0).abs() > 0.01 || (s.1 - c.size.1).abs() > 0.01 {
                     c.size = s;
@@ -334,6 +362,60 @@ impl Engine {
             }
         }
         self.paint_frames(page);
+    }
+
+    /// Give a connected `<iframe>` without a browsing context its initial
+    /// `about:blank` document now (scripts can use `contentDocument` /
+    /// `contentWindow` right after inserting it). A `src` still loads on
+    /// the next sync.
+    pub(crate) fn create_blank_frame(&self, page: &mut Page, node: NodeId) -> Option<u64> {
+        if !page.doc.is_element(node, "iframe") || !page.doc.is_connected(node) || page.frame_depth >= MAX_DEPTH || page.frames.children.len() >= MAX_FRAMES_PER_PAGE {
+            return None;
+        }
+        let id = new_frame_id();
+        let size = page.frame_content_rect(node).map(|r| (r.w, r.h)).unwrap_or_else(|| attr_size(&page.doc, node));
+        let vp = Viewport { width: size.0.max(1.0), height: size.1.max(1.0) };
+        let loaded = self.loader.load_html("<!doctype html><html><head></head><body></body></html>", Url::parse("about:blank").expect("about:blank"), vp);
+        let name = page.doc.attr(node, "name").map(|s| s.to_string());
+        self.frame_context.replace(Some(FrameContext { id, depth: page.frame_depth + 1, name, origin: Some(origin_of(page)) }));
+        let child = self.build_page_unscripted(loaded, vp);
+        self.frame_context.replace(None);
+        {
+            let mut reg = self.frames.borrow_mut();
+            let e = reg.entries.entry(id).or_default();
+            e.parent = Some(page.frame_id);
+            e.url = child.url.to_string();
+            let parent = reg.entries.entry(page.frame_id).or_default();
+            parent.children.push(id);
+        }
+        // Source Blank: a `src` attribute shows up as a change on the next
+        // sync and starts the real load.
+        page.frames.children.push(ChildFrame { node, id, source: FrameSource::Blank, page: Some(Box::new(child)), pending: None, size, dirty: true, image: None });
+        Some(id)
+    }
+
+    /// Restyle frame documents changed by this page's scripts (same-origin
+    /// `contentDocument` access) and repaint them. Returns true when any
+    /// frame changed.
+    pub(crate) fn sync_dirty_frames(&self, page: &mut Page) -> bool {
+        let mut any = false;
+        for c in page.frames.children.iter_mut() {
+            let Some(p) = c.page.as_mut() else { continue };
+            let mut changed = self.sync_dirty_frames(p);
+            if p.script.dom_dirty {
+                p.script.dom_dirty = false;
+                self.restyle(p);
+                changed = true;
+            }
+            if changed {
+                c.dirty = true;
+                any = true;
+            }
+        }
+        if any {
+            self.paint_frames(page);
+        }
+        any
     }
 
     /// Repaint dirty child frames into their images and install them in

@@ -123,6 +123,17 @@ pub trait HostEnv {
     fn frame_of_element(&self, _node: NodeId) -> Option<u64> {
         None
     }
+    /// The document of frame `id`, when this document may script it (same
+    /// origin); scripts here then read and change it directly.
+    fn frame_document(&mut self, _id: u64) -> Option<&mut Document> {
+        None
+    }
+    /// The frame an `<iframe>` element hosts, creating its initial
+    /// `about:blank` document right away when it has none yet (as browsers
+    /// do on insertion).
+    fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
+        self.frame_of_element(node)
+    }
     /// Initial `window.name` (the `name` attribute of the hosting iframe).
     fn frame_name(&self) -> Option<String> {
         None

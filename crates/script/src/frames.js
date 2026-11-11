@@ -136,6 +136,7 @@
       get length() { return info(id, 'length', 0); },
       get closed() { return info(id, 'closed', 0); },
       get location() { return location; },
+      get document() { return info(id, 'document', 0); },
       set location(v) { info(id, 'navigate', String(v)); },
     };
     Object.defineProperty(target, Symbol.toStringTag, { value: 'Window' });

@@ -397,6 +397,22 @@ impl HostEnv for EngineEnv<'_> {
     fn frame_of_element(&self, node: NodeId) -> Option<u64> {
         self.page.frames.get(node).map(|c| c.id)
     }
+    fn frame_document(&mut self, id: u64) -> Option<&mut Document> {
+        let origin = crate::frames::page_origin(self.page);
+        let child = crate::frames::find_frame_page_mut(self.page, id)?;
+        if crate::frames::page_origin(child) != origin {
+            return None;
+        }
+        // The caller may change it: restyle the frame on the next sync.
+        child.script.dom_dirty = true;
+        Some(&mut child.doc)
+    }
+    fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
+        if let Some(c) = self.page.frames.get(node) {
+            return Some(c.id);
+        }
+        self.engine.create_blank_frame(self.page, node)
+    }
     fn frame_name(&self) -> Option<String> {
         self.page.frame_name.clone()
     }
@@ -678,6 +694,9 @@ impl Engine {
         } else if page.incr.dirty() {
             // Layout was flushed for a script query; finish the display list.
             self.relayout_only(page);
+            out.relayout = true;
+        }
+        if !page.frames.children.is_empty() && self.sync_dirty_frames(page) {
             out.relayout = true;
         }
         out.navigation = page.script.pending_navigation.take();

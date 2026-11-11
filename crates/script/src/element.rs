@@ -1835,14 +1835,18 @@ fn iframe_content_window(realm: &mut Realm, this: Value, _: &[Value]) -> JsResul
     if n.doc != 0 {
         return Ok(Value::Null);
     }
-    let id = with_env(|env| env.frame_of_element(n.node));
+    let id = with_env(|env| env.ensure_frame(n.node));
     crate::frames::window_for(realm, id)
 }
 
-/// The frame's document is in another realm: `contentDocument` is null
-/// (as for a cross-origin frame).
-fn iframe_content_document(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Null)
+/// The frame's document, when it is same-origin (null otherwise).
+fn iframe_content_document(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &this) else { return Ok(Value::Null) };
+    if n.doc != 0 {
+        return Ok(Value::Null);
+    }
+    let Some(id) = with_env(|env| env.ensure_frame(n.node)) else { return Ok(Value::Null) };
+    Ok(crate::frames::frame_document_value(realm, id))
 }
 
 fn label_control(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {

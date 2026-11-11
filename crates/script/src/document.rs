@@ -354,13 +354,12 @@ fn d_import_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Val
                 t
             })
         } else {
-            let st = state();
-            let st = st.borrow();
-            let src = &st.extra_docs[(n.doc - 1) as usize];
-            let mut t = Document::new();
-            let c = t.import_subtree(src, n.node);
-            t.append_child(Document::ROOT, c);
-            t
+            with_doc(n.doc, |src| {
+                let mut t = Document::new();
+                let c = t.import_subtree(src, n.node);
+                t.append_child(Document::ROOT, c);
+                t
+            })
         };
         let root = tmp.first_child(Document::ROOT).unwrap();
         let copy = with_doc(d, |doc| doc.import_subtree(&tmp, root));

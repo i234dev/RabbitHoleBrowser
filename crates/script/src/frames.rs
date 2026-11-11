@@ -39,6 +39,15 @@ pub(crate) fn install(realm: &mut Realm) {
     }
 }
 
+/// The document of frame `id` as a node of this realm (same-origin
+/// frames), or null.
+pub(crate) fn frame_document_value(realm: &mut Realm, id: u64) -> Value {
+    if id >= crate::host::FRAME_DOC as u64 || with_env(|env| env.frame_document(id).is_none()) {
+        return Value::Null;
+    }
+    crate::host::wrap(realm, crate::host::NodeRef { doc: crate::host::FRAME_DOC | id as u32, node: rabbithole_dom::Document::ROOT })
+}
+
 fn api_call(realm: &mut Realm, method: &str, args: &[Value]) -> JsResult<Value> {
     let Some(api) = state().borrow().protos.get("__frames_api").copied() else {
         return Ok(Value::Null);
@@ -109,6 +118,7 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         }
         "closed" => Value::Bool(!with_env(|env| env.frame_exists(id))),
         "href" => Value::str(&with_env(|env| env.frame_url(id)).unwrap_or_default()),
+        "document" => frame_document_value(realm, id),
         "navigate" => {
             let url = realm.to_rust_string(arg(args, 2))?;
             with_env(|env| env.navigate_frame(id, &url));

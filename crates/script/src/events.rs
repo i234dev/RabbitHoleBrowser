@@ -850,6 +850,11 @@ fn any_listener_on_path(realm: &mut Realm, key: TargetKey, ty: &str) -> bool {
 fn with_doc_in_state<R>(st: &HostState, doc: u32, f: impl FnOnce(&Document) -> R) -> R {
     if doc == 0 {
         with_env(|env| f(env.doc()))
+    } else if doc & crate::host::FRAME_DOC != 0 {
+        with_env(|env| match env.frame_document((doc & !crate::host::FRAME_DOC) as u64) {
+            Some(d) => f(d),
+            None => f(&Document::new()),
+        })
     } else {
         f(&st.extra_docs[(doc - 1) as usize])
     }
