@@ -141,35 +141,37 @@ pub enum StmtKind {
     FunctionDecl(std::rc::Rc<Function>),
     ClassDecl(Class),
     Block(Vec<Stmt>),
+    // Large parts of statements are boxed: statements are moved around a
+    // lot while parsing, so `Stmt` is kept small.
     If {
-        test: Expr,
+        test: Box<Expr>,
         consequent: Box<Stmt>,
         alternate: Option<Box<Stmt>>,
     },
     For {
-        init: Option<ForInit>,
-        test: Option<Expr>,
-        update: Option<Expr>,
+        init: Option<Box<ForInit>>,
+        test: Option<Box<Expr>>,
+        update: Option<Box<Expr>>,
         body: Box<Stmt>,
     },
     ForIn {
-        left: ForHead,
-        right: Expr,
+        left: Box<ForHead>,
+        right: Box<Expr>,
         body: Box<Stmt>,
     },
     ForOf {
-        left: ForHead,
-        right: Expr,
+        left: Box<ForHead>,
+        right: Box<Expr>,
         body: Box<Stmt>,
         is_await: bool,
     },
     While {
-        test: Expr,
+        test: Box<Expr>,
         body: Box<Stmt>,
     },
     DoWhile {
         body: Box<Stmt>,
-        test: Expr,
+        test: Box<Expr>,
     },
     Return(Option<Expr>),
     Break(Option<Name>),
@@ -178,11 +180,11 @@ pub enum StmtKind {
     Try {
         block: Vec<Stmt>,
         /// (binding pattern, handler body); the pattern is `None` for `catch {}`.
-        handler: Option<(Option<Pattern>, Vec<Stmt>)>,
+        handler: Option<Box<(Option<Pattern>, Vec<Stmt>)>>,
         finalizer: Option<Vec<Stmt>>,
     },
     Switch {
-        discriminant: Expr,
+        discriminant: Box<Expr>,
         cases: Vec<SwitchCase>,
     },
     Labeled {
@@ -192,7 +194,7 @@ pub enum StmtKind {
     Debugger,
     /// `with (obj) stmt` — parsed for completeness; the compiler may reject it.
     With {
-        object: Expr,
+        object: Box<Expr>,
         body: Box<Stmt>,
     },
     Import(ImportDecl),

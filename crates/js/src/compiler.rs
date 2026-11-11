@@ -951,7 +951,7 @@ impl Compiler {
                 }
             }
             StmtKind::For { init, body, .. } => {
-                if let Some(ForInit::VarDecl(d)) = init {
+                if let Some(ForInit::VarDecl(d)) = init.as_deref() {
                     if d.kind == VarKind::Var {
                         for decl in &d.declarations {
                             Self::collect_pattern_names(&decl.target, out);
@@ -961,7 +961,7 @@ impl Compiler {
                 Self::collect_var_names_stmt(body, out);
             }
             StmtKind::ForIn { left, body, .. } | StmtKind::ForOf { left, body, .. } => {
-                if let ForHead::VarDecl { kind: VarKind::Var, target } = left {
+                if let ForHead::VarDecl { kind: VarKind::Var, target } = &**left {
                     Self::collect_pattern_names(target, out);
                 }
                 Self::collect_var_names_stmt(body, out);
@@ -971,7 +971,7 @@ impl Compiler {
             }
             StmtKind::Try { block, handler, finalizer } => {
                 Self::collect_var_names(block, out);
-                if let Some((_, h)) = handler {
+                if let Some((_, h)) = handler.as_deref() {
                     Self::collect_var_names(h, out);
                 }
                 if let Some(f) = finalizer {
@@ -1442,7 +1442,7 @@ impl Compiler {
                 self.emit(Op::JumpIfTrue(start as u32));
                 self.patch_breaks(&lp);
             }
-            StmtKind::For { init, test, update, body } => self.compile_for(init, test, update, body, None)?,
+            StmtKind::For { init, test, update, body } => self.compile_for(init.as_deref(), test.as_deref(), update.as_deref(), body, None)?,
             StmtKind::ForIn { left, right, body } => self.compile_for_in(left, right, body, None)?,
             StmtKind::ForOf { left, right, body, is_await } => self.compile_for_of(left, right, body, *is_await, None)?,
             StmtKind::Return(arg) => {
@@ -1475,11 +1475,11 @@ impl Compiler {
                 self.compile_expr(e)?;
                 self.emit(Op::Throw);
             }
-            StmtKind::Try { block, handler, finalizer } => self.compile_try(block, handler.as_ref(), finalizer.as_ref())?,
+            StmtKind::Try { block, handler, finalizer } => self.compile_try(block, handler.as_deref(), finalizer.as_ref())?,
             StmtKind::Switch { discriminant, cases } => self.compile_switch(discriminant, cases)?,
             StmtKind::Labeled { label, body } => {
                 match &body.kind {
-                    StmtKind::For { init, test, update, body: b } => self.compile_for(init, test, update, b, Some(label.to_string()))?,
+                    StmtKind::For { init, test, update, body: b } => self.compile_for(init.as_deref(), test.as_deref(), update.as_deref(), b, Some(label.to_string()))?,
                     StmtKind::ForIn { left, right, body: b } => self.compile_for_in(left, right, b, Some(label.to_string()))?,
                     StmtKind::ForOf { left, right, body: b, is_await } => self.compile_for_of(left, right, b, *is_await, Some(label.to_string()))?,
                     StmtKind::While { test, body: b } => self.compile_while(test, b, Some(label.to_string()))?,
@@ -1656,7 +1656,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_for(&mut self, init: &Option<ForInit>, test: &Option<Expr>, update: &Option<Expr>, body: &Stmt, label: Option<String>) -> CResult<()> {
+    fn compile_for(&mut self, init: Option<&ForInit>, test: Option<&Expr>, update: Option<&Expr>, body: &Stmt, label: Option<String>) -> CResult<()> {
         let mut decls = Vec::new();
         let mut per_iteration = false;
         if let Some(ForInit::VarDecl(d)) = init {

@@ -539,7 +539,7 @@ impl<'a> Parser<'a> {
                     let test = self.parse_expression()?;
                     self.expect_punct(")")?;
                     let body = Box::new(self.parse_loop_body()?);
-                    StmtKind::While { test, body }
+                    StmtKind::While { test: Box::new(test), body }
                 }
                 "do" => {
                     self.advance()?;
@@ -550,7 +550,7 @@ impl<'a> Parser<'a> {
                     self.expect_punct(")")?;
                     // Semicolon after do-while is optional.
                     self.eat_punct(";")?;
-                    StmtKind::DoWhile { body, test }
+                    StmtKind::DoWhile { body, test: Box::new(test) }
                 }
                 "return" => {
                     if !self.ctx.in_function {
@@ -633,7 +633,7 @@ impl<'a> Parser<'a> {
                     let object = self.parse_expression()?;
                     self.expect_punct(")")?;
                     let body = Box::new(self.parse_statement()?);
-                    StmtKind::With { object, body }
+                    StmtKind::With { object: Box::new(object), body }
                 }
                 "function" => {
                     // Function declaration in statement position (sloppy mode allows it).
@@ -764,7 +764,7 @@ impl<'a> Parser<'a> {
             None
         };
         Ok(StmtKind::If {
-            test,
+            test: Box::new(test),
             consequent,
             alternate,
         })
@@ -844,9 +844,9 @@ impl<'a> Parser<'a> {
         self.expect_punct(")")?;
         let body = Box::new(self.parse_loop_body()?);
         Ok(StmtKind::For {
-            init,
-            test,
-            update,
+            init: init.map(Box::new),
+            test: test.map(Box::new),
+            update: update.map(Box::new),
             body,
         })
     }
@@ -858,13 +858,13 @@ impl<'a> Parser<'a> {
         let body = Box::new(self.parse_loop_body()?);
         Ok(if is_of {
             StmtKind::ForOf {
-                left,
-                right,
+                left: Box::new(left),
+                right: Box::new(right),
                 body,
                 is_await,
             }
         } else {
-            StmtKind::ForIn { left, right, body }
+            StmtKind::ForIn { left: Box::new(left), right: Box::new(right), body }
         })
     }
 
@@ -889,7 +889,7 @@ impl<'a> Parser<'a> {
         }
         Ok(StmtKind::Try {
             block,
-            handler,
+            handler: handler.map(Box::new),
             finalizer,
         })
     }
@@ -932,7 +932,7 @@ impl<'a> Parser<'a> {
         self.ctx.in_switch = saved;
         result?;
         self.advance()?; // }
-        Ok(StmtKind::Switch { discriminant, cases })
+        Ok(StmtKind::Switch { discriminant: Box::new(discriminant), cases })
     }
 
     // ------------------------------------------------------- import/export

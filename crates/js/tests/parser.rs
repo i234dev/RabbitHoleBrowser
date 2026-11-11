@@ -249,10 +249,11 @@ fn loops_labels_switch() {
          lbl: { break lbl; }",
     );
     assert_eq!(p.body.len(), 9);
-    let StmtKind::ForOf { left: ForHead::VarDecl { kind: VarKind::Const, target: Pattern::Array { .. } }, .. } = &p.body[1].kind else { panic!() };
-    assert!(matches!(p.body[2].kind, StmtKind::ForIn { left: ForHead::Pattern(Pattern::Identifier(_)), .. }));
-    assert!(matches!(p.body[4].kind, StmtKind::ForOf { left: ForHead::Pattern(Pattern::Expr(_)), .. }));
-    assert!(matches!(p.body[5].kind, StmtKind::ForIn { left: ForHead::Pattern(Pattern::Identifier(_)), .. }));
+    let StmtKind::ForOf { left, .. } = &p.body[1].kind else { panic!() };
+    assert!(matches!(&**left, ForHead::VarDecl { kind: VarKind::Const, target: Pattern::Array { .. } }));
+    assert!(matches!(&p.body[2].kind, StmtKind::ForIn { left, .. } if matches!(&**left, ForHead::Pattern(Pattern::Identifier(_)))));
+    assert!(matches!(&p.body[4].kind, StmtKind::ForOf { left, .. } if matches!(&**left, ForHead::Pattern(Pattern::Expr(_)))));
+    assert!(matches!(&p.body[5].kind, StmtKind::ForIn { left, .. } if matches!(&**left, ForHead::Pattern(Pattern::Identifier(_)))));
     let StmtKind::Switch { cases, .. } = &p.body[7].kind else { panic!() };
     assert_eq!(cases.len(), 3);
     assert!(cases[0].body.is_empty());

@@ -152,7 +152,7 @@ impl Analyzer {
                 }
             }
             StmtKind::For { init, test, update, body } => {
-                match init {
+                match init.as_deref() {
                     Some(ForInit::VarDecl(d)) => self.var_decl(d),
                     Some(ForInit::Expr(e)) => self.expr(e),
                     None => {}
@@ -166,7 +166,7 @@ impl Analyzer {
                 self.stmt(body);
             }
             StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body, .. } => {
-                match left {
+                match &**left {
                     ForHead::VarDecl { target, .. } => self.pattern(target),
                     ForHead::Pattern(p) => self.pattern(p),
                 }
@@ -184,7 +184,7 @@ impl Analyzer {
             }
             StmtKind::Try { block, handler, finalizer } => {
                 self.stmts(block);
-                if let Some((p, body)) = handler {
+                if let Some((p, body)) = handler.as_deref() {
                     if let Some(p) = p {
                         self.pattern(p);
                     }
