@@ -789,7 +789,7 @@ fn detect_in(page: &Page, frames: &[NodeId], depth: u32) -> Option<ConsentDialog
             }
             if raised(page, n) {
                 raised_cands.push(n);
-            } else if has_consent_hint(doc, n) {
+            } else if has_consent_hint(doc, n) && !matches!(doc.tag(n), Some("body" | "html" | "main")) {
                 hinted.push(n);
             }
         }

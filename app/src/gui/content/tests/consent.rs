@@ -209,7 +209,7 @@ fn non_cookie_modal_is_left_alone() {
     let (sink, rx) = sink();
     let h = spawn_mode(1, &sink, mode(ConsentMode::Reject));
     let html = format!(
-        "<html><body style='margin:0'>{PROBE}{ARTICLE}
+        "<html><body class='has-cookie-consent' style='margin:0'>{PROBE}{ARTICLE}<footer><a href='/cookies'>Cookie policy</a> <button id='a11y'>Accessibility settings</button></footer>
 <div id='nl' role='dialog' aria-modal='true' style='position:fixed;left:200px;top:100px;width:500px;padding:20px;background:#fff;border:1px solid #000;z-index:1000'>
  <h2>Subscribe to our newsletter</h2><p>Get the best stories every morning. We respect your privacy.</p>
  <input type='email' placeholder='you@example.com'> <button id='sub'>Subscribe</button> <button id='no'>No thanks</button>
