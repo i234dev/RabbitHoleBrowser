@@ -189,6 +189,11 @@ impl Realm {
             self.new_target_stack.push(Value::Undefined);
         }
         let r = func(self, this, args);
+        if crate::realm::take_post_native() {
+            if let Some(h) = self.post_native {
+                h(self);
+            }
+        }
         if !construct {
             self.new_target_stack.pop();
         }

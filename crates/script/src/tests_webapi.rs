@@ -1292,3 +1292,32 @@ fn url_credentials_are_assignable() {
     let r = result_of("<p>x</p>", "'use strict'; var u = new URL('https://www.example.test/a?b#c'); u.password = ''; u.username = ''; u.hash = ''; var result = [u.password, u.username, u.href].join('|');");
     assert_eq!(r, "'||https://www.example.test/a?b'");
 }
+
+#[test]
+fn custom_element_attribute_reactions_run_before_the_method_returns() {
+    // [CEReactions]: attributeChangedCallback runs inside setAttribute /
+    // removeAttribute / toggleAttribute / reflected setters, so a guard
+    // flag set around the call is seen (Polymer's reflection relies on it).
+    let out = result_of(
+        "<html><body></body></html>",
+        r#"
+        const log = [];
+        class XRef extends HTMLElement {
+          static observedAttributes = ['a', 'id', 'class', 'hidden'];
+          attributeChangedCallback(n, o, v) { log.push(n + ':' + (this.guard ? 'in' : 'out')); }
+        }
+        customElements.define('x-ref', XRef);
+        const el = document.createElement('x-ref');
+        document.body.append(el);
+        el.guard = true;
+        el.setAttribute('a', '1');
+        el.toggleAttribute('a');
+        el.id = 'z';
+        el.className = 'c';
+        el.hidden = true;
+        el.guard = false;
+        window.result = log.join();
+        "#,
+    );
+    assert_eq!(out, "'a:in,a:in,id:in,class:in,hidden:in'");
+}

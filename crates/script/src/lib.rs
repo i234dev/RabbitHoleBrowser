@@ -245,6 +245,9 @@ impl ScriptHost {
             shadow::install(realm);
             modules::install(realm);
             natives::install(realm);
+            // [CEReactions]: reactions queued by a DOM method (setAttribute,
+            // classList, reflected attributes...) run before it returns.
+            realm.post_native = Some(shadow::run_pending_reactions);
             // Prototypes and internal objects the bindings look up by name
             // must survive GC even while nothing in JS references them
             // (e.g. the NamedNodeMap prototype when no `attributes` object

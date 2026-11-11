@@ -46,7 +46,7 @@ pub struct CeDefinition {
 pub struct ShadowState {
     pub info: HashMap<NodeRef, ShadowInfo>,
     pub ce_queue: Vec<CeReaction>,
-    pub definitions: HashMap<String, CeDefinition>,
+    pub definitions: HashMap<String, std::rc::Rc<CeDefinition>>,
     pub waiters: HashMap<String, Vec<Value>>,
     /// Last known assigned nodes per slot (for `slotchange`).
     pub slot_cache: HashMap<NodeRef, Vec<NodeId>>,
@@ -80,7 +80,7 @@ pub(crate) fn shadow_info(root: NodeRef) -> Option<ShadowInfo> {
 
 /// The definition that applies to element `n` (autonomous by tag, or a
 /// customized built-in through `is`).
-pub(crate) fn definition_for(n: NodeRef) -> Option<CeDefinition> {
+pub(crate) fn definition_for(n: NodeRef) -> Option<std::rc::Rc<CeDefinition>> {
     let (tag, is) = with_doc(n.doc, |doc| (doc.tag(n.node).map(|t| t.to_string()), doc.attr(n.node, "is").map(|t| t.to_ascii_lowercase())));
     let tag = tag?;
     sstate(|s| {
@@ -169,7 +169,12 @@ pub(crate) fn on_child_list(parent: NodeRef, added: &[NodeRef], removed: &[NodeR
 /// Called after an attribute change.
 pub(crate) fn on_attribute(n: NodeRef, name: &str, old: Option<String>, new: Option<&str>) {
     if state().borrow().ce_upgraded.contains(&n) {
-        sstate(|s| s.ce_queue.push(CeReaction::Attr(n, name.to_string(), old.clone(), new.map(|v| v.to_string()))));
+        // Only observed attributes get a reaction (checked again when it runs).
+        let observed = definition_for(n).map(|d| d.observed.iter().any(|o| o.as_str() == name || o.eq_ignore_ascii_case(name))).unwrap_or(false);
+        if observed {
+            sstate(|s| s.ce_queue.push(CeReaction::Attr(n, name.to_string(), old.clone(), new.map(|v| v.to_string()))));
+            rabbithole_js::request_post_native();
+        }
     }
     if name == "slot" || name == "name" {
         let root = with_doc(n.doc, |doc| {
@@ -249,7 +254,7 @@ pub(crate) fn drain_ce_reactions(realm: &mut Realm) {
                 }
                 CeReaction::Attr(n, name, old, new) => {
                     let Some(def) = definition_for(n) else { continue };
-                    if !def.observed.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
+                    if !def.observed.iter().any(|o| o.as_str() == name || o.eq_ignore_ascii_case(&name)) {
                         continue;
                     }
                     let el = wrap(realm, n);
@@ -653,13 +658,13 @@ fn ce_define(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         let len = realm.to_number(len)? as usize;
         for i in 0..len.min(1024) {
             let v = realm.get_str(observed_v.clone(), &i.to_string())?;
-            observed.push(realm.to_rust_string(v)?);
+            observed.push(realm.to_rust_string(v)?.to_ascii_lowercase());
         }
     }
     root_value(realm, &ctor);
     let def = CeDefinition { name: name.clone(), ctor: ctor.clone(), extends: extends.clone(), observed };
     sstate(|s| {
-        s.definitions.insert(name.clone(), def);
+        s.definitions.insert(name.clone(), std::rc::Rc::new(def));
     });
     // Keep the legacy map (used by the HTMLElement constructor lookup).
     state().borrow_mut().custom_elements.insert(name.clone(), ctor.clone());
@@ -701,7 +706,7 @@ fn ce_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 
 fn ce_get_name(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let c = arg(args, 0);
-    let defs: Vec<CeDefinition> = sstate(|s| s.definitions.values().cloned().collect());
+    let defs: Vec<std::rc::Rc<CeDefinition>> = sstate(|s| s.definitions.values().cloned().collect());
     for d in defs {
         if realm.strict_equals(&d.ctor, &c) {
             return Ok(Value::str(&d.name));
@@ -764,6 +769,14 @@ pub(crate) fn schedule_microtask_work(realm: &mut Realm) {
         if let Some(f) = f {
             realm.enqueue_callback(Value::Object(f), Value::Undefined, Vec::new());
         }
+    }
+}
+
+/// [`rabbithole_js::Realm::post_native`] hook: reactions queued by the DOM
+/// method that just returned.
+pub(crate) fn run_pending_reactions(realm: &mut Realm) {
+    if has_pending_reactions() {
+        drain_ce_reactions(realm);
     }
 }
 

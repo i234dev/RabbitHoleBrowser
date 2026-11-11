@@ -202,6 +202,10 @@ pub struct Realm {
     /// Input and capture ranges of the last successful built-in RegExp
     /// match (legacy `RegExp.$1`, `lastMatch`, ...).
     pub(crate) regexp_last: Option<(JsStr, Vec<Option<(usize, usize)>>)>,
+    /// Run after a native function returns when the host asked for it
+    /// with [`request_post_native`] (custom element reactions of DOM
+    /// methods: `[CEReactions]`).
+    pub post_native: Option<fn(&mut Realm)>,
 }
 
 thread_local! {
@@ -217,6 +221,21 @@ thread_local! {
 pub fn exclude_from_watchdog(spent: std::time::Duration) {
     WATCHDOG_CREDIT.with(|c| c.set(c.get() + spent));
     crate::regex::shift_deadline(spent);
+}
+
+thread_local! {
+    static POST_NATIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Ask for [`Realm::post_native`] to run when the native function now
+/// running returns.
+pub fn request_post_native() {
+    POST_NATIVE.with(|p| p.set(true));
+}
+
+#[inline]
+pub(crate) fn take_post_native() -> bool {
+    POST_NATIVE.with(|p| p.replace(false))
 }
 
 /// CPU time used by the calling thread.
@@ -382,6 +401,7 @@ impl Realm {
             mega: Vec::new(),
             regexp_pristine: None,
             regexp_last: None,
+            post_native: None,
         };
         crate::builtins::register_builtins(&mut realm);
         realm.mark_intrinsics();
