@@ -53,11 +53,14 @@ pub const IC_ADD_DEEP: u8 = 10;
 /// while the prototype epoch is `mid_shape`.
 pub const IC_SETTER: u8 = 11;
 
-/// One slot of the megamorphic cache (see [`Realm::mega_get`]).
-#[derive(Clone, Copy, Default)]
+/// One slot of the megamorphic cache (see [`Realm::mega_get`]). The
+/// entry keeps its name alive: names are compared by identity (their
+/// word), and a freed string's address could be reused by another name.
+#[derive(Clone, Default)]
 pub struct MegaEntry {
     shape: u32,
     key: u64,
+    name: Option<JsStr>,
     ic: PropIc,
 }
 
@@ -250,7 +253,7 @@ impl Realm {
             self.mega = vec![MegaEntry::default(); 1 << MEGA_BITS];
         }
         let kb = k.bits();
-        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, ic };
+        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, name: Some(k.clone()), ic };
     }
 
     /// Remember a filled store cache record in the megamorphic cache, under
@@ -264,7 +267,7 @@ impl Realm {
             self.mega = vec![MegaEntry::default(); 1 << MEGA_BITS];
         }
         let kb = k.bits() | 1;
-        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, ic };
+        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, name: Some(k.clone()), ic };
     }
 
     /// Walk the prototype chain above `first` (the receiver's prototype)

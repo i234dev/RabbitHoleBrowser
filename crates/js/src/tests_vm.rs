@@ -677,3 +677,11 @@ fn fused_loop_latches() {
     eq("(function(){ var s = 0; for (var i = 0; i < 1e5; i++) { if (i == 50) i = 1e9; s++; } return s + ':' + i; })()", "51:1000000001");
     eq("(function(){ var n = 3, s = 0; for (var i = 0; i < n; i++) { if (i == 1) n = 'x'; s++; } return s; })()", "2");
 }
+
+#[test]
+fn dynamic_names_in_the_shared_cache() {
+    // Names built at run time are freed and their memory reused for other
+    // names: a cache keyed by a name's address must keep it alive.
+    eq("var o = {aaaa: 1, bbbb: 2, cccc: 3}; var p = ['aa', 'bb', 'cc']; var s = ''; for (var i = 0; i < 300; i++) { var k = p[i % 3] + p[i % 3]; s += o[k]; } s.slice(0, 9) + ':' + s.length", "123123123:300");
+    eq("var o = {}; for (var i = 0; i < 50; i++) o['k' + i] = i; var t = 0; for (var j = 0; j < 500; j++) t += o['k' + (j % 50)]; t", "12250");
+}
