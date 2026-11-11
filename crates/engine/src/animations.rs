@@ -461,6 +461,10 @@ pub struct AnimationState {
     events: Vec<QueuedEvent>,
     /// Engine time (ms) of the next frame needed.
     next_due: Option<f64>,
+    /// Elements whose computed style declares transitions: their styles
+    /// are snapshotted before a restyle so a full restyle (which reports
+    /// no per-element changes) can still start transitions.
+    pub(crate) with_transitions: std::collections::HashSet<NodeId>,
 }
 
 impl AnimationState {
@@ -480,7 +484,13 @@ impl AnimationState {
 
     /// No effects and no element with a transition or animation seen.
     pub fn is_idle(&self) -> bool {
-        self.transitions.is_empty() && self.animations.is_empty() && self.base.is_empty() && self.events.is_empty()
+        self.transitions.is_empty() && self.animations.is_empty() && self.base.is_empty() && self.events.is_empty() && self.with_transitions.is_empty()
+    }
+
+    /// Current (base) styles of the elements with transitions, before a
+    /// restyle.
+    pub(crate) fn snapshot(&self, styles: &rabbithole_style::StyledTree) -> Vec<(NodeId, Rc<ComputedStyle>)> {
+        self.with_transitions.iter().filter_map(|n| self.base.get(n).cloned().or_else(|| styles.get(*n).cloned()).map(|s| (*n, s))).collect()
     }
 
     fn has_effects(&self, node: NodeId) -> bool {
@@ -512,8 +522,10 @@ impl Engine {
         let mut touched: Vec<NodeId> = Vec::new();
         if full {
             // Overlays were dropped: take the new styles as bases, and pick
-            // up animations on elements styled for the first time.
-            let nodes: Vec<NodeId> = page.anim.base.keys().copied().collect();
+            // up animations on elements styled for the first time. (Changed
+            // elements are handled with the changes below.)
+            let changed: std::collections::HashSet<NodeId> = changes.iter().map(|c| c.0).collect();
+            let nodes: Vec<NodeId> = page.anim.base.keys().copied().filter(|n| !changed.contains(n)).collect();
             for n in nodes {
                 match page.styles.get(n).cloned() {
                     Some(s) => {
@@ -524,9 +536,13 @@ impl Engine {
                 touched.push(n);
             }
             let count = page.styles.styles.len();
+            page.anim.with_transitions.clear();
             for i in 0..count {
                 let Some(Some(s)) = page.styles.styles.get(i) else { continue };
-                if s.animations.is_empty() {
+                if !s.transitions.is_empty() {
+                    page.anim.with_transitions.insert(i);
+                }
+                if s.animations.is_empty() || changed.contains(&i) {
                     continue;
                 }
                 let node: NodeId = i;
@@ -537,6 +553,14 @@ impl Engine {
             }
         }
         for (node, old, new) in changes {
+            match &new {
+                Some(s) if !s.transitions.is_empty() => {
+                    page.anim.with_transitions.insert(node);
+                }
+                _ => {
+                    page.anim.with_transitions.remove(&node);
+                }
+            }
             let Some(new) = new else {
                 if page.anim.has_effects(node) {
                     self.cancel_effects(page, node, true);

@@ -257,6 +257,10 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
     if let Some(id) = state().borrow().modules.cache.get(&key) {
         return Ok(*id);
     }
+    // Fetching and compiling a dependency is not script execution: the
+    // time it takes (network, size of the graph) moves the running
+    // script's deadline instead of eating its budget.
+    let started = std::time::Instant::now();
     // blob: URLs (URL.createObjectURL) are served from the page's store.
     let resp = if url.scheme == "blob" {
         crate::fetch::blob_url_response(&key).ok_or_else(|| format!("no blob for {key}"))
@@ -277,7 +281,12 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
     };
     let id = match kind {
         ModuleKind::JavaScript => match realm.compile_module(&text, &key) {
-            Ok(id) => id,
+            Ok(id) => {
+                if let Some(d) = realm.deadline {
+                    realm.set_deadline(Some(d + started.elapsed()));
+                }
+                id
+            }
             Err(e) => {
                 let msg = realm.error_to_string(&e);
                 host::log("error", &format!("Failed to compile module \"{specifier}\" ({key}): {msg}"));

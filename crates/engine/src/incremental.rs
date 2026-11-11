@@ -237,6 +237,7 @@ impl Engine {
         let fresh = !matches!(&incr.style, Some(se) if se.env_matches(&env));
         let mut anim_changes: Vec<crate::animations::Change> = Vec::new();
         let mut anim_full = fresh;
+        let anim_snapshot = page.anim.snapshot(&page.styles);
         if fresh {
             let mut se = StyleEngine::new(&page.sheets, &env);
             page.styles = se.full(&page.doc, &page.sheets, &opts);
@@ -290,6 +291,16 @@ impl Engine {
         page.background = canvas_background(&page.doc, &page.styles);
         if fresh || log.overflow || log.entries.iter().any(|m| matches!(m, Mutation::Children { .. } | Mutation::Node { .. })) {
             rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images);
+        }
+        if anim_full {
+            // A full restyle lists no changes: compare the elements with
+            // transitions against their styles before it.
+            for (n, old) in anim_snapshot {
+                let new = page.styles.get(n).cloned();
+                if new.as_ref().map(|s| **s != *old).unwrap_or(true) {
+                    anim_changes.push((n, Some(old), new));
+                }
+            }
         }
         if anim_full || !anim_changes.is_empty() {
             self.animations_after_style(page, anim_changes, anim_full);
