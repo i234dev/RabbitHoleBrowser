@@ -14,20 +14,29 @@ const ACC: u8 = CONFIGURABLE | ENUMERABLE;
 fn dom_exception_code(name: &str) -> u32 {
     match name {
         "IndexSizeError" => 1,
+        "DOMStringSizeError" => 2,
         "HierarchyRequestError" => 3,
         "WrongDocumentError" => 4,
         "InvalidCharacterError" => 5,
+        "NoDataAllowedError" => 6,
+        "NoModificationAllowedError" => 7,
         "NotFoundError" => 8,
         "NotSupportedError" => 9,
+        "InUseAttributeError" => 10,
         "InvalidStateError" => 11,
         "SyntaxError" => 12,
         "InvalidModificationError" => 13,
         "NamespaceError" => 14,
         "InvalidAccessError" => 15,
+        "ValidationError" => 16,
+        "TypeMismatchError" => 17,
         "SecurityError" => 18,
         "NetworkError" => 19,
         "AbortError" => 20,
+        "URLMismatchError" => 21,
+        "QuotaExceededError" => 22,
         "TimeoutError" => 23,
+        "InvalidNodeTypeError" => 24,
         "DataCloneError" => 25,
         _ => 0,
     }
@@ -773,15 +782,15 @@ pub(crate) fn forms_data_set(doc: &Document, form: NodeId) -> (Vec<(String, Stri
                 let ty = el.attr("type").map(|t| t.to_ascii_lowercase()).unwrap_or_else(|| "text".into());
                 match ty.as_str() {
                     "checkbox" | "radio" => {
-                        if el.attr("checked").is_some() {
+                        if doc.is_checked(n) {
                             fields.push((name, el.attr("value").unwrap_or("on").to_string()));
                         }
                     }
                     "submit" | "button" | "reset" | "image" | "file" => {}
-                    _ => fields.push((name, el.attr("value").unwrap_or("").to_string())),
+                    _ => fields.push((name, doc.control_value(n).unwrap_or("").to_string())),
                 }
             }
-            "textarea" => fields.push((name, el.attr("value").map(|v| v.to_string()).unwrap_or_else(|| doc.text_content(n)))),
+            "textarea" => fields.push((name, doc.control_value(n).map(|v| v.to_string()).unwrap_or_else(|| doc.text_content(n)))),
             "select" => {
                 let multiple = el.attr("multiple").is_some();
                 let mut first: Option<String> = None;

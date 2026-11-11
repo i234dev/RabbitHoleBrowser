@@ -530,6 +530,9 @@ fn parse_rgb(c: &[Token]) -> Option<Color> {
 
 fn parse_hsl(c: &[Token]) -> Option<Color> {
     let (vals, alpha) = color_args(c)?;
+    // The legacy comma syntax takes percentages only (`hsla(0, 0, 0, 1)`
+    // is invalid); bare numbers belong to the modern syntax (CSS Color 4).
+    let legacy = components(strip_function(c)).iter().any(|comp| matches!(comp, [Token::Comma]));
     let h = match vals[0] {
         [Token::Number(n)] => *n,
         [Token::Dimension(n, u)] => match u.as_str() {
@@ -545,7 +548,7 @@ fn parse_hsl(c: &[Token]) -> Option<Color> {
     let pct = |c: &[Token]| -> Option<f32> {
         match c {
             [Token::Percentage(p)] => Some(p / 100.0),
-            [Token::Number(n)] => Some(n / 100.0),
+            [Token::Number(n)] if !legacy => Some(n / 100.0),
             [Token::Ident(s)] if s.eq_ignore_ascii_case("none") => Some(0.0),
             _ => None,
         }
@@ -669,6 +672,10 @@ mod tests {
         assert_eq!(col("rgb(100%, 0%, 0%, 0.5)"), ColorValue::Color(Color::rgba(255, 0, 0, 128)));
         assert_eq!(col("hsl(120, 100%, 50%)"), ColorValue::Color(Color::rgb(0, 255, 0)));
         assert_eq!(col("hsl(0 0% 100%)"), ColorValue::Color(Color::rgb(255, 255, 255)));
+        // The legacy (comma) syntax needs percentages for saturation and
+        // lightness; bare numbers are the modern syntax.
+        assert!(parse_color(&Tokenizer::tokenize("hsla(0, 0, 0, 1)")).is_none());
+        assert_eq!(col("hsl(0 0 100)"), ColorValue::Color(Color::rgb(255, 255, 255)));
         assert_eq!(col("currentColor"), ColorValue::CurrentColor);
         assert_eq!(col("transparent"), ColorValue::Color(Color::TRANSPARENT));
         assert!(parse_color(&Tokenizer::tokenize("notacolor")).is_none());

@@ -924,8 +924,8 @@ pub(crate) fn run_default_action(realm: &mut Realm, n: NodeRef) {
         }
         DefaultAction::None => {
             // Checkbox / radio activation.
-            if n.doc == 0 {
-                let kind = with_doc(0, |doc| {
+            {
+                let kind = with_doc(n.doc, |doc| {
                     if doc.is_element(n.node, "input") {
                         doc.attr(n.node, "type").map(|t| t.to_ascii_lowercase())
                     } else {
@@ -934,8 +934,8 @@ pub(crate) fn run_default_action(realm: &mut Realm, n: NodeRef) {
                 });
                 match kind.as_deref() {
                     Some("checkbox") => {
-                        let checked = crate::element::get_attribute(n, "checked").is_some();
-                        crate::element::set_attribute(n, "checked", if checked { None } else { Some("") });
+                        let checked = with_doc(n.doc, |doc| doc.is_checked(n.node));
+                        crate::element::set_checkedness(n, Some(!checked));
                         dispatch(realm, TargetKey::Node(n), "input", EventInit::simple(true, false), true);
                         dispatch(realm, TargetKey::Node(n), "change", EventInit::simple(true, false), true);
                     }

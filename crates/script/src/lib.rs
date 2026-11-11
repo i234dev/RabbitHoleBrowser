@@ -14,6 +14,7 @@ mod frames;
 mod host;
 mod misc;
 mod modules;
+mod live;
 mod node;
 mod canvas2d;
 mod natives;

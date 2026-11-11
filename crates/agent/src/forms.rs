@@ -123,7 +123,7 @@ pub fn describe(page: &Page, frame: usize, form: NodeId, refs: &mut RefMap) -> V
         }
         match f.kind {
             ControlKind::Checkbox | ControlKind::Radio => {
-                if doc.attr(f.node, "checked").is_some() {
+                if doc.is_checked(f.node) {
                     l.push_str(" checked");
                 }
                 if f.kind == ControlKind::Radio {
@@ -269,12 +269,12 @@ pub fn validate(engine: &Engine, page: &mut Page, form: NodeId) -> Vec<Invalid> 
         let mut reason: Option<String> = None;
         match f.kind {
             ControlKind::Checkbox => {
-                if required && doc.attr(f.node, "checked").is_none() {
+                if required && !doc.is_checked(f.node) {
                     reason = Some("must be checked (required)".into());
                 }
             }
             ControlKind::Radio => {
-                let checked = doc.attr(f.node, "checked").is_some();
+                let checked = doc.is_checked(f.node);
                 match radio_groups_ok.iter_mut().find(|(n, _)| *n == f.name) {
                     Some(g) => g.1 |= checked,
                     None => radio_groups_ok.push((f.name.clone(), checked)),

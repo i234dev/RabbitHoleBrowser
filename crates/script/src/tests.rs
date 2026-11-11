@@ -510,7 +510,8 @@ fn forms_controls_reflect() {
         console.log(f.elements.length, f.elements.t === t, f.method, f.action.endsWith('page.html?q=1#frag'));
     "#,
     );
-    assert_eq!(out[0], "b b true true false text checkbox f");
+    // The value / checkedness changed; the attributes keep the defaults.
+    assert_eq!(out[0], "b a true false false text checkbox f");
     assert_eq!(out[1], "2 1 2 two hello");
     assert_eq!(out[2], "one 0 changed hello");
     assert_eq!(out[3], "t=b&c=on&r=2");
@@ -674,7 +675,7 @@ fn todo_app_end_to_end() {
     let input = find(&env, "input");
     let form = find(&env, "form");
     for text in ["Buy carrots", "Feed rabbits", "Write browser"] {
-        env.doc.set_attr(input, "value", Some(text));
+        env.doc.set_control_value(input, Some(text)); // the user types
         let r = host.dispatch_event(&mut env, form, "submit", EventInit::simple(true, true));
         assert!(r.default_prevented);
     }
@@ -687,7 +688,7 @@ fn todo_app_end_to_end() {
     assert_eq!(out[0], "true 2 items left");
     // Checkbox change on the first item through the checkbox element.
     let first_cb = env.doc.descendants(0).find(|&n| env.doc.is_element(n, "input") && env.doc.attr(n, "type") == Some("checkbox")).unwrap();
-    env.doc.set_attr(first_cb, "checked", Some(""));
+    env.doc.set_checked(first_cb, Some(true)); // the user checks it
     host.dispatch_event(&mut env, first_cb, "change", EventInit::simple(true, false));
     let out = run(&mut env, &mut host, "console.log(document.querySelectorAll('#list li.done').length)");
     assert_eq!(out[0], "2");
@@ -749,7 +750,8 @@ fn misc_apis() {
     // has no layout box for #d, so it is not intersecting.
     host.run_timers(&mut env, 1100.0);
     assert!(env.logs.iter().any(|(l, m)| l == "log" && m == "io 1 false"), "{:?}", env.logs);
-    assert!(out.contains(&"true \\31 a CSS1Compat UTF-8".to_string()), "{out:?}");
+    // No DOCTYPE: quirks mode.
+    assert!(out.contains(&"true \\31 a BackCompat UTF-8".to_string()), "{out:?}");
 }
 
 #[test]
@@ -1109,4 +1111,141 @@ fn long_timer_runs_yield_and_resume() {
     let out = run(&mut env, &mut host, "console.log(done)");
     assert_eq!(out[0], "6");
     assert_eq!(timeouts(&env), 0);
+}
+
+#[test]
+fn doctype_node_compat_mode_and_xml_documents() {
+    let (mut env, mut host) = setup(r#"<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd"><p>x</p>"#);
+    let out = run(&mut env, &mut host, r#"
+        const dt = document.firstChild;
+        console.log(dt.nodeType, dt.name, dt.publicId, dt === document.doctype, document.compatMode, dt.textContent, dt.nextSibling === document.documentElement);
+        const doctype = document.implementation.createDocumentType('html', '-//W3C//DTD XHTML 1.0 Strict//EN', 'x');
+        const doc = document.implementation.createDocument('http://www.w3.org/1999/xhtml', 'html', doctype);
+        doc.documentElement.appendChild(doc.createElementNS('http://www.w3.org/1999/xhtml', 'head'));
+        doc.documentElement.appendChild(doc.createElementNS('http://www.w3.org/1999/xhtml', 'body'));
+        const t = doc.createElementNS('http://www.w3.org/1999/xhtml', 'title');
+        doc.documentElement.firstChild.appendChild(t);
+        t.textContent = 'Sparrow';
+        doc.body.appendChild(doc.createElementNS('http://www.w3.org/1999/xhtml', 'form'));
+        console.log(String(doc), doctype.ownerDocument === doc, doc.firstChild === doctype, doc.title, doc.forms.length, doc.documentElement.tagName);
+        let code = 0;
+        try { document.implementation.createDocumentType('a:', '', ''); } catch (e) { code = e.code === e.NAMESPACE_ERR && e.INVALID_ACCESS_ERR === 15 ? 14 : -1; }
+        console.log(code);
+    "#);
+    assert_eq!(out[0], "10 html -//W3C//DTD HTML 4.01//EN true CSS1Compat null true");
+    assert_eq!(out[1], "[object XMLDocument] true true Sparrow 1 html");
+    assert_eq!(out[2], "14");
+    let (mut env, mut host) = setup("<p>no doctype</p>");
+    let out = run(&mut env, &mut host, "console.log(document.compatMode, document.doctype)");
+    assert_eq!(out[0], "BackCompat null");
+}
+
+#[test]
+fn document_children_are_validated_and_namespaces_kept() {
+    let (mut env, mut host) = setup("<!doctype html><p>x</p>");
+    let out = run(&mut env, &mut host, r#"
+        const codes = [];
+        const t = (f) => { try { f(); codes.push(0); } catch (e) { codes.push(e.code); } };
+        t(() => document.appendChild(document.createElement('a')));
+        t(() => document.appendChild(document.createTextNode('x')));
+        t(() => document.body.appendChild(document.implementation.createDocumentType('html', '', '')));
+        t(() => document.appendChild(document.createComment('ok')));
+        t(() => document.createElementNS(null, 'd:iv'));
+        t(() => document.createElementNS('http://example.com/', 'xmlns:test'));
+        t(() => document.createElementNS('http://www.w3.org/2000/xmlns/', 'x:test'));
+        t(() => document.createElementNS('http://www.w3.org/2000/xmlns/', 'xmlns:test'));
+        t(() => document.createElementNS(null, ':div'));
+        t(() => document.createElementNS(null, '0div'));
+        const e = document.createElementNS('http://ns.example.com/', 'prefix:localName');
+        console.log(codes.join(','), e.tagName, e.localName, e.prefix, e.namespaceURI, document.createElement('DIV').tagName);
+    "#);
+    assert_eq!(out[0], "3,3,3,0,14,14,14,0,14,5 prefix:localName localName prefix http://ns.example.com/ DIV");
+}
+
+#[test]
+fn live_ranges_follow_mutations() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const p = document.createElement('p');
+        p.appendChild(document.createTextNode('12345'));
+        document.body.appendChild(p);
+        const r = document.createRange();
+        r.setEnd(document.body, 1);
+        r.setStart(p.firstChild, 2);
+        document.body.removeChild(p);
+        const a = [r.collapsed, r.startContainer === document.body, r.startOffset, r.endOffset];
+        // insertNode splits the text node; the range keeps the inserted node.
+        const q = document.createElement('p');
+        const t1 = document.createTextNode('12345'), t2 = document.createTextNode('ABCDE');
+        q.appendChild(t1); q.appendChild(t2); document.body.appendChild(q);
+        const r2 = document.createRange();
+        r2.setStart(t1, 2); r2.setEnd(t1, 3);
+        r2.insertNode(t2);
+        const b = [q.childNodes.length, t1.data, q.childNodes[2].data, r2.toString()];
+        // extractContents moves fully contained nodes.
+        const h = document.createElement('h1');
+        const x1 = document.createTextNode('Hello '), em = document.createElement('em'), x2 = document.createTextNode('Wonderful'), x3 = document.createTextNode(' Kitty');
+        em.appendChild(x2); h.appendChild(x1); h.appendChild(em); h.appendChild(x3);
+        document.body.appendChild(h);
+        const r3 = document.createRange();
+        r3.setStart(x2, 6); r3.setEnd(h, 3);
+        const f = r3.extractContents();
+        const c = [f.childNodes[0].firstChild.data, f.childNodes[1] === x3, h.textContent, r3.startContainer === h, r3.startOffset];
+        let code = 0;
+        try { r3.setEndBefore(document); } catch (e) { code = e.code === e.INVALID_NODE_TYPE_ERR ? 24 : -1; }
+        console.log(a.join(','), b.join(','), c.join(','), code);
+    "#);
+    assert_eq!(out[0], "true,true,0,0 3,12,345,ABCDE3 ful,true,Hello Wonder,true,2 24");
+}
+
+#[test]
+fn node_iterator_survives_removal_by_its_filter() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const b = document.body;
+        const [t1, t2, t3, t4] = [1, 2, 3, 4].map((i) => b.appendChild(document.createElement('t' + i)));
+        const seen = [];
+        let removing = null;
+        const it = document.createNodeIterator(b, NodeFilter.SHOW_ELEMENT, (n) => { seen.push(n.tagName); if (n === removing) { b.removeChild(n); removing = null; return 2; } return 1; });
+        it.nextNode(); it.nextNode(); it.nextNode(); it.nextNode(); it.nextNode();
+        removing = t4;
+        const prev = it.previousNode();
+        console.log(prev && prev.tagName, seen.join(','), it.referenceNode.tagName, it.pointerBeforeReferenceNode);
+    "#);
+    assert_eq!(out[0], "T3 BODY,T1,T2,T3,T4,T4,T3 T3 true");
+}
+
+#[test]
+fn input_value_and_checkedness_are_separate_from_attributes() {
+    let (mut env, mut host) = setup("<form><input name=a value=def><input type=checkbox id=c checked><input type=radio name=r id=r1><input type=radio name=r id=r2></form>");
+    let out = run(&mut env, &mut host, r#"
+        const i = document.createElement('input');
+        i.type = 'text'; i.value = 'test';
+        const a = document.querySelector('[name=a]');
+        a.value = 'typed';
+        const c = document.getElementById('c');
+        c.checked = false;
+        const r1 = document.getElementById('r1'), r2 = document.getElementById('r2');
+        r1.checked = true;
+        r2.setAttribute('checked', 'checked');
+        console.log(i.hasAttribute('value'), i.value, a.value, a.defaultValue, a.getAttribute('value'), c.checked, c.hasAttribute('checked'), r1.checked, r2.checked,
+            document.querySelectorAll(':checked').length);
+        document.forms[0].reset();
+        console.log(a.value, c.checked, r1.checked, r2.checked);
+    "#);
+    assert_eq!(out[0], "false test typed def def false true true false 1");
+    assert_eq!(out[1], "def true false true");
+}
+
+#[test]
+fn document_open_write_close_replaces_the_document() {
+    let (mut env, mut host) = setup("<!doctype html><p>x</p>");
+    let out = run(&mut env, &mut host, r#"
+        const doc = document.implementation.createHTMLDocument('t');
+        doc.open();
+        doc.write('<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"><title></title><span></span>');
+        doc.close();
+        console.log(doc.childNodes.length, doc.firstChild.publicId, doc.compatMode, doc.body.firstChild.tagName);
+    "#);
+    assert_eq!(out[0], "2 -//W3C//DTD HTML 4.0 Transitional//EN BackCompat SPAN");
 }

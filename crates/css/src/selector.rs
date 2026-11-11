@@ -672,6 +672,9 @@ pub struct MatchState {
     pub active: Option<NodeId>,
     /// The id named by the URL fragment, for `:target`.
     pub target_id: Option<String>,
+    /// Links (`<a>` / `<area>` with `href`) whose destination was visited:
+    /// they match `:visited` instead of `:link`.
+    pub visited: std::sync::Arc<std::collections::HashSet<NodeId>>,
 }
 
 impl MatchState {
@@ -882,17 +885,31 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
             return false;
         }
     }
+    // Structural pseudo-classes need a parent element (or fragment): the
+    // root element is not a :first-child (as in Blink/WebKit/Gecko).
+    let has_parent = || doc.parent(node).map(|p| doc.element(p).is_some()).unwrap_or(false);
     for p in &c.pseudos {
         let ok = match p {
-            Pseudo::Root => el.tag == "html",
+            Pseudo::FirstChild | Pseudo::LastChild | Pseudo::OnlyChild | Pseudo::FirstOfType | Pseudo::LastOfType | Pseudo::OnlyOfType | Pseudo::NthChild(..) | Pseudo::NthLastChild(..) | Pseudo::NthOfType(..) | Pseudo::NthLastOfType(..)
+                if !has_parent() =>
+            {
+                false
+            }
+            Pseudo::Root => doc.parent(node).map(|p| matches!(doc.node(p).data, NodeData::Document)).unwrap_or(false),
             Pseudo::FirstChild => prev_element_sibling(doc, node).is_none(),
             Pseudo::LastChild => next_element_sibling(doc, node).is_none(),
             Pseudo::OnlyChild => prev_element_sibling(doc, node).is_none() && next_element_sibling(doc, node).is_none(),
             Pseudo::FirstOfType => child_index(doc, node, true, false) == 1,
             Pseudo::LastOfType => child_index(doc, node, true, true) == 1,
             Pseudo::OnlyOfType => child_index(doc, node, true, false) == 1 && child_index(doc, node, true, true) == 1,
-            Pseudo::Empty => doc.children(node).all(|ch| matches!(&doc.node(ch).data, NodeData::Comment(_))),
-            Pseudo::Link | Pseudo::AnyLink => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some(),
+            // No element children and no text (empty text nodes don't count).
+            Pseudo::Empty => doc.children(node).all(|ch| match &doc.node(ch).data {
+                NodeData::Comment(_) => true,
+                NodeData::Text(t) => t.is_empty(),
+                _ => false,
+            }),
+            Pseudo::AnyLink => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some(),
+            Pseudo::Link => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some() && !state.visited.contains(&node),
             Pseudo::NthChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, false)),
             Pseudo::NthLastChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, true)),
             Pseudo::NthOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, false)),
@@ -918,7 +935,13 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
                     && el.attr("disabled").is_none()
             }
             Pseudo::Disabled => el.attr("disabled").is_some(),
-            Pseudo::Checked => el.attr("checked").is_some() || (el.tag == "option" && el.attr("selected").is_some()),
+            // Checkboxes and radio buttons by checkedness; options by
+            // selectedness.
+            Pseudo::Checked => match el.tag.as_str() {
+                "input" => el.attr("type").map(|t| t.eq_ignore_ascii_case("checkbox") || t.eq_ignore_ascii_case("radio")).unwrap_or(false) && doc.is_checked(node),
+                "option" => el.attr("selected").is_some(),
+                _ => false,
+            },
             Pseudo::Hover => MatchState::is_or_contains(doc, state.hovered, node),
             Pseudo::Active => MatchState::is_or_contains(doc, state.active, node),
             Pseudo::Focus => state.focused == Some(node),
@@ -928,7 +951,7 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
                 (Some(t), Some(id)) => t == id,
                 _ => false,
             },
-            Pseudo::Visited => false,
+            Pseudo::Visited => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some() && state.visited.contains(&node),
             Pseudo::Host(list) => doc.shadow_root(node).is_some() && (list.is_empty() || list.iter().any(|s| matches_with(s, doc, node, state))),
             Pseudo::HostContext(list) => {
                 doc.shadow_root(node).is_some() && {

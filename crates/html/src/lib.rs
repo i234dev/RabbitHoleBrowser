@@ -8,7 +8,7 @@
 pub mod entities;
 pub mod tokenizer;
 
-use rabbithole_dom::{Document, NodeData, NodeId};
+use rabbithole_dom::{DoctypeData, Document, Namespace, NodeData, NodeId, QuirksMode};
 use tokenizer::{RawKind, Token, Tokenizer};
 
 const VOID: &[&str] = &[
@@ -32,6 +32,96 @@ const SCOPE_BOUNDARY: &[&str] = &[
 ];
 
 const HEAD_ONLY: &[&str] = &["base", "basefont", "bgsound", "link", "meta", "title", "style", "script", "noframes", "template", "noscript"];
+
+/// Split the text of a DOCTYPE token (after `<!DOCTYPE`) into name, public
+/// and system identifiers. The flag is the tokenizer's "force-quirks" flag
+/// (missing name, malformed identifiers).
+pub fn parse_doctype(text: &str) -> (DoctypeData, bool) {
+    let text = text.trim();
+    let name_end = text.find(|c: char| c.is_ascii_whitespace()).unwrap_or(text.len());
+    let name = text[..name_end].to_ascii_lowercase();
+    let mut rest = text[name_end..].trim_start();
+    let mut data = DoctypeData { name, ..Default::default() };
+    let mut force_quirks = data.name.is_empty();
+    // A quoted identifier at the start of `rest`.
+    fn quoted(rest: &mut &str) -> Option<String> {
+        let q = rest.chars().next().filter(|&c| c == '"' || c == '\'')?;
+        let body = &rest[1..];
+        let (value, after) = match body.find(q) {
+            Some(e) => (&body[..e], &body[e + 1..]),
+            None => (body, ""),
+        };
+        *rest = after.trim_start();
+        Some(value.to_string())
+    }
+    let keyword = |rest: &str, kw: &str| rest.len() >= kw.len() && rest.is_char_boundary(kw.len()) && rest[..kw.len()].eq_ignore_ascii_case(kw);
+    if keyword(rest, "public") {
+        rest = rest[6..].trim_start();
+        match quoted(&mut rest) {
+            Some(p) => {
+                data.public_id = p;
+                if let Some(s) = quoted(&mut rest) {
+                    data.system_id = s;
+                }
+            }
+            None => force_quirks = true,
+        }
+    } else if keyword(rest, "system") {
+        rest = rest[6..].trim_start();
+        match quoted(&mut rest) {
+            Some(s) => data.system_id = s,
+            None => force_quirks = true,
+        }
+    } else if !rest.is_empty() {
+        force_quirks = true;
+    }
+    (data, force_quirks)
+}
+
+/// The document's quirks mode for a DOCTYPE (HTML §13.2.6.4.1).
+pub fn quirks_mode_for(d: &DoctypeData, force_quirks: bool) -> QuirksMode {
+    const QUIRKY_PREFIXES: &[&str] = &[
+        "+//silmaril//dtd html pro v0r11 19970101//", "-//as//dtd html 3.0 aswedit + extensions//",
+        "-//advasoft ltd//dtd html 3.0 aswedit + extensions//", "-//ietf//dtd html 2.0 level 1//",
+        "-//ietf//dtd html 2.0 level 2//", "-//ietf//dtd html 2.0 strict level 1//", "-//ietf//dtd html 2.0 strict level 2//",
+        "-//ietf//dtd html 2.0 strict//", "-//ietf//dtd html 2.0//", "-//ietf//dtd html 2.1e//", "-//ietf//dtd html 3.0//",
+        "-//ietf//dtd html 3.2 final//", "-//ietf//dtd html 3.2//", "-//ietf//dtd html 3//", "-//ietf//dtd html level 0//",
+        "-//ietf//dtd html level 1//", "-//ietf//dtd html level 2//", "-//ietf//dtd html level 3//",
+        "-//ietf//dtd html strict level 0//", "-//ietf//dtd html strict level 1//", "-//ietf//dtd html strict level 2//",
+        "-//ietf//dtd html strict level 3//", "-//ietf//dtd html strict//", "-//ietf//dtd html//",
+        "-//metrius//dtd metrius presentational//", "-//microsoft//dtd internet explorer 2.0 html strict//",
+        "-//microsoft//dtd internet explorer 2.0 html//", "-//microsoft//dtd internet explorer 2.0 tables//",
+        "-//microsoft//dtd internet explorer 3.0 html strict//", "-//microsoft//dtd internet explorer 3.0 html//",
+        "-//microsoft//dtd internet explorer 3.0 tables//", "-//netscape comm. corp.//dtd html//",
+        "-//netscape comm. corp.//dtd strict html//", "-//o'reilly and associates//dtd html 2.0//",
+        "-//o'reilly and associates//dtd html extended 1.0//", "-//o'reilly and associates//dtd html extended relaxed 1.0//",
+        "-//sq//dtd html 2.0 hotmetal + extensions//",
+        "-//softquad software//dtd hotmetal pro 6.0::19990601::extensions to html 4.0//",
+        "-//softquad//dtd hotmetal pro 4.0::19970916::extensions to html 4.0//", "-//spyglass//dtd html 2.0 extended//",
+        "-//sun microsystems corp.//dtd hotjava html//", "-//sun microsystems corp.//dtd hotjava strict html//",
+        "-//w3c//dtd html 3 1995-03-24//", "-//w3c//dtd html 3.2 draft//", "-//w3c//dtd html 3.2 final//",
+        "-//w3c//dtd html 3.2//", "-//w3c//dtd html 3.2s draft//", "-//w3c//dtd html 4.0 frameset//",
+        "-//w3c//dtd html 4.0 transitional//", "-//w3c//dtd html experimental 19960712//",
+        "-//w3c//dtd html experimental 970421//", "-//w3c//dtd w3 html//", "-//w3o//dtd w3 html 3.0//",
+        "-//webtechs//dtd mozilla html 2.0//", "-//webtechs//dtd mozilla html//",
+    ];
+    let public = d.public_id.to_ascii_lowercase();
+    let system = d.system_id.to_ascii_lowercase();
+    let html401 = public.starts_with("-//w3c//dtd html 4.01 frameset//") || public.starts_with("-//w3c//dtd html 4.01 transitional//");
+    if force_quirks
+        || d.name != "html"
+        || matches!(public.as_str(), "-//w3o//dtd w3 html strict 3.0//en//" | "-/w3c/dtd html 4.0 transitional/en" | "html")
+        || system == "http://www.ibm.com/data/dtd/v11/ibmxhtml1-transitional.dtd"
+        || QUIRKY_PREFIXES.iter().any(|p| public.starts_with(p))
+        || (d.system_id.is_empty() && html401)
+    {
+        return QuirksMode::Quirks;
+    }
+    if public.starts_with("-//w3c//dtd xhtml 1.0 frameset//") || public.starts_with("-//w3c//dtd xhtml 1.0 transitional//") || html401 {
+        return QuirksMode::LimitedQuirks;
+    }
+    QuirksMode::NoQuirks
+}
 
 pub fn parse(input: &str) -> Document {
     let mut doc = parse_tree(input);
@@ -106,6 +196,8 @@ struct TreeBuilder {
     foreign_depth: usize,
     /// Pending whitespace-only text seen before body creation.
     saw_body_content: bool,
+    /// A DOCTYPE token was seen before the first element.
+    saw_doctype: bool,
 }
 
 impl TreeBuilder {
@@ -118,6 +210,7 @@ impl TreeBuilder {
             body: None,
             foreign_depth: 0,
             saw_body_content: false,
+            saw_doctype: false,
         }
     }
 
@@ -175,7 +268,7 @@ impl TreeBuilder {
             let tok = tk.next_token();
             match tok {
                 Token::Eof => break,
-                Token::Doctype(_) => {}
+                Token::Doctype(text) => self.doctype(&text),
                 Token::Comment(c) => {
                     let n = self.doc.create(NodeData::Comment(c));
                     let parent = self.current();
@@ -197,6 +290,22 @@ impl TreeBuilder {
         }
         // Make sure even an empty document has html/head/body.
         self.ensure_body();
+        if !self.saw_doctype {
+            self.doc.quirks_mode = QuirksMode::Quirks;
+        }
+    }
+
+    /// "initial" insertion mode: a DOCTYPE before anything else becomes the
+    /// document's DocumentType node and decides the quirks mode.
+    fn doctype(&mut self, text: &str) {
+        if self.saw_doctype || self.html.is_some() {
+            return; // parse error: ignored
+        }
+        self.saw_doctype = true;
+        let (data, force_quirks) = parse_doctype(text);
+        self.doc.quirks_mode = quirks_mode_for(&data, force_quirks);
+        let n = self.doc.create(NodeData::Doctype(data));
+        self.doc.append_child(Document::ROOT, n);
     }
 
     fn text(&mut self, t: String) {
@@ -236,7 +345,18 @@ impl TreeBuilder {
 
     fn insert_element(&mut self, name: &str, attrs: Vec<(String, String)>, push: bool) -> NodeId {
         let parent = self.current();
-        let n = self.doc.create_element(name, attrs);
+        // Elements inside <svg>/<math> are in the SVG/MathML namespace
+        // (HTML integration points switch back to HTML).
+        let ns = match name {
+            "svg" => Namespace::Svg,
+            "math" => Namespace::MathMl,
+            _ => match self.doc.element(parent) {
+                Some(p) if p.ns == Namespace::Svg && !matches!(p.tag.as_str(), "foreignobject" | "foreignObject" | "desc" | "title") => Namespace::Svg,
+                Some(p) if p.ns == Namespace::MathMl && !matches!(p.tag.as_str(), "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml") => Namespace::MathMl,
+                _ => Namespace::Html,
+            },
+        };
+        let n = if ns == Namespace::Html { self.doc.create_element(name, attrs) } else { self.doc.create_element_ns(ns, None, &name.to_ascii_lowercase(), attrs) };
         self.doc.append_child(parent, n);
         if push {
             self.stack.push(n);
@@ -596,6 +716,32 @@ mod tests {
         // Whitespace before <head> and after </head> is not kept.
         let html = doc.html_element().unwrap();
         assert!(doc.children(html).all(|c| doc.element(c).is_some()), "{}", doc.dump());
+    }
+
+    #[test]
+    fn doctype_node_and_quirks_mode() {
+        let doc = parse("<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\">\n<html><p>x");
+        let dt = doc.first_child(Document::ROOT).unwrap();
+        let NodeData::Doctype(d) = &doc.node(dt).data else { panic!("{}", doc.dump()) };
+        assert_eq!(d.name, "html");
+        assert_eq!(d.public_id, "-//W3C//DTD HTML 4.01//EN");
+        assert_eq!(d.system_id, "http://www.w3.org/TR/html4/strict.dtd");
+        assert_eq!(doc.doctype(), Some(dt));
+        assert_eq!(doc.quirks_mode, QuirksMode::NoQuirks);
+        assert!(doc.html_element().is_some());
+        assert_eq!(parse("<!doctype html><p>").quirks_mode, QuirksMode::NoQuirks);
+        assert_eq!(parse("<p>no doctype").quirks_mode, QuirksMode::Quirks);
+        assert!(parse("<p>no doctype").doctype().is_none());
+        assert_eq!(parse("<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\">").quirks_mode, QuirksMode::Quirks);
+        assert_eq!(parse("<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"x\">").quirks_mode, QuirksMode::LimitedQuirks);
+        // Foreign content is namespaced.
+        let doc = parse("<svg><circle/><foreignObject><div></div></foreignObject></svg><math><mi>x</mi></math>");
+        let circle = doc.find_element("circle").unwrap();
+        assert_eq!(doc.element(circle).unwrap().ns, Namespace::Svg);
+        let div = doc.find_element("div").unwrap();
+        assert_eq!(doc.element(div).unwrap().ns, Namespace::Html);
+        let mi = doc.find_element("mi").unwrap();
+        assert_eq!(doc.element(mi).unwrap().ns, Namespace::MathMl);
     }
 
     #[test]

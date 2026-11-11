@@ -1215,7 +1215,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "overflow-y" => to.overflow_y = from.overflow_y,
         "visibility" => to.visibility = from.visibility,
         "z-index" => to.z_index = from.z_index,
-        "cursor" => to.cursor_pointer = from.cursor_pointer,
+        "cursor" => to.cursor = from.cursor,
         "flex" => {
             to.flex_grow = from.flex_grow;
             to.flex_shrink = from.flex_shrink;
@@ -2215,9 +2215,11 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "cursor" => {
+            // `[<url> [<x> <y>]?,]* <keyword>`: the fallback keyword is
+            // last; an unknown keyword makes the declaration invalid.
             let last = comps.iter().rev().find_map(|c| values::ident(c));
-            if let Some(kw) = last {
-                style.cursor_pointer = kw == "pointer";
+            if let Some(kw) = last.and_then(|kw| crate::computed::CURSOR_KEYWORDS.iter().find(|k| k.eq_ignore_ascii_case(&kw))) {
+                style.cursor = *kw;
             }
         }
         _ => {
@@ -2408,7 +2410,7 @@ mod tests {
         let a = style_of(&doc, &t, "a");
         assert!(a.text_decoration.underline);
         assert_eq!(a.color, Color::rgb(0, 0, 0xee));
-        assert!(a.cursor_pointer);
+        assert!(a.cursor_pointer());
         let li = style_of(&doc, &t, "li");
         assert_eq!(li.display, Display::ListItem);
         assert_eq!(li.list_style_type, ListStyleType::Disc);

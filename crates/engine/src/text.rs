@@ -97,7 +97,7 @@ impl Writer<'_> {
     fn walk(&mut self, id: NodeId) {
         match &self.doc.node(id).data {
             NodeData::Text(t) => self.push_text(t),
-            NodeData::Comment(_) => {}
+            NodeData::Comment(_) | NodeData::Doctype(_) => {}
             NodeData::Document => {
                 for c in self.doc.children(id) {
                     self.walk(c);

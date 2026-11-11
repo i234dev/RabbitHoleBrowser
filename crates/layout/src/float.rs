@@ -105,6 +105,16 @@ impl Bfc {
             .fold(None, |acc: Option<f32>, b| Some(acc.map_or(b, |a| a.min(b))))
     }
 
+    /// The margin box of the most recently placed float.
+    pub fn last(&self) -> Option<Rect> {
+        self.floats.last().map(|f| f.rect)
+    }
+
+    /// Forget the most recently placed float (a tentative placement).
+    pub fn pop(&mut self) {
+        self.floats.pop();
+    }
+
     /// Place a float with margin-box size `w`×`h` no higher than `y0`.
     /// Returns the margin box top-left.
     pub fn place(&mut self, left: bool, w: f32, h: f32, y0: f32, cx: f32, cw: f32) -> (f32, f32) {

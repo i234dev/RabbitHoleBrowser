@@ -453,7 +453,7 @@ fn ranges_selection_traversal_and_xpath() {
 #[test]
 fn attrs_forms_validation_and_misc_dom() {
     let out = logs_of(
-        "<html><body><form id=f><input id=e type=email required value=bad><input id=n type=number min=1 max=5 step=2 value=4><select id=s required><option value=''>-</option><option>a</option></select></form><div id=d data-x=1 class='a b'></div></body></html>",
+        "<!doctype html><html><body><form id=f><input id=e type=email required value=bad><input id=n type=number min=1 max=5 step=2 value=4><select id=s required><option value=''>-</option><option>a</option></select></form><div id=d data-x=1 class='a b'></div></body></html>",
         r#"
         const d = document.getElementById('d');
         const attrs = d.attributes;

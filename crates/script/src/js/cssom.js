@@ -590,6 +590,23 @@
   }
   const gcs = g.getComputedStyle;
   if (gcs) hidden(g, 'getComputedStyle', function getComputedStyle(el, pseudo) { if (pendingSheets.size) flushSheets(); return gcs.call(this, el, pseudo); });
+  // Geometry queries see pending CSSOM changes too.
+  const geometry = [
+    [g.Element, ['getBoundingClientRect', 'getClientRects'], ['clientTop', 'clientLeft', 'clientWidth', 'clientHeight', 'scrollWidth', 'scrollHeight']],
+    [g.HTMLElement, [], ['offsetTop', 'offsetLeft', 'offsetWidth', 'offsetHeight', 'offsetParent']],
+    [g.HTMLImageElement, [], ['width', 'height']],
+  ];
+  for (const [C, methods, getters] of geometry) {
+    if (!C) continue;
+    for (const m of methods) {
+      const d = Object.getOwnPropertyDescriptor(C.prototype, m);
+      if (d && typeof d.value === 'function') { const f = d.value; Object.defineProperty(C.prototype, m, { ...d, value: { [m](...a) { if (pendingSheets.size) flushSheets(); return f.apply(this, a); } }[m] }); }
+    }
+    for (const k of getters) {
+      const d = Object.getOwnPropertyDescriptor(C.prototype, k);
+      if (d && d.get) { const get = d.get; Object.defineProperty(C.prototype, k, { ...d, get: { [k]() { if (pendingSheets.size) flushSheets(); return get.call(this); } }[k] }); }
+    }
+  }
 
   // `<style>.sheet` / `<link rel=stylesheet>.sheet` (cached per element,
   // re-parsed when the element's text changes).

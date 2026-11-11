@@ -641,12 +641,23 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
     }
 
     fn place_float(&mut self, c: usize) {
-        if self.cur.has_content {
-            self.pending_floats.push(c);
-            return;
-        }
         let y = self.cur.y;
-        self.layout_float_at(c, y);
+        if self.cur.has_content {
+            // A float met in the middle of a line goes at the top of that
+            // line when it fits beside the line's content (CSS 2.1 §9.5.1);
+            // otherwise it waits for the next line.
+            self.layout_float_at(c, y);
+            let placed_here = self.bfc.last().map(|r| (r.y - y).abs() < 0.01).unwrap_or(false);
+            let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
+            let used = self.cur.x - self.cur.left;
+            if !placed_here || r - l + 0.01 < used {
+                self.bfc.pop();
+                self.pending_floats.push(c);
+                return;
+            }
+        } else {
+            self.layout_float_at(c, y);
+        }
         // The current (empty) line shrinks around the new float.
         let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
         let shift = l - self.cur.left;

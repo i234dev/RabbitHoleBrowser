@@ -480,7 +480,7 @@ fn content_text_into(page: &Page, n: NodeId, out: &mut String, depth: usize) {
                 // what the user sees (text fields, buttons).
                 let ty = el.attr("type").unwrap_or("text").to_ascii_lowercase();
                 if !matches!(ty.as_str(), "checkbox" | "radio" | "hidden" | "file" | "image" | "password") {
-                    let v = el.attr("value").unwrap_or("");
+                    let v = doc.control_value(c).unwrap_or("");
                     out.push(' ');
                     out.push_str(v);
                     out.push(' ');
@@ -714,7 +714,7 @@ pub fn states_of(page: &Page, n: NodeId, role: &str, invalid: bool) -> Vec<Strin
         }
     }
     if matches!(role, "checkbox" | "radio" | "switch" | "menuitemcheckbox" | "menuitemradio") {
-        let checked = if is_input { attr("checked").is_some() } else { attr("aria-checked") == Some("true") };
+        let checked = if is_input { doc.is_checked(n) } else { attr("aria-checked") == Some("true") };
         if attr("aria-checked") == Some("mixed") {
             s.push("mixed".into());
         } else if checked {
@@ -1258,7 +1258,7 @@ impl<'a> Builder<'a> {
 fn accessible_name_unstyled(doc: &Document, n: NodeId) -> String {
     doc.attr(n, "aria-label")
         .map(|s| s.to_string())
-        .or_else(|| doc.attr(n, "value").filter(|_| doc.is_element(n, "input")).map(|s| s.to_string()))
+        .or_else(|| doc.control_value(n).filter(|_| doc.is_element(n, "input")).map(|s| s.to_string()))
         .or_else(|| doc.attr(n, "placeholder").map(|s| s.to_string()))
         .unwrap_or_else(|| doc.text_content(n))
 }

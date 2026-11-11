@@ -666,6 +666,14 @@ impl StyleEngine {
                 }
             }
         }
+        // Links that became visited (or not): `:link` / `:visited` flip.
+        if old_state.visited != new_state.visited {
+            for &e in old_state.visited.symmetric_difference(&new_state.visited) {
+                if e < doc.nodes.len() && doc.is_connected(e) {
+                    m.apply(e, R_SELF | R_DESC | R_SIB);
+                }
+            }
+        }
         if old_state.target_id != new_state.target_id && inval.target != 0 {
             for id in [old_state.target_id.as_deref(), new_state.target_id.as_deref()].into_iter().flatten() {
                 if let Some(e) = doc.element_by_id(id) {
@@ -833,7 +841,8 @@ impl StyleEngine {
     }
 
     /// Style of one element computed from scratch along its ancestor chain
-    /// (no stored state used). `None` when not rendered or detached.
+    /// (no stored state used), also inside `display: none` subtrees (as
+    /// `getComputedStyle` needs). `None` when detached.
     pub fn style_chain(&self, doc: &Document, opts: &StyleOptions, target: NodeId) -> Option<Rc<ComputedStyle>> {
         let html = doc.html_element()?;
         let mut chain = Vec::new();
@@ -864,9 +873,6 @@ impl StyleEngine {
                 root_fs = out.style.font_size;
             }
             let style = out.style;
-            if style.display.is_none() && node != target {
-                return None;
-            }
             vars = out.vars;
             parent = style;
         }

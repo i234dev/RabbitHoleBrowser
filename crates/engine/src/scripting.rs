@@ -210,7 +210,7 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>> {
         if !self.page.script.dom_dirty {
-            return self.page.styles.get(node).cloned();
+            return self.page.styles.get(node).cloned().or_else(|| self.engine.unrendered_style(self.page, node));
         }
         // The DOM changed: compute just this element's chain instead of
         // restyling and re-laying out the whole document (scripts often
@@ -426,6 +426,10 @@ impl HostEnv for EngineEnv<'_> {
         Some(&mut child.doc)
     }
     fn frame_computed_style(&mut self, id: u64, node: NodeId) -> Option<Rc<ComputedStyle>> {
+        // The frame's media queries depend on its size, which depends on
+        // this document's layout.
+        self.ensure_layout();
+        self.engine.update_frame_viewport(self.page, id);
         let origin = crate::frames::page_origin(self.page);
         if let Some(anc) = crate::frames::ancestor_page(id) {
             if crate::frames::page_origin(anc) != origin {
@@ -443,7 +447,18 @@ impl HostEnv for EngineEnv<'_> {
         if child.script.dom_dirty {
             return self.engine.computed_style_now(child, node);
         }
-        child.styles.get(node).cloned()
+        child.styles.get(node).cloned().or_else(|| self.engine.unrendered_style(child, node))
+    }
+    fn frame_node_rect(&mut self, id: u64, node: NodeId) -> Option<Rect> {
+        self.ensure_layout();
+        self.engine.update_frame_viewport(self.page, id);
+        let origin = crate::frames::page_origin(self.page);
+        let child = crate::frames::find_frame_page_mut(self.page, id)?;
+        if crate::frames::page_origin(child) != origin {
+            return None;
+        }
+        self.engine.flush_layout(child);
+        child.rect_of(node)
     }
     fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
         if let Some(c) = self.page.frames.get(node) {

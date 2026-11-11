@@ -85,6 +85,14 @@ pub struct Viewport {
 struct Caches {
     images: HashMap<String, Option<Arc<Image>>>,
     css: HashMap<String, Arc<str>>,
+    /// Stylesheet URLs served over HTTP with a Content-Type other than
+    /// `text/css`: ignored outside quirks mode (HTML §4.2.4 "link type
+    /// stylesheet", fetch and process the linked resource).
+    css_wrong_type: HashSet<String>,
+    /// Image-request URLs that answered with a document (HTML / XML / text)
+    /// instead of an image: an `<object>` showing one is a nested browsing
+    /// context, not a failed load (no fallback content).
+    documents: HashSet<String>,
     fonts: HashMap<String, Option<Arc<Vec<u8>>>>,
 }
 
@@ -453,7 +461,10 @@ impl Loader {
                 }
                 Src::Link(url, media) => {
                     let key = url.without_fragment().to_string();
-                    let text = self.caches.lock().unwrap().css.get(&key).cloned();
+                    let caches = self.caches.lock().unwrap();
+                    let ignored = doc.quirks_mode != rabbithole_dom::QuirksMode::Quirks && caches.css_wrong_type.contains(&key);
+                    let text = if ignored { None } else { caches.css.get(&key).cloned() };
+                    drop(caches);
                     text.map(|text| {
                         let mut sheet = rabbithole_css::parse_stylesheet(&text);
                         sheet.base_url = Some(url.to_string());
@@ -483,6 +494,10 @@ impl Loader {
             let key = u.without_fragment().to_string();
             match r {
                 Ok(resp) if resp.status < 400 => {
+                    let mime = resp.content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                    if u.is_http() && !mime.is_empty() && mime != "text/css" {
+                        caches.css_wrong_type.insert(key.clone());
+                    }
                     let text = decode_text(&resp.body, resp.charset.as_deref());
                     caches.css.insert(key, Arc::from(text));
                 }
@@ -598,6 +613,11 @@ impl Loader {
         self.caches.lock().unwrap().images.get(url).cloned()
     }
 
+    /// Did `url` (fetched as an image) turn out to be a document?
+    pub(crate) fn is_document_resource(&self, url: &str) -> bool {
+        self.caches.lock().unwrap().documents.contains(url)
+    }
+
     fn load_background_images(&self, styles: &StyledTree) -> Vec<(String, Arc<Image>)> {
         let mut keys: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
@@ -690,6 +710,15 @@ impl Loader {
         });
         let mut caches = self.caches.lock().unwrap();
         for (k, img) in decoded.into_inner().unwrap() {
+            if img.is_none() {
+                let doc_type = jobs.iter().find(|(u, _)| u.to_string() == k).and_then(|(_, r)| r.as_ref()).map(|r| {
+                    let mime = r.content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                    matches!(mime.as_str(), "text/html" | "application/xhtml+xml" | "text/xml" | "application/xml" | "text/plain" | "image/svg+xml") || mime.ends_with("+xml")
+                });
+                if doc_type == Some(true) {
+                    caches.documents.insert(k.clone());
+                }
+            }
             caches.images.insert(k, img);
         }
     }
@@ -900,6 +929,9 @@ pub struct Engine {
     pub frames: std::cell::RefCell<frames::FrameRegistry>,
     /// Set while a frame's page is being built.
     pub(crate) frame_context: std::cell::RefCell<Option<frames::FrameContext>>,
+    /// URLs (without fragment) of the documents loaded so far (pages and
+    /// frames): links to them match `:visited`.
+    pub visited: std::cell::RefCell<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -984,6 +1016,7 @@ impl Engine {
             registered_fonts: Default::default(),
             frames: Default::default(),
             frame_context: Default::default(),
+            visited: Default::default(),
         }
     }
 
@@ -1001,6 +1034,7 @@ impl Engine {
             registered_fonts: Default::default(),
             frames: Default::default(),
             frame_context: Default::default(),
+            visited: Default::default(),
         }
     }
 
@@ -1038,7 +1072,38 @@ impl Engine {
     /// display list, without running scripts, so the page can be painted
     /// right away (progressive rendering). Call [`Engine::finish_page_load`]
     /// next (after filling `page.scripts` when they were deferred).
+    /// Links of `page` whose destination is in the visited history (for
+    /// `:visited`), recomputed when the DOM or the history changed.
+    pub(crate) fn update_visited_links(&self, page: &mut Page) {
+        let visited = self.visited.borrow();
+        let key = (page.doc.epoch(), visited.len(), page.base_url.to_string());
+        if page.incr.visited_key.as_ref() == Some(&key) {
+            return;
+        }
+        let base = page.base_url.clone();
+        let mut links = HashSet::new();
+        if !visited.is_empty() {
+            for n in page.doc.descendants(Document::ROOT) {
+                let Some(el) = page.doc.element(n) else { continue };
+                if !matches!(el.tag.as_str(), "a" | "area") {
+                    continue;
+                }
+                let Some(href) = el.attr("href") else { continue };
+                if let Some(u) = base.join(href.trim()) {
+                    if visited.contains(&u.without_fragment().to_string()) {
+                        links.insert(n);
+                    }
+                }
+            }
+        }
+        if *page.state.visited != links {
+            page.state.visited = std::sync::Arc::new(links);
+        }
+        page.incr.visited_key = Some(key);
+    }
+
     pub fn build_page_unscripted(&self, loaded: LoadedPage, viewport: Viewport) -> Page {
+        self.visited.borrow_mut().insert(loaded.url.without_fragment().to_string());
         for f in &loaded.fonts {
             let key = format!("{}|{}|{}", f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic);
             if self.registered_fonts.borrow_mut().insert(key) {
@@ -1079,7 +1144,6 @@ impl Engine {
             frames: frames::Frames::default(),
             anim: animations::AnimationState::default(),
         };
-        page.snapshot_form_defaults();
         page.script.dialog_policy = self.dialog_policy.clone();
         page.sheet_signature = stylesheet_signature(&page.doc);
         self.restyle(&mut page);
@@ -1148,7 +1212,7 @@ impl Engine {
     /// changes only (layout stays dirty until a geometry query or paint).
     pub fn computed_style_now(&self, page: &mut Page, node: NodeId) -> Option<Rc<rabbithole_style::ComputedStyle>> {
         self.flush_style(page);
-        page.styles.get(node).cloned()
+        page.styles.get(node).cloned().or_else(|| self.unrendered_style(page, node))
     }
 
     /// Bring layout + display list up to date (images, scroll offsets or
@@ -1779,7 +1843,7 @@ impl Page {
         let mut cur = Some(node);
         while let Some(n) = cur {
             if let Some(s) = self.styles.get(n) {
-                if s.cursor_pointer {
+                if s.cursor_pointer() {
                     return "pointer";
                 }
                 break;
