@@ -591,3 +591,42 @@ fn setter_and_deep_add_caches() {
     eq("class A {} class B extends A {} class C extends B {} class D extends C {} var r = []; for (var i = 0; i < 4; i++) { if (i == 2) Object.defineProperty(A.prototype, 'a', { value: 7, writable: false }); var d = new D(); d.a = i; r.push(d.a); } r.join()", "0,1,7,7");
     eq("var p = {}; var o = Object.create(Object.create(Object.create(p))); var r = []; for (var i = 0; i < 4; i++) { var x = Object.create(Object.getPrototypeOf(o)); if (i == 2) Object.preventExtensions(x); x.q = i; r.push(x.q); } r.join()", "0,1,,3");
 }
+
+#[test]
+fn megamorphic_property_caches() {
+    // One read site and one write site see many shapes (own, inherited,
+    // accessor), interleaved with changes that must invalidate.
+    let setup = "var protoX = { get x() { return 'g' + this.k; } }; var objs = [{x: 1}, {a: 0, x: 2}, {b: 0, c: 0, x: 3}, Object.create({x: 4}), Object.create(Object.create(Object.create({x: 5}))), Object.create(protoX)]; objs[5].k = 6; function rd(o) { return o.x; }";
+    eq(&format!("{setup} var r = []; for (var i = 0; i < 24; i++) r.push(rd(objs[i % 6])); r.slice(-6).join()"), "1,2,3,4,5,g6");
+    eq(&format!("{setup} var r = []; for (var i = 0; i < 24; i++) {{ if (i == 13) {{ objs[1].x = 'B'; Object.getPrototypeOf(objs[3]).x = 'D'; protoX.k = 0; delete objs[5].k; }} r.push(rd(objs[i % 6])); }} r.slice(-6).join()"), "1,B,3,D,5,g0");
+    eq(&format!("{setup} var r = []; for (var i = 0; i < 24; i++) {{ if (i == 13) Object.setPrototypeOf(objs[4], {{x: 'P'}}); r.push(rd(objs[i % 6])); }} r.slice(-6).join()"), "1,2,3,4,P,g6");
+    let wsetup = "var log = []; var ps = { set y(v) { log.push(v); } }; function wr(o, v) { o.y = v; } var os = [{y: 0}, {a: 1, y: 0}, Object.create(ps), Object.create(Object.create(Object.create(ps))), {}, Object.create(null)];";
+    eq(&format!("{wsetup} for (var i = 0; i < 24; i++) wr(os[i % 6], i); os.map(o => o.y).join() + '|' + log.join()"), "18,19,,,22,23|2,3,8,9,14,15,20,21");
+    eq(&format!("{wsetup} for (var i = 0; i < 24; i++) {{ if (i == 12) Object.defineProperty(ps, 'y', {{ value: 'ro', writable: false }}); wr(os[i % 6], i); }} os.map(o => o.y).join() + '|' + log.join()"), "18,19,ro,ro,22,23|2,3,8,9");
+}
+
+#[test]
+fn regexp_replace_fast_path_matches_the_protocol() {
+    eq("'a-b-c'.replace(/-/g, '+')", "a+b+c");
+    eq("'a-b-c'.replace(/-/, '+')", "a+b-c");
+    eq("'john smith'.replace(/(\\w+)\\s(\\w+)/, '$2, $1')", "smith, john");
+    eq("'2020-01-02'.replace(/(?<y>\\d+)-(?<m>\\d+)-(?<d>\\d+)/, '$<d>/$<m>/$<y>')", "02/01/2020");
+    eq("'2020-01-02'.replace(/(?<y>\\d+)-(?<m>\\d+)/, (...a) => JSON.stringify(a))", "[\"2020-01\",\"2020\",\"01\",0,\"2020-01-02\",{\"y\":\"2020\",\"m\":\"01\"}]-02");
+    eq("'abc'.replace(/x*/g, '-')", "-a-b-c-");
+    eq("'\\ud83d\\ude00x'.replace(/(?:)/gu, '-').length", "6");
+    eq("'aaa'.replace(/a/g, (m, i) => i)", "012");
+    eq("var r = /a/g; r.lastIndex = 2; 'aXa'.replace(r, 'b') + r.lastIndex", "bXb0");
+    eq("var r = /a/; r.lastIndex = 2; 'aXa'.replace(r, 'b') + r.lastIndex", "bXa2");
+    eq("'a.b'.replace(/(z)?\\./, '[$1$&$`$\\'$$]')", "a[.ab$]b");
+    eq("/a/gimsuy.flags + /a/d.flags + Object.getOwnPropertyDescriptor(RegExp.prototype, 'flags').get.call({global: true, sticky: 1})", "gimsuydgy");
+    // A user exec is honoured (no fast path).
+    eq("var r = /a/g; r.exec = function (s) { return null; }; 'aaa'.replace(r, 'b')", "aaa");
+    eq("var e = RegExp.prototype.exec; RegExp.prototype.exec = function (s) { var m = e.call(this, s); if (m) m[0] = 'Q'; return m; }; var out = 'abc'.replace(/b/, 'x'); RegExp.prototype.exec = e; out", "axc");
+    eq("class R extends RegExp { exec(s) { return null; } } 'abc'.replace(new R('b'), 'x')", "abc");
+    eq("'a1b2'.split(/\\d/).join() + '|' + /b/.test('abc') + '|' + 'xAy'.match(/a/i)[0]", "a,b,|true|A");
+}
+
+#[test]
+fn surrogate_pair_escapes_in_literals() {
+    eq("var s = '\\ud83d\\ude00'; [s.length, s.charCodeAt(0).toString(16), s.charCodeAt(1).toString(16), s === '\\u{1F600}', `\\uD83D\\uDE00x`.length].join()", "2,d83d,de00,true,3");
+}

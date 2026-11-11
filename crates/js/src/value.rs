@@ -55,6 +55,11 @@ impl JsStr {
         // SAFETY: the handle holds a strong reference.
         unsafe { &(*self.ptr()).s }
     }
+    /// The handle's word (identifies the string instance).
+    #[inline(always)]
+    pub fn bits(&self) -> u64 {
+        self.0.get()
+    }
     /// Hash of the code units (FxHash-style), computed once per string.
     #[inline]
     pub fn hash32(&self) -> u32 {

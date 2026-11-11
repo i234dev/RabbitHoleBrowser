@@ -53,6 +53,22 @@ pub const IC_ADD_DEEP: u8 = 10;
 /// while the prototype epoch is `mid_shape`.
 pub const IC_SETTER: u8 = 11;
 
+/// One slot of the megamorphic cache (see [`Realm::mega_get`]).
+#[derive(Clone, Copy, Default)]
+pub struct MegaEntry {
+    shape: u32,
+    key: u64,
+    ic: PropIc,
+}
+
+const MEGA_BITS: u32 = 12;
+
+#[inline(always)]
+fn mega_index(shape: u32, key: u64) -> usize {
+    let h = (shape as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ key.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    (h >> (64 - MEGA_BITS)) as usize
+}
+
 /// Longest prototype chain walked when filling a deep cache.
 const MAX_CHAIN: usize = 48;
 
@@ -193,6 +209,50 @@ impl Realm {
             IC_OWN_DICT => None,
             _ => None,
         }
+    }
+
+    /// Megamorphic lookup of a read of `key` (the interned name's word)
+    /// from object `recv`.
+    #[inline]
+    pub(crate) fn mega_get(&self, recv: &Value, key: u64) -> Option<PropIc> {
+        let o = self.heap.try_get(recv.as_object()?)?;
+        let shape = o.props.shape_id();
+        let e = self.mega.get(mega_index(shape, key))?;
+        if e.shape == shape && e.key == key && e.ic.kind != IC_NONE {
+            Some(e.ic)
+        } else {
+            None
+        }
+    }
+
+    /// Remember a filled read cache record for `recv` / `key` in the
+    /// megamorphic cache.
+    pub(crate) fn mega_put(&mut self, recv: &Value, key: &PropertyKey, ic: PropIc) {
+        if ic.kind == IC_NONE || ic.kind == IC_LENGTH || ic.kind == IC_PRIM {
+            return;
+        }
+        let (Some(id), PropertyKey::String(k)) = (recv.as_object(), key) else { return };
+        let Some(o) = self.heap.try_get(id) else { return };
+        let shape = o.props.shape_id();
+        if self.mega.is_empty() {
+            self.mega = vec![MegaEntry::default(); 1 << MEGA_BITS];
+        }
+        let kb = k.bits();
+        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, ic };
+    }
+
+    /// Remember a filled store cache record in the megamorphic cache, under
+    /// the receiver's shape before the store.
+    pub(crate) fn mega_put_set(&mut self, recv: &Value, key: &PropertyKey, before: Option<(u32, Option<u32>)>, ic: PropIc) {
+        if !matches!(ic.kind, IC_OWN | IC_ADD | IC_ADD_DEEP | IC_SETTER) {
+            return;
+        }
+        let (Some((shape, _)), Some(_), PropertyKey::String(k)) = (before, recv.as_object(), key) else { return };
+        if self.mega.is_empty() {
+            self.mega = vec![MegaEntry::default(); 1 << MEGA_BITS];
+        }
+        let kb = k.bits() | 1;
+        self.mega[mega_index(shape, kb)] = MegaEntry { shape, key: kb, ic };
     }
 
     /// Walk the prototype chain above `first` (the receiver's prototype)

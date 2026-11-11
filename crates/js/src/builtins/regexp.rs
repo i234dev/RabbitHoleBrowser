@@ -35,6 +35,118 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(rsip, "next", 0, regexp_string_iterator_next);
     realm.define_property(rsip, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("RegExp String Iterator"), CONFIGURABLE);
     realm.intrinsics.others.insert("RegExpStringIteratorPrototype", rsip);
+    let p = &realm.obj(rp).props;
+    let exec_slot = p.find_slot(&PropertyKey::str("exec"));
+    let flags_slot = p.find_slot(&PropertyKey::str("flags"));
+    if let (Some(es), Some(fs)) = (exec_slot, flags_slot) {
+        let exec_fn = p.slot(es).and_then(|x| x.value.as_object());
+        let flags_fn = p.slot(fs).and_then(|x| x.getter()).and_then(|g| g.as_object());
+        if let (Some(e), Some(f)) = (exec_fn, flags_fn) {
+            realm.regexp_pristine = Some((p.shape_id(), es, e, fs, f));
+        }
+    }
+}
+
+/// `v` is a RegExp object whose observable protocol is the built-in one:
+/// only its own `lastIndex`, and `RegExp.prototype` with its original keys,
+/// `exec` and `flags`. Its flags and matches can then be used directly.
+fn pristine(realm: &Realm, v: &Value) -> Option<ObjectId> {
+    let (shape, es, e, fs, f) = realm.regexp_pristine?;
+    let id = v.as_object()?;
+    let o = realm.obj(id);
+    if !matches!(o.kind, ObjectKind::RegExp(_)) || o.props.len() != 1 {
+        return None;
+    }
+    let p = &realm.obj(o.proto?).props;
+    if p.shape_id() != shape {
+        return None;
+    }
+    if p.slot(es)?.value.as_object() != Some(e) || p.slot(fs)?.getter().and_then(|g| g.as_object()) != Some(f) {
+        return None;
+    }
+    Some(id)
+}
+
+/// `RegExp.prototype[Symbol.replace]` for a pristine RegExp: the matches
+/// come straight from the regex engine (no result arrays / property reads).
+fn fast_replace(realm: &mut Realm, rx: ObjectId, s: &JsStr, rep: &Value, functional: bool, rep_str: &JsStr) -> JsResult<Option<Value>> {
+    let (global, sticky, unicode) = match &realm.obj(rx).kind {
+        ObjectKind::RegExp(d) => (d.regex.flags.global, d.regex.flags.sticky, d.regex.flags.unicode),
+        _ => return Ok(None),
+    };
+    if sticky {
+        return Ok(None);
+    }
+    let rxv = Value::Object(rx);
+    // (start, end, captures) of every match.
+    let mut found: Vec<(usize, usize, Vec<Option<(usize, usize)>>)> = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        if pos > s.len() {
+            break;
+        }
+        let m = match &realm.obj(rx).kind {
+            ObjectKind::RegExp(d) => d.regex.exec_utf16(s.as_units(), pos),
+            _ => unreachable!(),
+        };
+        let Some(m) = m else { break };
+        let (a, b) = (m.start(), m.end());
+        let caps: Vec<Option<(usize, usize)>> = m.captures.iter().skip(1).cloned().collect();
+        found.push((a, b, caps));
+        if !global {
+            break;
+        }
+        pos = if a == b { advance_index(s, b, unicode) } else { b };
+    }
+    if global {
+        set_last_index(realm, &rxv, 0)?;
+    }
+    let names: Vec<(String, usize)> = match &realm.obj(rx).kind {
+        ObjectKind::RegExp(d) => d.regex.group_names().to_vec(),
+        _ => unreachable!(),
+    };
+    let mut out: Vec<u16> = Vec::with_capacity(s.len());
+    let mut next_pos = 0usize;
+    for (a, b, caps) in found {
+        let matched = s.slice(a, b);
+        let captures: Vec<Value> = caps.iter().map(|c| match c {
+            Some((x, y)) => Value::String(s.slice(*x, *y)),
+            None => Value::Undefined,
+        }).collect();
+        let named = if names.is_empty() {
+            Value::Undefined
+        } else {
+            let g = realm.new_object_with_proto(None);
+            for (name, idx) in &names {
+                let v = if *idx == 0 { Value::String(matched.clone()) } else { captures.get(*idx - 1).cloned().unwrap_or(Value::Undefined) };
+                realm.define_property(g, name.as_str(), v, ALL);
+            }
+            Value::Object(g)
+        };
+        let replacement = if functional {
+            let mut fargs = Vec::with_capacity(captures.len() + 4);
+            fargs.push(Value::String(matched.clone()));
+            fargs.extend(captures.iter().cloned());
+            fargs.push(Value::Number(a as f64));
+            fargs.push(Value::String(s.clone()));
+            if !named.is_undefined() {
+                fargs.push(named.clone());
+            }
+            let rv = realm.call(rep.clone(), Value::Undefined, &fargs)?;
+            realm.to_string(rv)?
+        } else {
+            string::get_substitution(realm, &matched, s, a, &captures, &named, rep_str)?
+        };
+        if a >= next_pos {
+            out.extend_from_slice(&s.as_units()[next_pos..a]);
+            out.extend_from_slice(replacement.as_units());
+            next_pos = b;
+        }
+    }
+    if next_pos < s.len() {
+        out.extend_from_slice(&s.as_units()[next_pos..]);
+    }
+    Ok(Some(Value::String(JsStr::from_units(out))))
 }
 
 fn species(_realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -269,6 +381,9 @@ pub fn builtin_exec(realm: &mut Realm, rx: ObjectId, s: &JsStr) -> JsResult<Valu
 
 /// RegExpExec: honours a user-defined `exec`.
 pub fn regexp_exec(realm: &mut Realm, rx: Value, s: &JsStr) -> JsResult<Value> {
+    if let Some(id) = pristine(realm, &rx) {
+        return builtin_exec(realm, id, s);
+    }
     let exec_fn = realm.get_str(rx.clone(), "exec")?;
     if realm.is_callable(&exec_fn) {
         let is_builtin = exec_fn.as_object().map(|f| realm.function_name(f).eq_str("exec") && matches!(realm.obj(f).kind, ObjectKind::Native(_))).unwrap_or(false);
@@ -324,6 +439,18 @@ fn source(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
 fn flags(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     if !this.is_object() {
         return realm.type_error("RegExp.prototype.flags getter called on non-object");
+    }
+    if let Some(id) = pristine(realm, &this) {
+        if let ObjectKind::RegExp(d) = &realm.obj(id).kind {
+            let f = &d.regex.flags;
+            let mut out = String::new();
+            for (on, c) in [(f.has_indices, 'd'), (f.global, 'g'), (f.ignore_case, 'i'), (f.multiline, 'm'), (f.dot_all, 's'), (f.unicode, 'u'), (f.sticky, 'y')] {
+                if on {
+                    out.push(c);
+                }
+            }
+            return Ok(Value::str(&out));
+        }
     }
     let mut out = String::new();
     for (name, c) in [("hasIndices", 'd'), ("global", 'g'), ("ignoreCase", 'i'), ("multiline", 'm'), ("dotAll", 's'), ("unicode", 'u'), ("unicodeSets", 'v'), ("sticky", 'y')] {
@@ -465,6 +592,11 @@ fn symbol_replace(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Va
     let rep = arg(args, 1);
     let functional = realm.is_callable(&rep);
     let rep_str = if functional { JsStr::empty() } else { realm.to_string(rep.clone())? };
+    if let Some(rx) = pristine(realm, &this) {
+        if let Some(v) = fast_replace(realm, rx, &s, &rep, functional, &rep_str)? {
+            return Ok(v);
+        }
+    }
     let flags = realm.get_str(this.clone(), "flags")?;
     let flags = realm.to_rust_string(flags)?;
     let global = flags.contains('g');

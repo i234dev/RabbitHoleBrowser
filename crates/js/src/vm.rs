@@ -1257,7 +1257,7 @@ impl Realm {
                     sl!($d).set_number(r);
                 }};
             }
-            loop {
+            'dispatch: loop {
                 // SAFETY: every path ends in a jump, return or throw, so the
                 // program counter stays within the code.
                 let op = unsafe {
@@ -1581,7 +1581,15 @@ impl Realm {
                                 _ => None,
                             }
                         } else {
-                            match self.ic_get(&rec, recv) {
+                            let mut p = self.ic_get(&rec, recv);
+                            if p.is_none() && recv.is_object() {
+                                // Polymorphic site: the shared cache by (shape, key).
+                                let kb = k!(code.ic_keys[ic as usize]).bits();
+                                if let Some(m) = self.mega_get(recv, kb) {
+                                    p = self.ic_get(&m, recv);
+                                }
+                            }
+                            match p {
                                 Some(p) if p.flags & ACCESSOR == 0 => Some(p.value.clone()),
                                 Some(p) => {
                                     // Cached accessor: a native getter (DOM
@@ -1607,36 +1615,41 @@ impl Realm {
                         }
                     }
                     Op::SetPropR(o, v, ic) => {
-                        let rec = code.ics[ic as usize].get();
+                        let mut rec = code.ics[ic as usize].get();
                         let val = &*sl!(v);
-                        if rec.kind == crate::ic::IC_SETTER {
-                            if let Some(f) = self.ic_setter(&rec, sl!(o)) {
-                                if !val.is_empty() {
-                                    let (recv, val) = (sl!(o).clone(), val.clone());
-                                    sync!();
-                                    tri!(self.call(Value::Object(f), recv, &[val]));
-                                    if self.frames.len() != fi + 1 {
-                                        continue 'reload;
-                                    }
-                                    // SAFETY: as in `slow`.
-                                    base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
-                                    continue;
-                                }
-                            }
-                            slow!(op);
-                            continue;
-                        }
-                        if rec.kind != 0 && !val.is_empty() {
+                        if !val.is_empty() {
                             let key = match k!(code.ic_keys[ic as usize]).v() {
                                 V::String(s) => s,
                                 _ => unreachable!(),
                             };
-                            let val = val.clone();
-                            if let Err(v) = self.ic_set(&rec, sl!(o), key, val) {
-                                drop(v);
-                                slow!(op);
+                            for attempt in 0..2 {
+                                if attempt == 1 {
+                                    // Polymorphic site: the shared cache by (shape, key).
+                                    match self.mega_get(sl!(o), key.bits() | 1) {
+                                        Some(m) => rec = m,
+                                        None => break,
+                                    }
+                                }
+                                if rec.kind == crate::ic::IC_SETTER {
+                                    if let Some(f) = self.ic_setter(&rec, sl!(o)) {
+                                        let (recv, val) = (sl!(o).clone(), sl!(v).clone());
+                                        sync!();
+                                        tri!(self.call(Value::Object(f), recv, &[val]));
+                                        if self.frames.len() != fi + 1 {
+                                            continue 'reload;
+                                        }
+                                        // SAFETY: as in `slow`.
+                                        base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
+                                        continue 'dispatch;
+                                    }
+                                } else if rec.kind != 0 {
+                                    let val = sl!(v).clone();
+                                    match self.ic_set(&rec, sl!(o), key, val) {
+                                        Ok(()) => continue 'dispatch,
+                                        Err(v) => drop(v),
+                                    }
+                                }
                             }
-                            continue;
                         }
                         slow!(op);
                     }
@@ -2074,6 +2087,7 @@ impl Realm {
                     let v = self.get(obj.clone(), key.clone())?;
                     let rec = self.ic_fill_get(&obj, &key);
                     frame!().code.ics[ic as usize].set(rec);
+                    self.mega_put(&obj, &key, rec);
                     set!(d, v);
                 }
                 Op::SetPropR(o, v, ic) => {
@@ -2087,6 +2101,9 @@ impl Realm {
                         return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
                     }
                     let rec = if ok { self.ic_fill_set(&obj, &key, before, false) } else { Default::default() };
+                    if ok {
+                        self.mega_put_set(&obj, &key, before, rec);
+                    }
                     frame!().code.ics[ic as usize].set(rec);
                 }
                 Op::DefinePropR(o, v, ic) => {

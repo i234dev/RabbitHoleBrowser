@@ -190,6 +190,12 @@ pub struct Realm {
     pub vstack: Vec<Value>,
     /// Reusable buffer for call arguments taken off the operand stack.
     pub(crate) arg_buf: Vec<Value>,
+    /// Megamorphic property cache: inline-cache records by (receiver
+    /// shape, key), consulted when an instruction's own cache misses.
+    pub(crate) mega: Vec<crate::ic::MegaEntry>,
+    /// `RegExp.prototype` as built: (shape id, slot of `exec`, `exec`,
+    /// slot of `flags`, its getter); see `builtins::regexp::pristine`.
+    pub(crate) regexp_pristine: Option<(u32, u32, ObjectId, u32, ObjectId)>,
 }
 
 thread_local! {
@@ -205,6 +211,25 @@ thread_local! {
 pub fn exclude_from_watchdog(spent: std::time::Duration) {
     WATCHDOG_CREDIT.with(|c| c.set(c.get() + spent));
     crate::regex::shift_deadline(spent);
+}
+
+/// `RH_DEBUG_TASKS=<ms>`: report tasks that ran longer than that (the
+/// time between one task start and the next, including host work).
+fn task_debug(prev_deadline: Option<std::time::Instant>, budget: std::time::Duration) {
+    thread_local! {
+        static LIMIT: Option<u64> = std::env::var("RH_DEBUG_TASKS").ok().and_then(|v| v.parse().ok());
+        static PREV: std::cell::Cell<Option<(std::time::Instant, std::time::Duration)>> = const { std::cell::Cell::new(None) };
+    }
+    let Some(limit) = LIMIT.with(|l| *l) else { return };
+    let now = std::time::Instant::now();
+    if let Some((start, b)) = PREV.with(|p| p.get()) {
+        let took = now - start;
+        if took.as_millis() as u64 >= limit {
+            let over = prev_deadline.map(|d| now > d).unwrap_or(false);
+            eprintln!("[task] {:?} (budget {:?}{})", took, b, if over { ", past deadline" } else { "" });
+        }
+    }
+    PREV.with(|p| p.set(Some((now, budget))));
 }
 
 impl Default for Realm {
@@ -294,6 +319,8 @@ impl Realm {
             tick: crate::vm::TICK_INTERVAL,
             vstack: Vec::with_capacity(1 << 14),
             arg_buf: Vec::new(),
+            mega: Vec::new(),
+            regexp_pristine: None,
         };
         crate::builtins::register_builtins(&mut realm);
         realm.mark_intrinsics();
@@ -672,6 +699,7 @@ impl Realm {
         if self.task_budget.is_none() || !self.frames.is_empty() || self.native_depth > 0 {
             return false;
         }
+        task_debug(self.deadline, budget);
         self.set_deadline(Some(std::time::Instant::now() + budget));
         true
     }

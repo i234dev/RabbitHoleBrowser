@@ -913,15 +913,22 @@ impl<'a> Lexer<'a> {
                 let v = self.scan_hex_digits(2)?;
                 char::from_u32(v).unwrap()
             }
-            'u' => {
-                let ch = self.scan_unicode_escape_body()?;
-                // Combine surrogate pairs written as two escapes.
-                if (0xd800..0xdc00).contains(&(ch as u32)) {
-                    // char::from_u32 rejects surrogates, so we never get here;
-                    // handled in scan_unicode_escape_body via replacement.
+            'u' if self.peek_byte() != Some(b'{') => {
+                let cp = self.scan_hex_digits(4)?;
+                // A surrogate pair written as two escapes is one character.
+                if (0xd800..0xdc00).contains(&cp) && self.src.as_bytes().get(self.pos..self.pos + 2) == Some(b"\\u".as_slice()) {
+                    let save = self.pos;
+                    self.pos += 2;
+                    match self.scan_hex_digits(4) {
+                        Ok(lo) if (0xdc00..0xe000).contains(&lo) => {
+                            return Ok(Some(char::from_u32(0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00)).unwrap_or('\u{fffd}')));
+                        }
+                        _ => self.pos = save,
+                    }
                 }
-                ch
+                char::from_u32(cp).unwrap_or('\u{fffd}')
             }
+            'u' => self.scan_unicode_escape_body()?,
             '\r' => {
                 if self.peek_byte() == Some(b'\n') {
                     self.pos += 1;
