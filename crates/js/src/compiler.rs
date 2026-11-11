@@ -68,6 +68,10 @@ const SCRIPT_LEX: Loc = Loc::Slot(u16::MAX);
 struct Binding {
     loc: Loc,
     kind: BindKind,
+    /// A register `let`/`const`/`class` binding whose declaration has been
+    /// compiled: later references (in compile order, which within one
+    /// block instance is execution order) need no TDZ check.
+    initialized: bool,
 }
 
 #[derive(Debug)]
@@ -83,11 +87,14 @@ struct CScope {
     force_heap: bool,
     /// Lexical bindings needing TDZ initialisation at entry.
     tdz: Vec<Loc>,
+    /// The shared scope of a switch's case clauses: a jump to a later
+    /// case can skip a declaration, so its bindings always keep TDZ checks.
+    is_switch: bool,
 }
 
 impl CScope {
     fn new(materialized: bool, is_function: bool) -> CScope {
-        CScope { names: HashMap::default(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new() }
+        CScope { names: HashMap::default(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new(), is_switch: false }
     }
 }
 
@@ -402,7 +409,7 @@ impl Compiler {
         if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
             scope.tdz.push(loc);
         }
-        scope.names.insert(name.to_string(), Binding { loc, kind });
+        scope.names.insert(name.to_string(), Binding { loc, kind, initialized: false });
         loc
     }
 
@@ -511,6 +518,28 @@ impl Compiler {
         Resolved::Global
     }
 
+    /// Whether the register binding `name` of the current function is
+    /// known to be initialized at this point (see `Binding::initialized`).
+    fn reg_initialized(&self, name: &str) -> bool {
+        for sc in self.fs_ref().scopes.iter().rev() {
+            if let Some(b) = sc.names.get(name) {
+                return b.initialized;
+            }
+        }
+        false
+    }
+
+    fn mark_reg_initialized(&mut self, name: &str) {
+        for sc in self.fs().scopes.iter_mut().rev() {
+            if let Some(b) = sc.names.get_mut(name) {
+                if !sc.is_switch && matches!(b.loc, Loc::Reg(_)) {
+                    b.initialized = true;
+                }
+                return;
+            }
+        }
+    }
+
     fn emit_get_var(&mut self, name: &str) {
         match self.resolve(name) {
             Resolved::Local { depth, slot, kind } => {
@@ -523,7 +552,7 @@ impl Compiler {
                 }
             }
             Resolved::Reg { reg, kind } => {
-                if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
+                if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) && !self.reg_initialized(name) {
                     self.emit(Op::GetRegChecked(reg));
                 } else {
                     self.emit(Op::GetReg(reg));
@@ -581,7 +610,7 @@ impl Compiler {
                     self.emit(Op::Pop);
                     let m = self.const_str("Assignment to constant variable.");
                     self.emit(Op::ThrowConst(1, m));
-                } else if matches!(kind, BindKind::Let | BindKind::Class) {
+                } else if matches!(kind, BindKind::Let | BindKind::Class) && !self.reg_initialized(name) {
                     self.emit(Op::SetRegChecked(reg));
                 } else {
                     self.emit(Op::SetReg(reg));
@@ -601,8 +630,11 @@ impl Compiler {
             Resolved::Local { depth, slot, .. } => {
                 self.emit(Op::InitLocal(depth, slot));
             }
-            Resolved::Reg { reg, .. } => {
+            Resolved::Reg { reg, kind } => {
                 self.emit(Op::SetReg(reg));
+                if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
+                    self.mark_reg_initialized(name);
+                }
             }
             Resolved::Global => {
                 let i = self.const_str(name);
@@ -892,7 +924,7 @@ impl Compiler {
             self.check_duplicates(&lex, &vars)?;
             for (n, k) in lex {
                 // Track as script-level lexical for emit_init_var.
-                self.fs().scopes[0].names.insert(n.clone(), Binding { loc: SCRIPT_LEX, kind: k });
+                self.fs().scopes[0].names.insert(n.clone(), Binding { loc: SCRIPT_LEX, kind: k, initialized: false });
                 let i = self.const_str(&n);
                 self.emit(Op::DeclareGlobalLex(i, k == BindKind::Const));
             }
@@ -1196,18 +1228,7 @@ impl Compiler {
                     self.patch_jump(j);
                 }
             }
-            StmtKind::While { test, body } => {
-                let start = self.here();
-                self.compile_expr(test)?;
-                let j = self.emit(Op::JumpIfFalse(0));
-                self.push_loop(None, true);
-                self.compile_stmt(body)?;
-                let lp = self.fs().loops.pop().unwrap();
-                self.patch_continues(&lp, start as u32);
-                self.emit(Op::Jump(start as u32));
-                self.patch_jump(j);
-                self.patch_breaks(&lp);
-            }
+            StmtKind::While { test, body } => self.compile_while(test, body, None)?,
             StmtKind::DoWhile { body, test } => {
                 let start = self.here();
                 self.push_loop(None, true);
@@ -1259,18 +1280,7 @@ impl Compiler {
                     StmtKind::For { init, test, update, body: b } => self.compile_for(init, test, update, b, Some(label.clone()))?,
                     StmtKind::ForIn { left, right, body: b } => self.compile_for_in(left, right, b, Some(label.clone()))?,
                     StmtKind::ForOf { left, right, body: b, is_await } => self.compile_for_of(left, right, b, *is_await, Some(label.clone()))?,
-                    StmtKind::While { test, body: b } => {
-                        let start = self.here();
-                        self.compile_expr(test)?;
-                        let j = self.emit(Op::JumpIfFalse(0));
-                        self.push_loop(Some(label.clone()), true);
-                        self.compile_stmt(b)?;
-                        let lp = self.fs().loops.pop().unwrap();
-                        self.patch_continues(&lp, start as u32);
-                        self.emit(Op::Jump(start as u32));
-                        self.patch_jump(j);
-                        self.patch_breaks(&lp);
-                    }
+                    StmtKind::While { test, body: b } => self.compile_while(test, b, Some(label.clone()))?,
                     StmtKind::DoWhile { body: b, test } => {
                         let start = self.here();
                         self.push_loop(Some(label.clone()), true);
@@ -1469,12 +1479,10 @@ impl Compiler {
             }
             None => {}
         }
+        // Rotated loop: the test sits at the bottom, so an iteration runs
+        // one conditional jump instead of a test, a branch and a jump.
+        let to_test = test.as_ref().map(|_| self.emit(Op::Jump(0)));
         let start = self.here();
-        let mut exit_jump = None;
-        if let Some(t) = test {
-            self.compile_expr(t)?;
-            exit_jump = Some(self.emit(Op::JumpIfFalse(0)));
-        }
         self.push_loop(label, true);
         self.compile_stmt(body)?;
         let lp = self.fs().loops.pop().unwrap();
@@ -1486,12 +1494,34 @@ impl Compiler {
         if let Some(u) = update {
             self.compile_expr_discard(u)?;
         }
-        self.emit(Op::Jump(start as u32));
-        if let Some(j) = exit_jump {
-            self.patch_jump(j);
+        match test {
+            Some(t) => {
+                self.patch_jump(to_test.unwrap());
+                self.compile_expr(t)?;
+                self.emit(Op::JumpIfTrue(start as u32));
+            }
+            None => {
+                self.emit(Op::Jump(start as u32));
+            }
         }
         self.patch_breaks(&lp);
         self.pop_block_scope(mat);
+        Ok(())
+    }
+
+    /// `while (test) body`, rotated like `for` loops.
+    fn compile_while(&mut self, test: &Expr, body: &Stmt, label: Option<String>) -> CResult<()> {
+        let to_test = self.emit(Op::Jump(0));
+        let start = self.here();
+        self.push_loop(label, true);
+        self.compile_stmt(body)?;
+        let lp = self.fs().loops.pop().unwrap();
+        let cont = self.here();
+        self.patch_continues(&lp, cont as u32);
+        self.patch_jump(to_test);
+        self.compile_expr(test)?;
+        self.emit(Op::JumpIfTrue(start as u32));
+        self.patch_breaks(&lp);
         Ok(())
     }
 
@@ -1667,6 +1697,9 @@ impl Compiler {
             decls.extend(Self::collect_lexical(&c.body, true));
         }
         let mat = self.push_block_scope(&decls);
+        if let Some(sc) = self.fs().scopes.last_mut() {
+            sc.is_switch = true;
+        }
         for c in cases {
             self.hoist_functions(&c.body)?;
         }
@@ -3120,7 +3153,21 @@ fn set_flags(code: &mut Rc<FunctionCode>, flags: CodeFlags) {
 }
 
 fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
-    crate::bytecode::peephole(&mut fs.ops, &mut fs.positions, &mut fs.handlers);
+    let mut ic_keys = vec![0u32; fs.ic_count as usize];
+    let tr = match crate::regs::translate(&fs.ops, &fs.positions, &fs.handlers, &mut fs.constants, fs.nregs as u32, &mut ic_keys) {
+        Ok(t) => t,
+        // Malformed stack code is a compiler bug; fail loudly at run time
+        // rather than miscompiling.
+        Err(e) => {
+            let msg = format!("internal compiler error: {}", e);
+            if std::env::var_os("RH_DEBUG_REGS").is_some() {
+                eprintln!("[regs] {} in {}", msg, fs.name);
+            }
+            let k = fs.constants.len() as u32;
+            fs.constants.push(Value::String(JsStr::new(&msg)));
+            crate::regs::Translated { ops: vec![Op::ThrowConst(2, k)], positions: vec![Pos::default()], handlers: Vec::new(), depths: vec![0], max_depth: 1 }
+        }
+    };
     let scope = &fs.scopes[0];
     let mut slot_names = vec![JsStr::empty(); scope.slot_count as usize];
     for (n, b) in &scope.names {
@@ -3132,11 +3179,11 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
     }
     FunctionCode {
         name: fs.name,
-        ops: fs.ops,
-        positions: fs.positions,
+        ops: tr.ops,
+        positions: tr.positions,
         constants: fs.constants,
         functions: fs.functions,
-        handlers: fs.handlers,
+        handlers: tr.handlers,
         param_count: fs.param_count,
         scope_slots: scope.slot_count as u32,
         nregs: fs.nregs as u32,
@@ -3150,6 +3197,9 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         block_names: fs.block_names,
         templates: fs.templates,
         ics: (0..fs.ic_count).map(|_| std::cell::Cell::new(crate::bytecode::PropIc::default())).collect(),
+        ic_keys: ic_keys.into(),
+        depths: tr.depths,
+        max_depth: tr.max_depth,
         source: fs.source,
         filename: fs.filename,
         module,

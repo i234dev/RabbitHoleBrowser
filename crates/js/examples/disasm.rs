@@ -5,7 +5,7 @@ fn dump(code: &FunctionCode, depth: usize) {
     let pad = "  ".repeat(depth);
     println!("{}function '{}' regs={} slots={} consts={}", pad, code.name, code.nregs, code.scope_slots, code.constants.len());
     for (i, op) in code.ops.iter().enumerate() {
-        println!("{}  {:4} {:?}", pad, i, op);
+        println!("{}  {:4} [{}] {:?}", pad, i, code.depths.get(i).copied().unwrap_or(0), op);
     }
     for f in &code.functions {
         dump(f, depth + 1);

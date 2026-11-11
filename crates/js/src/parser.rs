@@ -100,15 +100,16 @@ pub struct Parser<'a> {
     not_arrow: std::collections::HashSet<usize, crate::value::FxBuild>,
 }
 
-const RESERVED: &[&str] = &[
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum",
-    "export", "extends", "false", "finally", "for", "function", "if", "import", "in", "instanceof", "new", "null",
-    "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with",
-];
+fn is_reserved_word(n: &str) -> bool {
+    matches!(
+        n,
+        "break" | "case" | "catch" | "class" | "const" | "continue" | "debugger" | "default" | "delete" | "do" | "else" | "enum" | "export" | "extends" | "false" | "finally" | "for" | "function" | "if" | "import" | "in" | "instanceof" | "new" | "null" | "return" | "super" | "switch" | "this" | "throw" | "true" | "try" | "typeof" | "var" | "void" | "while" | "with"
+    )
+}
 
-const STRICT_RESERVED: &[&str] = &[
-    "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield",
-];
+fn is_strict_reserved_word(n: &str) -> bool {
+    matches!(n, "implements" | "interface" | "let" | "package" | "private" | "protected" | "public" | "static" | "yield")
+}
 
 fn binary_op(p: &str) -> Option<(BinaryOp, u8)> {
     Some(match p {
@@ -321,8 +322,13 @@ impl<'a> Parser<'a> {
     }
 
     fn is_reserved(&self, name: &str) -> bool {
-        RESERVED.contains(&name)
-            || (self.ctx.strict && STRICT_RESERVED.contains(&name))
+        // Every reserved word is 2..=10 lowercase ASCII letters.
+        let b = name.as_bytes();
+        if b.len() < 2 || b.len() > 10 || !b[0].is_ascii_lowercase() {
+            return false;
+        }
+        is_reserved_word(name)
+            || (self.ctx.strict && is_strict_reserved_word(name))
             || (name == "yield" && (self.ctx.in_generator || self.ctx.strict))
             || (name == "await" && (self.ctx.in_async || self.ctx.is_module))
     }
@@ -564,7 +570,7 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     let label = if !self.tok.newline_before {
                         match &self.tok.kind {
-                            TokenKind::Ident(l) if !RESERVED.contains(&l.as_str()) => {
+                            TokenKind::Ident(l) if !is_reserved_word(l) => {
                                 let l = l.clone();
                                 self.advance()?;
                                 Some(l)

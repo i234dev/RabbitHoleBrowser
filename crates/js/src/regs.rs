@@ -153,6 +153,16 @@ pub fn translate(ops: &[Op], positions: &[Pos], handlers: &[Handler], constants:
                 tr.op(next.unwrap(), None, &mut 0)?;
                 consumed = 3;
             }
+            // `Dup; GetProp; Swap`: method lookup for a call (obj -> method obj).
+            Op::Dup if matches!(next, Some(Op::GetProp(..))) && next2 == Some(Op::Swap) => {
+                for j in i + 1..i + 3 {
+                    map[j] = tr.out.len() as u32;
+                }
+                if let Some(Op::GetProp(k, ic)) = next {
+                    tr.op(Op::GetMethod(k, ic), None, &mut 0)?;
+                }
+                consumed = 3;
+            }
             _ => {
                 let mut extra = 0;
                 tr.op(op, next, &mut extra)?;
@@ -482,6 +492,14 @@ impl Tr<'_> {
                 self.emit_push(Op::GetLocalR(d, dp, s));
             }
             Op::SetLocal(dp, s) | Op::InitLocal(dp, s) => {
+                // Storing the TDZ marker must keep the raw value: the stack
+                // instruction does (register operands read it as undefined).
+                if let Some(Ent::Const(k)) = self.vs.last() {
+                    if matches!(self.constants[*k as usize], Value::Empty) {
+                        self.generic(op);
+                        return Ok(());
+                    }
+                }
                 let (e, d) = self.pop();
                 let v = self.opnd(e, d);
                 self.emit(Op::SetLocalR(v, dp, s));
@@ -843,6 +861,14 @@ fn fuse_branch(def: Op, s: u16, if_true: bool, t: u32) -> Option<Op> {
         (Op::CmpRK(k, _, a, b), false) if k == le => Op::JumpUnlessLtEqRK(a, b, t),
         (Op::CmpRK(k, _, a, b), false) if k == gt => Op::JumpUnlessGtRK(a, b, t),
         (Op::CmpRK(k, _, a, b), false) if k == ge => Op::JumpUnlessGtEqRK(a, b, t),
+        (Op::CmpRR(k, _, a, b), true) if k == lt => Op::JumpIfLtRR(a, b, t),
+        (Op::CmpRR(k, _, a, b), true) if k == le => Op::JumpIfLtEqRR(a, b, t),
+        (Op::CmpRR(k, _, a, b), true) if k == gt => Op::JumpIfGtRR(a, b, t),
+        (Op::CmpRR(k, _, a, b), true) if k == ge => Op::JumpIfGtEqRR(a, b, t),
+        (Op::CmpRK(k, _, a, b), true) if k == lt => Op::JumpIfLtRK(a, b, t),
+        (Op::CmpRK(k, _, a, b), true) if k == le => Op::JumpIfLtEqRK(a, b, t),
+        (Op::CmpRK(k, _, a, b), true) if k == gt => Op::JumpIfGtRK(a, b, t),
+        (Op::CmpRK(k, _, a, b), true) if k == ge => Op::JumpIfGtEqRK(a, b, t),
         (Op::CmpRR(k, _, a, b), _) if k == se => {
             if if_true {
                 Op::JumpIfStrictEqRR(a, b, t)

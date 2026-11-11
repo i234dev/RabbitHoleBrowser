@@ -218,6 +218,9 @@ enum Repr {
 #[derive(Debug, Clone)]
 pub struct PropertyMap {
     repr: Repr,
+    /// Copy of the shape / dictionary id (read by every inline cache
+    /// check without dereferencing the shape).
+    sid: u32,
 }
 
 impl Default for PropertyMap {
@@ -228,16 +231,23 @@ impl Default for PropertyMap {
 
 impl PropertyMap {
     pub fn new() -> PropertyMap {
-        PropertyMap { repr: Repr::Shaped { shape: Shape::root(), values: Vec::new() } }
+        let shape = Shape::root();
+        let sid = shape.id;
+        PropertyMap { repr: Repr::Shaped { shape, values: Vec::new() }, sid }
     }
 
     /// Shape id (shape mode) or key-set id (dictionary mode).
     #[inline(always)]
     pub fn shape_id(&self) -> u32 {
-        match &self.repr {
+        self.sid
+    }
+
+    #[inline]
+    fn resync(&mut self) {
+        self.sid = match &self.repr {
             Repr::Shaped { shape, .. } => shape.id,
             Repr::Dict(d) => d.id,
-        }
+        };
     }
 
     #[inline]
@@ -340,6 +350,11 @@ impl PropertyMap {
     }
 
     pub fn insert(&mut self, key: PropertyKey, prop: Property) {
+        self.insert_inner(key, prop);
+        self.resync();
+    }
+
+    fn insert_inner(&mut self, key: PropertyKey, prop: Property) {
         match &mut self.repr {
             Repr::Shaped { shape, values } => {
                 if let Some(i) = shape.find(&key) {
@@ -352,13 +367,14 @@ impl PropertyMap {
                     return;
                 }
                 self.to_dict();
-                self.insert(key, prop);
+                self.insert_inner(key, prop);
             }
             Repr::Dict(d) => {
-                d.id = fresh_id();
                 if let Some(&i) = d.index.get(&key) {
+                    // Same key set: cached entry indices stay valid.
                     d.entries[i] = Some((key, prop));
                 } else {
+                    d.id = fresh_id();
                     d.index.insert(key.clone(), d.entries.len());
                     d.entries.push(Some((key, prop)));
                 }
@@ -372,12 +388,19 @@ impl PropertyMap {
     #[inline]
     pub fn push_with_shape(&mut self, next: Rc<Shape>, prop: Property) {
         if let Repr::Shaped { shape, values } = &mut self.repr {
+            self.sid = next.id;
             *shape = next;
             values.push(prop);
         }
     }
 
     pub fn remove(&mut self, key: &PropertyKey) -> Option<Property> {
+        let r = self.remove_inner(key);
+        self.resync();
+        r
+    }
+
+    fn remove_inner(&mut self, key: &PropertyKey) -> Option<Property> {
         if let Repr::Shaped { shape, values } = &mut self.repr {
             let i = shape.find(key)? as usize;
             // Deleting the last added property returns to the parent layout.

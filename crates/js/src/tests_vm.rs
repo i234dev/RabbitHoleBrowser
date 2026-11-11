@@ -303,3 +303,81 @@ fn for_in_fast_path() {
     eq("var k = []; for (var x in null) k.push(x); for (var y in undefined) k.push(y); for (var z in 5) k.push(z); k.length", "0");
     eq("var o = {a: 1}; var n = 0; for (var i = 0; i < 1000; i++) for (var x in o) n += o[x]; n", "1000");
 }
+
+#[test]
+fn register_translation() {
+    // Assignment chains, compound and update expressions on registers.
+    eq("(function() { var a, b, c; a = b = c = 5; c += a * b; return [a, b, c].join(); })()", "5,5,30");
+    eq("(function() { var i = 0, r = []; r.push(i++, i++, ++i, i--, --i); return r.join() + '|' + i; })()", "0,1,3,3,1|1");
+    eq("(function() { var x = '1'; x++; var y = '5'; y -= 1; return typeof x + x + typeof y + y; })()", "number2number4");
+    eq("(function() { var o = {n: 1}, a = [1, 2]; o.n++; ++o.n; o.n += 10; a[0]++; a[1] *= 5; return o.n + ',' + a.join(); })()", "13,2,10");
+    eq("(function() { var k = 'n', o = {n: 2}; o[k] **= 3; o[k] ||= 9; o.m ??= 4; o.m &&= 7; return o.n + ',' + o.m; })()", "8,7");
+    // Operand order with side effects and constants on either side.
+    eq("(function() { var log = []; var a = {valueOf() { log.push('a'); return 1; }}, b = {valueOf() { log.push('b'); return 2; }}; var r = [a < b, 1 < b, a < 2, 3 - a, a - 3, a > b, b >= a]; return r.join() + '|' + log.join(''); })()", "true,true,true,2,-2,false,true|abbaaaabba");
+    eq("(function() { var s = 'x'; return (1 + s) + (s + 1) + (1 + 2 + s) + (s + 1 + 2); })()", "1xx13xx12");
+    eq("(function() { var n = NaN; var r = []; for (var i = 0; i < 1; i++) { r.push(n < 1, n >= 1, !(n < 1), 1 > n); } return r.join(); })()", "false,false,true,false");
+    // Strict equality and switch.
+    eq("(function(v) { switch (v) { case 1: return 'one'; case '1': return 'str'; default: return 'other'; } })('1')", "str");
+    eq("(function() { var r = []; for (var i = 0; i < 6; i++) { switch (i % 3) { case 0: r.push('a'); break; case 1: r.push('b'); default: r.push('c'); } } return r.join(''); })()", "abccabcc");
+    // Loops: continue, labeled continue/break, do-while, while with complex tests.
+    eq("(function() { var r = []; for (var i = 0; i < 5; i++) { if (i == 2) continue; r.push(i); } return r.join(); })()", "0,1,3,4");
+    eq("(function() { var r = [], i = 0; while (i < 5) { i++; if (i % 2) continue; r.push(i); } return r.join(); })()", "2,4");
+    eq("(function() { var r = []; outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { if (j == 1) continue outer; if (i == 2) break outer; r.push(i + '' + j); } } return r.join(); })()", "00,10");
+    eq("(function() { var i = 0; do { i++; } while (i < 3); return i; })()", "3");
+    eq("(function() { var n = 0; for (;;) { if (++n > 4) break; } while (true) { n++; if (n > 7) break; } return n; })()", "8");
+    eq("(function() { var a = [3, 1, 2], c = 0; for (var i = 0; i < a.length && a[i] != 2; i++) c++; return c; })()", "2");
+    eq("(function() { var fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); return fs.map(f => f()).join(); })()", "0,1,2");
+    eq("(function() { var r = 0; for (let i = 0, j = 10; i < j; i++, j--) r++; return r; })()", "5");
+    eq("(function() { var t = 0; for (var i = 10; i > 0; i -= 3) t += i; for (var k = 0; k <= 3; k++) t += k; for (var m = 5; m >= 5; m--) t += m; return t; })()", "33");
+    // TDZ: unchecked reads only after the declaration.
+    throws("(function() { switch (1) { case 0: let y = 1; break; case 1: return y; } })()", "before initialization");
+    throws("(function() { for (let k of [k]) {} })()", "ReferenceError");
+    throws("(function() { let a = a + 1; })()", "before initialization");
+    throws("(function() { for (var i = 0; i < 2; i++) { if (i == 1) { q++; } let q = 0; } })()", "before initialization");
+    eq("(function() { let a = 1; a++; a += 2; const b = a * 2; let c; return [a, b, String(c)].join(); })()", "4,8,undefined");
+    eq("(function() { var r = []; for (const x of [1, 2]) { let y = x * 2; r.push(y); } for (let k in {p: 1}) r.push(k); return r.join(); })()", "2,4,p");
+    throws("(function() { const c = 1; c++; })()", "Assignment to constant variable.");
+    // Calls with many arguments, missing arguments and method calls.
+    eq("(function() { function f(a, b, c) { return [a, b, c].join('-'); } return f(1) + '|' + f(1, 2, 3, 4) + '|' + f.call(null, 'x'); })()", "1--|1-2-3|x--");
+    eq("(function() { var o = { v: 2, m(x) { return this.v * x; } }; var s = 0; for (var i = 0; i < 3; i++) s += o.m(i); return s + (5).toString() + 'ab'.charAt(1); })()", "65b");
+    eq("(function() { function f() { return this; } 'use strict'; return typeof f(); })()", "object");
+    eq("(function() { 'use strict'; function f() { return this; } return typeof f(); })()", "undefined");
+    // Conditional and logical operators keep values.
+    eq("(function() { var a = 0, b = 'x', c = null; return [a || b, a && b, b && a, c ?? 'd', a ?? 'd', a ? 1 : 2, b ? 1 : 2].join(); })()", "x,0,0,d,0,2,1");
+    eq("(function() { var o = null, p = {q: {r: 5}}; return [o?.x, p?.q?.r, o?.x.y.z, p.q?.['r']].map(String).join(); })()", "undefined,5,undefined,5");
+    // typeof, void, delete, in, instanceof.
+    eq("(function() { var u, o = {a: 1}; return [typeof u, typeof o, void 0, delete o.a, 'a' in o, o instanceof Object].map(String).join(); })()", "undefined,object,undefined,true,false,true");
+    // Exceptions inside expressions and loops keep the stack consistent.
+    eq("(function() { var r = []; for (var i = 0; i < 3; i++) { try { r.push(i, i == 1 ? null.x : i); } catch (e) { r.push('E'); } } return r.join(); })()", "0,0,E,2,2");
+    eq("(function() { var s = 0; for (var i = 0; i < 4; i++) { try { if (i % 2) throw i; s += 10; } catch (e) { s += e; } finally { s += 100; } } return s; })()", "424");
+    // Generators resume into the right slot.
+    eq("(function() { function* g() { var a = yield 1; var b = (yield a + 1) * 2; return a + b; } var it = g(); var r = [it.next().value, it.next(5).value, it.next(3).value]; return r.join(); })()", "1,6,11");
+    eq("(function() { function* g() { var s = 0; for (var i = 0; i < 3; i++) s += yield i; return s; } var it = g(), r = [], x = it.next(); while (!x.done) { r.push(x.value); x = it.next(10); } return r.join() + '|' + x.value; })()", "0,1,2|30");
+    // Big functions with many registers and deep expressions.
+    let mut src = String::from("(function() { var t = 0;");
+    for i in 0..300 {
+        src.push_str(&format!(" var v{i} = {i}; t += v{i} * 2 - (v{i} % 3);"));
+    }
+    src.push_str(" return t; })()");
+    let expect: i64 = (0..300).map(|i: i64| i * 2 - i % 3).sum();
+    eq(&src, &expect.to_string());
+    let deep = format!("(function() {{ var x = 1; return {}x{}; }})()", "(1 + ".repeat(200), ")".repeat(200));
+    eq(&deep, "201");
+}
+
+#[test]
+fn json_and_array_like_fast_paths() {
+    eq("JSON.stringify({a: undefined, b: 1, c: function() {}, d: [undefined, function() {}, Symbol()], e: {}})", "{\"b\":1,\"d\":[null,null,null],\"e\":{}}");
+    eq("JSON.stringify({a: undefined})", "{}");
+    eq("JSON.stringify({x: undefined, y: 2}, null, 2)", "{\n  \"y\": 2\n}");
+    eq("JSON.stringify([], null, 2) + JSON.stringify({}, null, 2) + JSON.stringify([[]], null, 1)", "[]{}[\n []\n]");
+    eq("JSON.stringify({a: [1, {b: 2}]}, null, '--')", "{\n--\"a\": [\n----1,\n----{\n------\"b\": 2\n----}\n--]\n}");
+    eq("var o = JSON.parse('{\"a\":1,\"b\":[-0,12,-34,1e3,0.5,123456789012345678],\"a\":3,\"\\\\u0041\":4,\"c\\\\nd\":5}'); [o.a, 1 / o.b[0], o.b[1], o.b[2], o.b[3], o.b[4], o.b[5], o.A, o['c\\nd'], Object.keys(o).join()].join()", "3,-Infinity,12,-34,1000,0.5,123456789012345680,4,5,a,b,A,c\nd");
+    eq("var a = JSON.parse('[{\"k\":1},{\"k\":2}]'); a[0].k + a[1].k", "3");
+    eq("JSON.parse('{\"__proto__\": 1}').__proto__", "1");
+    eq("Array.from({length: 3}, (_, i) => i * 2).join()", "0,2,4");
+    eq("Array.from({length: 2}).map(String).join()", "undefined,undefined");
+    eq("Array.from({length: 2, 1: 'x'}).map(String).join()", "undefined,x");
+    eq("Object.prototype[1] = 'p'; var r = Array.from({length: 2}).map(String).join(); delete Object.prototype[1]; r", "undefined,p");
+    eq("Math.max.apply(null, {length: 2, 0: 4, 1: 9})", "9");
+}

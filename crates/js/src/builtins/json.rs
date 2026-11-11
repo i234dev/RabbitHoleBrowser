@@ -56,11 +56,13 @@ impl<'a> Parser<'a> {
                     if self.peek() != Some(b'"' as u16) {
                         return self.err(realm, "Expected property name");
                     }
-                    let key = self.string(realm)?;
+                    let key = self.key(realm)?;
                     self.ws();
                     self.expect(realm, b':')?;
                     let v = self.value(realm, depth + 1)?;
-                    realm.define_own(obj, PropertyKey::String(key), Property::data(v, ALL))?;
+                    // A fresh ordinary object: CreateDataProperty is a plain
+                    // insert (a repeated key replaces the earlier value).
+                    realm.obj_mut(obj).props.insert(PropertyKey::String(key), Property::data(v, ALL));
                     self.ws();
                     match self.peek() {
                         Some(c) if c == b',' as u16 => self.pos += 1,
@@ -148,8 +150,39 @@ impl<'a> Parser<'a> {
                 return self.err(realm, "Exponent part is missing a number");
             }
         }
-        let text = String::from_utf16_lossy(&self.s[start..self.pos]);
+        let digits = &self.s[start..self.pos];
+        // Short integers: exact without going through the float parser.
+        if digits.len() <= 15 && digits.iter().all(|&c| (b'0' as u16..=b'9' as u16).contains(&c) || c == b'-' as u16) {
+            let neg = digits[0] == b'-' as u16;
+            let mut n: i64 = 0;
+            for &c in &digits[neg as usize..] {
+                n = n * 10 + (c - b'0' as u16) as i64;
+            }
+            return Ok(Value::Number(if neg { -(n as f64) } else { n as f64 }));
+        }
+        let text = String::from_utf16_lossy(digits);
         Ok(Value::Number(text.parse::<f64>().unwrap_or(f64::NAN)))
+    }
+
+    /// An object key: short ASCII keys without escapes are interned (shared
+    /// by every object parsed with the same layout).
+    fn key(&mut self, realm: &mut Realm) -> JsResult<JsStr> {
+        let start = self.pos + 1;
+        let mut end = start;
+        while end < self.s.len() && end - start <= 32 {
+            let c = self.s[end];
+            if c == b'"' as u16 {
+                let units = &self.s[start..end];
+                let ascii: String = units.iter().map(|&u| u as u8 as char).collect();
+                self.pos = end + 1;
+                return Ok(JsStr::intern(&ascii));
+            }
+            if c >= 0x80 || c < 0x20 || c == b'\\' as u16 {
+                break;
+            }
+            end += 1;
+        }
+        self.string(realm)
     }
     fn string(&mut self, realm: &mut Realm) -> JsResult<JsStr> {
         self.pos += 1; // opening quote
@@ -350,34 +383,35 @@ impl Stringifier {
             Some(l) => l.clone(),
             None => realm.own_enumerable_string_keys(id)?,
         };
-        let mut parts: Vec<String> = Vec::new();
+        // Members are written straight into `out`; a member whose value
+        // does not serialize (undefined, functions, symbols) is cut again.
+        out.push('{');
+        let mut any = false;
         for k in keys {
-            let mut buf = String::new();
-            if self.serialize_property(realm, Value::Object(id), k.clone(), &mut buf)? {
-                let mut member = String::new();
-                quote(k.as_str().unwrap(), &mut member);
-                member.push(':');
-                if !self.gap.is_empty() {
-                    member.push(' ');
-                }
-                member.push_str(&buf);
-                parts.push(member);
+            let mark = out.len();
+            if any {
+                out.push(',');
+            }
+            if !self.gap.is_empty() {
+                out.push('\n');
+                out.push_str(&self.indent);
+            }
+            quote(k.as_str().unwrap(), out);
+            out.push(':');
+            if !self.gap.is_empty() {
+                out.push(' ');
+            }
+            if self.serialize_property(realm, Value::Object(id), k, out)? {
+                any = true;
+            } else {
+                out.truncate(mark);
             }
         }
-        if parts.is_empty() {
-            out.push_str("{}");
-        } else if self.gap.is_empty() {
-            out.push('{');
-            out.push_str(&parts.join(","));
-            out.push('}');
-        } else {
-            out.push_str("{\n");
-            out.push_str(&self.indent);
-            out.push_str(&parts.join(&format!(",\n{}", self.indent)));
+        if any && !self.gap.is_empty() {
             out.push('\n');
             out.push_str(&stepback);
-            out.push('}');
         }
+        out.push('}');
         self.stack.pop();
         self.indent = stepback;
         Ok(())
@@ -389,28 +423,24 @@ impl Stringifier {
         let stepback = self.indent.clone();
         self.indent.push_str(&self.gap.clone());
         let len = realm.length_of(Value::Object(id))?;
-        let mut parts: Vec<String> = Vec::with_capacity(len);
+        out.push('[');
         for i in 0..len {
-            let mut buf = String::new();
-            if !self.serialize_property(realm, Value::Object(id), PropertyKey::index(i as u32), &mut buf)? {
-                buf.push_str("null");
+            if i > 0 {
+                out.push(',');
             }
-            parts.push(buf);
+            if !self.gap.is_empty() {
+                out.push('\n');
+                out.push_str(&self.indent);
+            }
+            if !self.serialize_property(realm, Value::Object(id), PropertyKey::index(i as u32), out)? {
+                out.push_str("null");
+            }
         }
-        if parts.is_empty() {
-            out.push_str("[]");
-        } else if self.gap.is_empty() {
-            out.push('[');
-            out.push_str(&parts.join(","));
-            out.push(']');
-        } else {
-            out.push_str("[\n");
-            out.push_str(&self.indent);
-            out.push_str(&parts.join(&format!(",\n{}", self.indent)));
+        if len > 0 && !self.gap.is_empty() {
             out.push('\n');
             out.push_str(&stepback);
-            out.push(']');
         }
+        out.push(']');
         self.stack.pop();
         self.indent = stepback;
         Ok(())

@@ -1216,11 +1216,42 @@ impl Realm {
         }
         let len = self.get_str(Value::Object(id), "length")?;
         let len = self.to_length(len)?;
+        if self.no_index_properties(id) {
+            // `{length: n}`: every element reads as undefined.
+            return Ok(vec![Value::Undefined; len]);
+        }
         let mut out = Vec::with_capacity(len);
         for i in 0..len {
             out.push(self.get(Value::Object(id), PropertyKey::index(i as u32))?);
         }
         Ok(out)
+    }
+
+    /// No object on the prototype chain of `id` (itself included) can have
+    /// an array-index property: ordinary objects (and empty arrays) whose
+    /// property keys are all non-index strings or symbols.
+    pub fn no_index_properties(&self, id: ObjectId) -> bool {
+        let mut cur = Some(id);
+        let mut depth = 0;
+        while let Some(c) = cur {
+            let Some(o) = self.heap.try_get(c) else { return false };
+            match &o.kind {
+                ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Error => {}
+                ObjectKind::Array { elements, .. } if elements.is_empty() => {}
+                _ => return false,
+            }
+            for (k, _) in o.props.iter() {
+                if k.as_array_index().is_some() {
+                    return false;
+                }
+            }
+            cur = o.proto;
+            depth += 1;
+            if depth > 64 {
+                return false;
+            }
+        }
+        true
     }
 
     /// Length of an array-like.

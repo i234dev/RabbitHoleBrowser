@@ -133,23 +133,6 @@ pub enum Op {
     JumpIfNotUndefined(u32),
     /// Jump if the two top values are strictly equal (pops both)
     JumpIfStrictEq(u32),
-    // Fused compare-and-branch (peephole): pop b, a; jump unless `a OP b`.
-    JumpUnlessLt(u32),
-    JumpUnlessLtEq(u32),
-    JumpUnlessGt(u32),
-    JumpUnlessGtEq(u32),
-    /// Pop b, a; jump unless `a === b`.
-    JumpIfStrictNotEq(u32),
-    /// `r = r + 1` / `r = r - 1` on a register (statement `i++` / `i--`).
-    IncReg(u16),
-    DecReg(u16),
-    /// Push two registers.
-    GetReg2(u16, u16),
-    /// `top = top OP const` (OP: `BIN_*` index; peephole of `Const; OP`).
-    BinConst(u8, u32),
-    /// Pop a; jump unless `a < const` (peephole of `Const; Lt; JumpIfFalse`).
-    JumpUnlessLtConst(u32, u32),
-
     // --- operators
     Add,
     Sub,
@@ -259,6 +242,102 @@ pub enum Op {
     /// Async generator yield (awaits value first)
     AsyncYield,
 
+
+    // --- register forms, produced by `regs::translate`. Operands are
+    // absolute frame slots: the function's registers come first, then the
+    // operand stack (the value at stack depth `d` lives in slot
+    // `nregs + d`). Constants are `u16`/`u32` constant-table indices.
+    /// `d = s` with GetReg semantics (an uninitialized slot reads as undefined).
+    Mov(u16, u16),
+    /// `d = s` copying the raw value.
+    MovRaw(u16, u16),
+    /// `d = constant`
+    LoadK(u16, u32),
+    /// `d = s`, throwing the TDZ ReferenceError when register `s` is uninitialized.
+    MovChecked(u16, u16),
+    /// Throw the TDZ ReferenceError when register `r` is uninitialized.
+    CheckInit(u16),
+    /// `d = a OP b` (operands: d, a, b)
+    AddRR(u16, u16, u16),
+    SubRR(u16, u16, u16),
+    MulRR(u16, u16, u16),
+    DivRR(u16, u16, u16),
+    ModRR(u16, u16, u16),
+    /// `d = a OP const`
+    AddRK(u16, u16, u16),
+    SubRK(u16, u16, u16),
+    MulRK(u16, u16, u16),
+    DivRK(u16, u16, u16),
+    ModRK(u16, u16, u16),
+    /// Other binary operators by `BIN_OPS` index: (op, d, a, b) / (op, d, a, const)
+    BinRR(u8, u16, u16, u16),
+    BinRK(u8, u16, u16, u16),
+    /// Comparisons by `CMP_OPS` index, boolean result: (op, d, a, b) / (op, d, a, const)
+    CmpRR(u8, u16, u16, u16),
+    CmpRK(u8, u16, u16, u16),
+    /// Fused compare-and-branch: jump to the target unless `a OP b`.
+    JumpUnlessLtRR(u16, u16, u32),
+    JumpUnlessLtEqRR(u16, u16, u32),
+    JumpUnlessGtRR(u16, u16, u32),
+    JumpUnlessGtEqRR(u16, u16, u32),
+    JumpUnlessLtRK(u16, u16, u32),
+    JumpUnlessLtEqRK(u16, u16, u32),
+    JumpUnlessGtRK(u16, u16, u32),
+    JumpUnlessGtEqRK(u16, u16, u32),
+    /// Fused compare-and-branch: jump to the target when `a OP b`.
+    JumpIfLtRR(u16, u16, u32),
+    JumpIfLtEqRR(u16, u16, u32),
+    JumpIfGtRR(u16, u16, u32),
+    JumpIfGtEqRR(u16, u16, u32),
+    JumpIfLtRK(u16, u16, u32),
+    JumpIfLtEqRK(u16, u16, u32),
+    JumpIfGtRK(u16, u16, u32),
+    JumpIfGtEqRK(u16, u16, u32),
+    /// Jump when `a === b` / `a !== b`.
+    JumpIfStrictEqRR(u16, u16, u32),
+    JumpIfStrictNotEqRR(u16, u16, u32),
+    JumpIfStrictEqRK(u16, u16, u32),
+    JumpIfStrictNotEqRK(u16, u16, u32),
+    /// Conditional jumps on a slot (the slot is not consumed).
+    JumpIfTrueR(u16, u32),
+    JumpIfFalseR(u16, u32),
+    JumpIfNullishR(u16, u32),
+    JumpIfNotNullishR(u16, u32),
+    JumpIfUndefinedR(u16, u32),
+    JumpIfNotUndefinedR(u16, u32),
+    /// Unary operators: (d, s)
+    NotR(u16, u16),
+    IncR(u16, u16),
+    DecR(u16, u16),
+    ToNumericR(u16, u16),
+    /// Other unary operators by `UN_OPS` index: (op, d, s)
+    UnR(u8, u16, u16),
+    /// `d = this`
+    LoadThis(u16),
+    /// (d, obj, inline cache); the key is `FunctionCode::ic_keys[ic]`.
+    GetPropR(u16, u16, u32),
+    /// (obj, value, inline cache)
+    SetPropR(u16, u16, u32),
+    /// Object literal data property: (obj, value, inline cache)
+    DefinePropR(u16, u16, u32),
+    /// (d, obj, key)
+    GetElemR(u16, u16, u16),
+    /// (obj, key, value)
+    SetElemR(u16, u16, u16),
+    /// (d, inline cache) / (value, inline cache)
+    GetGlobalR(u16, u32),
+    SetGlobalR(u16, u32),
+    /// (d, scope depth, slot) / (value, scope depth, slot)
+    GetLocalR(u16, u16, u16),
+    SetLocalR(u16, u16, u16),
+    /// Call with the callee at slot `base`, `this` at `base + 1` and the
+    /// arguments after it; the result goes to `base`. (base, argc, desc)
+    CallR(u16, u16, u32),
+    /// Construct with the callee at `base` and the arguments after it. (base, argc)
+    NewR(u16, u16),
+    ReturnR(u16),
+    StoreCompletionR(u16),
+
     // --- misc
     /// Script completion value tracking: value ->
     StoreCompletion,
@@ -280,12 +359,15 @@ pub struct PropIc {
     pub mid_shape: u32,
 }
 
-/// Binary operators usable in `BinConst`, by index.
-pub const BIN_OPS: [Op; 11] = [Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod, Op::BitAnd, Op::BitOr, Op::BitXor, Op::Shl, Op::Shr, Op::UShr];
+/// Binary operators of `BinRR` / `BinRK`, by index.
+pub const BIN_OPS: [Op; 12] = [Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod, Op::BitAnd, Op::BitOr, Op::BitXor, Op::Shl, Op::Shr, Op::UShr, Op::Exp];
 
-fn bin_index(op: Op) -> Option<u8> {
-    BIN_OPS.iter().position(|o| *o == op).map(|i| i as u8)
-}
+/// Comparison operators of `CmpRR` / `CmpRK`, by index.
+pub const CMP_OPS: [Op; 8] = [Op::Lt, Op::LtEq, Op::Gt, Op::GtEq, Op::StrictEq, Op::StrictNotEq, Op::Eq, Op::NotEq];
+
+/// Unary operators of `UnR`, by index.
+pub const UN_OPS: [Op; 6] = [Op::Neg, Op::Plus, Op::BitNot, Op::Typeof, Op::ToString, Op::ToPropertyKey];
+
 
 /// `Call` without a callee description.
 pub const NO_DESC: u32 = u32::MAX;
@@ -370,9 +452,23 @@ pub struct FunctionCode {
     pub module: Option<u32>,
     /// Inline caches of the property / global instructions.
     pub ics: Box<[std::cell::Cell<PropIc>]>,
+    /// Key constant of each inline cache (register-form instructions
+    /// carry only the cache index).
+    pub ic_keys: Box<[u32]>,
+    /// Operand stack depth before each instruction: stack instructions
+    /// find their operands at slot `nregs + depth - 1` downwards.
+    pub depths: Vec<u16>,
+    /// Maximum operand stack depth (frames have `nregs + max_depth` slots).
+    pub max_depth: u32,
 }
 
 impl FunctionCode {
+    /// Number of value slots of a frame running this code.
+    #[inline]
+    pub fn frame_size(&self) -> usize {
+        self.nregs as usize + self.max_depth as usize
+    }
+
     pub fn position_at(&self, pc: usize) -> Pos {
         self.positions.get(pc.min(self.positions.len().saturating_sub(1))).copied().unwrap_or_default()
     }
@@ -392,12 +488,32 @@ impl Op {
             | Op::JumpIfUndefined(t)
             | Op::JumpIfNotUndefined(t)
             | Op::JumpIfStrictEq(t)
-            | Op::JumpUnlessLt(t)
-            | Op::JumpUnlessLtEq(t)
-            | Op::JumpUnlessGt(t)
-            | Op::JumpUnlessGtEq(t)
-            | Op::JumpIfStrictNotEq(t)
-            | Op::JumpUnlessLtConst(_, t) => Some(t),
+            | Op::JumpUnlessLtRR(_, _, t)
+            | Op::JumpUnlessLtEqRR(_, _, t)
+            | Op::JumpUnlessGtRR(_, _, t)
+            | Op::JumpUnlessGtEqRR(_, _, t)
+            | Op::JumpUnlessLtRK(_, _, t)
+            | Op::JumpUnlessLtEqRK(_, _, t)
+            | Op::JumpUnlessGtRK(_, _, t)
+            | Op::JumpUnlessGtEqRK(_, _, t)
+            | Op::JumpIfLtRR(_, _, t)
+            | Op::JumpIfLtEqRR(_, _, t)
+            | Op::JumpIfGtRR(_, _, t)
+            | Op::JumpIfGtEqRR(_, _, t)
+            | Op::JumpIfLtRK(_, _, t)
+            | Op::JumpIfLtEqRK(_, _, t)
+            | Op::JumpIfGtRK(_, _, t)
+            | Op::JumpIfGtEqRK(_, _, t)
+            | Op::JumpIfStrictEqRR(_, _, t)
+            | Op::JumpIfStrictNotEqRR(_, _, t)
+            | Op::JumpIfStrictEqRK(_, _, t)
+            | Op::JumpIfStrictNotEqRK(_, _, t)
+            | Op::JumpIfTrueR(_, t)
+            | Op::JumpIfFalseR(_, t)
+            | Op::JumpIfNullishR(_, t)
+            | Op::JumpIfNotNullishR(_, t)
+            | Op::JumpIfUndefinedR(_, t)
+            | Op::JumpIfNotUndefinedR(_, t) => Some(t),
             _ => None,
         }
     }
@@ -415,102 +531,180 @@ impl Op {
             Op::JumpIfUndefined(_) => Op::JumpIfUndefined(t),
             Op::JumpIfNotUndefined(_) => Op::JumpIfNotUndefined(t),
             Op::JumpIfStrictEq(_) => Op::JumpIfStrictEq(t),
-            Op::JumpUnlessLt(_) => Op::JumpUnlessLt(t),
-            Op::JumpUnlessLtEq(_) => Op::JumpUnlessLtEq(t),
-            Op::JumpUnlessGt(_) => Op::JumpUnlessGt(t),
-            Op::JumpUnlessGtEq(_) => Op::JumpUnlessGtEq(t),
-            Op::JumpIfStrictNotEq(_) => Op::JumpIfStrictNotEq(t),
-            Op::JumpUnlessLtConst(c, _) => Op::JumpUnlessLtConst(c, t),
+            Op::JumpUnlessLtRR(a, b, _) => Op::JumpUnlessLtRR(a, b, t),
+            Op::JumpUnlessLtEqRR(a, b, _) => Op::JumpUnlessLtEqRR(a, b, t),
+            Op::JumpUnlessGtRR(a, b, _) => Op::JumpUnlessGtRR(a, b, t),
+            Op::JumpUnlessGtEqRR(a, b, _) => Op::JumpUnlessGtEqRR(a, b, t),
+            Op::JumpUnlessLtRK(a, b, _) => Op::JumpUnlessLtRK(a, b, t),
+            Op::JumpUnlessLtEqRK(a, b, _) => Op::JumpUnlessLtEqRK(a, b, t),
+            Op::JumpUnlessGtRK(a, b, _) => Op::JumpUnlessGtRK(a, b, t),
+            Op::JumpUnlessGtEqRK(a, b, _) => Op::JumpUnlessGtEqRK(a, b, t),
+            Op::JumpIfLtRR(a, b, _) => Op::JumpIfLtRR(a, b, t),
+            Op::JumpIfLtEqRR(a, b, _) => Op::JumpIfLtEqRR(a, b, t),
+            Op::JumpIfGtRR(a, b, _) => Op::JumpIfGtRR(a, b, t),
+            Op::JumpIfGtEqRR(a, b, _) => Op::JumpIfGtEqRR(a, b, t),
+            Op::JumpIfLtRK(a, b, _) => Op::JumpIfLtRK(a, b, t),
+            Op::JumpIfLtEqRK(a, b, _) => Op::JumpIfLtEqRK(a, b, t),
+            Op::JumpIfGtRK(a, b, _) => Op::JumpIfGtRK(a, b, t),
+            Op::JumpIfGtEqRK(a, b, _) => Op::JumpIfGtEqRK(a, b, t),
+            Op::JumpIfStrictEqRR(a, b, _) => Op::JumpIfStrictEqRR(a, b, t),
+            Op::JumpIfStrictNotEqRR(a, b, _) => Op::JumpIfStrictNotEqRR(a, b, t),
+            Op::JumpIfStrictEqRK(a, b, _) => Op::JumpIfStrictEqRK(a, b, t),
+            Op::JumpIfStrictNotEqRK(a, b, _) => Op::JumpIfStrictNotEqRK(a, b, t),
+            Op::JumpIfTrueR(s, _) => Op::JumpIfTrueR(s, t),
+            Op::JumpIfFalseR(s, _) => Op::JumpIfFalseR(s, t),
+            Op::JumpIfNullishR(s, _) => Op::JumpIfNullishR(s, t),
+            Op::JumpIfNotNullishR(s, _) => Op::JumpIfNotNullishR(s, t),
+            Op::JumpIfUndefinedR(s, _) => Op::JumpIfUndefinedR(s, t),
+            Op::JumpIfNotUndefinedR(s, _) => Op::JumpIfNotUndefinedR(s, t),
             other => other,
         }
     }
 }
 
-/// Peephole optimisation of a finished function: fuses common instruction
-/// sequences into superinstructions and removes redundant stack traffic.
-/// Sequences are only fused when no jump or handler boundary points into
-/// them; all targets are remapped afterwards.
-pub fn peephole(ops: &mut Vec<Op>, positions: &mut Vec<crate::ast::Pos>, handlers: &mut [Handler]) {
+
+impl Op {
+    /// Operand stack effect `(pops, pushes)` of a stack instruction (for a
+    /// conditional jump: on the fall-through edge; see `taken_effect`).
+    pub fn stack_effect(&self) -> (u32, u32) {
+        use Op::*;
+        match *self {
+            Const(_) | Undefined | Null | True | False | Empty => (0, 1),
+            Pop => (1, 0),
+            Dup => (1, 2),
+            Dup2 => (2, 4),
+            Swap => (2, 2),
+            Rot3 => (3, 3),
+            Rot4 => (4, 4),
+            GetReg(_) | GetRegChecked(_) => (0, 1),
+            SetReg(_) | SetRegChecked(_) => (1, 0),
+            GetLocal(..) | GetLocalChecked(..) | GetImport(..) => (0, 1),
+            SetLocal(..) | InitLocal(..) | SetLocalChecked(..) => (1, 0),
+            GetGlobal(..) | TypeofGlobal(_) => (0, 1),
+            SetGlobal(..) | DeclareGlobalFunction(_) | InitGlobalLex(_) => (1, 0),
+            DeclareGlobalVar(_) | DeclareGlobalLex(..) => (0, 0),
+            PushScope(..) | PopScope | CopyScope => (0, 0),
+            GetProp(..) => (1, 1),
+            SetProp(..) => (2, 1),
+            GetElem => (2, 1),
+            SetElem => (3, 1),
+            GetElemKeep => (2, 3),
+            GetPropKeep(..) | GetMethod(..) => (1, 2),
+            DeleteProp(_) => (1, 1),
+            DeleteElem => (2, 1),
+            DefineProp(..) => (2, 1),
+            DefineElem | DefineMethod(_) | DefineGetter(_) | DefineSetter(_) => (3, 1),
+            CopyDataProps => (2, 1),
+            CopyDataPropsExcluding => (3, 1),
+            SetProtoLiteral => (2, 1),
+            GetSuperProp(_) => (0, 1),
+            SetSuperProp(_) | GetSuperElem => (1, 1),
+            SetSuperElem => (2, 1),
+            Call(argc, _) | CallEval(argc, _) => (argc as u32 + 2, 1),
+            CallSpread => (3, 1),
+            New(argc) => (argc as u32 + 1, 1),
+            NewSpread => (2, 1),
+            SuperCall(argc) => (argc as u32, 1),
+            SuperCallSpread => (1, 1),
+            Return | Throw => (1, 0),
+            ThrowConst(..) => (0, 0),
+            Jump(_) => (0, 0),
+            JumpIfFalse(_) | JumpIfTrue(_) | JumpIfNullish(_) | JumpIfUndefined(_) | JumpIfNotUndefined(_) => (1, 0),
+            JumpIfNotNullishKeep(_) => (1, 0),
+            JumpIfFalseKeep(_) | JumpIfTrueKeep(_) => (1, 1),
+            JumpIfStrictEq(_) => (2, 0),
+            Add | Sub | Mul | Div | Mod | Exp | BitAnd | BitOr | BitXor | Shl | Shr | UShr | Eq | NotEq | StrictEq | StrictNotEq | Lt | LtEq | Gt | GtEq | In | Instanceof => (2, 1),
+            Neg | Plus | Not | BitNot | Typeof | Void | Inc | Dec | ToNumeric | ToString | ToPropertyKey | PrivateIn(..) => (1, 1),
+            NewObject => (0, 1),
+            NewArray(n) => (n, 1),
+            ArrayPush | ArraySpread => (2, 1),
+            ArrayHole => (1, 1),
+            NewRegExp(..) | TemplateObject(_) | MakeClosure(_) | NewPrivateName(_) => (0, 1),
+            MakeClass(_) => (1, 2),
+            SetClassFields => (3, 2),
+            InitFields => (0, 0),
+            This | ThisChecked | NewTarget | Arguments | ArgsLength | Callee | ImportMeta => (0, 1),
+            ArgsGet | DynamicImport => (1, 1),
+            GetIterator | GetAsyncIterator => (1, 2),
+            IteratorNextResult => (2, 1),
+            IteratorNext => (2, 2),
+            IteratorClose | IteratorCloseIfNotDone => (2, 0),
+            ForInStart => (1, 1),
+            ForInNext => (1, 2),
+            IteratorStep | IteratorRest => (2, 3),
+            Yield | AsyncYield | Await => (1, 1),
+            IteratorNextWith => (3, 3),
+            StoreCompletion => (1, 0),
+            LoadCompletion => (0, 1),
+            Debugger | Nop => (0, 0),
+            // Register forms never appear in the stack code that the
+            // depth analysis runs on.
+            _ => (0, 0),
+        }
+    }
+
+    /// Stack effect on the taken edge of a conditional jump.
+    pub fn taken_effect(&self) -> (u32, u32) {
+        match *self {
+            Op::JumpIfNotNullishKeep(_) => (1, 1),
+            other => other.stack_effect(),
+        }
+    }
+
+    /// No fall-through to the next instruction.
+    pub fn is_terminator(&self) -> bool {
+        matches!(self, Op::Jump(_) | Op::Return | Op::Throw | Op::ThrowConst(..))
+    }
+}
+
+/// Operand stack depth before each instruction (above the registers), by
+/// a forward data-flow pass over the control-flow graph; `None` marks
+/// unreachable code. Fails when two paths reach an instruction with
+/// different depths (a compiler bug).
+pub fn compute_depths(ops: &[Op], handlers: &[Handler]) -> Result<Vec<Option<u32>>, String> {
     let n = ops.len();
-    let mut is_target = vec![false; n + 1];
-    for op in ops.iter() {
-        if let Some(t) = op.jump_target() {
-            if (t as usize) <= n {
-                is_target[t as usize] = true;
-            }
+    let mut depth: Vec<Option<u32>> = vec![None; n + 1];
+    let mut work: Vec<usize> = Vec::new();
+    let set = |depth: &mut Vec<Option<u32>>, work: &mut Vec<usize>, at: usize, d: u32| -> Result<(), String> {
+        if at > n {
+            return Err(format!("jump past end ({at})"));
         }
-    }
-    for h in handlers.iter() {
-        for x in [h.start, h.end, h.target] {
-            if (x as usize) <= n {
-                is_target[x as usize] = true;
-            }
-        }
-    }
-    let free = |i: usize, k: usize| -> bool { i + k <= n && (i + 1..i + k).all(|j| !is_target[j]) };
-    let mut out: Vec<Op> = Vec::with_capacity(n);
-    let mut out_pos = Vec::with_capacity(n);
-    let mut map = vec![0u32; n + 1];
-    let mut i = 0;
-    while i < n {
-        let here = out.len() as u32;
-        map[i] = here;
-        let (fused, len): (Option<Op>, usize) = match (ops[i], ops.get(i + 1).copied(), ops.get(i + 2).copied(), ops.get(i + 3).copied(), ops.get(i + 4).copied()) {
-            // i++ / ++i / i += 1 as a statement on a register.
-            (Op::GetReg(a), Some(Op::Inc), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::IncReg(a)), 5),
-            (Op::GetReg(a), Some(Op::Dec), Some(Op::Dup), Some(Op::SetReg(b)), Some(Op::Pop)) if a == b && free(i, 5) => (Some(Op::DecReg(a)), 5),
-            // Loop test against a constant bound.
-            (Op::Const(c), Some(Op::Lt), Some(Op::JumpIfFalse(t)), _, _) if free(i, 3) => (Some(Op::JumpUnlessLtConst(c, t)), 3),
-            // Arithmetic with a constant operand.
-            (Op::Const(c), Some(b), _, _, _) if bin_index(b).is_some() && free(i, 2) => (Some(Op::BinConst(bin_index(b).unwrap(), c)), 2),
-            // Two register loads.
-            (Op::GetReg(a), Some(Op::GetReg(b)), _, _, _) if free(i, 2) => (Some(Op::GetReg2(a, b)), 2),
-            // Method lookup for a call: obj -> method obj.
-            (Op::Dup, Some(Op::GetProp(k, ic)), Some(Op::Swap), _, _) if free(i, 3) => (Some(Op::GetMethod(k, ic)), 3),
-            // Assignment whose value is discarded.
-            (Op::Dup, Some(st @ (Op::SetReg(_) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetGlobal(..) | Op::SetRegChecked(_) | Op::SetLocalChecked(..))), Some(Op::Pop), _, _) if free(i, 3) => (Some(st), 3),
-            // Compare and branch.
-            (Op::Lt, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessLt(t)), 2),
-            (Op::LtEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessLtEq(t)), 2),
-            (Op::Gt, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessGt(t)), 2),
-            (Op::GtEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpUnlessGtEq(t)), 2),
-            (Op::StrictEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfStrictNotEq(t)), 2),
-            (Op::StrictNotEq, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfStrictEq(t)), 2),
-            (Op::StrictEq, Some(Op::JumpIfTrue(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfStrictEq(t)), 2),
-            (Op::StrictNotEq, Some(Op::JumpIfTrue(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfStrictNotEq(t)), 2),
-            (Op::Not, Some(Op::JumpIfFalse(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfTrue(t)), 2),
-            (Op::Not, Some(Op::JumpIfTrue(t)), _, _, _) if free(i, 2) => (Some(Op::JumpIfFalse(t)), 2),
-            _ => (None, 1),
-        };
-        match fused {
-            Some(op) => {
-                out.push(op);
-                // Use the position of the last fused instruction (the one
-                // that can throw is never the leading Dup / GetReg).
-                out_pos.push(positions.get(i + len - 1).or(positions.get(i)).copied().unwrap_or_default());
-                for j in i + 1..i + len {
-                    map[j] = here;
-                }
-                i += len;
-            }
+        match depth[at] {
+            Some(x) if x == d => Ok(()),
+            Some(x) => Err(format!("stack depth mismatch at {at}: {x} vs {d}")),
             None => {
-                out.push(ops[i]);
-                out_pos.push(positions.get(i).copied().unwrap_or_default());
-                i += 1;
+                depth[at] = Some(d);
+                work.push(at);
+                Ok(())
             }
         }
+    };
+    if n > 0 {
+        set(&mut depth, &mut work, 0, 0)?;
     }
-    map[n] = out.len() as u32;
-    for op in out.iter_mut() {
+    for h in handlers {
+        set(&mut depth, &mut work, h.target as usize, h.stack_depth + 1)?;
+    }
+    while let Some(i) = work.pop() {
+        if i >= n {
+            continue;
+        }
+        let d = depth[i].unwrap();
+        let op = ops[i];
         if let Some(t) = op.jump_target() {
-            *op = op.with_target(map[(t as usize).min(n)]);
+            let (p, q) = op.taken_effect();
+            if d < p {
+                return Err(format!("stack underflow at {i} ({op:?})"));
+            }
+            set(&mut depth, &mut work, t as usize, d - p + q)?;
+        }
+        if !op.is_terminator() {
+            let (p, q) = op.stack_effect();
+            if d < p {
+                return Err(format!("stack underflow at {i} ({op:?})"));
+            }
+            set(&mut depth, &mut work, i + 1, d - p + q)?;
         }
     }
-    for h in handlers.iter_mut() {
-        h.start = map[(h.start as usize).min(n)];
-        h.end = map[(h.end as usize).min(n)];
-        h.target = map[(h.target as usize).min(n)];
-    }
-    *ops = out;
-    *positions = out_pos;
+    Ok(depth)
 }

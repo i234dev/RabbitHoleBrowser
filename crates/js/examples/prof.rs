@@ -4,14 +4,17 @@
 //! A SIGPROF interval timer records the interrupted instruction pointer;
 //! raw addresses go to `prof.out` together with the runtime address of a
 //! marker function, so an offline script can symbolize them against an
-//! unstripped build (`CARGO_PROFILE_RELEASE_STRIP=false`).
+//! unstripped build (`CARGO_PROFILE_RELEASE_STRIP=false`). When built with
+//! frame pointers (`RUSTFLAGS=-Cforce-frame-pointers=yes`) each sample also
+//! carries up to 15 return addresses (one line per sample: `ip caller...`).
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod sampler {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const MAX: usize = 1 << 20;
-    static mut SAMPLES: [u64; MAX] = [0; MAX];
+    const DEPTH: usize = 16;
+    const MAX: usize = 1 << 17;
+    static mut SAMPLES: [[u64; DEPTH]; MAX] = [[0; DEPTH]; MAX];
     static COUNT: AtomicUsize = AtomicUsize::new(0);
 
     #[repr(C)]
@@ -37,11 +40,29 @@ mod sampler {
     }
 
     extern "C" fn on_prof(_sig: i32, _info: *mut u8, ctx: *mut u8) {
-        // ucontext_t.uc_mcontext.gregs[REG_RIP]
-        let rip = unsafe { *(ctx.add(40 + 16 * 8) as *const u64) };
+        // ucontext_t.uc_mcontext.gregs[REG_RIP / REG_RBP / REG_RSP]
+        let greg = |n: usize| unsafe { *(ctx.add(40 + n * 8) as *const u64) };
+        let (rip, mut rbp, rsp) = (greg(16), greg(10), greg(15));
         let i = COUNT.fetch_add(1, Ordering::Relaxed);
         if i < MAX {
-            unsafe { SAMPLES[i] = rip };
+            let mut chain = [0u64; DEPTH];
+            chain[0] = rip;
+            // Follow the frame-pointer chain while it stays on this stack.
+            let mut n = 1;
+            while n < DEPTH && rbp >= rsp && rbp < rsp + (8 << 20) && rbp % 8 == 0 {
+                let ret = unsafe { *((rbp + 8) as *const u64) };
+                let next = unsafe { *(rbp as *const u64) };
+                if ret == 0 {
+                    break;
+                }
+                chain[n] = ret;
+                n += 1;
+                if next <= rbp {
+                    break;
+                }
+                rbp = next;
+            }
+            unsafe { SAMPLES[i] = chain };
         }
     }
 
@@ -54,7 +75,7 @@ mod sampler {
         }
     }
 
-    pub fn stop() -> Vec<u64> {
+    pub fn stop() -> Vec<[u64; DEPTH]> {
         unsafe {
             let t = Itimerval { interval: Timeval { sec: 0, usec: 0 }, value: Timeval { sec: 0, usec: 0 } };
             setitimer(2, &t, std::ptr::null_mut());
@@ -100,7 +121,9 @@ fn main() {
         let samples = sampler::stop();
         let mut out = format!("marker {:x}\n", rh_prof_marker as usize);
         for s in samples {
-            out.push_str(&format!("{:x}\n", s));
+            let line: Vec<String> = s.iter().take_while(|a| **a != 0).map(|a| format!("{:x}", a)).collect();
+            out.push_str(&line.join(" "));
+            out.push('\n');
         }
         std::fs::write("prof.out", out).unwrap();
         if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
