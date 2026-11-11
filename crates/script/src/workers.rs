@@ -289,6 +289,8 @@ impl ScriptHost {
                     let host = &mut w.host;
                     for text in inbox {
                         host.enter(&mut wenv, |realm| {
+                            // Each delivered message is a task of the worker.
+                            realm.begin_task();
                             let v = Value::str(&text);
                             call_hook(realm, "__worker_receive", &[v]);
                         });
