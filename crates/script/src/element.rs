@@ -739,6 +739,10 @@ fn e_closest(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
 // geometry ---------------------------------------------------------------------
 
 pub(crate) fn node_rect(n: NodeRef) -> rabbithole_gfx::Rect {
+    if n.doc & crate::host::FRAME_DOC != 0 {
+        let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
+        return with_env(|env| env.frame_node_rect(frame, n.node)).unwrap_or_default();
+    }
     if n.doc != 0 {
         return rabbithole_gfx::Rect::default();
     }

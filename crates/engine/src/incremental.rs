@@ -192,6 +192,21 @@ fn touches_sheets(doc: &Document, m: &Mutation) -> bool {
 }
 
 impl Engine {
+    /// Computed style of an element that has no stored style because it
+    /// is not rendered (inside a `display: none` subtree): computed along
+    /// its ancestor chain. Styles must be flushed first.
+    pub fn unrendered_style(&self, page: &Page, node: NodeId) -> Option<std::rc::Rc<rabbithole_style::ComputedStyle>> {
+        page.doc.element(node)?;
+        let se = page.incr.style.as_ref()?;
+        let base_str = page.base_url.to_string();
+        let opts = StyleOptions {
+            state: &page.state,
+            resolve_url: &|base, raw| resolve_url(base, raw),
+            document_base: &base_str,
+        };
+        se.style_chain(&page.doc, &opts, node)
+    }
+
     /// Bring `page.styles` up to date with the DOM, stylesheets, viewport
     /// and dynamic state, restyling only what changed. Layout is marked
     /// dirty (see [`Engine::flush_layout`]).
@@ -202,14 +217,15 @@ impl Engine {
             page.doc.track_mutations(true);
             MutationLog { entries: Vec::new(), overflow: true }
         };
-        // Scripts may add/remove `<style>`/`<link>` elements or insert rules
-        // (CSS-in-JS): re-collect the sheets when their sources changed.
-        let scripted = page.script.host.is_some() || page.script.scripts_ran || page.script.dom_scripted;
+        // Scripts (this document's, a parent frame's, or evaluated from
+        // outside) may add/remove `<style>`/`<link>` elements, change their
+        // text or insert rules (CSS-in-JS): re-collect the sheets when
+        // their sources changed.
         // CSSOM edits and constructed / adopted sheets live outside the
         // node tree (not in the mutation log).
         let side = side_sheet_signature(&page.doc);
         let side_changed = std::mem::replace(&mut page.incr.side_sheets, side) != side;
-        if scripted && (side_changed || log.overflow || log.entries.iter().any(|m| touches_sheets(&page.doc, m))) {
+        if side_changed || log.overflow || log.entries.iter().any(|m| touches_sheets(&page.doc, m)) {
             let sig = stylesheet_signature(&page.doc);
             if sig != page.sheet_signature {
                 page.sheet_signature = sig;

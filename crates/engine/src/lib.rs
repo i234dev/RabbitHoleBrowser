@@ -1179,7 +1179,7 @@ impl Engine {
     /// changes only (layout stays dirty until a geometry query or paint).
     pub fn computed_style_now(&self, page: &mut Page, node: NodeId) -> Option<Rc<rabbithole_style::ComputedStyle>> {
         self.flush_style(page);
-        page.styles.get(node).cloned()
+        page.styles.get(node).cloned().or_else(|| self.unrendered_style(page, node))
     }
 
     /// Bring layout + display list up to date (images, scroll offsets or

@@ -841,7 +841,8 @@ impl StyleEngine {
     }
 
     /// Style of one element computed from scratch along its ancestor chain
-    /// (no stored state used). `None` when not rendered or detached.
+    /// (no stored state used), also inside `display: none` subtrees (as
+    /// `getComputedStyle` needs). `None` when detached.
     pub fn style_chain(&self, doc: &Document, opts: &StyleOptions, target: NodeId) -> Option<Rc<ComputedStyle>> {
         let html = doc.html_element()?;
         let mut chain = Vec::new();
@@ -872,9 +873,6 @@ impl StyleEngine {
                 root_fs = out.style.font_size;
             }
             let style = out.style;
-            if style.display.is_none() && node != target {
-                return None;
-            }
             vars = out.vars;
             parent = style;
         }

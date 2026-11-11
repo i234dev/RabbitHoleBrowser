@@ -250,6 +250,29 @@ impl Engine {
     /// Reconcile the page's child frames with its `<iframe>` elements and
     /// their laid-out sizes; start loads, resize and repaint children.
     /// Called after every layout of the page.
+    /// Resize the viewport of child frame `id` to its iframe's current
+    /// content box (the parent's layout must be up to date), so the
+    /// frame's media queries see it before the next frame sync.
+    pub(crate) fn update_frame_viewport(&self, page: &mut Page, id: u64) {
+        let Some(i) = page.frames.children.iter().position(|c| c.id == id) else { return };
+        let node = page.frames.children[i].node;
+        let Some(r) = page.frame_content_rect(node) else { return };
+        let s = (r.w.max(0.0), r.h.max(0.0));
+        let c = &mut page.frames.children[i];
+        if (s.0 - c.size.0).abs() <= 0.01 && (s.1 - c.size.1).abs() <= 0.01 {
+            return;
+        }
+        c.size = s;
+        c.dirty = true;
+        if let Some(p) = c.page.as_mut() {
+            let vp = Viewport { width: s.0.max(1.0), height: s.1.max(1.0) };
+            if p.viewport != vp {
+                p.viewport = vp;
+                p.script.dom_dirty = true;
+            }
+        }
+    }
+
     pub(crate) fn sync_frames(&self, page: &mut Page) {
         let iframes: Vec<NodeId> = if page.frame_depth >= MAX_DEPTH {
             Vec::new()
