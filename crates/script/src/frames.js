@@ -8,6 +8,16 @@
   const SELF = info(-1, 'self', 0);
   const ids = new WeakMap();
   const proxies = new Map();
+  // ECMAScript globals a same-origin frame's WindowProxy exposes (served
+  // from this realm, see windowFor).
+  const BUILTINS = new Set(['JSON', 'Math', 'Reflect', 'Atomics', 'Intl', 'Object', 'Function', 'Array', 'String', 'Number', 'Boolean',
+    'Symbol', 'BigInt', 'Date', 'RegExp', 'Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError',
+    'AggregateError', 'Map', 'Set', 'WeakMap', 'WeakSet', 'WeakRef', 'FinalizationRegistry', 'Promise', 'Proxy', 'ArrayBuffer',
+    'SharedArrayBuffer', 'DataView', 'Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array',
+    'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array', 'parseInt', 'parseFloat', 'isNaN', 'isFinite',
+    'encodeURI', 'encodeURIComponent', 'decodeURI', 'decodeURIComponent', 'escape', 'unescape', 'NaN', 'Infinity', 'undefined',
+    'Iterator']);
+  const sameOrigin = (id) => info(id, 'document', 0) !== null;
 
   function cloneError(what) {
     const msg = "Failed to execute 'postMessage': " + what + ' could not be cloned.';
@@ -148,8 +158,16 @@
           const child = info(id, 'child', Number(key));
           return child < 0 ? undefined : windowFor(child);
         }
-        const v = t[key];
-        return v;
+        if (key in t) return t[key];
+        // A same-origin frame's own globals (JSON, Array, ...): the frame
+        // runs in another realm, so this realm's pristine built-ins stand
+        // in for them (scripts take JSON / Array from a fresh about:blank
+        // iframe to avoid a page's patched ones).
+        if (BUILTINS.has(key) && sameOrigin(id)) return g[key];
+        return undefined;
+      },
+      has(t, key) {
+        return key in t || (BUILTINS.has(key) && sameOrigin(id));
       },
       set(t, key, v) {
         if (key === 'location') { info(id, 'navigate', String(v)); return true; }
