@@ -432,3 +432,14 @@ fn typed_array_element_fast_paths() {
     eq("var u = new Uint16Array(2); u['1'] = 7; u['-0'] = 9; u['1.5'] = 3; u.foo = 4; u[1] + ',' + u[0] + ',' + u['1.5'] + ',' + u.foo + ',' + Object.keys(u).join()", "7,0,undefined,4,0,1,foo");
     eq("var t = new Uint8Array([1, 2, 3]); var s = 0; for (var k = 0; k < t.length; k++) s += t[k]; s + ',' + ('Infinity' in t) + ',' + ('2' in t) + ',' + ('3' in t)", "6,false,true,false");
 }
+
+#[test]
+fn lazy_methods() {
+    eq("var o = { m() { return 1; }, get g() { return 2; }, set s(v) { this.v = v; } }; o.s = 3; [o.m(), o.g, o.v, typeof o.m.prototype].join()", "1,2,3,undefined");
+    throws("var o = { m() {} }; new o.m()", "is not a constructor");
+    eq("class A { static s() { return 'S'; } m(x) { return x + this.k; } get k() { return 1; } #p() { return 'P'; } q() { return this.#p(); } } var a = new A(); [A.s(), a.m(1), a.q(), typeof A.prototype.m.prototype].join()", "S,2,P,undefined");
+    throws("class B { m() {} } new (new B().m)()", "is not a constructor");
+    eq("class C { m() { return 'c'; } } class D extends C { m() { return super.m() + 'd'; } } new D().m()", "cd");
+    eq("var o = { base: 1, m() { return [1, 2].map(x => x + this.base).join(); } }; o.m()", "2,3");
+    eq("var p = { m() { return 'p'; } }; var q = { __proto__: p, m() { return super.m() + 'q'; } }; q.m()", "pq");
+}

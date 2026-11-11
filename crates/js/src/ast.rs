@@ -426,9 +426,9 @@ pub enum ObjectProperty {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PropertyValue {
     Init(Expr),
-    Method(Function),
-    Getter(Function),
-    Setter(Function),
+    Method(std::rc::Rc<Function>),
+    Getter(std::rc::Rc<Function>),
+    Setter(std::rc::Rc<Function>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,17 +546,17 @@ pub enum ClassMember {
     Constructor(Function),
     Method {
         key: PropertyKey,
-        value: Function,
+        value: std::rc::Rc<Function>,
         is_static: bool,
     },
     Getter {
         key: PropertyKey,
-        value: Function,
+        value: std::rc::Rc<Function>,
         is_static: bool,
     },
     Setter {
         key: PropertyKey,
-        value: Function,
+        value: std::rc::Rc<Function>,
         is_static: bool,
     },
     Field {

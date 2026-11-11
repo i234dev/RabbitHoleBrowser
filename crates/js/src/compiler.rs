@@ -319,7 +319,12 @@ pub fn compile_lazy(code: &FunctionCode) -> CResult<Rc<FunctionCode>> {
     c.fns.push(parent);
     let idx = c.compile_function(&lz.func, Some(&lz.name))?;
     c.check_internal()?;
-    let parent = c.fns.pop().unwrap();
+    let mut parent = c.fns.pop().unwrap();
+    if code.flags.is_method {
+        let mut flags = parent.functions[idx as usize].flags;
+        flags.is_method = true;
+        set_flags(&mut parent.functions[idx as usize], flags);
+    }
     Ok(parent.functions[idx as usize].clone())
 }
 
@@ -2994,7 +2999,7 @@ impl Compiler {
                                     self.emit_string(&n);
                                 }
                             }
-                            let idx = self.compile_method(f, static_name.as_deref(), false)?;
+                            let idx = self.compile_method_rc(f, static_name.as_deref())?;
                             self.emit(Op::MakeClosure(idx));
                             match value {
                                 PropertyValue::Method(_) => self.emit(Op::DefineMethod(1)),
@@ -3007,6 +3012,16 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// A method / accessor from the source (compiled lazily like functions).
+    fn compile_method_rc(&mut self, f: &Rc<Function>, name: Option<&str>) -> CResult<u32> {
+        let idx = self.compile_function_rc(f, name)?;
+        let fs = self.fs();
+        let mut flags = fs.functions[idx as usize].flags;
+        flags.is_method = true;
+        set_flags(&mut fs.functions[idx as usize], flags);
+        Ok(idx)
     }
 
     fn compile_method(&mut self, f: &Function, name: Option<&str>, _is_static: bool) -> CResult<u32> {
@@ -3122,7 +3137,7 @@ impl Compiler {
                     }
                     self.emit(Op::Dup);
                     let name = self.emit_class_key(key)?;
-                    let idx = self.compile_method(value, name.as_deref(), *is_static)?;
+                    let idx = self.compile_method_rc(value, name.as_deref())?;
                     self.emit(Op::MakeClosure(idx));
                     let flag = if matches!(key, PropertyKey::Private(_)) { 0 } else { 0 };
                     match m {

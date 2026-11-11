@@ -2335,9 +2335,9 @@ impl<'a> Parser<'a> {
         if self.is_punct("(") {
             let f = self.parse_method_function(pos, is_async, is_generator, accessor, false)?;
             let value = match accessor {
-                Some(true) => PropertyValue::Getter(f),
-                Some(false) => PropertyValue::Setter(f),
-                None => PropertyValue::Method(f),
+                Some(true) => PropertyValue::Getter(std::rc::Rc::new(f)),
+                Some(false) => PropertyValue::Setter(std::rc::Rc::new(f)),
+                None => PropertyValue::Method(std::rc::Rc::new(f)),
             };
             return Ok(ObjectProperty::Property {
                 key,
@@ -2608,9 +2608,9 @@ impl<'a> Parser<'a> {
             }
             let f = self.parse_method_function(pos, is_async, is_generator, accessor, false)?;
             return Ok(match accessor {
-                Some(true) => ClassMember::Getter { key, value: f, is_static },
-                Some(false) => ClassMember::Setter { key, value: f, is_static },
-                None => ClassMember::Method { key, value: f, is_static },
+                Some(true) => ClassMember::Getter { key, value: std::rc::Rc::new(f), is_static },
+                Some(false) => ClassMember::Setter { key, value: std::rc::Rc::new(f), is_static },
+                None => ClassMember::Method { key, value: std::rc::Rc::new(f), is_static },
             });
         }
         if is_async || is_generator || accessor.is_some() {
