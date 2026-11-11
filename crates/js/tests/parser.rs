@@ -87,7 +87,7 @@ fn regex_vs_division() {
 fn templates() {
     let e = expr("`a${ {b: 1}.b }c${`d${e}`}`");
     let ExprKind::Template { quasis, raws, expressions } = e.kind else { panic!() };
-    assert_eq!(quasis, vec![Some("a".into()), Some("c".into()), Some("".into())]);
+    assert_eq!(*quasis, vec![Some("a".into()), Some("c".into()), Some("".into())]);
     assert_eq!(raws.len(), 3);
     assert_eq!(expressions.len(), 2);
     let e = expr("tag`x\\ny${1}`");
@@ -151,11 +151,12 @@ fn destructuring() {
     assert!(rest.is_some());
     // assignment destructuring
     let e = expr("[a, b.c, {d = 3}] = arr");
-    let ExprKind::Assign { target: Pattern::Array { elements, .. }, .. } = e.kind else { panic!() };
+    let ExprKind::Assign { target, .. } = e.kind else { panic!() };
+    let Pattern::Array { elements, .. } = *target else { panic!() };
     assert!(matches!(elements[1], Some(Pattern::Expr(_))));
     assert!(matches!(elements[2], Some(Pattern::Object { .. })));
     let e = expr("({ a, b: [c] } = o)");
-    assert!(matches!(e.kind, ExprKind::Assign { target: Pattern::Object { .. }, .. }));
+    assert!(matches!(e.kind, ExprKind::Assign { target, .. } if matches!(*target, Pattern::Object { .. })));
     // swap idiom
     parse("[a, b] = [b, a];");
     // params

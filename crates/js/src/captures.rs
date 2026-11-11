@@ -329,7 +329,7 @@ impl Analyzer {
             }
             ExprKind::TaggedTemplate { tag, expressions, .. } => {
                 self.expr(tag);
-                for x in expressions {
+                for x in expressions.iter() {
                     self.expr(x);
                 }
             }

@@ -296,20 +296,21 @@ pub enum ExprKind {
     /// Quasis are the cooked strings (`None` when the cooked value is
     /// invalid, which is only allowed in tagged templates); `raws` keep the
     /// raw text for `String.raw` and tag functions.
+    // (Rare, large parts are boxed to keep `Expr` small.)
     Template {
-        quasis: Vec<Option<String>>,
-        raws: Vec<String>,
+        quasis: Box<Vec<Option<String>>>,
+        raws: Box<Vec<String>>,
         expressions: Vec<Expr>,
     },
     TaggedTemplate {
         tag: Box<Expr>,
-        quasis: Vec<Option<String>>,
-        raws: Vec<String>,
-        expressions: Vec<Expr>,
+        quasis: Box<Vec<Option<String>>>,
+        raws: Box<Vec<String>>,
+        expressions: Box<Vec<Expr>>,
     },
     Regex {
-        pattern: String,
-        flags: String,
+        pattern: Box<str>,
+        flags: Box<str>,
     },
     Array(Vec<ArrayElement>),
     Object(Vec<ObjectProperty>),
@@ -337,7 +338,7 @@ pub enum ExprKind {
     },
     Assign {
         op: AssignOp,
-        target: Pattern,
+        target: Box<Pattern>,
         value: Box<Expr>,
     },
     Conditional {

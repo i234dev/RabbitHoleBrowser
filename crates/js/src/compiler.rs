@@ -2244,7 +2244,7 @@ impl Compiler {
                 let idx = fs.templates.len() as u32;
                 fs.templates.push((quasis.iter().map(|q| q.as_ref().map(|s| JsStr::new(s))).collect(), raws.iter().map(|r| JsStr::new(r)).collect()));
                 self.emit(Op::TemplateObject(idx));
-                for ex in expressions {
+                for ex in expressions.iter() {
                     self.compile_expr(ex)?;
                 }
                 self.emit(Op::Call((expressions.len() + 1) as u16, crate::bytecode::NO_DESC));

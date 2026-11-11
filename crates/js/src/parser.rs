@@ -1269,7 +1269,7 @@ impl<'a> Parser<'a> {
                 target,
                 value,
             } => Ok(Pattern::Assign {
-                target: Box::new(target),
+                target,
                 default: value,
             }),
             _ => Err(self.error_at(pos, "Invalid assignment target")),
@@ -1327,7 +1327,7 @@ impl<'a> Parser<'a> {
         let value = Box::new(self.parse_assignment()?);
         Ok(Expr {
             pos,
-            kind: ExprKind::Assign { op, target, value },
+            kind: ExprKind::Assign { op, target: Box::new(target), value },
         })
     }
 
@@ -2049,9 +2049,9 @@ impl<'a> Parser<'a> {
                         pos,
                         kind: ExprKind::TaggedTemplate {
                             tag: Box::new(expr),
-                            quasis,
-                            raws,
-                            expressions,
+                            quasis: Box::new(quasis),
+                            raws: Box::new(raws),
+                            expressions: Box::new(expressions),
                         },
                     };
                 }
@@ -2108,8 +2108,8 @@ impl<'a> Parser<'a> {
             TokenKind::Template { .. } => {
                 let (quasis, raws, expressions) = self.parse_template_parts(false)?;
                 ExprKind::Template {
-                    quasis,
-                    raws,
+                    quasis: Box::new(quasis),
+                    raws: Box::new(raws),
                     expressions,
                 }
             }
@@ -2119,7 +2119,7 @@ impl<'a> Parser<'a> {
                 self.tok = re;
                 let TokenKind::Regex { pattern, flags } = self.tok.kind.clone() else { unreachable!() };
                 self.advance()?;
-                ExprKind::Regex { pattern, flags }
+                ExprKind::Regex { pattern: pattern.into(), flags: flags.into() }
             }
             TokenKind::Punct("(") => return self.parse_paren(),
             TokenKind::Punct("[") => return self.parse_array_literal(),
@@ -2375,7 +2375,7 @@ impl<'a> Parser<'a> {
                     pos,
                     kind: ExprKind::Assign {
                         op: AssignOp::Assign,
-                        target,
+                        target: Box::new(target),
                         value: Box::new(default),
                     },
                 }),
