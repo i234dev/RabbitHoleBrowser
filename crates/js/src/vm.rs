@@ -416,6 +416,68 @@ impl Realm {
         Ok(true)
     }
 
+    /// `CallR` of `f.call(this, ...)`, `f.apply(this, array)` or a bound
+    /// function whose target is a plain closure: the target's frame is
+    /// pushed directly (no native call and nested run). Returns false when
+    /// the general path is needed.
+    pub(crate) fn try_call_indirect(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
+        let cb = self.frames[fi].base as usize + b;
+        let Some(id) = self.vstack[cb].as_object() else { return Ok(false) };
+        let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
+        let mut buf = std::mem::take(&mut self.arg_buf);
+        buf.clear();
+        let (target, this) = match &obj.kind {
+            ObjectKind::Native(n) if n.intrinsic == INTRINSIC_FN_CALL => {
+                let Some(t) = self.vstack[cb + 1].as_object() else { return Ok(false) };
+                let this = if argc > 0 { self.vstack[cb + 2].clone() } else { Value::Undefined };
+                if argc > 1 {
+                    buf.extend_from_slice(&self.vstack[cb + 3..cb + 2 + argc]);
+                }
+                (t, this)
+            }
+            ObjectKind::Native(n) if n.intrinsic == INTRINSIC_FN_APPLY => {
+                let Some(t) = self.vstack[cb + 1].as_object() else { return Ok(false) };
+                let this = if argc > 0 { self.vstack[cb + 2].clone() } else { Value::Undefined };
+                if argc > 1 {
+                    let list = &self.vstack[cb + 3];
+                    if let Some(l) = list.as_object() {
+                        match self.heap.try_get(l).map(|o| &o.kind) {
+                            Some(ObjectKind::Array { elements, length }) if elements.len() == *length as usize && elements.iter().all(|v| !v.is_empty()) && elements.len() <= 1024 => {
+                                buf.extend_from_slice(elements);
+                            }
+                            _ => {
+                                self.arg_buf = buf;
+                                return Ok(false);
+                            }
+                        }
+                    } else if !list.is_nullish() {
+                        self.arg_buf = buf;
+                        return Ok(false);
+                    }
+                }
+                (t, this)
+            }
+            ObjectKind::Bound(bf) => {
+                buf.extend_from_slice(&bf.args);
+                buf.extend_from_slice(&self.vstack[cb + 2..cb + 2 + argc]);
+                (bf.target, bf.this.clone())
+            }
+            _ => {
+                self.arg_buf = buf;
+                return Ok(false);
+            }
+        };
+        let ok = match self.heap.try_get(target).map(|o| &o.kind) {
+            Some(ObjectKind::Function(_)) => self.push_plain_call(target, &this, &buf, b as u32, false),
+            _ => Ok(false),
+        };
+        buf.clear();
+        if buf.capacity() <= 64 {
+            self.arg_buf = buf;
+        }
+        ok
+    }
+
     /// Push the frame for calling plain closure `id` (no `arguments`
     /// object, rest parameter, generator / async or class constructor) with
     /// arguments from a slice, e.g. a callback called by a native function.
@@ -1735,6 +1797,9 @@ impl Realm {
                         tick!();
                         sync!();
                         if tri!(self.try_fast_call(fi, b as usize, argc as usize)) {
+                            continue 'reload;
+                        }
+                        if tri!(self.try_call_indirect(fi, b as usize, argc as usize)) {
                             continue 'reload;
                         }
                         if tri!(self.try_native_call(fi, b as usize, argc as usize)) {
@@ -3206,6 +3271,20 @@ impl Realm {
             V::Number(n) if (n as u32) as f64 == n && n < 4294967295.0 => PropertyKey::index(n as u32),
             other => self.to_property_key(other.to_value())?,
         };
+        if let (true, PropertyKey::String(k)) = (obj.is_object(), &key) {
+            // `obj[name]` with a string name: the shared cache by (shape, name).
+            if let Some(ic) = self.mega_get(&obj, k.bits()) {
+                if let Some(prop) = self.ic_get(&ic, &obj) {
+                    if prop.flags & ACCESSOR == 0 {
+                        return Ok(prop.value.clone());
+                    }
+                }
+            }
+            let v = self.get(obj.clone(), key.clone())?;
+            let rec = self.ic_fill_get(&obj, &key);
+            self.mega_put(&obj, &key, rec);
+            return Ok(v);
+        }
         self.get(obj, key)
     }
 
@@ -3522,10 +3601,29 @@ impl Realm {
             None => return self.type_error("'super' keyword unexpected here"),
         };
         let proto = self.get_prototype_of(home)?;
-        match proto {
-            Some(p) => self.get_from_object(p, &key, this),
-            None => Ok(Value::Undefined),
+        let Some(p) = proto else { return Ok(Value::Undefined) };
+        // `super.m` in class hierarchies: the lookup starts at the home
+        // object's prototype, cached like an ordinary read from it.
+        if let PropertyKey::String(k) = &key {
+            let start = Value::Object(p);
+            if let Some(ic) = self.mega_get(&start, k.bits()) {
+                let hit = match self.ic_get(&ic, &start) {
+                    Some(prop) if prop.flags & ACCESSOR == 0 => Some(Ok(prop.value.clone())),
+                    Some(prop) => prop.getter().cloned().map(Err),
+                    None => None,
+                };
+                match hit {
+                    Some(Ok(v)) => return Ok(v),
+                    Some(Err(g)) if !g.is_undefined() => return self.call(g, this, &[]),
+                    _ => {}
+                }
+            }
+            let v = self.get_from_object(p, &key, this)?;
+            let rec = self.ic_fill_get(&start, &key);
+            self.mega_put(&start, &key, rec);
+            return Ok(v);
         }
+        self.get_from_object(p, &key, this)
     }
 
     fn super_set(&mut self, fi: usize, key: PropertyKey, v: Value) -> JsResult<()> {
@@ -3993,6 +4091,10 @@ pub const INTRINSIC_CHAR_CODE_AT: u8 = 1;
 pub const INTRINSIC_FROM_CHAR_CODE: u8 = 2;
 /// `Math.imul`.
 pub const INTRINSIC_IMUL: u8 = 3;
+/// `Function.prototype.call` (see [`Realm::try_call_indirect`]).
+pub const INTRINSIC_FN_CALL: u8 = 4;
+/// `Function.prototype.apply`.
+pub const INTRINSIC_FN_APPLY: u8 = 5;
 
 /// Instructions (backward jumps and calls) between GC / watchdog checks.
 pub(crate) const TICK_INTERVAL: u32 = 1024;

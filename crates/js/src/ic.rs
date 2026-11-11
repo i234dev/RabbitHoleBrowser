@@ -69,6 +69,11 @@ fn mega_index(shape: u32, key: u64) -> usize {
     (h >> (64 - MEGA_BITS)) as usize
 }
 
+/// Neither a receiver with shape `shape` and prototype `mid` (`NO_OBJ`:
+/// none) nor its prototype chain has the key: the read is `undefined`.
+/// Valid while the prototype epoch is `mid_shape`.
+pub const IC_ABSENT: u8 = 12;
+
 /// Longest prototype chain walked when filling a deep cache.
 const MAX_CHAIN: usize = 48;
 
@@ -205,6 +210,13 @@ impl Realm {
                 } else {
                     None
                 }
+            }
+            IC_ABSENT => {
+                let o = self.heap.try_get(recv.as_object()?)?;
+                if o.props.shape_id() != ic.shape || o.proto.map(|p| p.0).unwrap_or(NO_OBJ) != ic.mid || crate::shape::proto_epoch() != ic.mid_shape {
+                    return None;
+                }
+                Some(&ABSENT_PROPERTY)
             }
             IC_OWN_DICT => None,
             _ => None,
@@ -356,7 +368,15 @@ impl Realm {
         }
         // Up to two prototype hops; every object passed must lack the key
         // (shape ids prove the absence stays true).
-        let Some(p1) = o.proto else { return ic };
+        let Some(p1) = o.proto else {
+            if plain_kind(&o.kind) {
+                ic.kind = IC_ABSENT;
+                ic.shape = o.props.shape_id();
+                ic.mid = NO_OBJ;
+                ic.mid_shape = crate::shape::proto_epoch();
+            }
+            return ic;
+        };
         let h1 = self.obj(p1);
         if !plain_kind(&h1.kind) || virtual_length(&h1.kind) {
             return ic;
@@ -398,6 +418,11 @@ impl Realm {
             ic.holder = holder.0;
             ic.holder_shape = hs;
             ic.slot = slot;
+        } else if plain_kind(&o.kind) && self.deep_absent(Some(p1), key) {
+            ic.kind = IC_ABSENT;
+            ic.shape = o.props.shape_id();
+            ic.mid = p1.0;
+            ic.mid_shape = epoch;
         }
         ic
     }

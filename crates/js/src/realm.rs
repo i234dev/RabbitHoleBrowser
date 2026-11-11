@@ -396,6 +396,8 @@ impl Realm {
             (Some(Value::Object(self.intrinsics.string_proto)), "charCodeAt", crate::vm::INTRINSIC_CHAR_CODE_AT),
             (string_ctor, "fromCharCode", crate::vm::INTRINSIC_FROM_CHAR_CODE),
             (math, "imul", crate::vm::INTRINSIC_IMUL),
+            (Some(Value::Object(self.intrinsics.function_proto)), "call", crate::vm::INTRINSIC_FN_CALL),
+            (Some(Value::Object(self.intrinsics.function_proto)), "apply", crate::vm::INTRINSIC_FN_APPLY),
         ];
         for (holder, name, tag) in marks {
             let Some(V::Object(h)) = holder.as_ref().map(Value::v) else { continue };

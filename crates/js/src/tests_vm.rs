@@ -637,3 +637,31 @@ fn legacy_regexp_statics() {
     eq("'x=1;y=2'.replace(/(\\w)=(\\d)/g, '$2'); RegExp.$1 + RegExp.$2 + RegExp['$&']", "y2y=2");
     eq("/q/.test('abc'); /(b)/.test('abc'); /zz/.exec('abc'); RegExp.$1", "b");
 }
+
+#[test]
+fn super_property_caches() {
+    let defs = "class A { m() { return 'A'; } get g() { return this.v; } } class B extends A { m() { return super.m() + 'B'; } get g() { return super.g * 2; } } class C extends B { m() { return super.m() + 'C'; } }";
+    eq(&format!("{defs} var c = new C(); c.v = 2; var r = []; for (var i = 0; i < 6; i++) {{ if (i == 3) A.prototype.m = function () {{ return 'a'; }}; if (i == 4) c.v = 5; r.push(c.m() + c.g); }} r.join()"), "ABC4,ABC4,ABC4,aBC4,aBC10,aBC10");
+    eq(&format!("{defs} var c = new C(); var r = []; for (var i = 0; i < 4; i++) {{ if (i == 2) Object.setPrototypeOf(B.prototype, {{ m() {{ return 'X'; }} }}); r.push(c.m()); }} r.join()"), "ABC,ABC,XBC,XBC");
+}
+
+#[test]
+fn absent_property_caches() {
+    eq("class A {} class B extends A {} var b = new B(); var r = []; for (var i = 0; i < 8; i++) { if (i == 2) A.prototype.x = 'a'; if (i == 4) b.x = 'own'; if (i == 6) delete b.x; r.push(String(b.x)); } r.join()", "undefined,undefined,a,a,own,own,a,a");
+    eq("var o = Object.create(null); var r = []; for (var i = 0; i < 4; i++) { if (i == 2) o.y = 1; r.push(String(o.y)); } r.join()", "undefined,undefined,1,1");
+    eq("var o = {}; var r = []; for (var i = 0; i < 4; i++) { if (i == 2) Object.setPrototypeOf(o, {z: 'p'}); r.push(String(o.z)); } r.join()", "undefined,undefined,p,p");
+    eq("var o = {}; var r = []; for (var i = 0; i < 4; i++) { if (i == 2) Object.prototype.w = 'op'; r.push(String(o.w)); } delete Object.prototype.w; r.join()", "undefined,undefined,op,op");
+    eq("var a = [1]; var r = []; for (var i = 0; i < 4; i++) { if (i == 2) Array.prototype.q = 'ap'; r.push(String(a.q)); } delete Array.prototype.q; r.join()", "undefined,undefined,ap,ap");
+    eq("var k = 'dyn'; var o = {}; var r = []; for (var i = 0; i < 4; i++) { if (i == 2) o.dyn = 3; r.push(String(o[k])); } r.join()", "undefined,undefined,3,3");
+}
+
+#[test]
+fn call_apply_and_bound_fast_paths() {
+    eq("function f(a, b) { return [this && this.n, a, b, arguments.length].join(); } var o = {n: 1}; [f.call(o, 2, 3), f.call(o), f.apply(o, [4, 5]), f.apply(o), f.apply(o, null), f.bind(o, 6)(7), f.bind(o)(8, 9, 10)].join('|')", "1,2,3,2|1,,,0|1,4,5,2|1,,,0|1,,,0|1,6,7,2|1,8,9,3");
+    eq("'use strict'; function g() { return this; } [typeof g.call(undefined), typeof g.call(5), g.bind(null)() === null, g.apply('s') === 's'].join()", "undefined,number,true,true");
+    eq("function h() { return typeof this; } [h.call(undefined), h.call(5), h.apply(null)].join()", "object,object,object");
+    eq("var s = 0; function add(x) { s += x; return s; } for (var i = 0; i < 100; i++) { add.call(null, i); add.apply(null, [1]); add.bind(null, 2)(); } s", "5250");
+    eq("function* gen() { yield this.v; } gen.call({v: 9}).next().value + ':' + Math.max.apply(null, [1, 5, 3]) + ':' + [].slice.call('abc').join('') + ':' + Array.prototype.concat.apply([1], [[2], [3]]).join('')", "9:5:abc:123");
+    eq("var r; try { (function f() { f.call(null); })(); } catch (e) { r = e instanceof RangeError; } r", "true");
+    eq("function k(a) { return a; } var arr = [1,,3]; [k.apply(null, arr), k.apply(null, {length: 1, 0: 'x'}), k.call.call(k, null, 'cc')].join()", "1,x,cc");
+}

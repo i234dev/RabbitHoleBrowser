@@ -31,6 +31,9 @@ pub struct Property {
     pub flags: u8,
 }
 
+/// What a read of an absent property finds (inline caches of misses).
+pub(crate) static ABSENT_PROPERTY: Property = Property { value: Value::Undefined, acc: None, flags: 0 };
+
 impl Property {
     #[inline]
     pub fn data(value: Value, flags: u8) -> Property {
