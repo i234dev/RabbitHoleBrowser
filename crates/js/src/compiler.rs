@@ -718,6 +718,7 @@ impl Compiler {
             depths: Vec::new(),
             max_depth: 0,
             source: Some(self.source.clone()),
+            source_span: (f.span.1 > f.span.0).then_some(f.span),
             filename: self.fs_ref().filename.clone(),
             module: self.module,
             lazy: Some(Box::new(lazy)),
