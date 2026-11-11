@@ -445,5 +445,15 @@ tools versus the new `snapshot` (default budget) and `read`:
 | bbc.com/news | 62,706 | 4,659 | 2,304 | 2,648 |
 | html.duckduckgo.com (results page) | 7,304 | 2,336 | 874 | 1,193 |
 
+`open` returns the [page summary](#the-page-summary); the full snapshot is
+opt-in (whole tool output, fences and notes included; measured 2026-11-11):
+
+| Page | `open` (summary) | `open snapshot=true` |
+|------|-----------------:|---------------------:|
+| en.wikipedia.org/wiki/Rabbit | 252 | 1,243 |
+| news.ycombinator.com | 74 | 498 |
+| github.com/rust-lang/rust | 325 | 1,577 |
+| bbc.com/news | 221 | 1,927 |
+
 Page load time is dominated by the engine (script execution and full
 restyles on large pages); the auto-wait adds at most its cap.
