@@ -54,8 +54,9 @@ fn srcdoc_frame_is_laid_out_and_painted_into_the_parent() {
     let inner = r#"<style>html,body{margin:0;background:rgb(255,0,0)}</style><p>inside</p>"#;
     let mut page = load(
         &mut e,
-        &format!(r#"<body style="margin:0"><iframe id="f" style="border:0;width:200px;height:100px" srcdoc="{}"></iframe></body>"#, escape_attr(inner)),
+        &format!(r#"<body style="margin:0"><iframe id="f" style="border:0;width:200px;height:100px" srcdoc="{}"></iframe><noscript><iframe srcdoc="fallback"></iframe></noscript></body>"#, escape_attr(inner)),
     );
+    // The `<noscript>` fallback frame is inert with scripting on.
     assert_eq!(page.frames.children.len(), 1);
     let c = child(&mut page, 0);
     assert_eq!(c.viewport.width, 200.0);

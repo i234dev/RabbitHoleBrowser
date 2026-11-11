@@ -489,10 +489,16 @@ impl Engine {
         {
             let mut env = EngineEnv { engine: self, page };
             // Watchdog: each script gets a few seconds and the whole load a
-            // bounded total, so a runaway script cannot freeze the browser.
-            let load_deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            // bounded total, so a runaway script cannot hang the page. The
+            // budget grows with the source size: compiling a multi-MB app
+            // bundle alone takes seconds (the deadline is only checked
+            // while running, so a fixed 3 s killed big bundles right after
+            // compilation).
+            let budget = |bytes: usize| std::time::Duration::from_millis(2000 * bytes as u64 / (1024 * 1024));
+            let total: usize = classic.iter().chain(deferred.iter()).chain(asyncs.iter()).map(|s| s.source.len()).sum();
+            let load_deadline = std::time::Instant::now() + (std::time::Duration::from_secs(8) + budget(total)).min(std::time::Duration::from_secs(40));
             for s in classic.iter().chain(deferred.iter()).chain(asyncs.iter()) {
-                let per_script = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                let per_script = std::time::Instant::now() + (std::time::Duration::from_secs(3) + budget(s.source.len())).min(std::time::Duration::from_secs(30));
                 host.realm().set_deadline(Some(per_script.min(load_deadline)));
                 let name = s.url.as_ref().map(|u| u.to_string()).unwrap_or_else(|| format!("{}#inline", env.page.url));
                 let debug = std::env::var_os("RH_DEBUG_SCRIPTS").is_some();

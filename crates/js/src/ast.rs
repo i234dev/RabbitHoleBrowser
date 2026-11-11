@@ -515,6 +515,9 @@ pub struct Function {
     pub is_generator: bool,
     pub strict: bool,
     pub pos: Pos,
+    /// Byte range of the source text (`Function.prototype.toString`);
+    /// (0, 0) when unknown.
+    pub span: (u32, u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -539,6 +542,8 @@ pub struct Class {
     pub superclass: Option<Box<Expr>>,
     pub members: Vec<ClassMember>,
     pub pos: Pos,
+    /// Byte range of the source text; (0, 0) when unknown.
+    pub span: (u32, u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -87,9 +87,10 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
         _ => return realm.type_error("Function.prototype.toString requires that 'this' be a Function"),
     };
     let s = match &realm.obj(id).kind {
-        ObjectKind::Function(c) => match &c.code.source {
-            Some(_) => format!("function {}() {{ [native code] }}", c.code.name),
-            None => format!("function {}() {{ [native code] }}", c.code.name),
+        ObjectKind::Function(c) => match (&c.code.source, c.code.source_span) {
+            (Some(src), Some((a, b))) if src.get(a as usize..b as usize).is_some() => src[a as usize..b as usize].to_string(),
+            _ if c.code.flags.is_class_constructor => format!("class {} {{ [native code] }}", c.code.name),
+            _ => format!("function {}() {{ [native code] }}", c.code.name),
         },
         ObjectKind::Native(n) => format!("function {}() {{ [native code] }}", n.name),
         _ => "function () { [native code] }".to_string(),

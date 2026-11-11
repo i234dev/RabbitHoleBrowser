@@ -438,7 +438,13 @@ pub(crate) fn run_ready_script_fetches(realm: &mut Realm) -> bool {
                 if dbg {
                     eprintln!("[script] async start {url} ({} bytes)", source.len());
                 }
+                // Large inserted bundles get time to compile and run (the
+                // caller's deadline is meant for event handlers / timers).
+                let saved_deadline = realm.deadline;
+                let budget = std::time::Duration::from_millis(3000 + 2000 * source.len() as u64 / (1024 * 1024)).min(std::time::Duration::from_secs(30));
+                realm.set_deadline(Some(std::time::Instant::now() + budget));
                 let r = if is_module { realm.eval_module(&source, &url) } else { realm.eval(&source, &url) };
+                realm.set_deadline(saved_deadline.map(|d| d.max(std::time::Instant::now() + std::time::Duration::from_millis(500))));
                 if dbg {
                     eprintln!("[script] async done  {url} in {:?}", t.elapsed());
                 }

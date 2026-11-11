@@ -157,6 +157,8 @@ struct LoopCtx {
 }
 
 struct FnState {
+    /// Byte range of the function's source text.
+    span: Option<(u32, u32)>,
     ops: Vec<Op>,
     positions: Vec<Pos>,
     constants: Vec<Value>,
@@ -202,6 +204,7 @@ impl FnState {
         let mut scopes = Vec::new();
         scopes.push(CScope::new(true, true));
         FnState {
+            span: None,
             ops: Vec::new(),
             positions: Vec::new(),
             constants: Vec::new(),
@@ -1251,6 +1254,7 @@ impl Compiler {
         let filename = self.fs_ref().filename.clone();
         let mut fs = FnState::new(name, flags, false, filename);
         fs.source = Some(self.source.clone());
+        fs.span = (f.span.1 > f.span.0).then_some(f.span);
         fs.class_depth = self.fs_ref().class_depth;
         let (captured, temp_keys) = self.captured_for(f);
         fs.captured = captured;
@@ -3108,10 +3112,12 @@ impl Compiler {
             }
         }
         // Constructor
-        let ctor_fn: Function = match c.members.iter().find_map(|m| if let ClassMember::Constructor(f) = m { Some(f.clone()) } else { None }) {
+        let mut ctor_fn: Function = match c.members.iter().find_map(|m| if let ClassMember::Constructor(f) = m { Some(f.clone()) } else { None }) {
             Some(f) => f,
             None => synth_constructor(has_super, c.pos),
         };
+        // The class's source text is its constructor's toString().
+        ctor_fn.span = c.span;
         let class_name = c.name.clone().unwrap_or_default();
         let ctor_idx = self.compile_function_with(&ctor_fn, Some(&class_name), move |fl| {
             fl.is_class_constructor = true;
@@ -3182,6 +3188,7 @@ impl Compiler {
                         is_generator: false,
                         strict: true,
                         pos: c.pos,
+                        span: (0, 0),
                     };
                     self.emit(Op::Swap); // proto ctor
                     self.emit(Op::Dup); // proto ctor ctor
@@ -3215,7 +3222,7 @@ impl Compiler {
                     optional: false,
                 } }) });
             }
-            let f = Function { name: None, params: vec![], body: FunctionBody::Block(stmts), is_arrow: false, is_async: false, is_generator: false, strict: true, pos };
+            let f = Function { name: None, params: vec![], body: FunctionBody::Block(stmts), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0) };
             let idx = self.compile_function_with(&f, Some(""), |fl| {
                 fl.is_field_init = true;
                 fl.is_method = true;
@@ -3267,7 +3274,7 @@ impl Compiler {
         // initializer as method called with this=ctor
         let pos = self.fs_ref().cur_pos;
         let value_expr = value.clone().unwrap_or(Expr { pos, kind: ExprKind::Undefined });
-        let f = Function { name: None, params: vec![], body: FunctionBody::Expr(Box::new(value_expr)), is_arrow: false, is_async: false, is_generator: false, strict: true, pos };
+        let f = Function { name: None, params: vec![], body: FunctionBody::Expr(Box::new(value_expr)), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0) };
         let key_name = match key {
             PropertyKey::Identifier(n) | PropertyKey::String(n) => Some(n.clone()),
             _ => None,
@@ -3358,9 +3365,10 @@ fn synth_constructor(derived: bool, pos: Pos) -> Function {
             is_generator: false,
             strict: true,
             pos,
+            span: (0, 0),
         }
     } else {
-        Function { name: None, params: vec![], body: FunctionBody::Block(vec![]), is_arrow: false, is_async: false, is_generator: false, strict: true, pos }
+        Function { name: None, params: vec![], body: FunctionBody::Block(vec![]), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0) }
     }
 }
 
@@ -3421,6 +3429,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         depths: tr.depths,
         max_depth: tr.max_depth,
         source: fs.source,
+        source_span: fs.span,
         filename: fs.filename,
         module,
     }

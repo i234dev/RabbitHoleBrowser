@@ -447,6 +447,8 @@ pub struct FunctionCode {
     pub templates: Vec<(Vec<Option<JsStr>>, Vec<JsStr>)>,
     /// Source text for `Function.prototype.toString`.
     pub source: Option<Rc<str>>,
+    /// Byte range of this function's text in `source`.
+    pub source_span: Option<(u32, u32)>,
     pub filename: Rc<str>,
     /// Module this code belongs to (`None` for classic scripts / eval).
     pub module: Option<u32>,

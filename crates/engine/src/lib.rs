@@ -1434,7 +1434,7 @@ fn has_inline_handlers(doc: &Document) -> bool {
 }
 
 /// Is the node inside a `<noscript>` element?
-fn in_noscript(doc: &rabbithole_dom::Document, mut n: NodeId) -> bool {
+pub(crate) fn in_noscript(doc: &rabbithole_dom::Document, mut n: NodeId) -> bool {
     while let Some(p) = doc.parent(n) {
         if doc.element(p).map(|e| e.tag == "noscript").unwrap_or(false) {
             return true;

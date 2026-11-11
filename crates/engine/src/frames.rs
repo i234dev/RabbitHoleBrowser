@@ -222,7 +222,12 @@ impl Engine {
         let iframes: Vec<NodeId> = if page.frame_depth >= MAX_DEPTH {
             Vec::new()
         } else {
-            page.doc.descendants(Document::ROOT).filter(|&n| page.doc.is_element(n, "iframe")).take(MAX_FRAMES_PER_PAGE).collect()
+            // With scripting on, `<noscript>` content is inert.
+            page.doc
+                .descendants(Document::ROOT)
+                .filter(|&n| page.doc.is_element(n, "iframe") && !(self.scripting && crate::in_noscript(&page.doc, n)))
+                .take(MAX_FRAMES_PER_PAGE)
+                .collect()
         };
         if iframes.is_empty() && page.frames.children.is_empty() {
             return;

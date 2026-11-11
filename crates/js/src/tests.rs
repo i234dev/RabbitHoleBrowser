@@ -190,6 +190,12 @@ fn variables_and_scope() {
     eq("var o = {k: 5}, k = 'k'; [o[k] ??= 7, o[k] ||= 8, o[k] &&= 0, o[k]].join()", "5,5,0,0");
     eq("var s = Symbol('a'), o = {}; var a = (o[s] ??= {n: 1}); var b = (o[s] ??= {n: 2}); [a === b, b.n].join()", "true,1");
     eq("var o = {k: 0}; [o['k'] &&= 9, o['k'] ||= 3].join()", "0,3");
+    // Function.prototype.toString returns the source text (libraries
+    // detect native ES classes with /\bclass\b/.test(fn.toString())).
+    eq("String(class A extends Object { m() {} })", "class A extends Object { m() {} }");
+    eq("(function f(a, b) { return a + b; }).toString()", "function f(a, b) { return a + b; }");
+    eq("/\\bclass\\b/.test(class {}.toString())", "true");
+    eq("function g(x) {\n  return x;\n}\ng.toString()", "function g(x) {\n  return x;\n}");
     eq("var o = {a: {b: {c: 1}}}; o?.a?.b?.c", "1");
     eq("var o = null; o?.a.b.c", "undefined");
     eq("var o = {}; o.f?.()", "undefined");

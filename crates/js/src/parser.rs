@@ -1630,6 +1630,7 @@ impl<'a> Parser<'a> {
                 is_generator: false,
                 strict,
                 pos,
+                span: (0, 0),
             })),
         })
     }
@@ -2422,6 +2423,7 @@ impl<'a> Parser<'a> {
                 is_generator,
                 strict,
                 pos,
+                span: (0, 0),
             })
         })
     }
@@ -2445,6 +2447,7 @@ impl<'a> Parser<'a> {
     /// `function [*] [name] ( params ) { body }` — current token is `function`.
     fn parse_function(&mut self, is_async: bool, is_expression: bool, is_declaration: bool) -> PResult<Function> {
         let pos = self.tok.pos;
+        let start = self.tok.start as u32;
         self.expect_ident("function")?;
         let is_generator = self.eat_punct("*")?;
         let name = if self.is_punct("(") {
@@ -2490,12 +2493,14 @@ impl<'a> Parser<'a> {
                 is_generator,
                 strict,
                 pos,
+                span: (start, p.prev_end as u32),
             })
         })
     }
 
     fn parse_class(&mut self, is_declaration: bool) -> PResult<Class> {
         let pos = self.tok.pos;
+        let start = self.tok.start as u32;
         self.expect_ident("class")?;
         // Class bodies are always strict.
         let saved_strict = self.ctx.strict;
@@ -2532,6 +2537,7 @@ impl<'a> Parser<'a> {
                 superclass,
                 members,
                 pos,
+                span: (start, self.prev_end as u32),
             })
         })();
         self.ctx.strict = saved_strict;
