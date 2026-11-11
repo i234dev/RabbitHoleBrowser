@@ -734,6 +734,13 @@ impl Engine {
             for g in &old.frames.children {
                 reg.remove_tree(g.id);
             }
+            drop(reg);
+            // Node wrappers this realm made for the replaced document are
+            // keyed by (frame, node id): they must not resolve to nodes of
+            // the new document.
+            if let Some(host) = page.script.host.as_mut() {
+                host.forget_frame_document(id);
+            }
         }
         page.frames.children[i].dirty = true;
         if let Some(nav) = nav {

@@ -331,6 +331,23 @@ impl ScriptHost {
 
     /// Mark script elements present at load time as executed by the engine
     /// (so inserting them again does not rerun them).
+    /// The document of frame `frame_id` was replaced: drop this realm's
+    /// node wrappers, listeners and inline handlers keyed by its node ids
+    /// (they would otherwise resolve to unrelated nodes of the new
+    /// document). Existing JS references keep pointing at nothing useful;
+    /// new lookups get fresh wrappers.
+    pub fn forget_frame_document(&mut self, frame_id: u64) {
+        if frame_id >= host::FRAME_DOC as u64 {
+            return;
+        }
+        let doc = host::FRAME_DOC | frame_id as u32;
+        let mut st = self.state.borrow_mut();
+        st.wrappers.retain(|k, _| k.doc != doc);
+        st.listeners.retain(|k, _| !matches!(k, TargetKey::Node(n) if n.doc == doc));
+        st.listener_counts.retain(|(k, _), _| !matches!(k, TargetKey::Node(n) if n.doc == doc));
+        st.inline_handlers.retain(|(n, _), _| n.doc != doc);
+    }
+
     pub fn mark_script_ran(&mut self, node: NodeId) {
         self.state.borrow_mut().ran_scripts.insert(node);
     }
