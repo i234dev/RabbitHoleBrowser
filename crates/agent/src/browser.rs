@@ -142,6 +142,9 @@ pub struct Tab {
     /// Network id of the last request when the current document loaded.
     pub load_net_id: u64,
     pub status: u16,
+    /// Rendered viewport just before the current action (visual-change
+    /// detection when the content did not change).
+    pub before_frame: Option<rabbithole_engine::diff::Frame>,
 }
 
 impl Tab {
@@ -163,6 +166,7 @@ impl Tab {
             pending: None,
             load_net_id: 0,
             status: 0,
+            before_frame: None,
         }
     }
 
@@ -562,6 +566,18 @@ impl Agent {
         (root, stats, overlays)
     }
 
+    /// State before an action: the flat items, plus the painted viewport.
+    pub fn before_state(&mut self, ti: usize) -> Vec<((usize, NodeId, u16, bool), String)> {
+        self.capture_frame(ti);
+        self.items(ti)
+    }
+
+    /// Paint the main frame's viewport for a later visual comparison.
+    pub fn capture_frame(&mut self, ti: usize) {
+        let frame = self.tabs[ti].frames.first().map(|f| self.engine.snapshot(&f.page));
+        self.tabs[ti].before_frame = frame;
+    }
+
     /// Flat items of the current tree (for diffs).
     pub fn items(&mut self, ti: usize) -> Vec<((usize, NodeId, u16, bool), String)> {
         let (root, _, _) = self.tree(ti, false);
@@ -777,9 +793,17 @@ impl Agent {
             }
         }
         lines.push(head);
-        if d.is_empty() {
+        // Only focus moved (the clicked control gained focus): judge the
+        // effect like an unchanged page, then say where focus went.
+        let focus_only = d.added == 0
+            && d.removed == 0
+            && d.lines.iter().all(|l| match l.strip_prefix("~ ").and_then(|r| r.split_once(" ⇒ ")) {
+                Some((x, y)) => x.replace(" focused", "") == y.replace(" focused", ""),
+                None => false,
+            });
+        if d.is_empty() || focus_only {
             // Silent failure detection.
-            let focus_changed = false;
+            let focus_changed = !d.is_empty();
             let mut why = vec!["no DOM change".to_string(), "no navigation".to_string()];
             if let Some((f, n)) = target {
                 let page = &self.tabs[ti].frames[f].page;
@@ -791,8 +815,38 @@ impl Agent {
                 }
             }
             let has_events = !self.tabs[ti].events.is_empty();
-            if !focus_changed && !has_events {
-                lines.push(format!("⚠ The action had no visible effect: {}.", why.join(", ")));
+            // Content unchanged: did anything change on screen (CSS-only
+            // effects such as a highlight or an opened menu drawn with
+            // existing nodes)?
+            let visual = match (self.tabs[ti].before_frame.take(), self.tabs[ti].frames.first()) {
+                (Some(before), Some(f)) => {
+                    let regions = rabbithole_engine::diff::changed_regions(&before, &self.engine.snapshot(&f.page));
+                    // A focus ring around the target is not an effect.
+                    let ring = target.filter(|t| t.0 == 0).and_then(|(_, n)| overlay::viewport_rect(&f.page, &GeoMap::build(&f.page), n));
+                    regions
+                        .into_iter()
+                        .filter(|r| match ring {
+                            Some(t) => {
+                                let (x, y, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+                                !(x >= t.x - 6.0 && y >= t.y - 6.0 && x + w <= t.right() + 6.0 && y + h <= t.bottom() + 6.0)
+                            }
+                            None => true,
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            if !visual.is_empty() {
+                let r = visual.iter().max_by_key(|r| r.pixels).copied();
+                let area: u64 = visual.iter().map(|r| r.w as u64 * r.h as u64).sum();
+                let mut m = format!("No content change, but the page changed visually: {} region(s), {} px²", visual.len(), area);
+                if let Some(r) = r {
+                    m.push_str(&format!(", largest {}x{} at ({}, {}) in the viewport", r.w, r.h, r.x, r.y));
+                }
+                m.push_str(" (a style-only change; screenshot to see it).");
+                lines.push(m);
+            } else if !has_events {
+                lines.push(format!("⚠ The action had no visible effect{}: {}.", if focus_changed { " (the element only received focus)" } else { "" }, why.join(", ")));
             } else {
                 lines.push("No change in the page content.".into());
             }
@@ -843,6 +897,9 @@ impl Agent {
         }
         let geo = GeoMap::build(page);
         let reach = if frame == 0 { overlay::reach(page, &geo, node) } else { Reach::Ancestor(0.0, 0.0) };
+        // Painted state right before the pointer action (after scrolling).
+        tab.before_frame = Some(self.engine.snapshot(&tab.frames[0].page));
+        let page = &mut tab.frames[frame].page;
         let outcome;
         let mut request = None;
         let verb = if hover_only { "Hovered" } else { "Clicked" };

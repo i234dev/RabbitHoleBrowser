@@ -404,7 +404,7 @@ fn type_(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     };
     let frame = target.map(|t| t.0).unwrap_or(0);
     let label = target.map(|(f, nd)| agent.describe_ref(ti, f, nd)).unwrap_or_else(|| "the page".into());
-    let before = agent.items(ti);
+    let before = agent.before_state(ti);
     let tab = &mut agent.tabs[ti];
     let page = &mut tab.frames[frame].page;
     let mut outcome = ScriptOutcome::default();
@@ -466,7 +466,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         let lines = crate::forms::describe(&tab.frames[frame].page, frame, f, &mut tab.refs);
         return Ok(Out::text(fence(&lines.join("\n"))));
     }
-    let before = agent.items(ti);
+    let before = agent.before_state(ti);
     let mut done = Vec::new();
     let mut errors = Vec::new();
     {
@@ -586,7 +586,7 @@ fn single_field(page: &rabbithole_engine::Page, node: NodeId, form: Option<NodeI
 fn scroll(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let ti = agent.tab_index()?;
     agent.ensure_loaded(ti)?;
-    let before = agent.items(ti);
+    let before = agent.before_state(ti);
     let max_steps = n(a, "max_steps").map(|x| x as usize).unwrap_or(10).clamp(1, 50);
     let cap = agent.cfg.settle_cap;
     let mut outcome = ScriptOutcome::default();

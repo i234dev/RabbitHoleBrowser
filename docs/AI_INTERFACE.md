@@ -222,6 +222,11 @@ The result of an action is:
 
   `~` changed (same node), `+` added, `-` removed; at most 40 lines. When
   most of the page changed, a new snapshot is returned instead.
+* **Only the look changed** (a class toggle, a highlight): the painted
+  viewport before and after is compared —
+  *"No content change, but the page changed visually: 1 region(s), 20000 px²,
+  largest 200x100 at (8, 8) in the viewport (a style-only change; screenshot
+  to see it)."*
 * **Nothing happened:** never silent —
   *"⚠ The action had no visible effect: no DOM change, no navigation, no
   event listeners on the target."*

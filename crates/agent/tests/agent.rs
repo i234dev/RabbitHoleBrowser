@@ -523,3 +523,20 @@ fn horizontal_menus_share_a_line_and_wrappers_are_not_buttons() {
     assert!(!snap.contains("clickable"), "{snap}");
     assert!(snap.contains("link \"upvote\" @e"), "icon link named by its tooltip: {snap}");
 }
+
+#[test]
+fn style_only_change_is_reported_as_visual() {
+    let srv = serve(Box::new(|p| match p {
+        "/" => html(
+            r#"<html><head><style>.on{background:#c00}</style></head><body><main><div id="box" style="width:200px;height:100px"></div>
+            <button onclick="document.getElementById('box').className='on'">Resaltar</button></main></body></html>"#,
+        ),
+        _ => None,
+    }));
+    let mut a = agent();
+    let snap = ok(&mut a, "open", json!({ "url": srv.url("/") }));
+    let b = ref_of(&snap, "button \"Resaltar\"");
+    let out = ok(&mut a, "click", json!({ "ref": b }));
+    assert!(out.contains("changed visually"), "{out}");
+    assert!(!out.contains("no visible effect"), "{out}");
+}
