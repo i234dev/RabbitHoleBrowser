@@ -973,27 +973,26 @@ pub(crate) fn run_ready_fetches(realm: &mut Realm) -> bool {
     for (sink, r) in ready {
         match sink {
             FetchSink::Promise(resolve, reject, _url) => {
-                crate::host::unroot_value(realm, &resolve);
-                crate::host::unroot_value(realm, &reject);
                 match r {
                     Ok(resp) => {
                         let st = status_text(resp.status).to_string();
                         let resp_obj = make_response(realm, &resp.url.to_string(), resp.status, &st, resp.headers.clone(), resp.body, "basic");
-                        let _ = realm.call(resolve, Value::Undefined, &[resp_obj]);
+                        let _ = realm.call(resolve.clone(), Value::Undefined, &[resp_obj]);
                     }
                     Err(e) => {
                         let err = realm.new_error("TypeError", &format!("Failed to fetch: {e}"));
-                        let _ = realm.call(reject, Value::Undefined, &[err]);
+                        let _ = realm.call(reject.clone(), Value::Undefined, &[err]);
                     }
                 }
+                crate::host::unroot_value(realm, &resolve);
+                crate::host::unroot_value(realm, &reject);
             }
             FetchSink::Xhr(o) => {
-                crate::host::unroot_value(realm, &Value::Object(o));
-                if !realm.host_data::<XhrData>(o).map(|d| d.sent).unwrap_or(false) {
-                    continue; // aborted meanwhile
+                if realm.host_data::<XhrData>(o).map(|d| d.sent).unwrap_or(false) {
+                    xhr_store_result(realm, o, r);
+                    xhr_finish_events(realm, o);
                 }
-                xhr_store_result(realm, o, r);
-                xhr_finish_events(realm, o);
+                crate::host::unroot_value(realm, &Value::Object(o));
             }
         }
         realm.run_jobs();

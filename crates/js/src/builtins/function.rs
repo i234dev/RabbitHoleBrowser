@@ -32,6 +32,31 @@ pub fn register(realm: &mut Realm) {
     let afp = realm.new_object_with_proto(Some(fp));
     realm.define_property(afp, PropertyKey::Symbol(crate::realm::SYM_TO_STRING_TAG), Value::str("AsyncFunction"), CONFIGURABLE);
     realm.intrinsics.others.insert("AsyncFunctionPrototype", afp);
+    // The (non-global) constructors reached through `.constructor`:
+    // `new AsyncFunction(params..., body)` and friends (Alpine.js builds its
+    // expression evaluators with AsyncFunction).
+    for (proto, name, f) in [
+        (gfp, "GeneratorFunction", generator_function_ctor as NativeFn),
+        (agfp, "AsyncGeneratorFunction", async_generator_function_ctor as NativeFn),
+        (afp, "AsyncFunction", async_function_ctor as NativeFn),
+    ] {
+        let c = realm.new_native_constructor(name, 1, f, proto);
+        let fc = realm.intrinsics.function_ctor;
+        realm.obj_mut(c).proto = Some(fc);
+        realm.define_property(proto, "constructor", Value::Object(c), CONFIGURABLE);
+    }
+}
+
+fn async_function_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    create_dynamic_function(realm, args, "async function")
+}
+
+fn generator_function_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    create_dynamic_function(realm, args, "function*")
+}
+
+fn async_generator_function_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    create_dynamic_function(realm, args, "async function*")
 }
 
 fn call(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {

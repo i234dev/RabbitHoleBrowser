@@ -974,6 +974,11 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
     };
     let default_action = default_action_for(realm, key, &ty);
     state().borrow_mut().event_stack.push(eid);
+    // The event object and the path's targets are only held by this Rust
+    // frame between listener calls: keep them alive across GCs that
+    // listeners trigger.
+    let _event_root = realm.root_object(eid);
+    let _path_roots: Vec<rabbithole_js::Root> = path.iter().map(|(_, v, t)| (realm.root(v.clone()), realm.root(t.clone()))).flat_map(|(a, b)| [a, b]).collect();
     let mut handled = false;
 
     // An entry whose shadow-adjusted target is itself is "at target"

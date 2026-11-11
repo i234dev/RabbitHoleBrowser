@@ -2667,6 +2667,33 @@ impl Realm {
                     };
                     push!(Value::Bool(r));
                 }
+                Op::WithHas(i) => {
+                    let obj = pop!();
+                    let key = const_key!(i);
+                    let found = match obj {
+                        Value::Object(id) => {
+                            if self.has_property(id, &key)? {
+                                // Symbol.unscopables hides names from `with`.
+                                match self.get(Value::Object(id), PropertyKey::Symbol(SYM_UNSCOPABLES))? {
+                                    Value::Object(u) => {
+                                        let hidden = self.get(Value::Object(u), key)?;
+                                        !self.to_boolean(&hidden)
+                                    }
+                                    _ => true,
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
+                    push!(Value::Bool(found));
+                }
+                Op::ToObject => {
+                    let v = pop!();
+                    let id = self.to_object(v)?;
+                    push!(Value::Object(id));
+                }
                 Op::In => {
                     let obj = pop!();
                     let key = pop!();

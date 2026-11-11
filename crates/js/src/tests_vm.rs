@@ -415,7 +415,7 @@ fn lazy_compilation() {
     eq("(function() { var fs = []; for (var i = 0; i < 3; i++) fs.push((x => () => x)(i)); return fs[2]() + fs[0]() + fs[1](); })()", "3");
     // Compile errors of a function surface when it is first called.
     eq("(function() { var ok = 1; function never() { with ({}) {} } return ok; })()", "1");
-    throws("(function() { function bad() { with ({}) {} } bad(); })()", "SyntaxError");
+    eq("(function() { function lazyWith(o) { with (o) { return a; } } return lazyWith({ a: 7 }); })()", "7");
     // Global code and functions defined in eval / new Function.
     eq("var G = 5; function useG() { return G * 2; } useG()", "10");
     eq("new Function('a', 'b', 'function inner(x) { return x * a; } return inner(b);')(3, 4)", "12");

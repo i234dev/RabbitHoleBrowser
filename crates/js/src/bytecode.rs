@@ -156,6 +156,11 @@ pub enum Op {
     GtEq,
     In,
     Instanceof,
+    /// `with` lookup: pop an object, push whether the constant name is a
+    /// property of it that `Symbol.unscopables` does not hide.
+    WithHas(u32),
+    /// Pop a value, push `ToObject(value)` (TypeError for null/undefined).
+    ToObject,
     Neg,
     Plus,
     Not,
@@ -622,6 +627,7 @@ impl Op {
             JumpIfStrictEq(_) => (2, 0),
             Add | Sub | Mul | Div | Mod | Exp | BitAnd | BitOr | BitXor | Shl | Shr | UShr | Eq | NotEq | StrictEq | StrictNotEq | Lt | LtEq | Gt | GtEq | In | Instanceof => (2, 1),
             Neg | Plus | Not | BitNot | Typeof | Void | Inc | Dec | ToNumeric | ToString | ToPropertyKey | PrivateIn(..) => (1, 1),
+            WithHas(_) | ToObject => (1, 1),
             NewObject => (0, 1),
             NewArray(n) => (n, 1),
             ArrayPush | ArraySpread => (2, 1),

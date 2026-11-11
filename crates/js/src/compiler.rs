@@ -93,6 +93,10 @@ struct CScope {
     /// Snapshot for lazily compiled nested functions, with the
     /// (slot count, materialized, name count) it was taken at.
     snap: Option<((u16, bool, usize), Rc<LazyScope>)>,
+    /// The scope of a `with` body: the hidden binding holding its object.
+    /// Names that are not bound inside it are looked up on that object
+    /// first (see [`Compiler::with_chain`]).
+    with_name: Option<String>,
 }
 
 /// Compile-time view of an enclosing scope kept for a lazily compiled
@@ -121,7 +125,7 @@ pub struct LazyCode {
 
 impl CScope {
     fn new(materialized: bool, is_function: bool) -> CScope {
-        CScope { names: HashMap::default(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new(), is_switch: false, snap: None }
+        CScope { names: HashMap::default(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new(), is_switch: false, snap: None, with_name: None }
     }
 }
 
@@ -665,7 +669,7 @@ impl Compiler {
     /// Compile a function expression / declaration node, or defer it until
     /// its first call (lazy compilation).
     fn compile_function_rc(&mut self, f: &Rc<Function>, name: Option<&str>) -> CResult<u32> {
-        if !self.lazy || self.pending_tweak.is_some() || std::ptr::eq(Rc::as_ptr(f), self.eager_root) {
+        if !self.lazy || self.pending_tweak.is_some() || std::ptr::eq(Rc::as_ptr(f), self.eager_root) || self.in_with() {
             return self.compile_function(f, name);
         }
         let fname = f.name.as_deref().or(name).unwrap_or("").to_string();
@@ -753,7 +757,71 @@ impl Compiler {
         }
     }
 
+    /// Hidden bindings of the `with` objects (innermost first) that a
+    /// reference to `name` must consult before its static binding: every
+    /// `with` scope between the reference and the scope declaring `name`.
+    fn with_chain(&self, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if name.starts_with('%') || name.starts_with('#') {
+            return out;
+        }
+        if !self.fns.iter().any(|f| f.scopes.iter().any(|s| s.with_name.is_some())) {
+            return out;
+        }
+        for f in self.fns.iter().rev() {
+            for s in f.scopes.iter().rev() {
+                if s.names.contains_key(name) {
+                    return out;
+                }
+                if let Some(w) = &s.with_name {
+                    out.push(w.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Inside `with`: is the code being compiled nested in a `with` body
+    /// (nested functions are then compiled eagerly, with the `with` scopes
+    /// in view)?
+    fn in_with(&self) -> bool {
+        self.fns.iter().any(|f| f.scopes.iter().any(|s| s.with_name.is_some()))
+    }
+
+    /// For each object of `chain`: push it, test `name` on it and jump to
+    /// the code `found` emits when present; the returned jumps lead past
+    /// the static fallback. Stack is unchanged on the fallthrough path.
+    fn emit_with_dispatch(&mut self, name: &str, chain: &[String], found: &mut dyn FnMut(&mut Self, &str, u32)) -> Vec<usize> {
+        let i = self.const_str(name);
+        let mut ends = Vec::new();
+        for w in chain {
+            self.emit_get_var(w);
+            self.emit(Op::WithHas(i));
+            let skip = self.emit(Op::JumpIfFalse(0));
+            found(self, w, i);
+            ends.push(self.emit(Op::Jump(0)));
+            self.patch_jump(skip);
+        }
+        ends
+    }
+
     fn emit_get_var(&mut self, name: &str) {
+        let chain = self.with_chain(name);
+        if !chain.is_empty() {
+            let ends = self.emit_with_dispatch(name, &chain, &mut |c, w, i| {
+                c.emit_get_var(w);
+                c.emit_ic(|ic| Op::GetProp(i, ic));
+            });
+            self.emit_get_var_static(name);
+            for j in ends {
+                self.patch_jump(j);
+            }
+            return;
+        }
+        self.emit_get_var_static(name);
+    }
+
+    fn emit_get_var_static(&mut self, name: &str) {
         match self.resolve(name) {
             Resolved::Local { depth, slot, kind } => {
                 if kind == BindKind::Import {
@@ -780,6 +848,24 @@ impl Compiler {
 
     /// Store top of stack (pops) into a variable (assignment semantics).
     fn emit_set_var(&mut self, name: &str) -> CResult<()> {
+        let chain = self.with_chain(name);
+        if !chain.is_empty() {
+            let ends = self.emit_with_dispatch(name, &chain, &mut |c, w, i| {
+                c.emit_get_var(w);
+                c.emit(Op::Swap);
+                c.emit_ic(|ic| Op::SetProp(i, ic));
+                c.emit(Op::Pop);
+            });
+            self.emit_set_var_static(name)?;
+            for j in ends {
+                self.patch_jump(j);
+            }
+            return Ok(());
+        }
+        self.emit_set_var_static(name)
+    }
+
+    fn emit_set_var_static(&mut self, name: &str) -> CResult<()> {
         // A named function expression's own name is an immutable binding:
         // assigning to it is ignored (sloppy) or a TypeError (strict).
         let resolved = self.resolve(name);
@@ -1521,7 +1607,24 @@ impl Compiler {
                     }
                 }
             }
-            StmtKind::With { .. } => return self.err("'with' statements are not supported"),
+            StmtKind::With { object, body } => {
+                if self.fs_ref().flags.is_strict {
+                    return self.err("Strict mode code may not include a with statement");
+                }
+                self.compile_expr(object)?;
+                self.emit(Op::ToObject);
+                // The object lives in a hidden heap binding of the body's
+                // scope, so closures created inside the body see it too.
+                let fs = self.fs();
+                fs.hidden_counter += 1;
+                let hidden = format!("%with{}", fs.hidden_counter);
+                let mat = self.push_block_scope_with(&[(hidden.clone(), BindKind::Var)], true);
+                self.emit_init_var(&hidden)?;
+                self.fs().scopes.last_mut().unwrap().with_name = Some(hidden);
+                let r = self.compile_stmt(body);
+                self.pop_block_scope(mat);
+                r?;
+            }
             // Import bindings are wired by the module linker.
             StmtKind::Import(_) => {}
             StmtKind::Export(e) => match e {
@@ -2310,6 +2413,25 @@ impl Compiler {
             ExprKind::Unary { op, operand } => match op {
                 UnaryOp::Typeof => {
                     if let ExprKind::Identifier(n) = &operand.kind {
+                        let chain = self.with_chain(n);
+                        if !chain.is_empty() {
+                            let ends = self.emit_with_dispatch(n, &chain, &mut |c, w, i| {
+                                c.emit_get_var(w);
+                                c.emit_ic(|ic| Op::GetProp(i, ic));
+                                c.emit(Op::Typeof);
+                            });
+                            if let Resolved::Global = self.resolve(n) {
+                                let i = self.const_str(n);
+                                self.emit(Op::TypeofGlobal(i));
+                            } else {
+                                self.emit_get_var_static(n);
+                                self.emit(Op::Typeof);
+                            }
+                            for j in ends {
+                                self.patch_jump(j);
+                            }
+                            return Ok(());
+                        }
                         if let Resolved::Global = self.resolve(n) {
                             let i = self.const_str(n);
                             self.emit(Op::TypeofGlobal(i));
@@ -2334,8 +2456,16 @@ impl Compiler {
                             MemberProp::Private(_) => return self.err("Private fields can not be deleted"),
                         }
                     }
-                    ExprKind::Identifier(_) => {
+                    ExprKind::Identifier(n) => {
+                        let chain = self.with_chain(n);
+                        let ends = self.emit_with_dispatch(n, &chain, &mut |c, w, i| {
+                            c.emit_get_var(w);
+                            c.emit(Op::DeleteProp(i));
+                        });
                         self.emit(Op::False);
+                        for j in ends {
+                            self.patch_jump(j);
+                        }
                     }
                     _ => {
                         self.compile_expr(operand)?;
@@ -2674,6 +2804,21 @@ impl Compiler {
                     for j in to_end {
                         self.patch_jump(j);
                     }
+                }
+            }
+            ExprKind::Identifier(n) if !self.with_chain(n).is_empty() => {
+                // f() inside `with (o)`: o.f() when o has f.
+                let chain = self.with_chain(n);
+                let ends = self.emit_with_dispatch(n, &chain, &mut |c, w, i| {
+                    c.emit_get_var(w);
+                    c.emit(Op::Dup);
+                    c.emit_ic(|ic| Op::GetProp(i, ic));
+                    c.emit(Op::Swap);
+                });
+                self.emit_get_var_static(n);
+                self.emit(Op::Undefined);
+                for j in ends {
+                    self.patch_jump(j);
                 }
             }
             _ => {

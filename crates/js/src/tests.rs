@@ -1489,6 +1489,39 @@ fn named_function_expression_binding_is_immutable() {
 }
 
 #[test]
+fn with_statement() {
+    // Names found on the object (get, set, call with `this`, typeof, delete).
+    eq("var o = { a: 1, f: function () { return this === o; } }; var a = 'outer'; var r; with (o) { a = a + 1; r = [a, f(), typeof a, typeof zzz] } [o.a, a, r.join()].join()", "2,outer,2,true,number,undefined");
+    eq("var o = { x: 1 }; with (o) { delete x; } 'x' in o", "false");
+    // Not found: the static binding; assignment to an undeclared name
+    // creates a global.
+    eq("(function () { var local = 5; var o = {}; with (o) { local = local + 1; newGlobal = 7; } return [local, o.local, typeof newGlobal, 'newGlobal' in o].join(); })()", "6,,number,false");
+    // Block bindings inside the body shadow the object; nested closures
+    // capture through `with`.
+    eq("var o = { v: 'obj' }; var fs = []; with (o) { let w = 'block'; fs.push(function () { return v + ':' + w; }); } o.v = 'changed'; fs[0]()", "changed:block");
+    eq("function mk(o) { with (o) { return function () { return n * 2; }; } } var o = { n: 3 }; var g = mk(o); o.n = 10; g()", "20");
+    // Symbol.unscopables hides names.
+    eq("var keys = 'outer'; var r; with ([1, 2]) { r = [typeof keys, length].join(); } r", "string,2");
+    // Nested with: innermost object first, then outer, then the scope.
+    eq("var a = { x: 'a' }, b = { y: 'b' }; var y = 'scope'; var r; with (a) { with (b) { r = x + y; } } r", "ab");
+    // Vue 3 runtime-compiled render functions.
+    eq(
+        "var Vue = { toDisplayString: function (v) { return '[' + v + ']'; } }; var render = new Function('Vue', 'return function render(_ctx, _cache) { with (_ctx) { const { toDisplayString: _toDisplayString } = Vue; return _toDisplayString(count) + msg } }')(Vue); var ctx = new Proxy({ count: 2, msg: '!' }, { has: function (t, k) { return k in t; } }); render(ctx)",
+        "[2]!",
+    );
+    // Alpine.js: async function with `with (scope)`.
+    eq(
+        "var AsyncFunction = Object.getPrototypeOf(async function () {}).constructor; var fn = new AsyncFunction(['__self', 'scope'], 'with (scope) { __self.result = n + 1 }; __self.finished = true; return __self.result;'); var s = {}; var p = fn(s, { n: 41 }); [p instanceof Promise, s.finished, s.result, AsyncFunction.name, AsyncFunction !== Function].join()",
+        "true,true,42,AsyncFunction,true",
+    );
+    // `with` is a SyntaxError in strict code.
+    throws("'use strict'; with ({}) {}", "SyntaxError");
+    // ToObject on the operand.
+    throws("with (null) {}", "TypeError");
+    eq("var r; with ('abc') { r = length; } r", "3");
+}
+
+#[test]
 fn finally_does_not_see_bindings_of_the_try_block() {
     // A `let` in the try block shadows an outer binding; a `return` from
     // the block inlines the finalizer, which must resolve the outer name
