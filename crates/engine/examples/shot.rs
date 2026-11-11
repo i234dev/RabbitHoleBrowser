@@ -130,7 +130,8 @@ fn main() {
         if let Ok(js) = std::env::var("RH_FRAME_EVAL") {
             for c in page.frames.children.iter_mut() {
                 if let Some(child) = c.page.as_mut() {
-                    eprintln!("frame {}: {}", child.url, engine.eval_in_page(child, &js));
+                    let url = child.url.to_string();
+                    eprintln!("frame {url}: {}", engine.eval_in_page(child, &js));
                 }
             }
         }

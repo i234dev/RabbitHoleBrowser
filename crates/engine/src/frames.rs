@@ -437,6 +437,19 @@ impl Engine {
         if page.frame_depth == 0 {
             self.route_frame_messages(page, &mut out);
         }
+        // Frame console output shows in the page's console, tagged with
+        // the frame's URL.
+        for c in page.frames.children.iter_mut() {
+            if let Some(child) = c.page.as_mut() {
+                if !child.script.console.is_empty() {
+                    let url = child.url.to_string();
+                    let short: String = url.chars().take(80).collect();
+                    for (level, msg) in std::mem::take(&mut child.script.console) {
+                        page.script.console.push((level, format!("[frame {short}] {msg}")));
+                    }
+                }
+            }
+        }
         if self.paint_frames(page) {
             out.relayout = true;
         }
