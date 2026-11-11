@@ -60,6 +60,8 @@ pub const IC_SETTER: u8 = 11;
 pub struct MegaEntry {
     shape: u32,
     key: u64,
+    /// Held only to keep the name alive (see above).
+    #[allow(dead_code)]
     name: Option<JsStr>,
     ic: PropIc,
 }
@@ -76,6 +78,15 @@ fn mega_index(shape: u32, key: u64) -> usize {
 /// none) nor its prototype chain has the key: the read is `undefined`.
 /// Valid while the prototype epoch is `mid_shape`.
 pub const IC_ABSENT: u8 = 12;
+
+/// Debug switches: `RH_NO_MEGA` disables the shared (shape, name) cache,
+/// `RH_NO_DEEP_IC` the prototype-epoch caches (deep chains, absent
+/// properties, deep additions, inherited setters).
+fn ic_disabled(which: u8) -> bool {
+    static FLAGS: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let f = *FLAGS.get_or_init(|| (std::env::var_os("RH_NO_MEGA").is_some() as u8) | ((std::env::var_os("RH_NO_DEEP_IC").is_some() as u8) << 1));
+    f & which != 0
+}
 
 /// Longest prototype chain walked when filling a deep cache.
 const MAX_CHAIN: usize = 48;
@@ -243,7 +254,7 @@ impl Realm {
     /// Remember a filled read cache record for `recv` / `key` in the
     /// megamorphic cache.
     pub(crate) fn mega_put(&mut self, recv: &Value, key: &PropertyKey, ic: PropIc) {
-        if ic.kind == IC_NONE || ic.kind == IC_LENGTH || ic.kind == IC_PRIM {
+        if ic.kind == IC_NONE || ic.kind == IC_LENGTH || ic.kind == IC_PRIM || ic_disabled(1) {
             return;
         }
         let (Some(id), PropertyKey::String(k)) = (recv.as_object(), key) else { return };
@@ -259,7 +270,7 @@ impl Realm {
     /// Remember a filled store cache record in the megamorphic cache, under
     /// the receiver's shape before the store.
     pub(crate) fn mega_put_set(&mut self, recv: &Value, key: &PropertyKey, before: Option<(u32, Option<u32>)>, ic: PropIc) {
-        if !matches!(ic.kind, IC_OWN | IC_ADD | IC_ADD_DEEP | IC_SETTER) {
+        if !matches!(ic.kind, IC_OWN | IC_ADD | IC_ADD_DEEP | IC_SETTER) || ic_disabled(1) {
             return;
         }
         let (Some((shape, _)), Some(_), PropertyKey::String(k)) = (before, recv.as_object(), key) else { return };
@@ -274,6 +285,9 @@ impl Realm {
     /// for `key`, marking every object passed so their changes invalidate
     /// deep caches. Returns (holder, holder shape id, slot).
     fn deep_find(&self, first: ObjectId, key: &PropertyKey) -> Option<(ObjectId, u32, u32)> {
+        if ic_disabled(2) {
+            return None;
+        }
         let mut cur = Some(first);
         let mut n = 0;
         while let Some(c) = cur {
@@ -296,6 +310,9 @@ impl Realm {
 
     /// The whole chain above `first` lacks `key` (marking each object).
     fn deep_absent(&self, first: Option<ObjectId>, key: &PropertyKey) -> bool {
+        if ic_disabled(2) {
+            return false;
+        }
         let mut cur = first;
         let mut n = 0;
         while let Some(c) = cur {
@@ -372,7 +389,7 @@ impl Realm {
         // Up to two prototype hops; every object passed must lack the key
         // (shape ids prove the absence stays true).
         let Some(p1) = o.proto else {
-            if plain_kind(&o.kind) {
+            if plain_kind(&o.kind) && !ic_disabled(2) {
                 ic.kind = IC_ABSENT;
                 ic.shape = o.props.shape_id();
                 ic.mid = NO_OBJ;
