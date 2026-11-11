@@ -172,6 +172,112 @@
     });
   }
 
+  // ---- MessageChannel / MessagePort / BroadcastChannel (this realm)
+  if (typeof MessageChannel !== 'function' && typeof EventTarget === 'function') {
+    const KEY = {};
+    const portState = new WeakMap();
+    const pending = [];
+    let flushScheduled = false;
+    function flush() {
+      flushScheduled = false;
+      const batch = pending.splice(0, pending.length);
+      for (const [target, ev] of batch) {
+        try { target.dispatchEvent(ev); } catch (e) { setTimeout(() => { throw e; }, 0); }
+      }
+    }
+    function enqueue(target, ev) {
+      pending.push([target, ev]);
+      if (!flushScheduled) { flushScheduled = true; setTimeout(flush, 0); }
+    }
+    function handlerProp(proto, name, onSet) {
+      const handlers = new WeakMap();
+      Object.defineProperty(proto, 'on' + name, {
+        configurable: true, enumerable: true,
+        get() { const h = handlers.get(this); return h ? h.fn : null; },
+        set(fn) {
+          const old = handlers.get(this);
+          if (old) this.removeEventListener(name, old.wrapper);
+          if (typeof fn === 'function') {
+            const wrapper = (ev) => fn.call(this, ev);
+            handlers.set(this, { fn, wrapper });
+            this.addEventListener(name, wrapper);
+            if (onSet) onSet(this);
+          } else handlers.delete(this);
+        },
+      });
+    }
+    class MessagePort extends EventTarget {
+      constructor(key) {
+        if (key !== KEY) throw new TypeError('Illegal constructor');
+        super();
+        portState.set(this, { other: null, started: false, closed: false, queue: [] });
+      }
+      postMessage(message, transfer) {
+        const me = portState.get(this);
+        if (!me || me.closed || !me.other) return;
+        const list = Array.isArray(transfer) ? transfer : (transfer && Array.isArray(transfer.transfer) ? transfer.transfer : []);
+        const ports = list.filter((t) => t instanceof MessagePort);
+        const data = deserialize(serialize(message));
+        const ev = new MessageEvent('message', { data, ports, origin: '' });
+        const other = portState.get(me.other);
+        if (!other || other.closed) return;
+        if (other.started) enqueue(me.other, ev); else other.queue.push(ev);
+      }
+      start() {
+        const me = portState.get(this);
+        if (!me || me.started) return;
+        me.started = true;
+        for (const ev of me.queue.splice(0, me.queue.length)) enqueue(this, ev);
+      }
+      close() {
+        const me = portState.get(this);
+        if (me) { me.closed = true; me.queue.length = 0; }
+      }
+    }
+    handlerProp(MessagePort.prototype, 'message', (port) => port.start());
+    handlerProp(MessagePort.prototype, 'messageerror');
+    Object.defineProperty(MessagePort.prototype, Symbol.toStringTag, { value: 'MessagePort', configurable: true });
+    class MessageChannel {
+      constructor() {
+        const a = new MessagePort(KEY), b = new MessagePort(KEY);
+        portState.get(a).other = b;
+        portState.get(b).other = a;
+        Object.defineProperty(this, 'port1', { value: a, enumerable: true });
+        Object.defineProperty(this, 'port2', { value: b, enumerable: true });
+      }
+    }
+    const channels = new Map();
+    class BroadcastChannel extends EventTarget {
+      constructor(name) {
+        super();
+        Object.defineProperty(this, 'name', { value: String(name), enumerable: true });
+        this._closed = false;
+        Object.defineProperty(this, '_closed', { enumerable: false, writable: true });
+        if (!channels.has(this.name)) channels.set(this.name, new Set());
+        channels.get(this.name).add(this);
+      }
+      postMessage(message) {
+        if (this._closed) throw new DOMException('BroadcastChannel is closed', 'InvalidStateError');
+        const text = serialize(message);
+        for (const other of channels.get(this.name) || []) {
+          if (other !== this && !other._closed) enqueue(other, new MessageEvent('message', { data: deserialize(text), origin: location.origin }));
+        }
+      }
+      close() { this._closed = true; const set = channels.get(this.name); if (set) set.delete(this); }
+    }
+    handlerProp(BroadcastChannel.prototype, 'message');
+    handlerProp(BroadcastChannel.prototype, 'messageerror');
+    for (const C of [MessagePort, MessageChannel, BroadcastChannel]) {
+      Object.defineProperty(g, C.name, { value: C, writable: true, configurable: true });
+    }
+  }
+
+  // structuredClone with the same algorithm as postMessage.
+  Object.defineProperty(g, 'structuredClone', {
+    value: function structuredClone(value) { return deserialize(serialize(value)); },
+    writable: true, configurable: true,
+  });
+
   function deliver(data, origin, source) {
     let value;
     try { value = deserialize(data); } catch (e) { value = null; }

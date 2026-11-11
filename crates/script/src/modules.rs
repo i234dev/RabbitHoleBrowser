@@ -203,8 +203,10 @@ pub(crate) fn resolve_specifier(map: &ImportMap, specifier: &str, referrer: &Url
 /// inline scripts use the document URL, which maps to the base URL).
 fn referrer_base(referrer: &str) -> Url {
     let (doc_url, base) = with_env(|env| (env.document_url(), env.base_url()));
+    // The engine names inline scripts `<document URL>#inline`.
+    let referrer = referrer.strip_suffix("#inline").unwrap_or(referrer);
     match Url::parse_absolute(referrer) {
-        Some(u) if u.to_string() != doc_url.to_string() && (u.is_http() || !u.host.is_empty() || u.scheme == "file") => u,
+        Some(u) if u.without_fragment().to_string() != doc_url.without_fragment().to_string() && (u.is_http() || !u.host.is_empty() || u.scheme == "file") => u,
         _ => base,
     }
 }

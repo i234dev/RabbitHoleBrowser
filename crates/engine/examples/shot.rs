@@ -24,6 +24,12 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // RH_INJECT=<file.js>: run this script before the page's own.
+    let mut loaded = loaded;
+    if let Ok(path) = std::env::var("RH_INJECT") {
+        let source = std::fs::read_to_string(&path).expect("read RH_INJECT");
+        loaded.scripts.insert(0, rabbithole_engine::ScriptSource { node: rabbithole_engine::dom::Document::ROOT, url: None, source, is_module: false, defer: false, is_async: false });
+    }
     let t1b = std::time::Instant::now();
     eprintln!("fetch+discovery {:?} ({} sheets, {} images, {} fonts)", t1b - t1, loaded.sheets.len(), loaded.images.len(), loaded.fonts.len());
     let page = engine.build_page(loaded, vp);

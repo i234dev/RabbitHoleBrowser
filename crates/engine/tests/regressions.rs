@@ -175,6 +175,33 @@ fn head_hydration_walk_finds_the_ssr_nodes() {
     assert_eq!(eval(&e, &mut page, "result"), "one,two,8");
 }
 
+/// `MessageChannel` (schedulers of large apps post to themselves through
+/// one) delivers asynchronously with a structured clone; `BroadcastChannel`
+/// reaches the other instances of its name; `structuredClone` keeps types.
+#[test]
+fn message_channel_and_structured_clone() {
+    let mut e = engine(true);
+    let mut page = load_doc(
+        &mut e,
+        "<script>window.log = [];
+           var ch = new MessageChannel();
+           ch.port1.onmessage = function (ev) { log.push('p1:' + ev.data.n + ':' + (ev.data.d instanceof Date)); };
+           ch.port2.postMessage({ n: 1, d: new Date(0) });
+           log.push('sync');
+           var a = new BroadcastChannel('x'), b = new BroadcastChannel('x');
+           b.addEventListener('message', function (ev) { log.push('bc:' + ev.data); });
+           a.postMessage('hi');
+           var m = structuredClone(new Map([[1, { s: new Set([2]) }]]));
+           log.push('clone:' + (m.get(1).s.has(2)));
+         </script>",
+    );
+    for _ in 0..5 {
+        e.tick(&mut page);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(eval(&e, &mut page, "log.join(',')"), "sync,clone:true,p1:1:true,bc:hi");
+}
+
 /// `navigator.serviceWorker.register()` resolves (SvelteKit / PWA
 /// bootstraps call it without a catch); other origins are refused.
 #[test]
