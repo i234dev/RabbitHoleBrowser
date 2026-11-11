@@ -1365,6 +1365,76 @@ fn watchdog_interrupts_infinite_loops() {
     assert_eq!(realm.to_rust_string(v).unwrap(), "2");
 }
 
+fn host_work(_realm: &mut crate::Realm, _this: crate::Value, args: &[crate::Value]) -> crate::JsResult<crate::Value> {
+    // Host work done for a script (like a forced layout): excluded.
+    let ms = args.first().and_then(|v| v.as_number()).unwrap_or(0.0);
+    let t = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    crate::exclude_from_watchdog(t.elapsed());
+    Ok(crate::Value::Undefined)
+}
+
+#[test]
+fn watchdog_does_not_count_excluded_host_time() {
+    let mut realm = crate::Realm::new();
+    let g = realm.global();
+    realm.define_method(g, "hostWork", 1, host_work);
+    realm.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(150)));
+    // 8 x 40 ms of host work in a loop: well past the deadline in wall time.
+    let v = realm.eval("let k = 0; for (let i = 0; i < 8; i++) { hostWork(40); for (let j = 0; j < 1000; j++) k++; } k", "t.js");
+    assert!(v.is_ok(), "host time was charged to the script");
+    assert!(!realm.timed_out());
+    // Script time is still charged.
+    let r = realm.eval("while (true) {}", "t.js");
+    assert!(r.is_err() && realm.timed_out());
+    realm.set_deadline(None);
+}
+
+fn nested_task(realm: &mut crate::Realm, _this: crate::Value, _args: &[crate::Value]) -> crate::JsResult<crate::Value> {
+    // A host callback reached from script tries to start a task.
+    assert!(!realm.begin_task(), "nested begin_task must keep the running task's deadline");
+    Ok(crate::Value::Undefined)
+}
+
+#[test]
+fn task_budget_restarts_only_between_tasks() {
+    let mut realm = crate::Realm::new();
+    let g = realm.global();
+    realm.define_method(g, "nested", 0, nested_task);
+    realm.set_task_budget(Some(std::time::Duration::from_millis(150)));
+    assert!(realm.begin_task());
+    let t = std::time::Instant::now();
+    let r = realm.eval("while (true) { nested(); }", "t.js");
+    assert!(r.is_err() && realm.timed_out());
+    assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    // The next task starts with a fresh budget.
+    assert!(realm.begin_task());
+    assert!(!realm.timed_out());
+    let v = realm.eval("1 + 2", "t.js").unwrap();
+    assert_eq!(v.as_number(), Some(3.0));
+}
+
+#[test]
+fn timed_out_microtask_checkpoint_keeps_remaining_jobs() {
+    let mut realm = crate::Realm::new();
+    realm.set_task_budget(Some(std::time::Duration::from_millis(100)));
+    realm.eval("globalThis.done = 0; Promise.resolve().then(() => { while (true) {} }); for (let i = 0; i < 50; i++) Promise.resolve().then(() => done++);", "t.js").unwrap();
+    let errors = std::rc::Rc::new(std::cell::Cell::new(0));
+    let e2 = errors.clone();
+    realm.set_console_sink(Box::new(move |_, _| e2.set(e2.get() + 1)));
+    assert!(realm.begin_task());
+    realm.run_jobs();
+    // The reaction's error rejects its promise (an unhandled rejection
+    // the host reports); the other jobs are not failed in cascade.
+    assert!(errors.get() <= 1, "one timeout, not a cascade ({})", errors.get());
+    assert_eq!(realm.take_unhandled_rejections().len(), 1);
+    assert!(realm.has_pending_jobs());
+    assert!(realm.begin_task());
+    realm.run_jobs();
+    let v = realm.eval("done", "t.js").unwrap();
+    assert_eq!(v.as_number(), Some(50.0));
+}
+
 #[test]
 fn watchdog_interrupts_catastrophic_regex() {
     let mut realm = crate::Realm::new();

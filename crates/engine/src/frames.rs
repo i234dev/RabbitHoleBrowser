@@ -902,7 +902,7 @@ fn deliver_in_tree(engine: &Engine, page: &mut Page, m: &FrameMessage) -> Option
         let mut host = page.script.host.take()?;
         {
             let mut env = EngineEnv { engine, page };
-            host.realm().set_deadline(Some(std::time::Instant::now() + crate::scripting::task_budget()));
+            host.realm().begin_task();
             host.deliver_message(&mut env, &m.data, &m.from_origin, m.from);
             host.run_jobs(&mut env);
             host.realm().set_deadline(None);

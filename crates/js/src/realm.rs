@@ -160,6 +160,9 @@ pub struct Realm {
     /// When set, running JavaScript past this instant is interrupted with an
     /// uncatchable "Script execution timed out" error (watchdog).
     pub deadline: Option<std::time::Instant>,
+    /// Watchdog budget of one task (see [`Realm::begin_task`]); `None`
+    /// leaves the deadline to explicit [`Realm::set_deadline`] calls.
+    pub task_budget: Option<std::time::Duration>,
     /// A timeout is unwinding: `catch`/`finally` handlers are skipped.
     pub(crate) terminating: bool,
     pub gc_enabled: bool,
@@ -183,6 +186,21 @@ pub struct Realm {
     pub vstack: Vec<Value>,
     /// Reusable buffer for call arguments taken off the operand stack.
     pub(crate) arg_buf: Vec<Value>,
+}
+
+thread_local! {
+    /// Time spent in host work that must not count against the running
+    /// task's watchdog budget (see [`exclude_from_watchdog`]).
+    static WATCHDOG_CREDIT: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+/// Exclude `spent` from the watchdog budget of the running task on this
+/// thread: hosts call it after work done on behalf of a script that is not
+/// script execution itself (forced style/layout, synchronous network
+/// loads), so a page is not killed for the browser's own slowness.
+pub fn exclude_from_watchdog(spent: std::time::Duration) {
+    WATCHDOG_CREDIT.with(|c| c.set(c.get() + spent));
+    crate::regex::shift_deadline(spent);
 }
 
 impl Default for Realm {
@@ -257,6 +275,7 @@ impl Realm {
             new_target_stack: Vec::new(),
             gc_threshold: 200_000,
             deadline: None,
+            task_budget: None,
             terminating: false,
             gc_enabled: true,
             unhandled_rejections: Vec::new(),
@@ -602,6 +621,49 @@ impl Realm {
         self.deadline = deadline;
         self.terminating = false;
         crate::regex::set_deadline(deadline);
+        WATCHDOG_CREDIT.with(|c| c.set(std::time::Duration::ZERO));
+    }
+
+    /// Set the per-task watchdog budget used by [`Realm::begin_task`].
+    pub fn set_task_budget(&mut self, budget: Option<std::time::Duration>) {
+        self.task_budget = budget;
+    }
+
+    /// A new task starts (timer callback, event listener, microtask
+    /// checkpoint, script): when no JavaScript is on the stack and a task
+    /// budget is set, the watchdog deadline restarts at now + budget and a
+    /// previous timeout stops unwinding. Nested calls (a listener run by
+    /// `el.click()` inside a timer) keep the enclosing task's deadline, so a
+    /// runaway script cannot extend its own budget. Returns whether a new
+    /// deadline was set.
+    pub fn begin_task(&mut self) -> bool {
+        match self.task_budget {
+            Some(budget) => self.begin_task_with(budget),
+            None => false,
+        }
+    }
+
+    /// [`Realm::begin_task`] with a specific budget (e.g. a large script),
+    /// when a task budget is set at all.
+    pub fn begin_task_with(&mut self, budget: std::time::Duration) -> bool {
+        if self.task_budget.is_none() || !self.frames.is_empty() || self.native_depth > 0 {
+            return false;
+        }
+        self.set_deadline(Some(std::time::Instant::now() + budget));
+        true
+    }
+
+    /// Push the watchdog deadline forward by the time spent since `start`
+    /// outside JavaScript (see [`exclude_from_watchdog`]).
+    pub(crate) fn apply_watchdog_credit(&mut self) -> bool {
+        let credit = WATCHDOG_CREDIT.with(|c| c.replace(std::time::Duration::ZERO));
+        if credit.is_zero() {
+            return false;
+        }
+        if let Some(d) = self.deadline.as_mut() {
+            *d += credit;
+        }
+        true
     }
 
     /// Did the last run hit the deadline?
@@ -695,6 +757,12 @@ impl Realm {
             if let Err(e) = r {
                 let msg = self.error_to_string(&e);
                 self.console_emit("error", format!("Uncaught (in job) {}", msg));
+            }
+            if self.terminating {
+                // The checkpoint ran out of time: the remaining jobs stay
+                // queued for the next checkpoint (with a fresh budget)
+                // instead of each failing at once.
+                break;
             }
         }
     }

@@ -1021,3 +1021,92 @@ fn node_iterator_starts_at_root_and_table_dom_api() {
     assert_eq!(out[0], "DIV,B,I,null,I,B true true true 2 true 1 0 1");
     assert_eq!(out[1], "1 false");
 }
+
+fn sleep_ms(_realm: &mut rabbithole_js::Realm, _this: rabbithole_js::Value, args: &[rabbithole_js::Value]) -> rabbithole_js::JsResult<rabbithole_js::Value> {
+    let ms = args.first().and_then(|v| v.as_number()).unwrap_or(0.0);
+    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    Ok(rabbithole_js::Value::Undefined)
+}
+
+fn timeouts(env: &MockEnv) -> usize {
+    env.errors().iter().filter(|e| e.contains("Script execution timed out")).count()
+}
+
+/// Run timers due at `now` until none is left due (yielded runs included).
+fn drain_timers(env: &mut MockEnv, host: &mut ScriptHost, now: f64) -> usize {
+    env.now = now;
+    let mut calls = 0;
+    while host.next_due().map(|d| d <= now).unwrap_or(false) && calls < 50 {
+        host.run_timers(env, now);
+        host.run_jobs(env);
+        calls += 1;
+    }
+    calls
+}
+
+#[test]
+fn runaway_timer_is_stopped_alone() {
+    let (mut env, mut host) = setup("<div></div>");
+    host.realm().set_task_budget(Some(std::time::Duration::from_millis(150)));
+    run(&mut env, &mut host, r#"
+        window.log = [];
+        setTimeout(() => log.push('a'), 0);
+        setTimeout(() => { while (true) {} }, 0);
+        setTimeout(() => { Promise.resolve().then(() => log.push('micro')); log.push('c'); }, 0);
+        setTimeout(() => { try { while (true) {} } finally { log.push('finally must not run'); } }, 0);
+        setTimeout(() => log.push('d'), 0);
+    "#);
+    drain_timers(&mut env, &mut host, 2000.0);
+    let out = run(&mut env, &mut host, "console.log(log.join(','))");
+    assert_eq!(out[0], "a,c,micro,d");
+    assert_eq!(timeouts(&env), 2, "{:?}", env.errors());
+}
+
+#[test]
+fn runaway_listener_does_not_stop_the_next_one() {
+    let (mut env, mut host) = setup("<div id=d></div>");
+    host.realm().set_task_budget(Some(std::time::Duration::from_millis(150)));
+    run(&mut env, &mut host, r#"
+        window.log = [];
+        const d = document.getElementById('d');
+        d.addEventListener('click', () => { while (true) {} });
+        d.addEventListener('click', () => log.push('second'));
+        // A runaway loop of nested dispatches must not restart its budget.
+        d.addEventListener('ping', () => {});
+        setTimeout(() => { for (;;) d.dispatchEvent(new Event('ping')); }, 0);
+        setTimeout(() => log.push('after'), 0);
+    "#);
+    let div = find(&env, "div");
+    host.realm().begin_task();
+    host.dispatch_event(&mut env, div, "click", EventInit::simple(true, true));
+    host.run_jobs(&mut env);
+    let t = std::time::Instant::now();
+    drain_timers(&mut env, &mut host, 2000.0);
+    assert!(t.elapsed() < std::time::Duration::from_secs(3));
+    let out = run(&mut env, &mut host, "console.log(log.join(','))");
+    assert_eq!(out[0], "second,after");
+    assert_eq!(timeouts(&env), 2, "{:?}", env.errors());
+}
+
+#[test]
+fn long_timer_runs_yield_and_resume() {
+    let (mut env, mut host) = setup("<div></div>");
+    {
+        let realm = host.realm();
+        let g = realm.global();
+        realm.define_method(g, "sleepMs", 1, sleep_ms);
+    }
+    run(&mut env, &mut host, r#"
+        window.done = 0;
+        for (let i = 0; i < 6; i++) setTimeout(() => { sleepMs(40); done++; }, 0);
+    "#);
+    env.now = 2000.0;
+    host.run_timers(&mut env, 2000.0);
+    let first = run(&mut env, &mut host, "console.log(done)")[0].parse::<u32>().unwrap();
+    assert!((1..6).contains(&first), "ran {first} timers in one slice");
+    assert!(host.next_due().unwrap() <= 2000.0, "the rest stay due");
+    drain_timers(&mut env, &mut host, 2000.0);
+    let out = run(&mut env, &mut host, "console.log(done)");
+    assert_eq!(out[0], "6");
+    assert_eq!(timeouts(&env), 0);
+}

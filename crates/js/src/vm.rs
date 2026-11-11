@@ -1031,8 +1031,21 @@ impl Realm {
     #[inline(never)]
     fn safepoint(&mut self) -> JsResult<()> {
         self.maybe_gc();
+        if crate::sampler::js::enabled() {
+            let frames: Vec<String> = self
+                .frames
+                .iter()
+                .rev()
+                .take(12)
+                .map(|f| format!("{}@{}:{}", f.code.name, f.code.filename, f.code.positions.first().map(|p| p.line).unwrap_or(0)))
+                .collect();
+            crate::sampler::js::sample(&frames);
+        }
         if let Some(d) = self.deadline {
             if self.terminating || std::time::Instant::now() >= d {
+                if !self.terminating && self.apply_watchdog_credit() && std::time::Instant::now() < self.deadline.unwrap_or(d) {
+                    return Ok(());
+                }
                 self.terminating = true;
                 return Err(self.new_error("RangeError", "Script execution timed out"));
             }
@@ -1238,11 +1251,11 @@ impl Realm {
                         None => slow!(op),
                     },
                     Op::BinRR(kd, d, a, b) => match num2!(a, b) {
-                        Some((x, y)) => set_num!(d, num_binop(crate::bytecode::BIN_OPS[kd as usize], x, y)),
+                        Some((x, y)) => set_num!(d, bin_by_index(kd, x, y)),
                         None => slow!(op),
                     },
                     Op::BinRK(kd, d, a, c) => match num_k!(a, c) {
-                        Some((x, y)) => set_num!(d, num_binop(crate::bytecode::BIN_OPS[kd as usize], x, y)),
+                        Some((x, y)) => set_num!(d, bin_by_index(kd, x, y)),
                         None => slow!(op),
                     },
                     Op::CmpRR(kd, d, a, b) => {
@@ -3776,6 +3789,21 @@ impl Realm {
             Op::Gt => x > y,
             _ => x >= y,
         })
+    }
+}
+
+/// `num_binop` of `BIN_OPS[kd]`, dispatched on the index (inlined into the
+/// interpreter loop; the bitwise operators dominate hash / codec loops).
+#[inline(always)]
+fn bin_by_index(kd: u8, x: f64, y: f64) -> f64 {
+    match kd {
+        5 => (to_int32(x) & to_int32(y)) as f64,
+        6 => (to_int32(x) | to_int32(y)) as f64,
+        7 => (to_int32(x) ^ to_int32(y)) as f64,
+        8 => to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64,
+        9 => (to_int32(x) >> (to_uint32(y) & 31)) as f64,
+        10 => (to_uint32(x) >> (to_uint32(y) & 31)) as f64,
+        _ => num_binop(crate::bytecode::BIN_OPS[kd as usize], x, y),
     }
 }
 

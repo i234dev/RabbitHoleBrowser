@@ -35,6 +35,13 @@ pub fn set_deadline(d: Option<std::time::Instant>) {
     EXPIRED.with(|c| c.set(false));
 }
 
+/// Move the matcher deadline later (host time excluded from the watchdog).
+pub(crate) fn shift_deadline(by: std::time::Duration) {
+    if !EXPIRED.with(|c| c.get()) {
+        DEADLINE.with(|c| c.set(c.get().map(|d| d + by)));
+    }
+}
+
 /// Check the deadline (cheap; call every few thousand steps).
 fn deadline_passed() -> bool {
     if EXPIRED.with(|c| c.get()) {

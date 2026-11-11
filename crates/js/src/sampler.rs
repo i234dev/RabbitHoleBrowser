@@ -120,3 +120,53 @@ pub fn start_from_env() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     imp::start_from_env();
 }
+
+/// JavaScript-level profile: with `RH_JSPROF=<file>`, every VM safe point
+/// (each tick of backward jumps and calls) counts the running function and
+/// its callers; the table is rewritten to the file every few thousand
+/// samples (`self  inclusive  function@file:line`).
+pub(crate) mod js {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static PATH: Option<String> = std::env::var("RH_JSPROF").ok();
+        static TABLE: RefCell<(u64, HashMap<String, (u64, u64)>)> = RefCell::new((0, HashMap::new()));
+    }
+
+    pub(crate) fn enabled() -> bool {
+        PATH.with(|p| p.is_some())
+    }
+
+    /// Record one sample: `frames` innermost first.
+    pub(crate) fn sample(frames: &[String]) {
+        TABLE.with(|t| {
+            let mut t = t.borrow_mut();
+            t.0 += 1;
+            let mut seen = std::collections::HashSet::new();
+            for (i, f) in frames.iter().enumerate() {
+                if !seen.insert(f.as_str()) {
+                    continue;
+                }
+                let e = t.1.entry(f.clone()).or_insert((0, 0));
+                if i == 0 {
+                    e.0 += 1;
+                }
+                e.1 += 1;
+            }
+            if t.0 % 2048 == 0 {
+                let mut rows: Vec<(&String, &(u64, u64))> = t.1.iter().collect();
+                rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+                let mut out = format!("samples {}\n", t.0);
+                for (k, (s, c)) in rows.iter().take(300) {
+                    out.push_str(&format!("{s:8} {c:8}  {k}\n"));
+                }
+                PATH.with(|p| {
+                    if let Some(p) = p {
+                        let _ = std::fs::write(p, out);
+                    }
+                });
+            }
+        });
+    }
+}

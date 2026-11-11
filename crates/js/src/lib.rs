@@ -53,6 +53,6 @@ pub use heap::{NativeFn, ObjectKind, Property, ALL, CONFIGURABLE, ENUMERABLE, HI
 pub use interop::JsResult;
 pub use modules::{ImportMetaHook, ModuleId, ModuleLoader, ModuleStatus};
 pub use parser::{parse_program, ParseError};
-pub use realm::{Realm, Root};
+pub use realm::{exclude_from_watchdog, Realm, Root};
 pub use value::{JsStr, ObjectId, PropertyKey, SymbolId, Value};
 pub use vm::ResumeMode;

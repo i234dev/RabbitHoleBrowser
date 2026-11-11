@@ -1040,6 +1040,8 @@ fn set_phase_target(realm: &mut Realm, eid: ObjectId, phase: u8, current: Value,
 fn run_inline_handler(realm: &mut Realm, key: TargetKey, current: &Value, eid: ObjectId, ty: &str) -> bool {
     let ev = Value::Object(eid);
     let Some(h) = inline_handler(realm, key, current, ty) else { return false };
+    // Each listener of a top-level dispatch is a watchdog task of its own.
+    realm.begin_task();
     let r = realm.call(h, current.clone(), &[ev]);
     match r {
         Ok(v) => {
@@ -1090,6 +1092,7 @@ fn invoke_listeners(realm: &mut Realm, key: TargetKey, current: &Value, eid: Obj
         }
         ran = true;
         let cb = l.callback.clone();
+        realm.begin_task();
         let r = if realm.is_callable(&cb) {
             realm.call(cb, current.clone(), &[ev.clone()])
         } else {

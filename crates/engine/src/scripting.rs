@@ -187,6 +187,8 @@ impl HostEnv for EngineEnv<'_> {
             let t = std::time::Instant::now();
             // Style + layout only; the display list waits for paint.
             self.engine.flush_layout(self.page);
+            // The browser's own work does not count against the script.
+            rabbithole_script::exclude_from_watchdog(t.elapsed());
             if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
                 eprintln!("[layout] forced restyle+layout {:?}", t.elapsed());
             }
@@ -198,7 +200,9 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn elements_from_point(&mut self, x: f32, y: f32) -> Option<Vec<NodeId>> {
         self.ensure_layout();
+        let t = std::time::Instant::now();
         self.engine.flush_display_list(self.page);
+        rabbithole_script::exclude_from_watchdog(t.elapsed());
         if x < 0.0 || y < 0.0 || x > self.page.viewport.width || y > self.page.viewport.height {
             return Some(Vec::new());
         }
@@ -213,6 +217,7 @@ impl HostEnv for EngineEnv<'_> {
         // interleave style writes and reads).
         let t = std::time::Instant::now();
         let r = self.engine.computed_style_now(self.page, node);
+        rabbithole_script::exclude_from_watchdog(t.elapsed());
         if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
             eprintln!("[layout] style_chain {:?}", t.elapsed());
         }
@@ -231,7 +236,11 @@ impl HostEnv for EngineEnv<'_> {
         if !req.url.is_http() && req.url.scheme != "data" && req.url.scheme != "file" {
             return Err(format!("unsupported scheme {}", req.url.scheme));
         }
-        self.engine.loader.fetcher.request(&req).map_err(|e| e.to_string())
+        // Waiting for the network is not script time.
+        let t = std::time::Instant::now();
+        let r = self.engine.loader.fetcher.request(&req).map_err(|e| e.to_string());
+        rabbithole_script::exclude_from_watchdog(t.elapsed());
+        r
     }
     fn fetch_background(&mut self, req: Request) -> Option<std::sync::mpsc::Receiver<Result<Response, String>>> {
         if !req.url.is_http() {
@@ -470,14 +479,6 @@ pub fn fill_random(buf: &mut [u8]) {
     });
 }
 
-/// How long one task (timer batch, event dispatch, message) may run
-/// before the watchdog stops it (1.5 s; `RH_TASK_BUDGET_MS` overrides it
-/// for diagnosing heavy sites).
-pub(crate) fn task_budget() -> std::time::Duration {
-    static BUDGET: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
-    *BUDGET.get_or_init(|| std::time::Duration::from_millis(std::env::var("RH_TASK_BUDGET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500)))
-}
-
 /// Result of a script-driven interaction step.
 #[derive(Debug, Default)]
 pub struct ScriptOutcome {
@@ -525,18 +526,12 @@ impl Engine {
         }
         {
             let mut env = EngineEnv { engine: self, page };
-            // Watchdog: each script gets a few seconds and the whole load a
-            // bounded total, so a runaway script cannot hang the page. The
-            // budget grows with the source size: compiling a multi-MB app
-            // bundle alone takes seconds (the deadline is only checked
-            // while running, so a fixed 3 s killed big bundles right after
-            // compilation).
-            let budget = |bytes: usize| std::time::Duration::from_millis(2000 * bytes as u64 / (1024 * 1024));
-            let total: usize = classic.iter().chain(deferred.iter()).chain(asyncs.iter()).map(|s| s.source.len()).sum();
-            let load_deadline = std::time::Instant::now() + (std::time::Duration::from_secs(8) + budget(total)).min(std::time::Duration::from_secs(40));
+            // Watchdog: each script, listener and microtask checkpoint is a
+            // task with its own budget (rabbithole_script::task_budget, plus
+            // 2 s per MB for scripts; forced layout and synchronous loads
+            // do not count), so a runaway script is stopped without failing
+            // the scripts after it.
             for s in classic.iter().chain(deferred.iter()).chain(asyncs.iter()) {
-                let per_script = std::time::Instant::now() + (std::time::Duration::from_secs(3) + budget(s.source.len())).min(std::time::Duration::from_secs(30));
-                host.realm().set_deadline(Some(per_script.min(load_deadline)));
                 let name = s.url.as_ref().map(|u| u.to_string()).unwrap_or_else(|| format!("{}#inline", env.page.url));
                 let debug = std::env::var_os("RH_DEBUG_SCRIPTS").is_some();
                 if debug {
@@ -551,7 +546,6 @@ impl Engine {
                     eprintln!("[script] done  {} in {:?}", name, t.elapsed());
                 }
             }
-            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_secs(2)));
             host.document_ready(&mut env);
             host.run_jobs(&mut env);
             host.realm().set_deadline(None);
@@ -597,7 +591,8 @@ impl Engine {
         let now = self.start.elapsed().as_secs_f64() * 1000.0;
         {
             let mut env = EngineEnv { engine: self, page };
-            host.realm().set_deadline(Some(std::time::Instant::now() + crate::scripting::task_budget()));
+            // run_timers gives every callback its own watchdog budget and
+            // yields after a time slice (timers still due run next tick).
             if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
                 eprintln!("[tick] run_timers start");
             }
@@ -630,7 +625,7 @@ impl Engine {
         }
         let result: DispatchResult = {
             let mut env = EngineEnv { engine: self, page };
-            host.realm().set_deadline(Some(std::time::Instant::now() + crate::scripting::task_budget()));
+            host.realm().begin_task();
             let r = host.dispatch_event(&mut env, target, event_type, init);
             host.run_jobs(&mut env);
             host.realm().set_deadline(None);
@@ -649,7 +644,7 @@ impl Engine {
         };
         {
             let mut env = EngineEnv { engine: self, page };
-            host.realm().set_deadline(Some(std::time::Instant::now() + crate::scripting::task_budget()));
+            host.realm().begin_task();
             host.dispatch_window_event(&mut env, event_type);
             host.run_jobs(&mut env);
             host.realm().set_deadline(None);

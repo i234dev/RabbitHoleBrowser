@@ -29,6 +29,7 @@ mod tests_webapi;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};
+pub use rabbithole_js::exclude_from_watchdog;
 
 use env::{with_env, EnvGuard};
 use host::{state, HostState, StateGuard};
@@ -62,6 +63,33 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:extras.js", include_str!("js/extras.js")),
     ("rabbithole:svg.js", include_str!("js/svg.js")),
 ];
+
+/// Default watchdog budget of one task (a timer callback, event listener,
+/// animation frame callback, message or microtask checkpoint; see
+/// [`task_budget`]).
+pub const TASK_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Watchdog budget of one task: [`TASK_BUDGET`], or `RH_TASK_BUDGET_MS`.
+/// Time spent in forced style/layout and synchronous loads does not count
+/// (see [`rabbithole_js::exclude_from_watchdog`]). A task past it is
+/// stopped with an uncatchable "Script execution timed out" error; the
+/// other tasks go on. Every realm (each frame has its own) applies it.
+pub fn task_budget() -> std::time::Duration {
+    static BUDGET: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| std::env::var("RH_TASK_BUDGET_MS").ok().and_then(|v| v.parse().ok()).map(std::time::Duration::from_millis).unwrap_or(TASK_BUDGET))
+}
+
+/// Budget of running a script of `bytes` bytes: a task budget plus 2 s per
+/// MB of source (compiling a multi-MB bundle alone takes seconds), at most
+/// 30 s.
+pub fn script_budget(bytes: usize) -> std::time::Duration {
+    (task_budget() + std::time::Duration::from_millis(2000 * bytes as u64 / (1024 * 1024))).min(std::time::Duration::from_secs(30).max(task_budget()))
+}
+
+/// How long one [`ScriptHost::run_timers`] call keeps running due timers
+/// before yielding to the event loop; the timers still due run on the next
+/// call (they stay due, so the embedder calls again right away).
+pub const TICK_SLICE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Extra data carried by a dispatched event.
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +148,7 @@ impl ScriptHost {
     /// Create the realm and install `window`, `document` and all globals.
     pub fn new(env: &mut dyn HostEnv) -> ScriptHost {
         let mut realm = Realm::new();
+        realm.set_task_budget(Some(task_budget()));
         let now = env.now_ms();
         let state = Rc::new(RefCell::new(HostState {
             wrappers: HashMap::new(),
@@ -236,6 +265,7 @@ impl ScriptHost {
     /// resolved through the document's import maps) and evaluated; pending
     /// jobs are drained afterwards.
     pub fn run_script(&mut self, env: &mut dyn HostEnv, source: &str, url: &str, is_module: bool) -> Result<(), String> {
+        self.realm.begin_task_with(script_budget(source.len()));
         if is_module {
             return self.enter(env, |realm| modules::run_module_script(realm, source, url));
         }
@@ -329,11 +359,13 @@ impl ScriptHost {
             }
             events::dispatch(realm, TargetKey::Node(NodeRef::main(Document::ROOT)), "readystatechange", EventInit::simple(false, false), true);
             events::dispatch(realm, TargetKey::Node(NodeRef::main(Document::ROOT)), "DOMContentLoaded", EventInit::simple(true, false), true);
+            realm.begin_task();
             realm.run_jobs();
             state().borrow_mut().ready_state = "complete";
             events::dispatch(realm, TargetKey::Node(NodeRef::main(Document::ROOT)), "readystatechange", EventInit::simple(false, false), true);
             events::dispatch(realm, TargetKey::Window, "load", EventInit::simple(false, false), true);
             events::dispatch(realm, TargetKey::Window, "pageshow", EventInit::simple(false, false), true);
+            realm.begin_task();
             realm.run_jobs();
         });
     }
@@ -341,7 +373,13 @@ impl ScriptHost {
     /// Drain microtasks, queued callbacks and mutation observer records.
     pub fn run_jobs(&mut self, env: &mut dyn HostEnv) {
         self.enter(env, |realm| {
+            // A microtask checkpoint is a task of its own for the watchdog.
+            realm.begin_task();
             for _ in 0..16 {
+                if realm.timed_out() {
+                    // Out of time: what is left runs at the next checkpoint.
+                    break;
+                }
                 shadow::flush(realm);
                 realm.run_jobs();
                 if observers::has_pending_mutations() {
@@ -364,27 +402,47 @@ impl ScriptHost {
 
     /// Run timers and animation frames that are due at `now_ms`. Returns
     /// whether anything ran.
+    ///
+    /// Every callback is a task with its own watchdog budget
+    /// ([`TASK_BUDGET`]), followed by a microtask checkpoint with its own
+    /// budget: a callback that runs out of time is stopped alone. After
+    /// [`TICK_SLICE`] of timer work the call yields; timers still due stay
+    /// due and run on the next call.
     pub fn run_timers(&mut self, env: &mut dyn HostEnv, now_ms: f64) -> bool {
         self.enter(env, |realm| {
+            let slice_end = std::time::Instant::now() + TICK_SLICE;
             state().borrow_mut().last_tick = now_ms;
+            realm.begin_task();
             let mut ran = node::run_ready_script_fetches(realm);
             // Timers due, in order of due time then id.
             loop {
+                if ran && std::time::Instant::now() >= slice_end {
+                    // Yield to the event loop (input, rendering); the timers
+                    // still due run on the next call.
+                    break;
+                }
                 let next = {
                     let st = state();
                     let mut st = st.borrow_mut();
-                    let mut due: Vec<usize> = st.timers.iter().enumerate().filter(|(_, t)| t.due <= now_ms).map(|(i, _)| i).collect();
-                    if due.is_empty() {
-                        None
-                    } else {
-                        due.sort_by(|a, b| {
-                            let ta = &st.timers[*a];
-                            let tb = &st.timers[*b];
-                            ta.due.partial_cmp(&tb.due).unwrap_or(std::cmp::Ordering::Equal).then(ta.id.cmp(&tb.id))
-                        });
-                        let i = due[0];
+                    let mut best: Option<usize> = None;
+                    for (i, t) in st.timers.iter().enumerate() {
+                        if t.due > now_ms {
+                            continue;
+                        }
+                        let better = match best {
+                            None => true,
+                            Some(b) => {
+                                let tb = &st.timers[b];
+                                t.due < tb.due || (t.due == tb.due && t.id < tb.id)
+                            }
+                        };
+                        if better {
+                            best = Some(i);
+                        }
+                    }
+                    best.map(|i| {
                         let t = &mut st.timers[i];
-                        let item = (t.id, t.callback.clone(), t.args.clone(), t.interval);
+                        let item = (t.callback.clone(), t.args.clone(), t.interval);
                         match t.interval {
                             Some(iv) => {
                                 t.due = now_ms + iv;
@@ -393,12 +451,14 @@ impl ScriptHost {
                                 st.timers.remove(i);
                             }
                         }
-                        Some(item)
-                    }
+                        item
+                    })
                 };
-                let Some((id, cb, args, interval)) = next else { break };
+                let Some((cb, args, interval)) = next else { break };
                 ran = true;
+                realm.begin_task();
                 host::call_logged(realm, &cb, Value::Undefined, &args, "timer");
+                realm.begin_task();
                 shadow::flush(realm);
                 if interval.is_none() {
                     host::unroot_value(realm, &cb);
@@ -406,9 +466,9 @@ impl ScriptHost {
                         host::unroot_value(realm, a);
                     }
                 }
-                let _ = id;
                 realm.run_jobs();
                 if observers::has_pending_mutations() {
+                    realm.begin_task();
                     observers::deliver_mutations(realm);
                 }
             }
@@ -428,28 +488,37 @@ impl ScriptHost {
                 let origin = state().borrow().time_origin;
                 for r in rafs {
                     ran = true;
+                    realm.begin_task();
                     host::call_logged(realm, &r.callback, Value::Undefined, &[Value::Number(now_ms - origin)], "requestAnimationFrame");
+                    realm.begin_task();
                     host::unroot_value(realm, &r.callback);
                     shadow::flush(realm);
                 }
+                realm.begin_task();
                 realm.run_jobs();
                 if observers::has_pending_mutations() {
+                    realm.begin_task();
                     observers::deliver_mutations(realm);
                 }
             }
             // Network connections (WebSocket / EventSource).
+            realm.begin_task();
             if sockets::has_connections() && sockets::poll(realm) {
                 ran = true;
+                realm.begin_task();
                 shadow::flush(realm);
                 realm.run_jobs();
             }
             // Update the rendering: Resize / Intersection observers.
             let origin = state().borrow().time_origin;
+            realm.begin_task();
             if natives::update_rendering(realm, now_ms - origin) {
                 ran = true;
+                realm.begin_task();
                 shadow::flush(realm);
                 realm.run_jobs();
                 if observers::has_pending_mutations() {
+                    realm.begin_task();
                     observers::deliver_mutations(realm);
                 }
             }
