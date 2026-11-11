@@ -471,6 +471,37 @@ fn flat_text(doc: &Document, n: NodeId, limit: usize) -> String {
     out
 }
 
+/// Text of the rendered part of the flat subtree (`display:none`
+/// descendants skipped; bounded to `limit` bytes).
+fn visible_text(page: &Page, n: NodeId, limit: usize) -> String {
+    fn walk(page: &Page, n: NodeId, out: &mut String, limit: usize) {
+        let doc = &page.doc;
+        if out.len() >= limit {
+            return;
+        }
+        if let Some(t) = doc.text(n) {
+            out.push_str(t);
+            out.push(' ');
+            return;
+        }
+        if skip_tag(doc, n) {
+            return;
+        }
+        if doc.element(n).is_some() && !doc.is_shadow_root(n) {
+            match page.styles.get(n) {
+                Some(s) if s.display != Display::None => {}
+                _ => return,
+            }
+        }
+        for c in kids(doc, n) {
+            walk(page, c, out, limit);
+        }
+    }
+    let mut out = String::new();
+    walk(page, n, &mut out, limit);
+    out
+}
+
 /// Is the element rendered (no `display:none`/`visibility:hidden`/zero
 /// opacity on it or an ancestor)?
 fn rendered(page: &Page, n: NodeId) -> bool {
@@ -705,8 +736,8 @@ fn has_credential_inputs(doc: &Document, root: NodeId) -> bool {
 /// Build a dialog from a candidate root (None when it does not qualify).
 fn qualify(page: &Page, frames: &[NodeId], root: NodeId, vendor: Option<&'static str>) -> Option<ConsentDialog> {
     let doc = &page.doc;
-    let text = flat_text(doc, root, 12000);
-    if text.len() >= 12000 && vendor.is_none() {
+    let text = visible_text(page, root, 20000);
+    if text.len() >= 20000 && vendor.is_none() {
         return None; // a whole page, not a dialog
     }
     if !is_consent_text(&text) {
@@ -789,6 +820,22 @@ fn detect_in(page: &Page, frames: &[NodeId], depth: u32) -> Option<ConsentDialog
 
     // 2. Generic raised boxes (outermost qualifying one wins).
     let mut found: Vec<ConsentDialog> = Vec::new();
+    if std::env::var_os("RH_DEBUG_CONSENT").is_some() {
+        for &n in &raised_cands {
+            let t = flat_text(doc, n, 12000);
+            eprintln!(
+                "[consent] depth {depth} raised <{} id={:?} class={:?}> share {:.2} rect {:?} text {} consent {} buttons {}",
+                doc.tag(n).unwrap_or("?"),
+                doc.attr(n, "id"),
+                doc.attr(n, "class").map(|c| c.chars().take(40).collect::<String>()),
+                topmost_share(page, n),
+                viewport_rect(page, n),
+                t.len(),
+                is_consent_text(&t),
+                collect_controls(page, n).0.len()
+            );
+        }
+    }
     for &n in &raised_cands {
         if found.iter().any(|d| contains(doc, d.root, n)) {
             continue;
@@ -972,6 +1019,25 @@ fn top_point(page: &Page, frames: &[NodeId], node: NodeId) -> Option<(f32, f32)>
     (page.node_at_viewport(x, y) == Some(f)).then_some((x, y))
 }
 
+/// Is `node` a link to another document (following it would leave the
+/// page instead of opening a panel)?
+fn leaves_page(page: &Page, d: &ConsentDialog, node: NodeId) -> bool {
+    let Some(p) = frame_page(page, &d.frames) else { return false };
+    let doc = &p.doc;
+    let mut cur = Some(node);
+    while let Some(c) = cur {
+        if doc.is_element(c, "a") {
+            let href = doc.attr(c, "href").unwrap_or("").trim();
+            return !(href.is_empty() || href.starts_with('#') || href.to_ascii_lowercase().starts_with("javascript:"));
+        }
+        if c == d.root {
+            break;
+        }
+        cur = doc.parent(c);
+    }
+    false
+}
+
 // --------------------------------------------------------------- driver
 
 /// How a page's consent dialog was handled.
@@ -1052,6 +1118,7 @@ pub struct ConsentDriver {
     attempts: u8,
     settings_opened: bool,
     toggles_done: bool,
+    settings_deadline: Option<Instant>,
     /// Next time to look (None: idle until `arm`).
     pub next: Option<Instant>,
     /// Stop watching for a dialog after this.
@@ -1080,6 +1147,7 @@ impl ConsentDriver {
             attempts: 0,
             settings_opened: false,
             toggles_done: false,
+            settings_deadline: None,
             next: Some(now + Duration::from_millis(300)),
             deadline: now + WATCH_FOR,
             vendor: None,
@@ -1117,7 +1185,7 @@ impl ConsentDriver {
     fn report(&mut self, outcome: ConsentOutcome) -> ConsentStep {
         self.stage = Stage::Done;
         self.next = None;
-        ConsentStep::Finished(ConsentReport { outcome, button: self.last_button.clone(), vendor: self.vendor.map(|v| v.to_string()), in_frame: self.in_frame, steps: self.steps.clone() })
+        ConsentStep::Finished(ConsentReport { outcome, button: if outcome == ConsentOutcome::NoButton { String::new() } else { self.last_button.clone() }, vendor: self.vendor.map(|v| v.to_string()), in_frame: self.in_frame, steps: self.steps.clone() })
     }
 
     fn click(&mut self, engine: &Engine, page: &mut Page, d: &ConsentDialog, b: &ConsentButton, now: Instant) -> ConsentStep {
@@ -1185,8 +1253,13 @@ impl ConsentDriver {
                     }
                 }
                 let Some(d) = detect(page) else {
-                    // The panel closed by itself: done.
-                    return self.step_verify_done();
+                    // The panel may still be loading (a new frame): wait a
+                    // little, then leave it (nothing was chosen).
+                    if self.settings_deadline.map(|t| now < t).unwrap_or(false) {
+                        self.next = Some(now + Duration::from_millis(400));
+                        return ConsentStep::Idle;
+                    }
+                    return self.report(ConsentOutcome::NoButton);
                 };
                 self.act(engine, page, d, now)
             }
@@ -1241,9 +1314,12 @@ impl ConsentDriver {
                     self.dialog = Some(d.clone());
                     return self.click(engine, page, &d, &save, now);
                 }
-            } else if d.count(ButtonKind::Settings) == 1 {
+            } else if d.count(ButtonKind::Settings) == 1 && d.first(ButtonKind::Settings).map(|s| !leaves_page(page, &d, s.node)).unwrap_or(false) {
+                // (a settings "button" that is a link to another page is
+                // not a panel: leave the dialog to the user)
                 let s = d.first(ButtonKind::Settings).cloned().unwrap();
                 self.settings_opened = true;
+                self.settings_deadline = Some(now + Duration::from_secs(6));
                 self.stage = Stage::InSettings;
                 self.dialog = Some(d.clone());
                 return self.click(engine, page, &d, &s, now);

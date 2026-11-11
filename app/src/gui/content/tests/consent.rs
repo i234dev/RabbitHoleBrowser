@@ -333,3 +333,41 @@ fn consent_page_with_form_submits_the_reject_button() {
     let body = request.body.as_ref().map(|b| String::from_utf8_lossy(&b.data).to_string()).unwrap_or_default();
     assert!(body.contains("set_eom=true"), "{body}");
 }
+
+#[test]
+fn settings_links_to_other_pages_are_not_followed() {
+    // BBC-style: "No, take me to settings" is a link to a settings page;
+    // rejecting must not navigate away.
+    let (sink, rx) = sink();
+    let h = spawn_mode(1, &sink, mode(ConsentMode::Reject));
+    let html = format!(
+        "<html><body style='margin:0'>{PROBE}{ARTICLE}
+<div id='cookiePrompt' style='position:fixed;left:0;right:0;top:0;padding:12px;background:#fff;z-index:100'>
+ <p>Let us know you agree to cookies. We use cookies to give you the best online experience.</p>
+ <button id='yes'>Yes, I agree</button> <a href='https://news.example.test/usingthebbc/cookies/'>No, take me to settings</a>
+</div></body></html>"
+    );
+    load_at(&h, &html, "https://news.example.test/");
+    let e = consent_event(&rx, 1, Duration::from_secs(10)).expect("consent event");
+    assert_eq!(e.outcome, ConsentOutcome::NoButton, "{e:?}");
+    assert!(e.steps.is_empty(), "{:?}", e.steps);
+    assert!(wait_for(&rx, 1, Duration::from_millis(800), |m| matches!(m, FromContent::Navigate { .. })).is_none(), "no navigation");
+}
+
+#[test]
+fn settings_panel_that_never_shows_is_left_alone() {
+    let (sink, rx) = sink();
+    let h = spawn_mode(1, &sink, mode(ConsentMode::Reject));
+    let html = format!(
+        "<html><body style='margin:0'>{PROBE}{ARTICLE}
+<div id='b' style='position:fixed;left:0;right:0;bottom:0;padding:12px;background:#fff;z-index:100'>
+ <p>We and our partners use cookies.</p><button id='ok'>Consent and continue</button> <button id='prefs'>Preferences</button>
+</div>
+<script>document.getElementById('prefs').onclick=function(){{document.getElementById('b').remove()}};</script></body></html>"
+    );
+    load_at(&h, &html, "https://mag.example.test/");
+    let e = consent_event(&rx, 1, Duration::from_secs(15)).expect("consent event");
+    assert_eq!(e.outcome, ConsentOutcome::NoButton, "{e:?}");
+    assert_eq!(e.steps, vec!["Preferences".to_string()]);
+    assert_eq!(eval(&h, &rx, 1, "window.__choice"), "none");
+}
