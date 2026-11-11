@@ -47,6 +47,14 @@ impl Profile {
     pub fn settings_path(&self) -> PathBuf {
         self.dir.join("settings.txt")
     }
+    /// Log of automatically handled cookie dialogs.
+    pub fn autocookies_path(&self) -> PathBuf {
+        self.dir.join("autocookies.txt")
+    }
+    /// Per-site rules for cookie dialogs.
+    pub fn autocookies_sites_path(&self) -> PathBuf {
+        self.dir.join("autocookies-sites.txt")
+    }
     pub fn local_storage_path(&self) -> PathBuf {
         self.dir.join("localstorage.txt")
     }

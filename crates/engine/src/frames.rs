@@ -825,6 +825,18 @@ impl Engine {
         out.relayout = true;
     }
 
+    /// After a synthetic click inside child frame `i` (hosted by `node`):
+    /// repaint the frame and apply its side effects.
+    pub(crate) fn frame_click_done(&self, page: &mut Page, node: NodeId, i: usize, o: ScriptOutcome, out: &mut ScriptOutcome) {
+        if let Some(c) = page.frames.children.get_mut(i) {
+            c.dirty = true;
+        }
+        self.frame_side_effects(page, node, o, out);
+        if self.paint_frames(page) {
+            out.relayout = true;
+        }
+    }
+
     /// Apply what a child frame's scripts asked for: navigations load in
     /// the frame, new windows and dialogs go to the embedder.
     fn frame_side_effects(&self, page: &mut Page, node: NodeId, o: ScriptOutcome, out: &mut ScriptOutcome) {

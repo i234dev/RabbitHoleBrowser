@@ -30,12 +30,10 @@ impl Overlay {
     }
 }
 
-const COOKIE_WORDS: &[&str] = &["cookie", "consent", "gdpr", "rgpd", "privacidad", "datenschutz", "privacy"];
-
-/// Does the text look like a cookie/consent banner?
+/// Does the text look like a cookie/consent banner? (shared multilingual
+/// matcher of `rabbithole_engine::consent`, plus privacy notices).
 pub fn is_cookie_text(t: &str) -> bool {
-    let t = t.to_lowercase();
-    COOKIE_WORDS.iter().any(|w| t.contains(w))
+    rabbithole_engine::consent::is_consent_text(t) || rabbithole_engine::consent::mentions_privacy(t)
 }
 
 fn is_dialog(doc: &Document, n: NodeId) -> bool {

@@ -12,6 +12,7 @@ use rabbithole_engine::layout::LayoutBox;
 use rabbithole_engine::net::{Request, Url};
 use rabbithole_engine::script::EventInit;
 use rabbithole_engine::scripting::{input_init, key_init, mouse_init, plain_init};
+use rabbithole_engine::consent::{ConsentDriver, ConsentReport, ConsentStep};
 use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page, ScriptOutcome, Selection};
 
 use super::frame::{Frame, Pixels};
@@ -142,6 +143,10 @@ struct Worker {
     sent_state: PageState,
     sent_title: String,
     sent_favicon: usize,
+    /// Handles the cookie-consent dialog of the current page.
+    consent: Option<ConsentDriver>,
+    /// Recent successful consent clicks per host (reload-loop guard).
+    consent_recent: Vec<(String, Instant)>,
     quit: bool,
 }
 
@@ -192,6 +197,8 @@ impl Worker {
             sent_state: PageState::default(),
             sent_title: String::new(),
             sent_favicon: 0,
+            consent: None,
+            consent_recent: Vec::new(),
             quit: false,
         };
         // Network log for the devtools (per tab: this thread's fetcher).
@@ -259,6 +266,7 @@ impl Worker {
             } else {
                 self.tick_deferred = true;
             }
+            self.consent_tick();
             let t3 = Instant::now();
             self.flush();
             if debug_content() && t0.elapsed() > Duration::from_millis(100) {
@@ -293,6 +301,10 @@ impl Worker {
         if self.load_phase.is_some() && !self.awaiting_scripts {
             // Watch for the end of image loading.
             wait = Some(wait.map(|w| w.min(200.0)).unwrap_or(200.0));
+        }
+        if let Some(next) = self.consent.as_ref().and_then(|d| d.next).filter(|_| !self.awaiting_scripts && self.running_scripts.is_none()) {
+            let left = next.saturating_duration_since(Instant::now()).as_secs_f64() * 1000.0;
+            wait = Some(wait.map(|w| w.min(left)).unwrap_or(left));
         }
         if self.scroll_event_pending {
             let left = SCROLL_EVENT_INTERVAL.saturating_sub(self.last_scroll_dispatch.elapsed()).as_secs_f64() * 1000.0;
@@ -480,7 +492,19 @@ impl Worker {
         self.engine.loader.load_images = s.images;
         self.engine.loader.fetcher.block_trackers = s.block_trackers;
         self.engine.loader.fetcher.accept_language = s.accept_language.clone();
+        let policy_changed = s.consent != self.config.settings.consent;
         self.config.settings = s;
+        if policy_changed {
+            // A new mode applies to the page on screen right away.
+            let choice = self.page.as_ref().and_then(|p| self.consent_choice(p));
+            match choice {
+                None => self.consent = None,
+                Some(c) if self.consent.as_ref().map(|d| d.choice != c || d.finished()).unwrap_or(true) => {
+                    self.consent = Some(ConsentDriver::new(c, Instant::now()));
+                }
+                _ => {}
+            }
+        }
     }
 
     fn download_prefs(&self) -> DownloadPrefs {
@@ -657,6 +681,9 @@ impl Worker {
         }
         self.running_scripts = None;
         debug_time("scripts", started);
+        if let Some(d) = self.consent.as_mut() {
+            d.extend_watch(Instant::now());
+        }
         let out = self.take_load_outcome();
         self.dirty = true;
         self.update_title();
@@ -711,6 +738,7 @@ impl Worker {
         self.send(FromContent::Committed { url: page.url.clone(), title, push_history });
         self.send(FromContent::Hover { cursor: "default", link: None });
         let fragment = page.url.fragment.clone();
+        self.consent = self.consent_choice(&page).map(|c| ConsentDriver::new(c, Instant::now()));
         self.page = Some(page);
         self.dirty = true;
         if let Some(f) = fragment {
@@ -719,6 +747,74 @@ impl Worker {
         if !self.find.query.is_empty() {
             self.refresh_find(false);
         }
+    }
+
+    // ------------------------------------------------------ cookie dialogs
+
+    /// What to do with this page's consent dialog (None: leave it alone).
+    fn consent_choice(&self, page: &Page) -> Option<rabbithole_engine::consent::Choice> {
+        if !matches!(page.url.scheme.as_str(), "http" | "https") {
+            return None;
+        }
+        let host = page.url.host.clone();
+        // Reload-loop guard: a site that keeps showing its dialog after
+        // three handled ones within a minute is left alone.
+        let recent = self.consent_recent.iter().filter(|(h, t)| *h == host && t.elapsed() < Duration::from_secs(60)).count();
+        if recent >= 3 {
+            return None;
+        }
+        self.config.settings.consent.choice_for(&host)
+    }
+
+    /// Run the consent driver when due.
+    fn consent_tick(&mut self) {
+        if self.awaiting_scripts || self.running_scripts.is_some() {
+            return;
+        }
+        let Some(mut d) = self.consent.take() else { return };
+        let now = Instant::now();
+        if d.next.map(|n| n > now).unwrap_or(true) {
+            self.consent = Some(d);
+            return;
+        }
+        let Some(page) = self.page.as_mut() else { return };
+        let step = d.step(&self.engine, page, now);
+        match step {
+            ConsentStep::Idle => self.consent = Some(d),
+            ConsentStep::Finished(r) => {
+                self.consent = Some(d);
+                self.report_consent(r);
+            }
+            ConsentStep::Clicked { action, outcome } => {
+                self.dirty = true;
+                let leaves = outcome.navigation.is_some() || matches!(action, ClickAction::Navigate { new_tab: false, .. } | ClickAction::Submit { .. });
+                let report = if leaves { d.navigated() } else { None };
+                self.consent = Some(d);
+                if let Some(r) = report {
+                    self.report_consent(r);
+                }
+                self.apply_outcome(outcome);
+                match action {
+                    ClickAction::Navigate { url, new_tab: false } => self.follow_link(url, false),
+                    ClickAction::Submit { form, submitter } => self.submit_form(submitter.unwrap_or(form), submitter),
+                    _ => {}
+                }
+                self.after_script_activity();
+            }
+        }
+    }
+
+    fn report_consent(&mut self, r: ConsentReport) {
+        let Some(page) = self.page.as_ref() else { return };
+        let Some(choice) = self.consent.as_ref().map(|d| d.choice) else { return };
+        use rabbithole_engine::consent::ConsentOutcome;
+        let host = page.url.host.clone();
+        if matches!(r.outcome, ConsentOutcome::Accepted | ConsentOutcome::Rejected) {
+            self.consent_recent.retain(|(_, t)| t.elapsed() < Duration::from_secs(60));
+            self.consent_recent.push((host.clone(), Instant::now()));
+        }
+        let ev = crate::autocookies::ConsentEvent { host, url: page.url.to_string(), outcome: r.outcome, choice, button: r.button, vendor: r.vendor, in_frame: r.in_frame, steps: r.steps };
+        self.send(FromContent::Consent(ev));
     }
 
     fn update_title(&mut self) {

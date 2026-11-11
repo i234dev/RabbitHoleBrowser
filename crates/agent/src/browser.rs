@@ -971,14 +971,14 @@ impl Agent {
     /// The cookie-banner shortcut: always chooses REJECT.
     fn reject_cookies(&mut self, ti: usize) -> Result<String, String> {
         let (root, _, overlays) = self.tree(ti, false);
-        let banner = overlays.iter().find(|o| o.cookie).map(|o| o.node);
+        // The shared consent detector (vendor CMPs, raised boxes, frames)
+        // first, then the overlay found by hit testing.
+        let detected = rabbithole_engine::consent::detect(&self.tabs[ti].frames[0].page).filter(|d| d.frames.is_empty()).map(|d| d.root);
+        let banner = detected.or_else(|| overlays.iter().find(|o| o.cookie).map(|o| o.node));
         // Candidate buttons: inside the banner if found, else any control
-        // in a cookie-ish container.
-        const REJECT: &[&str] = &[
-            "reject all", "reject", "decline", "deny", "refuse", "only necessary", "necessary only", "essential only", "only essential", "rechazar", "rechazar todo",
-            "no acepto", "denegar", "solo necesarias", "ablehnen", "alle ablehnen", "nur notwendige", "refuser", "tout refuser", "continuer sans accepter", "rifiuta",
-            "rejeitar", "weiger", "do not accept", "continue without accepting", "no, thanks", "no thanks",
-        ];
+        // in a cookie-ish container. Names are matched by the shared
+        // multilingual matcher; only "reject" buttons qualify.
+        let is_reject = |name: &str| rabbithole_engine::consent::classify_button(name) == Some(rabbithole_engine::consent::ButtonKind::Reject);
         let page = &self.tabs[ti].frames[0].page;
         let doc = &page.doc;
         let mut found: Option<(u32, String)> = None;
@@ -990,8 +990,7 @@ impl Agent {
                 Some(b) => b == a.node || doc.is_ancestor(b, a.node),
                 None => doc.ancestor_or_self(a.node, |x| overlay::is_cookie_text(&format!("{} {}", doc.attr(x, "id").unwrap_or(""), doc.attr(x, "class").unwrap_or("")))).is_some(),
             };
-            let name = a.name.to_lowercase();
-            if inside && REJECT.iter().any(|w| name.contains(w)) && !name.contains("accept all") {
+            if inside && is_reject(&a.name) {
                 if let Some(r) = a.reference {
                     found = Some((r, a.name.clone()));
                 }
@@ -1003,8 +1002,7 @@ impl Agent {
                 if found.is_some() || a.kind != Kind::Control || a.frame == 0 {
                     return;
                 }
-                let name = a.name.to_lowercase();
-                if REJECT.iter().any(|w| name.contains(w)) {
+                if is_reject(&a.name) {
                     if let Some(r) = a.reference {
                         found = Some((r, a.name.clone()));
                     }

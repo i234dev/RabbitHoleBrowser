@@ -4,6 +4,8 @@
 
 use std::path::Path;
 
+use crate::autocookies::ConsentMode;
+
 /// Search engines offered in the omnibox / settings page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchEngine {
@@ -109,6 +111,8 @@ pub struct Settings {
     pub show_bookmarks_bar: bool,
     /// Animate wheel and keyboard scrolling.
     pub smooth_scrolling: bool,
+    /// Automatic handling of cookie-consent dialogs.
+    pub cookie_consent: ConsentMode,
 }
 
 impl Default for Settings {
@@ -128,6 +132,7 @@ impl Default for Settings {
             accept_language: "es-ES,es;q=0.9,en;q=0.8".into(),
             show_bookmarks_bar: false,
             smooth_scrolling: true,
+            cookie_consent: ConsentMode::Off,
         }
     }
 }
@@ -140,7 +145,7 @@ impl Settings {
     pub fn serialize(&self) -> String {
         let b = |v: bool| v as u8;
         format!(
-            "javascript={}\nimages={}\nblock_trackers={}\nblock_third_party_cookies={}\nhomepage={}\nsearch_engine={}\nrestore_session={}\ndefault_zoom={:.2}\ndownload_dir={}\nask_download={}\ntheme={}\naccept_language={}\nshow_bookmarks_bar={}\nsmooth_scrolling={}\n",
+            "javascript={}\nimages={}\nblock_trackers={}\nblock_third_party_cookies={}\nhomepage={}\nsearch_engine={}\nrestore_session={}\ndefault_zoom={:.2}\ndownload_dir={}\nask_download={}\ntheme={}\naccept_language={}\nshow_bookmarks_bar={}\nsmooth_scrolling={}\ncookie_consent={}\n",
             b(self.javascript),
             b(self.images),
             b(self.block_trackers),
@@ -155,6 +160,7 @@ impl Settings {
             clean(&self.accept_language),
             b(self.show_bookmarks_bar),
             b(self.smooth_scrolling),
+            self.cookie_consent.id(),
         )
     }
 
@@ -204,6 +210,10 @@ impl Settings {
             }
             "show_bookmarks_bar" => self.show_bookmarks_bar = on,
             "smooth_scrolling" => self.smooth_scrolling = on,
+            "cookie_consent" => match ConsentMode::from_id(v) {
+                Some(m) => self.cookie_consent = m,
+                None => return false,
+            },
             _ => return false,
         }
         true
@@ -239,6 +249,7 @@ mod tests {
             accept_language: "en-US,en;q=0.9".into(),
             show_bookmarks_bar: true,
             smooth_scrolling: false,
+            cookie_consent: ConsentMode::Reject,
         };
         assert_eq!(Settings::parse(&s.serialize()), s);
         assert_eq!(Settings::parse(""), Settings::default());
@@ -261,6 +272,9 @@ mod tests {
         assert_eq!(s.default_zoom, 0.9);
         assert!(!s.set("default_zoom", "abc"));
         assert!(!s.set("search_engine", "altavista"));
+        assert!(s.set("cookie_consent", "accept"));
+        assert_eq!(s.cookie_consent, ConsentMode::Accept);
+        assert!(!s.set("cookie_consent", "maybe"));
         assert!(s.set("search_engine", "brave"));
         assert_eq!(s.search_engine, SearchEngine::Brave);
         assert!(!s.set("accept_language", "en\r\nX-Evil: 1"));

@@ -80,6 +80,9 @@ pub struct Tab {
     pub inspector: Inspector,
     /// When the last navigation started (spinner animation phase).
     pub load_started: Option<std::time::Instant>,
+    /// The page's cookie dialog was handled automatically (URL-bar
+    /// indicator), and when.
+    pub consent: Option<(crate::autocookies::ConsentEvent, std::time::Instant)>,
 }
 
 impl Tab {
@@ -109,6 +112,7 @@ impl Tab {
             hang_dismissed: None,
             inspector: Inspector::default(),
             load_started: None,
+            consent: None,
         }
     }
 

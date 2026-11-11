@@ -4,6 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::autocookies::{AutoCookies, ConsentMode, SiteRule};
 use crate::bookmarks::Bookmarks;
 use crate::history::History;
 use crate::profile::Profile;
@@ -389,6 +390,8 @@ pub fn settings_page(s: &Settings, sites: &[SiteData], default_download_dir: &st
     body.push_str("<h2>Privacy</h2><div class=\"card\"><table>");
     body.push_str(&toggle_row("Block ads and trackers", "Requests to known tracking domains are not made", "block_trackers", s.block_trackers));
     body.push_str(&toggle_row("Block third-party cookies", "Cross-site subresources get no cookies and cannot set any", "block_third_party_cookies", s.block_third_party_cookies));
+    body.push_str(&select_row("Cookie dialogs<br><span class=\"muted\" style=\"font-size:12px\">Answer European cookie-consent banners automatically</span>", "cookie_consent", &[("off", "Off (ask me)"), ("reject", "Auto-reject"), ("accept", "Auto-accept")], s.cookie_consent.id()));
+    body.push_str("<tr><td class=\"k\">Handled cookie dialogs</td><td><a class=\"toggle\" href=\"about:autocookies\">Log and per-site rules</a></td></tr>");
     body.push_str("<tr><td class=\"k\">Clear browsing data</td><td><a class=\"toggle\" href=\"rabbithole://data/clear-history\">History</a><a class=\"toggle\" href=\"rabbithole://data/clear-cookies\">All cookies and site data</a><a class=\"toggle\" href=\"rabbithole://data/clear-cache\">Cache</a></td></tr>");
     body.push_str("</table></div>");
 
@@ -422,6 +425,95 @@ pub fn settings_page(s: &Settings, sites: &[SiteData], default_download_dir: &st
     }
     body.push_str("<p class=\"muted\">Settings are stored in <code>settings.txt</code> in the profile folder.</p>");
     shell("Settings", &body)
+}
+
+// ------------------------------------------------------------- autocookies
+
+/// `about:autocookies`: the log of cookie dialogs handled automatically,
+/// filtered by `query`, plus the global mode and per-site rules.
+pub fn autocookies_page(a: &AutoCookies, mode: ConsentMode, query: &str, notice: Option<&str>, private: bool) -> String {
+    let query = query.trim();
+    let mut body = String::new();
+    if let Some(n) = notice.filter(|n| !n.is_empty()) {
+        body.push_str(&format!("<div class=\"card\">{}</div>", escape(n)));
+    }
+    if private {
+        body.push_str("<div class=\"card\">Private window: dialogs handled here are not saved to the log.</div>");
+    }
+    // Global mode.
+    body.push_str("<h2>Cookie dialogs</h2><div class=\"card\"><table><tr><td class=\"k\">When a site shows a cookie-consent dialog<br><span class=\"muted\" style=\"font-size:12px\">Only buttons inside the consent dialog are ever clicked</span></td><td>");
+    for m in ConsentMode::ALL {
+        if m == mode {
+            body.push_str(&format!("<span class=\"toggle\" style=\"background:#1a73e8;color:#fff;border-color:#1a73e8\">{}</span>", m.label()));
+        } else {
+            body.push_str(&format!("<a class=\"toggle\" href=\"rabbithole://autocookies/mode?value={}\">{}</a>", m.id(), m.label()));
+        }
+    }
+    body.push_str("</td></tr></table></div>");
+
+    // Log.
+    let entries = a.search(query);
+    body.push_str(&format!(
+        "<h2>Handled dialogs<span class=\"actions\">{}</span></h2><form action=\"about:autocookies\" method=\"get\"><input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search sites, buttons, actions\" style=\"width:360px\"> <input type=\"submit\" value=\"Search\">{}</form>",
+        if a.log.is_empty() { String::new() } else { "<a href=\"rabbithole://autocookies/clear\">clear all</a>".to_string() },
+        escape(query),
+        if query.is_empty() { String::new() } else { " &nbsp; <a href=\"about:autocookies\">Show all</a>".to_string() }
+    ));
+    if entries.is_empty() {
+        let msg = if !query.is_empty() {
+            format!("No entries match “{}”.", escape(query))
+        } else if mode == ConsentMode::Off {
+            "Nothing handled yet. Choose Auto-reject or Auto-accept above.".to_string()
+        } else {
+            "Nothing handled yet.".to_string()
+        };
+        body.push_str(&format!("<div class=\"empty\" style=\"margin-top:12px\">{msg}</div>"));
+    } else {
+        let qs = if query.is_empty() { String::new() } else { format!("&amp;q={}", escape(&percent_encode(query))) };
+        body.push_str("<div class=\"card\" style=\"margin-top:12px\"><table><tr class=\"muted\"><td>When</td><td>Site</td><td>Action</td><td>Button</td><td></td></tr>");
+        for e in entries.iter().take(500) {
+            let colour = match e.outcome {
+                rabbithole_engine::consent::ConsentOutcome::Rejected => "on",
+                rabbithole_engine::consent::ConsentOutcome::Accepted => "",
+                _ => "off",
+            };
+            let vendor = if e.vendor.is_empty() { String::new() } else { format!("<br><span class=\"muted\" style=\"font-size:11px\">{}</span>", escape(&e.vendor)) };
+            body.push_str(&format!(
+                "<tr><td class=\"muted\" style=\"white-space:nowrap\">{} {}</td><td><b>{}</b>{vendor}</td><td class=\"{colour}\">{}</td><td>{}</td><td style=\"text-align:right\"><span class=\"actions\"><a href=\"rabbithole://autocookies/delete?{}{qs}\">delete</a></span></td></tr>",
+                date_label(e.time),
+                time_label(e.time),
+                escape(&e.host),
+                e.action_label(),
+                if e.button.is_empty() { "—".to_string() } else { format!("“{}”", escape(&shorten(&e.button, 40))) },
+                e.id,
+            ));
+        }
+        body.push_str("</table></div>");
+    }
+
+    // Per-site rules.
+    body.push_str("<h2>Per-site rules</h2><p class=\"muted\">A rule for a site also covers its subdomains and wins over the global setting.</p>");
+    let hosts = a.hosts();
+    if !hosts.is_empty() {
+        body.push_str("<div class=\"card\"><table>");
+        for h in hosts.iter().take(300) {
+            let cur = a.sites.get(h).copied();
+            let mut links = String::new();
+            let opts: [(Option<SiteRule>, &str); 4] = [(None, "Default"), (Some(SiteRule::Reject), "Always reject"), (Some(SiteRule::Accept), "Always accept"), (Some(SiteRule::Never), "Never touch")];
+            for (r, label) in opts {
+                if r == cur {
+                    links.push_str(&format!("<span class=\"toggle\" style=\"background:#1a73e8;color:#fff;border-color:#1a73e8\">{label}</span>"));
+                } else {
+                    links.push_str(&format!("<a class=\"toggle\" href=\"rabbithole://autocookies/site?host={}&amp;rule={}\">{label}</a>", escape(&percent_encode(h)), r.map(|r| r.id()).unwrap_or("default")));
+                }
+            }
+            body.push_str(&format!("<tr><td class=\"k\"><b>{}</b></td><td>{links}</td></tr>", escape(h)));
+        }
+        body.push_str("</table></div>");
+    }
+    body.push_str("<form action=\"rabbithole://autocookies/site\" method=\"get\" style=\"margin-top:10px\">Add a rule for <input type=\"text\" name=\"host\" placeholder=\"example.com\" style=\"width:220px\"> <select name=\"rule\"><option value=\"reject\">Always reject</option><option value=\"accept\">Always accept</option><option value=\"never\">Never touch</option></select> <input type=\"submit\" value=\"Add\"></form>");
+    body.push_str("<p class=\"muted\">The log is stored in <code>autocookies.txt</code> and the rules in <code>autocookies-sites.txt</code> in the profile folder.</p>");
+    shell("Cookie dialogs handled automatically", &body)
 }
 
 // ------------------------------------------------------------------- others
@@ -573,6 +665,11 @@ fn day_label(day: u64) -> String {
     } else {
         format!("{y:04}-{m:02}-{d:02}")
     }
+}
+
+/// `YYYY-MM-DD` (or Today / Yesterday) for a timestamp.
+fn date_label(ts: u64) -> String {
+    day_label(ts / 86400)
 }
 
 fn time_label(ts: u64) -> String {

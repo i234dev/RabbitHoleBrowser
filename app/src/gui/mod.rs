@@ -48,6 +48,7 @@ use crate::history::History;
 use crate::profile::{clamp_zoom, Profile, Session, SessionTab, ZoomLevels};
 use crate::settings::{Settings, ThemeChoice};
 use chrome::{Menu, ToolButton};
+use crate::autocookies::{AutoCookies, ConsentEvent, ConsentPolicy, SiteRule};
 use content::{ContentConfig, ContentHandle, ContentSettings, FromContent, Sink, ToContent, ViewSize};
 use downloads::{DownloadItem, DownloadState, Downloads};
 use input::TextBuffer;
@@ -139,6 +140,7 @@ pub fn run(start_urls: Vec<String>, options: GuiOptions) -> Result<(), String> {
         let p = Profile::private();
         let _ = std::fs::copy(real.settings_path(), p.settings_path());
         let _ = std::fs::copy(real.bookmarks_path(), p.bookmarks_path());
+        let _ = std::fs::copy(real.autocookies_sites_path(), p.autocookies_sites_path());
         p
     } else {
         Profile::locate()
@@ -192,6 +194,8 @@ pub struct App {
     pub(crate) hover_tab: Option<usize>,
     pub(crate) hover_tab_close: bool,
     pub(crate) hover_plus: bool,
+    /// The pointer is over the cookie-dialog indicator.
+    pub(crate) hover_consent: bool,
     pub(crate) hover_bookmark: Option<usize>,
     pub(crate) status: Option<(String, Instant)>,
     pub(crate) modifiers: ModifiersState,
@@ -226,6 +230,8 @@ pub struct App {
     pub(crate) recovered_crash: bool,
     /// The next selection text from the page starts a search.
     pub(crate) pending_search: bool,
+    /// Cookie dialogs handled automatically and per-site rules.
+    pub(crate) autocookies: AutoCookies,
     /// UI thread frame/stall measurements.
     pub(crate) stats: UiStats,
     /// Show the frame-time overlay (Ctrl+Shift+U).
@@ -251,6 +257,11 @@ impl App {
         let history = if options.private { History::default() } else { History::load(&profile.history_path()) };
         let bookmarks = Bookmarks::load(&profile.bookmarks_path());
         let zoom_levels = if options.private { ZoomLevels::default() } else { ZoomLevels::load(&profile.zoom_path()) };
+        let mut autocookies = AutoCookies::load(&profile.autocookies_path(), &profile.autocookies_sites_path());
+        if options.private {
+            // The log is not kept for private windows (rules apply).
+            autocookies.log.clear();
+        }
         let main_window = !options.private && !options.new_window;
         let recovered_crash = main_window && profile.running_marker().exists();
         if main_window {
@@ -288,6 +299,7 @@ impl App {
             hover_tab: None,
             hover_tab_close: false,
             hover_plus: false,
+            hover_consent: false,
             hover_bookmark: None,
             status: None,
             modifiers: ModifiersState::empty(),
@@ -315,6 +327,7 @@ impl App {
             session_saved: Instant::now(),
             recovered_crash,
             pending_search: false,
+            autocookies,
             stats: UiStats::new(std::env::var_os("RH_UI_STATS").is_some()),
             show_stats: false,
         };
@@ -357,6 +370,7 @@ impl App {
             devtools_open: self.devtools_open,
             bookmarks_bar: self.settings.show_bookmarks_bar,
             prompt_open: self.save_prompt.is_some(),
+            consent_icon: self.tabs.get(self.active).map(|t| t.consent.is_some()).unwrap_or(false),
         }
     }
 
@@ -475,6 +489,7 @@ impl App {
             accept_language: self.settings.accept_language.clone(),
             download_dir: self.download_dir(),
             ask_download: self.settings.ask_download,
+            consent: ConsentPolicy { mode: self.settings.cookie_consent, sites: self.autocookies.sites.clone() },
         }
     }
 
@@ -899,6 +914,7 @@ impl App {
             "history" => pages::history_page(&self.history, &pages::query_value(q, "q").unwrap_or_default()),
             "bookmarks" => pages::bookmarks_page(&self.bookmarks, pages::query_value(q, "edit").as_deref(), self.settings.show_bookmarks_bar, notice),
             "downloads" => pages::downloads_page(&self.downloads.rows(), &self.download_dir().display().to_string(), self.settings.ask_download),
+            "autocookies" => pages::autocookies_page(&self.autocookies, self.settings.cookie_consent, &pages::query_value(q, "q").unwrap_or_default(), notice, self.options.private),
             "settings" | "preferences" => pages::settings_page(&self.settings, &self.site_data(), &self.profile.downloads_dir().display().to_string(), notice, self.options.private),
             "version" | "about" => pages::version_page(self.engine.fonts.face_count(), &self.profile, self.cookies.lock().map(|j| j.len()).unwrap_or(0)),
             "blank" | "" => pages::blank_page(),
@@ -1007,6 +1023,51 @@ impl App {
                 if ok {
                     self.set_status("Setting saved");
                 }
+            }
+            "autocookies" => {
+                let mut notice: Option<String> = None;
+                // Another window may have changed the files.
+                if !self.options.private {
+                    self.autocookies = AutoCookies::load(&self.profile.autocookies_path(), &self.profile.autocookies_sites_path());
+                }
+                match path.as_str() {
+                    "delete" => {
+                        if let Some(id) = raw_q.as_deref().and_then(|v| v.parse::<u64>().ok()) {
+                            self.autocookies.remove(id);
+                        }
+                    }
+                    "clear" => {
+                        self.autocookies.clear();
+                        notice = Some("Log cleared".into());
+                    }
+                    "site" => {
+                        let host = qv("host").unwrap_or_default();
+                        let rule = qv("rule").unwrap_or_default();
+                        let r = SiteRule::from_id(&rule);
+                        if !self.autocookies.set_rule(&host, r) {
+                            notice = Some(format!("Invalid site “{host}”"));
+                        } else {
+                            notice = Some(match r {
+                                Some(r) => format!("{}: {}", host.trim(), r.label()),
+                                None => format!("{}: follows the global setting", host.trim()),
+                            });
+                        }
+                        self.broadcast_settings();
+                    }
+                    "mode" => {
+                        let v = qv("value").unwrap_or_default();
+                        if !self.change_setting("cookie_consent", &v) {
+                            notice = Some(format!("Invalid mode “{v}”"));
+                        }
+                    }
+                    _ => {}
+                }
+                self.save_autocookies();
+                let back = match qv("q") {
+                    Some(q) if !q.is_empty() => Url::parse(&format!("about:autocookies?q={}", pages::percent_encode(&q))).unwrap_or_else(|| about_page("autocookies")),
+                    _ => about_page("autocookies"),
+                };
+                self.show_about_page_with(idx, &back, false, notice.as_deref());
             }
             "data" => {
                 let msg = match path.as_str() {
@@ -1122,6 +1183,11 @@ impl App {
         {
             let tab = &mut self.tabs[idx];
             tab.reset_page_state();
+            // A consent click that navigated (consent pages) keeps its
+            // indicator on the page it led to.
+            if tab.consent.as_ref().map(|(_, t)| t.elapsed() > Duration::from_secs(4)).unwrap_or(false) {
+                tab.consent = None;
+            }
             tab.title = title.clone();
             tab.current_url = Some(url.clone());
             tab.loading = None;
@@ -1521,7 +1587,44 @@ impl App {
                 }
             }
             FromContent::Download(_) => {}
+            FromContent::Consent(ev) => self.on_consent(idx, ev),
         }
+    }
+
+    /// A content thread handled (or found) a cookie-consent dialog.
+    fn on_consent(&mut self, idx: usize, ev: ConsentEvent) {
+        self.autocookies.record(&ev, crate::profile::now_secs());
+        self.save_autocookies();
+        let summary = ev.summary();
+        self.tabs[idx].consent = Some((ev, Instant::now()));
+        if idx == self.active {
+            self.set_status(summary);
+        }
+        // Refresh an open about:autocookies.
+        for i in 0..self.tabs.len() {
+            let showing = self.tabs[i].current_url.as_ref().map(|u| u.scheme == "about" && u.path == "autocookies").unwrap_or(false);
+            if showing {
+                let u = self.tabs[i].current_url.clone().unwrap();
+                self.show_about_page(i, &u, false);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Persist the cookie-dialog log (not for private windows) and rules.
+    pub(crate) fn save_autocookies(&self) {
+        if self.options.private {
+            let _ = std::fs::write(self.profile.autocookies_sites_path(), self.autocookies.serialize_sites());
+            return;
+        }
+        self.autocookies.save(&self.profile.autocookies_path(), &self.profile.autocookies_sites_path());
+    }
+
+    /// Menu entry: cycle off → auto-reject → auto-accept.
+    pub(crate) fn cycle_cookie_consent(&mut self) {
+        let next = self.settings.cookie_consent.next();
+        self.change_setting("cookie_consent", next.id());
+        self.set_status(format!("Cookie dialogs: {}", next.label()));
     }
 
     fn on_download(&mut self, event: DownloadEvent) {

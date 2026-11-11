@@ -83,7 +83,7 @@ impl App {
     pub(crate) fn chrome_cursor(&self) -> CursorIcon {
         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
         let chrome = self.chrome();
-        let over_button = ToolButton::ALL.into_iter().any(|b| chrome.button_rect(b).contains(x, y));
+        let over_button = ToolButton::ALL.into_iter().any(|b| chrome.button_rect(b).contains(x, y)) || (chrome.consent_icon && chrome.consent_icon_rect().contains(x, y));
         let (tab_rects, plus) = chrome.tab_rects(&self.pinned_flags());
         let over_tab = tab_rects.iter().any(|r| r.contains(x, y)) || plus.contains(x, y);
         let over_hang_button = self.hang_bar().map(|(_, w, s)| w.contains(x, y) || s.contains(x, y)).unwrap_or(false);
@@ -120,6 +120,11 @@ impl App {
         let button = ToolButton::ALL.into_iter().find(|b| chrome.button_rect(*b).contains(x, y));
         if button != self.hover_button {
             self.hover_button = button;
+            redraw = true;
+        }
+        let over_consent = chrome.consent_icon && chrome.consent_icon_rect().contains(x, y);
+        if over_consent != self.hover_consent {
+            self.hover_consent = over_consent;
             redraw = true;
         }
         let (tab_rects, plus) = chrome.tab_rects(&self.pinned_flags());
@@ -259,6 +264,11 @@ impl App {
 
         // Toolbar.
         if chrome.toolbar().contains(x, y) {
+            if chrome.consent_icon && chrome.consent_icon_rect().contains(x, y) && button == MouseButton::Left {
+                self.blur_url_field();
+                self.new_tab(Some("about:autocookies"), false);
+                return;
+            }
             if chrome.url_field().contains(x, y) {
                 if button == MouseButton::Right {
                     self.open_url_menu(x, y);
@@ -585,7 +595,7 @@ impl App {
         self.request_redraw();
     }
 
-    fn open_main_menu(&mut self) {
+    pub(crate) fn open_main_menu(&mut self) {
         let chrome = self.chrome();
         let r = chrome.button_rect(ToolButton::Menu);
         let zoom = self.tab().map(|t| t.zoom).unwrap_or(1.0);
@@ -607,6 +617,8 @@ impl App {
             MenuItem::new("Developer tools", Action::ToggleDevtools).key("F12"),
             MenuItem::new(if self.settings.javascript { "Disable JavaScript" } else { "Enable JavaScript" }, Action::ToggleJavaScript).sep(),
             MenuItem::new(if self.settings.block_trackers { "Allow ads & trackers" } else { "Block ads & trackers" }, Action::ToggleTrackerBlocking),
+            MenuItem::new(&format!("Cookie dialogs: {}", self.settings.cookie_consent.label()), Action::CycleCookieConsent).key("click to change").sep(),
+            MenuItem::new("Handled cookie dialogs…", Action::AutoCookies),
             MenuItem::new("Settings", Action::Settings).key("Ctrl+,").sep(),
             MenuItem::new("About RabbitHole", Action::About),
             MenuItem::new("Quit", Action::Quit).key("Ctrl+Q").sep(),
@@ -769,6 +781,8 @@ impl App {
             Action::ToggleBookmarksBar => self.toggle_bookmarks_bar(),
             Action::ToggleJavaScript => self.toggle_javascript(),
             Action::ToggleTrackerBlocking => self.toggle_tracker_blocking(),
+            Action::CycleCookieConsent => self.cycle_cookie_consent(),
+            Action::AutoCookies => self.navigate_tab(idx, "about:autocookies", true),
             Action::ToggleDevtools => self.toggle_devtools(),
             Action::Inspect(x, y) => self.inspect_at(x, y),
             Action::UrlCut => {

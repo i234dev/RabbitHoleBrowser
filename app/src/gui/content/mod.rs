@@ -69,6 +69,8 @@ pub struct ContentSettings {
     pub download_dir: PathBuf,
     /// Ask where to save each download.
     pub ask_download: bool,
+    /// Automatic handling of cookie-consent dialogs.
+    pub consent: crate::autocookies::ConsentPolicy,
 }
 
 impl ContentSettings {
@@ -80,6 +82,7 @@ impl ContentSettings {
             accept_language: "es-ES,es;q=0.9,en;q=0.8".into(),
             download_dir: std::env::temp_dir(),
             ask_download: false,
+            consent: crate::autocookies::ConsentPolicy::default(),
         }
     }
 }
@@ -219,6 +222,9 @@ pub enum FromContent {
     Network(rabbithole_engine::net::NetEvent),
     DomTree(Vec<DomRow>),
     NodeDetails(NodeDetails),
+    /// A cookie-consent dialog was handled automatically (or found and
+    /// left alone).
+    Consent(crate::autocookies::ConsentEvent),
 }
 
 /// Callback receiving a tab's messages: (tab id, epoch, message). Called

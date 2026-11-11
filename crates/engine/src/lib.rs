@@ -8,6 +8,7 @@
 //! thread that owns the fonts and paints.
 
 pub mod animations;
+pub mod consent;
 pub mod diff;
 pub mod forms;
 pub mod frames;

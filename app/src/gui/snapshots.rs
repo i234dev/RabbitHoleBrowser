@@ -212,6 +212,54 @@ fn devtools_panels() {
 }
 
 #[test]
+fn cookie_menu_and_indicator() {
+    let _guard = lock();
+    let mut app = headless_app("cookies");
+    populate(&mut app);
+    app.settings.cookie_consent = crate::autocookies::ConsentMode::Reject;
+    let ev = crate::autocookies::ConsentEvent {
+        host: "doc.rust-lang.org".into(),
+        url: "https://doc.rust-lang.org/book/".into(),
+        outcome: rabbithole_engine::consent::ConsentOutcome::Rejected,
+        choice: rabbithole_engine::consent::Choice::Reject,
+        button: "Reject all".into(),
+        vendor: Some("OneTrust".into()),
+        in_frame: false,
+        steps: vec!["Reject all".into()],
+    };
+    app.tabs[2].consent = Some((ev, std::time::Instant::now()));
+    let chrome = app.chrome();
+    assert!(chrome.consent_icon);
+    assert!(chrome.url_text().right() <= chrome.consent_icon_rect().x);
+    // Hover the indicator: tooltip in the status bar.
+    let r = chrome.consent_icon_rect();
+    app.cursor = winit::dpi::PhysicalPosition::new((r.x + r.w / 2.0) as f64, (r.y + r.h / 2.0) as f64);
+    assert!(app.consent_tooltip().unwrap().contains("rejected automatically"));
+    app.paint(1200, 800);
+    let p = save_png(&app.canvas, "cookie-indicator.png");
+    // The badge is painted (cookie colour inside the icon rect).
+    let mut found = false;
+    for y in r.y as usize..(r.y + r.h) as usize {
+        for x in r.x as usize..(r.x + r.w) as usize {
+            let c = Color::from_u32(app.canvas.data[y * app.canvas.width as usize + x]);
+            if c.r == 0xd4 && c.g == 0x9a && c.b == 0x4f {
+                found = true;
+            }
+        }
+    }
+    assert!(found, "cookie icon not painted: {}", p.display());
+    // The main menu shows the current mode and the log entry.
+    app.open_main_menu();
+    app.paint(1200, 800);
+    save_png(&app.canvas, "menu-cookies.png");
+    let m = app.menu.as_ref().unwrap();
+    assert!(m.items.iter().any(|i| i.label == "Cookie dialogs: Auto-reject"));
+    assert!(m.items.iter().any(|i| i.label == "Handled cookie dialogs…"));
+    assert!(m.items.len() <= m.max_visible, "menu fits without scrolling");
+    app.menu = None;
+}
+
+#[test]
 fn about_pages_render() {
     let _guard = lock();
     let mut h = History::default();
@@ -225,7 +273,21 @@ fn about_pages_render() {
         pages::DownloadRow { id: 2, url: "https://example.org/doc.pdf".into(), filename: "doc.pdf".into(), path: "/home/user/Downloads/doc.pdf".into(), done: 2 << 20, total: Some(2 << 20), state: "Completed".into(), active: false, paused: false, resumable: false, finished: true, failed: false, speed: None },
     ];
     let sites = vec![pages::SiteData { host: "example.org".into(), cookies: 3, zoom: Some(1.25) }];
+    let mut ac = crate::autocookies::AutoCookies::default();
+    for (host, outcome, button, vendor, t) in [
+        ("www.bbc.example", rabbithole_engine::consent::ConsentOutcome::Rejected, "Reject additional cookies", "generic", 1_762_850_000u64),
+        ("elpais.example", rabbithole_engine::consent::ConsentOutcome::Rejected, "Rechazar todo", "Didomi", 1_762_853_600),
+        ("www.spiegel.example", rabbithole_engine::consent::ConsentOutcome::NoButton, "", "Sourcepoint", 1_762_857_200),
+        ("www.lemonde.example", rabbithole_engine::consent::ConsentOutcome::Accepted, "Tout accepter", "", 1_762_860_800),
+    ] {
+        let ev = crate::autocookies::ConsentEvent { host: host.into(), url: format!("https://{host}/"), outcome, choice: rabbithole_engine::consent::Choice::Reject, button: button.into(), vendor: Some(vendor.into()).filter(|v: &String| !v.is_empty()), in_frame: false, steps: vec![] };
+        ac.record(&ev, t);
+    }
+    ac.set_rule("spiegel.example", Some(crate::autocookies::SiteRule::Accept));
+    ac.set_rule("bank.example", Some(crate::autocookies::SiteRule::Never));
     let cases: Vec<(&str, String)> = vec![
+        ("about-autocookies.png", pages::autocookies_page(&ac, crate::autocookies::ConsentMode::Reject, "", None, false)),
+        ("about-autocookies-search.png", pages::autocookies_page(&ac, crate::autocookies::ConsentMode::Reject, "rechazar", Some("elpais.example: Always reject"), false)),
         ("about-settings.png", pages::settings_page(&Settings::default(), &sites, "/home/user/Downloads", None, false)),
         ("about-history.png", pages::history_page(&h, "")),
         ("about-bookmarks.png", pages::bookmarks_page(&b, None, true, None)),

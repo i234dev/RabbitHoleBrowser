@@ -3,6 +3,7 @@
 //! Entry point: hand-rolled argument parsing dispatching to the GUI, the
 //! headless CLI subcommands or the MCP server.
 
+mod autocookies;
 mod bookmarks;
 mod cli;
 mod gui;
@@ -33,6 +34,9 @@ USAGE:
     rabbithole js <URL> <EXPRESSION>       Evaluate JavaScript in the loaded page and print the result
     rabbithole click <URL> <X> <Y>         Show what is under a viewport point and click it like a mouse
                                            (--scroll Y, --width/--height, --hit-only)
+    rabbithole consent <URL> [--accept]    Detect the page's cookie-consent dialog and reject (or accept)
+                                           it like the browser's automatic mode (--shot PREFIX saves
+                                           before/after PNGs, --timeout S)
     rabbithole mcp [options]               Run as a Model Context Protocol server on stdio
     rabbithole agent [options] [-c CMD]... Agent tools from the shell (REPL on stdin without -c;
                                            --script FILE replays commands, --replay FILE.json checks a test)
@@ -156,6 +160,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("cookies") => cli::cookies(&args[1..]),
         Some("js") => cli::js(&args[1..]),
         Some("click") => cli::click(&args[1..]),
+        Some("consent") => cli::consent(&args[1..]),
         Some("mcp") => mcp::serve(&args[1..]),
         Some("agent") => cli::agent(&args[1..]),
         Some("ui-bench") => gui::bench::run(&args[1..]),

@@ -239,6 +239,9 @@ pub enum Action {
     About,
     ToggleJavaScript,
     ToggleTrackerBlocking,
+    /// Cycle the cookie-dialog mode (off → reject → accept).
+    CycleCookieConsent,
+    AutoCookies,
     ToggleDevtools,
     Inspect(f32, f32),
     // Address bar menu.
@@ -406,6 +409,8 @@ pub struct Chrome {
     pub bookmarks_bar: bool,
     /// A prompt bar (save download as…) is shown above the page.
     pub prompt_open: bool,
+    /// The cookie-dialog indicator is shown at the right of the URL field.
+    pub consent_icon: bool,
 }
 
 impl Chrome {
@@ -526,11 +531,18 @@ impl Chrome {
         Rect::new(f.x + 4.0 * self.s, f.y, 24.0 * self.s, f.h)
     }
 
+    /// The cookie-dialog indicator inside the URL field (right end).
+    pub fn consent_icon_rect(&self) -> Rect {
+        let f = self.url_field();
+        Rect::new(f.right() - 30.0 * self.s, f.y, 26.0 * self.s, f.h)
+    }
+
     /// The editable text area of the URL field (after the indicator).
     pub fn url_text(&self) -> Rect {
         let f = self.url_field();
         let x = self.security_icon().right() + 2.0 * self.s;
-        Rect::new(x, f.y, (f.right() - 10.0 * self.s - x).max(10.0), f.h)
+        let right = if self.consent_icon { self.consent_icon_rect().x - 2.0 * self.s } else { f.right() - 10.0 * self.s };
+        Rect::new(x, f.y, (right - x).max(10.0), f.h)
     }
 
     /// Tab rects for tabs with the given pinned flags, plus the "+" rect.
@@ -772,7 +784,7 @@ mod tests {
     use super::*;
 
     fn chrome() -> Chrome {
-        Chrome { s: 2.0, width: 1600.0, height: 1000.0, find_open: true, fullscreen: false, devtools_open: false, bookmarks_bar: false, prompt_open: false }
+        Chrome { s: 2.0, width: 1600.0, height: 1000.0, find_open: true, fullscreen: false, devtools_open: false, bookmarks_bar: false, prompt_open: false, consent_icon: false }
     }
 
     #[test]

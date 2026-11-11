@@ -246,6 +246,7 @@ impl App {
         };
         draw_field(&mut self.canvas, &fonts, self.ui_font, s, &view);
         self.draw_security_icon();
+        self.draw_consent_icon();
         if loading {
             let t_anim = self.anim_start.elapsed().as_secs_f32() / 1.4;
             draw_progress(&mut self.canvas, chrome.progress_bar(), t_anim);
@@ -285,6 +286,54 @@ impl App {
                 draw_centered(&mut self.canvas, &fonts, self.ui_font, 13.0 * s, "⌕", r, p.text_muted);
             }
         }
+    }
+
+    /// The cookie indicator at the right of the address bar: a cookie
+    /// with a check (accepted), a cross (rejected) or a question mark
+    /// (dialog left for the user).
+    fn draw_consent_icon(&mut self) {
+        let chrome = self.chrome();
+        if !chrome.consent_icon {
+            return;
+        }
+        let Some(outcome) = self.tab().and_then(|t| t.consent.as_ref()).map(|(e, _)| e.outcome) else { return };
+        let s = chrome.s;
+        let p = *pal();
+        let r = chrome.consent_icon_rect();
+        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        if r.contains(x, y) {
+            self.canvas.fill_rounded_rect(Rect::new(r.x, r.y + 3.0 * s, r.w, r.h - 6.0 * s), chrome::RADIUS * s, p.hover_bg);
+        }
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let rad = 7.5 * s;
+        let dough = Color::rgb(0xd4, 0x9a, 0x4f);
+        let crumb = Color::rgb(0x6b, 0x3e, 0x1a);
+        self.canvas.fill_rounded_rect(Rect::new(cx - rad, cy - rad, rad * 2.0, rad * 2.0), rad, dough);
+        for (dx, dy) in [(-3.0, -3.0), (2.5, -2.0), (-1.0, 2.5), (3.5, 3.0), (-4.0, 1.0)] {
+            let d = 1.6 * s;
+            self.canvas.fill_rounded_rect(Rect::new(cx + dx * s - d / 2.0, cy + dy * s - d / 2.0, d, d), d / 2.0, crumb);
+        }
+        // Badge at the bottom right.
+        let (badge, glyph) = match outcome {
+            rabbithole_engine::consent::ConsentOutcome::Rejected => (p.secure, "✕"),
+            rabbithole_engine::consent::ConsentOutcome::Accepted => (p.accent, "✓"),
+            _ => (p.insecure, "?"),
+        };
+        let b = Rect::new(cx + 2.0 * s, cy + 1.0 * s, 9.0 * s, 9.0 * s);
+        self.canvas.fill_rounded_rect(Rect::new(b.x - 1.0 * s, b.y - 1.0 * s, b.w + 2.0 * s, b.h + 2.0 * s), 5.5 * s, p.field_bg);
+        self.canvas.fill_rounded_rect(b, 4.5 * s, badge);
+        let fonts = self.engine.fonts.clone();
+        draw_centered(&mut self.canvas, &fonts, self.ui_font_bold, 7.0 * s, glyph, b, Color::WHITE);
+    }
+
+    /// Tooltip of the cookie indicator (status bar) when hovered.
+    pub(crate) fn consent_tooltip(&self) -> Option<String> {
+        let chrome = self.chrome();
+        if !chrome.consent_icon || !chrome.consent_icon_rect().contains(self.cursor.x as f32, self.cursor.y as f32) {
+            return None;
+        }
+        let (e, _) = self.tab()?.consent.as_ref()?;
+        Some(format!("{} — click to see about:autocookies", e.summary()))
     }
 
     /// Bookmark buttons for the bookmarks bar: (index, rect) that fit,
@@ -460,7 +509,7 @@ impl App {
             _ => None,
         });
         let hover_link = self.tab().and_then(|t| t.hover_link.as_ref()).map(|u| u.to_string());
-        let tooltip = self.hover_button.map(|b| b.tooltip().to_string());
+        let tooltip = self.consent_tooltip().or_else(|| self.hover_button.map(|b| b.tooltip().to_string()));
         let hover_tab = self.hover_tab.and_then(|i| self.tabs.get(i)).filter(|_| self.tab_drag.is_none()).map(|t| match &t.current_url {
             Some(u) => format!("{} — {}", t.display_title(), u),
             None => t.display_title().to_string(),

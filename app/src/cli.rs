@@ -1,6 +1,7 @@
 //! Headless command line subcommands: screenshot, text, links, dump, cookies.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rabbithole_engine::net::{CookieJar, Request, Url};
 use rabbithole_engine::{Engine, Loaded, Page, Viewport};
@@ -471,6 +472,110 @@ pub fn click(args: &[String]) -> Result<(), String> {
         }
         session.flush_console(&mut page);
     }
+    emit(&lines.join("\n"));
+    Ok(())
+}
+
+/// `rabbithole consent <URL> [--accept] [--shot PREFIX] [--timeout S]
+/// [--width W] [--height H] [--wait ms]`: run the automatic cookie-dialog
+/// handling of the browser on a page and report what was detected and
+/// clicked.
+pub fn consent(args: &[String]) -> Result<(), String> {
+    use rabbithole_engine::consent::{self, Choice, ConsentDriver, ConsentStep};
+    let (positional, flags) = parse_args(args, &["width", "height", "wait", "shot", "timeout"])?;
+    let url = url_arg(&positional, "consent")?;
+    let choice = if has_flag(&flags, "accept") { Choice::Accept } else { Choice::Reject };
+    let js = JsOptions::from_flags(&flags, 3000)?;
+    let viewport = Viewport { width: parse_num(&flags, "width", 1280u32)? as f32, height: parse_num(&flags, "height", 800u32)? as f32 };
+    let timeout = Duration::from_secs(parse_num(&flags, "timeout", 25u64)?);
+    let shot = flag(&flags, "shot").map(|s| s.to_string());
+    let mut session = Session::new(shot.is_some()).with_js(js);
+    let parsed = Url::parse(url).ok_or_else(|| format!("invalid URL: {url}"))?;
+    let t0 = Instant::now();
+    let mut page = session.load_request(&Request::get(parsed), viewport)?;
+    let save = |session: &Session, page: &mut Page, name: &str| {
+        if let Some(prefix) = &shot {
+            session.engine.flush_display_list(page);
+            let mut canvas = rabbithole_engine::gfx::Canvas::new(viewport.width as u32, viewport.height as u32);
+            session.engine.render(page, &mut canvas, 0.0, 0.0);
+            let path = format!("{prefix}-{name}.png");
+            let _ = image::save_buffer(&path, &canvas.to_rgba8(), canvas.width, canvas.height, image::ExtendedColorType::Rgba8);
+            eprintln!("  saved {path}");
+        }
+    };
+    let mut lines = vec![format!("{} — loaded {} in {:.1}s", page.title.trim(), page.url, t0.elapsed().as_secs_f32())];
+    let mut driver = ConsentDriver::new(choice, Instant::now());
+    let deadline = Instant::now() + timeout;
+    let mut described = false;
+    let mut shot_before = false;
+    loop {
+        if Instant::now() >= deadline {
+            lines.push("timeout".into());
+            break;
+        }
+        // Timers, frame loads, script work.
+        if let Some(nav) = crate::scripting::settle(&session.engine, &mut page, 150) {
+            lines.push(format!("page navigated by itself to {}", nav.request.url));
+            break;
+        }
+        if !described {
+            session.engine.restyle(&mut page);
+            if let Some(d) = consent::detect(&page) {
+                described = true;
+                lines.push(format!(
+                    "dialog: {}{} root <{}{}>",
+                    d.vendor.unwrap_or("generic"),
+                    if d.frames.is_empty() { String::new() } else { format!(" (in iframe, depth {})", d.frames.len()) },
+                    consent::frame_page(&page, &d.frames).and_then(|p| p.doc.tag(d.root)).unwrap_or("?"),
+                    consent::frame_page(&page, &d.frames).and_then(|p| p.doc.attr(d.root, "id")).map(|i| format!(" id={i}")).unwrap_or_default()
+                ));
+                for b in &d.buttons {
+                    lines.push(format!("  button {:?}: {:?}", b.kind, b.name));
+                }
+                if !shot_before {
+                    save(&session, &mut page, "before");
+                    shot_before = true;
+                }
+            }
+        }
+        match driver.step(&session.engine, &mut page, Instant::now()) {
+            ConsentStep::Idle => {
+                if driver.finished() {
+                    lines.push("no consent dialog found".into());
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            ConsentStep::Clicked { action, outcome } => {
+                lines.push(format!("clicked at {:.1}s", t0.elapsed().as_secs_f32()));
+                if let Some(req) = crate::scripting::click_request(&session.engine, &mut page, action, outcome.navigation) {
+                    if let Some(r) = driver.navigated() {
+                        lines.push(format!("result: {:?} via {:?} (steps {:?}) -> navigates to {} {}", r.outcome, r.button, r.steps, req.method, req.url));
+                    } else {
+                        lines.push(format!("navigates to {} {}", req.method, req.url));
+                    }
+                    match session.engine.loader.load_request(&req, viewport) {
+                        Ok(Loaded::Page(p)) => {
+                            page = session.engine.build_page(p, viewport);
+                            let _ = crate::scripting::settle(&session.engine, &mut page, session.wait_ms);
+                            lines.push(format!("now at {} — {}", page.url, page.title.trim()));
+                            session.engine.restyle(&mut page);
+                            lines.push(format!("dialog after: {}", if consent::detect(&page).is_some() { "still shown" } else { "none" }));
+                        }
+                        Ok(_) => {}
+                        Err(e) => lines.push(format!("navigation failed: {e}")),
+                    }
+                    break;
+                }
+            }
+            ConsentStep::Finished(r) => {
+                lines.push(format!("result: {:?} — button {:?}, steps {:?}, vendor {:?}, in iframe: {}", r.outcome, r.button, r.steps, r.vendor, r.in_frame));
+                break;
+            }
+        }
+    }
+    save(&session, &mut page, "after");
+    session.save();
     emit(&lines.join("\n"));
     Ok(())
 }
