@@ -1483,3 +1483,14 @@ fn named_function_expression_binding_is_immutable() {
     // Shadowed by a var or parameter of the same name: an ordinary binding.
     eq("(function f(f) { f = 3; return f; })(1)", "3");
 }
+
+#[test]
+fn finally_does_not_see_bindings_of_the_try_block() {
+    // A `let` in the try block shadows an outer binding; a `return` from
+    // the block inlines the finalizer, which must resolve the outer name
+    // (Svelte's `hydrate()` restored its hydration flag from the wrong
+    // `r` and left hydration on).
+    eq("(function(){ var out=[]; function f(){ let r='outer'; try { let r='inner'; return r; } finally { out.push(r); } } f(); return out.join(); })()", "outer");
+    eq("(function(){ var out=[]; function f(){ let r='o'; try { let r='i'; for (let k of [1]) { let r='loop'; return r; } } finally { out.push(r); } } return f() + out.join(); })()", "loopo");
+    eq("(function(){ var out=[]; for (let i = 0; i < 2; i++) { let r = 'x' + i; try { let r = 'y'; if (i == 0) continue; break; } finally { out.push(r); } } return out.join(); })()", "x0,x1");
+}

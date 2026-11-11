@@ -131,7 +131,9 @@ enum ExitCtx {
     Scope,
     /// Inline this finalizer. The index identifies the owning try context
     /// (whose handler ranges are suspended while the finalizer is inlined).
-    Finally { body: Rc<Vec<Stmt>>, try_index: usize },
+    /// `scopes` is the number of compile-time scopes outside the try:
+    /// the finalizer must not see bindings declared inside it.
+    Finally { body: Rc<Vec<Stmt>>, try_index: usize, scopes: usize },
     /// Close the for-of iterator held in hidden slots.
     IterClose { iter: u16, next: u16 },
 }
@@ -1624,7 +1626,7 @@ impl Compiler {
                     self.emit(Op::GetReg(*next));
                     self.emit(Op::IteratorClose);
                 }
-                ExitCtx::Finally { body, try_index } => {
+                ExitCtx::Finally { body, try_index, scopes } => {
                     // Inline the finalizer with inner contexts removed and the
                     // owning try's handler ranges suspended.
                     let saved_exits = self.fs().exits.split_off(depth + i);
@@ -1646,20 +1648,15 @@ impl Compiler {
                     // Those runtime scopes are gone while the finalizer runs:
                     // hide their compile-time counterparts too, or names in
                     // the finalizer would resolve one scope too deep.
-                    let mut hidden_scopes = Vec::new();
-                    let mut to_hide = popped;
-                    while to_hide > 0 {
-                        let Some(s) = self.fs().scopes.pop() else { break };
-                        if s.materialized {
-                            to_hide -= 1;
-                        }
-                        hidden_scopes.push(s);
-                    }
+                    // Bindings kept in registers (scopes that were not
+                    // materialized) must be hidden as well: a `let` inside
+                    // the try block would otherwise shadow the finalizer's
+                    // outer name of the same spelling.
+                    let keep = (*scopes).min(self.fs_ref().scopes.len());
+                    let hidden_scopes = self.fs().scopes.split_off(keep);
                     let body = body.clone();
                     let r = self.compile_block(&body);
-                    while let Some(s) = hidden_scopes.pop() {
-                        self.fs().scopes.push(s);
-                    }
+                    self.fs().scopes.extend(hidden_scopes);
                     r?;
                     self.fs().scope_depth = saved_scope_depth;
                     let here = self.here() as u32;
@@ -1965,10 +1962,11 @@ impl Compiler {
         let finalizer_rc = finalizer.map(|f| Rc::new(f.clone()));
         let try_index = self.fs_ref().tries.len();
         let scope_depth = self.fs_ref().scope_depth;
+        let scopes = self.fs_ref().scopes.len();
         let start = self.here() as u32;
         self.fs().tries.push(TryCtx { ranges: Vec::new(), open_start: Some(start) });
         if let Some(f) = &finalizer_rc {
-            self.fs().exits.push(ExitCtx::Finally { body: f.clone(), try_index });
+            self.fs().exits.push(ExitCtx::Finally { body: f.clone(), try_index, scopes });
         }
         // --- protected block
         self.compile_block(block)?;
@@ -1980,7 +1978,7 @@ impl Compiler {
         if let Some(f) = &finalizer_rc {
             self.fs().exits.pop();
             self.compile_block(f)?;
-            self.fs().exits.push(ExitCtx::Finally { body: f.clone(), try_index });
+            self.fs().exits.push(ExitCtx::Finally { body: f.clone(), try_index, scopes });
         }
         end_jumps.push(self.emit(Op::Jump(0)));
         // --- catch handler
