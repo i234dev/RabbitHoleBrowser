@@ -1112,9 +1112,12 @@ impl Realm {
     fn run_inner(&mut self) -> JsResult<Exit> {
         'reload: loop {
             let fi = self.frames.len() - 1;
-            // A clone of the code keeps the op slice alive independently of
-            // `self` borrows while this frame is current.
-            let code = self.frames[fi].code.clone();
+            // The frame's code, borrowed independently of `self` (no
+            // reference count traffic per call / return).
+            // SAFETY: frame `fi` holds a strong reference to its code for as
+            // long as this loop runs it: every path that pops or replaces
+            // the frame leaves through `continue 'reload` or a return.
+            let code: &FunctionCode = unsafe { &*Rc::as_ptr(&self.frames[fi].code) };
             let ops: &[Op] = &code.ops;
             let consts: &[Value] = &code.constants;
             let mut pc = self.frames[fi].pc;
