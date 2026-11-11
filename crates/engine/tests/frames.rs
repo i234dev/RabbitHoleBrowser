@@ -222,3 +222,22 @@ fn same_origin_content_document_is_scriptable() {
     );
     assert_eq!(r, "dyn,about:blank,true");
 }
+
+#[test]
+fn window_proxies_expose_builtins_and_named_frames() {
+    let mut e = engine();
+    let inner = r#"<script>window.fromChild = parent.frames['other'] ? 'found' : 'missing';</script>"#;
+    let mut page = load(
+        &mut e,
+        &format!(r#"<iframe id="a" name="other" srcdoc="<p>x</p>"></iframe><iframe id="b" srcdoc="{}"></iframe>"#, escape_attr(inner)),
+    );
+    // A same-origin frame's WindowProxy serves the ECMAScript globals
+    // (scripts take pristine JSON from a fresh iframe).
+    let r = eval(&e, &mut page, "(() => { const w = document.getElementById('a').contentWindow; return [typeof w.JSON, w.JSON.parse('[1,2]').length, 'Array' in w, typeof w.nonexistent].join(); })()");
+    assert_eq!(r, "object,2,true,undefined");
+    // Named access to child frames, from the parent and from a sibling.
+    let r = eval(&e, &mut page, "[window.frames[0] === document.getElementById('a').contentWindow, typeof document.getElementById('b').contentWindow.parent.frames['other'].postMessage].join()");
+    assert_eq!(r, "true,function");
+    let c = child(&mut page, 1);
+    assert_eq!(e.eval_in_page(c, "window.fromChild").trim_matches('\''), "found");
+}

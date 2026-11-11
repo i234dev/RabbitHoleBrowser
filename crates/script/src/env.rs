@@ -142,6 +142,15 @@ pub trait HostEnv {
     fn frame_name(&self) -> Option<String> {
         None
     }
+    /// The child frame of frame `id` named `name` (named access:
+    /// `window.frames[name]`, `parent[name]`).
+    fn frame_named_child(&self, _id: u64, _name: &str) -> Option<u64> {
+        None
+    }
+    /// The `name` of the iframe hosting frame `id`.
+    fn frame_name_of(&self, _id: u64) -> Option<String> {
+        None
+    }
     /// Queue a `postMessage` to frame `target` (`data` is the serialized
     /// structured clone, `target_origin` as given to `postMessage`).
     fn post_message(&mut self, _target: u64, _data: String, _target_origin: String) {}

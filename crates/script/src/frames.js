@@ -164,6 +164,11 @@
         // in for them (scripts take JSON / Array from a fresh about:blank
         // iframe to avoid a page's patched ones).
         if (BUILTINS.has(key) && sameOrigin(id)) return g[key];
+        if (typeof key === 'string' && key !== '') {
+          // Named access to a child frame (`parent.frames['name']`).
+          const child = info(id, 'named', key);
+          if (child >= 0) return windowFor(child);
+        }
         return undefined;
       },
       has(t, key) {
@@ -189,6 +194,37 @@
   for (const k of Object.keys(own)) {
     Object.defineProperty(g, k, { get: own[k], set(v) { Object.defineProperty(g, k, { value: v, writable: true, configurable: true }); }, configurable: true });
   }
+  // Named access to child frames (`window.frames['name']`, `window.name`
+  // of a child): getters on the global for the current children's names,
+  // refreshed whenever `frames` / `length` is read.
+  const named = new Set();
+  function defineNamed() {
+    const n = info(SELF, 'length', 0);
+    for (let i = 0; i < n; i++) {
+      const name = info(info(SELF, 'child', i), 'name', 0);
+      if (typeof name !== 'string' || name === '' || named.has(name) || name in g) continue;
+      named.add(name);
+      Object.defineProperty(g, name, {
+        get() { const c = info(SELF, 'named', name); return c < 0 ? undefined : windowFor(c); },
+        set(v) { named.delete(name); Object.defineProperty(g, name, { value: v, writable: true, configurable: true, enumerable: true }); },
+        configurable: true,
+      });
+    }
+  }
+  const framesDesc = Object.getOwnPropertyDescriptor(g, 'frames');
+  if (!framesDesc || framesDesc.configurable) {
+    Object.defineProperty(g, 'frames', {
+      get() { defineNamed(); return g; },
+      set(v) { Object.defineProperty(g, 'frames', { value: v, writable: true, configurable: true }); },
+      configurable: true,
+    });
+  }
+  const lengthGet = own.length;
+  Object.defineProperty(g, 'length', {
+    get() { defineNamed(); return lengthGet(); },
+    set(v) { Object.defineProperty(g, 'length', { value: v, writable: true, configurable: true }); },
+    configurable: true,
+  });
   for (let i = 0; i < 16; i++) {
     Object.defineProperty(g, String(i), {
       get() { const c = info(SELF, 'child', i); return c < 0 ? undefined : windowFor(c); },

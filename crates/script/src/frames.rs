@@ -119,6 +119,14 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         "closed" => Value::Bool(!with_env(|env| env.frame_exists(id))),
         "href" => Value::str(&with_env(|env| env.frame_url(id)).unwrap_or_default()),
         "document" => frame_document_value(realm, id),
+        "name" => match with_env(|env| env.frame_name_of(id)) {
+            Some(n) => Value::str(&n),
+            None => Value::Null,
+        },
+        "named" => {
+            let name = realm.to_rust_string(arg(args, 2))?;
+            id_value(with_env(|env| env.frame_named_child(id, &name)))
+        }
         "navigate" => {
             let url = realm.to_rust_string(arg(args, 2))?;
             with_env(|env| env.navigate_frame(id, &url));

@@ -438,6 +438,18 @@ impl HostEnv for EngineEnv<'_> {
     fn frame_name(&self) -> Option<String> {
         self.page.frame_name.clone()
     }
+    fn frame_name_of(&self, id: u64) -> Option<String> {
+        if let Some(c) = self.page.frames.children.iter().find(|c| c.id == id) {
+            return self.page.doc.attr(c.node, "name").map(|s| s.to_string());
+        }
+        self.engine.frames.borrow().name(id)
+    }
+    fn frame_named_child(&self, id: u64, name: &str) -> Option<u64> {
+        if id == self.page.frame_id {
+            return self.page.frames.children.iter().find(|c| self.page.doc.attr(c.node, "name") == Some(name)).map(|c| c.id);
+        }
+        self.engine.frames.borrow().named_child(id, name)
+    }
     fn post_message(&mut self, target: u64, data: String, target_origin: String) {
         self.queue_message(target, data, target_origin);
     }

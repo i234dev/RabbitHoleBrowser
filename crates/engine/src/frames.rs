@@ -104,6 +104,8 @@ struct FrameEntry {
     parent: Option<u64>,
     children: Vec<u64>,
     url: String,
+    /// `name` attribute of the hosting iframe (named frame access).
+    name: Option<String>,
 }
 
 /// The frame tree of every page of an engine (what scripts can see of
@@ -127,6 +129,14 @@ impl FrameRegistry {
     }
     pub fn url(&self, id: u64) -> Option<String> {
         self.entries.get(&id).map(|e| e.url.clone())
+    }
+    /// The `name` of the iframe hosting frame `id`.
+    pub fn name(&self, id: u64) -> Option<String> {
+        self.entries.get(&id)?.name.clone()
+    }
+    /// The child of frame `id` whose iframe is named `name`.
+    pub fn named_child(&self, id: u64, name: &str) -> Option<u64> {
+        self.entries.get(&id)?.children.iter().copied().find(|c| self.entries.get(c).and_then(|e| e.name.as_deref()) == Some(name))
     }
     fn remove_tree(&mut self, id: u64) {
         if let Some(e) = self.entries.remove(&id) {
@@ -295,6 +305,7 @@ impl Engine {
         for c in &page.frames.children {
             let e = reg.entries.entry(c.id).or_default();
             e.parent = Some(id);
+            e.name = page.doc.attr(c.node, "name").map(|s| s.to_string());
             if let Some(p) = &c.page {
                 e.url = p.url.to_string();
             }
@@ -387,6 +398,7 @@ impl Engine {
             let e = reg.entries.entry(id).or_default();
             e.parent = Some(page.frame_id);
             e.url = child.url.to_string();
+            e.name = page.doc.attr(node, "name").map(|s| s.to_string());
             let parent = reg.entries.entry(page.frame_id).or_default();
             if !parent.children.contains(&id) {
                 parent.children.push(id);
