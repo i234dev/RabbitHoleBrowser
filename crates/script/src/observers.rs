@@ -45,13 +45,23 @@ fn mo_observe(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
     let attributes = dict_bool(realm, &opts, "attributes")?.unwrap_or(attribute_old_value || !attr_filter.is_undefined());
     let character_data = dict_bool(realm, &opts, "characterData")?.unwrap_or(dict_bool(realm, &opts, "characterDataOldValue")?.unwrap_or(false));
     let subtree = dict_bool(realm, &opts, "subtree")?.unwrap_or(false);
+    let attribute_filter = if attr_filter.is_nullish() {
+        None
+    } else {
+        let list = realm.create_list_from_array_like(attr_filter)?;
+        let mut names = Vec::with_capacity(list.len());
+        for v in list {
+            names.push(realm.to_rust_string(v)?);
+        }
+        Some(names)
+    };
     if !(child_list || attributes || character_data) {
         return Err(realm.throw_type_error("The options object must set at least one of 'attributes', 'characterData', or 'childList' to true."));
     }
     let st = state();
     let mut st = st.borrow_mut();
     st.observers.retain(|r| !(r.observer == o && r.target == target));
-    st.observers.push(ObserverReg { observer: o, target, child_list, attributes, character_data, subtree, attribute_old_value });
+    st.observers.push(ObserverReg { observer: o, target, child_list, attributes, character_data, subtree, attribute_old_value, attribute_filter });
     Ok(Value::Undefined)
 }
 

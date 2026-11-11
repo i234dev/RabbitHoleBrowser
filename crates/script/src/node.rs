@@ -126,18 +126,68 @@ fn is_connected(n: NodeRef) -> bool {
     (n.doc == 0 || n.doc & crate::host::FRAME_DOC != 0) && with_doc(n.doc, |doc| doc.is_connected(n.node))
 }
 
-/// Adopt `child` into `target_doc` (copying when documents differ).
-fn adopt(child: NodeRef, target_doc: u32) -> NodeRef {
+/// Adopt `child` into `target_doc`. Documents are separate arenas, so the
+/// subtree is copied into the target and removed from its old document
+/// (a fragment is emptied); the script-side state of every moved node
+/// (its JS wrapper, listeners, inline handlers, custom element state) is
+/// re-pointed at the copy, so node identity survives the move.
+fn adopt(realm: &mut Realm, child: NodeRef, target_doc: u32) -> NodeRef {
     if child.doc == target_doc {
         return child;
     }
-    // Copy the subtree across documents. The original stays in its document
-    // (detached); wrappers keep pointing at the original, which is an
-    // accepted simplification.
     // (Main document, script-created documents and same-origin frame
     // documents all go through `with_doc`.)
     let src_clone: Document = with_doc(child.doc, |d| d.clone_subtree_readonly(child.node));
     let copied = with_doc(target_doc, |d| d.import_subtree(&src_clone, src_clone_root(&src_clone)));
+    let old_nodes: Vec<NodeId> = with_doc(child.doc, |d| d.descendants(child.node).collect());
+    let new_nodes: Vec<NodeId> = with_doc(target_doc, |d| d.descendants(copied).collect());
+    let fragment = is_fragment(child);
+    let old_parent = with_doc(child.doc, |d| {
+        let p = d.parent(child.node);
+        if fragment {
+            d.clear_children(child.node);
+        } else {
+            d.detach(child.node);
+        }
+        p
+    });
+    if let Some(op) = old_parent {
+        record_child_list(NodeRef { doc: child.doc, node: op }, Vec::new(), vec![child]);
+    }
+    if old_nodes.len() == new_nodes.len() {
+        let st = state();
+        let mut st = st.borrow_mut();
+        for (o, n) in old_nodes.iter().zip(new_nodes.iter()) {
+            let (o, n) = (NodeRef { doc: child.doc, node: *o }, NodeRef { doc: target_doc, node: *n });
+            if let Some(obj) = st.wrappers.remove(&o) {
+                st.wrappers.insert(n, obj);
+                if let Some(r) = realm.host_data_mut::<NodeRef>(obj) {
+                    *r = n;
+                }
+            }
+            if let Some(l) = st.listeners.remove(&TargetKey::Node(o)) {
+                st.listeners.insert(TargetKey::Node(n), l);
+                let keys: Vec<(TargetKey, String)> = st.listener_counts.keys().filter(|(k, _)| *k == TargetKey::Node(o)).cloned().collect();
+                for k in keys {
+                    if let Some(c) = st.listener_counts.remove(&k) {
+                        st.listener_counts.insert((TargetKey::Node(n), k.1), c);
+                    }
+                }
+            }
+            let keys: Vec<(NodeRef, String)> = st.inline_handlers.keys().filter(|(k, _)| *k == o).cloned().collect();
+            for k in keys {
+                if let Some(v) = st.inline_handlers.remove(&k) {
+                    st.inline_handlers.insert((n, k.1), v);
+                }
+            }
+            if st.ce_upgraded.remove(&o) {
+                st.ce_upgraded.insert(n);
+            }
+            if st.ce_failed.remove(&o) {
+                st.ce_failed.insert(n);
+            }
+        }
+    }
     NodeRef { doc: target_doc, node: copied }
 }
 
@@ -202,6 +252,11 @@ pub(crate) fn record_attribute(target: NodeRef, name: &str, old: Option<String>)
         if !reg.attributes || reg.target.doc != target.doc {
             continue;
         }
+        if let Some(filter) = &reg.attribute_filter {
+            if !filter.iter().any(|f| f == name) {
+                continue;
+            }
+        }
         let ok = reg.target.node == target.node
             || (reg.subtree && with_doc_in_state(&st, target.doc, |doc| doc.is_ancestor(reg.target.node, target.node)));
         if ok && !hits.iter().any(|(o, _)| *o == reg.observer) {
@@ -263,7 +318,7 @@ pub(crate) fn insert_node(realm: &mut Realm, parent: NodeRef, child: NodeRef, be
     if !parent_is_ok {
         return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "This node type does not support this method."));
     }
-    let child = adopt(child, parent.doc);
+    let child = adopt(realm, child, parent.doc);
     if child.node == parent.node || with_doc(parent.doc, |doc| doc.is_ancestor(child.node, parent.node)) {
         return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
     }
@@ -512,6 +567,8 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
         crate::host::mark_dirty();
         return Ok(());
     }
+    // A template's markup is its content's.
+    let n = if context == "template" { NodeRef { doc: n.doc, node: with_doc(n.doc, |doc| doc.template_content(n.node)) } } else { n };
     let frag = rabbithole_html::parse_fragment(html, &context);
     let frag_body = frag.body().unwrap_or(Document::ROOT);
     let old = children_of(n);

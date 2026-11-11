@@ -339,6 +339,16 @@ impl Realm {
             Value::Object(r) => r,
             _ => return Ok(false),
         };
+        // A proxy receiver (Reflect.set(target, k, v, proxy) in a set trap,
+        // as Vue's reactive() does): its [[GetOwnProperty]] and
+        // [[DefineOwnProperty]] go through the traps / its target.
+        if let ObjectKind::Proxy { .. } = &self.obj(rid).kind {
+            return match self.proxy_get_own_property(rid, &key)? {
+                Some(existing) if existing.is_accessor() || !existing.writable() => Ok(false),
+                Some(existing) => self.proxy_define(rid, key, Property::data(value, existing.flags)),
+                None => self.proxy_define(rid, key, Property::data(value, ALL)),
+            };
+        }
         if let Some(existing) = self.get_own_property(rid, &key) {
             if existing.is_accessor() || !existing.writable() {
                 return Ok(false);

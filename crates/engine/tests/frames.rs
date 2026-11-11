@@ -280,3 +280,21 @@ fn same_origin_child_scripts_its_parent() {
     // A top-level document has no frameElement.
     assert_eq!(eval(&e, &mut page2, "String(window.frameElement)"), "null");
 }
+
+#[test]
+fn hover_feedback_comes_from_inside_frames() {
+    let mut e = engine();
+    let inner = r#"<style>html,body{margin:0}</style><a id="l" href="https://example.test/inner" style="display:block;height:40px">link</a><input id="t" style="display:block;height:30px;width:100px">"#;
+    let page = load(
+        &mut e,
+        &format!(r#"<body style="margin:0"><iframe style="border:0;width:300px;height:200px;display:block" srcdoc="{}"></iframe><p style="margin:0;height:50px">outside</p></body>"#, escape_attr(inner)),
+    );
+    let over_link = page.hover_info(20.0, 20.0);
+    assert_eq!(over_link.cursor, "pointer");
+    assert_eq!(over_link.link.map(|u| u.to_string()).as_deref(), Some("https://example.test/inner"));
+    let over_input = page.hover_info(20.0, 55.0);
+    assert_eq!(over_input.cursor, "text");
+    assert!(over_input.link.is_none());
+    let outside = page.hover_info(20.0, 220.0);
+    assert!(outside.link.is_none());
+}

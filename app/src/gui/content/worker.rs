@@ -1030,21 +1030,10 @@ impl Worker {
         // Hover state + pointer/mouse events from the same hit test as clicks.
         self.page_op(|engine, page| ((), engine.pointer_move(page, x, y, mods)));
         let Some(page) = self.page.as_ref() else { return };
-        let node = page.pointer.hover;
-        let link = node.and_then(|n| page.link_of(n));
-        let mut cursor = match page.cursor_at(doc.0, doc.1) {
-            "pointer" => "pointer",
-            "text" => "text",
-            _ => "default",
-        };
-        if link.is_some() {
-            cursor = "pointer";
-        }
-        if let Some(c) = node.and_then(|n| page.control_of(n)) {
-            if matches!(page.control_kind(c), ControlKind::Text | ControlKind::Password | ControlKind::TextArea) {
-                cursor = "text";
-            }
-        }
+        // Cursor and link from the innermost document under the pointer
+        // (iframes included).
+        let rabbithole_engine::frames::HoverInfo { cursor, link } = page.hover_info(x, y);
+        let _ = doc;
         if (cursor, &link) != (self.sent_hover.0, &self.sent_hover.1) {
             self.sent_hover = (cursor, link.clone());
             self.send(FromContent::Hover { cursor, link });

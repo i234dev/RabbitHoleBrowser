@@ -1744,23 +1744,8 @@ fn sheet_insert_rule(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
 
 fn template_content(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "content")?;
-    let Value::Object(w) = this else { unreachable!() };
-    let cached = get_hidden(realm, w, "__content");
-    if cached.is_object() {
-        return Ok(cached);
-    }
-    let frag = with_doc(n.doc, |doc| {
-        let f = doc.create_element("#fragment", vec![]);
-        let kids: Vec<NodeId> = doc.children(n.node).collect();
-        for k in kids {
-            let c = doc.clone_subtree(k, true);
-            doc.append_child(f, c);
-        }
-        f
-    });
-    let v = wrap(realm, NodeRef { doc: n.doc, node: frag });
-    set_hidden(realm, w, "__content", v.clone());
-    Ok(v)
+    let frag = with_doc(n.doc, |doc| doc.template_content(n.node));
+    Ok(wrap(realm, NodeRef { doc: n.doc, node: frag }))
 }
 
 /// `canvas.getContext()` returns null: there is no 2D canvas yet.

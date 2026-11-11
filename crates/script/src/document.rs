@@ -18,7 +18,8 @@ fn this_doc(realm: &mut Realm, this: &Value) -> JsResult<u32> {
 
 fn d_document_element(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
-    let h = with_doc(d, |doc| doc.html_element());
+    // The document's element child, whatever its name (XML documents).
+    let h = with_doc(d, |doc| doc.child_elements(Document::ROOT).next());
     Ok(wrap_opt(realm, d, h))
 }
 

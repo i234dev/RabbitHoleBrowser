@@ -104,6 +104,15 @@ pub(crate) fn new_frame_id() -> u64 {
     NEXT_FRAME_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Pointer feedback for the embedder (see [`Page::hover_info`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoverInfo {
+    /// `"default"`, `"pointer"` or `"text"`.
+    pub cursor: &'static str,
+    /// The link under the pointer (status bar).
+    pub link: Option<Url>,
+}
+
 /// What an iframe displays.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameSource {
@@ -292,6 +301,33 @@ impl Page {
         let r = self.frame_content_rect(node)?;
         let (dx, dy) = (x + self.page_scroll.0, y + self.page_scroll.1);
         Some((node, dx - r.x, dy - r.y))
+    }
+
+    /// Cursor and link under viewport point `(x, y)` for the embedder's
+    /// pointer feedback, looking into the frame under the point (nested
+    /// frames included).
+    pub fn hover_info(&self, x: f32, y: f32) -> HoverInfo {
+        if let Some((node, cx, cy)) = self.frame_at_viewport(x, y) {
+            if let Some(child) = self.frames.get(node).and_then(|c| c.page.as_deref()) {
+                return child.hover_info(cx - child.page_scroll.0, cy - child.page_scroll.1);
+            }
+        }
+        let node = self.node_at_viewport(x, y);
+        let link = node.and_then(|n| self.link_of(n));
+        let mut cursor = match self.cursor_at(x + self.page_scroll.0, y + self.page_scroll.1) {
+            "pointer" => "pointer",
+            "text" => "text",
+            _ => "default",
+        };
+        if link.is_some() {
+            cursor = "pointer";
+        }
+        if let Some(c) = node.and_then(|n| self.control_of(n)) {
+            if matches!(self.control_kind(c), crate::forms::ControlKind::Text | crate::forms::ControlKind::Password | crate::forms::ControlKind::TextArea) {
+                cursor = "text";
+            }
+        }
+        HoverInfo { cursor, link }
     }
 
     fn frame_mut(&mut self, node: NodeId) -> Option<&mut ChildFrame> {

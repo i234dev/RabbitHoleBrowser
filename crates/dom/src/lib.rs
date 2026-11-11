@@ -110,6 +110,13 @@ pub struct Document {
     pub sheet_overrides: HashMap<NodeId, (String, String)>,
     /// Custom elements whose constructor ran (`:defined`).
     pub defined_custom: std::collections::HashSet<NodeId>,
+    /// `<template>` element → its content (a parentless `#fragment` node):
+    /// a template's children live there, not in the tree.
+    pub template_contents: HashMap<NodeId, NodeId>,
+    /// Shadow roots created by declarative shadow DOM
+    /// (`<template shadowrootmode>`), with whether they are open; the
+    /// first `attachShadow()` on the host takes such a root over.
+    pub declarative_shadow: HashMap<NodeId, bool>,
 }
 
 impl Default for Document {
@@ -142,6 +149,8 @@ impl Document {
             adopted_styles: HashMap::new(),
             sheet_overrides: HashMap::new(),
             defined_custom: std::collections::HashSet::new(),
+            template_contents: HashMap::new(),
+            declarative_shadow: HashMap::new(),
         }
     }
 
@@ -320,6 +329,15 @@ impl Document {
                 let cc = self.clone_subtree(c, true);
                 self.append_child(copy, cc);
             }
+            // Cloning a template clones its content.
+            if let Some(&content) = self.template_contents.get(&root) {
+                let target = self.template_content(copy);
+                let kids: Vec<NodeId> = self.children(content).collect();
+                for c in kids {
+                    let cc = self.clone_subtree(c, true);
+                    self.append_child(target, cc);
+                }
+            }
         }
         copy
     }
@@ -331,6 +349,13 @@ impl Document {
         for c in other.children(root) {
             let cc = self.import_subtree(other, c);
             self.append_child(copy, cc);
+        }
+        if let Some(&content) = other.template_contents.get(&root) {
+            let target = self.template_content(copy);
+            for c in other.children(content) {
+                let cc = self.import_subtree(other, c);
+                self.append_child(target, cc);
+            }
         }
         copy
     }
@@ -396,6 +421,48 @@ impl Document {
                     Some(&h) => cur = h,
                     None => return false,
                 },
+            }
+        }
+    }
+
+    // ---------------------------------------------------------- templates
+
+    /// The content fragment of `<template>` element `template`, created on
+    /// first use.
+    pub fn template_content(&mut self, template: NodeId) -> NodeId {
+        if let Some(&c) = self.template_contents.get(&template) {
+            return c;
+        }
+        let f = self.create_element("#fragment", vec![]);
+        self.template_contents.insert(template, f);
+        f
+    }
+
+    /// After parsing: move the children of every `<template>` under `root`
+    /// into its content fragment (nested templates too). With
+    /// `declarative_shadow`, a `<template shadowrootmode=open|closed>`
+    /// instead becomes the shadow root of its parent element.
+    pub fn adopt_template_contents(&mut self, root: NodeId, declarative_shadow: bool) {
+        let templates: Vec<NodeId> = self.descendants(root).filter(|&n| self.is_element(n, "template")).collect();
+        // Innermost first, so nested templates end up in their parent's content.
+        for t in templates.into_iter().rev() {
+            let mode = if declarative_shadow { self.attr(t, "shadowrootmode").map(|m| m.to_ascii_lowercase()) } else { None };
+            let host = self.parent(t).filter(|&p| self.element(p).is_some() && !self.shadow_roots.contains_key(&p));
+            let target = match (mode.as_deref(), host) {
+                (Some(m @ ("open" | "closed")), Some(h)) => {
+                    let r = self.attach_shadow(h);
+                    self.declarative_shadow.insert(r, m == "open");
+                    r
+                }
+                _ => self.template_content(t),
+            };
+            let kids: Vec<NodeId> = self.children(t).collect();
+            for k in kids {
+                self.detach(k);
+                self.append_child(target, k);
+            }
+            if target != self.template_contents.get(&t).copied().unwrap_or(usize::MAX) {
+                self.detach(t);
             }
         }
     }
@@ -601,6 +668,7 @@ impl Document {
         if include_self {
             self.serialize_into(id, &mut out);
         } else {
+            let id = self.template_contents.get(&id).copied().unwrap_or(id);
             for c in self.children(id) {
                 self.serialize_into(c, &mut out);
             }
@@ -631,6 +699,7 @@ impl Document {
                     return;
                 }
                 let raw = matches!(e.tag.as_str(), "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext");
+                let id = self.template_contents.get(&id).copied().unwrap_or(id);
                 for c in self.children(id) {
                     if raw {
                         if let NodeData::Text(t) = &self.nodes[c].data {

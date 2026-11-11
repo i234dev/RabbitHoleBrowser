@@ -1703,7 +1703,7 @@ impl Page {
                 if let Some(b) = self.layout.box_of(&self.doc, n) {
                     return Some(b.rect);
                 }
-                cur = self.doc.parent(n);
+                cur = self.doc.flat_parent(n);
             }
             None
         })

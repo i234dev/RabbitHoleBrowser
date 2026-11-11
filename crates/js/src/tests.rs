@@ -1489,6 +1489,14 @@ fn named_function_expression_binding_is_immutable() {
 }
 
 #[test]
+fn set_with_a_proxy_receiver_reaches_the_target() {
+    // Vue's reactive(): set trap → Reflect.set(target, key, value, receiver).
+    eq("var raw = { x: 1 }; var p = new Proxy(raw, { set: function (t, k, v, r) { return Reflect.set(t, k, v, r); } }); p.x = 2; p.y = 3; [raw.x, raw.y, Object.keys(p).join('')].join()", "2,3,xy");
+    eq("var q = new Proxy({ y: 1 }, {}); Reflect.set(q, 'y', 5, q); q.y", "5");
+    eq("var log = []; var q = new Proxy({}, { defineProperty: function (t, k, d) { log.push(k + '=' + d.value); return Reflect.defineProperty(t, k, d); } }); Reflect.set({}, 'z', 7, q); log.join() + ':' + q.z", "z=7:7");
+}
+
+#[test]
 fn with_statement() {
     // Names found on the object (get, set, call with `this`, typeof, delete).
     eq("var o = { a: 1, f: function () { return this === o; } }; var a = 'outer'; var r; with (o) { a = a + 1; r = [a, f(), typeof a, typeof zzz] } [o.a, a, r.join()].join()", "2,outer,2,true,number,undefined");

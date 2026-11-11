@@ -79,6 +79,8 @@ pub struct ObserverReg {
     pub character_data: bool,
     pub subtree: bool,
     pub attribute_old_value: bool,
+    /// `attributeFilter`: only these attribute names (None = all).
+    pub attribute_filter: Option<Vec<String>>,
 }
 
 #[allow(dead_code)]

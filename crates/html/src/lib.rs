@@ -34,6 +34,13 @@ const SCOPE_BOUNDARY: &[&str] = &[
 const HEAD_ONLY: &[&str] = &["base", "basefont", "bgsound", "link", "meta", "title", "style", "script", "noframes", "template", "noscript"];
 
 pub fn parse(input: &str) -> Document {
+    let mut doc = parse_tree(input);
+    doc.adopt_template_contents(Document::ROOT, true);
+    doc
+}
+
+/// Tree construction only (template children still in the tree).
+fn parse_tree(input: &str) -> Document {
     let mut builder = TreeBuilder::new();
     builder.run(input);
     builder.doc
@@ -54,6 +61,12 @@ pub fn parse_fragment(input: &str, context: &str) -> Document {
         "ul" | "ol" => ("<ul>", "ul"),
         "dl" => ("<dl>", "dl"),
         _ => ("", ""),
+    };
+    // Fragment parsing (innerHTML) never creates declarative shadow roots.
+    let parse = |s: &str| {
+        let mut d = parse_tree(s);
+        d.adopt_template_contents(Document::ROOT, false);
+        d
     };
     if prefix.is_empty() {
         let mut doc = parse(input);

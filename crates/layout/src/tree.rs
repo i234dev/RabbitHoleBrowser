@@ -646,13 +646,13 @@ impl LayoutTree {
     pub fn inline_rect(&self, doc: &rabbithole_dom::Document, node: NodeId) -> Option<Rect> {
         // The nearest ancestor with a box holds the line boxes (possibly in
         // anonymous block boxes below it).
-        let mut cur = doc.parent(node);
+        let mut cur = doc.flat_parent(node);
         let container = loop {
             let c = cur?;
             if let Some(b) = self.box_of(doc, c) {
                 break b;
             }
-            cur = doc.parent(c);
+            cur = doc.flat_parent(c);
         };
         let stop = container.node;
         let inside = |n: NodeId| {
@@ -664,7 +664,7 @@ impl LayoutTree {
                 if Some(x) == stop {
                     return false;
                 }
-                c = doc.parent(x);
+                c = doc.flat_parent(x);
             }
             false
         };
@@ -933,11 +933,13 @@ fn guided_path(root: &LayoutBox, doc: &rabbithole_dom::Document, node: NodeId) -
     if root.node == Some(node) {
         return Some(Vec::new());
     }
+    // Boxes follow the flat tree (shadow trees under their host, slotted
+    // nodes under their slot).
     let mut ancestors = std::collections::HashSet::new();
     let mut cur = Some(node);
     while let Some(c) = cur {
         ancestors.insert(c);
-        cur = doc.parent(c);
+        cur = doc.flat_parent(c);
     }
     fn walk(b: &LayoutBox, node: NodeId, anc: &std::collections::HashSet<NodeId>, path: &mut Vec<usize>) -> bool {
         for (i, c) in b.children.iter().enumerate() {

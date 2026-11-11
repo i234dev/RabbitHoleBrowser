@@ -370,7 +370,7 @@ impl ScriptHost {
         };
         let errors = Rc::new(RefCell::new(Vec::new()));
         let mut doc = Document::new();
-        let mut host = {
+        let host = {
             let mut wenv = WorkerEnv { outer: &mut *env, doc: &mut doc, url: u.clone(), errors: errors.clone() };
             let mut host = Box::new(ScriptHost::new_worker(&mut wenv, name, shared.is_some(), id));
             let _ = host.run_script(&mut wenv, &source, url, module);

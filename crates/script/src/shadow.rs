@@ -70,7 +70,12 @@ pub(crate) fn is_shadow_root(n: NodeRef) -> bool {
 }
 
 pub(crate) fn shadow_info(root: NodeRef) -> Option<ShadowInfo> {
-    sstate(|s| s.info.get(&root).copied())
+    if let Some(i) = sstate(|s| s.info.get(&root).copied()) {
+        return Some(i);
+    }
+    // Declarative shadow roots (parsed): open or closed per the markup.
+    let open = with_doc(root.doc, |doc| doc.declarative_shadow.get(&root.node).copied())?;
+    Some(ShadowInfo { open, delegates_focus: false, manual: false, clonable: false, serializable: true })
 }
 
 /// The definition that applies to element `n` (autonomous by tag, or a
@@ -316,6 +321,21 @@ fn e_attach_shadow(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     let tag = tag_of(n).unwrap_or_default();
     if !(tag.contains('-') || VALID_HOSTS.contains(&tag.as_str())) {
         return Err(crate::misc::dom_exception(realm, "NotSupportedError", &format!("Failed to execute 'attachShadow' on 'Element': This element does not support attachShadow")));
+    }
+    // A declarative shadow root (`<template shadowrootmode>`) of the same
+    // mode is taken over: emptied and returned.
+    let declarative = with_doc(n.doc, |doc| doc.shadow_root(n.node).and_then(|r| doc.declarative_shadow.get(&r).map(|o| (r, *o))));
+    if let Some((r, was_open)) = declarative {
+        if was_open == open {
+            with_doc(n.doc, |doc| {
+                doc.declarative_shadow.remove(&r);
+                doc.clear_children(r);
+            });
+            if n.doc == 0 {
+                mark_dirty();
+            }
+            return Ok(wrap(realm, NodeRef { doc: n.doc, node: r }));
+        }
     }
     if with_doc(n.doc, |doc| doc.shadow_root(n.node).is_some()) {
         return Err(crate::misc::dom_exception(realm, "NotSupportedError", "Failed to execute 'attachShadow' on 'Element': Shadow root cannot be created on a host which already hosts a shadow tree."));

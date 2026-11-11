@@ -1227,3 +1227,60 @@ fn workers_have_their_own_realm() {
     host.run_timers(&mut env, 1100.0);
     assert!(!env.logs[before..].iter().any(|(_, m)| m.contains("after terminate")));
 }
+
+/// `<template>` children live in its content fragment (not in the tree);
+/// declarative shadow roots; nodes moved across documents keep their
+/// identity; MutationObserver honours attributeFilter.
+#[test]
+fn templates_declarative_shadow_and_adoption() {
+    let (mut env, mut host) = setup(
+        "<html><body><template id=t><li class=x>a</li><template id=inner><b>n</b></template></template>\
+         <div id=h><template shadowrootmode=open><span id=s>shadow</span></template><i>light</i></div></body></html>",
+    );
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        var t = document.getElementById('t');
+        console.log('tpl', t.childNodes.length, t.content.childNodes.length, document.querySelectorAll('li').length, t.content.firstChild.tagName, t.innerHTML.indexOf('<li class="x">a</li>') === 0);
+        console.log('nested', t.content.querySelector('template').content.firstChild.tagName, t.content === t.content);
+        t.innerHTML = '<p>x</p><p>y</p>';
+        console.log('set', t.childNodes.length, t.content.childNodes.length);
+        var c = t.cloneNode(true);
+        console.log('clone', c.content.childNodes.length, c.content.firstChild.textContent);
+        var imp = document.importNode(t.content, true);
+        document.body.appendChild(imp);
+        console.log('import', document.querySelectorAll('body > p').length, t.content.childNodes.length);
+        var h = document.getElementById('h');
+        console.log('dsd', !!h.shadowRoot, h.shadowRoot && h.shadowRoot.getElementById('s').textContent, h.querySelectorAll('template').length, h.children.length);
+        var r = h.attachShadow({ mode: 'open' });
+        console.log('takeover', r === h.shadowRoot, r.childNodes.length);
+        var d = new DOMParser().parseFromString('<body><u id=u>x</u></body>', 'text/html');
+        var u = d.getElementById('u'); u.expando = 7;
+        u.addEventListener('click', function () { console.log('clicked moved node'); });
+        document.body.appendChild(u);
+        console.log('adopt', document.getElementById('u') === u, u.expando, u.ownerDocument === document, d.body.childNodes.length);
+        u.click();
+        var seen = [];
+        var mo = new MutationObserver(function (recs) { recs.forEach(function (rec) { seen.push(rec.attributeName); }); });
+        mo.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['value'] });
+        u.setAttribute('selected', ''); u.setAttribute('value', 'v');
+        "#,
+    );
+    let mo = run(&mut env, &mut host, "console.log('mo', seen.join())");
+    assert_eq!(mo, vec!["mo value"]);
+    assert_eq!(
+        out,
+        vec![
+            "tpl 0 2 0 LI true",
+            "nested B true",
+            "set 0 2",
+            "clone 2 x",
+            "import 2 2",
+            "dsd true shadow 0 1",
+            "takeover true 0",
+            "adopt true 7 true 0",
+            "clicked moved node",
+        ]
+    );
+}
