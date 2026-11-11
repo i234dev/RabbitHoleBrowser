@@ -1111,6 +1111,7 @@ fn long_timer_runs_yield_and_resume() {
     let out = run(&mut env, &mut host, "console.log(done)");
     assert_eq!(out[0], "6");
     assert_eq!(timeouts(&env), 0);
+}
 
 #[test]
 fn doctype_node_compat_mode_and_xml_documents() {
