@@ -7,7 +7,7 @@ use crate::client::{Client, ClientError, Priority, WireRequest};
 use crate::cookies::{CookieContext, CookieJar};
 use crate::cors::{self, CredentialsMode, PreflightCache, RedirectMode, ReferrerPolicy, RequestMode, ResponseType};
 use crate::url::{percent_decode, percent_encode_component, site_of, Url};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1378,16 +1378,32 @@ impl Fetcher {
 
     /// Like `fetch_many`, for subresources of a page: browser headers for
     /// `dest`, with `initiator` as referer/initiator.
+    /// The same URL listed several times (a font shared by several
+    /// `@font-face` rules, an image used twice…) is fetched once.
     pub fn fetch_many_for(&self, urls: &[Url], parallelism: usize, dest: Destination, initiator: Option<&Url>) -> Vec<Result<Response, FetchError>> {
-        let reqs: Vec<Request> = urls
+        let mut unique: Vec<&Url> = Vec::with_capacity(urls.len());
+        let mut index: Vec<usize> = Vec::with_capacity(urls.len());
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for u in urls {
+            let i = *seen.entry(u.to_string()).or_insert_with(|| {
+                unique.push(u);
+                unique.len() - 1
+            });
+            index.push(i);
+        }
+        let reqs: Vec<Request> = unique
             .iter()
             .map(|u| {
-                let mut r = Request::get(u.clone()).with_dest(dest);
+                let mut r = Request::get((*u).clone()).with_dest(dest);
                 r.referer = initiator.cloned();
                 r
             })
             .collect();
-        self.request_many(&reqs, parallelism)
+        let results = self.request_many(&reqs, parallelism);
+        if unique.len() == urls.len() {
+            return results;
+        }
+        index.into_iter().map(|i| results[i].clone()).collect()
     }
 
     /// Perform several requests concurrently, preserving result order.

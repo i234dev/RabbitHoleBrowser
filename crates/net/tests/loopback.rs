@@ -178,6 +178,22 @@ fn http1_keepalive_codings_and_headers() {
 }
 
 #[test]
+fn duplicate_urls_in_a_batch_are_fetched_once() {
+    let srv = serve(Arc::new(|req: &Req| (200, hv(&[("cache-control", "no-store")]), req.path.clone().into_bytes())));
+    let f = fetcher();
+    let font = srv.url("/icons.woff");
+    let other = srv.url("/other.woff");
+    let urls = vec![font.clone(), font.clone(), other.clone(), font.clone(), other];
+    let res = f.fetch_many_for(&urls, 6, Destination::Font, None);
+    assert_eq!(res.len(), 5);
+    let bodies: Vec<String> = res.iter().map(|r| String::from_utf8_lossy(&r.as_ref().unwrap().body).into_owned()).collect();
+    assert_eq!(bodies, ["/icons.woff", "/icons.woff", "/other.woff", "/icons.woff", "/other.woff"]);
+    let hits = srv.requests().iter().filter(|r| r.path == "/icons.woff").count();
+    assert_eq!(hits, 1, "one request per distinct URL");
+    assert_eq!(srv.requests().len(), 2);
+}
+
+#[test]
 fn parallel_requests_respect_per_host_limit() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
