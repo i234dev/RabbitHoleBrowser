@@ -147,6 +147,14 @@ fn cacheable_key(key: &PropertyKey) -> Option<&JsStr> {
     }
 }
 
+/// A receiver whose reads and writes go through the inline caches at all:
+/// proxies and module namespaces share the empty shape but forward
+/// elsewhere, so no record may match them.
+#[inline(always)]
+fn cacheable_receiver(o: &Object) -> bool {
+    !matches!(o.kind, ObjectKind::Proxy { .. } | ObjectKind::ModuleBinding { .. })
+}
+
 fn plain_kind(kind: &ObjectKind) -> bool {
     !matches!(kind, ObjectKind::Proxy { .. } | ObjectKind::TypedArray(_) | ObjectKind::ModuleBinding { .. })
 }
@@ -178,7 +186,7 @@ impl Realm {
             }
             IC_PROTO => {
                 let o = self.heap.try_get(recv.as_object()?)?;
-                if o.props.shape_id() != ic.shape {
+                if o.props.shape_id() != ic.shape || !cacheable_receiver(o) {
                     return None;
                 }
                 let mut next = o.proto?;
@@ -215,7 +223,7 @@ impl Realm {
             }
             IC_PROTO_DEEP => {
                 let o = self.heap.try_get(recv.as_object()?)?;
-                if o.props.shape_id() != ic.shape || o.proto?.0 != ic.mid || crate::shape::proto_epoch() != ic.mid_shape {
+                if o.props.shape_id() != ic.shape || o.proto?.0 != ic.mid || crate::shape::proto_epoch() != ic.mid_shape || !cacheable_receiver(o) {
                     return None;
                 }
                 let h = self.heap.try_get(ObjectId(ic.holder))?;
@@ -227,7 +235,7 @@ impl Realm {
             }
             IC_ABSENT => {
                 let o = self.heap.try_get(recv.as_object()?)?;
-                if o.props.shape_id() != ic.shape || o.proto.map(|p| p.0).unwrap_or(NO_OBJ) != ic.mid || crate::shape::proto_epoch() != ic.mid_shape {
+                if o.props.shape_id() != ic.shape || o.proto.map(|p| p.0).unwrap_or(NO_OBJ) != ic.mid || crate::shape::proto_epoch() != ic.mid_shape || !cacheable_receiver(o) {
                     return None;
                 }
                 Some(&ABSENT_PROPERTY)
@@ -474,7 +482,7 @@ impl Realm {
                     Some(o) => o,
                     None => return Err(v),
                 };
-                if o.props.shape_id() != ic.shape || !o.extensible || o.proto.map(|p| p.0) != Some(ic.holder) || crate::shape::proto_epoch() != ic.mid_shape {
+                if o.props.shape_id() != ic.shape || !o.extensible || o.proto.map(|p| p.0) != Some(ic.holder) || crate::shape::proto_epoch() != ic.mid_shape || !cacheable_receiver(o) {
                     return Err(v);
                 }
                 let next = match o.props.shape().and_then(|s| s.lookup_transition_str(key)) {
@@ -504,7 +512,7 @@ impl Realm {
     #[inline]
     pub(crate) fn ic_setter(&self, ic: &PropIc, recv: &Value) -> Option<ObjectId> {
         let o = self.heap.try_get(recv.as_object()?)?;
-        if o.props.shape_id() != ic.shape {
+        if o.props.shape_id() != ic.shape || !cacheable_receiver(o) {
             return None;
         }
         let p = if ic.holder == NO_OBJ {
@@ -529,7 +537,7 @@ impl Realm {
     #[inline]
     fn ic_add_valid(&self, ic: &PropIc, id: ObjectId) -> bool {
         let Some(o) = self.heap.try_get(id) else { return false };
-        if o.props.shape_id() != ic.shape || !o.extensible {
+        if o.props.shape_id() != ic.shape || !o.extensible || !cacheable_receiver(o) {
             return false;
         }
         if ic.holder == NO_OBJ {
