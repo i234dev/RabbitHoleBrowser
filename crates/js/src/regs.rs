@@ -188,7 +188,30 @@ pub fn translate(ops: &[Op], positions: &[Pos], handlers: &[Handler], constants:
         .iter()
         .map(|h| Handler { start: map[(h.start as usize).min(n)], end: map[(h.end as usize).min(n)], target: map[(h.target as usize).min(n)], ..*h })
         .collect();
+    fuse_loop_latches(&mut out);
     Ok(Translated { ops: out, positions: pos, handlers, depths, max_depth })
+}
+
+/// `for (...; i < n; i++)` ends in `IncR(i, i)` followed by the loop test
+/// `JumpIfLt(i, n, top)` jumping backwards; the increment becomes one
+/// instruction doing both (the test stays where it is: the loop is entered
+/// by jumping to it).
+fn fuse_loop_latches(ops: &mut [Op]) {
+    for i in 0..ops.len().saturating_sub(1) {
+        if let Op::IncR(d, s) = ops[i] {
+            if d != s {
+                continue;
+            }
+            ops[i] = match ops[i + 1] {
+                Op::JumpIfLtRR(a, b, t) if a == d && (t as usize) <= i => Op::IncJumpIfLtRR(a, b, t),
+                Op::JumpIfLtRK(a, k, t) if a == d && (t as usize) <= i => Op::IncJumpIfLtRK(a, k, t),
+                other => {
+                    let _ = other;
+                    continue;
+                }
+            };
+        }
+    }
 }
 
 /// The stack code unchanged (every instruction runs as a stack instruction).

@@ -289,6 +289,12 @@ pub enum Op {
     JumpUnlessLtEqRK(u16, u16, u32),
     JumpUnlessGtRK(u16, u16, u32),
     JumpUnlessGtEqRK(u16, u16, u32),
+    /// Loop latch `r++; if (r < b) goto t` (see `regs::fuse_loop_latches`):
+    /// replaces an `IncR(r, r)` followed by `JumpIfLtRR(r, b, t)`, which
+    /// stays in place as the loop's entry test.
+    IncJumpIfLtRR(u16, u16, u32),
+    /// `r++; if (r < k) goto t` (with `JumpIfLtRK`).
+    IncJumpIfLtRK(u16, u16, u32),
     /// Fused compare-and-branch: jump to the target when `a OP b`.
     JumpIfLtRR(u16, u16, u32),
     JumpIfLtEqRR(u16, u16, u32),
@@ -508,6 +514,8 @@ impl Op {
             | Op::JumpUnlessLtEqRK(_, _, t)
             | Op::JumpUnlessGtRK(_, _, t)
             | Op::JumpUnlessGtEqRK(_, _, t)
+            | Op::IncJumpIfLtRR(_, _, t)
+            | Op::IncJumpIfLtRK(_, _, t)
             | Op::JumpIfLtRR(_, _, t)
             | Op::JumpIfLtEqRR(_, _, t)
             | Op::JumpIfGtRR(_, _, t)
@@ -551,6 +559,8 @@ impl Op {
             Op::JumpUnlessLtEqRK(a, b, _) => Op::JumpUnlessLtEqRK(a, b, t),
             Op::JumpUnlessGtRK(a, b, _) => Op::JumpUnlessGtRK(a, b, t),
             Op::JumpUnlessGtEqRK(a, b, _) => Op::JumpUnlessGtEqRK(a, b, t),
+            Op::IncJumpIfLtRR(a, b, _) => Op::IncJumpIfLtRR(a, b, t),
+            Op::IncJumpIfLtRK(a, b, _) => Op::IncJumpIfLtRK(a, b, t),
             Op::JumpIfLtRR(a, b, _) => Op::JumpIfLtRR(a, b, t),
             Op::JumpIfLtEqRR(a, b, _) => Op::JumpIfLtEqRR(a, b, t),
             Op::JumpIfGtRR(a, b, _) => Op::JumpIfGtRR(a, b, t),

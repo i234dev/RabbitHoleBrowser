@@ -1606,6 +1606,36 @@ impl Realm {
                         let r = !sl!(s).truthy();
                         *sl!(d) = Value::Bool(r);
                     }
+                    Op::IncJumpIfLtRK(r, c, t) => {
+                        let (x, y) = (&*sl!(r), k!(c));
+                        if x.is_number() && y.is_number() {
+                            let (n, lim) = (x.number_unchecked() + 1.0, y.number_unchecked());
+                            sl!(r).set_number(n);
+                            if n < lim {
+                                jump!(t);
+                            } else {
+                                // Skip the loop's entry test that follows.
+                                pc += 1;
+                            }
+                        } else {
+                            // The increment, then the test that follows.
+                            slow!(Op::IncR(r, r));
+                        }
+                    }
+                    Op::IncJumpIfLtRR(r, b, t) => {
+                        let (x, y) = (&*sl!(r), &*sl!(b));
+                        if x.is_number() && y.is_number() {
+                            let (n, lim) = (x.number_unchecked() + 1.0, y.number_unchecked());
+                            sl!(r).set_number(n);
+                            if n < lim {
+                                jump!(t);
+                            } else {
+                                pc += 1;
+                            }
+                        } else {
+                            slow!(Op::IncR(r, r));
+                        }
+                    }
                     Op::IncR(d, s) => match sl!(s).as_number() {
                         Some(n) => set_num!(d, n + 1.0),
                         None => slow!(op),
@@ -2130,6 +2160,10 @@ impl Realm {
                     if !matches!(sl!(s), Value::Undefined | Value::Empty) {
                         jmp!(t);
                     }
+                }
+                Op::IncJumpIfLtRR(r, ..) | Op::IncJumpIfLtRK(r, ..) => {
+                    // Out of line: the increment; the loop test follows.
+                    return self.exec_op(fi, Op::IncR(r, r));
                 }
                 Op::NotR(d, s) | Op::IncR(d, s) | Op::DecR(d, s) | Op::ToNumericR(d, s) => {
                     let uop = match op {

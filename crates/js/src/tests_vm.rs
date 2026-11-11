@@ -665,3 +665,15 @@ fn call_apply_and_bound_fast_paths() {
     eq("var r; try { (function f() { f.call(null); })(); } catch (e) { r = e instanceof RangeError; } r", "true");
     eq("function k(a) { return a; } var arr = [1,,3]; [k.apply(null, arr), k.apply(null, {length: 1, 0: 'x'}), k.call.call(k, null, 'cc')].join()", "1,x,cc");
 }
+
+#[test]
+fn fused_loop_latches() {
+    eq("(function(){ var s = 0; for (var i = 0; i < 5; i++) s += i; return s + ':' + i; })()", "10:5");
+    eq("(function(){ var s = 0, n = 4; for (var i = 0; i < n; i++) s += i; return s + ':' + i; })()", "6:4");
+    eq("(function(){ var s = ''; for (var i = '1'; i < 4; i++) s += typeof i + i; return s; })()", "string1number2number3");
+    eq("(function(){ var calls = 0, n = { valueOf() { calls++; return 3; } }; for (var i = 0; i < n; i++); return i + ':' + calls; })()", "3:4");
+    eq("(function(){ var r = []; for (let i = 0; i < 3; i++) r.push(() => i); return r.map(f => f()).join(); })()", "0,1,2");
+    eq("(function(){ var i = 0; for (; i < 0; i++); for (var j = 10; j < 3; j++); return i + ':' + j; })()", "0:10");
+    eq("(function(){ var s = 0; for (var i = 0; i < 1e5; i++) { if (i == 50) i = 1e9; s++; } return s + ':' + i; })()", "51:1000000001");
+    eq("(function(){ var n = 3, s = 0; for (var i = 0; i < n; i++) { if (i == 1) n = 'x'; s++; } return s; })()", "2");
+}
