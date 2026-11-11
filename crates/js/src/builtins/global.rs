@@ -1,6 +1,7 @@
 //! Global functions, console and the global object itself.
 
 use super::*;
+use crate::value::V;
 
 pub fn register(realm: &mut Realm) {
     let g = realm.global;
@@ -315,8 +316,8 @@ fn queue_microtask(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<
 
 fn structured_clone(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     fn clone_value(realm: &mut Realm, v: Value, seen: &mut Vec<(ObjectId, ObjectId)>) -> JsResult<Value> {
-        let id = match &v {
-            Value::Object(id) => *id,
+        let id = match v.v() {
+            V::Object(id) => id,
             _ => return Ok(v),
         };
         if let Some((_, c)) = seen.iter().find(|(o, _)| *o == id) {
@@ -369,9 +370,9 @@ fn structured_clone(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 }
 
 fn eval(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let src = match arg(args, 0) {
-        Value::String(s) => s.to_rust_string(),
-        other => return Ok(other),
+    let src = match (arg(args, 0)).v() {
+        V::String(s) => s.to_rust_string(),
+        other => return Ok(other.to_value()),
     };
     let code = realm.compile(&src, "eval", false)?;
     realm.run_script(code)
@@ -383,22 +384,22 @@ fn eval(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 pub fn format_console_args(realm: &mut Realm, args: &[Value]) -> String {
     let mut parts = Vec::new();
     for (i, a) in args.iter().enumerate() {
-        parts.push(match a {
-            Value::String(s) if i == 0 || true => s.to_rust_string(),
-            other => inspect(realm, other, 0),
+        parts.push(match a.v() {
+            V::String(s) if i == 0 || true => s.to_rust_string(),
+            other => inspect(realm, &other.to_value(), 0),
         });
     }
     parts.join(" ")
 }
 
 pub fn inspect(realm: &mut Realm, v: &Value, depth: usize) -> String {
-    match v {
-        Value::String(s) => format!("'{}'", s),
-        Value::Object(id) => {
+    match v.v() {
+        V::String(s) => format!("'{}'", s),
+        V::Object(id) => {
             if depth > 2 {
                 return "[Object]".into();
             }
-            let id = *id;
+            let id = id;
             if realm.is_callable(v) {
                 let n = realm.function_name(id);
                 return format!("[Function: {}]", if n.is_empty() { "(anonymous)".to_string() } else { n.to_rust_string() });
@@ -440,12 +441,12 @@ pub fn inspect(realm: &mut Realm, v: &Value, depth: usize) -> String {
                 }
             }
         }
-        Value::Symbol(s) => format!("Symbol({})", realm.symbol_description(*s)),
-        Value::BigInt(b) => format!("{}n", b.to_string_radix(10)),
-        Value::Number(n) => number_to_string(*n),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "null".into(),
-        Value::Undefined | Value::Empty => "undefined".into(),
+        V::Symbol(s) => format!("Symbol({})", realm.symbol_description(s)),
+        V::BigInt(b) => format!("{}n", b.to_string_radix(10)),
+        V::Number(n) => number_to_string(n),
+        V::Bool(b) => b.to_string(),
+        V::Null => "null".into(),
+        V::Undefined | V::Empty => "undefined".into(),
     }
 }
 

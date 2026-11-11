@@ -8,6 +8,7 @@
 //! compiles. Failures are logged with the specifier and URL.
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use crate::host::{self, state};
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_js::{JsResult, ModuleId, ObjectId, PropertyKey, Realm, Value, HIDDEN};
@@ -83,8 +84,8 @@ pub(crate) fn parse_import_map(realm: &mut Realm, json: &str) -> JsResult<Import
     let imports = realm.get_str(parsed.clone(), "imports")?;
     map.imports = specifier_map(realm, &imports)?;
     let scopes = realm.get_str(parsed, "scopes")?;
-    if let Value::Object(s) = &scopes {
-        for key in string_keys(realm, *s) {
+    if let V::Object(s) = scopes.v() {
+        for key in string_keys(realm, s) {
             let entries = realm.get_str(scopes.clone(), &key)?;
             let entries = specifier_map(realm, &entries)?;
             map.scopes.push((key, entries));
@@ -98,10 +99,10 @@ fn string_keys(realm: &Realm, obj: ObjectId) -> Vec<String> {
 }
 
 fn specifier_map(realm: &mut Realm, v: &Value) -> JsResult<Vec<(String, String)>> {
-    let Value::Object(o) = v else { return Ok(Vec::new()) };
+    let V::Object(o) = v.v() else { return Ok(Vec::new()) };
     let mut out = Vec::new();
-    for key in string_keys(realm, *o) {
-        if let Value::String(addr) = realm.get_str(v.clone(), &key)? {
+    for key in string_keys(realm, o) {
+        if let V::String(addr) = (realm.get_str(v.clone(), &key)?).v() {
             out.push((key, addr.to_rust_string()));
         }
     }

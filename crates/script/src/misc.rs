@@ -3,6 +3,7 @@
 //! `customElements`, `Notification`, form data sets.
 
 use crate::host::*;
+use rabbithole_js::V;
 use crate::node;
 use rabbithole_dom::{Document, NodeData, NodeId};
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN};
@@ -59,9 +60,9 @@ fn dom_exception_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
     let message = arg_str_opt(realm, args, 0)?.unwrap_or_default();
     let name = arg_str_opt(realm, args, 1)?.unwrap_or_else(|| "Error".into());
     let v = dom_exception(realm, &name, &message);
-    if let Value::Object(id) = &v {
+    if let V::Object(id) = v.v() {
         let p = realm.proto_from_new_target(proto("DOMException"));
-        realm.obj_mut(*id).proto = Some(p);
+        realm.obj_mut(id).set_proto(Some(p));
     }
     Ok(v)
 }
@@ -110,8 +111,8 @@ struct RangeData {
 }
 
 fn range_data(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
-    match this {
-        Value::Object(o) if realm.host_data::<RangeData>(*o).is_some() => Ok(*o),
+    match this.v() {
+        V::Object(o) if realm.host_data::<RangeData>(o).is_some() => Ok(o),
         _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
@@ -337,8 +338,8 @@ struct WalkerData {
 }
 
 fn walker_data(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
-    match this {
-        Value::Object(o) if realm.host_data::<WalkerData>(*o).is_some() => Ok(*o),
+    match this.v() {
+        V::Object(o) if realm.host_data::<WalkerData>(o).is_some() => Ok(o),
         _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
@@ -347,9 +348,9 @@ pub(crate) fn new_tree_walker(realm: &mut Realm, args: &[Value], iterator: bool)
     let Some(root) = node_of(realm, &arg(args, 0)) else {
         return Err(realm.throw_type_error("parameter 1 is not of type 'Node'"));
     };
-    let what = match args.get(1) {
-        None | Some(Value::Undefined) => 0xFFFF_FFFF,
-        Some(v) => realm.to_number(v.clone())? as u32,
+    let what = match (args.get(1)).map(Value::v) {
+        None | Some(V::Undefined) => 0xFFFF_FFFF,
+        Some(v) => realm.to_number(v.to_value())? as u32,
     };
     let filter = arg(args, 2);
     root_value(realm, &filter);
@@ -623,21 +624,21 @@ fn sel_get_range(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value
 
 pub(crate) fn selection_object(realm: &mut Realm) -> JsResult<Value> {
     let o = object_from(realm, vec![("anchorNode", Value::Null), ("focusNode", Value::Null), ("anchorOffset", Value::Number(0.0)), ("focusOffset", Value::Number(0.0)), ("isCollapsed", Value::Bool(true)), ("rangeCount", Value::Number(0.0)), ("type", Value::str("None"))]);
-    if let Value::Object(id) = &o {
-        realm.set_class_name(*id, "Selection");
-        realm.define_method(*id, "toString", 0, sel_to_string);
-        realm.define_method(*id, "getRangeAt", 1, sel_get_range);
-        realm.define_method(*id, "addRange", 1, sel_noop);
-        realm.define_method(*id, "removeAllRanges", 0, sel_noop);
-        realm.define_method(*id, "removeRange", 1, sel_noop);
-        realm.define_method(*id, "collapse", 2, sel_noop);
-        realm.define_method(*id, "collapseToStart", 0, sel_noop);
-        realm.define_method(*id, "collapseToEnd", 0, sel_noop);
-        realm.define_method(*id, "selectAllChildren", 1, sel_noop);
-        realm.define_method(*id, "extend", 2, sel_noop);
-        realm.define_method(*id, "setBaseAndExtent", 4, sel_noop);
-        realm.define_method(*id, "empty", 0, sel_noop);
-        realm.define_method(*id, "containsNode", 2, sel_false);
+    if let V::Object(id) = o.v() {
+        realm.set_class_name(id, "Selection");
+        realm.define_method(id, "toString", 0, sel_to_string);
+        realm.define_method(id, "getRangeAt", 1, sel_get_range);
+        realm.define_method(id, "addRange", 1, sel_noop);
+        realm.define_method(id, "removeAllRanges", 0, sel_noop);
+        realm.define_method(id, "removeRange", 1, sel_noop);
+        realm.define_method(id, "collapse", 2, sel_noop);
+        realm.define_method(id, "collapseToStart", 0, sel_noop);
+        realm.define_method(id, "collapseToEnd", 0, sel_noop);
+        realm.define_method(id, "selectAllChildren", 1, sel_noop);
+        realm.define_method(id, "extend", 2, sel_noop);
+        realm.define_method(id, "setBaseAndExtent", 4, sel_noop);
+        realm.define_method(id, "empty", 0, sel_noop);
+        realm.define_method(id, "containsNode", 2, sel_false);
     }
     Ok(o)
 }
@@ -666,17 +667,17 @@ pub(crate) fn new_abort_signal(realm: &mut Realm) -> ObjectId {
 }
 
 fn signal_aborted(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = this else { return Ok(Value::Bool(false)) };
+    let V::Object(o) = this.v() else { return Ok(Value::Bool(false)) };
     Ok(Value::Bool(get_hidden(realm, o, "__aborted").truthy()))
 }
 
 fn signal_reason(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = this else { return Ok(Value::Undefined) };
+    let V::Object(o) = this.v() else { return Ok(Value::Undefined) };
     Ok(get_hidden(realm, o, "__reason"))
 }
 
 fn signal_throw_if_aborted(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = this else { return Ok(Value::Undefined) };
+    let V::Object(o) = this.v() else { return Ok(Value::Undefined) };
     if get_hidden(realm, o, "__aborted").truthy() {
         return Err(get_hidden(realm, o, "__reason"));
     }
@@ -695,7 +696,7 @@ pub(crate) fn abort_signal(realm: &mut Realm, sig: ObjectId, reason: Option<Valu
     set_hidden(realm, sig, "__reason", reason);
     // Remove listeners registered with this signal.
     let list = get_hidden(realm, sig, "__listeners");
-    if let Value::Object(a) = list {
+    if let V::Object(a) = list.v() {
         let recs: Vec<Value> = realm.obj(a).array_elements().cloned().unwrap_or_default();
         for r in recs {
             let ty = realm.get_str(r.clone(), "type").ok().map(|t| realm.to_rust_string(t).unwrap_or_default()).unwrap_or_default();
@@ -712,7 +713,7 @@ pub(crate) fn abort_signal(realm: &mut Realm, sig: ObjectId, reason: Option<Valu
 
 fn abort_controller_abort(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let sig = realm.get_str(this, "signal")?;
-    if let Value::Object(s) = sig {
+    if let V::Object(s) = sig.v() {
         abort_signal(realm, s, Some(arg(args, 0)));
     }
     Ok(Value::Undefined)
@@ -735,9 +736,9 @@ fn abort_signal_timeout_static(realm: &mut Realm, _this: Value, args: &[Value]) 
 
 fn abort_timeout_fire(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     let caps = native_captures(realm);
-    if let Some(Value::Object(s)) = caps.first() {
+    if let Some(V::Object(s)) = caps.first().map(Value::v) {
         let e = dom_exception(realm, "TimeoutError", "signal timed out");
-        abort_signal(realm, *s, Some(e));
+        abort_signal(realm, s, Some(e));
     }
     Ok(Value::Undefined)
 }
@@ -825,7 +826,7 @@ pub(crate) fn forms_data_set(doc: &Document, form: NodeId) -> (Vec<(String, Stri
 pub(crate) fn install(realm: &mut Realm) {
     let de = define_class(realm, "DOMException", None, dom_exception_ctor);
     let error_proto = realm.intrinsics.error_proto;
-    realm.obj_mut(de).proto = Some(error_proto);
+    realm.obj_mut(de).set_proto(Some(error_proto));
     realm.define_method(de, "toString", 0, dom_exception_to_string);
     for (k, v) in [("INDEX_SIZE_ERR", 1.0), ("HIERARCHY_REQUEST_ERR", 3.0), ("NOT_FOUND_ERR", 8.0), ("NOT_SUPPORTED_ERR", 9.0), ("INVALID_STATE_ERR", 11.0), ("SYNTAX_ERR", 12.0), ("ABORT_ERR", 20.0)] {
         realm.define_property(de, k, Value::Number(v), 0);
@@ -897,7 +898,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(asig, "throwIfAborted", 0, signal_throw_if_aborted);
     crate::events::install_handler_props(realm, asig, &["abort"]);
     let asig_ctor = realm.obj(asig).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone());
-    if let Some(Value::Object(c)) = asig_ctor {
+    if let Some(V::Object(c)) = asig_ctor.as_ref().map(Value::v) {
         realm.define_method(c, "abort", 1, abort_signal_abort_static);
         realm.define_method(c, "timeout", 1, abort_signal_timeout_static);
         realm.define_method(c, "any", 1, abort_signal_any);
@@ -906,7 +907,7 @@ pub(crate) fn install(realm: &mut Realm) {
 
     let notif = define_class(realm, "Notification", Some("EventTarget"), notification_ctor);
     let notif_ctor = realm.obj(notif).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone());
-    if let Some(Value::Object(c)) = notif_ctor {
+    if let Some(V::Object(c)) = notif_ctor.as_ref().map(Value::v) {
         realm.define_property(c, "permission", Value::str("denied"), ACC);
         realm.define_method(c, "requestPermission", 0, notification_request_permission);
     }

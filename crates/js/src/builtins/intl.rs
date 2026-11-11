@@ -8,6 +8,7 @@
 //! `en-US`.
 
 use super::date::{fields, local_fields, local_tza, long_zone_name, tz, DAY_LONG, DAY_NAMES, MONTH_LONG, MONTH_NAMES};
+use crate::value::V;
 use super::*;
 use crate::realm::SYM_TO_STRING_TAG;
 
@@ -66,13 +67,13 @@ impl Locale {
 
 /// Resolve the `locales` argument (string, array of strings or undefined).
 pub fn resolve_locale(realm: &mut Realm, v: Value) -> JsResult<Locale> {
-    match v {
-        Value::Undefined => Ok(Locale::default_locale()),
-        Value::String(s) => match Locale::parse(&s.to_rust_string()) {
+    match v.v() {
+        V::Undefined => Ok(Locale::default_locale()),
+        V::String(s) => match Locale::parse(&s.to_rust_string()) {
             Some(l) => Ok(l),
             None => realm.range_error(&format!("Incorrect locale information provided: {}", s)),
         },
-        Value::Object(id) => {
+        V::Object(id) => {
             if realm.obj(id).is_array() {
                 let items = realm.create_list_from_array_like(Value::Object(id))?;
                 match items.into_iter().next() {
@@ -88,7 +89,7 @@ pub fn resolve_locale(realm: &mut Realm, v: Value) -> JsResult<Locale> {
             }
         }
         other => {
-            let s = realm.to_rust_string(other)?;
+            let s = realm.to_rust_string(other.to_value())?;
             match Locale::parse(&s) {
                 Some(l) => Ok(l),
                 None => realm.range_error("Incorrect locale information provided"),
@@ -98,14 +99,14 @@ pub fn resolve_locale(realm: &mut Realm, v: Value) -> JsResult<Locale> {
 }
 
 fn canonical_locale_list(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
-    match v {
-        Value::Undefined => Ok(Vec::new()),
-        Value::String(s) => match Locale::parse(&s.to_rust_string()) {
+    match v.v() {
+        V::Undefined => Ok(Vec::new()),
+        V::String(s) => match Locale::parse(&s.to_rust_string()) {
             Some(l) => Ok(vec![l.tag]),
             None => realm.range_error(&format!("Incorrect locale information provided: {}", s)),
         },
         other => {
-            let o = realm.to_object(other)?;
+            let o = realm.to_object(other.to_value())?;
             let items = realm.create_list_from_array_like(Value::Object(o))?;
             let mut out = Vec::new();
             for it in items {
@@ -757,9 +758,9 @@ fn read_nf_options(realm: &mut Realm, locales: Value, options: Value) -> JsResul
     let use_grouping = match opts {
         Some(o) => {
             let v = realm.get_str(Value::Object(o), "useGrouping")?;
-            match v {
-                Value::Undefined => !compact || true,
-                Value::String(s) => !s.eq_str("false"),
+            match v.v() {
+                V::Undefined => !compact || true,
+                V::String(s) => !s.eq_str("false"),
                 v => v.truthy(),
             }
         }
@@ -1532,8 +1533,8 @@ fn new_intl_object<T: 'static>(realm: &mut Realm, proto_key: &str, data: T) -> O
 }
 
 fn host<T: 'static + Clone>(realm: &mut Realm, this: &Value, what: &str) -> JsResult<T> {
-    if let Value::Object(id) = this {
-        if let Some(d) = realm.host_data::<T>(*id) {
+    if let V::Object(id) = this.v() {
+        if let Some(d) = realm.host_data::<T>(id) {
             return Ok(d.clone());
         }
     }
@@ -1542,7 +1543,7 @@ fn host<T: 'static + Clone>(realm: &mut Realm, this: &Value, what: &str) -> JsRe
 
 /// A `format`/`compare` getter returning a function bound to `this`.
 fn bound_getter(realm: &mut Realm, this: Value, name: &str, f: NativeFn, what: &str) -> JsResult<Value> {
-    if !matches!(&this, Value::Object(id) if matches!(realm.obj(*id).kind, ObjectKind::Host(_))) {
+    if !matches!(this.v(), V::Object(id) if matches!(realm.obj(id).kind, ObjectKind::Host(_))) {
         return realm.type_error(&format!("Method {} called on incompatible receiver", what));
     }
     let b = realm.new_native_function_full(name, 1, f, None, vec![this], false);
@@ -1564,13 +1565,13 @@ fn dtf_format_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResul
 }
 
 fn date_arg(realm: &mut Realm, v: Value) -> JsResult<f64> {
-    match v {
-        Value::Undefined => Ok(super::date::now_ms()),
-        Value::Object(id) => match &realm.obj(id).kind {
+    match v.v() {
+        V::Undefined => Ok(super::date::now_ms()),
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::Date(t) => Ok(*t),
             _ => realm.to_number(Value::Object(id)),
         },
-        other => realm.to_number(other),
+        other => realm.to_number(other.to_value()),
     }
 }
 
@@ -1715,18 +1716,18 @@ fn nf_format_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult
 }
 
 fn number_arg(realm: &mut Realm, v: Value) -> JsResult<f64> {
-    match realm.to_numeric(v)? {
-        Value::BigInt(b) => Ok(b.to_f64()),
-        Value::Number(n) => Ok(n),
+    match (realm.to_numeric(v)?).v() {
+        V::BigInt(b) => Ok(b.to_f64()),
+        V::Number(n) => Ok(n),
         _ => Ok(f64::NAN),
     }
 }
 
 /// Format any numeric value, keeping BigInts exact.
 fn format_numeric(realm: &mut Realm, v: Value, o: &NfOptions) -> JsResult<String> {
-    match realm.to_numeric(v)? {
-        Value::BigInt(b) => Ok(format_bigint_parts(&b.to_string_radix(10).trim_start_matches('-'), b.is_negative(), o).to_string()),
-        Value::Number(n) => Ok(format_number(n, o)),
+    match (realm.to_numeric(v)?).v() {
+        V::BigInt(b) => Ok(format_bigint_parts(&b.to_string_radix(10).trim_start_matches('-'), b.is_negative(), o).to_string()),
+        V::Number(n) => Ok(format_number(n, o)),
         _ => Ok("NaN".into()),
     }
 }
@@ -1800,9 +1801,9 @@ fn nf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRes
 }
 
 fn number_to_locale(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let n = match &this {
-        Value::Number(n) => *n,
-        Value::Object(id) => match &realm.obj(*id).kind {
+    let n = match this.v() {
+        V::Number(n) => n,
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::Number(n) => *n,
             _ => return realm.type_error("Number.prototype.toLocaleString requires that 'this' be a Number"),
         },
@@ -1812,9 +1813,9 @@ fn number_to_locale(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 }
 
 fn bigint_to_locale(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let n = match &this {
-        Value::BigInt(b) => (**b).clone(),
-        Value::Object(id) => match &realm.obj(*id).kind {
+    let n = match this.v() {
+        V::BigInt(b) => b.clone(),
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::BigInt(b) => (**b).clone(),
             _ => return realm.type_error("BigInt.prototype.toLocaleString requires that 'this' be a BigInt"),
         },
@@ -1950,8 +1951,8 @@ fn lf_items(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
     let vals = if v.is_undefined() { Vec::new() } else { realm.iterate_to_vec(v)? };
     let mut out = Vec::new();
     for v in vals {
-        match v {
-            Value::String(s) => out.push(s.to_rust_string()),
+        match v.v() {
+            V::String(s) => out.push(s.to_rust_string()),
             _ => return realm.type_error("Iterable yielded a non-String value"),
         }
     }
@@ -2006,9 +2007,9 @@ fn lf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRes
 
 // Locale
 fn locale_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let tag = match arg(args, 0) {
-        Value::String(s) => s.to_rust_string(),
-        Value::Object(id) => match realm.host_data::<Locale>(id) {
+    let tag = match (arg(args, 0)).v() {
+        V::String(s) => s.to_rust_string(),
+        V::Object(id) => match realm.host_data::<Locale>(id) {
             Some(l) => l.tag.clone(),
             None => return realm.type_error("First argument to Intl.Locale constructor can't be empty or missing"),
         },

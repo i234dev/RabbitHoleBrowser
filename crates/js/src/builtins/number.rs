@@ -1,6 +1,7 @@
 //! Number, Boolean and BigInt.
 
 use super::*;
+use crate::value::V;
 use crate::realm::SYM_TO_STRING_TAG;
 
 pub fn register(realm: &mut Realm) {
@@ -50,9 +51,9 @@ pub fn register(realm: &mut Realm) {
 }
 
 fn this_number(realm: &mut Realm, this: &Value) -> JsResult<f64> {
-    match this {
-        Value::Number(n) => Ok(*n),
-        Value::Object(id) => match &realm.obj(*id).kind {
+    match this.v() {
+        V::Number(n) => Ok(n),
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::Number(n) => Ok(*n),
             _ => realm.type_error("Number.prototype method called on incompatible receiver"),
         },
@@ -64,9 +65,9 @@ fn number_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let n = if args.is_empty() {
         0.0
     } else {
-        match realm.to_numeric(args[0].clone())? {
-            Value::BigInt(b) => b.to_f64(),
-            Value::Number(n) => n,
+        match (realm.to_numeric(args[0].clone())?).v() {
+            V::BigInt(b) => b.to_f64(),
+            V::Number(n) => n,
             _ => unreachable!(),
         }
     };
@@ -305,16 +306,16 @@ fn to_precision(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
 
 fn is_finite(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let _ = realm;
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Number(n) if n.is_finite())))
+    Ok(Value::Bool(matches!((arg(args, 0)).v(), V::Number(n) if n.is_finite())))
 }
 fn is_integer(_realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Number(n) if n.is_finite() && n.fract() == 0.0)))
+    Ok(Value::Bool(matches!((arg(args, 0)).v(), V::Number(n) if n.is_finite() && n.fract() == 0.0)))
 }
 fn is_nan(_realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Number(n) if n.is_nan())))
+    Ok(Value::Bool(matches!((arg(args, 0)).v(), V::Number(n) if n.is_nan())))
 }
 fn is_safe_integer(_realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9007199254740991.0)))
+    Ok(Value::Bool(matches!((arg(args, 0)).v(), V::Number(n) if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9007199254740991.0)))
 }
 
 // ---------------------------------------------------------------- Boolean
@@ -330,9 +331,9 @@ fn boolean_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
 }
 
 fn this_bool(realm: &mut Realm, this: &Value) -> JsResult<bool> {
-    match this {
-        Value::Bool(b) => Ok(*b),
-        Value::Object(id) => match &realm.obj(*id).kind {
+    match this.v() {
+        V::Bool(b) => Ok(b),
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::Boolean(b) => Ok(*b),
             _ => realm.type_error("Boolean.prototype method called on incompatible receiver"),
         },
@@ -354,16 +355,16 @@ fn bigint_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         return realm.type_error("BigInt is not a constructor");
     }
     let v = realm.to_primitive(arg(args, 0), crate::interop::Hint::Number)?;
-    match v {
-        Value::Number(n) => {
+    match v.v() {
+        V::Number(n) => {
             if n.fract() != 0.0 || !n.is_finite() {
                 return realm.range_error("The number cannot be converted to a BigInt because it is not an integer");
             }
             Ok(realm.new_bigint_value(BigInt::from_f64(n).unwrap_or_default()))
         }
-        Value::BigInt(_) => Ok(v),
-        Value::Bool(b) => Ok(realm.new_bigint(b as i128)),
-        Value::String(s) => match BigInt::parse(&s.to_rust_string()) {
+        V::BigInt(_) => Ok(v),
+        V::Bool(b) => Ok(realm.new_bigint(b as i128)),
+        V::String(s) => match BigInt::parse(&s.to_rust_string()) {
             Some(b) => Ok(Value::BigInt(std::rc::Rc::new(b))),
             None => realm.new_error("SyntaxError", &format!("Cannot convert {} to a BigInt", s)).pipe_err(),
         },
@@ -381,9 +382,9 @@ impl PipeErr for Value {
 }
 
 fn this_bigint(realm: &mut Realm, this: &Value) -> JsResult<BigInt> {
-    match this {
-        Value::BigInt(b) => Ok((**b).clone()),
-        Value::Object(id) => match &realm.obj(*id).kind {
+    match this.v() {
+        V::BigInt(b) => Ok(b.clone()),
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::BigInt(b) => Ok((**b).clone()),
             _ => realm.type_error("BigInt.prototype method called on incompatible receiver"),
         },
@@ -413,18 +414,22 @@ fn bigint_value_of(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<
 
 fn as_int_n(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let bits = realm.to_index(arg(args, 0))?;
-    let v = match arg(args, 1) {
-        Value::BigInt(b) => b,
+    let a = arg(args, 1);
+    let v = match a.v() {
+        V::BigInt(b) => b,
         _ => return realm.type_error("Cannot convert value to a BigInt"),
     };
-    Ok(realm.new_bigint_value(v.as_int_n(bits as u64)))
+    let r = v.as_int_n(bits as u64);
+    Ok(realm.new_bigint_value(r))
 }
 
 fn as_uint_n(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let bits = realm.to_index(arg(args, 0))?;
-    let v = match arg(args, 1) {
-        Value::BigInt(b) => b,
+    let a = arg(args, 1);
+    let v = match a.v() {
+        V::BigInt(b) => b,
         _ => return realm.type_error("Cannot convert value to a BigInt"),
     };
-    Ok(realm.new_bigint_value(v.as_uint_n(bits as u64)))
+    let r = v.as_uint_n(bits as u64);
+    Ok(realm.new_bigint_value(r))
 }

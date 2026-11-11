@@ -4,6 +4,7 @@
 //! no ephemeron support yet, so entries live as long as the collection.
 
 use super::iterator::create_map_iterator;
+use crate::value::V;
 use super::*;
 use crate::realm::{SYM_ITERATOR, SYM_SPECIES, SYM_TO_STRING_TAG};
 
@@ -97,13 +98,13 @@ fn kind_name(k: Kind) -> &'static str {
 }
 
 fn this_coll(realm: &mut Realm, this: &Value, kind: Kind, method: &str) -> JsResult<ObjectId> {
-    if let Value::Object(id) = this {
-        let ok = match (&realm.obj(*id).kind, kind) {
+    if let V::Object(id) = this.v() {
+        let ok = match (&realm.obj(id).kind, kind) {
             (ObjectKind::Map(_), Kind::Map) | (ObjectKind::Set(_), Kind::Set) | (ObjectKind::WeakMap(_), Kind::WeakMap) | (ObjectKind::WeakSet(_), Kind::WeakSet) => true,
             _ => false,
         };
         if ok {
-            return Ok(*id);
+            return Ok(id);
         }
     }
     realm.type_error(&format!("Method {}.prototype.{} called on incompatible receiver", kind_name(kind), method))
@@ -151,9 +152,9 @@ fn entry_count(realm: &Realm, id: ObjectId) -> usize {
 }
 
 fn require_object_key(realm: &mut Realm, v: &Value, what: &str) -> JsResult<()> {
-    match v {
-        Value::Object(_) => Ok(()),
-        Value::Symbol(s) if !realm.symbol_key_for(*s).is_some() => Ok(()),
+    match v.v() {
+        V::Object(_) => Ok(()),
+        V::Symbol(s) if !realm.symbol_key_for(s).is_some() => Ok(()),
         _ => {
             let d = realm.describe_for_error(v);
             realm.type_error(&format!("Invalid value used {}: {}", what, d))
@@ -292,9 +293,9 @@ fn map_group_by(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
     for (i, item) in items.into_iter().enumerate() {
         let key = realm.call(cb.clone(), Value::Undefined, &[item.clone(), Value::Number(i as f64)])?;
-        let key = match key {
-            Value::Number(n) if n == 0.0 => Value::Number(0.0),
-            k => k,
+        let key = match key.v() {
+            V::Number(n) if n == 0.0 => Value::Number(0.0),
+            k => k.to_value(),
         };
         match groups.iter_mut().find(|(k, _)| realm.same_value_zero(k, &key)) {
             Some((_, v)) => v.push(item),

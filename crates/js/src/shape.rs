@@ -250,6 +250,25 @@ pub struct PropertyMap {
     /// Copy of the shape / dictionary id (read by every inline cache
     /// check without dereferencing the shape).
     sid: u32,
+    /// Some inline cache relies on this object as a member of a prototype
+    /// chain: key-set changes advance [`proto_epoch`].
+    in_chain: Cell<bool>,
+}
+
+/// Advanced whenever an object that a deep prototype-chain inline cache
+/// went through changes its key set or prototype (see
+/// [`PropertyMap::mark_in_chain`]); such caches are valid while it is
+/// unchanged.
+static PROTO_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+#[inline(always)]
+pub fn proto_epoch() -> u32 {
+    PROTO_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline(never)]
+pub fn bump_proto_epoch() {
+    PROTO_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl Default for PropertyMap {
@@ -262,7 +281,7 @@ impl PropertyMap {
     pub fn new() -> PropertyMap {
         let shape = Shape::root();
         let sid = shape.id;
-        PropertyMap { repr: Repr::Shaped { shape, values: Vec::new() }, sid }
+        PropertyMap { repr: Repr::Shaped { shape, values: Vec::new() }, sid, in_chain: Cell::new(false) }
     }
 
     /// Shape id (shape mode) or key-set id (dictionary mode). Inline caches
@@ -275,10 +294,26 @@ impl PropertyMap {
 
     #[inline]
     fn resync(&mut self) {
-        self.sid = match &self.repr {
+        let sid = match &self.repr {
             Repr::Shaped { shape, .. } => shape.id,
             Repr::Dict(d) => d.id,
         };
+        if sid != self.sid && self.in_chain.get() {
+            bump_proto_epoch();
+        }
+        self.sid = sid;
+    }
+
+    /// Mark the object as part of a cached prototype chain (see
+    /// [`proto_epoch`]).
+    #[inline]
+    pub fn mark_in_chain(&self) {
+        self.in_chain.set(true);
+    }
+
+    #[inline]
+    pub fn in_chain(&self) -> bool {
+        self.in_chain.get()
     }
 
     #[inline]
@@ -422,6 +457,9 @@ impl PropertyMap {
     #[inline]
     pub fn push_with_shape(&mut self, next: Rc<Shape>, prop: Property) {
         if let Repr::Shaped { shape, values } = &mut self.repr {
+            if self.in_chain.get() {
+                bump_proto_epoch();
+            }
             self.sid = next.id;
             *shape = next;
             if values.capacity() == 0 {

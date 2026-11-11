@@ -1,6 +1,7 @@
 //! JSON.parse / JSON.stringify.
 
 use super::*;
+use crate::value::V;
 use crate::realm::SYM_TO_STRING_TAG;
 
 pub fn register(realm: &mut Realm) {
@@ -255,8 +256,8 @@ fn parse(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 
 fn internalize(realm: &mut Realm, holder: ObjectId, key: PropertyKey, reviver: &Value) -> JsResult<Value> {
     let val = realm.get(Value::Object(holder), key.clone())?;
-    if let Value::Object(id) = &val {
-        let id = *id;
+    if let V::Object(id) = val.v() {
+        let id = id;
         if array::is_array_value(realm, &val) {
             let len = realm.length_of(val.clone())?;
             for i in 0..len {
@@ -329,7 +330,7 @@ impl Stringifier {
             return realm.range_error("Maximum call stack size exceeded");
         }
         let mut value = realm.get(holder.clone(), key.clone())?;
-        if let Value::Object(_) | Value::BigInt(_) = &value {
+        if let V::Object(_) | V::BigInt(_) = value.v() {
             let to_json = realm.get_str(value.clone(), "toJSON")?;
             if realm.is_callable(&to_json) {
                 value = realm.call(to_json, value, &[key.to_value()])?;
@@ -339,8 +340,8 @@ impl Stringifier {
             value = realm.call(f.clone(), holder, &[key.to_value(), value])?;
         }
         // unwrap wrappers
-        if let Value::Object(id) = &value {
-            match &realm.obj(*id).kind {
+        if let V::Object(id) = value.v() {
+            match &realm.obj(id).kind {
                 ObjectKind::Number(_) => value = Value::Number(realm.to_number(value.clone())?),
                 ObjectKind::String(_) => value = Value::String(realm.to_string(value.clone())?),
                 ObjectKind::Boolean(b) => value = Value::Bool(*b),
@@ -348,19 +349,19 @@ impl Stringifier {
                 _ => {}
             }
         }
-        match value {
-            Value::Null => out.push_str("null"),
-            Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
-            Value::String(s) => quote(&s, out),
-            Value::Number(n) => {
+        match value.v() {
+            V::Null => out.push_str("null"),
+            V::Bool(b) => out.push_str(if b { "true" } else { "false" }),
+            V::String(s) => quote(&s, out),
+            V::Number(n) => {
                 if n.is_finite() {
                     out.push_str(&number_to_string(n));
                 } else {
                     out.push_str("null");
                 }
             }
-            Value::BigInt(_) => return realm.type_error("Do not know how to serialize a BigInt"),
-            Value::Object(id) if !realm.is_callable(&value) => {
+            V::BigInt(_) => return realm.type_error("Do not know how to serialize a BigInt"),
+            V::Object(id) if !realm.is_callable(&value) => {
                 if array::is_array_value(realm, &value) {
                     self.serialize_array(realm, id, out)?;
                 } else {
@@ -463,10 +464,10 @@ fn stringify(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         let items = realm.create_list_from_array_like(replacer)?;
         let mut list: Vec<PropertyKey> = Vec::new();
         for it in items {
-            let k = match &it {
-                Value::String(s) => Some(PropertyKey::String(s.clone())),
-                Value::Number(n) => Some(PropertyKey::String(JsStr::new(&number_to_string(*n)))),
-                Value::Object(id) => match &realm.obj(*id).kind {
+            let k = match it.v() {
+                V::String(s) => Some(PropertyKey::String(s.clone())),
+                V::Number(n) => Some(PropertyKey::String(JsStr::new(&number_to_string(n)))),
+                V::Object(id) => match &realm.obj(id).kind {
                     ObjectKind::String(_) | ObjectKind::Number(_) => Some(PropertyKey::String(realm.to_string(it.clone())?)),
                     _ => None,
                 },
@@ -480,17 +481,17 @@ fn stringify(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         }
         st.allow_list = Some(list);
     }
-    let space = match &space {
-        Value::Object(id) => match &realm.obj(*id).kind {
+    let space = match space.v() {
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::Number(_) => Value::Number(realm.to_number(space.clone())?),
             ObjectKind::String(_) => Value::String(realm.to_string(space.clone())?),
             _ => space.clone(),
         },
         _ => space.clone(),
     };
-    st.gap = match space {
-        Value::Number(n) => " ".repeat(to_integer(n).clamp(0.0, 10.0) as usize),
-        Value::String(s) => s.to_rust_string().chars().take(10).collect(),
+    st.gap = match space.v() {
+        V::Number(n) => " ".repeat(to_integer(n).clamp(0.0, 10.0) as usize),
+        V::String(s) => s.to_rust_string().chars().take(10).collect(),
         _ => String::new(),
     };
     let wrapper = realm.new_object();

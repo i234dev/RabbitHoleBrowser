@@ -2,6 +2,7 @@
 //! search/split/matchAll protocol used by String.prototype.
 
 use super::*;
+use crate::value::V;
 use crate::realm::{SYM_MATCH, SYM_MATCH_ALL, SYM_REPLACE, SYM_SEARCH, SYM_SPECIES, SYM_SPLIT, SYM_TO_STRING_TAG};
 use crate::regex::Regex;
 
@@ -109,9 +110,9 @@ pub fn regexp_create_from(realm: &mut Realm, pattern: Value, flags: Value) -> Js
 }
 
 fn this_regexp(realm: &mut Realm, this: &Value, method: &str) -> JsResult<ObjectId> {
-    if let Value::Object(id) = this {
-        if matches!(realm.obj(*id).kind, ObjectKind::RegExp(_)) {
-            return Ok(*id);
+    if let V::Object(id) = this.v() {
+        if matches!(realm.obj(id).kind, ObjectKind::RegExp(_)) {
+            return Ok(id);
         }
     }
     realm.type_error(&format!("RegExp.prototype.{} called on incompatible receiver", method))
@@ -120,7 +121,7 @@ fn this_regexp(realm: &mut Realm, this: &Value, method: &str) -> JsResult<Object
 fn regexp_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let pattern = arg(args, 0);
     let flags = arg(args, 1);
-    let pattern_is_regexp = matches!(&pattern, Value::Object(id) if matches!(realm.obj(*id).kind, ObjectKind::RegExp(_)));
+    let pattern_is_regexp = matches!(pattern.v(), V::Object(id) if matches!(realm.obj(id).kind, ObjectKind::RegExp(_)));
     if !realm.is_construct_call() && pattern_is_regexp && flags.is_undefined() {
         let ctor = realm.get_str(pattern.clone(), "constructor")?;
         if ctor.as_object() == Some(realm.intrinsics.others["RegExp"]) {

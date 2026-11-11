@@ -1,6 +1,7 @@
 //! Array constructor and Array.prototype.
 
 use super::*;
+use crate::value::V;
 use crate::realm::{SYM_IS_CONCAT_SPREADABLE, SYM_ITERATOR, SYM_SPECIES, SYM_UNSCOPABLES};
 
 pub fn register(realm: &mut Realm) {
@@ -72,16 +73,16 @@ fn array_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
     let default = realm.intrinsics.array_proto;
     let proto = realm.proto_from_new_target(default);
     let arr = if args.len() == 1 {
-        match &args[0] {
-            Value::Number(n) => {
-                let len = *n as u32;
-                if len as f64 != *n {
+        match args[0].v() {
+            V::Number(n) => {
+                let len = n as u32;
+                if len as f64 != n {
                     return realm.range_error("Invalid array length");
                 }
                 let elems = if len <= 1 << 20 { vec![Value::Empty; len as usize] } else { Vec::new() };
                 realm.alloc(Object::new(Some(proto), ObjectKind::Array { elements: elems, length: len }))
             }
-            v => realm.alloc(Object::new(Some(proto), ObjectKind::Array { elements: vec![v.clone()], length: 1 })),
+            v => realm.alloc(Object::new(Some(proto), ObjectKind::Array { elements: vec![v.to_value()], length: 1 })),
         }
     } else {
         realm.alloc(Object::new(Some(proto), ObjectKind::Array { elements: args.to_vec(), length: args.len() as u32 }))
@@ -90,8 +91,8 @@ fn array_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
 }
 
 pub fn is_array_value(realm: &Realm, v: &Value) -> bool {
-    match v {
-        Value::Object(id) => match &realm.obj(*id).kind {
+    match v.v() {
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::Array { .. } => true,
             ObjectKind::Proxy { target, .. } => is_array_value(realm, &Value::Object(*target)),
             _ => false,
@@ -135,8 +136,8 @@ fn construct_array_like(realm: &mut Realm, ctor: Value, items: Vec<Value>) -> Js
     let obj = realm.construct(ctor, &[Value::Number(len as f64)], Value::Undefined)?;
     for (i, v) in items.into_iter().enumerate() {
         let k = PropertyKey::index(i as u32);
-        if let Value::Object(o) = &obj {
-            realm.define_own(*o, k, Property::data(v, ALL))?;
+        if let V::Object(o) = obj.v() {
+            realm.define_own(o, k, Property::data(v, ALL))?;
         }
     }
     realm.set_str(obj.clone(), "length", Value::Number(len as f64))?;
@@ -221,8 +222,8 @@ fn species_create(realm: &mut Realm, original: ObjectId, len: usize) -> JsResult
         return Ok(realm.new_array(vec![]));
     }
     let c = realm.get_str(Value::Object(original), "constructor")?;
-    let c = match c {
-        Value::Object(cid) => {
+    let c = match c.v() {
+        V::Object(cid) => {
             let s = realm.get(Value::Object(cid), PropertyKey::Symbol(SYM_SPECIES))?;
             if s.is_nullish() {
                 Value::Undefined
@@ -230,7 +231,7 @@ fn species_create(realm: &mut Realm, original: ObjectId, len: usize) -> JsResult
                 s
             }
         }
-        Value::Undefined => Value::Undefined,
+        V::Undefined => Value::Undefined,
         _ => return realm.type_error("constructor is not an object"),
     };
     if c.is_undefined() || c.as_object() == Some(realm.intrinsics.array_ctor) {
@@ -240,8 +241,8 @@ fn species_create(realm: &mut Realm, original: ObjectId, len: usize) -> JsResult
         return realm.type_error("species is not a constructor");
     }
     let r = realm.construct(c, &[Value::Number(len as f64)], Value::Undefined)?;
-    match r {
-        Value::Object(id) => Ok(id),
+    match r.v() {
+        V::Object(id) => Ok(id),
         _ => realm.type_error("species constructor returned non-object"),
     }
 }
@@ -271,8 +272,8 @@ fn at(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn is_concat_spreadable(realm: &mut Realm, v: &Value) -> JsResult<bool> {
-    if let Value::Object(id) = v {
-        let s = realm.get(Value::Object(*id), PropertyKey::Symbol(SYM_IS_CONCAT_SPREADABLE))?;
+    if let V::Object(id) = v.v() {
+        let s = realm.get(Value::Object(id), PropertyKey::Symbol(SYM_IS_CONCAT_SPREADABLE))?;
         if !s.is_undefined() {
             return Ok(s.truthy());
         }

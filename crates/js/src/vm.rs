@@ -1,6 +1,7 @@
 //! The bytecode interpreter: frames, calls, generators, async and exceptions.
 
 use crate::bytecode::{FunctionCode, Op, VarLoc};
+use crate::value::V;
 use crate::heap::*;
 use crate::interop::{Hint, JsResult};
 use crate::realm::*;
@@ -109,8 +110,8 @@ impl Realm {
 
     /// Call any callable value.
     pub fn call(&mut self, f: Value, this: Value, args: &[Value]) -> JsResult<Value> {
-        let id = match f {
-            Value::Object(id) => id,
+        let id = match f.v() {
+            V::Object(id) => id,
             _ => {
                 let d = self.describe_for_error(&f);
                 if std::env::var_os("RH_DEBUG_NOTFN").is_some() {
@@ -199,8 +200,8 @@ impl Realm {
     /// `[[Construct]]`.
     pub fn construct(&mut self, f: Value, args: &[Value], new_target: Value) -> JsResult<Value> {
         let new_target = if new_target.is_undefined() { f.clone() } else { new_target };
-        let id = match f {
-            Value::Object(id) => id,
+        let id = match f.v() {
+            V::Object(id) => id,
             _ => {
                 let d = self.describe_for_error(&f);
                 return self.type_error(&format!("{} is not a constructor", d));
@@ -334,8 +335,8 @@ impl Realm {
     /// caller's frame must be synced.
     pub(crate) fn try_fast_call(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
         let cb = self.frames[fi].base as usize + b;
-        let id = match &self.vstack[cb] {
-            Value::Object(id) => *id,
+        let id = match self.vstack[cb].v() {
+            V::Object(id) => id,
             _ => return Ok(false),
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
@@ -351,14 +352,11 @@ impl Realm {
         let this = if flags.is_arrow {
             c.this_value.clone().unwrap_or(Value::Undefined)
         } else if flags.is_strict {
-            match &self.vstack[cb + 1] {
-                Value::Empty => Value::Undefined,
-                v => v.clone(),
-            }
+            self.vstack[cb + 1].undef_if_empty()
         } else {
-            match &self.vstack[cb + 1] {
-                Value::Undefined | Value::Null | Value::Empty => Value::Object(self.global),
-                v @ Value::Object(_) => v.clone(),
+            match self.vstack[cb + 1].v() {
+                V::Undefined | V::Null | V::Empty => Value::Object(self.global),
+                V::Object(o) => Value::Object(o),
                 _ => return Ok(false),
             }
         };
@@ -436,14 +434,11 @@ impl Realm {
         let this = if flags.is_arrow {
             c.this_value.clone().unwrap_or(Value::Undefined)
         } else if flags.is_strict {
-            match this {
-                Value::Empty => Value::Undefined,
-                v => v.clone(),
-            }
+            this.undef_if_empty()
         } else {
-            match this {
-                Value::Undefined | Value::Null | Value::Empty => Value::Object(self.global),
-                v @ Value::Object(_) => v.clone(),
+            match this.v() {
+                V::Undefined | V::Null | V::Empty => Value::Object(self.global),
+                V::Object(o) => Value::Object(o),
                 _ => return Ok(false),
             }
         };
@@ -531,8 +526,8 @@ impl Realm {
     #[inline(never)]
     pub(crate) fn try_native_call(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
         let cb = self.frames[fi].base as usize + b;
-        let id = match &self.vstack[cb] {
-            Value::Object(id) => *id,
+        let id = match self.vstack[cb].v() {
+            V::Object(id) => id,
             _ => return Ok(false),
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
@@ -544,10 +539,7 @@ impl Realm {
             }
         }
         let func = n.func;
-        let this = match &self.vstack[cb + 1] {
-            Value::Empty => Value::Undefined,
-            v => v.clone(),
-        };
+        let this = self.vstack[cb + 1].undef_if_empty();
         let mut args = std::mem::take(&mut self.arg_buf);
         args.extend_from_slice(&self.vstack[cb + 2..cb + 2 + argc]);
         let r = self.call_native(id, func, this, &args, false);
@@ -561,17 +553,17 @@ impl Realm {
         Ok(true)
     }
 
-    /// Call the native getter `g` with the value in slot `o` of frame `fi`
-    /// as receiver (an inline-cache hit on an accessor); `None` when `g` is
-    /// not a native function.
+    /// Call the getter `g` with the value in slot `o` of frame `fi` as
+    /// receiver (an inline-cache hit on an accessor): natives directly,
+    /// JavaScript getters through a nested run.
     #[inline(never)]
-    fn call_native_getter(&mut self, g: ObjectId, o: usize, fi: usize) -> JsResult<Option<Value>> {
-        let f = match self.heap.try_get(g).map(|x| &x.kind) {
-            Some(ObjectKind::Native(n)) => n.func,
-            _ => return Ok(None),
-        };
+    fn call_cached_getter(&mut self, g: ObjectId, o: usize, fi: usize) -> JsResult<Value> {
         let this = self.vstack[self.frames[fi].base as usize + o].clone();
-        self.call_native(g, f, this, &[], false).map(Some)
+        if let Some(ObjectKind::Native(n)) = self.heap.try_get(g).map(|x| &x.kind) {
+            let f = n.func;
+            return self.call_native(g, f, this, &[], false);
+        }
+        self.call(Value::Object(g), this, &[])
     }
 
     /// A tagged built-in computed without the native call when its
@@ -581,11 +573,11 @@ impl Realm {
     fn inline_intrinsic(&self, tag: u8, cb: usize, argc: usize) -> Option<Value> {
         match tag {
             INTRINSIC_CHAR_CODE_AT => {
-                let Value::String(s) = &self.vstack[cb + 1] else { return None };
+                let V::String(s) = self.vstack[cb + 1].v() else { return None };
                 let i = match argc {
                     0 => 0.0,
-                    _ => match &self.vstack[cb + 2] {
-                        Value::Number(n) => *n,
+                    _ => match self.vstack[cb + 2].v() {
+                        V::Number(n) => n,
                         _ => return None,
                     },
                 };
@@ -605,12 +597,12 @@ impl Realm {
                     Value::Number(u[i.trunc() as usize] as f64)
                 })
             }
-            INTRINSIC_FROM_CHAR_CODE if argc == 1 => match &self.vstack[cb + 2] {
-                Value::Number(n) => Some(Value::String(JsStr::from_unit(to_uint32(*n) as u16))),
+            INTRINSIC_FROM_CHAR_CODE if argc == 1 => match self.vstack[cb + 2].v() {
+                V::Number(n) => Some(Value::String(JsStr::from_unit(to_uint32(n) as u16))),
                 _ => None,
             },
-            INTRINSIC_IMUL if argc >= 2 => match (&self.vstack[cb + 2], &self.vstack[cb + 3]) {
-                (Value::Number(a), Value::Number(b)) => Some(Value::Number(to_int32(*a).wrapping_mul(to_int32(*b)) as f64)),
+            INTRINSIC_IMUL if argc >= 2 => match (self.vstack[cb + 2].v(), self.vstack[cb + 3].v()) {
+                (V::Number(a), V::Number(b)) => Some(Value::Number(to_int32(a).wrapping_mul(to_int32(b)) as f64)),
                 _ => None,
             },
             _ => None,
@@ -624,8 +616,8 @@ impl Realm {
     /// needed. The caller must be synced.
     pub(crate) fn try_fast_construct(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
         let cb = self.frames[fi].base as usize + b;
-        let id = match &self.vstack[cb] {
-            Value::Object(id) => *id,
+        let id = match self.vstack[cb].v() {
+            V::Object(id) => id,
             _ => return Ok(false),
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
@@ -647,8 +639,8 @@ impl Realm {
             return Ok(false);
         }
         let proto = match obj.props.get(&names::prototype()) {
-            Some(p) if p.flags & ACCESSOR == 0 => match &p.value {
-                Value::Object(p) => *p,
+            Some(p) if p.flags & ACCESSOR == 0 => match p.value.v() {
+                V::Object(p) => p,
                 _ => self.intrinsics.object_proto,
             },
             _ => return Ok(false),
@@ -723,8 +715,8 @@ impl Realm {
             if flags.is_derived {
                 Value::Empty
             } else {
-                let proto = match self.get(new_target.clone(), names::prototype())? {
-                    Value::Object(p) => p,
+                let proto = match (self.get(new_target.clone(), names::prototype())?).v() {
+                    V::Object(p) => p,
                     _ => self.intrinsics.object_proto,
                 };
                 Value::Object(self.alloc(Object::new(Some(proto), ObjectKind::Ordinary)))
@@ -732,10 +724,10 @@ impl Realm {
         } else if flags.is_strict {
             this
         } else {
-            match this {
-                Value::Undefined | Value::Null | Value::Empty => Value::Object(self.global),
-                Value::Object(_) => this,
-                prim => Value::Object(self.to_object(prim)?),
+            match this.v() {
+                V::Undefined | V::Null | V::Empty => Value::Object(self.global),
+                V::Object(_) => this,
+                prim => Value::Object(self.to_object(prim.to_value())?),
             }
         };
         let new_target = if flags.is_arrow { arrow_nt.unwrap_or(Value::Undefined) } else { new_target };
@@ -839,8 +831,8 @@ impl Realm {
         let is_gen = flags.is_generator;
         let proto = if is_gen {
             // generator object prototype = fn.prototype (if object) else intrinsic
-            match self.get(Value::Object(id), names::prototype())? {
-                Value::Object(p) => p,
+            match (self.get(Value::Object(id), names::prototype())?).v() {
+                V::Object(p) => p,
                 _ => {
                     if is_async {
                         self.intrinsics.async_generator_proto
@@ -1240,29 +1232,29 @@ impl Realm {
                 }};
             }
             macro_rules! num2 {
-                ($a:expr, $b:expr) => {
-                    match (&*sl!($a), &*sl!($b)) {
-                        (Value::Number(x), Value::Number(y)) => Some((*x, *y)),
-                        _ => None,
+                ($a:expr, $b:expr) => {{
+                    let (x, y) = (&*sl!($a), &*sl!($b));
+                    if x.is_number() && y.is_number() {
+                        Some((x.number_unchecked(), y.number_unchecked()))
+                    } else {
+                        None
                     }
-                };
+                }};
             }
             macro_rules! num_k {
-                ($a:expr, $k:expr) => {
-                    match (&*sl!($a), k!($k)) {
-                        (Value::Number(x), Value::Number(y)) => Some((*x, *y)),
-                        _ => None,
+                ($a:expr, $k:expr) => {{
+                    let (x, y) = (&*sl!($a), k!($k));
+                    if x.is_number() && y.is_number() {
+                        Some((x.number_unchecked(), y.number_unchecked()))
+                    } else {
+                        None
                     }
-                };
+                }};
             }
             macro_rules! set_num {
                 ($d:expr, $v:expr) => {{
                     let r = $v;
-                    let d = sl!($d);
-                    match d {
-                        Value::Number(n) => *n = r,
-                        _ => *d = Value::Number(r),
-                    }
+                    sl!($d).set_number(r);
                 }};
             }
             loop {
@@ -1275,10 +1267,7 @@ impl Realm {
                 pc += 1;
                 match op {
                     Op::Mov(d, s) => {
-                        let v = match &*sl!(s) {
-                            Value::Empty => Value::Undefined,
-                            v => v.clone(),
-                        };
+                        let v = sl!(s).undef_if_empty();
                         *sl!(d) = v;
                     }
                     Op::MovRaw(d, s) => {
@@ -1294,7 +1283,7 @@ impl Realm {
                             set_num!(d, x + y);
                             continue;
                         }
-                        if let (Value::String(x), Value::String(y)) = (&*sl!(a), &*sl!(b)) {
+                        if let (V::String(x), V::String(y)) = (sl!(a).v(), sl!(b).v()) {
                             let r = x.concat(y);
                             *sl!(d) = Value::String(r);
                             continue;
@@ -1306,7 +1295,7 @@ impl Realm {
                             set_num!(d, x + y);
                             continue;
                         }
-                        if let (Value::String(x), Value::String(y)) = (&*sl!(a), k!(c)) {
+                        if let (V::String(x), V::String(y)) = (sl!(a).v(), k!(c).v()) {
                             let r = x.concat(y);
                             *sl!(d) = Value::String(r);
                             continue;
@@ -1550,45 +1539,42 @@ impl Realm {
                         let r = !sl!(s).truthy();
                         *sl!(d) = Value::Bool(r);
                     }
-                    Op::IncR(d, s) => match &*sl!(s) {
-                        Value::Number(n) => set_num!(d, *n + 1.0),
-                        _ => slow!(op),
+                    Op::IncR(d, s) => match sl!(s).as_number() {
+                        Some(n) => set_num!(d, n + 1.0),
+                        None => slow!(op),
                     },
-                    Op::DecR(d, s) => match &*sl!(s) {
-                        Value::Number(n) => set_num!(d, *n - 1.0),
-                        _ => slow!(op),
+                    Op::DecR(d, s) => match sl!(s).as_number() {
+                        Some(n) => set_num!(d, n - 1.0),
+                        None => slow!(op),
                     },
-                    Op::UnR(k, d, s) => match (k, &*sl!(s)) {
+                    Op::UnR(k, d, s) => match (k, sl!(s).v()) {
                         // Neg, Plus, BitNot of numbers; ToPropertyKey of
                         // numbers and strings is the value itself.
-                        (0, Value::Number(n)) => set_num!(d, -*n),
-                        (1 | 5, Value::Number(n)) => set_num!(d, *n),
-                        (2, Value::Number(n)) => set_num!(d, !to_int32(*n) as f64),
-                        (5, Value::String(_)) => {
+                        (0, V::Number(n)) => set_num!(d, -n),
+                        (1 | 5, V::Number(n)) => set_num!(d, n),
+                        (2, V::Number(n)) => set_num!(d, !to_int32(n) as f64),
+                        (5, V::String(_)) => {
                             let v = sl!(s).clone();
                             *sl!(d) = v;
                         }
                         _ => slow!(op),
                     },
-                    Op::ToNumericR(d, s) => match &*sl!(s) {
-                        Value::Number(n) => set_num!(d, *n),
+                    Op::ToNumericR(d, s) => match sl!(s).v() {
+                        V::Number(n) => set_num!(d, n),
                         _ => slow!(op),
                     },
                     Op::LoadThis(d) => {
                         // SAFETY: as in `sync`.
-                        let v = match &unsafe { self.frames.get_unchecked(fi) }.this {
-                            Value::Empty => Value::Undefined,
-                            v => v.clone(),
-                        };
+                        let v = (unsafe { self.frames.get_unchecked(fi) }.this).undef_if_empty();
                         *sl!(d) = v;
                     }
                     Op::GetPropR(d, o, ic) => {
                         let rec = code.ics[ic as usize].get();
                         let recv = &*sl!(o);
                         let hit = if rec.kind == crate::ic::IC_LENGTH {
-                            match recv {
-                                Value::String(s) => Some(Value::Number(s.len() as f64)),
-                                Value::Object(id) => match self.heap.try_get(*id).map(|o| &o.kind) {
+                            match recv.v() {
+                                V::String(s) => Some(Value::Number(s.len() as f64)),
+                                V::Object(id) => match self.heap.try_get(id).map(|o| &o.kind) {
                                     Some(ObjectKind::Array { length, .. }) => Some(Value::Number(*length as f64)),
                                     _ => None,
                                 },
@@ -1601,16 +1587,14 @@ impl Realm {
                                     // Cached accessor: a native getter (DOM
                                     // attributes, `ta.length`, ...) is called
                                     // directly, out of line.
-                                    if let Some(Value::Object(g)) = p.getter() {
-                                        let g = *g;
+                                    if let Some(V::Object(g)) = p.getter().map(Value::v) {
                                         sync!();
-                                        if let Some(r) = tri!(self.call_native_getter(g, o as usize, fi)) {
-                                            // SAFETY: as in `slow`; the native may have run
-                                            // JavaScript (the value stack may have moved).
-                                            base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
-                                            *sl!(d) = r;
-                                            continue;
-                                        }
+                                        let r = tri!(self.call_cached_getter(g, o as usize, fi));
+                                        // SAFETY: as in `slow`; the getter may have run
+                                        // JavaScript (the value stack may have moved).
+                                        base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
+                                        *sl!(d) = r;
+                                        continue;
                                     }
                                     None
                                 }
@@ -1625,9 +1609,26 @@ impl Realm {
                     Op::SetPropR(o, v, ic) => {
                         let rec = code.ics[ic as usize].get();
                         let val = &*sl!(v);
+                        if rec.kind == crate::ic::IC_SETTER {
+                            if let Some(f) = self.ic_setter(&rec, sl!(o)) {
+                                if !val.is_empty() {
+                                    let (recv, val) = (sl!(o).clone(), val.clone());
+                                    sync!();
+                                    tri!(self.call(Value::Object(f), recv, &[val]));
+                                    if self.frames.len() != fi + 1 {
+                                        continue 'reload;
+                                    }
+                                    // SAFETY: as in `slow`.
+                                    base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
+                                    continue;
+                                }
+                            }
+                            slow!(op);
+                            continue;
+                        }
                         if rec.kind != 0 && !val.is_empty() {
-                            let key = match k!(code.ic_keys[ic as usize]) {
-                                Value::String(s) => s,
+                            let key = match k!(code.ic_keys[ic as usize]).v() {
+                                V::String(s) => s,
                                 _ => unreachable!(),
                             };
                             let val = val.clone();
@@ -1643,8 +1644,8 @@ impl Realm {
                         let rec = code.ics[ic as usize].get();
                         let val = &*sl!(v);
                         if rec.kind == crate::ic::IC_ADD && !val.is_empty() {
-                            let key = match k!(code.ic_keys[ic as usize]) {
-                                Value::String(s) => s,
+                            let key = match k!(code.ic_keys[ic as usize]).v() {
+                                V::String(s) => s,
                                 _ => unreachable!(),
                             };
                             let val = val.clone();
@@ -1658,8 +1659,8 @@ impl Realm {
                     }
                     Op::GetGlobalR(d, ic) => {
                         let rec = code.ics[ic as usize].get();
-                        let key = match k!(code.ic_keys[ic as usize]) {
-                            Value::String(s) => s,
+                        let key = match k!(code.ic_keys[ic as usize]).v() {
+                            V::String(s) => s,
                             _ => unreachable!(),
                         };
                         match self.ic_get_global(&rec, key) {
@@ -1674,8 +1675,8 @@ impl Realm {
                         let rec = code.ics[ic as usize].get();
                         let val = &*sl!(s);
                         if !val.is_empty() {
-                            let key = match k!(code.ic_keys[ic as usize]) {
-                                Value::String(s) => s,
+                            let key = match k!(code.ic_keys[ic as usize]).v() {
+                                V::String(s) => s,
                                 _ => unreachable!(),
                             };
                             let val = val.clone();
@@ -1707,10 +1708,7 @@ impl Realm {
                         *sl!(d) = if v.is_empty() { Value::Undefined } else { v };
                     }
                     Op::SetLocalR(v, dp, s) => {
-                        let val = match &*sl!(v) {
-                            Value::Empty => Value::Undefined,
-                            v => v.clone(),
-                        };
+                        let val = sl!(v).undef_if_empty();
                         // SAFETY: as in `sync`.
                         let scope = unsafe { self.frames.get_unchecked(fi) }.scope;
                         self.slot_set(scope, dp, s, val);
@@ -1781,9 +1779,9 @@ impl Realm {
     }
 
     fn inc_value(&mut self, v: Value, d: f64) -> JsResult<Value> {
-        Ok(match self.to_numeric(v)? {
-            Value::Number(n) => Value::Number(n + d),
-            Value::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
+        Ok(match (self.to_numeric(v)?).v() {
+            V::Number(n) => Value::Number(n + d),
+            V::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
             _ => unreachable!(),
         })
     }
@@ -1792,7 +1790,7 @@ impl Realm {
     fn args_get(&mut self, fi: usize, key: Value) -> JsResult<Value> {
         let f = &self.frames[fi];
         let (bottom, argc) = (f.bottom(), f.argc as usize);
-        if let Value::Number(n) = key {
+        if let V::Number(n) = key.v() {
             let i = n as usize;
             // Like the arguments objects this engine creates, reads are
             // not mapped to the parameters.
@@ -1851,10 +1849,7 @@ impl Realm {
             }
             macro_rules! rd {
                 ($i:expr) => {
-                    match &sl!($i) {
-                        Value::Empty => Value::Undefined,
-                        v => v.clone(),
-                    }
+                    sl!($i).undef_if_empty()
                 };
             }
             macro_rules! set {
@@ -1871,8 +1866,8 @@ impl Realm {
             macro_rules! ic_key {
                 ($ic:expr) => {{
                     let k = frame!().code.ic_keys[$ic as usize];
-                    match &frame!().code.constants[k as usize] {
-                        Value::String(s) => PropertyKey::String(s.clone()),
+                    match (frame!().code.constants[k as usize]).v() {
+                        V::String(s) => PropertyKey::String(s.clone()),
                         _ => unreachable!(),
                     }
                 }};
@@ -1884,8 +1879,8 @@ impl Realm {
             }
             macro_rules! const_key {
                 ($i:expr) => {
-                    match &frame!().code.constants[$i as usize] {
-                        Value::String(s) => PropertyKey::String(s.clone()),
+                    match (frame!().code.constants[$i as usize]).v() {
+                        V::String(s) => PropertyKey::String(s.clone()),
                         _ => unreachable!(),
                     }
                 };
@@ -2410,19 +2405,19 @@ impl Realm {
                     let obj = peek!().as_object().unwrap();
                     let key = self.to_property_key(key)?;
                     // Anonymous functions take the computed key as their name.
-                    if let Value::Object(fid) = &v {
-                        let anonymous = match &self.obj(*fid).kind {
+                    if let V::Object(fid) = v.v() {
+                        let anonymous = match &self.obj(fid).kind {
                             ObjectKind::Function(c) => c.code.name.is_empty(),
                             _ => false,
                         };
                         if anonymous {
-                            let has_name = self.obj(*fid).props.get(&PropertyKey::str("name")).map(|p| matches!(&p.value, Value::String(s) if !s.is_empty())).unwrap_or(false);
+                            let has_name = self.obj(fid).props.get(&PropertyKey::str("name")).map(|p| matches!(p.value.v(), V::String(s) if !s.is_empty())).unwrap_or(false);
                             if !has_name {
                                 let name = match &key {
                                     PropertyKey::String(s) => Value::String(s.clone()),
                                     PropertyKey::Symbol(sym) => Value::str(&format!("[{}]", self.symbol_description(*sym))),
                                 };
-                                self.define_property(*fid, "name", name, CONFIGURABLE);
+                                self.define_property(fid, "name", name, CONFIGURABLE);
                             }
                         }
                     }
@@ -2434,8 +2429,8 @@ impl Realm {
                     let obj = peek!().as_object().unwrap();
                     let key = self.to_property_key(key)?;
                     self.set_function_name(&f, &key, "");
-                    if let Value::Object(fid) = &f {
-                        if let ObjectKind::Function(c) = &mut self.obj_mut(*fid).kind {
+                    if let V::Object(fid) = f.v() {
+                        if let ObjectKind::Function(c) = &mut self.obj_mut(fid).kind {
                             c.home_object = Some(obj);
                         }
                     }
@@ -2449,8 +2444,8 @@ impl Realm {
                     let key = self.to_property_key(key)?;
                     let is_getter = matches!(op, Op::DefineGetter(_));
                     self.set_function_name(&f, &key, if is_getter { "get" } else { "set" });
-                    if let Value::Object(fid) = &f {
-                        if let ObjectKind::Function(c) = &mut self.obj_mut(*fid).kind {
+                    if let V::Object(fid) = f.v() {
+                        if let ObjectKind::Function(c) = &mut self.obj_mut(fid).kind {
                             c.home_object = Some(obj);
                         }
                     }
@@ -2486,9 +2481,9 @@ impl Realm {
                 Op::SetProtoLiteral => {
                     let v = pop!();
                     let obj = peek!().as_object().unwrap();
-                    match v {
-                        Value::Object(p) => self.obj_mut(obj).proto = Some(p),
-                        Value::Null => self.obj_mut(obj).proto = None,
+                    match v.v() {
+                        V::Object(p) => self.obj_mut(obj).set_proto(Some(p)),
+                        V::Null => self.obj_mut(obj).set_proto(None),
                         _ => {}
                     }
                 }
@@ -2655,9 +2650,9 @@ impl Realm {
                 Op::Add => {
                     let b = pop!();
                     let a = pop!();
-                    let r = match (&a, &b) {
-                        (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
-                        (Value::String(x), Value::String(y)) => Value::String(x.concat(y)),
+                    let r = match (a.v(), b.v()) {
+                        (V::Number(x), V::Number(y)) => Value::Number(x + y),
+                        (V::String(x), V::String(y)) => Value::String(x.concat(y)),
                         _ => self.add_slow(a, b)?,
                     };
                     push!(r);
@@ -2665,8 +2660,8 @@ impl Realm {
                 Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Exp | Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr => {
                     let b = pop!();
                     let a = pop!();
-                    let r = match (&a, &b) {
-                        (Value::Number(x), Value::Number(y)) => Value::Number(num_binop(op, *x, *y)),
+                    let r = match (a.v(), b.v()) {
+                        (V::Number(x), V::Number(y)) => Value::Number(num_binop(op, x, y)),
                         _ => self.numeric_binop(op, a, b)?,
                     };
                     push!(r);
@@ -2686,8 +2681,8 @@ impl Realm {
                 Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => {
                     let b = pop!();
                     let a = pop!();
-                    let r = match (&a, &b) {
-                        (Value::Number(x), Value::Number(y)) => match op {
+                    let r = match (a.v(), b.v()) {
+                        (V::Number(x), V::Number(y)) => match op {
                             Op::Lt => x < y,
                             Op::LtEq => x <= y,
                             Op::Gt => x > y,
@@ -2700,12 +2695,12 @@ impl Realm {
                 Op::WithHas(i) => {
                     let obj = pop!();
                     let key = const_key!(i);
-                    let found = match obj {
-                        Value::Object(id) => {
+                    let found = match obj.v() {
+                        V::Object(id) => {
                             if self.has_property(id, &key)? {
                                 // Symbol.unscopables hides names from `with`.
-                                match self.get(Value::Object(id), PropertyKey::Symbol(SYM_UNSCOPABLES))? {
-                                    Value::Object(u) => {
+                                match (self.get(Value::Object(id), PropertyKey::Symbol(SYM_UNSCOPABLES))?).v() {
+                                    V::Object(u) => {
                                         let hidden = self.get(Value::Object(u), key)?;
                                         !self.to_boolean(&hidden)
                                     }
@@ -2727,8 +2722,8 @@ impl Realm {
                 Op::In => {
                     let obj = pop!();
                     let key = pop!();
-                    let id = match obj {
-                        Value::Object(id) => id,
+                    let id = match obj.v() {
+                        V::Object(id) => id,
                         _ => {
                             let k = self.describe_for_error(&key);
                             return self.type_error(&format!("Cannot use 'in' operator to search for '{}' in a non-object", k));
@@ -2746,11 +2741,11 @@ impl Realm {
                 }
                 Op::Neg => {
                     let v = pop!();
-                    let r = match v {
-                        Value::Number(n) => Value::Number(-n),
-                        other => match self.to_numeric(other)? {
-                            Value::BigInt(b) => Value::BigInt(Rc::new(b.neg())),
-                            Value::Number(n) => Value::Number(-n),
+                    let r = match v.v() {
+                        V::Number(n) => Value::Number(-n),
+                        other => match (self.to_numeric(other.to_value())?).v() {
+                            V::BigInt(b) => Value::BigInt(Rc::new(b.neg())),
+                            V::Number(n) => Value::Number(-n),
                             _ => unreachable!(),
                         },
                     };
@@ -2767,9 +2762,9 @@ impl Realm {
                 }
                 Op::BitNot => {
                     let v = pop!();
-                    let r = match self.to_numeric(v)? {
-                        Value::BigInt(b) => Value::BigInt(Rc::new(b.not())),
-                        Value::Number(n) => Value::Number(!to_int32(n) as f64),
+                    let r = match (self.to_numeric(v)?).v() {
+                        V::BigInt(b) => Value::BigInt(Rc::new(b.not())),
+                        V::Number(n) => Value::Number(!to_int32(n) as f64),
                         _ => unreachable!(),
                     };
                     push!(r);
@@ -2786,12 +2781,12 @@ impl Realm {
                 Op::Inc | Op::Dec => {
                     let v = pop!();
                     let d = if matches!(op, Op::Inc) { 1.0 } else { -1.0 };
-                    let r = match v {
-                        Value::Number(n) => Value::Number(n + d),
-                        Value::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
-                        other => match self.to_numeric(other)? {
-                            Value::Number(n) => Value::Number(n + d),
-                            Value::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
+                    let r = match v.v() {
+                        V::Number(n) => Value::Number(n + d),
+                        V::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
+                        other => match (self.to_numeric(other.to_value())?).v() {
+                            V::Number(n) => Value::Number(n + d),
+                            V::BigInt(b) => Value::BigInt(Rc::new(b.add(&BigInt::from_i128(d as i128)))),
                             _ => unreachable!(),
                         },
                     };
@@ -2799,27 +2794,27 @@ impl Realm {
                 }
                 Op::ToNumeric => {
                     let v = pop!();
-                    let r = match v {
-                        Value::Number(_) | Value::BigInt(_) => v,
-                        other => self.to_numeric(other)?,
+                    let r = match v.v() {
+                        V::Number(_) | V::BigInt(_) => v,
+                        other => self.to_numeric(other.to_value())?,
                     };
                     push!(r);
                 }
                 Op::ToString => {
                     let v = pop!();
-                    let r = match v {
-                        Value::String(_) => v,
-                        other => Value::String(self.to_string(other)?),
+                    let r = match v.v() {
+                        V::String(_) => v,
+                        other => Value::String(self.to_string(other.to_value())?),
                     };
                     push!(r);
                 }
                 Op::ToPropertyKey => {
                     let v = pop!();
-                    let r = match v {
+                    let r = match v.v() {
                         // Numbers stay numbers: every consumer canonicalizes keys, and
                         // element fast paths want numeric indices.
-                        Value::String(_) | Value::Symbol(_) | Value::Number(_) => v,
-                        other => self.to_property_key(other)?.to_value(),
+                        V::String(_) | V::Symbol(_) | V::Number(_) => v,
+                        other => self.to_property_key(other.to_value())?.to_value(),
                     };
                     push!(r);
                 }
@@ -2827,8 +2822,8 @@ impl Realm {
                     let obj = pop!();
                     let scope = frame!().scope;
                     let sym = self.slot_get(scope, d, s);
-                    let id = match obj {
-                        Value::Object(id) => id,
+                    let id = match obj.v() {
+                        V::Object(id) => id,
                         _ => return self.type_error("Cannot use 'in' operator to search for a private field in a non-object"),
                     };
                     let key = self.to_property_key(sym)?;
@@ -2911,8 +2906,8 @@ impl Realm {
                     let f = pop!();
                     let proto = self.vstack[sp - 1].as_object().unwrap();
                     let ctor = self.vstack[sp - 2].as_object().unwrap();
-                    if let Value::Object(fid) = &f {
-                        if let ObjectKind::Function(c) = &mut self.obj_mut(*fid).kind {
+                    if let V::Object(fid) = f.v() {
+                        if let ObjectKind::Function(c) = &mut self.obj_mut(fid).kind {
                             c.home_object = Some(proto);
                         }
                     }
@@ -3189,10 +3184,10 @@ impl Realm {
         if let Some(v) = self.get_elem_fast(&obj, &key) {
             return Ok(v);
         }
-        let key = match key {
+        let key = match key.v() {
             // Integer keys: cached index strings, no number formatting.
-            Value::Number(n) if (n as u32) as f64 == n && n < 4294967295.0 => PropertyKey::index(n as u32),
-            other => self.to_property_key(other)?,
+            V::Number(n) if (n as u32) as f64 == n && n < 4294967295.0 => PropertyKey::index(n as u32),
+            other => self.to_property_key(other.to_value())?,
         };
         self.get(obj, key)
     }
@@ -3200,13 +3195,13 @@ impl Realm {
     /// `obj[key]` for dense array elements and string characters.
     #[inline]
     pub(crate) fn get_elem_fast(&self, obj: &Value, key: &Value) -> Option<Value> {
-        let Value::Number(n) = key else { return None };
-        let i = *n as u32;
-        if i as f64 != *n {
+        let V::Number(n) = key.v() else { return None };
+        let i = n as u32;
+        if i as f64 != n {
             return None;
         }
-        match obj {
-            Value::Object(id) => match &self.heap.try_get(*id)?.kind {
+        match obj.v() {
+            V::Object(id) => match &self.heap.try_get(id)?.kind {
                 ObjectKind::Array { elements, .. } => match elements.get(i as usize) {
                     Some(v) if !v.is_empty() => Some(v.clone()),
                     _ => None,
@@ -3214,7 +3209,7 @@ impl Realm {
                 ObjectKind::TypedArray(t) if !matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) => crate::builtins::typed_array_get(self, t, i as usize),
                 _ => None,
             },
-            Value::String(s) if (i as usize) < s.len() => Some(Value::String(s.char_at(i as usize))),
+            V::String(s) if (i as usize) < s.len() => Some(Value::String(s.char_at(i as usize))),
             _ => None,
         }
     }
@@ -3223,19 +3218,19 @@ impl Realm {
     /// back when not applicable.
     #[inline]
     pub(crate) fn set_elem_fast(&mut self, obj: &Value, key: &Value, v: Value) -> Result<(), Value> {
-        let (Value::Object(id), Value::Number(n)) = (obj, key) else { return Err(v) };
-        let i = *n as u32;
-        if i as f64 != *n || i >= (1 << 28) {
+        let (V::Object(id), V::Number(n)) = (obj.v(), key.v()) else { return Err(v) };
+        let i = n as u32;
+        if i as f64 != n || i >= (1 << 28) {
             return Err(v);
         }
-        if let (Some(ObjectKind::TypedArray(t)), Value::Number(x)) = (self.heap.try_get(*id).map(|o| &o.kind), &v) {
+        if let (Some(ObjectKind::TypedArray(t)), V::Number(x)) = (self.heap.try_get(id).map(|o| &o.kind), v.v()) {
             if !matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) && (i as usize) < t.length {
-                crate::builtins::typed_array_set(self, t, i as usize, *x);
+                crate::builtins::typed_array_set(self, t, i as usize, x);
                 return Ok(());
             }
             return Err(v);
         }
-        let Some(o) = self.heap.try_get_mut(*id) else { return Err(v) };
+        let Some(o) = self.heap.try_get_mut(id) else { return Err(v) };
         let no_props = o.props.is_empty();
         let extensible = o.extensible;
         match &mut o.kind {
@@ -3260,9 +3255,9 @@ impl Realm {
     }
 
     fn delete_elem(&mut self, obj: Value, key: PropertyKey, strict: bool) -> JsResult<bool> {
-        let id = match obj {
-            Value::Object(id) => id,
-            Value::Undefined | Value::Null => return self.type_error("Cannot convert undefined or null to object"),
+        let id = match obj.v() {
+            V::Object(id) => id,
+            V::Undefined | V::Null => return self.type_error("Cannot convert undefined or null to object"),
             _ => return Ok(true),
         };
         let r = self.delete_property(id, &key)?;
@@ -3297,15 +3292,15 @@ impl Realm {
     /// Call from the current frame; the result goes to its slot `ret`
     /// (directly, or when a pushed JS frame returns).
     fn do_call(&mut self, f: Value, this: Value, args: &[Value], ret: usize) -> JsResult<()> {
-        if let Value::Object(id) = &f {
-            match &self.obj(*id).kind {
+        if let V::Object(id) = f.v() {
+            match &self.obj(id).kind {
                 ObjectKind::Function(c) => {
                     let flags = c.code.flags;
                     if !flags.is_generator && !flags.is_async && !flags.is_class_constructor {
-                        if self.push_plain_call(*id, &this, args, ret as u32, false)? {
+                        if self.push_plain_call(id, &this, args, ret as u32, false)? {
                             return Ok(());
                         }
-                        let mut frame = self.prepare_frame(*id, this, args, Value::Undefined, false)?;
+                        let mut frame = self.prepare_frame(id, this, args, Value::Undefined, false)?;
                         frame.ret_slot = ret as u32;
                         self.push_frame(frame, false)?;
                         return Ok(());
@@ -3313,7 +3308,7 @@ impl Realm {
                 }
                 ObjectKind::Native(n) => {
                     let func = n.func;
-                    let v = self.call_native(*id, func, this, args, false)?;
+                    let v = self.call_native(id, func, this, args, false)?;
                     self.set_current_slot(ret, v);
                     return Ok(());
                 }
@@ -3333,10 +3328,10 @@ impl Realm {
     }
 
     fn do_construct(&mut self, f: Value, args: &[Value], ret: usize) -> JsResult<()> {
-        if let Value::Object(id) = &f {
-            if let ObjectKind::Function(_) = &self.obj(*id).kind {
+        if let V::Object(id) = f.v() {
+            if let ObjectKind::Function(_) = &self.obj(id).kind {
                 if self.is_constructor(&f) {
-                    let mut frame = self.prepare_frame(*id, Value::Empty, args, f.clone(), true)?;
+                    let mut frame = self.prepare_frame(id, Value::Empty, args, f.clone(), true)?;
                     frame.ret_slot = ret as u32;
                     self.push_frame(frame, false)?;
                     return Ok(());
@@ -3376,21 +3371,21 @@ impl Realm {
     /// instructions).
     fn binop_values(&mut self, op: Op, a: Value, b: Value) -> JsResult<Value> {
         Ok(match op {
-            Op::Add => match (&a, &b) {
-                (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
-                (Value::String(x), Value::String(y)) => Value::String(x.concat(y)),
-                (Value::String(x), Value::Number(_)) => {
+            Op::Add => match (a.v(), b.v()) {
+                (V::Number(x), V::Number(y)) => Value::Number(x + y),
+                (V::String(x), V::String(y)) => Value::String(x.concat(y)),
+                (V::String(x), V::Number(_)) => {
                     let y = self.to_string(b.clone())?;
                     Value::String(x.concat(&y))
                 }
-                (Value::Number(_), Value::String(y)) => {
+                (V::Number(_), V::String(y)) => {
                     let x = self.to_string(a.clone())?;
                     Value::String(x.concat(y))
                 }
                 _ => self.add_slow(a, b)?,
             },
-            Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => Value::Bool(match (&a, &b) {
-                (Value::Number(x), Value::Number(y)) => match op {
+            Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => Value::Bool(match (a.v(), b.v()) {
+                (V::Number(x), V::Number(y)) => match op {
                     Op::Lt => x < y,
                     Op::LtEq => x <= y,
                     Op::Gt => x > y,
@@ -3406,8 +3401,8 @@ impl Realm {
                 let r = self.strict_equals(&a, &b);
                 Value::Bool(if matches!(op, Op::StrictEq) { r } else { !r })
             }
-            _ => match (&a, &b) {
-                (Value::Number(x), Value::Number(y)) => Value::Number(num_binop(op, *x, *y)),
+            _ => match (a.v(), b.v()) {
+                (V::Number(x), V::Number(y)) => Value::Number(num_binop(op, x, y)),
                 _ => self.numeric_binop(op, a, b)?,
             },
         })
@@ -3419,44 +3414,44 @@ impl Realm {
             Op::Not => Value::Bool(!v.truthy()),
             Op::Inc => self.inc_value(v, 1.0)?,
             Op::Dec => self.inc_value(v, -1.0)?,
-            Op::ToNumeric => match v {
-                Value::Number(_) | Value::BigInt(_) => v,
-                other => self.to_numeric(other)?,
+            Op::ToNumeric => match v.v() {
+                V::Number(_) | V::BigInt(_) => v,
+                other => self.to_numeric(other.to_value())?,
             },
-            Op::Neg => match v {
-                Value::Number(n) => Value::Number(-n),
-                other => match self.to_numeric(other)? {
-                    Value::BigInt(b) => Value::BigInt(Rc::new(b.neg())),
-                    Value::Number(n) => Value::Number(-n),
+            Op::Neg => match v.v() {
+                V::Number(n) => Value::Number(-n),
+                other => match (self.to_numeric(other.to_value())?).v() {
+                    V::BigInt(b) => Value::BigInt(Rc::new(b.neg())),
+                    V::Number(n) => Value::Number(-n),
                     _ => unreachable!(),
                 },
             },
             Op::Plus => Value::Number(self.to_number(v)?),
-            Op::BitNot => match self.to_numeric(v)? {
-                Value::BigInt(b) => Value::BigInt(Rc::new(b.not())),
-                Value::Number(n) => Value::Number(!to_int32(n) as f64),
+            Op::BitNot => match (self.to_numeric(v)?).v() {
+                V::BigInt(b) => Value::BigInt(Rc::new(b.not())),
+                V::Number(n) => Value::Number(!to_int32(n) as f64),
                 _ => unreachable!(),
             },
             Op::Typeof => Value::str(self.type_of(&v)),
             Op::Void => Value::Undefined,
-            Op::ToString => match v {
-                Value::String(_) => v,
-                other => Value::String(self.to_string(other)?),
+            Op::ToString => match v.v() {
+                V::String(_) => v,
+                other => Value::String(self.to_string(other.to_value())?),
             },
-            Op::ToPropertyKey => match v {
+            Op::ToPropertyKey => match v.v() {
                 // Numbers stay numbers: every consumer canonicalizes keys,
                 // and element fast paths want numeric indices.
-                Value::String(_) | Value::Symbol(_) | Value::Number(_) => v,
-                other => self.to_property_key(other)?.to_value(),
+                V::String(_) | V::Symbol(_) | V::Number(_) => v,
+                other => self.to_property_key(other.to_value())?.to_value(),
             },
             _ => unreachable!("not a unary operator"),
         })
     }
 
     fn direct_eval(&mut self, arg: Value, strict: bool) -> JsResult<Value> {
-        let src = match arg {
-            Value::String(s) => s.to_rust_string(),
-            other => return Ok(other),
+        let src = match arg.v() {
+            V::String(s) => s.to_rust_string(),
+            other => return Ok(other.to_value()),
         };
         let src = if strict { format!("\"use strict\";{}", src) } else { src };
         let code = self.compile(&src, "eval", false)?;
@@ -3532,10 +3527,10 @@ impl Realm {
     }
 
     fn copy_data_properties(&mut self, target: ObjectId, src: Value, excluded: &[PropertyKey]) -> JsResult<()> {
-        let sid = match src {
-            Value::Undefined | Value::Null | Value::Empty => return Ok(()),
-            Value::Object(id) => id,
-            prim => self.to_object(prim)?,
+        let sid = match src.v() {
+            V::Undefined | V::Null | V::Empty => return Ok(()),
+            V::Object(id) => id,
+            prim => self.to_object(prim.to_value())?,
         };
         let keys = self.own_keys(sid)?;
         for k in keys {
@@ -3555,7 +3550,7 @@ impl Realm {
     }
 
     pub(crate) fn set_function_name(&mut self, f: &Value, key: &PropertyKey, prefix: &str) {
-        if let Value::Object(id) = f {
+        if let V::Object(id) = f.v() {
             let base = match key {
                 PropertyKey::String(s) => s.to_rust_string(),
                 PropertyKey::Symbol(s) => {
@@ -3567,10 +3562,10 @@ impl Realm {
                 }
             };
             let name = if prefix.is_empty() { base } else { format!("{} {}", prefix, base) };
-            let existing = self.obj(*id).props.get(&PropertyKey::str("name")).map(|p| p.value.clone());
-            let keep = matches!(&existing, Some(Value::String(s)) if !s.is_empty());
+            let existing = self.obj(id).props.get(&PropertyKey::str("name")).map(|p| p.value.clone());
+            let keep = matches!(existing.as_ref().map(Value::v), Some(V::String(s)) if !s.is_empty());
             if !keep {
-                self.define_property(*id, "name", Value::str(&name), CONFIGURABLE);
+                self.define_property(id, "name", Value::str(&name), CONFIGURABLE);
             }
         }
     }
@@ -3618,17 +3613,17 @@ impl Realm {
     }
 
     fn make_class(&mut self, fi: usize, code: Rc<FunctionCode>, superclass: Value) -> JsResult<(ObjectId, ObjectId)> {
-        let (proto_parent, ctor_parent) = match &superclass {
-            Value::Empty => (Some(self.intrinsics.object_proto), self.intrinsics.function_proto),
-            Value::Null => (None, self.intrinsics.function_proto),
-            Value::Object(s) if self.is_constructor(&superclass) => {
+        let (proto_parent, ctor_parent) = match superclass.v() {
+            V::Empty => (Some(self.intrinsics.object_proto), self.intrinsics.function_proto),
+            V::Null => (None, self.intrinsics.function_proto),
+            V::Object(s) if self.is_constructor(&superclass) => {
                 let pp = self.get(superclass.clone(), names::prototype())?;
-                let pp = match pp {
-                    Value::Object(p) => Some(p),
-                    Value::Null => None,
+                let pp = match pp.v() {
+                    V::Object(p) => Some(p),
+                    V::Null => None,
                     _ => return self.type_error("Class extends value does not have valid prototype property"),
                 };
-                (pp, *s)
+                (pp, s)
             }
             _ => {
                 let d = self.describe_for_error(&superclass);
@@ -3636,7 +3631,7 @@ impl Realm {
             }
         };
         let ctor = self.make_closure(fi, code);
-        self.obj_mut(ctor).proto = Some(ctor_parent);
+        self.obj_mut(ctor).set_proto(Some(ctor_parent));
         let proto = self.alloc(Object::new(proto_parent, ObjectKind::Ordinary));
         self.define_property(proto, "constructor", Value::Object(ctor), HIDDEN);
         self.define_property(ctor, "prototype", Value::Object(proto), 0);
@@ -3726,10 +3721,10 @@ impl Realm {
 
     fn for_in_start(&mut self, v: Value) -> JsResult<ObjectId> {
         let mut keys: Vec<JsStr> = Vec::new();
-        let object = match v {
-            Value::Undefined | Value::Null | Value::Empty => None,
-            Value::Object(id) => Some(id),
-            prim => Some(self.to_object(prim)?),
+        let object = match v.v() {
+            V::Undefined | V::Null | V::Empty => None,
+            V::Object(id) => Some(id),
+            prim => Some(self.to_object(prim.to_value())?),
         };
         if let Some((keys, shape)) = object.and_then(|id| self.for_in_fast_keys(id)) {
             let proto = self.intrinsics.object_proto;
@@ -3837,16 +3832,16 @@ impl Realm {
     fn add_slow(&mut self, a: Value, b: Value) -> JsResult<Value> {
         let pa = self.to_primitive(a, Hint::Default)?;
         let pb = self.to_primitive(b, Hint::Default)?;
-        if matches!(pa, Value::String(_)) || matches!(pb, Value::String(_)) {
+        if matches!(pa.v(), V::String(_)) || matches!(pb.v(), V::String(_)) {
             let sa = self.to_string(pa)?;
             let sb = self.to_string(pb)?;
             return Ok(Value::String(sa.concat(&sb)));
         }
         let na = self.to_numeric(pa)?;
         let nb = self.to_numeric(pb)?;
-        match (na, nb) {
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x + y)),
-            (Value::BigInt(x), Value::BigInt(y)) => Ok(Value::BigInt(Rc::new(x.add(&y)))),
+        match (na.v(), nb.v()) {
+            (V::Number(x), V::Number(y)) => Ok(Value::Number(x + y)),
+            (V::BigInt(x), V::BigInt(y)) => Ok(Value::BigInt(Rc::new(x.add(&y)))),
             _ => self.type_error("Cannot mix BigInt and other types, use explicit conversions"),
         }
     }
@@ -3854,9 +3849,9 @@ impl Realm {
     fn numeric_binop(&mut self, op: Op, a: Value, b: Value) -> JsResult<Value> {
         let na = self.to_numeric(a)?;
         let nb = self.to_numeric(b)?;
-        match (na, nb) {
-            (Value::Number(x), Value::Number(y)) => Ok(Value::Number(num_binop(op, x, y))),
-            (Value::BigInt(x), Value::BigInt(y)) => {
+        match (na.v(), nb.v()) {
+            (V::Number(x), V::Number(y)) => Ok(Value::Number(num_binop(op, x, y))),
+            (V::BigInt(x), V::BigInt(y)) => {
                 let shift_amount = |y: &BigInt| -> i64 { y.to_i128().map(|v| v.clamp(-(1 << 40), 1 << 40) as i64).unwrap_or(if y.is_negative() { -(1 << 40) } else { 1 << 40 }) };
                 let r = match op {
                     Op::Sub => x.sub(&y),
@@ -3901,7 +3896,7 @@ impl Realm {
     fn compare_slow(&mut self, op: Op, a: Value, b: Value) -> JsResult<bool> {
         let pa = self.to_primitive(a, Hint::Number)?;
         let pb = self.to_primitive(b, Hint::Number)?;
-        if let (Value::String(x), Value::String(y)) = (&pa, &pb) {
+        if let (V::String(x), V::String(y)) = (pa.v(), pb.v()) {
             let o = x.cmp_units(y);
             return Ok(match op {
                 Op::Lt => o.is_lt(),
@@ -3912,13 +3907,13 @@ impl Realm {
         }
         let na = self.to_numeric(pa)?;
         let nb = self.to_numeric(pb)?;
-        let ord = match (&na, &nb) {
-            (Value::BigInt(x), Value::BigInt(y)) => Some(x.cmp(y)),
-            (Value::BigInt(x), Value::Number(y)) => x.cmp_f64(*y),
-            (Value::Number(x), Value::BigInt(y)) => y.cmp_f64(*x).map(|o| o.reverse()),
+        let ord = match (na.v(), nb.v()) {
+            (V::BigInt(x), V::BigInt(y)) => Some(x.cmp(y)),
+            (V::BigInt(x), V::Number(y)) => x.cmp_f64(y),
+            (V::Number(x), V::BigInt(y)) => y.cmp_f64(x).map(|o| o.reverse()),
             _ => None,
         };
-        if let (Value::BigInt(_), _) | (_, Value::BigInt(_)) = (&na, &nb) {
+        if let (V::BigInt(_), _) | (_, V::BigInt(_)) = (na.v(), nb.v()) {
             let Some(o) = ord else { return Ok(false) };
             return Ok(match op {
                 Op::Lt => o.is_lt(),
@@ -3927,8 +3922,8 @@ impl Realm {
                 _ => o.is_ge(),
             });
         }
-        let (x, y) = match (&na, &nb) {
-            (Value::Number(x), Value::Number(y)) => (*x, *y),
+        let (x, y) = match (na.v(), nb.v()) {
+            (V::Number(x), V::Number(y)) => (x, y),
             _ => unreachable!(),
         };
         if x.is_nan() || y.is_nan() {
@@ -4022,7 +4017,7 @@ pub fn js_pow(x: f64, y: f64) -> f64 {
 /// Promise reaction used by `await`: resume the generator with the value.
 fn on_await_fulfilled(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let gen = realm.current_native().and_then(|f| realm.native_captures(f).first().cloned());
-    if let Some(Value::Object(g)) = gen {
+    if let Some(V::Object(g)) = gen.as_ref().map(Value::v) {
         let v = args.first().cloned().unwrap_or(Value::Undefined);
         realm.async_step_dispatch(g, ResumeMode::Next, v);
     }
@@ -4031,7 +4026,7 @@ fn on_await_fulfilled(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
 
 fn on_await_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let gen = realm.current_native().and_then(|f| realm.native_captures(f).first().cloned());
-    if let Some(Value::Object(g)) = gen {
+    if let Some(V::Object(g)) = gen.as_ref().map(Value::v) {
         let v = args.first().cloned().unwrap_or(Value::Undefined);
         realm.async_step_dispatch(g, ResumeMode::Throw, v);
     }

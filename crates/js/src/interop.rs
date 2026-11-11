@@ -2,6 +2,7 @@
 //! and proxies, type conversions, equality, iteration helpers.
 
 use crate::heap::*;
+use crate::value::V;
 use crate::realm::*;
 use crate::value::*;
 use std::rc::Rc;
@@ -84,9 +85,9 @@ impl Realm {
 
     /// `[[Get]]` on any value (primitives use their wrapper prototype).
     pub fn get(&mut self, target: Value, key: PropertyKey) -> JsResult<Value> {
-        match &target {
-            Value::Object(id) => self.get_from_object(*id, &key, target.clone()),
-            Value::String(s) => {
+        match target.v() {
+            V::Object(id) => self.get_from_object(id, &key, target.clone()),
+            V::String(s) => {
                 if let Some(i) = key.as_array_index() {
                     if (i as usize) < s.len() {
                         return Ok(Value::String(s.slice(i as usize, i as usize + 1)));
@@ -101,23 +102,23 @@ impl Realm {
                 let proto = self.intrinsics.string_proto;
                 self.get_from_object(proto, &key, target.clone())
             }
-            Value::Number(_) => {
+            V::Number(_) => {
                 let p = self.intrinsics.number_proto;
                 self.get_from_object(p, &key, target.clone())
             }
-            Value::Bool(_) => {
+            V::Bool(_) => {
                 let p = self.intrinsics.boolean_proto;
                 self.get_from_object(p, &key, target.clone())
             }
-            Value::Symbol(_) => {
+            V::Symbol(_) => {
                 let p = self.intrinsics.symbol_proto;
                 self.get_from_object(p, &key, target.clone())
             }
-            Value::BigInt(_) => {
+            V::BigInt(_) => {
                 let p = self.intrinsics.bigint_proto;
                 self.get_from_object(p, &key, target.clone())
             }
-            Value::Undefined | Value::Null | Value::Empty => {
+            V::Undefined | V::Null | V::Empty => {
                 let what = if target.is_null() { "null" } else { "undefined" };
                 let k = self.key_display(&key);
                 self.type_error(&format!("Cannot read properties of {} (reading '{}')", what, k))
@@ -196,20 +197,20 @@ impl Realm {
 
     /// `[[Set]]`; returns false when the assignment silently fails (sloppy mode).
     pub fn set(&mut self, target: Value, key: PropertyKey, value: Value) -> JsResult<bool> {
-        match &target {
-            Value::Object(id) => self.set_on_object(*id, key, value, target.clone()),
-            Value::Undefined | Value::Null | Value::Empty => {
+        match target.v() {
+            V::Object(id) => self.set_on_object(id, key, value, target.clone()),
+            V::Undefined | V::Null | V::Empty => {
                 let what = if target.is_null() { "null" } else { "undefined" };
                 let k = self.key_display(&key);
                 self.type_error(&format!("Cannot set properties of {} (setting '{}')", what, k))
             }
             _ => {
                 // Primitives: look for a setter on the prototype chain; otherwise ignore.
-                let proto = match &target {
-                    Value::String(_) => self.intrinsics.string_proto,
-                    Value::Number(_) => self.intrinsics.number_proto,
-                    Value::Bool(_) => self.intrinsics.boolean_proto,
-                    Value::Symbol(_) => self.intrinsics.symbol_proto,
+                let proto = match target.v() {
+                    V::String(_) => self.intrinsics.string_proto,
+                    V::Number(_) => self.intrinsics.number_proto,
+                    V::Bool(_) => self.intrinsics.boolean_proto,
+                    V::Symbol(_) => self.intrinsics.symbol_proto,
                     _ => self.intrinsics.bigint_proto,
                 };
                 let mut cur = Some(proto);
@@ -335,8 +336,8 @@ impl Realm {
             cur = self.obj(c).proto;
         }
         // Define on receiver.
-        let rid = match receiver {
-            Value::Object(r) => r,
+        let rid = match receiver.v() {
+            V::Object(r) => r,
             _ => return Ok(false),
         };
         // A proxy receiver (Reflect.set(target, k, v, proxy) in a set trap,
@@ -713,8 +714,8 @@ impl Realm {
     // ------------------------------------------------------ descriptors
 
     pub fn to_property_descriptor(&mut self, v: Value) -> JsResult<Property> {
-        let id = match v {
-            Value::Object(id) => id,
+        let id = match v.v() {
+            V::Object(id) => id,
             _ => return self.type_error("Property description must be an object"),
         };
         let has = |r: &mut Realm, k: &str| r.has_property(id, &PropertyKey::str(k));
@@ -753,8 +754,8 @@ impl Realm {
     /// Like `to_property_descriptor` but merges with an existing property
     /// for fields the descriptor leaves out (defineProperty semantics).
     pub fn to_property_descriptor_merged(&mut self, v: Value, existing: Option<&Property>) -> JsResult<Property> {
-        let id = match v {
-            Value::Object(id) => id,
+        let id = match v.v() {
+            V::Object(id) => id,
             _ => return self.type_error("Property description must be an object"),
         };
         let has_enum = self.has_property(id, &PropertyKey::str("enumerable"))?;
@@ -814,9 +815,9 @@ impl Realm {
     // ------------------------------------------------------- conversions
 
     pub fn to_primitive(&mut self, v: Value, hint: Hint) -> JsResult<Value> {
-        let id = match v {
-            Value::Object(id) => id,
-            other => return Ok(other),
+        let id = match v.v() {
+            V::Object(id) => id,
+            other => return Ok(other.to_value()),
         };
         if let Some(exotic) = self.get_method(Value::Object(id), PropertyKey::Symbol(SYM_TO_PRIMITIVE))? {
             let h = match hint {
@@ -844,21 +845,21 @@ impl Realm {
     }
 
     pub fn to_number(&mut self, v: Value) -> JsResult<f64> {
-        Ok(match v {
-            Value::Undefined | Value::Empty => f64::NAN,
-            Value::Null => 0.0,
-            Value::Bool(b) => {
+        Ok(match v.v() {
+            V::Undefined | V::Empty => f64::NAN,
+            V::Null => 0.0,
+            V::Bool(b) => {
                 if b {
                     1.0
                 } else {
                     0.0
                 }
             }
-            Value::Number(n) => n,
-            Value::String(s) => string_to_number(&s),
-            Value::Symbol(_) => return self.type_error("Cannot convert a Symbol value to a number"),
-            Value::BigInt(_) => return self.type_error("Cannot convert a BigInt value to a number"),
-            Value::Object(_) => {
+            V::Number(n) => n,
+            V::String(s) => string_to_number(&s),
+            V::Symbol(_) => return self.type_error("Cannot convert a Symbol value to a number"),
+            V::BigInt(_) => return self.type_error("Cannot convert a BigInt value to a number"),
+            V::Object(_) => {
                 let p = self.to_primitive(v, Hint::Number)?;
                 return self.to_number(p);
             }
@@ -868,23 +869,23 @@ impl Realm {
     /// ToNumeric: Number or BigInt.
     pub fn to_numeric(&mut self, v: Value) -> JsResult<Value> {
         let p = self.to_primitive(v, Hint::Number)?;
-        if let Value::BigInt(_) = p {
+        if let V::BigInt(_) = p.v() {
             return Ok(p);
         }
         Ok(Value::Number(self.to_number(p)?))
     }
 
     pub fn to_string(&mut self, v: Value) -> JsResult<JsStr> {
-        Ok(match v {
-            Value::Undefined | Value::Empty => JsStr::new("undefined"),
-            Value::Null => JsStr::new("null"),
-            Value::Bool(b) => JsStr::new(if b { "true" } else { "false" }),
-            Value::Number(n) if n >= 0.0 && n < 65536.0 && n == (n as u32) as f64 && !(n == 0.0 && n.is_sign_negative()) => JsStr::from_index(n as u32),
-            Value::Number(n) => JsStr::new(&number_to_string(n)),
-            Value::String(s) => s,
-            Value::Symbol(_) => return self.type_error("Cannot convert a Symbol value to a string"),
-            Value::BigInt(b) => JsStr::new(&b.to_string_radix(10)),
-            Value::Object(_) => {
+        Ok(match v.v() {
+            V::Undefined | V::Empty => JsStr::new("undefined"),
+            V::Null => JsStr::new("null"),
+            V::Bool(b) => JsStr::new(if b { "true" } else { "false" }),
+            V::Number(n) if n >= 0.0 && n < 65536.0 && n == (n as u32) as f64 && !(n == 0.0 && n.is_sign_negative()) => JsStr::from_index(n as u32),
+            V::Number(n) => JsStr::new(&number_to_string(n)),
+            V::String(s) => s.clone(),
+            V::Symbol(_) => return self.type_error("Cannot convert a Symbol value to a string"),
+            V::BigInt(b) => JsStr::new(&b.to_string_radix(10)),
+            V::Object(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 return self.to_string(p);
             }
@@ -900,48 +901,48 @@ impl Realm {
     }
 
     pub fn to_object(&mut self, v: Value) -> JsResult<ObjectId> {
-        Ok(match v {
-            Value::Object(id) => id,
-            Value::Undefined | Value::Null | Value::Empty => return self.type_error("Cannot convert undefined or null to object"),
-            Value::Bool(b) => {
+        Ok(match v.v() {
+            V::Object(id) => id,
+            V::Undefined | V::Null | V::Empty => return self.type_error("Cannot convert undefined or null to object"),
+            V::Bool(b) => {
                 let p = self.intrinsics.boolean_proto;
                 self.alloc(Object::new(Some(p), ObjectKind::Boolean(b)))
             }
-            Value::Number(n) => {
+            V::Number(n) => {
                 let p = self.intrinsics.number_proto;
                 self.alloc(Object::new(Some(p), ObjectKind::Number(n)))
             }
-            Value::String(s) => {
+            V::String(s) => {
                 let p = self.intrinsics.string_proto;
-                self.alloc(Object::new(Some(p), ObjectKind::String(s)))
+                self.alloc(Object::new(Some(p), ObjectKind::String(s.clone())))
             }
-            Value::Symbol(s) => {
+            V::Symbol(s) => {
                 let p = self.intrinsics.symbol_proto;
                 self.alloc(Object::new(Some(p), ObjectKind::Symbol(s)))
             }
-            Value::BigInt(b) => {
+            V::BigInt(b) => {
                 let p = self.intrinsics.bigint_proto;
-                self.alloc(Object::new(Some(p), ObjectKind::BigInt(b)))
+                self.alloc(Object::new(Some(p), ObjectKind::BigInt(Rc::new(b.clone()))))
             }
         })
     }
 
     pub fn to_property_key(&mut self, v: Value) -> JsResult<PropertyKey> {
-        Ok(match v {
-            Value::String(s) => PropertyKey::String(s),
-            Value::Symbol(s) => PropertyKey::Symbol(s),
-            Value::Number(n) => {
+        Ok(match v.v() {
+            V::String(s) => PropertyKey::String(s.clone()),
+            V::Symbol(s) => PropertyKey::Symbol(s),
+            V::Number(n) => {
                 if n >= 0.0 && n < 4294967295.0 && n.fract() == 0.0 {
                     PropertyKey::index(n as u32)
                 } else {
                     PropertyKey::String(JsStr::new(&number_to_string(n)))
                 }
             }
-            Value::Object(_) => {
+            V::Object(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 return self.to_property_key(p);
             }
-            other => PropertyKey::String(self.to_string(other)?),
+            other => PropertyKey::String(self.to_string(other.to_value())?),
         })
     }
 
@@ -989,26 +990,26 @@ impl Realm {
     // ---------------------------------------------------------- equality
 
     pub fn strict_equals(&self, a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
-            (Value::Empty, Value::Empty) | (Value::Empty, Value::Undefined) | (Value::Undefined, Value::Empty) => true,
-            (Value::Bool(x), Value::Bool(y)) => x == y,
-            (Value::Number(x), Value::Number(y)) => x == y,
-            (Value::String(x), Value::String(y)) => x == y,
-            (Value::Symbol(x), Value::Symbol(y)) => x == y,
-            (Value::BigInt(x), Value::BigInt(y)) => x == y,
-            (Value::Object(x), Value::Object(y)) => x == y,
+        match (a.v(), b.v()) {
+            (V::Undefined, V::Undefined) | (V::Null, V::Null) => true,
+            (V::Empty, V::Empty) | (V::Empty, V::Undefined) | (V::Undefined, V::Empty) => true,
+            (V::Bool(x), V::Bool(y)) => x == y,
+            (V::Number(x), V::Number(y)) => x == y,
+            (V::String(x), V::String(y)) => x == y,
+            (V::Symbol(x), V::Symbol(y)) => x == y,
+            (V::BigInt(x), V::BigInt(y)) => x == y,
+            (V::Object(x), V::Object(y)) => x == y,
             _ => false,
         }
     }
 
     pub fn same_value(&self, a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Number(x), Value::Number(y)) => {
+        match (a.v(), b.v()) {
+            (V::Number(x), V::Number(y)) => {
                 if x.is_nan() && y.is_nan() {
                     return true;
                 }
-                if *x == 0.0 && *y == 0.0 {
+                if x == 0.0 && y == 0.0 {
                     return x.is_sign_negative() == y.is_sign_negative();
                 }
                 x == y
@@ -1018,40 +1019,40 @@ impl Realm {
     }
 
     pub fn same_value_zero(&self, a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan() => true,
+        match (a.v(), b.v()) {
+            (V::Number(x), V::Number(y)) if x.is_nan() && y.is_nan() => true,
             _ => self.strict_equals(a, b),
         }
     }
 
     pub fn loose_equals(&mut self, a: Value, b: Value) -> JsResult<bool> {
-        match (&a, &b) {
-            (Value::Undefined | Value::Null | Value::Empty, Value::Undefined | Value::Null | Value::Empty) => Ok(true),
-            (Value::Undefined | Value::Null | Value::Empty, _) | (_, Value::Undefined | Value::Null | Value::Empty) => Ok(false),
-            (Value::Number(_), Value::String(s)) => {
+        match (a.v(), b.v()) {
+            (V::Undefined | V::Null | V::Empty, V::Undefined | V::Null | V::Empty) => Ok(true),
+            (V::Undefined | V::Null | V::Empty, _) | (_, V::Undefined | V::Null | V::Empty) => Ok(false),
+            (V::Number(_), V::String(s)) => {
                 let n = string_to_number(s);
                 Ok(a.as_number() == Some(n))
             }
-            (Value::String(s), Value::Number(_)) => {
+            (V::String(s), V::Number(_)) => {
                 let n = string_to_number(s);
                 Ok(b.as_number() == Some(n))
             }
-            (Value::BigInt(x), Value::Number(y)) | (Value::Number(y), Value::BigInt(x)) => Ok(x.eq_f64(*y)),
-            (Value::BigInt(x), Value::String(s)) | (Value::String(s), Value::BigInt(x)) => Ok(BigInt::parse(&s.to_rust_string()).map(|b| b == **x).unwrap_or(false)),
-            (Value::Bool(x), _) => {
-                let n = if *x { 1.0 } else { 0.0 };
+            (V::BigInt(x), V::Number(y)) | (V::Number(y), V::BigInt(x)) => Ok(x.eq_f64(y)),
+            (V::BigInt(x), V::String(s)) | (V::String(s), V::BigInt(x)) => Ok(BigInt::parse(&s.to_rust_string()).map(|b| b == *x).unwrap_or(false)),
+            (V::Bool(x), _) => {
+                let n = if x { 1.0 } else { 0.0 };
                 self.loose_equals(Value::Number(n), b)
             }
-            (_, Value::Bool(y)) => {
-                let n = if *y { 1.0 } else { 0.0 };
+            (_, V::Bool(y)) => {
+                let n = if y { 1.0 } else { 0.0 };
                 self.loose_equals(a, Value::Number(n))
             }
-            (Value::Object(_), Value::Object(_)) => Ok(self.strict_equals(&a, &b)),
-            (Value::Object(_), _) => {
+            (V::Object(_), V::Object(_)) => Ok(self.strict_equals(&a, &b)),
+            (V::Object(_), _) => {
                 let p = self.to_primitive(a, Hint::Default)?;
                 self.loose_equals(p, b)
             }
-            (_, Value::Object(_)) => {
+            (_, V::Object(_)) => {
                 let p = self.to_primitive(b, Hint::Default)?;
                 self.loose_equals(a, p)
             }
@@ -1082,13 +1083,13 @@ impl Realm {
             let t = Value::Object(b.target);
             return self.instance_of(v, t);
         }
-        let mut o = match v {
-            Value::Object(o) => o,
+        let mut o = match v.v() {
+            V::Object(o) => o,
             _ => return Ok(false),
         };
         let proto = self.get_str(c, "prototype")?;
-        let proto = match proto {
-            Value::Object(p) => p,
+        let proto = match proto.v() {
+            V::Object(p) => p,
             _ => return self.type_error("Function has non-object prototype in instanceof check"),
         };
         loop {
@@ -1105,8 +1106,8 @@ impl Realm {
     }
 
     pub fn type_of(&self, v: &Value) -> &'static str {
-        match v {
-            Value::Object(o) => {
+        match v.v() {
+            V::Object(o) => {
                 if self.is_callable(v) {
                     "function"
                 } else {
@@ -1182,10 +1183,10 @@ impl Realm {
 
     /// Collect an iterable into a Vec (fast path for plain arrays).
     pub fn iterate_to_vec(&mut self, v: Value) -> JsResult<Vec<Value>> {
-        if let Value::Object(id) = &v {
-            if let ObjectKind::Array { elements, length } = &self.obj(*id).kind {
+        if let V::Object(id) = v.v() {
+            if let ObjectKind::Array { elements, length } = &self.obj(id).kind {
                 // Only when the array iterator is untouched.
-                let proto_ok = self.obj(*id).proto == Some(self.intrinsics.array_proto) && !self.obj(*id).props.contains(&PropertyKey::Symbol(SYM_ITERATOR));
+                let proto_ok = self.obj(id).proto == Some(self.intrinsics.array_proto) && !self.obj(id).props.contains(&PropertyKey::Symbol(SYM_ITERATOR));
                 if proto_ok && self.array_iterator_pristine() && *length as usize == elements.len() {
                     return Ok(elements.iter().map(|e| if e.is_empty() { Value::Undefined } else { e.clone() }).collect());
                 }
@@ -1215,8 +1216,8 @@ impl Realm {
     }
 
     pub fn create_list_from_array_like(&mut self, v: Value) -> JsResult<Vec<Value>> {
-        let id = match v {
-            Value::Object(id) => id,
+        let id = match v.v() {
+            V::Object(id) => id,
             _ => return self.type_error("CreateListFromArrayLike called on non-object"),
         };
         if let ObjectKind::Array { elements, length } = &self.obj(id).kind {
@@ -1266,8 +1267,8 @@ impl Realm {
 
     /// Length of an array-like.
     pub fn length_of(&mut self, v: Value) -> JsResult<usize> {
-        if let Value::Object(id) = &v {
-            if let ObjectKind::Array { length, .. } = &self.obj(*id).kind {
+        if let V::Object(id) = v.v() {
+            if let ObjectKind::Array { length, .. } = &self.obj(id).kind {
                 return Ok(*length as usize);
             }
         }
@@ -1284,16 +1285,16 @@ impl Realm {
     }
 
     pub fn describe_for_error(&mut self, v: &Value) -> String {
-        match v {
-            Value::String(s) => format!("\"{}\"", s),
-            Value::Object(id) => match &self.obj(*id).kind {
+        match v.v() {
+            V::String(s) => format!("\"{}\"", s),
+            V::Object(id) => match &self.obj(id).kind {
                 ObjectKind::Function(c) => format!("function {}", c.code.name),
                 ObjectKind::Native(n) => format!("function {}", n.name),
                 ObjectKind::Array { .. } => "array".into(),
                 _ => "object".into(),
             },
-            Value::Undefined | Value::Empty => "undefined".into(),
-            other => self.to_string(other.clone()).map(|s| s.to_rust_string()).unwrap_or_else(|_| other.type_of().into()),
+            V::Undefined | V::Empty => "undefined".into(),
+            other => self.to_string(other.to_value()).map(|s| s.to_rust_string()).unwrap_or_else(|_| other.type_of().into()),
         }
     }
 

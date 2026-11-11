@@ -1,6 +1,7 @@
 //! `Document`: lookup, creation, `write`, `cookie`, ready state, etc.
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use crate::host::*;
 use crate::node::{self, html_collection, insert_node};
 use rabbithole_dom::{Document, Namespace, NodeData, NodeId};
@@ -291,9 +292,9 @@ pub(crate) fn validate_and_extract(ns: Option<String>, qname: &str) -> Result<(N
 fn d_create_element_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
     // `DOMString? namespace`: null and undefined are no namespace.
-    let ns = match args.first() {
-        None | Some(Value::Null) | Some(Value::Undefined) => None,
-        Some(v) => Some(realm.to_rust_string(v.clone())?),
+    let ns = match args.first().map(Value::v) {
+        None | Some(V::Null) | Some(V::Undefined) => None,
+        Some(v) => Some(realm.to_rust_string(v.to_value())?),
     };
     let qname = arg_str(realm, args, 1)?;
     let (ns, prefix, local) = match validate_and_extract(ns, &qname) {
@@ -304,11 +305,11 @@ fn d_create_element_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResu
     let node = with_doc(d, |doc| doc.create_element_ns(ns, prefix, &local, vec![]));
     let v = wrap(realm, NodeRef { doc: d, node });
     if svg {
-        if let Value::Object(id) = &v {
+        if let V::Object(id) = v.v() {
             let class = crate::host::svg_class(&local);
             let p = proto(class);
-            realm.obj_mut(*id).proto = Some(p);
-            realm.set_class_name(*id, class);
+            realm.obj_mut(id).set_proto(Some(p));
+            realm.set_class_name(id, class);
         }
     }
     Ok(v)
@@ -356,9 +357,9 @@ fn d_create_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let _ = this_doc(realm, &this)?;
     let name = arg_str(realm, args, 0)?.to_ascii_lowercase();
     let a = object_from(realm, vec![("name", Value::str(&name)), ("value", Value::str("")), ("nodeName", Value::str(&name)), ("nodeValue", Value::str("")), ("specified", Value::Bool(true))]);
-    if let Value::Object(o) = &a {
+    if let V::Object(o) = a.v() {
         let p = proto("Attr");
-        realm.obj_mut(*o).proto = Some(p);
+        realm.obj_mut(o).set_proto(Some(p));
     }
     Ok(a)
 }
@@ -662,12 +663,12 @@ fn d_fonts(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     let (p, resolve, _) = realm.new_promise();
     realm.call(Value::Object(resolve), Value::Undefined, &[Value::Undefined])?;
     let o = object_from(realm, vec![("ready", Value::Object(p)), ("status", Value::str("loaded")), ("size", Value::Number(0.0))]);
-    if let Value::Object(id) = &o {
-        realm.define_method(*id, "load", 1, fonts_load);
-        realm.define_method(*id, "check", 1, d_true);
-        realm.define_method(*id, "add", 1, d_null);
-        realm.define_method(*id, "addEventListener", 2, d_null);
-        realm.define_method(*id, "forEach", 1, d_null);
+    if let V::Object(id) = o.v() {
+        realm.define_method(id, "load", 1, fonts_load);
+        realm.define_method(id, "check", 1, d_true);
+        realm.define_method(id, "add", 1, d_null);
+        realm.define_method(id, "addEventListener", 2, d_null);
+        realm.define_method(id, "forEach", 1, d_null);
     }
     Ok(o)
 }

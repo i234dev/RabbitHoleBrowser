@@ -3,6 +3,7 @@
 //! `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `Blob` (minimal).
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use crate::host::*;
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN};
 use rabbithole_net::{Body, Request, Url};
@@ -44,8 +45,8 @@ pub(crate) struct UrlData {
 }
 
 fn url_data(realm: &mut Realm, this: &Value) -> JsResult<Url> {
-    match this {
-        Value::Object(o) => match realm.host_data::<UrlData>(*o) {
+    match this.v() {
+        V::Object(o) => match realm.host_data::<UrlData>(o) {
             Some(d) => Ok(d.url.clone()),
             None => Err(realm.throw_type_error("Illegal invocation")),
         },
@@ -54,8 +55,8 @@ fn url_data(realm: &mut Realm, this: &Value) -> JsResult<Url> {
 }
 
 fn set_url_data(realm: &mut Realm, this: &Value, u: Url) {
-    if let Value::Object(o) = this {
-        if let Some(d) = realm.host_data_mut::<UrlData>(*o) {
+    if let V::Object(o) = this.v() {
+        if let Some(d) = realm.host_data_mut::<UrlData>(o) {
             d.url = u;
         }
     }
@@ -75,12 +76,12 @@ fn parse_url_args(realm: &mut Realm, args: &[Value]) -> JsResult<Option<Url>> {
         return Ok(Some(u));
     }
     let input = realm.to_rust_string(input)?;
-    let base = match args.get(1) {
-        None | Some(Value::Undefined) => None,
-        Some(v) => match realm_url_of(realm, v) {
+    let base = match (args.get(1)).map(Value::v) {
+        None | Some(V::Undefined) => None,
+        Some(v) => match realm_url_of(realm, &v.to_value()) {
             Some(u) => Some(u),
             None => {
-                let s = realm.to_rust_string(v.clone())?;
+                let s = realm.to_rust_string(v.to_value())?;
                 match Url::parse_absolute(&s) {
                     Some(u) => Some(u),
                     None => return Ok(None),
@@ -95,8 +96,8 @@ fn parse_url_args(realm: &mut Realm, args: &[Value]) -> JsResult<Option<Url>> {
 }
 
 fn realm_url_of(realm: &Realm, v: &Value) -> Option<Url> {
-    match v {
-        Value::Object(o) => realm.host_data::<UrlData>(*o).map(|d| d.url.clone()),
+    match v.v() {
+        V::Object(o) => realm.host_data::<UrlData>(o).map(|d| d.url.clone()),
         _ => None,
     }
 }
@@ -105,9 +106,9 @@ fn url_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
     match parse_url_args(realm, args)? {
         Some(u) => {
             let v = make_url_object(realm, u);
-            if let Value::Object(id) = &v {
+            if let V::Object(id) = v.v() {
                 let p = realm.proto_from_new_target(proto("URL"));
-                realm.obj_mut(*id).proto = Some(p);
+                realm.obj_mut(id).set_proto(Some(p));
             }
             Ok(v)
         }
@@ -172,8 +173,8 @@ fn url_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     set_url_data(realm, &this, u.clone());
     // Keep searchParams in sync.
     if which.as_str() == "search" || which.as_str() == "href" {
-        if let Value::Object(o) = &this {
-            if let Some(d) = realm.host_data::<UrlData>(*o) {
+        if let V::Object(o) = this.v() {
+            if let Some(d) = realm.host_data::<UrlData>(o) {
                 if let Some(p) = d.params {
                     let pairs = parse_query(u.query.as_deref().unwrap_or(""));
                     if let Some(pd) = realm.host_data_mut::<ParamsData>(p) {
@@ -203,15 +204,15 @@ fn url_to_string(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
 
 fn url_search_params(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let u = url_data(realm, &this)?;
-    let Value::Object(o) = &this else { unreachable!() };
-    if let Some(d) = realm.host_data::<UrlData>(*o) {
+    let V::Object(o) = this.v() else { unreachable!() };
+    if let Some(d) = realm.host_data::<UrlData>(o) {
         if let Some(p) = d.params {
             return Ok(Value::Object(p));
         }
     }
     let pairs = parse_query(u.query.as_deref().unwrap_or(""));
-    let p = make_params(realm, pairs, Some(*o));
-    if let Some(d) = realm.host_data_mut::<UrlData>(*o) {
+    let p = make_params(realm, pairs, Some(o));
+    if let Some(d) = realm.host_data_mut::<UrlData>(o) {
         d.params = Some(p);
     }
     Ok(Value::Object(p))
@@ -253,8 +254,8 @@ fn make_params(realm: &mut Realm, pairs: Vec<(String, String)>, owner: Option<Ob
 }
 
 fn params_of(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
-    match this {
-        Value::Object(o) if realm.host_data::<ParamsData>(*o).is_some() => Ok(*o),
+    match this.v() {
+        V::Object(o) if realm.host_data::<ParamsData>(o).is_some() => Ok(o),
         _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
@@ -278,13 +279,13 @@ fn params_update(realm: &mut Realm, o: ObjectId, pairs: Vec<(String, String)>) {
 
 fn params_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let init = arg(args, 0);
-    let pairs: Vec<(String, String)> = match &init {
-        Value::Undefined | Value::Null => Vec::new(),
-        Value::String(s) => parse_query(&s.to_rust_string()),
-        Value::Object(o) => {
-            if let Some(d) = realm.host_data::<ParamsData>(*o) {
+    let pairs: Vec<(String, String)> = match init.v() {
+        V::Undefined | V::Null => Vec::new(),
+        V::String(s) => parse_query(&s.to_rust_string()),
+        V::Object(o) => {
+            if let Some(d) = realm.host_data::<ParamsData>(o) {
                 d.pairs.clone()
-            } else if realm.obj(*o).is_array() || realm.get_method(init.clone(), PropertyKey::Symbol(rabbithole_js::realm::SYM_ITERATOR))?.is_some() {
+            } else if realm.obj(o).is_array() || realm.get_method(init.clone(), PropertyKey::Symbol(rabbithole_js::realm::SYM_ITERATOR))?.is_some() {
                 let items = realm.iterate_to_vec(init.clone())?;
                 let mut out = Vec::new();
                 for it in items {
@@ -298,7 +299,7 @@ fn params_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
                 }
                 out
             } else {
-                let keys = realm.own_enumerable_string_keys(*o)?;
+                let keys = realm.own_enumerable_string_keys(o)?;
                 let mut out = Vec::new();
                 for k in keys {
                     let v = realm.get(init.clone(), k.clone())?;
@@ -308,11 +309,11 @@ fn params_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
                 out
             }
         }
-        other => parse_query(&realm.to_rust_string(other.clone())?),
+        other => parse_query(&realm.to_rust_string(other.to_value())?),
     };
     let o = make_params(realm, pairs, None);
     let p = realm.proto_from_new_target(proto("URLSearchParams"));
-    realm.obj_mut(o).proto = Some(p);
+    realm.obj_mut(o).set_proto(Some(p));
     Ok(Value::Object(o))
 }
 
@@ -441,8 +442,8 @@ pub(crate) struct HeadersData {
 }
 
 fn headers_of(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
-    match this {
-        Value::Object(o) if realm.host_data::<HeadersData>(*o).is_some() => Ok(*o),
+    match this.v() {
+        V::Object(o) if realm.host_data::<HeadersData>(o).is_some() => Ok(o),
         _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
@@ -457,13 +458,13 @@ pub(crate) fn make_headers(realm: &mut Realm, list: Vec<(String, String)>) -> Ob
 
 /// Convert a Headers init (object, array of pairs, Headers) to a list.
 pub(crate) fn headers_from_init(realm: &mut Realm, init: &Value) -> JsResult<Vec<(String, String)>> {
-    match init {
-        Value::Undefined | Value::Null => Ok(Vec::new()),
-        Value::Object(o) => {
-            if let Some(h) = realm.host_data::<HeadersData>(*o) {
+    match init.v() {
+        V::Undefined | V::Null => Ok(Vec::new()),
+        V::Object(o) => {
+            if let Some(h) = realm.host_data::<HeadersData>(o) {
                 return Ok(h.list.clone());
             }
-            if realm.obj(*o).is_array() {
+            if realm.obj(o).is_array() {
                 let items = realm.iterate_to_vec(init.clone())?;
                 let mut out = Vec::new();
                 for it in items {
@@ -476,7 +477,7 @@ pub(crate) fn headers_from_init(realm: &mut Realm, init: &Value) -> JsResult<Vec
                 }
                 return Ok(out);
             }
-            let keys = realm.own_enumerable_string_keys(*o)?;
+            let keys = realm.own_enumerable_string_keys(o)?;
             let mut out = Vec::new();
             for k in keys {
                 let v = realm.get(init.clone(), k.clone())?;
@@ -578,22 +579,22 @@ pub(crate) struct BodyData {
 }
 
 pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(Vec<u8>, Option<String>)> {
-    match v {
-        Value::Undefined | Value::Null => Ok((Vec::new(), None)),
-        Value::String(s) => Ok((s.to_rust_string().into_bytes(), Some("text/plain;charset=UTF-8".into()))),
-        Value::Object(o) => {
-            if let Some(p) = realm.host_data::<ParamsData>(*o) {
+    match v.v() {
+        V::Undefined | V::Null => Ok((Vec::new(), None)),
+        V::String(s) => Ok((s.to_rust_string().into_bytes(), Some("text/plain;charset=UTF-8".into()))),
+        V::Object(o) => {
+            if let Some(p) = realm.host_data::<ParamsData>(o) {
                 return Ok((serialize_query(&p.pairs).into_bytes(), Some("application/x-www-form-urlencoded;charset=UTF-8".into())));
             }
-            if let Some(f) = realm.host_data::<FormDataData>(*o) {
+            if let Some(f) = realm.host_data::<FormDataData>(o) {
                 let fields: Vec<(String, String)> = f.fields.clone();
                 let b = Body::multipart(&fields, &[]);
                 return Ok((b.data, Some(b.content_type)));
             }
-            if let Some(b) = realm.host_data::<BodyData>(*o) {
+            if let Some(b) = realm.host_data::<BodyData>(o) {
                 return Ok((b.bytes.clone(), None));
             }
-            match &realm.obj(*o).kind {
+            match &realm.obj(o).kind {
                 rabbithole_js::ObjectKind::ArrayBuffer(buf) => Ok((buf.borrow().clone(), None)),
                 rabbithole_js::ObjectKind::TypedArray(t) => {
                     let buf = realm.obj(t.buffer);
@@ -612,7 +613,7 @@ pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(V
             }
         }
         other => {
-            let s = realm.to_rust_string(other.clone())?;
+            let s = realm.to_rust_string(other.to_value())?;
             Ok((s.into_bytes(), Some("text/plain;charset=UTF-8".into())))
         }
     }
@@ -658,10 +659,10 @@ fn status_text(status: u16) -> &'static str {
 }
 
 fn take_body(realm: &mut Realm, this: &Value) -> JsResult<Vec<u8>> {
-    let Value::Object(o) = this else {
+    let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
-    let Some(b) = realm.host_data_mut::<BodyData>(*o) else {
+    let Some(b) = realm.host_data_mut::<BodyData>(o) else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
     if b.used {
@@ -669,7 +670,7 @@ fn take_body(realm: &mut Realm, this: &Value) -> JsResult<Vec<u8>> {
     }
     b.used = true;
     let bytes = b.bytes.clone();
-    realm.define_property(*o, "bodyUsed", Value::Bool(true), ACC);
+    realm.define_property(o, "bodyUsed", Value::Bool(true), ACC);
     Ok(bytes)
 }
 
@@ -722,7 +723,7 @@ fn body_json(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 pub fn make_array_buffer(realm: &mut Realm, bytes: Vec<u8>) -> Value {
     let ctor = realm.get_str(Value::Object(realm.global()), "ArrayBuffer").unwrap_or(Value::Undefined);
     if realm.is_constructor(&ctor) {
-        if let Ok(Value::Object(ab)) = realm.construct(ctor, &[Value::Number(bytes.len() as f64)], Value::Undefined) {
+        if let Ok(V::Object(ab)) = realm.construct(ctor, &[Value::Number(bytes.len() as f64)], Value::Undefined).as_ref().map(Value::v) {
             if let rabbithole_js::ObjectKind::ArrayBuffer(buf) = &realm.obj(ab).kind {
                 *buf.borrow_mut() = bytes;
                 return Value::Object(ab);
@@ -773,10 +774,10 @@ fn body_form_data(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
 }
 
 fn response_clone(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = &this else {
+    let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
-    let bytes = realm.host_data::<BodyData>(*o).map(|b| b.bytes.clone()).unwrap_or_default();
+    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
     let url = realm.get_str(this.clone(), "url")?;
     let status = realm.get_str(this.clone(), "status")?;
     let st = realm.get_str(this.clone(), "statusText")?;
@@ -839,13 +840,13 @@ pub(crate) fn make_request(realm: &mut Realm, url: &str, method: &str, headers: 
 
 /// Resolve (url, method, headers, body) from fetch/Request arguments.
 fn request_parts(realm: &mut Realm, input: &Value, init: &Value) -> JsResult<(String, String, Vec<(String, String)>, Vec<u8>)> {
-    let (mut url, mut method, mut headers, mut body) = match input {
-        Value::Object(o) if realm.host_data::<BodyData>(*o).is_some() && realm.get_str(input.clone(), "method").map(|m| !m.is_undefined()).unwrap_or(false) => {
+    let (mut url, mut method, mut headers, mut body) = match input.v() {
+        V::Object(o) if realm.host_data::<BodyData>(o).is_some() && realm.get_str(input.clone(), "method").map(|m| !m.is_undefined()).unwrap_or(false) => {
             let u = realm.get_str(input.clone(), "url")?;
             let m = realm.get_str(input.clone(), "method")?;
             let h = realm.get_str(input.clone(), "headers")?;
             let list = h.as_object().and_then(|h| realm.host_data::<HeadersData>(h).map(|d| d.list.clone())).unwrap_or_default();
-            let b = realm.host_data::<BodyData>(*o).map(|b| b.bytes.clone()).unwrap_or_default();
+            let b = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
             (realm.to_rust_string(u)?, realm.to_rust_string(m)?, list, b)
         }
         _ => {
@@ -884,18 +885,18 @@ fn request_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     let req = make_request(realm, &url, &method, headers, body);
     // `signal` follows init.signal, else the input Request's signal.
     let mut signal = Value::Undefined;
-    if let init @ Value::Object(_) = arg(args, 1) {
-        signal = realm.get_str(init, "signal")?;
+    if let init @ V::Object(_) = (arg(args, 1)).v() {
+        signal = realm.get_str(init.to_value(), "signal")?;
     }
     if signal.is_nullish() {
-        if let input @ Value::Object(_) = arg(args, 0) {
-            if realm.get_str(input.clone(), "method").map(|m| !m.is_undefined()).unwrap_or(false) {
-                signal = realm.get_str(input, "signal")?;
+        if let input @ V::Object(_) = (arg(args, 0)).v() {
+            if realm.get_str(input.to_value(), "method").map(|m| !m.is_undefined()).unwrap_or(false) {
+                signal = realm.get_str(input.to_value(), "signal")?;
             }
         }
     }
-    if let (Value::Object(o), Value::Object(_)) = (&req, &signal) {
-        realm.define_property(*o, "signal", signal, ACC);
+    if let (V::Object(o), V::Object(_)) = (req.v(), signal.v()) {
+        realm.define_property(o, "signal", signal, ACC);
     }
     Ok(req)
 }
@@ -1082,8 +1083,8 @@ fn form_data_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
 }
 
 fn fd_of(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
-    match this {
-        Value::Object(o) if realm.host_data::<FormDataData>(*o).is_some() => Ok(*o),
+    match this.v() {
+        V::Object(o) if realm.host_data::<FormDataData>(o).is_some() => Ok(o),
         _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
@@ -1199,27 +1200,27 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 }
 
 fn blob_text(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = &this else {
+    let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
-    let bytes = realm.host_data::<BodyData>(*o).map(|b| b.bytes.clone()).unwrap_or_default();
+    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
     resolved(realm, Value::str(&String::from_utf8_lossy(&bytes)))
 }
 
 fn blob_array_buffer(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = &this else {
+    let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
-    let bytes = realm.host_data::<BodyData>(*o).map(|b| b.bytes.clone()).unwrap_or_default();
+    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
     let ab = make_array_buffer(realm, bytes);
     resolved(realm, ab)
 }
 
 fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = &this else {
+    let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
-    let bytes = realm.host_data::<BodyData>(*o).map(|b| b.bytes.clone()).unwrap_or_default();
+    let bytes = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
     let start = realm.relative_index(arg(args, 0), bytes.len(), 0)?;
     let end = realm.relative_index(arg(args, 1), bytes.len(), bytes.len())?;
     let ty = arg_str_opt(realm, args, 2)?.unwrap_or_default();
@@ -1230,14 +1231,14 @@ fn blob_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
 /// blob's bytes for fetch / XHR / workers until revoked.
 fn url_create_object_url(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
-    let (bytes, ty) = match &v {
-        Value::Object(o) if realm.host_data::<BodyData>(*o).is_some() => {
-            let b = realm.host_data::<BodyData>(*o).map(|b| b.bytes.clone()).unwrap_or_default();
+    let (bytes, ty) = match v.v() {
+        V::Object(o) if realm.host_data::<BodyData>(o).is_some() => {
+            let b = realm.host_data::<BodyData>(o).map(|b| b.bytes.clone()).unwrap_or_default();
             let t = realm.get_str(v.clone(), "type").ok().and_then(|t| realm.to_rust_string(t).ok()).unwrap_or_default();
             (b, t)
         }
         // MediaSource and other objects: an opaque URL.
-        Value::Object(_) => (Vec::new(), String::new()),
+        V::Object(_) => (Vec::new(), String::new()),
         _ => return Err(realm.throw_type_error("Failed to execute 'createObjectURL' on 'URL': Overload resolution failed.")),
     };
     let mut b = [0u8; 16];
@@ -1363,8 +1364,8 @@ pub(crate) struct XhrData {
 }
 
 fn xhr_of(realm: &mut Realm, this: &Value) -> JsResult<ObjectId> {
-    match this {
-        Value::Object(o) if realm.host_data::<XhrData>(*o).is_some() => Ok(*o),
+    match this.v() {
+        V::Object(o) if realm.host_data::<XhrData>(o).is_some() => Ok(o),
         _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }
@@ -1476,8 +1477,8 @@ fn xhr_finish_events(realm: &mut Realm, o: ObjectId) {
 /// Job: deliver the result of an asynchronous XHR.
 fn xhr_deliver(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     let caps = native_captures(realm);
-    if let Some(Value::Object(o)) = caps.first() {
-        let o = *o;
+    if let Some(V::Object(o)) = caps.first().map(Value::v) {
+        let o = o;
         if realm.host_data::<XhrData>(o).map(|d| d.sent).unwrap_or(false) {
             fire_xhr_event(realm, o, "loadstart");
             let (url, method, headers, body) = {
@@ -1610,7 +1611,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(url, "toString", 0, url_to_string);
     realm.define_method(url, "toJSON", 0, url_to_string);
     let url_ctor_v = realm.obj(url).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
-    if let Value::Object(c) = url_ctor_v {
+    if let V::Object(c) = url_ctor_v.v() {
         realm.define_method(c, "canParse", 1, url_can_parse);
         realm.define_method(c, "parse", 1, url_parse_static);
         realm.define_method(c, "createObjectURL", 1, url_create_object_url);
@@ -1655,7 +1656,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(resp, "clone", 0, response_clone);
     realm.define_property(resp, "body", Value::Null, HIDDEN);
     let resp_ctor = realm.obj(resp).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
-    if let Value::Object(c) = resp_ctor {
+    if let V::Object(c) = resp_ctor.v() {
         realm.define_method(c, "error", 0, response_error);
         realm.define_method(c, "json", 1, response_json_static);
     }
@@ -1731,9 +1732,9 @@ fn file_reader_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Va
 }
 
 fn file_reader_finish(realm: &mut Realm, this: Value, result: Value) -> JsResult<Value> {
-    if let Value::Object(o) = &this {
-        realm.define_property(*o, "result", result, ALL);
-        realm.define_property(*o, "readyState", Value::Number(2.0), ALL);
+    if let V::Object(o) = this.v() {
+        realm.define_property(o, "result", result, ALL);
+        realm.define_property(o, "readyState", Value::Number(2.0), ALL);
         let f = realm.new_native_function_full("frDeliver", 0, file_reader_deliver, None, vec![this.clone()], false);
         realm.enqueue_callback(Value::Object(f), Value::Undefined, vec![]);
     }
@@ -1742,9 +1743,9 @@ fn file_reader_finish(realm: &mut Realm, this: Value, result: Value) -> JsResult
 
 fn file_reader_deliver(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     let caps = native_captures(realm);
-    if let Some(Value::Object(o)) = caps.first() {
-        fire_xhr_event(realm, *o, "load");
-        fire_xhr_event(realm, *o, "loadend");
+    if let Some(V::Object(o)) = caps.first().map(Value::v) {
+        fire_xhr_event(realm, o, "load");
+        fire_xhr_event(realm, o, "loadend");
     }
     Ok(Value::Undefined)
 }

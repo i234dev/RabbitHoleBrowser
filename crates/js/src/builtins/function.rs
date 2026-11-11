@@ -1,6 +1,7 @@
 //! Function.prototype and the Function constructor.
 
 use super::*;
+use crate::value::V;
 use crate::realm::SYM_HAS_INSTANCE;
 
 pub fn register(realm: &mut Realm) {
@@ -42,7 +43,7 @@ pub fn register(realm: &mut Realm) {
     ] {
         let c = realm.new_native_constructor(name, 1, f, proto);
         let fc = realm.intrinsics.function_ctor;
-        realm.obj_mut(c).proto = Some(fc);
+        realm.obj_mut(c).set_proto(Some(fc));
         realm.define_property(proto, "constructor", Value::Object(c), CONFIGURABLE);
     }
 }
@@ -73,17 +74,17 @@ fn apply(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         return realm.type_error("Function.prototype.apply was called on a non-function");
     }
     let t = arg(args, 0);
-    let list = match arg(args, 1) {
-        Value::Undefined | Value::Null => Vec::new(),
-        v @ Value::Object(_) => realm.create_list_from_array_like(v)?,
+    let list = match (arg(args, 1)).v() {
+        V::Undefined | V::Null => Vec::new(),
+        v @ V::Object(_) => realm.create_list_from_array_like(v.to_value())?,
         _ => return realm.type_error("CreateListFromArrayLike called on non-object"),
     };
     realm.call(this, t, &list)
 }
 
 fn bind(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let target = match this {
-        Value::Object(id) if realm.is_callable(&this) => id,
+    let target = match this.v() {
+        V::Object(id) if realm.is_callable(&this) => id,
         _ => return realm.type_error("Bind must be called on a function"),
     };
     let bound_this = arg(args, 0);
@@ -92,14 +93,14 @@ fn bind(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n_bound = bound_args.len();
     let b = realm.alloc(Object::new(proto, ObjectKind::Bound(Box::new(BoundFunction { target, this: bound_this, args: bound_args }))));
     let len = realm.get_str(Value::Object(target), "length")?;
-    let len = match len {
-        Value::Number(n) => (n - n_bound as f64).max(0.0),
+    let len = match len.v() {
+        V::Number(n) => (n - n_bound as f64).max(0.0),
         _ => 0.0,
     };
     realm.define_property(b, "length", Value::Number(len), CONFIGURABLE);
     let name = realm.get_str(Value::Object(target), "name")?;
-    let name = match name {
-        Value::String(s) => s.to_rust_string(),
+    let name = match name.v() {
+        V::String(s) => s.to_rust_string(),
         _ => String::new(),
     };
     realm.define_property(b, "name", Value::str(&format!("bound {}", name)), CONFIGURABLE);
@@ -107,8 +108,8 @@ fn bind(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let id = match this {
-        Value::Object(id) if realm.is_callable(&this) => id,
+    let id = match this.v() {
+        V::Object(id) if realm.is_callable(&this) => id,
         _ => return realm.type_error("Function.prototype.toString requires that 'this' be a Function"),
     };
     let s = match &realm.obj(id).kind {

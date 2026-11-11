@@ -3,6 +3,7 @@
 //! formatting.
 
 use super::*;
+use crate::value::V;
 use crate::realm::SYM_TO_PRIMITIVE;
 use std::sync::OnceLock;
 
@@ -1229,9 +1230,9 @@ pub fn register(realm: &mut Realm) {
 }
 
 fn this_time(realm: &mut Realm, this: &Value, method: &str) -> JsResult<(ObjectId, f64)> {
-    if let Value::Object(id) = this {
-        if let ObjectKind::Date(t) = &realm.obj(*id).kind {
-            return Ok((*id, *t));
+    if let V::Object(id) = this.v() {
+        if let ObjectKind::Date(t) = &realm.obj(id).kind {
+            return Ok((id, *t));
         }
     }
     realm.type_error(&format!("this is not a Date object. (Date.prototype.{})", method))
@@ -1251,16 +1252,16 @@ fn date_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
         0 => now_ms(),
         1 => {
             let v = args[0].clone();
-            if let Value::Object(id) = &v {
-                if let ObjectKind::Date(t) = &realm.obj(*id).kind {
+            if let V::Object(id) = v.v() {
+                if let ObjectKind::Date(t) = &realm.obj(id).kind {
                     let t = *t;
                     return finish_ctor(realm, t);
                 }
             }
             let prim = realm.to_primitive(v, crate::interop::Hint::Default)?;
-            match prim {
-                Value::String(s) => parse_date(&s.to_rust_string()),
-                other => time_clip(realm.to_number(other)?),
+            match prim.v() {
+                V::String(s) => parse_date(&s.to_rust_string()),
+                other => time_clip(realm.to_number(other.to_value())?),
             }
         }
         _ => {
@@ -1502,7 +1503,7 @@ fn to_iso_string_m(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<
 fn to_json(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let o = realm.to_object(this)?;
     let tv = realm.to_primitive(Value::Object(o), crate::interop::Hint::Number)?;
-    if let Value::Number(n) = tv {
+    if let V::Number(n) = tv.v() {
         if !n.is_finite() {
             return Ok(Value::Null);
         }
@@ -1512,9 +1513,9 @@ fn to_json(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
 
 fn to_primitive(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_object(realm, &this, "Date.prototype[Symbol.toPrimitive]")?;
-    let hint = match arg(args, 0) {
-        Value::String(s) if s.eq_str("number") => crate::interop::Hint::Number,
-        Value::String(s) if s.eq_str("string") || s.eq_str("default") => crate::interop::Hint::String,
+    let hint = match (arg(args, 0)).v() {
+        V::String(s) if s.eq_str("number") => crate::interop::Hint::Number,
+        V::String(s) if s.eq_str("string") || s.eq_str("default") => crate::interop::Hint::String,
         _ => return realm.type_error("Invalid hint"),
     };
     ordinary_to_primitive(realm, id, hint)

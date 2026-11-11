@@ -6,6 +6,7 @@
 //! never run.
 
 use super::typed_array::{ta_get, ta_set_value};
+use crate::value::V;
 use super::*;
 use crate::realm::SYM_TO_STRING_TAG;
 
@@ -124,16 +125,16 @@ Object.defineProperty(Array, "fromAsync", { writable: true, configurable: true, 
 
 fn weak_ref_key(realm: &Realm) -> PropertyKey {
     let holder = realm.intrinsics.others["WeakRefTargetKey"];
-    match realm.obj(holder).props.get(&PropertyKey::str("sym")).map(|p| p.value.clone()) {
-        Some(Value::Symbol(s)) => PropertyKey::Symbol(s),
+    match (realm.obj(holder).props.get(&PropertyKey::str("sym")).map(|p| p.value.clone())).as_ref().map(Value::v) {
+        Some(V::Symbol(s)) => PropertyKey::Symbol(s),
         _ => PropertyKey::str("__target"),
     }
 }
 
 fn can_be_held_weakly(realm: &Realm, v: &Value) -> bool {
-    match v {
-        Value::Object(_) => true,
-        Value::Symbol(s) => realm.symbol_key_for(*s).is_none(),
+    match v.v() {
+        V::Object(_) => true,
+        V::Symbol(s) => realm.symbol_key_for(s).is_none(),
         _ => false,
     }
 }
@@ -215,8 +216,8 @@ fn finalization_unregister(realm: &mut Realm, this: Value, args: &[Value]) -> Js
 // ------------------------------------------------------------ Atomics
 
 fn atomics_target(realm: &mut Realm, args: &[Value]) -> JsResult<(TypedArrayData, usize)> {
-    let t = match arg(args, 0) {
-        Value::Object(id) => match &realm.obj(id).kind {
+    let t = match (arg(args, 0)).v() {
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::TypedArray(t) => TypedArrayData { kind: t.kind, buffer: t.buffer, byte_offset: t.byte_offset, length: t.length },
             _ => return realm.type_error("[object Object] is not an integer shared typed array."),
         },
@@ -236,9 +237,9 @@ fn atomics_rmw(realm: &mut Realm, args: &[Value], op: fn(i128, i128) -> i128) ->
     let (t, idx) = atomics_target(realm, args)?;
     let old = ta_get(realm, &t, idx).unwrap_or(Value::Number(0.0));
     let operand = arg(args, 2);
-    let (a, b, is_big) = match (&old, &operand) {
-        (Value::BigInt(o), _) => (o.to_i128_wrapping(), super::typed_array::to_bigint(realm, operand.clone())?, true),
-        (Value::Number(o), _) => (*o as i128, to_integer(realm.to_number(operand.clone())?) as i128, false),
+    let (a, b, is_big) = match (old.v(), operand.v()) {
+        (V::BigInt(o), _) => (o.to_i128_wrapping(), super::typed_array::to_bigint(realm, operand.clone())?, true),
+        (V::Number(o), _) => (o as i128, to_integer(realm.to_number(operand.clone())?) as i128, false),
         _ => (0, 0, false),
     };
     let new = op(a, b);
@@ -272,10 +273,10 @@ fn atomics_compare_exchange(realm: &mut Realm, _this: Value, args: &[Value]) -> 
     // Coerce the expected value through the array type so comparisons match.
     let expected = arg(args, 2);
     let replacement = arg(args, 3);
-    let matches = match (&old, &expected) {
-        (Value::BigInt(o), e) => super::typed_array::to_bigint(realm, e.clone())? == o.to_i128_wrapping(),
-        (Value::Number(o), e) => {
-            let n = realm.to_number(e.clone())?;
+    let matches = match (old.v(), expected.v()) {
+        (V::BigInt(o), e) => super::typed_array::to_bigint(realm, e.to_value())? == o.to_i128_wrapping(),
+        (V::Number(o), e) => {
+            let n = realm.to_number(e.to_value())?;
             // Apply the element type's wrap-around before comparing.
             let tmp = super::typed_array::create_typed_array(realm, t.kind, 1, None)?;
             let td = match &realm.obj(tmp).kind {
@@ -283,7 +284,7 @@ fn atomics_compare_exchange(realm: &mut Realm, _this: Value, args: &[Value]) -> 
                 _ => unreachable!(),
             };
             typed_array_set(realm, &td, 0, n);
-            ta_get(realm, &td, 0).and_then(|v| v.as_number()) == Some(*o)
+            ta_get(realm, &td, 0).and_then(|v| v.as_number()) == Some(o)
         }
         _ => false,
     };
@@ -320,9 +321,9 @@ fn atomics_wait(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     let (t, idx) = atomics_target(realm, args)?;
     let cur = ta_get(realm, &t, idx).unwrap_or(Value::Undefined);
     let expected = arg(args, 2);
-    let eq = match (&cur, &expected) {
-        (Value::Number(a), e) => realm.to_number(e.clone())? == *a,
-        (Value::BigInt(a), e) => super::typed_array::to_bigint(realm, e.clone())? == a.to_i128_wrapping(),
+    let eq = match (cur.v(), expected.v()) {
+        (V::Number(a), e) => realm.to_number(e.to_value())? == a,
+        (V::BigInt(a), e) => super::typed_array::to_bigint(realm, e.to_value())? == a.to_i128_wrapping(),
         _ => false,
     };
     // Single-threaded: nobody can wake us, so a matching wait times out.
@@ -366,9 +367,9 @@ fn regexp_exec_recording(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
     let orig = caps.first().cloned().unwrap_or(Value::Undefined);
     let ctor = caps.get(1).cloned().unwrap_or(Value::Undefined);
     let result = realm.call(orig, this, args)?;
-    if let (Value::Object(arr), Value::Object(c)) = (&result, &ctor) {
+    if let (V::Object(arr), V::Object(c)) = (result.v(), ctor.v()) {
         let key = PropertyKey::str("__lastMatch__");
-        realm.define_property(*c, key, Value::Object(*arr), WRITABLE | CONFIGURABLE);
+        realm.define_property(c, key, Value::Object(arr), WRITABLE | CONFIGURABLE);
     }
     Ok(result)
 }

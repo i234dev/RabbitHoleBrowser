@@ -1,6 +1,7 @@
 //! Engine tests driven through `Realm::eval`.
 
 use crate::realm::Realm;
+use crate::value::V;
 use crate::value::Value;
 
 fn run(src: &str) -> Result<String, String> {
@@ -602,8 +603,8 @@ fn gc_survives_allocation_churn() {
     let mut realm = Realm::new();
     realm.gc_threshold = 1000;
     let r = realm.eval("var keep = []; for (let i = 0; i < 20000; i++) { const o = {i, arr: [i, i + 1], s: 'x' + i}; if (i % 1000 == 0) keep.push(o); } keep.map(o => o.arr[1]).join()", "gc.js");
-    match r {
-        Ok(Value::String(s)) => assert_eq!(s.to_rust_string(), "1,1001,2001,3001,4001,5001,6001,7001,8001,9001,10001,11001,12001,13001,14001,15001,16001,17001,18001,19001"),
+    match r.as_ref().map(Value::v) {
+        Ok(V::String(s)) => assert_eq!(s.to_rust_string(), "1,1001,2001,3001,4001,5001,6001,7001,8001,9001,10001,11001,12001,13001,14001,15001,16001,17001,18001,19001"),
         Ok(v) => panic!("unexpected {:?}", v),
         Err(e) => panic!("{}", realm.error_to_string(&e)),
     }
@@ -971,8 +972,8 @@ fn es2023_surface_probe() {
     let mut missing = Vec::new();
     for p in probes {
         let src = format!("(function(){{ try {{ var v = {}; return typeof v === 'function' || typeof v === 'object' || typeof v === 'symbol'; }} catch (e) {{ return false; }} }})()", p);
-        match realm.eval(&src, "probe.js") {
-            Ok(Value::Bool(true)) => {}
+        match realm.eval(&src, "probe.js").as_ref().map(Value::v) {
+            Ok(V::Bool(true)) => {}
             _ => missing.push(p),
         }
     }

@@ -8,6 +8,7 @@
 //! handle the slot is released lazily.
 
 use crate::host::*;
+use rabbithole_js::V;
 use rabbithole_dom::{BoundaryPoint, Document, IteratorPosition};
 use rabbithole_js::{JsResult, Realm, Value, CONFIGURABLE, ENUMERABLE};
 use std::cell::RefCell;
@@ -61,8 +62,8 @@ fn offset_arg(realm: &mut Realm, v: Value) -> JsResult<usize> {
 }
 
 fn handle_obj(realm: &mut Realm, this: &Value) -> JsResult<rabbithole_js::ObjectId> {
-    match this {
-        Value::Object(o) if realm.host_data::<PointHandle>(*o).is_some() || realm.host_data::<IterHandle>(*o).is_some() => Ok(*o),
+    match this.v() {
+        V::Object(o) if realm.host_data::<PointHandle>(o).is_some() || realm.host_data::<IterHandle>(o).is_some() => Ok(o),
         _ => Err(realm.throw_type_error("Illegal invocation")),
     }
 }

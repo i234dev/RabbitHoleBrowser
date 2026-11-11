@@ -34,6 +34,7 @@ pub use host::{NodeRef, TargetKey};
 pub use rabbithole_js::exclude_from_watchdog;
 
 use env::{with_env, EnvGuard};
+use rabbithole_js::V;
 use host::{state, HostState, StateGuard};
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_js::{Realm, Value};
@@ -254,7 +255,7 @@ impl ScriptHost {
             }
             // The document wrapper (the JS-implemented APIs use `document`).
             let doc_obj = host::wrap_main(realm, Document::ROOT);
-            if let Value::Object(d) = doc_obj {
+            if let V::Object(d) = doc_obj.v() {
                 host.state.borrow_mut().document_obj = d;
             }
             // Web APIs written in JavaScript (DOMMatrix, CSSOM, ...).

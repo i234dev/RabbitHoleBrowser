@@ -1,6 +1,7 @@
 //! `Element`, `HTMLElement` and the tag-specific subclasses.
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use crate::host::*;
 use crate::node::{self, children_of, inner_text, insert_node, remove_node, set_inner_html, set_text_content};
 use rabbithole_dom::{Document, NodeData, NodeId};
@@ -218,9 +219,9 @@ fn e_attributes(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
     let mut items = Vec::new();
     for (k, v) in &attrs {
         let a = object_from(realm, vec![("name", Value::str(k)), ("localName", Value::str(k)), ("value", Value::str(v)), ("nodeName", Value::str(k)), ("nodeValue", Value::str(v)), ("specified", Value::Bool(true))]);
-        if let Value::Object(o) = a {
+        if let V::Object(o) = a.v() {
             let p = proto("Attr");
-            realm.obj_mut(o).proto = Some(p);
+            realm.obj_mut(o).set_proto(Some(p));
             let owner = wrap(realm, n);
             realm.define_property(o, "ownerElement", owner, CONFIGURABLE);
         }
@@ -228,7 +229,7 @@ fn e_attributes(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
     }
     let arr = realm.new_array(items.clone());
     let p = proto("NamedNodeMap");
-    realm.obj_mut(arr).proto = Some(p);
+    realm.obj_mut(arr).set_proto(Some(p));
     for ((k, _), v) in attrs.iter().zip(items) {
         if !realm.obj(arr).props.contains(&PropertyKey::str(k)) {
             realm.define_property(arr, k.as_str(), v, rabbithole_js::HIDDEN);
@@ -284,8 +285,8 @@ fn tokens_of(n: NodeRef, attr: &str) -> Vec<String> {
 }
 
 fn token_list_ref(realm: &mut Realm, this: &Value) -> JsResult<TokenListRef> {
-    match this {
-        Value::Object(o) => match realm.host_data::<TokenListRef>(*o) {
+    match this.v() {
+        V::Object(o) => match realm.host_data::<TokenListRef>(o) {
             Some(r) => Ok(TokenListRef { node: r.node, attr: r.attr }),
             None => Err(realm.throw_type_error("Illegal invocation")),
         },
@@ -444,19 +445,19 @@ pub(crate) fn token_list(realm: &mut Realm, wrapper: ObjectId, n: NodeRef, attr:
 
 fn e_class_list(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "classList")?;
-    let Value::Object(w) = this else { unreachable!() };
+    let V::Object(w) = this.v() else { unreachable!() };
     Ok(token_list(realm, w, n, "class"))
 }
 
 fn e_rel_list(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "relList")?;
-    let Value::Object(w) = this else { unreachable!() };
+    let V::Object(w) = this.v() else { unreachable!() };
     Ok(token_list(realm, w, n, "rel"))
 }
 
 fn e_part(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "part")?;
-    let Value::Object(w) = this else { unreachable!() };
+    let V::Object(w) = this.v() else { unreachable!() };
     Ok(token_list(realm, w, n, "part"))
 }
 
@@ -502,7 +503,7 @@ fn proxy_target_node(realm: &mut Realm, args: &[Value]) -> JsResult<NodeRef> {
 fn dataset_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let n = proxy_target_node(realm, args)?;
     let key = arg(args, 1);
-    let Value::String(k) = key else { return Ok(Value::Undefined) };
+    let V::String(k) = key.v() else { return Ok(Value::Undefined) };
     let k = k.to_rust_string();
     if k == "toJSON" {
         let f = realm.new_native_function("toJSON", 0, dataset_to_json);
@@ -570,7 +571,7 @@ pub(crate) fn make_proxy(realm: &mut Realm, target: ObjectId, traps: &[(&str, ra
 
 fn e_dataset(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "dataset")?;
-    let Value::Object(w) = this else { unreachable!() };
+    let V::Object(w) = this.v() else { unreachable!() };
     let cached = get_hidden(realm, w, "__dataset");
     if cached.is_object() {
         return Ok(cached);
@@ -592,9 +593,9 @@ fn e_inner_html_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
 
 fn e_inner_html_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "innerHTML")?;
-    let html = match args.first() {
-        None | Some(Value::Null) | Some(Value::Undefined) => String::new(),
-        Some(v) => realm.to_rust_string(v.clone())?,
+    let html = match args.first().map(Value::v) {
+        None | Some(V::Null) | Some(V::Undefined) => String::new(),
+        Some(v) => realm.to_rust_string(v.to_value())?,
     };
     set_inner_html(realm, n, &html)?;
     Ok(Value::Undefined)
@@ -769,9 +770,9 @@ pub(crate) fn dom_rect(realm: &mut Realm, x: f32, y: f32, w: f32, h: f32) -> Val
         ("right", Value::Number(x.max(x + w) as f64)),
         ("bottom", Value::Number(y.max(y + h) as f64)),
     ]);
-    if let Value::Object(id) = o {
+    if let V::Object(id) = o.v() {
         let p = proto("DOMRect");
-        realm.obj_mut(id).proto = Some(p);
+        realm.obj_mut(id).set_proto(Some(p));
     }
     o
 }
@@ -940,12 +941,12 @@ fn set_element_scroll(realm: &mut Realm, this: &Value, n: NodeRef, x: Option<f64
         state().borrow_mut().render.dirty = true;
     } else if cur.is_none() {
         // No box (or no layout support): remember the values.
-        if let Value::Object(w) = this {
+        if let V::Object(w) = this.v() {
             if let Some(x) = x {
-                set_hidden(realm, *w, "__scrollLeft", Value::Number(x.max(0.0)));
+                set_hidden(realm, w, "__scrollLeft", Value::Number(x.max(0.0)));
             }
             if let Some(y) = y {
-                set_hidden(realm, *w, "__scrollTop", Value::Number(y.max(0.0)));
+                set_hidden(realm, w, "__scrollTop", Value::Number(y.max(0.0)));
             }
         }
     }
@@ -969,7 +970,7 @@ fn e_scroll_top_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
     if let Some((_, y)) = element_scroll_offset(n) {
         return Ok(Value::Number(y as f64));
     }
-    let Value::Object(w) = this else { unreachable!() };
+    let V::Object(w) = this.v() else { unreachable!() };
     let v = get_hidden(realm, w, "__scrollTop");
     Ok(if v.is_undefined() { Value::Number(0.0) } else { v })
 }
@@ -996,7 +997,7 @@ fn e_scroll_left_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
     if let Some((x, _)) = element_scroll_offset(n) {
         return Ok(Value::Number(x as f64));
     }
-    let Value::Object(w) = this else { unreachable!() };
+    let V::Object(w) = this.v() else { unreachable!() };
     let v = get_hidden(realm, w, "__scrollLeft");
     Ok(if v.is_undefined() { Value::Number(0.0) } else { v })
 }
@@ -1018,10 +1019,10 @@ fn e_scroll_left_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
 fn e_scroll_into_view(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollIntoView")?;
     let r = node_rect(n);
-    let align_top = match args.first() {
-        Some(Value::Bool(b)) => *b,
+    let align_top = match args.first().map(Value::v) {
+        Some(V::Bool(b)) => b,
         Some(v) if v.is_object() => {
-            let b = dict_str(realm, v, "block")?;
+            let b = dict_str(realm, &v.to_value(), "block")?;
             !matches!(b.as_deref(), Some("end") | Some("nearest"))
         }
         _ => true,
@@ -1169,13 +1170,13 @@ fn e_animate(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let _ = this_node(realm, &this, "animate")?;
     let (p, resolve, _) = realm.new_promise();
     let anim = object_from(realm, vec![("finished", Value::Object(p)), ("playState", Value::str("finished")), ("currentTime", Value::Number(0.0)), ("playbackRate", Value::Number(1.0))]);
-    if let Value::Object(a) = &anim {
-        realm.define_method(*a, "cancel", 0, e_noop);
-        realm.define_method(*a, "finish", 0, e_noop);
-        realm.define_method(*a, "pause", 0, e_noop);
-        realm.define_method(*a, "play", 0, e_noop);
-        realm.define_method(*a, "reverse", 0, e_noop);
-        realm.define_method(*a, "addEventListener", 2, e_noop);
+    if let V::Object(a) = anim.v() {
+        realm.define_method(a, "cancel", 0, e_noop);
+        realm.define_method(a, "finish", 0, e_noop);
+        realm.define_method(a, "pause", 0, e_noop);
+        realm.define_method(a, "play", 0, e_noop);
+        realm.define_method(a, "reverse", 0, e_noop);
+        realm.define_method(a, "addEventListener", 2, e_noop);
     }
     realm.call(Value::Object(resolve), Value::Undefined, &[anim.clone()])?;
     Ok(anim)
@@ -1191,7 +1192,7 @@ fn e_get_animations(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Va
 
 fn e_style(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "style")?;
-    let Value::Object(w) = this else { unreachable!() };
+    let V::Object(w) = this.v() else { unreachable!() };
     Ok(crate::cssom::style_object(realm, w, n))
 }
 
@@ -1284,9 +1285,9 @@ fn input_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
 
 fn input_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "value")?;
-    let v = match args.first() {
-        None | Some(Value::Null) | Some(Value::Undefined) => String::new(),
-        Some(v) => realm.to_rust_string(v.clone())?,
+    let v = match args.first().map(Value::v) {
+        None | Some(V::Null) | Some(V::Undefined) => String::new(),
+        Some(v) => realm.to_rust_string(v.to_value())?,
     };
     let tag = tag_of(n).unwrap_or_default();
     if tag == "select" {
@@ -1502,9 +1503,9 @@ fn select_length(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
 fn select_add(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "add")?;
     let Some(opt) = node_of(realm, &arg(args, 0)) else { return Ok(Value::Undefined) };
-    let before = match args.get(1) {
-        Some(Value::Number(i)) => options_of(n).get(*i as usize).copied(),
-        Some(v) => node_of(realm, v).map(|r| r.node),
+    let before = match (args.get(1)).map(Value::v) {
+        Some(V::Number(i)) => options_of(n).get(i as usize).copied(),
+        Some(v) => node_of(realm, &v.to_value()).map(|r| r.node),
         None => None,
     };
     insert_node(realm, n, opt, before)?;
@@ -1813,13 +1814,13 @@ fn style_sheet(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let href = get_attribute(n, "href");
     let rules = realm.new_array_value(vec![]);
     let o = object_from(realm, vec![("href", href.map(|h| Value::str(&h)).unwrap_or(Value::Null)), ("cssRules", rules.clone()), ("rules", rules), ("disabled", Value::Bool(false)), ("type", Value::str("text/css"))]);
-    if let Value::Object(id) = &o {
-        realm.define_method(*id, "insertRule", 2, sheet_insert_rule);
-        realm.define_method(*id, "deleteRule", 1, e_noop);
-        realm.define_method(*id, "addRule", 3, sheet_insert_rule);
-        realm.define_method(*id, "removeRule", 1, e_noop);
+    if let V::Object(id) = o.v() {
+        realm.define_method(id, "insertRule", 2, sheet_insert_rule);
+        realm.define_method(id, "deleteRule", 1, e_noop);
+        realm.define_method(id, "addRule", 3, sheet_insert_rule);
+        realm.define_method(id, "removeRule", 1, e_noop);
         let owner = wrap(realm, n);
-        realm.define_property(*id, "ownerNode", owner, CONFIGURABLE);
+        realm.define_property(id, "ownerNode", owner, CONFIGURABLE);
     }
     Ok(o)
 }
@@ -1864,8 +1865,8 @@ fn queue_media_events(realm: &mut Realm, n: NodeRef, events: &[&'static str]) {
 }
 
 fn media_set_state(realm: &mut Realm, this: &Value, key: &str, v: Value) {
-    if let Value::Object(o) = this {
-        realm.define_property(*o, key, v, rabbithole_js::HIDDEN | ENUMERABLE);
+    if let V::Object(o) = this.v() {
+        realm.define_property(o, key, v, rabbithole_js::HIDDEN | ENUMERABLE);
     }
 }
 
@@ -2526,12 +2527,12 @@ fn row_index(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 fn svg_create_point(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     let o = object_from(realm, vec![("x", Value::Number(0.0)), ("y", Value::Number(0.0)), ("a", Value::Number(1.0)), ("b", Value::Number(0.0)), ("c", Value::Number(0.0)), ("d", Value::Number(1.0)), ("e", Value::Number(0.0)), ("f", Value::Number(0.0))]);
-    if let Value::Object(id) = &o {
-        realm.define_method(*id, "matrixTransform", 1, svg_identity);
-        realm.define_method(*id, "inverse", 0, svg_identity);
-        realm.define_method(*id, "multiply", 1, svg_identity);
-        realm.define_method(*id, "translate", 2, svg_identity);
-        realm.define_method(*id, "scale", 1, svg_identity);
+    if let V::Object(id) = o.v() {
+        realm.define_method(id, "matrixTransform", 1, svg_identity);
+        realm.define_method(id, "inverse", 0, svg_identity);
+        realm.define_method(id, "multiply", 1, svg_identity);
+        realm.define_method(id, "translate", 2, svg_identity);
+        realm.define_method(id, "scale", 1, svg_identity);
     }
     Ok(o)
 }
@@ -2597,9 +2598,9 @@ fn e_get_attribute_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     match get_attribute(n, &name) {
         Some(v) => {
             let a = object_from(realm, vec![("name", Value::str(&name)), ("value", Value::str(&v)), ("nodeName", Value::str(&name)), ("nodeValue", Value::str(&v)), ("specified", Value::Bool(true))]);
-            if let Value::Object(o) = &a {
+            if let V::Object(o) = a.v() {
                 let p = proto("Attr");
-                realm.obj_mut(*o).proto = Some(p);
+                realm.obj_mut(o).set_proto(Some(p));
             }
             Ok(a)
         }

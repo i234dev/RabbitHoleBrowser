@@ -28,6 +28,7 @@
 //! `Slot`), so all paths into an instruction agree on where values are.
 
 use crate::ast::Pos;
+use crate::value::V;
 use crate::bytecode::{Handler, Op, BIN_OPS, CMP_OPS, UN_OPS};
 use crate::value::Value;
 
@@ -671,10 +672,10 @@ impl Tr<'_> {
                 let (e, d) = self.pop();
                 // Constant condition (`while (true)`).
                 if let Ent::Const(k) = e {
-                    let truthy = match &self.constants[k as usize] {
-                        Value::Bool(b) => Some(*b),
-                        Value::Undefined | Value::Null => Some(false),
-                        Value::Number(n) => Some(!(*n == 0.0 || n.is_nan())),
+                    let truthy = match self.constants[k as usize].v() {
+                        V::Bool(b) => Some(b),
+                        V::Undefined | V::Null => Some(false),
+                        V::Number(n) => Some(!(n == 0.0 || n.is_nan())),
                         _ => None,
                     };
                     if let Some(b) = truthy {

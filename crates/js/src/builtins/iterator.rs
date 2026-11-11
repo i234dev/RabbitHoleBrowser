@@ -1,6 +1,7 @@
 //! Iterator prototypes, generators and async generators.
 
 use super::*;
+use crate::value::V;
 use crate::realm::{SYM_ASYNC_ITERATOR, SYM_ITERATOR, SYM_TO_STRING_TAG};
 use crate::vm::{ResumeMode, Step};
 
@@ -36,7 +37,7 @@ pub fn register(realm: &mut Realm) {
     realm.define_symbol_method(aip2, SYM_ASYNC_ITERATOR, "[Symbol.asyncIterator]", 0, return_this);
     realm.intrinsics.others.insert("AsyncIteratorPrototype", aip2);
     let agp = realm.intrinsics.async_generator_proto;
-    realm.obj_mut(agp).proto = Some(aip2);
+    realm.obj_mut(agp).set_proto(Some(aip2));
     realm.define_method(agp, "next", 1, async_generator_next);
     realm.define_method(agp, "return", 1, async_generator_return);
     realm.define_method(agp, "throw", 1, async_generator_throw);
@@ -68,8 +69,8 @@ fn array_iterator_next(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRes
     if target.is_undefined() {
         return Ok(realm.create_iter_result(Value::Undefined, true));
     }
-    let len = match &target {
-        Value::Object(t) => match &realm.obj(*t).kind {
+    let len = match target.v() {
+        V::Object(t) => match &realm.obj(t).kind {
             ObjectKind::Array { length, .. } => *length as usize,
             ObjectKind::TypedArray(ta) => ta.length,
             _ => realm.length_of(target.clone())?,
@@ -166,10 +167,10 @@ fn map_iterator_next(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResul
 // ------------------------------------------------------------- generators
 
 fn this_generator(realm: &mut Realm, this: &Value, is_async: bool) -> JsResult<ObjectId> {
-    if let Value::Object(id) = this {
-        if let ObjectKind::Generator(g) = &realm.obj(*id).kind {
+    if let V::Object(id) = this.v() {
+        if let ObjectKind::Generator(g) = &realm.obj(id).kind {
             if g.is_async == is_async && g.promise.is_none() {
-                return Ok(*id);
+                return Ok(id);
             }
         }
     }

@@ -1,6 +1,7 @@
 //! CSSOM: `element.style`, `getComputedStyle`, `matchMedia`, `CSS`.
 
 use crate::element::{get_attribute, make_proxy, set_attribute};
+use rabbithole_js::V;
 use crate::env::with_env;
 use crate::host::*;
 use rabbithole_css::{parse_declaration_list, Declaration, Token};
@@ -155,9 +156,9 @@ fn style_target(realm: &mut Realm, args: &[Value]) -> JsResult<NodeRef> {
 }
 
 fn key_of(realm: &mut Realm, args: &[Value]) -> Option<String> {
-    match arg(args, 1) {
-        Value::String(s) => Some(s.to_rust_string()),
-        Value::Number(n) => Some(format!("{}", n)),
+    match (arg(args, 1)).v() {
+        V::String(s) => Some(s.to_rust_string()),
+        V::Number(n) => Some(format!("{}", n)),
         _ => {
             let _ = realm;
             None
@@ -624,8 +625,8 @@ fn match_media(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 }
 
 fn css_supports(_realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let text = match args.first() {
-        Some(Value::String(s)) => s.to_rust_string().to_ascii_lowercase(),
+    let text = match args.first().map(Value::v) {
+        Some(V::String(s)) => s.to_rust_string().to_ascii_lowercase(),
         _ => String::new(),
     };
     Ok(Value::Bool(!(text.contains("container") || text.contains("grid-template-areas: none") || text.contains("backdrop-filter"))))
@@ -684,11 +685,11 @@ fn mql_add_listener(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 fn css_style_sheet_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     let rules = realm.new_array_value(vec![]);
     let o = object_from(realm, vec![("cssRules", rules.clone()), ("rules", rules), ("href", Value::Null), ("disabled", Value::Bool(false))]);
-    if let Value::Object(id) = &o {
-        realm.define_method(*id, "insertRule", 2, cs_zero);
-        realm.define_method(*id, "deleteRule", 1, mql_noop);
-        realm.define_method(*id, "replaceSync", 1, mql_noop);
-        realm.define_method(*id, "replace", 1, mql_noop);
+    if let V::Object(id) = o.v() {
+        realm.define_method(id, "insertRule", 2, cs_zero);
+        realm.define_method(id, "deleteRule", 1, mql_noop);
+        realm.define_method(id, "replaceSync", 1, mql_noop);
+        realm.define_method(id, "replace", 1, mql_noop);
     }
     Ok(o)
 }

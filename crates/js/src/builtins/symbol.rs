@@ -1,6 +1,7 @@
 //! Symbol constructor and prototype.
 
 use super::*;
+use crate::value::V;
 use crate::realm::{SYM_TO_PRIMITIVE, SYM_TO_STRING_TAG, WELL_KNOWN_SYMBOLS};
 
 pub fn register(realm: &mut Realm) {
@@ -31,9 +32,9 @@ fn symbol_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 }
 
 fn this_symbol(realm: &mut Realm, this: &Value) -> JsResult<SymbolId> {
-    match this {
-        Value::Symbol(s) => Ok(*s),
-        Value::Object(id) => match &realm.obj(*id).kind {
+    match this.v() {
+        V::Symbol(s) => Ok(s),
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::Symbol(s) => Ok(*s),
             _ => realm.type_error("not a Symbol"),
         },
@@ -64,8 +65,8 @@ fn symbol_for(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
 }
 
 fn key_for(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    match arg(args, 0) {
-        Value::Symbol(s) => Ok(realm.symbol_key_for(s).map(Value::String).unwrap_or(Value::Undefined)),
+    match (arg(args, 0)).v() {
+        V::Symbol(s) => Ok(realm.symbol_key_for(s).map(Value::String).unwrap_or(Value::Undefined)),
         _ => realm.type_error("Symbol.keyFor: argument is not a symbol"),
     }
 }

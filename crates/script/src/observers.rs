@@ -2,6 +2,7 @@
 //! `PerformanceObserver` (stub).
 
 use crate::host::*;
+use rabbithole_js::V;
 use crate::node;
 use rabbithole_js::{JsResult, ObjectId, Realm, Value, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN};
 
@@ -32,7 +33,7 @@ fn mo_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn mo_observe(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = this else {
+    let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
     let Some(target) = node_of(realm, &arg(args, 0)) else {
@@ -66,7 +67,7 @@ fn mo_observe(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
 }
 
 fn mo_disconnect(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = this else {
+    let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
     let st = state();
@@ -96,9 +97,9 @@ fn records_to_js(realm: &mut Realm, recs: Vec<MutationRecord>) -> Value {
                 ("nextSibling", Value::Null),
             ],
         );
-        if let Value::Object(id) = &rec {
+        if let V::Object(id) = rec.v() {
             let p = proto("MutationRecord");
-            realm.obj_mut(*id).proto = Some(p);
+            realm.obj_mut(id).set_proto(Some(p));
         }
         out.push(rec);
     }
@@ -106,7 +107,7 @@ fn records_to_js(realm: &mut Realm, recs: Vec<MutationRecord>) -> Value {
 }
 
 fn mo_take_records(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let Value::Object(o) = this else {
+    let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
     let recs: Vec<MutationRecord> = {
@@ -176,7 +177,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(po, "disconnect", 0, po_noop);
     realm.define_method(po, "takeRecords", 0, po_take_records);
     let po_ctor_v = realm.obj(po).props.get(&rabbithole_js::PropertyKey::str("constructor")).map(|p| p.value.clone());
-    if let Some(Value::Object(c)) = po_ctor_v {
+    if let Some(V::Object(c)) = po_ctor_v.as_ref().map(Value::v) {
         let types = realm.new_array_value(vec![]);
         realm.define_property(c, "supportedEntryTypes", types, ACC);
     }

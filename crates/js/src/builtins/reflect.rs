@@ -1,6 +1,7 @@
 //! Reflect and Proxy.
 
 use super::*;
+use crate::value::V;
 use crate::realm::SYM_TO_STRING_TAG;
 
 pub fn register(realm: &mut Realm) {
@@ -27,8 +28,8 @@ pub fn register(realm: &mut Realm) {
 }
 
 fn target_obj(realm: &mut Realm, v: &Value, name: &str) -> JsResult<ObjectId> {
-    match v {
-        Value::Object(id) => Ok(*id),
+    match v.v() {
+        V::Object(id) => Ok(id),
         _ => realm.type_error(&format!("Reflect.{} called on non-object", name)),
     }
 }
@@ -126,15 +127,15 @@ fn set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 
 fn set_prototype_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = target_obj(realm, &arg(args, 0), "setPrototypeOf")?;
-    let proto = match arg(args, 1) {
-        Value::Object(p) => Some(p),
-        Value::Null => None,
+    let proto = match (arg(args, 1)).v() {
+        V::Object(p) => Some(p),
+        V::Null => None,
         _ => return realm.type_error("Object prototype may only be an Object or null"),
     };
     if !realm.obj(id).extensible && realm.obj(id).proto != proto {
         return Ok(Value::Bool(false));
     }
-    realm.obj_mut(id).proto = proto;
+    realm.obj_mut(id).set_proto(proto);
     Ok(Value::Bool(true))
 }
 
@@ -146,8 +147,8 @@ fn proxy_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
 }
 
 fn create_proxy(realm: &mut Realm, target: Value, handler: Value) -> JsResult<Value> {
-    let (t, h) = match (target, handler) {
-        (Value::Object(t), Value::Object(h)) => (t, h),
+    let (t, h) = match (target.v(), handler.v()) {
+        (V::Object(t), V::Object(h)) => (t, h),
         _ => return realm.type_error("Cannot create proxy with a non-object as target or handler"),
     };
     let p = realm.alloc(Object::new(None, ObjectKind::Proxy { target: t, handler: h, revoked: false }));
@@ -164,7 +165,7 @@ fn revocable(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 }
 
 fn revoke_fn(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    if let Some(Value::Object(p)) = realm.current_native().and_then(|n| realm.native_captures(n).first().cloned()) {
+    if let Some(V::Object(p)) = (realm.current_native().and_then(|n| realm.native_captures(n).first().cloned())).as_ref().map(Value::v) {
         if let ObjectKind::Proxy { revoked, .. } = &mut realm.obj_mut(p).kind {
             *revoked = true;
         }

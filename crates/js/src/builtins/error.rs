@@ -1,6 +1,7 @@
 //! Error constructors.
 
 use super::*;
+use crate::value::V;
 
 const KINDS: [&str; 7] = ["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError"];
 
@@ -26,7 +27,7 @@ pub fn register(realm: &mut Realm) {
             _ => uri_error_ctor,
         };
         let c = define_ctor(realm, kind, 1, f, proto);
-        realm.obj_mut(c).proto = Some(error_ctor);
+        realm.obj_mut(c).set_proto(Some(error_ctor));
         let key: &'static str = Box::leak(format!("{}Prototype", kind).into_boxed_str());
         realm.intrinsics.others.insert(key, proto);
         realm.intrinsics.others.insert(kind, c);
@@ -36,7 +37,7 @@ pub fn register(realm: &mut Realm) {
     realm.define_property(ap, "name", Value::str("AggregateError"), HIDDEN);
     realm.define_property(ap, "message", Value::str(""), HIDDEN);
     let c = define_ctor(realm, "AggregateError", 2, aggregate_error_ctor, ap);
-    realm.obj_mut(c).proto = Some(error_ctor);
+    realm.obj_mut(c).set_proto(Some(error_ctor));
     realm.intrinsics.others.insert("AggregateErrorPrototype", ap);
     realm.intrinsics.others.insert("AggregateError", c);
 }
@@ -53,7 +54,7 @@ fn make_error(realm: &mut Realm, kind: &str, args: &[Value], msg_index: usize) -
         realm.define_property(id, "message", Value::String(s.clone()), HIDDEN);
         s.to_rust_string()
     };
-    if let Value::Object(opts) = arg(args, msg_index + 1) {
+    if let V::Object(opts) = (arg(args, msg_index + 1)).v() {
         if realm.has_property(opts, &PropertyKey::str("cause"))? {
             let cause = realm.get_str(Value::Object(opts), "cause")?;
             realm.define_property(id, "cause", cause, HIDDEN);
@@ -61,8 +62,8 @@ fn make_error(realm: &mut Realm, kind: &str, args: &[Value], msg_index: usize) -
     }
     // name for stack: from the prototype chain
     let name = realm.get_str(Value::Object(id), "name")?;
-    let name = match name {
-        Value::String(s) => s.to_rust_string(),
+    let name = match name.v() {
+        V::String(s) => s.to_rust_string(),
         _ => kind.to_string(),
     };
     let stack = realm.build_stack_string(&name, &msg_str);
@@ -95,8 +96,8 @@ fn aggregate_error_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRe
     let e = make_error(realm, "AggregateError", args, 1)?;
     let errors = realm.iterate_to_vec(arg(args, 0))?;
     let arr = realm.new_array_value(errors);
-    if let Value::Object(id) = &e {
-        realm.define_property(*id, "errors", arr, HIDDEN);
+    if let V::Object(id) = e.v() {
+        realm.define_property(id, "errors", arr, HIDDEN);
     }
     Ok(e)
 }
@@ -119,7 +120,7 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
 }
 
 fn capture_stack_trace(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    if let Value::Object(id) = arg(args, 0) {
+    if let V::Object(id) = (arg(args, 0)).v() {
         let stack = realm.build_stack_string("Error", "");
         realm.define_property(id, "stack", Value::str(&stack), HIDDEN);
     }

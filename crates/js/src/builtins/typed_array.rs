@@ -2,6 +2,7 @@
 //! eleven concrete typed array classes.
 
 use super::iterator::create_array_iterator;
+use crate::value::V;
 use super::*;
 use crate::realm::{SYM_ITERATOR, SYM_SPECIES, SYM_TO_STRING_TAG};
 use std::cell::RefCell;
@@ -166,7 +167,7 @@ pub fn register(realm: &mut Realm) {
         let proto = realm.new_object_with_proto(Some(tap));
         realm.intrinsics.others.insert(proto_key(kind), proto);
         let ctor = realm.new_native_function_full(kind.name(), 3, typed_array_ctor, Some(Rc::new(kind)), vec![], true);
-        realm.obj_mut(ctor).proto = Some(ta_ctor);
+        realm.obj_mut(ctor).set_proto(Some(ta_ctor));
         realm.define_property(ctor, "prototype", Value::Object(proto), 0);
         realm.define_property(proto, "constructor", Value::Object(ctor), HIDDEN);
         let bpe = Value::Number(kind.element_size() as f64);
@@ -196,9 +197,9 @@ pub fn buffer_of(realm: &Realm, id: ObjectId) -> Option<Rc<RefCell<Vec<u8>>>> {
 }
 
 fn this_buffer(realm: &mut Realm, this: &Value, method: &str) -> JsResult<(ObjectId, Rc<RefCell<Vec<u8>>>)> {
-    if let Value::Object(id) = this {
-        if let Some(b) = buffer_of(realm, *id) {
-            return Ok((*id, b));
+    if let V::Object(id) = this.v() {
+        if let Some(b) = buffer_of(realm, id) {
+            return Ok((id, b));
         }
     }
     realm.type_error(&format!("Method ArrayBuffer.prototype.{} called on incompatible receiver", method))
@@ -232,8 +233,8 @@ fn shared_array_buffer_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> 
 }
 
 fn array_buffer_is_view(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(match arg(args, 0) {
-        Value::Object(id) => matches!(realm.obj(id).kind, ObjectKind::TypedArray(_) | ObjectKind::DataView(_)),
+    Ok(Value::Bool(match (arg(args, 0)).v() {
+        V::Object(id) => matches!(realm.obj(id).kind, ObjectKind::TypedArray(_) | ObjectKind::DataView(_)),
         _ => false,
     }))
 }
@@ -253,8 +254,8 @@ fn array_buffer_slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     let default = realm.intrinsics.others["ArrayBuffer"];
     let ctor = realm.species_constructor(id, default)?;
     let out = realm.construct(ctor, &[Value::Number(new_len as f64)], Value::Undefined)?;
-    let out_id = match out {
-        Value::Object(o) if buffer_of(realm, o).is_some() => o,
+    let out_id = match out.v() {
+        V::Object(o) if buffer_of(realm, o).is_some() => o,
         _ => return realm.type_error("ArrayBuffer species constructor did not return an ArrayBuffer"),
     };
     if out_id == id {
@@ -287,8 +288,8 @@ fn data_view_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
     if !realm.is_construct_call() {
         return realm.type_error("Constructor DataView requires 'new'");
     }
-    let buffer = match arg(args, 0) {
-        Value::Object(id) if buffer_of(realm, id).is_some() => id,
+    let buffer = match (arg(args, 0)).v() {
+        V::Object(id) if buffer_of(realm, id).is_some() => id,
         _ => return realm.type_error("First argument to DataView constructor must be an ArrayBuffer"),
     };
     let buf_len = buffer_of(realm, buffer).unwrap().borrow().len();
@@ -312,8 +313,8 @@ fn data_view_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
 }
 
 fn this_view(realm: &mut Realm, this: &Value, method: &str) -> JsResult<TypedArrayData> {
-    if let Value::Object(id) = this {
-        if let ObjectKind::DataView(t) = &realm.obj(*id).kind {
+    if let V::Object(id) = this.v() {
+        if let ObjectKind::DataView(t) = &realm.obj(id).kind {
             return Ok(copy_data(t));
         }
     }
@@ -321,8 +322,8 @@ fn this_view(realm: &mut Realm, this: &Value, method: &str) -> JsResult<TypedArr
 }
 
 fn view_buffer(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    if let Value::Object(id) = &this {
-        if let Some((t, _)) = view_data(realm, *id) {
+    if let V::Object(id) = this.v() {
+        if let Some((t, _)) = view_data(realm, id) {
             return Ok(Value::Object(t.buffer));
         }
     }
@@ -330,8 +331,8 @@ fn view_buffer(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Valu
 }
 
 fn view_byte_offset(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    if let Value::Object(id) = &this {
-        if let Some((t, _)) = view_data(realm, *id) {
+    if let V::Object(id) = this.v() {
+        if let Some((t, _)) = view_data(realm, id) {
             return Ok(Value::Number(t.byte_offset as f64));
         }
     }
@@ -446,14 +447,14 @@ dv_set!(dv_set_biguint64, u64, 8, "setBigUint64", conv_u64);
 /// convert, numbers throw.
 pub fn to_bigint(realm: &mut Realm, v: Value) -> JsResult<i128> {
     let p = realm.to_primitive(v, crate::interop::Hint::Number)?;
-    match p {
-        Value::BigInt(b) => Ok(b.to_i128_wrapping()),
-        Value::Bool(b) => Ok(b as i128),
-        Value::String(s) => match crate::value::BigInt::parse(s.to_rust_string().trim()) {
+    match p.v() {
+        V::BigInt(b) => Ok(b.to_i128_wrapping()),
+        V::Bool(b) => Ok(b as i128),
+        V::String(s) => match crate::value::BigInt::parse(s.to_rust_string().trim()) {
             Some(b) => Ok(b.to_i128_wrapping()),
             None => realm.type_error("Cannot convert string to a BigInt"),
         },
-        Value::Number(_) => realm.type_error("Cannot convert a Number to a BigInt"),
+        V::Number(_) => realm.type_error("Cannot convert a Number to a BigInt"),
         _ => realm.type_error("Cannot convert value to a BigInt"),
     }
 }
@@ -523,9 +524,9 @@ pub fn ta_set_value(realm: &mut Realm, t: &TypedArrayData, i: usize, v: Value) -
 }
 
 fn this_ta(realm: &mut Realm, this: &Value, method: &str) -> JsResult<(ObjectId, TypedArrayData)> {
-    if let Value::Object(id) = this {
-        if let ObjectKind::TypedArray(t) = &realm.obj(*id).kind {
-            return Ok((*id, copy_data(t)));
+    if let V::Object(id) = this.v() {
+        if let ObjectKind::TypedArray(t) = &realm.obj(id).kind {
+            return Ok((id, copy_data(t)));
         }
     }
     realm.type_error(&format!("Method %TypedArray%.prototype.{} called on incompatible receiver", method))
@@ -555,9 +556,9 @@ fn typed_array_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     let default = realm.intrinsics.others[proto_key(kind)];
     let proto = realm.proto_from_new_target(default);
     let first = arg(args, 0);
-    let id = match &first {
-        Value::Object(src) => {
-            let src = *src;
+    let id = match first.v() {
+        V::Object(src) => {
+            let src = src;
             if let Some(buf) = buffer_of(realm, src) {
                 // (buffer, byteOffset, length)
                 let esize = kind.element_size();
@@ -606,9 +607,9 @@ fn typed_array_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
                 id
             }
         }
-        Value::Undefined => create_typed_array(realm, kind, 0, Some(proto))?,
+        V::Undefined => create_typed_array(realm, kind, 0, Some(proto))?,
         v => {
-            let len = realm.to_index(v.clone()).map_err(|_| realm.throw_range_error("Invalid typed array length"))?;
+            let len = realm.to_index(v.to_value()).map_err(|_| realm.throw_range_error("Invalid typed array length"))?;
             create_typed_array(realm, kind, len, Some(proto))?
         }
     };
@@ -620,19 +621,19 @@ fn species_create(realm: &mut Realm, exemplar: ObjectId, kind: TypedArrayKind, a
     let default = realm.intrinsics.others[kind.name()];
     let ctor = realm.species_constructor(exemplar, default)?;
     let out = realm.construct(ctor, args, Value::Undefined)?;
-    match &out {
-        Value::Object(o) => match &realm.obj(*o).kind {
+    match out.v() {
+        V::Object(o) => match &realm.obj(o).kind {
             ObjectKind::TypedArray(t) => {
                 if is_bigint_kind(t.kind) != is_bigint_kind(kind) {
                     return realm.type_error("Content type of the typed array species does not match");
                 }
                 let d = copy_data(t);
-                if let Some(Value::Number(n)) = args.first() {
-                    if args.len() == 1 && (d.length as f64) < *n {
+                if let Some(V::Number(n)) = args.first().map(Value::v) {
+                    if args.len() == 1 && (d.length as f64) < n {
                         return realm.type_error("Species constructor returned a typed array that is too short");
                     }
                 }
-                Ok((*o, d))
+                Ok((o, d))
             }
             _ => realm.type_error("Species constructor did not return a TypedArray"),
         },
@@ -651,8 +652,8 @@ fn ta_length(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
 }
 
 fn ta_to_string_tag(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    if let Value::Object(id) = &this {
-        if let ObjectKind::TypedArray(t) = &realm.obj(*id).kind {
+    if let V::Object(id) = this.v() {
+        if let ObjectKind::TypedArray(t) = &realm.obj(id).kind {
             return Ok(Value::str(t.kind.name()));
         }
     }
@@ -750,7 +751,7 @@ fn ta_fill(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let start = realm.relative_index(arg(args, 1), len, 0)?;
     let end = realm.relative_index(arg(args, 2), len, len)?;
     if t.kind == TypedArrayKind::Uint8 || t.kind == TypedArrayKind::Int8 {
-        if let Value::Number(n) = value {
+        if let V::Number(n) = value.v() {
             let byte = to_int32(n) as u8;
             let buf = buffer_of(realm, t.buffer).unwrap();
             let mut b = buf.borrow_mut();
@@ -994,8 +995,8 @@ fn ta_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     }
     let offset = offset as usize;
     let source = arg(args, 0);
-    if let Value::Object(sid) = &source {
-        if let ObjectKind::TypedArray(st) = &realm.obj(*sid).kind {
+    if let V::Object(sid) = source.v() {
+        if let ObjectKind::TypedArray(st) = &realm.obj(sid).kind {
             let st = copy_data(st);
             if is_bigint_kind(st.kind) != is_bigint_kind(t.kind) {
                 return realm.type_error("Cannot mix BigInt and other types, use explicit conversions");
@@ -1060,9 +1061,9 @@ fn sort_elements(realm: &mut Realm, t: &TypedArrayData, cmp: Value) -> JsResult<
     if cmp.is_undefined() {
         let mut keyed: Vec<(f64, i128, Value)> = items
             .into_iter()
-            .map(|v| match &v {
-                Value::Number(n) => (*n, 0, v),
-                Value::BigInt(b) => (0.0, b.to_i128_wrapping(), v),
+            .map(|v| match v.v() {
+                V::Number(n) => (n, 0, v),
+                V::BigInt(b) => (0.0, b.to_i128_wrapping(), v),
                 _ => (0.0, 0, v),
             })
             .collect();

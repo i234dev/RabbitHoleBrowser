@@ -1,6 +1,7 @@
 //! String constructor and String.prototype.
 
 use super::*;
+use crate::value::V;
 use crate::realm::{SYM_ITERATOR, SYM_MATCH, SYM_MATCH_ALL, SYM_REPLACE, SYM_SEARCH, SYM_SPLIT};
 
 pub fn register(realm: &mut Realm) {
@@ -61,9 +62,9 @@ fn string_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let s = if args.is_empty() {
         JsStr::empty()
     } else {
-        match &args[0] {
-            Value::Symbol(sym) if !realm.is_construct_call() => JsStr::new(&format!("Symbol({})", realm.symbol_description(*sym))),
-            v => realm.to_string(v.clone())?,
+        match args[0].v() {
+            V::Symbol(sym) if !realm.is_construct_call() => JsStr::new(&format!("Symbol({})", realm.symbol_description(sym))),
+            v => realm.to_string(v.to_value())?,
         }
     };
     if realm.is_construct_call() {
@@ -75,9 +76,11 @@ fn string_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 }
 
 fn from_char_code(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    if let [Value::Number(n)] = args {
-        // One code unit: shared strings for the first 256.
-        return Ok(Value::String(JsStr::from_unit(to_uint32(*n) as u16)));
+    if let [a] = args {
+        if let V::Number(n) = a.v() {
+            // One code unit: shared strings for the first 256.
+            return Ok(Value::String(JsStr::from_unit(to_uint32(n) as u16)));
+        }
     }
     let mut units = Vec::with_capacity(args.len());
     for a in args {
@@ -129,14 +132,14 @@ fn raw(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 
 /// RequireObjectCoercible(this) + ToString.
 pub fn this_str(realm: &mut Realm, this: &Value, method: &str) -> JsResult<JsStr> {
-    match this {
-        Value::String(s) => Ok(s.clone()),
-        Value::Undefined | Value::Null => realm.type_error(&format!("String.prototype.{} called on null or undefined", method)),
-        Value::Object(id) => match &realm.obj(*id).kind {
+    match this.v() {
+        V::String(s) => Ok(s.clone()),
+        V::Undefined | V::Null => realm.type_error(&format!("String.prototype.{} called on null or undefined", method)),
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::String(s) => Ok(s.clone()),
             _ => realm.to_string(this.clone()),
         },
-        other => realm.to_string(other.clone()),
+        other => realm.to_string(other.to_value()),
     }
 }
 
@@ -197,12 +200,12 @@ fn concat(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn is_regexp(realm: &mut Realm, v: &Value) -> JsResult<bool> {
-    if let Value::Object(id) = v {
-        let m = realm.get(Value::Object(*id), PropertyKey::Symbol(SYM_MATCH))?;
+    if let V::Object(id) = v.v() {
+        let m = realm.get(Value::Object(id), PropertyKey::Symbol(SYM_MATCH))?;
         if !m.is_undefined() {
             return Ok(m.truthy());
         }
-        return Ok(matches!(realm.obj(*id).kind, ObjectKind::RegExp(_)));
+        return Ok(matches!(realm.obj(id).kind, ObjectKind::RegExp(_)));
     }
     Ok(false)
 }
@@ -644,9 +647,9 @@ fn to_upper_case(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Va
 }
 
 fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    match &this {
-        Value::String(s) => Ok(Value::String(s.clone())),
-        Value::Object(id) => match &realm.obj(*id).kind {
+    match this.v() {
+        V::String(s) => Ok(Value::String(s.clone())),
+        V::Object(id) => match &realm.obj(id).kind {
             ObjectKind::String(s) => Ok(Value::String(s.clone())),
             _ => realm.type_error("String.prototype.toString requires that 'this' be a String"),
         },

@@ -2,6 +2,7 @@
 //! the dispatch algorithm (capture → target → bubble).
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use crate::host::*;
 use crate::{DefaultAction, DispatchResult, EventDetail, EventInit};
 use rabbithole_dom::{Document, NodeId};
@@ -29,8 +30,8 @@ pub struct EventData {
 }
 
 fn event_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a mut EventData> {
-    match this {
-        Value::Object(o) if realm.host_data::<EventData>(*o).is_some() => Ok(realm.host_data_mut::<EventData>(*o).unwrap()),
+    match this.v() {
+        V::Object(o) if realm.host_data::<EventData>(o).is_some() => Ok(realm.host_data_mut::<EventData>(o).unwrap()),
         _ => Err(realm.throw_type_error("Illegal invocation: not an Event")),
     }
 }
@@ -239,7 +240,7 @@ fn event_ctor_generic(realm: &mut Realm, class: &str, args: &[Value]) -> JsResul
     }
     // Honour subclassing (`class MyEvent extends Event`).
     let p = realm.proto_from_new_target(proto(class));
-    realm.obj_mut(id).proto = Some(p);
+    realm.obj_mut(id).set_proto(Some(p));
     Ok(id)
 }
 
@@ -393,8 +394,8 @@ fn generic_sub_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> Js
     let id = event_ctor_generic(realm, "Event", args)?;
     let dict = arg(args, 1);
     if dict.is_object() {
-        if let Value::Object(d) = &dict {
-            let keys = realm.own_enumerable_string_keys(*d)?;
+        if let V::Object(d) = dict.v() {
+            let keys = realm.own_enumerable_string_keys(d)?;
             for k in keys {
                 let ks = k.as_str().map(|s| s.to_rust_string()).unwrap_or_default();
                 if matches!(ks.as_str(), "bubbles" | "cancelable" | "composed") {
@@ -406,7 +407,7 @@ fn generic_sub_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> Js
         }
     }
     let p = realm.proto_from_new_target(proto("Event"));
-    realm.obj_mut(id).proto = Some(p);
+    realm.obj_mut(id).set_proto(Some(p));
     Ok(Value::Object(id))
 }
 
@@ -494,7 +495,7 @@ fn ev_init_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Val
 
 fn ev_init_custom_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     ev_init_event(realm, this.clone(), args)?;
-    if let Value::Object(id) = this {
+    if let V::Object(id) = this.v() {
         realm.define_property(id, "detail", arg(args, 3), ACC);
     }
     Ok(Value::Undefined)
@@ -502,7 +503,7 @@ fn ev_init_custom_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
 
 fn ev_init_mouse_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     ev_init_event(realm, this.clone(), args)?;
-    if let Value::Object(id) = this {
+    if let V::Object(id) = this.v() {
         let names = ["view", "detail", "screenX", "screenY", "clientX", "clientY", "ctrlKey", "altKey", "shiftKey", "metaKey", "button", "relatedTarget"];
         for (i, n) in names.iter().enumerate() {
             realm.define_property(id, *n, arg(args, 3 + i), ACC);
@@ -515,32 +516,32 @@ fn ev_init_mouse_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsResu
 
 /// Resolve `this` of an EventTarget method to a key.
 pub(crate) fn target_key(realm: &Realm, this: &Value) -> Option<TargetKey> {
-    match this {
-        Value::Object(o) => {
-            if let Some(n) = realm.host_data::<NodeRef>(*o) {
+    match this.v() {
+        V::Object(o) => {
+            if let Some(n) = realm.host_data::<NodeRef>(o) {
                 return Some(TargetKey::Node(*n));
             }
-            if *o == realm.global() || Some(*o) == state().borrow().protos.get("__window").copied() {
+            if o == realm.global() || Some(o) == state().borrow().protos.get("__window").copied() {
                 return Some(TargetKey::Window);
             }
-            Some(TargetKey::Object(*o))
+            Some(TargetKey::Object(o))
         }
-        Value::Undefined | Value::Null => Some(TargetKey::Window),
+        V::Undefined | V::Null => Some(TargetKey::Window),
         _ => None,
     }
 }
 
 fn listener_options(realm: &mut Realm, v: &Value) -> JsResult<(bool, bool, bool, Option<ObjectId>)> {
-    match v {
-        Value::Object(_) => {
+    match v.v() {
+        V::Object(_) => {
             let capture = dict_bool(realm, v, "capture")?.unwrap_or(false);
             let once = dict_bool(realm, v, "once")?.unwrap_or(false);
             let passive = dict_bool(realm, v, "passive")?.unwrap_or(false);
             let signal = dict_value(realm, v, "signal")?.as_object();
             Ok((capture, once, passive, signal))
         }
-        Value::Undefined => Ok((false, false, false, None)),
-        other => Ok((realm.to_boolean(other), false, false, None)),
+        V::Undefined => Ok((false, false, false, None)),
+        other => Ok((realm.to_boolean(&other.to_value()), false, false, None)),
     }
 }
 
@@ -582,8 +583,8 @@ pub(crate) fn add_listener(realm: &mut Realm, key: TargetKey, ty: &str, cb: Valu
         let existing = get_hidden(realm, sig, "__listeners");
         let arr = if existing.is_object() { existing } else { set_hidden(realm, sig, "__listeners", entry.clone()); entry };
         let rec = object_from(realm, vec![("type", Value::str(ty)), ("callback", cb), ("capture", Value::Bool(capture))]);
-        if let (Value::Object(a), Value::Object(_)) = (&arr, &rec) {
-            if let rabbithole_js::ObjectKind::Array { elements, length } = &mut realm.obj_mut(*a).kind {
+        if let (V::Object(a), V::Object(_)) = (arr.v(), rec.v()) {
+            if let rabbithole_js::ObjectKind::Array { elements, length } = &mut realm.obj_mut(a).kind {
                 elements.push(rec);
                 *length = elements.len() as u32;
             }
@@ -630,7 +631,7 @@ fn et_dispatch_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
         return Err(realm.throw_type_error("Illegal invocation"));
     };
     let ev = arg(args, 0);
-    let Value::Object(eid) = ev else {
+    let V::Object(eid) = ev.v() else {
         return Err(realm.throw_type_error("parameter 1 is not of type 'Event'."));
     };
     if realm.host_data::<EventData>(eid).is_none() {
@@ -983,8 +984,8 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
 
     // An entry whose shadow-adjusted target is itself is "at target"
     // (the target, or a shadow host the event was retargeted to).
-    let at_target = |p: &(TargetKey, Value, Value)| match (&p.1, &p.2) {
-        (Value::Object(a), Value::Object(b)) => a == b,
+    let at_target = |p: &(TargetKey, Value, Value)| match (p.1.v(), p.2.v()) {
+        (V::Object(a), V::Object(b)) => a == b,
         _ => false,
     };
     // Capture phase: window → … → target.
@@ -1058,7 +1059,7 @@ fn run_inline_handler(realm: &mut Realm, key: TargetKey, current: &Value, eid: O
     match r {
         Ok(v) => {
             // Returning false from an inline handler cancels.
-            if matches!(v, Value::Bool(false)) && ty != "mouseover" {
+            if matches!(v.v(), V::Bool(false)) && ty != "mouseover" {
                 if let Some(d) = realm.host_data_mut::<EventData>(eid) {
                     if d.cancelable {
                         d.default_prevented = true;
@@ -1124,8 +1125,8 @@ fn invoke_listeners(realm: &mut Realm, key: TargetKey, current: &Value, eid: Obj
 /// The `onX` handler of a target: IDL property, else compiled attribute.
 fn inline_handler(realm: &mut Realm, key: TargetKey, current: &Value, ty: &str) -> Option<Value> {
     let hidden = format!("__on_{ty}");
-    if let Value::Object(o) = current {
-        let v = get_hidden(realm, *o, &hidden);
+    if let V::Object(o) = current.v() {
+        let v = get_hidden(realm, o, &hidden);
         if realm.is_callable(&v) {
             return Some(v);
         }
@@ -1176,8 +1177,8 @@ struct HandlerSpec {
 
 fn handler_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let spec = native_data::<HandlerSpec>(realm).expect("handler spec");
-    let Value::Object(o) = &this else { return Ok(Value::Null) };
-    let v = get_hidden(realm, *o, &format!("__on_{}", spec.ty));
+    let V::Object(o) = this.v() else { return Ok(Value::Null) };
+    let v = get_hidden(realm, o, &format!("__on_{}", spec.ty));
     if !v.is_undefined() {
         return Ok(v);
     }
@@ -1192,10 +1193,10 @@ fn handler_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 fn handler_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let spec = native_data::<HandlerSpec>(realm).expect("handler spec");
-    let Value::Object(o) = &this else { return Ok(Value::Undefined) };
+    let V::Object(o) = this.v() else { return Ok(Value::Undefined) };
     let v = arg(args, 0);
     let v = if realm.is_callable(&v) { v } else { Value::Null };
-    set_hidden(realm, *o, &format!("__on_{}", spec.ty), v.clone());
+    set_hidden(realm, o, &format!("__on_{}", spec.ty), v.clone());
     if v.is_object() {
         if let Some(key) = target_key(realm, &this) {
             let st = state();

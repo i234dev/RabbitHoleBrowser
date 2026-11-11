@@ -2,6 +2,7 @@
 //! ParentNode/ChildNode mixins, selectors, and the shared mutation helpers.
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use crate::host::*;
 use rabbithole_css::{selector::SelectorParser, Selector, Tokenizer};
 use rabbithole_dom::{Document, NodeData, NodeId};
@@ -65,7 +66,7 @@ pub(crate) fn node_list(realm: &mut Realm, nodes: Vec<NodeRef>) -> Value {
     let values: Vec<Value> = nodes.into_iter().map(|n| wrap(realm, n)).collect();
     let arr = realm.new_array(values);
     let p = proto("NodeList");
-    realm.obj_mut(arr).proto = Some(p);
+    realm.obj_mut(arr).set_proto(Some(p));
     Value::Object(arr)
 }
 
@@ -73,7 +74,7 @@ pub(crate) fn html_collection(realm: &mut Realm, nodes: Vec<NodeRef>) -> Value {
     let values: Vec<Value> = nodes.iter().map(|n| wrap(realm, *n)).collect();
     let arr = realm.new_array(values.clone());
     let p = proto("HTMLCollection");
-    realm.obj_mut(arr).proto = Some(p);
+    realm.obj_mut(arr).set_proto(Some(p));
     // Named access by id / name.
     for (n, v) in nodes.iter().zip(values.iter()) {
         let names = with_doc(n.doc, |doc| {
@@ -834,9 +835,9 @@ fn n_text_content_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<V
 
 fn n_text_content_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "textContent")?;
-    let v = match args.first() {
-        None | Some(Value::Null) | Some(Value::Undefined) => String::new(),
-        Some(v) => realm.to_rust_string(v.clone())?,
+    let v = match args.first().map(Value::v) {
+        None | Some(V::Null) | Some(V::Undefined) => String::new(),
+        Some(v) => realm.to_rust_string(v.to_value())?,
     };
     let (is_char, is_leaf) = with_doc(n.doc, |doc| match doc.node(n.node).data {
         NodeData::Text(_) | NodeData::Comment(_) => (true, false),
@@ -980,9 +981,9 @@ fn n_insert_before(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
         Some(c) => c,
         None => return Err(realm.throw_type_error("Failed to execute 'insertBefore' on 'Node': parameter 1 is not of type 'Node'.")),
     };
-    let before = match args.get(1) {
-        None | Some(Value::Null) | Some(Value::Undefined) => None,
-        Some(v) => match node_of(realm, v) {
+    let before = match (args.get(1)).map(Value::v) {
+        None | Some(V::Null) | Some(V::Undefined) => None,
+        Some(v) => match node_of(realm, &v.to_value()) {
             Some(r) => {
                 if with_doc(n.doc, |doc| doc.parent(r.node)) != Some(n.node) {
                     return Err(crate::misc::dom_exception(realm, "NotFoundError", "The node before which the new node is to be inserted is not a child of this node."));
@@ -1470,13 +1471,13 @@ pub(crate) fn install(realm: &mut Realm) {
     let ctor = realm.obj(node).props.get(&rabbithole_js::PropertyKey::str("constructor")).map(|p| p.value.clone());
     for (k, v) in consts {
         realm.define_property(node, k, Value::Number(v), 0);
-        if let Some(Value::Object(c)) = &ctor {
-            realm.define_property(*c, k, Value::Number(v), 0);
+        if let Some(V::Object(c)) = ctor.as_ref().map(Value::v) {
+            realm.define_property(c, k, Value::Number(v), 0);
         }
     }
-    if let Some(Value::Object(c)) = &ctor {
-        realm.define_property(*c, "DOCUMENT_POSITION_CONTAINS", Value::Number(8.0), 0);
-        realm.define_property(*c, "DOCUMENT_POSITION_CONTAINED_BY", Value::Number(16.0), 0);
+    if let Some(V::Object(c)) = ctor.as_ref().map(Value::v) {
+        realm.define_property(c, "DOCUMENT_POSITION_CONTAINS", Value::Number(8.0), 0);
+        realm.define_property(c, "DOCUMENT_POSITION_CONTAINED_BY", Value::Number(16.0), 0);
     }
     let acc = |realm: &mut Realm, name: &str, g: rabbithole_js::NativeFn| realm.define_accessor(node, name, Some(g), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     acc(realm, "nodeType", n_node_type);

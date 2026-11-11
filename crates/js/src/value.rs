@@ -1,5 +1,6 @@
 //! Core value types: UTF-16 strings, symbols, object ids and `Value`.
 
+use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -9,12 +10,79 @@ use std::rc::Rc;
 /// Concatenation of long strings builds a rope (no copying); the flat
 /// representation is produced lazily the first time the code units are
 /// needed and then cached, so `s += "x"` loops stay linear.
-#[derive(Clone)]
-pub struct JsStr(Rc<StrInner>);
+///
+/// The handle is one word: the string tag of [`Value`] over the pointer of
+/// an `Rc<StrInner>`, so a string `Value` and a `JsStr` share their bits.
+#[repr(transparent)]
+pub struct JsStr(std::num::NonZeroU64);
 
-enum StrInner {
+/// The shared allocation of a string: its contents and a lazily computed
+/// hash (property names are hashed on every dictionary / shape lookup).
+pub(crate) struct StrBox {
+    hash: Cell<u32>,
+    s: StrInner,
+}
+
+pub(crate) enum StrInner {
     Flat(Box<[u16]>),
     Rope { left: JsStr, right: JsStr, len: usize, flat: std::cell::OnceCell<Box<[u16]>> },
+}
+
+impl Clone for JsStr {
+    #[inline(always)]
+    fn clone(&self) -> JsStr {
+        // SAFETY: the handle holds a strong reference.
+        unsafe { Rc::increment_strong_count(self.ptr()) };
+        JsStr(self.0)
+    }
+}
+
+impl Drop for JsStr {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: the handle owns a strong reference.
+        unsafe { Rc::decrement_strong_count(self.ptr()) };
+    }
+}
+
+impl JsStr {
+    #[inline(always)]
+    fn ptr(&self) -> *const StrBox {
+        (self.0.get() & PAYLOAD) as *const StrBox
+    }
+    #[inline(always)]
+    fn inner(&self) -> &StrInner {
+        // SAFETY: the handle holds a strong reference.
+        unsafe { &(*self.ptr()).s }
+    }
+    /// Hash of the code units (FxHash-style), computed once per string.
+    #[inline]
+    pub fn hash32(&self) -> u32 {
+        // SAFETY: the handle holds a strong reference.
+        let b = unsafe { &*self.ptr() };
+        let h = b.hash.get();
+        if h != 0 {
+            return h;
+        }
+        let mut x: u64 = 0xcbf2_9ce4_8422_2325;
+        for &u in self.as_units() {
+            x = (x.rotate_left(5) ^ u as u64).wrapping_mul(FX_SEED);
+        }
+        let h = ((x >> 32) as u32 ^ x as u32) | 1;
+        b.hash.set(h);
+        h
+    }
+    fn from_inner(i: StrInner) -> JsStr {
+        let p = Rc::into_raw(Rc::new(StrBox { hash: Cell::new(0), s: i })) as u64;
+        assert!(p & TAG_MASK == 0, "pointer beyond 48 bits");
+        // SAFETY: the tag is non-zero.
+        JsStr(unsafe { std::num::NonZeroU64::new_unchecked(TAG_STRING | p) })
+    }
+    fn into_rc(self) -> Rc<StrBox> {
+        let s = std::mem::ManuallyDrop::new(self);
+        // SAFETY: transfers the handle's strong reference.
+        unsafe { Rc::from_raw(s.ptr()) }
+    }
 }
 
 impl Drop for StrInner {
@@ -24,15 +92,15 @@ impl Drop for StrInner {
         // behind is created here (not taken from a thread-local: strings
         // can be dropped while thread-local storage is being torn down).
         let StrInner::Rope { left, right, .. } = self else { return };
-        let is_rope = |s: &JsStr| matches!(&*s.0, StrInner::Rope { .. });
+        let is_rope = |s: &JsStr| matches!(s.inner(), StrInner::Rope { .. });
         if !is_rope(left) && !is_rope(right) {
             return;
         }
-        let hole = JsStr(Rc::new(StrInner::Flat(Box::default())));
+        let hole = JsStr::from_inner(StrInner::Flat(Box::default()));
         let mut stack = vec![std::mem::replace(left, hole.clone()), std::mem::replace(right, hole.clone())];
         while let Some(s) = stack.pop() {
-            if let Ok(mut inner) = Rc::try_unwrap(s.0) {
-                if let StrInner::Rope { left, right, .. } = &mut inner {
+            if let Ok(mut inner) = Rc::try_unwrap(s.into_rc()) {
+                if let StrInner::Rope { left, right, .. } = &mut inner.s {
                     stack.push(std::mem::replace(left, hole.clone()));
                     stack.push(std::mem::replace(right, hole.clone()));
                 }
@@ -45,13 +113,13 @@ const ROPE_MIN: usize = 48;
 
 impl JsStr {
     pub fn new(s: &str) -> JsStr {
-        JsStr(Rc::new(StrInner::Flat(s.encode_utf16().collect::<Vec<u16>>().into())))
+        JsStr::from_inner(StrInner::Flat(s.encode_utf16().collect::<Vec<u16>>().into()))
     }
     pub fn from_units(units: Vec<u16>) -> JsStr {
-        JsStr(Rc::new(StrInner::Flat(units.into())))
+        JsStr::from_inner(StrInner::Flat(units.into()))
     }
     pub fn from_slice(units: &[u16]) -> JsStr {
-        JsStr(Rc::new(StrInner::Flat(units.into())))
+        JsStr::from_inner(StrInner::Flat(units.into()))
     }
     /// One-code-unit string (Latin-1 range cached).
     pub fn from_unit(u: u16) -> JsStr {
@@ -103,13 +171,13 @@ impl JsStr {
     }
     pub fn empty() -> JsStr {
         thread_local! {
-            static EMPTY: JsStr = JsStr(Rc::new(StrInner::Flat(Vec::new().into())));
+            static EMPTY: JsStr = JsStr::from_inner(StrInner::Flat(Vec::new().into()));
         }
         EMPTY.with(|e| e.clone())
     }
     /// The code units (flattening a rope on first use).
     pub fn as_units(&self) -> &[u16] {
-        match &*self.0 {
+        match self.inner() {
             StrInner::Flat(b) => b,
             StrInner::Rope { flat, .. } => flat.get_or_init(|| self.flatten()),
         }
@@ -119,7 +187,7 @@ impl JsStr {
         // Iterative in-order traversal (ropes can be very deep).
         let mut stack: Vec<&JsStr> = vec![self];
         while let Some(s) = stack.pop() {
-            match &*s.0 {
+            match s.inner() {
                 StrInner::Flat(b) => out.extend_from_slice(b),
                 StrInner::Rope { left, right, flat, .. } => {
                     if let Some(f) = flat.get() {
@@ -134,7 +202,7 @@ impl JsStr {
         out.into()
     }
     pub fn len(&self) -> usize {
-        match &*self.0 {
+        match self.inner() {
             StrInner::Flat(b) => b.len(),
             StrInner::Rope { len, .. } => *len,
         }
@@ -158,9 +226,9 @@ impl JsStr {
             let mut v = Vec::with_capacity(len);
             v.extend_from_slice(self.as_units());
             v.extend_from_slice(other.as_units());
-            return JsStr(Rc::new(StrInner::Flat(v.into())));
+            return JsStr::from_inner(StrInner::Flat(v.into()));
         }
-        JsStr(Rc::new(StrInner::Rope { left: self.clone(), right: other.clone(), len, flat: std::cell::OnceCell::new() }))
+        JsStr::from_inner(StrInner::Rope { left: self.clone(), right: other.clone(), len, flat: std::cell::OnceCell::new() })
     }
     pub fn slice(&self, start: usize, end: usize) -> JsStr {
         let end = end.min(self.len());
@@ -267,7 +335,7 @@ impl JsStr {
         self.as_units().cmp(other.as_units())
     }
     pub fn ptr_eq(&self, other: &JsStr) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        self.0 == other.0
     }
 }
 
@@ -303,13 +371,25 @@ pub fn is_js_whitespace_unit(c: u16) -> bool {
 
 impl PartialEq for JsStr {
     fn eq(&self, other: &JsStr) -> bool {
-        Rc::ptr_eq(&self.0, &other.0) || (self.len() == other.len() && self.as_units() == other.as_units())
+        if self.0 == other.0 {
+            return true;
+        }
+        if self.len() != other.len() {
+            return false;
+        }
+        // SAFETY: both handles hold strong references.
+        let (ha, hb) = unsafe { ((*self.ptr()).hash.get(), (*other.ptr()).hash.get()) };
+        if ha != 0 && hb != 0 && ha != hb {
+            return false;
+        }
+        self.as_units() == other.as_units()
     }
 }
 impl Eq for JsStr {}
 impl Hash for JsStr {
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_units().hash(state)
+        state.write_u32(self.hash32())
     }
 }
 
@@ -421,74 +501,351 @@ pub struct ObjectId(pub u32);
 
 pub use crate::bigint::BigInt;
 
-/// A JavaScript value.
+/// A JavaScript value, NaN-boxed into one 64-bit word.
 ///
-/// `repr(u64)` gives every variant a full-word tag followed by an 8-byte
-/// payload, so values move as two machine words: the interpreter's operand
-/// stack then never mixes partial-width stores with full-width loads (which
-/// defeats store-to-load forwarding and costs ~70% in the dispatch loop).
-#[derive(Debug)]
-#[repr(u64)]
-pub enum Value {
+/// Numbers are stored as their IEEE-754 bits. Every other kind lives in the
+/// negative quiet-NaN space from [`TAG_MIN`] up (no number uses those bit
+/// patterns: NaNs are canonicalized on construction). The top 16 bits are
+/// the tag and the low 48 bits the payload:
+///
+/// | tag      | kind                                           |
+/// |----------|------------------------------------------------|
+/// | `0xFFF9` | undefined / null / empty / false / true         |
+/// | `0xFFFA` | symbol (`u32` id)                              |
+/// | `0xFFFB` | object (`u32` id)                              |
+/// | `0xFFFC` | BigInt (`Rc<BigInt>` pointer)                  |
+/// | `0xFFFD` | string (a [`JsStr`], whose word is identical)   |
+///
+/// Only strings and BigInts own a reference count (`bits >= TAG_BIGINT`).
+/// Code inspects a value through [`Value::v`], a borrowed view with the
+/// classic variants; `Value::Number(n)`, `Value::String(s)`, ... remain the
+/// constructors, and `Value::Undefined`, `Value::Null` and `Value::Empty`
+/// are constants usable in patterns.
+#[repr(transparent)]
+#[derive(PartialEq, Eq)]
+pub struct Value(u64);
+
+pub const TAG_MIN: u64 = 0xFFF9_0000_0000_0000;
+const TAG_SPECIAL: u64 = 0xFFF9_0000_0000_0000;
+const TAG_SYMBOL: u64 = 0xFFFA_0000_0000_0000;
+const TAG_OBJECT: u64 = 0xFFFB_0000_0000_0000;
+const TAG_BIGINT: u64 = 0xFFFC_0000_0000_0000;
+const TAG_STRING: u64 = 0xFFFD_0000_0000_0000;
+const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+const PAYLOAD: u64 = 0x0000_FFFF_FFFF_FFFF;
+const UNDEFINED_BITS: u64 = TAG_SPECIAL;
+const NULL_BITS: u64 = TAG_SPECIAL | 1;
+const EMPTY_BITS: u64 = TAG_SPECIAL | 2;
+const FALSE_BITS: u64 = TAG_SPECIAL | 4;
+const TRUE_BITS: u64 = TAG_SPECIAL | 5;
+/// The canonical NaN (what `0.0 / 0.0` produces).
+const CANON_NAN: u64 = 0x7FF8_0000_0000_0000;
+
+/// A borrowed, decoded view of a [`Value`] (see [`Value::v`]).
+#[derive(Clone, Copy, Debug)]
+pub enum V<'a> {
     Undefined,
     Null,
     Bool(bool),
     Number(f64),
-    String(JsStr),
+    String(&'a JsStr),
     Symbol(SymbolId),
-    BigInt(Rc<BigInt>),
+    BigInt(&'a BigInt),
     Object(ObjectId),
     /// Internal marker used for array holes and uninitialized (TDZ)
     /// bindings. It never escapes to JavaScript code.
     Empty,
 }
 
+impl V<'_> {
+    /// The value this view decodes (a new reference for strings / BigInts).
+    #[inline]
+    pub fn to_value(self) -> Value {
+        match self {
+            V::Undefined => Value::Undefined,
+            V::Null => Value::Null,
+            V::Empty => Value::Empty,
+            V::Bool(b) => Value::Bool(b),
+            V::Number(n) => Value::Number(n),
+            V::String(s) => Value::String(s.clone()),
+            V::Symbol(s) => Value::Symbol(s),
+            V::BigInt(b) => Value::BigInt(Rc::new(b.clone())),
+            V::Object(o) => Value::Object(o),
+        }
+    }
+    pub fn is_object(&self) -> bool {
+        matches!(self, V::Object(_))
+    }
+    pub fn type_of(&self) -> &'static str {
+        match self {
+            V::Undefined | V::Empty => "undefined",
+            V::Null => "object",
+            V::Bool(_) => "boolean",
+            V::Number(_) => "number",
+            V::String(_) => "string",
+            V::Symbol(_) => "symbol",
+            V::BigInt(_) => "bigint",
+            V::Object(_) => "object",
+        }
+    }
+    /// ToBoolean (no side effects).
+    pub fn truthy(&self) -> bool {
+        match *self {
+            V::Undefined | V::Null | V::Empty => false,
+            V::Bool(b) => b,
+            V::Number(n) => !(n == 0.0 || n.is_nan()),
+            V::String(s) => !s.is_empty(),
+            V::Symbol(_) => true,
+            V::BigInt(b) => !b.is_zero(),
+            V::Object(_) => true,
+        }
+    }
+}
+
+#[allow(non_upper_case_globals, non_snake_case)]
+impl Value {
+    pub const Undefined: Value = Value(UNDEFINED_BITS);
+    pub const Null: Value = Value(NULL_BITS);
+    /// Internal marker used for array holes and uninitialized (TDZ)
+    /// bindings. It never escapes to JavaScript code.
+    pub const Empty: Value = Value(EMPTY_BITS);
+    pub const TRUE: Value = Value(TRUE_BITS);
+    pub const FALSE: Value = Value(FALSE_BITS);
+
+    #[inline(always)]
+    pub fn Bool(b: bool) -> Value {
+        Value(FALSE_BITS | b as u64)
+    }
+    #[inline(always)]
+    pub fn Number(n: f64) -> Value {
+        let b = n.to_bits();
+        Value(if b >= TAG_MIN { CANON_NAN } else { b })
+    }
+    #[inline(always)]
+    pub fn String(s: JsStr) -> Value {
+        let s = std::mem::ManuallyDrop::new(s);
+        Value(s.0.get())
+    }
+    #[inline(always)]
+    pub fn Symbol(s: SymbolId) -> Value {
+        Value(TAG_SYMBOL | s.0 as u64)
+    }
+    #[inline(always)]
+    pub fn Object(o: ObjectId) -> Value {
+        Value(TAG_OBJECT | o.0 as u64)
+    }
+    #[inline]
+    pub fn BigInt(b: Rc<BigInt>) -> Value {
+        let p = Rc::into_raw(b) as u64;
+        assert!(p & TAG_MASK == 0, "pointer beyond 48 bits");
+        Value(TAG_BIGINT | p)
+    }
+
+    /// The raw 64-bit word.
+    #[inline(always)]
+    pub fn bits(&self) -> u64 {
+        self.0
+    }
+
+    /// Decode into a borrowed view.
+    #[inline(always)]
+    pub fn v(&self) -> V<'_> {
+        let b = self.0;
+        if b < TAG_MIN {
+            return V::Number(f64::from_bits(b));
+        }
+        match b & TAG_MASK {
+            TAG_SPECIAL => match b {
+                UNDEFINED_BITS => V::Undefined,
+                NULL_BITS => V::Null,
+                FALSE_BITS => V::Bool(false),
+                TRUE_BITS => V::Bool(true),
+                _ => V::Empty,
+            },
+            TAG_SYMBOL => V::Symbol(SymbolId(b as u32)),
+            TAG_OBJECT => V::Object(ObjectId(b as u32)),
+            // SAFETY: the payload is a live `Rc<BigInt>` owned by `self`.
+            TAG_BIGINT => V::BigInt(unsafe { &*((b & PAYLOAD) as *const BigInt) }),
+            // SAFETY: a string value's word is a valid `JsStr`
+            // (`repr(transparent)` over the same bits).
+            _ => V::String(unsafe { &*(self as *const Value as *const JsStr) }),
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_number(&self) -> bool {
+        self.0 < TAG_MIN
+    }
+    /// The number of a value known to be one (see [`Value::is_number`]).
+    #[inline(always)]
+    pub fn number_unchecked(&self) -> f64 {
+        debug_assert!(self.is_number());
+        f64::from_bits(self.0)
+    }
+    #[inline(always)]
+    pub fn is_string(&self) -> bool {
+        self.0 & TAG_MASK == TAG_STRING
+    }
+    #[inline(always)]
+    pub fn is_bool(&self) -> bool {
+        self.0 & !1 == FALSE_BITS
+    }
+    #[inline(always)]
+    pub fn as_bool(&self) -> Option<bool> {
+        if self.is_bool() {
+            Some(self.0 & 1 == 1)
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn is_symbol(&self) -> bool {
+        self.0 & TAG_MASK == TAG_SYMBOL
+    }
+    #[inline(always)]
+    pub fn as_symbol(&self) -> Option<SymbolId> {
+        if self.is_symbol() {
+            Some(SymbolId(self.0 as u32))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn is_bigint(&self) -> bool {
+        self.0 & TAG_MASK == TAG_BIGINT
+    }
+    #[inline(always)]
+    pub fn as_bigint(&self) -> Option<&BigInt> {
+        match self.v() {
+            V::BigInt(b) => Some(b),
+            _ => None,
+        }
+    }
+    /// A new reference to the BigInt payload.
+    pub fn bigint_rc(&self) -> Option<Rc<BigInt>> {
+        if !self.is_bigint() {
+            return None;
+        }
+        let p = (self.0 & PAYLOAD) as *const BigInt;
+        // SAFETY: the payload is a live `Rc<BigInt>` owned by `self`.
+        unsafe {
+            Rc::increment_strong_count(p);
+            Some(Rc::from_raw(p))
+        }
+    }
+    /// Whether two values are the same word (identical non-string
+    /// primitives, the same object or symbol, the same string instance).
+    #[inline(always)]
+    pub fn same_bits(&self, other: &Value) -> bool {
+        self.0 == other.0
+    }
+}
+
 impl Clone for Value {
     #[inline(always)]
     fn clone(&self) -> Value {
-        match self {
-            Value::String(s) => Value::String(s.clone()),
-            Value::BigInt(b) => Value::BigInt(b.clone()),
-            // SAFETY: every other variant is plain data without a destructor,
-            // so a bitwise copy is a valid clone (and compiles to a 16-byte
-            // move instead of a per-variant reconstruction).
-            _ => unsafe { std::ptr::read(self) },
+        let b = self.0;
+        if b >= TAG_BIGINT {
+            clone_slow(b);
+        }
+        Value(b)
+    }
+}
+
+#[inline(never)]
+fn clone_slow(b: u64) {
+    // SAFETY: strings and BigInts carry a live `Rc` pointer.
+    unsafe {
+        if b >= TAG_STRING {
+            Rc::increment_strong_count((b & PAYLOAD) as *const StrBox);
+        } else {
+            Rc::increment_strong_count((b & PAYLOAD) as *const BigInt);
+        }
+    }
+}
+
+impl Drop for Value {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if self.0 >= TAG_BIGINT {
+            drop_slow(self.0);
+        }
+    }
+}
+
+#[inline(never)]
+fn drop_slow(b: u64) {
+    // SAFETY: strings and BigInts carry a live `Rc` pointer owned by the
+    // value being dropped.
+    unsafe {
+        if b >= TAG_STRING {
+            Rc::decrement_strong_count((b & PAYLOAD) as *const StrBox);
+        } else {
+            Rc::decrement_strong_count((b & PAYLOAD) as *const BigInt);
+        }
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.v() {
+            V::Undefined => f.write_str("Undefined"),
+            V::Null => f.write_str("Null"),
+            V::Empty => f.write_str("Empty"),
+            V::Bool(b) => write!(f, "Bool({b})"),
+            V::Number(n) => write!(f, "Number({n:?})"),
+            V::String(s) => write!(f, "String({s:?})"),
+            V::Symbol(s) => write!(f, "Symbol({s:?})"),
+            V::BigInt(b) => write!(f, "BigInt({b:?})"),
+            V::Object(o) => write!(f, "Object({o:?})"),
         }
     }
 }
 
 impl Value {
+    #[inline(always)]
     pub fn is_undefined(&self) -> bool {
-        matches!(self, Value::Undefined)
+        self.0 == UNDEFINED_BITS
     }
+    #[inline(always)]
     pub fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
+        self.0 == NULL_BITS
     }
+    #[inline(always)]
     pub fn is_nullish(&self) -> bool {
-        matches!(self, Value::Undefined | Value::Null)
+        self.0 & !1 == UNDEFINED_BITS
     }
+    #[inline(always)]
     pub fn is_object(&self) -> bool {
-        matches!(self, Value::Object(_))
+        self.0 & TAG_MASK == TAG_OBJECT
     }
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        matches!(self, Value::Empty)
+        self.0 == EMPTY_BITS
     }
+    #[inline(always)]
     pub fn as_object(&self) -> Option<ObjectId> {
-        match self {
-            Value::Object(o) => Some(*o),
-            _ => None,
+        if self.is_object() {
+            Some(ObjectId(self.0 as u32))
+        } else {
+            None
         }
     }
+    #[inline(always)]
     pub fn as_number(&self) -> Option<f64> {
-        match self {
-            Value::Number(n) => Some(*n),
-            _ => None,
+        if self.is_number() {
+            Some(f64::from_bits(self.0))
+        } else {
+            None
         }
     }
+    #[inline(always)]
     pub fn as_str(&self) -> Option<&JsStr> {
-        match self {
-            Value::String(s) => Some(s),
-            _ => None,
+        if self.is_string() {
+            // SAFETY: a string value's word is a valid `JsStr`.
+            Some(unsafe { &*(self as *const Value as *const JsStr) })
+        } else {
+            None
         }
     }
     pub fn str(s: &str) -> Value {
@@ -498,27 +855,44 @@ impl Value {
         Value::Number(n)
     }
     pub fn type_of(&self) -> &'static str {
-        match self {
-            Value::Undefined | Value::Empty => "undefined",
-            Value::Null => "object",
-            Value::Bool(_) => "boolean",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Symbol(_) => "symbol",
-            Value::BigInt(_) => "bigint",
-            Value::Object(_) => "object",
-        }
+        self.v().type_of()
     }
     /// ToBoolean (no side effects).
+    #[inline(always)]
     pub fn truthy(&self) -> bool {
-        match self {
-            Value::Undefined | Value::Null | Value::Empty => false,
-            Value::Bool(b) => *b,
-            Value::Number(n) => !(*n == 0.0 || n.is_nan()),
-            Value::String(s) => !s.is_empty(),
-            Value::Symbol(_) => true,
-            Value::BigInt(b) => !b.is_zero(),
-            Value::Object(_) => true,
+        let b = self.0;
+        if b < TAG_MIN {
+            let n = f64::from_bits(b);
+            // NaN and ±0 are falsy.
+            return n != 0.0 && n == n;
+        }
+        if b == TRUE_BITS {
+            return true;
+        }
+        if b & TAG_MASK == TAG_SPECIAL {
+            return false;
+        }
+        self.v().truthy()
+    }
+    /// A copy of the value, with the internal `Empty` marker read as
+    /// `undefined`.
+    #[inline(always)]
+    pub fn undef_if_empty(&self) -> Value {
+        if self.0 == EMPTY_BITS {
+            Value::Undefined
+        } else {
+            self.clone()
+        }
+    }
+    /// Store a number, reusing the slot (no destructor run when it already
+    /// holds a non-reference-counted value).
+    #[inline(always)]
+    pub fn set_number(&mut self, n: f64) {
+        if self.0 >= TAG_BIGINT {
+            *self = Value::Number(n);
+        } else {
+            let b = n.to_bits();
+            self.0 = if b >= TAG_MIN { CANON_NAN } else { b };
         }
     }
 }

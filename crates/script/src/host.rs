@@ -2,6 +2,7 @@
 //! timers, observers, and the helpers natives use to reach the DOM.
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, HIDDEN};
 use std::cell::RefCell;
@@ -406,10 +407,10 @@ pub(crate) fn wrap_opt(realm: &mut Realm, doc: u32, node: Option<NodeId>) -> Val
 
 /// The object carrying host data for `v`: itself, or a Proxy's target.
 pub(crate) fn host_obj(realm: &Realm, v: &Value) -> Option<ObjectId> {
-    match v {
-        Value::Object(id) => match &realm.obj(*id).kind {
+    match v.v() {
+        V::Object(id) => match &realm.obj(id).kind {
             rabbithole_js::ObjectKind::Proxy { target, .. } => Some(*target),
-            _ => Some(*id),
+            _ => Some(id),
         },
         _ => None,
     }
@@ -442,10 +443,10 @@ pub(crate) fn root_value(realm: &mut Realm, v: &Value) {
 }
 
 pub(crate) fn unroot_value(realm: &mut Realm, v: &Value) {
-    let Value::Object(target) = v else { return };
+    let V::Object(target) = v.v() else { return };
     let arr = state().borrow().root_array;
     if let rabbithole_js::ObjectKind::Array { elements, length } = &mut realm.obj_mut(arr).kind {
-        if let Some(pos) = elements.iter().rposition(|e| matches!(e, Value::Object(o) if o == target)) {
+        if let Some(pos) = elements.iter().rposition(|e| matches!(e.v(), V::Object(o) if o == target)) {
             elements.remove(pos);
         }
         *length = elements.len() as u32;
@@ -477,7 +478,7 @@ pub(crate) fn illegal_ctor(realm: &mut Realm, _this: Value, _args: &[Value]) -> 
 /// fresh element of the class's registered name.
 pub(crate) fn html_element_ctor(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
     let nt = realm.new_target();
-    let Value::Object(nt_id) = nt.clone() else {
+    let V::Object(nt_id) = nt.clone().v() else {
         return Err(realm.throw_type_error("Illegal constructor"));
     };
     let def = state()
@@ -485,7 +486,7 @@ pub(crate) fn html_element_ctor(realm: &mut Realm, _this: Value, _args: &[Value]
         .shadow
         .definitions
         .values()
-        .find(|d| matches!(d.ctor, Value::Object(id) if id == nt_id))
+        .find(|d| matches!(d.ctor.v(), V::Object(id) if id == nt_id))
         .map(|d| (d.name.clone(), d.extends.clone()));
     let Some((name, extends)) = def else {
         return Err(realm.throw_type_error("Illegal constructor"));
@@ -506,8 +507,8 @@ pub(crate) fn html_element_ctor(realm: &mut Realm, _this: Value, _args: &[Value]
     state().borrow_mut().ce_upgraded.insert(n);
     with_doc(n.doc, |doc| doc.defined_custom.insert(n.node));
     let el = wrap(realm, n);
-    if let (Value::Object(e), Ok(Value::Object(p))) = (&el, realm.get_str(nt, "prototype")) {
-        realm.obj_mut(*e).proto = Some(p);
+    if let (Some(e), Ok(Some(p))) = (el.as_object(), realm.get_str(nt, "prototype").map(|p| p.as_object())) {
+        realm.obj_mut(e).set_proto(Some(p));
     }
     Ok(el)
 }
@@ -533,8 +534,8 @@ pub(crate) fn upgrade_custom_element(realm: &mut Realm, n: NodeRef, ctor: &Value
             if let Ok(obs) = realm.get_str(ctor.clone(), "observedAttributes") {
                 if let Ok(cb) = realm.get_str(el.clone(), "attributeChangedCallback") {
                     if realm.is_callable(&cb) {
-                        let names: Vec<String> = match obs {
-                            Value::Object(arr) => {
+                        let names: Vec<String> = match obs.v() {
+                            V::Object(arr) => {
                                 let len = realm.get_str(Value::Object(arr), "length").ok().and_then(|v| realm.to_number(v).ok()).unwrap_or(0.0) as usize;
                                 let mut names = Vec::new();
                                 for i in 0..len.min(64) {
@@ -587,9 +588,9 @@ pub(crate) fn arg_str(realm: &mut Realm, args: &[Value], i: usize) -> JsResult<S
 }
 
 pub(crate) fn arg_str_opt(realm: &mut Realm, args: &[Value], i: usize) -> JsResult<Option<String>> {
-    match args.get(i) {
-        None | Some(Value::Undefined) => Ok(None),
-        Some(v) => realm.to_rust_string(v.clone()).map(Some),
+    match (args.get(i)).map(Value::v) {
+        None | Some(V::Undefined) => Ok(None),
+        Some(v) => realm.to_rust_string(v.to_value()).map(Some),
     }
 }
 

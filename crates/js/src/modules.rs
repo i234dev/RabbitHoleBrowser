@@ -23,6 +23,7 @@
 //! a specifier against the referrer URL, fetches, compiles and caches.
 
 use crate::builtins::promise::perform_then_native;
+use crate::value::V;
 use crate::bytecode::FunctionCode;
 use crate::compiler::{CompiledModule, DEFAULT_EXPORT_BINDING};
 use crate::heap::*;
@@ -458,7 +459,7 @@ impl Realm {
         }
         let Some(code) = self.rec(id).code.clone() else { return Ok(()) };
         let body = self.run_script(code)?;
-        let Value::Object(body) = body else {
+        let V::Object(body) = body.v() else {
             return Err(self.new_error("TypeError", "module environment did not produce a body"));
         };
         let env = match &self.obj(body).kind {
@@ -593,8 +594,8 @@ impl Realm {
     /// Read an import slot: dereference a module binding reference (TDZ
     /// checked); other values (namespace objects) are returned as is.
     pub(crate) fn read_import_slot(&mut self, v: Value) -> JsResult<Value> {
-        let Value::Object(id) = &v else { return Ok(v) };
-        let (scope, slot, name) = match &self.obj(*id).kind {
+        let V::Object(id) = v.v() else { return Ok(v) };
+        let (scope, slot, name) = match &self.obj(id).kind {
             ObjectKind::ModuleBinding { scope, slot, name } => (*scope, *slot, name.clone()),
             _ => return Ok(v),
         };
@@ -733,13 +734,14 @@ impl Realm {
             self.finish_module(id);
             return Ok(());
         };
-        let promise = match self.call(Value::Object(body), Value::Undefined, &[]) {
-            Ok(Value::Object(p)) => p,
+        let promise = match self.call(Value::Object(body), Value::Undefined, &[]).as_ref().map(Value::v) {
+            Ok(V::Object(p)) => p,
             Ok(_) => {
                 self.finish_module(id);
                 return Ok(());
             }
             Err(e) => {
+                let e = e.clone();
                 self.fail_module(id, e.clone());
                 return Err(e);
             }
@@ -785,8 +787,8 @@ impl Realm {
 
     /// Drop a rejection the module machinery handles from the unhandled list.
     fn forget_unhandled(&mut self, reason: &Value) {
-        let pos = self.unhandled_rejections.iter().rposition(|v| match (v, reason) {
-            (Value::Object(a), Value::Object(b)) => a == b,
+        let pos = self.unhandled_rejections.iter().rposition(|v| match (v.v(), reason.v()) {
+            (V::Object(a), V::Object(b)) => a == b,
             _ => !reason.is_object(),
         });
         if let Some(pos) = pos {
@@ -802,14 +804,14 @@ impl Realm {
         let id = self.compile_module(source, url)?;
         self.link_module(id)?;
         let p = self.evaluate_module(id)?;
-        if let Value::Object(pid) = &p {
-            let (state, value) = match &self.obj(*pid).kind {
+        if let V::Object(pid) = p.v() {
+            let (state, value) = match &self.obj(pid).kind {
                 ObjectKind::Promise(pd) => (pd.state, pd.value.clone()),
                 _ => (PromiseState::Fulfilled, Value::Undefined),
             };
             match state {
                 PromiseState::Rejected => return Err(value),
-                PromiseState::Pending => perform_then_native(self, *pid, ignore_settlement, report_module_error, Value::str(url)),
+                PromiseState::Pending => perform_then_native(self, pid, ignore_settlement, report_module_error, Value::str(url)),
                 PromiseState::Fulfilled => {}
             }
         }

@@ -9,6 +9,7 @@
 //! validated against current object state and falls back to the slow path.
 
 use crate::bytecode::PropIc;
+use crate::value::V;
 use crate::heap::*;
 use crate::realm::Realm;
 use crate::value::*;
@@ -35,6 +36,25 @@ pub const IC_GLOBAL_LEX: u8 = 7;
 /// Global object property: shaped (`holder_shape` = shape id) or dictionary
 /// (key-checked entry `slot`), valid while the lexical epoch is `shape`.
 pub const IC_GLOBAL_OBJ: u8 = 8;
+
+/// Receiver with shape `shape` and prototype `mid` lacks the key; it is
+/// found in `slot` of `holder` further up the chain. Valid while the
+/// prototype epoch is `mid_shape` (every object passed is marked, see
+/// [`crate::shape::proto_epoch`]).
+pub const IC_PROTO_DEEP: u8 = 9;
+/// Like [`IC_ADD`] for longer prototype chains: receiver shape `shape`
+/// transitions to the shape with id `slot`; its prototype is `holder` and
+/// the chain (proved to lack the key) is unchanged while the prototype
+/// epoch is `mid_shape`.
+pub const IC_ADD_DEEP: u8 = 10;
+/// Store through an accessor property: `holder` (`NO_OBJ`: the receiver
+/// itself, with shape `shape`) has it in `slot`; for an inherited one the
+/// receiver has shape `shape` and prototype `mid`, and the chain is valid
+/// while the prototype epoch is `mid_shape`.
+pub const IC_SETTER: u8 = 11;
+
+/// Longest prototype chain walked when filling a deep cache.
+const MAX_CHAIN: usize = 48;
 
 /// Object id 0 is a valid id, so "no object" is encoded as `u32::MAX`.
 pub const NO_OBJ: u32 = u32::MAX;
@@ -100,11 +120,11 @@ impl Realm {
     /// Wrapper prototype used for property lookups on a primitive.
     #[inline]
     pub(crate) fn prim_proto(&self, v: &Value) -> Option<ObjectId> {
-        match v {
-            Value::String(_) => Some(self.intrinsics.string_proto),
-            Value::Number(_) => Some(self.intrinsics.number_proto),
-            Value::Bool(_) => Some(self.intrinsics.boolean_proto),
-            Value::Symbol(_) => Some(self.intrinsics.symbol_proto),
+        match v.v() {
+            V::String(_) => Some(self.intrinsics.string_proto),
+            V::Number(_) => Some(self.intrinsics.number_proto),
+            V::Bool(_) => Some(self.intrinsics.boolean_proto),
+            V::Symbol(_) => Some(self.intrinsics.symbol_proto),
             _ => None,
         }
     }
@@ -158,9 +178,67 @@ impl Realm {
                     None
                 }
             }
+            IC_PROTO_DEEP => {
+                let o = self.heap.try_get(recv.as_object()?)?;
+                if o.props.shape_id() != ic.shape || o.proto?.0 != ic.mid || crate::shape::proto_epoch() != ic.mid_shape {
+                    return None;
+                }
+                let h = self.heap.try_get(ObjectId(ic.holder))?;
+                if h.props.shape_id() == ic.holder_shape {
+                    h.props.slot(ic.slot)
+                } else {
+                    None
+                }
+            }
             IC_OWN_DICT => None,
             _ => None,
         }
+    }
+
+    /// Walk the prototype chain above `first` (the receiver's prototype)
+    /// for `key`, marking every object passed so their changes invalidate
+    /// deep caches. Returns (holder, holder shape id, slot).
+    fn deep_find(&self, first: ObjectId, key: &PropertyKey) -> Option<(ObjectId, u32, u32)> {
+        let mut cur = Some(first);
+        let mut n = 0;
+        while let Some(c) = cur {
+            n += 1;
+            if n > MAX_CHAIN {
+                return None;
+            }
+            let h = self.heap.try_get(c)?;
+            if !plain_kind(&h.kind) || matches!(h.kind, ObjectKind::Array { .. } | ObjectKind::String(_)) {
+                return None;
+            }
+            h.props.mark_in_chain();
+            if let Some(slot) = h.props.find_slot(key) {
+                return Some((c, h.props.shape_id(), slot));
+            }
+            cur = h.proto;
+        }
+        None
+    }
+
+    /// The whole chain above `first` lacks `key` (marking each object).
+    fn deep_absent(&self, first: Option<ObjectId>, key: &PropertyKey) -> bool {
+        let mut cur = first;
+        let mut n = 0;
+        while let Some(c) = cur {
+            n += 1;
+            if n > MAX_CHAIN {
+                return false;
+            }
+            let Some(h) = self.heap.try_get(c) else { return false };
+            if !plain_kind(&h.kind) || matches!(h.kind, ObjectKind::Array { .. } | ObjectKind::String(_)) {
+                return false;
+            }
+            h.props.mark_in_chain();
+            if h.props.find_slot(key).is_some() {
+                return false;
+            }
+            cur = h.proto;
+        }
+        true
     }
 
     /// Record how `key` was read from `recv` (after a successful slow read).
@@ -172,12 +250,12 @@ impl Realm {
         // objects) cache it like any other key.
         let len_key = matches!(key, PropertyKey::String(s) if s.eq_str("length"));
         if len_key {
-            match recv {
-                Value::String(_) => {
+            match recv.v() {
+                V::String(_) => {
                     ic.kind = IC_LENGTH;
                     return ic;
                 }
-                Value::Object(id) if matches!(self.obj(*id).kind, ObjectKind::Array { .. }) => {
+                V::Object(id) if matches!(self.obj(id).kind, ObjectKind::Array { .. }) => {
                     ic.kind = IC_LENGTH;
                     return ic;
                 }
@@ -188,9 +266,9 @@ impl Realm {
         if cacheable_key(key).is_none() {
             return ic;
         }
-        let (start, prim) = match recv {
-            Value::Object(id) => (*id, false),
-            other => match self.prim_proto(other) {
+        let (start, prim) = match recv.v() {
+            V::Object(id) => (id, false),
+            other => match self.prim_proto(&other.to_value()) {
                 Some(p) => (p, true),
                 None => return ic,
             },
@@ -245,6 +323,21 @@ impl Realm {
             ic.holder = p2.0;
             ic.holder_shape = h2.props.shape_id();
             ic.slot = slot;
+            return ic;
+        }
+        // Deeper: class hierarchies, DOM interfaces (element -> HTMLElement
+        // -> Element -> Node -> EventTarget).
+        let epoch = crate::shape::proto_epoch();
+        if let Some((holder, hs, slot)) = self.deep_find(p1, key) {
+            // Marking may not have changed anything cached: the epoch only
+            // moves on later changes.
+            ic.kind = IC_PROTO_DEEP;
+            ic.shape = o.props.shape_id();
+            ic.mid = p1.0;
+            ic.mid_shape = epoch;
+            ic.holder = holder.0;
+            ic.holder_shape = hs;
+            ic.slot = slot;
         }
         ic
     }
@@ -271,6 +364,21 @@ impl Realm {
                     _ => Err(v),
                 }
             }
+            IC_ADD_DEEP => {
+                let o = match self.heap.try_get_mut(id) {
+                    Some(o) => o,
+                    None => return Err(v),
+                };
+                if o.props.shape_id() != ic.shape || !o.extensible || o.proto.map(|p| p.0) != Some(ic.holder) || crate::shape::proto_epoch() != ic.mid_shape {
+                    return Err(v);
+                }
+                let next = match o.props.shape().and_then(|s| s.lookup_transition_str(key)) {
+                    Some(n) if n.id == ic.slot => n,
+                    _ => return Err(v),
+                };
+                o.props.push_with_shape(next, Property::data(v, ALL));
+                Ok(())
+            }
             IC_ADD => {
                 if !self.ic_add_valid(ic, id) {
                     return Err(v);
@@ -285,6 +393,31 @@ impl Realm {
             }
             _ => Err(v),
         }
+    }
+
+    /// The setter an `IC_SETTER` record finds for `recv`, if still valid.
+    #[inline]
+    pub(crate) fn ic_setter(&self, ic: &PropIc, recv: &Value) -> Option<ObjectId> {
+        let o = self.heap.try_get(recv.as_object()?)?;
+        if o.props.shape_id() != ic.shape {
+            return None;
+        }
+        let p = if ic.holder == NO_OBJ {
+            o.props.slot(ic.slot)?
+        } else {
+            if o.proto?.0 != ic.mid || crate::shape::proto_epoch() != ic.mid_shape {
+                return None;
+            }
+            let h = self.heap.try_get(ObjectId(ic.holder))?;
+            if h.props.shape_id() != ic.holder_shape {
+                return None;
+            }
+            h.props.slot(ic.slot)?
+        };
+        if p.flags & ACCESSOR == 0 {
+            return None;
+        }
+        p.setter()?.as_object()
     }
 
     /// The receiver and its prototype chain still match an `IC_ADD` record.
@@ -346,11 +479,36 @@ impl Realm {
                             ic.kind = IC_OWN;
                             ic.shape = before_id;
                             ic.slot = slot;
+                        } else if p.flags & ACCESSOR != 0 && p.setter().is_some() && !define {
+                            ic.kind = IC_SETTER;
+                            ic.shape = before_id;
+                            ic.holder = NO_OBJ;
+                            ic.slot = slot;
                         }
                     }
                 }
             }
             None => {
+                if !define && o.props.shape_id() == before_id && o.props.find_slot(key).is_none() {
+                    // Not added: an inherited setter took it.
+                    let epoch = crate::shape::proto_epoch();
+                    let Some(p1) = o.proto else { return ic };
+                    if let Some((holder, hs, slot)) = self.deep_find(p1, key) {
+                        let h = self.obj(holder);
+                        if let Some(p) = h.props.slot(slot) {
+                            if p.flags & ACCESSOR != 0 && p.setter().is_some() {
+                                ic.kind = IC_SETTER;
+                                ic.shape = before_id;
+                                ic.mid = p1.0;
+                                ic.mid_shape = epoch;
+                                ic.holder = holder.0;
+                                ic.holder_shape = hs;
+                                ic.slot = slot;
+                            }
+                        }
+                    }
+                    return ic;
+                }
                 // Added as the newest property?
                 let Some(shape) = o.props.shape() else { return ic };
                 let n = shape.len();
@@ -380,8 +538,19 @@ impl Realm {
                     ic.holder_shape = h1.props.shape_id();
                     if let Some(p2) = h1.proto {
                         let h2 = self.obj(p2);
-                        if !plain_kind(&h2.kind) || h2.props.find_slot(key).is_some() || h2.proto.is_some() {
+                        if !plain_kind(&h2.kind) || h2.props.find_slot(key).is_some() {
                             return PropIc::default();
+                        }
+                        if h2.proto.is_some() {
+                            // Longer chain: validated by the prototype epoch.
+                            let epoch = crate::shape::proto_epoch();
+                            if define || !self.deep_absent(Some(p1), key) {
+                                return PropIc::default();
+                            }
+                            ic.kind = IC_ADD_DEEP;
+                            ic.holder = p1.0;
+                            ic.mid_shape = epoch;
+                            return ic;
                         }
                         ic.mid = p2.0;
                         ic.mid_shape = h2.props.shape_id();

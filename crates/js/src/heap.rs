@@ -1,6 +1,7 @@
 //! Object model and garbage-collected heap.
 
 use crate::bytecode::FunctionCode;
+use crate::value::V;
 use crate::value::{BigInt, JsStr, ObjectId, SymbolId, Value};
 use crate::vm::Frame;
 use std::any::Any;
@@ -194,18 +195,18 @@ pub enum ValueKey {
 
 impl ValueKey {
     pub fn from_value(v: &Value) -> ValueKey {
-        match v {
-            Value::Undefined | Value::Empty => ValueKey::Undefined,
-            Value::Null => ValueKey::Null,
-            Value::Bool(b) => ValueKey::Bool(*b),
-            Value::Number(n) => {
-                let n = if n.is_nan() { f64::NAN } else if *n == 0.0 { 0.0 } else { *n };
+        match v.v() {
+            V::Undefined | V::Empty => ValueKey::Undefined,
+            V::Null => ValueKey::Null,
+            V::Bool(b) => ValueKey::Bool(b),
+            V::Number(n) => {
+                let n = if n.is_nan() { f64::NAN } else if n == 0.0 { 0.0 } else { n };
                 ValueKey::Number(n.to_bits())
             }
-            Value::String(s) => ValueKey::String(s.clone()),
-            Value::Symbol(s) => ValueKey::Symbol(*s),
-            Value::BigInt(b) => ValueKey::BigInt((**b).clone()),
-            Value::Object(o) => ValueKey::Object(*o),
+            V::String(s) => ValueKey::String(s.clone()),
+            V::Symbol(s) => ValueKey::Symbol(s),
+            V::BigInt(b) => ValueKey::BigInt(b.clone()),
+            V::Object(o) => ValueKey::Object(o),
         }
     }
 }
@@ -225,9 +226,9 @@ impl MapData {
     }
     pub fn set(&mut self, k: Value, v: Value) {
         let key = ValueKey::from_value(&k);
-        let k = match k {
-            Value::Number(n) if n == 0.0 => Value::Number(0.0),
-            other => other,
+        let k = match k.v() {
+            V::Number(n) if n == 0.0 => Value::Number(0.0),
+            other => other.to_value(),
         };
         if let Some(&i) = self.index.get(&key) {
             self.entries[i] = Some((k, v));
@@ -418,6 +419,15 @@ impl Object {
     pub fn new(proto: Option<ObjectId>, kind: ObjectKind) -> Object {
         Object { proto, props: PropertyMap::new(), extensible: true, kind, class_name: None }
     }
+    /// Change the prototype (`[[SetPrototypeOf]]` without checks); keeps
+    /// prototype-chain inline caches honest.
+    #[inline]
+    pub fn set_proto(&mut self, proto: Option<ObjectId>) {
+        if self.props.in_chain() && self.proto != proto {
+            crate::shape::bump_proto_epoch();
+        }
+        self.proto = proto;
+    }
     pub fn is_callable(&self) -> bool {
         match &self.kind {
             ObjectKind::Proxy { target: _, .. } => true, // refined by Realm::is_callable
@@ -520,8 +530,8 @@ impl Heap {
                 trace_object(obj, &mut children);
             }
             for v in &children {
-                if let Value::Object(o) = v {
-                    self.mark_push(*o, &mut work);
+                if let V::Object(o) = v.v() {
+                    self.mark_push(o, &mut work);
                 }
             }
         }

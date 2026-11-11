@@ -2,6 +2,7 @@
 //! storage, console routing, scrolling, dialogs, and the remaining globals.
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use crate::host::*;
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN};
 use rabbithole_net::Url;
@@ -343,11 +344,11 @@ fn uad_to_json(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> 
 /// requested hint we know.
 fn uad_high_entropy(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let mut hints: Vec<String> = Vec::new();
-    if let Some(Value::Object(arr)) = args.first() {
-        let len = realm.get_str(Value::Object(*arr), "length")?;
+    if let Some(V::Object(arr)) = args.first().map(Value::v) {
+        let len = realm.get_str(Value::Object(arr), "length")?;
         let n = realm.to_number(len)? as usize;
         for i in 0..n.min(64) {
-            let v = realm.get(Value::Object(*arr), PropertyKey::index(i as u32))?;
+            let v = realm.get(Value::Object(arr), PropertyKey::index(i as u32))?;
             hints.push(realm.to_rust_string(v)?);
         }
     }
@@ -468,8 +469,8 @@ fn make_navigator(realm: &mut Realm) -> ObjectId {
 
 fn permissions_query(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     let status = object_from(realm, vec![("state", Value::str("denied")), ("onchange", Value::Null)]);
-    if let Value::Object(s) = &status {
-        realm.define_method(*s, "addEventListener", 2, noop);
+    if let V::Object(s) = status.v() {
+        realm.define_method(s, "addEventListener", 2, noop);
     }
     let (p, resolve, _) = realm.new_promise();
     realm.call(Value::Object(resolve), Value::Undefined, &[status])?;
@@ -526,11 +527,11 @@ fn make_screen(realm: &mut Realm) -> ObjectId {
     realm.define_property(o, "availLeft", Value::Number(0.0), ACC);
     realm.define_property(o, "availTop", Value::Number(0.0), ACC);
     let orient = object_from(realm, vec![("type", Value::str("landscape-primary")), ("angle", Value::Number(0.0)), ("onchange", Value::Null)]);
-    if let Value::Object(oo) = &orient {
-        realm.define_method(*oo, "addEventListener", 2, noop);
-        realm.define_method(*oo, "removeEventListener", 2, noop);
-        realm.define_method(*oo, "lock", 1, rejected_not_supported);
-        realm.define_method(*oo, "unlock", 0, noop);
+    if let V::Object(oo) = orient.v() {
+        realm.define_method(oo, "addEventListener", 2, noop);
+        realm.define_method(oo, "removeEventListener", 2, noop);
+        realm.define_method(oo, "lock", 1, rejected_not_supported);
+        realm.define_method(oo, "unlock", 0, noop);
     }
     realm.define_property(o, "orientation", orient, ACC);
     realm.extra_roots.push(Value::Object(o));
@@ -597,16 +598,16 @@ fn timer_callback_args(realm: &mut Realm, args: &[Value]) -> JsResult<(Value, f6
     let cb = arg(args, 0);
     let cb = if realm.is_callable(&cb) {
         cb
-    } else if let Value::String(s) = &cb {
+    } else if let V::String(s) = cb.v() {
         // String code: compile to a function.
         let src = format!("(function() {{\n{}\n}})", s.to_rust_string());
         realm.eval(&src, "timer")?
     } else {
         return Err(realm.throw_type_error("The callback provided as parameter 1 is not a function."));
     };
-    let delay = match args.get(1) {
-        None | Some(Value::Undefined) => 0.0,
-        Some(v) => realm.to_number(v.clone())?,
+    let delay = match (args.get(1)).map(Value::v) {
+        None | Some(V::Undefined) => 0.0,
+        Some(v) => realm.to_number(v.to_value())?,
     };
     let delay = if delay.is_nan() || delay < 0.0 { 0.0 } else { delay };
     let extra: Vec<Value> = args.iter().skip(2).cloned().collect();
@@ -825,8 +826,8 @@ struct StorageRef {
 }
 
 fn storage_target(realm: &mut Realm, args: &[Value]) -> JsResult<bool> {
-    match arg(args, 0) {
-        Value::Object(o) => match realm.host_data::<StorageRef>(o) {
+    match (arg(args, 0)).v() {
+        V::Object(o) => match realm.host_data::<StorageRef>(o) {
             Some(r) => Ok(r.local),
             None => Err(realm.throw_type_error("Illegal invocation")),
         },
@@ -893,8 +894,7 @@ fn storage_length(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
 fn storage_proxy_get(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let local = storage_target(realm, args)?;
     let target = arg(args, 0);
-    let Value::String(k) = arg(args, 1) else { return Ok(Value::Undefined) };
-    let k = k.to_rust_string();
+    let Some(k) = arg(args, 1).as_str().map(|k| k.to_rust_string()) else { return Ok(Value::Undefined) };
     // Methods and length come from the target/prototype.
     let own = realm.get_str(target, &k)?;
     if !own.is_undefined() {
@@ -1002,14 +1002,14 @@ fn make_performance(realm: &mut Realm) -> ObjectId {
 
 fn crypto_get_random_values(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
-    let Value::Object(o) = &v else {
+    let V::Object(o) = v.v() else {
         return Err(realm.throw_type_error("parameter 1 is not of type 'ArrayBufferView'"));
     };
     let len = realm.length_of(v.clone())?;
     let mut buf = vec![0u8; len * 8];
     with_env(|env| env.random_bytes(&mut buf));
     // Determine element bit width from the class name.
-    let bits = match realm.obj(*o).kind {
+    let bits = match realm.obj(o).kind {
         rabbithole_js::ObjectKind::TypedArray(ref t) => t.kind.element_size() * 8,
         _ => 8,
     };
@@ -1056,7 +1056,7 @@ pub(crate) fn install(realm: &mut Realm) {
     let g = realm.global();
     // window inherits from Window.prototype → EventTarget.prototype.
     let wp = define_class(realm, "Window", Some("EventTarget"), illegal_ctor);
-    realm.obj_mut(g).proto = Some(wp);
+    realm.obj_mut(g).set_proto(Some(wp));
     realm.set_class_name(g, "Window");
     state().borrow_mut().window = g;
     state().borrow_mut().protos.insert("__window", g);
@@ -1144,11 +1144,11 @@ pub(crate) fn install(realm: &mut Realm) {
     let crypto = make_crypto(realm);
     realm.define_property(g, "crypto", Value::Object(crypto), ACC);
     let vv = object_from(realm, vec![("offsetLeft", Value::Number(0.0)), ("offsetTop", Value::Number(0.0)), ("pageLeft", Value::Number(0.0)), ("pageTop", Value::Number(0.0)), ("scale", Value::Number(1.0))]);
-    if let Value::Object(v) = &vv {
-        realm.define_accessor(*v, "width", Some(screen_width), None, ACC);
-        realm.define_accessor(*v, "height", Some(screen_height), None, ACC);
-        realm.define_method(*v, "addEventListener", 2, noop);
-        realm.define_method(*v, "removeEventListener", 2, noop);
+    if let V::Object(v) = vv.v() {
+        realm.define_accessor(v, "width", Some(screen_width), None, ACC);
+        realm.define_accessor(v, "height", Some(screen_height), None, ACC);
+        realm.define_method(v, "addEventListener", 2, noop);
+        realm.define_method(v, "removeEventListener", 2, noop);
     }
     realm.define_property(g, "visualViewport", vv, ACC);
     let _ = HIDDEN;

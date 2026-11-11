@@ -558,3 +558,36 @@ fn inlined_intrinsics_match_the_builtins() {
     // Unary fast paths.
     eq("var a = 5, b = -0, s = '7', o = {}; o[a] = 1; o[s] = 2; [-a, +a, ~a, 1 / -b, -s, ~~3.7, Object.keys(o).join('|')].join()", "-5,5,-6,Infinity,-7,3,5|7");
 }
+
+#[test]
+fn deep_prototype_chain_caches() {
+    // Methods found four levels up, read in a loop (cached), then shadowed
+    // in the middle of the chain, replaced, and the chain re-linked.
+    let chain = "class A { m() { return 'A'; } } class B extends A {} class C extends B {} class D extends C {} var d = new D();";
+    eq(&format!("{chain} var r = ''; for (var i = 0; i < 4; i++) r += d.m(); r"), "AAAA");
+    eq(&format!("{chain} var r = ''; for (var i = 0; i < 6; i++) {{ if (i == 3) C.prototype.m = function () {{ return 'C'; }}; r += d.m(); }} r"), "AAACCC");
+    eq(&format!("{chain} var r = ''; for (var i = 0; i < 6; i++) {{ if (i == 3) A.prototype.m = function () {{ return 'a'; }}; r += d.m(); }} r"), "AAAaaa");
+    eq(&format!("{chain} var r = ''; for (var i = 0; i < 6; i++) {{ if (i == 3) Object.setPrototypeOf(C.prototype, {{ m() {{ return 'X'; }} }}); r += d.m(); }} r"), "AAAXXX");
+    eq(&format!("{chain} var r = ''; for (var i = 0; i < 6; i++) {{ if (i == 3) delete A.prototype.m; r += typeof d.m; }} r"), "functionfunctionfunctionundefinedundefinedundefined");
+    eq(&format!("{chain} var r = ''; for (var i = 0; i < 6; i++) {{ if (i == 3) d.m = () => 'own'; r += d.m(); }} r"), "AAAownownown");
+    // Different receivers sharing the chain and shape.
+    eq(&format!("{chain} var e = new D(); var r = ''; for (var i = 0; i < 4; i++) r += (i % 2 ? d : e).m(); r"), "AAAA");
+    // Data properties and getters deep in the chain.
+    eq("class A { get g() { return this.v * 2; } } class B extends A {} class C extends B {} class D extends C { constructor() { super(); this.v = 3; } } var d = new D(), s = 0; for (var i = 0; i < 5; i++) { if (i == 3) d.v = 10; s += d.g; } s", "58");
+    eq("var p = { k: 1 }; var o = Object.create(Object.create(Object.create(Object.create(p)))); var s = 0; for (var i = 0; i < 6; i++) { if (i == 3) p.k = 5; s += o.k; } s", "18");
+}
+
+#[test]
+fn setter_and_deep_add_caches() {
+    // Inherited setters (deep and shallow), own accessors, re-definition
+    // as data, and additions below a long chain.
+    let chain = "class A { set s(v) { this.log = (this.log || '') + v; } } class B extends A {} class C extends B {} class D extends C {}";
+    eq(&format!("{chain} var d = new D(); for (var i = 0; i < 5; i++) d.s = i; d.log + ':' + Object.keys(d).join()"), "01234:log");
+    eq(&format!("{chain} var d = new D(); for (var i = 0; i < 5; i++) {{ if (i == 3) Object.defineProperty(B.prototype, 's', {{ value: 0, writable: true, configurable: true }}); d.s = i; }} d.log + ':' + d.s + ':' + d.hasOwnProperty('s')"), "012:4:true");
+    eq("var log = ''; var o = { set x(v) { log += v; } }; for (var i = 0; i < 4; i++) o.x = i; log", "0123");
+    eq("var o = {}; Object.defineProperty(o, 'x', { set(v) { this.y = v * 2; }, configurable: true }); for (var i = 0; i < 4; i++) { if (i == 2) Object.defineProperty(o, 'x', { value: 0, writable: true }); o.x = i; } o.x + ':' + o.y", "3:2");
+    eq("'use strict'; class A {} class B extends A {} class C extends B {} class D extends C {} var r = []; for (var i = 0; i < 4; i++) { var d = new D(); d.a = i; d.b = i + 1; r.push(d.a + d.b); } r.join()", "1,3,5,7");
+    eq("class A {} class B extends A {} class C extends B {} class D extends C {} var r = []; for (var i = 0; i < 4; i++) { if (i == 2) Object.defineProperty(B.prototype, 'a', { set(v) { this.z = v; }, configurable: true }); var d = new D(); d.a = i; r.push(d.hasOwnProperty('a') + '/' + d.z); } r.join()", "true/undefined,true/undefined,false/2,false/3");
+    eq("class A {} class B extends A {} class C extends B {} class D extends C {} var r = []; for (var i = 0; i < 4; i++) { if (i == 2) Object.defineProperty(A.prototype, 'a', { value: 7, writable: false }); var d = new D(); d.a = i; r.push(d.a); } r.join()", "0,1,7,7");
+    eq("var p = {}; var o = Object.create(Object.create(Object.create(p))); var r = []; for (var i = 0; i < 4; i++) { var x = Object.create(Object.getPrototypeOf(o)); if (i == 2) Object.preventExtensions(x); x.q = i; r.push(x.q); } r.join()", "0,1,,3");
+}

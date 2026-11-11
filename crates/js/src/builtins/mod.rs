@@ -24,6 +24,7 @@ pub mod symbol;
 pub mod typed_array;
 
 use crate::heap::*;
+use crate::value::V;
 use crate::interop::JsResult;
 use crate::realm::Realm;
 use crate::value::*;
@@ -58,8 +59,8 @@ pub fn arg(args: &[Value], i: usize) -> Value {
 
 /// Require `this` to be an object.
 pub fn this_object(realm: &mut Realm, this: &Value, method: &str) -> JsResult<ObjectId> {
-    match this {
-        Value::Object(id) => Ok(*id),
+    match this.v() {
+        V::Object(id) => Ok(id),
         _ => realm.type_error(&format!("{} called on non-object", method)),
     }
 }

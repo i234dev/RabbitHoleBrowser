@@ -22,7 +22,8 @@ pub(crate) fn install(realm: &mut Realm) {
         }
     };
     match realm.call(factory, Value::Undefined, &[Value::Object(post), Value::Object(info)]) {
-        Ok(api @ Value::Object(id)) => {
+        Ok(api) if api.is_object() => {
+            let id = api.as_object().unwrap();
             root_value(realm, &api);
             state().borrow_mut().protos.insert("__frames_api", id);
         }

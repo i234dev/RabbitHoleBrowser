@@ -1,6 +1,7 @@
 //! Object constructor and Object.prototype.
 
 use super::*;
+use crate::value::V;
 use crate::realm::SYM_TO_STRING_TAG;
 
 pub fn register(realm: &mut Realm) {
@@ -45,8 +46,8 @@ pub fn register(realm: &mut Realm) {
 
 fn object_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let nt = realm.new_target();
-    if let Value::Object(nt) = &nt {
-        if *nt != realm.intrinsics.object_ctor {
+    if let V::Object(nt) = nt.v() {
+        if nt != realm.intrinsics.object_ctor {
             let proto = realm.proto_from_new_target(realm.intrinsics.object_proto);
             return Ok(Value::Object(realm.new_object_with_proto(Some(proto))));
         }
@@ -72,8 +73,8 @@ fn has_own(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn is_prototype_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let v = match arg(args, 0) {
-        Value::Object(o) => o,
+    let v = match (arg(args, 0)).v() {
+        V::Object(o) => o,
         _ => return Ok(Value::Bool(false)),
     };
     let me = realm.to_object(this)?;
@@ -95,15 +96,15 @@ fn property_is_enumerable(realm: &mut Realm, this: Value, args: &[Value]) -> JsR
 }
 
 pub fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let tag = match &this {
-        Value::Undefined => return Ok(Value::str("[object Undefined]")),
-        Value::Null => return Ok(Value::str("[object Null]")),
+    let tag = match this.v() {
+        V::Undefined => return Ok(Value::str("[object Undefined]")),
+        V::Null => return Ok(Value::str("[object Null]")),
         _ => {
             let id = realm.to_object(this.clone())?;
             let builtin = class_of(realm, id);
             let t = realm.get(Value::Object(id), PropertyKey::Symbol(SYM_TO_STRING_TAG))?;
-            match t {
-                Value::String(s) => s.to_rust_string(),
+            match t.v() {
+                V::String(s) => s.to_rust_string(),
                 _ => builtin.to_string(),
             }
         }
@@ -128,12 +129,12 @@ fn proto_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Val
 }
 
 fn proto_setter(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    if let Value::Object(id) = this {
-        match arg(args, 0) {
-            Value::Object(p) => {
+    if let V::Object(id) = this.v() {
+        match (arg(args, 0)).v() {
+            V::Object(p) => {
                 set_proto_checked(realm, id, Some(p))?;
             }
-            Value::Null => {
+            V::Null => {
                 set_proto_checked(realm, id, None)?;
             }
             _ => {}
@@ -157,7 +158,7 @@ fn set_proto_checked(realm: &mut Realm, id: ObjectId, proto: Option<ObjectId>) -
         }
         cur = realm.obj(c).proto;
     }
-    realm.obj_mut(id).proto = proto;
+    realm.obj_mut(id).set_proto(proto);
     Ok(true)
 }
 
@@ -247,10 +248,10 @@ fn entries(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 fn assign(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let target = realm.to_object(arg(args, 0))?;
     for src in args.iter().skip(1) {
-        let sid = match src {
-            Value::Undefined | Value::Null => continue,
-            Value::Object(id) => *id,
-            prim => realm.to_object(prim.clone())?,
+        let sid = match src.v() {
+            V::Undefined | V::Null => continue,
+            V::Object(id) => id,
+            prim => realm.to_object(prim.to_value())?,
         };
         let keys = realm.own_keys(sid)?;
         for k in keys {
@@ -271,21 +272,21 @@ fn assign(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn create(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let proto = match arg(args, 0) {
-        Value::Object(p) => Some(p),
-        Value::Null => None,
+    let proto = match (arg(args, 0)).v() {
+        V::Object(p) => Some(p),
+        V::Null => None,
         _ => return realm.type_error("Object prototype may only be an Object or null"),
     };
     let o = realm.new_object_with_proto(proto);
-    if let v @ Value::Object(_) = arg(args, 1) {
-        define_properties_impl(realm, o, v)?;
+    if let v @ V::Object(_) = (arg(args, 1)).v() {
+        define_properties_impl(realm, o, v.to_value())?;
     }
     Ok(Value::Object(o))
 }
 
 fn define_property(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = match arg(args, 0) {
-        Value::Object(id) => id,
+    let id = match (arg(args, 0)).v() {
+        V::Object(id) => id,
         _ => return realm.type_error("Object.defineProperty called on non-object"),
     };
     let key = realm.to_property_key(arg(args, 1))?;
@@ -322,8 +323,8 @@ fn define_properties_impl(realm: &mut Realm, id: ObjectId, props: Value) -> JsRe
 }
 
 fn define_properties(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = match arg(args, 0) {
-        Value::Object(id) => id,
+    let id = match (arg(args, 0)).v() {
+        V::Object(id) => id,
         _ => return realm.type_error("Object.defineProperties called on non-object"),
     };
     define_properties_impl(realm, id, arg(args, 1))?;
@@ -376,13 +377,13 @@ fn get_prototype_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 
 fn set_prototype_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let target = arg(args, 0);
-    let proto = match arg(args, 1) {
-        Value::Object(p) => Some(p),
-        Value::Null => None,
+    let proto = match (arg(args, 1)).v() {
+        V::Object(p) => Some(p),
+        V::Null => None,
         _ => return realm.type_error("Object prototype may only be an Object or null"),
     };
-    if let Value::Object(id) = &target {
-        if !set_proto_checked(realm, *id, proto)? {
+    if let V::Object(id) = target.v() {
+        if !set_proto_checked(realm, id, proto)? {
             return realm.type_error("Object.setPrototypeOf: object is not extensible");
         }
     } else if target.is_nullish() {
@@ -393,8 +394,8 @@ fn set_prototype_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 
 fn freeze(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
-    if let Value::Object(id) = &v {
-        let id = *id;
+    if let V::Object(id) = v.v() {
+        let id = id;
         materialize_array(realm, id);
         let keys = realm.own_keys(id)?;
         for k in keys {
@@ -430,8 +431,8 @@ fn materialize_array(realm: &mut Realm, id: ObjectId) {
 }
 
 fn is_frozen(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = match arg(args, 0) {
-        Value::Object(id) => id,
+    let id = match (arg(args, 0)).v() {
+        V::Object(id) => id,
         _ => return Ok(Value::Bool(true)),
     };
     if realm.obj(id).extensible {
@@ -450,8 +451,8 @@ fn is_frozen(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 
 fn seal(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
-    if let Value::Object(id) = &v {
-        let id = *id;
+    if let V::Object(id) = v.v() {
+        let id = id;
         materialize_array(realm, id);
         let keys = realm.own_keys(id)?;
         for k in keys {
@@ -466,8 +467,8 @@ fn seal(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn is_sealed(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = match arg(args, 0) {
-        Value::Object(id) => id,
+    let id = match (arg(args, 0)).v() {
+        V::Object(id) => id,
         _ => return Ok(Value::Bool(true)),
     };
     if realm.obj(id).extensible {
@@ -486,15 +487,15 @@ fn is_sealed(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 
 fn prevent_extensions(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
-    if let Value::Object(id) = &v {
-        realm.obj_mut(*id).extensible = false;
+    if let V::Object(id) = v.v() {
+        realm.obj_mut(id).extensible = false;
     }
     Ok(v)
 }
 
 fn is_extensible(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(match arg(args, 0) {
-        Value::Object(id) => realm.obj(id).extensible,
+    Ok(Value::Bool(match (arg(args, 0)).v() {
+        V::Object(id) => realm.obj(id).extensible,
         _ => false,
     }))
 }
@@ -525,7 +526,7 @@ fn group_by(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
         let existing = realm.get_own_property(out, &key);
         match existing {
             Some(p) => {
-                if let Value::Object(arr) = p.value {
+                if let V::Object(arr) = p.value.v() {
                     if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(arr).kind {
                         elements.push(item);
                         *length = elements.len() as u32;

@@ -1,6 +1,7 @@
 //! Promises and the microtask machinery.
 
 use super::*;
+use crate::value::V;
 use crate::realm::{Job, SYM_SPECIES, SYM_TO_STRING_TAG};
 
 pub fn register(realm: &mut Realm) {
@@ -26,7 +27,7 @@ fn species(_realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> 
 }
 
 fn is_promise(realm: &Realm, v: &Value) -> bool {
-    matches!(v, Value::Object(id) if matches!(realm.obj(*id).kind, ObjectKind::Promise(_)))
+    matches!(v.v(), V::Object(id) if matches!(realm.obj(id).kind, ObjectKind::Promise(_)))
 }
 
 /// Create a promise and its resolving functions.
@@ -86,7 +87,7 @@ pub fn resolve_promise(realm: &mut Realm, promise: ObjectId, resolution: Value) 
         reject_promise(realm, promise, e);
         return;
     }
-    if let Value::Object(_) = &resolution {
+    if let V::Object(_) = resolution.v() {
         let then = match realm.get_str(resolution.clone(), "then") {
             Ok(t) => t,
             Err(e) => {
@@ -140,10 +141,10 @@ pub fn reject_promise(realm: &mut Realm, promise: ObjectId, reason: Value) {
 
 /// PromiseResolve(%Promise%, v): returns a promise object id.
 pub fn promise_resolve(realm: &mut Realm, v: Value) -> JsResult<ObjectId> {
-    if let Value::Object(id) = &v {
-        if let ObjectKind::Promise(_) = &realm.obj(*id).kind {
+    if let V::Object(id) = v.v() {
+        if let ObjectKind::Promise(_) = &realm.obj(id).kind {
             // Only when its constructor is %Promise% (approximation: accept all promises)
-            return Ok(*id);
+            return Ok(id);
         }
     }
     let (p, res, _rej) = new_promise_capability(realm);
@@ -166,9 +167,9 @@ fn attach_reactions(realm: &mut Realm, promise: ObjectId, fr: PromiseReaction, r
         _ => None,
     };
     if let Some(reason) = late {
-        let pos = realm.unhandled_rejections.iter().rposition(|v| match (v, &reason) {
-            (Value::Object(a), Value::Object(b)) => a == b,
-            (a, b) => !b.is_object() && realm.strict_equals(a, b),
+        let pos = realm.unhandled_rejections.iter().rposition(|v| match (v.v(), reason.v()) {
+            (V::Object(a), V::Object(b)) => a == b,
+            (_, b) => !b.is_object() && realm.strict_equals(v, &reason),
         });
         if let Some(pos) = pos {
             realm.unhandled_rejections.remove(pos);
@@ -262,8 +263,8 @@ fn promise_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
 }
 
 fn then(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let p = match &this {
-        Value::Object(id) if is_promise(realm, &this) => *id,
+    let p = match this.v() {
+        V::Object(id) if is_promise(realm, &this) => id,
         _ => return realm.type_error("Promise.prototype.then called on incompatible receiver"),
     };
     let on_ok = arg(args, 0);
@@ -341,8 +342,8 @@ fn new_capability_with_ctor(realm: &mut Realm, c: Value) -> JsResult<(Value, Val
     let holder = realm.new_object_with_proto(None);
     let executor = realm.new_native_function_full("", 2, capability_executor, None, vec![Value::Object(holder)], false);
     let p = realm.construct(c, &[Value::Object(executor)], Value::Undefined)?;
-    let p = match p {
-        Value::Object(_) => p,
+    let p = match p.v() {
+        V::Object(_) => p,
         _ => return realm.type_error("Promise constructor returned non-object"),
     };
     let res = realm.get_str(Value::Object(holder), "resolve")?;
@@ -510,8 +511,8 @@ fn any_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     if remaining <= 0.0 {
         let rej = realm.get_str(Value::Object(state), "reject")?;
         let e = realm.new_error("AggregateError", "All promises were rejected");
-        if let Value::Object(eid) = &e {
-            realm.define_property(*eid, "errors", values, HIDDEN);
+        if let V::Object(eid) = e.v() {
+            realm.define_property(eid, "errors", values, HIDDEN);
         }
         realm.call(rej, Value::Undefined, &[e])?;
     }

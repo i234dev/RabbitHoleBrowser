@@ -1,6 +1,7 @@
 //! The realm: heap, intrinsics, global object, job queue and the embedding API.
 
 use crate::bytecode::FunctionCode;
+use crate::value::V;
 use crate::heap::*;
 use crate::value::*;
 use crate::vm::Frame;
@@ -309,8 +310,8 @@ impl Realm {
             (math, "imul", crate::vm::INTRINSIC_IMUL),
         ];
         for (holder, name, tag) in marks {
-            let Some(Value::Object(h)) = holder else { continue };
-            let Some(Value::Object(f)) = self.obj(h).props.get(&PropertyKey::str(name)).map(|p| p.value.clone()) else { continue };
+            let Some(V::Object(h)) = holder.as_ref().map(Value::v) else { continue };
+            let Some(V::Object(f)) = (self.obj(h).props.get(&PropertyKey::str(name)).map(|p| p.value.clone())).as_ref().map(Value::v) else { continue };
             if let ObjectKind::Native(n) = &mut self.obj_mut(f).kind {
                 n.intrinsic = tag;
             }
@@ -590,8 +591,8 @@ impl Realm {
         ]);
         roots.extend(i.others.values().copied());
         for (v, _) in self.global_lex.values() {
-            if let Value::Object(o) = v {
-                roots.push(*o);
+            if let V::Object(o) = v.v() {
+                roots.push(o);
             }
         }
         let mut tmp = Vec::new();
@@ -630,7 +631,7 @@ impl Realm {
             tmp.push(Value::Object(c));
         }
         for v in tmp {
-            if let Value::Object(o) = v {
+            if let V::Object(o) = v.v() {
                 roots.push(o);
             }
         }
@@ -795,9 +796,9 @@ impl Realm {
 
     /// Best-effort textual form of a thrown value (for logging).
     pub fn error_to_string(&mut self, v: &Value) -> String {
-        if let Value::Object(o) = v {
-            if let Some(p) = self.obj(*o).props.get(&PropertyKey::str("stack")) {
-                if let Value::String(s) = &p.value {
+        if let V::Object(o) = v.v() {
+            if let Some(p) = self.obj(o).props.get(&PropertyKey::str("stack")) {
+                if let V::String(s) = p.value.v() {
                     return s.to_rust_string();
                 }
             }
@@ -809,8 +810,8 @@ impl Realm {
     }
 
     pub fn is_callable(&self, v: &Value) -> bool {
-        match v {
-            Value::Object(o) => match &self.obj(*o).kind {
+        match v.v() {
+            V::Object(o) => match &self.obj(o).kind {
                 ObjectKind::Proxy { target, .. } => self.is_callable(&Value::Object(*target)),
                 k => k.is_callable(),
             },
@@ -819,8 +820,8 @@ impl Realm {
     }
 
     pub fn is_constructor(&self, v: &Value) -> bool {
-        match v {
-            Value::Object(o) => match &self.obj(*o).kind {
+        match v.v() {
+            V::Object(o) => match &self.obj(o).kind {
                 ObjectKind::Function(c) => !c.code.flags.is_arrow && !c.code.flags.is_method && !c.code.flags.is_generator && !c.code.flags.is_async,
                 ObjectKind::Native(n) => n.is_constructor,
                 ObjectKind::Bound(b) => self.is_constructor(&Value::Object(b.target)),
@@ -843,8 +844,8 @@ impl Realm {
     /// Prototype for an object created by a native constructor, honouring
     /// subclassing via `new.target.prototype`; falls back to `default`.
     pub fn proto_from_new_target(&mut self, default: ObjectId) -> ObjectId {
-        if let Value::Object(nt) = self.new_target() {
-            if let Ok(Value::Object(p)) = self.get(Value::Object(nt), names::prototype()) {
+        if let V::Object(nt) = self.new_target().v() {
+            if let Ok(V::Object(p)) = self.get(Value::Object(nt), names::prototype()).as_ref().map(Value::v) {
                 return p;
             }
         }

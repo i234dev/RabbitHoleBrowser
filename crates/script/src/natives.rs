@@ -3,6 +3,7 @@
 //! once those files have captured it.
 
 use crate::env::with_env;
+use rabbithole_js::V;
 use crate::host::*;
 use rabbithole_dom::Document;
 use rabbithole_js::{JsResult, Realm, Value};
@@ -72,8 +73,8 @@ fn string_list(realm: &mut Realm, v: &Value) -> JsResult<Vec<String>> {
     let len = realm.to_number(len)? as usize;
     for i in 0..len.min(100_000) {
         let s = realm.get_str(v.clone(), &i.to_string())?;
-        match &s {
-            Value::String(js) if js.len() >= CACHED_TEXT_MIN => out.push(cached_text(js)),
+        match s.v() {
+            V::String(js) if js.len() >= CACHED_TEXT_MIN => out.push(cached_text(js)),
             _ => out.push(realm.to_rust_string(s)?),
         }
     }
@@ -228,7 +229,7 @@ fn set_factory(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 /// `installHandlers(prototype, ["click", ...])`: `onclick`-style IDL
 /// event handler attributes (shared with the native ones).
 fn install_handlers(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let Value::Object(target) = arg(args, 0) else {
+    let V::Object(target) = (arg(args, 0)).v() else {
         return Err(realm.throw_type_error("installHandlers: object expected"));
     };
     let names = string_list(realm, &arg(args, 1))?;
@@ -241,7 +242,7 @@ fn install_handlers(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 /// prototype natives use for `name` (wrappers, events).
 fn register_proto(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let name = arg_str(realm, args, 0)?;
-    let Value::Object(p) = arg(args, 1) else {
+    let V::Object(p) = (arg(args, 1)).v() else {
         return Err(realm.throw_type_error("registerProto: object expected"));
     };
     realm.extra_roots.push(Value::Object(p));
