@@ -15,10 +15,10 @@ use rabbithole_engine::scripting::{input_init, key_init, mouse_init, plain_init}
 use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page, ScriptOutcome, Selection};
 
 use super::frame::{Frame, Pixels};
-use super::{now_ms, ContentConfig, ContentSettings, FromContent, Inbox, KeyInput, PageState, Sink, ToContent, ViewSize};
+use super::{now_ms, ContentConfig, ContentSettings, DomRow, FromContent, Inbox, KeyInput, NodeDetails, PageState, Sink, ToContent, ViewSize};
 use crate::gui::chrome::{ACCENT, FIND_CURRENT, FIND_MATCH, SELECTION, TEXT};
 use crate::gui::input::TextBuffer;
-use crate::gui::loader::{self, LoadJob, LoadOutcome, LoadResult};
+use crate::gui::loader::{self, DownloadPrefs, LoadJob, LoadOutcome, LoadResult};
 use crate::gui::pages;
 
 /// Overscan above and below the viewport, in viewport heights.
@@ -54,6 +54,27 @@ struct Find {
     matches: Vec<Rect>,
     current: usize,
 }
+
+/// The last painted page pixels (without overlays), reused by the next
+/// paint: scrolling shifts them and only the exposed strip is rastered;
+/// page changes repaint only the damaged regions.
+struct PaintCache {
+    canvas: Canvas,
+    origin: (f32, f32),
+    scale: f32,
+}
+
+/// Paint statistics (tests, `RH_DEBUG_CONTENT`).
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PaintStats {
+    pub full: u64,
+    pub partial: u64,
+    /// Device pixels rastered by partial paints.
+    pub partial_area: u64,
+}
+
+/// Partial (incremental) paints done by all content threads.
+pub(crate) static PARTIAL_PAINTS: AtomicU64 = AtomicU64::new(0);
 
 /// What the last frame covered.
 struct Painted {
@@ -98,6 +119,10 @@ struct Worker {
     dirty: bool,
     frame_seq: u64,
     painted: Option<Painted>,
+    cache: Option<PaintCache>,
+    paint_stats: PaintStats,
+    /// Node outlined for the devtools Elements view.
+    inspect: Option<NodeId>,
     sent_hover: (&'static str, Option<Url>),
     sent_state: PageState,
     sent_title: String,
@@ -141,13 +166,19 @@ impl Worker {
             dirty: false,
             frame_seq: 0,
             painted: None,
+            cache: None,
+            paint_stats: PaintStats::default(),
+            inspect: None,
             sent_hover: ("default", None),
             sent_state: PageState::default(),
             sent_title: String::new(),
             sent_favicon: 0,
             quit: false,
         };
-        let settings = w.config.settings;
+        // Network log for the devtools (per tab: this thread's fetcher).
+        let (sink, tab_id, epoch) = (w.sink.clone(), w.tab_id, w.epoch);
+        w.engine.loader.fetcher.observer = Some(rabbithole_engine::net::NetObserver(Arc::new(move |ev: &rabbithole_engine::net::NetEvent| sink(tab_id, epoch, FromContent::Network(ev.clone())))));
+        let settings = w.config.settings.clone();
         w.apply_settings(settings);
         w
     }
@@ -348,16 +379,118 @@ impl Worker {
                 self.show_html(&html, crate::gui::about_page("text"), true);
             }
             ToContent::Settings(s) => self.apply_settings(s),
+            ToContent::PrintPdf(path) => self.print_pdf(path),
+            ToContent::InspectTree => self.send_dom_tree(),
+            ToContent::InspectNode(node) => self.inspect_node(node),
+            ToContent::InspectAt { x, y } => {
+                let node = self.page.as_ref().and_then(|p| p.node_at_viewport(x, y));
+                self.send_dom_tree();
+                self.inspect_node(node);
+            }
+            ToContent::SaveUrl(url) => {
+                let referer = self.page.as_ref().map(|p| p.url.clone());
+                let mut req = Request::get(url);
+                if let Some(r) = referer {
+                    req = req.with_referer(r);
+                }
+                let sink = self.sink.clone();
+                let (tab_id, epoch) = (self.tab_id, self.epoch);
+                loader::spawn_download(self.engine.loader.clone(), req, self.download_prefs(), move |d| sink(tab_id, epoch, FromContent::Download(d)));
+            }
             ToContent::Shutdown => self.quit = true,
         }
     }
 
     fn apply_settings(&mut self, s: ContentSettings) {
-        self.config.settings = s;
         self.engine.scripting = s.javascript;
         self.engine.loader.load_scripts = s.javascript;
         self.engine.loader.load_images = s.images;
         self.engine.loader.fetcher.block_trackers = s.block_trackers;
+        self.engine.loader.fetcher.accept_language = s.accept_language.clone();
+        self.config.settings = s;
+    }
+
+    fn download_prefs(&self) -> DownloadPrefs {
+        DownloadPrefs { dir: self.config.settings.download_dir.clone(), ask: self.config.settings.ask_download, next_id: self.config.next_download_id.clone() }
+    }
+
+    // ------------------------------------------------------------ devtools
+
+    /// The DOM as indented rows (elements and non-blank text).
+    fn send_dom_tree(&mut self) {
+        let Some(page) = self.page.as_ref() else { return };
+        let doc = &page.doc;
+        let mut rows = Vec::new();
+        fn walk(doc: &rabbithole_engine::dom::Document, n: NodeId, depth: usize, rows: &mut Vec<DomRow>) {
+            if rows.len() >= 5000 {
+                return;
+            }
+            if let Some(e) = doc.element(n) {
+                let mut label = format!("<{}", e.tag);
+                for (k, v) in e.attrs.iter().take(6) {
+                    let v: String = v.chars().take(60).collect();
+                    label.push_str(&format!(" {k}=\"{v}\""));
+                }
+                label.push('>');
+                rows.push(DomRow { node: n, depth, label, is_text: false });
+                if matches!(e.tag.as_str(), "script" | "style") {
+                    return;
+                }
+                for c in doc.children(n) {
+                    walk(doc, c, depth + 1, rows);
+                }
+            } else if let Some(t) = doc.text(n) {
+                let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !t.is_empty() {
+                    let mut label: String = t.chars().take(80).collect();
+                    if t.chars().count() > 80 {
+                        label.push('…');
+                    }
+                    rows.push(DomRow { node: n, depth, label: format!("\"{label}\""), is_text: true });
+                }
+            } else {
+                for c in doc.children(n) {
+                    walk(doc, c, depth, rows);
+                }
+            }
+        }
+        walk(doc, rabbithole_engine::dom::Document::ROOT, 0, &mut rows);
+        self.send(FromContent::DomTree(rows));
+    }
+
+    fn inspect_node(&mut self, node: Option<NodeId>) {
+        // Text nodes are inspected through their parent element.
+        let node = node.map(|n| if self.page.as_ref().map(|p| p.doc.element(n).is_none()).unwrap_or(false) { self.page.as_ref().and_then(|p| p.doc.parent(n)).unwrap_or(n) } else { n });
+        self.inspect = node;
+        self.dirty = true;
+        let Some(n) = node else {
+            self.send(FromContent::NodeDetails(NodeDetails::default()));
+            return;
+        };
+        let Some(page) = self.page.as_mut() else { return };
+        let rect = page.rect_of(n);
+        let attrs = page.doc.element(n).map(|e| e.attrs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()).unwrap_or_default();
+        let styles = self.engine.computed_style_now(page, n).map(|cs| super::style_summary(&cs, rect)).unwrap_or_default();
+        if let Some(r) = rect {
+            self.scroll_into_view(r);
+        }
+        self.send(FromContent::NodeDetails(NodeDetails { node: Some(n), styles, attrs }));
+    }
+
+    /// "Print": rasterize the page into A4 pages and write a PDF.
+    fn print_pdf(&mut self, path: std::path::PathBuf) {
+        let Some(page) = self.page.as_mut() else { return };
+        self.engine.flush_display_list(page);
+        let t = Instant::now();
+        let pages = crate::gui::pdf::paginate(&page.display_list, &self.engine.fonts, page.viewport.width, page.content_height(), page.background, 2.0);
+        let title = if page.title.trim().is_empty() { page.url.to_string() } else { page.title.trim().to_string() };
+        let pdf = crate::gui::pdf::write_pdf(&pages, crate::gui::pdf::A4, &title);
+        debug_time("print to PDF", t);
+        let msg = match std::fs::write(&path, pdf) {
+            Ok(()) => format!("Saved PDF ({} page{}): {}", pages.len(), if pages.len() == 1 { "" } else { "s" }, path.display()),
+            Err(e) => format!("Could not save the PDF: {e}"),
+        };
+        self.send(FromContent::Status(msg));
     }
 
     // ---------------------------------------------------------- navigation
@@ -379,8 +512,7 @@ impl Worker {
             loader: self.engine.loader.clone(),
             request,
             viewport: self.view.viewport,
-            download_dir: self.config.download_dir.clone(),
-            next_download_id: self.config.next_download_id.clone(),
+            downloads: self.download_prefs(),
         };
         let generation = self.generation;
         let tx = self.tx.clone();
@@ -478,6 +610,7 @@ impl Worker {
         self.find.current = 0;
         self.scroll = (0.0, 0.0);
         self.painted = None;
+        self.inspect = None;
         self.sent_hover = ("default", None);
         let title = if page.title.trim().is_empty() { page.url.to_string() } else { page.title.trim().to_string() };
         self.sent_title = title.clone();
@@ -638,24 +771,101 @@ impl Worker {
         let (sx, sy) = self.scroll;
         let content_h = page.content_height().max(vp.height);
         let margin = vp.height * OVERSCAN;
-        let oy = (sy - margin).max(0.0);
+        // The canvas origin sits on a whole device pixel, so moving it
+        // shifts the old pixels exactly.
+        let oy = ((sy - margin).max(0.0) * s).floor() / s;
         let bottom = (sy + vp.height + margin).min(content_h.max(sy + vp.height));
         let max_h = self.view.height as f32 * (1.0 + 2.0 * OVERSCAN) + 2.0;
         let h = (((bottom - oy) * s).ceil()).clamp(1.0, max_h.min(16384.0)) as u32;
         let w = self.view.width.max(1);
         let origin = (sx, oy);
+        let fixed = page.layout.has_sticky_or_fixed();
+        let background = page.background;
 
-        let mut canvas = Canvas::new(w, h);
-        if page.background.a > 0 {
-            canvas.fill_rect(Rect::new(0.0, 0.0, w as f32, h as f32), page.background);
+        // Incremental paths need a matching cached canvas, no content that
+        // moves with the scroll (fixed / sticky) and scale >= 1 (region
+        // culling works in canvas units).
+        // `partial`: the cached pixels brought up to date; `spare`: a
+        // canvas of the right size to repaint fully.
+        let mut partial: Option<Canvas> = None;
+        let mut spare: Option<Canvas> = None;
+        if let Some(c) = self.cache.take() {
+            let compatible = !fixed && s >= 1.0 && (c.scale - s).abs() < 1e-4 && c.canvas.width == w && c.canvas.height == h && c.origin.0 == origin.0;
+            let shift = (origin.1 - c.origin.1) * s;
+            let dy = shift.round() as i64;
+            let exact = (shift - dy as f32).abs() < 0.01 && dy.unsigned_abs() < h as u64;
+            let damage = if compatible && exact { self.engine.paint_damage_since(page, c.origin) } else { None };
+            let mut cv = c.canvas;
+            match damage {
+                Some(damage) => {
+                    shift_rows(&mut cv, dy);
+                    // Damage (CSS px relative to the old origin) → device px now.
+                    let mut regions: Vec<Rect> = damage.iter().map(|r| Rect::new(r.x * s, (r.y + c.origin.1 - origin.1) * s, r.w * s, r.h * s)).collect();
+                    if dy > 0 {
+                        regions.push(Rect::new(0.0, (h as i64 - dy) as f32, w as f32, dy as f32));
+                    } else if dy < 0 {
+                        regions.push(Rect::new(0.0, 0.0, w as f32, (-dy) as f32));
+                    }
+                    let full = Rect::new(0.0, 0.0, w as f32, h as f32);
+                    let regions: Vec<Rect> = rabbithole_engine::layout::merge_damage(regions)
+                        .into_iter()
+                        .map(|r| r.intersect(&full))
+                        .filter(|r| !r.is_empty())
+                        .map(|r| Rect::new(r.x.floor(), r.y.floor(), r.right().ceil() - r.x.floor(), r.bottom().ceil() - r.y.floor()))
+                        .collect();
+                    let area: f32 = regions.iter().map(|r| r.w * r.h).sum();
+                    if area <= 0.6 * w as f32 * h as f32 {
+                        for r in &regions {
+                            cv.push_clip(*r);
+                            cv.fill_rect(*r, Color::WHITE);
+                            if background.a > 0 {
+                                cv.fill_rect(*r, background);
+                            }
+                            cv.pop_clip();
+                            cv.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
+                            let css = Rect::new(r.x / s, r.y / s, r.w / s, r.h / s);
+                            rabbithole_engine::layout::paint_region(&page.display_list, &mut cv, &self.engine.fonts, origin.0, origin.1, css);
+                            cv.pop_transform();
+                        }
+                        self.paint_stats.partial += 1;
+                        self.paint_stats.partial_area += area as u64;
+                        PARTIAL_PAINTS.fetch_add(1, Ordering::Relaxed);
+                        partial = Some(cv);
+                    } else {
+                        spare = Some(cv);
+                    }
+                }
+                None => {
+                    if cv.width == w && cv.height == h {
+                        spare = Some(cv);
+                    }
+                }
+            }
         }
-        // Fixed content (interleaved in stacking order) is painted where
-        // the viewport is inside the overscanned canvas.
-        canvas.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
-        rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut canvas, &self.engine.fonts, origin.0, origin.1, (sx - origin.0, sy - origin.1));
-        canvas.pop_transform();
+        let mut cv = match partial {
+            Some(c) => c,
+            None => {
+                let mut cv = spare.unwrap_or_else(|| Canvas::new(w, h));
+                cv.clear(Color::WHITE);
+                if background.a > 0 {
+                    cv.fill_rect(Rect::new(0.0, 0.0, w as f32, h as f32), background);
+                }
+                // Fixed content (interleaved in stacking order) is painted
+                // where the viewport is inside the overscanned canvas.
+                cv.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
+                rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut cv, &self.engine.fonts, origin.0, origin.1, (sx - origin.0, sy - origin.1));
+                cv.pop_transform();
+                self.paint_stats.full += 1;
+                cv
+            }
+        };
+        self.engine.mark_painted(page, origin);
 
-        self.paint_overlays(&mut canvas, origin);
+        // The frame: the page pixels plus overlays (selection, find, caret).
+        let mut frame_canvas = Canvas::new(w, h);
+        frame_canvas.data.copy_from_slice(&cv.data);
+        self.paint_overlays(&mut frame_canvas, origin);
+        self.cache = Some(PaintCache { canvas: std::mem::replace(&mut cv, Canvas::new(1, 1)), origin, scale: s });
 
         let page = self.page.as_ref().expect("page");
         let mut containers = Vec::new();
@@ -664,7 +874,7 @@ impl Worker {
         self.frame_seq += 1;
         let frame = Frame {
             seq: self.frame_seq,
-            canvas: Arc::new(Pixels::from_canvas(&mut canvas)),
+            canvas: Arc::new(Pixels::from_canvas(&mut frame_canvas)),
             origin,
             scale: s,
             scroll: (sx, sy),
@@ -672,7 +882,7 @@ impl Worker {
             background: if page.background.a > 0 { page.background } else { Color::WHITE },
             scroll_containers: Arc::new(containers),
         };
-        self.painted = Some(Painted { covered, scroll: (sx, sy), scale: s, scroll_dependent: page.layout.has_sticky_or_fixed() });
+        self.painted = Some(Painted { covered, scroll: (sx, sy), scale: s, scroll_dependent: fixed });
         self.send(FromContent::Frame(frame));
     }
 
@@ -681,6 +891,10 @@ impl Worker {
         let Some(page) = self.page.as_ref() else { return };
         let s = self.view.scale;
         let map = |r: Rect| Rect::new((r.x - origin.0) * s, (r.y - origin.1) * s, r.w * s, r.h * s);
+        if let Some(r) = self.inspect.and_then(|n| page.rect_of(n)).map(map) {
+            canvas.fill_rect(r, rabbithole_engine::gfx::Color::rgba(0x6f, 0xa8, 0xdc, 110));
+            canvas.stroke_rect(r, [1.0; 4], [rabbithole_engine::gfx::Color::rgb(0x1a, 0x73, 0xe8); 4], [0; 4], 0.0);
+        }
         if let Some(sel) = &self.selection {
             for r in &sel.rects {
                 canvas.fill_rect(map(*r), SELECTION);
@@ -869,7 +1083,8 @@ impl Worker {
                 page.pointer.down = None;
             }
             if !prevented {
-                self.send(FromContent::ContextMenu { link, has_selection: self.selection.is_some() });
+                let image = node.and_then(|n| self.page.as_ref().and_then(|p| image_of(p, n)));
+                self.send(FromContent::ContextMenu { link, image, has_selection: self.selection.is_some() });
             }
             return;
         }
@@ -1382,4 +1597,36 @@ fn collect_scroll_containers(b: &LayoutBox, fixed: bool, out: &mut Vec<(Rect, bo
     for c in &b.children {
         collect_scroll_containers(c, fixed, out);
     }
+}
+
+/// Move the rows of a canvas up by `dy` device rows (down when negative):
+/// the content of a scroll by `dy`.
+fn shift_rows(c: &mut Canvas, dy: i64) {
+    let (w, h) = (c.width as usize, c.height as i64);
+    if dy == 0 || dy.abs() >= h {
+        return;
+    }
+    if dy > 0 {
+        let d = dy as usize * w;
+        c.data.copy_within(d.., 0);
+    } else {
+        let d = (-dy) as usize * w;
+        let n = c.data.len() - d;
+        c.data.copy_within(..n, d);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn shift_rows_for_tests(c: &mut Canvas, dy: i64) {
+    shift_rows(c, dy)
+}
+
+/// The image (`<img src>`) under a node, resolved.
+fn image_of(page: &Page, node: NodeId) -> Option<Url> {
+    let img = page.doc.ancestor_or_self(node, |n| page.doc.is_element(n, "img"))?;
+    let src = page.doc.attr(img, "src")?;
+    if src.trim().is_empty() {
+        return None;
+    }
+    page.resolve(src)
 }

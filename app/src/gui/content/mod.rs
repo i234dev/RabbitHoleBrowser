@@ -20,6 +20,8 @@ mod worker;
 mod tests;
 
 pub use frame::Frame;
+#[cfg(test)]
+pub use frame::Pixels;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,11 +58,50 @@ impl ViewSize {
 }
 
 /// Browser settings that affect pages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentSettings {
     pub javascript: bool,
     pub images: bool,
     pub block_trackers: bool,
+    /// `Accept-Language` header.
+    pub accept_language: String,
+    /// Where downloads go.
+    pub download_dir: PathBuf,
+    /// Ask where to save each download.
+    pub ask_download: bool,
+}
+
+impl ContentSettings {
+    pub fn new(javascript: bool, images: bool, block_trackers: bool) -> ContentSettings {
+        ContentSettings {
+            javascript,
+            images,
+            block_trackers,
+            accept_language: "es-ES,es;q=0.9,en;q=0.8".into(),
+            download_dir: std::env::temp_dir(),
+            ask_download: false,
+        }
+    }
+}
+
+/// A node of the DOM tree shown in the devtools Elements view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomRow {
+    pub node: NodeId,
+    pub depth: usize,
+    /// `<div id="a" class="b">` or `"text…"`.
+    pub label: String,
+    pub is_text: bool,
+}
+
+/// Details of the inspected element.
+#[derive(Debug, Clone, Default)]
+pub struct NodeDetails {
+    pub node: Option<NodeId>,
+    /// Computed style (property, value).
+    pub styles: Vec<(String, String)>,
+    /// Attributes.
+    pub attrs: Vec<(String, String)>,
 }
 
 /// A key press or release for the page (`key` uses DOM `KeyboardEvent.key`
@@ -114,6 +155,16 @@ pub enum ToContent {
     /// Show the page's readable text (about:text).
     ShowText,
     Settings(ContentSettings),
+    /// Render the page to a PDF file.
+    PrintPdf(PathBuf),
+    /// Send the DOM tree (devtools Elements view).
+    InspectTree,
+    /// Send the details of a node (and outline it on the page).
+    InspectNode(Option<NodeId>),
+    /// Inspect the element at a viewport point (context menu "Inspect").
+    InspectAt { x: f32, y: f32 },
+    /// Save the URL to disk (save link / image as).
+    SaveUrl(Url),
     Shutdown,
 }
 
@@ -156,7 +207,7 @@ pub enum FromContent {
     ScrollBy { dx: f32, dy: f32 },
     /// Go back (-1) or forward (1) in the tab's history (Backspace).
     History(isize),
-    ContextMenu { link: Option<Url>, has_selection: bool },
+    ContextMenu { link: Option<Url>, image: Option<Url>, has_selection: bool },
     /// Open a `<select>` popup: (label, selected, disabled) per option;
     /// `rect` in document coordinates.
     SelectDropdown { node: NodeId, options: Vec<(String, bool, bool)>, rect: Rect },
@@ -164,6 +215,10 @@ pub enum FromContent {
     Status(String),
     FindResult { count: usize, current: usize },
     Download(DownloadEvent),
+    /// A finished network request of this tab.
+    Network(rabbithole_engine::net::NetEvent),
+    DomTree(Vec<DomRow>),
+    NodeDetails(NodeDetails),
 }
 
 /// Callback receiving a tab's messages: (tab id, epoch, message). Called
@@ -177,7 +232,6 @@ pub struct ContentConfig {
     pub loader: Loader,
     pub settings: ContentSettings,
     pub local_storage: Arc<Mutex<LocalStorage>>,
-    pub download_dir: PathBuf,
     pub next_download_id: Arc<AtomicU64>,
     pub view: ViewSize,
     /// Load the system fonts (false: bundled fonts only, for tests).
@@ -256,4 +310,72 @@ impl Drop for ContentHandle {
         // finishes its current task first; its messages are then ignored).
         let _ = self.tx.send(Inbox::Ui(ToContent::Shutdown));
     }
+}
+
+/// The computed style properties shown in the devtools Elements view.
+pub(crate) fn style_summary(s: &rabbithole_engine::style::ComputedStyle, rect: Option<Rect>) -> Vec<(String, String)> {
+    use rabbithole_engine::gfx::Color;
+    let color = |c: Color| if c.a == 255 { format!("rgb({}, {}, {})", c.r, c.g, c.b) } else { format!("rgba({}, {}, {}, {:.2})", c.r, c.g, c.b, c.a as f32 / 255.0) };
+    // `FlexStart` → `flex-start`
+    let kw = |d: &dyn std::fmt::Debug| {
+        let raw = format!("{d:?}");
+        let mut out = String::new();
+        for (i, ch) in raw.chars().enumerate() {
+            if ch.is_ascii_uppercase() && i > 0 {
+                out.push('-');
+            }
+            out.push(ch.to_ascii_lowercase());
+        }
+        out
+    };
+    // Px(10.0) → 10px, Percent(50.0) → 50%, Auto → auto
+    let len = |l: &dyn std::fmt::Debug| {
+        let raw = format!("{l:?}");
+        if let Some(v) = raw.strip_prefix("Px(").and_then(|r| r.strip_suffix(')')) {
+            format!("{}px", v.trim_end_matches(".0"))
+        } else if let Some(v) = raw.strip_prefix("Percent(").and_then(|r| r.strip_suffix(')')) {
+            format!("{}%", v.trim_end_matches(".0"))
+        } else {
+            raw.to_ascii_lowercase()
+        }
+    };
+    let edges = |t: String, r: String, b: String, l: String| if t == r && r == b && b == l { t } else { format!("{t} {r} {b} {l}") };
+    let px = |v: f32| format!("{}px", (v * 100.0).round() / 100.0);
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut push = |k: &str, v: String| out.push((k.to_string(), v));
+    if let Some(r) = rect {
+        push("box (x, y, w × h)", format!("{}, {}, {} × {}", px(r.x), px(r.y), px(r.w), px(r.h)));
+    }
+    push("display", kw(&s.display));
+    push("position", kw(&s.position));
+    push("box-sizing", kw(&s.box_sizing));
+    push("width", len(&s.width));
+    push("height", len(&s.height));
+    push("margin", edges(len(&s.margin.top), len(&s.margin.right), len(&s.margin.bottom), len(&s.margin.left)));
+    push("padding", edges(len(&s.padding.top), len(&s.padding.right), len(&s.padding.bottom), len(&s.padding.left)));
+    push("border-width", edges(px(s.border_width.top), px(s.border_width.right), px(s.border_width.bottom), px(s.border_width.left)));
+    push("border-color", color(s.border_color.top));
+    push("border-radius", px(s.border_radius));
+    push("color", color(s.color));
+    push("background-color", color(s.background_color));
+    if let Some(bg) = &s.background_image {
+        push("background-image", bg.chars().take(80).collect());
+    }
+    push("font-family", kw(&s.font_family));
+    push("font-size", px(s.font_size));
+    push("font-weight", s.font_weight.to_string());
+    push("line-height", s.line_height.map(px).unwrap_or_else(|| "normal".into()));
+    push("text-align", kw(&s.text_align));
+    push("white-space", kw(&s.white_space));
+    push("opacity", format!("{}", s.opacity));
+    push("visibility", kw(&s.visibility));
+    push("overflow", format!("{} {}", kw(&s.overflow_x), kw(&s.overflow_y)));
+    push("z-index", s.z_index.map(|z| z.to_string()).unwrap_or_else(|| "auto".into()));
+    push("float", kw(&s.float));
+    push("flex", format!("{} {} {}", s.flex_grow, s.flex_shrink, len(&s.flex_basis)));
+    push("flex-direction", kw(&s.flex_direction));
+    push("justify-content", kw(&s.justify_content));
+    push("align-items", kw(&s.align_items));
+    push("inset", edges(len(&s.inset.top), len(&s.inset.right), len(&s.inset.bottom), len(&s.inset.left)));
+    out
 }

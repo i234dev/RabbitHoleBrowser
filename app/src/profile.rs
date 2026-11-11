@@ -66,6 +66,18 @@ impl Profile {
         }
     }
 
+    /// Marker present while the browser runs: found at startup, it means
+    /// the last run crashed.
+    pub fn running_marker(&self) -> PathBuf {
+        self.dir.join("running.lock")
+    }
+
+    /// A throwaway profile for a private window (deleted on exit).
+    pub fn private() -> Profile {
+        let dir = std::env::temp_dir().join(format!("rabbithole-private-{}-{}", std::process::id(), now_secs()));
+        Profile::at(&dir)
+    }
+
     /// The downloads directory (`~/Downloads` or the platform default).
     pub fn downloads_dir(&self) -> PathBuf {
         let dir = dirs::download_dir()
@@ -78,36 +90,96 @@ impl Profile {
 
 // ------------------------------------------------------------------ session
 
-/// Open tabs at the end of the last run.
+/// One tab of a saved session: its back/forward list and flags.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SessionTab {
+    pub history: Vec<String>,
+    /// Current entry in `history`.
+    pub index: usize,
+    pub pinned: bool,
+    pub title: String,
+}
+
+#[cfg(test)]
+impl SessionTab {
+    pub fn url(&self) -> Option<&str> {
+        self.history.get(self.index).or(self.history.last()).map(String::as_str)
+    }
+}
+
+/// Open tabs at the end of the last run (saved continuously, so a crash
+/// loses at most the last few seconds).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Session {
-    pub urls: Vec<String>,
+    pub tabs: Vec<SessionTab>,
     pub active: usize,
 }
 
+fn clean_field(s: &str) -> String {
+    s.chars().map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c }).collect()
+}
+
+#[cfg(test)]
 impl Session {
+    /// A session of plain URLs (one entry each).
+    pub fn from_urls(urls: &[&str], active: usize) -> Session {
+        Session { tabs: urls.iter().map(|u| SessionTab { history: vec![u.to_string()], index: 0, pinned: false, title: String::new() }).collect(), active }
+    }
+
+    /// The current URL of every tab.
+    pub fn urls(&self) -> Vec<String> {
+        self.tabs.iter().filter_map(|t| t.url().map(str::to_string)).collect()
+    }
+}
+
+impl Session {
+    /// Format: `active<TAB>n`, then per tab a `tab<TAB>index<TAB>pinned<TAB>title`
+    /// line followed by its `url<TAB>...` entries. Version 1 files (`tab<TAB>url`
+    /// lines) still load.
     pub fn serialize(&self) -> String {
-        let mut out = format!("active\t{}\n", self.active);
-        for u in &self.urls {
-            out.push_str("tab\t");
-            out.push_str(u);
-            out.push('\n');
+        let mut out = format!("session\t2\nactive\t{}\n", self.active);
+        for t in &self.tabs {
+            out.push_str(&format!("tab\t{}\t{}\t{}\n", t.index, t.pinned as u8, clean_field(&t.title)));
+            for u in &t.history {
+                out.push_str("url\t");
+                out.push_str(&clean_field(u));
+                out.push('\n');
+            }
         }
         out
     }
 
     pub fn parse(text: &str) -> Session {
         let mut s = Session::default();
+        let v2 = text.lines().next().map(|l| l.starts_with("session\t")).unwrap_or(false);
         for line in text.lines() {
             if let Some(v) = line.strip_prefix("active\t") {
                 s.active = v.trim().parse().unwrap_or(0);
-            } else if let Some(u) = line.strip_prefix("tab\t") {
-                if !u.trim().is_empty() {
-                    s.urls.push(u.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("tab\t") {
+                if v2 {
+                    let mut f = rest.splitn(3, '\t');
+                    let index = f.next().and_then(|x| x.trim().parse().ok()).unwrap_or(0);
+                    let pinned = f.next().map(|x| x.trim() == "1").unwrap_or(false);
+                    let title = f.next().unwrap_or("").trim().to_string();
+                    s.tabs.push(SessionTab { history: Vec::new(), index, pinned, title });
+                } else if !rest.trim().is_empty() {
+                    s.tabs.push(SessionTab { history: vec![rest.trim().to_string()], index: 0, pinned: false, title: String::new() });
+                }
+            } else if let Some(u) = line.strip_prefix("url\t") {
+                if let Some(t) = s.tabs.last_mut() {
+                    if !u.trim().is_empty() {
+                        t.history.push(u.trim().to_string());
+                    }
                 }
             }
         }
-        if s.active >= s.urls.len() {
+        s.tabs.retain(|t| !t.history.is_empty());
+        for t in &mut s.tabs {
+            if t.index >= t.history.len() {
+                t.index = t.history.len() - 1;
+            }
+        }
+        if s.active >= s.tabs.len() {
             s.active = 0;
         }
         s
@@ -117,8 +189,13 @@ impl Session {
         std::fs::read_to_string(path).map(|t| Session::parse(&t)).unwrap_or_default()
     }
 
+    /// Write atomically (temp file + rename) so a crash never leaves a
+    /// half-written session.
     pub fn save(&self, path: &Path) {
-        let _ = std::fs::write(path, self.serialize());
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, self.serialize()).is_ok() && std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::write(path, self.serialize());
+        }
     }
 }
 
@@ -139,10 +216,12 @@ pub fn clamp_zoom(z: f32) -> f32 {
 }
 
 impl ZoomLevels {
+    #[cfg(test)]
     pub fn get(&self, host: &str) -> f32 {
         self.levels.get(host).copied().unwrap_or(1.0)
     }
 
+    #[cfg(test)]
     pub fn set(&mut self, host: &str, zoom: f32) {
         if (zoom - 1.0).abs() < 0.01 {
             self.levels.remove(host);
@@ -204,12 +283,26 @@ mod tests {
 
     #[test]
     fn session_round_trip() {
-        let s = Session { urls: vec!["https://a/".into(), "about:home".into()], active: 1 };
+        let mut s = Session::from_urls(&["https://a/", "about:home"], 1);
+        s.tabs[0].history.push("https://a/next".into());
+        s.tabs[0].index = 1;
+        s.tabs[1].pinned = true;
+        s.tabs[1].title = "Home\tpage".into();
         let back = Session::parse(&s.serialize());
-        assert_eq!(s, back);
-        let bad = Session::parse("active\t9\ntab\thttps://x/\n");
-        assert_eq!(bad.active, 0);
-        assert_eq!(bad.urls.len(), 1);
+        assert_eq!(back.tabs.len(), 2);
+        assert_eq!(back.tabs[0].url(), Some("https://a/next"));
+        assert!(back.tabs[1].pinned);
+        assert_eq!(back.tabs[1].title, "Home page");
+        assert_eq!(back.active, 1);
+        // Version 1 files.
+        let old = Session::parse("active\t9\ntab\thttps://x/\n");
+        assert_eq!(old.active, 0);
+        assert_eq!(old.urls(), vec!["https://x/".to_string()]);
+        let dir = std::env::temp_dir().join(format!("rh-session-test-{}", std::process::id()));
+        let p = Profile::at(&dir);
+        s.save(&p.session_path());
+        assert_eq!(Session::load(&p.session_path()).tabs.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

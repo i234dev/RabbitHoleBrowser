@@ -27,7 +27,7 @@ pub use url::{percent_decode, percent_encode_component, site_of, Url};
 pub use cookies::{Cookie, CookieContext, CookieJar};
 pub use fetch::{
     base64_decode, bot_user_agent, browser_headers, decode_content, default_user_agent, fetch, fetch_many, form_encode, mime_for_extension, parse_content_type, sanitize_filename, ApiResponse, Body, Destination,
-    FetchError, Fetcher, HeaderProfile, NetContext, Request, Response, StreamedResponse,
+    FetchError, Fetcher, HeaderProfile, NetContext, NetEvent, NetObserver, Request, Response, StreamedResponse,
 };
 pub use cache::{platform_cache_dir, CacheMode, HttpCache};
 pub use client::Priority;

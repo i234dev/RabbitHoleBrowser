@@ -3,11 +3,30 @@
 
 use std::sync::Arc;
 
-use crate::gui::content::{ContentHandle, Frame, PageState, ToContent, ViewSize};
+use crate::gui::content::{ContentHandle, DomRow, Frame, NodeDetails, PageState, ToContent, ViewSize};
 use crate::gui::input::TextBuffer;
 use crate::scripting::ConsoleLog;
 use rabbithole_engine::gfx::Image;
 use rabbithole_engine::net::Url;
+
+/// Requests kept per tab for the devtools Network view.
+pub const MAX_NETWORK: usize = 1000;
+
+/// Devtools state of a tab (Elements and Network views).
+#[derive(Debug, Default)]
+pub struct Inspector {
+    pub network: Vec<rabbithole_engine::net::NetEvent>,
+    /// When the current page started loading (request times are shown
+    /// relative to it).
+    pub dom: Vec<DomRow>,
+    pub details: NodeDetails,
+    /// Selected row in the Elements / Network list.
+    pub selected: Option<usize>,
+    /// First visible row of the Elements / Network list.
+    pub scroll: usize,
+    pub network_scroll: usize,
+    pub network_selected: Option<usize>,
+}
 
 /// Find-in-page state (the matches live on the content thread).
 #[derive(Debug, Default)]
@@ -20,6 +39,9 @@ pub struct FindState {
 
 pub struct Tab {
     pub id: u64,
+    /// Pinned tabs sit first in the strip, icon-only, and survive "close
+    /// other tabs".
+    pub pinned: bool,
     /// The tab's content thread (None only in unit tests).
     pub content: Option<ContentHandle>,
     /// Latest painted frame.
@@ -55,12 +77,16 @@ pub struct Tab {
     /// The "not responding" bar was dismissed for the busy period that
     /// started at this time (content clock, ms).
     pub hang_dismissed: Option<u64>,
+    pub inspector: Inspector,
+    /// When the last navigation started (spinner animation phase).
+    pub load_started: Option<std::time::Instant>,
 }
 
 impl Tab {
     pub fn new(id: u64) -> Tab {
         Tab {
             id,
+            pinned: false,
             content: None,
             frame: None,
             title: String::from("New tab"),
@@ -81,6 +107,8 @@ impl Tab {
             hover_link: None,
             view: None,
             hang_dismissed: None,
+            inspector: Inspector::default(),
+            load_started: None,
         }
     }
 
@@ -156,6 +184,23 @@ impl Tab {
         self.state = PageState::default();
         self.cursor = "default";
         self.hover_link = None;
+        self.inspector.dom.clear();
+        self.inspector.details = NodeDetails::default();
+        self.inspector.selected = None;
+        self.inspector.scroll = 0;
+    }
+
+    /// Record a network request (oldest dropped past the limit).
+    pub fn log_request(&mut self, ev: rabbithole_engine::net::NetEvent) {
+        self.inspector.network.push(ev);
+        if self.inspector.network.len() > MAX_NETWORK {
+            self.inspector.network.remove(0);
+        }
+    }
+
+    /// The back/forward list as strings (session saving).
+    pub fn history_strings(&self) -> Vec<String> {
+        self.history.iter().map(|u| u.to_string()).collect()
     }
 }
 

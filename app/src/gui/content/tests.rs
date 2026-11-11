@@ -27,9 +27,8 @@ fn config(view: ViewSize) -> ContentConfig {
     let dir = std::env::temp_dir().join(format!("rh-content-test-{}", std::process::id()));
     ContentConfig {
         loader: rabbithole_engine::Loader::new(),
-        settings: ContentSettings { javascript: true, images: true, block_trackers: false },
+        settings: ContentSettings { download_dir: dir, ..ContentSettings::new(true, true, false) },
         local_storage: Arc::new(Mutex::new(rabbithole_engine::LocalStorage::default())),
-        download_dir: dir,
         next_download_id: Arc::new(AtomicU64::new(1)),
         view,
         system_fonts: false,
@@ -332,4 +331,127 @@ fn handle_drop_stops_the_thread() {
             _ => assert!(Instant::now() < deadline, "content thread did not exit"),
         }
     }
+}
+
+// ------------------------------------------------------- incremental paint
+
+/// A tall page of distinct lines (no fixed content), so scrolls and
+/// style changes take the incremental paths.
+fn lines_page(color: &str) -> String {
+    let mut body = String::from("<html><body style='margin:0;font:16px sans-serif'>");
+    body.push_str(&format!("<div id='a' style='color:{color};background:#eef;height:40px'>changing block</div>"));
+    for i in 0..200 {
+        body.push_str(&format!("<p style='margin:0;height:30px;background:rgb({},{},200)'>line {i} of the incremental paint test</p>", (i * 7) % 255, (i * 13) % 255));
+    }
+    body.push_str("</body></html>");
+    body
+}
+
+/// A full, from-scratch paint of `html` with the frame's geometry.
+fn reference_paint(html: &str, f: &Frame) -> Vec<u32> {
+    let mut engine = rabbithole_engine::Engine::new_bundled_fonts_only();
+    let mut page = engine.load_html(html, url("https://example.test/"), rabbithole_engine::Viewport { width: 800.0, height: 600.0 });
+    engine.flush_display_list(&mut page);
+    let mut c = rabbithole_engine::gfx::Canvas::new(f.canvas.width, f.canvas.height);
+    c.clear(rabbithole_engine::gfx::Color::WHITE);
+    rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut c, &engine.fonts, f.origin.0, f.origin.1, (f.scroll.0 - f.origin.0, f.scroll.1 - f.origin.1));
+    c.data
+}
+
+fn mismatches(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b).filter(|(x, y)| x != y).count()
+}
+
+#[test]
+fn incremental_scroll_and_damage_match_full_paints() {
+    use std::sync::atomic::Ordering;
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    let html = lines_page("red");
+    load(&h, &html);
+    wait_for(&rx, 1, Duration::from_secs(10), is_frame).expect("first frame");
+    let before = super::worker::PARTIAL_PAINTS.load(Ordering::Relaxed);
+    // Scroll past the overscan: the old pixels shift, only the strip is painted.
+    for y in [700.0, 1400.0, 1000.0] {
+        h.send(ToContent::Scroll { x: 0.0, y });
+        let (_, f) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if f.scroll.1 == y)).expect("frame after scroll");
+        let FromContent::Frame(f) = f else { unreachable!() };
+        let reference = reference_paint(&html, &f);
+        let bad = mismatches(&f.canvas.data, &reference);
+        assert!(bad * 1000 < reference.len(), "scroll to {y}: {bad} of {} pixels differ", reference.len());
+    }
+    assert!(super::worker::PARTIAL_PAINTS.load(Ordering::Relaxed) > before, "scrolling used partial paints");
+    // A style change repaints only its damage.
+    h.send(ToContent::Scroll { x: 0.0, y: 0.0 });
+    wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::Frame(f) if f.scroll.1 == 0.0)).expect("back at the top");
+    let before = super::worker::PARTIAL_PAINTS.load(Ordering::Relaxed);
+    h.send(ToContent::Eval("document.getElementById('a').style.color = 'blue'".into()));
+    let (_, f) = wait_for(&rx, 1, Duration::from_secs(10), is_frame).expect("frame after the style change");
+    let FromContent::Frame(f) = f else { unreachable!() };
+    let reference = reference_paint(&lines_page("blue"), &f);
+    let bad = mismatches(&f.canvas.data, &reference);
+    assert!(bad * 1000 < reference.len(), "after style change: {bad} pixels differ");
+    assert!(super::worker::PARTIAL_PAINTS.load(Ordering::Relaxed) > before, "the style change used a partial paint");
+}
+
+#[test]
+fn shift_rows_moves_content() {
+    let mut c = rabbithole_engine::gfx::Canvas::new(2, 4);
+    for (i, p) in c.data.iter_mut().enumerate() {
+        *p = (i / 2) as u32;
+    }
+    super::worker::shift_rows_for_tests(&mut c, 1);
+    assert_eq!(c.data, vec![1, 1, 2, 2, 3, 3, 3, 3]);
+    super::worker::shift_rows_for_tests(&mut c, -2);
+    assert_eq!(&c.data[4..], &[1, 1, 2, 2]);
+}
+
+#[test]
+fn context_menu_reports_images() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    load(&h, "<html><body style='margin:0'><a href='/x'><img src='/pic.png' width=100 height=100 style='display:block'></a></body></html>");
+    wait_for(&rx, 1, Duration::from_secs(10), is_frame).expect("frame");
+    h.send(ToContent::PointerDown { x: 50.0, y: 50.0, button: 2, mods: Default::default(), click_count: 1 });
+    let (_, m) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::ContextMenu { .. })).expect("context menu");
+    let FromContent::ContextMenu { link, image, .. } = m else { unreachable!() };
+    assert_eq!(link.map(|u| u.path), Some("/x".to_string()));
+    assert_eq!(image.map(|u| u.to_string()), Some("https://example.test/pic.png".to_string()));
+}
+
+#[test]
+fn inspector_tree_and_styles() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    load(&h, "<html><body style='margin:0'><div id='box' class='big' style='color:rgb(1, 2, 3);width:120px;height:50px'>hello</div></body></html>");
+    wait_for(&rx, 1, Duration::from_secs(10), is_frame).expect("frame");
+    h.send(ToContent::InspectAt { x: 20.0, y: 12.0 });
+    let (_, t) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::DomTree(_))).expect("tree");
+    let FromContent::DomTree(rows) = t else { unreachable!() };
+    assert!(rows.iter().any(|r| r.label.starts_with("<div id=\"box\"")), "{rows:?}");
+    assert!(rows.iter().any(|r| r.is_text && r.label.contains("hello")));
+    let (_, d) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::NodeDetails(_))).expect("details");
+    let FromContent::NodeDetails(d) = d else { unreachable!() };
+    let get = |k: &str| d.styles.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!(get("color").as_deref(), Some("rgb(1, 2, 3)"), "{:?}", d.styles);
+    assert_eq!(get("display").as_deref(), Some("block"));
+    assert!(d.attrs.iter().any(|(k, v)| k == "class" && v == "big"));
+}
+
+#[test]
+fn print_to_pdf_writes_pages() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    load(&h, TALL);
+    wait_for(&rx, 1, Duration::from_secs(10), is_frame).expect("frame");
+    let path = std::env::temp_dir().join(format!("rh-print-{}.pdf", std::process::id()));
+    h.send(ToContent::PrintPdf(path.clone()));
+    let (_, m) = wait_for(&rx, 1, Duration::from_secs(60), |m| matches!(m, FromContent::Status(s) if s.contains("PDF"))).expect("status");
+    let FromContent::Status(msg) = m else { unreachable!() };
+    assert!(msg.starts_with("Saved PDF"), "{msg}");
+    let data = std::fs::read(&path).unwrap();
+    assert!(data.starts_with(b"%PDF-1.4"));
+    // 5000 px tall at 800 px wide → 5 A4 pages (800 × 1131).
+    assert!(String::from_utf8_lossy(&data).contains("/Count 5"));
+    let _ = std::fs::remove_file(&path);
 }

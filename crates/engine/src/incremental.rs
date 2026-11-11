@@ -492,6 +492,29 @@ impl Engine {
         damage
     }
 
+    /// For embedders that rasterize the display list themselves (scaled
+    /// or overscanned canvases): the regions, in CSS px relative to
+    /// `origin` (the document point at the canvas' top-left corner), where
+    /// the display list changed since [`Engine::mark_painted`] was called
+    /// with the same origin. `Some(empty)`: nothing changed; `None`:
+    /// unknown, repaint everything. Only meaningful for pages without
+    /// fixed or sticky content (their position depends on the scroll).
+    pub fn paint_damage_since(&self, page: &mut Page, origin: (f32, f32)) -> Option<Vec<rabbithole_gfx::Rect>> {
+        self.flush_display_list(page);
+        match (page.incr.canvas, page.incr.painted_dl.as_ref()) {
+            (CanvasSync::Current(s), _) if s == origin => Some(Vec::new()),
+            (CanvasSync::Stale(s), Some(prev)) if s == origin => rabbithole_layout::display_list_damage(prev, &page.display_list, origin),
+            _ => None,
+        }
+    }
+
+    /// The embedder's canvas now shows the current display list painted
+    /// with its top-left corner at document point `origin`.
+    pub fn mark_painted(&self, page: &mut Page, origin: (f32, f32)) {
+        page.incr.painted_dl = None;
+        page.incr.canvas = CanvasSync::Current(origin);
+    }
+
     fn repaint_regions(&self, page: &Page, canvas: &mut rabbithole_gfx::Canvas, damage: &[rabbithole_gfx::Rect]) {
         use rabbithole_gfx::Rect;
         let scroll = page.page_scroll;

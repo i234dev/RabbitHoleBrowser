@@ -20,6 +20,8 @@ const HELP: &str = "RabbitHole Browser — a web browser written from scratch (n
 
 USAGE:
     rabbithole [URL...]                    Open the graphical browser (no URL: restore the last session)
+    rabbithole --private [URL...]          Open a private window (nothing is saved)
+    rabbithole --new-window [URL...]       Open another window (does not restore the session)
     rabbithole screenshot <URL> [options]  Render a page headlessly to a PNG
     rabbithole diff <URL-A> <URL-B|PNG> [--out diff.png] [--width W] [--height H] [--tolerance T] [--max-percent P]
                                            Render two pages (or a page and a PNG) and compare them pixel by pixel
@@ -122,7 +124,9 @@ fn run_headless(args: Vec<String>) -> ExitCode {
 fn run(args: &[String]) -> Result<(), String> {
     let first = args.first().map(String::as_str);
     match first {
-        None => gui::run(Vec::new()),
+        None => gui::run(Vec::new(), gui::GuiOptions::default()),
+        Some("--private") | Some("--incognito") => gui::run(args[1..].to_vec(), gui::GuiOptions { private: true, new_window: true }),
+        Some("--new-window") => gui::run(args[1..].to_vec(), gui::GuiOptions { private: false, new_window: true }),
         Some("-h") | Some("--help") | Some("help") => {
             print!("{HELP}");
             Ok(())
@@ -143,6 +147,6 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("agent") => cli::agent(&args[1..]),
         Some("ui-bench") => gui::bench::run(&args[1..]),
         Some(url) if url.starts_with('-') => Err(format!("unknown option `{url}` (try --help)")),
-        Some(_) => gui::run(args.to_vec()),
+        Some(_) => gui::run(args.to_vec(), gui::GuiOptions::default()),
     }
 }

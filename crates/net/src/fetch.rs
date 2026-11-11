@@ -465,7 +465,36 @@ pub struct Fetcher {
     pub respect_robots: bool,
     /// Optional request log (agent interface: network listing, waits).
     pub log: Option<Arc<crate::netlog::NetLog>>,
+    /// Called after every HTTP request (devtools network view).
+    pub observer: Option<NetObserver>,
 }
+
+/// One finished HTTP request, for a network log.
+#[derive(Debug, Clone)]
+pub struct NetEvent {
+    pub method: String,
+    pub url: Url,
+    pub dest: Destination,
+    /// None when the request failed.
+    pub status: Option<u16>,
+    pub content_type: String,
+    /// Announced body length (Content-Length), when known.
+    pub size: Option<u64>,
+    /// Time to the response headers.
+    pub duration: Duration,
+    pub error: Option<String>,
+}
+
+/// Callback receiving [`NetEvent`]s (shared by fetcher clones).
+#[derive(Clone)]
+pub struct NetObserver(pub Arc<dyn Fn(&NetEvent) + Send + Sync>);
+
+impl std::fmt::Debug for NetObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NetObserver")
+    }
+}
+
 
 /// The identity a [`Fetcher`] presents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -498,6 +527,7 @@ impl Default for Fetcher {
             header_profile: HeaderProfile::Browser,
             respect_robots: false,
             log: None,
+            observer: None,
         }
     }
 }
@@ -825,6 +855,37 @@ fn debug_net() -> bool {
 }
 
 impl Fetcher {
+    /// Run a request, reporting it to the observer.
+    fn run_observed(&self, req: &Request) -> Result<Outcome, FetchError> {
+        let Some(obs) = &self.observer else { return self.run(req) };
+        let start = std::time::Instant::now();
+        let out = self.run(req);
+        let ev = match &out {
+            Ok(o) => NetEvent {
+                method: req.method.to_ascii_uppercase(),
+                url: o.url.clone(),
+                dest: req.dest,
+                status: Some(o.status),
+                content_type: o.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.clone()).unwrap_or_default(),
+                size: o.content_length,
+                duration: start.elapsed(),
+                error: None,
+            },
+            Err(e) => NetEvent {
+                method: req.method.to_ascii_uppercase(),
+                url: req.url.clone(),
+                dest: req.dest,
+                status: None,
+                content_type: String::new(),
+                size: None,
+                duration: start.elapsed(),
+                error: Some(e.to_string()),
+            },
+        };
+        (obs.0)(&ev);
+        out
+    }
+
     /// Fetch any supported URL: http/https (redirects followed, content
     /// codings decoded, HTTP cache), file, data (base64 or
     /// percent-encoded), about.
@@ -870,7 +931,7 @@ impl Fetcher {
     }
 
     fn request_inner(&self, req: &Request) -> Result<Response, FetchError> {
-        let out = self.run(req)?;
+        let out = self.run_observed(req)?;
         let api = req.mode.is_some();
         let (content_type, charset) = parse_content_type(out.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()).unwrap_or(""));
         let body = if out.kind == ResponseType::Opaque || out.kind == ResponseType::OpaqueRedirect {
@@ -913,7 +974,7 @@ impl Fetcher {
     }
 
     fn fetch_api_inner(&self, req: &Request) -> Result<ApiResponse, FetchError> {
-        let out = self.run(req)?;
+        let out = self.run_observed(req)?;
         let (content_type, charset) = parse_content_type(out.headers.iter().find(|(k, _)| k == "content-type").map(|(_, v)| v.as_str()).unwrap_or(""));
         let opaque = matches!(out.kind, ResponseType::Opaque | ResponseType::OpaqueRedirect);
         let body = if opaque { Vec::new() } else { read_limited(out.body, self.max_body)? };
@@ -945,7 +1006,7 @@ impl Fetcher {
         }
         self.check_robots(req)?;
         let id = self.log.as_ref().map(|l| l.begin(req));
-        let out = match self.run(req) {
+        let out = match self.run_observed(req) {
             Ok(o) => o,
             Err(e) => {
                 if let (Some(l), Some(id)) = (&self.log, id) {

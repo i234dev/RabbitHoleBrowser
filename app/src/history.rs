@@ -107,6 +107,39 @@ impl History {
             .collect()
     }
 
+    /// Number of visits per URL (for omnibox ranking).
+    pub fn visit_counts(&self) -> std::collections::HashMap<&str, u32> {
+        let mut m = std::collections::HashMap::new();
+        for e in &self.entries {
+            *m.entry(e.url.as_str()).or_insert(0) += 1;
+        }
+        m
+    }
+
+    /// Delete every visit of `url` and rewrite the file.
+    pub fn remove_url(&mut self, url: &str, path: &Path) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| e.url != url);
+        let changed = self.entries.len() != before;
+        if changed {
+            self.rewrite(path);
+        }
+        changed
+    }
+
+    /// Delete the visits of one day (days since the epoch, UTC).
+    pub fn remove_day(&mut self, day: u64, path: &Path) {
+        self.entries.retain(|e| e.timestamp / 86400 != day);
+        self.rewrite(path);
+    }
+
+    /// Replace the file with the in-memory entries.
+    pub fn rewrite(&mut self, path: &Path) {
+        self.pending.clear();
+        let text: String = self.entries.iter().map(|e| History::serialize_entry(e) + "\n").collect();
+        let _ = std::fs::write(path, text);
+    }
+
     pub fn clear(&mut self, path: &Path) {
         self.entries.clear();
         self.pending.clear();
@@ -135,5 +168,25 @@ mod tests {
         assert_eq!(recent[0].title, "Example again");
         assert_eq!(back.search("rust", 5).len(), 1);
         assert!(History::parse("garbage\nx\ty\n").entries.is_empty());
+        assert_eq!(back.visit_counts()["https://example.com/a"], 2);
+    }
+
+    #[test]
+    fn remove_entries() {
+        let dir = std::env::temp_dir().join(format!("rh-hist-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("history.txt");
+        let mut h = History::default();
+        h.add("https://a/", "A");
+        h.add("https://b/", "B");
+        h.add("https://a/", "A2");
+        h.flush(&path);
+        assert!(h.remove_url("https://a/", &path));
+        assert!(!h.remove_url("https://zzz/", &path));
+        assert_eq!(History::load(&path).entries.len(), 1);
+        let day = h.entries[0].timestamp / 86400;
+        h.remove_day(day, &path);
+        assert!(History::load(&path).entries.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

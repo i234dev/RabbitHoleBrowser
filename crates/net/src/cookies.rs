@@ -276,6 +276,9 @@ pub struct CookieJar {
     cookies: Vec<Cookie>,
     /// Set when a cookie changed since the last `save`.
     pub dirty: bool,
+    /// Browser setting: cross-site subresource requests neither send nor
+    /// store cookies (top-level navigations are unaffected).
+    pub block_third_party: bool,
 }
 
 impl CookieJar {
@@ -307,6 +310,9 @@ impl CookieJar {
     /// and keying `Partitioned` cookies by the top-level site.
     pub fn store_from_response(&mut self, url: &Url, set_cookie_values: &[String], ctx: &CookieContext) {
         let same_site = ctx.same_site_chain && ctx.is_same_site(url);
+        if self.block_third_party && !same_site && !ctx.top_level_navigation {
+            return;
+        }
         for v in set_cookie_values {
             let Some(mut c) = Cookie::parse(v, url) else { continue };
             if !same_site && !ctx.top_level_navigation && c.same_site != "None" {
@@ -325,6 +331,9 @@ impl CookieJar {
     /// also on top-level POSTs).
     pub fn header_for_context(&self, url: &Url, ctx: &CookieContext) -> Option<String> {
         let same_site = ctx.same_site_chain && ctx.is_same_site(url);
+        if self.block_third_party && !same_site && !ctx.top_level_navigation {
+            return None;
+        }
         let partition = ctx.partition_site(url);
         let t = now();
         self.header_filtered(url, |c| {
@@ -628,5 +637,23 @@ mod tests {
         assert_eq!(back.cookies()[0].name, "a");
         assert!(back.cookies()[0].http_only);
         assert!(!back.cookies()[0].host_only);
+    }
+
+    #[test]
+    fn third_party_blocking() {
+        let site = Url::parse("https://site.example/").unwrap();
+        let other = Url::parse("https://tracker.other/").unwrap();
+        let mut jar = CookieJar::new();
+        jar.block_third_party = true;
+        let tracker = Url::parse("https://tracker.other/pixel").unwrap();
+        let sub = CookieContext::new(Some(&site), &tracker, false, "GET");
+        jar.store_from_response(&tracker, &["id=1; SameSite=None; Secure".to_string()], &sub);
+        assert!(jar.is_empty(), "third-party Set-Cookie ignored");
+        let top = CookieContext::new(None, &other, true, "GET");
+        jar.store_from_response(&tracker, &["id=1; SameSite=None; Secure".to_string()], &top);
+        assert_eq!(jar.len(), 1, "first-party visit stores it");
+        assert!(jar.header_for_context(&tracker, &sub).is_none(), "not sent cross-site");
+        jar.block_third_party = false;
+        assert!(jar.header_for_context(&tracker, &sub).is_some());
     }
 }

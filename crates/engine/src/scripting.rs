@@ -126,6 +126,17 @@ impl LocalStorage {
         self.data.remove(origin);
         self.dirty = true;
     }
+
+    /// Origins with stored data.
+    pub fn origins(&self) -> Vec<String> {
+        self.data.iter().filter(|(_, m)| !m.is_empty()).map(|(o, _)| o.clone()).collect()
+    }
+
+    /// Forget everything (clear browsing data).
+    pub fn clear_all(&mut self) {
+        self.data.clear();
+        self.dirty = true;
+    }
 }
 
 fn escape(s: &str) -> String {

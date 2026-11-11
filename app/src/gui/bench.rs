@@ -35,7 +35,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let url = url.ok_or("usage: rabbithole ui-bench <URL> [--legacy] [--seconds N]")?;
-    let url = Url::parse(&super::App::resolve_input(&url)).ok_or("bad URL")?;
+    let url = Url::parse(&super::omnibox::resolve_input(&url, crate::settings::SearchEngine::DuckDuckGo, "about:home")).ok_or("bad URL")?;
     if legacy {
         legacy_run(url, Duration::from_secs(seconds))
     } else {
@@ -52,9 +52,8 @@ fn threaded_run(url: Url, duration: Duration) -> Result<(), String> {
     let view = ViewSize::new(W, H - 120, 1.0);
     let config = ContentConfig {
         loader: rabbithole_engine::Loader::new(),
-        settings: ContentSettings { javascript: true, images: true, block_trackers: true },
+        settings: ContentSettings::new(true, true, true),
         local_storage: Arc::new(Mutex::new(LocalStorage::default())),
-        download_dir: std::env::temp_dir(),
         next_download_id: Arc::new(AtomicU64::new(1)),
         view,
         system_fonts: true,

@@ -1523,6 +1523,7 @@ dependencies = [
  "arboard",
  "dirs",
  "image",
+ "miniz_oxide 0.8.9",
  "rabbithole-agent",
  "rabbithole-engine",
  "rabbithole-gfx",
