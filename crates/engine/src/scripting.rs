@@ -441,6 +441,14 @@ pub fn fill_random(buf: &mut [u8]) {
     });
 }
 
+/// How long one task (timer batch, event dispatch, message) may run
+/// before the watchdog stops it (1.5 s; `RH_TASK_BUDGET_MS` overrides it
+/// for diagnosing heavy sites).
+pub(crate) fn task_budget() -> std::time::Duration {
+    static BUDGET: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| std::time::Duration::from_millis(std::env::var("RH_TASK_BUDGET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500)))
+}
+
 /// Result of a script-driven interaction step.
 #[derive(Debug, Default)]
 pub struct ScriptOutcome {
@@ -560,7 +568,7 @@ impl Engine {
         let now = self.start.elapsed().as_secs_f64() * 1000.0;
         {
             let mut env = EngineEnv { engine: self, page };
-            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(1500)));
+            host.realm().set_deadline(Some(std::time::Instant::now() + crate::scripting::task_budget()));
             if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
                 eprintln!("[tick] run_timers start");
             }
@@ -593,7 +601,7 @@ impl Engine {
         }
         let result: DispatchResult = {
             let mut env = EngineEnv { engine: self, page };
-            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(1500)));
+            host.realm().set_deadline(Some(std::time::Instant::now() + crate::scripting::task_budget()));
             let r = host.dispatch_event(&mut env, target, event_type, init);
             host.run_jobs(&mut env);
             host.realm().set_deadline(None);
@@ -612,7 +620,7 @@ impl Engine {
         };
         {
             let mut env = EngineEnv { engine: self, page };
-            host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(1500)));
+            host.realm().set_deadline(Some(std::time::Instant::now() + crate::scripting::task_budget()));
             host.dispatch_window_event(&mut env, event_type);
             host.run_jobs(&mut env);
             host.realm().set_deadline(None);

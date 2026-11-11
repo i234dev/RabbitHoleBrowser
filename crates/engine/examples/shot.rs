@@ -118,6 +118,23 @@ fn main() {
     }
     // RH_CLICK=<css selector> clicks the element's center like the GUI
     // does; RH_TYPE=<text> then types into the focused control.
+    // RH_CLICK_AT=x,y clicks a viewport point (e.g. inside an iframe).
+    if let Some((x, y)) = std::env::var("RH_CLICK_AT").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?)))) {
+        let up = engine.click_at(&mut page, x, y, Default::default());
+        eprintln!("click at ({x}, {y}): target {:?} action {:?}", up.target.and_then(|t| page.doc.tag(t).map(str::to_string)), up.action);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(std::env::var("RH_JS_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(300));
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let _ = engine.tick(&mut page);
+        }
+        if let Ok(js) = std::env::var("RH_FRAME_EVAL") {
+            for c in page.frames.children.iter_mut() {
+                if let Some(child) = c.page.as_mut() {
+                    eprintln!("frame {}: {}", child.url, engine.eval_in_page(child, &js));
+                }
+            }
+        }
+    }
     if let Ok(sel) = std::env::var("RH_CLICK") {
         let js = format!("(()=>{{const e=document.querySelector({sel:?}); if(!e) return ''; const r=e.getBoundingClientRect(); return (r.x+r.width/2)+','+(r.y+r.height/2)}})()");
         let at = engine.eval_in_page(&mut page, &js);
