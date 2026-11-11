@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>React 19 SSR fixture</title>
+<link rel="stylesheet" href="/fw/common.css">
+</head><body>
+<!-- server-rendered markup (as the framework's server renderer emits it) -->
+<div id="root"><div id="ssr"><button id="inc">+</button><span id="count">0</span><button id="cond-toggle">toggle</button><p id="cond">shown</p><ul><li class="ssr-item">one</li><li class="ssr-item">two</li><li class="ssr-item">three</li></ul></div></div>
+<script>window.__ssr = { count: document.getElementById('count'), inc: document.getElementById('inc') };</script>
+<script src="/vendor/react19/react19.production.js"></script>
+<script src="/fw/react-app.js"></script>
+<script>ReactDOMClient.hydrateRoot(document.getElementById('root'), React.createElement(ReactFixture.SsrApp), { onRecoverableError: function (e) { console.error('hydration error: ' + e.message); } });</script>
+</body></html>

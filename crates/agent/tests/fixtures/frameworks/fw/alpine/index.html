@@ -1,0 +1,71 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Alpine fixture</title>
+<link rel="stylesheet" href="/fw/common.css">
+<script>
+  document.addEventListener('alpine:initialized', function () { window.__ready = true; });
+  var base = location.pathname.replace(/about$/, '');
+  function routeOf() { return /\/about$/.test(location.pathname) ? 'about' : 'home'; }
+  function todos() {
+    return {
+      items: [], text: '', next: 1,
+      add() { if (!this.text.trim()) return; this.items.push({ id: this.next++, text: this.text.trim(), done: false }); this.text = ''; },
+      del(it) { this.items = this.items.filter(function (x) { return x.id !== it.id; }); },
+      get left() { return this.items.filter(function (i) { return !i.done; }).length; }
+    };
+  }
+  function fetcher() {
+    return {
+      status: '', items: [],
+      async load() { this.status = 'loading'; var r = await fetch('/api/items'); this.items = await r.json(); this.status = 'loaded'; }
+    };
+  }
+</script>
+<script defer src="/vendor/alpine/alpine.min.js"></script>
+</head><body>
+<section x-data="{ n: 0 }">
+  <button id="dec" @click="n--">-</button><span id="count" x-text="n"></span><button id="inc" @click="n++">+</button>
+</section>
+
+<section x-data="todos()">
+  <form id="todo-form" @submit.prevent="add()">
+    <input id="todo-input" x-model="text"><button id="todo-add" type="submit">Add</button>
+    <button id="todo-reverse" type="button" @click="items.reverse()">Reverse</button>
+  </form>
+  <ul id="todo-list">
+    <template x-for="it in items" :key="it.id">
+      <li class="todo"><input type="checkbox" class="done" x-model="it.done"><span class="text" x-text="it.text"></span><button type="button" class="del" @click="del(it)">x</button></li>
+    </template>
+  </ul>
+  <p id="todo-left" x-text="left + ' left'"></p>
+</section>
+
+<section x-data="{ name: '', upper: '', color: 'red', agree: false, result: '' }">
+  <form id="form" @submit.prevent="result = [name, upper, color, agree ? 'yes' : 'no'].join('|')">
+    <input id="name" x-model="name"><p id="greeting" x-text="'Hello, ' + name + '!'"></p>
+    <input id="upper" :value="upper" @input="upper = $event.target.value.toUpperCase(); $event.target.value = upper">
+    <select id="color" x-model="color"><option>red</option><option>green</option><option>blue</option></select>
+    <span id="color-out" x-text="color"></span>
+    <label><input id="agree" type="checkbox" x-model="agree"> I agree</label>
+    <button id="submit" type="submit" :disabled="!agree">Send</button>
+    <p id="result" x-text="result"></p>
+  </form>
+</section>
+
+<section x-data="{ route: routeOf(), go(href) { history.pushState({}, '', href); this.route = routeOf(); } }" @popstate.window="route = routeOf()">
+  <nav><a id="link-home" :href="base" @click.prevent="go(base)">Home</a> <a id="link-about" :href="base + 'about'" @click.prevent="go(base + 'about')">About</a></nav>
+  <div id="view" x-text="route === 'about' ? 'About' : 'Home'"></div>
+</section>
+
+<section x-data="fetcher()">
+  <button id="load" @click="load()">Load</button>
+  <template x-if="status"><p id="status" x-text="status"></p></template>
+  <ul id="items"><template x-for="i in items" :key="i.id"><li class="item" x-text="i.name"></li></template></ul>
+</section>
+
+<section x-data="{ show: true }">
+  <button id="toggle" @click="show = !show">Toggle</button>
+  <div id="box" x-show="show"
+       x-transition:enter="t-active" x-transition:enter-start="t-from" x-transition:enter-end="t-to"
+       x-transition:leave="t-active" x-transition:leave-start="t-to" x-transition:leave-end="t-from">box</div>
+</section>
+</body></html>

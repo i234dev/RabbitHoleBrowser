@@ -1,0 +1,77 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>jQuery fixture</title>
+<link rel="stylesheet" href="/fw/common.css">
+<script src="/vendor/jquery/jquery.min.js"></script>
+</head><body>
+<section><button id="dec">-</button><span id="count">0</span><button id="inc">+</button></section>
+
+<section>
+  <form id="todo-form"><input id="todo-input"><button id="todo-add" type="submit">Add</button>
+    <button id="todo-reverse" type="button">Reverse</button></form>
+  <ul id="todo-list"></ul><p id="todo-left">0 left</p>
+</section>
+
+<section>
+  <form id="form">
+    <input id="name"><p id="greeting">Hello, !</p>
+    <input id="upper">
+    <select id="color"><option>red</option><option>green</option><option>blue</option></select><span id="color-out">red</span>
+    <label><input id="agree" type="checkbox"> I agree</label>
+    <button id="submit" type="submit" disabled>Send</button>
+    <p id="result"></p>
+  </form>
+</section>
+
+<section><nav><a id="link-home" href="./">Home</a> <a id="link-about" href="about">About</a></nav><div id="view"></div></section>
+
+<section><button id="load">Load</button><p id="status"></p><ul id="items"></ul></section>
+
+<section><button id="toggle">Toggle</button><div id="box">box</div></section>
+
+<script>
+$(function () {
+  var n = 0;
+  $('#inc').on('click', function () { $('#count').text(++n); });
+  $('#dec').on('click', function () { $('#count').text(--n); });
+
+  function left() { $('#todo-left').text($('#todo-list li.todo').not(':has(input.done:checked)').length + ' left'); }
+  $('#todo-form').on('submit', function (e) {
+    e.preventDefault();
+    var t = $.trim($('#todo-input').val());
+    if (!t) return;
+    $('<li class="todo"><input type="checkbox" class="done"> <span class="text"></span> <button type="button" class="del">x</button></li>')
+      .find('.text').text(t).end().appendTo('#todo-list');
+    $('#todo-input').val('');
+    left();
+  });
+  $('#todo-list').on('change', 'input.done', left).on('click', 'button.del', function () { $(this).closest('li').remove(); left(); });
+  $('#todo-reverse').on('click', function () { var ul = $('#todo-list'); ul.children().get().reverse().forEach(function (li) { ul.append(li); }); });
+
+  $('#name').on('input', function () { $('#greeting').text('Hello, ' + this.value + '!'); });
+  $('#upper').on('input', function () { this.value = this.value.toUpperCase(); });
+  $('#color').on('change', function () { $('#color-out').text($(this).val()); });
+  $('#agree').on('change', function () { $('#submit').prop('disabled', !this.checked); });
+  $('#form').on('submit', function (e) {
+    e.preventDefault();
+    $('#result').text([$('#name').val(), $('#upper').val(), $('#color').val(), $('#agree').is(':checked') ? 'yes' : 'no'].join('|'));
+  });
+
+  var base = location.pathname.replace(/about$/, '');
+  function route() { $('#view').text(/\/about$/.test(location.pathname) ? 'About' : 'Home'); }
+  $('nav a').on('click', function (e) { e.preventDefault(); history.pushState({}, '', this.href); route(); });
+  $(window).on('popstate', route);
+  route();
+
+  $('#load').on('click', function () {
+    $('#status').text('loading');
+    $.getJSON('/api/items').done(function (items) {
+      $('#items').empty().append($.map(items, function (i) { return $('<li class="item">').text(i.name); }));
+      $('#status').text('loaded');
+    }).fail(function (x, s, err) { console.error('load failed: ' + s + ' ' + err); });
+  });
+
+  $('#toggle').on('click', function () { $('#box').stop(true, true).fadeToggle(300); });
+  window.__ready = true;
+});
+</script>
+</body></html>

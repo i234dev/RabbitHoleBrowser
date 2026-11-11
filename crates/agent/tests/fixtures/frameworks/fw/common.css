@@ -1,0 +1,16 @@
+body { font: 16px/20px sans-serif; margin: 8px; }
+section { border: 1px solid #ccc; margin: 6px 0; padding: 6px; }
+button, input, select { font: inherit; margin: 2px; }
+#box { width: 160px; height: 40px; background: teal; color: white; }
+/* class-toggled transition used by the React / Preact / Lit / Solid apps */
+.box { opacity: 1; transition: opacity 0.3s linear; }
+.box.hidden-state { opacity: 0; }
+/* Vue <Transition name="fade"> */
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s linear; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+/* Alpine x-transition classes */
+.t-active { transition: opacity 0.3s linear; }
+.t-from { opacity: 0; }
+.t-to { opacity: 1; }
+/* htmx swap transition */
+#box.htmx-swapping { opacity: 0; transition: opacity 0.3s linear; }

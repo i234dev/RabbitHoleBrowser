@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Preact SSR fixture</title>
+<link rel="stylesheet" href="/fw/common.css">
+<script type="importmap">{"imports":{"preact":"/vendor/preact/preact.mjs","preact/hooks":"/vendor/preact/hooks.mjs"}}</script>
+</head><body data-ssr="1">
+<!-- server-rendered markup (preact-render-to-string output) -->
+<div id="root"><div id="ssr"><button id="inc">+</button><span id="count">0</span><button id="cond-toggle">toggle</button><p id="cond">shown</p><ul><li class="ssr-item">one</li><li class="ssr-item">two</li><li class="ssr-item">three</li></ul></div></div>
+<script>window.__ssr = { count: document.getElementById('count'), inc: document.getElementById('inc') };</script>
+<script type="module" src="/fw/preact/app.js"></script>
+</body></html>

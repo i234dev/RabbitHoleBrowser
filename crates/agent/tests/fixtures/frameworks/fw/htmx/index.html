@@ -1,0 +1,57 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>htmx fixture</title>
+<link rel="stylesheet" href="/fw/common.css">
+<style>
+  #box-wrap.htmx-swapping #box { opacity: 0; transition: opacity 0.3s linear; }
+  #box { transition: opacity 0.3s linear; }
+  #box.htmx-added { opacity: 0; }
+</style>
+<script src="/vendor/htmx/htmx.min.js"></script>
+<script>document.addEventListener('htmx:load', function () { window.__ready = true; });</script>
+</head><body>
+<section>
+  <div id="cval"><span id="count">0</span><input type="hidden" name="n" value="0"></div>
+  <button id="dec" hx-post="/api/htmx/counter" hx-include="#cval" hx-vals='{"d":"-1"}' hx-target="#cval">-</button>
+  <button id="inc" hx-post="/api/htmx/counter" hx-include="#cval" hx-vals='{"d":"1"}' hx-target="#cval">+</button>
+</section>
+
+<section>
+  <form id="todo-form" hx-post="/api/htmx/todos" hx-include="#todos" hx-target="#todos" hx-vals='{"op":"add"}' hx-on::after-request="if (event.detail.elt === this) this.reset()">
+    <input id="todo-input" name="text"><button id="todo-add" type="submit">Add</button>
+    <button id="todo-reverse" type="button" hx-post="/api/htmx/todos" hx-include="#todos" hx-vals='{"op":"reverse"}' hx-target="#todos">Reverse</button>
+  </form>
+  <div id="todos"><ul id="todo-list"></ul><p id="todo-left">0 left</p></div>
+</section>
+
+<section>
+  <form id="form" hx-post="/api/htmx/form" hx-target="#result" hx-swap="outerHTML">
+    <input id="name" name="name" hx-get="/api/htmx/greeting" hx-trigger="input changed delay:30ms" hx-target="#greeting" hx-swap="innerHTML">
+    <p id="greeting">Hello, !</p>
+    <input id="upper" name="upper" hx-on:input="this.value = this.value.toUpperCase()">
+    <select id="color" name="color" hx-on:change="document.getElementById('color-out').textContent = this.value"><option>red</option><option>green</option><option>blue</option></select>
+    <span id="color-out">red</span>
+    <label><input id="agree" name="agree" type="checkbox" hx-on:change="document.getElementById('submit').disabled = !this.checked"> I agree</label>
+    <button id="submit" type="submit" disabled>Send</button>
+    <p id="result"></p>
+  </form>
+</section>
+
+<section>
+  <nav><a id="link-home" href="./" hx-get="/api/htmx/view?v=home" hx-target="#view" hx-swap="outerHTML" hx-push-url="./">Home</a>
+    <a id="link-about" href="about" hx-get="/api/htmx/view?v=about" hx-target="#view" hx-swap="outerHTML" hx-push-url="about">About</a></nav>
+  <div id="view">Home</div>
+</section>
+
+<section>
+  <button id="load" hx-get="/api/htmx/items" hx-target="#items"
+    hx-on::before-request="document.getElementById('status').textContent = 'loading'"
+    hx-on::after-request="document.getElementById('status').textContent = 'loaded'">Load</button>
+  <p id="status"></p>
+  <ul id="items"></ul>
+</section>
+
+<section>
+  <button id="toggle" hx-get="/api/htmx/box" hx-vals='js:{show: document.getElementById("box") ? 0 : 1}' hx-target="#box-wrap" hx-swap="innerHTML swap:300ms settle:300ms">Toggle</button>
+  <div id="box-wrap"><div id="box">box</div></div>
+</section>
+</body></html>

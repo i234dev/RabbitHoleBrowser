@@ -1,0 +1,126 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Svelte fixture</title>
+<link rel="stylesheet" href="/fw/common.css">
+<!-- App.js / SsrApp.js: Svelte 5 runes components (sources in the comment
+     below) compiled with svelte.compile(src, {generate: 'client'}) by the
+     Svelte compiler running inside RabbitHole's own JS engine; the SSR markup
+     of ssr.html is the output of svelte/server render() of the same
+     component compiled with {generate: 'server'}, also run in RabbitHole. -->
+<!-- App.svelte:
+<script>
+  import { onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
+
+  let n = $state(0);
+
+  let items = $state([]);
+  let text = $state('');
+  let next = 1;
+  function add(e) {
+    e.preventDefault();
+    if (!text.trim()) return;
+    items.push({ id: next++, text: text.trim(), done: false });
+    text = '';
+  }
+  let left = $derived(items.filter((i) => !i.done).length);
+
+  let name = $state('');
+  let upper = $state('');
+  let color = $state('red');
+  let agree = $state(false);
+  let result = $state('');
+
+  const base = location.pathname.replace(/about$/, '');
+  const routeOf = () => (/\/about$/.test(location.pathname) ? 'about' : 'home');
+  let route = $state(routeOf());
+  function go(e) {
+    e.preventDefault();
+    history.pushState({}, '', e.currentTarget.getAttribute('href'));
+    route = routeOf();
+  }
+
+  let promise = $state(null);
+  let show = $state(true);
+
+  onMount(() => {
+    window.__ready = true;
+  });
+</script>
+
+<svelte:window onpopstate={() => (route = routeOf())} />
+
+<section id="counter">
+  <button id="dec" onclick={() => n- -}>-</button><span id="count">{n}</span><button id="inc" onclick={() => n++}>+</button>
+</section>
+
+<section id="todos">
+  <form id="todo-form" onsubmit={add}>
+    <input id="todo-input" bind:value={text} /><button id="todo-add" type="submit">Add</button>
+    <button id="todo-reverse" type="button" onclick={() => items.reverse()}>Reverse</button>
+  </form>
+  <ul id="todo-list">
+    {#each items as it (it.id)}
+      <li class="todo">
+        <input type="checkbox" class="done" bind:checked={it.done} /><span class="text">{it.text}</span>
+        <button type="button" class="del" onclick={() => (items = items.filter((x) => x !== it))}>x</button>
+      </li>
+    {/each}
+  </ul>
+  <p id="todo-left">{left} left</p>
+</section>
+
+<section>
+  <form id="form" onsubmit={(e) => { e.preventDefault(); result = [name, upper, color, agree ? 'yes' : 'no'].join('|'); }}>
+    <input id="name" bind:value={name} /><p id="greeting">Hello, {name}!</p>
+    <input id="upper" bind:value={() => upper, (v) => (upper = v.toUpperCase())} />
+    <select id="color" bind:value={color}><option>red</option><option>green</option><option>blue</option></select>
+    <span id="color-out">{color}</span>
+    <label><input id="agree" type="checkbox" bind:checked={agree} /> I agree</label>
+    <button id="submit" type="submit" disabled={!agree}>Send</button>
+    <p id="result">{result}</p>
+  </form>
+</section>
+
+<section>
+  <nav><a id="link-home" href={base} onclick={go}>Home</a> <a id="link-about" href={base + 'about'} onclick={go}>About</a></nav>
+  <div id="view">{#if route === 'about'}About{:else}Home{/if}</div>
+</section>
+
+<section>
+  <button id="load" onclick={() => (promise = fetch('/api/items').then((r) => r.json()))}>Load</button>
+  {#if promise}
+    {#await promise}
+      <p id="status">loading</p>
+    {:then list}
+      <ul id="items">{#each list as i (i.id)}<li class="item">{i.name}</li>{/each}</ul>
+      <p id="status">loaded</p>
+    {/await}
+  {/if}
+</section>
+
+<section>
+  <button id="toggle" onclick={() => (show = !show)}>Toggle</button>
+  {#if show}<div id="box" transition:fade={{ duration: 300 }}>box</div>{/if}
+</section>
+
+-->
+<script type="importmap">{
+ "imports": {
+  "svelte": "/vendor/svelte/src/index-client.js",
+  "svelte/internal/client": "/vendor/svelte/src/internal/client/index.js",
+  "svelte/internal/disclose-version": "/vendor/svelte/src/internal/disclose-version.js",
+  "svelte/internal/flags/legacy": "/vendor/svelte/src/internal/flags/legacy.js",
+  "svelte/internal/flags/async": "/vendor/svelte/src/internal/flags/async.js",
+  "svelte/transition": "/vendor/svelte/src/transition/index.js",
+  "svelte/easing": "/vendor/svelte/src/easing/index.js",
+  "#client/constants": "/vendor/svelte/src/internal/client/constants.js",
+  "esm-env": "/vendor/svelte/esm-env.js",
+  "clsx": "/vendor/svelte/clsx.mjs"
+ }
+}</script>
+<script type="module">
+  import { mount } from 'svelte';
+  import App from '/fw/svelte/App.js';
+  mount(App, { target: document.getElementById('root') });
+</script>
+</head><body><div id="root"></div></body></html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Svelte SSR fixture</title>
+<link rel="stylesheet" href="/fw/common.css">
+<!-- App.js / SsrApp.js: Svelte 5 runes components (sources in the comment
+     below) compiled with svelte.compile(src, {generate: 'client'}) by the
+     Svelte compiler running inside RabbitHole's own JS engine; the SSR markup
+     of ssr.html is the output of svelte/server render() of the same
+     component compiled with {generate: 'server'}, also run in RabbitHole. -->
+<!-- SsrApp.svelte:
+<script>
+  import { onMount } from 'svelte';
+  let n = $state(0);
+  let cond = $state(true);
+  // Differs between server and client: the client hydrates a branch the
+  // server did not render (a hydration mismatch Svelte must recover from).
+  const client = typeof window !== 'undefined' && !!window.__client;
+  onMount(() => {
+    window.__ready = true;
+  });
+</script>
+
+<div id="ssr">
+  <button id="inc" onclick={() => n++}>+</button><span id="count">{n}</span>
+  <button id="cond-toggle" onclick={() => (cond = !cond)}>toggle</button>
+  {#if cond}<p id="cond">shown</p>{/if}
+  {#if n > 0}<p id="positive">positive</p>{:else}<p id="zero">zero</p>{/if}
+  {#if client}<p id="client-only">client</p>{/if}
+  <ul>{#each ['one', 'two', 'three'] as t}<li class="ssr-item">{t}</li>{/each}</ul>
+</div>
+
+-->
+<script type="importmap">{
+ "imports": {
+  "svelte": "/vendor/svelte/src/index-client.js",
+  "svelte/internal/client": "/vendor/svelte/src/internal/client/index.js",
+  "svelte/internal/disclose-version": "/vendor/svelte/src/internal/disclose-version.js",
+  "svelte/internal/flags/legacy": "/vendor/svelte/src/internal/flags/legacy.js",
+  "svelte/internal/flags/async": "/vendor/svelte/src/internal/flags/async.js",
+  "svelte/transition": "/vendor/svelte/src/transition/index.js",
+  "svelte/easing": "/vendor/svelte/src/easing/index.js",
+  "#client/constants": "/vendor/svelte/src/internal/client/constants.js",
+  "esm-env": "/vendor/svelte/esm-env.js",
+  "clsx": "/vendor/svelte/clsx.mjs"
+ }
+}</script>
+</head><body>
+<div id="root"><!--[--><div id="ssr"><button id="inc">+</button><span id="count">0</span> <button id="cond-toggle">toggle</button> <!--[0--><p id="cond">shown</p><!--]--> <!--[-1--><p id="zero">zero</p><!--]--> <!--[-1--><!--]--> <ul><!--[--><li class="ssr-item">one</li><li class="ssr-item">two</li><li class="ssr-item">three</li><!--]--></ul></div><!--]--></div>
+<script>
+  window.__ssr = { count: document.getElementById('count'), inc: document.getElementById('inc') };
+  // The client renders a branch the server did not: Svelte recovers from
+  // the mismatch by replacing that block's server nodes.
+  window.__client = true;
+  window.__expectClientOnly = true;
+</script>
+<script type="module">
+  import { hydrate } from 'svelte';
+  import App from '/fw/svelte/SsrApp.js';
+  hydrate(App, { target: document.getElementById('root') });
+</script>
+</body></html>

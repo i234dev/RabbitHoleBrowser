@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Lit SSR fixture</title>
+<link rel="stylesheet" href="/fw/common.css">
+</head><body data-ssr="1">
+<!-- server-rendered with a declarative shadow root -->
+<fx-ssr><template shadowrootmode="open"><style>:host{display:block} #count{font-weight:bold}</style><div id="ssr"><button id="inc">+</button><span id="count">0</span><button id="cond-toggle">toggle</button><p id="cond">shown</p><ul><li class="ssr-item">one</li><li class="ssr-item">two</li><li class="ssr-item">three</li></ul></div></template></fx-ssr>
+<script type="module" src="/fw/lit/app.js"></script>
+</body></html>
