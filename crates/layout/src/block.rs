@@ -534,6 +534,15 @@ impl<'a> Layouter<'a> {
         h = self.clamp_height(&style, h, cb.height, pb_v);
         b.rect.h = h + pb_v;
         b.content_rect.h = h;
+        // An `<input>` shows its one line of text centered vertically in
+        // its content box, whatever its height (Material fields with
+        // `height: 28px; padding: 13px 15px`, short boxes with a large
+        // line-height, ...). Reused contents were centered already.
+        if !b.reused_layout && b.pseudo.is_none() && !b.lines.is_empty() && (h - content_h).abs() > 0.01 {
+            if b.node.is_some_and(|n| self.ctx.doc.is_element(n, "input")) {
+                crate::table::translate_contents(b, 0.0, (h - content_h) / 2.0);
+            }
+        }
         if explicit_h.is_some() || (h - content_h).abs() > 0.01 {
             // A definite or clamped height separates the last child's
             // bottom margin from ours.
@@ -971,8 +980,18 @@ impl<'a> Layouter<'a> {
             width: avail,
             height: Some(cb.h),
         };
+        // `top` and `bottom` with an auto height: the box fills the space
+        // between them (CSS 2.1 §10.6.4; overlays, outlines, `inset: 0`).
+        if let (Some(t), Some(bt), true) = (t, btm, style.height.is_auto()) {
+            if c.kind != BoxKind::Image {
+                let p = resolve_edges(&style.padding, cb.w);
+                let pb_v = p.top + p.bottom + style.border_width.top + style.border_width.bottom;
+                self.forced_content_height = Some((cb.h - t - bt - mt - mb - pb_v).max(0.0));
+            }
+        }
         let mut bfc = Bfc::new();
         self.layout_block(c, &inner_cb, cb.y, &mut bfc, mode);
+        self.forced_content_height = None;
         let x = if let Some(l) = l {
             cb.x + l + ml
         } else if let Some(r) = r {

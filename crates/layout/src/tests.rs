@@ -610,7 +610,18 @@ fn z_index_order() {
     let parent_bg = pos(&|i| matches!(i, DisplayItem::Rect { color, .. } if color.r == 1));
     let neg_bg = pos(&|i| matches!(i, DisplayItem::Rect { color, .. } if color.r == 2));
     let text = pos(&|i| matches!(i, DisplayItem::Text { text, .. } if text == "text"));
-    assert!(parent_bg < neg_bg && neg_bg < text, "{parent_bg} {neg_bg} {text}");
+    // The parent (position: relative, z-index auto) is no stacking
+    // context: the negative child goes below it, into the root's
+    // negative layer (CSS 2.1 Appendix E), as in other browsers.
+    assert!(neg_bg < parent_bg && parent_bg < text, "{parent_bg} {neg_bg} {text}");
+    // With a z-index the parent is a stacking context and keeps it above
+    // its own background.
+    let fx = Fixture::new(&html.replace("position:relative;", "position:relative;z-index:0;"), "");
+    let list = fx.display_list();
+    let pos = |pred: &dyn Fn(&DisplayItem) -> bool| list.items.iter().position(pred).expect("item");
+    let parent_bg = pos(&|i| matches!(i, DisplayItem::Rect { color, .. } if color.r == 1));
+    let neg_bg = pos(&|i| matches!(i, DisplayItem::Rect { color, .. } if color.r == 2));
+    assert!(parent_bg < neg_bg, "{parent_bg} {neg_bg}");
 }
 
 #[test]
@@ -754,4 +765,86 @@ fn v2_paint_does_not_panic() {
     paint(&list, &mut canvas, &fx.fonts, 0.0, 0.0);
     assert!(canvas.data.iter().any(|p| *p != 0xffffff));
     let _ = Rect::default();
+}
+
+/// A `z-index: 1` flex item inside a `position: relative` (z-index auto)
+/// wrapper paints and takes clicks above an absolutely positioned sibling
+/// of the wrapper that covers it (Material outlined text fields: the
+/// `<input>` under the outline box).
+#[test]
+fn z_index_flex_item_escapes_a_positioned_z_auto_wrapper() {
+    let html = "<div id=field><div id=row><div id=wrap><input id=q></div><div id=outline></div></div></div>";
+    let css = "#field{position:relative;width:300px;height:56px} #row{display:flex} \
+               #wrap{display:flex;position:relative;flex-grow:1} \
+               #q{z-index:1;flex-grow:1;height:28px;padding:13px 15px;border:none;background:transparent} \
+               #outline{position:absolute;top:0;bottom:0;left:0;width:100%;border:1px solid gray;box-sizing:border-box}";
+    let fx = Fixture::new(html, css);
+    let dl = fx.display_list();
+    let q = fx.doc.element_by_id("q").unwrap();
+    let outline = fx.doc.element_by_id("outline").unwrap();
+    assert_eq!(dl.hits.hit_test(150.0, 30.0, (0.0, 0.0)), Some(q));
+    // The outline still covers the field (it stretches between top and bottom).
+    let t = fx.layout();
+    let o = fx.find(&t, "div").into_iter().find(|b| b.node == Some(outline)).unwrap();
+    assert!((o.rect.h - 56.0).abs() < 0.01, "outline height {}", o.rect.h);
+    // Without the z-index the outline (later in tree order) is on top.
+    let fx = Fixture::new(html, &css.replace("z-index:1;", ""));
+    assert_eq!(fx.display_list().hits.hit_test(150.0, 30.0, (0.0, 0.0)), Some(outline));
+}
+
+/// Positive z-index descendants of nested `z-index: auto` positioned boxes
+/// paint after later positioned siblings; z-index auto ones stay in place.
+#[test]
+fn positioned_z_auto_boxes_do_not_capture_z_indexed_descendants() {
+    let html = "<div id=a><div id=b><div id=top></div><div id=mid></div></div></div><div id=cover></div>";
+    let css = "body{margin:0} div{width:100px;height:100px} #a,#b{position:relative} #top{position:absolute;top:0;left:0;z-index:2;background:red} \
+               #mid{position:absolute;top:0;left:0;background:green} #cover{position:absolute;top:0;left:0;background:blue}";
+    let fx = Fixture::new(html, css);
+    let dl = fx.display_list();
+    // Painted on top of #cover (a later z-index:auto box)...
+    assert_eq!(dl.hits.hit_test(50.0, 50.0, (0.0, 0.0)), fx.doc.element_by_id("top"));
+    let hits = dl.hits.hit_test_all(50.0, 50.0, (0.0, 0.0));
+    let pos = |id: &str| hits.iter().position(|&n| Some(n) == fx.doc.element_by_id(id)).unwrap();
+    // ...while #mid (z-index auto) stays below #cover.
+    assert!(pos("top") < pos("cover") && pos("cover") < pos("mid"), "{hits:?}");
+    // And it is painted exactly once.
+    let reds = dl.items.iter().filter(|it| matches!(it, DisplayItem::Rect { color, .. } if color.r == 255 && color.g == 0)).count();
+    assert_eq!(reds, 1);
+}
+
+#[test]
+fn absolute_box_with_top_and_bottom_fills_the_containing_block() {
+    let fx = Fixture::new(
+        "<div id=cb><div id=ov></div><div id=pad></div></div>",
+        "#cb{position:relative;height:200px} #ov{position:absolute;top:10px;bottom:20px;left:0;width:50px} #pad{position:absolute;inset:0;padding:5px;border:2px solid}",
+    );
+    let t = fx.layout();
+    let divs = fx.find(&t, "div");
+    let get = |id: &str| *divs.iter().find(|b| b.node == fx.doc.element_by_id(id)).unwrap();
+    assert!((get("ov").rect.h - 170.0).abs() < 0.01, "{}", get("ov").rect.h);
+    assert!((get("ov").rect.y - get("cb").rect.y - 10.0).abs() < 0.01);
+    assert!((get("pad").rect.h - 200.0).abs() < 0.01, "{}", get("pad").rect.h);
+    assert!((get("pad").content_rect.h - 186.0).abs() < 0.01);
+}
+
+/// Text inputs are content-box (author height + padding add up) and show
+/// their line of text centered vertically.
+#[test]
+fn text_input_is_content_box_with_centered_text() {
+    let fx = Fixture::new(
+        "<input id=q value=hello><input id=d value=x><input type=submit id=s value=Go style='height:40px;padding:5px'>",
+        "#q{height:28px;padding:13px 15px;border:none;font-size:16px;line-height:normal} #d{border:1px solid;padding:1px 2px}",
+    );
+    let t = fx.layout();
+    let inputs = fx.find(&t, "input");
+    let q = inputs[0];
+    assert!((q.rect.h - 54.0).abs() < 0.01, "height {}", q.rect.h);
+    let line = &q.lines[0];
+    let mid = line.rect.y + line.rect.h / 2.0;
+    assert!((mid - (q.content_rect.y + 14.0)).abs() < 0.6, "line {:?} content {:?}", line.rect, q.content_rect);
+    // Default text fields keep their usual 1.6em total height.
+    let d = inputs[1];
+    assert!((d.rect.h - 13.333 * 1.6).abs() < 0.1, "default height {}", d.rect.h);
+    // Buttons stay border-box.
+    assert!((inputs[2].rect.h - 40.0).abs() < 0.01, "button {}", inputs[2].rect.h);
 }

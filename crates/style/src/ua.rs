@@ -94,11 +94,15 @@ input, select, button, textarea, meter, progress {
   display: inline-block; font-family: sans-serif; font-size: 13.333px; font-style: normal;
   font-weight: normal; line-height: normal; letter-spacing: normal; word-spacing: normal;
   text-transform: none; text-indent: 0; text-align: left; text-decoration: none; color: initial;
-  white-space: nowrap; box-sizing: border-box; vertical-align: middle; appearance: auto;
+  white-space: nowrap; vertical-align: middle; appearance: auto;
   user-select: none; overflow: hidden; text-overflow: clip;
 }
 input, textarea, select { border: 1px solid #767676; padding: 1px 2px; background-color: white; border-radius: 2px; }
-input { width: 20ch; height: 1.6em; user-select: text; }
+/* Text fields and textareas are content-box like in other browsers (author
+   `height` + `padding` add up); the rest are border-box. */
+input { width: calc(20ch - 6px); height: calc(1.6em - 4px); user-select: text; }
+select, button, meter, progress, input[type=search i], input[type=checkbox i], input[type=radio i], input[type=submit i],
+input[type=button i], input[type=reset i], input[type=image i], input[type=file i], input[type=color i], input[type=range i] { box-sizing: border-box; }
 input[type=checkbox i], input[type=radio i] { width: 13px; height: 13px; padding: 0; margin: 3px 3px 3px 4px; border-radius: 2px; background-color: white; }
 input[type=radio i] { border-radius: 50%; }
 input[type=submit i], input[type=button i], input[type=reset i], button, input[type=file i]::file-selector-button {
@@ -107,6 +111,7 @@ input[type=submit i], input[type=button i], input[type=reset i], button, input[t
 }
 button { white-space: normal; }
 input[type=range i], input[type=color i] { width: 129px; height: 1.6em; }
+input[type=search i] { width: 20ch; height: 1.6em; }
 input[type=file i] { width: auto; }
 input[type=image i] { border: none; padding: 0; background-color: transparent; width: auto; height: auto; }
 select { padding: 1px 4px; width: auto; min-width: 8ch; border-radius: 2px; }

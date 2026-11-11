@@ -270,6 +270,7 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         sticky_scrollport: Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height),
         hits: HitList::default(),
         scope: None,
+        hoisted: std::collections::HashSet::new(),
     };
     p.paint_stacking_context(root, bounds);
     let hits = std::mem::take(&mut p.hits);
@@ -288,6 +289,10 @@ struct Painter<'l, 't, 'a> {
     hits: HitList,
     /// Current hit scope (clip / transform / fixed layer).
     scope: Option<u32>,
+    /// Boxes (by address) already taken into an outer stacking context
+    /// from inside a positioned `z-index: auto` ancestor (see
+    /// [`Painter::collect_hoisted`]); that ancestor skips them.
+    hoisted: std::collections::HashSet<usize>,
 }
 
 /// Painting phases of the in-flow content of a stacking context.
@@ -496,6 +501,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     fn collect_deferred(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
         for c in &b.children {
+            if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
+                continue;
+            }
             if c.fixed && c.flow == Flow::Absolute {
                 *order += 1;
                 out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new() });
@@ -505,13 +513,21 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             if deferred {
                 *order += 1;
                 let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { b.content_rect };
+                let clips = if c.flow == Flow::Absolute { abs_clips.to_vec() } else { flow_clips.to_vec() };
                 out.push(Deferred {
                     z: if c.is_stacking_context() || c.is_positioned() { c.style.z_index.unwrap_or(0) } else { 0 },
                     order: *order,
                     b: c,
                     cb: cb_rect,
-                    clips: if c.flow == Flow::Absolute { abs_clips.to_vec() } else { flow_clips.to_vec() },
+                    clips: clips.clone(),
                 });
+                if Self::is_pseudo_stacking(c) {
+                    let mut inner = clips;
+                    if c.clips && !c.rect.is_empty() {
+                        inner.push(c.padding_rect());
+                    }
+                    self.collect_hoisted(c, c.padding_rect(), out, order, &inner, &inner);
+                }
             } else if c.clips && !c.rect.is_empty() {
                 // A non-positioned clipping box clips in-flow (relative,
                 // sticky, stacking) descendants but not absolutely
@@ -521,6 +537,62 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 self.collect_deferred(c, cb_for_children, out, order, &fc, abs_clips);
             } else {
                 self.collect_deferred(c, cb_for_children, out, order, flow_clips, abs_clips);
+            }
+        }
+    }
+
+    /// A positioned box with `z-index: auto`: painted like a stacking
+    /// context, but it is not one (CSS 2.1 Appendix E).
+    fn is_pseudo_stacking(c: &LayoutBox) -> bool {
+        c.is_positioned() && !c.is_stacking_context() && !(c.fixed && c.flow == Flow::Absolute) && c.style.position != rabbithole_style::Position::Sticky
+    }
+
+    /// Inside a positioned `z-index: auto` box `b`: collect the descendant
+    /// stacking contexts with a non-zero z-index, which belong to the
+    /// enclosing stacking context (a `z-index: 1` flex item inside a
+    /// `position: relative` wrapper must paint, and take clicks, above a
+    /// later absolutely positioned sibling of that wrapper). Descendants
+    /// with z-index auto / 0 keep painting inside `b`: in tree order that
+    /// is the same place.
+    fn collect_hoisted(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
+        let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
+        for c in &b.children {
+            if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
+                // Already taken by an outer stacking context.
+                continue;
+            }
+            if c.fixed && c.flow == Flow::Absolute {
+                if c.style.z_index.unwrap_or(0) != 0 {
+                    *order += 1;
+                    self.hoisted.insert(c as *const LayoutBox as usize);
+                    out.push(Deferred { z: c.style.z_index.unwrap_or(0), order: *order, b: c, cb: self.bounds, clips: Vec::new() });
+                }
+                continue;
+            }
+            let deferred = Self::is_deferred(c);
+            let clips = if c.flow == Flow::Absolute { abs_clips } else { flow_clips };
+            if deferred && c.is_stacking_context() {
+                let z = c.style.z_index.unwrap_or(0);
+                if z != 0 {
+                    *order += 1;
+                    self.hoisted.insert(c as *const LayoutBox as usize);
+                    let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { b.content_rect };
+                    out.push(Deferred { z, order: *order, b: c, cb: cb_rect, clips: clips.to_vec() });
+                }
+            } else if deferred {
+                if Self::is_pseudo_stacking(c) {
+                    let mut inner = clips.to_vec();
+                    if c.clips && !c.rect.is_empty() {
+                        inner.push(c.padding_rect());
+                    }
+                    self.collect_hoisted(c, c.padding_rect(), out, order, &inner, &inner);
+                }
+            } else if c.clips && !c.rect.is_empty() {
+                let mut fc = flow_clips.to_vec();
+                fc.push(c.padding_rect());
+                self.collect_hoisted(c, cb_for_children, out, order, &fc, abs_clips);
+            } else {
+                self.collect_hoisted(c, cb_for_children, out, order, flow_clips, abs_clips);
             }
         }
     }

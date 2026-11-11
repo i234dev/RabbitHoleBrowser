@@ -609,6 +609,13 @@ fn apply_declarations(
             d => d,
         };
     }
+    // A flex or grid item with a z-index other than `auto` is a stacking
+    // context even when it is not positioned (CSS Flexbox §4.3, Grid §9.5):
+    // e.g. Material text fields raise the `<input>` above the absolutely
+    // positioned outline drawn over it.
+    if in_flex_or_grid && style.z_index.is_some() && !matches!(style.position, Position::Absolute | Position::Fixed) {
+        style.creates_stacking_context = true;
+    }
     style
 }
 
