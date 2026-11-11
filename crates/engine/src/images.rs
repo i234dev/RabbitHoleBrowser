@@ -764,7 +764,8 @@ impl Engine {
             }
             match self.loader.cached_image(&key) {
                 Some(result) => {
-                    changed |= install(page, n, Some(result), density, &key);
+                    let document = self.loader.is_document_resource(&key);
+                    changed |= install(page, n, Some(result), density, &key, document);
                 }
                 None => {
                     page.image_state.reqs.insert(n, Req { url: key.clone(), density, status: Status::Loading });
@@ -886,7 +887,8 @@ impl Engine {
             .collect();
         let mut changed = bg_changed;
         for (n, key, density) in ready {
-            changed |= install(page, n, self.loader.cached_image(&key), density, &key);
+            let document = self.loader.is_document_resource(&key);
+            changed |= install(page, n, self.loader.cached_image(&key), density, &key, document);
         }
         changed
     }
@@ -1020,9 +1022,16 @@ fn favicon_url(doc: &Document, base: &Url, page: &Url) -> Option<Url> {
 }
 
 /// Put a fetch result on an element (`None` = failed). Returns true when
-/// the element's image changed.
-fn install(page: &mut Page, n: NodeId, result: Option<Option<Arc<Image>>>, density: f32, key: &str) -> bool {
+/// the element's image changed. `document`: the resource is a document,
+/// which an `<object>` shows as a nested browsing context (its content is
+/// not rendered here: a transparent 300×150 box, the default object size)
+/// instead of falling back to its children.
+fn install(page: &mut Page, n: NodeId, result: Option<Option<Arc<Image>>>, density: f32, key: &str, document: bool) -> bool {
     let decoded = result.flatten();
+    let decoded = match decoded {
+        None if document && page.doc.is_element(n, "object") => Some(Arc::new(Image::new(1, 1, vec![0; 4]).with_natural_size(300, 150))),
+        d => d,
+    };
     let is_img = page.doc.is_element(n, "img") || page.doc.is_element(n, "input");
     let ok = decoded.is_some();
     page.image_state.reqs.insert(n, Req { url: key.to_string(), density, status: if ok { Status::Loaded } else { Status::Failed } });

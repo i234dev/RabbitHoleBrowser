@@ -84,6 +84,14 @@ pub struct Viewport {
 struct Caches {
     images: HashMap<String, Option<Arc<Image>>>,
     css: HashMap<String, Arc<str>>,
+    /// Stylesheet URLs served over HTTP with a Content-Type other than
+    /// `text/css`: ignored outside quirks mode (HTML §4.2.4 "link type
+    /// stylesheet", fetch and process the linked resource).
+    css_wrong_type: HashSet<String>,
+    /// Image-request URLs that answered with a document (HTML / XML / text)
+    /// instead of an image: an `<object>` showing one is a nested browsing
+    /// context, not a failed load (no fallback content).
+    documents: HashSet<String>,
     fonts: HashMap<String, Option<Arc<Vec<u8>>>>,
 }
 
@@ -452,7 +460,10 @@ impl Loader {
                 }
                 Src::Link(url, media) => {
                     let key = url.without_fragment().to_string();
-                    let text = self.caches.lock().unwrap().css.get(&key).cloned();
+                    let caches = self.caches.lock().unwrap();
+                    let ignored = doc.quirks_mode != rabbithole_dom::QuirksMode::Quirks && caches.css_wrong_type.contains(&key);
+                    let text = if ignored { None } else { caches.css.get(&key).cloned() };
+                    drop(caches);
                     text.map(|text| {
                         let mut sheet = rabbithole_css::parse_stylesheet(&text);
                         sheet.base_url = Some(url.to_string());
@@ -482,6 +493,10 @@ impl Loader {
             let key = u.without_fragment().to_string();
             match r {
                 Ok(resp) if resp.status < 400 => {
+                    let mime = resp.content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                    if u.is_http() && !mime.is_empty() && mime != "text/css" {
+                        caches.css_wrong_type.insert(key.clone());
+                    }
                     let text = decode_text(&resp.body, resp.charset.as_deref());
                     caches.css.insert(key, Arc::from(text));
                 }
@@ -597,6 +612,11 @@ impl Loader {
         self.caches.lock().unwrap().images.get(url).cloned()
     }
 
+    /// Did `url` (fetched as an image) turn out to be a document?
+    pub(crate) fn is_document_resource(&self, url: &str) -> bool {
+        self.caches.lock().unwrap().documents.contains(url)
+    }
+
     fn load_background_images(&self, styles: &StyledTree) -> Vec<(String, Arc<Image>)> {
         let mut keys: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
@@ -689,6 +709,15 @@ impl Loader {
         });
         let mut caches = self.caches.lock().unwrap();
         for (k, img) in decoded.into_inner().unwrap() {
+            if img.is_none() {
+                let doc_type = jobs.iter().find(|(u, _)| u.to_string() == k).and_then(|(_, r)| r.as_ref()).map(|r| {
+                    let mime = r.content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                    matches!(mime.as_str(), "text/html" | "application/xhtml+xml" | "text/xml" | "application/xml" | "text/plain" | "image/svg+xml") || mime.ends_with("+xml")
+                });
+                if doc_type == Some(true) {
+                    caches.documents.insert(k.clone());
+                }
+            }
             caches.images.insert(k, img);
         }
     }
