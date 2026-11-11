@@ -19,15 +19,22 @@ enum StrInner {
 
 impl Drop for StrInner {
     fn drop(&mut self) {
-        // Unlink deep ropes iteratively to avoid recursive drops.
-        if let StrInner::Rope { left, right, .. } = self {
-            let mut stack = vec![std::mem::replace(left, JsStr::empty()), std::mem::replace(right, JsStr::empty())];
-            while let Some(s) = stack.pop() {
-                if let Ok(mut inner) = Rc::try_unwrap(s.0) {
-                    if let StrInner::Rope { left, right, .. } = &mut inner {
-                        stack.push(std::mem::replace(left, JsStr::empty()));
-                        stack.push(std::mem::replace(right, JsStr::empty()));
-                    }
+        // Unlink deep ropes iteratively to avoid recursive drops. Only
+        // children that are ropes themselves need it; the placeholder left
+        // behind is created here (not taken from a thread-local: strings
+        // can be dropped while thread-local storage is being torn down).
+        let StrInner::Rope { left, right, .. } = self else { return };
+        let is_rope = |s: &JsStr| matches!(&*s.0, StrInner::Rope { .. });
+        if !is_rope(left) && !is_rope(right) {
+            return;
+        }
+        let hole = JsStr(Rc::new(StrInner::Flat(Box::default())));
+        let mut stack = vec![std::mem::replace(left, hole.clone()), std::mem::replace(right, hole.clone())];
+        while let Some(s) = stack.pop() {
+            if let Ok(mut inner) = Rc::try_unwrap(s.0) {
+                if let StrInner::Rope { left, right, .. } = &mut inner {
+                    stack.push(std::mem::replace(left, hole.clone()));
+                    stack.push(std::mem::replace(right, hole.clone()));
                 }
             }
         }

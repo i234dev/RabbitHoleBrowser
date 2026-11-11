@@ -219,3 +219,33 @@ fn superinstructions_and_fast_paths() {
     eq("var p = {z: 1}; var o = Object.create(p); o.y = 2; var k = []; for (var x in o) k.push(x); k.join()", "y,z");
     eq("var k = []; for (var x in [5, 6]) k.push(x); for (var y in 'ab') k.push(y); k.join()", "0,1,0,1");
 }
+
+#[test]
+fn realm_dropped_during_thread_teardown() {
+    // A realm kept in thread-local storage is destroyed while the thread's
+    // other thread-locals (string caches, the root shape...) may already be
+    // gone: dropping its strings and shapes must not touch them.
+    thread_local! {
+        static KEEP: std::cell::RefCell<Option<Realm>> = const { std::cell::RefCell::new(None) };
+    }
+    let t = std::thread::spawn(|| {
+        // Registered first, so destroyed after the engine's thread-locals.
+        KEEP.with(|k| k.borrow_mut().take());
+        let mut realm = Realm::new();
+        let src = "var big = 'x'.repeat(40); var o = {}; var keys = [];\n\
+                   for (var i = 0; i < 200; i++) { var k = big + i + big; o[k] = k + k; keys.push(k + '!'); }\n\
+                   var s = ''; for (var j = 0; j < 2000; j++) s += 'ab' + j; o[s] = s; keys.length";
+        let v = realm.eval(src, "t.js").map_err(|e| realm.error_to_string(&e)).unwrap();
+        assert_eq!(realm.to_string(v).unwrap().to_rust_string(), "200");
+        realm.gc();
+        KEEP.with(|k| *k.borrow_mut() = Some(realm));
+    });
+    t.join().expect("thread with a realm exited cleanly");
+    // Dropping a realm on a spawned thread normally works too.
+    std::thread::spawn(|| {
+        let mut realm = Realm::new();
+        realm.eval("var a = []; for (var i = 0; i < 100; i++) a.push({x: 'y'.repeat(60) + i}); a.length", "t.js").unwrap();
+    })
+    .join()
+    .unwrap();
+}
