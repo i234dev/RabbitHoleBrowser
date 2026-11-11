@@ -68,6 +68,11 @@ The profile (cookies, history, bookmarks, session) lives in the platform
 config directory under `rabbithole/` (override with RABBITHOLE_PROFILE).
 ";
 
+/// Small blocks of script / layout threads come from size classes (see
+/// `rabbithole_js::alloc`); everything else from the system allocator.
+#[global_allocator]
+static ALLOC: rabbithole_js::alloc::RhAlloc = rabbithole_js::alloc::RhAlloc;
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // Headless subcommands use the standard browser identity (like the

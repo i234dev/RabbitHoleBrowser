@@ -1527,6 +1527,7 @@ dependencies = [
  "rabbithole-agent",
  "rabbithole-engine",
  "rabbithole-gfx",
+ "rabbithole-js",
  "rabbithole-net",
  "serde",
  "serde_json",

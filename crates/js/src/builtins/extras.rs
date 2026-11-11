@@ -67,13 +67,6 @@ pub fn register(realm: &mut Realm) {
         let g = realm.global;
         realm.obj(g).props.get(&PropertyKey::str("RegExp")).and_then(|p| p.value.as_object())
     }) {
-        let rp = realm.obj(rc).props.get(&PropertyKey::str("prototype")).and_then(|p| p.value.as_object());
-        if let Some(rp) = rp {
-            if let Some(orig) = realm.obj(rp).props.get(&PropertyKey::str("exec")).map(|p| p.value.clone()) {
-                let wrapper = realm.new_native_function_full("exec", 1, regexp_exec_recording, None, vec![orig, Value::Object(rc)], false);
-                realm.define_property(rp, "exec", Value::Object(wrapper), HIDDEN);
-            }
-        }
         for (name, f) in [
             ("input", regexp_static_input as NativeFn),
             ("$_", regexp_static_input),
@@ -362,27 +355,15 @@ fn promise_try(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 // ------------------------------------------------- RegExp legacy statics
 
-fn regexp_exec_recording(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let caps = realm.current_native().map(|n| realm.native_captures(n)).unwrap_or_default();
-    let orig = caps.first().cloned().unwrap_or(Value::Undefined);
-    let ctor = caps.get(1).cloned().unwrap_or(Value::Undefined);
-    let result = realm.call(orig, this, args)?;
-    if let (V::Object(arr), V::Object(c)) = (result.v(), ctor.v()) {
-        let key = PropertyKey::str("__lastMatch__");
-        realm.define_property(c, key, Value::Object(arr), WRITABLE | CONFIGURABLE);
-    }
-    Ok(result)
-}
-
-fn last_match(realm: &mut Realm) -> Option<ObjectId> {
-    let rc = realm.intrinsics.others.get("RegExp").copied()?;
-    realm.obj(rc).props.get(&PropertyKey::str("__lastMatch__")).and_then(|p| p.value.as_object())
-}
-
-fn static_group(realm: &mut Realm, n: u32) -> JsResult<Value> {
-    let Some(arr) = last_match(realm) else { return Ok(Value::str("")) };
-    let v = realm.get(Value::Object(arr), PropertyKey::index(n))?;
-    Ok(if v.is_undefined() { Value::str("") } else { v })
+/// Capture `n` of the last built-in match ("" when absent).
+fn static_group(realm: &mut Realm, n: usize) -> JsResult<Value> {
+    Ok(match &realm.regexp_last {
+        Some((s, caps)) => match caps.get(n) {
+            Some(Some((a, b))) => Value::String(s.slice(*a, *b)),
+            _ => Value::str(""),
+        },
+        None => Value::str(""),
+    })
 }
 
 fn regexp_static_noop_set(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -390,9 +371,10 @@ fn regexp_static_noop_set(_realm: &mut Realm, _this: Value, _args: &[Value]) -> 
 }
 
 fn regexp_static_input(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    let Some(arr) = last_match(realm) else { return Ok(Value::str("")) };
-    let v = realm.get_str(Value::Object(arr), "input")?;
-    Ok(if v.is_undefined() { Value::str("") } else { v })
+    Ok(match &realm.regexp_last {
+        Some((s, _)) => Value::String(s.clone()),
+        None => Value::str(""),
+    })
 }
 
 fn regexp_static_last_match(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -400,33 +382,31 @@ fn regexp_static_last_match(realm: &mut Realm, _this: Value, _args: &[Value]) ->
 }
 
 fn regexp_static_last_paren(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    let Some(arr) = last_match(realm) else { return Ok(Value::str("")) };
-    let len = realm.length_of(Value::Object(arr))?;
-    if len <= 1 {
+    let n = realm.regexp_last.as_ref().map(|(_, c)| c.len()).unwrap_or(0);
+    if n <= 1 {
         return Ok(Value::str(""));
     }
-    static_group(realm, (len - 1) as u32)
+    static_group(realm, n - 1)
 }
 
 fn regexp_static_left_context(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    let Some(arr) = last_match(realm) else { return Ok(Value::str("")) };
-    let input = realm.get_str(Value::Object(arr), "input")?;
-    let index = realm.get_str(Value::Object(arr), "index")?;
-    let s = realm.to_string(input)?;
-    let i = realm.to_number(index)?.max(0.0) as usize;
-    Ok(Value::String(s.slice(0, i.min(s.len()))))
+    Ok(match &realm.regexp_last {
+        Some((s, caps)) => match caps.first() {
+            Some(Some((a, _))) => Value::String(s.slice(0, *a)),
+            _ => Value::str(""),
+        },
+        None => Value::str(""),
+    })
 }
 
 fn regexp_static_right_context(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    let Some(arr) = last_match(realm) else { return Ok(Value::str("")) };
-    let input = realm.get_str(Value::Object(arr), "input")?;
-    let index = realm.get_str(Value::Object(arr), "index")?;
-    let whole = realm.get(Value::Object(arr), PropertyKey::index(0))?;
-    let s = realm.to_string(input)?;
-    let i = realm.to_number(index)?.max(0.0) as usize;
-    let m = realm.to_string(whole)?;
-    let end = (i + m.len()).min(s.len());
-    Ok(Value::String(s.slice(end, s.len())))
+    Ok(match &realm.regexp_last {
+        Some((s, caps)) => match caps.first() {
+            Some(Some((_, b))) => Value::String(s.slice(*b, s.len())),
+            _ => Value::str(""),
+        },
+        None => Value::str(""),
+    })
 }
 
 macro_rules! static_n {

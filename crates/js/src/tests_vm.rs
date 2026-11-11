@@ -630,3 +630,10 @@ fn regexp_replace_fast_path_matches_the_protocol() {
 fn surrogate_pair_escapes_in_literals() {
     eq("var s = '\\ud83d\\ude00'; [s.length, s.charCodeAt(0).toString(16), s.charCodeAt(1).toString(16), s === '\\u{1F600}', `\\uD83D\\uDE00x`.length].join()", "2,d83d,de00,true,3");
 }
+
+#[test]
+fn legacy_regexp_statics() {
+    eq("/(\\d+)-(\\d+)/.exec('ab12-34cd'); [RegExp.$1, RegExp.$2, RegExp.$3, RegExp.lastMatch, RegExp.leftContext, RegExp.rightContext, RegExp.lastParen, RegExp.input].join('|')", "12|34||12-34|ab|cd|34|ab12-34cd");
+    eq("'x=1;y=2'.replace(/(\\w)=(\\d)/g, '$2'); RegExp.$1 + RegExp.$2 + RegExp['$&']", "y2y=2");
+    eq("/q/.test('abc'); /(b)/.test('abc'); /zz/.exec('abc'); RegExp.$1", "b");
+}

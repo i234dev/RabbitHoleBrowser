@@ -5,6 +5,7 @@ use super::*;
 use crate::value::V;
 use crate::realm::{SYM_MATCH, SYM_MATCH_ALL, SYM_REPLACE, SYM_SEARCH, SYM_SPECIES, SYM_SPLIT, SYM_TO_STRING_TAG};
 use crate::regex::Regex;
+use std::rc::Rc;
 
 pub fn register(realm: &mut Realm) {
     let rp = realm.new_object();
@@ -92,6 +93,7 @@ fn fast_replace(realm: &mut Realm, rx: ObjectId, s: &JsStr, rep: &Value, functio
         let Some(m) = m else { break };
         let (a, b) = (m.start(), m.end());
         let caps: Vec<Option<(usize, usize)>> = m.captures.iter().skip(1).cloned().collect();
+        realm.regexp_last = Some((s.clone(), m.captures));
         found.push((a, b, caps));
         if !global {
             break;
@@ -163,8 +165,30 @@ pub fn regexp_create(realm: &mut Realm, pattern: &str, flags: &str) -> JsResult<
     regexp_alloc(realm, pattern, flags, proto)
 }
 
+/// The compiled regex for (pattern, flags), from a per-thread cache: a
+/// literal inside a function compiles once, not on every evaluation.
+fn compiled(pattern: &str, flags: &str) -> Result<Rc<Regex>, crate::regex::RegexError> {
+    type Cache = std::collections::HashMap<(Box<str>, Box<str>), Rc<Regex>, crate::value::FxBuild>;
+    thread_local! {
+        static CACHE: std::cell::RefCell<Cache> = std::cell::RefCell::new(Cache::default());
+    }
+    let key: (Box<str>, Box<str>) = (pattern.into(), flags.into());
+    if let Some(r) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return Ok(r);
+    }
+    let r = Rc::new(Regex::new(pattern, flags)?);
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 2048 {
+            c.clear();
+        }
+        c.insert(key, r.clone());
+    });
+    Ok(r)
+}
+
 fn regexp_alloc(realm: &mut Realm, pattern: &str, flags: &str, proto: ObjectId) -> JsResult<Value> {
-    let regex = match Regex::new(pattern, flags) {
+    let regex = match compiled(pattern, flags) {
         Ok(r) => r,
         Err(e) => return Err(realm.new_error("SyntaxError", &format!("Invalid regular expression: /{}/{}: {}", pattern, flags, e.message))),
     };
@@ -262,7 +286,7 @@ fn compile(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_regexp(realm, &this, "compile")?;
     let p = if arg(args, 0).is_undefined() { String::new() } else { realm.to_rust_string(arg(args, 0))? };
     let f = if arg(args, 1).is_undefined() { String::new() } else { realm.to_rust_string(arg(args, 1))? };
-    let regex = match Regex::new(&p, &f) {
+    let regex = match compiled(&p, &f) {
         Ok(r) => r,
         Err(e) => return Err(realm.new_error("SyntaxError", &e.message)),
     };
@@ -326,6 +350,7 @@ pub fn builtin_exec(realm: &mut Realm, rx: ObjectId, s: &JsStr) -> JsResult<Valu
     if global || sticky {
         set_last_index(realm, &rxv, last_index)?;
     }
+    realm.regexp_last = Some((s.clone(), m.captures.clone()));
     let names: Vec<(String, usize)> = match &realm.obj(rx).kind {
         ObjectKind::RegExp(d) => d.regex.group_names().to_vec(),
         _ => unreachable!(),
@@ -731,4 +756,19 @@ fn symbol_split(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
     }
     parts.push(Value::String(s.slice(p, size)));
     Ok(realm.new_array_value(parts))
+}
+
+#[cfg(test)]
+mod pristine_tests {
+    use super::*;
+
+    #[test]
+    fn literal_regexps_are_pristine() {
+        let mut realm = Realm::new();
+        assert!(realm.regexp_pristine.is_some());
+        let v = realm.eval("/-/g", "t.js").unwrap();
+        assert!(pristine(&realm, &v).is_some());
+        let v = realm.eval("var r = /x/; r.foo = 1; r", "t.js").unwrap();
+        assert!(pristine(&realm, &v).is_none());
+    }
 }

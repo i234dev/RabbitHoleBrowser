@@ -1,5 +1,8 @@
 //! Time parsing, compiling and running a JS file: `runfile <path>`.
 //! Reports wall time and (Linux) thread CPU time.
+#[global_allocator]
+static ALLOC: rabbithole_js::alloc::RhAlloc = rabbithole_js::alloc::RhAlloc;
+
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]

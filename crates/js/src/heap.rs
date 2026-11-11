@@ -306,7 +306,9 @@ pub struct TypedArrayData {
 
 #[derive(Debug)]
 pub struct RegExpData {
-    pub regex: crate::regex::Regex,
+    /// Compiled program, shared by every RegExp with the same source and
+    /// flags (see `builtins::regexp::compiled`).
+    pub regex: Rc<crate::regex::Regex>,
     pub source: JsStr,
     pub flags: JsStr,
 }

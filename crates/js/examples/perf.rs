@@ -3,6 +3,9 @@
 //! Every case runs in a fresh realm; the best of three runs is reported.
 //! On Linux the thread CPU time is measured (robust on a loaded machine);
 //! elsewhere wall-clock time.
+#[global_allocator]
+static ALLOC: rabbithole_js::alloc::RhAlloc = rabbithole_js::alloc::RhAlloc;
+
 use rabbithole_js::Realm;
 
 #[cfg(target_os = "linux")]

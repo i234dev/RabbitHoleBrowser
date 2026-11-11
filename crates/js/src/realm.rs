@@ -161,6 +161,9 @@ pub struct Realm {
     /// When set, running JavaScript past this instant is interrupted with an
     /// uncatchable "Script execution timed out" error (watchdog).
     pub deadline: Option<std::time::Instant>,
+    /// (wall clock, thread CPU time) when the deadline was set (see
+    /// [`Realm::watch_now`]).
+    watch_origin: Option<(std::time::Instant, std::time::Duration)>,
     /// Watchdog budget of one task (see [`Realm::begin_task`]); `None`
     /// leaves the deadline to explicit [`Realm::set_deadline`] calls.
     pub task_budget: Option<std::time::Duration>,
@@ -196,6 +199,9 @@ pub struct Realm {
     /// `RegExp.prototype` as built: (shape id, slot of `exec`, `exec`,
     /// slot of `flags`, its getter); see `builtins::regexp::pristine`.
     pub(crate) regexp_pristine: Option<(u32, u32, ObjectId, u32, ObjectId)>,
+    /// Input and capture ranges of the last successful built-in RegExp
+    /// match (legacy `RegExp.$1`, `lastMatch`, ...).
+    pub(crate) regexp_last: Option<(JsStr, Vec<Option<(usize, usize)>>)>,
 }
 
 thread_local! {
@@ -213,23 +219,75 @@ pub fn exclude_from_watchdog(spent: std::time::Duration) {
     crate::regex::shift_deadline(spent);
 }
 
+/// CPU time used by the calling thread.
+pub fn thread_cpu_time() -> Option<std::time::Duration> {
+    #[cfg(target_os = "linux")]
+    {
+        #[repr(C)]
+        struct Timespec {
+            sec: i64,
+            nsec: i64,
+        }
+        extern "C" {
+            fn clock_gettime(clk: i32, ts: *mut Timespec) -> i32;
+        }
+        let mut ts = Timespec { sec: 0, nsec: 0 };
+        // SAFETY: plain libc call writing into `ts`.
+        // CLOCK_THREAD_CPUTIME_ID = 3.
+        if unsafe { clock_gettime(3, &mut ts) } == 0 {
+            return Some(std::time::Duration::new(ts.sec as u64, ts.nsec as u32));
+        }
+        None
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct FileTime {
+            lo: u32,
+            hi: u32,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn GetThreadTimes(t: isize, creation: *mut FileTime, exit: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
+        }
+        let (mut c, mut e, mut k, mut u) = (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
+        // SAFETY: plain Win32 call writing into the four structs.
+        if unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } != 0 {
+            let t = |f: &FileTime| ((f.hi as u64) << 32 | f.lo as u64) * 100;
+            return Some(std::time::Duration::from_nanos(t(&k) + t(&u)));
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
+}
+
 /// `RH_DEBUG_TASKS=<ms>`: report tasks that ran longer than that (the
 /// time between one task start and the next, including host work).
 fn task_debug(prev_deadline: Option<std::time::Instant>, budget: std::time::Duration) {
     thread_local! {
         static LIMIT: Option<u64> = std::env::var("RH_DEBUG_TASKS").ok().and_then(|v| v.parse().ok());
-        static PREV: std::cell::Cell<Option<(std::time::Instant, std::time::Duration)>> = const { std::cell::Cell::new(None) };
+        static PREV: std::cell::Cell<Option<(std::time::Instant, std::time::Duration, Option<std::time::Duration>)>> = const { std::cell::Cell::new(None) };
     }
     let Some(limit) = LIMIT.with(|l| *l) else { return };
     let now = std::time::Instant::now();
-    if let Some((start, b)) = PREV.with(|p| p.get()) {
+    let cpu = thread_cpu_time();
+    if let Some((start, b, cpu0)) = PREV.with(|p| p.get()) {
         let took = now - start;
         if took.as_millis() as u64 >= limit {
             let over = prev_deadline.map(|d| now > d).unwrap_or(false);
-            eprintln!("[task] {:?} (budget {:?}{})", took, b, if over { ", past deadline" } else { "" });
+            let used = match (cpu, cpu0) {
+                (Some(a), Some(b)) => format!(", cpu {:?}", a.saturating_sub(b)),
+                _ => String::new(),
+            };
+            eprintln!("[task] {:?}{} (budget {:?}{})", took, used, b, if over { ", past deadline" } else { "" });
         }
     }
-    PREV.with(|p| p.set(Some((now, budget))));
+    PREV.with(|p| p.set(Some((now, budget, cpu))));
 }
 
 impl Default for Realm {
@@ -241,6 +299,7 @@ impl Default for Realm {
 impl Realm {
     pub fn new() -> Realm {
         crate::sampler::start_from_env();
+        crate::alloc::enable_for_this_thread();
         let mut heap = Heap::new();
         let object_proto = heap.alloc(Object::new(None, ObjectKind::Ordinary));
         let function_proto = heap.alloc(Object::new(
@@ -304,6 +363,7 @@ impl Realm {
             new_target_stack: Vec::new(),
             gc_threshold: 200_000,
             deadline: None,
+            watch_origin: None,
             task_budget: None,
             terminating: false,
             gc_enabled: true,
@@ -321,6 +381,7 @@ impl Realm {
             arg_buf: Vec::new(),
             mega: Vec::new(),
             regexp_pristine: None,
+            regexp_last: None,
         };
         crate::builtins::register_builtins(&mut realm);
         realm.mark_intrinsics();
@@ -669,6 +730,7 @@ impl Realm {
     /// Set (or clear) the execution deadline for subsequent JavaScript.
     pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
         self.deadline = deadline;
+        self.watch_origin = thread_cpu_time().map(|c| (std::time::Instant::now(), c));
         self.terminating = false;
         crate::regex::set_deadline(deadline);
         WATCHDOG_CREDIT.with(|c| c.set(std::time::Duration::ZERO));
@@ -715,6 +777,18 @@ impl Realm {
             *d += credit;
         }
         true
+    }
+
+    /// The watchdog's clock: the wall clock at [`Realm::set_deadline`]
+    /// advanced by the CPU time this thread used since, so a script is
+    /// stopped for what it costs, not for the machine being busy with
+    /// other processes (wall clock where thread CPU time is unavailable).
+    #[inline]
+    pub(crate) fn watch_now(&self) -> std::time::Instant {
+        match (self.watch_origin, thread_cpu_time()) {
+            (Some((wall, cpu)), Some(now)) => wall + now.saturating_sub(cpu),
+            _ => std::time::Instant::now(),
+        }
     }
 
     /// Did the last run hit the deadline?

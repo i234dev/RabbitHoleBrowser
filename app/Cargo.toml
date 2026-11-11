@@ -16,6 +16,7 @@ rabbithole-engine.workspace = true
 rabbithole-gfx.workspace = true
 rabbithole-net.workspace = true
 rabbithole-agent.workspace = true
+rabbithole-js.workspace = true
 winit = "0.30"
 softbuffer = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -24,6 +24,7 @@
 //! [`Realm::define_method`] / [`Realm::define_accessor`]. Values that the
 //! host keeps across calls must be kept alive with [`Realm::root`].
 
+pub mod alloc;
 pub mod ast;
 pub mod bigint;
 pub mod builtins;

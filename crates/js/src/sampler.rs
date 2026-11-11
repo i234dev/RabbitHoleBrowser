@@ -16,6 +16,9 @@ mod imp {
     const MAX: usize = 1 << 16;
     static mut SAMPLES: [[u64; DEPTH]; MAX] = [[0; DEPTH]; MAX];
     static COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// Set on every tick; the VM takes a JavaScript-level sample at its
+    /// next safe point (`RH_JSPROF`).
+    pub static JS_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static STARTED: std::sync::Once = std::sync::Once::new();
 
     #[repr(C)]
@@ -49,6 +52,7 @@ mod imp {
         // ucontext_t.uc_mcontext.gregs[REG_RIP / REG_RBP / REG_RSP]
         // SAFETY: the kernel passes a valid ucontext_t.
         let greg = |n: usize| unsafe { *(ctx.add(40 + n * 8) as *const u64) };
+        JS_PENDING.store(true, Ordering::Relaxed);
         let (rip, mut rbp, rsp) = (greg(16), greg(10), greg(15));
         let i = COUNT.fetch_add(1, Ordering::Relaxed);
         if i >= MAX {
@@ -99,7 +103,7 @@ mod imp {
     }
 
     pub fn start_from_env() {
-        if std::env::var_os("RH_PROF").is_none() {
+        if std::env::var_os("RH_PROF").is_none() && std::env::var_os("RH_JSPROF").is_none() {
             return;
         }
         STARTED.call_once(|| {
@@ -121,10 +125,12 @@ pub fn start_from_env() {
     imp::start_from_env();
 }
 
-/// JavaScript-level profile: with `RH_JSPROF=<file>`, every VM safe point
-/// (each tick of backward jumps and calls) counts the running function and
-/// its callers; the table is rewritten to the file every few thousand
-/// samples (`self  inclusive  function@file:line`).
+/// JavaScript-level profile: with `RH_JSPROF=<file>`, the first VM safe
+/// point after each profiling-timer tick (every 0.5 ms of CPU time on
+/// Linux x86-64; every safe point elsewhere) counts the running function
+/// and its callers, so time spent in natives called from a function counts
+/// as that function's; the table is rewritten to the file every few
+/// thousand samples (`self  inclusive  function@file:line`).
 pub(crate) mod js {
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -136,6 +142,18 @@ pub(crate) mod js {
 
     pub(crate) fn enabled() -> bool {
         PATH.with(|p| p.is_some())
+    }
+
+    /// A timer tick asked for a sample.
+    pub(crate) fn take_pending() -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            super::imp::JS_PENDING.swap(false, std::sync::atomic::Ordering::Relaxed)
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        {
+            true
+        }
     }
 
     /// Record one sample: `frames` innermost first.
@@ -154,7 +172,7 @@ pub(crate) mod js {
                 }
                 e.1 += 1;
             }
-            if t.0 % 2048 == 0 {
+            if t.0 % 256 == 0 {
                 let mut rows: Vec<(&String, &(u64, u64))> = t.1.iter().collect();
                 rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
                 let mut out = format!("samples {}\n", t.0);

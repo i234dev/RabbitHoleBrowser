@@ -1115,7 +1115,7 @@ impl Realm {
     #[inline(never)]
     fn safepoint(&mut self) -> JsResult<()> {
         self.maybe_gc();
-        if crate::sampler::js::enabled() {
+        if crate::sampler::js::enabled() && crate::sampler::js::take_pending() {
             let frames: Vec<String> = self
                 .frames
                 .iter()
@@ -1126,8 +1126,8 @@ impl Realm {
             crate::sampler::js::sample(&frames);
         }
         if let Some(d) = self.deadline {
-            if self.terminating || std::time::Instant::now() >= d {
-                if !self.terminating && self.apply_watchdog_credit() && std::time::Instant::now() < self.deadline.unwrap_or(d) {
+            if self.terminating || self.watch_now() >= d {
+                if !self.terminating && self.apply_watchdog_credit() && self.watch_now() < self.deadline.unwrap_or(d) {
                     return Ok(());
                 }
                 self.terminating = true;
