@@ -1699,6 +1699,7 @@ impl<'a> Parser<'a> {
                 strict,
                 pos,
                 span: (0, 0),
+                self_binding: false,
             })),
         })
     }
@@ -2493,6 +2494,7 @@ impl<'a> Parser<'a> {
                 strict,
                 pos,
                 span: (0, 0),
+                self_binding: false,
             })
         })
     }
@@ -2590,6 +2592,7 @@ impl<'a> Parser<'a> {
             self.ctx = saved;
             Some(n?)
         };
+        let name_is_some = name.is_some();
         let ctx = Context {
             in_function: true,
             in_generator: is_generator,
@@ -2618,6 +2621,7 @@ impl<'a> Parser<'a> {
                 strict,
                 pos,
                 span: (start, p.prev_end as u32),
+                self_binding: is_expression && name_is_some,
             })
         })
     }

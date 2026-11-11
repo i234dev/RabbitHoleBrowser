@@ -1482,6 +1482,10 @@ fn named_function_expression_binding_is_immutable() {
     throws("(function f() { \"use strict\"; f = 1; })()", "constant");
     // Shadowed by a var or parameter of the same name: an ordinary binding.
     eq("(function f(f) { f = 3; return f; })(1)", "3");
+    // A function *declaration* may reassign its own name (Babel's
+    // `_typeof` helper, inside Svelte's compiler bundle).
+    eq("(function(){ 'use strict'; function t(e) { return t = function (x) { return 'ok' + x; }, t(e); } return t(1) + t(2); })()", "ok1ok2");
+    eq("(function(){ function t() { t = 5; } t(); return t; })()", "5");
 }
 
 #[test]

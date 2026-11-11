@@ -518,6 +518,10 @@ pub struct Function {
     /// Byte range of the source text (`Function.prototype.toString`);
     /// (0, 0) when unknown.
     pub span: (u32, u32),
+    /// A named function *expression*: its name is an immutable binding
+    /// inside its own body. A declaration's name lives in the enclosing
+    /// scope and is an ordinary (assignable) binding.
+    pub self_binding: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

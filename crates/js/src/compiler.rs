@@ -1331,7 +1331,7 @@ impl Compiler {
         // function declaration with the same name shadows it: only bind it
         // when nothing in the body declares the name.
         if let Some(n) = &f.name {
-            if !f.is_arrow && !self.fs_ref().scopes[0].names.contains_key(&**n) {
+            if f.self_binding && !self.fs_ref().scopes[0].names.contains_key(&**n) {
                 let loc = self.declare(n, BindKind::Hidden);
                 self.fs().self_loc = Some(loc);
             }
@@ -3195,6 +3195,7 @@ impl Compiler {
                         strict: true,
                         pos: c.pos,
                         span: (0, 0),
+                        self_binding: false,
                     };
                     self.emit(Op::Swap); // proto ctor
                     self.emit(Op::Dup); // proto ctor ctor
@@ -3228,7 +3229,7 @@ impl Compiler {
                     optional: false,
                 } }) });
             }
-            let f = Function { name: None, params: vec![], body: FunctionBody::Block(stmts), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0) };
+            let f = Function { name: None, params: vec![], body: FunctionBody::Block(stmts), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0), self_binding: false };
             let idx = self.compile_function_with(&f, Some(""), |fl| {
                 fl.is_field_init = true;
                 fl.is_method = true;
@@ -3280,7 +3281,7 @@ impl Compiler {
         // initializer as method called with this=ctor
         let pos = self.fs_ref().cur_pos;
         let value_expr = value.clone().unwrap_or(Expr { pos, kind: ExprKind::Undefined });
-        let f = Function { name: None, params: vec![], body: FunctionBody::Expr(Box::new(value_expr)), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0) };
+        let f = Function { name: None, params: vec![], body: FunctionBody::Expr(Box::new(value_expr)), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0), self_binding: false };
         let key_name = match key {
             PropertyKey::Identifier(n) | PropertyKey::String(n) => Some(n.clone()),
             _ => None,
@@ -3372,9 +3373,10 @@ fn synth_constructor(derived: bool, pos: Pos) -> Function {
             strict: true,
             pos,
             span: (0, 0),
+            self_binding: false,
         }
     } else {
-        Function { name: None, params: vec![], body: FunctionBody::Block(vec![]), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0) }
+        Function { name: None, params: vec![], body: FunctionBody::Block(vec![]), is_arrow: false, is_async: false, is_generator: false, strict: true, pos, span: (0, 0), self_binding: false }
     }
 }
 
