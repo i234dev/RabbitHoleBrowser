@@ -630,7 +630,19 @@ impl Realm {
         self.run_module(source, filename)
     }
 
+    /// Run a classic script for its effects (its completion value is not
+    /// computed).
+    pub fn exec(&mut self, source: &str, filename: &str) -> Result<(), Value> {
+        let code = self.compile_with(source, filename, false, false)?;
+        self.run_script(code)?;
+        Ok(())
+    }
+
     pub fn compile(&mut self, source: &str, filename: &str, is_module: bool) -> Result<Rc<FunctionCode>, Value> {
+        self.compile_with(source, filename, is_module, true)
+    }
+
+    fn compile_with(&mut self, source: &str, filename: &str, is_module: bool, completion: bool) -> Result<Rc<FunctionCode>, Value> {
         let program = match crate::parser::parse_program(source, is_module) {
             Ok(p) => p,
             Err(e) => {
@@ -638,7 +650,7 @@ impl Realm {
                 return Err(self.new_error("SyntaxError", &msg));
             }
         };
-        match crate::compiler::compile_program(&program, filename, source) {
+        match crate::compiler::compile_program_with(&program, filename, source, completion) {
             Ok(c) => Ok(c),
             Err(e) => Err(self.new_error("SyntaxError", &e.message)),
         }

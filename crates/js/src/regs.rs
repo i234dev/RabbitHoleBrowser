@@ -415,6 +415,22 @@ impl Tr<'_> {
             *extra = 1;
             return;
         }
+        if next == Some(Op::StoreCompletion) {
+            // `obj.x = v;` as a script statement: v is the completion value.
+            let s = match v {
+                Ent::Reg(r) => r,
+                Ent::Copy(s) => s,
+                Ent::Slot { .. } => self.slot(vdepth),
+                Ent::Const(k) => {
+                    let d = self.slot(self.vs.len());
+                    self.emit(Op::LoadK(d, k));
+                    d
+                }
+            };
+            self.emit(Op::StoreCompletionR(s));
+            *extra = 1;
+            return;
+        }
         match v {
             Ent::Reg(_) | Ent::Const(_) | Ent::Copy(_) => self.vs.push(v),
             Ent::Slot { .. } => {

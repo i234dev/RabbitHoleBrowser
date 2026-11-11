@@ -212,6 +212,8 @@ impl FnState {
 }
 
 pub struct Compiler {
+    /// Track the script completion value (`eval` results).
+    completion: bool,
     fns: Vec<FnState>,
     filename: Rc<str>,
     source: Rc<str>,
@@ -253,7 +255,14 @@ enum Resolved {
 
 /// Compile a whole script/module.
 pub fn compile_program(program: &Program, filename: &str, source: &str) -> CResult<Rc<FunctionCode>> {
+    compile_program_with(program, filename, source, true)
+}
+
+/// Compile a script; without `completion` its completion value (the
+/// result of `eval`) is not tracked and the script evaluates to undefined.
+pub fn compile_program_with(program: &Program, filename: &str, source: &str, completion: bool) -> CResult<Rc<FunctionCode>> {
     let mut c = Compiler {
+        completion,
         fns: Vec::new(),
         filename: Rc::from(filename),
         source: Rc::from(source),
@@ -282,6 +291,7 @@ pub fn compile_module(program: &Program, filename: &str, source: &str, module_id
         module: Some(module_id),
         captures: crate::captures::analyze_program(&program.body),
         internal_error: None,
+        completion: false,
     };
     let m = c.compile_module_program(program)?;
     c.check_internal()?;
@@ -1200,7 +1210,7 @@ impl Compiler {
         match &s.kind {
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::Expr(e) => {
-                if self.fns.len() == 1 && self.fs_ref().is_script {
+                if self.fns.len() == 1 && self.fs_ref().is_script && self.completion {
                     self.compile_expr(e)?;
                     self.emit(Op::StoreCompletion);
                 } else {

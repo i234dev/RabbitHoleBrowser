@@ -126,8 +126,10 @@ impl Realm {
                 if code.flags.is_generator || code.flags.is_async {
                     return self.start_generator_like(id, this, args);
                 }
-                let frame = self.prepare_frame(id, this, args, Value::Undefined, false)?;
-                self.push_frame(frame, true)?;
+                if !self.push_plain_call(id, &this, args, 0, true)? {
+                    let frame = self.prepare_frame(id, this, args, Value::Undefined, false)?;
+                    self.push_frame(frame, true)?;
+                }
                 match self.run()? {
                     Exit::Return(v) => Ok(v),
                     _ => unreachable!("non-generator frame suspended"),
@@ -398,6 +400,114 @@ impl Realm {
             entry: false,
             extra: None,
         });
+        Ok(true)
+    }
+
+    /// Push the frame for calling plain closure `id` (no `arguments`
+    /// object, rest parameter, generator / async or class constructor) with
+    /// arguments from a slice, e.g. a callback called by a native function.
+    /// Returns false (nothing done) when the general path is needed.
+    pub(crate) fn push_plain_call(&mut self, id: ObjectId, this: &Value, args: &[Value], ret_slot: u32, entry: bool) -> JsResult<bool> {
+        let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
+        let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
+        let flags = c.code.flags;
+        if flags.is_generator || flags.is_async || flags.is_class_constructor || c.code.arguments_loc.is_some() || c.code.rest_loc.is_some() || (flags.is_arrow && c.arguments.is_some()) {
+            return Ok(false);
+        }
+        let this = if flags.is_arrow {
+            c.this_value.clone().unwrap_or(Value::Undefined)
+        } else if flags.is_strict {
+            match this {
+                Value::Empty => Value::Undefined,
+                v => v.clone(),
+            }
+        } else {
+            match this {
+                Value::Undefined | Value::Null | Value::Empty => Value::Object(self.global),
+                v @ Value::Object(_) => v.clone(),
+                _ => return Ok(false),
+            }
+        };
+        if self.frames.len() >= self.max_frames {
+            return self.range_error("Maximum call stack size exceeded");
+        }
+        let code = c.code.clone();
+        let parent_scope = c.scope;
+        let home = c.home_object;
+        let new_target = if flags.is_arrow { c.new_target.clone().unwrap_or(Value::Undefined) } else { Value::Undefined };
+        let nslots = code.scope_slots as usize;
+        let mut slots = if nslots == 0 { Vec::new() } else { vec![Value::Undefined; nslots] };
+        let kept = if flags.args_direct { args.len() } else { 0 };
+        if kept > 0 {
+            self.vstack.extend_from_slice(args);
+        }
+        let base = self.reserve_slots(code.frame_size());
+        for (i, &loc) in code.param_locs.iter().enumerate() {
+            let Some(v) = args.get(i) else { break };
+            match loc {
+                VarLoc::Reg(r) => self.vstack[base + r as usize] = v.clone(),
+                VarLoc::Slot(s) => slots[s as usize] = v.clone(),
+            }
+        }
+        if let Some(sl) = code.self_loc {
+            match sl {
+                VarLoc::Reg(r) => self.vstack[base + r as usize] = Value::Object(id),
+                VarLoc::Slot(s) => slots[s as usize] = Value::Object(id),
+            }
+        }
+        let scope = if nslots > 0 {
+            self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: parent_scope, names: None }))))
+        } else {
+            match parent_scope {
+                Some(p) => p,
+                None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
+            }
+        };
+        self.frames.push(Frame {
+            code,
+            pc: 0,
+            base: base as u32,
+            argc: kept as u32,
+            scope,
+            scope_depth: 0,
+            this,
+            func: Some(id),
+            new_target,
+            home_object: home,
+            ret_slot,
+            is_construct: false,
+            entry,
+            extra: None,
+        });
+        Ok(true)
+    }
+
+    /// `CallR` of a native function: arguments are handed over straight
+    /// from the caller's slots and the result is written back to slot `b`.
+    #[inline(never)]
+    pub(crate) fn try_native_call(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
+        let cb = self.frames[fi].base as usize + b;
+        let id = match &self.vstack[cb] {
+            Value::Object(id) => *id,
+            _ => return Ok(false),
+        };
+        let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
+        let ObjectKind::Native(n) = &obj.kind else { return Ok(false) };
+        let func = n.func;
+        let this = match &self.vstack[cb + 1] {
+            Value::Empty => Value::Undefined,
+            v => v.clone(),
+        };
+        let mut args = std::mem::take(&mut self.arg_buf);
+        args.extend_from_slice(&self.vstack[cb + 2..cb + 2 + argc]);
+        let r = self.call_native(id, func, this, &args, false);
+        args.clear();
+        if args.capacity() <= 64 {
+            self.arg_buf = args;
+        }
+        let v = r?;
+        let at = self.frames[fi].base as usize + b;
+        self.vstack[at] = v;
         Ok(true)
     }
 
@@ -1440,6 +1550,11 @@ impl Realm {
                         sync!();
                         if tri!(self.try_fast_call(fi, b as usize, argc as usize)) {
                             continue 'reload;
+                        }
+                        if tri!(self.try_native_call(fi, b as usize, argc as usize)) {
+                            // SAFETY: as in `slow`.
+                            base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
+                            continue;
                         }
                         slow!(op);
                     }
@@ -2977,6 +3092,9 @@ impl Realm {
                 ObjectKind::Function(c) => {
                     let flags = c.code.flags;
                     if !flags.is_generator && !flags.is_async && !flags.is_class_constructor {
+                        if self.push_plain_call(*id, &this, args, ret as u32, false)? {
+                            return Ok(());
+                        }
                         let mut frame = self.prepare_frame(*id, this, args, Value::Undefined, false)?;
                         frame.ret_slot = ret as u32;
                         self.push_frame(frame, false)?;
@@ -3051,6 +3169,14 @@ impl Realm {
             Op::Add => match (&a, &b) {
                 (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
                 (Value::String(x), Value::String(y)) => Value::String(x.concat(y)),
+                (Value::String(x), Value::Number(_)) => {
+                    let y = self.to_string(b.clone())?;
+                    Value::String(x.concat(&y))
+                }
+                (Value::Number(_), Value::String(y)) => {
+                    let x = self.to_string(a.clone())?;
+                    Value::String(x.concat(y))
+                }
                 _ => self.add_slow(a, b)?,
             },
             Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => Value::Bool(match (&a, &b) {

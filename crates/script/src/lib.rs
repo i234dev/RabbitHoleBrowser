@@ -230,7 +230,7 @@ impl ScriptHost {
             return self.enter(env, |realm| modules::run_module_script(realm, source, url));
         }
         self.enter(env, |realm| {
-            let r = realm.eval(source, url);
+            let r = realm.exec(source, url);
             shadow::flush(realm);
             match r {
                 Ok(_) => Ok(()),
