@@ -54,6 +54,9 @@ pub struct ScriptState {
     pub console: Vec<(String, String)>,
     pub dialogs: Vec<Dialog>,
     pub scripts_ran: bool,
+    /// Another document's scripts changed this (frame) document, so its
+    /// style sheets must be re-collected when `<style>`/`<link>` change.
+    pub dom_scripted: bool,
     /// Session storage for this page's origin (tab-scoped).
     pub session_storage: HashMap<String, String>,
     /// Answers given to `confirm()` / `prompt()`.
@@ -414,6 +417,7 @@ impl HostEnv for EngineEnv<'_> {
         }
         // The caller may change it: restyle the frame on the next sync.
         child.script.dom_dirty = true;
+        child.script.dom_scripted = true;
         Some(&mut child.doc)
     }
     fn frame_computed_style(&mut self, id: u64, node: NodeId) -> Option<Rc<ComputedStyle>> {

@@ -171,7 +171,7 @@ pub fn form_data_set(
                 }
             }
             ControlKind::Checkbox | ControlKind::Radio => {
-                if name.is_empty() || doc.attr(n, "checked").is_none() {
+                if name.is_empty() || !doc.is_checked(n) {
                     continue;
                 }
                 fields.push((name, doc.attr(n, "value").unwrap_or("on").to_string()));
@@ -190,7 +190,7 @@ pub fn form_data_set(
                 }
                 // The DOM `value` attribute (set when the user types) wins
                 // over the initial text content.
-                let value = doc.attr(n, "value").map(|v| v.to_string()).unwrap_or_else(|| doc.text_content(n));
+                let value = doc.control_value(n).map(|v| v.to_string()).unwrap_or_else(|| doc.text_content(n));
                 fields.push((name, value.replace('\n', "\r\n")));
             }
             ControlKind::File => {
@@ -210,7 +210,7 @@ pub fn form_data_set(
                 if name.is_empty() {
                     continue;
                 }
-                let mut value = doc.attr(n, "value").unwrap_or("").to_string();
+                let mut value = doc.control_value(n).unwrap_or("").to_string();
                 if name == "_charset_" && kind == ControlKind::Hidden && value.is_empty() {
                     value = "UTF-8".into();
                 }
@@ -283,22 +283,23 @@ impl Page {
     /// Current text of a text-like control.
     pub fn control_text(&self, node: NodeId) -> String {
         match control_kind(&self.doc, node) {
-            ControlKind::TextArea => self.doc.attr(node, "value").map(|v| v.to_string()).unwrap_or_else(|| self.doc.text_content(node)),
-            _ => self.doc.attr(node, "value").unwrap_or("").to_string(),
+            ControlKind::TextArea => self.doc.control_value(node).map(|v| v.to_string()).unwrap_or_else(|| self.doc.text_content(node)),
+            _ => self.doc.control_value(node).unwrap_or("").to_string(),
         }
     }
 
-    /// Set the text of a text-like control (`value` attribute).
+    /// Set the text of a text-like control (its dirty value; the `value`
+    /// attribute stays the default value).
     pub fn set_control_text(&mut self, node: NodeId, text: &str) {
-        set_attr(&mut self.doc, node, "value", Some(text));
+        self.doc.set_control_value(node, Some(text));
     }
 
     /// Toggle a checkbox, or select a radio button (unchecking its group).
     pub fn toggle_control(&mut self, node: NodeId) {
         match control_kind(&self.doc, node) {
             ControlKind::Checkbox => {
-                let checked = self.doc.attr(node, "checked").is_some();
-                set_attr(&mut self.doc, node, "checked", if checked { None } else { Some("") });
+                let checked = self.doc.is_checked(node);
+                self.doc.set_checked(node, Some(!checked));
             }
             ControlKind::Radio => {
                 let name = self.doc.attr(node, "name").map(|s| s.to_string());
@@ -310,10 +311,10 @@ impl Page {
                         .filter(|&n| n != node && control_kind(&self.doc, n) == ControlKind::Radio && self.doc.attr(n, "name") == Some(name.as_str()))
                         .collect();
                     for g in group {
-                        set_attr(&mut self.doc, g, "checked", None);
+                        self.doc.set_checked(g, Some(false));
                     }
                 }
-                set_attr(&mut self.doc, node, "checked", Some(""));
+                self.doc.set_checked(node, Some(true));
             }
             _ => {}
         }
@@ -347,43 +348,15 @@ impl Page {
         }
     }
 
-    /// Reset all controls of a form to their initial state (attributes
-    /// named `data-rh-initial-*` are not kept; we approximate by clearing
-    /// user-set values: `value` on inputs falls back to `defaultvalue`).
+    /// Reset all controls of a form to their initial state: dirty values
+    /// and checkedness are dropped, so the `value` / `checked` attributes
+    /// (the defaults) apply again.
     pub fn reset_form(&mut self, form: NodeId) {
         let controls: Vec<NodeId> = self.doc.descendants(form).filter(|&n| is_control(&self.doc, n)).collect();
         for n in controls {
             match control_kind(&self.doc, n) {
-                ControlKind::Text | ControlKind::Password | ControlKind::Other => {
-                    let default = self.doc.attr(n, "data-rh-default").map(|v| v.to_string());
-                    set_attr(&mut self.doc, n, "value", default.as_deref());
-                }
-                ControlKind::TextArea => set_attr(&mut self.doc, n, "value", None),
-                ControlKind::Checkbox | ControlKind::Radio => {
-                    let default = self.doc.attr(n, "data-rh-default-checked").is_some();
-                    set_attr(&mut self.doc, n, "checked", if default { Some("") } else { None });
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Remember initial control values so `reset_form` can restore them.
-    /// Called once after loading.
-    pub fn snapshot_form_defaults(&mut self) {
-        let controls: Vec<NodeId> = self.doc.descendants(Document::ROOT).filter(|&n| is_control(&self.doc, n)).collect();
-        for n in controls {
-            match control_kind(&self.doc, n) {
-                ControlKind::Text | ControlKind::Password | ControlKind::Other => {
-                    if let Some(v) = self.doc.attr(n, "value").map(|v| v.to_string()) {
-                        set_attr(&mut self.doc, n, "data-rh-default", Some(&v));
-                    }
-                }
-                ControlKind::Checkbox | ControlKind::Radio => {
-                    if self.doc.attr(n, "checked").is_some() {
-                        set_attr(&mut self.doc, n, "data-rh-default-checked", Some(""));
-                    }
-                }
+                ControlKind::Text | ControlKind::Password | ControlKind::Other | ControlKind::TextArea => self.doc.set_control_value(n, None),
+                ControlKind::Checkbox | ControlKind::Radio => self.doc.set_checked(n, None),
                 _ => {}
             }
         }

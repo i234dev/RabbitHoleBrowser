@@ -390,14 +390,14 @@ impl Engine {
         // click is dispatched and revert if it is cancelled.
         let mut saved: Vec<(NodeId, bool)> = Vec::new();
         if let (Some(a), true, ControlKind::Checkbox | ControlKind::Radio) = (act, is_input_or_button, kind) {
-            saved.push((a, page.doc.attr(a, "checked").is_some()));
+            saved.push((a, page.doc.is_checked(a)));
             if kind == ControlKind::Radio {
                 let name = page.doc.attr(a, "name").map(|s| s.to_string());
                 if let Some(name) = name {
                     let scope = page.form_of(a).unwrap_or(Document::ROOT);
                     for n in page.doc.descendants(scope).collect::<Vec<_>>() {
                         if n != a && control_kind(&page.doc, n) == ControlKind::Radio && page.doc.attr(n, "name") == Some(name.as_str()) {
-                            saved.push((n, page.doc.attr(n, "checked").is_some()));
+                            saved.push((n, page.doc.is_checked(n)));
                         }
                     }
                 }
@@ -410,7 +410,7 @@ impl Engine {
         if prevented {
             if !saved.is_empty() {
                 for (n, checked) in saved {
-                    set_attr(&mut page.doc, n, "checked", if checked { Some("") } else { None });
+                    page.doc.set_checked(n, Some(checked));
                 }
                 self.restyle(page);
                 out.relayout = true;
@@ -478,7 +478,7 @@ impl Engine {
             }
             _ => match kind {
                 ControlKind::Checkbox | ControlKind::Radio => {
-                    let changed = saved.first().map(|&(n, was)| page.doc.attr(n, "checked").is_some() != was).unwrap_or(false);
+                    let changed = saved.first().map(|&(n, was)| page.doc.is_checked(n) != was).unwrap_or(false);
                     if changed {
                         self.dispatch_into(page, &mut out, a, "input", crate::scripting::input_init(None));
                         self.dispatch_into(page, &mut out, a, "change", plain_init(false));

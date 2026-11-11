@@ -172,7 +172,7 @@ pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &s
     match page.control_kind(control) {
         ControlKind::Checkbox | ControlKind::Radio => {
             let want = matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes" | "checked");
-            let is = page.doc.attr(control, "checked").is_some();
+            let is = page.doc.is_checked(control);
             if want != is {
                 page.toggle_control(control);
             }
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(engine.eval_in_page(&mut page, "n").trim(), "1");
         let c = query_selector(&page.doc, "#c").unwrap().unwrap();
         fill_control(&engine, &mut page, c, "on").unwrap();
-        assert!(page.doc.attr(c, "checked").is_some());
+        assert!(page.doc.is_checked(c));
         let s = query_selector(&page.doc, "#s").unwrap().unwrap();
         fill_control(&engine, &mut page, s, "Two").unwrap();
         assert_eq!(engine.eval_in_page(&mut page, "document.getElementById('s').value").trim(), "'2'");

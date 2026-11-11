@@ -128,6 +128,7 @@ impl MediaAlternative {
             MediaFeature::MaxWidth(w) => env.width <= *w,
             MediaFeature::MinHeight(h) => env.height >= *h,
             MediaFeature::MaxHeight(h) => env.height <= *h,
+            MediaFeature::Other(name, value) if is_numeric_feature(name) => numeric_feature(name, value),
             MediaFeature::Other(name, value) => match (name.as_str(), value.as_str()) {
                 ("orientation", "landscape") => env.width >= env.height,
                 ("orientation", "portrait") => env.width < env.height,
@@ -136,7 +137,6 @@ impl MediaAlternative {
                 ("prefers-reduced-motion", _) => true,
                 ("hover", "hover") => true,
                 ("pointer", "fine") => true,
-                ("color", _) => true,
                 ("scripting", "enabled") => env.scripting,
                 ("scripting", "none") => !env.scripting,
                 ("scripting", "initial-only") => false,
@@ -151,6 +151,43 @@ impl MediaAlternative {
         } else {
             result
         }
+    }
+}
+
+/// Integer device features (Media Queries 4 §6): bits per color component
+/// (8), monochrome bits (0), color map entries (0), grid device (0).
+fn device_integer(base: &str) -> Option<f32> {
+    match base {
+        "color" => Some(8.0),
+        "monochrome" | "color-index" | "grid" => Some(0.0),
+        _ => None,
+    }
+}
+
+fn is_numeric_feature(name: &str) -> bool {
+    let base = name.strip_prefix("min-").or_else(|| name.strip_prefix("max-")).unwrap_or(name);
+    device_integer(base).is_some()
+}
+
+/// Evaluate `(color)`, `(min-color: 1)`, `(max-monochrome: 0)`, ...
+fn numeric_feature(name: &str, value: &str) -> bool {
+    let (op, base) = match (name.strip_prefix("min-"), name.strip_prefix("max-")) {
+        (Some(b), _) => ('>', b),
+        (_, Some(b)) => ('<', b),
+        _ => ('=', name),
+    };
+    let Some(actual) = device_integer(base) else { return false };
+    if value.is_empty() {
+        // Boolean context; `min-`/`max-` need a value.
+        return op == '=' && actual != 0.0;
+    }
+    match value.parse::<f32>() {
+        Ok(n) if n >= 0.0 && n.fract() == 0.0 => match op {
+            '>' => actual >= n,
+            '<' => actual <= n,
+            _ => actual == n,
+        },
+        _ => false,
     }
 }
 
@@ -732,6 +769,24 @@ fn to_px(v: f32, unit: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_queries_color_features() {
+        let env = MediaEnv { width: 0.0, height: 0.0, screen: true, scripting: true };
+        let m = |q: &str| parse_media_query(q).evaluate(&env);
+        assert!(m("all and (min-color: 0)"));
+        assert!(m("only all and (min-color: 0)"));
+        assert!(!m("not all and (min-color: 0)"));
+        assert!(!m("(bogus)"));
+        assert!(m("(bogus), all"));
+        assert!(!m("(max-color: 0) and (max-monochrome: 0)"));
+        assert!(m("(min-color: 1), (min-monochrome: 1)"));
+        assert!(m("all and (min-color: 0) and (min-monochrome: 0)"));
+        assert!(m("not all and (min-color: 1), not all and (min-monochrome: 1)"));
+        assert!(m("(color)") && !m("(monochrome)"));
+        assert!(!m("all and color") && !m("all and min-color: 0"));
+        assert!(m("all and (max-height: 1em) and (max-width: 1em)"));
+    }
 
     #[test]
     fn parse_sheet() {

@@ -313,6 +313,10 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "isShadowRoot", 1, is_shadow_root);
     realm.define_method(o, "nodeKey", 1, node_key);
     realm.define_method(o, "documentNode", 0, document_root);
+    crate::live::install(realm, o);
+    realm.define_method(o, "createDoctype", 4, crate::document::create_doctype);
+    realm.define_method(o, "createXMLDocument", 0, crate::document::create_xml_document);
+    realm.define_method(o, "validateQName", 1, crate::document::validate_qname);
     let g = realm.global();
     realm.define_property(g, "__rhNative", Value::Object(o), rabbithole_js::CONFIGURABLE | rabbithole_js::WRITABLE);
 }

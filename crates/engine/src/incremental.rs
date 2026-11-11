@@ -47,6 +47,9 @@ pub struct IncrementalStats {
 #[derive(Default)]
 pub struct IncrementalState {
     style: Option<StyleEngine>,
+    /// (DOM epoch, visited history size, base URL) the `:visited` link set
+    /// was computed for.
+    pub(crate) visited_key: Option<(u64, usize, String)>,
     /// Lay out from scratch next time.
     layout_full: bool,
     /// Elements whose boxes must be rebuilt.
@@ -201,7 +204,7 @@ impl Engine {
         };
         // Scripts may add/remove `<style>`/`<link>` elements or insert rules
         // (CSS-in-JS): re-collect the sheets when their sources changed.
-        let scripted = page.script.host.is_some() || page.script.scripts_ran;
+        let scripted = page.script.host.is_some() || page.script.scripts_ran || page.script.dom_scripted;
         // CSSOM edits and constructed / adopted sheets live outside the
         // node tree (not in the mutation log).
         let side = side_sheet_signature(&page.doc);
@@ -216,6 +219,7 @@ impl Engine {
             }
         }
         let env = media_env(page.viewport, self.scripting);
+        self.update_visited_links(page);
         let base_str = page.base_url.to_string();
         let state = page.state.clone();
         let opts = StyleOptions {

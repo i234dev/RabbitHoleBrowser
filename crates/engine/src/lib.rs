@@ -899,6 +899,9 @@ pub struct Engine {
     pub frames: std::cell::RefCell<frames::FrameRegistry>,
     /// Set while a frame's page is being built.
     pub(crate) frame_context: std::cell::RefCell<Option<frames::FrameContext>>,
+    /// URLs (without fragment) of the documents loaded so far (pages and
+    /// frames): links to them match `:visited`.
+    pub visited: std::cell::RefCell<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -981,6 +984,7 @@ impl Engine {
             registered_fonts: Default::default(),
             frames: Default::default(),
             frame_context: Default::default(),
+            visited: Default::default(),
         }
     }
 
@@ -998,6 +1002,7 @@ impl Engine {
             registered_fonts: Default::default(),
             frames: Default::default(),
             frame_context: Default::default(),
+            visited: Default::default(),
         }
     }
 
@@ -1035,7 +1040,38 @@ impl Engine {
     /// display list, without running scripts, so the page can be painted
     /// right away (progressive rendering). Call [`Engine::finish_page_load`]
     /// next (after filling `page.scripts` when they were deferred).
+    /// Links of `page` whose destination is in the visited history (for
+    /// `:visited`), recomputed when the DOM or the history changed.
+    pub(crate) fn update_visited_links(&self, page: &mut Page) {
+        let visited = self.visited.borrow();
+        let key = (page.doc.epoch(), visited.len(), page.base_url.to_string());
+        if page.incr.visited_key.as_ref() == Some(&key) {
+            return;
+        }
+        let base = page.base_url.clone();
+        let mut links = HashSet::new();
+        if !visited.is_empty() {
+            for n in page.doc.descendants(Document::ROOT) {
+                let Some(el) = page.doc.element(n) else { continue };
+                if !matches!(el.tag.as_str(), "a" | "area") {
+                    continue;
+                }
+                let Some(href) = el.attr("href") else { continue };
+                if let Some(u) = base.join(href.trim()) {
+                    if visited.contains(&u.without_fragment().to_string()) {
+                        links.insert(n);
+                    }
+                }
+            }
+        }
+        if *page.state.visited != links {
+            page.state.visited = std::sync::Arc::new(links);
+        }
+        page.incr.visited_key = Some(key);
+    }
+
     pub fn build_page_unscripted(&self, loaded: LoadedPage, viewport: Viewport) -> Page {
+        self.visited.borrow_mut().insert(loaded.url.without_fragment().to_string());
         for f in &loaded.fonts {
             let key = format!("{}|{}|{}", f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic);
             if self.registered_fonts.borrow_mut().insert(key) {
@@ -1075,7 +1111,6 @@ impl Engine {
             frame_origin: frame.and_then(|f| f.origin),
             frames: frames::Frames::default(),
         };
-        page.snapshot_form_defaults();
         page.script.dialog_policy = self.dialog_policy.clone();
         page.sheet_signature = stylesheet_signature(&page.doc);
         self.restyle(&mut page);
@@ -1769,7 +1804,7 @@ impl Page {
         let mut cur = Some(node);
         while let Some(n) = cur {
             if let Some(s) = self.styles.get(n) {
-                if s.cursor_pointer {
+                if s.cursor_pointer() {
                     return "pointer";
                 }
                 break;

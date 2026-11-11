@@ -3,7 +3,7 @@
 use crate::env::with_env;
 use crate::host::*;
 use crate::node::{self, html_collection, insert_node};
-use rabbithole_dom::{Document, NodeData, NodeId};
+use rabbithole_dom::{Document, Namespace, NodeData, NodeId};
 use rabbithole_js::{JsResult, Realm, Value, CONFIGURABLE, ENUMERABLE};
 
 const ACC: u8 = CONFIGURABLE | ENUMERABLE;
@@ -18,7 +18,8 @@ fn this_doc(realm: &mut Realm, this: &Value) -> JsResult<u32> {
 
 fn d_document_element(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
-    let h = with_doc(d, |doc| doc.html_element());
+    // The document's element child, whatever its name (XML documents).
+    let h = with_doc(d, |doc| doc.child_elements(Document::ROOT).next());
     Ok(wrap_opt(realm, d, h))
 }
 
@@ -254,32 +255,55 @@ fn d_create_element(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
     Ok(wrap(realm, NodeRef { doc: d, node }))
 }
 
+/// DOM "validate and extract" (DOM §1.4): a namespace and qualified name
+/// → (namespace, prefix, local name), or the DOMException to throw.
+pub(crate) fn validate_and_extract(ns: Option<String>, qname: &str) -> Result<(Namespace, Option<String>, String), (&'static str, String)> {
+    const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+    const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
+    let ns = ns.filter(|s| !s.is_empty());
+    if !is_xml_name(qname) {
+        return Err(("InvalidCharacterError", format!("'{qname}' is not a valid name.")));
+    }
+    // QName: NCName (":" NCName)?
+    let parts: Vec<&str> = qname.split(':').collect();
+    let ncname = |p: &str| is_xml_name(p);
+    if parts.len() > 2 || !parts.iter().all(|p| ncname(p)) {
+        return Err(("NamespaceError", format!("'{qname}' is not a valid qualified name.")));
+    }
+    let (prefix, local) = match parts.as_slice() {
+        [p, l] => (Some(p.to_string()), l.to_string()),
+        _ => (None, qname.to_string()),
+    };
+    let ns_err = || Err(("NamespaceError", format!("'{qname}' is not a valid qualified name for this namespace.")));
+    if prefix.is_some() && ns.is_none() {
+        return ns_err();
+    }
+    if prefix.as_deref() == Some("xml") && ns.as_deref() != Some(XML_NS) {
+        return ns_err();
+    }
+    let is_xmlns = qname == "xmlns" || prefix.as_deref() == Some("xmlns");
+    if is_xmlns != (ns.as_deref() == Some(XMLNS_NS)) {
+        return ns_err();
+    }
+    Ok((Namespace::from_uri(ns.as_deref()), prefix, local))
+}
+
 fn d_create_element_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
-    let ns = arg_str_opt(realm, args, 0)?.unwrap_or_default();
+    // `DOMString? namespace`: null and undefined are no namespace.
+    let ns = match args.first() {
+        None | Some(Value::Null) | Some(Value::Undefined) => None,
+        Some(v) => Some(realm.to_rust_string(v.clone())?),
+    };
     let qname = arg_str(realm, args, 1)?;
-    // DOM "validate and extract": a Name, then a QName (prefix needs a namespace).
-    if !is_xml_name(&qname) {
-        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("'{qname}' is not a valid name.")));
-    }
-    let parts: Vec<&str> = qname.split(':').collect();
-    let bad_qname = parts.len() > 2 || parts.iter().any(|p| p.is_empty()) || parts.len() == 2 && !parts[1].starts_with(|c: char| c.is_alphabetic() || c == '_');
-    let prefix_without_ns = parts.len() == 2 && ns.is_empty();
-    if bad_qname || prefix_without_ns || parts.len() == 2 && parts[0] == "xml" && ns != "http://www.w3.org/XML/1998/namespace" {
-        return Err(crate::misc::dom_exception(realm, "NamespaceError", &format!("'{qname}' is not a valid qualified name for this namespace.")));
-    }
-    let local = qname.rsplit(':').next().unwrap_or(&qname).to_string();
-    let node = with_doc(d, |doc| {
-        let tag = if ns.contains("svg") { local.clone() } else { local.to_ascii_lowercase() };
-        let n = doc.create_element(&tag, vec![]);
-        if ns.contains("svg") && tag != "svg" {
-            // Mark as SVG so wrapping picks the SVG prototype even before insertion.
-            doc.set_attr(n, "data-rh-ns", Some("svg"));
-        }
-        n
-    });
+    let (ns, prefix, local) = match validate_and_extract(ns, &qname) {
+        Ok(v) => v,
+        Err((name, msg)) => return Err(crate::misc::dom_exception(realm, name, &msg)),
+    };
+    let svg = ns == Namespace::Svg;
+    let node = with_doc(d, |doc| doc.create_element_ns(ns, prefix, &local, vec![]));
     let v = wrap(realm, NodeRef { doc: d, node });
-    if ns.contains("svg") {
+    if svg {
         if let Value::Object(id) = &v {
             let class = crate::host::svg_class(&local);
             let p = proto(class);
@@ -379,9 +403,16 @@ fn d_import_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Val
 }
 
 fn d_adopt_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let _ = this_doc(realm, &this)?;
+    let d = this_doc(realm, &this)?;
     if let Some(n) = node_of(realm, &arg(args, 0)) {
-        node::remove_node(n);
+        if n.node == Document::ROOT {
+            return Err(crate::misc::dom_exception(realm, "NotSupportedError", "The node provided is a document, which may not be adopted."));
+        }
+        if n.doc == d {
+            node::remove_node(n);
+        } else {
+            node::adopt(realm, n, d);
+        }
     }
     Ok(arg(args, 0))
 }
@@ -464,7 +495,50 @@ fn d_writeln(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     write_html(realm, d, &text)
 }
 
+thread_local! {
+    /// Documents opened with `document.open()` (not yet closed) and the
+    /// markup written to them so far.
+    static OPEN_DOCS: std::cell::RefCell<std::collections::HashMap<u32, String>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Replace the whole content of document `d` with `html` parsed as a new
+/// document (the script-created parser of `document.open()`).
+fn replace_document_content(d: u32, html: &str) {
+    let parsed = rabbithole_html::parse(html);
+    let root = NodeRef { doc: d, node: Document::ROOT };
+    let removed = node::children_of(root);
+    let added: Vec<NodeRef> = with_doc(d, |doc| {
+        doc.clear_children(Document::ROOT);
+        doc.quirks_mode = parsed.quirks_mode;
+        parsed
+            .children(Document::ROOT)
+            .map(|c| {
+                let n = doc.import_subtree(&parsed, c);
+                doc.append_child(Document::ROOT, n);
+                NodeRef { doc: d, node: n }
+            })
+            .collect()
+    });
+    node::record_child_list(root, added, removed);
+    if d == 0 {
+        mark_dirty();
+    }
+}
+
 fn write_html(realm: &mut Realm, d: u32, html: &str) -> JsResult<Value> {
+    // A document opened by `document.open()`: its content is the markup
+    // written so far.
+    let open = OPEN_DOCS.with(|o| {
+        let mut o = o.borrow_mut();
+        o.get_mut(&d).map(|buf| {
+            buf.push_str(html);
+            buf.clone()
+        })
+    });
+    if let Some(markup) = open {
+        replace_document_content(d, &markup);
+        return Ok(Value::Undefined);
+    }
     let (loading, current) = {
         let st = state();
         let st = st.borrow();
@@ -491,11 +565,31 @@ fn write_html(realm: &mut Realm, d: u32, html: &str) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
-fn d_open(_realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+/// `document.open()`: outside of the main document's own parsing, empty
+/// the document and start a new script-created parser (HTML §8.4.1).
+fn d_open(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    let parsing = d == 0 && state().borrow().loading;
+    if !parsing {
+        OPEN_DOCS.with(|o| o.borrow_mut().insert(d, String::new()));
+        let root = NodeRef { doc: d, node: Document::ROOT };
+        let removed = node::children_of(root);
+        with_doc(d, |doc| doc.clear_children(Document::ROOT));
+        node::record_child_list(root, Vec::new(), removed);
+        if d == 0 {
+            mark_dirty();
+        }
+    }
     Ok(this)
 }
 
-fn d_close(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+/// `document.close()`: finish the script-created parser (an empty write
+/// still produces html/head/body).
+fn d_close(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    if let Some(markup) = OPEN_DOCS.with(|o| o.borrow_mut().remove(&d)) {
+        replace_document_content(d, &markup);
+    }
     Ok(Value::Undefined)
 }
 
@@ -590,8 +684,52 @@ fn d_true(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
 }
 
 fn d_doctype(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let _ = this_doc(realm, &this)?;
-    Ok(object_from(realm, vec![("name", Value::str("html")), ("publicId", Value::str("")), ("systemId", Value::str("")), ("nodeType", Value::Number(10.0)), ("nodeName", Value::str("html"))]))
+    let d = this_doc(realm, &this)?;
+    let dt = with_doc(d, |doc| doc.doctype());
+    Ok(wrap_opt(realm, d, dt))
+}
+
+fn d_compat_mode(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    let quirks = with_doc(d, |doc| doc.quirks_mode == rabbithole_dom::QuirksMode::Quirks);
+    Ok(Value::str(if quirks { "BackCompat" } else { "CSS1Compat" }))
+}
+
+/// `__rhNative.createDoctype(document, name, publicId, systemId)`: a new
+/// DocumentType node owned by `document` (DOMImplementation.createDocumentType).
+pub(crate) fn create_doctype(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &arg(args, 0))?;
+    let name = arg_str(realm, args, 1)?;
+    let public_id = arg_str_opt(realm, args, 2)?.unwrap_or_default();
+    let system_id = arg_str_opt(realm, args, 3)?.unwrap_or_default();
+    let node = with_doc(d, |doc| doc.create(NodeData::Doctype(rabbithole_dom::DoctypeData { name, public_id, system_id })));
+    Ok(wrap(realm, NodeRef { doc: d, node }))
+}
+
+/// `__rhNative.createXMLDocument()`: a new, empty XML document
+/// (DOMImplementation.createDocument).
+pub(crate) fn create_xml_document(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    let mut doc = Document::new();
+    doc.is_html = false;
+    let key = {
+        let st = state();
+        let mut st = st.borrow_mut();
+        st.extra_docs.push(doc);
+        st.extra_docs.len() as u32
+    };
+    Ok(wrap(realm, NodeRef { doc: key, node: Document::ROOT }))
+}
+
+/// `__rhNative.validateQName(name)`: throws the DOMException of "validate"
+/// for a qualified name (InvalidCharacterError / NamespaceError).
+pub(crate) fn validate_qname(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let name = arg_str(realm, args, 0)?;
+    // Any namespace: only the Name / QName productions are checked.
+    let ns = if name == "xmlns" || name.starts_with("xmlns:") { "http://www.w3.org/2000/xmlns/" } else if name.starts_with("xml:") { "http://www.w3.org/XML/1998/namespace" } else { "urn:x" };
+    match validate_and_extract(Some(ns.to_string()), &name) {
+        Ok(_) => Ok(Value::Undefined),
+        Err((n, msg)) => Err(crate::misc::dom_exception(realm, n, &msg)),
+    }
 }
 
 pub(crate) fn install(realm: &mut Realm) {
@@ -627,8 +765,9 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "pictureInPictureElement", d_null, None);
     acc(realm, "fonts", d_fonts, None);
     acc(realm, "doctype", d_doctype, None);
+    acc(realm, "compatMode", d_compat_mode, None);
     acc(realm, "location", crate::window::location_getter, None);
-    for (name, val) in [("characterSet", "UTF-8"), ("charset", "UTF-8"), ("inputEncoding", "UTF-8"), ("contentType", "text/html"), ("compatMode", "CSS1Compat"), ("visibilityState", "visible"), ("designMode", "off"), ("dir", "")] {
+    for (name, val) in [("characterSet", "UTF-8"), ("charset", "UTF-8"), ("inputEncoding", "UTF-8"), ("contentType", "text/html"), ("visibilityState", "visible"), ("designMode", "off"), ("dir", "")] {
         let data: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(val.to_string());
         let g = realm.new_native_function_full(&format!("get {name}"), 0, d_constant_str, Some(data), vec![], false);
         realm.define_accessor_values(d, name, Some(Value::Object(g)), None, ACC);

@@ -479,7 +479,7 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect) -
         }
         .to_string(),
         "pointer-events" => if s.pointer_events == rabbithole_style::PointerEvents::None { "none".into() } else { "auto".into() },
-        "cursor" => if s.cursor_pointer { "pointer".into() } else { "auto".into() },
+        "cursor" => s.cursor.into(),
         "transform" => if s.transform.is_empty() { "none".into() } else { let m = rabbithole_style::transform_matrix(&s.transform, r.w, r.h, s.font_size); format!("matrix({}, {}, {}, {}, {}, {})", m[0], m[1], m[2], m[3], m[4], m[5]) },
         "text-decoration" | "text-decoration-line" => {
             let mut parts = Vec::new();

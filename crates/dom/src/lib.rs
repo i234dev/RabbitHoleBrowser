@@ -6,6 +6,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
+mod live;
+pub use live::{BoundaryPoint, IteratorPosition};
+
 pub type NodeId = usize;
 
 #[derive(Debug, Clone)]
@@ -14,14 +17,78 @@ pub enum NodeData {
     Element(ElementData),
     Text(String),
     Comment(String),
+    /// A `<!DOCTYPE>` node (a child of the document).
+    Doctype(DoctypeData),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DoctypeData {
+    pub name: String,
+    pub public_id: String,
+    pub system_id: String,
+}
+
+/// An element's namespace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Namespace {
+    #[default]
+    Html,
+    Svg,
+    MathMl,
+    /// No namespace (`createElementNS(null, ...)`).
+    None,
+    /// Any other namespace URI.
+    Other(String),
+}
+
+impl Namespace {
+    pub const HTML: &'static str = "http://www.w3.org/1999/xhtml";
+    pub const SVG: &'static str = "http://www.w3.org/2000/svg";
+    pub const MATHML: &'static str = "http://www.w3.org/1998/Math/MathML";
+
+    pub fn from_uri(uri: Option<&str>) -> Namespace {
+        match uri {
+            None | Some("") => Namespace::None,
+            Some(Self::HTML) => Namespace::Html,
+            Some(Self::SVG) => Namespace::Svg,
+            Some(Self::MATHML) => Namespace::MathMl,
+            Some(u) => Namespace::Other(u.to_string()),
+        }
+    }
+
+    /// The namespace URI (`None` for no namespace).
+    pub fn uri(&self) -> Option<&str> {
+        match self {
+            Namespace::Html => Some(Self::HTML),
+            Namespace::Svg => Some(Self::SVG),
+            Namespace::MathMl => Some(Self::MATHML),
+            Namespace::None => None,
+            Namespace::Other(u) => Some(u),
+        }
+    }
+}
+
+/// How the document was parsed (HTML "quirks mode", from the DOCTYPE).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QuirksMode {
+    #[default]
+    NoQuirks,
+    LimitedQuirks,
+    Quirks,
 }
 
 #[derive(Debug, Clone)]
 pub struct ElementData {
-    /// Lower-cased local name (`div`, `a`, `img`, ...).
+    /// Local name: lower-cased for HTML elements (`div`, `a`, `img`, ...),
+    /// as given for elements in other namespaces.
     pub tag: String,
     /// Attributes in source order; names lower-cased.
     pub attrs: Vec<(String, String)>,
+    /// Namespace (HTML unless created in foreign content or through
+    /// `createElementNS`).
+    pub ns: Namespace,
+    /// Namespace prefix (`p` for `createElementNS(ns, "p:x")`).
+    pub prefix: Option<String>,
 }
 
 impl ElementData {
@@ -110,6 +177,24 @@ pub struct Document {
     pub sheet_overrides: HashMap<NodeId, (String, String)>,
     /// Custom elements whose constructor ran (`:defined`).
     pub defined_custom: std::collections::HashSet<NodeId>,
+    /// Quirks mode decided by the parser from the DOCTYPE.
+    pub quirks_mode: QuirksMode,
+    /// An HTML document (`false` for XML documents made by
+    /// `createDocument`): decides `tagName` upper-casing.
+    pub is_html: bool,
+    /// Live range boundary points, updated by tree and text mutations
+    /// (DOM §5.5 "live ranges"). Slots are freed with `remove_live_point`.
+    pub live_points: Vec<Option<BoundaryPoint>>,
+    /// Live NodeIterator positions (reference / candidate nodes), updated
+    /// by the "pre-removing steps".
+    pub live_iterators: Vec<Option<IteratorPosition>>,
+    /// Current values of form controls changed by the user or a script
+    /// (HTML "dirty value"); the `value` attribute stays the default value.
+    pub control_values: HashMap<NodeId, String>,
+    /// Checkedness of checkboxes / radio buttons changed by the user or a
+    /// script (HTML "dirty checkedness"); the `checked` attribute stays the
+    /// default.
+    pub checkedness: HashMap<NodeId, bool>,
 }
 
 impl Default for Document {
@@ -142,6 +227,12 @@ impl Document {
             adopted_styles: HashMap::new(),
             sheet_overrides: HashMap::new(),
             defined_custom: std::collections::HashSet::new(),
+            quirks_mode: QuirksMode::NoQuirks,
+            is_html: true,
+            live_points: Vec::new(),
+            live_iterators: Vec::new(),
+            control_values: HashMap::new(),
+            checkedness: HashMap::new(),
         }
     }
 
@@ -208,7 +299,21 @@ impl Document {
         self.create(NodeData::Element(ElementData {
             tag: tag.to_ascii_lowercase(),
             attrs,
+            ns: Namespace::Html,
+            prefix: None,
         }))
+    }
+
+    /// Create an element in namespace `ns` with local name `local` (kept
+    /// as given) and an optional prefix.
+    pub fn create_element_ns(&mut self, ns: Namespace, prefix: Option<String>, local: &str, attrs: Vec<(String, String)>) -> NodeId {
+        let tag = if ns == Namespace::Html { local.to_ascii_lowercase() } else { local.to_string() };
+        self.create(NodeData::Element(ElementData { tag, attrs, ns, prefix }))
+    }
+
+    /// The DOCTYPE child of the document, if any.
+    pub fn doctype(&self) -> Option<NodeId> {
+        self.children(Self::ROOT).find(|&c| matches!(self.nodes[c].data, NodeData::Doctype(_)))
     }
 
     pub fn create_text(&mut self, text: &str) -> NodeId {
@@ -245,6 +350,9 @@ impl Document {
     /// None). No-op for the document node.
     pub fn detach(&mut self, child: NodeId) {
         let Some(parent) = self.nodes[child].parent else { return };
+        if self.has_live_positions() {
+            self.live_before_remove(parent, child);
+        }
         let prev = self.nodes[child].prev_sibling;
         let next = self.nodes[child].next_sibling;
         match prev {
@@ -275,6 +383,10 @@ impl Document {
                 if self.nodes[r].parent != Some(parent) {
                     self.append_child(parent, child);
                     return;
+                }
+                if self.has_live_positions() {
+                    let index = self.index_of(r);
+                    self.live_after_insert(parent, index);
                 }
                 let prev = self.nodes[r].prev_sibling;
                 self.nodes[child].parent = Some(parent);
@@ -310,10 +422,65 @@ impl Document {
         false
     }
 
+    /// The current value of a form control: its dirty value when the user
+    /// or a script changed it, else the `value` attribute (default value).
+    pub fn control_value(&self, id: NodeId) -> Option<&str> {
+        self.control_values.get(&id).map(|s| s.as_str()).or_else(|| self.attr(id, "value"))
+    }
+
+    /// Set (`Some`) or clear (`None`, back to the default value) the dirty
+    /// value of a form control. Recorded as a change of `value`.
+    pub fn set_control_value(&mut self, id: NodeId, value: Option<&str>) {
+        let old = self.control_value(id).map(|s| s.to_string());
+        match value {
+            Some(v) => {
+                if self.control_values.get(&id).map(|s| s.as_str()) == Some(v) {
+                    return;
+                }
+                self.control_values.insert(id, v.to_string());
+            }
+            None => {
+                if self.control_values.remove(&id).is_none() {
+                    return;
+                }
+            }
+        }
+        self.record(Mutation::Attr { node: id, name: "value".into(), old });
+    }
+
+    /// Checkedness of a checkbox / radio button: its dirty checkedness when
+    /// the user or a script changed it, else whether `checked` is present.
+    pub fn is_checked(&self, id: NodeId) -> bool {
+        match self.checkedness.get(&id) {
+            Some(&c) => c,
+            None => self.attr(id, "checked").is_some(),
+        }
+    }
+
+    /// Set (`Some`) the checkedness of a control, or clear it (`None`, back
+    /// to the default from the `checked` attribute). Recorded as a change
+    /// of `checked`.
+    pub fn set_checked(&mut self, id: NodeId, checked: Option<bool>) {
+        let old = self.is_checked(id);
+        let prev = match checked {
+            Some(c) => self.checkedness.insert(id, c),
+            None => self.checkedness.remove(&id),
+        };
+        if prev != checked || self.is_checked(id) != old {
+            self.record(Mutation::Attr { node: id, name: "checked".into(), old: old.then(String::new) });
+        }
+    }
+
     /// Deep-copy a subtree; the copy is detached.
     pub fn clone_subtree(&mut self, root: NodeId, deep: bool) -> NodeId {
         let data = self.nodes[root].data.clone();
         let copy = self.create(data);
+        if let Some(v) = self.control_values.get(&root).cloned() {
+            self.control_values.insert(copy, v);
+        }
+        if let Some(&c) = self.checkedness.get(&root) {
+            self.checkedness.insert(copy, c);
+        }
         if deep {
             let children: Vec<NodeId> = self.children(root).collect();
             for c in children {
@@ -328,6 +495,12 @@ impl Document {
     /// is detached.
     pub fn import_subtree(&mut self, other: &Document, root: NodeId) -> NodeId {
         let copy = self.create(other.nodes[root].data.clone());
+        if let Some(v) = other.control_values.get(&root) {
+            self.control_values.insert(copy, v.clone());
+        }
+        if let Some(&c) = other.checkedness.get(&root) {
+            self.checkedness.insert(copy, c);
+        }
         for c in other.children(root) {
             let cc = self.import_subtree(other, c);
             self.append_child(copy, cc);
@@ -376,8 +549,12 @@ impl Document {
     pub fn set_text(&mut self, id: NodeId, text: &str) {
         if let NodeData::Text(t) = &mut self.nodes[id].data {
             if t != text {
+                let old_len = t.encode_utf16().count();
                 *t = text.to_string();
                 self.record(Mutation::Text { node: id });
+                if !self.live_points.is_empty() {
+                    self.live_replace_data(id, 0, old_len, text.encode_utf16().count());
+                }
             }
         }
     }
@@ -652,6 +829,11 @@ impl Document {
                 out.push_str(c);
                 out.push_str("-->");
             }
+            NodeData::Doctype(d) => {
+                out.push_str("<!DOCTYPE ");
+                out.push_str(&d.name);
+                out.push('>');
+            }
         }
     }
 
@@ -807,6 +989,7 @@ impl Document {
                 let short: String = c.chars().take(40).collect();
                 writeln!(out, "{pad}<!-- {short} -->").unwrap();
             }
+            NodeData::Doctype(d) => writeln!(out, "{pad}<!DOCTYPE {}>", d.name).unwrap(),
         }
         for c in self.children(id) {
             self.dump_into(c, depth + 1, out);

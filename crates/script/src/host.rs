@@ -352,7 +352,12 @@ pub(crate) fn svg_class(tag: &str) -> &'static str {
 }
 
 fn is_svg_node(doc: &Document, node: NodeId) -> bool {
-    doc.attr(node, "data-rh-ns") == Some("svg") || doc.is_element(node, "foreignobject") || doc.ancestor_or_self(node, |n| doc.is_element(n, "svg") || doc.is_element(n, "foreignobject")).map(|a| doc.is_element(a, "svg")).unwrap_or(false)
+    match doc.element(node).map(|e| &e.ns) {
+        Some(rabbithole_dom::Namespace::Svg) => true,
+        // HTML-namespaced nodes parsed into an <svg> subtree by innerHTML.
+        Some(rabbithole_dom::Namespace::Html) => doc.is_element(node, "foreignobject") || doc.ancestor_or_self(node, |n| doc.is_element(n, "svg") || doc.is_element(n, "foreignobject")).map(|a| doc.is_element(a, "svg")).unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Wrapper object for a node (cached).
@@ -364,6 +369,8 @@ pub(crate) fn wrap(realm: &mut Realm, n: NodeRef) -> Value {
         rabbithole_dom::NodeData::Document => ("Document", "HTMLDocument"),
         rabbithole_dom::NodeData::Text(_) => ("Text", "Text"),
         rabbithole_dom::NodeData::Comment(_) => ("Comment", "Comment"),
+        rabbithole_dom::NodeData::Doctype(_) => ("DocumentType", "DocumentType"),
+        rabbithole_dom::NodeData::Element(e) if matches!(e.ns, rabbithole_dom::Namespace::None | rabbithole_dom::Namespace::Other(_)) => ("Element", "Element"),
         rabbithole_dom::NodeData::Element(e) => {
             let svg = e.tag != "#fragment" && is_svg_node(doc, n.node);
             element_class(&e.tag, svg)

@@ -11,6 +11,7 @@ pub const ELEMENT_NODE: f64 = 1.0;
 pub const TEXT_NODE: f64 = 3.0;
 pub const COMMENT_NODE: f64 = 8.0;
 pub const DOCUMENT_NODE: f64 = 9.0;
+pub const DOCUMENT_TYPE_NODE: f64 = 10.0;
 pub const DOCUMENT_FRAGMENT_NODE: f64 = 11.0;
 
 // ------------------------------------------------------------------ helpers
@@ -22,6 +23,7 @@ pub(crate) fn node_type(n: NodeRef) -> f64 {
         NodeData::Element(_) => ELEMENT_NODE,
         NodeData::Text(_) => TEXT_NODE,
         NodeData::Comment(_) => COMMENT_NODE,
+        NodeData::Doctype(_) => DOCUMENT_TYPE_NODE,
     })
 }
 
@@ -30,14 +32,22 @@ pub(crate) fn node_name(n: NodeRef) -> String {
         NodeData::Document => "#document".into(),
         NodeData::Element(e) if e.tag == "#fragment" || e.tag == "#shadow-root" => "#document-fragment".into(),
         NodeData::Element(e) => {
-            if doc.ancestor_or_self(n.node, |a| doc.is_element(a, "svg")).is_some() {
-                e.tag.clone()
+            // The qualified name, upper-cased for HTML elements in an HTML
+            // document.
+            let qualified = match &e.prefix {
+                Some(p) => format!("{p}:{}", e.tag),
+                None => e.tag.clone(),
+            };
+            let html = e.ns == rabbithole_dom::Namespace::Html && doc.is_html && doc.ancestor_or_self(n.node, |a| doc.is_element(a, "svg")).is_none();
+            if html {
+                qualified.to_ascii_uppercase()
             } else {
-                e.tag.to_ascii_uppercase()
+                qualified
             }
         }
         NodeData::Text(_) => "#text".into(),
         NodeData::Comment(_) => "#comment".into(),
+        NodeData::Doctype(d) => d.name.clone(),
     })
 }
 
@@ -126,19 +136,127 @@ fn is_connected(n: NodeRef) -> bool {
     (n.doc == 0 || n.doc & crate::host::FRAME_DOC != 0) && with_doc(n.doc, |doc| doc.is_connected(n.node))
 }
 
-/// Adopt `child` into `target_doc` (copying when documents differ).
-fn adopt(child: NodeRef, target_doc: u32) -> NodeRef {
+/// Adopt `child` into `target_doc` (DOM "adopt"): it is removed from its
+/// parent and, when the documents differ, its subtree moves to the arena of
+/// the target document. Existing wrappers (and their listeners) follow the
+/// moved nodes, so script references stay valid.
+pub(crate) fn adopt(realm: &mut Realm, child: NodeRef, target_doc: u32) -> NodeRef {
     if child.doc == target_doc {
         return child;
     }
-    // Copy the subtree across documents. The original stays in its document
-    // (detached); wrappers keep pointing at the original, which is an
-    // accepted simplification.
+    remove_node(child);
     // (Main document, script-created documents and same-origin frame
     // documents all go through `with_doc`.)
     let src_clone: Document = with_doc(child.doc, |d| d.clone_subtree_readonly(child.node));
     let copied = with_doc(target_doc, |d| d.import_subtree(&src_clone, src_clone_root(&src_clone)));
+    let old: Vec<NodeId> = with_doc(child.doc, |d| d.descendants(child.node).collect());
+    let new: Vec<NodeId> = with_doc(target_doc, |d| d.descendants(copied).collect());
+    let moves: Vec<(NodeRef, NodeRef)> = old.into_iter().zip(new).map(|(o, n)| (NodeRef { doc: child.doc, node: o }, NodeRef { doc: target_doc, node: n })).collect();
+    repoint_wrappers(realm, &moves);
     NodeRef { doc: target_doc, node: copied }
+}
+
+/// Make the wrappers, listeners and inline handlers of nodes that moved to
+/// another document's arena refer to their new identity.
+fn repoint_wrappers(realm: &mut Realm, moves: &[(NodeRef, NodeRef)]) {
+    let st = state();
+    let mut st = st.borrow_mut();
+    for &(from, to) in moves {
+        if let Some(obj) = st.wrappers.remove(&from) {
+            if let Some(h) = realm.host_data_mut::<NodeRef>(obj) {
+                *h = to;
+            }
+            st.wrappers.insert(to, obj);
+        }
+        if let Some(l) = st.listeners.remove(&TargetKey::Node(from)) {
+            st.listeners.insert(TargetKey::Node(to), l);
+        }
+        let counts: Vec<(TargetKey, String)> = st.listener_counts.keys().filter(|(k, _)| *k == TargetKey::Node(from)).cloned().collect();
+        for key in counts {
+            if let Some(c) = st.listener_counts.remove(&key) {
+                st.listener_counts.insert((TargetKey::Node(to), key.1), c);
+            }
+        }
+        let handlers: Vec<(NodeRef, String)> = st.inline_handlers.keys().filter(|(k, _)| *k == from).cloned().collect();
+        for key in handlers {
+            if let Some(h) = st.inline_handlers.remove(&key) {
+                st.inline_handlers.insert((to, key.1), h);
+            }
+        }
+    }
+}
+
+/// What kind of node `n` is, for the pre-insertion checks.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Document,
+    Doctype,
+    Fragment,
+    Element,
+    Text,
+    Other,
+}
+
+fn kind_of(doc: &Document, id: NodeId) -> Kind {
+    match &doc.node(id).data {
+        NodeData::Document => Kind::Document,
+        NodeData::Doctype(_) => Kind::Doctype,
+        NodeData::Element(e) if e.tag == "#fragment" || e.tag == "#shadow-root" => Kind::Fragment,
+        NodeData::Element(_) => Kind::Element,
+        NodeData::Text(_) => Kind::Text,
+        NodeData::Comment(_) => Kind::Other,
+    }
+}
+
+/// DOM "ensure pre-insertion validity" (and the matching checks of
+/// "replace" when `replacing`): `child` is the reference child (insert) or
+/// the child being replaced.
+pub(crate) fn ensure_insert_validity(realm: &mut Realm, parent: NodeRef, node: NodeRef, child: Option<NodeId>, replacing: bool) -> JsResult<()> {
+    let parent_kind = with_doc(parent.doc, |doc| kind_of(doc, parent.node));
+    if !matches!(parent_kind, Kind::Document | Kind::Fragment | Kind::Element) {
+        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "This node type does not support this method."));
+    }
+    let (node_kind, frag_elements, frag_text) = with_doc(node.doc, |doc| {
+        let k = kind_of(doc, node.node);
+        let (mut elements, mut text) = (0, false);
+        if k == Kind::Fragment {
+            for c in doc.children(node.node) {
+                match kind_of(doc, c) {
+                    Kind::Element => elements += 1,
+                    Kind::Text => text = true,
+                    _ => {}
+                }
+            }
+        }
+        (k, elements, text)
+    });
+    let err = |realm: &mut Realm, msg: &str| Err(crate::misc::dom_exception(realm, "HierarchyRequestError", msg));
+    match node_kind {
+        Kind::Document => return err(realm, "Nodes of type '#document' may not be inserted inside nodes."),
+        Kind::Text if parent_kind == Kind::Document => return err(realm, "Nodes of type '#text' may not be inserted inside nodes of type '#document'."),
+        Kind::Doctype if parent_kind != Kind::Document => return err(realm, "Nodes of type 'DocumentType' may only be inserted inside a Document."),
+        _ => {}
+    }
+    if parent_kind != Kind::Document {
+        return Ok(());
+    }
+    let bad = with_doc(parent.doc, |doc| {
+        let kids: Vec<NodeId> = doc.children(parent.node).collect();
+        let others = |k: Kind| kids.iter().any(|&c| kind_of(doc, c) == k && (!replacing || Some(c) != child));
+        let pos = child.and_then(|c| kids.iter().position(|&k| k == c));
+        let doctype_after = pos.map(|i| kids[i + 1..].iter().any(|&c| kind_of(doc, c) == Kind::Doctype) || (!replacing && kind_of(doc, kids[i]) == Kind::Doctype)).unwrap_or(false);
+        let element_before = pos.map(|i| kids[..i].iter().any(|&c| kind_of(doc, c) == Kind::Element)).unwrap_or(false);
+        match node_kind {
+            Kind::Fragment => frag_elements > 1 || frag_text || (frag_elements == 1 && (others(Kind::Element) || doctype_after)),
+            Kind::Element => others(Kind::Element) || doctype_after,
+            Kind::Doctype => others(Kind::Doctype) || element_before || (child.is_none() && others(Kind::Element)),
+            _ => false,
+        }
+    });
+    if bad {
+        return err(realm, "Only one element and one doctype are allowed as children of a Document, in that order.");
+    }
+    Ok(())
 }
 
 fn src_clone_root(d: &Document) -> NodeId {
@@ -259,14 +377,19 @@ fn with_doc_in_state<R>(st: &HostState, doc: u32, f: impl FnOnce(&Document) -> R
 
 /// Insert `child` (or a fragment's children) into `parent` before `before`.
 pub(crate) fn insert_node(realm: &mut Realm, parent: NodeRef, child: NodeRef, before: Option<NodeId>) -> JsResult<()> {
-    let parent_is_ok = with_doc(parent.doc, |doc| doc.element(parent.node).is_some() || matches!(doc.node(parent.node).data, NodeData::Document));
-    if !parent_is_ok {
-        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "This node type does not support this method."));
-    }
-    let child = adopt(child, parent.doc);
-    if child.node == parent.node || with_doc(parent.doc, |doc| doc.is_ancestor(child.node, parent.node)) {
+    insert_node_checked(realm, parent, child, before, true)
+}
+
+/// `insert_node`; `validate` runs the pre-insertion checks (callers that
+/// already ran the "replace" checks pass false).
+pub(crate) fn insert_node_checked(realm: &mut Realm, parent: NodeRef, child: NodeRef, before: Option<NodeId>, validate: bool) -> JsResult<()> {
+    if child.doc == parent.doc && (child.node == parent.node || with_doc(parent.doc, |doc| doc.is_ancestor(child.node, parent.node))) {
         return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
     }
+    if validate {
+        ensure_insert_validity(realm, parent, child, before, false)?;
+    }
+    let child = adopt(realm, child, parent.doc);
     let inserted: Vec<NodeRef> = if is_fragment(child) {
         let kids = children_of(child);
         with_doc(parent.doc, |doc| {
@@ -660,10 +783,7 @@ fn n_node_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
 }
 
 pub(crate) fn set_character_data(n: NodeRef, v: &str) {
-    let old = with_doc(n.doc, |doc| match &mut doc.node_mut(n.node).data {
-        NodeData::Text(t) | NodeData::Comment(t) => Some(std::mem::replace(t, v.to_string())),
-        _ => None,
-    });
+    let old = with_doc(n.doc, |doc| doc.set_char_data(n.node, v));
     if old.is_some() {
         record_character_data(n, old);
         if n.doc == 0 {
@@ -675,7 +795,7 @@ pub(crate) fn set_character_data(n: NodeRef, v: &str) {
 fn n_text_content_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "textContent")?;
     Ok(with_doc(n.doc, |doc| match &doc.node(n.node).data {
-        NodeData::Document => Value::Null,
+        NodeData::Document | NodeData::Doctype(_) => Value::Null,
         NodeData::Text(t) | NodeData::Comment(t) => Value::str(t),
         _ => Value::str(&doc.text_content(n.node)),
     }))
@@ -687,10 +807,14 @@ fn n_text_content_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
         None | Some(Value::Null) | Some(Value::Undefined) => String::new(),
         Some(v) => realm.to_rust_string(v.clone())?,
     };
-    let is_char = with_doc(n.doc, |doc| matches!(doc.node(n.node).data, NodeData::Text(_) | NodeData::Comment(_)));
+    let (is_char, is_leaf) = with_doc(n.doc, |doc| match doc.node(n.node).data {
+        NodeData::Text(_) | NodeData::Comment(_) => (true, false),
+        NodeData::Document | NodeData::Doctype(_) => (false, true),
+        _ => (false, false),
+    });
     if is_char {
         set_character_data(n, &v);
-    } else {
+    } else if !is_leaf {
         set_text_content(n, &v);
     }
     Ok(Value::Undefined)
@@ -864,10 +988,14 @@ fn n_replace_child(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     if with_doc(n.doc, |doc| doc.parent(old.node)) != Some(n.node) {
         return Err(crate::misc::dom_exception(realm, "NotFoundError", "The node to be replaced is not a child of this node."));
     }
+    if new.doc == n.doc && (new.node == n.node || with_doc(n.doc, |doc| doc.is_ancestor(new.node, n.node))) {
+        return Err(crate::misc::dom_exception(realm, "HierarchyRequestError", "The new child element contains the parent."));
+    }
+    ensure_insert_validity(realm, n, new, Some(old.node), true)?;
     let next = with_doc(n.doc, |doc| doc.next_sibling(old.node));
-    remove_node(old);
     let next = next.filter(|nx| Some(*nx) != Some(new.node));
-    insert_node(realm, n, new, next)?;
+    remove_node(old);
+    insert_node_checked(realm, n, new, next, false)?;
     Ok(arg(args, 1))
 }
 
@@ -1134,14 +1262,39 @@ fn cd_data_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 fn cd_length(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "length")?;
-    Ok(Value::Number(with_doc(n.doc, |doc| doc.text(n.node).map(|t| t.encode_utf16().count()).unwrap_or(0)) as f64))
+    Ok(Value::Number(with_doc(n.doc, |doc| doc.char_data(n.node).map(|t| t.encode_utf16().count()).unwrap_or(0)) as f64))
 }
 
 fn cd_append_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "appendData")?;
     let v = arg_str(realm, args, 0)?;
-    let cur = with_doc(n.doc, |doc| doc.text(n.node).unwrap_or("").to_string());
-    set_character_data(n, &format!("{cur}{v}"));
+    let len = with_doc(n.doc, |doc| doc.char_data(n.node).map(|t| t.encode_utf16().count()).unwrap_or(0));
+    replace_character_data(n, len, 0, &v);
+    Ok(Value::Undefined)
+}
+
+/// DOM "replace data" (live ranges follow); offsets in UTF-16 code units.
+pub(crate) fn replace_character_data(n: NodeRef, offset: usize, count: usize, data: &str) {
+    let old = with_doc(n.doc, |doc| doc.replace_data(n.node, offset, count, data));
+    if old.is_some() {
+        record_character_data(n, old);
+        if n.doc == 0 {
+            mark_dirty();
+        }
+    }
+}
+
+/// `CharacterData.replaceData(offset, count, data)`.
+fn cd_replace_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "replaceData")?;
+    let off = realm.to_number(arg(args, 0))? as i64 as u32 as usize;
+    let count = realm.to_number(arg(args, 1))? as i64 as u32 as usize;
+    let data = arg_str(realm, args, 2)?;
+    let len = with_doc(n.doc, |doc| doc.char_data(n.node).map(|t| t.encode_utf16().count()).unwrap_or(0));
+    if off > len {
+        return Err(crate::misc::dom_exception(realm, "IndexSizeError", &format!("The offset {off} is greater than the node's length ({len}).")));
+    }
+    replace_character_data(n, off, count, &data);
     Ok(Value::Undefined)
 }
 
@@ -1149,7 +1302,7 @@ fn cd_substring_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
     let n = this_node(realm, &this, "substringData")?;
     let off = realm.to_number(arg(args, 0))?.max(0.0) as usize;
     let count = realm.to_number(arg(args, 1))?.max(0.0) as usize;
-    let cur = with_doc(n.doc, |doc| doc.text(n.node).unwrap_or("").to_string());
+    let cur = with_doc(n.doc, |doc| doc.char_data(n.node).unwrap_or("").to_string());
     let units: Vec<u16> = cur.encode_utf16().collect();
     let end = (off + count).min(units.len());
     let s = String::from_utf16_lossy(&units[off.min(units.len())..end]);
@@ -1158,22 +1311,25 @@ fn cd_substring_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
 
 fn text_split(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "splitText")?;
-    let off = realm.to_number(arg(args, 0))?.max(0.0) as usize;
-    let cur = with_doc(n.doc, |doc| doc.text(n.node).unwrap_or("").to_string());
-    let units: Vec<u16> = cur.encode_utf16().collect();
-    let off = off.min(units.len());
-    let head = String::from_utf16_lossy(&units[..off]);
-    let tail = String::from_utf16_lossy(&units[off..]);
-    set_character_data(n, &head);
-    let new = with_doc(n.doc, |doc| {
-        let t = doc.create_text(&tail);
-        if let Some(p) = doc.parent(n.node) {
-            let next = doc.next_sibling(n.node);
-            doc.insert_before(p, t, next);
-        }
-        t
+    let off = realm.to_number(arg(args, 0))? as i64 as u32 as usize;
+    let (old, len, parent) = with_doc(n.doc, |doc| {
+        let t = doc.char_data(n.node).unwrap_or("").to_string();
+        let len = t.encode_utf16().count();
+        (t, len, doc.parent(n.node))
     });
-    Ok(wrap(realm, NodeRef { doc: n.doc, node: new }))
+    if off > len {
+        return Err(crate::misc::dom_exception(realm, "IndexSizeError", &format!("The offset {off} is larger than the Text node's length.")));
+    }
+    let new = with_doc(n.doc, |doc| doc.split_text(n.node, off));
+    let new = NodeRef { doc: n.doc, node: new };
+    if let Some(p) = parent {
+        record_child_list(NodeRef { doc: n.doc, node: p }, vec![new], Vec::new());
+    }
+    record_character_data(n, Some(old));
+    if n.doc == 0 {
+        mark_dirty();
+    }
+    Ok(wrap(realm, new))
 }
 
 fn text_whole(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1198,6 +1354,28 @@ fn text_whole(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
         out
     });
     Ok(Value::str(&s))
+}
+
+// DocumentType
+
+fn doctype_field(realm: &mut Realm, this: &Value, f: fn(&rabbithole_dom::DoctypeData) -> &str) -> JsResult<Value> {
+    let n = this_node(realm, this, "DocumentType")?;
+    Ok(Value::str(&with_doc(n.doc, |doc| match &doc.node(n.node).data {
+        NodeData::Doctype(d) => f(d).to_string(),
+        _ => String::new(),
+    })))
+}
+
+fn doctype_name(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    doctype_field(realm, &this, |d| &d.name)
+}
+
+fn doctype_public_id(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    doctype_field(realm, &this, |d| &d.public_id)
+}
+
+fn doctype_system_id(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    doctype_field(realm, &this, |d| &d.system_id)
 }
 
 fn text_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1327,13 +1505,17 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(cd, "data", Some(cd_data_get), Some(cd_data_set), rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_accessor(cd, "length", Some(cd_length), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_method(cd, "appendData", 1, cd_append_data);
+    realm.define_method(cd, "replaceData", 3, cd_replace_data);
     realm.define_method(cd, "substringData", 2, cd_substring_data);
     let text = define_class(realm, "Text", Some("CharacterData"), text_ctor);
     realm.define_method(text, "splitText", 1, text_split);
     realm.define_accessor(text, "wholeText", Some(text_whole), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     define_class(realm, "Comment", Some("CharacterData"), comment_ctor);
     define_class(realm, "CDATASection", Some("Text"), illegal_ctor);
-    define_class(realm, "DocumentType", Some("Node"), illegal_ctor);
+    let dt = define_class(realm, "DocumentType", Some("Node"), illegal_ctor);
+    realm.define_accessor(dt, "name", Some(doctype_name), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
+    realm.define_accessor(dt, "publicId", Some(doctype_public_id), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
+    realm.define_accessor(dt, "systemId", Some(doctype_system_id), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     define_class(realm, "ProcessingInstruction", Some("CharacterData"), illegal_ctor);
     let frag = define_class(realm, "DocumentFragment", Some("Node"), fragment_ctor);
     realm.define_method(frag, "getElementById", 1, fragment_get_element_by_id);

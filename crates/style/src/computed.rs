@@ -704,7 +704,8 @@ pub struct ComputedStyle {
     pub overflow_y: Overflow,
     pub visibility: Visibility,
     pub z_index: Option<i32>,
-    pub cursor_pointer: bool,
+    /// `cursor` keyword (one of [`CURSOR_KEYWORDS`]).
+    pub cursor: &'static str,
 
     // ---- flexbox
     pub flex_grow: f32,
@@ -854,7 +855,7 @@ impl ComputedStyle {
             overflow_y: Overflow::Visible,
             visibility: Visibility::Visible,
             z_index: None,
-            cursor_pointer: false,
+            cursor: "auto",
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
@@ -948,7 +949,7 @@ impl ComputedStyle {
             list_style_type: parent.list_style_type,
             list_style_position: parent.list_style_position,
             visibility: parent.visibility,
-            cursor_pointer: parent.cursor_pointer,
+            cursor: parent.cursor,
             text_shadow: parent.text_shadow.clone(),
             word_break: parent.word_break,
             overflow_wrap: parent.overflow_wrap,
@@ -988,7 +989,7 @@ impl ComputedStyle {
             && self.list_style_type == o.list_style_type
             && self.list_style_position == o.list_style_position
             && self.visibility == o.visibility
-            && self.cursor_pointer == o.cursor_pointer
+            && self.cursor == o.cursor
             && self.text_shadow == o.text_shadow
             && self.word_break == o.word_break
             && self.overflow_wrap == o.overflow_wrap
@@ -1057,5 +1058,20 @@ impl ComputedStyle {
     pub fn has_visible_border(&self) -> bool {
         self.border_style.as_array().iter().any(|s| s.is_visible())
             && self.border_width.as_array().iter().any(|w| *w > 0.0)
+    }
+}
+
+/// The `cursor` keywords (CSS Basic User Interface 4 §5.1).
+pub const CURSOR_KEYWORDS: &[&str] = &[
+    "auto", "default", "none", "context-menu", "help", "pointer", "progress", "wait", "cell", "crosshair", "text",
+    "vertical-text", "alias", "copy", "move", "no-drop", "not-allowed", "grab", "grabbing", "e-resize", "n-resize",
+    "ne-resize", "nw-resize", "s-resize", "se-resize", "sw-resize", "w-resize", "ew-resize", "ns-resize",
+    "nesw-resize", "nwse-resize", "col-resize", "row-resize", "all-scroll", "zoom-in", "zoom-out",
+];
+
+impl ComputedStyle {
+    /// Does the element ask for the link (hand) cursor?
+    pub fn cursor_pointer(&self) -> bool {
+        self.cursor == "pointer"
     }
 }

@@ -177,43 +177,23 @@
   }, undefined, true);
 
   // ---------------------------------------- DOMImplementation / DocumentType
-  class DocumentType extends g.Node { constructor() { super(); ILLEGAL(); } }
-  Object.setPrototypeOf(DocumentType.prototype, g.Node.prototype);
-  if (g.DocumentType) {
-    for (const k of Reflect.ownKeys(g.DocumentType.prototype)) if (k !== 'constructor') { try { Object.defineProperty(DocumentType.prototype, k, Object.getOwnPropertyDescriptor(g.DocumentType.prototype, k)); } catch (e) {} }
-  }
-  for (const k of ['name', 'publicId', 'systemId']) Object.defineProperty(DocumentType.prototype, k, { get() { return this[S] ? this[S][k] : ''; }, configurable: true, enumerable: true });
-  Object.defineProperty(DocumentType.prototype, 'nodeType', { get() { return 10; }, configurable: true });
-  Object.defineProperty(DocumentType.prototype, 'nodeName', { get() { return this[S] ? this[S].name : ''; }, configurable: true });
-  for (const k of ['parentNode', 'parentElement', 'previousSibling', 'nextSibling', 'firstChild', 'lastChild', 'nodeValue', 'textContent']) Object.defineProperty(DocumentType.prototype, k, { get() { return k === 'parentNode' ? (this[S] && this[S].doc) || null : null; }, configurable: true });
-  Object.defineProperty(DocumentType.prototype, 'childNodes', { get() { return Object.setPrototypeOf([], g.NodeList.prototype); }, configurable: true });
-  Object.defineProperty(DocumentType.prototype, 'ownerDocument', { get() { return (this[S] && this[S].doc) || document; }, configurable: true });
-  for (const k of ['before', 'after', 'replaceWith', 'remove']) hidden(DocumentType.prototype, k, function () {});
-  tag(DocumentType, 'DocumentType');
-  define('DocumentType', DocumentType);
-  const doctypes = new WeakMap();
-  function makeDoctype(name, publicId, systemId, doc) { const d = Object.create(DocumentType.prototype); hidden(d, S, { name: String(name), publicId: String(publicId || ''), systemId: String(systemId || ''), doc: doc || null }); return d; }
-  acc(g.Document, 'doctype', function () {
-    if (this.compatMode === 'BackCompat' && !doctypes.has(this)) return null;
-    let d = doctypes.get(this);
-    if (!d) { d = makeDoctype('html', '', '', this); doctypes.set(this, d); }
-    return d;
-  }, undefined, true);
-
+  // DocumentType nodes are native (parsed `<!DOCTYPE>` and
+  // createDocumentType); `document.doctype` / `compatMode` too.
   class DOMImplementation {
     constructor() { ILLEGAL(); }
     createDocumentType(name, publicId, systemId) {
       name = String(name);
-      if (!/^[A-Za-z_:][\w:.-]*$/.test(name)) throw domError(`The qualified name provided ('${name}') contains the invalid name-start character.`, 'InvalidCharacterError');
-      return makeDoctype(name, publicId, systemId, this[S]);
+      N.validateQName(name);
+      return N.createDoctype(this[S], name, String(publicId), String(systemId));
     }
     createDocument(ns, qname, doctype) {
-      const d = new g.DOMParser().parseFromString('<html></html>', 'text/html');
-      while (d.documentElement && d.documentElement.firstChild) d.documentElement.firstChild.remove();
+      // DOM §4.5.1: an XML document with the doctype and the element.
+      const d = N.createXMLDocument();
       Object.setPrototypeOf(d, XMLDocument.prototype);
-      if (qname) { const root = d.createElementNS(ns, qname); if (d.documentElement) d.documentElement.replaceWith(root); else d.appendChild(root); }
-      else if (d.documentElement) d.documentElement.remove();
-      if (doctype) doctypes.set(d, doctype);
+      qname = qname === null || qname === undefined ? '' : String(qname);
+      const root = qname ? d.createElementNS(ns, qname) : null;
+      if (doctype) d.appendChild(doctype);
+      if (root) d.appendChild(root);
       return d;
     }
     createHTMLDocument(title) {
@@ -311,10 +291,23 @@
   }
   tag(StaticRange, 'StaticRange');
 
+  // A live range's boundary points are native live points: tree and text
+  // mutations update them (DOM §5.5).
+  class RangeState {
+    constructor(node) { hidden(this, 'a', N.liveBoundary(node, 0)); hidden(this, 'b', N.liveBoundary(node, 0)); }
+    get sc() { return this.a.node; }
+    set sc(v) { this.a.node = v; }
+    get so() { return this.a.offset; }
+    set so(v) { this.a.offset = v; }
+    get ec() { return this.b.node; }
+    set ec(v) { this.b.node = v; }
+    get eo() { return this.b.offset; }
+    set eo(v) { this.b.offset = v; }
+  }
   class Range extends AbstractRange {
     constructor() {
       const r = Object.create(new.target ? new.target.prototype : Range.prototype);
-      hidden(r, S, { sc: document, so: 0, ec: document, eo: 0 });
+      hidden(r, S, new RangeState(document));
       return r;
     }
     get commonAncestorContainer() { let a = this[S].sc; while (!isInclusiveAncestor(a, this[S].ec)) a = a.parentNode; return a; }
@@ -371,7 +364,7 @@
       this.selectNode(newParent);
       void s;
     }
-    cloneRange() { const r = new Range(); Object.assign(r[S], this[S]); return r; }
+    cloneRange() { const r = new Range(); const s = this[S], t = r[S]; t.sc = s.sc; t.so = s.so; t.ec = s.ec; t.eo = s.eo; return r; }
     detach() {}
     isPointInRange(node, offset) {
       const s = this[S];
@@ -496,47 +489,83 @@
     for (const k of Array.from(n.childNodes)) if (range.intersectsNode(k)) c.appendChild(cloneBounded(range, k));
     return c;
   }
+  // DOM §5.5 "extract" / "delete the contents" over explicit boundary
+  // points (extraction recurses into partially contained children with a
+  // subrange). Contained nodes are moved, not copied.
+  function pointsContain(n, sc, so, ec, eo) {
+    const p = n.parentNode;
+    if (!p) return false;
+    const i = index(n);
+    return comparePoints(p, i, sc, so) >= 0 && comparePoints(p, i + 1, ec, eo) <= 0;
+  }
+  function extractPoints(sc, so, ec, eo) {
+    const frag = (sc.nodeType === 9 ? sc : sc.ownerDocument).createDocumentFragment();
+    if (sc === ec && so === eo) return frag;
+    if (sc === ec && isCharData(sc)) {
+      const c = sc.cloneNode(); c.data = sc.data.slice(so, eo); frag.appendChild(c);
+      sc.replaceData(so, eo - so, '');
+      return frag;
+    }
+    let ca = sc; while (!isInclusiveAncestor(ca, ec)) ca = ca.parentNode;
+    const kids = Array.from(ca.childNodes);
+    const firstPartial = isInclusiveAncestor(sc, ec) ? null : kids.find((c) => isInclusiveAncestor(c, sc)) || null;
+    const lastPartial = isInclusiveAncestor(ec, sc) ? null : kids.find((c) => isInclusiveAncestor(c, ec)) || null;
+    const contained = kids.filter((c) => pointsContain(c, sc, so, ec, eo));
+    if (contained.some((c) => c.nodeType === 10)) throw domError("Failed to execute 'extractContents' on 'Range': The Range contains a doctype node.", 'HierarchyRequestError');
+    if (firstPartial) {
+      if (isCharData(firstPartial)) {
+        const c = sc.cloneNode(); c.data = sc.data.slice(so); frag.appendChild(c);
+        sc.replaceData(so, sc.data.length - so, '');
+      } else {
+        const c = firstPartial.cloneNode(false); frag.appendChild(c);
+        c.appendChild(extractPoints(sc, so, firstPartial, nodeLength(firstPartial)));
+      }
+    }
+    for (const n of contained) frag.appendChild(n);
+    if (lastPartial) {
+      if (isCharData(lastPartial)) {
+        const c = ec.cloneNode(); c.data = ec.data.slice(0, eo); frag.appendChild(c);
+        ec.replaceData(0, eo, '');
+      } else {
+        const c = lastPartial.cloneNode(false); frag.appendChild(c);
+        c.appendChild(extractPoints(lastPartial, 0, ec, eo));
+      }
+    }
+    return frag;
+  }
+  // Where a range collapses after its contents went away.
+  function collapsePoint(sc, so, ec) {
+    if (isInclusiveAncestor(sc, ec)) return [sc, so];
+    let ref = sc;
+    while (ref.parentNode && !isInclusiveAncestor(ref.parentNode, ec)) ref = ref.parentNode;
+    return [ref.parentNode, index(ref) + 1];
+  }
   function removeContents(range, extract) {
     const s = range[S];
-    const frag = document.createDocumentFragment();
-    if (range.collapsed) return extract ? frag : undefined;
-    if (s.sc === s.ec && isCharData(s.sc)) {
-      if (extract) { const c = s.sc.cloneNode(); c.data = s.sc.data.slice(s.so, s.eo); frag.appendChild(c); }
-      s.sc.replaceData(s.so, s.eo - s.so, '');
-      s.eo = s.so;
-      return extract ? frag : undefined;
+    const sc = s.sc, so = s.so, ec = s.ec, eo = s.eo;
+    if (sc === ec && so === eo) return extract ? (sc.nodeType === 9 ? sc : sc.ownerDocument).createDocumentFragment() : undefined;
+    const [newNode, newOffset] = sc === ec && isCharData(sc) ? [sc, so] : collapsePoint(sc, so, ec);
+    let frag;
+    if (extract) frag = extractPoints(sc, so, ec, eo);
+    else if (sc === ec && isCharData(sc)) sc.replaceData(so, eo - so, '');
+    else {
+      // Contained nodes (outermost only), then the partial text ends.
+      const doomed = [];
+      const collect = (n) => { for (const c of Array.from(n.childNodes)) { if (pointsContain(c, sc, so, ec, eo)) doomed.push(c); else if (isInclusiveAncestor(c, sc) || isInclusiveAncestor(c, ec)) collect(c); } };
+      let ca = sc; while (!isInclusiveAncestor(ca, ec)) ca = ca.parentNode;
+      collect(ca);
+      if (isCharData(sc)) sc.replaceData(so, sc.data.length - so, '');
+      for (const n of doomed) n.remove();
+      if (isCharData(ec)) ec.replaceData(0, eo, '');
     }
-    const ca = range.commonAncestorContainer;
-    // Where the collapsed range ends up.
-    let newNode, newOffset;
-    if (isInclusiveAncestor(s.sc, s.ec)) { newNode = s.sc; newOffset = s.so; }
-    else { let ref = s.sc; while (ref.parentNode && !isInclusiveAncestor(ref.parentNode, s.ec)) ref = ref.parentNode; newNode = ref.parentNode; newOffset = index(ref) + 1; }
-    for (const n of Array.from(ca.childNodes)) {
-      if (!range.intersectsNode(n)) continue;
-      if (contained(range, n)) { if (extract) frag.appendChild(n); else n.remove(); continue; }
-      if (extract) frag.appendChild(cloneBounded(range, n));
-      trimPartial(range, n);
-    }
-    s.sc = s.ec = newNode; s.so = s.eo = newOffset;
-    return extract ? frag : undefined;
-  }
-  function trimPartial(range, n) {
-    const s = range[S];
-    if (isCharData(n)) {
-      const from = n === s.sc ? s.so : 0, to = n === s.ec ? s.eo : n.data.length;
-      n.replaceData(from, to - from, '');
-      return;
-    }
-    for (const k of Array.from(n.childNodes)) {
-      if (!range.intersectsNode(k)) continue;
-      if (contained(range, k)) k.remove(); else trimPartial(range, k);
-    }
+    s.sc = newNode; s.so = newOffset; s.ec = newNode; s.eo = newOffset;
+    return frag;
   }
   define('AbstractRange', AbstractRange);
   define('StaticRange', StaticRange);
   define('Range', Range);
   N.registerProto('Range', Range.prototype);
-  method(g.Document, 'createRange', function () { const r = new Range(); r[S].sc = r[S].ec = this; return r; }, true);
+  method(g.Document, 'createRange', function () { const r = Object.create(Range.prototype); hidden(r, S, new RangeState(this)); return r; }, true);
   method(g.Document, 'caretRangeFromPoint', function (x, y) {
     const el = this.elementFromPoint(x, y);
     if (!el) return null;
@@ -724,8 +753,8 @@
   class NodeIterator {
     constructor() { ILLEGAL(); }
     get root() { return this[S].root; }
-    get referenceNode() { return this[S].ref; }
-    get pointerBeforeReferenceNode() { return this[S].before; }
+    get referenceNode() { return this[S].ref.node; }
+    get pointerBeforeReferenceNode() { return this[S].ref.before; }
     get whatToShow() { return this[S].what; }
     get filter() { return this[S].filter; }
     nextNode() { return iterate(this, true); }
@@ -735,16 +764,18 @@
   tag(NodeIterator, 'NodeIterator');
   function following(node, root) { if (node.firstChild) return node.firstChild; while (node && node !== root) { if (node.nextSibling) return node.nextSibling; node = node.parentNode; } return null; }
   function preceding(node, root) { if (node === root) return null; let p = node.previousSibling; if (p) { while (p.lastChild) p = p.lastChild; return p; } return node.parentNode; }
+  // The reference and the candidate being filtered are live positions:
+  // a filter that removes nodes moves them (DOM §6.1 pre-removing steps).
   function iterate(it, forward) {
-    const st = it[S];
-    let node = st.ref, before = st.before;
+    const st = it[S], ref = st.ref, cand = st.cand;
+    cand.node = ref.node; cand.before = ref.before;
     for (;;) {
+      let node = cand.node, before = cand.before;
       if (forward) { if (before) before = false; else { node = following(node, st.root); if (!node) return null; } }
       else { if (!before) before = true; else { node = preceding(node, st.root); if (!node) return null; } }
-      if (acceptNode(it, node) === 1) break;
+      cand.node = node; cand.before = before;
+      if (acceptNode(it, node) === 1) { ref.node = cand.node; ref.before = cand.before; return node; }
     }
-    st.ref = node; st.before = before;
-    return node;
   }
   define('TreeWalker', TreeWalker);
   define('NodeIterator', NodeIterator);
@@ -758,7 +789,7 @@
   method(g.Document, 'createNodeIterator', function (root, what = 0xFFFFFFFF, filter = null) {
     if (!(root instanceof g.Node)) throw new TypeError("Failed to execute 'createNodeIterator' on 'Document': parameter 1 is not of type 'Node'.");
     const it = Object.create(NodeIterator.prototype);
-    hidden(it, S, { root, what: what >>> 0, filter: filterOf(filter), ref: root, before: true, active: false });
+    hidden(it, S, { root, what: what >>> 0, filter: filterOf(filter), ref: N.liveIteratorPosition(root, root, true), cand: N.liveIteratorPosition(root, root, true), active: false });
     return it;
   }, true);
 

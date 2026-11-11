@@ -112,8 +112,26 @@ fn e_local_name(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
 
 fn e_namespace_uri(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "namespaceURI")?;
-    let svg = with_doc(n.doc, |doc| doc.ancestor_or_self(n.node, |a| doc.is_element(a, "svg")).is_some());
-    Ok(Value::str(if svg { "http://www.w3.org/2000/svg" } else { "http://www.w3.org/1999/xhtml" }))
+    let ns = with_doc(n.doc, |doc| {
+        let e = doc.element(n.node)?;
+        // HTML-namespaced nodes parsed into an <svg> subtree by innerHTML.
+        if e.ns == rabbithole_dom::Namespace::Html && doc.ancestor_or_self(n.node, |a| doc.is_element(a, "svg")).is_some() {
+            return Some(rabbithole_dom::Namespace::SVG.to_string());
+        }
+        e.ns.uri().map(|s| s.to_string())
+    });
+    Ok(match ns {
+        Some(u) => Value::str(&u),
+        None => Value::Null,
+    })
+}
+
+fn e_prefix(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "prefix")?;
+    Ok(match with_doc(n.doc, |doc| doc.element(n.node).and_then(|e| e.prefix.clone())) {
+        Some(p) => Value::str(&p),
+        None => Value::Null,
+    })
 }
 
 fn e_get_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1179,14 +1197,28 @@ fn a_to_string(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 // input ---------------------------------------------------------------------
 
+/// Does `value` of this `<input>` use the "value" mode (a dirty value
+/// separate from the `value` attribute)? Other modes reflect the attribute
+/// (HTML §4.10.5.4).
+fn input_value_mode_is_value(n: NodeRef) -> bool {
+    let ty = get_attribute(n, "type").map(|t| t.to_ascii_lowercase()).unwrap_or_default();
+    !matches!(ty.as_str(), "hidden" | "submit" | "image" | "reset" | "button" | "checkbox" | "radio" | "file")
+}
+
+/// The current value of a text-like control (dirty value, else default).
+pub(crate) fn control_value(n: NodeRef) -> Option<String> {
+    with_doc(n.doc, |doc| doc.control_value(n.node).map(|s| s.to_string()))
+}
+
 fn input_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "value")?;
     let tag = tag_of(n).unwrap_or_default();
     Ok(Value::str(&match tag.as_str() {
-        "textarea" => get_attribute(n, "value").unwrap_or_else(|| with_doc(n.doc, |doc| doc.text_content(n.node))),
+        "textarea" => control_value(n).unwrap_or_else(|| with_doc(n.doc, |doc| doc.text_content(n.node))),
         "select" => select_value(n),
         "option" => option_value(n),
         "button" => get_attribute(n, "value").unwrap_or_default(),
+        "input" if input_value_mode_is_value(n) => control_value(n).unwrap_or_default(),
         _ => {
             let ty = get_attribute(n, "type").map(|t| t.to_ascii_lowercase()).unwrap_or_default();
             let v = get_attribute(n, "value").unwrap_or_default();
@@ -1208,13 +1240,14 @@ fn input_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     let tag = tag_of(n).unwrap_or_default();
     if tag == "select" {
         set_select_value(n, &v);
+    } else if tag == "textarea" || (tag == "input" && input_value_mode_is_value(n)) {
+        // "value" mode: set the dirty value; the attribute is the default.
+        with_doc(n.doc, |doc| doc.set_control_value(n.node, Some(&v)));
+        if n.doc == 0 {
+            mark_dirty();
+        }
     } else {
         set_attribute(n, "value", Some(&v));
-        if tag == "input" {
-            // The dirty value flag: remember the user/script value separately
-            // from the default (attribute) value is not modelled; the
-            // attribute is the value.
-        }
     }
     Ok(Value::Undefined)
 }
@@ -1225,13 +1258,22 @@ fn input_default_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsRes
     Ok(Value::str(&if tag == "textarea" {
         with_doc(n.doc, |doc| doc.text_content(n.node))
     } else {
-        get_attribute(n, "data-rh-default").or_else(|| get_attribute(n, "value")).unwrap_or_default()
+        get_attribute(n, "value").unwrap_or_default()
     }))
 }
 
 fn input_checked_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "checked")?;
-    Ok(Value::Bool(get_attribute(n, "checked").is_some()))
+    Ok(Value::Bool(with_doc(n.doc, |doc| doc.is_checked(n.node))))
+}
+
+/// Set the checkedness of a control (its "dirty checkedness"; the
+/// `checked` attribute stays the default).
+pub(crate) fn set_checkedness(n: NodeRef, checked: Option<bool>) {
+    with_doc(n.doc, |doc| doc.set_checked(n.node, checked));
+    if n.doc == 0 {
+        mark_dirty();
+    }
 }
 
 fn input_checked_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1247,11 +1289,11 @@ fn input_checked_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
                     .collect()
             });
             for g in group {
-                set_attribute(NodeRef { doc: n.doc, node: g }, "checked", None);
+                set_checkedness(NodeRef { doc: n.doc, node: g }, Some(false));
             }
         }
     }
-    set_attribute(n, "checked", if b { Some("") } else { None });
+    set_checkedness(n, Some(b));
     Ok(Value::Undefined)
 }
 
@@ -1317,13 +1359,13 @@ fn input_files(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 fn input_validity(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "validity")?;
-    let missing = get_attribute(n, "required").is_some() && get_attribute(n, "value").map(|v| v.is_empty()).unwrap_or(true);
+    let missing = get_attribute(n, "required").is_some() && control_value(n).map(|v| v.is_empty()).unwrap_or(true);
     Ok(object_from(realm, vec![("valid", Value::Bool(!missing)), ("valueMissing", Value::Bool(missing)), ("typeMismatch", Value::Bool(false)), ("patternMismatch", Value::Bool(false)), ("tooLong", Value::Bool(false)), ("tooShort", Value::Bool(false)), ("rangeUnderflow", Value::Bool(false)), ("rangeOverflow", Value::Bool(false)), ("stepMismatch", Value::Bool(false)), ("badInput", Value::Bool(false)), ("customError", Value::Bool(false))]))
 }
 
 fn input_check_validity(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "checkValidity")?;
-    let missing = get_attribute(n, "required").is_some() && get_attribute(n, "value").map(|v| v.is_empty()).unwrap_or(true);
+    let missing = get_attribute(n, "required").is_some() && control_value(n).map(|v| v.is_empty()).unwrap_or(true);
     Ok(Value::Bool(!missing))
 }
 
@@ -1560,16 +1602,18 @@ fn form_reset(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
         let cr = NodeRef { doc: n.doc, node: c };
         let tag = tag_of(cr).unwrap_or_default();
         match tag.as_str() {
-            "textarea" => set_attribute(cr, "value", None),
             "select" => {}
             _ => {
                 let ty = get_attribute(cr, "type").map(|t| t.to_ascii_lowercase()).unwrap_or_default();
                 if matches!(ty.as_str(), "checkbox" | "radio") {
-                    let def = get_attribute(cr, "data-rh-default-checked").is_some();
-                    set_attribute(cr, "checked", if def { Some("") } else { None });
+                    // Back to the default checkedness.
+                    set_checkedness(cr, None);
                 } else {
-                    let def = get_attribute(cr, "data-rh-default");
-                    set_attribute(cr, "value", def.as_deref());
+                    // Back to the default value.
+                    with_doc(cr.doc, |doc| doc.set_control_value(cr.node, None));
+                    if cr.doc == 0 {
+                        mark_dirty();
+                    }
                 }
             }
         }
@@ -1581,7 +1625,7 @@ fn form_check_validity(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<
     let n = this_node(realm, &this, "checkValidity")?;
     let ok = with_doc(n.doc, |doc| {
         doc.descendants(n.node).all(|d| {
-            !(doc.is_element(d, "input") && doc.attr(d, "required").is_some() && doc.attr(d, "value").map(|v| v.is_empty()).unwrap_or(true))
+            !(doc.is_element(d, "input") && doc.attr(d, "required").is_some() && doc.control_value(d).map(|v| v.is_empty()).unwrap_or(true))
         })
     });
     Ok(Value::Bool(ok))
@@ -1886,7 +1930,7 @@ pub(crate) fn install(realm: &mut Realm) {
     acc(realm, "tagName", e_tag_name, None);
     acc(realm, "localName", e_local_name, None);
     acc(realm, "namespaceURI", e_namespace_uri, None);
-    acc(realm, "prefix", node_null, None);
+    acc(realm, "prefix", e_prefix, None);
     acc(realm, "id", e_id_get, Some(id_set));
     acc(realm, "className", e_class_name_get, Some(e_class_name_set));
     acc(realm, "classList", e_class_list, None);

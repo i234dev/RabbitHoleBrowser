@@ -378,9 +378,9 @@ impl<'a> Builder<'a> {
             "select" => self.build_select(node, &style),
             "textarea" => {
                 let mut t = LayoutBox::new(BoxKind::Text, None, style.clone());
-                // The edited ("dirty") value lives in the `value`
-                // attribute; the children are only the default value.
-                let mut value = doc.attr(node, "value").map(str::to_string).unwrap_or_else(|| doc.text_content(node));
+                // The edited ("dirty") value, else the default value (the
+                // text content).
+                let mut value = doc.control_value(node).map(str::to_string).unwrap_or_else(|| doc.text_content(node));
                 if value.is_empty() {
                     value = doc.attr(node, "placeholder").unwrap_or("").to_string();
                 }
@@ -506,7 +506,7 @@ impl<'a> Builder<'a> {
             "button" => doc.attr(node, "value").unwrap_or("").to_string(),
             "checkbox" | "radio" | "range" | "color" | "file" | "image" => String::new(),
             _ => doc
-                .attr(node, "value")
+                .control_value(node)
                 .filter(|v| !v.is_empty())
                 .or_else(|| doc.attr(node, "placeholder"))
                 .unwrap_or("")
