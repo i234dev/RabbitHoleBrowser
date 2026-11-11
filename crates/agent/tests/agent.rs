@@ -121,6 +121,7 @@ const FIXTURE: &str = r##"<!doctype html><html><head><title>Portada - Example Ne
 <a href="/perfil"><img src="/a.png" alt="Perfil de usuario"></a>
 <span id="ll">Nombre completo</span><input aria-labelledby="ll">
 <input type="submit" value="Enviar">
+<label for="r1"><input type="radio" id="r1" name="g" value="true"> Opción sí</label>
 </main>
 <footer><a href="/aviso">Aviso legal</a> <a href="/privacidad">Privacidad</a></footer>
 </body></html>"##;
@@ -152,6 +153,7 @@ fn snapshot_shape_names_refs_truncation() {
     assert!(snap.contains("textbox \"Nombre completo\""), "aria-labelledby: {snap}");
     assert!(snap.contains("textbox \"Buscar\""), "placeholder: {snap}");
     assert!(snap.contains("button \"Enviar\""), "submit value: {snap}");
+    assert!(snap.contains("radio \"Opción sí\" @e"), "label[for] wrapping, no value, no duplicate: {snap}");
     assert!(snap.contains("type=email"), "{snap}");
     // Truncated list with an expand ref.
     assert!(snap.contains("more items"), "{snap}");

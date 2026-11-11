@@ -375,11 +375,25 @@ robots=false` to keep the bot identity without robots checks.
 
 ## Performance
 
-Measured on the development machine (release build, Linux x86-64; see the
-numbers in the commit that introduced this document for the method):
+Measured on the development machine (release build, Linux x86-64, while
+other builds were running):
 
-* MCP server start to `initialize` reply: a few milliseconds — the browser
-  is created lazily on the first tool call, with bundled fonts only (system
-  fonts are loaded on the first screenshot).
-* Each context is a cookie jar plus a localStorage map; each tab holds its
-  DOM, styles and layout. Memory is dominated by page size.
+| What | Result |
+|------|--------|
+| `rabbithole mcp` start → `initialize` reply → exit | 17–31 ms (the browser is created lazily on the first tool call) |
+| Start + first `open` of a small page + exit | ≈ 1 s wall, 0.2 s CPU (bundled fonts only; system fonts load on the first screenshot) |
+| Resident memory, 1 / 10 / 50 isolated contexts with one small page each | 115.9 / 116.3 / 117.2 MB — about 25 KB per extra context; the ≈ 114 MB base is the engine (fonts, script runtime) |
+
+Token cost of one page (approx. characters / 4), old MCP `dom` and `browse`
+tools versus the new `snapshot` (default budget) and `read`:
+
+| Page | old `dom` | old `browse` (text) | `snapshot` | `read` |
+|------|----------:|--------------------:|-----------:|-------:|
+| en.wikipedia.org/wiki/Rabbit | 393,830 | 45,101 | 1,269 | 4,242 (first 4,000-token page) |
+| news.ycombinator.com | 14,253 | 3,572 | 628 | 1,096 |
+| github.com/rust-lang/rust | 100,573 | 3,273 | 1,483 | 1,166 |
+| bbc.com/news | 62,706 | 4,659 | 2,304 | 2,648 |
+| html.duckduckgo.com (results page) | 7,304 | 2,336 | 874 | 1,193 |
+
+Page load time is dominated by the engine (script execution and full
+restyles on large pages); the auto-wait adds at most its cap.

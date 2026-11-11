@@ -476,10 +476,15 @@ fn content_text_into(page: &Page, n: NodeId, out: &mut String, depth: usize) {
                 }
             }
             "input" => {
-                let v = el.attr("value").unwrap_or("");
-                out.push(' ');
-                out.push_str(v);
-                out.push(' ');
+                // Embedded controls contribute their value only when it is
+                // what the user sees (text fields, buttons).
+                let ty = el.attr("type").unwrap_or("text").to_ascii_lowercase();
+                if !matches!(ty.as_str(), "checkbox" | "radio" | "hidden" | "file" | "image" | "password") {
+                    let v = el.attr("value").unwrap_or("");
+                    out.push(' ');
+                    out.push_str(v);
+                    out.push(' ');
+                }
             }
             "br" => out.push(' '),
             _ => {
@@ -510,14 +515,15 @@ fn labelled_by(page: &Page, ids: &str) -> String {
 fn label_text(page: &Page, n: NodeId) -> Option<String> {
     let doc = &page.doc;
     let mut parts = Vec::new();
+    let wrapping = doc.ancestor_or_self(n, |a| doc.is_element(a, "label"));
     if let Some(id) = doc.attr(n, "id").filter(|i| !i.is_empty()) {
         for l in doc.descendants(Document::ROOT) {
-            if doc.is_element(l, "label") && doc.attr(l, "for") == Some(id) {
+            if doc.is_element(l, "label") && doc.attr(l, "for") == Some(id) && Some(l) != wrapping {
                 parts.push(content_text(page, l));
             }
         }
     }
-    if let Some(l) = doc.ancestor_or_self(n, |a| doc.is_element(a, "label")) {
+    if let Some(l) = wrapping {
         // The label's text without the control's own value.
         let mut s = String::new();
         for c in doc.children(l) {
@@ -1014,6 +1020,23 @@ impl<'a> Builder<'a> {
                 // heading level too.
                 if let Some(h) = doc.descendants(n).find(|&d| matches!(doc.tag(d), Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6"))) {
                     a.level = doc.tag(h).and_then(|t| t[1..].parse().ok()).unwrap_or(0);
+                    if el.attr("aria-label").is_none() && el.attr("aria-labelledby").is_none() {
+                        let hn = content_text(page, h);
+                        if !hn.is_empty() {
+                            a.name = clip_text(&hn, 100);
+                        }
+                    }
+                }
+                // Icon links next to a named link to the same place
+                // (favicons, thumbnails) add nothing.
+                if role == "link" && a.name.starts_with("(link to ") {
+                    if let Some(href) = el.attr("href") {
+                        let scope = doc.parent(n).and_then(|p| doc.parent(p)).and_then(|p| doc.parent(p)).unwrap_or(n);
+                        let dup = doc.descendants(scope).any(|d| d != n && doc.is_element(d, "a") && doc.attr(d, "href") == Some(href) && !doc.text_content(d).trim().is_empty());
+                        if dup {
+                            return;
+                        }
+                    }
                 }
                 a.reference = Some(self.refs.assign(frame, n, &role, &a.name));
                 // Controls do not expose their content as separate items,

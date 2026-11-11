@@ -641,7 +641,7 @@ impl Agent {
         let page = &f.page;
         let text = page.doc.body().map(|b| page.doc.text_content(b)).unwrap_or_default();
         let lower = text.to_lowercase();
-        let wall = ["captcha", "are you a robot", "are you human", "verify you are human", "unusual traffic", "checking your browser", "just a moment", "access denied", "bot detection", "please enable javascript and cookies", "cf-challenge", "attention required"];
+        let wall = ["captcha", "are you a robot", "are you human", "verify you are human", "unusual traffic", "checking your browser", "just a moment", "access denied", "bot detection", "please enable javascript and cookies", "cf-challenge", "attention required", "made by a human", "confirm you are human", "complete the following challenge", "bots use"];
         let looks_wall = wall.iter().any(|w| lower.contains(w)) || page.doc.descendants(Document::ROOT).any(|n| {
             page.doc.attr(n, "class").map(|c| c.contains("g-recaptcha") || c.contains("h-captcha") || c.contains("cf-turnstile")).unwrap_or(false)
                 || page.doc.attr(n, "src").map(|s| s.contains("recaptcha") || s.contains("hcaptcha") || s.contains("challenges.cloudflare")).unwrap_or(false)
