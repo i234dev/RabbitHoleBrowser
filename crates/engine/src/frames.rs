@@ -464,7 +464,10 @@ impl Engine {
                     let had = b.image.is_some();
                     b.image = Some(img.clone());
                     let mut patched = false;
-                    if let Some(old) = &old {
+                    // Patch the painted item in place only when the raster
+                    // keeps its pixel size (its source rectangle is in raster
+                    // pixels); a resized frame needs a new display list.
+                    if let Some(old) = old.as_ref().filter(|o| o.width == img.width && o.height == img.height) {
                         for it in page.display_list.items.iter_mut() {
                             if let rabbithole_layout::DisplayItem::Image { image, .. } = it {
                                 if Arc::ptr_eq(image, old) {

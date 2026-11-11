@@ -241,3 +241,25 @@ fn window_proxies_expose_builtins_and_named_frames() {
     let c = child(&mut page, 1);
     assert_eq!(e.eval_in_page(c, "window.fromChild").trim_matches('\''), "found");
 }
+
+#[test]
+fn resized_frame_is_painted_whole() {
+    // A frame whose box grows after it was painted (reCAPTCHA's challenge
+    // frame) must not keep the old raster's source rectangle.
+    let mut e = engine();
+    let inner = r#"<style>html,body{margin:0;background:rgb(0,0,255)}</style><p>inside</p>"#;
+    let mut page = load(&mut e, &format!(r#"<body style="margin:0"><iframe id="f" style="border:0;width:200px;height:100px" srcdoc="{}"></iframe></body>"#, escape_attr(inner)));
+    eval(&e, &mut page, "document.getElementById('f').style.cssText = 'border:0;width:300px;height:250px'");
+    settle(&e, &mut page);
+    let (src, image) = page
+        .display_list
+        .items
+        .iter()
+        .find_map(|it| match it {
+            DisplayItem::Image { rect, src, image, .. } if rect.w == 300.0 && rect.h == 250.0 => Some((*src, image.clone())),
+            _ => None,
+        })
+        .expect("resized frame painted");
+    assert_eq!((src.w.round(), src.h.round()), (image.width as f32, image.height as f32), "source covers the whole raster");
+    assert_eq!(image.pixel(image.width / 2, image.height - 2), [0, 0, 255, 255]);
+}
