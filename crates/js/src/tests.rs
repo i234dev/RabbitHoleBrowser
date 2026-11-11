@@ -185,6 +185,11 @@ fn variables_and_scope() {
     eq("var a = 1; a &&= 7; a", "7");
     eq("var a = null; a ??= 3; a ??= 9; a", "3");
     eq("var o = {}; o.x ??= 4; o.x", "4");
+    // The value of a short-circuited logical assignment to a computed
+    // member is the existing value (not the key).
+    eq("var o = {k: 5}, k = 'k'; [o[k] ??= 7, o[k] ||= 8, o[k] &&= 0, o[k]].join()", "5,5,0,0");
+    eq("var s = Symbol('a'), o = {}; var a = (o[s] ??= {n: 1}); var b = (o[s] ??= {n: 2}); [a === b, b.n].join()", "true,1");
+    eq("var o = {k: 0}; [o['k'] &&= 9, o['k'] ||= 3].join()", "0,3");
     eq("var o = {a: {b: {c: 1}}}; o?.a?.b?.c", "1");
     eq("var o = null; o?.a.b.c", "undefined");
     eq("var o = {}; o.f?.()", "undefined");

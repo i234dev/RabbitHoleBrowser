@@ -141,3 +141,50 @@ fn textarea_rows_is_an_intrinsic_height() {
     let plain = page.rect_of(by_id(&page, "plain")).unwrap();
     assert!((plain.h - 60.0).abs() < 0.5, "rows=3 height {}", plain.h);
 }
+
+fn load_doc(engine: &mut Engine, html: &str) -> Page {
+    let url = Url::parse("https://example.test/").unwrap();
+    engine.load_html(html, url, Viewport { width: 800.0, height: 600.0 })
+}
+
+fn eval(engine: &Engine, page: &mut Page, js: &str) -> String {
+    engine.eval_in_page(page, js).trim_matches(|c| c == '\'' || c == '"').to_string()
+}
+
+/// Server-rendered head content is hydrated by walking siblings from a
+/// comment marker by count (Svelte 5 `<svelte:head>`): the whitespace text
+/// nodes between head elements must exist, as in browsers.
+#[test]
+fn head_hydration_walk_finds_the_ssr_nodes() {
+    let mut e = engine(true);
+    let mut page = load_doc(
+        &mut e,
+        "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<!--h1--><!--[0--><link rel=\"canonical\" href=\"/\"><!--]--> <meta name=\"a\" content=\"one\"> <meta name=\"b\" content=\"two\"><!----><title>T</title>\n</head>\n<body><div style=\"display:contents\"><!--[--><p>ssr</p><!--]--></div>
+         <script>
+           var first = Object.getOwnPropertyDescriptor(Node.prototype, 'firstChild').get;
+           var next = Object.getOwnPropertyDescriptor(Node.prototype, 'nextSibling').get;
+           function sib(n, k) { while (k--) n = next.call(n); return n; }
+           var a = first.call(document.head);
+           while (a !== null && (a.nodeType !== 8 || a.data !== 'h1')) a = next.call(a);
+           var r = next.call(a);
+           var meta = sib(r, 4);
+           var meta2 = sib(r, 6);
+           window.result = [meta.getAttribute('content'), meta2.getAttribute('content'), sib(r, 7).nodeType].join(',');
+         </script></body></html>",
+    );
+    assert_eq!(eval(&e, &mut page, "result"), "one,two,8");
+}
+
+/// `navigator.serviceWorker.register()` resolves (SvelteKit / PWA
+/// bootstraps call it without a catch); other origins are refused.
+#[test]
+fn service_worker_registration_resolves() {
+    let mut e = engine(true);
+    let mut page = load_doc(
+        &mut e,
+        "<script>window.r = 'pending'; navigator.serviceWorker.register('./sw.js').then(function (reg) { r = [reg.scope, reg.active.state, typeof reg.unregister].join(' '); return navigator.serviceWorker.ready; }).then(function () { r += ' ready'; }, function (err) { r = 'rejected ' + err; });
+         navigator.serviceWorker.register('https://other.test/sw.js').catch(function (e) { window.cross = e.name; });</script>",
+    );
+    assert_eq!(eval(&e, &mut page, "r"), "https://example.test/ activated function ready");
+    assert_eq!(eval(&e, &mut page, "cross"), "SecurityError");
+}

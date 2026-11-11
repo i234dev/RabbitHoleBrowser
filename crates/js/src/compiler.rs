@@ -2934,8 +2934,9 @@ impl Compiler {
                     let end = self.emit(Op::Jump(0));
                     self.patch_jump(j);
                     // stack: obj key val -> val
-                    self.emit(Op::Rot3);
+                    self.emit(Op::Swap);
                     self.emit(Op::Pop);
+                    self.emit(Op::Swap);
                     self.emit(Op::Pop);
                     self.patch_jump(end);
                 } else {

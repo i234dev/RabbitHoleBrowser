@@ -190,9 +190,11 @@ impl TreeBuilder {
         if self.body.is_none() {
             // Whitespace before body is dropped; anything else opens the body.
             if t.trim().is_empty() {
-                // ...unless we're inside <head> raw elements like <title>
+                // ...except inside <head> ("in head" mode inserts it, and
+                // hydrating frameworks count those text nodes) and its raw
+                // elements like <title>.
                 let cur = self.current_tag().to_string();
-                if HEAD_ONLY.contains(&cur.as_str()) {
+                if cur == "head" || HEAD_ONLY.contains(&cur.as_str()) {
                     self.append_text(t);
                 }
                 return;
@@ -560,6 +562,27 @@ mod tests {
         let body = doc.body().unwrap();
         let ps: Vec<_> = doc.child_elements(body).collect();
         assert_eq!(ps.len(), 2, "{d}");
+    }
+
+    /// Whitespace and comments inside `<head>` stay where they are (SSR
+    /// hydration walks those siblings by count).
+    #[test]
+    fn head_keeps_whitespace_and_comments() {
+        let doc = parse("<!doctype html>\n<html>\n<head>\n<meta charset=utf-8>\n<!--h--><!--[--><link rel=a><!--]--> <meta name=x> <title>T</title></head>\n<body><p>x</p></body></html>");
+        let head = doc.head().unwrap();
+        let kinds: Vec<String> = doc
+            .children(head)
+            .map(|c| match &doc.node(c).data {
+                NodeData::Text(t) => format!("text({})", t.escape_debug()),
+                NodeData::Comment(t) => format!("comment({t})"),
+                NodeData::Element(e) => e.tag.clone(),
+                _ => "?".into(),
+            })
+            .collect();
+        assert_eq!(kinds, ["text(\\n)", "meta", "text(\\n)", "comment(h)", "comment([)", "link", "comment(])", "text( )", "meta", "text( )", "title"]);
+        // Whitespace before <head> and after </head> is not kept.
+        let html = doc.html_element().unwrap();
+        assert!(doc.children(html).all(|c| doc.element(c).is_some()), "{}", doc.dump());
     }
 
     #[test]

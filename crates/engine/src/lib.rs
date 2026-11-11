@@ -151,6 +151,9 @@ pub struct LoadedPage {
 
 const MAX_IMPORT_DEPTH: usize = 4;
 
+/// Largest external script body accepted.
+const MAX_SCRIPT_BYTES: usize = 32 * 1024 * 1024;
+
 /// Result of navigating to a URL: a page to display, or a download.
 pub enum Loaded {
     Page(LoadedPage),
@@ -796,15 +799,28 @@ impl Loader {
             return;
         }
         let urls: Vec<Url> = external.iter().map(|(_, u)| u.clone()).collect();
+        // App bundles of large sites exceed 8 MB (a video site's main
+        // bundle is ~10 MB): allow as much as for documents.
         let mut fetcher = self.fetcher.clone();
-        fetcher.max_body = 8 * 1024 * 1024;
+        fetcher.max_body = MAX_SCRIPT_BYTES;
         let results = fetcher.fetch_many_for(&urls, 6, Destination::Script, Some(page_url));
-        for ((idx, _), r) in external.iter().zip(results) {
+        for ((idx, url), r) in external.iter().zip(results) {
             match r {
                 Ok(resp) if resp.status < 400 => {
                     scripts[*idx].source = decode_text(&resp.body, resp.charset.as_deref());
                 }
-                _ => scripts[*idx].source.clear(),
+                Ok(resp) => {
+                    if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                        eprintln!("[script] failed to load {url}: HTTP {}", resp.status);
+                    }
+                    scripts[*idx].source.clear();
+                }
+                Err(e) => {
+                    if std::env::var_os("RH_DEBUG_SCRIPTS").is_some() {
+                        eprintln!("[script] failed to load {url}: {e}");
+                    }
+                    scripts[*idx].source.clear();
+                }
             }
         }
     }

@@ -202,8 +202,10 @@ impl Page {
 
     pub(crate) fn frames_next_due(&self) -> Option<f64> {
         let mut due: Option<f64> = None;
+        // Poll background loads every 25 ms (engine clock).
+        let poll = self.image_state.clock.map(|origin| (std::time::Instant::now() + std::time::Duration::from_millis(25)).saturating_duration_since(origin).as_secs_f64() * 1000.0).unwrap_or(0.0);
         for c in &self.frames.children {
-            let d = if c.pending.is_some() { Some(0.0) } else { c.page.as_ref().and_then(|p| p.next_script_due()) };
+            let d = if c.pending.is_some() { Some(poll) } else { c.page.as_ref().and_then(|p| p.next_script_due()) };
             if let Some(d) = d {
                 due = Some(due.map(|x: f64| x.min(d)).unwrap_or(d));
             }
@@ -400,14 +402,18 @@ impl Engine {
         if page.frames.children.is_empty() && page.frame_depth > 0 {
             return out;
         }
+        // Build at most one arrived document per tick (each runs its
+        // scripts on this thread), so input is handled in between.
+        let mut installed = false;
         for i in 0..page.frames.children.len() {
-            let arrived = match page.frames.children[i].pending.as_ref().map(|rx| rx.try_recv()) {
+            let arrived = match page.frames.children[i].pending.as_ref().filter(|_| !installed).map(|rx| rx.try_recv()) {
                 Some(Ok(r)) => Some(r),
                 Some(Err(TryRecvError::Disconnected)) => Some(Err("load failed".to_string())),
                 _ => None,
             };
             if let Some(result) = arrived {
                 page.frames.children[i].pending = None;
+                installed = true;
                 self.install_frame(page, i, result, &mut out);
             }
             let c = &mut page.frames.children[i];
