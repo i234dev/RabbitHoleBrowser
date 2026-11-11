@@ -1,0 +1,909 @@
+# JIT para el motor JS de RabbitHole: análisis y diseño (Stage 1)
+
+Estado: **análisis y diseño, sin código JIT**. Rama base: `main` @ `3896a9e`.
+También se ha medido la rama de la "ronda 4 de la VM" (`worktree-agent-ac8f2d59ac314de8f` @ `0d121b8`:
+`Value` NaN-boxed de 8 bytes, ICs de cadena de prototipos, caché megamórfica,
+asignador por clases de tamaño, latch de bucle fusionado), porque el JIT se
+construirá sobre la representación que exista cuando se empiece.
+
+## Resumen
+
+1. **Hoy no es la mejor inversión. Recomendación: "todavía no"** para el JIT,
+   pero sí hacer ya la fase 1 de infraestructura de medida (contadores) como
+   puerta de decisión. Datos:
+   - En páginas reales el intérprete propiamente dicho (bucle de dispatch +
+     fast paths + `exec_op` + maquinaria de llamadas + ICs) es el **8–9 % del
+     tiempo de JS** en Wikipedia y en un fixture DOM, y el **21 %** en YouTube
+     (≈ 11 % de la CPU total del proceso). El resto es DOM/bindings, malloc,
+     búsqueda de propiedades, strings, parseo/compilación y layout.
+   - Un prototipo desechable de JIT base con las restricciones de Level 1
+     (valores siempre en el frame en memoria, sin especialización ni OSR) da
+     **1,2–1,3×** en un bucle de una sola instrucción, **1,5×** en `s += i % 7`
+     y **2,7×** en un bucle de 7 instrucciones numéricas, frente al intérprete
+     de la ronda 4.
+   - Pero sin OSR, los bucles de código que se ejecuta una vez (cuerpo del
+     script, IIFE) **nunca** se compilan: eso es casi todo `perf.rs`. Y las
+     llamadas JS→JS siguen pasando por los frames de la VM, que es donde más
+     perdemos frente a QuickJS (fib 28 ms frente a 11 ms; `calls` 33 frente a 16).
+   - Estimación de ganancia de Level 1: ≤ 2–4 % de CPU en YouTube, ≤ 4 % en el
+     fixture DOM, ≈ 0 % en la mayoría de `perf.rs`. Hay alternativas medidas más
+     baratas y con más retorno (sección 2.8): coste de las llamadas, globales,
+     hashing/wrappers del DOM, malloc, parseo.
+2. **Backend: generador propio** (emisor de plantillas x86-64, después aarch64),
+   no Cranelift. Con los mismos ops y la misma estrategia, el prototipo propio
+   compila en **0,06–0,12 µs por instrucción** frente a **34–52 µs** de Cranelift
+   (≈ 500× más), genera código igual de rápido en Level 1 (89 ms frente a 96 ms
+   en el bucle de 7 ops) y de tamaño parecido (61–80 B/op frente a 62–78 B/op),
+   sin añadir dependencias (Cranelift: +38 crates, +4,9 MB de binario,
+   +212 s de CPU en build limpia). Cranelift queda como opción para un futuro
+   nivel optimizador.
+3. El diseño de Level 1 (secciones 4–7) está listo para cuando se abra la puerta:
+   función entera o nada, valores siempre en el frame, helpers que devuelven un
+   código de estado, llamadas JS→JS que vuelven a la VM y se reanudan en
+   puntos de continuación (sin recursión nativa), excepciones resueltas por la
+   VM, W^X, código liberado con su `FunctionCode`.
+
+---
+
+## 0. Método y entorno de medida
+
+- Máquina: Intel Core i5-7500T (4 hilos lógicos visibles como 3 CPUs, 2,7 GHz),
+  carga media 5–8 por otros agentes. Todos los tiempos son **tiempo de CPU del
+  hilo** (`CLOCK_THREAD_CPUTIME_ID`), mejor de 3 ejecuciones, y se repitieron
+  al menos dos veces en la misma sesión.
+- Perfiles: muestreador propio `RH_PROF` (SIGPROF + cadena de frame pointers;
+  binarios con `CARGO_PROFILE_RELEASE_STRIP=false` y
+  `RUSTFLAGS=-Cforce-frame-pointers=yes`). La resolución efectiva del timer
+  es ~1 ms, así que se acumularon varias ejecuciones (de 300 a 5000 muestras
+  por caso). La simbolización se hizo con un script Python que lee `.symtab`.
+- Para atribuir tiempo **por opcode** se usó una copia desechable de la ronda 4
+  con una línea extra en el bucle de dispatch (guarda la etiqueta del op en
+  curso en una atómica que el manejador de la señal copia en la muestra) y un
+  contador dinámico de ops (`RH_OPCOUNT`). Esa instrumentación no se ha
+  comiteado (tocaba `vm.rs`/`sampler.rs`); el método está en el apéndice A.
+- Los símbolos `libc:*` salen de la tabla dinámica de libc (sin símbolos
+  internos), así que agrupan malloc/free/memcpy internos; se reportan juntos.
+- Las categorías "intérprete" agrupan: `run_inner` (dispatch + fast paths
+  inline), `exec_op` y conversiones lentas, maquinaria de llamadas/frames e ICs.
+
+---
+
+## 1. Arquitectura actual (`crates/js`)
+
+### 1.1 Pipeline
+
+`lexer.rs` → `prescan.rs` (parseo perezoso: los cuerpos de funciones se saltan
+y se guardan como `LazyCode`) → `parser.rs`/`ast.rs` → `captures.rs` (qué
+nombres captura alguna función anidada) → `compiler.rs` genera bytecode **de
+pila** → `regs.rs::translate` lo reescribe a **forma de registros** →
+`FunctionCode` (`bytecode.rs`). Las funciones se compilan la primera vez que se
+llaman (`ensure_compiled` → `compile_lazy`; el resultado se comparte en
+`FunctionCode::compiled: OnceCell`).
+
+### 1.2 Formato de bytecode y bucle de dispatch
+
+- `Op` es un `enum` Rust `Copy` con operandos inline (212 variantes en `main`,
+  214 en la ronda 4, que añade `IncJumpIfLtRR/RK`). Una función es un
+  `Vec<Op>` más tablas: `constants`, `functions`, `handlers`, `ics`
+  (`Box<[Cell<PropIc>]>`), `ic_keys`, `depths` (profundidad de pila estática por
+  instrucción), `positions`.
+- Formas de registro (producidas por `regs.rs`): `Mov`, `LoadK`, `AddRR/RK`…
+  `ModRR/RK`, `BinRR/RK`, `CmpRR/RK`, saltos fusionados comparar-y-saltar
+  (`JumpUnlessLtRK`, `JumpIfStrictEqRR`…), `JumpIfTrueR`…, `IncR/DecR/NotR/UnR`,
+  `GetPropR/SetPropR/DefinePropR`, `GetElemR/SetElemR`, `GetGlobalR/SetGlobalR`,
+  `GetLocalR/SetLocalR`, `CallR/NewR/ReturnR`, `LoadThis`, `StoreCompletionR`.
+  Los operandos son **índices absolutos de slot del frame**: primero los
+  `nregs` registros y después la pila de operandos (el valor a profundidad `d`
+  vive en el slot `nregs + d`). Lo que no tiene forma de registro sigue siendo
+  una instrucción de pila cuyos operandos están en profundidades conocidas
+  estáticamente (`depths`). Si el frame no cabe en `u16`, se deja el código de
+  pila sin traducir (`untranslated`).
+- `vm.rs::run_inner` es un `loop { match op }` (dispatch por `match`, Rust
+  estable no tiene computed goto). Mantiene `pc` y un puntero base `base` a los
+  slots del frame en locales; solo los **fast paths** viven ahí (números,
+  concatenación de strings, aciertos de IC, llamadas rápidas). Cualquier fallo
+  o instrucción de pila sale a `exec_op(fi, op)` (`#[inline(never)]`), que
+  implementa **la semántica completa de cada instrucción** (el macro `slow!`
+  sincroniza `pc`, llama, y recarga `pc`/`base` porque `vstack` puede haberse
+  movido).
+- `tick`: los saltos hacia atrás y las llamadas decrementan `realm.tick`; cada
+  1024 se llama a `safepoint()` (GC, watchdog, muestreo `RH_JSPROF`).
+
+### 1.3 Registros, frames, variables, closures y scopes
+
+- `Realm::vstack: Vec<Value>` contiene los slots de todos los frames activos;
+  `Realm::frames: Vec<Frame>`. `Frame` = `code: Rc<FunctionCode>`, `pc`,
+  `base`, `argc` (argumentos conservados debajo de `base` en modo
+  `args_direct`), `scope: ObjectId`, `scope_depth`, `this`, `func`,
+  `new_target`, `home_object`, `ret_slot` (slot del llamador que recibe el
+  resultado), `is_construct`, `entry` (volver de este frame sale del bucle) y
+  `extra: Option<Box<FrameExtra>>` (objeto `arguments`, generador, valor de
+  compleción, slots guardados de un frame suspendido).
+- **`vstack` es un `Vec` que crece**: cualquier operación que reserve slots
+  (empujar un frame, una llamada nativa que reentra) puede **reubicarlo**. Por
+  eso el intérprete recarga `base` tras cada salida de línea. El JIT tendrá la
+  misma obligación.
+- Variables: las que ninguna función anidada menciona (análisis por nombre,
+  sobreaproximado) van a **registros del frame**; las capturadas van a un
+  **objeto Scope del heap** (`ObjectKind::Scope(ScopeData { slots, parent })`)
+  direccionado por `(profundidad, slot)` (`GetLocalR/SetLocalR`). Los bloques
+  con `let` capturados hacen `PushScope/PopScope/CopyScope` (este último para
+  bindings por iteración). El TDZ se representa con `Value::Empty`
+  (`MovChecked`, `CheckInit`, `GetLocalChecked`).
+- Closures: `ObjectKind::Function(Closure { code, scope, this_value,
+  new_target, home_object, fields, arguments })`; el `scope` capturado es el
+  padre del scope de la llamada.
+- Globales: `GetGlobalR/SetGlobalR` con IC (`IC_GLOBAL_LEX` para `let/const`
+  de script indexados en `GlobalLex`, `IC_GLOBAL_OBJ` para propiedades del
+  objeto global), validados por una época léxica.
+
+### 1.4 Llamadas y reentrada
+
+- **JS→JS sin recursión nativa**: `CallR` → `try_fast_call` (closure "plana":
+  sin `arguments` materializado, sin rest, no generador/async/constructor de
+  clase) mueve los argumentos del llamador directamente a un frame nuevo y hace
+  `continue 'reload`; `ReturnR` hace `pop_frame`, escribe el resultado en
+  `ret_slot` del llamador y `continue 'reload`. El caso general pasa por
+  `exec_op` → `do_call` → `push_plain_call`/`prepare_frame` + `push_frame`.
+  `NewR` → `try_fast_construct`.
+- **JS→nativo**: `try_native_call` llama a `NativeFn = fn(&mut Realm, Value,
+  &[Value]) -> JsResult<Value>` vía `call_native` (incrementa `native_depth`,
+  `current_callee`, `new_target_stack`); algunos intrínsecos (`charCodeAt`,
+  `fromCharCode`, `Math.imul`) se calculan inline; los getters nativos cacheados
+  por IC (DOM) se llaman directamente.
+- **Nativo→JS (reentrada)**: `Realm::call`/`construct` empujan un frame con
+  `entry = true` y ejecutan un `run()` **anidado** en la pila nativa. La
+  protección de pila (`stack.rs`) compara el puntero de pila con los límites
+  reales del hilo y lanza `RangeError` antes de desbordar; `max_frames = 12 500`
+  limita la profundidad JS.
+- En la ronda 4: `f.call`/`f.apply`/funciones ligadas empujan el frame destino
+  directamente (sin `run()` anidado) y hay un hook `post_native` del host.
+
+### 1.5 Inline caches (`ic.rs`)
+
+- Cada `GetPropR/SetPropR/DefinePropR/GetGlobalR/SetGlobalR` tiene un
+  `PropIc { kind, shape, slot, holder, holder_shape, mid, mid_shape }` en
+  `FunctionCode::ics` (celdas `Cell`). Clases en `main`: `IC_OWN` (forma +
+  slot), `IC_OWN_DICT`, `IC_PROTO` (receptor de forma X, propiedad en `holder`
+  a través de `mid`), `IC_PRIM`, `IC_LENGTH` (arrays y strings), `IC_ADD`
+  (transición de forma al añadir), `IC_GLOBAL_LEX`, `IC_GLOBAL_OBJ`.
+- Monomórficas; el camino lento rellena el registro (`ic_fill_get`,
+  `ic_fill_set`) y el rápido revalida con comparaciones de id de forma
+  (`ic_get`, `ic_set`). Un acierto en un accessor nativo se llama directamente.
+- La ronda 4 añade IC de cadena de prototipos profunda validada por una "época
+  de prototipos", setters y getters JS cacheados, `IC_ABSENT`, una caché
+  megamórfica compartida `(forma, nombre)` y hashes de string cacheados.
+
+### 1.6 Excepciones y try/catch/finally
+
+- Todo es `JsResult<T> = Result<T, Value>` propagado con `?`. **No hay
+  unwinding nativo para excepciones JS**.
+- `run()` envuelve `run_inner()`; ante `Err(e)` llama a `unwind(e)`: busca en
+  `code.handlers` (`[start, end) → target`, con `stack_depth` y `scope_depth`)
+  usando `frame.pc - 1`, restaura la cadena de scopes, deja la excepción en el
+  slot `nregs + stack_depth` y salta al `target`; si no hay manejador, saca el
+  frame y sigue con el llamador; al llegar a un frame `entry` devuelve `Err` al
+  código Rust que hizo la llamada. Un timeout del watchdog (`terminating`) no
+  es capturable.
+- `finally` se compila **inline** en cada salida (return/break/continue/caída)
+  más un manejador catch-all que relanza. No hay instrucciones especiales de
+  finally.
+- Los pánicos de Rust (p. ej. `Heap::get` sobre un objeto liberado) se
+  propagan como unwinding normal de Rust.
+
+### 1.7 Generadores y async/await
+
+- Sí se suspenden frames: `Yield/Await` (en `exec_op`) guardan el slot de
+  reanudación, **sacan el frame** de `frames`, mueven sus slots de `vstack` a
+  `FrameExtra::saved` (`detach_slots`) y devuelven `Exit::Yield/Await` con el
+  `Frame` en una caja, que vive en el objeto generador. Reanudar
+  (`generator_resume_raw`) vuelve a colocar los slots al final de `vstack`
+  (**con otro `base`**) y llama a `run()`; `throw` se inyecta con `unwind`.
+- async = generador con promesa; `await_value` encadena `then` nativos que
+  reanudan el frame. `return()` sobre un generador suspendido no ejecuta
+  `finally` (limitación conocida, ya documentada en el código).
+
+### 1.8 Representación de `Value`
+
+| | `main` | ronda 4 |
+|---|---|---|
+| Tamaño | 16 bytes | 8 bytes |
+| Representación | `enum` con `#[repr(u64)]`: palabra de etiqueta (Undefined=0, Null=1, Bool=2, Number=3, String=4, Symbol=5, BigInt=6, Object=7, Empty=8) + palabra de payload | NaN-boxing: un número es su patrón IEEE (< `TAG_MIN = 0xFFF9_0000_0000_0000`); el resto vive en el espacio de NaN negativos: `0xFFF9` especiales (undefined=…0, null=…1, empty=…2, false=…4, true=…5), `0xFFFA` símbolo, `0xFFFB` objeto (id u32), `0xFFFC` BigInt (`Rc`), `0xFFFD` string (`Rc`) |
+| ¿Layout estable? | Sí: `#[repr(u64)]` en un enum con datos tiene layout definido (RFC 2195): etiqueta u64 en +0, payload en +8 | Sí: `#[repr(transparent)] struct Value(u64)` |
+| Con contador de referencias | String, BigInt (`Rc`) | `bits >= TAG_BIGINT` (`0xFFFC…`) |
+| Comprobación "es número" | `qword [slot] == 3` | `bits < TAG_MIN` (una comparación sin signo) |
+| NaN | — | canonicalización: `Value::Number`/`set_number` convierten cualquier patrón `>= TAG_MIN` en `0x7FF8…` |
+
+Consecuencias para código nativo: ambos layouts se pueden leer y escribir
+directamente; los objetos son **índices** (`ObjectId(u32)`) en una arena, no
+punteros; copiar o sobrescribir un valor con `Rc` exige ajustar contadores
+(clone/drop), así que el código generado **no debe copiar ni sobrescribir
+valores con contador**: eso va a un helper.
+
+### 1.9 GC (`heap.rs`, `realm.rs`)
+
+- Mark-and-sweep en una arena `Vec<Option<Object>>`; los ids se reciclan con
+  una lista libre. **No mueve objetos**, no es incremental ni generacional y
+  **no tiene barreras de escritura**.
+- Raíces (`Realm::gc`): intrínsecos y global, `global_lex`, cada `Frame`
+  (`scope`, `this`, `func`, `new_target`, `home_object`, extras y slots
+  guardados), **todo `vstack`**, jobs, la tabla de `Root` (handles), `extra_roots`
+  del host (wrappers DOM), `job_roots`, `new_target_stack`, promesas no
+  manejadas, `template_cache`, módulos y `current_callee`. Las strings son
+  `Rc` (fuera del GC).
+- **La GC solo corre en `safepoint()` de la VM y solo si `native_depth == 0`**
+  (ninguna función nativa activa; así no hace falta rastrear locales Rust).
+  Pero un helper que ejecute JS (getter, `valueOf`, proxy, llamada) entra en
+  un `run()` anidado que sí puede alcanzar un safepoint: **cualquier llamada que
+  pueda ejecutar JS es un posible punto de GC y de reubicación de `vstack`**.
+
+### 1.10 Lo que esto implica para un JIT
+
+| Hecho | Implicación |
+|---|---|
+| Frames y slots ya viven en memoria (`vstack`), con layout fijo y profundidades estáticas | El JIT puede usar **exactamente el mismo frame** que el intérprete: entrar y salir en cualquier frontera de instrucción es trivial (no hay estado que reconstruir) |
+| `exec_op` implementa cada instrucción completa | Helper genérico: el JIT no reimplementa semántica, llama a `exec_op` para todo lo que no sea fast path |
+| JS→JS sin recursión nativa | El JIT debe preservarlo: las llamadas vuelven a la VM y la función se reanuda en un punto de continuación |
+| `vstack` se reubica | Recargar la base de slots tras **cada** helper |
+| GC no móvil, sin barreras, raíces = todo `vstack` | Ningún mapa de pila ni barrera si los valores viven en el frame |
+| Excepciones = `Result`, desenrollado por la VM | Los helpers devuelven un estado; la VM resuelve `catch` con la tabla de handlers existente |
+| `Rc` en strings/BigInt | Fast paths solo con valores sin contador; el resto, helper |
+
+---
+
+## 2. Perfil medido
+
+### 2.1 Micro-benchmarks (`crates/js/examples/perf.rs`, ms de CPU)
+
+| caso | `main` | ronda 4 | QuickJS (zig cc -O2) |
+|---|---:|---:|---:|
+| empty_loop | 71,8 | 50,6 | 112,9 |
+| global_loop | 78,3 | 77,8 | 30,1 |
+| local_loop | 22,3 | 20,0 | 21,9 |
+| let_loop | 28,2 | 27,6 | 29,1 |
+| push_objects | 51,6 | 41,2 | 45,5 |
+| calls | 37,5 | 33,2 | 16,4 |
+| closure_calls | 47,6 | 47,6 | 17,9 |
+| method_calls | 47,3 | 48,9 | 22,2 |
+| new_objects | 97,3 | 82,8 | 48,9 |
+| props | 37,9 | 42,6 | 27,7 |
+| prop_set | 55,2 | 57,7 | 34,9 |
+| array_rw | 50,3 | 52,0 | 22,2 |
+| strings | 9,9 | 5,9 | 11,7 |
+| string_ops | 41,6 | 46,8 | 25,1 |
+| array_map | 83,3 | 65,7 | 53,9 |
+| fib | 28,9 | 28,0 | 10,9 |
+| json | 80,4 | 59,1 | 68,4 |
+| for_in | 46,8 | 41,8 | 41,0 |
+| try_catch | 9,8 | 10,6 | 4,8 |
+| arguments | 40,7 | 39,2 | 34,1 |
+| switch | 43,1 | 47,3 | 22,5 |
+| **TOTAL** | **1010** | **926** | **702** |
+
+Lectura: nuestro intérprete ya es **más rápido que QuickJS en bucles numéricos
+monomórficos** (empty_loop 2,2×). Donde perdemos de 2 a 2,7× es en
+**llamadas** (fib, calls, closure_calls, method_calls), **globales**
+(global_loop) y accesos a arrays/propiedades. Ninguna de esas pérdidas es de
+dispatch.
+
+### 2.2 Reparto del tiempo en `perf.rs` (ronda 4, 3354 muestras)
+
+Por categoría (tiempo propio): núcleo del intérprete (`run_inner`: dispatch +
+fast paths inline) **68,1 %**, llamadas/frames 6,2 %, propiedades/objetos 5,9 %,
+drop/clone de `Value` 4,3 %, strings 2,9 %, ICs 2,2 %, `exec_op` 1,8 %, otros
+(arena, asignador) 7,7 %. En micro-benchmarks el dispatch domina por diseño.
+
+**Top 10 opcodes por tiempo** (inclusivo: incluye los helpers que llaman):
+
+| op | % tiempo | dónde se va |
+|---|---:|---|
+| GetGlobalR | 20,8 | 98 % en `run_inner` (fast path de IC global) |
+| CallR | 19,9 | frames 29 %, `run_inner` 24 %, nativos 21 % |
+| SetGlobalR | 7,8 | `run_inner` |
+| IncJumpIfLtRK | 6,4 | `run_inner` |
+| AddRR | 5,5 | `run_inner` 81 %, concatenación 13 % |
+| ReturnR | 4,7 | `run_inner` 88 %, drop 11 % |
+| ModRK | 4,1 | `run_inner` (división entera) |
+| GetPropR | 4,0 | `run_inner` 63 %, `ic_get` 34 % |
+| NewR | 2,8 | asignación 31 %, `run_inner` 29 %, formas 21 % |
+| JumpIfLtRK | 2,5 | `run_inner` 61 % |
+
+**Top opcodes por frecuencia** (273,7 M ops ejecutados): GetGlobalR 25,6 %,
+IncJumpIfLtRK 14,1 %, SetGlobalR 10,7 %, AddRR 7,9 %, StoreCompletionR 7,2 %,
+IncR 4,8 %, JumpIfLtRK 4,4 %, GetPropR 3,8 %, ModRK 2,5 %, LoadK 2,5 %.
+Globales leídas/escritas = **36 % de todos los ops** (código de nivel superior).
+
+**Top helpers** (tiempo propio, toda la suite): `Vec<Frame>::push` 2,2 %,
+`Heap::alloc` 1,8 %, `push_plain_call` 1,5 %, `ic_get` 1,5 %,
+`try_native_call` 0,9 %, `Vec<Value>::extend_with` (inicializar slots de
+frame) 0,9 %, `PropertyMap::push_with_shape` 0,8 %, `exec_op` 0,8 %,
+`ic_set` 0,75 %, drop de `Vec<Value>` 0,7 %.
+
+Casos sueltos:
+- `empty_loop`: 97,9 % en `IncJumpIfLtRK`. `local_loop`: `ModRK` 61 %, `AddRR`
+  19 %, latch 15 %.
+- `fib`: `CallR` 40 % + `ReturnR` 23 % + `GetGlobalR` 10 %; 11,6 % propio en
+  maquinaria de frames. `calls`: `CallR` 30 %, `ReturnR` 15 %, globales 25 %.
+- `new_objects`: solo 48 % en `run_inner`; `NewR` 26 %, `SetPropR` 20 %
+  (transiciones de forma).
+- `array_map`: `CallR` 71 % (map/filter nativos que llaman al callback: 36 %
+  propio en llamadas/frames). `json`: 7 % en `run_inner`, el resto builtins.
+
+### 2.3 Benchmark de manipulación DOM (fixture local)
+
+Página local (`file://`) con funciones estilo framework: crear una tabla de
+1500×6 con `createElement`/`textContent`/`setAttribute`, recorrer
+`querySelectorAll` cambiando `classList`/`style`/atributos, `innerHTML` de
+1500 `<li>` y lectura de `data-*`, 20 000 `dispatchEvent(CustomEvent)`, y un
+mini-virtual-DOM (300 nodos, 60 rondas de render + diff + patch). Ejecutado con
+`crates/engine/examples/shot.rs` (`main`, 4 ejecuciones, 3852 muestras).
+Tiempos: tabla 48 ms, touch 45 ms, innerHTML 43 ms, eventos 103–113 ms,
+vdom 479–517 ms.
+
+El 81 % de la CPU del proceso está bajo ejecución JS. **Dentro del JS**:
+
+| categoría | % del tiempo JS |
+|---|---:|
+| Bindings DOM (`crates/script`, `crates/dom`) | 43,0 |
+| libc (malloc/free/memcpy) | 25,8 |
+| propiedades/objetos | 5,5 |
+| núcleo del intérprete (`run_inner`) | 4,6 |
+| strings | 3,8 |
+| drop/clone | 2,4 |
+| `exec_op` + llamadas + ICs | 3,6 |
+
+Puntos calientes: `script::host::wrap` 13,6 %, **SipHash** (`HashMap` con
+`RandomState` en el host de script) 13,1 %, materializar `Vec<NodeRef>` para
+`childNodes` 5,2 % + `n_child_nodes` 3,2 %. **El intérprete propiamente dicho
+es el 8,2 % del tiempo de JS.**
+
+### 2.4 Páginas reales (`shot`, `main`)
+
+- **Wikipedia** (artículo "JavaScript", 1274 muestras): JS = 38 % de la CPU;
+  dentro del JS el intérprete propiamente dicho es el **8,8 %** (3,4 % del
+  total). Domina malloc/libc (39 % del total) y estilo/layout (31 %).
+- **YouTube** (portada, 6 s de espera, 5153 muestras): JS = 55 % de la CPU.
+  Dentro del JS: `run_inner` 13,9 %, `exec_op` 4,0 %, llamadas 2,6 %, ICs 0,4 %
+  → **20,9 %** (≈ 11,5 % del total). libc 26,6 %, propiedades/objetos 13 %
+  (`Shape::find` 6,2 %), strings 4,7 %, GC 0,9 %. El parseo y la compilación JS
+  son el **11,7 % de la CPU total**.
+
+### 2.5 Ganancia medida de un JIT base (prototipo desechable)
+
+Prototipo fuera del repo (borrado al terminar): un bytecode de registros
+mínimo (`LoadK`, `Mov`, `AddRR/RK`, `ModRK`, `IncR`, `JumpUnlessLtRK`, `Jump`,
+`ReturnR`, "genérico"), sobre `Value` NaN-boxed de la ronda 4, **con las reglas
+de Level 1**: todo valor se lee y escribe en el frame en memoria, comprobación
+de tipo en cada operando, almacenamiento solo si el valor anterior no tiene
+contador, caminos lentos a helpers `extern "C"` que devuelven un estado, tick
+de safepoint en saltos hacia atrás, base del frame recargada tras cada helper.
+Dos generadores: Cranelift 0.137 y un emisor de plantillas x86-64 propio
+(~250 líneas). Comparado con el intérprete en la misma sesión (ms de CPU):
+
+| bucle | `main` | ronda 4 | JIT L1 Cranelift | JIT L1 propio | Cranelift con valores en registros (ya no L1) |
+|---|---:|---:|---:|---:|---:|
+| `for (i<1e7){}` (1 op/iter) | 70,7 | 50,3–53,7 | 43,2–43,6 | 40,6–41,9 | 34 |
+| `s += i % 7` (1e6) | 21,7–23,6 | 19,8–20,1 | 13,6–14,3 | 12,5–13,4 | 13,3 |
+| 7 ops numéricas (1e7) | 255 | 243 | 96–97 | 89 | 90–93 |
+
+Speedup de Level 1 sobre la ronda 4: **1,2–1,3×** con una instrucción por
+iteración (el camino crítico es la dependencia a través de memoria
+store→load + `addsd`, que el intérprete ya oculta con un salto bien predicho),
+**1,5×** con `%`, **2,7×** con 7 ops por iteración (ahí sí pesa el dispatch).
+Tener los valores en registros (lo que haría un nivel 2) apenas añade sobre
+L1 en estos bucles.
+
+### 2.6 Por qué esa ganancia no llega a las cargas reales
+
+1. **Sin OSR no se compilan los bucles de código que se ejecuta una vez.** En
+   `perf.rs`, 19 de 21 casos tienen su bucle en el cuerpo del script o en una
+   IIFE (los otros dos, `fib` y `array_map`, no tienen bucle JS): con umbral
+   > 0 esos bucles no ganan nada. Solo se compilarían los callees
+   (`f(x){return x+1}`, constructores, callbacks de `map`), que son
+   diminutos.
+2. **Las llamadas siguen en la VM.** fib/calls/method_calls pasan del 45 al
+   63 % del tiempo en `CallR`/`ReturnR` (crear y destruir frames); el JIT de
+   Level 1 no lo cambia.
+3. **En páginas reales el intérprete es una fracción pequeña del JS**
+   (8–21 %), y solo la parte de dispatch dentro de funciones calientes es
+   recuperable.
+
+Estimación de Level 1 (cota superior): YouTube ≤ 2–4 % de CPU (la mitad del
+`run_inner` que cae en funciones calientes); fixture DOM ≤ 4 %; Wikipedia
+≤ 2 %; `perf.rs` total < 5 %; funciones calientes con bucles numéricos de
+varias instrucciones 2–2,7×. Coste: ~3–5 k líneas más tests, y mantener para
+siempre un segundo motor de ejecución que debe coincidir con el intérprete.
+
+### 2.7 Alternativas más baratas (medidas)
+
+| Alternativa | Dato que la respalda | Ganancia estimada | Coste |
+|---|---|---|---|
+| A. Bindings DOM: hash rápido (Fx/identidad) en los mapas del host, caché de wrappers en el nodo, `childNodes` vivo sin materializar `Vec` | SipHash 13,1 % + `wrap` 13,6 % + `childNodes` 8,4 % del JS en el fixture DOM | 20–30 % del tiempo JS en código DOM | días; fuera de `crates/js` |
+| B. Llamadas más baratas: `Frame` más pequeño, sin `Rc::clone` del código por llamada, no asignar scope ni rellenar slots innecesarios, ICs de llamada | `CallR`+`ReturnR` = 45–63 % en fib/calls; QuickJS 2,6× más rápido ahí | 1,3–2× en código con muchas llamadas, **también en código que corre una vez** | 1–2 semanas; la ronda 4 ya trabaja en ICs de llamada |
+| C. Globales más baratas (slots directos) | 36 % de los ops de la suite; QuickJS 2,6× en `global_loop` | 1,5–2× en código de nivel superior | en curso en la ronda 4 |
+| D. Propiedades: caché megamórfica, menos `Shape::find` | 13 % del JS de YouTube | 5–10 % del JS en frameworks | hecho en parte en la ronda 4 |
+| E. Parseo/compilación: más pereza, caché de bytecode por URL | 11,7 % de la CPU total en YouTube | 5–10 % de la carga | 1–2 semanas |
+| F. Asignador por clases de tamaño | libc 26–27 % del JS (DOM, YouTube) | ya medido por la ronda 4 (malloc/free = 1/5 de YouTube) | hecho en la ronda 4 |
+| G. Más superinstrucciones (método+llamada, carga+guarda, latches) | latch fusionado: empty_loop 71→51 ms | 10–30 % en bucles | días cada una |
+| H. Representación de `Value` (NaN-boxing) | suite 1010→926 ms; strings 9,9→5,9; json 80→59 | ya hecho en la ronda 4 | — |
+
+### 2.8 Conclusión de 1.3
+
+**Todavía no.** Orden recomendado: A y B (ganancia grande, también en código
+frío), dejar terminar C/D/F/G a la ronda 4, luego E. **Puerta para reabrir el
+JIT**, medida con la fase 1 del plan (contadores, sin generar código):
+
+1. el intérprete propiamente dicho (dispatch + fast paths + `exec_op`) supera
+   el 25–30 % del tiempo JS en el conjunto de páginas de referencia tras A–C, y
+2. al menos el 50 % de los ops ejecutados caen en funciones que superan el
+   umbral de invocaciones (lo que Level 1 puede acelerar sin OSR).
+
+Si la puerta se abre antes, el diseño siguiente es el que se debe implementar.
+
+---
+
+## 3. Backend: Cranelift o generador propio
+
+Prototipo: los mismos ops y la misma estrategia L1 con ambos generadores
+(sección 2.5); funciones sintéticas de 10 a 5000 ops (60 % llamadas a helper,
+40 % aritmética/saltos con fast path). Tiempo de compilación = CPU del hilo,
+media de 3–20 repeticiones; Cranelift con `opt_level=speed`, verificador
+desactivado, unwind info activado.
+
+| Criterio | Cranelift 0.137 (`cranelift-codegen` + `frontend`) | Generador propio (plantillas) |
+|---|---|---|
+| Compilación por instrucción | **34–52 µs** (10–1000 ops); 141 µs con 5000 ops (crecimiento superlineal); `opt_level=none`: 23–37 µs | **0,06–0,12 µs**, lineal |
+| Función típica de 200 ops | 6,7 ms | 13,5 µs |
+| 500 funciones calientes de 50–200 ops (página pesada) | ≈ 1–3,5 s en el hilo principal | ≈ 2–7 ms |
+| Velocidad del código L1 | bucle de 7 ops 96 ms; `%` 13,6 ms; 1 op 43 ms | 89 ms; 12,5 ms; 41 ms (con constantes de etiqueta fijadas en registros) |
+| Tamaño de código | 62–78 B/op | 61–80 B/op |
+| Binario | **+4,9 MB** (5,22 MB frente a 0,36 MB, x86-64 solo, stripped) | estimado +50–100 KB |
+| Dependencias | **+38 crates** (`cranelift-*`, `regalloc2`, `gimli`, `hashbrown`, `target-lexicon`, ISLE y generadores en build); hoy `crates/js` tiene **cero** | ninguna |
+| Build limpia | +212 s de CPU (5:56 de pared con carga) | despreciable |
+| Toolchain (sin C, zig como cc/linker) | Rust puro; `cargo check --target x86_64-pc-windows-gnu` OK (1:26) | Rust puro |
+| Arquitecturas | x86-64, aarch64, riscv64, s390x; ABIs SysV, fastcall de Windows y Apple aarch64 resueltos | x86-64 SysV + Win64 primero; aarch64 después (~1,5–2 k líneas, codificación fija de 32 bits) |
+| W^X y liberar código | `cranelift-jit` no libera funciones sueltas (solo el módulo entero) → usar `cranelift-codegen` directo y nuestra propia memoria (igual que el propio) | nuestra memoria |
+| Unwind en Windows | genera `UNWIND_INFO` de Win64 (`create_unwind_info`) | prólogo fijo ⇒ `UNWIND_INFO` constante (~60 líneas) |
+| Mantenimiento | API con cambios incompatibles frecuentes (en el prototipo: `MemFlags` internados, `finalize(config)`, `icmp_imm` renombrado); bugs ajenos difíciles de depurar | bugs de codificación nuestros; mitigación: tests de bytes por plantilla, volcados con mnemónicos, tests diferenciales |
+| Depuración | IR legible (CLIF), pero sin desensamblador aquí (no hay `objdump`) | el emisor puede producir su propio listado con mnemónicos por instrucción |
+
+**Preferencia del propietario.** Cranelift es un generador de código, no un
+motor JS: toda la semántica JS seguiría siendo nuestra, así que no viola la
+regla de "sin motor JS de terceros". Pero metería ~200 k líneas ajenas en el
+núcleo de un crate que hoy no tiene dependencias, y para un nivel base (helpers
++ plantillas, sin asignación de registros entre instrucciones) su optimizador y
+su regalloc no aportan: el código sale igual de rápido y compila 500× más
+lento. La preferencia y los datos apuntan al mismo sitio.
+
+**Decisión: generador propio** para Level 1. Reevaluar Cranelift solo para un
+futuro nivel optimizador (especialización de tipos, valores en registros,
+OSR/deopt), donde su regalloc sí importa y el coste de compilación se amortiza
+con umbrales altos (y, si se diseña así, compilando en otro hilo a partir de
+una copia `Send` del bytecode).
+
+---
+
+## 4. Opcodes de la primera versión
+
+Principio: **función entera o nada**. El generador hace un `match` exhaustivo
+sobre `Op` **sin brazo comodín**, de modo que añadir un opcode al enum obliga a
+clasificarlo. Tres clases:
+
+### 4.1 Fast path nativo (con caída al helper si los tipos no encajan)
+
+- Movimientos: `Mov` (convierte `Empty` en `undefined`), `MovRaw`, `LoadK`,
+  `MovChecked`, `CheckInit` (si es `Empty`, helper que lanza el
+  `ReferenceError`). Fast path solo si ni el valor nuevo ni el que se
+  sobrescribe tienen contador; si no, helper `jit_mov`.
+- Aritmética sobre números: `AddRR/RK` (la concatenación de strings va al
+  helper), `SubRR/RK`, `MulRR/RK`, `DivRR/RK`, `ModRR/RK` (llamada a la función
+  pura `js_mod`), `BinRR/RK` (`&`, `|`, `^`, `<<`, `>>`, `>>>` con ToInt32
+  inline en rango, `**` vía la función pura `js_pow`), `IncR`, `DecR`,
+  `ToNumericR`, `UnR` para `Neg`, `Plus`, `BitNot` (`typeof`, `ToString`,
+  `ToPropertyKey` → helper), `NotR` (veracidad inline para
+  bool/número/undefined/null; strings y resto → helper puro). Todo resultado
+  numérico pasa por la **misma canonicalización de NaN** que `set_number`.
+- Comparaciones: `CmpRR/RK` (`<`, `<=`, `>`, `>=`, `==`, `!=` entre números;
+  `===`/`!==` entre números o bits idénticos que no sean strings; resto →
+  helper puro `strict_equals`).
+- Saltos: `Jump` (tick en saltos hacia atrás), `JumpUnless{Lt,LtEq,Gt,GtEq}{RR,RK}`,
+  `JumpIf{Lt,LtEq,Gt,GtEq}{RR,RK}`, `JumpIfStrict{Eq,NotEq}{RR,RK}`,
+  `JumpIf{True,False,Nullish,NotNullish,Undefined,NotUndefined}R`,
+  `IncJumpIfLt{RR,RK}` (ronda 4) y **también las formas de pila** que queden
+  (`JumpIfFalse`, `JumpIfTrue`, `JumpIfNullish`, `JumpIfNotNullishKeep`,
+  `JumpIfFalseKeep`, `JumpIfTrueKeep`, `JumpIfUndefined`, `JumpIfNotUndefined`,
+  `JumpIfStrictEq`) sobre el slot `nregs + depth - 1`. Ningún salto pasa por
+  `exec_op` (que escribe `frame.pc`).
+- `Nop`, `Debugger` (sin efecto, como en el intérprete).
+
+### 4.2 Helper dedicado (sin fast path en Level 1)
+
+- `ReturnR`, `Return` → `jit_return` (estado `RETURN` o `EXIT`).
+- `CallR`, `Call`, `CallSpread`, `NewR`, `New`, `NewSpread`, `SuperCall`,
+  `SuperCallSpread` → `jit_call` (estado `NEXT` si fue nativa o se resolvió
+  dentro, `CALL` si se empujó un frame JS: punto de reanudación en `pc+1`).
+- `Throw`, `ThrowConst` → estado `THROW`.
+- `GetPropR`, `SetPropR`, `DefinePropR`, `GetGlobalR`, `SetGlobalR`: helpers que
+  ejecutan **el mismo código de fast path de IC** que `run_inner` (se extrae a
+  funciones `#[inline]` compartidas; no se duplica) y, si falla, `exec_op`.
+- `GetElemR`/`SetElemR` (`get_elem_fast`/`set_elem_fast` y luego `exec_op`),
+  `GetLocalR`/`SetLocalR`, `LoadThis`, `StoreCompletionR`.
+- **Todo lo demás** (instrucciones de pila de propiedades, literales, closures,
+  clases, iteradores, for-in, `PushScope/PopScope/CopyScope`, `typeof`,
+  `delete`, `in`, `instanceof`, `arguments`, `ArgsLength/ArgsGet`, plantillas,
+  RegExp, `super`, `with`, `import.meta`, `import()`…) → helper genérico
+  `jit_op(ctx, pc)`, que llama a `exec_op` con el `pc` sincronizado. El JIT
+  nunca cachea `frame.scope`, así que las instrucciones de scope son seguras
+  vía helper.
+
+### 4.3 Hacen que la función NO se compile (se queda en la VM)
+
+- `flags.is_generator || flags.is_async` (y, por validación, cualquier
+  `Yield`, `AsyncYield`, `Await`, `IteratorNextWith`).
+- `CallEval` (eval directo: puede declarar `var` en el scope de la función;
+  se deja fuera hasta tener tests diferenciales específicos).
+- Funciones cuyo código quedó sin traducir a registros (`untranslated`, frames
+  > `u16`), con más de `JIT_MAX_OPS` (p. ej. 20 000) instrucciones o con
+  `frame_size` por encima de un límite.
+- Fallo de validación: algún operando de slot ≥ `frame_size`, destino de salto
+  ≥ `ops.len()`, índice de constante/IC/función fuera de rango, handler mal
+  formado, o `depths` inconsistente.
+- Excluida por `RABBITHOLE_JIT_EXCLUDE` / no incluida en `RABBITHOLE_JIT_ONLY`.
+
+Con umbral 0 también se compilan cuerpos de script y de módulo (cobertura para
+tests); con el umbral por defecto no llegan nunca (se ejecutan una vez).
+
+---
+
+## 5. Convención de llamada JIT ↔ VM ↔ runtime
+
+### 5.1 Contexto y firma
+
+```rust
+#[repr(C)]
+pub struct JitCtx {
+    slots: *mut Value,          // +0  base de los slots del frame (vstack + base); la reescriben los helpers
+    consts: *const Value,       // +8  code.constants (inmutable mientras corre)
+    realm: *mut Realm,          // +16
+    helpers: *const JitHelpers, // +24 tabla de punteros a función: el código no lleva relocaciones
+    tick: *mut u32,             // +32 &realm.tick
+    fi: u32,                    // +40 índice del frame
+    pc: u32,                    // +44 pc de salida / reanudación que dejan los helpers
+}
+
+// Entrada de una función compilada (ABI C de la plataforma: SysV o Win64).
+type JitEntry = unsafe extern "C" fn(ctx: *mut JitCtx, pc: u32) -> u32; // devuelve un estado
+
+// Helpers por instrucción: decodifican ellos mismos `code.ops[pc]`.
+type OpHelper = unsafe extern "C" fn(ctx: *mut JitCtx, pc: u32) -> u32;
+// Helpers puros (sin Realm): js_mod, js_pow (f64, f64) -> f64; truthy(u64) -> u32; strict_eq(u64, u64) -> u32
+```
+
+Estados: `NEXT=0` (seguir), `CALL` (se empujó un frame JS; reanudar en `pc+1`
+cuando vuelva), `RETURN` (frame sacado y resultado escrito en el llamador),
+`EXIT` (volvió un frame `entry`; valor en `realm.jit_exit`), `THROW`
+(excepción en `realm.jit_exc`, raíz del GC), `PANIC` (pánico capturado en un
+helper; carga útil en `realm.jit_panic`).
+
+### 5.2 Contrato de los helpers
+
+1. Antes de nada que pueda lanzar o llamar, `frames[fi].pc = pc + 1` (igual que
+   `sync!`), para que `unwind` (que mira `pc - 1`), las trazas de pila y
+   `exec_op` (que usa `depths[pc - 1]`) vean exactamente lo mismo que con el
+   intérprete.
+2. Al volver con `NEXT`, `ctx.slots` es válido (recalculado desde `vstack`).
+3. **Nunca desenrollan**: el cuerpo va dentro de `catch_unwind`; un pánico se
+   guarda y se devuelve `PANIC`; la VM hace `resume_unwind` cuando ya no hay
+   frames JIT en la pila. (Sin esto, un pánico que cruza un `extern "C"`
+   aborta el proceso, y en Windows el desenrollador no sabría cruzar el frame
+   JIT.)
+4. Reutilizan código existente (`exec_op`, `try_fast_call`, `try_native_call`,
+   `ic_get`/`ic_set`, `do_return`); **no se duplica semántica JS**.
+
+### 5.3 Entrada, reanudación y salida
+
+- La VM decide en `run_inner`, en `'reload` (todos los caminos que empujan un
+  frame pasan por ahí: llamada rápida, general, nativo→JS, constructores):
+  - `pc == 0`: incrementar el contador de la función; si supera el umbral y la
+    compilación (cacheada en `FunctionCode`) tuvo éxito, marcar
+    `frame.jit = true` y llamar a la entrada con `pc = 0`;
+  - `frame.jit && pc > 0`: es una reanudación tras una llamada que empujó un
+    frame; entrar con ese `pc`.
+- El código generado empieza con un prólogo fijo y un **despacho de entrada**:
+  `pc == 0` cae a la primera instrucción; si no, salto indirecto por una tabla
+  densa de desplazamientos por instrucción (4 B/op) con comprobación de rango.
+- Llamadas JS→JS: `jit_call` usa `try_fast_call`/`do_call`; si empujó un
+  frame devuelve `CALL`, el código JIT retorna a la VM, que ejecuta el callee
+  (interpretado o compilado); el `ReturnR` del callee escribe el resultado en
+  `ret_slot` y recarga el frame del llamador, que se reanuda en `pc+1`.
+  **Ninguna recursión nativa**: los límites de profundidad (`max_frames`) y el
+  consumo de pila nativa son idénticos con y sin JIT. Esto no es deopt ni OSR:
+  no se reconstruye estado y una activación compilada nunca se ejecuta en el
+  intérprete salvo tras una excepción capturada (5.4).
+- JS→nativo: dentro del helper (`try_native_call`/`call_native`), sin volver
+  a la VM. Nativo→JS: como hoy (`Realm::call` → `run()` anidado), y ese `run()`
+  puede a su vez entrar en código JIT.
+- Integración en la VM (esquema):
+
+```rust
+#[cfg(feature = "jit")]
+if let Some(entry) = self.jit_entry_for(fi) {
+    match self.run_jit(fi, entry) {           // prepara JitCtx y llama
+        JitExit::Reload => continue 'reload,   // CALL o RETURN
+        JitExit::Return(v) => return Ok(Exit::Return(v)),
+        JitExit::Throw(e) => return Err(e),    // run() → unwind(), como hoy
+    }
+}
+```
+
+### 5.4 Excepciones en código JIT
+
+`THROW` llega a `run()` como cualquier `Err`; `unwind` usa la tabla de
+handlers existente. Si el handler está en el propio frame compilado, **Level 1
+borra `frame.jit` y el resto de esa activación sigue en el intérprete** (la
+VM gestiona catch/finally, como pide la especificación). La tabla de entrada
+permitiría reanudar en el `target` del handler; queda como opción posterior
+detrás de un flag, cuando los tests diferenciales de excepciones estén verdes.
+
+### 5.5 Registros fijos (x86-64)
+
+`rbx` = `JitCtx`, `r12` = base de slots (recargada de `[rbx]` tras cada
+helper), `r13` = `TAG_MIN` (o etiqueta `Number` en `main`), `r14` = umbral de
+valores con contador, `r15` = `consts`, `rbp` = cadena de frame pointers.
+Temporales: `rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8`–`r11`, `xmm0`–`xmm5`. En
+Win64: argumentos en `rcx`/`rdx`, 32 bytes de shadow space en cada llamada,
+`rsi`/`rdi`/`xmm6`–`xmm15` son callee-saved (no se usan `xmm6+`). Pila alineada
+a 16 en cada llamada. Las constantes de JS (`LoadK`, operandos `K`) se cargan
+de la tabla de constantes vía `r15`, **nunca como inmediatos** (evita JIT
+spraying con dobles elegidos por el atacante).
+
+Plantilla de `AddRR d, a, b` con el `Value` de la ronda 4 (caminos lentos fuera
+de línea):
+
+```text
+mov rax, [r12+a*8] ; cmp rax, r13 ; jae slow_i      ; ¿número?
+mov rcx, [r12+b*8] ; cmp rcx, r13 ; jae slow_i
+movq xmm0, rax ; movq xmm1, rcx ; addsd xmm0, xmm1 ; movq rax, xmm0
+cmp rax, r13 ; jae nan_i                            ; canonicalizar NaN (raro)
+mov rdx, [r12+d*8] ; cmp rdx, r14 ; jae slow_i      ; ¿el valor viejo tiene Rc?
+mov [r12+d*8], rax
+...
+slow_i: mov rdi, rbx ; mov esi, i ; call [helpers.op] ; mov r12, [rbx]
+        test eax, eax ; jnz exit_status ; jmp next_i
+```
+
+---
+
+## 6. GC, excepciones y liberación de código
+
+- **GC**: no móvil, sin barreras, raíz = todo `vstack`. Level 1 no guarda
+  ningún `Value` en registros nativos entre instrucciones (solo temporales
+  dentro de una plantilla), así que no necesita mapas de pila. Todo helper se
+  trata como posible punto de GC y de reubicación de `vstack` (recarga de
+  `r12`). Safepoints propios del JIT: saltos hacia atrás y llamadas
+  decrementan `*tick`; a cero, `jit_safepoint` (GC, watchdog, `RH_JSPROF`).
+  Si algún día la GC es móvil o generacional: los objetos ya se direccionan
+  por id (no por puntero) y la recarga tras helpers ya está; habría que añadir
+  barreras como llamadas a helper en los stores a objetos (que en Level 1 ya
+  son helpers).
+- **Contadores de referencias**: el código generado nunca copia ni sobrescribe
+  valores con `Rc`; cuando aparece uno, helper (`Value::clone` / drop de Rust).
+- **Excepciones**: estado `THROW`, la VM desenrolla (5.4). Pánicos: capturados
+  en cada helper (5.2). Un fallo de hardware dentro de código JIT es un bug
+  (como hoy cualquier error de memoria); en depuración, un manejador de
+  `SIGSEGV` que diga en qué función JIT ocurrió.
+- **Windows x64**: registrar cada función con `RtlAddFunctionTable`
+  (`RUNTIME_FUNCTION` + `UNWIND_INFO` constante del prólogo fijo) para que
+  depuradores, volcados de WER y perfiles ETW recorran los frames JIT; no se
+  depende de ello para el control de flujo (ningún desenrollado cruza código
+  JIT). `RtlDeleteFunctionTable` al liberar. `FlushInstructionCache` tras
+  escribir.
+- **Linux**: se mantienen frame pointers (el muestreador `RH_PROF` y gdb
+  funcionan sin unwind info); un registro de rangos de código permite que
+  `RH_PROF` simbolice como `jit:<función>`; opcionalmente un fichero
+  `/tmp/perf-<pid>.map`.
+- **Memoria W^X**: Level 1 empieza simple: un mapeo por función redondeado a
+  página (`mmap` RW → copiar → `mprotect` RX; `VirtualAlloc` →
+  `VirtualProtect`), **nunca RWX** (un test comprueba que no hay mapeos `rwx`).
+  En aarch64 hará falta `__clear_cache`/`sys_icache_invalidate` y, en macOS,
+  `MAP_JIT` + `pthread_jit_write_protect_np`. Si la memoria por redondeo
+  importa (medido en la fase 6), arena por hilo en trozos con listas libres
+  (el `Realm` es por hilo, así que la arena también).
+- **Liberación**: `JitCode` (mapeo + registro de unwind) pertenece al
+  `FunctionCode` compilado (`OnceCell<Option<Box<JitCode>>>`; `None` recuerda
+  "no compilable" para no reintentar). Su `Drop` desmapea y desregistra. Es
+  seguro porque una función solo se ejecuta mientras un `Frame` de la VM
+  mantiene un `Rc<FunctionCode>`, y los frames JIT siempre tienen su `Frame`
+  en la VM.
+
+---
+
+## 7. Plan de fases de Stage 2
+
+### Validación común (bloquea cada fase)
+
+- `cargo test --workspace --features jit` con `RABBITHOLE_JIT=off` y con
+  `RABBITHOLE_JIT=on RABBITHOLE_JIT_THRESHOLD=0` (variables de entorno porque
+  `cargo test` no pasa flags de CLI): mismo conjunto de tests verde
+  (`crates/js`: 57 + 20 + 18; `crates/script`: 33 + 31; resto del workspace).
+  Un script `scripts/jit-check.sh` ejecuta ambos modos y compara.
+- test262 no está en el repo: opcionalmente, un subconjunto fijado ejecutado
+  desde un checkout externo en `/tmp`, igual en ambos modos.
+- Tests diferenciales: un ejemplo `jitdiff` ejecuta cada script de un corpus
+  (tests, casos de `perf.rs`, scripts capturados de páginas) en dos realms
+  frescos (VM y umbral 0) y compara valor de compleción, salida de consola,
+  excepción (tipo, mensaje, línea) y un resumen del estado global. **cargo-fuzz
+  no es viable aquí** (requiere nightly, libFuzzer en C++ y runtimes de
+  sanitizers; solo tenemos Rust estable y zig): en su lugar, un generador
+  aleatorio de programas en Rust puro (semilla registrada) con mezcla de tipos,
+  bucles, llamadas, try/catch, getters con efectos, `valueOf`, concatenaciones,
+  ejecutado en segundo plano.
+- GC-stress: `RH_GC_STRESS=1` fuerza `gc()` en cada safepoint con intervalo de
+  tick 1, con JIT activado y umbral 0.
+- Seguridad de memoria: asserts de depuración (slots en rango, `ctx.slots`
+  coherente con `vstack` tras cada helper, `frame.pc` coherente), página de
+  guarda tras el código, test "sin `rwx`". ASan con nightly
+  (`-Zsanitizer=address`) solo si enlaza con zig: se intenta una vez en la
+  fase 1 y se documenta el resultado.
+- Cualquier regresión de compatibilidad bloquea la fase.
+
+### Benchmarks en cada fase
+
+VM sin JIT, VM con JIT (umbral por defecto y 0), y QuickJS como referencia:
+**zig cc compila QuickJS** (verificado: `quickjs.c` + `dtoa.c` + `libregexp.c`
++ `libunicode.c` + `cutils.c` con un `main` de 60 líneas, ~2 min, binario de
+7 MB) — solo para comparar, en `/tmp`, **nunca** en el producto ni en el repo.
+Medir: tiempo de compilación (ns/op y total por página), tiempo de ejecución,
+calentamiento (tiempo por llamada en las primeras N invocaciones), memoria
+(RSS y bytes de código JIT), scripts cortos frente a largos, carga de páginas
+(fixture DOM local, Wikipedia, YouTube con `shot`). Añadir a `perf.rs` una
+categoría "funciones calientes" (el bucle dentro de una función llamada cientos
+de veces), que es lo único que Level 1 puede acelerar.
+
+### Depuración
+
+`RABBITHOLE_JIT_DUMP=<nombre>` (bytes + listado por instrucción con
+desplazamientos y mnemónicos que escribe el propio emisor; aquí no hay
+`objdump`), `RABBITHOLE_JIT_TRACE=1` (qué se compila, qué no y por qué,
+tamaño y tiempo), `RABBITHOLE_JIT_EXCLUDE=<patrones>`,
+`RABBITHOLE_JIT_ONLY=<patrones>`, `RABBITHOLE_JIT_MAX=<n>` (compilar solo las
+primeras n funciones: bisección automática de un miscompile).
+
+### Fases
+
+1. **Infraestructura** (sin compilar nada): feature `jit` en `crates/js`
+   (propagada desde `app`), flags `--jit=off|on`, `--jit-threshold=N` y sus
+   variables de entorno, `JitOptions` en `Realm`, campo `jit` en `Frame` y
+   `FunctionCode`, contadores de invocación en la entrada de frame, memoria
+   ejecutable W^X (Linux y Windows) con `Drop`, registro de rangos, trazas y
+   listas de exclusión, e informe `RABBITHOLE_JIT_STATS` (% de ops ejecutados en
+   funciones por encima del umbral). **Hecho cuando**: compila con y sin la
+   feature (Linux y cross-build de Windows); con JIT desactivado la suite
+   `perf.rs` y una carga de página no se mueven más allá del ruido (±1 %); un
+   test escribe un stub `mov eax, 0; ret`, lo protege RX, lo ejecuta y lo
+   libera, y comprueba que no existe ningún mapeo `rwx`; el informe de
+   cobertura existe para `perf.rs`, el fixture DOM y YouTube. **Aquí se evalúa
+   la puerta de la sección 2.8.**
+2. **Funciones triviales**: emisor x86-64 (SysV + Win64), prólogo/epílogo,
+   despacho de entrada, pasada de validación, `LoadK`, `Mov*`, aritmética
+   RR/RK, `IncR/DecR`, `CmpRR/RK` sobre números y `ReturnR` (helper);
+   cualquier otro op ⇒ la función no se compila. **Hecho cuando**:
+   `function f(a, b) { return a * b + 1 }` y similares compilan y dan el mismo
+   resultado con números y con no-números (caída al helper); paridad de la
+   suite en umbral 0; volcados funcionando; ≤ 0,2 µs/op.
+3. **Flujo de control**: todos los saltos (registro y pila), ticks en saltos
+   hacia atrás y `jit_safepoint`, latches fusionados. **Hecho cuando**: bucles
+   dentro de funciones calientes correctos; un bucle infinito en una función
+   compilada es cortado por el watchdog; GC-stress verde; el bucle de 7 ops en
+   función caliente ≥ 2× frente a la VM.
+4. **Valores dinámicos**: fast paths por tipo con caída al helper
+   (veracidad, nullish/undefined, igualdad estricta, ToInt32 en operaciones de
+   bits, movimientos con conciencia de `Rc`), y el helper genérico `jit_op`, que
+   habilita todas las instrucciones que no son llamadas. **Hecho cuando**: el
+   informe muestra que casi todas las funciones no generadoras compilan (cifra
+   de cobertura publicada), y el fuzzer diferencial pasa 10⁶ programas sin
+   diferencias.
+5. **Llamadas y excepciones**: `jit_call` con puntos de reanudación (JS→JS por
+   la VM, JS→nativo en el helper, nativo→JS por `run()`), `jit_return`, `Throw`,
+   estado `THROW` y desenrollado por la VM, `PANIC` con `catch_unwind`,
+   registro de unwind en Windows. **Hecho cuando**: toda la suite (incluidos
+   los tests de `crates/script`/DOM) pasa en umbral 0; la profundidad máxima de
+   recursión es idéntica con y sin JIT; mensajes y trazas de excepción
+   idénticos; cross-build de Windows verde (y prueba de humo en una máquina
+   Windows en cuanto haya una; hasta entonces, JIT desactivado en Windows).
+6. **Tiering automático**: umbral por defecto ajustado con datos (probable
+   500–2000 llamadas), fallos de compilación cacheados, límite de memoria JIT
+   por realm (p. ej. 16 MB, después se deja de compilar), test de liberación
+   (crear y soltar miles de closures: los bytes JIT vuelven a la línea base),
+   arena por trozos si el redondeo a página pesa. **Hecho cuando**: con JIT
+   activado las cargas de página no empeoran más del 1 % de CPU, se cumplen
+   los objetivos de la sección 9, y el JIT sigue **desactivado por defecto**
+   hasta que el propietario decida.
+
+---
+
+## 8. Riesgos y mitigaciones
+
+| Riesgo | Mitigación |
+|---|---|
+| Poco retorno (medido: ≤ 2–4 % en páginas) | Puerta de decisión tras la fase 1; hacer antes A–C (sección 2.7) |
+| Punteros obsoletos a `vstack` tras una reubicación | Recarga obligatoria de `r12` tras cada helper; asserts en depuración; los helpers recalculan `ctx.slots` |
+| Fugas o doble liberación de `Rc` | El código generado nunca copia/sobrescribe valores con contador |
+| Pánicos cruzando frames JIT (aborto, o desenrollado roto en Windows) | `catch_unwind` en todos los helpers + `resume_unwind` en la VM |
+| Divergencia semántica entre fast paths y VM | Fast paths mínimos; todo lo demás reutiliza `exec_op` y los fast paths de IC compartidos; tests diferenciales y fuzzer |
+| NaN fuera de canon dentro del espacio de etiquetas (un sNaN `0xFFF7…` silenciado da `0xFFFF…`) | Canonicalizar todo resultado numérico igual que `set_number` |
+| La ronda 4 cambia `Value` u opcodes | Módulo `value_abi` aislado con asserts de tamaño y discriminantes; `match` exhaustivo sin comodín |
+| Windows sin máquina de prueba | Solo cross-build verificable aquí; JIT desactivado en Windows hasta una prueba de humo real |
+| Seguridad (JIT spraying, W^X, validación) | Constantes desde memoria, nunca RWX, bytecode validado antes de emitir, bounds checks del runtime intactos |
+| Coste de mantener dos motores | Clasificación obligatoria de opcodes nuevos, script de paridad en CI, exclusiones por función para aislar bugs |
+| Generadores/async quedan fuera | Los puntos de reanudación ya existen: en una fase futura un `Yield` puede ser "volver a la VM con estado" sin cambiar el modelo |
+| Memoria de código (página por función) | Medir en la fase 6; arena por trozos si hace falta; límite por realm |
+
+---
+
+## 9. Objetivos numéricos (ajustados al perfil)
+
+| Métrica | Objetivo Level 1 | Referencia medida |
+|---|---|---|
+| Función caliente con bucle numérico de varias instrucciones | **≥ 2×** frente a la VM | prototipo 2,7× |
+| Bucle de una sola instrucción fusionada | ≥ 1,2× | prototipo 1,2–1,3× |
+| Llamadas (fib, method_calls) | ≥ 1,0× (sin regresión); la ganancia de verdad viene de B | `CallR`/`ReturnR` siguen en la VM |
+| `perf.rs` total con umbral por defecto | sin regresión (±1 %) | casi todo es código que corre una vez |
+| Carga de páginas y scripts que no calientan, JIT activado | ≤ 1 % de CPU de regresión (la guía decía ≤ 3 %; con 0,06 µs/op cabe en menos) | — |
+| JIT compilado pero desactivado | 0 % medible | una carga y un salto por entrada de frame |
+| Compilación | ≤ 0,2 µs/op, ≤ 100 B/op | prototipo 0,06–0,12 µs/op, 61–80 B/op |
+| Código JIT en una página pesada (YouTube) | ≤ 4 MB | a medir en la fase 6 |
+
+El "≥ 2× en benchmarks numéricos y de bucles" de la guía solo es alcanzable en
+la categoría "funciones calientes": los bucles actuales de `perf.rs` están en
+código de una sola ejecución y Level 1 (sin OSR) no los toca.
+
+---
+
+## 10. Qué cambia si la ronda 4 aterriza o no
+
+- **Si aterriza** (lo más probable): `Value` de 8 bytes: comprobar número = una
+  comparación sin signo con `TAG_MIN`; con contador = `>= 0xFFFC…`; constantes
+  inmediatas para undefined/null/empty/true/false; un solo store de 8 bytes por
+  valor; canonicalización de NaN obligatoria. Los ops fusionados
+  `IncJumpIfLtRR/RK` entran en 4.1. Los nuevos ICs (prototipo profundo,
+  `IC_ABSENT`, megamórfica) y los ICs de llamada se aprovechan sin hacer nada,
+  porque las propiedades y las llamadas van por helpers que reutilizan esos
+  caminos. Si las "globales más baratas" introducen opcodes nuevos, el `match`
+  exhaustivo obliga a clasificarlos (por defecto, helper genérico).
+- **Si no aterriza**: `Value` de 16 bytes con `#[repr(u64)]`: número =
+  `qword [slot] == 3`; con contador = etiqueta 4 o 6; guardar un número son dos
+  stores de 8 bytes (etiqueta y payload; nunca stores parciales, que rompen el
+  store-to-load forwarding, como ya documenta `value.rs`). El intérprete de
+  `main` es más lento (empty_loop 71 ms frente a 51), así que el speedup
+  relativo del JIT sería algo mayor (estimado ~1,7× en el bucle simple: 71 ms
+  frente a ~41 ms), pero
+  la conclusión de 2.8 no cambia.
+- En ambos casos, todo lo que depende del layout vive en un único módulo
+  `value_abi` (≈ 100 líneas: es-número, unbox/box f64, tiene-contador,
+  constantes), con tests que comprueban `size_of::<Value>()` y discriminantes.
+
+---
+
+## Apéndice A. Reproducir las medidas
+
+- Binarios con símbolos y frame pointers:
+  `CARGO_PROFILE_RELEASE_STRIP=false RUSTFLAGS=-Cforce-frame-pointers=yes cargo build --release -p rabbithole-js --example perf --example prof`
+  (y `-p rabbithole-engine --example shot` para páginas; se usó
+  `CARGO_PROFILE_RELEASE_LTO=false` para acortar la build).
+- Perfiles: `RH_PROF=out.prof target/release/examples/perf <caso>` y
+  `RH_PROF=out.prof RH_JS_WAIT=6000 target/release/examples/shot <url> x.png`;
+  simbolizar leyendo `.symtab` del binario y desplazando por la dirección de
+  `rh_sampler_marker` registrada en la primera línea; `out.maps` sirve para
+  atribuir direcciones de libc. Para separar "dentro de JS", quedarse con las
+  muestras cuya cadena contiene `run_inner`.
+- Atribución por opcode (no comiteada): en `run_inner`, tras leer `op`, guardar
+  su primer byte (discriminante) en una `AtomicUsize`; en `run()`, guardar y
+  restaurar ese valor alrededor de `run_inner` (para los `run()` anidados);
+  en el manejador de SIGPROF, añadir ese valor a la muestra. Con
+  `RH_OPCOUNT=<fichero>`, un contador por discriminante da las frecuencias.
+- Prototipo JIT: un crate desechable con `cranelift-codegen`/`cranelift-frontend`
+  0.137 y un emisor x86-64 propio sobre el mismo mini-bytecode; tiempos con
+  `CLOCK_THREAD_CPUTIME_ID`; código en `mmap` RW → `mprotect` RX.
+- QuickJS: `zig cc -O2 -fwrapv -D_GNU_SOURCE -DCONFIG_VERSION=... runner.c quickjs.c dtoa.c libregexp.c libunicode.c cutils.c -lm -lpthread`,
+  con un `runner.c` que evalúa los mismos 21 casos en contextos nuevos.
