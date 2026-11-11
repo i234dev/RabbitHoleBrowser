@@ -1192,6 +1192,14 @@ impl Realm {
                 .collect();
             crate::sampler::js::sample(&frames);
         }
+        self.check_watchdog()
+    }
+
+    /// The watchdog part of a safe point, for hosts running long work on
+    /// behalf of a script outside the interpreter loop (WebAssembly loops
+    /// poll it): past the deadline, an uncatchable "Script execution timed
+    /// out" error to propagate.
+    pub fn check_watchdog(&mut self) -> JsResult<()> {
         if let Some(d) = self.deadline {
             if self.terminating || self.watch_now() >= d {
                 if !self.terminating && self.apply_watchdog_credit() && self.watch_now() < self.deadline.unwrap_or(d) {
