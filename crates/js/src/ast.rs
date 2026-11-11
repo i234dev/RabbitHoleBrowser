@@ -4,6 +4,113 @@
 //! the parser, the compiler and tests can all share it freely. Positions
 //! are 1-based line/column of the first token of each node.
 
+
+/// An identifier (or other name) from the source. Cheap to clone: equal
+/// names produced by one lexer share their text.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Name(std::rc::Rc<str>);
+
+impl Default for Name {
+    fn default() -> Name {
+        Name::new("")
+    }
+}
+
+impl Name {
+    pub fn new(s: &str) -> Name {
+        Name(std::rc::Rc::from(s))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for Name {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for Name {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for Name {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for Name {
+    fn eq(&self, other: &str) -> bool {
+        &*self.0 == other
+    }
+}
+
+impl PartialEq<&str> for Name {
+    fn eq(&self, other: &&str) -> bool {
+        &*self.0 == *other
+    }
+}
+
+impl PartialEq<String> for Name {
+    fn eq(&self, other: &String) -> bool {
+        &*self.0 == other.as_str()
+    }
+}
+
+impl PartialEq<Name> for str {
+    fn eq(&self, other: &Name) -> bool {
+        self == &*other.0
+    }
+}
+
+impl PartialEq<Name> for &str {
+    fn eq(&self, other: &Name) -> bool {
+        *self == &*other.0
+    }
+}
+
+impl PartialEq<Name> for String {
+    fn eq(&self, other: &Name) -> bool {
+        self.as_str() == &*other.0
+    }
+}
+
+impl From<&str> for Name {
+    fn from(s: &str) -> Name {
+        Name::new(s)
+    }
+}
+
+impl From<String> for Name {
+    fn from(s: String) -> Name {
+        Name(std::rc::Rc::from(s))
+    }
+}
+
+impl From<&String> for Name {
+    fn from(s: &String) -> Name {
+        Name::new(s)
+    }
+}
+
+impl std::fmt::Debug for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&*self.0, f)
+    }
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Pos {
     pub line: u32,
@@ -31,7 +138,7 @@ pub enum StmtKind {
     Empty,
     Expr(Expr),
     VarDecl(VarDecl),
-    FunctionDecl(Function),
+    FunctionDecl(std::rc::Rc<Function>),
     ClassDecl(Class),
     Block(Vec<Stmt>),
     If {
@@ -65,8 +172,8 @@ pub enum StmtKind {
         test: Expr,
     },
     Return(Option<Expr>),
-    Break(Option<String>),
-    Continue(Option<String>),
+    Break(Option<Name>),
+    Continue(Option<Name>),
     Throw(Expr),
     Try {
         block: Vec<Stmt>,
@@ -79,7 +186,7 @@ pub enum StmtKind {
         cases: Vec<SwitchCase>,
     },
     Labeled {
-        label: String,
+        label: Name,
         body: Box<Stmt>,
     },
     Debugger,
@@ -138,7 +245,7 @@ pub enum ForHead {
 /// Binding / assignment targets (destructuring).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
-    Identifier(String),
+    Identifier(Name),
     /// Only valid as an assignment target (not in declarations): `a.b = ...`
     Expr(Box<Expr>),
     Object {
@@ -175,7 +282,7 @@ pub struct Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
-    Identifier(String),
+    Identifier(Name),
     Null,
     Undefined,
     This,
@@ -204,8 +311,8 @@ pub enum ExprKind {
     },
     Array(Vec<ArrayElement>),
     Object(Vec<ObjectProperty>),
-    Function(Box<Function>),
-    Arrow(Box<Function>),
+    Function(std::rc::Rc<Function>),
+    Arrow(std::rc::Rc<Function>),
     Class(Box<Class>),
     Unary {
         op: UnaryOp,
@@ -270,16 +377,16 @@ pub enum ExprKind {
     DynamicImport(Box<Expr>),
     /// `#priv in obj`
     PrivateIn {
-        name: String,
+        name: Name,
         object: Box<Expr>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemberProp {
-    Identifier(String),
+    Identifier(Name),
     /// `obj.#field`
-    Private(String),
+    Private(Name),
     Computed(Box<Expr>),
 }
 
@@ -293,12 +400,12 @@ pub enum ArrayElement {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PropertyKey {
-    Identifier(String),
-    String(String),
+    Identifier(Name),
+    String(Name),
     Number(f64),
     Computed(Box<Expr>),
     /// `#name` (class private members only)
-    Private(String),
+    Private(Name),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -397,7 +504,7 @@ pub enum AssignOp {
 pub struct Function {
     /// Binding name (declarations, named expressions); `None` for
     /// anonymous functions and arrows. Methods carry their key separately.
-    pub name: Option<String>,
+    pub name: Option<Name>,
     pub params: Vec<Param>,
     pub body: FunctionBody,
     pub is_arrow: bool,
@@ -425,7 +532,7 @@ pub enum FunctionBody {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Class {
-    pub name: Option<String>,
+    pub name: Option<Name>,
     pub superclass: Option<Box<Expr>>,
     pub members: Vec<ClassMember>,
     pub pos: Pos,

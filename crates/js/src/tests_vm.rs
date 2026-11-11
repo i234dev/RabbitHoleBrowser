@@ -381,3 +381,43 @@ fn json_and_array_like_fast_paths() {
     eq("Object.prototype[1] = 'p'; var r = Array.from({length: 2}).map(String).join(); delete Object.prototype[1]; r", "undefined,p");
     eq("Math.max.apply(null, {length: 2, 0: 4, 1: 9})", "9");
 }
+
+#[test]
+fn lazy_compilation() {
+    // Nested functions compile on first call and see their enclosing scopes.
+    eq("(function() { var a = 1; let b = 2; const c = 3; function f(x) { return a + b + c + x; } return f(4) + f(5); })()", "21");
+    eq("(function() { var n = 0; function inc() { n++; return n; } inc(); inc(); return n; })()", "2");
+    eq("(function() { var fs = []; for (let i = 0; i < 3; i++) { let j = i * 2; fs.push(function() { return i + j; }); } return fs.map(f => f()).join(); })()", "0,3,6");
+    eq("(function() { function outer(a) { return function mid(b) { return (c) => a + b + c; }; } return outer(1)(2)(3); })()", "6");
+    eq("(function() { var x = 'outer'; function f() { var x = 'inner'; return (() => x)(); } return f() + x; })()", "innerouter");
+    eq("(function() { var k = 10; function f(a = k + 1) { return a; } return f() + f(1); })()", "12");
+    // Self reference, recursion and hoisting.
+    eq("var fact = function f(n) { return n < 2 ? 1 : n * f(n - 1); }; fact(5)", "120");
+    eq("(function() { return g(); function g() { return h() + 1; } function h() { return 41; } })()", "42");
+    // `arguments`, `this` and `new.target` in nested functions.
+    eq("(function() { function f() { return (() => arguments.length + arguments[0])(); } return f(5, 6); })()", "7");
+    eq("(function() { var o = { v: 3, m() { return [1, 2].map(x => x * this.v).join(); } }; return o.m(); })()", "3,6");
+    eq("(function() { function C() { this.t = new.target === C; this.a = (() => new.target === C)(); } var c = new C(); return c.t && c.a; })()", "true");
+    // Generators, async functions and classes inside lazily compiled code.
+    eq("(function() { function* g(n) { for (let i = 0; i < n; i++) yield i * i; } return [...g(4)].join(); })()", "0,1,4,9");
+    eq("var r = []; (async function() { async function f(x) { await null; return x * 2; } r.push(await f(21)); })(); r", "42");
+    eq("(function() { class A { #p = 7; get() { return [1].map(() => this.#p)[0]; } static make() { return new A(); } } return A.make().get(); })()", "7");
+    eq("(function() { class B { constructor(x) { this.x = x; } } class D extends B { constructor() { super(5); this.y = (() => this.x + 1)(); } } return new D().y; })()", "6");
+    // Strictness is inherited.
+    eq("(function() { 'use strict'; function f() { return this; } return typeof f(); })()", "undefined");
+    eq("(function() { function f() { return this === undefined; } return f(); })()", "false");
+    throws("(function() { 'use strict'; function f() { undeclared_var_xyz = 1; } f(); })()", "ReferenceError");
+    // Function metadata without compiling.
+    eq("(function() { function f(a, b, c = 1, ...d) {} var g = (x, y) => x; return f.length + ',' + f.name + ',' + g.length + ',' + g.name; })()", "2,f,2,g");
+    eq("(function() { var h = function() {}; return h.name; })()", "h");
+    eq("typeof (function f() { return 1; }).toString()", "string");
+    // Closures created from the same code before and after its first call.
+    eq("(function() { var fs = []; for (var i = 0; i < 3; i++) fs.push((x => () => x)(i)); return fs[2]() + fs[0]() + fs[1](); })()", "3");
+    // Compile errors of a function surface when it is first called.
+    eq("(function() { var ok = 1; function never() { with ({}) {} } return ok; })()", "1");
+    throws("(function() { function bad() { with ({}) {} } bad(); })()", "SyntaxError");
+    // Global code and functions defined in eval / new Function.
+    eq("var G = 5; function useG() { return G * 2; } useG()", "10");
+    eq("new Function('a', 'b', 'function inner(x) { return x * a; } return inner(b);')(3, 4)", "12");
+    eq("eval('(function(q) { return function() { return q + 1; }; })(1)()')", "2");
+}

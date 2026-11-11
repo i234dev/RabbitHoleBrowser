@@ -531,6 +531,9 @@ impl Heap {
                     let keys: Vec<String> = o.props.iter().take(6).map(|(k, _)| format!("{k:?}")).collect();
                     FREED_INFO.with(|m| m.borrow_mut().insert(i as u32, format!("{} {:?} props={:?}", o.kind.name(), o.class_name, keys)));
                 }
+                if let Some(o) = slot.as_mut() {
+                    o.props.recycle();
+                }
                 *slot = None;
                 self.free.push(i as u32);
                 freed += 1;

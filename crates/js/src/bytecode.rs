@@ -460,6 +460,11 @@ pub struct FunctionCode {
     pub depths: Vec<u16>,
     /// Maximum operand stack depth (frames have `nregs + max_depth` slots).
     pub max_depth: u32,
+    /// Set for a function not compiled yet (see `compiler::compile_lazy`);
+    /// only the name, flags, parameter count and source are meaningful.
+    pub lazy: Option<Box<crate::compiler::LazyCode>>,
+    /// The compiled code of a lazy function, once compiled.
+    pub compiled: std::cell::OnceCell<Rc<FunctionCode>>,
 }
 
 impl FunctionCode {

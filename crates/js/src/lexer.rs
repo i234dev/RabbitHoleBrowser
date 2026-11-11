@@ -6,14 +6,14 @@
 //! continues a template literal. Tokens remember whether a line terminator
 //! preceded them, which the parser needs for automatic semicolon insertion.
 
-use crate::ast::Pos;
+use crate::ast::{Name, Pos};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     /// Identifier or keyword (keywords are classified by the parser).
-    Ident(String),
+    Ident(Name),
     /// `#name`
-    PrivateName(String),
+    PrivateName(Name),
     Number(f64),
     BigInt(String),
     /// Cooked string value.
@@ -60,7 +60,7 @@ pub struct LexError {
 }
 
 /// Snapshot of the lexer state for speculative parsing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct LexerState {
     pos: usize,
     line: u32,
@@ -75,6 +75,15 @@ pub struct Lexer<'a> {
     line_start: usize,
     /// Scripts (not modules) honour HTML-like comments.
     html_comments: bool,
+    /// Names seen so far: each distinct identifier is allocated once.
+    names: std::collections::HashMap<&'a str, Name, crate::value::FxBuild>,
+    /// While set, scanned tokens are kept in `cache`.
+    recording: bool,
+    /// Tokens scanned ahead by the parser (a cheap lookahead pass), by the
+    /// position the scan started from, with the lexer state after them:
+    /// the parse proper reuses them instead of scanning again. A token
+    /// depends only on where scanning starts, so entries stay valid.
+    cache: std::collections::HashMap<usize, (Token, LexerState), crate::value::FxBuild>,
 }
 
 // Punctuators ordered longest-first so greedy matching works.
@@ -106,6 +115,9 @@ impl<'a> Lexer<'a> {
             line: 1,
             line_start: 0,
             html_comments: !is_module,
+            names: std::collections::HashMap::default(),
+            recording: false,
+            cache: std::collections::HashMap::default(),
         };
         // Hashbang
         if src.starts_with("#!") {
@@ -121,6 +133,14 @@ impl<'a> Lexer<'a> {
 
     pub fn source(&self) -> &'a str {
         self.src
+    }
+
+    /// Keep the tokens scanned from now on for reuse (see `cache`).
+    pub fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+        if on && self.cache.len() > 1 << 16 {
+            self.cache.clear();
+        }
     }
 
     pub fn state(&self) -> LexerState {
@@ -274,6 +294,22 @@ impl<'a> Lexer<'a> {
     /// Scan the next token in the "division allowed" goal (regex literals
     /// are produced by [`Lexer::rescan_regex`] on parser request).
     pub fn next_token(&mut self) -> Result<Token, LexError> {
+        if !self.cache.is_empty() {
+            if let Some((t, st)) = self.cache.remove(&self.pos) {
+                self.restore(&st);
+                return Ok(t);
+            }
+        }
+        if self.recording {
+            let from = self.pos;
+            let t = self.scan_next()?;
+            self.cache.insert(from, (t.clone(), self.state()));
+            return Ok(t);
+        }
+        self.scan_next()
+    }
+
+    fn scan_next(&mut self) -> Result<Token, LexError> {
         let newline_before = self.skip_trivia()?;
         let start = self.pos;
         let pos = self.cur_pos();
@@ -509,7 +545,7 @@ impl<'a> Lexer<'a> {
         Some(s)
     }
 
-    fn scan_identifier_name(&mut self) -> Result<String, LexError> {
+    fn scan_identifier_name(&mut self) -> Result<Name, LexError> {
         // ASCII fast path: the whole name is [A-Za-z0-9_$].
         {
             let b = self.bytes;
@@ -521,7 +557,14 @@ impl<'a> Lexer<'a> {
             let at_end = i >= b.len() || (b[i] < 0x80 && b[i] != b'\\');
             if i > start && at_end && !b[start].is_ascii_digit() {
                 self.pos = i;
-                return Ok(self.src[start..i].to_string());
+                let src: &'a str = self.src;
+                let text = &src[start..i];
+                if let Some(n) = self.names.get(text) {
+                    return Ok(n.clone());
+                }
+                let n = Name::new(text);
+                self.names.insert(text, n.clone());
+                return Ok(n);
             }
         }
         let mut name = String::new();
@@ -547,7 +590,7 @@ impl<'a> Lexer<'a> {
             }
             first = false;
         }
-        Ok(name)
+        Ok(Name::from(name))
     }
 
     /// After `\u`: parse `XXXX` or `{X...}`.

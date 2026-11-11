@@ -22,6 +22,18 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
+thread_local! {
+    /// Property vectors of collected objects, reused by new objects (saves
+    /// an allocation per object for short-lived ones).
+    static VALUE_POOL: RefCell<Vec<Vec<Property>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// An empty property vector, recycled when possible.
+#[inline]
+fn fresh_values() -> Vec<Property> {
+    VALUE_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_else(|| Vec::with_capacity(4))
+}
+
 /// Largest number of properties kept in shape mode.
 pub const MAX_SHAPED: usize = 128;
 /// Shapes up to this size are searched linearly (larger ones use an index).
@@ -177,6 +189,23 @@ impl Shape {
             }
         }
         child
+    }
+
+    /// An existing transition for string key `key` (no key construction).
+    #[inline]
+    pub fn lookup_transition_str(&self, key: &JsStr) -> Option<Rc<Shape>> {
+        let t = self.transitions.borrow();
+        if t.map.is_none() {
+            for (x, w) in t.small.iter() {
+                if let PropertyKey::String(s) = x {
+                    if s.ptr_eq(key) {
+                        return w.upgrade();
+                    }
+                }
+            }
+        }
+        drop(t);
+        self.lookup_transition(&PropertyKey::String(key.clone()))
     }
 
     /// An existing transition for `key`.
@@ -363,6 +392,9 @@ impl PropertyMap {
                 }
                 if values.len() < MAX_SHAPED {
                     *shape = shape.add(&key);
+                    if values.capacity() == 0 {
+                        *values = fresh_values();
+                    }
                     values.push(prop);
                     return;
                 }
@@ -390,7 +422,28 @@ impl PropertyMap {
         if let Repr::Shaped { shape, values } = &mut self.repr {
             self.sid = next.id;
             *shape = next;
+            if values.capacity() == 0 {
+                *values = fresh_values();
+            }
             values.push(prop);
+        }
+    }
+
+    /// Give the storage of a dead object back for reuse (the map is left
+    /// empty).
+    pub fn recycle(&mut self) {
+        if let Repr::Shaped { values, .. } = &mut self.repr {
+            let cap = values.capacity();
+            if (4..=16).contains(&cap) {
+                let mut v = std::mem::take(values);
+                v.clear();
+                VALUE_POOL.with(|p| {
+                    let mut p = p.borrow_mut();
+                    if p.len() < 4096 {
+                        p.push(v);
+                    }
+                });
+            }
         }
     }
 

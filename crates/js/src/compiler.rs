@@ -90,11 +90,38 @@ struct CScope {
     /// The shared scope of a switch's case clauses: a jump to a later
     /// case can skip a declaration, so its bindings always keep TDZ checks.
     is_switch: bool,
+    /// Snapshot for lazily compiled nested functions, with the
+    /// (slot count, materialized, name count) it was taken at.
+    snap: Option<((u16, bool, usize), Rc<LazyScope>)>,
+}
+
+/// Compile-time view of an enclosing scope kept for a lazily compiled
+/// function: its heap bindings (nested functions never see registers: the
+/// capture analysis keeps every name they mention in heap slots).
+#[derive(Debug)]
+pub struct LazyScope {
+    names: HashMap<String, (u16, BindKind), FxBuild>,
+    materialized: bool,
+    parent: Option<Rc<LazyScope>>,
+}
+
+/// What a lazy [`FunctionCode`] keeps to compile its function on first
+/// call.
+#[derive(Debug)]
+pub struct LazyCode {
+    func: Rc<Function>,
+    name: String,
+    env: Option<Rc<LazyScope>>,
+    parent_strict: bool,
+    class_depth: u32,
+    module: Option<u32>,
+    filename: Rc<str>,
+    source: Rc<str>,
 }
 
 impl CScope {
     fn new(materialized: bool, is_function: bool) -> CScope {
-        CScope { names: HashMap::default(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new(), is_switch: false }
+        CScope { names: HashMap::default(), slot_count: 0, materialized, is_function, force_heap: false, tdz: Vec::new(), is_switch: false, snap: None }
     }
 }
 
@@ -227,6 +254,13 @@ pub struct Compiler {
     /// Set when the capture analysis missed a reference (a register binding
     /// resolved from a nested function); reported as a compile error.
     internal_error: Option<String>,
+    /// Scopes enclosing the outermost function being compiled (lazy
+    /// compilation of a nested function).
+    outer: Option<Rc<LazyScope>>,
+    /// The function a lazy compilation is for (compiled, not deferred).
+    eager_root: *const Function,
+    /// Defer compiling nested functions until their first call.
+    lazy: bool,
 }
 
 /// Name of the hidden binding initialised by `export default <expr>` and
@@ -253,6 +287,42 @@ enum Resolved {
     Global,
 }
 
+/// Lazy compilation of nested functions (on unless `RH_EAGER_COMPILE` is set).
+fn lazy_enabled() -> bool {
+    thread_local!(static LAZY: bool = std::env::var_os("RH_EAGER_COMPILE").is_none());
+    LAZY.with(|l| *l)
+}
+
+/// Compile the function of a lazy [`FunctionCode`] (see [`LazyCode`]).
+pub fn compile_lazy(code: &FunctionCode) -> CResult<Rc<FunctionCode>> {
+    let lz = code.lazy.as_ref().expect("not a lazy function");
+    let mut c = Compiler {
+        completion: false,
+        fns: Vec::new(),
+        filename: lz.filename.clone(),
+        source: lz.source.clone(),
+        pending_tweak: None,
+        chain_stack: Vec::new(),
+        loose_chain_exits: Vec::new(),
+        module: lz.module,
+        captures: CaptureMap::default(),
+        internal_error: None,
+        outer: lz.env.clone(),
+        eager_root: Rc::as_ptr(&lz.func),
+        lazy: true,
+    };
+    // A transparent parent: no bindings of its own, not a scope at run
+    // time; names resolve through `outer`.
+    let mut parent = FnState::new("", CodeFlags { is_strict: lz.parent_strict, ..Default::default() }, true, lz.filename.clone());
+    parent.scopes[0].materialized = false;
+    parent.class_depth = lz.class_depth;
+    c.fns.push(parent);
+    let idx = c.compile_function(&lz.func, Some(&lz.name))?;
+    c.check_internal()?;
+    let parent = c.fns.pop().unwrap();
+    Ok(parent.functions[idx as usize].clone())
+}
+
 /// Compile a whole script/module.
 pub fn compile_program(program: &Program, filename: &str, source: &str) -> CResult<Rc<FunctionCode>> {
     compile_program_with(program, filename, source, true)
@@ -272,6 +342,9 @@ pub fn compile_program_with(program: &Program, filename: &str, source: &str, com
         module: None,
         captures: crate::captures::analyze_program(&program.body),
         internal_error: None,
+        outer: None,
+        eager_root: std::ptr::null(),
+        lazy: lazy_enabled(),
     };
     let code = c.compile_script(program)?;
     c.check_internal()?;
@@ -292,6 +365,9 @@ pub fn compile_module(program: &Program, filename: &str, source: &str, module_id
         captures: crate::captures::analyze_program(&program.body),
         internal_error: None,
         completion: false,
+        outer: None,
+        eager_root: std::ptr::null(),
+        lazy: lazy_enabled(),
     };
     let m = c.compile_module_program(program)?;
     c.check_internal()?;
@@ -525,7 +601,123 @@ impl Compiler {
                 }
             }
         }
+        let mut node = self.outer.clone();
+        while let Some(n) = node {
+            if let Some(&(slot, kind)) = n.names.get(name) {
+                if n.materialized {
+                    return Resolved::Local { depth, slot, kind };
+                }
+                // Script-level lexical names (globals): keep looking.
+            }
+            if n.materialized {
+                depth += 1;
+            }
+            node = n.parent.clone();
+        }
         Resolved::Global
+    }
+
+    /// Snapshot of the scope chain at this point of the compilation, for a
+    /// nested function compiled later (snapshots are reused while a scope
+    /// is unchanged).
+    fn env_snapshot(&mut self) -> Option<Rc<LazyScope>> {
+        let mut parent = self.outer.clone();
+        for fi in 0..self.fns.len() {
+            for si in 0..self.fns[fi].scopes.len() {
+                let sc = &mut self.fns[fi].scopes[si];
+                let fp = (sc.slot_count, sc.materialized, sc.names.len());
+                let reuse = match &sc.snap {
+                    Some((f, n)) if *f == fp && opt_ptr_eq(&n.parent, &parent) => Some(n.clone()),
+                    _ => None,
+                };
+                let node = match reuse {
+                    Some(n) => n,
+                    None => {
+                        let names = sc
+                            .names
+                            .iter()
+                            .filter_map(|(k, b)| match b.loc {
+                                Loc::Slot(s) => Some((k.clone(), (s, b.kind))),
+                                Loc::Reg(_) => None,
+                            })
+                            .collect();
+                        let n = Rc::new(LazyScope { names, materialized: sc.materialized, parent: parent.clone() });
+                        sc.snap = Some((fp, n.clone()));
+                        n
+                    }
+                };
+                parent = Some(node);
+            }
+        }
+        parent
+    }
+
+    /// Compile a function expression / declaration node, or defer it until
+    /// its first call (lazy compilation).
+    fn compile_function_rc(&mut self, f: &Rc<Function>, name: Option<&str>) -> CResult<u32> {
+        if !self.lazy || self.pending_tweak.is_some() || std::ptr::eq(Rc::as_ptr(f), self.eager_root) {
+            return self.compile_function(f, name);
+        }
+        let fname = f.name.as_deref().or(name).unwrap_or("").to_string();
+        let parent_strict = self.fs_ref().flags.is_strict;
+        let flags = CodeFlags {
+            is_arrow: f.is_arrow,
+            is_async: f.is_async,
+            is_generator: f.is_generator,
+            is_strict: f.strict || parent_strict,
+            has_simple_params: f.params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest),
+            ..Default::default()
+        };
+        let mut param_count = 0u32;
+        for p in &f.params {
+            if p.rest || matches!(p.pattern, Pattern::Assign { .. }) {
+                break;
+            }
+            param_count += 1;
+        }
+        let env = self.env_snapshot();
+        let lazy = LazyCode {
+            func: f.clone(),
+            name: fname.clone(),
+            env,
+            parent_strict,
+            class_depth: self.fs_ref().class_depth,
+            module: self.module,
+            filename: self.fs_ref().filename.clone(),
+            source: self.source.clone(),
+        };
+        let code = FunctionCode {
+            name: JsStr::new(&fname),
+            ops: Vec::new(),
+            positions: Vec::new(),
+            constants: Vec::new(),
+            functions: Vec::new(),
+            handlers: Vec::new(),
+            param_count,
+            scope_slots: 0,
+            nregs: 0,
+            reg_names: Vec::new(),
+            param_locs: Vec::new(),
+            rest_loc: None,
+            arguments_loc: None,
+            self_loc: None,
+            flags,
+            slot_names: Vec::new(),
+            block_names: Vec::new(),
+            templates: Vec::new(),
+            ics: Box::new([]),
+            ic_keys: Box::new([]),
+            depths: Vec::new(),
+            max_depth: 0,
+            source: Some(self.source.clone()),
+            filename: self.fs_ref().filename.clone(),
+            module: self.module,
+            lazy: Some(Box::new(lazy)),
+            compiled: std::cell::OnceCell::new(),
+        };
+        let parent = self.fs();
+        parent.functions.push(Rc::new(code));
+        Ok((parent.functions.len() - 1) as u32)
     }
 
     /// Whether the register binding `name` of the current function is
@@ -722,7 +914,7 @@ impl Compiler {
 
     pub(crate) fn collect_pattern_names(p: &Pattern, out: &mut Vec<String>) {
         match p {
-            Pattern::Identifier(n) => out.push(n.clone()),
+            Pattern::Identifier(n) => out.push(n.to_string()),
             Pattern::Expr(_) => {}
             Pattern::Object { properties, rest } => {
                 for pr in properties {
@@ -817,11 +1009,11 @@ impl Compiler {
                     }
                 }
                 StmtKind::ClassDecl(c) => match &c.name {
-                    Some(n) => out.push((n.clone(), BindKind::Class)),
+                    Some(n) => out.push((n.to_string(), BindKind::Class)),
                     None => out.push((DEFAULT_EXPORT_BINDING.to_string(), BindKind::Class)),
                 },
                 StmtKind::FunctionDecl(f) if block_functions => match &f.name {
-                    Some(n) => out.push((n.clone(), BindKind::Function)),
+                    Some(n) => out.push((n.to_string(), BindKind::Function)),
                     None => out.push((DEFAULT_EXPORT_BINDING.to_string(), BindKind::Function)),
                 },
                 _ => {}
@@ -854,8 +1046,8 @@ impl Compiler {
             if let StmtKind::FunctionDecl(f) = &s.kind {
                 // Anonymous `export default function () {}` is named
                 // "default" but bound to the hidden `*default*` slot.
-                let name = f.name.clone().unwrap_or_else(|| DEFAULT_EXPORT_BINDING.to_string());
-                let idx = self.compile_function(f, Some(if f.name.is_some() { &name } else { "default" }))?;
+                let name = f.name.as_deref().unwrap_or(DEFAULT_EXPORT_BINDING).to_string();
+                let idx = self.compile_function_rc(f, Some(if f.name.is_some() { &name } else { "default" }))?;
                 self.emit(Op::MakeClosure(idx));
                 match self.resolve(&name) {
                     Resolved::Local { depth, slot, .. } => {
@@ -1121,7 +1313,7 @@ impl Compiler {
         // function declaration with the same name shadows it: only bind it
         // when nothing in the body declares the name.
         if let Some(n) = &f.name {
-            if !f.is_arrow && !self.fs_ref().scopes[0].names.contains_key(n) {
+            if !f.is_arrow && !self.fs_ref().scopes[0].names.contains_key(&**n) {
                 let loc = self.declare(n, BindKind::Hidden);
                 self.fs().self_loc = Some(loc);
             }
@@ -1287,13 +1479,13 @@ impl Compiler {
             StmtKind::Switch { discriminant, cases } => self.compile_switch(discriminant, cases)?,
             StmtKind::Labeled { label, body } => {
                 match &body.kind {
-                    StmtKind::For { init, test, update, body: b } => self.compile_for(init, test, update, b, Some(label.clone()))?,
-                    StmtKind::ForIn { left, right, body: b } => self.compile_for_in(left, right, b, Some(label.clone()))?,
-                    StmtKind::ForOf { left, right, body: b, is_await } => self.compile_for_of(left, right, b, *is_await, Some(label.clone()))?,
-                    StmtKind::While { test, body: b } => self.compile_while(test, b, Some(label.clone()))?,
+                    StmtKind::For { init, test, update, body: b } => self.compile_for(init, test, update, b, Some(label.to_string()))?,
+                    StmtKind::ForIn { left, right, body: b } => self.compile_for_in(left, right, b, Some(label.to_string()))?,
+                    StmtKind::ForOf { left, right, body: b, is_await } => self.compile_for_of(left, right, b, *is_await, Some(label.to_string()))?,
+                    StmtKind::While { test, body: b } => self.compile_while(test, b, Some(label.to_string()))?,
                     StmtKind::DoWhile { body: b, test } => {
                         let start = self.here();
-                        self.push_loop(Some(label.clone()), true);
+                        self.push_loop(Some(label.to_string()), true);
                         self.compile_stmt(b)?;
                         let lp = self.fs().loops.pop().unwrap();
                         let cont = self.here();
@@ -1303,7 +1495,7 @@ impl Compiler {
                         self.patch_breaks(&lp);
                     }
                     _ => {
-                        self.push_loop(Some(label.clone()), false);
+                        self.push_loop(Some(label.to_string()), false);
                         self.compile_stmt(body)?;
                         let lp = self.fs().loops.pop().unwrap();
                         self.patch_breaks(&lp);
@@ -1325,7 +1517,7 @@ impl Compiler {
                 ExportDecl::DefaultDecl(d) => match &d.kind {
                     StmtKind::ClassDecl(c) if c.name.is_none() => {
                         let mut named = c.clone();
-                        named.name = Some("default".to_string());
+                        named.name = Some("default".into());
                         self.compile_class(&named)?;
                         self.emit_init_var(DEFAULT_EXPORT_BINDING)?;
                     }
@@ -1959,19 +2151,19 @@ impl Compiler {
         match (&e.kind, name) {
             (ExprKind::Function(f), Some(n)) if f.name.is_none() => {
                 self.set_pos(e.pos);
-                let idx = self.compile_function(f, Some(n))?;
+                let idx = self.compile_function_rc(f, Some(n))?;
                 self.emit(Op::MakeClosure(idx));
                 Ok(())
             }
             (ExprKind::Arrow(f), Some(n)) => {
                 self.set_pos(e.pos);
-                let idx = self.compile_function(f, Some(n))?;
+                let idx = self.compile_function_rc(f, Some(n))?;
                 self.emit(Op::MakeClosure(idx));
                 Ok(())
             }
             (ExprKind::Class(c), Some(n)) if c.name.is_none() => {
                 let mut c2 = (**c).clone();
-                c2.name = Some(n.to_string());
+                c2.name = Some(n.into());
                 self.compile_class_expr(&c2, true)
             }
             _ => self.compile_expr(e),
@@ -2092,11 +2284,11 @@ impl Compiler {
             }
             ExprKind::Object(props) => self.compile_object_literal(props)?,
             ExprKind::Function(f) => {
-                let idx = self.compile_function(f, None)?;
+                let idx = self.compile_function_rc(f, None)?;
                 self.emit(Op::MakeClosure(idx));
             }
             ExprKind::Arrow(f) => {
-                let idx = self.compile_function(f, None)?;
+                let idx = self.compile_function_rc(f, None)?;
                 self.emit(Op::MakeClosure(idx));
             }
             ExprKind::Class(c) => self.compile_class_expr(c, true)?,
@@ -2761,7 +2953,7 @@ impl Compiler {
                 }
                 ObjectProperty::Property { key, value, shorthand } => {
                     let static_name: Option<String> = match key {
-                        PropertyKey::Identifier(n) | PropertyKey::String(n) => Some(n.clone()),
+                        PropertyKey::Identifier(n) | PropertyKey::String(n) => Some(n.to_string()),
                         PropertyKey::Number(n) => Some(crate::value::number_to_string(*n)),
                         _ => None,
                     };
@@ -2854,7 +3046,7 @@ impl Compiler {
         // Class scope: name binding + private names + computed field keys.
         let mut decls: Vec<(String, BindKind)> = Vec::new();
         if let Some(n) = &c.name {
-            decls.push((n.clone(), BindKind::Const));
+            decls.push((n.to_string(), BindKind::Const));
         }
         let mut private_names: Vec<String> = Vec::new();
         for m in &c.members {
@@ -2995,10 +3187,10 @@ impl Compiler {
             for (key, value, slot_idx) in &instance_fields {
                 let value_expr = (*value).clone().unwrap_or(Expr { pos, kind: ExprKind::Undefined });
                 let key_expr: ExprKind = match key {
-                    PropertyKey::Identifier(n) | PropertyKey::String(n) => ExprKind::String(n.clone()),
+                    PropertyKey::Identifier(n) | PropertyKey::String(n) => ExprKind::String(n.to_string()),
                     PropertyKey::Number(n) => ExprKind::Number(*n),
-                    PropertyKey::Computed(_) => ExprKind::Identifier(computed_field_slots[*slot_idx].clone()),
-                    PropertyKey::Private(n) => ExprKind::Identifier(format!("#{}", n)),
+                    PropertyKey::Computed(_) => ExprKind::Identifier(computed_field_slots[*slot_idx].as_str().into()),
+                    PropertyKey::Private(n) => ExprKind::Identifier(format!("#{}", n).into()),
                 };
                 // Represent as a synthetic statement: this[key] = value using DefineElem semantics.
                 stmts.push(Stmt { pos, kind: StmtKind::Expr(Expr { pos, kind: ExprKind::Call {
@@ -3026,7 +3218,7 @@ impl Compiler {
         Ok(match key {
             PropertyKey::Identifier(n) | PropertyKey::String(n) => {
                 self.emit_string(n);
-                Some(n.clone())
+                Some(n.to_string())
             }
             PropertyKey::Number(n) => {
                 let s = crate::value::number_to_string(*n);
@@ -3099,7 +3291,7 @@ fn callee_description(e: &Expr) -> Option<String> {
             return None;
         }
         match &e.kind {
-            ExprKind::Identifier(n) => Some(n.clone()),
+            ExprKind::Identifier(n) => Some(n.to_string()),
             ExprKind::This => Some("this".into()),
             ExprKind::Member { object, property, .. } => {
                 let o = describe(object, depth + 1)?;
@@ -3207,11 +3399,21 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         block_names: fs.block_names,
         templates: fs.templates,
         ics: (0..fs.ic_count).map(|_| std::cell::Cell::new(crate::bytecode::PropIc::default())).collect(),
+        lazy: None,
+        compiled: std::cell::OnceCell::new(),
         ic_keys: ic_keys.into(),
         depths: tr.depths,
         max_depth: tr.max_depth,
         source: fs.source,
         filename: fs.filename,
         module,
+    }
+}
+
+fn opt_ptr_eq(a: &Option<Rc<LazyScope>>, b: &Option<Rc<LazyScope>>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => Rc::ptr_eq(x, y),
+        (None, None) => true,
+        _ => false,
     }
 }

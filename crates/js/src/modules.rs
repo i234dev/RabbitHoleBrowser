@@ -173,8 +173,8 @@ impl ModuleRecord {
                     ExportDecl::DefaultExpr(_) => self.local_exports.push(LocalExport { export_name: "default".into(), local_name: DEFAULT_EXPORT_BINDING.into() }),
                     ExportDecl::DefaultDecl(d) => {
                         let name = match &d.kind {
-                            StmtKind::FunctionDecl(f) => f.name.clone(),
-                            StmtKind::ClassDecl(c) => c.name.clone(),
+                            StmtKind::FunctionDecl(f) => f.name.as_ref().map(|n| n.to_string()),
+                            StmtKind::ClassDecl(c) => c.name.as_ref().map(|n| n.to_string()),
                             _ => None,
                         };
                         let local_name = name.unwrap_or_else(|| DEFAULT_EXPORT_BINDING.into());
@@ -188,8 +188,8 @@ impl ModuleRecord {
                                     crate::compiler::Compiler::collect_pattern_names(&decl.target, &mut names);
                                 }
                             }
-                            StmtKind::FunctionDecl(f) => names.extend(f.name.clone()),
-                            StmtKind::ClassDecl(c) => names.extend(c.name.clone()),
+                            StmtKind::FunctionDecl(f) => names.extend(f.name.as_ref().map(|n| n.to_string())),
+                            StmtKind::ClassDecl(c) => names.extend(c.name.as_ref().map(|n| n.to_string())),
                             _ => {}
                         }
                         for n in names {

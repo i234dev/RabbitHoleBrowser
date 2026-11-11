@@ -334,14 +334,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Current token as a binding identifier (not reserved).
-    fn ident_name_if_binding(&self) -> Option<String> {
+    fn ident_name_if_binding(&self) -> Option<Name> {
         match &self.tok.kind {
             TokenKind::Ident(n) if !self.is_reserved(n) => Some(n.clone()),
             _ => None,
         }
     }
 
-    fn expect_binding_identifier(&mut self) -> PResult<String> {
+    fn expect_binding_identifier(&mut self) -> PResult<Name> {
         match self.ident_name_if_binding() {
             Some(n) => {
                 if self.ctx.strict && (n == "eval" || n == "arguments") {
@@ -355,7 +355,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Any IdentifierName (keywords allowed), e.g. after `.`.
-    fn expect_identifier_name(&mut self) -> PResult<String> {
+    fn expect_identifier_name(&mut self) -> PResult<Name> {
         match &self.tok.kind {
             TokenKind::Ident(n) => {
                 let n = n.clone();
@@ -451,12 +451,12 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(n) => match keyword(n) {
                 "function" => {
                     let f = self.parse_function(false, false, true)?;
-                    return Ok(Stmt { pos, kind: StmtKind::FunctionDecl(f) });
+                    return Ok(Stmt { pos, kind: StmtKind::FunctionDecl(std::rc::Rc::new(f)) });
                 }
                 "async" if self.peek_is_function_no_newline()? => {
                     self.advance()?;
                     let f = self.parse_function(true, false, true)?;
-                    return Ok(Stmt { pos, kind: StmtKind::FunctionDecl(f) });
+                    return Ok(Stmt { pos, kind: StmtKind::FunctionDecl(std::rc::Rc::new(f)) });
                 }
                 "class" => {
                     let c = self.parse_class(true)?;
@@ -638,7 +638,7 @@ impl<'a> Parser<'a> {
                 "function" => {
                     // Function declaration in statement position (sloppy mode allows it).
                     let f = self.parse_function(false, false, true)?;
-                    StmtKind::FunctionDecl(f)
+                    StmtKind::FunctionDecl(std::rc::Rc::new(f))
                 }
                 "class" => {
                     let c = self.parse_class(true)?;
@@ -647,7 +647,7 @@ impl<'a> Parser<'a> {
                 "async" if self.peek_is_function_no_newline()? => {
                     self.advance()?;
                     let f = self.parse_function(true, false, true)?;
-                    StmtKind::FunctionDecl(f)
+                    StmtKind::FunctionDecl(std::rc::Rc::new(f))
                 }
                 "const" => {
                     let d = self.parse_var_decl(VarKind::Const)?;
@@ -689,12 +689,13 @@ impl<'a> Parser<'a> {
         Ok(StmtKind::Expr(e))
     }
 
-    fn parse_labeled(&mut self, pos: Pos, label: String) -> PResult<Stmt> {
+    fn parse_labeled(&mut self, pos: Pos, label: Name) -> PResult<Stmt> {
+        let label_s = label.to_string();
         if self.ctx.labels.iter().any(|(n, _)| *n == label) {
             return Err(self.error_at(pos, format!("Label '{label}' has already been declared")));
         }
         let is_loop = self.is_ident("for") || self.is_ident("while") || self.is_ident("do");
-        self.ctx.labels.push((label.clone(), is_loop));
+        self.ctx.labels.push((label_s, is_loop));
         let body = self.parse_statement();
         self.ctx.labels.pop();
         let body = Box::new(body?);
@@ -953,14 +954,14 @@ impl<'a> Parser<'a> {
         }
         if let Some(name) = self.ident_name_if_binding() {
             self.advance()?;
-            decl.default = Some(name);
+            decl.default = Some(name.to_string());
             if !self.eat_punct(",")? {
                 return self.finish_import(pos, decl);
             }
         }
         if self.eat_punct("*")? {
             self.expect_ident("as")?;
-            decl.namespace = Some(self.expect_binding_identifier()?);
+            decl.namespace = Some(self.expect_binding_identifier()?.to_string());
         } else if self.eat_punct("{")? {
             while !self.is_punct("}") {
                 let imported = match &self.tok.kind {
@@ -969,10 +970,10 @@ impl<'a> Parser<'a> {
                         self.advance()?;
                         s
                     }
-                    _ => self.expect_identifier_name()?,
+                    _ => self.expect_identifier_name()?.to_string(),
                 };
                 let local = if self.eat_ident("as")? {
-                    self.expect_binding_identifier()?
+                    self.expect_binding_identifier()?.to_string()
                 } else {
                     if self.is_reserved(&imported) {
                         return Err(self.error(format!("Unexpected reserved word '{imported}'")));
@@ -1031,7 +1032,7 @@ impl<'a> Parser<'a> {
                 let f = self.parse_function(is_async, false, false)?;
                 StmtKind::Export(ExportDecl::DefaultDecl(Box::new(Stmt {
                     pos: dpos,
-                    kind: StmtKind::FunctionDecl(f),
+                    kind: StmtKind::FunctionDecl(std::rc::Rc::new(f)),
                 })))
             } else if self.is_ident("class") {
                 let c = self.parse_class(false)?;
@@ -1045,7 +1046,7 @@ impl<'a> Parser<'a> {
                 StmtKind::Export(ExportDecl::DefaultExpr(e))
             }
         } else if self.eat_punct("*")? {
-            let namespace = if self.eat_ident("as")? { Some(self.expect_identifier_name()?) } else { None };
+            let namespace = if self.eat_ident("as")? { Some(self.expect_identifier_name()?.to_string()) } else { None };
             self.expect_ident("from")?;
             let source = match &self.tok.kind {
                 TokenKind::Str(s) => s.clone(),
@@ -1064,7 +1065,7 @@ impl<'a> Parser<'a> {
                         self.advance()?;
                         s
                     }
-                    _ => self.expect_identifier_name()?,
+                    _ => self.expect_identifier_name()?.to_string(),
                 };
                 let exported = if self.eat_ident("as")? {
                     match &self.tok.kind {
@@ -1073,7 +1074,7 @@ impl<'a> Parser<'a> {
                             self.advance()?;
                             s
                         }
-                        _ => self.expect_identifier_name()?,
+                        _ => self.expect_identifier_name()?.to_string(),
                     }
                 } else {
                     local.clone()
@@ -1417,6 +1418,14 @@ impl<'a> Parser<'a> {
                 Ok(None)
             }
             TokenKind::Punct("(") => {
+                let start = self.tok.start;
+                if self.not_arrow.contains(&start) {
+                    return Ok(None);
+                }
+                if !self.paren_may_start_arrow() {
+                    self.not_arrow.insert(start);
+                    return Ok(None);
+                }
                 let snap = self.snapshot();
                 match self.try_parse_arrow_params()? {
                     Some(params) => Ok(Some(self.parse_arrow_body(pos, params, false)?)),
@@ -1430,9 +1439,101 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Cheap token scan from the current `(`: false when it certainly does
+    /// not start arrow parameters (the contents are not a parameter list,
+    /// or no `=>` follows the matching `)`), so the speculative parameter
+    /// parse can be skipped. Regular expressions and templates make the
+    /// scan give up (true: let the parser decide).
+    fn paren_may_start_arrow(&mut self) -> bool {
+        let snap = self.snapshot();
+        self.lx.set_recording(true);
+        let r = self.scan_arrow_params().unwrap_or(true);
+        self.lx.set_recording(false);
+        self.restore(snap);
+        r
+    }
+
+    fn scan_arrow_params(&mut self) -> PResult<bool> {
+        self.advance()?; // (
+        loop {
+            // A parameter: binding identifier / pattern, optionally rest.
+            match &self.tok.kind {
+                TokenKind::Punct(")") => break,
+                TokenKind::Punct("...") => {
+                    self.advance()?;
+                }
+                _ => {}
+            }
+            match &self.tok.kind {
+                TokenKind::Ident(_) => {
+                    self.advance()?;
+                }
+                TokenKind::Punct("[") | TokenKind::Punct("{") => {
+                    if !self.scan_balanced()? {
+                        return Ok(true);
+                    }
+                }
+                _ => return Ok(false),
+            }
+            match &self.tok.kind {
+                TokenKind::Punct(")") => break,
+                TokenKind::Punct(",") => {
+                    self.advance()?;
+                }
+                TokenKind::Punct("=") => {
+                    // Default value: any expression up to `,` / `)` at this level.
+                    self.advance()?;
+                    loop {
+                        match &self.tok.kind {
+                            TokenKind::Punct(",") => {
+                                self.advance()?;
+                                break;
+                            }
+                            TokenKind::Punct(")") => break,
+                            TokenKind::Punct("(") | TokenKind::Punct("[") | TokenKind::Punct("{") => {
+                                if !self.scan_balanced()? {
+                                    return Ok(true);
+                                }
+                            }
+                            TokenKind::Punct("/") | TokenKind::Punct("/=") | TokenKind::Template { .. } | TokenKind::Punct("]") | TokenKind::Punct("}") | TokenKind::Eof => return Ok(true),
+                            _ => {
+                                self.advance()?;
+                            }
+                        }
+                    }
+                }
+                _ => return Ok(false),
+            }
+        }
+        // At the closing `)`.
+        self.advance()?;
+        Ok(self.is_punct("=>") && !self.tok.newline_before)
+    }
+
+    /// Skip a bracketed group starting at the current `(` / `[` / `{`;
+    /// false when its tokens cannot be told apart without parsing.
+    fn scan_balanced(&mut self) -> PResult<bool> {
+        let mut depth = 0usize;
+        loop {
+            match &self.tok.kind {
+                TokenKind::Punct("(") | TokenKind::Punct("[") | TokenKind::Punct("{") => depth += 1,
+                TokenKind::Punct(")") | TokenKind::Punct("]") | TokenKind::Punct("}") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.advance()?;
+                        return Ok(true);
+                    }
+                }
+                TokenKind::Punct("/") | TokenKind::Punct("/=") | TokenKind::Template { .. } | TokenKind::Eof => return Ok(false),
+                _ => {}
+            }
+            self.advance()?;
+        }
+    }
+
     /// Like `ident_name_if_binding` but used right after `async`, where
     /// `await` may not be a parameter name.
-    fn ident_name_if_binding_async(&self) -> Option<String> {
+    fn ident_name_if_binding_async(&self) -> Option<Name> {
         match &self.tok.kind {
             TokenKind::Ident(n) if !self.is_reserved(n) && n != "await" => Some(n.clone()),
             _ => None,
@@ -1520,7 +1621,7 @@ impl<'a> Parser<'a> {
         })?;
         Ok(Expr {
             pos,
-            kind: ExprKind::Arrow(Box::new(Function {
+            kind: ExprKind::Arrow(std::rc::Rc::new(Function {
                 name: None,
                 params,
                 body,
@@ -2042,12 +2143,12 @@ impl<'a> Parser<'a> {
                 }
                 "function" => {
                     let f = self.parse_function(false, true, false)?;
-                    ExprKind::Function(Box::new(f))
+                    ExprKind::Function(std::rc::Rc::new(f))
                 }
                 "async" if self.peek_is_function_no_newline()? => {
                     self.advance()?;
                     let f = self.parse_function(true, true, false)?;
-                    ExprKind::Function(Box::new(f))
+                    ExprKind::Function(std::rc::Rc::new(f))
                 }
                 "class" => {
                     let c = self.parse_class(false)?;
@@ -2141,11 +2242,11 @@ impl<'a> Parser<'a> {
 
     /// Parses a property key. Also returns the identifier text when the key
     /// is a plain identifier (for shorthand detection).
-    fn parse_property_key(&mut self) -> PResult<(PropertyKey, Option<String>)> {
+    fn parse_property_key(&mut self) -> PResult<(PropertyKey, Option<Name>)> {
         Ok(match &self.tok.kind {
             TokenKind::Ident(_) | TokenKind::Str(_) | TokenKind::BigInt(_) | TokenKind::PrivateName(_) => match self.advance()?.kind {
                 TokenKind::Ident(n) => (PropertyKey::Identifier(n.clone()), Some(n)),
-                TokenKind::Str(s) | TokenKind::BigInt(s) => (PropertyKey::String(s), None),
+                TokenKind::Str(s) | TokenKind::BigInt(s) => (PropertyKey::String(s.into()), None),
                 TokenKind::PrivateName(n) => (PropertyKey::Private(n), None),
                 _ => unreachable!(),
             },

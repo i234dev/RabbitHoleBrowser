@@ -329,6 +329,10 @@ impl Realm {
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
+        if c.code.lazy.is_some() {
+            self.ensure_compiled(id)?;
+            return self.try_fast_call(fi, b, argc);
+        }
         let flags = c.code.flags;
         if flags.is_generator || flags.is_async || flags.is_class_constructor || c.code.arguments_loc.is_some() || c.code.rest_loc.is_some() || (flags.is_arrow && c.arguments.is_some()) {
             return Ok(false);
@@ -410,6 +414,10 @@ impl Realm {
     pub(crate) fn push_plain_call(&mut self, id: ObjectId, this: &Value, args: &[Value], ret_slot: u32, entry: bool) -> JsResult<bool> {
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
+        if c.code.lazy.is_some() {
+            self.ensure_compiled(id)?;
+            return self.push_plain_call(id, this, args, ret_slot, entry);
+        }
         let flags = c.code.flags;
         if flags.is_generator || flags.is_async || flags.is_class_constructor || c.code.arguments_loc.is_some() || c.code.rest_loc.is_some() || (flags.is_arrow && c.arguments.is_some()) {
             return Ok(false);
@@ -482,6 +490,31 @@ impl Realm {
         Ok(true)
     }
 
+    /// Compile closure `id`'s function if it is still lazy (once per
+    /// function: closures of the same code share the result).
+    #[inline(never)]
+    pub(crate) fn ensure_compiled(&mut self, id: ObjectId) -> JsResult<()> {
+        let code = match &self.obj(id).kind {
+            ObjectKind::Function(c) if c.code.lazy.is_some() => c.code.clone(),
+            _ => return Ok(()),
+        };
+        let compiled = match code.compiled.get() {
+            Some(c) => c.clone(),
+            None => {
+                let c = match crate::compiler::compile_lazy(&code) {
+                    Ok(c) => c,
+                    Err(e) => return Err(self.new_error("SyntaxError", &e.message)),
+                };
+                let _ = code.compiled.set(c.clone());
+                c
+            }
+        };
+        if let ObjectKind::Function(c) = &mut self.obj_mut(id).kind {
+            c.code = compiled;
+        }
+        Ok(())
+    }
+
     /// `CallR` of a native function: arguments are handed over straight
     /// from the caller's slots and the result is written back to slot `b`.
     #[inline(never)]
@@ -524,6 +557,10 @@ impl Realm {
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
+        if c.code.lazy.is_some() {
+            self.ensure_compiled(id)?;
+            return self.try_fast_construct(fi, b, argc);
+        }
         let flags = c.code.flags;
         if flags.is_arrow
             || flags.is_method
@@ -600,6 +637,7 @@ impl Realm {
     /// Build the frame for calling closure `id`; its slots are reserved on
     /// top of the value stack (push it next, or detach them).
     pub(crate) fn prepare_frame(&mut self, id: ObjectId, this: Value, args: &[Value], new_target: Value, is_construct: bool) -> JsResult<Frame> {
+        self.ensure_compiled(id)?;
         let (code, parent_scope, this_value, arrow_nt, home, arrow_args) = match &self.obj(id).kind {
             ObjectKind::Function(c) => (c.code.clone(), c.scope, c.this_value.clone(), c.new_target.clone(), c.home_object, c.arguments.clone()),
             _ => unreachable!(),
@@ -3367,6 +3405,11 @@ impl Realm {
 
     /// Create a function object for `code` in the context of frame `fi`.
     pub(crate) fn make_closure(&mut self, fi: usize, code: Rc<FunctionCode>) -> ObjectId {
+        // A lazy function compiled through another closure: use its code.
+        let code = match code.compiled.get() {
+            Some(c) => c.clone(),
+            None => code,
+        };
         let frame = &self.frames[fi];
         let flags = code.flags;
         let closure = Closure {

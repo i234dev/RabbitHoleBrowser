@@ -22,7 +22,17 @@ fn cpu_ms() -> f64 {
     0.0
 }
 
+extern "C" {
+    fn mallopt(param: i32, value: i32) -> i32;
+}
+
 fn main() {
+    if std::env::var_os("RH_MALLOPT").is_some() {
+        unsafe {
+            mallopt(-1, 256 << 20); // M_TRIM_THRESHOLD
+            mallopt(-2, 64 << 20); // M_TOP_PAD
+        }
+    }
     let path = std::env::args().nth(1).expect("path");
     let src = std::fs::read_to_string(&path).unwrap();
     let t = Instant::now();

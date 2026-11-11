@@ -273,7 +273,7 @@ impl Realm {
                     return Err(v);
                 }
                 let o = self.heap.get_mut(id);
-                let next = match o.props.shape().and_then(|s| s.lookup_transition(&PropertyKey::String(key.clone()))) {
+                let next = match o.props.shape().and_then(|s| s.lookup_transition_str(key)) {
                     Some(n) if n.id == ic.slot => n,
                     _ => return Err(v),
                 };
