@@ -265,7 +265,9 @@ impl PropertyMap {
         PropertyMap { repr: Repr::Shaped { shape, values: Vec::new() }, sid }
     }
 
-    /// Shape id (shape mode) or key-set id (dictionary mode).
+    /// Shape id (shape mode) or key-set id (dictionary mode). Inline caches
+    /// rely on it: in dictionary mode the id changes whenever the key set
+    /// changes, and entry indices (slots) are stable while it does not.
     #[inline(always)]
     pub fn shape_id(&self) -> u32 {
         self.sid

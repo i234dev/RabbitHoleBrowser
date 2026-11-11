@@ -83,6 +83,9 @@ pub struct NativeFunction {
     /// Values kept alive for the native (e.g. captured JS callbacks).
     pub captures: Vec<Value>,
     pub is_constructor: bool,
+    /// Built-ins the interpreter computes inline on `CallR` when the
+    /// arguments are simple (see `vm::INTRINSIC_*`); 0 for the others.
+    pub intrinsic: u8,
 }
 
 impl std::fmt::Debug for NativeFunction {

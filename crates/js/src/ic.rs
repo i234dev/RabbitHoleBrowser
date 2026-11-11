@@ -166,16 +166,25 @@ impl Realm {
     /// Record how `key` was read from `recv` (after a successful slow read).
     pub(crate) fn ic_fill_get(&self, recv: &Value, key: &PropertyKey) -> PropIc {
         let mut ic = PropIc::default();
-        if let PropertyKey::String(s) = key {
-            if s.eq_str("length") {
-                match recv {
-                    Value::String(_) => ic.kind = IC_LENGTH,
-                    Value::Object(id) if matches!(self.obj(*id).kind, ObjectKind::Array { .. }) => ic.kind = IC_LENGTH,
-                    _ => {}
+        // `length` is virtual on arrays and String objects: those are never
+        // cached through their property maps (arrays and string primitives
+        // get IC_LENGTH); other receivers (typed arrays, functions, plain
+        // objects) cache it like any other key.
+        let len_key = matches!(key, PropertyKey::String(s) if s.eq_str("length"));
+        if len_key {
+            match recv {
+                Value::String(_) => {
+                    ic.kind = IC_LENGTH;
+                    return ic;
                 }
-                return ic;
+                Value::Object(id) if matches!(self.obj(*id).kind, ObjectKind::Array { .. }) => {
+                    ic.kind = IC_LENGTH;
+                    return ic;
+                }
+                _ => {}
             }
         }
+        let virtual_length = |k: &ObjectKind| len_key && matches!(k, ObjectKind::Array { .. } | ObjectKind::String(_));
         if cacheable_key(key).is_none() {
             return ic;
         }
@@ -187,13 +196,13 @@ impl Realm {
             },
         };
         let o = self.obj(start);
-        if !plain_kind(&o.kind) {
+        // Typed arrays are ordinary for keys that are not canonical numeric
+        // strings (`cacheable_key` excludes those): `ta.length` and method
+        // reads are cacheable.
+        if (!plain_kind(&o.kind) && !matches!(o.kind, ObjectKind::TypedArray(_))) || virtual_length(&o.kind) {
             return ic;
         }
         if let Some(slot) = o.props.find_slot(key) {
-            if o.props.is_dict() {
-                return ic;
-            }
             ic.kind = if prim { IC_PRIM } else { IC_OWN };
             ic.slot = slot;
             if prim {
@@ -211,13 +220,10 @@ impl Realm {
         // (shape ids prove the absence stays true).
         let Some(p1) = o.proto else { return ic };
         let h1 = self.obj(p1);
-        if !plain_kind(&h1.kind) {
+        if !plain_kind(&h1.kind) || virtual_length(&h1.kind) {
             return ic;
         }
         if let Some(slot) = h1.props.find_slot(key) {
-            if h1.props.is_dict() {
-                return ic;
-            }
             ic.kind = IC_PROTO;
             ic.shape = o.props.shape_id();
             ic.mid = NO_OBJ;
@@ -228,13 +234,10 @@ impl Realm {
         }
         let Some(p2) = h1.proto else { return ic };
         let h2 = self.obj(p2);
-        if !plain_kind(&h2.kind) {
+        if !plain_kind(&h2.kind) || virtual_length(&h2.kind) {
             return ic;
         }
         if let Some(slot) = h2.props.find_slot(key) {
-            if h2.props.is_dict() {
-                return ic;
-            }
             ic.kind = IC_PROTO;
             ic.shape = o.props.shape_id();
             ic.mid = p1.0;
@@ -319,7 +322,7 @@ impl Realm {
         let id = recv.as_object()?;
         cacheable_key(key)?;
         let o = self.heap.try_get(id)?;
-        if !plain_kind(&o.kind) || o.props.is_dict() {
+        if !plain_kind(&o.kind) {
             return None;
         }
         Some((o.props.shape_id(), o.props.find_slot(key)))
@@ -331,7 +334,8 @@ impl Realm {
         let mut ic = PropIc::default();
         let (Some((before_id, before_slot)), Some(id)) = (before, recv.as_object()) else { return ic };
         let o = self.obj(id);
-        if o.props.is_dict() {
+        if o.props.is_dict() && before_slot.is_none() {
+            // Additions to dictionaries are not cached (no transitions).
             return ic;
         }
         match before_slot {

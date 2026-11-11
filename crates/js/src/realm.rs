@@ -216,7 +216,7 @@ impl Realm {
         let object_proto = heap.alloc(Object::new(None, ObjectKind::Ordinary));
         let function_proto = heap.alloc(Object::new(
             Some(object_proto),
-            ObjectKind::Native(Box::new(NativeFunction { func: |_, _, _| Ok(Value::Undefined), name: JsStr::empty(), data: None, captures: vec![], is_constructor: false })),
+            ObjectKind::Native(Box::new(NativeFunction { func: |_, _, _| Ok(Value::Undefined), name: JsStr::empty(), data: None, captures: vec![], is_constructor: false, intrinsic: 0 })),
         ));
         let mk = |heap: &mut Heap, proto: ObjectId| heap.alloc(Object::new(Some(proto), ObjectKind::Ordinary));
         let array_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::Array { elements: vec![], length: 0 }));
@@ -292,7 +292,26 @@ impl Realm {
             arg_buf: Vec::new(),
         };
         crate::builtins::register_builtins(&mut realm);
+        realm.mark_intrinsics();
         realm
+    }
+
+    /// Tag the built-ins the interpreter inlines (see `vm::INTRINSIC_*`).
+    fn mark_intrinsics(&mut self) {
+        let string_ctor = self.obj(self.intrinsics.string_proto).props.get(&PropertyKey::str("constructor")).map(|p| p.value.clone());
+        let math = self.obj(self.global).props.get(&PropertyKey::str("Math")).map(|p| p.value.clone());
+        let marks = [
+            (Some(Value::Object(self.intrinsics.string_proto)), "charCodeAt", crate::vm::INTRINSIC_CHAR_CODE_AT),
+            (string_ctor, "fromCharCode", crate::vm::INTRINSIC_FROM_CHAR_CODE),
+            (math, "imul", crate::vm::INTRINSIC_IMUL),
+        ];
+        for (holder, name, tag) in marks {
+            let Some(Value::Object(h)) = holder else { continue };
+            let Some(Value::Object(f)) = self.obj(h).props.get(&PropertyKey::str(name)).map(|p| p.value.clone()) else { continue };
+            if let ObjectKind::Native(n) = &mut self.obj_mut(f).kind {
+                n.intrinsic = tag;
+            }
+        }
     }
 
     // ------------------------------------------------------------ objects
@@ -344,7 +363,7 @@ impl Realm {
     /// (kept alive by the GC).
     pub fn new_native_function_full(&mut self, name: &str, arity: u32, func: NativeFn, data: Option<Rc<dyn Any>>, captures: Vec<Value>, is_constructor: bool) -> ObjectId {
         let proto = self.intrinsics.function_proto;
-        let id = self.alloc(Object::new(Some(proto), ObjectKind::Native(Box::new(NativeFunction { func, name: JsStr::new(name), data, captures, is_constructor }))));
+        let id = self.alloc(Object::new(Some(proto), ObjectKind::Native(Box::new(NativeFunction { func, name: JsStr::new(name), data, captures, is_constructor, intrinsic: 0 }))));
         let o = self.heap.get_mut(id);
         o.props.insert(names::length(), Property::data(Value::Number(arity as f64), CONFIGURABLE));
         o.props.insert(names::name(), Property::data(Value::str(name), CONFIGURABLE));

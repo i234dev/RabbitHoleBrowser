@@ -523,3 +523,38 @@ fn lazy_body_errors() {
     // Early errors outside any skipped body still fail the whole script.
     throws(&format!("function f() {{ {PAD} return 1; }} let x = ;"), "SyntaxError");
 }
+
+// ------------------------------------------- dictionary ICs, intrinsics
+
+#[test]
+fn dictionary_mode_inline_caches() {
+    // Large objects are dictionaries; cached reads/writes must notice key
+    // set changes.
+    eq("var o = {}; for (var i = 0; i < 300; i++) o['k' + i] = i; function f() { return o.k5; } var a = [f(), f()]; delete o.k5; a.push(f()); o.k5 = 7; a.push(f()); a.join()", "5,5,,7");
+    eq("var o = {}; for (var i = 0; i < 300; i++) o['k' + i] = i; function s(v) { o.k9 = v; } s(1); s(2); Object.defineProperty(o, 'k9', { writable: false }); s(3); o.k9", "2");
+    eq("var p = {}; for (var i = 0; i < 300; i++) p['m' + i] = i; var o = Object.create(p); function g() { return o.m3; } var r = [g(), g()]; o.m3 = 'own'; r.push(g()); r.join()", "3,3,own");
+    // Methods of built-in prototypes (dictionaries) through primitives.
+    eq("var t = 0; for (var i = 0; i < 50; i++) t += 'abc'.indexOf('c'); String.prototype.indexOf = function () { return 100; }; t + 'x'.indexOf('x')", "200");
+}
+
+#[test]
+fn length_caches_respect_exotic_objects() {
+    eq("function L(x) { return x.length; } [L([1, 2]), L('abc'), L(new String('abcd')), L(new Uint8Array(5)), L(function (a, b) {}), L({ length: 9 }), L(Object.create(Array.prototype)), L(Object.create(new String('xy')))].join()", "2,3,4,5,2,9,0,2");
+    eq("function L(x) { return x.length; } var u = new Uint16Array(3); var r = [L(u), L(u)]; Object.defineProperty(u, 'length', { value: 42 }); r.push(L(u)); r.join()", "3,3,42");
+    eq("function L(x) { return x.length; } var u = new Int8Array(4); L(u); L(u); Object.defineProperty(Object.getPrototypeOf(Int8Array.prototype), 'length', { get() { return -1; } }); L(u)", "-1");
+    // Native getters called from the cache.
+    eq("function B(x) { return x.byteLength; } var a = new Float64Array(2); [B(a), B(a), B(new Uint8Array(3))].join()", "16,16,3");
+}
+
+#[test]
+fn inlined_intrinsics_match_the_builtins() {
+    eq("var s = 'h\\u00e9llo'; [s.charCodeAt(0), s.charCodeAt(1), s.charCodeAt(), s.charCodeAt(-0), s.charCodeAt(0.9), s.charCodeAt(NaN), s.charCodeAt(-1), s.charCodeAt(5), s.charCodeAt(1e300), s.charCodeAt(2.7), ''.charCodeAt(0)].join()", "104,233,104,104,104,104,NaN,NaN,NaN,108,NaN");
+    eq("[new String('ab').charCodeAt(1), String.prototype.charCodeAt.call(12, 1), 'ab'.charCodeAt('1')].join()", "98,50,98");
+    eq("[Math.imul(3, 4), Math.imul(0xffffffff, 5), Math.imul(0x5bd1e995, 0x5bd1e995), Math.imul(2.9, 3), Math.imul('3', 2), Math.imul(1)].join()", "12,-5,678072505,6,6,0");
+    eq("[String.fromCharCode(65), String.fromCharCode(0x1F600 & 0xffff).length, String.fromCharCode(65.7), String.fromCharCode(-1).charCodeAt(0), String.fromCharCode(72, 105), String.fromCharCode('66')].join()", "A,1,A,65535,Hi,B");
+    // Replaced built-ins are not inlined.
+    eq("var f = String.prototype.charCodeAt; String.prototype.charCodeAt = function () { return 'mine'; }; var r = 'a'.charCodeAt(0); String.prototype.charCodeAt = f; r", "mine");
+    eq("var m = Math.imul; Math.imul = function () { return 'x'; }; var r = Math.imul(2, 3); Math.imul = m; r + Math.imul(2, 3)", "x6");
+    // Unary fast paths.
+    eq("var a = 5, b = -0, s = '7', o = {}; o[a] = 1; o[s] = 2; [-a, +a, ~a, 1 / -b, -s, ~~3.7, Object.keys(o).join('|')].join()", "-5,5,-6,Infinity,-7,3,5|7");
+}

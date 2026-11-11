@@ -75,6 +75,10 @@ fn string_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 }
 
 fn from_char_code(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if let [Value::Number(n)] = args {
+        // One code unit: shared strings for the first 256.
+        return Ok(Value::String(JsStr::from_unit(to_uint32(*n) as u16)));
+    }
     let mut units = Vec::with_capacity(args.len());
     for a in args {
         let n = realm.to_number(a.clone())?;

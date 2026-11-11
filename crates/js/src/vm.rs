@@ -526,6 +526,12 @@ impl Realm {
         };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Native(n) = &obj.kind else { return Ok(false) };
+        if n.intrinsic != 0 {
+            if let Some(v) = self.inline_intrinsic(n.intrinsic, cb, argc) {
+                self.vstack[cb] = v;
+                return Ok(true);
+            }
+        }
         let func = n.func;
         let this = match &self.vstack[cb + 1] {
             Value::Empty => Value::Undefined,
@@ -542,6 +548,49 @@ impl Realm {
         let at = self.frames[fi].base as usize + b;
         self.vstack[at] = v;
         Ok(true)
+    }
+
+    /// A tagged built-in computed without the native call when its
+    /// receiver / arguments (at `cb + 1`, `cb + 2`...) are the common case;
+    /// `None` falls back to the native.
+    #[inline]
+    fn inline_intrinsic(&self, tag: u8, cb: usize, argc: usize) -> Option<Value> {
+        match tag {
+            INTRINSIC_CHAR_CODE_AT => {
+                let Value::String(s) = &self.vstack[cb + 1] else { return None };
+                let i = match argc {
+                    0 => 0.0,
+                    _ => match &self.vstack[cb + 2] {
+                        Value::Number(n) => *n,
+                        _ => return None,
+                    },
+                };
+                let u = s.as_units();
+                let k = i as usize;
+                Some(if k as f64 == i && k < u.len() {
+                    Value::Number(u[k] as f64)
+                } else if i.is_nan() || (i > -1.0 && i < 1.0) {
+                    // NaN and (-1, 1) truncate to 0.
+                    match u.first() {
+                        Some(&c) => Value::Number(c as f64),
+                        None => Value::Number(f64::NAN),
+                    }
+                } else if i.trunc() as usize >= u.len() || i < 0.0 {
+                    Value::Number(f64::NAN)
+                } else {
+                    Value::Number(u[i.trunc() as usize] as f64)
+                })
+            }
+            INTRINSIC_FROM_CHAR_CODE if argc == 1 => match &self.vstack[cb + 2] {
+                Value::Number(n) => Some(Value::String(JsStr::from_unit(to_uint32(*n) as u16))),
+                _ => None,
+            },
+            INTRINSIC_IMUL if argc >= 2 => match (&self.vstack[cb + 2], &self.vstack[cb + 3]) {
+                (Value::Number(a), Value::Number(b)) => Some(Value::Number(to_int32(*a).wrapping_mul(to_int32(*b)) as f64)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// `New(argc)` of a plain (non-derived, non-class-field) function
@@ -1463,6 +1512,18 @@ impl Realm {
                         Value::Number(n) => set_num!(d, *n - 1.0),
                         _ => slow!(op),
                     },
+                    Op::UnR(k, d, s) => match (k, &*sl!(s)) {
+                        // Neg, Plus, BitNot of numbers; ToPropertyKey of
+                        // numbers and strings is the value itself.
+                        (0, Value::Number(n)) => set_num!(d, -*n),
+                        (1 | 5, Value::Number(n)) => set_num!(d, *n),
+                        (2, Value::Number(n)) => set_num!(d, !to_int32(*n) as f64),
+                        (5, Value::String(_)) => {
+                            let v = sl!(s).clone();
+                            *sl!(d) = v;
+                        }
+                        _ => slow!(op),
+                    },
                     Op::ToNumericR(d, s) => match &*sl!(s) {
                         Value::Number(n) => set_num!(d, *n),
                         _ => slow!(op),
@@ -1490,7 +1551,30 @@ impl Realm {
                         } else {
                             match self.ic_get(&rec, recv) {
                                 Some(p) if p.flags & ACCESSOR == 0 => Some(p.value.clone()),
-                                _ => None,
+                                Some(p) => match p.getter() {
+                                    // Cached accessor with a native getter
+                                    // (DOM attributes, `ta.length`, ...):
+                                    // call it directly.
+                                    Some(Value::Object(g)) => {
+                                        let g = *g;
+                                        match self.heap.try_get(g).map(|o| &o.kind) {
+                                            Some(ObjectKind::Native(n)) => {
+                                                let f = n.func;
+                                                let this = recv.clone();
+                                                sync!();
+                                                let r = tri!(self.call_native(g, f, this, &[], false));
+                                                // SAFETY: as in `slow`; the native may have run
+                                                // JavaScript (the value stack may have moved).
+                                                base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
+                                                *sl!(d) = r;
+                                                continue;
+                                            }
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                },
+                                None => None,
                             }
                         };
                         match hit {
@@ -3823,6 +3907,13 @@ fn num_binop(op: Op, x: f64, y: f64) -> f64 {
         _ => f64::NAN,
     }
 }
+
+/// `String.prototype.charCodeAt` (see `NativeFunction::intrinsic`).
+pub const INTRINSIC_CHAR_CODE_AT: u8 = 1;
+/// `String.fromCharCode` with one argument.
+pub const INTRINSIC_FROM_CHAR_CODE: u8 = 2;
+/// `Math.imul`.
+pub const INTRINSIC_IMUL: u8 = 3;
 
 /// Instructions (backward jumps and calls) between GC / watchdog checks.
 pub(crate) const TICK_INTERVAL: u32 = 1024;
