@@ -321,6 +321,35 @@ pub enum TrackSize {
     MinMax(Box<TrackSize>, Box<TrackSize>),
     /// `fit-content(limit)`
     FitContent(Length),
+    /// `calc()` / `min()` / `max()` / `clamp()` mixing percentages with
+    /// lengths (`clamp(100px, 50%, calc(100% - 4rem))`): (px, percent)
+    /// terms resolved against the grid container's size at layout.
+    Calc(TrackCalc, Vec<(f32, f32)>),
+}
+
+/// How the terms of a [`TrackSize::Calc`] combine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackCalc {
+    /// One linear term (`calc()`).
+    Sum,
+    Min,
+    Max,
+    /// `clamp(min, value, max)`.
+    Clamp,
+}
+
+impl TrackCalc {
+    /// The track size for a container of size `base`.
+    pub fn eval(self, terms: &[(f32, f32)], base: f32) -> f32 {
+        let vals: Vec<f32> = terms.iter().map(|(px, pct)| px + base * pct / 100.0).collect();
+        match self {
+            TrackCalc::Sum => vals.first().copied().unwrap_or(0.0),
+            TrackCalc::Min => vals.iter().cloned().fold(f32::INFINITY, f32::min),
+            TrackCalc::Max => vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+            TrackCalc::Clamp if vals.len() == 3 => vals[1].min(vals[2]).max(vals[0]),
+            TrackCalc::Clamp => vals.first().copied().unwrap_or(0.0),
+        }
+    }
 }
 
 /// A track list entry: a sized track, optionally preceded by line names,

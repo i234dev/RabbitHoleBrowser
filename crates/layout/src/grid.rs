@@ -103,6 +103,14 @@ fn sizing_of(ts: &TrackSize, avail: Option<f32>) -> (Sizing, Sizing) {
             let amin = if matches!(amin, Sizing::Flex(_)) { Sizing::Auto } else { amin };
             (amin, bmax)
         }
+        TrackSize::Calc(op, terms) => match avail {
+            Some(a) => {
+                let v = op.eval(terms, a).max(0.0);
+                (Sizing::Fixed(v), Sizing::Fixed(v))
+            }
+            // Percentages of an indefinite size behave as `auto`.
+            None => (Sizing::Auto, Sizing::Auto),
+        },
         TrackSize::FitContent(l) => {
             let lim = match l {
                 Length::Px(v) => *v,

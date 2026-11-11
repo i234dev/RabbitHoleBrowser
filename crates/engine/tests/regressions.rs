@@ -323,3 +323,27 @@ fn link_elements_fire_load_and_error_events() {
     }
     assert_eq!(e.eval_in_page(&mut page, "log.length"), "4");
 }
+
+/// Grid tracks sized with math functions mixing percentages and lengths
+/// resolve against the grid container: svelte-split-pane's
+/// `grid-template-columns: clamp(var(--min), var(--pos), var(--max)) 1fr`
+/// (the Svelte playground's editor | preview split) was dropped as invalid,
+/// stacking both panes in one column.
+#[test]
+fn grid_tracks_with_mixed_math_functions() {
+    let mut e = engine(false);
+    let page = load(
+        &mut e,
+        r#"<style>x-pane{--c:clamp(var(--min), var(--pos), var(--max));width:800px;height:100px;display:grid;grid-template-columns:var(--c) 1fr}
+           #g{display:grid;width:800px;height:50px;grid-template-columns:calc(25% + 10px) minmax(calc(10% - 5px), 1fr) min(50%, 100px)}</style>
+           <x-pane style="--pos: 50%; --min: 100px; --max: calc(100% - 4rem)"><div id=a></div><div id=b></div></x-pane>
+           <x-pane style="--pos: 99%; --min: 100px; --max: calc(100% - 4rem)"><div id=c></div><div id=d></div></x-pane>
+           <div id=g><div id=g1></div><div id=g2></div><div id=g3></div></div>"#,
+    );
+    let rect = |id: &str| page.rect_of(by_id(&page, id)).expect("laid out");
+    assert_eq!((rect("a").x, rect("a").w, rect("b").x, rect("b").y), (0.0, 400.0, 400.0, rect("a").y));
+    // Clamped to the maximum: 800 - 4rem.
+    assert_eq!(rect("c").w, 736.0);
+    assert_eq!((rect("g1").w, rect("g3").w), (210.0, 100.0));
+    assert_eq!(rect("g2").x, 210.0);
+}

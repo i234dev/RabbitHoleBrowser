@@ -112,6 +112,24 @@ pub enum LengthValue {
 }
 
 impl LengthValue {
+    /// A `calc()` / math function that mixes percentages with lengths, as
+    /// its combinator and (px, percent) terms (None for anything else).
+    pub fn mixed_terms(&self, ctx: &LengthContext) -> Option<(crate::computed::TrackCalc, Vec<(f32, f32)>)> {
+        use crate::computed::TrackCalc;
+        match self {
+            LengthValue::Calc(lin) if lin.has_percent() && lin.px_part(ctx) != 0.0 => Some((TrackCalc::Sum, vec![(lin.px_part(ctx), lin.percent)])),
+            LengthValue::Math(f, args) if args.iter().any(|a| a.has_percent()) => {
+                let op = match f {
+                    MathFn::Min => TrackCalc::Min,
+                    MathFn::Max => TrackCalc::Max,
+                    MathFn::Clamp => TrackCalc::Clamp,
+                };
+                Some((op, args.iter().map(|a| (a.px_part(ctx), a.percent)).collect()))
+            }
+            _ => None,
+        }
+    }
+
     /// Resolve to a computed `Length`.
     ///
     /// Approximations: a `calc()` mixing percentages with absolute terms

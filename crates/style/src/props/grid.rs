@@ -81,6 +81,25 @@ fn track_breadth(tok: &Token, ctx: &LengthContext) -> Option<TrackSize> {
     }
 }
 
+/// A track breadth written as one component: a token or a math function
+/// (`calc()`, `min()`, `max()`, `clamp()`).
+fn track_breadth_comp(c: &[Token], ctx: &LengthContext) -> Option<TrackSize> {
+    match c {
+        [t] => track_breadth(t, ctx),
+        [Token::Function(f), ..] if matches!(f.to_ascii_lowercase().as_str(), "calc" | "-webkit-calc" | "min" | "max" | "clamp") => {
+            let l = values::parse_length(c)?;
+            if let Some((op, terms)) = l.mixed_terms(ctx) {
+                return Some(TrackSize::Calc(op, terms));
+            }
+            match l.resolve(ctx) {
+                Length::Auto => None,
+                l => Some(TrackSize::Length(l)),
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Parse one track size at the cursor (breadth, `minmax()`, `fit-content()`).
 fn track_size(cur: &mut Cur, ctx: &LengthContext) -> Option<TrackSize> {
     if let Some(Token::Function(f)) = cur.peek() {
@@ -89,10 +108,11 @@ fn track_size(cur: &mut Cur, ctx: &LengthContext) -> Option<TrackSize> {
         let args = super::fn_args(call);
         return match lf.as_str() {
             "minmax" if args.len() == 2 && args[0].len() == 1 && args[1].len() == 1 => {
-                let a = track_breadth(&args[0][0][0], ctx)?;
-                let b = track_breadth(&args[1][0][0], ctx)?;
+                let a = track_breadth_comp(args[0][0], ctx)?;
+                let b = track_breadth_comp(args[1][0], ctx)?;
                 Some(TrackSize::MinMax(Box::new(a), Box::new(b)))
             }
+            "calc" | "-webkit-calc" | "min" | "max" | "clamp" => track_breadth_comp(call, ctx),
             "fit-content" if args.len() == 1 && args[0].len() == 1 => {
                 let l = super::len_no_auto(args[0][0], ctx)?;
                 Some(TrackSize::FitContent(l))
