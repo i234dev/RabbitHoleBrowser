@@ -71,6 +71,9 @@ pub struct IncrementalState {
     /// Border-box unions of the line fragments of every inline element
     /// (built in one pass over the layout on first use).
     inline_index: std::cell::RefCell<Option<HashMap<NodeId, rabbithole_gfx::Rect>>>,
+    /// Styles of unrendered elements computed since the last style flush
+    /// (`getComputedStyle` inside `display: none` subtrees).
+    unrendered: std::cell::RefCell<HashMap<NodeId, Option<std::rc::Rc<rabbithole_style::ComputedStyle>>>>,
     /// [`side_sheet_signature`] at the last style flush.
     side_sheets: u64,
     /// Device pixel ratio images were last selected for.
@@ -222,6 +225,15 @@ impl Engine {
     /// its ancestor chain. Styles must be flushed first.
     pub fn unrendered_style(&self, page: &Page, node: NodeId) -> Option<std::rc::Rc<rabbithole_style::ComputedStyle>> {
         page.doc.element(node)?;
+        if let Some(s) = page.incr.unrendered.borrow().get(&node) {
+            return s.clone();
+        }
+        let s = self.unrendered_style_uncached(page, node);
+        page.incr.unrendered.borrow_mut().insert(node, s.clone());
+        s
+    }
+
+    fn unrendered_style_uncached(&self, page: &Page, node: NodeId) -> Option<std::rc::Rc<rabbithole_style::ComputedStyle>> {
         let se = page.incr.style.as_ref()?;
         let base_str = page.base_url.to_string();
         let opts = StyleOptions {
@@ -229,13 +241,14 @@ impl Engine {
             resolve_url: &|base, raw| resolve_url(base, raw),
             document_base: &base_str,
         };
-        se.style_chain(&page.doc, &opts, node)
+        se.style_chain_from(&page.doc, &opts, node, Some(&page.styles))
     }
 
     /// Bring `page.styles` up to date with the DOM, stylesheets, viewport
     /// and dynamic state, restyling only what changed. Layout is marked
     /// dirty (see [`Engine::flush_layout`]).
     pub fn flush_style(&self, page: &mut Page) {
+        page.incr.unrendered.get_mut().clear();
         let log = if page.doc.is_tracking_mutations() {
             page.doc.take_mutations()
         } else {

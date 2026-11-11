@@ -844,11 +844,27 @@ impl StyleEngine {
     /// (no stored state used), also inside `display: none` subtrees (as
     /// `getComputedStyle` needs). `None` when detached.
     pub fn style_chain(&self, doc: &Document, opts: &StyleOptions, target: NodeId) -> Option<Rc<ComputedStyle>> {
+        self.style_chain_from(doc, opts, target, None)
+    }
+
+    /// [`StyleEngine::style_chain`] starting below the nearest ancestor
+    /// whose style is stored in `tree` (the up-to-date styles this engine
+    /// computed), so only the unrendered part of the chain is computed.
+    pub fn style_chain_from(&self, doc: &Document, opts: &StyleOptions, target: NodeId, tree: Option<&StyledTree>) -> Option<Rc<ComputedStyle>> {
         let html = doc.html_element()?;
         let mut chain = Vec::new();
         let mut cur = Some(target);
+        let mut start: Option<(Rc<ComputedStyle>, Rc<Vars>)> = None;
         while let Some(n) = cur {
             if doc.element(n).is_some() {
+                if n != target {
+                    if let (Some(t), Some(Some(v))) = (tree, self.vars.get(n)) {
+                        if let Some(st) = t.get(n) {
+                            start = Some((st.clone(), v.clone()));
+                            break;
+                        }
+                    }
+                }
                 chain.push(n);
             }
             if n == html {
@@ -856,16 +872,17 @@ impl StyleEngine {
             }
             cur = doc.flat_parent(n);
         }
-        if chain.last() != Some(&html) {
+        if start.is_none() && chain.last() != Some(&html) {
             return None; // detached
         }
         chain.reverse();
         let mut candidates = Vec::new();
         let mut matched: Vec<Matched> = Vec::new();
         let mut decls = DeclCache::default();
-        let mut parent = Rc::new(ComputedStyle::initial());
-        let mut vars: Rc<Vars> = Rc::new(HashMap::new());
-        let mut root_fs = 16.0;
+        let (mut parent, mut vars, mut root_fs) = match start {
+            Some((st, v)) => (st, v, tree.map(|t| t.root_font_size).unwrap_or(16.0)),
+            None => (Rc::new(ComputedStyle::initial()), Rc::new(HashMap::new()), 16.0),
+        };
         let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, bloom: None };
         for &node in &chain {
             let out = compute_element(doc, node, &parent, &vars, root_fs, &cx, &mut decls, None, &mut candidates, &mut matched);

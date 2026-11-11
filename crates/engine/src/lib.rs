@@ -454,12 +454,12 @@ impl Loader {
                 }
             }
             let parsed = match &s {
-                Src::Inline(text, media) => {
+                Src::Inline(text, media) => Some(parsed_sheet_cached(text, media.as_deref(), &format!("{}{base}", self.load_stylesheets as u8), || {
                     let mut sheet = rabbithole_css::parse_stylesheet(text);
                     sheet.base_url = Some(base.to_string());
                     self.resolve_imports(&mut sheet, base, 0);
-                    Some(wrap_media(sheet, media.as_deref()))
-                }
+                    wrap_media(sheet, media.as_deref())
+                })),
                 Src::Link(url, media) => {
                     let key = url.without_fragment().to_string();
                     let caches = self.caches.lock().unwrap();
@@ -467,10 +467,12 @@ impl Loader {
                     let text = if ignored { None } else { caches.css.get(&key).cloned() };
                     drop(caches);
                     text.map(|text| {
-                        let mut sheet = rabbithole_css::parse_stylesheet(&text);
-                        sheet.base_url = Some(url.to_string());
-                        self.resolve_imports(&mut sheet, url, 0);
-                        wrap_media(sheet, media.as_deref())
+                        parsed_sheet_cached(&text, media.as_deref(), &format!("{}{url}", self.load_stylesheets as u8), || {
+                            let mut sheet = rabbithole_css::parse_stylesheet(&text);
+                            sheet.base_url = Some(url.to_string());
+                            self.resolve_imports(&mut sheet, url, 0);
+                            wrap_media(sheet, media.as_deref())
+                        })
                     })
                 }
             };
@@ -1890,4 +1892,31 @@ impl Page {
         }
         "default"
     }
+}
+
+/// A parsed style sheet (with its imports resolved and media applied) for
+/// this source text, media and base URL: re-collecting the sheets after a
+/// script inserts or removes one (style-in-JS, Polymer / Shady CSS) parses
+/// only the new ones.
+fn parsed_sheet_cached(text: &str, media: Option<&str>, base: &str, parse: impl FnOnce() -> Stylesheet) -> Stylesheet {
+    type Key = (Box<str>, Option<Box<str>>, Box<str>);
+    thread_local! {
+        static CACHE: std::cell::RefCell<(usize, HashMap<Key, Stylesheet>)> = std::cell::RefCell::new((0, HashMap::new()));
+    }
+    let key: Key = (text.into(), media.map(Into::into), base.into());
+    if let Some(s) = CACHE.with(|c| c.borrow().1.get(&key).cloned()) {
+        return s;
+    }
+    let sheet = parse();
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        // Bounded by source size; dropped wholesale when full.
+        if c.0 + text.len() > 32 << 20 {
+            c.0 = 0;
+            c.1.clear();
+        }
+        c.0 += text.len();
+        c.1.insert(key, sheet.clone());
+    });
+    sheet
 }
