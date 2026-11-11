@@ -58,6 +58,11 @@ pub struct ScriptState {
     pub session_storage: HashMap<String, String>,
     /// Answers given to `confirm()` / `prompt()`.
     pub dialog_policy: DialogPolicy,
+    /// `<link>` elements whose `load`/`error` event was queued, with the
+    /// resource URL it was for (a new `href` fires again).
+    pub link_loads: HashMap<NodeId, String>,
+    /// `load`/`error` events for `<link>` elements, fired on the next tick.
+    pub link_events: Vec<(NodeId, &'static str)>,
 }
 
 /// Origin-scoped `localStorage`, shared by all pages of an engine and
@@ -647,7 +652,9 @@ impl Engine {
             images_changed = true;
         }
         let anim_out = self.dispatch_animation_events(page);
+        let link_out = self.fire_link_events(page);
         let mut out = self.tick_scripts(page);
+        out.merge(link_out);
         out.merge(anim_out);
         let frames_out = self.tick_frames(page);
         out.merge(frames_out);
@@ -686,6 +693,76 @@ impl Engine {
         }
         page.script.host = Some(host);
         self.settle(page, false)
+    }
+
+    /// Queue `load` / `error` events for `<link>` elements whose resource
+    /// finished (stylesheets: once fetched into the cache by the last
+    /// style flush; `modulepreload` / `preload` / `prefetch`: right away).
+    /// Loaders such as Vite's preload helper await a stylesheet link's
+    /// `load` before importing the module that needs it.
+    pub(crate) fn queue_link_events(&self, page: &mut Page) {
+        if page.script.host.is_none() {
+            return;
+        }
+        let mut roots = vec![Document::ROOT];
+        roots.extend(page.doc.connected_shadow_roots());
+        let mut found: Vec<(NodeId, String, bool)> = Vec::new();
+        for root in roots {
+            for n in page.doc.descendants(root) {
+                let Some(el) = page.doc.element(n) else { continue };
+                if el.tag != "link" {
+                    continue;
+                }
+                let rel = el.attr("rel").unwrap_or("").to_ascii_lowercase();
+                let sheet = rel.split_ascii_whitespace().any(|r| r == "stylesheet");
+                let preload = rel.split_ascii_whitespace().any(|r| matches!(r, "modulepreload" | "preload" | "prefetch"));
+                if !(sheet || preload) || el.attr("disabled").is_some() {
+                    continue;
+                }
+                let Some(href) = el.attr("href").map(str::trim).filter(|h| !h.is_empty()) else { continue };
+                let Some(url) = page.base_url.join(href) else { continue };
+                let key = url.without_fragment().to_string();
+                if page.script.link_loads.get(&n) == Some(&key) {
+                    continue;
+                }
+                found.push((n, key, sheet));
+            }
+        }
+        if found.is_empty() {
+            return;
+        }
+        let caches = self.loader.caches.lock().unwrap();
+        for (n, key, sheet) in found {
+            let ev = if sheet && self.loader.load_stylesheets {
+                if !caches.css.contains_key(&key) {
+                    // Not fetched (yet): the next flush that collects it fires.
+                    continue;
+                }
+                if caches.css_failed.contains(&key) {
+                    "error"
+                } else {
+                    "load"
+                }
+            } else {
+                "load"
+            };
+            page.script.link_loads.insert(n, key);
+            page.script.link_events.push((n, ev));
+        }
+    }
+
+    /// Fire the queued `<link>` `load` / `error` events.
+    fn fire_link_events(&self, page: &mut Page) -> ScriptOutcome {
+        let events = std::mem::take(&mut page.script.link_events);
+        let mut out = ScriptOutcome::default();
+        for (n, ev) in events {
+            if !page.doc.is_connected(n) {
+                continue;
+            }
+            let o = self.dispatch_event(page, n, ev, EventInit { bubbles: false, cancelable: false, detail: None });
+            out.merge(o);
+        }
+        out
     }
 
     /// Dispatch a DOM event to scripts. Returns whether the default action
@@ -812,6 +889,9 @@ impl Page {
         };
         if let Some(a) = self.anim.next_due() {
             due = Some(due.map(|d| d.min(a)).unwrap_or(a));
+        }
+        if !self.script.link_events.is_empty() {
+            due = Some(0.0);
         }
         let frames = if crate::frames::mail_pending() { Some(0.0) } else { self.frames_next_due() };
         if let Some(f) = frames {

@@ -287,3 +287,39 @@ fn scroll_container_scroll_updates_intersection_observers() {
     tick(&e, &mut page);
     assert_eq!(e.eval_in_page(&mut page, "log.join(',')"), "'false,true'");
 }
+
+/// `<link>` elements fire `load` once their stylesheet is fetched (`error`
+/// when the fetch fails), parser-inserted or added by script, and
+/// `modulepreload` links fire `load` too. Vite's preload helper (SvelteKit
+/// apps) awaits a stylesheet link's `load` before importing the module
+/// that needs it: without the event the app never starts.
+#[test]
+fn link_elements_fire_load_and_error_events() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        r#"<link rel="stylesheet" href="data:text/css,%23p{color:red}" onload="log.push('parsed')">
+           <script>var log = [];
+             function add(rel, href) {
+               var l = document.createElement('link'); l.rel = rel; l.href = href;
+               l.onload = function () { log.push(rel + ':load'); };
+               l.onerror = function () { log.push(rel + ':error'); };
+               document.head.appendChild(l);
+             }
+             add('stylesheet', 'data:text/css,p{margin:0}');
+             add('modulepreload', 'data:text/javascript,export%20default%201');
+             add('stylesheet', 'file:///nonexistent-rabbithole-dir/missing.css');
+           </script><p id=p>x</p>"#,
+    );
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = e.tick(&mut page);
+    }
+    let log = e.eval_in_page(&mut page, "log.slice().sort().join(',')");
+    assert_eq!(log, "'modulepreload:load,parsed,stylesheet:error,stylesheet:load'");
+    // Each link fires once.
+    for _ in 0..3 {
+        let _ = e.tick(&mut page);
+    }
+    assert_eq!(e.eval_in_page(&mut page, "log.length"), "4");
+}

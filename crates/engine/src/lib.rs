@@ -89,6 +89,9 @@ struct Caches {
     /// `text/css`: ignored outside quirks mode (HTML §4.2.4 "link type
     /// stylesheet", fetch and process the linked resource).
     css_wrong_type: HashSet<String>,
+    /// Stylesheet URLs whose fetch failed (network error or HTTP error
+    /// status): their `<link>` elements get an `error` event.
+    css_failed: HashSet<String>,
     /// Image-request URLs that answered with a document (HTML / XML / text)
     /// instead of an image: an `<object>` showing one is a nested browsing
     /// context, not a failed load (no fallback content).
@@ -502,6 +505,7 @@ impl Loader {
                         caches.css_wrong_type.insert(key.clone());
                     }
                     let text = decode_text(&resp.body, resp.charset.as_deref());
+                    caches.css_failed.remove(&key);
                     caches.css.insert(key, Arc::from(text));
                 }
                 other => {
@@ -511,6 +515,7 @@ impl Loader {
                             Err(e) => eprintln!("[fetch] css {u}: {e}"),
                         }
                     }
+                    caches.css_failed.insert(key.clone());
                     caches.css.insert(key, Arc::from(""));
                 }
             }

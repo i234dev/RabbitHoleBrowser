@@ -271,6 +271,7 @@ impl Engine {
                 page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
                 page.incr.style = None;
             }
+            self.queue_link_events(page);
         }
         let env = media_env(page.viewport, self.scripting);
         self.update_visited_links(page);
