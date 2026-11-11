@@ -178,6 +178,18 @@ pub trait HostEnv {
     /// Queue a `postMessage` to frame `target` (`data` is the serialized
     /// structured clone, `target_origin` as given to `postMessage`).
     fn post_message(&mut self, _target: u64, _data: String, _target_origin: String) {}
+    /// Run `call` synchronously in the realm of same-origin frame `id` (a
+    /// descendant of this document's frame): scripts of a same-origin
+    /// parent dispatch events at the frame's nodes, call its functions
+    /// (`iframe.contentWindow.f()`) and so on. None when the frame cannot
+    /// be scripted from here.
+    fn frame_call(&mut self, _id: u64, _call: crate::FrameCall) -> Option<crate::FrameReply> {
+        None
+    }
+    /// Microtask checkpoint of the frames this realm called into through
+    /// [`HostEnv::frame_call`]: same-origin frames share the event loop, so
+    /// their microtasks run when this realm's do.
+    fn frame_checkpoint(&mut self) {}
 }
 
 type EnvPtr = *mut (dyn HostEnv + 'static);

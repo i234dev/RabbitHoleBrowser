@@ -1084,6 +1084,9 @@ fn e_scroll_by(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 fn e_focus(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "focus")?;
+    if forward_to_frame(n, "focus") {
+        return Ok(Value::Undefined);
+    }
     if n.doc != 0 {
         return Ok(Value::Undefined);
     }
@@ -1104,6 +1107,9 @@ fn e_focus(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 fn e_blur(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "blur")?;
+    if forward_to_frame(n, "blur") {
+        return Ok(Value::Undefined);
+    }
     if state().borrow().focused != Some(n.node) {
         return Ok(Value::Undefined);
     }
@@ -1114,9 +1120,29 @@ fn e_blur(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
+/// `click()` / `focus()` / `blur()` on a node of a same-origin child
+/// frame run in the frame's realm (its listeners and default actions).
+fn forward_to_frame(n: NodeRef, method: &str) -> bool {
+    if n.doc & crate::host::FRAME_DOC == 0 {
+        return false;
+    }
+    let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
+    match crate::frames::call_frame(frame, crate::FrameCall::Method { node: n.node, name: method.to_string() }) {
+        Some(crate::FrameReply::Error(m)) => {
+            crate::host::log("error", &format!("Uncaught {m}"));
+            true
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
 /// `element.click()`: dispatch a synthetic click and run the default action.
 fn e_click(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "click")?;
+    if forward_to_frame(n, "click") {
+        return Ok(Value::Undefined);
+    }
     let disabled = get_attribute(n, "disabled").is_some();
     if disabled {
         return Ok(Value::Undefined);

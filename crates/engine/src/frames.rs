@@ -39,6 +39,12 @@ thread_local! {
 }
 
 thread_local! {
+    /// Frames whose realm a parent's script called into since the parent's
+    /// last microtask checkpoint (see [`Engine::frame_microtasks`]).
+    static TOUCHED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+thread_local! {
     /// Pages whose child frame is running scripts right now, outermost
     /// first. The running child is detached from its owner (see
     /// [`Engine::with_child`]), so the owner can be reached here without
@@ -212,6 +218,11 @@ impl FrameRegistry {
 
 /// Origin used for messages and `targetOrigin` checks. Documents without
 /// a network origin (about:blank, srcdoc) inherit their parent's.
+/// Is frame `id` `page` or one of its descendants?
+fn find_frame_page(page: &Page, id: u64) -> bool {
+    page.frame_id == id || page.frames.children.iter().any(|c| c.id == id || c.page.as_ref().map(|p| find_frame_page(p, id)).unwrap_or(false))
+}
+
 fn origin_of(page: &Page) -> String {
     page.frame_origin.clone().unwrap_or_else(|| page.url.origin())
 }
@@ -279,6 +290,66 @@ impl Engine {
             self.restyle(page);
         }
         Some(r)
+    }
+
+    /// Run `f` on the page of descendant frame `id` of `page` (detached
+    /// like [`Engine::with_child`], every page between them on the
+    /// ancestor stack).
+    pub(crate) fn with_frame<R>(&self, page: &mut Page, id: u64, f: &mut dyn FnMut(&mut Page) -> R) -> Option<R> {
+        if let Some(i) = page.frames.children.iter().position(|c| c.id == id) {
+            return self.with_child(page, i, |c| f(c));
+        }
+        let i = page.frames.children.iter().position(|c| c.page.as_ref().map(|p| find_frame_page(p, id)).unwrap_or(false))?;
+        self.with_child(page, i, |c| self.with_frame(c, id, f)).flatten()
+    }
+
+    /// Run a same-origin parent's request in the realm of descendant frame
+    /// `id` (see [`rabbithole_script::FrameCall`]). None when the frame is
+    /// cross-origin, gone, or running script itself.
+    pub(crate) fn call_in_frame(&self, page: &mut Page, id: u64, call: rabbithole_script::FrameCall) -> Option<rabbithole_script::FrameReply> {
+        let origin = page_origin(page);
+        let mut call = Some(call);
+        let r = self.with_frame(page, id, &mut |child: &mut Page| {
+            if page_origin(child) != origin {
+                return None;
+            }
+            let mut host = child.script.host.take()?;
+            let reply = {
+                let mut env = EngineEnv { engine: self, page: child };
+                host.frame_call(&mut env, call.take()?)
+            };
+            child.script.host = Some(host);
+            // Restyled and repainted on the next sync (or layout query).
+            child.script.dom_dirty = true;
+            Some(reply)
+        })
+        .flatten();
+        if r.is_some() {
+            TOUCHED.with(|t| {
+                let mut t = t.borrow_mut();
+                if !t.contains(&id) {
+                    t.push(id);
+                }
+            });
+        }
+        r
+    }
+
+    /// Microtask checkpoint of the frames scripts of `page` called into.
+    pub(crate) fn frame_microtasks(&self, page: &mut Page) {
+        let ids = TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()));
+        for id in ids {
+            self.with_frame(page, id, &mut |child: &mut Page| {
+                if let Some(mut host) = child.script.host.take() {
+                    {
+                        let mut env = EngineEnv { engine: self, page: child };
+                        host.run_jobs(&mut env);
+                    }
+                    child.script.host = Some(host);
+                    child.script.dom_dirty = true;
+                }
+            });
+        }
     }
 
     fn child_index(page: &Page, node: NodeId) -> Option<usize> {

@@ -137,6 +137,8 @@
         post(id, JSON.stringify({ t: 'msg', d: data, ports: ports.map((port) => bridgePort(port, id)) }), targetOriginOf(targetOrigin));
       },
       focus() {}, blur() {}, close() {},
+      get screenX() { return sameOrigin(id) ? foreignValue(id, 'screenX') : 0; },
+      get screenY() { return sameOrigin(id) ? foreignValue(id, 'screenY') : 0; },
       // The frame's window lives in another realm: listeners registered
       // from here are accepted (scripts must not throw) but not delivered.
       addEventListener() {}, removeEventListener() {},
@@ -172,6 +174,14 @@
           // Named access to a child frame (`parent.frames['name']`).
           const child = info(id, 'named', key);
           if (child >= 0) return windowFor(child);
+          if (sameOrigin(id)) {
+            // DOM interfaces: the frame's nodes are reached through this
+            // realm's wrappers (and its prototypes), so its interface
+            // objects are this realm's (`new frame.contentWindow.MouseEvent`
+            // makes an event that dispatches into the frame).
+            if (/^[A-Z]/.test(key) && typeof g[key] === 'function' && key !== 'Function') return g[key];
+            return foreignValue(id, key);
+          }
         }
         return undefined;
       },
@@ -186,6 +196,70 @@
     ids.set(p, id);
     proxies.set(id, p);
     return p;
+  }
+
+  // ---- scripting a same-origin frame's realm (the engine runs these
+  // requests synchronously there; values cross as structured clones,
+  // nodes as this realm's wrappers of the frame's nodes)
+  const FN = '\u0000function';
+  const foreignFns = new Map();
+  function foreignValue(id, key) {
+    const r = info(id, 'global', key);
+    if (r === FN) {
+      const cacheKey = id + ':' + key;
+      let f = foreignFns.get(cacheKey);
+      if (!f) {
+        f = function (...args) { return fromForeign(info(id, 'call', key, serialize(args))); };
+        foreignFns.set(cacheKey, f);
+      }
+      return f;
+    }
+    return fromForeign(r);
+  }
+  function fromForeign(r) {
+    if (typeof r === 'string') { try { return deserialize(r); } catch (e) { return undefined; } }
+    return r;
+  }
+  // In the frame: `foreignGet(name)` / `foreignCall(name, args)` answer a
+  // node (as is), the function marker, or a serialized clone.
+  function toForeign(v) {
+    if (typeof v === 'function') return [];
+    if (typeof Node === 'function' && v instanceof Node) return v;
+    try { return serialize(v); } catch (e) { return undefined; }
+  }
+  function foreignGet(name) { return toForeign(g[name]); }
+  function foreignCall(name, args) {
+    const f = g[name];
+    if (typeof f !== 'function') throw new TypeError(name + ' is not a function');
+    return toForeign(f.apply(g, deserialize(args)));
+  }
+  // Re-create an event from another realm and dispatch it at `node`.
+  function foreignDispatch(node, iface, type, init) {
+    const C = typeof g[iface] === 'function' && /Event$/.test(iface) ? g[iface] : Event;
+    let opts = {};
+    try { opts = JSON.parse(init); } catch (e) {}
+    let ev;
+    try { ev = new C(type, opts); } catch (e) { ev = new Event(type, opts); }
+    return node.dispatchEvent(ev);
+  }
+  // The init dictionary of an event (its own members), as JSON.
+  const INIT_KEYS = ['bubbles', 'cancelable', 'composed', 'detail', 'key', 'code', 'keyCode', 'which', 'charCode', 'location', 'repeat',
+    'isComposing', 'ctrlKey', 'shiftKey', 'altKey', 'metaKey', 'clientX', 'clientY', 'screenX', 'screenY', 'movementX', 'movementY',
+    'button', 'buttons', 'deltaX', 'deltaY', 'deltaZ', 'deltaMode', 'data', 'inputType', 'pointerId', 'pointerType', 'isPrimary',
+    'width', 'height', 'pressure', 'tiltX', 'tiltY', 'twist', 'animationName', 'elapsedTime', 'pseudoElement', 'propertyName',
+    'oldURL', 'newURL', 'persisted', 'state', 'newState', 'oldState'];
+  function eventInit(ev) {
+    const o = {};
+    for (const k of INIT_KEYS) {
+      let v;
+      try { v = ev[k]; } catch (e) { continue; }
+      if (v === undefined || typeof v === 'function' || (typeof v === 'object' && v !== null)) continue;
+      o[k] = v;
+    }
+    if (ev.detail !== null && typeof ev.detail === 'object') { try { o.detail = JSON.parse(JSON.stringify(ev.detail)); } catch (e) {} }
+    let iface = 'Event';
+    try { iface = ev.constructor && ev.constructor.name || Object.prototype.toString.call(ev).slice(8, -1); } catch (e) {}
+    return [iface, JSON.stringify(o)];
   }
 
   // ---- this window's frame accessors
@@ -282,5 +356,5 @@
     g.dispatchEvent(ev);
   }
 
-  return { serialize, deserialize, windowFor, deliver };
+  return { serialize, deserialize, windowFor, deliver, foreignGet, foreignCall, foreignDispatch, eventInit };
 })

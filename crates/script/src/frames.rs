@@ -80,6 +80,75 @@ fn id_value(id: Option<u64>) -> Value {
     Value::Number(id.map(|i| i as f64).unwrap_or(-1.0))
 }
 
+thread_local! {
+    /// Some realm called into a same-origin frame's realm since the last
+    /// microtask checkpoint (see [`checkpoint`]).
+    static FOREIGN_CALLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Microtask checkpoint of the realm running now: frames it called into
+/// run theirs too (same-origin frames share one event loop).
+pub(crate) fn checkpoint() {
+    if FOREIGN_CALLS.with(|f| f.replace(false)) && crate::env::env_active() {
+        with_env(|env| env.frame_checkpoint());
+    }
+}
+
+/// Run `call` in the realm of same-origin frame `id` (None when the frame
+/// cannot be scripted from this realm).
+pub(crate) fn call_frame(id: u64, call: crate::FrameCall) -> Option<crate::FrameReply> {
+    let r = with_env(|env| env.frame_call(id, call));
+    if r.is_some() {
+        FOREIGN_CALLS.with(|f| f.set(true));
+    }
+    r
+}
+
+/// A parent realm's request, in this (the frame's) realm.
+pub(crate) fn foreign(realm: &mut Realm, call: crate::FrameCall) -> crate::FrameReply {
+    use crate::{FrameCall, FrameReply};
+    let r = match call {
+        FrameCall::Dispatch { node, iface, ty, init } => {
+            let n = crate::host::wrap(realm, crate::host::NodeRef::main(node));
+            api_call(realm, "foreignDispatch", &[n, Value::str(&iface), Value::str(&ty), Value::str(&init)])
+        }
+        FrameCall::Method { node, name } => {
+            let n = crate::host::wrap(realm, crate::host::NodeRef::main(node));
+            realm.invoke(n, &name, &[]).map(|_| Value::Undefined)
+        }
+        FrameCall::GetGlobal { name } => api_call(realm, "foreignGet", &[Value::str(&name)]),
+        FrameCall::CallGlobal { name, args } => api_call(realm, "foreignCall", &[Value::str(&name), Value::str(&args)]),
+    };
+    match r {
+        Err(e) => FrameReply::Error(realm.error_to_string(&e)),
+        Ok(v) => match v.v() {
+            rabbithole_js::V::Bool(b) => FrameReply::Bool(b),
+            rabbithole_js::V::Undefined => FrameReply::Undefined,
+            rabbithole_js::V::String(s) => FrameReply::Value(s.to_rust_string()),
+            rabbithole_js::V::Object(_) => match crate::host::node_of(realm, &v) {
+                Some(n) if n.doc == 0 => FrameReply::Node(n.node),
+                // The API returns a function marker as an empty array.
+                _ => FrameReply::Function,
+            },
+            _ => FrameReply::Undefined,
+        },
+    }
+}
+
+/// A reply from another realm as a value of this one.
+fn reply_value(realm: &mut Realm, id: u64, r: Option<crate::FrameReply>) -> JsResult<Value> {
+    use crate::FrameReply;
+    match r {
+        None | Some(FrameReply::Undefined) => Ok(Value::Undefined),
+        Some(FrameReply::Bool(b)) => Ok(Value::Bool(b)),
+        Some(FrameReply::Node(node)) if id < crate::host::FRAME_DOC as u64 => Ok(crate::host::wrap(realm, crate::host::NodeRef { doc: crate::host::FRAME_DOC | id as u32, node })),
+        Some(FrameReply::Node(_)) => Ok(Value::Null),
+        Some(FrameReply::Function) => Ok(Value::str("\u{0}function")),
+        Some(FrameReply::Value(s)) => Ok(Value::str(&s)),
+        Some(FrameReply::Error(m)) => Err(realm.throw_type_error(&m)),
+    }
+}
+
 /// `post(targetId, serializedData, targetOrigin)`.
 fn native_post(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let Some(target) = to_id(realm, arg(args, 0))? else { return Ok(Value::Undefined) };
@@ -127,6 +196,19 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         "named" => {
             let name = realm.to_rust_string(arg(args, 2))?;
             id_value(with_env(|env| env.frame_named_child(id, &name)))
+        }
+        // Same-origin frames: `contentWindow[key]` and calls of its
+        // functions run in the frame's realm.
+        "global" => {
+            let name = realm.to_rust_string(arg(args, 2))?;
+            let r = call_frame(id, crate::FrameCall::GetGlobal { name });
+            reply_value(realm, id, r)?
+        }
+        "call" => {
+            let name = realm.to_rust_string(arg(args, 2))?;
+            let a = realm.to_rust_string(arg(args, 3))?;
+            let r = call_frame(id, crate::FrameCall::CallGlobal { name, args: a });
+            reply_value(realm, id, r)?
         }
         "navigate" => {
             let url = realm.to_rust_string(arg(args, 2))?;

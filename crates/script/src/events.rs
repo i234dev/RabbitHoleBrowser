@@ -643,8 +643,51 @@ fn et_dispatch_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
     if let Some(d) = realm.host_data_mut::<EventData>(eid) {
         d.is_trusted = false;
     }
+    if let TargetKey::Node(n) = key {
+        if n.doc & crate::host::FRAME_DOC != 0 {
+            // A node of a same-origin frame: its listeners live in the
+            // frame's realm, where the event is re-created and dispatched.
+            return dispatch_into_frame(realm, n, eid, &ev);
+        }
+    }
     let r = dispatch_object(realm, key, eid, Some(this));
     Ok(Value::Bool(!r.default_prevented))
+}
+
+/// `dispatchEvent` at a node of a same-origin child frame's document.
+fn dispatch_into_frame(realm: &mut Realm, n: NodeRef, eid: ObjectId, ev: &Value) -> JsResult<Value> {
+    let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
+    let api = state().borrow().protos.get("__frames_api").copied();
+    let (iface, init) = match api {
+        Some(api) => {
+            let f = realm.get_str(Value::Object(api), "eventInit")?;
+            let pair = realm.call(f, Value::Object(api), &[ev.clone()])?;
+            let iface = realm.get_str(pair.clone(), "0")?;
+            let init = realm.get_str(pair, "1")?;
+            (realm.to_rust_string(iface)?, realm.to_rust_string(init)?)
+        }
+        None => ("Event".to_string(), "{}".to_string()),
+    };
+    let ty = realm.host_data::<EventData>(eid).map(|d| d.ty.clone()).unwrap_or_default();
+    match crate::frames::call_frame(frame, crate::FrameCall::Dispatch { node: n.node, iface, ty, init }) {
+        Some(crate::FrameReply::Bool(not_cancelled)) => {
+            if !not_cancelled {
+                if let Some(d) = realm.host_data_mut::<EventData>(eid) {
+                    d.default_prevented = true;
+                }
+            }
+            Ok(Value::Bool(not_cancelled))
+        }
+        Some(crate::FrameReply::Error(m)) => {
+            crate::host::log("error", &format!("Uncaught {m}"));
+            Ok(Value::Bool(true))
+        }
+        // The frame is gone (or not scriptable): nothing listens.
+        _ => {
+            let r = dispatch_object(realm, TargetKey::Node(n), eid, None);
+            Ok(Value::Bool(!r.default_prevented))
+        }
+    }
 }
 
 fn et_ctor(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {

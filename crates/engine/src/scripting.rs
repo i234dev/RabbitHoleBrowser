@@ -518,6 +518,12 @@ impl HostEnv for EngineEnv<'_> {
     fn post_message(&mut self, target: u64, data: String, target_origin: String) {
         self.queue_message(target, data, target_origin);
     }
+    fn frame_call(&mut self, id: u64, call: rabbithole_script::FrameCall) -> Option<rabbithole_script::FrameReply> {
+        self.engine.call_in_frame(self.page, id, call)
+    }
+    fn frame_checkpoint(&mut self) {
+        self.engine.frame_microtasks(self.page);
+    }
     fn focus_node(&mut self, node: Option<NodeId>) {
         self.page.state.focused = node;
         self.page.state.focus_visible = node.map(|n| self.page.focus_should_be_visible(n)).unwrap_or(false);

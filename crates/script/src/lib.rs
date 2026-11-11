@@ -144,6 +144,38 @@ impl DispatchResult {
     }
 }
 
+/// A request from a same-origin ancestor's realm, run in a frame's realm
+/// (see [`HostEnv::frame_call`] and [`ScriptHost::frame_call`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameCall {
+    /// Create an event of interface `iface` (`MouseEvent`, ...) with type
+    /// `ty` and the init dictionary `init` (JSON) and dispatch it at `node`.
+    Dispatch { node: NodeId, iface: String, ty: String, init: String },
+    /// Call a no-argument method of the node: `click`, `focus`, `blur`.
+    Method { node: NodeId, name: String },
+    /// Read global property `name` of the frame's window.
+    GetGlobal { name: String },
+    /// Call the frame's global function `name` with the arguments (a
+    /// structured clone, serialized).
+    CallGlobal { name: String, args: String },
+}
+
+/// Result of a [`FrameCall`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameReply {
+    /// `Dispatch`: whether the event was not cancelled.
+    Bool(bool),
+    /// A node of the frame's document.
+    Node(NodeId),
+    /// A function (the caller wraps it to call it through `CallGlobal`).
+    Function,
+    /// Any other value, as a serialized structured clone.
+    Value(String),
+    Undefined,
+    /// An exception thrown in the frame (its message).
+    Error(String),
+}
+
 /// The scripting host of one page.
 pub struct ScriptHost {
     realm: Realm,
@@ -368,6 +400,17 @@ impl ScriptHost {
         })
     }
 
+    /// Run a request from a same-origin ancestor's realm in this realm
+    /// (see [`FrameCall`]). Microtasks it queues run at the caller's next
+    /// microtask checkpoint ([`HostEnv::frame_checkpoint`]).
+    pub fn frame_call(&mut self, env: &mut dyn HostEnv, call: FrameCall) -> FrameReply {
+        self.enter(env, |realm| {
+            let r = frames::foreign(realm, call);
+            shadow::flush(realm);
+            r
+        })
+    }
+
     /// Something that observers depend on changed outside of scripts
     /// (e.g. an inner scroll container scrolled): run the "update the
     /// rendering" hook (IntersectionObserver / ResizeObserver) soon.
@@ -456,6 +499,7 @@ impl ScriptHost {
                 let msg = realm.error_to_string(&r);
                 host::log("error", &format!("Uncaught (in promise) {msg}"));
             }
+            frames::checkpoint();
         });
     }
 
@@ -531,6 +575,7 @@ impl ScriptHost {
                     realm.begin_task();
                     observers::deliver_mutations(realm);
                 }
+                frames::checkpoint();
             }
             // Animation frames (~60 Hz).
             let frame_due = {
@@ -560,6 +605,7 @@ impl ScriptHost {
                     realm.begin_task();
                     observers::deliver_mutations(realm);
                 }
+                frames::checkpoint();
             }
             // Network connections (WebSocket / EventSource).
             realm.begin_task();

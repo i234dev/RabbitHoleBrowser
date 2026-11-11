@@ -300,3 +300,37 @@ fn hover_feedback_comes_from_inside_frames() {
     let outside = page.hover_info(20.0, 220.0);
     assert!(outside.link.is_none());
 }
+
+/// A same-origin parent drives its frame the way Speedometer does: events
+/// it dispatches at the frame's nodes run the frame's listeners (in the
+/// frame's realm, as that realm's event interfaces), `click()` runs the
+/// frame's handlers and default actions, `contentWindow.f()` calls the
+/// frame's functions (nodes come back as the parent's wrappers), and the
+/// frame's microtasks run at the parent's microtask checkpoint.
+#[test]
+fn parent_scripts_drive_a_same_origin_frame() {
+    let mut e = engine();
+    let inner = r#"<input id=i><button id=b>b</button><input id=c type=checkbox>
+      <script>var log = [];
+        var i = document.getElementById('i');
+        i.addEventListener('keydown', function (e) { log.push('key:' + e.key + ':' + e.keyCode + ':' + (e instanceof KeyboardEvent)); e.preventDefault(); });
+        i.addEventListener('input', function (e) { log.push('input:' + e.target.value); });
+        document.getElementById('b').onclick = function () { log.push('click'); Promise.resolve().then(function () { log.push('micro'); }); };
+        function getLog() { return log.join(','); }
+        function button() { return document.getElementById('b'); }
+        var answer = { n: 42 };
+      </script>"#;
+    let mut page = load(&mut e, &format!(r#"<iframe id="f" srcdoc="{}"></iframe>"#, escape_attr(inner)));
+    let r = eval(
+        &e,
+        &mut page,
+        "(() => { const f = document.getElementById('f'), d = f.contentDocument, i = d.getElementById('i');
+           i.value = 'hi'; i.dispatchEvent(new Event('input', { bubbles: true }));
+           const ok = i.dispatchEvent(new f.contentWindow.KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+           d.getElementById('b').click(); d.getElementById('c').click();
+           return [ok, f.contentWindow.getLog(), f.contentWindow.button() === d.getElementById('b'), d.getElementById('c').checked, f.contentWindow.answer.n, typeof f.contentWindow.nothing].join('|'); })()",
+    );
+    assert_eq!(r, "false|input:hi,key:Enter:13:true,click|true|true|42|undefined");
+    settle(&e, &mut page);
+    assert_eq!(eval(&e, &mut page, "document.getElementById('f').contentWindow.getLog()"), "input:hi,key:Enter:13:true,click,micro");
+}
