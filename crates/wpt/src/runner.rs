@@ -1,0 +1,238 @@
+//! Running tests: a child process per test page (crash and hang
+//! isolation) loads the page in the engine and prints the harness results;
+//! the parent schedules children over a few jobs and collects results.
+
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use rabbithole_engine::{Engine, Viewport};
+use serde_json::Value;
+
+use crate::discover::TestId;
+
+/// Subtest status names (testharness.js numbering).
+pub const SUBTEST_STATUS: [&str; 5] = ["PASS", "FAIL", "TIMEOUT", "NOTRUN", "PRECONDITION_FAILED"];
+/// Harness status names (testharness.js numbering).
+pub const HARNESS_STATUS: [&str; 4] = ["OK", "ERROR", "TIMEOUT", "PRECONDITION_FAILED"];
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Subtest {
+    pub name: String,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestResult {
+    pub url: String,
+    /// OK, ERROR, TIMEOUT, PRECONDITION_FAILED (harness), or CRASH /
+    /// NORESULT (runner).
+    pub harness: String,
+    pub message: Option<String>,
+    pub subtests: Vec<Subtest>,
+    pub ms: u64,
+}
+
+impl TestResult {
+    /// (passed, total) as counted for pass rates: each subtest counts; a
+    /// page without subtests counts as one test that passes when the
+    /// harness completed OK.
+    pub fn counts(&self) -> (usize, usize) {
+        if self.subtests.is_empty() {
+            return (usize::from(self.harness == "OK"), 1);
+        }
+        (self.subtests.iter().filter(|s| s.status == "PASS").count(), self.subtests.len())
+    }
+}
+
+fn status_name(table: &[&str], v: &Value) -> String {
+    match v.as_u64() {
+        Some(i) => table.get(i as usize).copied().unwrap_or("UNKNOWN").to_string(),
+        None => v.as_str().unwrap_or("UNKNOWN").to_string(),
+    }
+}
+
+/// Parse the JSON line the report script prints.
+pub fn parse_report(url: &str, json: &str, ms: u64) -> Option<TestResult> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let subtests = v["tests"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|t| Subtest {
+                    name: t["name"].as_str().unwrap_or("").to_string(),
+                    status: status_name(&SUBTEST_STATUS, &t["status"]),
+                    message: t["message"].as_str().map(|s| s.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(TestResult {
+        url: url.to_string(),
+        harness: status_name(&HARNESS_STATUS, &v["status"]),
+        message: v["message"].as_str().map(|s| s.to_string()),
+        subtests,
+        ms,
+    })
+}
+
+const MARKER: &str = "@@WPT@@";
+
+/// Child side: load `url`, run its event loop until the harness reports
+/// (or `timeout` passes, then ask the harness to time out), and print the
+/// report JSON line on stdout.
+pub fn run_child(url: &str, timeout: Duration, verbose: bool) -> i32 {
+    let start = Instant::now();
+    let mut engine = Engine::new_bundled_fonts_only();
+    engine.loader.load_fonts = false;
+    let viewport = Viewport { width: 800.0, height: 600.0 };
+    let mut page = match engine.load(url, viewport) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("{{\"status\":\"NORESULT\",\"message\":{},\"tests\":[]}}", Value::from(format!("load failed: {e}")));
+            return 0;
+        }
+    };
+    let check = |page: &mut rabbithole_engine::Page| -> Option<String> {
+        let mut found = None;
+        for (level, msg) in page.take_console() {
+            if let Some(j) = msg.strip_prefix(MARKER) {
+                found = Some(j.to_string());
+            } else if verbose {
+                eprintln!("[console.{level}] {msg}");
+            }
+        }
+        found
+    };
+    let deadline = start + timeout;
+    let mut timed_out = false;
+    let mut grace_end = None;
+    loop {
+        if let Some(j) = check(&mut page) {
+            println!("{j}");
+            return 0;
+        }
+        let now = Instant::now();
+        if !timed_out && now >= deadline {
+            timed_out = true;
+            grace_end = Some(now + Duration::from_millis(1500));
+            // explicit_timeout: the harness waits for the runner to call
+            // `timeout()`, which reports the unfinished tests as TIMEOUT.
+            let _ = engine.eval_in_page(&mut page, "typeof timeout === 'function' && timeout(); 0");
+            continue;
+        }
+        if let Some(g) = grace_end {
+            if now >= g {
+                break;
+            }
+        }
+        let now_ms = engine.start.elapsed().as_secs_f64() * 1000.0;
+        let wait = match page.next_script_due() {
+            Some(due) if due > now_ms => Duration::from_micros(((due - now_ms) * 1000.0) as u64).min(Duration::from_millis(5)),
+            Some(_) => Duration::ZERO,
+            None => Duration::from_millis(5),
+        };
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+        let _ = engine.tick(&mut page);
+    }
+    println!("{{\"status\":\"TIMEOUT\",\"message\":\"no harness report\",\"tests\":[]}}");
+    0
+}
+
+/// Parent-side options.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    pub jobs: usize,
+    pub timeout: Duration,
+    pub long_timeout: Duration,
+    pub verbose: bool,
+    /// Address-space limit for each child (KiB, 0 = none).
+    pub memory_kb: u64,
+}
+
+/// Run one test in a child process with a hard kill deadline.
+pub fn run_one(exe: &std::path::Path, base: &str, test: &TestId, opts: &RunOptions) -> TestResult {
+    let start = Instant::now();
+    let timeout = if test.long { opts.long_timeout } else { opts.timeout };
+    let url = format!("{base}{}", test.url);
+    // Each page runs under an address-space limit (the machines running
+    // this are small and shared): `sh -c 'ulimit -v N; exec rh-wpt child ...'`.
+    let mut cmd = if cfg!(unix) && opts.memory_kb > 0 {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(format!("ulimit -v {} 2>/dev/null; exec \"$0\" \"$@\"", opts.memory_kb)).arg(exe);
+        c
+    } else {
+        Command::new(exe)
+    };
+    cmd.arg("child").arg(&url).arg(timeout.as_millis().to_string());
+    if opts.verbose {
+        cmd.arg("--verbose");
+    }
+    cmd.stdout(Stdio::piped()).stderr(if opts.verbose { Stdio::inherit() } else { Stdio::null() }).stdin(Stdio::null());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return crash(test, &format!("spawn failed: {e}"), 0),
+    };
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        s
+    });
+    // Hard deadline: the child's own timeout plus time to report.
+    let kill_at = start + timeout + Duration::from_secs(8);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if Instant::now() >= kill_at => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => break None,
+        }
+    };
+    let out = reader.join().unwrap_or_default();
+    let ms = start.elapsed().as_millis() as u64;
+    let line = BufReader::new(out.as_bytes()).lines().map_while(Result::ok).filter(|l| l.starts_with('{')).last();
+    match (status, line) {
+        (_, Some(l)) => parse_report(&test.url, &l, ms).unwrap_or_else(|| crash(test, "unparsable report", ms)),
+        (None, None) => TestResult { url: test.url.clone(), harness: "TIMEOUT".into(), message: Some("killed".into()), subtests: Vec::new(), ms },
+        (Some(s), None) => crash(test, &format!("exited with {s}"), ms),
+    }
+}
+
+fn crash(test: &TestId, msg: &str, ms: u64) -> TestResult {
+    TestResult { url: test.url.clone(), harness: "CRASH".into(), message: Some(msg.to_string()), subtests: Vec::new(), ms }
+}
+
+/// Run all `tests` over `opts.jobs` worker threads; `progress` is called
+/// after each result.
+pub fn run_all(base: &str, tests: &[TestId], opts: &RunOptions, progress: &(dyn Fn(usize, usize, &TestResult) + Sync)) -> Vec<TestResult> {
+    let exe = std::env::current_exe().expect("current exe");
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let results: Arc<Mutex<Vec<Option<TestResult>>>> = Arc::new(Mutex::new(vec![None; tests.len()]));
+    std::thread::scope(|s| {
+        for _ in 0..opts.jobs.max(1) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                if i >= tests.len() {
+                    break;
+                }
+                let r = run_one(&exe, base, &tests[i], opts);
+                let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+                progress(n, tests.len(), &r);
+                results.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    let v = std::mem::take(&mut *results.lock().unwrap());
+    v.into_iter().flatten().collect()
+}

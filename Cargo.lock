@@ -1711,6 +1711,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rabbithole-wpt"
+version = "0.1.0"
+dependencies = [
+ "rabbithole-engine",
+ "serde_json",
+]
+
+[[package]]
 name = "rav1d"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
