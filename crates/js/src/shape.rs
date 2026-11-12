@@ -262,6 +262,11 @@ pub struct PropertyMap {
 static PROTO_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 #[inline(always)]
+/// Address of the prototype epoch counter (read by native code).
+pub(crate) fn proto_epoch_addr() -> usize {
+    &PROTO_EPOCH as *const std::sync::atomic::AtomicU32 as usize
+}
+
 pub fn proto_epoch() -> u32 {
     PROTO_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
 }

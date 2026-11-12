@@ -17,7 +17,7 @@ out=${JIT_CHECK_OUT:-$(mktemp -d)}
 run() {
   local mode=$1
   shift
-  env "$@" cargo test --release --features rabbithole-js/jit "${ARGS[@]}" 2>&1 |
+  env "$@" cargo test --release --features jit "${ARGS[@]}" 2>&1 |
     tee "$out/$mode.log" | grep -E "^test .* \.\.\. (ok|FAILED|ignored)$" | sort > "$out/$mode.txt"
 }
 ARGS=("$@")

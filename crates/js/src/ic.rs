@@ -104,6 +104,9 @@ pub struct GlobalLex {
     index: HashMap<JsStr, u32, FxBuild>,
     pub vals: Vec<(Value, bool)>,
     pub epoch: u32,
+    /// Address of `vals`' buffer, for native code (kept in sync: `vals`
+    /// only grows in `insert`).
+    pub(crate) raw: usize,
 }
 
 impl GlobalLex {
@@ -119,6 +122,7 @@ impl GlobalLex {
             None => {
                 self.index.insert(name, self.vals.len() as u32);
                 self.vals.push(v);
+                self.raw = self.vals.as_ptr() as usize;
                 self.epoch = self.epoch.wrapping_add(1);
             }
         }

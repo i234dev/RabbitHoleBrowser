@@ -360,7 +360,9 @@ pub enum Op {
 }
 
 /// Inline cache record of one property or global access site (see `ic.rs`).
+/// `repr(C)`: native code reads it (field offsets in `jit::emit`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(C)]
 pub struct PropIc {
     pub kind: u8,
     pub shape: u32,

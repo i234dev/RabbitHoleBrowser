@@ -62,7 +62,7 @@ enum Class {
 /// ticks, 4 every non-call instruction (generic helper, property and
 /// global caches), 5 calls and exceptions. Instructions of later phases
 /// make a function not compilable.
-pub(crate) const PHASE: u8 = 1;
+pub(crate) const PHASE: u8 = 3;
 
 fn classify(op: &Op) -> Class {
     let c = classify_all(op);
@@ -76,6 +76,7 @@ fn classify(op: &Op) -> Class {
         Op::JumpIfStrictEqRR(..) | Op::JumpIfStrictNotEqRR(..) | Op::JumpIfStrictEqRK(..) | Op::JumpIfStrictNotEqRK(..) => 4,
         Op::JumpIfNullishR(..) | Op::JumpIfNotNullishR(..) | Op::JumpIfUndefinedR(..) | Op::JumpIfNotUndefinedR(..) => 4,
         Op::NotR(..) => 4,
+        Op::GetGlobalR(..) | Op::SetGlobalR(..) => 4,
         Op::CallR(..) | Op::NewR(..) => 5,
         Op::ReturnR(..) => 2,
         _ => match c {
@@ -120,8 +121,12 @@ fn classify_all(op: &Op) -> Class {
         // Dedicated helpers.
         Op::ReturnR(..) => Helper(h_return as *const () as usize, "h_return"),
         Op::CallR(..) | Op::NewR(..) => Native,
-        Op::GetPropR(..) | Op::SetPropR(..) | Op::DefinePropR(..) | Op::GetGlobalR(..) | Op::SetGlobalR(..) => access,
-        Op::GetElemR(..) | Op::SetElemR(..) | Op::GetLocalR(..) | Op::SetLocalR(..) | Op::LoadThis(..) | Op::StoreCompletionR(..) => access,
+        Op::GetGlobalR(..) | Op::SetGlobalR(..) => Native,
+        Op::GetPropR(..) => Helper(h_get_prop as *const () as usize, "h_get_prop"),
+        Op::SetPropR(..) => Helper(h_set_prop as *const () as usize, "h_set_prop"),
+        Op::GetElemR(..) => Helper(h_get_elem as *const () as usize, "h_get_elem"),
+        Op::SetElemR(..) => Helper(h_set_elem as *const () as usize, "h_set_elem"),
+        Op::DefinePropR(..) | Op::GetLocalR(..) | Op::SetLocalR(..) | Op::LoadThis(..) | Op::StoreCompletionR(..) => access,
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
         Op::CallEval(..) => Reject("direct eval"),
@@ -422,7 +427,12 @@ impl Gen<'_> {
     }
 
     fn arith(&mut self, pc: usize, sse: Option<u8>, d: u16, a: u16, b: Result<u16, u32>) {
-        let slow = self.exec_slow(pc);
+        let slow = if sse == Some(SSE_ADD) {
+            let next = self.lbl(pc + 1);
+            self.slow(h_add as *const () as usize, "h_add", pc, next)
+        } else {
+            self.exec_slow(pc)
+        };
         if !self.operands(a, b, slow) {
             self.a.jmp(slow);
             return;
@@ -610,6 +620,106 @@ impl Gen<'_> {
         self.store(d, slow);
     }
 
+    /// `GetGlobalR` (`Ok(dst)`) / `SetGlobalR` (`Err(src)`) through the
+    /// site's cache: script `let`/`const` bindings (`IC_GLOBAL_LEX`) and
+    /// global object data properties (`IC_GLOBAL_OBJ`) inline; misses,
+    /// reference-counted values, TDZ and constants through the helper.
+    fn global(&mut self, pc: usize, ic: u32, dst: Result<u16, u16>) {
+        let (h, name) = match dst {
+            Ok(_) => (h_get_global as *const () as usize, "h_get_global"),
+            Err(_) => (h_set_global as *const () as usize, "h_set_global"),
+        };
+        let next = self.lbl(pc + 1);
+        let slow = self.slow(h, name, pc, next);
+        let Some(cell) = self.code.ics.get(ic as usize) else {
+            self.a.jmp(slow);
+            return;
+        };
+        let realm_gl = std::mem::offset_of!(crate::realm::Realm, global_lex);
+        let gl_epoch = (realm_gl + std::mem::offset_of!(crate::ic::GlobalLex, epoch)) as i32;
+        let gl_raw = (realm_gl + std::mem::offset_of!(crate::ic::GlobalLex, raw)) as i32;
+        let lex_stride = std::mem::size_of::<(crate::value::Value, bool)>();
+        let lex_val = std::mem::offset_of!((crate::value::Value, bool), 0) as i32;
+        let lex_const = std::mem::offset_of!((crate::value::Value, bool), 1) as i32;
+        let p_value = std::mem::offset_of!(crate::heap::Property, value) as i32;
+        let p_flags = std::mem::offset_of!(crate::heap::Property, flags) as i32;
+        let ic_kind = std::mem::offset_of!(crate::bytecode::PropIc, kind) as i32;
+        let ic_shape = std::mem::offset_of!(crate::bytecode::PropIc, shape) as i32;
+        let ic_slot = std::mem::offset_of!(crate::bytecode::PropIc, slot) as i32;
+        let ic_holder = std::mem::offset_of!(crate::bytecode::PropIc, holder) as i32;
+        let ic_mid = std::mem::offset_of!(crate::bytecode::PropIc, mid) as i32;
+        debug_assert_eq!(std::mem::offset_of!(crate::bytecode::PropIc, mid_shape) as i32, ic_mid + 4);
+        debug_assert_eq!(lex_stride, 16);
+        let (obj, have) = (self.a.label(), self.a.label());
+        // rcx = the cache record, rax = realm
+        self.a.mov_imm64(RCX, cell as *const std::cell::Cell<crate::bytecode::PropIc> as u64);
+        self.a.load64(RAX, Mem::base(CTX, CTX_REALM));
+        self.a.load32(RDX, Mem::base(RCX, ic_shape));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RAX, gl_epoch));
+        self.a.jcc(CC_NE, slow);
+        self.a.movzx8(RDX, Mem::base(RCX, ic_kind));
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_GLOBAL_LEX as i32);
+        self.a.jcc(CC_NE, obj);
+        // Lexical binding: rdx = &vals[slot]
+        self.a.load32(RDX, Mem::base(RCX, ic_slot));
+        self.a.alu_rr64(Alu::Add, RDX, RDX);
+        self.a.load64(RAX, Mem::base(RAX, gl_raw));
+        self.a.lea(RDX, Mem::index(RAX, RDX, 8, 0));
+        if dst.is_err() {
+            // `const`: the helper throws
+            self.a.test_mi8(Mem::base(RDX, lex_const), 1);
+            self.a.jcc(CC_NE, slow);
+        }
+        self.a.lea(RDX, Mem::base(RDX, lex_val));
+        self.a.jmp(have);
+        // Global object data property: rdx = &property.value
+        self.a.bind(obj);
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_GLOBAL_OBJ as i32);
+        self.a.jcc(CC_NE, slow);
+        self.a.mov_imm64(RAX, crate::shape::proto_epoch_addr() as u64);
+        self.a.load32(RAX, Mem::base(RAX, 0));
+        self.a.alu_rm32(Alu::Cmp, RAX, Mem::base(RCX, ic_holder));
+        self.a.jcc(CC_NE, slow);
+        self.a.load64(RDX, Mem::base(RCX, ic_mid));
+        let mask = if dst.is_ok() { crate::heap::ACCESSOR } else { crate::heap::ACCESSOR | crate::heap::WRITABLE };
+        let want = if dst.is_ok() { 0 } else { crate::heap::WRITABLE };
+        self.a.movzx8(RAX, Mem::base(RDX, p_flags));
+        self.a.alu_ri32(Alu::And, RAX, mask as i32);
+        self.a.alu_ri32(Alu::Cmp, RAX, want as i32);
+        self.a.jcc(CC_NE, slow);
+        self.a.lea(RDX, Mem::base(RDX, p_value));
+        // rdx = the binding's value cell
+        self.a.bind(have);
+        match dst {
+            Ok(d) => {
+                self.a.load64(RAX, Mem::base(RDX, 0));
+                // Uninitialized lexical binding (TDZ) or a counted value.
+                self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+                self.a.cmp_rr64(RAX, RCX);
+                self.a.jcc(CC_E, slow);
+                self.a.cmp_rr64(RAX, RCMIN);
+                self.a.jcc(CC_AE, slow);
+                self.store(d, slow);
+            }
+            Err(s) => {
+                self.a.load64(RCX, Mem::base(RDX, 0));
+                // TDZ, or the old value is counted
+                self.a.lea(RAX, Mem::base(TAGMIN, EMPTY));
+                self.a.cmp_rr64(RCX, RAX);
+                self.a.jcc(CC_E, slow);
+                self.a.cmp_rr64(RCX, RCMIN);
+                self.a.jcc(CC_AE, slow);
+                self.a.load64(RAX, slot(s));
+                self.a.cmp_rr64(RAX, RCMIN);
+                self.a.jcc(CC_AE, slow);
+                self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+                self.a.cmp_rr64(RAX, RCX);
+                self.a.jcc(CC_E, slow);
+                self.a.store64(Mem::base(RDX, 0), RAX);
+            }
+        }
+    }
+
     fn emit(&mut self, pc: usize, op: Op) {
         match op {
             Op::Mov(d, s) => self.mov(pc, d, s, true, false),
@@ -777,6 +887,8 @@ impl Gen<'_> {
                 self.a.jcc(CC_BE, exit);
                 self.jump(pc, t as usize);
             }
+            Op::GetGlobalR(d, ic) => self.global(pc, ic, Ok(d)),
+            Op::SetGlobalR(s, ic) => self.global(pc, ic, Err(s)),
             Op::Nop | Op::Debugger => {}
             Op::CallR(..) | Op::NewR(..) => {
                 // The safe-point tick of a call, then the call helper.
@@ -794,6 +906,10 @@ impl Gen<'_> {
         }
     }
 }
+
+/// Offset of the inner entry (past the shared prologue) in every
+/// function's code.
+pub(super) const INNER_ENTRY: usize = 40;
 
 /// Compile `code` (validated here) into native code.
 pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Option<String>), String> {
@@ -816,10 +932,14 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     }
     a.alu_ri64(Alu::Sub, RSP, 8);
     a.mov_rr64(CTX, RDI);
-    a.load64(SLOTS, Mem::base(CTX, CTX_SLOTS));
-    a.load64(CONSTS, Mem::base(CTX, CTX_CONSTS));
     a.mov_imm64(TAGMIN, TAG_MIN);
     a.mov_imm64(RCMIN, TAG_BIGINT);
+    // Inner entry (INNER_ENTRY bytes in): the native frame is already set
+    // up by some function's prologue (they are all identical) and `ctx`
+    // describes this function's frame; `esi` = pc.
+    assert_eq!(a.pos(), INNER_ENTRY, "prologue size");
+    a.load64(SLOTS, Mem::base(CTX, CTX_SLOTS));
+    a.load64(CONSTS, Mem::base(CTX, CTX_CONSTS));
     a.alu_rr32(Alu::Or, RSI, RSI); // zero-extend the pc
     a.bind(dispatch);
     a.alu_ri32(Alu::Cmp, RSI, n as i32);
@@ -851,12 +971,27 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
         }
     }
     let mut a = g.a;
-    // Non-zero status: an internal jump continues at ctx.pc; anything
-    // else returns to the run loop.
+    // Non-zero status: an internal jump continues at ctx.pc; after a call
+    // or return the new last frame continues in its own native code when
+    // it has some (h_switch rewrites ctx); anything else returns to the run
+    // loop.
     a.comment(|| "status".into());
     a.bind(status);
+    let (jump, reload) = (a.label(), a.label());
     a.alu_ri32(Alu::Cmp, RAX, ST_JUMP as i32);
+    a.jcc(CC_E, jump);
+    a.alu_ri32(Alu::Cmp, RAX, ST_RELOAD as i32);
     a.jcc(CC_NE, epilogue);
+    a.mov_rr64(RDI, CTX);
+    a.call_abs(h_switch as *const () as usize, "h_switch");
+    a.test_rr64(RAX, RAX);
+    a.jcc(CC_E, reload);
+    a.load32(RSI, Mem::base(CTX, CTX_PC));
+    a.jmp_r(RAX);
+    a.bind(reload);
+    a.mov_imm32(RAX, ST_RELOAD);
+    a.jmp(epilogue);
+    a.bind(jump);
     a.load32(RSI, Mem::base(CTX, CTX_PC));
     a.jmp(dispatch);
     a.bind(interp);
@@ -879,7 +1014,9 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     }
     a.finish_labels();
     let listing = a.listing();
+    let t = std::time::Instant::now();
     let mem = ExecMem::new(&a.buf, |_, _| {}).ok_or("executable memory unavailable")?;
+    super::MAP_NS.with(|m| m.set(m.get() + t.elapsed().as_nanos() as u64));
     Ok((mem, listing))
 }
 

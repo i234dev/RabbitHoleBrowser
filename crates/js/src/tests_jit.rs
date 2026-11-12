@@ -152,7 +152,7 @@ fn native_code_is_freed_with_its_function() {
         let v = realm.eval("var s = 0; for (var i = 0; i < 300; i++) s += (new Function('x', 'return x + ' + i))(1); s", "free.js").unwrap();
         assert_eq!(realm.to_string(v).unwrap().to_rust_string(), "45150");
         if crate::jit::PHASE >= 5 {
-            assert!(crate::jit::code_bytes() > before + 300 * 64, "functions were compiled");
+            assert!(realm.jit.stats.compiled >= 300, "functions were compiled");
         }
         realm.gc();
     }

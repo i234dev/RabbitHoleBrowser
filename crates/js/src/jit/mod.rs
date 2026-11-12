@@ -163,7 +163,7 @@ impl Drop for Stats {
         }
         let pct = |n: u64| if self.samples == 0 { 0.0 } else { 100.0 * n as f64 / self.samples as f64 };
         eprintln!(
-            "[jit] samples {} | in hot functions {:.1}% | in native code {:.1}% | compiled {} ({} ops, {} bytes, {:.2} ms, {:.3} us/op) | rejected {} | entries {}",
+            "[jit] samples {} | in hot functions {:.1}% | in native code {:.1}% | compiled {} ({} ops, {} bytes, {:.2} ms, {:.3} us/op; mapping {:.2} ms in this thread) | rejected {} | entries {}",
             self.samples,
             pct(self.hot_samples),
             pct(self.jit_samples),
@@ -172,6 +172,7 @@ impl Drop for Stats {
             self.code_bytes,
             self.compile_ns as f64 / 1e6,
             if self.ops_compiled == 0 { 0.0 } else { self.compile_ns as f64 / 1e3 / self.ops_compiled as f64 },
+            MAP_NS.with(|m| m.get()) as f64 / 1e6,
             self.rejected,
             self.entries
         );
@@ -181,6 +182,8 @@ impl Drop for Stats {
 thread_local! {
     /// Native code bytes of this thread (realms are per thread).
     static CODE_BYTES: Cell<usize> = const { Cell::new(0) };
+    /// Time spent mapping and protecting native code (part of compile time).
+    pub(crate) static MAP_NS: Cell<u64> = const { Cell::new(0) };
     /// Functions compiled by this thread (for `RABBITHOLE_JIT_MAX`).
     static COMPILED_COUNT: Cell<u32> = const { Cell::new(0) };
 }

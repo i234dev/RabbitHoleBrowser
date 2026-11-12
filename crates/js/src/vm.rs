@@ -18,7 +18,7 @@ pub struct Frame {
     /// (`func`, which the frame keeps alive), any other frame's by
     /// `extra.code`. A closure's code is only ever replaced while it is
     /// still lazy, and lazy code never runs.
-    code: std::ptr::NonNull<FunctionCode>,
+    pub(crate) code: std::ptr::NonNull<FunctionCode>,
     pub pc: usize,
     pub base: u32,
     pub argc: u32,
@@ -393,9 +393,12 @@ impl Realm {
             ret_slot: 0,
             is_construct: false,
             entry: true,
-            extra: Some(Box::new(FrameExtra { code: Some(code), ..Default::default() })),
+            extra: Some(Box::new(FrameExtra { code: Some(code.clone()), ..Default::default() })),
         };
         self.push_frame(frame, true)?;
+        // `code` stays alive until the run is over: returning from the
+        // frame drops the frame's reference while native code of it may
+        // still be finishing.
         match self.run()? {
             Exit::Return(v) => Ok(v),
             _ => unreachable!(),
@@ -2230,7 +2233,16 @@ impl Realm {
                 self.jit.stats.hot_samples += 1;
             }
         }
-        if !self.jit.on || !osr || !crate::jit::LOOP_OSR {
+        if !self.jit.on || !crate::jit::LOOP_OSR {
+            return false;
+        }
+        if !osr {
+            // A call's tick (the frame is past the call, not at a loop
+            // edge): if this function is hot, catch the very next tick,
+            // which in a loop is soon its backward jump.
+            if n >= self.jit.threshold && s.state.get() != crate::jit::REJECTED {
+                self.tick = 1;
+            }
             return false;
         }
         if s.entry.get() == 0 && n >= self.jit.threshold {

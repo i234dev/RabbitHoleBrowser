@@ -105,8 +105,10 @@ fn stmt(r: &mut Rng, vars: &[&str], depth: u32, out: &mut String, ind: usize) {
     let pad = " ".repeat(ind);
     let v = r.pick(vars);
     match r.below(if depth == 0 { 4 } else { 9 }) {
-        0 | 1 => out.push_str(&format!("{pad}{v} = {};\n", expr(r, vars, 3))),
-        2 => out.push_str(&format!("{pad}{v} {}= {};\n", r.pick(&["+", "-", "*", "|", "&", "^"]), expr(r, vars, 2))),
+        // `clip` keeps strings short (doubling a string in a loop would
+        // otherwise exhaust memory before the length limit).
+        0 | 1 => out.push_str(&format!("{pad}{v} = clip({});\n", expr(r, vars, 3))),
+        2 => out.push_str(&format!("{pad}{v} = clip({v} {} {});\n", r.pick(&["+", "-", "*", "|", "&", "^"]), expr(r, vars, 2))),
         3 => out.push_str(&format!("{pad}{v}{};\n", r.pick(&["++", "--"]))),
         4 => {
             out.push_str(&format!("{pad}if ({}) {{\n", expr(r, vars, 2)));
@@ -143,7 +145,8 @@ fn program(seed: u64) -> String {
         "var seen = [];\nfunction log(x) { seen.push(typeof x === 'number' && x !== x ? 'NaN' : (Object.is(x, -0) ? '-0' : String(x))); }\n\
          var calls = 0;\nvar o = { valueOf() { calls++; return 3; }, toString() { return 'O'; } };\n\
          var obj2 = { get g() { calls += 2; return 5; } };\nvar arr = [1, 'x', 3];\nvar big = 9007199254740993;\n\
-         function h(x, y) { calls++; if (typeof x === 'string') return x + y; return (x * 2) - y; }\n",
+         function h(x, y) { calls++; if (typeof x === 'string') return clip(x + y); return (x * 2) - y; }\n\
+         function clip(x) { return typeof x === 'string' && x.length > 40 ? x.slice(0, 40) : x; }\n",
     );
     for f in 0..3 {
         src.push_str(&format!("function f{f}(a, b) {{\n  var c = {}, d = {}, s = {};\n", expr(&mut r, &["a", "b"], 2), r.pick(ATOMS), r.pick(ATOMS)));

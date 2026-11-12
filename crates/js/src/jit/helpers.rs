@@ -30,6 +30,7 @@ pub(crate) struct Ctx {
 
 pub(crate) const CTX_SLOTS: i32 = 0;
 pub(crate) const CTX_CONSTS: i32 = 8;
+pub(crate) const CTX_REALM: i32 = 16;
 pub(crate) const CTX_TICK: i32 = 24;
 pub(crate) const CTX_PC: i32 = 40;
 
@@ -78,55 +79,90 @@ impl Realm {
     }
 
     /// Enter native code `entry` of `code` (the last frame's) at `pc`.
+    /// When native code leaves because frames were pushed or popped (a
+    /// call or a return), the new last frame continues here in its own
+    /// native code if it has some, without going back to the run loop
+    /// (the native stack does not grow: each activation returns first).
     #[inline(never)]
     pub(crate) fn jit_run(&mut self, code: &FunctionCode, entry: usize, pc: usize) -> Ctl {
-        self.jit.entries += 1;
-        if self.jit.stats.enabled {
-            self.jit.stats.entries += 1;
-        }
-        // SAFETY: the run loop has a frame; its slots are within `vstack`.
-        let slots = unsafe {
-            let b = self.frames.last().unwrap_unchecked().base as usize;
-            self.vstack.as_mut_ptr().add(b)
-        };
-        // A frame without a closure (script, eval) owns its code: returning
-        // from it frees the code, native code included, while that code
-        // still has to run its epilogue. Keep it until native code is done.
-        // (A closure's code is owned by the closure, which stays alive: no
-        // collection happens between a return and the native exit.)
-        // SAFETY: as above.
-        let _keep = unsafe { self.frames.last().unwrap_unchecked() }.extra.as_ref().and_then(|e| e.code.clone());
-        let realm: *mut Realm = self;
-        let mut ctx = Ctx {
-            slots,
-            consts: code.constants.as_ptr(),
-            realm,
-            // SAFETY: `realm` is valid; the field is only accessed through
-            // this pointer (and `realm`) while native code runs.
-            tick: unsafe { std::ptr::addr_of_mut!((*realm).tick) },
-            code,
-            pc: 0,
-        };
-        // SAFETY: `entry` is the native code of `code` (kept alive by the
-        // frame's code), entered at an instruction of it; from here until
-        // it returns, the realm is only used through `ctx.realm`.
-        let st = unsafe {
-            let f: Entry = std::mem::transmute(entry);
-            f(&mut ctx, pc as u32)
-        };
-        match st {
-            ST_RELOAD => Ctl::Reload,
-            ST_DONE => Ctl::Done,
-            ST_PANIC => match self.jit.panic.take() {
-                Some(p) => std::panic::resume_unwind(p),
-                None => panic!("native code panicked"),
-            },
-            _ => {
-                // Native code declined to continue (an entry outside the
-                // function): interpret this function from now on.
-                code.jit.s.entry.set(0);
-                code.jit.s.state.set(REJECTED);
-                Ctl::Reload
+        let mut code: *const FunctionCode = code;
+        let mut entry = entry;
+        let mut pc = pc;
+        loop {
+            self.jit.entries += 1;
+            if self.jit.stats.enabled {
+                self.jit.stats.entries += 1;
+            }
+            // SAFETY: the run loop has a frame; its slots are within `vstack`.
+            let f = unsafe { self.frames.last().unwrap_unchecked() };
+            let slots = unsafe { self.vstack.as_mut_ptr().add(f.base as usize) };
+            // Native code may outlive the frame running it until it leaves
+            // (a return pops the frame first): a closure's code is owned by
+            // the closure, which no collection can free before native code
+            // leaves; a script's code is held by `run_script` for the whole
+            // run.
+            let realm: *mut Realm = self;
+            let mut ctx = Ctx {
+                slots,
+                // SAFETY: `code` is the last frame's code.
+                consts: unsafe { (*code).constants.as_ptr() },
+                realm,
+                // SAFETY: `realm` is valid; the field is only accessed
+                // through this pointer while native code runs.
+                tick: unsafe { std::ptr::addr_of_mut!((*realm).tick) },
+                code,
+                pc: 0,
+            };
+            // SAFETY: `entry` is the native code of `code` (kept alive by
+            // the frame's code), entered at an instruction of it; until it
+            // returns, the realm is only used through `ctx.realm`.
+            let st = unsafe {
+                let f: Entry = std::mem::transmute(entry);
+                f(&mut ctx, pc as u32)
+            };
+            match st {
+                ST_RELOAD => {
+                    // Continue with the new last frame in native code when
+                    // it has (or now gets) some.
+                    let Some(f) = self.frames.last() else { return Ctl::Reload };
+                    // SAFETY: the code of the last frame outlives this use.
+                    let next: &FunctionCode = unsafe { f.code.as_ref() };
+                    let npc = f.pc;
+                    let s = &next.jit.s;
+                    let mut e = s.entry.get();
+                    if e == 0 {
+                        if npc != 0 {
+                            return Ctl::Reload;
+                        }
+                        let n = s.counter.get().saturating_add(1);
+                        s.counter.set(n);
+                        if n < self.jit.threshold || s.state.get() != UNTRIED {
+                            return Ctl::Reload;
+                        }
+                        compile(next, &mut self.jit.stats);
+                        e = s.entry.get();
+                        if e == 0 {
+                            return Ctl::Reload;
+                        }
+                    }
+                    code = next;
+                    entry = e;
+                    pc = npc;
+                }
+                ST_DONE => return Ctl::Done,
+                ST_PANIC => match self.jit.panic.take() {
+                    Some(p) => std::panic::resume_unwind(p),
+                    None => panic!("native code panicked"),
+                },
+                _ => {
+                    // Native code declined to continue (an entry outside
+                    // the function): interpret this function from now on.
+                    // SAFETY: `code` is the last frame's code.
+                    let c = unsafe { &*ctx.code };
+                    c.jit.s.entry.set(0);
+                    c.jit.s.state.set(REJECTED);
+                    return Ctl::Reload;
+                }
             }
         }
     }
@@ -272,6 +308,198 @@ pub(crate) unsafe extern "sysv64" fn h_access(ctx: *mut Ctx, pc: u32) -> u32 {
     guard(ctx, |r, ctx| {
         let c = r.step_access(&*(*ctx).code, (*ctx).slots, pc as usize);
         status(r, ctx, c, pc)
+    })
+}
+
+/// After a call pushed a frame or a return popped one: the address of the
+/// new last frame's native code (inner entry, ctx rewritten for it) to
+/// continue without leaving native code, or 0 to go back to the run loop.
+/// Counts and compiles like the run loop's hook.
+pub(crate) unsafe extern "sysv64" fn h_switch(ctx: *mut Ctx) -> usize {
+    let r = &mut *(*ctx).realm;
+    let Some(f) = r.frames.last() else { return 0 };
+    let code: &FunctionCode = f.code.as_ref();
+    let s = &code.jit.s;
+    let pc = f.pc;
+    let base = f.base as usize;
+    if s.entry.get() == 0 {
+        if pc != 0 {
+            return 0;
+        }
+        let n = s.counter.get().saturating_add(1);
+        s.counter.set(n);
+        if n < r.jit.threshold || s.state.get() != UNTRIED {
+            return 0;
+        }
+        // Compilation runs no JavaScript; a panic in it is a bug, left to
+        // the run loop (which compiles again and reports it).
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(code, &mut r.jit.stats))).is_err() {
+            return 0;
+        }
+        if s.entry.get() == 0 {
+            return 0;
+        }
+    }
+    r.jit.entries += 1;
+    if r.jit.stats.enabled {
+        r.jit.stats.entries += 1;
+    }
+    let c = &mut *ctx;
+    c.slots = r.vstack.as_mut_ptr().add(base);
+    c.consts = code.constants.as_ptr();
+    c.code = code;
+    c.pc = pc as u32;
+    s.entry.get() + super::emit::INNER_ENTRY
+}
+
+/// Fast paths of the most frequent accesses, without syncing the frame:
+/// an inline-cache hit neither throws nor runs JavaScript nor moves the
+/// value stack. Anything else takes [`h_access`].
+#[inline(always)]
+unsafe fn fast_access(ctx: *mut Ctx, pc: u32, f: impl FnOnce(&mut Realm, &FunctionCode, *mut Value) -> bool) -> u32 {
+    // No unwinding guard here: an inline-cache hit only reads and writes
+    // plain data (a panic in it would be memory corruption, and aborts);
+    // the miss path runs guarded.
+    let realm = (*ctx).realm;
+    let code: &FunctionCode = &*(*ctx).code;
+    let slots = (*ctx).slots;
+    if f(&mut *realm, code, slots) {
+        ST_NEXT
+    } else {
+        h_access(ctx, pc)
+    }
+}
+
+/// `AddRR` / `AddRK` of two strings (concatenation); anything else in
+/// full.
+pub(crate) unsafe extern "sysv64" fn h_add(ctx: *mut Ctx, pc: u32) -> u32 {
+    fast_access(ctx, pc, |_, code, slots| {
+        let (d, a, b) = match *code.ops.get_unchecked(pc as usize) {
+            Op::AddRR(d, a, b) => (d, &*slots.add(a as usize), &*slots.add(b as usize)),
+            Op::AddRK(d, a, c) => (d, &*slots.add(a as usize), code.constants.get_unchecked(c as usize)),
+            _ => return false,
+        };
+        match (a.v(), b.v()) {
+            (crate::value::V::String(x), crate::value::V::String(y)) if x.len() + y.len() <= crate::value::MAX_STRING_LEN => {
+                let r = x.concat(y);
+                *slots.add(d as usize) = Value::String(r);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+/// `GetGlobalR` hit.
+pub(crate) unsafe extern "sysv64" fn h_get_global(ctx: *mut Ctx, pc: u32) -> u32 {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::GetGlobalR(d, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let key = code.constants.get_unchecked(*code.ic_keys.get_unchecked(ic as usize) as usize).as_js_str_unchecked();
+        match r.ic_get_global(code.ics.get_unchecked(ic as usize), key) {
+            Some(v) => {
+                let v = v.clone();
+                *slots.add(d as usize) = v;
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// `SetGlobalR` hit.
+pub(crate) unsafe extern "sysv64" fn h_set_global(ctx: *mut Ctx, pc: u32) -> u32 {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::SetGlobalR(s, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let val = &*slots.add(s as usize);
+        if val.is_empty() {
+            return false;
+        }
+        let key = code.constants.get_unchecked(*code.ic_keys.get_unchecked(ic as usize) as usize).as_js_str_unchecked();
+        match r.ic_set_global(code.ics.get_unchecked(ic as usize), key, val.clone()) {
+            Ok(()) => true,
+            Err(v) => {
+                drop(v);
+                false
+            }
+        }
+    })
+}
+
+/// `GetPropR` hit on a data property (own, prototype, primitive, length).
+pub(crate) unsafe extern "sysv64" fn h_get_prop(ctx: *mut Ctx, pc: u32) -> u32 {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::GetPropR(d, o, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let rec = code.ics.get_unchecked(ic as usize).get();
+        let recv = &*slots.add(o as usize);
+        let v = if rec.kind == crate::ic::IC_LENGTH {
+            match recv.v() {
+                crate::value::V::String(s) => Value::Number(s.len() as f64),
+                crate::value::V::Object(id) => match r.heap.try_get(id).map(|o| &o.kind) {
+                    Some(crate::heap::ObjectKind::Array { length, .. }) => Value::Number(*length as f64),
+                    _ => return false,
+                },
+                _ => return false,
+            }
+        } else {
+            match r.ic_get(&rec, recv) {
+                Some(p) if p.flags & crate::heap::ACCESSOR == 0 => p.value.clone(),
+                _ => return false,
+            }
+        };
+        *slots.add(d as usize) = v;
+        true
+    })
+}
+
+/// `SetPropR` hit on a writable data property or a cached transition.
+pub(crate) unsafe extern "sysv64" fn h_set_prop(ctx: *mut Ctx, pc: u32) -> u32 {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::SetPropR(o, v, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let rec = code.ics.get_unchecked(ic as usize).get();
+        let val = &*slots.add(v as usize);
+        if rec.kind == 0 || rec.kind == crate::ic::IC_SETTER || val.is_empty() {
+            return false;
+        }
+        let key = code.constants.get_unchecked(*code.ic_keys.get_unchecked(ic as usize) as usize).as_js_str_unchecked();
+        match r.ic_set(&rec, &*slots.add(o as usize), key, val.clone()) {
+            Ok(()) => true,
+            Err(v) => {
+                drop(v);
+                false
+            }
+        }
+    })
+}
+
+/// `GetElemR` on arrays / typed arrays / strings with an index in range.
+pub(crate) unsafe extern "sysv64" fn h_get_elem(ctx: *mut Ctx, pc: u32) -> u32 {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::GetElemR(d, o, k) = *code.ops.get_unchecked(pc as usize) else { return false };
+        match r.get_elem_fast(&*slots.add(o as usize), &*slots.add(k as usize)) {
+            Some(v) => {
+                *slots.add(d as usize) = v;
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// `SetElemR` on arrays / typed arrays with an index in range.
+pub(crate) unsafe extern "sysv64" fn h_set_elem(ctx: *mut Ctx, pc: u32) -> u32 {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::SetElemR(o, k, v) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let val = (*slots.add(v as usize)).clone();
+        if val.is_empty() {
+            return false;
+        }
+        match r.set_elem_fast(&*slots.add(o as usize), &*slots.add(k as usize), val) {
+            Ok(()) => true,
+            Err(v) => {
+                drop(v);
+                false
+            }
+        }
     })
 }
 

@@ -392,6 +392,19 @@ impl Asm {
         self.op_mem(None, true, &[(op as u8) << 3 | 3], dst, m);
         self.note(at, || format!("{} {}, qword {}", alu_name(op), r64(dst), mem_str(m)));
     }
+    /// `op r32, dword [m]`
+    pub fn alu_rm32(&mut self, op: Alu, dst: u8, m: Mem) {
+        let at = self.pos();
+        self.op_mem(None, false, &[(op as u8) << 3 | 3], dst, m);
+        self.note(at, || format!("{} {}, dword {}", alu_name(op), r32(dst), mem_str(m)));
+    }
+    /// `test byte [m], imm8`
+    pub fn test_mi8(&mut self, m: Mem, imm: u8) {
+        let at = self.pos();
+        self.op_mem(None, false, &[0xf6], 0, m);
+        self.b(imm);
+        self.note(at, || format!("test byte {}, {imm:#x}", mem_str(m)));
+    }
     pub fn alu_ri64(&mut self, op: Alu, dst: u8, imm: i32) {
         let at = self.pos();
         if (-128..128).contains(&imm) {
