@@ -512,6 +512,10 @@ fn lookup(name: &str) -> Option<(Option<u8>, u32, Imm)> {
         "memory.fill" => (Some(0xfc), 11, Mem),
         "table.init" => (Some(0xfc), 12, TableInit),
         "elem.drop" => (Some(0xfc), 13, Elem),
+        "i64.add128" => (Some(0xfc), 19, Nil),
+        "i64.sub128" => (Some(0xfc), 20, Nil),
+        "i64.mul_wide_s" => (Some(0xfc), 21, Nil),
+        "i64.mul_wide_u" => (Some(0xfc), 22, Nil),
         "table.copy" => (Some(0xfc), 14, TableCopy),
         "table.grow" => (Some(0xfc), 15, Table),
         "table.size" => (Some(0xfc), 16, Table),
@@ -1355,7 +1359,49 @@ fn field_id(l: &[Sx]) -> Option<&str> {
     }
 }
 
+/// Expand compact import fields (`(import "m" (item "a" desc) ...)` and
+/// `(import "m" (item "a") (item "b") desc)`) into plain imports.
+fn expand_compact_imports(fields: &[Sx]) -> R<Vec<Sx>> {
+    let mut out = Vec::with_capacity(fields.len());
+    for f in fields {
+        let compact = f.head() == Some("import") && f.list().is_some_and(|l| l.len() >= 2 && !matches!(l.get(2), Some(Sx::Str(_))));
+        if !compact {
+            out.push(f.clone());
+            continue;
+        }
+        let l = f.list().unwrap();
+        let module = l[1].clone();
+        let rest = &l[2..];
+        let shared = rest.iter().find(|s| !s.is_list_of("item"));
+        if let Some(d) = shared {
+            if matches!(d.list().and_then(|l| l.get(1)), Some(Sx::Id(_))) {
+                return err("identifier not allowed");
+            }
+            if !rest.iter().any(|s| s.is_list_of("item")) {
+                // No items: the description's type use still counts.
+                out.push(Sx::List(vec![Sx::Atom("implicit-type-use".into()), d.clone()]));
+            }
+        }
+        for it in rest.iter().filter(|s| s.is_list_of("item")) {
+            let il = it.list().unwrap();
+            let name = il.get(1).cloned().ok_or_else(|| Error::Malformed("malformed import item".into()))?;
+            let desc = match (il.get(2), shared) {
+                (Some(d), None) if il.len() == 3 => d.clone(),
+                (None, Some(d)) => d.clone(),
+                _ => return err("malformed import item"),
+            };
+            out.push(Sx::List(vec![Sx::Atom("import".into()), module.clone(), name, desc]));
+        }
+        if rest.iter().filter(|s| !s.is_list_of("item")).count() > 1 {
+            return err("malformed compact import");
+        }
+    }
+    Ok(out)
+}
+
 pub fn encode_module(fields: &[Sx]) -> R<Vec<u8>> {
+    let expanded = expand_compact_imports(fields)?;
+    let fields: &[Sx] = &expanded;
     let mut cx = Ctx {
         types: Vec::new(),
         rec_groups: Vec::new(),
@@ -1520,7 +1566,7 @@ pub fn encode_module(fields: &[Sx]) -> R<Vec<u8>> {
                     _ => return err("malformed import kind"),
                 };
             }
-            "type" | "rec" | "export" | "start" => {}
+            "type" | "rec" | "export" | "start" | "implicit-type-use" => {}
             h => return err(format!("unknown module field {h}")),
         }
     }
@@ -1541,6 +1587,13 @@ pub fn encode_module(fields: &[Sx]) -> R<Vec<u8>> {
         let _ = id;
         match f.head().unwrap() {
             "type" | "rec" => {}
+            "implicit-type-use" => {
+                let d = l[1].list().unwrap_or(&[]);
+                if matches!(l[1].head(), Some("func" | "tag")) {
+                    let mut k = 1;
+                    cx.type_use(d, &mut k, true)?;
+                }
+            }
             "import" => {
                 if seen_def {
                     return err("import after definition");

@@ -1951,6 +1951,20 @@ impl<'a> FC<'a> {
                 self.emit(Instr::new(Op::TableSize, d, 0, t));
                 Ok(())
             }
+            19 | 20 => {
+                let base = self.call_args(&[I64, I64, I64, I64], 0)?;
+                self.emit(Instr::with_x(Op::Wide, sub as u16, base, 0, 0));
+                self.push(I64);
+                self.push(I64);
+                Ok(())
+            }
+            21 | 22 => {
+                let base = self.call_args(&[I64, I64], 0)?;
+                self.emit(Instr::with_x(Op::Wide, sub as u16, base, 0, 0));
+                self.push(I64);
+                self.push(I64);
+                Ok(())
+            }
             17 => {
                 let t = self.r.u32()?;
                 let Some(tt) = self.cx.m.tables.get(t as usize).copied() else {

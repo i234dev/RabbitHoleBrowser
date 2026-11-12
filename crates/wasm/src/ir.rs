@@ -371,6 +371,8 @@ ops! {
     BrOnCastFail = Other,
     /// Threads proposal: x = sub-opcode, a = base, c = memarg index
     Atomic = Other,
+    /// Wide arithmetic: x = 0xfc sub-opcode, a = base (results at a, a+1)
+    Wide = Other,
 }
 
 impl Instr {

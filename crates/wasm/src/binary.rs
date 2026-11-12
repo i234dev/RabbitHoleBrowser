@@ -497,45 +497,31 @@ pub fn decode(bytes: &[u8]) -> Result<Module> {
                 for _ in 0..n {
                     let module = s.name()?;
                     let name = s.name()?;
-                    let kind = s.byte()?;
-                    let desc = match kind {
-                        0 => {
-                            let t = s.u32()?;
-                            m.funcs.push(t);
-                            m.num_imported_funcs += 1;
-                            ImportDesc::Func(t)
-                        }
-                        1 => {
-                            let t = s.table_type()?;
-                            m.tables.push(t);
-                            m.num_imported_tables += 1;
-                            ImportDesc::Table(t)
-                        }
-                        2 => {
-                            let t = s.memory_type()?;
-                            m.memories.push(t);
-                            m.num_imported_memories += 1;
-                            ImportDesc::Memory(t)
-                        }
-                        3 => {
-                            let t = s.global_type()?;
-                            m.globals.push(t);
-                            m.num_imported_globals += 1;
-                            ImportDesc::Global(t)
-                        }
-                        4 => {
-                            let attr = s.byte()?;
-                            if attr != 0 {
-                                return malformed("malformed tag attribute");
+                    match (name.is_empty(), s.peek()) {
+                        // Compact import section: one module, many items.
+                        (true, Some(0x7f)) => {
+                            s.byte()?;
+                            let k = s.u32()?;
+                            for _ in 0..k {
+                                let name = s.name()?;
+                                let desc = import_desc(&mut s)?;
+                                add_import(&mut m, module.clone(), name, desc);
                             }
-                            let t = s.u32()?;
-                            m.tags.push(t);
-                            m.num_imported_tags += 1;
-                            ImportDesc::Tag(t)
                         }
-                        _ => return malformed("malformed import kind"),
-                    };
-                    m.imports.push(Import { module, name, desc });
+                        (true, Some(0x7e)) => {
+                            s.byte()?;
+                            let desc = import_desc(&mut s)?;
+                            let k = s.u32()?;
+                            for _ in 0..k {
+                                let name = s.name()?;
+                                add_import(&mut m, module.clone(), name, desc.clone());
+                            }
+                        }
+                        _ => {
+                            let desc = import_desc(&mut s)?;
+                            add_import(&mut m, module, name, desc);
+                        }
+                    }
                 }
             }
             3 => {
@@ -684,6 +670,48 @@ pub fn decode(bytes: &[u8]) -> Result<Module> {
         }
     }
     Ok(m)
+}
+
+fn import_desc(s: &mut Reader) -> Result<ImportDesc> {
+    Ok(match s.byte()? {
+        0 => ImportDesc::Func(s.u32()?),
+        1 => ImportDesc::Table(s.table_type()?),
+        2 => ImportDesc::Memory(s.memory_type()?),
+        3 => ImportDesc::Global(s.global_type()?),
+        4 => {
+            if s.byte()? != 0 {
+                return malformed("malformed tag attribute");
+            }
+            ImportDesc::Tag(s.u32()?)
+        }
+        _ => return malformed("malformed import kind"),
+    })
+}
+
+fn add_import(m: &mut Module, module: String, name: String, desc: ImportDesc) {
+    match &desc {
+        ImportDesc::Func(t) => {
+            m.funcs.push(*t);
+            m.num_imported_funcs += 1;
+        }
+        ImportDesc::Table(t) => {
+            m.tables.push(*t);
+            m.num_imported_tables += 1;
+        }
+        ImportDesc::Memory(t) => {
+            m.memories.push(*t);
+            m.num_imported_memories += 1;
+        }
+        ImportDesc::Global(t) => {
+            m.globals.push(*t);
+            m.num_imported_globals += 1;
+        }
+        ImportDesc::Tag(t) => {
+            m.tags.push(*t);
+            m.num_imported_tags += 1;
+        }
+    }
+    m.imports.push(Import { module, name, desc });
 }
 
 fn decode_elem(s: &mut Reader) -> Result<ElemSegment> {

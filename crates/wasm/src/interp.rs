@@ -942,6 +942,24 @@ pub(crate) unsafe fn exec_simple(store: &Store, inst: *const Instance, code: *co
                 Op::Atomic => {
                     try_trap!(unsafe { crate::atomics::exec(&*inst, &*code, i, regs) });
                 }
+        Op::Wide => {
+            let a = i.a;
+            let z: u128 = match i.x {
+                19 | 20 => {
+                    let x = r!(a) as u128 | (r!(a + 1) as u128) << 64;
+                    let y = r!(a + 2) as u128 | (r!(a + 3) as u128) << 64;
+                    if i.x == 19 {
+                        x.wrapping_add(y)
+                    } else {
+                        x.wrapping_sub(y)
+                    }
+                }
+                21 => (r!(a) as i64 as i128).wrapping_mul(r!(a + 1) as i64 as i128) as u128,
+                _ => (r!(a) as u128) * (r!(a + 1) as u128),
+            };
+            w!(a, z as u64);
+            w!(a + 1, (z >> 64) as u64);
+        }
         _ => unreachable!("control instruction in exec_simple"),
     }
     Ok(())
