@@ -235,9 +235,8 @@ pub struct Realm {
     /// Megamorphic property cache: inline-cache records by (receiver
     /// shape, key), consulted when an instruction's own cache misses.
     pub(crate) mega: Vec<crate::ic::MegaEntry>,
-    /// `RegExp.prototype` as built: (shape id, slot of `exec`, `exec`,
-    /// slot of `flags`, its getter); see `builtins::regexp::pristine`.
-    pub(crate) regexp_pristine: Option<(u32, u32, ObjectId, u32, ObjectId)>,
+    /// `RegExp.prototype` as built; see `builtins::regexp::pristine`.
+    pub(crate) regexp_pristine: Option<Box<crate::builtins::regexp::Pristine>>,
     /// Input and capture ranges of the last successful built-in RegExp
     /// match (legacy `RegExp.$1`, `lastMatch`, ...).
     pub(crate) regexp_last: Option<(JsStr, Vec<Option<(usize, usize)>>)>,

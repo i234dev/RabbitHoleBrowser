@@ -67,10 +67,10 @@ pub fn register(realm: &mut Realm) {
         let g = realm.global;
         realm.obj(g).props.get(&PropertyKey::str("RegExp")).and_then(|p| p.value.as_object())
     }) {
+        realm.define_accessor(rc, "input", Some(regexp_static_input), Some(regexp_static_input_set), CONFIGURABLE);
+        realm.define_accessor(rc, "$_", Some(regexp_static_input), Some(regexp_static_input_set), CONFIGURABLE);
         for (name, f) in [
-            ("input", regexp_static_input as NativeFn),
-            ("$_", regexp_static_input),
-            ("lastMatch", regexp_static_last_match),
+            ("lastMatch", regexp_static_last_match as NativeFn),
             ("$&", regexp_static_last_match),
             ("lastParen", regexp_static_last_paren),
             ("$+", regexp_static_last_paren),
@@ -79,17 +79,17 @@ pub fn register(realm: &mut Realm) {
             ("rightContext", regexp_static_right_context),
             ("$'", regexp_static_right_context),
         ] {
-            realm.define_accessor(rc, name, Some(f), Some(regexp_static_noop_set), CONFIGURABLE);
+            realm.define_accessor(rc, name, Some(f), None, CONFIGURABLE);
         }
-        realm.define_accessor(rc, "$1", Some(regexp_static_1), Some(regexp_static_noop_set), CONFIGURABLE);
-        realm.define_accessor(rc, "$2", Some(regexp_static_2), Some(regexp_static_noop_set), CONFIGURABLE);
-        realm.define_accessor(rc, "$3", Some(regexp_static_3), Some(regexp_static_noop_set), CONFIGURABLE);
-        realm.define_accessor(rc, "$4", Some(regexp_static_4), Some(regexp_static_noop_set), CONFIGURABLE);
-        realm.define_accessor(rc, "$5", Some(regexp_static_5), Some(regexp_static_noop_set), CONFIGURABLE);
-        realm.define_accessor(rc, "$6", Some(regexp_static_6), Some(regexp_static_noop_set), CONFIGURABLE);
-        realm.define_accessor(rc, "$7", Some(regexp_static_7), Some(regexp_static_noop_set), CONFIGURABLE);
-        realm.define_accessor(rc, "$8", Some(regexp_static_8), Some(regexp_static_noop_set), CONFIGURABLE);
-        realm.define_accessor(rc, "$9", Some(regexp_static_9), Some(regexp_static_noop_set), CONFIGURABLE);
+        realm.define_accessor(rc, "$1", Some(regexp_static_1), None, CONFIGURABLE);
+        realm.define_accessor(rc, "$2", Some(regexp_static_2), None, CONFIGURABLE);
+        realm.define_accessor(rc, "$3", Some(regexp_static_3), None, CONFIGURABLE);
+        realm.define_accessor(rc, "$4", Some(regexp_static_4), None, CONFIGURABLE);
+        realm.define_accessor(rc, "$5", Some(regexp_static_5), None, CONFIGURABLE);
+        realm.define_accessor(rc, "$6", Some(regexp_static_6), None, CONFIGURABLE);
+        realm.define_accessor(rc, "$7", Some(regexp_static_7), None, CONFIGURABLE);
+        realm.define_accessor(rc, "$8", Some(regexp_static_8), None, CONFIGURABLE);
+        realm.define_accessor(rc, "$9", Some(regexp_static_9), None, CONFIGURABLE);
         realm.intrinsics.others.insert("RegExp", rc);
     }
 }
@@ -355,8 +355,17 @@ fn promise_try(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 // ------------------------------------------------- RegExp legacy statics
 
+/// GetLegacyRegExpStaticProperty: the receiver must be %RegExp% itself.
+fn legacy_receiver(realm: &mut Realm, this: &Value) -> JsResult<()> {
+    if this.as_object() != realm.intrinsics.others.get("RegExp").copied() {
+        return realm.type_error("RegExp legacy static accessor called on an incompatible receiver");
+    }
+    Ok(())
+}
+
 /// Capture `n` of the last built-in match ("" when absent).
-fn static_group(realm: &mut Realm, n: usize) -> JsResult<Value> {
+fn static_group(realm: &mut Realm, this: &Value, n: usize) -> JsResult<Value> {
+    legacy_receiver(realm, this)?;
     Ok(match &realm.regexp_last {
         Some((s, caps)) => match caps.get(n) {
             Some(Some((a, b))) => Value::String(s.slice(*a, *b)),
@@ -366,30 +375,35 @@ fn static_group(realm: &mut Realm, n: usize) -> JsResult<Value> {
     })
 }
 
-fn regexp_static_noop_set(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+fn regexp_static_input_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    legacy_receiver(realm, &this)?;
+    realm.to_string(args.first().cloned().unwrap_or(Value::Undefined))?;
     Ok(Value::Undefined)
 }
 
-fn regexp_static_input(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+fn regexp_static_input(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    legacy_receiver(realm, &this)?;
     Ok(match &realm.regexp_last {
         Some((s, _)) => Value::String(s.clone()),
         None => Value::str(""),
     })
 }
 
-fn regexp_static_last_match(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    static_group(realm, 0)
+fn regexp_static_last_match(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    static_group(realm, &this, 0)
 }
 
-fn regexp_static_last_paren(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+fn regexp_static_last_paren(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    legacy_receiver(realm, &this)?;
     let n = realm.regexp_last.as_ref().map(|(_, c)| c.len()).unwrap_or(0);
     if n <= 1 {
         return Ok(Value::str(""));
     }
-    static_group(realm, n - 1)
+    static_group(realm, &this, n - 1)
 }
 
-fn regexp_static_left_context(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+fn regexp_static_left_context(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    legacy_receiver(realm, &this)?;
     Ok(match &realm.regexp_last {
         Some((s, caps)) => match caps.first() {
             Some(Some((a, _))) => Value::String(s.slice(0, *a)),
@@ -399,7 +413,8 @@ fn regexp_static_left_context(realm: &mut Realm, _this: Value, _args: &[Value]) 
     })
 }
 
-fn regexp_static_right_context(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+fn regexp_static_right_context(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    legacy_receiver(realm, &this)?;
     Ok(match &realm.regexp_last {
         Some((s, caps)) => match caps.first() {
             Some(Some((_, b))) => Value::String(s.slice(*b, s.len())),
@@ -411,8 +426,8 @@ fn regexp_static_right_context(realm: &mut Realm, _this: Value, _args: &[Value])
 
 macro_rules! static_n {
     ($name:ident, $n:expr) => {
-        fn $name(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-            static_group(realm, $n)
+        fn $name(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+            static_group(realm, &this, $n)
         }
     };
 }

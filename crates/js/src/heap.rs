@@ -479,8 +479,13 @@ pub struct RegExpData {
     /// Compiled program, shared by every RegExp with the same source and
     /// flags (see `builtins::regexp::compiled`).
     pub regex: Rc<crate::regex::Regex>,
+    /// `source` (EscapeRegExpPattern of the original source).
     pub source: JsStr,
     pub flags: JsStr,
+    /// [[OriginalSource]].
+    pub original_source: JsStr,
+    /// [[LegacyFeaturesEnabled]] (Annex B `compile`): created by %RegExp% itself.
+    pub legacy: bool,
 }
 
 /// The internal shape of an object.
