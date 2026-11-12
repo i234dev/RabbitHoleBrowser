@@ -3,7 +3,7 @@
 //! ```text
 //! wpt_reftest [--wpt DIR] [--jobs N] [--timeout SECS] [--mem-kb KB] [--out FILE]
 //!             [--baseline FILE [--update-baseline | --compare]] [--filter SUBSTR]
-//!             [DIR ...]
+//!             [--list FILE] [DIR ...]
 //! ```
 //!
 //! Serves the WPT checkout (default `$RH_WPT_DIR`, else
@@ -11,7 +11,8 @@
 //! reftests under each `DIR` (relative to the checkout, default a list of
 //! `css/` areas), runs them in worker processes (each test with a timeout;
 //! a crashed or hung worker is replaced) and prints the pass rate per
-//! directory. `--out` writes every result as TSV. `--baseline` with
+//! directory (`--list` runs the test paths listed in a file instead,
+//! one per line; a baseline's `fail` lines work). `--out` writes every result as TSV. `--baseline` with
 //! `--update-baseline` stores the counts and failing tests; with
 //! `--compare` it reports tests that passed in the baseline and fail now
 //! (exit status 1 on regressions).
@@ -49,6 +50,7 @@ fn main() {
     let mut update = false;
     let mut compare = false;
     let mut filter: Option<String> = None;
+    let mut list: Option<String> = None;
     let mut dirs: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -65,6 +67,7 @@ fn main() {
             "--out" => out = Some(val()),
             "--baseline" => baseline = Some(val()),
             "--filter" => filter = Some(val()),
+            "--list" => list = Some(val()),
             "--update-baseline" => update = true,
             "--compare" => compare = true,
             _ => dirs.push(a.trim_end_matches('/').to_string()),
@@ -79,7 +82,20 @@ fn main() {
 
     // Collect tests.
     let mut tests: Vec<(String, String)> = Vec::new(); // (group, path)
-    for d in &dirs {
+    if let Some(l) = &list {
+        // Explicit test paths (a baseline's `fail …` lines work too).
+        let text = std::fs::read_to_string(l).expect("read --list file");
+        for line in text.lines() {
+            let t = line.trim().trim_start_matches("fail ").trim();
+            if t.is_empty() || t.starts_with('#') || t.starts_with("dir ") || filter.as_ref().is_some_and(|f| !t.contains(f.as_str())) {
+                continue;
+            }
+            let group = t.splitn(3, '/').take(2).collect::<Vec<_>>().join("/");
+            tests.push((group, t.to_string()));
+        }
+        dirs = tests.iter().map(|(g, _)| g.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+    }
+    for d in dirs.iter().filter(|_| list.is_none()) {
         for t in reftest::find_tests(&root, d) {
             if filter.as_ref().is_some_and(|f| !t.contains(f.as_str())) {
                 continue;

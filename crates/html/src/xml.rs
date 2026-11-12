@@ -391,6 +391,14 @@ pub fn parse_xml(input: &str) -> Document {
 
 /// Parse an XML document, or the well-formedness error message.
 pub fn try_parse_xml(input: &str) -> Result<Document, String> {
+    // End-of-line handling (XML 1.0 §2.11): CR LF and lone CR become LF.
+    let normalized;
+    let input = if input.contains('\r') {
+        normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+        normalized.as_str()
+    } else {
+        input
+    };
     let mut p = Parser { s: input.as_bytes(), src: input, pos: 0, doc: Document::new(), scopes: Vec::new() };
     p.doc.is_html = false;
     p.doc.content_type = "application/xml".to_string();

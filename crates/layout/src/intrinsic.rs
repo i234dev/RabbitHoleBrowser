@@ -123,6 +123,14 @@ impl<'a> Layouter<'a> {
         let mut line: f32 = 0.0;
         let mut run: f32 = 0.0;
         let mut pending_space: f32 = 0.0;
+        // text-indent widens the first line (percentages resolve against
+        // a zero base here, as in browsers).
+        let indent = cstyle.text_indent.resolve_or_zero(0.0);
+        line += indent;
+        run += indent;
+        // Until the first word or atomic, break opportunities keep the
+        // indent with the content that follows.
+        let mut lead = true;
         if let Some(mt) = &b.marker_text {
             if cstyle.list_style_position == rabbithole_style::ListStylePosition::Inside {
                 let font = self.font_for(&cstyle);
@@ -137,21 +145,22 @@ impl<'a> Layouter<'a> {
                     width, item, break_before, ..
                 } => {
                     let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
-                    if *break_before && wraps {
+                    if *break_before && wraps && !lead {
                         min = min.max(run);
                         run = 0.0;
                     }
+                    lead = false;
                     line += pending_space + width;
                     run += pending_space + width;
                     pending_space = 0.0;
                 }
                 Piece::Space { width, item } => {
                     let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
-                    if wraps {
+                    if wraps && !lead {
                         min = min.max(run);
                         run = 0.0;
                     }
-                    if line > 0.0 {
+                    if line > 0.0 && !lead {
                         pending_space = *width;
                     }
                 }
@@ -169,17 +178,23 @@ impl<'a> Layouter<'a> {
                     let ex = extras_px(&b.children[*c].style);
                     let (cmin, cmax) = self.intrinsic(&mut b.children[*c]);
                     if container_wraps {
-                        min = min.max(run);
+                        if lead {
+                            min = min.max(run + cmin + ex);
+                        } else {
+                            min = min.max(run);
+                            min = min.max(cmin + ex);
+                        }
                         run = 0.0;
-                        min = min.max(cmin + ex);
                     } else {
                         run += cmin + ex;
                     }
                     line += pending_space + cmax + ex;
                     pending_space = 0.0;
+                    lead = false;
                 }
                 Piece::Abs(_) => {}
                 Piece::Break => {
+                    lead = false;
                     min = min.max(run);
                     run = 0.0;
                     max = max.max(line);

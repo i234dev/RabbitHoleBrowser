@@ -304,6 +304,9 @@ pub fn find_tests(root: &Path, dir: &str) -> Vec<String> {
 fn content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
         Some("html" | "htm") => "text/html; charset=utf-8",
+        // RH_XHT_AS_HTML=1 serves XHTML tests as text/html (to tell XML
+        // parsing differences from layout bugs).
+        Some("xht" | "xhtml") if std::env::var_os("RH_XHT_AS_HTML").is_some() => "text/html; charset=utf-8",
         Some("xht" | "xhtml") => "application/xhtml+xml",
         Some("css") => "text/css",
         Some("js") => "text/javascript",
