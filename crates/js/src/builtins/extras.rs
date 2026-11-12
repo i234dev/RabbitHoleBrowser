@@ -5,7 +5,6 @@
 //! `deref()` always returns the object; `FinalizationRegistry` callbacks
 //! never run.
 
-use super::typed_array::{ta_get, ta_set_value};
 use crate::value::V;
 use super::*;
 use crate::realm::SYM_TO_STRING_TAG;
@@ -32,27 +31,7 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(frp, "unregister", 1, finalization_unregister);
     realm.define_property(frp, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("FinalizationRegistry"), CONFIGURABLE);
 
-    // ---------------------------------------------------------- Atomics
-    let atomics = realm.new_object_with_proto(Some(op));
-    realm.define_global("Atomics", Value::Object(atomics));
-    realm.define_property(atomics, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("Atomics"), CONFIGURABLE);
-    let ops: &[(&str, u32, NativeFn)] = &[
-        ("add", 3, atomics_add),
-        ("and", 3, atomics_and),
-        ("compareExchange", 4, atomics_compare_exchange),
-        ("exchange", 3, atomics_exchange),
-        ("isLockFree", 1, atomics_is_lock_free),
-        ("load", 2, atomics_load),
-        ("or", 3, atomics_or),
-        ("store", 3, atomics_store),
-        ("sub", 3, atomics_sub),
-        ("xor", 3, atomics_xor),
-        ("wait", 4, atomics_wait),
-        ("notify", 3, atomics_notify),
-    ];
-    for (name, arity, f) in ops {
-        realm.define_method(atomics, name, *arity, *f);
-    }
+    // Atomics: see typed_array.rs.
 
     // ------------------------------------------------------ Promise.try
     let pc = realm.intrinsics.promise_ctor;
@@ -204,128 +183,6 @@ fn finalization_unregister(realm: &mut Realm, this: Value, args: &[Value]) -> Js
         return realm.type_error("Invalid unregisterToken");
     }
     Ok(Value::Bool(false))
-}
-
-// ------------------------------------------------------------ Atomics
-
-fn atomics_target(realm: &mut Realm, args: &[Value]) -> JsResult<(TypedArrayData, usize)> {
-    let t = match (arg(args, 0)).v() {
-        V::Object(id) => match &realm.obj(id).kind {
-            ObjectKind::TypedArray(t) => TypedArrayData { kind: t.kind, buffer: t.buffer, byte_offset: t.byte_offset, length: t.length },
-            _ => return realm.type_error("[object Object] is not an integer shared typed array."),
-        },
-        _ => return realm.type_error("Atomics operation on non-typed-array"),
-    };
-    if matches!(t.kind, TypedArrayKind::Float32 | TypedArrayKind::Float64 | TypedArrayKind::Uint8Clamped) {
-        return realm.type_error("Atomics operations are not allowed on this typed array type");
-    }
-    let idx = realm.to_index(arg(args, 1))?;
-    if idx >= t.length {
-        return realm.range_error("Invalid atomic access index");
-    }
-    Ok((t, idx))
-}
-
-fn atomics_rmw(realm: &mut Realm, args: &[Value], op: fn(i128, i128) -> i128) -> JsResult<Value> {
-    let (t, idx) = atomics_target(realm, args)?;
-    let old = ta_get(realm, &t, idx).unwrap_or(Value::Number(0.0));
-    let operand = arg(args, 2);
-    let (a, b, is_big) = match (old.v(), operand.v()) {
-        (V::BigInt(o), _) => (o.to_i128_wrapping(), super::typed_array::to_bigint(realm, operand.clone())?, true),
-        (V::Number(o), _) => (o as i128, to_integer(realm.to_number(operand.clone())?) as i128, false),
-        _ => (0, 0, false),
-    };
-    let new = op(a, b);
-    let new_v = if is_big { realm.new_bigint(new) } else { Value::Number(new as f64) };
-    ta_set_value(realm, &t, idx, new_v)?;
-    Ok(old)
-}
-
-fn atomics_add(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    atomics_rmw(realm, args, |a, b| a.wrapping_add(b))
-}
-fn atomics_sub(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    atomics_rmw(realm, args, |a, b| a.wrapping_sub(b))
-}
-fn atomics_and(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    atomics_rmw(realm, args, |a, b| a & b)
-}
-fn atomics_or(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    atomics_rmw(realm, args, |a, b| a | b)
-}
-fn atomics_xor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    atomics_rmw(realm, args, |a, b| a ^ b)
-}
-fn atomics_exchange(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    atomics_rmw(realm, args, |_, b| b)
-}
-
-fn atomics_compare_exchange(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let (t, idx) = atomics_target(realm, args)?;
-    let old = ta_get(realm, &t, idx).unwrap_or(Value::Number(0.0));
-    // Coerce the expected value through the array type so comparisons match.
-    let expected = arg(args, 2);
-    let replacement = arg(args, 3);
-    let matches = match (old.v(), expected.v()) {
-        (V::BigInt(o), e) => super::typed_array::to_bigint(realm, e.to_value())? == o.to_i128_wrapping(),
-        (V::Number(o), e) => {
-            let n = realm.to_number(e.to_value())?;
-            // Apply the element type's wrap-around before comparing.
-            let tmp = super::typed_array::create_typed_array(realm, t.kind, 1, None)?;
-            let td = match &realm.obj(tmp).kind {
-                ObjectKind::TypedArray(d) => TypedArrayData { kind: d.kind, buffer: d.buffer, byte_offset: d.byte_offset, length: d.length },
-                _ => unreachable!(),
-            };
-            typed_array_set(realm, &td, 0, n);
-            ta_get(realm, &td, 0).and_then(|v| v.as_number()) == Some(o)
-        }
-        _ => false,
-    };
-    if matches {
-        ta_set_value(realm, &t, idx, replacement)?;
-    }
-    Ok(old)
-}
-
-fn atomics_load(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let (t, idx) = atomics_target(realm, args)?;
-    Ok(ta_get(realm, &t, idx).unwrap_or(Value::Undefined))
-}
-
-fn atomics_store(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let (t, idx) = atomics_target(realm, args)?;
-    let v = arg(args, 2);
-    let stored = if matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) {
-        let b = super::typed_array::to_bigint(realm, v)?;
-        realm.new_bigint(b)
-    } else {
-        Value::Number(to_integer(realm.to_number(v)?) + 0.0)
-    };
-    ta_set_value(realm, &t, idx, stored.clone())?;
-    Ok(stored)
-}
-
-fn atomics_is_lock_free(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let n = realm.to_number(arg(args, 0))?;
-    Ok(Value::Bool(matches!(n as i64, 1 | 2 | 4 | 8)))
-}
-
-fn atomics_wait(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let (t, idx) = atomics_target(realm, args)?;
-    let cur = ta_get(realm, &t, idx).unwrap_or(Value::Undefined);
-    let expected = arg(args, 2);
-    let eq = match (cur.v(), expected.v()) {
-        (V::Number(a), e) => realm.to_number(e.to_value())? == a,
-        (V::BigInt(a), e) => super::typed_array::to_bigint(realm, e.to_value())? == a.to_i128_wrapping(),
-        _ => false,
-    };
-    // Single-threaded: nobody can wake us, so a matching wait times out.
-    Ok(Value::str(if eq { "timed-out" } else { "not-equal" }))
-}
-
-fn atomics_notify(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    atomics_target(realm, args)?;
-    Ok(Value::Number(0.0))
 }
 
 // --------------------------------------------------------- Promise.try

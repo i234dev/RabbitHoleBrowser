@@ -606,13 +606,13 @@ fn buffer_source(realm: &mut Realm, v: &Value) -> JsResult<Vec<u8>> {
         _ => return Err(realm.throw_type_error("argument must be a BufferSource")),
     };
     let (buf, off, len) = match &realm.obj(id).kind {
-        ObjectKind::ArrayBuffer(b) => return Ok(b.borrow().clone()),
-        ObjectKind::TypedArray(t) | ObjectKind::DataView(t) => (t.buffer, t.byte_offset, t.length * t.kind.element_size()),
+        ObjectKind::ArrayBuffer(b) => return Ok(b.bytes.borrow().clone()),
+        ObjectKind::TypedArray(t) | ObjectKind::DataView(t) => (t.buffer, t.byte_offset, rabbithole_js::builtins::typed_array::typed_array_length(realm, t) * t.kind.element_size()),
         _ => return Err(realm.throw_type_error("argument must be a BufferSource")),
     };
     match &realm.obj(buf).kind {
         ObjectKind::ArrayBuffer(b) => {
-            let b = b.borrow();
+            let b = b.bytes.borrow();
             let end = (off + len).min(b.len());
             Ok(b[off.min(end)..end].to_vec())
         }
@@ -910,7 +910,7 @@ fn module_custom_sections(realm: &mut Realm, _this: Value, args: &[Value]) -> Js
     let mut out = Vec::new();
     for data in cm.module.custom_sections(&name) {
         let rc = Rc::new(RefCell::new(data.to_vec()));
-        let o = realm.alloc(Object::new(abp, ObjectKind::ArrayBuffer(rc)));
+        let o = realm.alloc(Object::new(abp, ObjectKind::ArrayBuffer(rabbithole_js::heap::ArrayBufferData::from_rc(rc))));
         out.push(Value::Object(o));
     }
     Ok(realm.new_array_value(out))
@@ -1043,14 +1043,14 @@ fn memory_buffer(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Va
     if let Some(p) = realm.get_own_property(id, &key) {
         if let V::Object(ab) = p.value.v() {
             if let ObjectKind::ArrayBuffer(b) = &realm.obj(ab).kind {
-                if Rc::ptr_eq(b, &cur) {
+                if Rc::ptr_eq(&b.bytes, &cur) {
                     return Ok(p.value.clone());
                 }
             }
         }
     }
     let abp = realm.intrinsics.get("ArrayBufferPrototype");
-    let ab = realm.alloc(Object::new(abp, ObjectKind::ArrayBuffer(cur)));
+    let ab = realm.alloc(Object::new(abp, ObjectKind::ArrayBuffer(rabbithole_js::heap::ArrayBufferData::from_rc(cur))));
     realm.define_property(id, key, Value::Object(ab), 0);
     Ok(Value::Object(ab))
 }

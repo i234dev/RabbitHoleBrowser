@@ -65,8 +65,9 @@ impl Realm {
                 // Integer-indexed exotic object: every canonical numeric key
                 // is an element access; out-of-range ones have no property.
                 if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(key) {
-                    let i = crate::builtins::typed_array::valid_integer_index(n, t.length)?;
-                    return crate::builtins::typed_array_get(self, t, i).map(|v| Property::data(v, WRITABLE | ENUMERABLE | CONFIGURABLE));
+                    let i = crate::builtins::typed_array::ta_valid_index(self, t, n)?;
+                    let flags = if crate::builtins::typed_array::ta_immutable(self, t) { ENUMERABLE } else { WRITABLE | ENUMERABLE | CONFIGURABLE };
+                    return crate::builtins::typed_array_get(self, t, i).map(|v| Property::data(v, flags));
                 }
             }
             ObjectKind::Arguments => {}
@@ -157,6 +158,12 @@ impl Realm {
             match &obj.kind {
                 ObjectKind::Proxy { .. } => return self.proxy_get(cur, key, receiver),
                 ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) => {
+                    // A typed array answers every canonical numeric key itself.
+                    if let ObjectKind::TypedArray(t) = &obj.kind {
+                        if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(key) {
+                            return Ok(crate::builtins::typed_array::ta_valid_index(self, t, n).and_then(|i| crate::builtins::typed_array_get(self, t, i)).unwrap_or(Value::Undefined));
+                        }
+                    }
                     // Exotic own properties (elements, length).
                     if let Some(p) = self.get_own_property(cur, key) {
                         if p.is_accessor() {
@@ -247,7 +254,27 @@ impl Realm {
     }
 
     pub fn set_on_object(&mut self, id: ObjectId, key: PropertyKey, value: Value, receiver: Value) -> JsResult<bool> {
+        if let ObjectKind::TypedArray(t) = &self.obj(id).kind {
+            if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(&key) {
+                let t = **t;
+                if receiver.as_object() == Some(id) {
+                    if crate::builtins::typed_array::ta_immutable(self, &t) {
+                        return Ok(false);
+                    }
+                    // TypedArraySetElement: conversion happens even for
+                    // out-of-range indices (it may throw).
+                    crate::builtins::typed_array::ta_set_element(self, &t, n, value)?;
+                    return Ok(true);
+                }
+                if crate::builtins::typed_array::ta_valid_index(self, &t, n).is_none() {
+                    return Ok(true);
+                }
+            }
+        }
         // Fast path: own writable data property on an ordinary object / array element.
+        // Appends only when the prototype is Array.prototype (an exotic
+        // prototype, e.g. a typed array, decides the [[Set]] otherwise).
+        let array_proto = Some(self.intrinsics.array_proto);
         {
             let obj = self.obj_mut(id);
             match &mut obj.kind {
@@ -261,14 +288,14 @@ impl Realm {
                                     return Ok(true);
                                 }
                             }
-                        } else if i == elements.len() && obj.extensible && i < (1 << 28) && (*length as usize) <= i {
+                        } else if i == elements.len() && obj.extensible && obj.proto == array_proto && i < (1 << 28) && (*length as usize) <= i {
                             let frozen_len = obj.props.get(&crate::value::names::length()).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
                             if !frozen_len {
                                 elements.push(value);
                                 *length = (i + 1) as u32;
                                 return Ok(true);
                             }
-                        } else if i > elements.len() && i - elements.len() <= 4096 && obj.extensible && i < (1 << 28) {
+                        } else if i > elements.len() && i - elements.len() <= 4096 && obj.extensible && obj.proto == array_proto && i < (1 << 28) {
                             let frozen_len = obj.props.get(&crate::value::names::length()).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
                             if !frozen_len {
                                 // Fill holes (only if no sparse props exist in between).
@@ -284,23 +311,6 @@ impl Realm {
                         if s.eq_str("length") {
                             return self.set_array_length(id, value);
                         }
-                    }
-                }
-                ObjectKind::TypedArray(t) => {
-                    if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(&key) {
-                        let t = TypedArrayData { kind: t.kind, buffer: t.buffer, byte_offset: t.byte_offset, length: t.length };
-                        // Conversion happens even for out-of-range indices (it may throw).
-                        match crate::builtins::typed_array::valid_integer_index(n, t.length) {
-                            Some(i) => crate::builtins::typed_array::ta_set_value(self, &t, i, value)?,
-                            None => {
-                                if matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) {
-                                    crate::builtins::typed_array::to_bigint(self, value)?;
-                                } else {
-                                    self.to_number(value)?;
-                                }
-                            }
-                        }
-                        return Ok(true);
                     }
                 }
                 ObjectKind::Proxy { .. } => {
@@ -327,6 +337,14 @@ impl Realm {
             if let ObjectKind::Proxy { .. } = &self.obj(c).kind {
                 if c != id {
                     return self.proxy_set(c, key, value, receiver);
+                }
+            }
+            if c != id {
+                if let ObjectKind::TypedArray(_) = &self.obj(c).kind {
+                    if crate::builtins::typed_array::canonical_numeric_index(&key).is_some() {
+                        // A typed array on the chain: its [[Set]] decides.
+                        return self.set_on_object(c, key, value, receiver);
+                    }
                 }
             }
             if let Some(p) = self.get_own_property(c, &key) {
@@ -360,6 +378,16 @@ impl Realm {
                 Some(existing) => self.proxy_define(rid, key, Property::data(value, existing.flags)),
                 None => self.proxy_define(rid, key, Property::data(value, ALL)),
             };
+        }
+        if let ObjectKind::TypedArray(_) = &self.obj(rid).kind {
+            if crate::builtins::typed_array::canonical_numeric_index(&key).is_some() {
+                // The receiver's [[DefineOwnProperty]] stores the element
+                // (or refuses an invalid index).
+                return match self.get_own_property(rid, &key) {
+                    Some(existing) if existing.is_accessor() || !existing.writable() => Ok(false),
+                    _ => self.define_own(rid, key, Property::data(value, ALL)),
+                };
+            }
         }
         if let Some(existing) = self.get_own_property(rid, &key) {
             if existing.is_accessor() || !existing.writable() {
@@ -413,6 +441,25 @@ impl Realm {
     pub fn define_own(&mut self, id: ObjectId, key: PropertyKey, prop: Property) -> JsResult<bool> {
         if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
             return self.proxy_define(id, key, prop);
+        }
+        if let ObjectKind::TypedArray(t) = &self.obj(id).kind {
+            if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(&key) {
+                let t = **t;
+                if crate::builtins::typed_array::ta_valid_index(self, &t, n).is_none() {
+                    return Ok(false);
+                }
+                if crate::builtins::typed_array::ta_immutable(self, &t) {
+                    // Elements of an immutable buffer are non-writable,
+                    // non-configurable: only a no-op redefinition succeeds.
+                    let cur = self.get_own_property(id, &key).map(|p| p.value).unwrap_or(Value::Undefined);
+                    return Ok(!prop.is_accessor() && !prop.configurable() && !prop.writable() && prop.enumerable() && self.same_value(&prop.value, &cur));
+                }
+                if prop.is_accessor() || !prop.configurable() || !prop.enumerable() || !prop.writable() {
+                    return Ok(false);
+                }
+                crate::builtins::typed_array::ta_set_element(self, &t, n, prop.value)?;
+                return Ok(true);
+            }
         }
         let existing = self.get_own_property(id, &key);
         if let Some(ex) = &existing {
@@ -486,6 +533,11 @@ impl Realm {
         if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
             return self.proxy_delete(id, key);
         }
+        if let ObjectKind::TypedArray(t) = &self.obj(id).kind {
+            if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(key) {
+                return Ok(crate::builtins::typed_array::ta_valid_index(self, t, n).is_none());
+            }
+        }
         let obj = self.obj_mut(id);
         if let ObjectKind::Array { elements, .. } = &mut obj.kind {
             if let Some(i) = key.as_array_index() {
@@ -532,6 +584,11 @@ impl Realm {
             if let ObjectKind::Proxy { .. } = &self.obj(c).kind {
                 return self.proxy_has(c, key);
             }
+            if let ObjectKind::TypedArray(t) = &self.obj(c).kind {
+                if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(key) {
+                    return Ok(crate::builtins::typed_array::ta_valid_index(self, t, n).is_some());
+                }
+            }
             if self.has_own_property(c, key) {
                 return Ok(true);
             }
@@ -561,7 +618,7 @@ impl Realm {
                 }
             }
             ObjectKind::TypedArray(t) => {
-                for i in 0..t.length {
+                for i in 0..crate::builtins::typed_array::typed_array_length(self, t) {
                     out.push(PropertyKey::index(i as u32));
                 }
             }
@@ -1265,10 +1322,16 @@ impl Realm {
 
     pub(crate) fn array_iterator_pristine(&self) -> bool {
         // Cheap check: Array.prototype[Symbol.iterator] is still the intrinsic function.
-        match self.intrinsics.others.get("ArrayProtoValues") {
+        let values_ok = match self.intrinsics.others.get("ArrayProtoValues") {
             Some(orig) => self.obj(self.intrinsics.array_proto).props.get(&PropertyKey::Symbol(SYM_ITERATOR)).map(|p| p.value.as_object() == Some(*orig)).unwrap_or(false),
             None => false,
-        }
+        };
+        // ... and %ArrayIteratorPrototype%.next too.
+        values_ok
+            && match self.intrinsics.others.get("ArrayIteratorProtoNext") {
+                Some(orig) => self.obj(self.intrinsics.array_iterator_proto).props.get(&PropertyKey::str("next")).map(|p| p.value.as_object() == Some(*orig)).unwrap_or(false),
+                None => true,
+            }
     }
 
     pub fn create_iter_result(&mut self, value: Value, done: bool) -> Value {

@@ -396,6 +396,9 @@ fn freeze(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     if let V::Object(id) = v.v() {
         let id = id;
+        if !super::typed_array::check_integrity(realm, id, true)? {
+            return realm.type_error("Cannot freeze a length-tracking typed array");
+        }
         materialize_array(realm, id);
         let keys = realm.own_keys(id)?;
         for k in keys {
@@ -453,6 +456,9 @@ fn seal(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     if let V::Object(id) = v.v() {
         let id = id;
+        if !super::typed_array::check_integrity(realm, id, true)? {
+            return realm.type_error("Cannot seal a length-tracking typed array");
+        }
         materialize_array(realm, id);
         let keys = realm.own_keys(id)?;
         for k in keys {
@@ -488,6 +494,9 @@ fn is_sealed(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 fn prevent_extensions(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     if let V::Object(id) = v.v() {
+        if !super::typed_array::check_integrity(realm, id, false)? {
+            return realm.type_error("Cannot prevent extensions of a length-tracking typed array");
+        }
         realm.obj_mut(id).extensible = false;
     }
     Ok(v)

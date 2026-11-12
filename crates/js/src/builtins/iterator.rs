@@ -10,7 +10,8 @@ pub fn register(realm: &mut Realm) {
     realm.define_symbol_method(ip, SYM_ITERATOR, "[Symbol.iterator]", 0, return_this);
     // Array iterator
     let aip = realm.intrinsics.array_iterator_proto;
-    realm.define_method(aip, "next", 0, array_iterator_next);
+    let next = realm.define_method(aip, "next", 0, array_iterator_next);
+    realm.intrinsics.others.insert("ArrayIteratorProtoNext", next);
     realm.define_property(aip, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("Array Iterator"), CONFIGURABLE);
     // String iterator
     let sip = realm.new_object_with_proto(Some(ip));
@@ -131,7 +132,10 @@ fn array_iterator_step(realm: &mut Realm, id: ObjectId) -> JsResult<Option<Value
     let len = match target.v() {
         V::Object(t) => match &realm.obj(t).kind {
             ObjectKind::Array { length, .. } => *length as usize,
-            ObjectKind::TypedArray(ta) => ta.length,
+            ObjectKind::TypedArray(ta) => {
+                let ta = **ta;
+                crate::builtins::typed_array::iteration_length(realm, &ta)?
+            }
             _ => realm.length_of(target.clone())?,
         },
         _ => realm.length_of(target.clone())?,

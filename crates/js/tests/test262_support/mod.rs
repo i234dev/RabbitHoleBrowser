@@ -277,15 +277,7 @@ fn native_gc(_realm: &mut Realm, _this: Value, _args: &[Value]) -> Result<Value,
 }
 
 fn native_detach(realm: &mut Realm, _this: Value, args: &[Value]) -> Result<Value, Value> {
-    let buf = arg(args, 0);
-    // `ArrayBuffer.prototype.transfer` detaches its receiver.
-    let ab = realm.get(Value::Object(realm.global), PropertyKey::str("ArrayBuffer"))?;
-    let proto = realm.get(ab, PropertyKey::str("prototype"))?;
-    let transfer = realm.get(proto, PropertyKey::str("transfer"))?;
-    if !realm.is_callable(&transfer) {
-        return Err(realm.throw_type_error("detachArrayBuffer is not supported"));
-    }
-    realm.call(transfer, buf, &[])?;
+    rabbithole_js::builtins::typed_array::detach_array_buffer(realm, arg(args, 0))?;
     Ok(Value::Null)
 }
 

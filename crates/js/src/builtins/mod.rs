@@ -72,65 +72,18 @@ pub fn define_ctor(realm: &mut Realm, name: &str, arity: u32, func: NativeFn, pr
     c
 }
 
-/// Read element `index` of a typed array (None when out of range).
+/// Read element `index` of a typed array (None when out of range, out of
+/// bounds or detached).
+#[inline]
 pub fn typed_array_get(realm: &Realm, t: &TypedArrayData, index: usize) -> Option<Value> {
-    if index >= t.length {
-        return None;
-    }
-    let buf = match &realm.obj(t.buffer).kind {
-        ObjectKind::ArrayBuffer(b) => b.clone(),
-        _ => return None,
-    };
-    let b = buf.borrow();
-    let size = t.kind.element_size();
-    let off = t.byte_offset + index * size;
-    if off + size > b.len() {
-        return None;
-    }
-    let bytes = &b[off..off + size];
-    Some(match t.kind {
-        TypedArrayKind::Int8 => Value::Number(bytes[0] as i8 as f64),
-        TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => Value::Number(bytes[0] as f64),
-        TypedArrayKind::Int16 => Value::Number(i16::from_le_bytes([bytes[0], bytes[1]]) as f64),
-        TypedArrayKind::Uint16 => Value::Number(u16::from_le_bytes([bytes[0], bytes[1]]) as f64),
-        TypedArrayKind::Int32 => Value::Number(i32::from_le_bytes(bytes.try_into().unwrap()) as f64),
-        TypedArrayKind::Uint32 => Value::Number(u32::from_le_bytes(bytes.try_into().unwrap()) as f64),
-        TypedArrayKind::Float32 => Value::Number(f32::from_le_bytes(bytes.try_into().unwrap()) as f64),
-        TypedArrayKind::Float64 => Value::Number(f64::from_le_bytes(bytes.try_into().unwrap())),
-        TypedArrayKind::BigInt64 => Value::BigInt(std::rc::Rc::new(BigInt::from_i64(i64::from_le_bytes(bytes.try_into().unwrap())))),
-        TypedArrayKind::BigUint64 => Value::BigInt(std::rc::Rc::new(BigInt::from_u64(u64::from_le_bytes(bytes.try_into().unwrap())))),
-    })
+    typed_array::get_element(realm, t, index)
 }
 
-/// Write a number into element `index` of a typed array (ignored when out of range).
+/// Write a number into element `index` of a typed array (ignored when out
+/// of range, out of bounds, detached or immutable).
+#[inline]
 pub fn typed_array_set(realm: &Realm, t: &TypedArrayData, index: usize, n: f64) {
-    if index >= t.length {
-        return;
-    }
-    let buf = match &realm.obj(t.buffer).kind {
-        ObjectKind::ArrayBuffer(b) => b.clone(),
-        _ => return,
-    };
-    let mut b = buf.borrow_mut();
-    let size = t.kind.element_size();
-    let off = t.byte_offset + index * size;
-    if off + size > b.len() {
-        return;
-    }
-    let dst = &mut b[off..off + size];
-    match t.kind {
-        TypedArrayKind::Int8 => dst[0] = to_int32(n) as i8 as u8,
-        TypedArrayKind::Uint8 => dst[0] = to_int32(n) as u8,
-        TypedArrayKind::Uint8Clamped => dst[0] = if n.is_nan() { 0 } else { n.clamp(0.0, 255.0).round_ties_even() as u8 },
-        TypedArrayKind::Int16 => dst.copy_from_slice(&(to_int32(n) as i16).to_le_bytes()),
-        TypedArrayKind::Uint16 => dst.copy_from_slice(&(to_int32(n) as u16).to_le_bytes()),
-        TypedArrayKind::Int32 => dst.copy_from_slice(&to_int32(n).to_le_bytes()),
-        TypedArrayKind::Uint32 => dst.copy_from_slice(&to_uint32(n).to_le_bytes()),
-        TypedArrayKind::Float32 => dst.copy_from_slice(&(n as f32).to_le_bytes()),
-        TypedArrayKind::Float64 => dst.copy_from_slice(&n.to_le_bytes()),
-        TypedArrayKind::BigInt64 => dst.copy_from_slice(&(n as i64).to_le_bytes()),
-        TypedArrayKind::BigUint64 => dst.copy_from_slice(&(n as u64).to_le_bytes()),
-    }
+    typed_array::set_element(realm, t, index, typed_array::Num::F(n));
 }
 
 /// Helper for `Object.prototype.toString`-style class names.

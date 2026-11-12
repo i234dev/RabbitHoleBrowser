@@ -4271,15 +4271,18 @@ impl Realm {
             return Err(v);
         }
         if let (Some(ObjectKind::TypedArray(t)), V::Number(x)) = (self.heap.try_get(id).map(|o| &o.kind), v.v()) {
-            if !matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) && (i as usize) < t.length {
+            if !matches!(t.kind, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64) {
+                // A Number needs no conversion: out-of-range writes are ignored.
                 crate::builtins::typed_array_set(self, t, i as usize, x);
                 return Ok(());
             }
             return Err(v);
         }
+        let array_proto = Some(self.intrinsics.array_proto);
         let Some(o) = self.heap.try_get_mut(id) else { return Err(v) };
         let no_props = o.props.is_empty();
-        let extensible = o.extensible;
+        // Appends need the plain prototype (a typed array prototype decides).
+        let extensible = o.extensible && o.proto == array_proto;
         match &mut o.kind {
             ObjectKind::Array { elements, length } => {
                 let i = i as usize;

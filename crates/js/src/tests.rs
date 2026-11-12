@@ -879,6 +879,21 @@ fn typed_arrays() {
     throws("Atomics.add(new Float32Array(1), 0, 1)", "TypeError");
 }
 
+#[test]
+fn resizable_and_detached_buffers() {
+    eq("var b = new ArrayBuffer(4, { maxByteLength: 16 }); var a = new Uint8Array(b); var f = new Uint8Array(b, 0, 4); b.resize(8); var l1 = a.length; b.resize(2); [b.resizable, b.maxByteLength, l1, a.length, f.length, f.byteOffset, f[0]].join()", "true,16,8,2,0,0,");
+    eq("var b = new ArrayBuffer(8); var a = new Uint8Array(b); a[0] = 5; var c = b.transfer(); [b.detached, b.byteLength, a.length, a[0], c.byteLength, new Uint8Array(c)[0]].join()", "true,0,0,,8,5");
+    throws("var b = new ArrayBuffer(8); b.transfer(); new Uint8Array(b).fill(1)", "TypeError");
+    throws("var b = new ArrayBuffer(8); var d = new DataView(b); b.transfer(); d.getInt8(0)", "TypeError");
+    eq("var b = new ArrayBuffer(8).transferToImmutable(); var a = new Uint8Array(b); a[0] = 1; [b.immutable, a[0]].join()", "true,0");
+    throws("new ArrayBuffer(9007199254740991)", "RangeError");
+    eq("var s = new SharedArrayBuffer(2, { maxByteLength: 4 }); s.grow(4); [s.growable, s.byteLength].join()", "true,4");
+    eq("new Uint8Array([72, 105, 33]).toBase64() + '|' + Uint8Array.fromBase64('SGkh').join() + '|' + new Uint8Array([255, 1]).toHex() + '|' + Uint8Array.fromHex('ff01').join()", "SGkh|72,105,33|ff01|255,1");
+    eq("var t = new Uint8Array(2); var r = t.setFromBase64('SGkh'); [r.read, r.written, t.join()].join()", "0,0,0,0");
+    eq("[Math.f16round(1.337), new Float16Array([65520, 1e-8])].join()", "1.3369140625,Infinity,0");
+    eq("var b = new ArrayBuffer(8); var a = new Uint8Array(b); b.transfer(); [...(function*(){ try { for (var x of a) yield x; } catch (e) { yield e.name; } })()].join()", "TypeError");
+}
+
 // ------------------------------------------------------------------ Intl
 
 #[test]
@@ -993,7 +1008,10 @@ fn extras_behaviour() {
     eq("var log = []; Promise.try(() => 1).then(v => log.push('ok:' + v)); Promise.try(() => { throw new Error('x'); }).catch(e => log.push('err:' + e.message)); Promise.try((a, b) => a + b, 2, 3).then(v => log.push('sum:' + v)); Promise.try(() => Promise.resolve(9)).then(v => log.push('nested:' + v)); 'queued'", "queued");
     assert_eq!(logs("var log = []; Promise.try(() => 1).then(v => log.push('ok:' + v)); Promise.try(() => { throw new Error('x'); }).catch(e => log.push('err:' + e.message)); Promise.try((a, b) => a + b, 2, 3).then(v => log.push('sum:' + v)); Promise.try(() => Promise.resolve(9)).then(v => log.push('nested:' + v)); Promise.resolve().then(() => {}).then(() => {}).then(() => console.log(log.join('|')));"), "ok:1|err:x|sum:5|nested:9");
     eq("/(\\d+)-(\\d+)/.exec('a 12-34 b'); [RegExp.$1, RegExp.$2, RegExp.$3, RegExp.lastMatch, RegExp['$&'], RegExp.input, RegExp.leftContext, RegExp.rightContext, RegExp.lastParen].join('|')", "12|34||12-34|12-34|a 12-34 b|a | b|34");
-    eq("var a = new Int32Array([1, 2, 3]); Atomics.store(a, 0, 10); Atomics.wait(a, 0, 10, 0) + ',' + Atomics.wait(a, 0, 11)", "timed-out,not-equal");
+    // Atomics.wait needs a shared buffer, and the main thread cannot block.
+    throws("Atomics.wait(new Int32Array(1), 0, 0, 0)", "TypeError");
+    throws("Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 0)", "TypeError");
+    eq("var a = new Int32Array(new SharedArrayBuffer(8)); var r = Atomics.waitAsync(a, 0, 1); var s = Atomics.waitAsync(a, 0, 0, 0); var t = Atomics.waitAsync(a, 0, 0); [r.async, r.value, s.async, s.value, t.async, Atomics.notify(a, 0)].join()", "false,not-equal,false,timed-out,true,1");
     eq("Error.prototype.toString.call({name: 'X', message: 'm'})", "X: m");
     eq("new Date(2026, 0, 1).toLocaleDateString('en-US') === new Intl.DateTimeFormat('en-US').format(new Date(2026, 0, 1))", "true");
 }
