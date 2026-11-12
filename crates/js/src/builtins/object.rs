@@ -3,6 +3,7 @@
 use super::*;
 use crate::value::V;
 use crate::realm::SYM_TO_STRING_TAG;
+use crate::descriptor::PropDesc;
 
 pub fn register(realm: &mut Realm) {
     let op = realm.intrinsics.object_proto;
@@ -140,89 +141,76 @@ fn proto_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Val
 }
 
 fn proto_setter(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    if this.is_nullish() {
+        return realm.type_error("Object.prototype.__proto__ called on null or undefined");
+    }
+    let proto = match arg(args, 0).v() {
+        V::Object(p) => Some(p),
+        V::Null => None,
+        _ => return Ok(Value::Undefined),
+    };
     if let V::Object(id) = this.v() {
-        match (arg(args, 0)).v() {
-            V::Object(p) => {
-                set_proto_checked(realm, id, Some(p))?;
-            }
-            V::Null => {
-                set_proto_checked(realm, id, None)?;
-            }
-            _ => {}
+        if !set_proto_checked(realm, id, proto)? {
+            return realm.type_error("Object.prototype.__proto__: cannot set the prototype");
         }
     }
     Ok(Value::Undefined)
 }
 
+/// O.[[SetPrototypeOf]](proto) (%Object.prototype% is an immutable
+/// prototype exotic object).
 fn set_proto_checked(realm: &mut Realm, id: ObjectId, proto: Option<ObjectId>) -> JsResult<bool> {
-    if realm.obj(id).proto == proto {
-        return Ok(true);
+    if id == realm.intrinsics.object_proto {
+        return Ok(realm.obj(id).proto == proto);
     }
-    if !realm.obj(id).extensible {
-        return Ok(false);
+    realm.set_prototype_of_any(id, proto)
+}
+
+fn define_legacy_accessor(realm: &mut Realm, this: Value, args: &[Value], getter: bool) -> JsResult<Value> {
+    let id = realm.to_object(this)?;
+    let f = arg(args, 1);
+    if !realm.is_callable(&f) {
+        return realm.type_error(if getter { "Getter must be a function" } else { "Setter must be a function" });
     }
-    // cycle check
-    let mut cur = proto;
-    while let Some(c) = cur {
-        if c == id {
-            return realm.type_error("Cyclic __proto__ value");
-        }
-        cur = realm.obj(c).proto;
+    let key = realm.to_property_key(arg(args, 0))?;
+    let mut desc = PropDesc { enumerable: Some(true), configurable: Some(true), ..Default::default() };
+    if getter {
+        desc.get = Some(f);
+    } else {
+        desc.set = Some(f);
     }
-    realm.obj_mut(id).set_proto(proto);
-    Ok(true)
+    realm.define_property_or_throw(id, key, desc)?;
+    Ok(Value::Undefined)
 }
 
 fn define_getter_legacy(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = realm.to_object(this)?;
-    let key = realm.to_property_key(arg(args, 0))?;
-    let f = arg(args, 1);
-    if !realm.is_callable(&f) {
-        return realm.type_error("Getter must be a function");
-    }
-    let existing = realm.get_own_property(id, &key);
-    let setter = existing.and_then(|p| p.setter_cloned());
-    realm.define_own(id, key, Property::accessor(Some(f), setter, ENUMERABLE | CONFIGURABLE))?;
-    Ok(Value::Undefined)
+    define_legacy_accessor(realm, this, args, true)
 }
 
 fn define_setter_legacy(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    define_legacy_accessor(realm, this, args, false)
+}
+
+fn lookup_legacy_accessor(realm: &mut Realm, this: Value, args: &[Value], getter: bool) -> JsResult<Value> {
     let id = realm.to_object(this)?;
     let key = realm.to_property_key(arg(args, 0))?;
-    let f = arg(args, 1);
-    if !realm.is_callable(&f) {
-        return realm.type_error("Setter must be a function");
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        if let Some(p) = realm.get_own_property_any(c, &key)? {
+            let f = if getter { p.getter_cloned() } else { p.setter_cloned() };
+            return Ok(if p.is_accessor() { f.unwrap_or(Value::Undefined) } else { Value::Undefined });
+        }
+        cur = realm.get_prototype_of(c)?;
     }
-    let existing = realm.get_own_property(id, &key);
-    let getter = existing.and_then(|p| p.getter_cloned());
-    realm.define_own(id, key, Property::accessor(getter, Some(f), ENUMERABLE | CONFIGURABLE))?;
     Ok(Value::Undefined)
 }
 
 fn lookup_getter_legacy(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = realm.to_object(this)?;
-    let key = realm.to_property_key(arg(args, 0))?;
-    let mut cur = Some(id);
-    while let Some(c) = cur {
-        if let Some(p) = realm.get_own_property(c, &key) {
-            return Ok(p.getter_cloned().unwrap_or(Value::Undefined));
-        }
-        cur = realm.obj(c).proto;
-    }
-    Ok(Value::Undefined)
+    lookup_legacy_accessor(realm, this, args, true)
 }
 
 fn lookup_setter_legacy(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = realm.to_object(this)?;
-    let key = realm.to_property_key(arg(args, 0))?;
-    let mut cur = Some(id);
-    while let Some(c) = cur {
-        if let Some(p) = realm.get_own_property(c, &key) {
-            return Ok(p.setter_cloned().unwrap_or(Value::Undefined));
-        }
-        cur = realm.obj(c).proto;
-    }
-    Ok(Value::Undefined)
+    lookup_legacy_accessor(realm, this, args, false)
 }
 
 // ---------------------------------------------------------------- statics
@@ -234,25 +222,34 @@ fn keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(realm.new_array_value(vals))
 }
 
+/// EnumerableOwnProperties(O, kind): each key is checked (and read) in
+/// turn, so getters that change later keys are respected.
+fn enumerable_own(realm: &mut Realm, id: ObjectId, entries: bool) -> JsResult<Vec<Value>> {
+    let keys = realm.own_keys(id)?;
+    let mut out = Vec::with_capacity(keys.len());
+    for k in keys {
+        if k.is_symbol() {
+            continue;
+        }
+        match realm.get_own_property_any(id, &k)? {
+            Some(p) if p.enumerable() => {}
+            _ => continue,
+        }
+        let v = realm.get(Value::Object(id), k.clone())?;
+        out.push(if entries { realm.new_array_value(vec![k.to_value(), v]) } else { v });
+    }
+    Ok(out)
+}
+
 fn values(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = realm.to_object(arg(args, 0))?;
-    let ks = realm.own_enumerable_string_keys(id)?;
-    let mut vals = Vec::with_capacity(ks.len());
-    for k in ks {
-        vals.push(realm.get(Value::Object(id), k)?);
-    }
+    let vals = enumerable_own(realm, id, false)?;
     Ok(realm.new_array_value(vals))
 }
 
 fn entries(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = realm.to_object(arg(args, 0))?;
-    let ks = realm.own_enumerable_string_keys(id)?;
-    let mut vals = Vec::with_capacity(ks.len());
-    for k in ks {
-        let v = realm.get(Value::Object(id), k.clone())?;
-        let pair = realm.new_array_value(vec![k.to_value(), v]);
-        vals.push(pair);
-    }
+    let vals = enumerable_own(realm, id, true)?;
     Ok(realm.new_array_value(vals))
 }
 
@@ -289,8 +286,9 @@ fn create(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
         _ => return realm.type_error("Object prototype may only be an Object or null"),
     };
     let o = realm.new_object_with_proto(proto);
-    if let v @ V::Object(_) = (arg(args, 1)).v() {
-        define_properties_impl(realm, o, v.to_value())?;
+    let props = arg(args, 1);
+    if !props.is_undefined() {
+        define_properties_impl(realm, o, props)?;
     }
     Ok(Value::Object(o))
 }
@@ -301,34 +299,27 @@ fn define_property(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<
         _ => return realm.type_error("Object.defineProperty called on non-object"),
     };
     let key = realm.to_property_key(arg(args, 1))?;
-    let existing = realm.get_own_property_any(id, &key)?;
-    let desc = realm.to_property_descriptor_merged(arg(args, 2), existing.as_ref())?;
-    let ok = realm.define_own(id, key.clone(), desc)?;
-    if !ok {
-        let k = realm.key_display(&key);
-        return realm.type_error(&format!("Cannot redefine property: {}", k));
-    }
+    let desc = realm.to_prop_desc(arg(args, 2))?;
+    realm.define_property_or_throw(id, key, desc)?;
     Ok(Value::Object(id))
 }
 
+/// ObjectDefineProperties: every descriptor is read before any is defined.
 fn define_properties_impl(realm: &mut Realm, id: ObjectId, props: Value) -> JsResult<()> {
     let pid = realm.to_object(props)?;
     let keys = realm.own_keys(pid)?;
+    let mut descs = Vec::new();
     for k in keys {
-        let p = realm.get_own_property_any(pid, &k)?;
-        if let Some(p) = p {
-            if !p.enumerable() {
-                continue;
-            }
-            let dv = realm.get_from_object(pid, &k, Value::Object(pid))?;
-            let existing = realm.get_own_property_any(id, &k)?;
-            let desc = realm.to_property_descriptor_merged(dv, existing.as_ref())?;
-            let ok = realm.define_own(id, k.clone(), desc)?;
-            if !ok {
-                let kd = realm.key_display(&k);
-                return realm.type_error(&format!("Cannot redefine property: {}", kd));
+        if let Some(p) = realm.get_own_property_any(pid, &k)? {
+            if p.enumerable() {
+                let dv = realm.get(Value::Object(pid), k.clone())?;
+                let d = realm.to_prop_desc(dv)?;
+                descs.push((k, d));
             }
         }
+    }
+    for (k, d) in descs {
+        realm.define_property_or_throw(id, k, d)?;
     }
     Ok(())
 }
@@ -388,6 +379,9 @@ fn get_prototype_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 
 fn set_prototype_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let target = arg(args, 0);
+    if target.is_nullish() {
+        return realm.type_error("Object.setPrototypeOf called on null or undefined");
+    }
     let proto = match (arg(args, 1)).v() {
         V::Object(p) => Some(p),
         V::Null => None,
@@ -395,18 +389,58 @@ fn set_prototype_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     };
     if let V::Object(id) = target.v() {
         if !set_proto_checked(realm, id, proto)? {
-            return realm.type_error("Object.setPrototypeOf: object is not extensible");
+            return realm.type_error("Object.setPrototypeOf: cannot set the prototype (non-extensible object or cyclic prototype chain)");
         }
-    } else if target.is_nullish() {
-        return realm.type_error("Object.setPrototypeOf called on null or undefined");
     }
     Ok(target)
+}
+
+/// SetIntegrityLevel(O, sealed/frozen) through the object's internal
+/// methods (proxies observe each step).
+fn set_integrity_level(realm: &mut Realm, id: ObjectId, frozen: bool) -> JsResult<bool> {
+    if !realm.prevent_extensions_any(id)? {
+        return Ok(false);
+    }
+    let keys = realm.own_keys(id)?;
+    for k in keys {
+        let mut d = PropDesc { configurable: Some(false), ..Default::default() };
+        if frozen {
+            match realm.get_own_property_any(id, &k)? {
+                Some(p) if !p.is_accessor() => d.writable = Some(false),
+                Some(_) => {}
+                None => continue,
+            }
+        }
+        realm.define_property_or_throw(id, k, d)?;
+    }
+    Ok(true)
+}
+
+/// TestIntegrityLevel(O, sealed/frozen).
+fn test_integrity_level(realm: &mut Realm, id: ObjectId, frozen: bool) -> JsResult<bool> {
+    if realm.is_extensible_any(id)? {
+        return Ok(false);
+    }
+    let keys = realm.own_keys(id)?;
+    for k in keys {
+        if let Some(p) = realm.get_own_property_any(id, &k)? {
+            if p.configurable() || (frozen && !p.is_accessor() && p.writable()) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn freeze(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     if let V::Object(id) = v.v() {
-        let id = id;
+        if let ObjectKind::Proxy { .. } = &realm.obj(id).kind {
+            if !set_integrity_level(realm, id, true)? {
+                return realm.type_error("Object.freeze: cannot prevent extensions");
+            }
+            return Ok(v);
+        }
         if !super::typed_array::check_integrity(realm, id, true)? {
             return realm.type_error("Cannot freeze a length-tracking typed array");
         }
@@ -418,11 +452,6 @@ fn freeze(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
                 if !p.is_accessor() {
                     p.flags &= !WRITABLE;
                 }
-                if let ObjectKind::Array { .. } = &realm.obj(id).kind {
-                    if k.as_array_index().is_some() {
-                        // dense elements moved to props by materialize_array
-                    }
-                }
                 realm.obj_mut(id).props.insert(k, p);
             }
         }
@@ -431,7 +460,6 @@ fn freeze(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(v)
 }
 
-/// Move dense array elements into the property map so per-element flags can be stored.
 fn materialize_array(realm: &mut Realm, id: ObjectId) {
     let elements = match &mut realm.obj_mut(id).kind {
         ObjectKind::Array { elements, .. } => std::mem::take(elements),
@@ -445,28 +473,21 @@ fn materialize_array(realm: &mut Realm, id: ObjectId) {
 }
 
 fn is_frozen(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = match (arg(args, 0)).v() {
-        V::Object(id) => id,
-        _ => return Ok(Value::Bool(true)),
-    };
-    if realm.obj(id).extensible {
-        return Ok(Value::Bool(false));
+    match (arg(args, 0)).v() {
+        V::Object(id) => Ok(Value::Bool(test_integrity_level(realm, id, true)?)),
+        _ => Ok(Value::Bool(true)),
     }
-    let keys = realm.own_keys(id)?;
-    for k in keys {
-        if let Some(p) = realm.get_own_property(id, &k) {
-            if p.configurable() || (!p.is_accessor() && p.writable()) {
-                return Ok(Value::Bool(false));
-            }
-        }
-    }
-    Ok(Value::Bool(true))
 }
 
 fn seal(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     if let V::Object(id) = v.v() {
-        let id = id;
+        if let ObjectKind::Proxy { .. } = &realm.obj(id).kind {
+            if !set_integrity_level(realm, id, false)? {
+                return realm.type_error("Object.seal: cannot prevent extensions");
+            }
+            return Ok(v);
+        }
         if !super::typed_array::check_integrity(realm, id, true)? {
             return realm.type_error("Cannot seal a length-tracking typed array");
         }
@@ -484,22 +505,10 @@ fn seal(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn is_sealed(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let id = match (arg(args, 0)).v() {
-        V::Object(id) => id,
-        _ => return Ok(Value::Bool(true)),
-    };
-    if realm.obj(id).extensible {
-        return Ok(Value::Bool(false));
+    match (arg(args, 0)).v() {
+        V::Object(id) => Ok(Value::Bool(test_integrity_level(realm, id, false)?)),
+        _ => Ok(Value::Bool(true)),
     }
-    let keys = realm.own_keys(id)?;
-    for k in keys {
-        if let Some(p) = realm.get_own_property(id, &k) {
-            if p.configurable() {
-                return Ok(Value::Bool(false));
-            }
-        }
-    }
-    Ok(Value::Bool(true))
 }
 
 fn prevent_extensions(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -508,14 +517,16 @@ fn prevent_extensions(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
         if !super::typed_array::check_integrity(realm, id, false)? {
             return realm.type_error("Cannot prevent extensions of a length-tracking typed array");
         }
-        realm.obj_mut(id).extensible = false;
+        if !realm.prevent_extensions_any(id)? {
+            return realm.type_error("Object.preventExtensions: cannot prevent extensions");
+        }
     }
     Ok(v)
 }
 
 fn is_extensible(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Bool(match (arg(args, 0)).v() {
-        V::Object(id) => realm.obj(id).extensible,
+        V::Object(id) => realm.is_extensible_any(id)?,
         _ => false,
     }))
 }

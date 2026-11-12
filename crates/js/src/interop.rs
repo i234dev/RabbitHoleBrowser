@@ -81,16 +81,8 @@ impl Realm {
     }
 
     pub fn get_prototype_of(&mut self, id: ObjectId) -> JsResult<Option<ObjectId>> {
-        if let ObjectKind::Proxy { target, handler, revoked } = &self.obj(id).kind {
-            let (target, handler) = (*target, *handler);
-            if *revoked {
-                return self.type_error("Cannot perform 'getPrototypeOf' on a proxy that has been revoked");
-            }
-            if let Some(trap) = self.get_method(Value::Object(handler), PropertyKey::str("getPrototypeOf"))? {
-                let r = self.call(trap, Value::Object(handler), &[Value::Object(target)])?;
-                return Ok(r.as_object());
-            }
-            return self.get_prototype_of(target);
+        if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
+            return self.proxy_get_prototype_of(id);
         }
         Ok(self.obj(id).proto)
     }
@@ -275,10 +267,11 @@ impl Realm {
         // Appends only when the prototype is Array.prototype (an exotic
         // prototype, e.g. a typed array, decides the [[Set]] otherwise).
         let array_proto = Some(self.intrinsics.array_proto);
+        let own_receiver = receiver.as_object() == Some(id);
         {
             let obj = self.obj_mut(id);
             match &mut obj.kind {
-                ObjectKind::Array { elements, length } => {
+                ObjectKind::Array { elements, length } if own_receiver => {
                     if let Some(i) = key.as_array_index() {
                         let i = i as usize;
                         if i < elements.len() {
@@ -288,14 +281,14 @@ impl Realm {
                                     return Ok(true);
                                 }
                             }
-                        } else if i == elements.len() && obj.extensible && obj.proto == array_proto && i < (1 << 28) && (*length as usize) <= i {
+                        } else if i == elements.len() && obj.extensible && obj.proto == array_proto && i < (1 << 28) && (*length as usize) <= i && (obj.props.is_empty() || !obj.props.contains(&key)) {
                             let frozen_len = obj.props.get(&crate::value::names::length()).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
                             if !frozen_len {
                                 elements.push(value);
                                 *length = (i + 1) as u32;
                                 return Ok(true);
                             }
-                        } else if i > elements.len() && i - elements.len() <= 4096 && obj.extensible && obj.proto == array_proto && i < (1 << 28) {
+                        } else if i > elements.len() && i - elements.len() <= 4096 && obj.extensible && obj.proto == array_proto && i < (1 << 28) && !obj.props.iter().any(|(k, _)| k.as_array_index().is_some_and(|j| j as usize >= elements.len())) {
                             let frozen_len = obj.props.get(&crate::value::names::length()).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
                             if !frozen_len {
                                 // Fill holes (only if no sparse props exist in between).
@@ -372,22 +365,14 @@ impl Realm {
         // A proxy receiver (Reflect.set(target, k, v, proxy) in a set trap,
         // as Vue's reactive() does): its [[GetOwnProperty]] and
         // [[DefineOwnProperty]] go through the traps / its target.
-        if let ObjectKind::Proxy { .. } = &self.obj(rid).kind {
-            return match self.proxy_get_own_property(rid, &key)? {
+        if !matches!(self.obj(rid).kind, ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Error) {
+            // Exotic receivers (proxies, arrays, typed arrays...): their own
+            // [[GetOwnProperty]] and [[DefineOwnProperty]].
+            return match self.get_own_property_any(rid, &key)? {
                 Some(existing) if existing.is_accessor() || !existing.writable() => Ok(false),
-                Some(existing) => self.proxy_define(rid, key, Property::data(value, existing.flags)),
-                None => self.proxy_define(rid, key, Property::data(value, ALL)),
+                Some(_) => self.define_own_desc(rid, key, crate::descriptor::PropDesc::value_only(value)),
+                None => self.define_own_desc(rid, key, crate::descriptor::PropDesc::from_property(&Property::data(value, ALL))),
             };
-        }
-        if let ObjectKind::TypedArray(_) = &self.obj(rid).kind {
-            if crate::builtins::typed_array::canonical_numeric_index(&key).is_some() {
-                // The receiver's [[DefineOwnProperty]] stores the element
-                // (or refuses an invalid index).
-                return match self.get_own_property(rid, &key) {
-                    Some(existing) if existing.is_accessor() || !existing.writable() => Ok(false),
-                    _ => self.define_own(rid, key, Property::data(value, ALL)),
-                };
-            }
         }
         if let Some(existing) = self.get_own_property(rid, &key) {
             if existing.is_accessor() || !existing.writable() {
@@ -410,56 +395,22 @@ impl Realm {
         Ok(true)
     }
 
+    /// `array.length = value` ([[Set]] fails on a non-writable length
+    /// before any conversion).
     pub fn set_array_length(&mut self, id: ObjectId, value: Value) -> JsResult<bool> {
-        let n = self.to_number(value)?;
-        let len = n as u32;
-        if len as f64 != n {
-            return self.range_error("Invalid array length");
-        }
-        let frozen = self.obj(id).props.get(&crate::value::names::length()).map(|p| p.flags & WRITABLE == 0).unwrap_or(false);
-        if frozen {
+        if !self.array_length_state(id).1 {
             return Ok(false);
         }
-        let obj = self.obj_mut(id);
-        if let ObjectKind::Array { elements, length } = &mut obj.kind {
-            if (len as usize) < elements.len() {
-                elements.truncate(len as usize);
-            }
-            if len < *length {
-                // remove sparse props >= len
-                let keys: Vec<PropertyKey> = obj.props.keys().into_iter().filter(|k| k.as_array_index().map(|i| i >= len).unwrap_or(false)).collect();
-                for k in keys {
-                    obj.props.remove(&k);
-                }
-            }
-            *length = len;
-        }
-        Ok(true)
+        self.array_set_length(id, crate::descriptor::PropDesc::value_only(value))
     }
 
     /// Create or replace an own property; returns false if not allowed.
     pub fn define_own(&mut self, id: ObjectId, key: PropertyKey, prop: Property) -> JsResult<bool> {
-        if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
-            return self.proxy_define(id, key, prop);
-        }
-        if let ObjectKind::TypedArray(t) = &self.obj(id).kind {
-            if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(&key) {
-                let t = **t;
-                if crate::builtins::typed_array::ta_valid_index(self, &t, n).is_none() {
-                    return Ok(false);
-                }
-                if crate::builtins::typed_array::ta_immutable(self, &t) {
-                    // Elements of an immutable buffer are non-writable,
-                    // non-configurable: only a no-op redefinition succeeds.
-                    let cur = self.get_own_property(id, &key).map(|p| p.value).unwrap_or(Value::Undefined);
-                    return Ok(!prop.is_accessor() && !prop.configurable() && !prop.writable() && prop.enumerable() && self.same_value(&prop.value, &cur));
-                }
-                if prop.is_accessor() || !prop.configurable() || !prop.enumerable() || !prop.writable() {
-                    return Ok(false);
-                }
-                crate::builtins::typed_array::ta_set_element(self, &t, n, prop.value)?;
-                return Ok(true);
+        match &self.obj(id).kind {
+            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::TypedArray(_) => {
+                return self.define_own_desc(id, key, crate::descriptor::PropDesc::from_property(&prop));
             }
+            _ => {}
         }
         let existing = self.get_own_property(id, &key);
         if let Some(ex) = &existing {
@@ -470,6 +421,16 @@ impl Realm {
                 }
                 if prop.configurable() || (prop.enumerable() != ex.enumerable()) {
                     return Ok(false);
+                }
+                if ex.is_accessor() {
+                    let same = |a: Option<&Value>, b: Option<&Value>| match (a, b) {
+                        (None, None) => true,
+                        (Some(x), Some(y)) => self.same_value(x, y),
+                        _ => false,
+                    };
+                    if !same(prop.getter(), ex.getter()) || !same(prop.setter(), ex.setter()) {
+                        return Ok(false);
+                    }
                 }
                 if !ex.is_accessor() && !ex.writable() {
                     if prop.writable() {
@@ -482,48 +443,6 @@ impl Realm {
             }
         } else if !self.obj(id).extensible {
             return Ok(false);
-        }
-        // Arrays: keep dense storage in sync.
-        let obj = self.obj_mut(id);
-        if let ObjectKind::Array { elements, length } = &mut obj.kind {
-            if let Some(i) = key.as_array_index() {
-                let i_us = i as usize;
-                if !prop.is_accessor() && prop.flags & ALL == ALL {
-                    if i_us < elements.len() {
-                        elements[i_us] = prop.value;
-                        obj.props.remove(&key);
-                        return Ok(true);
-                    } else if i_us == elements.len() {
-                        elements.push(prop.value);
-                        if *length <= i {
-                            *length = i + 1;
-                        }
-                        return Ok(true);
-                    }
-                }
-                if i_us < elements.len() {
-                    // move to sparse storage: mark hole
-                    elements[i_us] = Value::Empty;
-                }
-                if *length <= i {
-                    *length = i + 1;
-                }
-            } else if let PropertyKey::String(s) = &key {
-                if s.eq_str("length") {
-                    let new_flags = prop.flags;
-                    let v = prop.value.clone();
-                    let was_accessor = prop.is_accessor();
-                    if was_accessor {
-                        return Ok(false);
-                    }
-                    if !v.is_undefined() {
-                        self.set_array_length(id, v)?;
-                    }
-                    // store the writability flag in props
-                    self.obj_mut(id).props.insert(key, Property::data(Value::Undefined, new_flags & WRITABLE));
-                    return Ok(true);
-                }
-            }
         }
         self.obj_mut(id).props.insert(key, prop);
         Ok(true)
@@ -675,101 +594,7 @@ impl Realm {
     }
 
     // ---------------------------------------------------------- proxies
-
-    fn proxy_parts(&mut self, id: ObjectId, trap: &str) -> JsResult<(ObjectId, ObjectId, Option<Value>)> {
-        let (target, handler) = match &self.obj(id).kind {
-            ObjectKind::Proxy { target, handler, revoked } => {
-                if *revoked {
-                    return self.type_error(&format!("Cannot perform '{}' on a proxy that has been revoked", trap));
-                }
-                (*target, *handler)
-            }
-            _ => unreachable!(),
-        };
-        let t = self.get_method(Value::Object(handler), PropertyKey::str(trap))?;
-        Ok((target, handler, t))
-    }
-
-    fn proxy_get(&mut self, id: ObjectId, key: &PropertyKey, receiver: Value) -> JsResult<Value> {
-        let (target, handler, trap) = self.proxy_parts(id, "get")?;
-        match trap {
-            Some(t) => self.call(t, Value::Object(handler), &[Value::Object(target), key.to_value(), receiver]),
-            None => self.get_from_object(target, key, receiver),
-        }
-    }
-
-    fn proxy_set(&mut self, id: ObjectId, key: PropertyKey, value: Value, receiver: Value) -> JsResult<bool> {
-        let (target, handler, trap) = self.proxy_parts(id, "set")?;
-        match trap {
-            Some(t) => {
-                let r = self.call(t, Value::Object(handler), &[Value::Object(target), key.to_value(), value, receiver])?;
-                Ok(r.truthy())
-            }
-            None => self.set_on_object(target, key, value, receiver),
-        }
-    }
-
-    fn proxy_has(&mut self, id: ObjectId, key: &PropertyKey) -> JsResult<bool> {
-        let (target, handler, trap) = self.proxy_parts(id, "has")?;
-        match trap {
-            Some(t) => Ok(self.call(t, Value::Object(handler), &[Value::Object(target), key.to_value()])?.truthy()),
-            None => self.has_property(target, key),
-        }
-    }
-
-    fn proxy_delete(&mut self, id: ObjectId, key: &PropertyKey) -> JsResult<bool> {
-        let (target, handler, trap) = self.proxy_parts(id, "deleteProperty")?;
-        match trap {
-            Some(t) => Ok(self.call(t, Value::Object(handler), &[Value::Object(target), key.to_value()])?.truthy()),
-            None => self.delete_property(target, key),
-        }
-    }
-
-    fn proxy_own_keys(&mut self, id: ObjectId) -> JsResult<Vec<PropertyKey>> {
-        let (target, handler, trap) = self.proxy_parts(id, "ownKeys")?;
-        match trap {
-            Some(t) => {
-                let r = self.call(t, Value::Object(handler), &[Value::Object(target)])?;
-                let list = self.create_list_from_array_like(r)?;
-                let mut out = Vec::new();
-                for v in list {
-                    out.push(self.to_property_key(v)?);
-                }
-                Ok(out)
-            }
-            None => self.own_keys(target),
-        }
-    }
-
-    pub fn proxy_get_own_property(&mut self, id: ObjectId, key: &PropertyKey) -> JsResult<Option<Property>> {
-        let (target, handler, trap) = self.proxy_parts(id, "getOwnPropertyDescriptor")?;
-        match trap {
-            Some(t) => {
-                let r = self.call(t, Value::Object(handler), &[Value::Object(target), key.to_value()])?;
-                if r.is_undefined() {
-                    return Ok(None);
-                }
-                Ok(Some(self.to_property_descriptor(r)?))
-            }
-            None => {
-                if let ObjectKind::Proxy { .. } = &self.obj(target).kind {
-                    return self.proxy_get_own_property(target, key);
-                }
-                Ok(self.get_own_property(target, key))
-            }
-        }
-    }
-
-    fn proxy_define(&mut self, id: ObjectId, key: PropertyKey, prop: Property) -> JsResult<bool> {
-        let (target, handler, trap) = self.proxy_parts(id, "defineProperty")?;
-        match trap {
-            Some(t) => {
-                let desc = self.from_property_descriptor(&prop);
-                Ok(self.call(t, Value::Object(handler), &[Value::Object(target), key.to_value(), desc])?.truthy())
-            }
-            None => self.define_own(target, key, prop),
-        }
-    }
+    // (the Proxy internal methods live in descriptor.rs)
 
     /// Resolve the own property of any object kind including proxies.
     pub fn get_own_property_any(&mut self, id: ObjectId, key: &PropertyKey) -> JsResult<Option<Property>> {
