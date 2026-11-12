@@ -59,9 +59,8 @@ fn construct(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 fn define_property(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = target_obj(realm, &arg(args, 0), "defineProperty")?;
     let key = realm.to_property_key(arg(args, 1))?;
-    let existing = realm.get_own_property_any(id, &key)?;
-    let desc = realm.to_property_descriptor_merged(arg(args, 2), existing.as_ref())?;
-    Ok(Value::Bool(realm.define_own(id, key, desc)?))
+    let desc = realm.to_prop_desc(arg(args, 2))?;
+    Ok(Value::Bool(realm.define_own_desc(id, key, desc)?))
 }
 
 fn delete_property(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -102,7 +101,7 @@ fn has(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 
 fn is_extensible(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = target_obj(realm, &arg(args, 0), "isExtensible")?;
-    Ok(Value::Bool(realm.obj(id).extensible))
+    Ok(Value::Bool(realm.is_extensible_any(id)?))
 }
 
 fn own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -117,8 +116,7 @@ fn prevent_extensions(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
     if !super::typed_array::check_integrity(realm, id, false)? {
         return Ok(Value::Bool(false));
     }
-    realm.obj_mut(id).extensible = false;
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(realm.prevent_extensions_any(id)?))
 }
 
 fn set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -135,11 +133,10 @@ fn set_prototype_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
         V::Null => None,
         _ => return realm.type_error("Object prototype may only be an Object or null"),
     };
-    if !realm.obj(id).extensible && realm.obj(id).proto != proto {
-        return Ok(Value::Bool(false));
+    if id == realm.intrinsics.object_proto {
+        return Ok(Value::Bool(realm.obj(id).proto == proto));
     }
-    realm.obj_mut(id).set_proto(proto);
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(realm.set_prototype_of_any(id, proto)?))
 }
 
 fn proxy_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {

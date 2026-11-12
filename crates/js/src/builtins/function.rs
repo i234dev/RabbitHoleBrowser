@@ -14,6 +14,15 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(fp, "toString", 0, to_string);
     let hi = realm.new_native_function("[Symbol.hasInstance]", 1, has_instance);
     realm.define_property(fp, PropertyKey::Symbol(SYM_HAS_INSTANCE), Value::Object(hi), 0);
+    // %ThrowTypeError%: unique per realm, frozen, anonymous.
+    let tte = realm.new_native_function("", 0, throw_type_error);
+    realm.define_property(tte, "length", Value::Number(0.0), 0);
+    realm.define_property(tte, "name", Value::str(""), 0);
+    realm.obj_mut(tte).extensible = false;
+    realm.intrinsics.others.insert("ThrowTypeError", tte);
+    for name in ["caller", "arguments"] {
+        realm.define_accessor_values(fp, name, Some(Value::Object(tte)), Some(Value::Object(tte)), CONFIGURABLE);
+    }
     let ctor = define_ctor(realm, "Function", 1, function_ctor, fp);
     realm.intrinsics.function_ctor = ctor;
 
@@ -46,6 +55,20 @@ pub fn register(realm: &mut Realm) {
         realm.obj_mut(c).set_proto(Some(fc));
         realm.define_property(proto, "constructor", Value::Object(c), CONFIGURABLE);
     }
+}
+
+fn throw_type_error(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    // Web compatibility: `sloppyFunction.caller` / `.arguments` read null
+    // (browsers give such functions own null-valued properties).
+    if let V::Object(id) = this.v() {
+        if let ObjectKind::Function(c) = &realm.obj(id).kind {
+            let f = &c.code.flags;
+            if !f.is_strict && !f.is_arrow && !f.is_async && !f.is_generator && !f.is_method && !f.is_class_constructor {
+                return Ok(Value::Null);
+            }
+        }
+    }
+    realm.type_error("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them")
 }
 
 fn async_function_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -89,16 +112,18 @@ fn bind(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     };
     let bound_this = arg(args, 0);
     let bound_args: Vec<Value> = if args.len() > 1 { args[1..].to_vec() } else { Vec::new() };
-    let proto = realm.obj(target).proto;
+    let proto = realm.get_prototype_of(target)?;
     let n_bound = bound_args.len();
     let b = realm.alloc(Object::new(proto, ObjectKind::Bound(Box::new(BoundFunction { target, this: bound_this, args: bound_args }))));
-    let len = realm.get_str(Value::Object(target), "length")?;
-    let len = match len.v() {
-        V::Number(n) => (n - n_bound as f64).max(0.0),
-        _ => 0.0,
-    };
+    // length: only an own "length" counts; ToIntegerOrInfinity of a number.
+    let mut len = 0.0;
+    if realm.get_own_property_any(target, &crate::value::names::length())?.is_some() {
+        if let V::Number(n) = realm.get(Value::Object(target), crate::value::names::length())?.v() {
+            len = if n == f64::INFINITY { n } else if n == f64::NEG_INFINITY { 0.0 } else { (to_integer(n) - n_bound as f64).max(0.0) };
+        }
+    }
     realm.define_property(b, "length", Value::Number(len), CONFIGURABLE);
-    let name = realm.get_str(Value::Object(target), "name")?;
+    let name = realm.get(Value::Object(target), crate::value::names::name())?;
     let name = match name.v() {
         V::String(s) => s.to_rust_string(),
         _ => String::new(),
@@ -118,7 +143,14 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
             _ if c.code.flags.is_class_constructor => format!("class {} {{ [native code] }}", c.code.name),
             _ => format!("function {}() {{ [native code] }}", c.code.name),
         },
-        ObjectKind::Native(n) => format!("function {}() {{ [native code] }}", n.name),
+        ObjectKind::Native(n) => {
+            // NativeFunction syntax: the name only when it is an (optionally
+            // get/set-prefixed) identifier name or a [symbol] name.
+            let name = n.name.to_rust_string();
+            let bare = name.strip_prefix("get ").or_else(|| name.strip_prefix("set ")).unwrap_or(&name);
+            let ok = bare.starts_with('[') && bare.ends_with(']') || bare.chars().enumerate().all(|(i, c)| c == '$' || c == '_' || c.is_alphabetic() || (i > 0 && c.is_alphanumeric()));
+            if ok { format!("function {}() {{ [native code] }}", name) } else { "function () { [native code] }".to_string() }
+        }
         _ => "function () { [native code] }".to_string(),
     };
     Ok(Value::str(&s))

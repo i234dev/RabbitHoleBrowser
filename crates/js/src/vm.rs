@@ -992,7 +992,9 @@ impl Realm {
             rest_arr = Some(self.new_array_value(rest));
         }
         if code.arguments_loc.is_some() {
-            arguments_obj = Some(self.create_arguments_object(args, if flags.is_strict { None } else { Some(id) }));
+            // Unmapped arguments (strict code or non-simple parameters) have
+            // the poison-pill callee.
+            arguments_obj = Some(self.create_arguments_object(args, if flags.is_strict || !flags.has_simple_params { None } else { Some(id) }));
         } else if flags.is_arrow {
             arguments_obj = arrow_args;
         }
@@ -1057,6 +1059,9 @@ impl Realm {
         self.define_property(id, names::length(), Value::Number(args.len() as f64), HIDDEN);
         if let Some(c) = callee {
             self.define_property(id, names::callee(), Value::Object(c), HIDDEN);
+        } else if let Some(tte) = self.intrinsics.others.get("ThrowTypeError").copied() {
+            // Unmapped (strict) arguments: callee is a poison-pill accessor.
+            self.define_accessor_values(id, names::callee(), Some(Value::Object(tte)), Some(Value::Object(tte)), 0);
         }
         if let Some(values) = self.intrinsics.others.get("ArrayProtoValues").copied() {
             self.define_property(id, PropertyKey::Symbol(SYM_ITERATOR), Value::Object(values), HIDDEN);
@@ -2661,7 +2666,7 @@ impl Realm {
         }
         // Anything else: an equivalent (unobservable) arguments object.
         let args = self.vstack[bottom..bottom + argc].to_vec();
-        let callee = if f.code().flags.is_strict { None } else { f.func };
+        let callee = if f.code().flags.is_strict || !f.code().flags.has_simple_params { None } else { f.func };
         let ao = self.create_arguments_object(&args, callee);
         let key = self.to_property_key(key)?;
         self.get(ao, key)

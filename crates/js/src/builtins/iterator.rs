@@ -339,6 +339,34 @@ fn settle_request(realm: &mut Realm, p: ObjectId, result: Result<(Value, bool), 
 }
 
 /// Process queued requests until the generator awaits or the queue drains.
+/// The awaited value of a `return(value)` on a completed async generator.
+fn await_return_settled(realm: &mut Realm, args: &[Value], ok: bool) {
+    let gen = realm.current_native().and_then(|f| realm.native_captures(f).first().cloned()).and_then(|v| v.as_object());
+    let Some(gen) = gen else { return };
+    let front = match &mut realm.obj_mut(gen).kind {
+        ObjectKind::Generator(gd) => {
+            gd.state = GeneratorState::Completed;
+            gd.queue.pop_front()
+        }
+        _ => None,
+    };
+    if let Some((_, _, p)) = front {
+        let v = arg(args, 0);
+        settle_request(realm, p, if ok { Ok((v, true)) } else { Err(v) });
+    }
+    async_gen_drive(realm, gen, None);
+}
+
+fn await_return_fulfilled(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    await_return_settled(realm, args, true);
+    Ok(Value::Undefined)
+}
+
+fn await_return_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    await_return_settled(realm, args, false);
+    Ok(Value::Undefined)
+}
+
 fn async_gen_drive(realm: &mut Realm, gen: ObjectId, mut resume: Option<(ResumeMode, Value)>) {
     loop {
         let (state, front) = match &realm.obj(gen).kind {
@@ -352,13 +380,40 @@ fn async_gen_drive(realm: &mut Realm, gen: ObjectId, mut resume: Option<(ResumeM
         if state == GeneratorState::Executing && resume.is_none() {
             return;
         }
+        // A request before the first `next()` completes the generator.
+        if state == GeneratorState::SuspendedStart && kind != GenRequestKind::Next {
+            if let ObjectKind::Generator(gd) = &mut realm.obj_mut(gen).kind {
+                gd.state = GeneratorState::Completed;
+                gd.frame = None;
+            }
+            continue;
+        }
         if state == GeneratorState::Completed {
+            if kind == GenRequestKind::Return {
+                // AsyncGeneratorAwaitReturn: the value is awaited first.
+                match crate::builtins::promise::promise_resolve(realm, value) {
+                    Ok(pr) => {
+                        if let ObjectKind::Generator(gd) = &mut realm.obj_mut(gen).kind {
+                            gd.state = GeneratorState::Executing;
+                        }
+                        crate::builtins::promise::perform_then_native(realm, pr, await_return_fulfilled, await_return_rejected, Value::Object(gen));
+                        return;
+                    }
+                    Err(e) => {
+                        if let ObjectKind::Generator(gd) = &mut realm.obj_mut(gen).kind {
+                            gd.queue.pop_front();
+                        }
+                        settle_request(realm, p, Err(e));
+                        continue;
+                    }
+                }
+            }
             if let ObjectKind::Generator(gd) = &mut realm.obj_mut(gen).kind {
                 gd.queue.pop_front();
             }
             match kind {
                 GenRequestKind::Next => settle_request(realm, p, Ok((Value::Undefined, true))),
-                GenRequestKind::Return => settle_request(realm, p, Ok((value, true))),
+                GenRequestKind::Return => unreachable!(),
                 GenRequestKind::Throw => settle_request(realm, p, Err(value)),
             }
             continue;

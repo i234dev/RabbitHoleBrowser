@@ -20,6 +20,47 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(ctor, "any", 1, any);
     realm.define_method(ctor, "withResolvers", 0, with_resolvers);
     realm.define_accessor(ctor, PropertyKey::Symbol(SYM_SPECIES), Some(species), None, CONFIGURABLE);
+    if let Some(g) = realm.obj(ctor).props.get(&PropertyKey::Symbol(SYM_SPECIES)).and_then(|p| p.getter().and_then(|g| g.as_object())) {
+        realm.intrinsics.others.insert("PromiseSpeciesGetter", g);
+    }
+}
+
+/// SpeciesConstructor(promise, %Promise%), answered without lookups for a
+/// plain promise whose constructor and species are the intrinsic ones.
+fn promise_species(realm: &mut Realm, p: ObjectId) -> JsResult<Value> {
+    let pc = realm.intrinsics.promise_ctor;
+    let pp = realm.intrinsics.promise_proto;
+    let ctor_key = crate::value::names::constructor();
+    let plain = {
+        let o = realm.obj(p);
+        o.proto == Some(pp)
+            && !o.props.contains(&ctor_key)
+            && matches!(realm.obj(pp).props.get(&ctor_key), Some(d) if !d.is_accessor() && d.value.as_object() == Some(pc))
+            && match (realm.obj(pc).props.get(&PropertyKey::Symbol(SYM_SPECIES)), realm.intrinsics.others.get("PromiseSpeciesGetter")) {
+                (Some(d), Some(g)) => d.is_accessor() && d.getter().and_then(|v| v.as_object()) == Some(*g),
+                _ => false,
+            }
+    };
+    if plain {
+        return Ok(Value::Object(pc));
+    }
+    realm.species_constructor(p, pc)
+}
+
+/// PromiseResolve(C, x).
+pub(crate) fn promise_resolve_with(realm: &mut Realm, c: Value, v: Value) -> JsResult<Value> {
+    if c.as_object() == Some(realm.intrinsics.promise_ctor) {
+        return Ok(Value::Object(promise_resolve(realm, v)?));
+    }
+    if is_promise(realm, &v) {
+        let ctor = realm.get_str(v.clone(), "constructor")?;
+        if realm.same_value(&ctor, &c) {
+            return Ok(v);
+        }
+    }
+    let (p, res, _rej) = new_capability_with_ctor(realm, c)?;
+    realm.call(res, Value::Undefined, &[v])?;
+    Ok(p)
 }
 
 fn species(_realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -155,17 +196,6 @@ pub fn promise_resolve(realm: &mut Realm, v: Value) -> JsResult<ObjectId> {
     Ok(p)
 }
 
-/// PromiseResolve(C, v) for `finally`, whose C is the species constructor
-/// (not tracked here): any promise object is taken as is.
-fn promise_resolve_lenient(realm: &mut Realm, v: Value) -> JsResult<ObjectId> {
-    if let V::Object(id) = v.v() {
-        if let ObjectKind::Promise(_) = &realm.obj(id).kind {
-            return Ok(id);
-        }
-    }
-    promise_resolve(realm, v)
-}
-
 /// Attach reactions; `capability` is the derived promise (if any).
 fn perform_then(realm: &mut Realm, promise: ObjectId, on_fulfilled: Option<Value>, on_rejected: Option<Value>, capability: Option<(Value, Value, Value)>) {
     let fr = PromiseReaction { handler: on_fulfilled, capability: capability.clone(), native: None, is_reject: false };
@@ -283,11 +313,13 @@ fn then(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     };
     let on_ok = arg(args, 0);
     let on_err = arg(args, 1);
+    let c = promise_species(realm, p)?;
+    let cap = new_capability_with_ctor(realm, c)?;
+    let np = cap.0.clone();
     let on_ok = if realm.is_callable(&on_ok) { Some(on_ok) } else { None };
     let on_err = if realm.is_callable(&on_err) { Some(on_err) } else { None };
-    let (np, res, rej) = new_promise_capability(realm);
-    perform_then(realm, p, on_ok, on_err, Some((Value::Object(np), Value::Object(res), Value::Object(rej))));
-    Ok(Value::Object(np))
+    perform_then(realm, p, on_ok, on_err, Some(cap));
+    Ok(np)
 }
 
 fn catch(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -295,31 +327,41 @@ fn catch(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn finally(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(pid) = this.as_object() else { return realm.type_error("Promise.prototype.finally called on a non-object") };
+    let c = if is_promise(realm, &this) { promise_species(realm, pid)? } else { realm.species_constructor(pid, realm.intrinsics.promise_ctor)? };
     let on_finally = arg(args, 0);
     if !realm.is_callable(&on_finally) {
         return realm.invoke(this, "then", &[on_finally.clone(), on_finally]);
     }
-    let then_finally = realm.new_native_function_full("", 1, finally_fulfilled, None, vec![on_finally.clone()], false);
-    let catch_finally = realm.new_native_function_full("", 1, finally_rejected, None, vec![on_finally], false);
+    let then_finally = realm.new_native_function_full("", 1, finally_fulfilled, None, vec![on_finally.clone(), c.clone()], false);
+    let catch_finally = realm.new_native_function_full("", 1, finally_rejected, None, vec![on_finally, c], false);
     realm.invoke(this, "then", &[Value::Object(then_finally), Value::Object(catch_finally)])
 }
 
+/// The onFinally callback and the constructor captured by finally's closures.
+fn finally_captures(realm: &mut Realm) -> (Value, Value) {
+    let caps = realm.current_native().map(|n| realm.native_captures(n).to_vec()).unwrap_or_default();
+    let f = caps.first().cloned().unwrap_or(Value::Undefined);
+    let c = caps.get(1).cloned().unwrap_or(Value::Object(realm.intrinsics.promise_ctor));
+    (f, c)
+}
+
 fn finally_fulfilled(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let f = realm.current_native().and_then(|n| realm.native_captures(n).first().cloned()).unwrap_or(Value::Undefined);
+    let (f, c) = finally_captures(realm);
     let value = arg(args, 0);
     let r = realm.call(f, Value::Undefined, &[])?;
-    let p = promise_resolve_lenient(realm, r)?;
+    let p = promise_resolve_with(realm, c, r)?;
     let value_thunk = realm.new_native_function_full("", 0, return_capture, None, vec![value], false);
-    realm.invoke(Value::Object(p), "then", &[Value::Object(value_thunk)])
+    realm.invoke(p, "then", &[Value::Object(value_thunk)])
 }
 
 fn finally_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let f = realm.current_native().and_then(|n| realm.native_captures(n).first().cloned()).unwrap_or(Value::Undefined);
+    let (f, c) = finally_captures(realm);
     let reason = arg(args, 0);
     let r = realm.call(f, Value::Undefined, &[])?;
-    let p = promise_resolve_lenient(realm, r)?;
+    let p = promise_resolve_with(realm, c, r)?;
     let thrower = realm.new_native_function_full("", 0, throw_capture, None, vec![reason], false);
-    realm.invoke(Value::Object(p), "then", &[Value::Object(thrower)])
+    realm.invoke(p, "then", &[Value::Object(thrower)])
 }
 
 fn return_capture(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -359,7 +401,7 @@ fn promise_reject_static(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
 }
 
 /// NewPromiseCapability(C) for arbitrary constructors.
-fn new_capability_with_ctor(realm: &mut Realm, c: Value) -> JsResult<(Value, Value, Value)> {
+pub(crate) fn new_capability_with_ctor(realm: &mut Realm, c: Value) -> JsResult<(Value, Value, Value)> {
     if c.as_object() == Some(realm.intrinsics.promise_ctor) {
         let (p, res, rej) = new_promise_capability(realm);
         return Ok((Value::Object(p), Value::Object(res), Value::Object(rej)));

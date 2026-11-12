@@ -31,6 +31,7 @@ pub mod builtins;
 pub mod bytecode;
 pub mod captures;
 pub mod compiler;
+pub mod descriptor;
 pub mod early;
 pub mod heap;
 pub mod ic;

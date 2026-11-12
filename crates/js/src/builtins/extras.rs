@@ -13,7 +13,7 @@ pub fn register(realm: &mut Realm) {
     let op = realm.intrinsics.object_proto;
 
     // ---------------------------------------------------------- WeakRef
-    let target_sym = realm.symbol_for(JsStr::new("rabbithole.weakref.target"));
+    let target_sym = realm.new_private_symbol(JsStr::new("WeakRefTarget"));
     let sym_obj = realm.new_object_with_proto(None);
     realm.define_property(sym_obj, "sym", Value::Symbol(target_sym), 0);
     realm.intrinsics.others.insert("WeakRefTargetKey", sym_obj);
@@ -38,8 +38,17 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(pc, "try", 1, promise_try);
 
     // --------------------------------------------------- Array.fromAsync
-    // Written in JavaScript: it is an async function that needs `for await`.
-    let _ = realm.eval(ARRAY_FROM_ASYNC, "<builtins/Array.fromAsync>");
+    // The steps run as a JavaScript async function (they await); a native
+    // wrapper gives Array.fromAsync its built-in shape.
+    if let Ok(factory) = realm.eval(ARRAY_FROM_ASYNC, "<builtins/Array.fromAsync>") {
+        let helpers: [(&str, u32, NativeFn); 4] = [("isConstructor", 1, from_async_is_constructor), ("defineData", 3, from_async_define_data), ("lengthOf", 1, from_async_length_of), ("arrayCreate", 1, from_async_array_create)];
+        let hv: Vec<Value> = helpers.iter().map(|(n, a, f)| Value::Object(realm.new_native_function(n, *a, *f))).collect();
+        if let Some(imp) = realm.call(factory, Value::Undefined, &hv).ok().and_then(|v| v.as_object()) {
+            realm.intrinsics.others.insert("ArrayFromAsyncImpl", imp);
+            let ac = realm.intrinsics.array_ctor;
+            realm.define_method(ac, "fromAsync", 1, array_from_async);
+        }
+    }
 
     // ------------------------------------------------- RegExp legacy statics
     if let Some(rc) = realm.intrinsics.others.get("RegExp").copied().or_else(|| {
@@ -74,24 +83,124 @@ pub fn register(realm: &mut Realm) {
 }
 
 const ARRAY_FROM_ASYNC: &str = r#"
-Object.defineProperty(Array, "fromAsync", { writable: true, configurable: true, enumerable: false,
-  value: async function fromAsync(items, mapFn, thisArg) {
-    if (mapFn !== undefined && typeof mapFn !== "function") throw new TypeError("Array.fromAsync: mapFn is not a function");
-    const C = typeof this === "function" ? this : Array;
-    const out = C === Array ? [] : new C();
-    let i = 0;
-    if (items == null) throw new TypeError("Array.fromAsync requires an iterable or array-like");
-    if (items[Symbol.asyncIterator] !== undefined || items[Symbol.iterator] !== undefined) {
-      for await (const v of items) { out[i] = mapFn ? await mapFn.call(thisArg, v, i) : v; i++; }
-    } else {
-      const o = Object(items);
-      const len = Math.min(Math.max(Math.trunc(Number(o.length)) || 0, 0), 9007199254740991);
-      for (; i < len; i++) { const v = await o[i]; out[i] = mapFn ? await mapFn.call(thisArg, v, i) : v; }
+(function (isConstructor, defineData, lengthOf, arrayCreate) {
+  "use strict";
+  const ReflectApply = Reflect.apply, ReflectConstruct = Reflect.construct;
+  const asyncIter = Symbol.asyncIterator, syncIter = Symbol.iterator;
+  const TypeErr = TypeError, Obj = Object;
+  const isObject = (v) => (typeof v === "object" && v !== null) || typeof v === "function";
+  const getMethod = (o, k) => {
+    const m = o[k];
+    if (m === undefined || m === null) return undefined;
+    if (typeof m !== "function") throw new TypeErr("Array.fromAsync: iterator method is not callable");
+    return m;
+  };
+  // AsyncIteratorClose(iteratorRecord, throw completion): the original error wins.
+  const closeAfterError = async (it, err) => {
+    try {
+      const ret = it["return"];
+      if (ret !== undefined && ret !== null) await ReflectApply(ret, it, []);
+    } catch (_) {}
+    throw err;
+  };
+  const syncCloseAfterError = (it, err) => {
+    try {
+      const ret = it["return"];
+      if (ret !== undefined && ret !== null) ReflectApply(ret, it, []);
+    } catch (_) {}
+    throw err;
+  };
+  return async function fromAsync(C, asyncItems, mapfn, thisArg) {
+    let mapping = false;
+    if (mapfn !== undefined) {
+      if (typeof mapfn !== "function") throw new TypeErr("Array.fromAsync: mapper is not a function");
+      mapping = true;
     }
-    out.length = i;
-    return out;
-  } });
+    if (asyncItems === undefined || asyncItems === null) throw new TypeErr("Array.fromAsync requires an iterable or array-like");
+    const usingAsync = getMethod(asyncItems, asyncIter);
+    const usingSync = usingAsync === undefined ? getMethod(asyncItems, syncIter) : undefined;
+    if (usingAsync !== undefined || usingSync !== undefined) {
+      const isAsync = usingAsync !== undefined;
+      const it = ReflectApply(isAsync ? usingAsync : usingSync, asyncItems, []);
+      if (!isObject(it)) throw new TypeErr("Result of the Symbol.iterator method is not an object");
+      const next = it.next;
+      const A = isConstructor(C) ? ReflectConstruct(C, []) : arrayCreate(0);
+      let k = 0;
+      for (;;) {
+        if (k >= 9007199254740991) {
+          const e = new TypeErr("Array.fromAsync: too many elements");
+          if (isAsync) await closeAfterError(it, e); else syncCloseAfterError(it, e);
+        }
+        let result = ReflectApply(next, it, []);
+        let value;
+        if (isAsync) {
+          result = await result;
+          if (!isObject(result)) throw new TypeErr("Iterator result is not an object");
+          if (result.done) { A.length = k; return A; }
+          value = result.value;
+        } else {
+          if (!isObject(result)) throw new TypeErr("Iterator result is not an object");
+          const done = !!result.done;
+          value = result.value;
+          if (done) { await value; A.length = k; return A; }
+          try { value = await value; } catch (e) { syncCloseAfterError(it, e); }
+        }
+        let mapped = value;
+        if (mapping) {
+          try {
+            mapped = await ReflectApply(mapfn, thisArg, [value, k]);
+          } catch (e) {
+            if (isAsync) await closeAfterError(it, e); else syncCloseAfterError(it, e);
+          }
+        }
+        try {
+          defineData(A, k, mapped);
+        } catch (e) {
+          if (isAsync) await closeAfterError(it, e); else syncCloseAfterError(it, e);
+        }
+        k++;
+      }
+    }
+    const arrayLike = Obj(asyncItems);
+    const len = lengthOf(arrayLike);
+    const A = isConstructor(C) ? ReflectConstruct(C, [len]) : arrayCreate(len);
+    for (let k = 0; k < len; k++) {
+      let v = await arrayLike[k];
+      if (mapping) v = await ReflectApply(mapfn, thisArg, [v, k]);
+      defineData(A, k, v);
+    }
+    A.length = len;
+    return A;
+  };
+})
 "#;
+
+fn array_from_async(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let imp = realm.intrinsics.others["ArrayFromAsyncImpl"];
+    let call_args = [this, arg(args, 0), arg(args, 1), arg(args, 2)];
+    realm.call(Value::Object(imp), Value::Undefined, &call_args)
+}
+fn from_async_is_constructor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    Ok(Value::Bool(realm.is_constructor(&arg(args, 0))))
+}
+fn from_async_define_data(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(o) = arg(args, 0).as_object() else { return realm.type_error("not an object") };
+    let k = realm.to_number(arg(args, 1))?;
+    super::array::create_data_property_or_throw(realm, o, k, arg(args, 2))?;
+    Ok(Value::Undefined)
+}
+fn from_async_length_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = realm.length_of(arg(args, 0))?;
+    Ok(Value::Number(n as f64))
+}
+fn from_async_array_create(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = realm.to_number(arg(args, 0))?;
+    if n > u32::MAX as f64 {
+        return realm.range_error("Invalid array length");
+    }
+    let proto = realm.intrinsics.array_proto;
+    Ok(Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::Array { elements: Vec::new(), length: n as u32 }))))
+}
 
 // ------------------------------------------------------------ WeakRef
 
@@ -151,7 +260,16 @@ fn finalization_registry_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -
     let proto = realm.proto_from_new_target(default);
     let id = realm.new_object_with_proto(Some(proto));
     realm.set_class_name(id, "FinalizationRegistry");
+    // Registered unregister tokens (cleanup callbacks never run).
+    let cells = realm.new_array(Vec::new());
+    let key = weak_ref_key(realm);
+    realm.define_property(id, key, Value::Object(cells), 0);
     Ok(Value::Object(id))
+}
+
+fn registry_cells(realm: &Realm, id: ObjectId) -> Option<ObjectId> {
+    let key = weak_ref_key(realm);
+    realm.obj(id).props.get(&key).and_then(|p| p.value.as_object())
 }
 
 fn finalization_register(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -170,6 +288,14 @@ fn finalization_register(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
     if !token.is_undefined() && !can_be_held_weakly(realm, &token) {
         return realm.type_error("FinalizationRegistry.prototype.register: invalid unregister token");
     }
+    if !token.is_undefined() {
+        if let Some(cells) = registry_cells(realm, id) {
+            if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(cells).kind {
+                elements.push(token);
+                *length = elements.len() as u32;
+            }
+        }
+    }
     Ok(Value::Undefined)
 }
 
@@ -182,32 +308,38 @@ fn finalization_unregister(realm: &mut Realm, this: Value, args: &[Value]) -> Js
     if !can_be_held_weakly(realm, &token) {
         return realm.type_error("Invalid unregisterToken");
     }
-    Ok(Value::Bool(false))
+    let Some(cells) = registry_cells(realm, id) else { return Ok(Value::Bool(false)) };
+    let tokens = match &realm.obj(cells).kind {
+        ObjectKind::Array { elements, .. } => elements.clone(),
+        _ => Vec::new(),
+    };
+    let kept: Vec<Value> = tokens.iter().filter(|t| !realm.same_value(t, &token)).cloned().collect();
+    let removed = kept.len() != tokens.len();
+    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(cells).kind {
+        *elements = kept;
+        *length = elements.len() as u32;
+    }
+    Ok(Value::Bool(removed))
 }
 
 // --------------------------------------------------------- Promise.try
 
 fn promise_try(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    if !realm.is_constructor(&this) {
-        return realm.type_error("Promise.try called on non-constructor");
+    if !this.is_object() {
+        return realm.type_error("Promise.try called on non-object");
     }
-    let (p, res, rej) = realm.new_promise();
     let f = arg(args, 0);
     let rest: Vec<Value> = args.iter().skip(1).cloned().collect();
     match realm.call(f, Value::Undefined, &rest) {
-        Ok(v) => {
-            realm.call(Value::Object(res), Value::Undefined, &[v])?;
-        }
+        // A returned value goes through PromiseResolve(C, value): a promise
+        // of the receiver's constructor is returned as is.
+        Ok(v) => super::promise::promise_resolve_with(realm, this, v),
         Err(e) => {
-            realm.call(Value::Object(rej), Value::Undefined, &[e])?;
+            let (p, _res, rej) = super::promise::new_capability_with_ctor(realm, this)?;
+            realm.call(rej, Value::Undefined, &[e])?;
+            Ok(p)
         }
     }
-    // Subclass support: resolve through the receiver when it is not %Promise%.
-    if this.as_object() != Some(realm.intrinsics.promise_ctor) {
-        let resolve = realm.get_str(this.clone(), "resolve")?;
-        return realm.call(resolve, this, &[Value::Object(p)]);
-    }
-    Ok(Value::Object(p))
 }
 
 // ------------------------------------------------- RegExp legacy statics

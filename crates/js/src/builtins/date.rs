@@ -737,7 +737,7 @@ fn year_string(y: f64) -> String {
     if y >= 0.0 {
         format!("{:04}", y as i64)
     } else {
-        format!("-{:06}", -(y as i64))
+        format!("-{:04}", -(y as i64))
     }
 }
 
@@ -807,6 +807,10 @@ pub fn parse_date(s: &str) -> f64 {
     }
     if let Some(t) = parse_iso(s) {
         return t;
+    }
+    if s.starts_with("-000000") {
+        // Minus zero is not a valid extended year (and not a loose date).
+        return f64::NAN;
     }
     parse_loose(s).unwrap_or(f64::NAN)
 }
@@ -1216,7 +1220,6 @@ pub fn register(realm: &mut Realm) {
         ("toTimeString", 0, to_time_string_m),
         ("toISOString", 0, to_iso_string_m),
         ("toUTCString", 0, to_utc_string_m),
-        ("toGMTString", 0, to_utc_string_m),
         ("toJSON", 1, to_json),
         ("toLocaleString", 0, to_locale_string),
         ("toLocaleDateString", 0, to_locale_date_string),
@@ -1224,6 +1227,10 @@ pub fn register(realm: &mut Realm) {
     ];
     for (name, arity, f) in methods {
         realm.define_method(dp, name, *arity, *f);
+    }
+    // Annex B: toGMTString is the same function object as toUTCString.
+    if let Some(v) = realm.obj(dp).props.get(&PropertyKey::str("toUTCString")).map(|p| p.value.clone()) {
+        realm.define_property(dp, "toGMTString", v, HIDDEN);
     }
     let tp = realm.new_native_function("[Symbol.toPrimitive]", 1, to_primitive);
     realm.define_property(dp, PropertyKey::Symbol(SYM_TO_PRIMITIVE), Value::Object(tp), CONFIGURABLE);
@@ -1393,7 +1400,9 @@ fn set_parts(realm: &mut Realm, this: Value, args: &[Value], method: &str, local
             // setFullYear on an invalid date starts from +0.
             0.0
         } else {
-            return Ok(set_time_value(realm, id, f64::NAN));
+            // An invalid date stays as it is (the arguments were converted
+            // first and may have changed it).
+            return Ok(Value::Number(f64::NAN));
         }
     } else if local {
         local_time(t0)
