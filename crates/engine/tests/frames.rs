@@ -334,3 +334,29 @@ fn parent_scripts_drive_a_same_origin_frame() {
     settle(&e, &mut page);
     assert_eq!(eval(&e, &mut page, "document.getElementById('f').contentWindow.getLog()"), "input:hi,key:Enter:13:true,click,micro");
 }
+
+/// A frame whose realm used ranges in `DOMParser` / `createHTMLDocument`
+/// documents is removed: its realm goes away, and the parent's ranges
+/// (live slots in the parent's own documents) must be untouched by it. A
+/// thread-wide list of released slots used to make the parent's next
+/// `createRange` index documents it doesn't have (the tab crashed) or free
+/// its own ranges' slots. Nodes of the removed frame's document held by
+/// the parent fail with a JS error, never a crash.
+#[test]
+fn removed_frame_realm_leaves_the_parent_ranges_alone() {
+    let mut e = engine();
+    let inner = r#"<p>child</p><script>
+        var d = new DOMParser().parseFromString('<p>a</p><p>b</p>', 'text/html');
+        var h = document.implementation.createHTMLDocument('x');
+        for (var i = 0; i < 6; i++) { var r = d.createRange(); r.selectNodeContents(d.body); var s = h.createRange(); s.selectNodeContents(h.body); var t = document.createRange(); t.selectNodeContents(document.body); }
+        </script>"#;
+    let mut page = load(&mut e, &format!(r#"<p id="x">hello</p><iframe id="f" srcdoc="{}"></iframe>"#, escape_attr(inner)));
+    assert_eq!(eval(&e, &mut page, "window.r1 = document.createRange(); var t = document.getElementById('x').firstChild; r1.setStart(t, 1); r1.setEnd(t, 3); window.kept = document.getElementById('f').contentDocument.body; r1.toString()"), "el");
+    eval(&e, &mut page, "document.getElementById('f').remove()");
+    settle(&e, &mut page);
+    assert_eq!(page.frames.children.len(), 0);
+    let r = eval(&e, &mut page, "var r2 = document.createRange(); r2.selectNodeContents(document.body); var p = new DOMParser().parseFromString('<i>z</i>', 'text/html'); var r3 = p.createRange(); r3.selectNodeContents(p.body); [r1.startContainer.nodeName, r1.startOffset, r1.endOffset, r1.toString(), r3.toString()].join()");
+    assert_eq!(r, "#text,1,3,el,z");
+    let r = eval(&e, &mut page, "var out; try { out = String(kept.firstChild && kept.firstChild.nodeName); } catch (err) { out = 'threw'; } out + ',' + document.getElementById('x').textContent");
+    assert!(r.ends_with(",hello"), "{r}");
+}
