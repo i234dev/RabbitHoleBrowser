@@ -86,8 +86,8 @@ tfoot, tfoot[hidden] { display: table-footer-group; }
 tr, tr[hidden] { display: table-row; }
 td, th { display: table-cell; padding: 1px; vertical-align: middle; }
 th { font-weight: bold; text-align: center; }
-table[border] td, table[border] th { border: 1px solid #a0a0a0; }
-table[border] { border: 1px solid #808080; }
+table[border]:not([border="0"]) td, table[border]:not([border="0"]) th { border: 1px solid #a0a0a0; }
+table[border]:not([border="0"]) { border: 1px solid #808080; }
 
 /* ---- form controls ----
    Geometry and colors of Blink's (refreshed) controls. Blink lays text

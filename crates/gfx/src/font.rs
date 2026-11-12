@@ -127,6 +127,52 @@ impl Default for FontContext {
     }
 }
 
+/// Per character: does it belong to a right-to-left run? Strong Hebrew /
+/// Arabic / Syriac / Thaana / NKo... letters are RTL; neutrals (spaces,
+/// punctuation) between two RTL letters too. `None` when the text has no
+/// RTL letter (the common case, checked on the UTF-8 lead bytes).
+fn rtl_chars(text: &str) -> Option<Vec<bool>> {
+    if !text.bytes().any(|b| b >= 0xD6) {
+        return None;
+    }
+    // 0 neutral, 1 LTR, 2 RTL.
+    let class = |ch: char| -> u8 {
+        let c = ch as u32;
+        if matches!(c, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF) {
+            if ch.is_alphabetic() {
+                2
+            } else {
+                0
+            }
+        } else if ch.is_alphanumeric() {
+            1
+        } else {
+            0
+        }
+    };
+    let classes: Vec<u8> = text.chars().map(class).collect();
+    if !classes.contains(&2) {
+        return None;
+    }
+    let n = classes.len();
+    let mut out = vec![false; n];
+    let mut prev = 0u8;
+    for i in 0..n {
+        out[i] = match classes[i] {
+            2 => true,
+            1 => false,
+            _ => {
+                let next = classes[i + 1..].iter().copied().find(|c| *c != 0).unwrap_or(0);
+                prev == 2 && next == 2
+            }
+        };
+        if classes[i] != 0 {
+            prev = classes[i];
+        }
+    }
+    Some(out)
+}
+
 /// Combining marks, variation selectors and joiners: they belong to the
 /// preceding character's cluster.
 fn is_mark_like(ch: char) -> bool {
@@ -420,7 +466,9 @@ impl FontContext {
         // Segment the text into runs of one face; tabs and zero-width
         // characters are runs of their own (`face == usize::MAX`).
         const SPECIAL: usize = usize::MAX;
-        let mut segs: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, face)
+        let mut segs: Vec<(usize, usize, usize, bool)> = Vec::new(); // (start, end, face, rtl)
+        let dirs = rtl_chars(text);
+        let mut ci = 0usize;
         for (i, ch) in text.char_indices() {
             let end = i + ch.len_utf8();
             let joiner = matches!(ch, '\u{200C}' | '\u{200D}');
@@ -437,12 +485,16 @@ impl FontContext {
                     _ => self.lookup(primary, ch).0,
                 }
             };
+            // Right-to-left runs are shaped on their own (the shaper lays
+            // them out in visual order).
+            let rtl = dirs.as_ref().map(|d| d[ci]).unwrap_or(false);
+            ci += 1;
             match segs.last_mut() {
-                Some(s) if s.2 == face && face != SPECIAL => s.1 = end,
-                _ => segs.push((i, end, face)),
+                Some(s) if s.2 == face && face != SPECIAL && s.3 == rtl => s.1 = end,
+                _ => segs.push((i, end, face, rtl)),
             }
         }
-        for (start, end, face_idx) in segs {
+        for (start, end, face_idx, _) in segs {
             let run = &text[start..end];
             if face_idx == SPECIAL {
                 let ch = run.chars().next().unwrap_or(' ');

@@ -1039,6 +1039,11 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     if el.attr("nowrap").is_some() && matches!(tag, "td" | "th") {
         css.push_str("white-space:nowrap;");
     }
+    if tag == "table" && doc.quirks_mode == rabbithole_dom::QuirksMode::Quirks {
+        // Quirks mode: tables do not inherit text and font properties
+        // (HTML §15.3.3 / Blink's quirks sheet).
+        css.push_str("text-align:start;white-space:normal;line-height:normal;font-weight:normal;font-size:medium;font-style:normal;");
+    }
     if matches!(tag, "table" | "img") {
         if let Some(b) = el.attr("border") {
             let n: f32 = b.trim().parse().unwrap_or(1.0);
