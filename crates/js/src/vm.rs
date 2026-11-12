@@ -1057,6 +1057,9 @@ impl Realm {
         self.define_property(id, names::length(), Value::Number(args.len() as f64), HIDDEN);
         if let Some(c) = callee {
             self.define_property(id, names::callee(), Value::Object(c), HIDDEN);
+        } else if let Some(tte) = self.intrinsics.others.get("ThrowTypeError").copied() {
+            // Unmapped (strict) arguments: callee is a poison-pill accessor.
+            self.define_accessor_values(id, names::callee(), Some(Value::Object(tte)), Some(Value::Object(tte)), 0);
         }
         if let Some(values) = self.intrinsics.others.get("ArrayProtoValues").copied() {
             self.define_property(id, PropertyKey::Symbol(SYM_ITERATOR), Value::Object(values), HIDDEN);
