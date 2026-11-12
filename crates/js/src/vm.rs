@@ -2354,6 +2354,13 @@ impl Realm {
             let kb = code.constants[code.ic_keys[ic as usize] as usize].bits();
             if let Some(m) = self.mega_get(recv, kb) {
                 p = self.ic_get(&m, recv);
+                // A site whose first lookups were all served by the shared
+                // cache never filled its own record: adopt the shared one
+                // (a monomorphic site would otherwise take this path on
+                // every execution).
+                if p.is_some() && rec.kind == crate::ic::IC_NONE {
+                    code.ics[ic as usize].set(m);
+                }
             }
         }
         match p {
@@ -2404,6 +2411,7 @@ impl Realm {
                 V::String(s) => s,
                 _ => unreachable!(),
             };
+            let site_empty = rec.kind == crate::ic::IC_NONE;
             for attempt in 0..2 {
                 if attempt == 1 {
                     // Polymorphic site: the shared cache by (shape, key).
@@ -2414,6 +2422,9 @@ impl Realm {
                 }
                 if rec.kind == crate::ic::IC_SETTER {
                     if let Some(f) = self.ic_setter(&rec, &self.vstack[os]) {
+                        if attempt == 1 && site_empty {
+                            code.ics[ic as usize].set(rec);
+                        }
                         let (recv, val) = (self.vstack[os].clone(), self.vstack[vs].clone());
                         self.call(Value::Object(f), recv, &[val])?;
                         return Ok(if self.frames.len() != fi + 1 { Flow::Reload } else { Flow::Next });
@@ -2422,7 +2433,14 @@ impl Realm {
                     let val = self.vstack[vs].clone();
                     let recv = self.vstack[os].clone();
                     match self.ic_set(&rec, &recv, key, val) {
-                        Ok(()) => return Ok(Flow::Next),
+                        Ok(()) => {
+                            // As for reads: an empty site adopts the shared
+                            // record that served it.
+                            if attempt == 1 && site_empty {
+                                code.ics[ic as usize].set(rec);
+                            }
+                            return Ok(Flow::Next);
+                        }
                         Err(v) => drop(v),
                     }
                 }
