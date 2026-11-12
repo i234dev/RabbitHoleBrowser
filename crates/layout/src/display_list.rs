@@ -94,6 +94,20 @@ pub enum DisplayItem {
     /// Mask of the layer closed by the next `PopLayer` (`mask-image`):
     /// the alpha of these items scales the layer's contribution.
     LayerMask(Vec<DisplayItem>),
+    /// `filter`: `items` (the element's painting) rendered offscreen
+    /// within `bounds` and filtered before being composited.
+    Filtered {
+        bounds: Rect,
+        filters: Vec<rabbithole_style::FilterOp>,
+        items: Vec<DisplayItem>,
+    },
+    /// `backdrop-filter`: what is already painted inside `rect` (clipped to
+    /// `radii`) is filtered in place.
+    BackdropFilter {
+        rect: Rect,
+        radii: Radii,
+        filters: Vec<rabbithole_style::FilterOp>,
+    },
     /// Items inside are in viewport coordinates (not scrolled).
     PushFixed,
     PopFixed,
@@ -283,6 +297,8 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         hits: HitList::default(),
         scope: None,
         hoisted: top_layer.iter().map(|(_, b)| *b as *const LayoutBox as usize).collect(),
+        flipped: false,
+        wm_bg: None,
     };
     p.paint_stacking_context(root, bounds);
     for (node, b) in top_layer {
@@ -308,6 +324,12 @@ struct Painter<'l, 't, 'a> {
     /// from inside a positioned `z-index: auto` ancestor (see
     /// [`Painter::collect_hoisted`]); that ancestor skips them.
     hoisted: std::collections::HashSet<usize>,
+    /// Inside an odd number of reflections (`vertical-lr` subtrees): text
+    /// is flipped back locally so glyphs read sideways, not mirrored.
+    flipped: bool,
+    /// The box a vertical-mode wrapper turns, with the wrapper's physical
+    /// rect, mapping and background layers: painted in physical space.
+    wm_bg: Option<(usize, Rect, Matrix, std::rc::Rc<rabbithole_style::ComputedStyle>)>,
 }
 
 /// Painting phases of the in-flow content of a stacking context.
@@ -406,6 +428,16 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
         let mut pushed_matrix = false;
+        let saved_flip = self.flipped;
+        let saved_wm_bg = self.wm_bg.take();
+        if let (Some(m), Some(bg), Some(inner)) = (root.transform_matrix().filter(|_| root.wm_transform.is_some()), root.wm_background.clone(), root.children.first()) {
+            self.wm_bg = Some((inner as *const LayoutBox as usize, root.rect, m, bg));
+        }
+        if let Some(m) = root.wm_transform {
+            if m[0] * m[3] - m[1] * m[2] < 0.0 {
+                self.flipped = !self.flipped;
+            }
+        }
         if let Some(m) = root.transform_matrix() {
             self.list.push(DisplayItem::PushTransform(m));
             let inverse = crate::tree::invert_matrix(m);
@@ -427,14 +459,30 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.sticky.truncate(sticky_start);
             self.scope = saved_scope;
             self.bounds = saved_bounds;
+            self.flipped = saved_flip;
+            self.wm_bg = saved_wm_bg;
             return;
+        }
+        if !root.style.backdrop_filters.is_empty() && root.style.visibility != Visibility::Hidden {
+            let r = root.rect;
+            self.list.push(DisplayItem::BackdropFilter { rect: r, radii: root.style.resolved_radii(r.w, r.h), filters: root.style.backdrop_filters.clone() });
         }
         let mask = self.mask_items(root);
         let layer = layer || mask.is_some();
         if layer {
             self.list.push(DisplayItem::PushLayer(root.subtree_bounds()));
         }
+        let filter_start = (self.list.items.len(), self.list.sticky.len());
         self.paint_stacking_context_inner(root);
+        // `filter`: the painted items move into a filtered group (not
+        // around sticky descendants, whose items are patched in place).
+        if !root.style.filters.is_empty() && self.list.sticky.len() == filter_start.1 {
+            let items: Vec<DisplayItem> = self.list.items.drain(filter_start.0..).collect();
+            let e = crate::filter::spread(&root.style.filters);
+            let b = root.subtree_bounds();
+            let bounds = Rect::new(b.x - e, b.y - e, b.w + 2.0 * e, b.h + 2.0 * e);
+            self.list.push(DisplayItem::Filtered { bounds, filters: root.style.filters.clone(), items });
+        }
         if let Some(items) = mask {
             self.list.push(DisplayItem::LayerMask(items));
         }
@@ -444,6 +492,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         self.pop_wrappers(pushed_matrix, pushed_transform);
         self.scope = saved_scope;
         self.bounds = saved_bounds;
+        self.flipped = saved_flip;
+        self.wm_bg = saved_wm_bg;
     }
 
     /// The mask of a box with `mask-image` layers: its mask layers painted
@@ -787,6 +837,21 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         if !skip_bg {
             background::paint_backgrounds(self.list, &geom, style, self.ctx.background_images, vp);
+            // A vertical box's background images, unturned.
+            if let Some((ptr, prect, m, bg)) = self.wm_bg.clone() {
+                if ptr == b as *const LayoutBox as usize {
+                    if let Some(inv) = crate::tree::invert_matrix(m) {
+                        self.list.push(DisplayItem::PushTransform(inv));
+                        let bw = bg.border_width;
+                        let pad = crate::block::resolve_edges(&bg.padding, prect.w);
+                        let padding = Rect::new(prect.x + bw.left, prect.y + bw.top, (prect.w - bw.left - bw.right).max(0.0), (prect.h - bw.top - bw.bottom).max(0.0));
+                        let content = Rect::new(padding.x + pad.left, padding.y + pad.top, (padding.w - pad.left - pad.right).max(0.0), (padding.h - pad.top - pad.bottom).max(0.0));
+                        let pgeom = BoxGeometry { border: prect, padding, content, radii: bg.resolved_radii(prect.w, prect.h), border_width: bw };
+                        background::paint_backgrounds(self.list, &pgeom, &bg, self.ctx.background_images, vp);
+                        self.list.push(DisplayItem::PopTransform);
+                    }
+                }
+            }
         }
         background::paint_box_shadows(self.list, &geom, &style.box_shadow, true);
         if style.has_visible_border() {
@@ -1170,6 +1235,10 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         if !self.visible(&f.rect) {
                             continue;
                         }
+                        if self.flipped {
+                            let cy = f.rect.y + f.rect.h / 2.0;
+                            self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * cy]));
+                        }
                         self.list.push(DisplayItem::Text {
                             x: f.rect.x,
                             y: f.baseline,
@@ -1184,6 +1253,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         });
                         if decoration.any() {
                             self.paint_decorations(f.rect, f.baseline, *size, *color, decoration_info);
+                        }
+                        if self.flipped {
+                            self.list.push(DisplayItem::PopTransform);
                         }
                     }
                     FragmentKind::Box(i) => {

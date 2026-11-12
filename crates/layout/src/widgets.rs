@@ -141,7 +141,12 @@ pub(crate) fn widget(b: &LayoutBox, ctx: &LayoutContext) -> Option<Widget> {
     if r.w <= 0.0 || r.h <= 0.0 {
         return None;
     }
-    let auto = style.appearance != Appearance::None;
+    let mut auto = style.appearance != Appearance::None;
+    // Author backgrounds / borders devolve color wells, progress bars and
+    // meters to their primitive look (CSS UI 4 §6.2.3).
+    if style.author_widget_style && (matches!(tag, "progress" | "meter") || (tag == "input" && input_type(doc, node) == "color")) {
+        auto = false;
+    }
     match tag {
         "input" => {
             let ty = input_type(doc, node);

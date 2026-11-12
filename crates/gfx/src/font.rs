@@ -181,11 +181,32 @@ fn is_mark_like(ch: char) -> bool {
         | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x200C | 0x200D | 0x20D0..=0x20FF | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F | 0xE0100..=0xE01EF)
 }
 
+/// Bidi_Mirroring_Glyph of common paired punctuation.
+fn mirror_bracket(c: char) -> char {
+    match c {
+        '(' => ')',
+        ')' => '(',
+        '[' => ']',
+        ']' => '[',
+        '{' => '}',
+        '}' => '{',
+        '<' => '>',
+        '>' => '<',
+        '\u{AB}' => '\u{BB}',
+        '\u{BB}' => '\u{AB}',
+        '\u{2039}' => '\u{203A}',
+        '\u{203A}' => '\u{2039}',
+        c => c,
+    }
+}
+
 fn is_zero_width(ch: char) -> bool {
     matches!(
         ch,
         '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}' | '\u{2060}' | '\u{200E}' | '\u{200F}'
-    ) || (ch.is_control() && ch != '\t')
+            | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    ) // Other control characters are visible (CSS Text 3 §4.1.1).
+        || matches!(ch, '\n' | '\r' | '\u{0C}' | '\0')
 }
 
 pub(crate) fn fontdue_settings() -> fontdue::FontSettings {
@@ -459,6 +480,24 @@ impl FontContext {
 
     /// [`FontContext::shape`] with explicit font features.
     pub fn shape_with(&self, font: FontId, size: f32, text: &str, letter_spacing: f32, features: crate::ShapeFeatures) -> Vec<ShapedGlyph> {
+        // A leading RLO / LRO (put there by bidi layout) gives the whole run
+        // its direction: right-to-left runs come out in visual order.
+        let (forced, skip) = match text.chars().next() {
+            Some('\u{202E}') => (Some(true), 3),
+            Some('\u{202D}') => (Some(false), 3),
+            _ => (None, 0),
+        };
+        let text = &text[skip..];
+        let mut out = self.shape_dir(font, size, text, letter_spacing, features, forced);
+        if skip > 0 {
+            for g in &mut out {
+                g.byte_index += skip;
+            }
+        }
+        out
+    }
+
+    fn shape_dir(&self, font: FontId, size: f32, text: &str, letter_spacing: f32, features: crate::ShapeFeatures, forced: Option<bool>) -> Vec<ShapedGlyph> {
         let primary = self.resolve_index(font.0);
         let primary_face = self.face(primary);
         let mut out = Vec::with_capacity(text.len());
@@ -467,7 +506,11 @@ impl FontContext {
         // characters are runs of their own (`face == usize::MAX`).
         const SPECIAL: usize = usize::MAX;
         let mut segs: Vec<(usize, usize, usize, bool)> = Vec::new(); // (start, end, face, rtl)
-        let dirs = rtl_chars(text);
+        let dirs = match forced {
+            Some(true) => Some(vec![true; text.chars().count()]),
+            Some(false) => None,
+            None => rtl_chars(text),
+        };
         let mut ci = 0usize;
         for (i, ch) in text.char_indices() {
             let end = i + ch.len_utf8();
@@ -494,7 +537,7 @@ impl FontContext {
                 _ => segs.push((i, end, face, rtl)),
             }
         }
-        for (start, end, face_idx, _) in segs {
+        for (start, end, face_idx, seg_rtl) in segs {
             let run = &text[start..end];
             if face_idx == SPECIAL {
                 let ch = run.chars().next().unwrap_or(' ');
@@ -509,7 +552,8 @@ impl FontContext {
                 continue;
             }
             if self.wants_shaping(face_idx) {
-                if let Some(units) = self.shape_units(face_idx, run, features) {
+                let dir = if forced.is_some() || seg_rtl { Some(seg_rtl) } else { None };
+                if let Some(units) = self.shape_units(face_idx, run, features, dir) {
                     let scale = size / units.upem.max(1.0);
                     for g in &units.glyphs {
                         let mut adv = g.x_advance as f32 * scale;
@@ -530,10 +574,16 @@ impl FontContext {
                     continue;
                 }
             }
-            // No layout tables: advances plus `kern` pairs.
+            // No layout tables: advances plus `kern` pairs (right-to-left
+            // runs in reverse, with mirrored brackets).
             let face = self.face(face_idx);
             let mut prev: Option<u16> = None;
-            for (bi, ch) in run.char_indices() {
+            let chars: Vec<(usize, char)> = if seg_rtl {
+                run.char_indices().rev().map(|(i, c)| (i, mirror_bracket(c))).collect()
+            } else {
+                run.char_indices().collect()
+            };
+            for (bi, ch) in chars {
                 let glyph = face.lookup_glyph_index(ch);
                 if let Some(pg) = prev {
                     if let Some(k) = face.horizontal_kern_indexed(pg, glyph, size) {

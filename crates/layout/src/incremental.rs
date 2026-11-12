@@ -98,7 +98,9 @@ impl Reuse {
     pub(crate) fn take(&self, node: NodeId, style: &Rc<ComputedStyle>) -> Option<LayoutBox> {
         let mut map = self.map.borrow_mut();
         let old = map.remove(&node)?;
-        if !self.tainted.contains(&node) && old.built_from.as_ref().is_some_and(|s| Rc::ptr_eq(s, style)) {
+        // Vertical subtrees are rebuilt (their boxes are transposed and
+        // wrapped after building).
+        if !self.tainted.contains(&node) && !style.writing_mode.is_vertical() && old.built_from.as_ref().is_some_and(|s| Rc::ptr_eq(s, style)) {
             return Some(old);
         }
         dismantle(old, &mut map);

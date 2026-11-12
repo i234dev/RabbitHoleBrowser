@@ -426,6 +426,9 @@ pub enum ContentDistribution {
 pub enum ItemAlign {
     /// `auto` (align-self / justify-self only): use the container's value.
     Auto,
+    /// `normal`: stretch for grid and flex items (start for replaced
+    /// grid items and in the stacking axis of grid lanes).
+    Normal,
     Stretch,
     FlexStart,
     FlexEnd,
@@ -503,6 +506,16 @@ pub enum GridLine {
     Span(u32),
     /// `<custom-ident>` or `span <ident>` (name, span)
     Named(String, bool),
+}
+
+/// `grid-lanes-direction: normal | [ row | column ] [ fill-reverse || track-reverse ]?`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GridLanesDirection {
+    /// `None` = `normal`; `Some(true)` = `row` (row lanes: the block
+    /// axis is the grid axis), `Some(false)` = `column`.
+    pub rows: Option<bool>,
+    pub fill_reverse: bool,
+    pub track_reverse: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -679,6 +692,51 @@ pub enum ObjectFit {
 pub enum Direction {
     Ltr,
     Rtl,
+}
+
+/// A `filter` / `backdrop-filter` function (Filter Effects 1 §5).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilterOp {
+    /// Standard deviation in px.
+    Blur(f32),
+    Brightness(f32),
+    Contrast(f32),
+    Grayscale(f32),
+    Sepia(f32),
+    Saturate(f32),
+    /// Radians.
+    HueRotate(f32),
+    Invert(f32),
+    Opacity(f32),
+    DropShadow { x: f32, y: f32, blur: f32, color: Color },
+}
+
+/// `writing-mode` (`sideways-rl` is treated as `vertical-rl`: Latin text
+/// is set sideways in both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritingMode {
+    HorizontalTb,
+    VerticalRl,
+    VerticalLr,
+    /// Lines left to right, text bottom to top.
+    SidewaysLr,
+}
+
+impl WritingMode {
+    pub fn is_vertical(self) -> bool {
+        self != WritingMode::HorizontalTb
+    }
+}
+
+/// `unicode-bidi`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnicodeBidi {
+    Normal,
+    Embed,
+    Isolate,
+    BidiOverride,
+    IsolateOverride,
+    Plaintext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -884,6 +942,16 @@ pub struct ComputedStyle {
     pub grid_auto_columns: Vec<TrackSize>,
     pub grid_auto_rows: Vec<TrackSize>,
     pub grid_auto_flow: GridAutoFlow,
+    /// `display: grid-lanes` / `inline-grid-lanes` (CSS Grid 3): `display`
+    /// is `Grid` / `InlineGrid` with this flag.
+    pub grid_lanes: bool,
+    /// `grid-lanes-direction`.
+    pub grid_lanes_direction: GridLanesDirection,
+    /// `grid-lanes-pack: dense`.
+    pub grid_lanes_dense: bool,
+    /// `fit-tolerance` (`None` = `normal`, 1em in grid lanes layout;
+    /// `Some(INFINITY)` = `infinite`).
+    pub fit_tolerance: Option<Length>,
     /// Rows of area names (`.` for none).
     pub grid_template_areas: Vec<Vec<String>>,
     pub grid_row_start: GridLine,
@@ -915,6 +983,13 @@ pub struct ComputedStyle {
     pub outline_offset: f32,
     /// `filter: opacity()/blur()/grayscale()` — only opacity is applied (multiplied into `opacity`).
     pub backdrop: bool,
+    /// SVG presentation properties declared for the element by the page
+    /// (`fill`, `stroke`, ...), as specified tokens, for the SVG renderer.
+    pub svg_props: Vec<(String, Vec<rabbithole_css::Token>)>,
+    /// `filter` functions (in order).
+    pub filters: Vec<FilterOp>,
+    /// `backdrop-filter` functions.
+    pub backdrop_filters: Vec<FilterOp>,
     pub clip_overflow_text: bool,
 
     // ---- text
@@ -925,6 +1000,13 @@ pub struct ComputedStyle {
     pub text_decoration_style: TextDecorationStyle,
     pub text_decoration_thickness: Option<f32>,
     pub direction: Direction,
+    /// `writing-mode` (inherited).
+    pub writing_mode: WritingMode,
+    /// `unicode-bidi` (not inherited).
+    pub unicode_bidi: UnicodeBidi,
+    /// Layout-internal: a vertical writing mode's style transposed into
+    /// its logical (horizontal) layout space.
+    pub layout_transposed: bool,
     pub tab_size: f32,
     /// `-webkit-line-clamp`
     pub line_clamp: Option<u32>,
@@ -934,6 +1016,10 @@ pub struct ComputedStyle {
     pub contain_paint: bool,
     pub contain_layout: bool,
     pub contain_size: bool,
+    /// `contain-intrinsic-width` / `-height` (px; `None` = `none`): the
+    /// size a size-contained box is laid out as.
+    pub contain_intrinsic_width: Option<f32>,
+    pub contain_intrinsic_height: Option<f32>,
     /// `line_clamp` came from `-webkit-line-clamp` (applies only to
     /// `display: -webkit-box` with `-webkit-box-orient: vertical`).
     pub line_clamp_prefixed: bool,
@@ -1045,7 +1131,7 @@ impl ComputedStyle {
             flex_basis: Length::Auto,
             flex_wrap: FlexWrap::NoWrap,
             justify_content: ContentDistribution::FlexStart,
-            align_items: ItemAlign::Stretch,
+            align_items: ItemAlign::Normal,
             align_self: ItemAlign::Auto,
             align_content: ContentDistribution::Stretch,
             order: 0,
@@ -1056,12 +1142,16 @@ impl ComputedStyle {
             grid_auto_columns: Vec::new(),
             grid_auto_rows: Vec::new(),
             grid_auto_flow: GridAutoFlow::Row,
+            grid_lanes: false,
+            grid_lanes_direction: GridLanesDirection::default(),
+            grid_lanes_dense: false,
+            fit_tolerance: None,
             grid_template_areas: Vec::new(),
             grid_row_start: GridLine::Auto,
             grid_row_end: GridLine::Auto,
             grid_column_start: GridLine::Auto,
             grid_column_end: GridLine::Auto,
-            justify_items: ItemAlign::Stretch,
+            justify_items: ItemAlign::Normal,
             justify_self: ItemAlign::Auto,
             background_layers: Vec::new(),
             mask_layers: Vec::new(),
@@ -1075,6 +1165,9 @@ impl ComputedStyle {
             outline_color: None,
             outline_offset: 0.0,
             backdrop: false,
+            svg_props: Vec::new(),
+            filters: Vec::new(),
+            backdrop_filters: Vec::new(),
             clip_overflow_text: false,
             text_overflow: TextOverflow::Clip,
             word_break: WordBreak::Normal,
@@ -1083,12 +1176,17 @@ impl ComputedStyle {
             text_decoration_style: TextDecorationStyle::Solid,
             text_decoration_thickness: None,
             direction: Direction::Ltr,
+            writing_mode: WritingMode::HorizontalTb,
+            unicode_bidi: UnicodeBidi::Normal,
+            layout_transposed: false,
             tab_size: 8.0,
             line_clamp: None,
             content_visibility_hidden: false,
             contain_paint: false,
             contain_layout: false,
             contain_size: false,
+            contain_intrinsic_width: None,
+            contain_intrinsic_height: None,
             line_clamp_prefixed: false,
             webkit_box: false,
             font_family_list: Vec::new(),
@@ -1150,6 +1248,7 @@ impl ComputedStyle {
             word_break: parent.word_break,
             overflow_wrap: parent.overflow_wrap,
             direction: parent.direction,
+            writing_mode: parent.writing_mode,
             tab_size: parent.tab_size,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
@@ -1194,6 +1293,7 @@ impl ComputedStyle {
             && self.word_break == o.word_break
             && self.overflow_wrap == o.overflow_wrap
             && self.direction == o.direction
+            && self.writing_mode == o.writing_mode
             && self.tab_size == o.tab_size
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps

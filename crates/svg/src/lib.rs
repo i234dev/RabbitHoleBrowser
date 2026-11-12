@@ -10,6 +10,7 @@ mod color;
 mod paint;
 mod parse;
 mod style;
+pub use style::tokens_to_string;
 mod text;
 mod units;
 

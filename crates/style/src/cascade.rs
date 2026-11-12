@@ -680,7 +680,7 @@ fn apply_declarations(
     // backgrounds, shadows...) is the element's final color, whatever the
     // declaration order.
     for (name, value, base) in &resolved {
-        if *name == "color" {
+        if matches!(*name, "color" | "writing-mode" | "-webkit-writing-mode" | "direction") {
             let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
             apply_property(name, value, &mut style, parent, &ctx);
         }
@@ -691,7 +691,7 @@ fn apply_declarations(
     style.border_color = Edges::all(style.color);
     style.border_width = Edges::all(3.0);
     for (i, (name, value, base)) in resolved.iter().enumerate() {
-        if *name == "font-size" || *name == "color" {
+        if matches!(*name, "font-size" | "color" | "writing-mode" | "-webkit-writing-mode" | "direction") {
             continue;
         }
         let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
@@ -996,6 +996,41 @@ fn substitute_vars(value: &[Token], vars: &Vars, depth: u32) -> Option<Vec<Token
 
 /// Presentational hints of an element as CSS text (`None` when there are
 /// none); parsed through the cascade's declaration cache.
+/// Direction of the first strong character of a string (`Some(true)` for
+/// right-to-left).
+fn first_strong_rtl(s: &str) -> Option<bool> {
+    for c in s.chars() {
+        let cp = c as u32;
+        if matches!(cp, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF) && c.is_alphabetic() {
+            return Some(true);
+        }
+        if c.is_alphabetic() {
+            return Some(false);
+        }
+    }
+    None
+}
+
+/// The auto direction of an element: its first strong character, skipping
+/// `bdi`, `script`, `style`, `textarea` and elements with a `dir`.
+fn auto_direction(doc: &Document, node: NodeId) -> Option<bool> {
+    for c in doc.children(node) {
+        if let Some(t) = doc.text(c) {
+            if let Some(d) = first_strong_rtl(t) {
+                return Some(d);
+            }
+        } else if let Some(e) = doc.element(c) {
+            if matches!(e.tag.as_str(), "bdi" | "script" | "style" | "textarea") || e.attr("dir").is_some() {
+                continue;
+            }
+            if let Some(d) = auto_direction(doc, c) {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
 fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     let el = doc.element(node)?;
     let mut css = String::new();
@@ -1026,6 +1061,22 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     }
     if let Some(c) = el.attr("bgcolor") {
         css.push_str(&format!("background-color:{};", legacy_color(c)));
+    }
+    // `dir=auto` (and `bdi` without a valid `dir`): the direction of the
+    // first strong character of the element's text (HTML §3.2.6.4).
+    let dir = el.attr("dir").map(|d| d.trim().to_ascii_lowercase());
+    let auto = match dir.as_deref() {
+        Some("auto") => true,
+        Some("ltr" | "rtl") => false,
+        _ => tag == "bdi",
+    };
+    if auto {
+        let rtl = if tag == "textarea" || tag == "input" {
+            el.attr("value").and_then(first_strong_rtl).unwrap_or(false)
+        } else {
+            auto_direction(doc, node).unwrap_or(false)
+        };
+        css.push_str(if rtl { "direction:rtl;" } else { "direction:ltr;" });
     }
     if tag == "body" {
         if let Some(c) = el.attr("text") {
@@ -1283,6 +1334,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "display" => {
             to.display = from.display;
             to.webkit_box = from.webkit_box;
+            to.grid_lanes = from.grid_lanes;
         }
         "position" => to.position = from.position,
         "float" => to.float = from.float,
@@ -1423,6 +1475,29 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "grid-auto-columns" => to.grid_auto_columns = from.grid_auto_columns.clone(),
         "grid-auto-rows" => to.grid_auto_rows = from.grid_auto_rows.clone(),
         "grid-auto-flow" => to.grid_auto_flow = from.grid_auto_flow,
+        "filter" | "-webkit-filter" => {
+            to.filters = from.filters.clone();
+            to.opacity = from.opacity;
+            to.creates_stacking_context = from.creates_stacking_context;
+        }
+        "backdrop-filter" | "-webkit-backdrop-filter" => {
+            to.backdrop = from.backdrop;
+            to.backdrop_filters = from.backdrop_filters.clone();
+        }
+        "contain-intrinsic-size" => {
+            to.contain_intrinsic_width = from.contain_intrinsic_width;
+            to.contain_intrinsic_height = from.contain_intrinsic_height;
+        }
+        "contain-intrinsic-width" | "contain-intrinsic-inline-size" => to.contain_intrinsic_width = from.contain_intrinsic_width,
+        "contain-intrinsic-height" | "contain-intrinsic-block-size" => to.contain_intrinsic_height = from.contain_intrinsic_height,
+        "grid-lanes-direction" => to.grid_lanes_direction = from.grid_lanes_direction,
+        "grid-lanes-pack" => to.grid_lanes_dense = from.grid_lanes_dense,
+        "fit-tolerance" | "flow-tolerance" => to.fit_tolerance = from.fit_tolerance,
+        "grid-lanes" => {
+            to.grid_lanes_direction = from.grid_lanes_direction;
+            to.grid_template_columns = from.grid_template_columns.clone();
+            to.grid_template_rows = from.grid_template_rows.clone();
+        }
         "grid-row" | "grid-area" | "grid-column" => {
             to.grid_row_start = from.grid_row_start.clone();
             to.grid_row_end = from.grid_row_end.clone();
@@ -1463,6 +1538,8 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "text-decoration-style" => to.text_decoration_style = from.text_decoration_style,
         "text-decoration-thickness" => to.text_decoration_thickness = from.text_decoration_thickness,
         "direction" => to.direction = from.direction,
+        "writing-mode" | "-webkit-writing-mode" => to.writing_mode = from.writing_mode,
+        "unicode-bidi" => to.unicode_bidi = from.unicode_bidi,
         "tab-size" => to.tab_size = from.tab_size,
         "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
         "contain" => {
@@ -1501,7 +1578,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "caption-side" => to.caption_side_bottom = from.caption_side_bottom,
         "empty-cells" => to.empty_cells_hide = from.empty_cells_hide,
         "scroll-margin-top" => to.scroll_margin_top = from.scroll_margin_top,
-        "filter" | "isolation" | "will-change" | "mix-blend-mode" => to.creates_stacking_context = from.creates_stacking_context,
+        "isolation" | "will-change" | "mix-blend-mode" => to.creates_stacking_context = from.creates_stacking_context,
         _ => {}
     }
 }
@@ -1637,6 +1714,8 @@ fn display_of(comps: &[&[Token]]) -> Option<Display> {
             "inline-flex" | "-webkit-inline-box" | "-webkit-inline-flex" => Display::InlineFlex,
             "grid" | "-ms-grid" => Display::Grid,
             "inline-grid" => Display::InlineGrid,
+            "grid-lanes" => Display::Grid,
+            "inline-grid-lanes" => Display::InlineGrid,
             "table" => Display::Table,
             "inline-table" => Display::InlineTable,
             "table-row" => Display::TableRow,
@@ -1654,8 +1733,8 @@ fn display_of(comps: &[&[Token]]) -> Option<Display> {
     }
     // Two-value syntax: <outer> <inner>
     let outer_inline = idents.iter().any(|i| i == "inline");
-    let inner = idents.iter().find(|i| matches!(i.as_str(), "flow" | "flow-root" | "flex" | "grid" | "table" | "list-item"));
-    Some(match (outer_inline, inner.map(|s| s.as_str())) {
+    let inner = idents.iter().find(|i| matches!(i.as_str(), "flow" | "flow-root" | "flex" | "grid" | "grid-lanes" | "table" | "list-item"));
+    Some(match (outer_inline, inner.map(|s| if s == "grid-lanes" { "grid" } else { s.as_str() })) {
         (true, Some("flow")) => Display::Inline,
         (true, Some("flow-root")) => Display::InlineBlock,
         (true, Some("flex")) => Display::InlineFlex,
@@ -1839,42 +1918,127 @@ const SINGLE_VALUE: &[&str] = &[
     "border-collapse", "table-layout", "caption-side", "empty-cells",
 ];
 
-fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) {
-    // Logical property aliases.
-    let name = match name {
-        "margin-inline-start" => "margin-left",
-        "margin-inline-end" => "margin-right",
-        "margin-block-start" => "margin-top",
-        "margin-block-end" => "margin-bottom",
-        "padding-inline-start" => "padding-left",
-        "padding-inline-end" => "padding-right",
-        "padding-block-start" => "padding-top",
-        "padding-block-end" => "padding-bottom",
-        "inset-inline-start" => "left",
-        "inset-inline-end" => "right",
-        "inset-block-start" => "top",
-        "inset-block-end" => "bottom",
-        "inline-size" => "width",
-        "block-size" => "height",
-        "min-inline-size" => "min-width",
-        "max-inline-size" => "max-width",
-        "min-block-size" => "min-height",
-        "max-block-size" => "max-height",
-        "border-inline-start" => "border-left",
-        "border-inline-end" => "border-right",
-        "border-block-start" => "border-top",
-        "border-block-end" => "border-bottom",
-        "border-inline-start-width" => "border-left-width",
-        "border-inline-end-width" => "border-right-width",
-        "border-inline-start-color" => "border-left-color",
-        "border-inline-end-color" => "border-right-color",
-        "border-inline-start-style" => "border-left-style",
-        "border-inline-end-style" => "border-right-style",
-        "border-start-start-radius" | "border-start-end-radius" | "border-end-start-radius" | "border-end-end-radius" => {
-            "border-top-left-radius"
+/// Two-sided logical shorthands: (start longhand, end longhand, whether
+/// the value is a `start end` pair rather than one value for both).
+fn logical_pair(name: &str) -> Option<(&'static str, &'static str, bool)> {
+    Some(match name {
+        "margin-inline" => ("margin-inline-start", "margin-inline-end", true),
+        "margin-block" => ("margin-block-start", "margin-block-end", true),
+        "padding-inline" => ("padding-inline-start", "padding-inline-end", true),
+        "padding-block" => ("padding-block-start", "padding-block-end", true),
+        "inset-inline" => ("inset-inline-start", "inset-inline-end", true),
+        "inset-block" => ("inset-block-start", "inset-block-end", true),
+        "border-inline-width" => ("border-inline-start-width", "border-inline-end-width", true),
+        "border-block-width" => ("border-block-start-width", "border-block-end-width", true),
+        "border-inline-color" => ("border-inline-start-color", "border-inline-end-color", true),
+        "border-block-color" => ("border-block-start-color", "border-block-end-color", true),
+        "border-inline-style" => ("border-inline-start-style", "border-inline-end-style", true),
+        "border-block-style" => ("border-block-start-style", "border-block-end-style", true),
+        "border-inline" => ("border-inline-start", "border-inline-end", false),
+        "border-block" => ("border-block-start", "border-block-end", false),
+        _ => return None,
+    })
+}
+
+/// The physical side for a flow-relative one (`block-start`, ...).
+fn physical_side(side: &str, wm: WritingMode, rtl: bool) -> &'static str {
+    let vertical = wm.is_vertical();
+    match side {
+        "block-start" => match wm {
+            WritingMode::HorizontalTb => "top",
+            WritingMode::VerticalRl => "right",
+            WritingMode::VerticalLr | WritingMode::SidewaysLr => "left",
+        },
+        "block-end" => match wm {
+            WritingMode::HorizontalTb => "bottom",
+            WritingMode::VerticalRl => "left",
+            WritingMode::VerticalLr | WritingMode::SidewaysLr => "right",
+        },
+        // sideways-lr: the inline axis runs bottom to top.
+        "inline-start" if wm == WritingMode::SidewaysLr => if rtl { "top" } else { "bottom" },
+        "inline-end" if wm == WritingMode::SidewaysLr => if rtl { "bottom" } else { "top" },
+        "inline-start" => match (vertical, rtl) {
+            (false, false) => "left",
+            (false, true) => "right",
+            (true, false) => "top",
+            (true, true) => "bottom",
+        },
+        _ => match (vertical, rtl) {
+            (false, false) => "right",
+            (false, true) => "left",
+            (true, false) => "bottom",
+            (true, true) => "top",
+        },
+    }
+}
+
+/// Map a flow-relative longhand to its physical property for the
+/// element's writing mode and direction (CSS Logical Properties §4).
+fn logical_to_physical(name: &str, wm: WritingMode, rtl: bool) -> Option<String> {
+    let vertical = wm.is_vertical();
+    let size = |inline: bool| if inline != vertical { "width" } else { "height" };
+    match name {
+        "inline-size" => return Some(size(true).into()),
+        "block-size" => return Some(size(false).into()),
+        "min-inline-size" => return Some(format!("min-{}", size(true))),
+        "max-inline-size" => return Some(format!("max-{}", size(true))),
+        "min-block-size" => return Some(format!("min-{}", size(false))),
+        "max-block-size" => return Some(format!("max-{}", size(false))),
+        _ => {}
+    }
+    if let Some(corner) = name.strip_prefix("border-").and_then(|r| r.strip_suffix("-radius")) {
+        let (b, i) = corner.split_once('-')?;
+        if !matches!(b, "start" | "end") || !matches!(i, "start" | "end") {
+            return None;
         }
-        n => n,
-    };
+        let bs = physical_side(&format!("block-{b}"), wm, rtl);
+        let is = physical_side(&format!("inline-{i}"), wm, rtl);
+        return Some(if vertical { format!("border-{is}-{bs}-radius") } else { format!("border-{bs}-{is}-radius") });
+    }
+    for prefix in ["margin-", "padding-", "inset-", "border-"] {
+        let Some(rest) = name.strip_prefix(prefix) else { continue };
+        for side in ["block-start", "block-end", "inline-start", "inline-end"] {
+            let Some(suffix) = rest.strip_prefix(side) else { continue };
+            if !matches!(suffix, "" | "-width" | "-color" | "-style") || (prefix != "border-" && !suffix.is_empty()) {
+                return None;
+            }
+            let phys = physical_side(side, wm, rtl);
+            return Some(if prefix == "inset-" { phys.to_string() } else { format!("{prefix}{phys}{suffix}") });
+        }
+    }
+    None
+}
+
+/// SVG presentation properties kept for the SVG renderer.
+const SVG_PROPS: &[&str] = &[
+    "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
+    "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "text-anchor", "paint-order", "vector-effect", "stop-color",
+    "stop-opacity", "clip-rule",
+];
+
+fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) {
+    if SVG_PROPS.contains(&name) {
+        let v = value.to_vec();
+        match style.svg_props.iter_mut().find(|(n, _)| n == name) {
+            Some(slot) => slot.1 = v,
+            None => style.svg_props.push((name.to_string(), v)),
+        }
+        return;
+    }
+    if let Some((start, end, pair)) = logical_pair(name) {
+        let comps = values::components(value);
+        if pair && wide_keyword(value).is_none() && comps.len() == 2 {
+            apply_property(start, comps[0], style, parent, ctx);
+            apply_property(end, comps[1], style, parent, ctx);
+        } else if !pair || comps.len() == 1 || wide_keyword(value).is_some() {
+            apply_property(start, value, style, parent, ctx);
+            apply_property(end, value, style, parent, ctx);
+        }
+        return;
+    }
+    // Flow-relative longhands map to physical ones.
+    let mapped = logical_to_physical(name, style.writing_mode, style.direction == Direction::Rtl);
+    let name = mapped.as_deref().unwrap_or(name);
 
     if let Some(w) = wide_keyword(value) {
         let initial = ComputedStyle::initial();
@@ -1918,6 +2082,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             if let Some(d) = display_of(&comps) {
                 style.display = d;
                 style.webkit_box = comps.len() == 1 && values::ident(comps[0]).is_some_and(|k| k == "-webkit-box" || k == "-webkit-inline-box");
+                style.grid_lanes = comps.iter().any(|c| values::ident(c).is_some_and(|k| k == "grid-lanes" || k == "inline-grid-lanes"));
             }
         }
         "position" => {

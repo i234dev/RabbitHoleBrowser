@@ -23,6 +23,11 @@ impl<'a> Layouter<'a> {
         if let Some(c) = b.intrinsic_cache {
             return c;
         }
+        if b.wm_wrapper {
+            let r = self.wm_wrapper_intrinsic(b);
+            b.intrinsic_cache = Some(r);
+            return r;
+        }
         let style = b.style.clone();
         let pb = horizontal_extras(&style, 0.0);
         let adj = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb).max(0.0) } else { v };
@@ -40,7 +45,8 @@ impl<'a> Layouter<'a> {
             let w = adj(w);
             (w, w)
         } else if style.contain_size && !matches!(style.display, rabbithole_style::Display::Inline) && b.kind != BoxKind::Image {
-            (0.0, 0.0)
+            let w = style.contain_intrinsic_width.unwrap_or(0.0);
+            (w, w)
         } else if b.kind == BoxKind::Image {
             let (w, _) = self.replaced_size(b, None, None, pb);
             (w, w)

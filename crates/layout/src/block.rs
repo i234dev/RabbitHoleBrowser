@@ -220,7 +220,7 @@ impl<'a> Layouter<'a> {
         let debug = crate::incremental::debug_timing();
         let t0 = std::time::Instant::now();
         let builder = Builder::new(self.ctx, reuse);
-        let mut root = builder.build_root();
+        let mut root = crate::wm::prepare(builder.build_root(), self.ctx.doc.body());
         let t_build = t0.elapsed();
         let uses_counters = builder.uses_counters();
         let vp_w = self.ctx.viewport_width.max(1.0);
@@ -363,6 +363,11 @@ impl<'a> Layouter<'a> {
 
     /// Lay out `b` as a block-level box whose border-box top is at `top`.
     pub fn layout_block(&mut self, b: &mut LayoutBox, cb: &Cb, top: f32, bfc: &mut Bfc, mode: WidthMode) {
+        if b.wm_wrapper {
+            let _ = bfc;
+            let forced = self.forced_content_height.take();
+            return self.layout_wm_wrapper(b, cb, top, mode, forced);
+        }
         let forced_h = self.forced_content_height.take(); // grid/flex hook
         // Where the contents' origin is now (for reuse by translation): the
         // current content box (it moved together with the contents, relative
@@ -546,7 +551,7 @@ impl<'a> Layouter<'a> {
             Some(e) if matches!(b.formatting, Formatting::Table) || b.kind == BoxKind::TableCell => e.max(content_h),
             Some(e) => e,
             // Size containment: laid out as if empty.
-            None if style.contain_size && b.kind != BoxKind::Inline => 0.0,
+            None if style.contain_size && b.kind != BoxKind::Inline => style.contain_intrinsic_height.unwrap_or(0.0),
             None => content_h,
         };
         if explicit_h.is_none() {
@@ -1015,6 +1020,11 @@ impl<'a> Layouter<'a> {
     /// is `b` (padding box `cb`).
     /// Returns whether any such descendant exists.
     pub(crate) fn layout_abs_descendants(&mut self, b: &mut LayoutBox, cb: Rect) -> bool {
+        // Into a vertical subtree's logical space.
+        let cb = match b.wm_transform {
+            Some(m) => crate::wm::to_logical(m, cb),
+            None => cb,
+        };
         let mut found = false;
         for i in 0..b.children.len() {
             if b.children[i].flow == Flow::Absolute {
@@ -1188,7 +1198,7 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
     if b.flow == Flow::Absolute && b.fixed {
         return r;
     }
-    if b.clips {
+    if b.clips || b.wm_transform.is_some() {
         return r;
     }
     for line in &b.lines {
@@ -1209,7 +1219,7 @@ fn bounds(b: &LayoutBox) -> (f32, f32) {
     }
     let mut r = b.rect.right();
     let mut btm = b.rect.bottom();
-    if b.clips {
+    if b.clips || b.wm_transform.is_some() {
         return (r, btm);
     }
     for line in &b.lines {

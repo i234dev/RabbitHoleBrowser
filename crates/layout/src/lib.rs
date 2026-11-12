@@ -20,6 +20,9 @@ mod intrinsic;
 mod table;
 mod text;
 mod widgets;
+mod wm;
+mod filter;
+mod bidi;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

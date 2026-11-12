@@ -645,3 +645,151 @@ fn grid_perf_1000_items() {
     // 10 columns of 80px → 100 rows.
     assert_near!(fx.by_id(&t, "g").rect.h, 2000.0);
 }
+
+// --------------------------------------------------------------- grid lanes
+
+#[test]
+fn grid_lanes_columns_fill_shortest_lane() {
+    let html = "<div id=g><div id=a style='height:50px'></div><div id=b style='height:20px'></div><div id=c style='height:30px'></div><div id=d style='height:10px'></div></div>";
+    let css = "#g { display: grid-lanes; grid-template-columns: 100px 100px; gap: 10px; width: 210px; fit-tolerance: 0 }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    let (a, b, c, d) = (fx.by_id(&t, "a"), fx.by_id(&t, "b"), fx.by_id(&t, "c"), fx.by_id(&t, "d"));
+    assert_near!(b.rect.x, a.rect.x + 110.0);
+    // c goes under b (the shorter lane), d under a.
+    assert_near!(c.rect.x, b.rect.x);
+    assert_near!(c.rect.y, b.rect.y + 30.0);
+    assert_near!(d.rect.x, a.rect.x);
+    assert_near!(d.rect.y, a.rect.y + 60.0);
+    assert_near!(fx.by_id(&t, "g").rect.h, 70.0);
+}
+
+#[test]
+fn grid_lanes_auto_tracks_share_space_with_gaps() {
+    let html = "<div id=g><div id=a>Some text here</div><div id=b>More words in this one</div><div id=c>x</div><div id=d style='grid-column: span 2'>A spanning item with some long text in it</div></div>";
+    let css = "#g { display: grid-lanes; grid-template-columns: auto auto auto; gap: 20px; width: 340px; padding: 20px } #g > div { padding: 10px }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    let (a, b, c) = (fx.by_id(&t, "a"), fx.by_id(&t, "b"), fx.by_id(&t, "c"));
+    assert_near!(c.rect.x + c.rect.w - a.rect.x, 340.0);
+    assert_near!(b.rect.x - (a.rect.x + a.rect.w), 20.0);
+}
+
+
+// ------------------------------------------------------------ writing modes
+
+fn find_wrapper(b: &LayoutBox) -> Option<&LayoutBox> {
+    if b.wm_wrapper {
+        return Some(b);
+    }
+    b.children.iter().find_map(find_wrapper)
+}
+
+#[test]
+fn vertical_rl_block_is_sized_from_its_columns() {
+    let html = "<body style='margin:0'><div id=v style='writing-mode: vertical-rl; height: 100px'><div style='width: 20px'></div><div style='width: 30px'></div></div><div id=after style='height:10px'></div></body>";
+    let fx = Fx::new(html, "");
+    let t = fx.layout();
+    let w = find_wrapper(&t.root).expect("wrapper");
+    assert_near!(w.rect.w, 50.0);
+    assert_near!(w.rect.h, 100.0);
+    assert_near!(w.rect.x, 0.0);
+    // The next block follows below.
+    assert_near!(fx.by_id(&t, "after").rect.y, 100.0);
+    // The first child (block-start) maps to the right: logical y 0..20.
+    let m = w.wm_transform.expect("transform");
+    let first = &w.children[0].children[0];
+    let (x0, _) = crate::tree::map_point(m, first.rect.x, first.rect.y);
+    assert_near!(x0, 50.0);
+}
+
+#[test]
+fn vertical_lr_root_flows_left_to_right() {
+    let html = "<html style='writing-mode: vertical-lr'><body style='margin:0'><div style='width: 20px'></div><div id=b style='width: 30px'></div></body></html>";
+    let fx = Fx::new(html, "");
+    let t = fx.layout();
+    assert!(t.root.wm_wrapper);
+    let m = t.root.wm_transform.expect("transform");
+    let b = fx.by_id(&t, "b");
+    let (x0, y0) = crate::tree::map_point(m, b.rect.x, b.rect.y);
+    assert_near!(x0, 20.0);
+    assert_near!(y0, 0.0);
+    // Inline size: the viewport height.
+    assert_near!(b.rect.w, 600.0);
+}
+
+// -------------------------------------------------------------------- bidi
+
+fn line_texts(b: &LayoutBox) -> Vec<(f32, String)> {
+    let mut out: Vec<(f32, String)> = b
+        .lines
+        .iter()
+        .flat_map(|l| l.fragments.iter())
+        .filter_map(|f| match &f.kind {
+            crate::tree::FragmentKind::Text { text, .. } => Some((f.rect.x, text.to_string())),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out
+}
+
+#[test]
+fn bidi_ltr_words_keep_their_order_in_rtl_paragraphs() {
+    // Hebrew, a number and English in a right-to-left paragraph: the
+    // Hebrew word is rightmost, the English run reads left to right.
+    let fx = Fx::new("<p id=p dir=rtl>\u{5E9}\u{5DC}\u{5D5}\u{5DD} 12 abc def</p>", "p { width: 600px; margin: 0 }");
+    let t = fx.layout();
+    let texts = line_texts(fx.by_id(&t, "p"));
+    let words: Vec<String> = texts.iter().map(|(_, s)| s.trim_start_matches(['\u{202E}', '\u{202D}']).trim().to_string()).filter(|s| !s.is_empty()).collect();
+    assert_eq!(words, vec!["abc def", "12", "\u{5E9}\u{5DC}\u{5D5}\u{5DD}"], "{texts:?}");
+}
+
+#[test]
+fn bidi_override_reverses_latin() {
+    let fx = Fx::new("<p id=p><bdo dir=rtl>abc</bdo></p>", "p { margin: 0 }");
+    let t = fx.layout();
+    let texts = line_texts(fx.by_id(&t, "p"));
+    // The run is shaped right to left (RLO prefix for the shaper).
+    assert!(texts.iter().any(|(_, s)| s == "\u{202E}abc"), "{texts:?}");
+}
+
+#[test]
+fn horizontal_block_inside_vertical_rl_keeps_its_physical_size() {
+    let html = "<body style='margin:0'><div style='writing-mode: vertical-rl; height: 200px'><div id=h style='writing-mode: horizontal-tb; width: 50px; height: 30px'></div></div></body>";
+    let fx = Fx::new(html, "");
+    let t = fx.layout();
+    let w1 = find_wrapper(&t.root).expect("outer wrapper");
+    let m1 = w1.wm_transform.expect("outer transform");
+    let w2 = find_wrapper(&w1.children[0]).expect("inner wrapper");
+    let m2 = w2.wm_transform.expect("inner transform");
+    let h = fx.by_id(&t, "h");
+    let map = |x: f32, y: f32| {
+        let (a, b) = crate::tree::map_point(m2, x, y);
+        crate::tree::map_point(m1, a, b)
+    };
+    let (ax, ay) = map(h.rect.x, h.rect.y);
+    let (bx, by) = map(h.rect.x + h.rect.w, h.rect.y + h.rect.h);
+    let (x0, x1, y0, y1) = (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by));
+    assert_near!(x1 - x0, 50.0);
+    assert_near!(y1 - y0, 30.0);
+    assert_near!(y0, 0.0);
+    assert_near!(w1.rect.w, 50.0);
+    // Upright: the box's own top-left maps to the physical top-left.
+    assert_near!(ax, x0);
+    assert_near!(ay, y0);
+}
+
+#[test]
+fn grid_items_share_a_baseline() {
+    let html = "<div id=g><div id=a style='font-size: 10px; padding-top: 15px'>a</div><div id=b style='font-size: 30px'>b</div></div>";
+    let css = "#g { display: grid; grid-template-columns: 100px 100px; align-items: baseline }";
+    let fx = Fx::new(html, css);
+    let t = fx.layout();
+    let (a, b) = (fx.by_id(&t, "a"), fx.by_id(&t, "b"));
+    let (ba, bb) = (a.first_baseline().unwrap(), b.first_baseline().unwrap());
+    assert_near!(ba, bb);
+    // The row grows to hold the shifted item.
+    let g = fx.by_id(&t, "g");
+    assert!(g.rect.bottom() + 0.5 >= a.rect.bottom().max(b.rect.bottom()));
+}
