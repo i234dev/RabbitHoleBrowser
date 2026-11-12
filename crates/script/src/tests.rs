@@ -803,9 +803,15 @@ fn realistic_vanilla_script() {
     }
     let out = run(&mut env, &mut host, "console.log($('#n').textContent, $('#inc').dataset.count, window.summary, document.querySelectorAll('li.item').length)");
     assert_eq!(out[0], r#"3 3 {"keys":["a","b"],"ok":true,"n":4} 4"#);
-    // Hash navigation from script fires hashchange and routes.
-    let out = run(&mut env, &mut host, "location.hash = '#about'; console.log($('#about').hidden, $('#home').hidden, $('#nav a.active').textContent)");
-    assert_eq!(out[0], "false true About");
+    // Hash navigation from script queues hashchange (a task, so a listener
+    // that sets the hash again cannot recurse) and routes; setting the
+    // current fragment again does not navigate.
+    let out = run(&mut env, &mut host, "window.hc = 0; addEventListener('hashchange', () => { hc++; location.hash = location.hash; }); location.hash = '#about'; location.hash = '#about'; console.log(hc)");
+    assert_eq!(out[0], "0");
+    let now = env.now;
+    host.run_timers(&mut env, now);
+    let out = run(&mut env, &mut host, "console.log($('#about').hidden, $('#home').hidden, $('#nav a.active').textContent, hc)");
+    assert_eq!(out[0], "false true About 1");
     // Delegated click.
     let lis: Vec<NodeId> = env.doc.descendants(0).filter(|&n| env.doc.is_element(n, "li")).collect();
     host.dispatch_event(&mut env, lis[2], "click", EventInit::simple(true, true));

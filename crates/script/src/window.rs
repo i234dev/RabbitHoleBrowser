@@ -42,7 +42,13 @@ fn loc_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
         }
         "hash" => {
             let f = v.trim_start_matches('#');
-            u.fragment = if f.is_empty() { None } else { Some(f.to_string()) };
+            let fragment = if f.is_empty() { None } else { Some(f.to_string()) };
+            // Setting the current fragment again does nothing (no
+            // navigation, no `hashchange`).
+            if fragment == u.fragment {
+                return Ok(Value::Undefined);
+            }
+            u.fragment = fragment;
             // Same-document navigation: update the override and fire events.
             let old = current_href();
             state().borrow_mut().location_override = Some(u.to_string());
@@ -86,12 +92,23 @@ fn scroll_to_fragment(frag: &str) {
     });
 }
 
+/// Queue `hashchange` (a task: listeners run after the script that changed
+/// the fragment, like in browsers; a handler setting the hash again must
+/// not recurse).
 fn fire_hashchange(realm: &mut Realm, old: &str, new: &str) {
     let init = crate::EventInit::simple(false, false);
     let id = crate::events::create_event(realm, "HashChangeEvent", "hashchange", &init, true);
     realm.define_property(id, "oldURL", Value::str(old), ACC);
     realm.define_property(id, "newURL", Value::str(new), ACC);
-    crate::events::dispatch_object(realm, TargetKey::Window, id, None);
+    let f = realm.new_native_function("hashchange", 1, deliver_hashchange);
+    add_timer(realm, Value::Object(f), 0.0, vec![Value::Object(id)], false);
+}
+
+fn deliver_hashchange(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if let V::Object(id) = arg(args, 0).v() {
+        crate::events::dispatch_object(realm, TargetKey::Window, id, None);
+    }
+    Ok(Value::Undefined)
 }
 
 pub(crate) fn navigate_to(u: Url, replace: bool) {
