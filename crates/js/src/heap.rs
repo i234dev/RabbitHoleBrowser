@@ -752,14 +752,53 @@ impl Heap {
             self.mark_push(r, &mut work);
         }
         let mut children: Vec<Value> = Vec::new();
-        while let Some(id) = work.pop() {
-            children.clear();
-            if let Some(obj) = &self.objects[id.0 as usize] {
-                trace_object(obj, &mut children);
+        let mut weak: Vec<ObjectId> = Vec::new();
+        loop {
+            while let Some(id) = work.pop() {
+                children.clear();
+                if let Some(obj) = &self.objects[id.0 as usize] {
+                    if matches!(obj.kind, ObjectKind::WeakMap(_) | ObjectKind::WeakSet(_)) {
+                        weak.push(id);
+                    }
+                    trace_object(obj, &mut children);
+                }
+                for v in &children {
+                    if let V::Object(o) = v.v() {
+                        self.mark_push(o, &mut work);
+                    }
+                }
             }
-            for v in &children {
+            // WeakMap / WeakSet entries whose key is reachable keep their
+            // value (which may make more keys reachable): repeat until
+            // nothing new is marked.
+            children.clear();
+            for &w in &weak {
+                if let Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = &self.objects[w.0 as usize] {
+                    for (k, v) in m.entries.iter().flatten() {
+                        if self.value_alive(k) && !self.value_alive(v) {
+                            children.push(v.clone());
+                        }
+                    }
+                }
+            }
+            if children.is_empty() {
+                break;
+            }
+            for v in std::mem::take(&mut children) {
                 if let V::Object(o) = v.v() {
                     self.mark_push(o, &mut work);
+                }
+            }
+        }
+        // Entries whose key is unreachable go with it.
+        for &w in &weak {
+            let dead: Vec<Value> = match &self.objects[w.0 as usize] {
+                Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) => m.entries.iter().flatten().filter(|(k, _)| !self.value_alive(k)).map(|(k, _)| k.clone()).collect(),
+                _ => continue,
+            };
+            if let Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = &mut self.objects[w.0 as usize] {
+                for k in &dead {
+                    m.delete(k);
                 }
             }
         }
@@ -795,6 +834,14 @@ impl Heap {
         self.live_count -= freed;
         self.allocated_since_gc = 0;
         freed
+    }
+
+    /// During a collection: whether `v` is marked (non-objects always are).
+    fn value_alive(&self, v: &Value) -> bool {
+        match v.v() {
+            V::Object(o) => self.marks.get(o.0 as usize).copied().unwrap_or(false),
+            _ => true,
+        }
     }
 
     fn mark_push(&mut self, id: ObjectId, work: &mut Vec<ObjectId>) {
@@ -868,12 +915,15 @@ pub fn trace_object(obj: &Object, out: &mut Vec<Value>) {
                 push_val(out, v);
             }
         }
-        ObjectKind::Map(m) | ObjectKind::Set(m) | ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m) => {
+        ObjectKind::Map(m) | ObjectKind::Set(m) => {
             for (k, v) in m.entries.iter().flatten() {
                 push_val(out, k);
                 push_val(out, v);
             }
         }
+        // Ephemerons: an entry keeps its value alive only while its key is
+        // alive otherwise (see `Heap::collect`).
+        ObjectKind::WeakMap(_) | ObjectKind::WeakSet(_) => {}
         ObjectKind::Generator(g) => {
             if let Some(f) = &g.frame {
                 trace_frame(f, out);

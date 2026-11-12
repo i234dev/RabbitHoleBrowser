@@ -24,7 +24,8 @@ fn garbage_heavy_scripts_keep_peak_memory_bounded() {
         ("1M closures", "function mk(n) { return function () { return n + 1; }; } var s = 0; for (var i = 0; i < 1e6; i++) s += mk(i)(); s", "500000500000"),
         ("1M throws", "var n = 0; for (var i = 0; i < 1e6; i++) { try { throw new Error('e' + i); } catch (e) { n += e.message.length > 0 ? 1 : 0; } } n", "1000000"),
         ("forEach callbacks", "var t = 0; new Array(500000).fill(0).forEach(function (_, i) { var o = { a: 'x' + i, b: [i] }; t += o.b[0] & 1; }); t", "250000"),
-        ("generator bodies", "function* g() { let [a, b] = [0, 1]; for (;;) { yield a; [a, b] = [b, (a + b) % 1000]; } } var n = 0, s = 0; for (const v of g()) { s += v; if (++n === 500000) break; } n", "500000"),
+        ("300k WeakMap keys", "var wm = new WeakMap(), n = 0; for (var i = 0; i < 3e5; i++) { var k = {}; wm.set(k, new Array(20).fill(i)); n += wm.has(k) ? 1 : 0; } n", "300000"),
+        ("generator bodies","function* g() { let [a, b] = [0, 1]; for (;;) { yield a; [a, b] = [b, (a + b) % 1000]; } } var n = 0, s = 0; for (const v of g()) { s += v; if (++n === 500000) break; } n", "500000"),
     ];
     for (name, src, expected) in cases {
         let mut realm = rabbithole_js::Realm::new();

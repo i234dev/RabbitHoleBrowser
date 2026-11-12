@@ -1709,3 +1709,32 @@ fn regexp_fast_paths() {
     eq("var r = /a/g; r.exec('aa'); r.test('aa') + ':' + r.lastIndex", "true:2");
     eq("/(b)/.test('abc'); RegExp.$1", "b");
 }
+
+/// WeakMap / WeakSet hold their keys weakly (ephemerons): an entry whose
+/// key is otherwise unreachable is dropped by a collection, and a value is
+/// kept alive by its entry while the key is.
+#[test]
+fn weak_collections_drop_entries_with_their_keys() {
+    let mut realm = Realm::new();
+    let src = "var wm = new WeakMap(), ws = new WeakSet(); var keep = {};
+        (function () { var k2 = {}; wm.set(keep, { inner: k2 }); wm.set(k2, 'chained'); })();
+        (function () { for (var i = 0; i < 1000; i++) { var o = {}; wm.set(o, [i]); ws.add(o); } })();
+        ws.add(keep); [wm, ws]";
+    let v = realm.eval(src, "weak.js").unwrap();
+    let arr = v.as_object().unwrap();
+    let (wm, ws) = match &realm.obj(arr).kind {
+        crate::heap::ObjectKind::Array { elements, .. } => (elements[0].as_object().unwrap(), elements[1].as_object().unwrap()),
+        _ => unreachable!(),
+    };
+    let size = |realm: &Realm, id| match &realm.obj(id).kind {
+        crate::heap::ObjectKind::WeakMap(m) | crate::heap::ObjectKind::WeakSet(m) => m.size(),
+        _ => usize::MAX,
+    };
+    assert_eq!(size(&realm, wm), 1002);
+    let _root = realm.root(v);
+    realm.gc();
+    assert!(size(&realm, wm) <= 3, "WeakMap kept {} entries", size(&realm, wm));
+    assert!(size(&realm, ws) <= 2, "WeakSet kept {} entries", size(&realm, ws));
+    let r = realm.eval("wm.get(wm.get(keep).inner) + ':' + ws.has(keep) + ':' + wm.has({})", "weak2.js").unwrap();
+    assert_eq!(realm.to_string(r).unwrap().to_rust_string(), "chained:true:false");
+}
