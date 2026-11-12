@@ -195,6 +195,26 @@ fn watchdog_interrupts_loops() {
     let _ = Value::Undefined;
 }
 
+/// Loop-free recursion (native calls) is interruptible too.
+#[test]
+fn watchdog_interrupts_recursion() {
+    let mut r = realm();
+    define_module(
+        &mut r,
+        "bytes",
+        "(module (func $fib (export \"fib\") (param i64) (result i64)
+           (if (result i64) (i64.lt_u (local.get 0) (i64.const 2)) (then (local.get 0))
+             (else (i64.add (call $fib (i64.sub (local.get 0) (i64.const 1))) (call $fib (i64.sub (local.get 0) (i64.const 2))))))))",
+    );
+    r.eval("var fib = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.fib;", "s.js").unwrap();
+    r.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(200)));
+    let t0 = std::time::Instant::now();
+    let res = r.eval("fib(60n)", "fib.js");
+    assert!(res.is_err());
+    assert!(r.timed_out());
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+}
+
 /// wasm-bindgen glue refreshes cached views when `view.byteLength === 0`
 /// after `memory.grow` detached the old buffer.
 #[test]

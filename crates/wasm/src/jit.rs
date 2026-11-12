@@ -726,6 +726,9 @@ pub fn compile(code: &Code) -> Option<Compiled> {
     c.a.op_mem(None, true, &[0x8d], RAX, Mem { base: RBX, index: None, disp: (code.frame_slots as i32 + 2) * 8 });
     c.a.op_mem(None, true, &[0x3b], RAX, ctxm(CTX_STACK_END));
     let ov = c.a.jcc(CC_A);
+    // Calls count against the interrupt fuel too (recursion without loops
+    // stays interruptible).
+    c.fuel_check();
     // Zero the declared locals, load the constants.
     let (ps, ls) = (code.param_slots, code.local_slots);
     if ls - ps <= 24 {
