@@ -337,6 +337,12 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             if name == "contain" && kws.iter().any(|k| matches!(k.as_str(), "paint" | "layout" | "strict" | "content")) {
                 style.creates_stacking_context = true;
             }
+            if name == "contain" {
+                let has = |k: &str| kws.iter().any(|x| x == k);
+                style.contain_paint = has("paint") || has("strict") || has("content");
+                style.contain_layout = has("layout") || has("strict") || has("content");
+                style.contain_size = has("size") || has("strict");
+            }
             if name == "will-change" && kws.iter().any(|k| matches!(k.as_str(), "transform" | "opacity")) {
                 style.creates_stacking_context = true;
             }

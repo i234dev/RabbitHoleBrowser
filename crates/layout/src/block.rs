@@ -543,6 +543,8 @@ impl<'a> Layouter<'a> {
         let mut h = match explicit_h {
             Some(e) if matches!(b.formatting, Formatting::Table) || b.kind == BoxKind::TableCell => e.max(content_h),
             Some(e) => e,
+            // Size containment: laid out as if empty.
+            None if style.contain_size && b.kind != BoxKind::Inline => 0.0,
             None => content_h,
         };
         if explicit_h.is_none() {

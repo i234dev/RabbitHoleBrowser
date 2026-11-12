@@ -808,6 +808,10 @@ pub struct ComputedStyle {
     pub line_clamp: Option<u32>,
     /// `content-visibility: hidden`: the contents are not rendered.
     pub content_visibility_hidden: bool,
+    /// `contain`: paint / layout / size containment.
+    pub contain_paint: bool,
+    pub contain_layout: bool,
+    pub contain_size: bool,
     /// `line_clamp` came from `-webkit-line-clamp` (applies only to
     /// `display: -webkit-box` with `-webkit-box-orient: vertical`).
     pub line_clamp_prefixed: bool,
@@ -955,6 +959,9 @@ impl ComputedStyle {
             tab_size: 8.0,
             line_clamp: None,
             content_visibility_hidden: false,
+            contain_paint: false,
+            contain_layout: false,
+            contain_size: false,
             line_clamp_prefixed: false,
             webkit_box: false,
             font_family_list: Vec::new(),

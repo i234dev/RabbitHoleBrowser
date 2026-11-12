@@ -39,6 +39,8 @@ impl<'a> Layouter<'a> {
         } else if let Length::Px(w) = style.width {
             let w = adj(w);
             (w, w)
+        } else if style.contain_size && !matches!(style.display, rabbithole_style::Display::Inline) && b.kind != BoxKind::Image {
+            (0.0, 0.0)
         } else if b.kind == BoxKind::Image {
             let (w, _) = self.replaced_size(b, None, None, pb);
             (w, w)

@@ -1392,6 +1392,11 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "direction" => to.direction = from.direction,
         "tab-size" => to.tab_size = from.tab_size,
         "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
+        "contain" => {
+            to.contain_paint = from.contain_paint;
+            to.contain_layout = from.contain_layout;
+            to.contain_size = from.contain_size;
+        }
         "-webkit-line-clamp" | "line-clamp" => {
             to.line_clamp = from.line_clamp;
             to.line_clamp_prefixed = from.line_clamp_prefixed;

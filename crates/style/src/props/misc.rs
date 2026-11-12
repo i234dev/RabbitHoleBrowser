@@ -198,6 +198,11 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         "content-visibility" => {
             if let Some(kw) = values::ident(c0) {
                 style.content_visibility_hidden = kw == "hidden";
+                if kw == "hidden" {
+                    style.contain_paint = true;
+                    style.contain_layout = true;
+                    style.contain_size = true;
+                }
                 if kw != "visible" {
                     style.creates_stacking_context = true;
                 }

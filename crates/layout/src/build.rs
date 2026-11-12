@@ -353,7 +353,11 @@ impl<'a> Builder<'a> {
             || style.overflow_x.clips()
             || style.overflow_y.clips()
             || matches!(style.display, Display::FlowRoot | Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid);
-        b.clips = (style.overflow_x.clips() || style.overflow_y.clips()) && !matches!(tag, "html" | "body");
+        let contained = !matches!(style.display, Display::Inline | Display::Contents) && !matches!(tag, "html" | "body");
+        b.clips = (style.overflow_x.clips() || style.overflow_y.clips() || (style.contain_paint && contained)) && !matches!(tag, "html" | "body");
+        if contained && (style.contain_paint || style.contain_layout) {
+            b.bfc_root = true;
+        }
         if matches!(tag, "td" | "th") {
             if let Some(cs) = doc.attr(node, "colspan").and_then(|v| v.trim().parse::<u32>().ok()) {
                 b.colspan = cs.clamp(1, 1000);
