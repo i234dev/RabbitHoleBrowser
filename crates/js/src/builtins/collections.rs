@@ -225,13 +225,10 @@ fn map_delete(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
     Ok(Value::Bool(data_mut(realm, id).delete(&arg(args, 0))))
 }
 
-/// `clear()` leaves tombstones in place (ECMA-262 §24.1.3.1) so live
-/// iterators keep their position and see entries added afterwards.
+/// `clear()` keeps positions while iterations are in progress
+/// (ECMA-262 §24.1.3.1): live iterators see entries added afterwards.
 fn clear_entries(d: &mut MapData) {
-    for e in d.entries.iter_mut() {
-        *e = None;
-    }
-    d.index.clear();
+    d.clear();
 }
 
 fn map_clear(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -253,15 +250,22 @@ fn for_each_impl(realm: &mut Realm, id: ObjectId, args: &[Value], is_set: bool) 
         return realm.type_error(&format!("{} is not a function", d));
     }
     let this_arg = arg(args, 1);
+    // Entry positions stay put during the loop.
+    data_mut(realm, id).iteration_started();
     let mut i = 0;
+    let mut result = Ok(Value::Undefined);
     while i < entry_count(realm, id) {
         if let Some((k, v)) = entry_at(realm, id, i) {
             let args = if is_set { [k.clone(), k, Value::Object(id)] } else { [v, k, Value::Object(id)] };
-            realm.call(cb.clone(), this_arg.clone(), &args)?;
+            if let Err(e) = realm.call(cb.clone(), this_arg.clone(), &args) {
+                result = Err(e);
+                break;
+            }
         }
         i += 1;
     }
-    Ok(Value::Undefined)
+    data_mut(realm, id).iteration_ended();
+    result
 }
 
 fn map_for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -335,11 +339,8 @@ fn set_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
 
 fn set_add(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_coll(realm, &this, Kind::Set, "add")?;
-    let v = arg(args, 0);
-    let d = data_mut(realm, id);
-    if !d.has(&v) {
-        d.set(v.clone(), v);
-    }
+    let v = crate::heap::normalize_key(arg(args, 0));
+    data_mut(realm, id).set(v.clone(), v);
     Ok(this)
 }
 
@@ -431,9 +432,8 @@ fn new_set_from(realm: &mut Realm, values: Vec<Value>) -> Value {
     let proto = realm.intrinsics.others["SetPrototype"];
     let mut d = MapData::default();
     for v in values {
-        if !d.has(&v) {
-            d.set(v.clone(), v);
-        }
+        let v = crate::heap::normalize_key(v);
+        d.set(v.clone(), v);
     }
     Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::Set(Box::new(d)))))
 }

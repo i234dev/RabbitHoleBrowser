@@ -136,7 +136,7 @@ pub fn typed_array_set(realm: &Realm, t: &TypedArrayData, index: usize, n: f64) 
 /// Helper for `Object.prototype.toString`-style class names.
 pub fn class_of(realm: &Realm, id: ObjectId) -> &'static str {
     let o = realm.obj(id);
-    if let Some(c) = o.class_name {
+    if let Some(c) = o.class_name() {
         return c;
     }
     match &o.kind {

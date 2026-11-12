@@ -333,12 +333,12 @@ fn structured_clone(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
                 realm.alloc(Object::new(p, ObjectKind::Date(*d)))
             }
             ObjectKind::Map(m) => {
-                let data = MapData { entries: m.entries.clone(), index: m.index.clone() };
+                let data = m.snapshot();
                 let p = realm.intrinsics.others.get("MapPrototype").copied();
                 realm.alloc(Object::new(p, ObjectKind::Map(Box::new(data))))
             }
             ObjectKind::Set(m) => {
-                let data = MapData { entries: m.entries.clone(), index: m.index.clone() };
+                let data = m.snapshot();
                 let p = realm.intrinsics.others.get("SetPrototype").copied();
                 realm.alloc(Object::new(p, ObjectKind::Set(Box::new(data))))
             }

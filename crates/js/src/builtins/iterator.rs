@@ -60,14 +60,65 @@ pub fn create_array_iterator(realm: &mut Realm, target: Value, kind: u8) -> Valu
     Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::ArrayIterator { target, index: 0, kind })))
 }
 
+fn iter_result(realm: &mut Realm, step: Option<Value>) -> Value {
+    match step {
+        Some(v) => realm.create_iter_result(v, false),
+        None => realm.create_iter_result(Value::Undefined, true),
+    }
+}
+
+/// One step of an iterator object whose `next` is a built-in one, without
+/// creating the result object (`None`: not such an iterator). Calling the
+/// built-in `next` and reading `done` / `value` from its fresh result is
+/// not observably different.
+pub fn fast_step(realm: &mut Realm, it: &Value, next: &Value) -> Option<JsResult<Option<Value>>> {
+    let (V::Object(nid), V::Object(iid)) = (next.v(), it.v()) else { return None };
+    let f = match &realm.heap.try_get(nid)?.kind {
+        ObjectKind::Native(n) => n.func as usize,
+        _ => return None,
+    };
+    let kind = &realm.heap.try_get(iid)?.kind;
+    if f == array_iterator_next as NativeFn as usize && matches!(kind, ObjectKind::ArrayIterator { .. }) {
+        return Some(array_iterator_step(realm, iid));
+    }
+    if f == generator_next as NativeFn as usize {
+        if let ObjectKind::Generator(g) = kind {
+            if !g.is_async && g.promise.is_none() {
+                return Some(match realm.generator_resume_raw(iid, ResumeMode::Next, Value::Undefined) {
+                    Ok(Step::Yield(v)) => Ok(Some(v)),
+                    Ok(Step::Return(_)) => Ok(None),
+                    Ok(Step::Await(_)) => realm.type_error("await in a non-async generator"),
+                    Err(e) => Err(e),
+                });
+            }
+        }
+        return None;
+    }
+    if f == map_iterator_next as NativeFn as usize && matches!(kind, ObjectKind::MapIterator { .. }) {
+        return Some(map_iterator_step(realm, iid));
+    }
+    if f == string_iterator_next as NativeFn as usize && matches!(kind, ObjectKind::StringIterator { .. }) {
+        return Some(Ok(string_iterator_step(realm, iid)));
+    }
+    None
+}
+
 fn array_iterator_next(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let id = this_object(realm, &this, "Array Iterator.prototype.next")?;
+    if !matches!(realm.obj(id).kind, ObjectKind::ArrayIterator { .. }) {
+        return realm.type_error("next method called on incompatible receiver");
+    }
+    let step = array_iterator_step(realm, id)?;
+    Ok(iter_result(realm, step))
+}
+
+fn array_iterator_step(realm: &mut Realm, id: ObjectId) -> JsResult<Option<Value>> {
     let (target, index, kind) = match &realm.obj(id).kind {
         ObjectKind::ArrayIterator { target, index, kind } => (target.clone(), *index, *kind),
         _ => return realm.type_error("next method called on incompatible receiver"),
     };
     if target.is_undefined() {
-        return Ok(realm.create_iter_result(Value::Undefined, true));
+        return Ok(None);
     }
     let len = match target.v() {
         V::Object(t) => match &realm.obj(t).kind {
@@ -81,10 +132,22 @@ fn array_iterator_next(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRes
         if let ObjectKind::ArrayIterator { target, .. } = &mut realm.obj_mut(id).kind {
             *target = Value::Undefined;
         }
-        return Ok(realm.create_iter_result(Value::Undefined, true));
+        return Ok(None);
     }
     if let ObjectKind::ArrayIterator { index: i, .. } = &mut realm.obj_mut(id).kind {
         *i += 1;
+    }
+    // A present element of a dense array needs no property lookup.
+    if kind == 1 {
+        if let V::Object(t) = target.v() {
+            if let ObjectKind::Array { elements, .. } = &realm.obj(t).kind {
+                if let Some(v) = elements.get(index as usize) {
+                    if !v.is_empty() {
+                        return Ok(Some(v.clone()));
+                    }
+                }
+            }
+        }
     }
     let result = match kind {
         0 => Value::Number(index as f64),
@@ -94,7 +157,7 @@ fn array_iterator_next(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRes
             realm.new_array_value(vec![Value::Number(index as f64), v])
         }
     };
-    Ok(realm.create_iter_result(result, false))
+    Ok(Some(result))
 }
 
 pub fn create_string_iterator(realm: &mut Realm, s: JsStr) -> Value {
@@ -104,34 +167,53 @@ pub fn create_string_iterator(realm: &mut Realm, s: JsStr) -> Value {
 
 fn string_iterator_next(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let id = this_object(realm, &this, "String Iterator.prototype.next")?;
+    if !matches!(realm.obj(id).kind, ObjectKind::StringIterator { .. }) {
+        return realm.type_error("next method called on incompatible receiver");
+    }
+    let step = string_iterator_step(realm, id);
+    Ok(iter_result(realm, step))
+}
+
+fn string_iterator_step(realm: &mut Realm, id: ObjectId) -> Option<Value> {
     let (s, index) = match &realm.obj(id).kind {
         ObjectKind::StringIterator { string, index } => (string.clone(), *index),
-        _ => return realm.type_error("next method called on incompatible receiver"),
+        _ => return None,
     };
     let units = s.as_units();
     if index >= units.len() {
-        return Ok(realm.create_iter_result(Value::Undefined, true));
+        return None;
     }
     let first = units[index];
     let len = if (0xD800..0xDC00).contains(&first) && index + 1 < units.len() && (0xDC00..0xE000).contains(&units[index + 1]) { 2 } else { 1 };
     if let ObjectKind::StringIterator { index: i, .. } = &mut realm.obj_mut(id).kind {
         *i += len;
     }
-    Ok(realm.create_iter_result(Value::String(s.slice(index, index + len)), false))
+    Some(if len == 1 { Value::String(JsStr::from_unit(first)) } else { Value::String(s.slice(index, index + len)) })
 }
 
 /// kind: 0 keys, 1 values, 2 entries
 pub fn create_map_iterator(realm: &mut Realm, target: ObjectId, kind: u8, is_set: bool) -> Value {
     let proto = realm.intrinsics.others[if is_set { "SetIteratorPrototype" } else { "MapIteratorPrototype" }];
+    if let ObjectKind::Map(m) | ObjectKind::Set(m) | ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m) = &mut realm.obj_mut(target).kind {
+        m.iteration_started();
+    }
     Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::MapIterator { target, index: 0, kind })))
 }
 
 fn map_iterator_next(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let id = this_object(realm, &this, "Map Iterator.prototype.next")?;
+    let step = map_iterator_step(realm, id)?;
+    Ok(iter_result(realm, step))
+}
+
+fn map_iterator_step(realm: &mut Realm, id: ObjectId) -> JsResult<Option<Value>> {
     let (target, mut index, kind) = match &realm.obj(id).kind {
         ObjectKind::MapIterator { target, index, kind } => (*target, *index, *kind),
         _ => return realm.type_error("next method called on incompatible receiver"),
     };
+    if index == crate::heap::MAP_ITER_DONE {
+        return Ok(None);
+    }
     let entry = {
         let data = match &realm.obj(target).kind {
             ObjectKind::Map(m) | ObjectKind::Set(m) | ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m) => m,
@@ -148,20 +230,20 @@ fn map_iterator_next(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResul
         }
         found
     };
+    let done = entry.is_none();
     if let ObjectKind::MapIterator { index: i, .. } = &mut realm.obj_mut(id).kind {
-        *i = index;
+        *i = if done { crate::heap::MAP_ITER_DONE } else { index };
     }
-    match entry {
-        None => Ok(realm.create_iter_result(Value::Undefined, true)),
-        Some((k, v)) => {
-            let r = match kind {
-                0 => k,
-                1 => v,
-                _ => realm.new_array_value(vec![k, v]),
-            };
-            Ok(realm.create_iter_result(r, false))
+    if done {
+        if let ObjectKind::Map(m) | ObjectKind::Set(m) | ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m) = &mut realm.obj_mut(target).kind {
+            m.iteration_ended();
         }
     }
+    Ok(entry.map(|(k, v)| match kind {
+        0 => k,
+        1 => v,
+        _ => realm.new_array_value(vec![k, v]),
+    }))
 }
 
 // ------------------------------------------------------------- generators

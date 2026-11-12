@@ -151,7 +151,7 @@ fn weak_ref_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
 
 fn weak_ref_deref(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let id = this_object(realm, &this, "WeakRef.prototype.deref")?;
-    if realm.obj(id).class_name != Some("WeakRef") {
+    if realm.obj(id).class_name() != Some("WeakRef") {
         return realm.type_error("WeakRef.prototype.deref called on incompatible receiver");
     }
     let key = weak_ref_key(realm);
@@ -177,7 +177,7 @@ fn finalization_registry_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -
 
 fn finalization_register(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_object(realm, &this, "FinalizationRegistry.prototype.register")?;
-    if realm.obj(id).class_name != Some("FinalizationRegistry") {
+    if realm.obj(id).class_name() != Some("FinalizationRegistry") {
         return realm.type_error("FinalizationRegistry.prototype.register called on incompatible receiver");
     }
     let target = arg(args, 0);
@@ -196,7 +196,7 @@ fn finalization_register(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
 
 fn finalization_unregister(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_object(realm, &this, "FinalizationRegistry.prototype.unregister")?;
-    if realm.obj(id).class_name != Some("FinalizationRegistry") {
+    if realm.obj(id).class_name() != Some("FinalizationRegistry") {
         return realm.type_error("FinalizationRegistry.prototype.unregister called on incompatible receiver");
     }
     let token = arg(args, 0);

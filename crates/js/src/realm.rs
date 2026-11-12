@@ -165,6 +165,8 @@ pub struct Realm {
     /// Receivers, arguments and [`Realm::native_root`] slots of the
     /// `gc_safe` natives running.
     pub native_roots: Vec<Value>,
+    /// Cached closure shapes (see `make_closure`).
+    pub(crate) closure_shapes: Option<(Rc<crate::shape::Shape>, Rc<crate::shape::Shape>, Rc<crate::shape::Shape>)>,
     /// `new.target` for the innermost native constructor call.
     pub new_target_stack: Vec<Value>,
     pub gc_threshold: usize,
@@ -401,6 +403,7 @@ impl Realm {
             native_depth: 0,
             gc_block: 0,
             native_roots: Vec::new(),
+            closure_shapes: None,
             new_target_stack: Vec::new(),
             gc_threshold: 200_000,
             gc_bytes_base: 0,
@@ -603,8 +606,8 @@ impl Realm {
         }
     }
 
-    pub fn set_class_name(&mut self, obj: ObjectId, name: &'static str) {
-        self.obj_mut(obj).class_name = Some(name);
+    pub fn set_class_name(&mut self, obj: ObjectId, name: &str) {
+        self.obj_mut(obj).set_class_name(name);
     }
 
     // ------------------------------------------------------------ symbols

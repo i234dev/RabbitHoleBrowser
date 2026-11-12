@@ -152,6 +152,14 @@ pub struct Regex {
     /// First code unit required at the match start, when the program
     /// starts with a literal (used to skip ahead quickly).
     first_unit: Option<u16>,
+    /// Code units below 256 a match can start with (bit set), and whether
+    /// one can start with a unit above: positions that cannot start a
+    /// match are skipped without running the machine.
+    start_set: Option<([u64; 4], bool)>,
+    /// The pattern starts with `^` (no `m` flag): only position 0 can match.
+    anchored: bool,
+    /// Per class: which code units below 256 it matches (flags applied).
+    class_bits: Vec<[u64; 4]>,
 }
 
 /// Result of a successful match. `captures[0]` is the whole match; other
@@ -194,6 +202,7 @@ impl Regex {
             program: Vec::new(),
             classes: Vec::new(),
             registers: 0,
+            flags,
         };
         compiler.compile(&node, false)?;
         compiler.program.push(Inst::Match);
@@ -205,6 +214,21 @@ impl Regex {
             }
             _ => None,
         };
+        let class_bits: Vec<[u64; 4]> = compiler
+            .classes
+            .iter()
+            .map(|cls| {
+                let mut bits = [0u64; 4];
+                for c in 0..256u32 {
+                    if cls.matches(c, flags.ignore_case, flags.unicode) {
+                        bits[(c >> 6) as usize] |= 1 << (c & 63);
+                    }
+                }
+                bits
+            })
+            .collect();
+        let start_set = if flags.unicode { None } else { start_set(&compiler.program, &compiler.classes, &class_bits, flags) };
+        let anchored = !flags.multiline && starts_anchored(&compiler.program);
         Ok(Regex {
             source: pattern.to_string(),
             flags,
@@ -214,6 +238,9 @@ impl Regex {
             group_names: parser.group_names,
             registers: compiler.registers,
             first_unit,
+            start_set,
+            anchored,
+            class_bits,
         })
     }
 
@@ -244,11 +271,21 @@ impl Regex {
         if self.flags.sticky {
             return machine.run_at(start);
         }
+        if self.anchored {
+            return if start == 0 { machine.run_at(0) } else { None };
+        }
         let mut pos = start;
         loop {
             if let Some(first) = self.first_unit {
                 match subject[pos..].iter().position(|&u| u == first) {
                     Some(off) => pos += off,
+                    None => return None,
+                }
+            } else if let Some((bits, high)) = &self.start_set {
+                let high = *high;
+                match subject[pos..].iter().position(|&u| if u < 256 { bits[(u >> 6) as usize] & (1 << (u & 63)) != 0 } else { high }) {
+                    Some(off) => pos += off,
+                    // No match can be empty (see `start_set`).
                     None => return None,
                 }
             }
@@ -449,17 +486,80 @@ fn is_low(u: u16) -> bool {
     (0xDC00..=0xDFFF).contains(&u)
 }
 
+/// Up to four case variants of a character (see [`case_variants`]).
+#[derive(Clone, Copy)]
+struct Variants {
+    v: [u32; 4],
+    n: usize,
+}
+
+impl Variants {
+    fn as_slice(&self) -> &[u32] {
+        &self.v[..self.n]
+    }
+    fn contains(&self, c: &u32) -> bool {
+        self.as_slice().contains(c)
+    }
+}
+
+impl IntoIterator for Variants {
+    type Item = u32;
+    type IntoIter = std::iter::Take<std::array::IntoIter<u32, 4>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.v.into_iter().take(self.n)
+    }
+}
+
 /// Single-character case variants of `c` (upper and lower forms) used for
-/// case-insensitive comparisons.
-fn case_variants(c: u32, unicode: bool) -> Vec<u32> {
-    let mut out = Vec::new();
+/// case-insensitive comparisons (no allocation: this runs per character
+/// matched).
+fn case_variants(c: u32, unicode: bool) -> Variants {
+    let mut out = Variants { v: [0; 4], n: 0 };
+    if c < 128 && !unicode {
+        let u = c as u8;
+        if u.is_ascii_lowercase() {
+            out.v[0] = (u - 32) as u32;
+            out.n = 1;
+        } else if u.is_ascii_uppercase() {
+            out.v[0] = (u + 32) as u32;
+            out.n = 1;
+        }
+        return out;
+    }
     let Some(ch) = char::from_u32(c) else {
         return out;
     };
+    if !unicode {
+        // Canonicalize (ECMA-262 22.2.2.7.3) without `u`: the upper case
+        // form, unless it is several characters or an ASCII form of a
+        // non-ASCII one. The variants are the characters with the same
+        // canonical form.
+        fn canon(x: char) -> char {
+            let mut up = x.to_uppercase();
+            match (up.next(), up.next()) {
+                (Some(u), None) if !(x as u32 >= 128 && (u as u32) < 128) => u,
+                _ => x,
+            }
+        }
+        let cc = canon(ch);
+        let single = |mut it: std::char::ToLowercase| match (it.next(), it.next()) {
+            (Some(l), None) => Some(l),
+            _ => None,
+        };
+        for cand in [Some(cc), single(ch.to_lowercase()), single(cc.to_lowercase())].into_iter().flatten() {
+            let v = cand as u32;
+            if v != c && canon(cand) == cc && !out.as_slice().contains(&v) && out.n < 4 {
+                out.v[out.n] = v;
+                out.n += 1;
+            }
+        }
+        return out;
+    }
     let mut push = |v: char| {
         let v = v as u32;
-        if v != c && !out.contains(&v) {
-            out.push(v);
+        if v != c && !out.as_slice().contains(&v) && out.n < 4 {
+            out.v[out.n] = v;
+            out.n += 1;
         }
     };
     let mut up = ch.to_uppercase();
@@ -1394,6 +1494,9 @@ fn is_unicode_symbol(c: char) -> bool {
 enum Inst {
     /// Match one literal (code point in unicode mode, code unit otherwise).
     Char { unit: u32, back: bool },
+    /// Match any of these (a literal and its case variants; unused entries
+    /// repeat the literal).
+    CharAny { units: [u32; 4], back: bool },
     /// `.`
     Any { back: bool },
     /// Character class by index.
@@ -1421,6 +1524,7 @@ struct Compiler {
     program: Vec<Inst>,
     classes: Vec<CharClass>,
     registers: usize,
+    flags: Flags,
 }
 
 const MAX_PROGRAM: usize = 200_000;
@@ -1438,6 +1542,19 @@ impl Compiler {
         match node {
             Node::Empty => Ok(()),
             Node::Char(c) => {
+                if self.flags.ignore_case {
+                    // The case variants are known now: compare against them
+                    // instead of folding at match time.
+                    let vs = case_variants(*c, self.flags.unicode);
+                    if vs.n > 0 {
+                        let mut units = [*c; 4];
+                        for (i, v) in vs.into_iter().enumerate() {
+                            units[i + 1] = v;
+                        }
+                        self.emit(Inst::CharAny { units, back })?;
+                        return Ok(());
+                    }
+                }
                 self.emit(Inst::Char { unit: *c, back })?;
                 Ok(())
             }
@@ -1617,6 +1734,67 @@ impl Compiler {
     }
 }
 
+/// Which code units can start a match (see `Regex::start_set`), when
+/// every path from the program start consumes a character before it can
+/// reach `Match` (so no empty match exists) and no lookaround or `.` comes
+/// first.
+fn start_set(prog: &[Inst], classes: &[CharClass], class_bits: &[[u64; 4]], flags: Flags) -> Option<([u64; 4], bool)> {
+    let mut bits = [0u64; 4];
+    let mut high = false;
+    let mut seen = vec![false; prog.len()];
+    let mut work = vec![0usize];
+    let add = |u: u32, bits: &mut [u64; 4], high: &mut bool| {
+        if u < 256 {
+            bits[(u >> 6) as usize] |= 1 << (u & 63);
+        } else {
+            *high = true;
+        }
+    };
+    while let Some(pc) = work.pop() {
+        if pc >= prog.len() || seen[pc] {
+            continue;
+        }
+        seen[pc] = true;
+        match &prog[pc] {
+            Inst::Char { unit, back: false } => add(*unit, &mut bits, &mut high),
+            Inst::CharAny { units, back: false } => {
+                for u in units {
+                    add(*u, &mut bits, &mut high);
+                }
+            }
+            Inst::Class { id, back: false } => {
+                for (w, b) in bits.iter_mut().zip(class_bits[*id].iter()) {
+                    *w |= b;
+                }
+                let cls = &classes[*id];
+                if cls.negate || flags.ignore_case || cls.ranges.iter().any(|&(_, hi)| hi >= 256) {
+                    high = true;
+                }
+            }
+            Inst::Split { first, second } => {
+                work.push(*first);
+                work.push(*second);
+            }
+            Inst::Jmp(t) => work.push(*t),
+            Inst::Save(_) | Inst::ResetCaps { .. } | Inst::SetReg(_) | Inst::CheckProgress(_) | Inst::Assert(_) => work.push(pc + 1),
+            _ => return None,
+        }
+    }
+    Some((bits, high))
+}
+
+/// The program begins with `^` on every path (captures aside).
+fn starts_anchored(prog: &[Inst]) -> bool {
+    for inst in prog {
+        match inst {
+            Inst::Save(_) | Inst::ResetCaps { .. } => continue,
+            Inst::Assert(AssertKind::Start) => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
 // --------------------------------------------------------------- machine
 
 enum Backtrack {
@@ -1707,7 +1885,15 @@ impl Machine<'_> {
             let ok = match &prog[pc] {
                 Inst::Match => return Some(pos),
                 Inst::Char { unit, back } => match self.read(pos, *back) {
-                    Some((c, np)) if c == *unit || (flags.ignore_case && fold_eq(*unit, c, flags.unicode)) => {
+                    Some((c, np)) if c == *unit => {
+                        pos = np;
+                        pc += 1;
+                        true
+                    }
+                    _ => false,
+                },
+                Inst::CharAny { units, back } => match self.read(pos, *back) {
+                    Some((c, np)) if c == units[0] || c == units[1] || c == units[2] || c == units[3] => {
                         pos = np;
                         pc += 1;
                         true
@@ -1723,7 +1909,13 @@ impl Machine<'_> {
                     _ => false,
                 },
                 Inst::Class { id, back } => match self.read(pos, *back) {
-                    Some((c, np)) if regex.classes[*id].matches(c, flags.ignore_case, flags.unicode) => {
+                    Some((c, np))
+                        if if c < 256 {
+                            regex.class_bits[*id][(c >> 6) as usize] & (1 << (c & 63)) != 0
+                        } else {
+                            regex.classes[*id].matches(c, flags.ignore_case, flags.unicode)
+                        } =>
+                    {
                         pos = np;
                         pc += 1;
                         true

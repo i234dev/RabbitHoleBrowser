@@ -39,6 +39,8 @@ fn main() {
     if std::env::var_os("RH_SIZES").is_some() {
         use rabbithole_js::ast::*;
         eprintln!("Expr {} ExprKind {} Stmt {} Pattern {} Function {} Token {}", std::mem::size_of::<Expr>(), std::mem::size_of::<ExprKind>(), std::mem::size_of::<Stmt>(), std::mem::size_of::<Pattern>(), std::mem::size_of::<Function>(), std::mem::size_of::<rabbithole_js::lexer::Token>());
+        use rabbithole_js::heap::*;
+        eprintln!("Object {} ObjectKind {} PropertyMap {} Property {} Closure {} ScopeData {} Frame {}", std::mem::size_of::<Object>(), std::mem::size_of::<ObjectKind>(), std::mem::size_of::<PropertyMap>(), std::mem::size_of::<Property>(), std::mem::size_of::<Closure>(), std::mem::size_of::<ScopeData>(), std::mem::size_of::<rabbithole_js::vm::Frame>());
     }
     let path = std::env::args().nth(1).expect("path");
     let src = std::fs::read_to_string(&path).unwrap();

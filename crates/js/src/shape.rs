@@ -289,6 +289,16 @@ impl PropertyMap {
         PropertyMap { repr: Repr::Shaped { shape, values: Vec::new() }, sid, in_chain: Cell::new(false) }
     }
 
+    /// A map in shape mode with `values` for the keys of `shape`, in order
+    /// (objects created with a known layout skip the transitions).
+    pub fn with_shape(shape: Rc<Shape>, props: &[Property]) -> PropertyMap {
+        debug_assert_eq!(shape.len(), props.len());
+        let mut values = fresh_values();
+        values.extend_from_slice(props);
+        let sid = shape.id;
+        PropertyMap { repr: Repr::Shaped { shape, values }, sid, in_chain: Cell::new(false) }
+    }
+
     /// Shape id (shape mode) or key-set id (dictionary mode). Inline caches
     /// rely on it: in dictionary mode the id changes whenever the key set
     /// changes, and entry indices (slots) are stable while it does not.

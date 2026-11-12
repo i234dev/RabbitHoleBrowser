@@ -4502,19 +4502,46 @@ impl Realm {
         } else {
             self.intrinsics.function_proto
         };
-        let id = self.alloc(Object::new(Some(proto), ObjectKind::Function(Box::new(closure))));
-        self.define_property(id, names::length(), Value::Number(code.param_count as f64), CONFIGURABLE);
-        self.define_property(id, names::name(), Value::String(code.name.clone()), CONFIGURABLE);
+        let length = Property::data(Value::Number(code.param_count as f64), CONFIGURABLE);
+        let name = Property::data(Value::String(code.name.clone()), CONFIGURABLE);
         if flags.is_generator {
+            let id = self.alloc(Object::new(Some(proto), ObjectKind::Function(Box::new(closure))));
+            self.define_property(id, names::length(), length.value, CONFIGURABLE);
+            self.define_property(id, names::name(), name.value, CONFIGURABLE);
             let gp = if flags.is_async { self.intrinsics.async_generator_proto } else { self.intrinsics.generator_proto };
             let p = self.alloc(Object::new(Some(gp), ObjectKind::Ordinary));
             self.define_property(id, "prototype", Value::Object(p), WRITABLE);
+            id
         } else if !flags.is_arrow && !flags.is_method && !flags.is_async && !flags.is_class_constructor {
+            // Layouts known in advance (the same shapes the property
+            // definitions would reach): no transitions per closure.
+            let shapes = self.closure_shapes();
+            let mut obj = Object::new(Some(proto), ObjectKind::Function(Box::new(closure)));
             let p = self.new_object();
-            self.define_property(p, names::constructor(), Value::Object(id), HIDDEN);
-            self.define_property(id, names::prototype(), Value::Object(p), WRITABLE);
+            obj.props = PropertyMap::with_shape(shapes.1, &[length, name, Property::data(Value::Object(p), WRITABLE)]);
+            let id = self.alloc(obj);
+            self.obj_mut(p).props = PropertyMap::with_shape(shapes.2, &[Property::data(Value::Object(id), HIDDEN)]);
+            id
+        } else {
+            let shapes = self.closure_shapes();
+            let mut obj = Object::new(Some(proto), ObjectKind::Function(Box::new(closure)));
+            obj.props = PropertyMap::with_shape(shapes.0, &[length, name]);
+            self.alloc(obj)
         }
-        id
+    }
+
+    /// Shapes of closures: (length, name), (length, name, prototype) and
+    /// their prototype objects' (constructor).
+    fn closure_shapes(&mut self) -> (Rc<crate::shape::Shape>, Rc<crate::shape::Shape>, Rc<crate::shape::Shape>) {
+        if let Some(s) = &self.closure_shapes {
+            return s.clone();
+        }
+        let root = crate::shape::Shape::root();
+        let ln = root.add(&names::length()).add(&names::name());
+        let lnp = ln.add(&names::prototype());
+        let c = root.add(&names::constructor());
+        self.closure_shapes = Some((ln.clone(), lnp.clone(), c.clone()));
+        (ln, lnp, c)
     }
 
     fn make_class(&mut self, fi: usize, code: Rc<FunctionCode>, superclass: Value) -> JsResult<(ObjectId, ObjectId)> {
@@ -4633,7 +4660,7 @@ impl Realm {
         };
         if let Some((keys, shape)) = object.and_then(|id| self.for_in_fast_keys(id)) {
             let proto = self.intrinsics.object_proto;
-            return Ok(self.alloc(Object::new(Some(proto), ObjectKind::ForInIterator { keys, index: 0, object, shape })));
+            return Ok(self.alloc(Object::new(Some(proto), ObjectKind::ForInIterator(Box::new(crate::heap::ForInState { keys, index: 0, object, shape })))));
         }
         if let Some(id) = object {
             // Names seen on objects already visited (shadowing, even by
@@ -4700,19 +4727,19 @@ impl Realm {
             }
         }
         let proto = self.intrinsics.object_proto;
-        Ok(self.alloc(Object::new(Some(proto), ObjectKind::ForInIterator { keys, index: 0, object, shape: 0 })))
+        Ok(self.alloc(Object::new(Some(proto), ObjectKind::ForInIterator(Box::new(crate::heap::ForInState { keys, index: 0, object, shape: 0 })))))
     }
 
     fn for_in_next(&mut self, it: ObjectId) -> JsResult<Option<JsStr>> {
         loop {
             let (key, object, shape) = match &mut self.obj_mut(it).kind {
-                ObjectKind::ForInIterator { keys, index, object, shape } => {
-                    if *index >= keys.len() {
+                ObjectKind::ForInIterator(f) => {
+                    if f.index >= f.keys.len() {
                         return Ok(None);
                     }
-                    let k = keys[*index].clone();
-                    *index += 1;
-                    (k, *object, *shape)
+                    let k = f.keys[f.index].clone();
+                    f.index += 1;
+                    (k, f.object, f.shape)
                 }
                 _ => return Ok(None),
             };

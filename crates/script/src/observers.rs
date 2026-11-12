@@ -19,7 +19,7 @@ fn callback_of(realm: &mut Realm, args: &[Value]) -> JsResult<Value> {
 fn new_observer(realm: &mut Realm, class: &str, cb: Value) -> ObjectId {
     let p = realm.proto_from_new_target(proto(class));
     let o = realm.new_object_with_proto(Some(p));
-    realm.set_class_name(o, Box::leak(class.to_string().into_boxed_str()));
+    realm.set_class_name(o, class);
     set_hidden(realm, o, "__callback", cb);
     realm.extra_roots.push(Value::Object(o));
     o

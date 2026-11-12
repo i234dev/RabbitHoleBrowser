@@ -5,7 +5,6 @@ use crate::value::V;
 use crate::value::{BigInt, JsStr, ObjectId, SymbolId, Value};
 use crate::vm::Frame;
 use std::any::Any;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 pub const WRITABLE: u8 = 1;
@@ -190,78 +189,239 @@ pub struct PromiseData {
     pub handled: bool,
 }
 
-/// Hashable form of a value for Map/Set (SameValueZero).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ValueKey {
-    Undefined,
-    Null,
-    Bool(bool),
-    Number(u64),
-    String(JsStr),
-    Symbol(SymbolId),
-    BigInt(BigInt),
-    Object(ObjectId),
-}
-
-impl ValueKey {
-    pub fn from_value(v: &Value) -> ValueKey {
-        match v.v() {
-            V::Undefined | V::Empty => ValueKey::Undefined,
-            V::Null => ValueKey::Null,
-            V::Bool(b) => ValueKey::Bool(b),
-            V::Number(n) => {
-                let n = if n.is_nan() { f64::NAN } else if n == 0.0 { 0.0 } else { n };
-                ValueKey::Number(n.to_bits())
-            }
-            V::String(s) => ValueKey::String(s.clone()),
-            V::Symbol(s) => ValueKey::Symbol(s),
-            V::BigInt(b) => ValueKey::BigInt(b.clone()),
-            V::Object(o) => ValueKey::Object(o),
-        }
+/// The key a Map/Set stores for `k`: -0 becomes +0 (SameValueZero keys).
+#[inline]
+pub fn normalize_key(k: Value) -> Value {
+    match k.v() {
+        V::Number(n) if n == 0.0 => Value::Number(0.0),
+        V::Empty => Value::Undefined,
+        _ => k,
     }
 }
 
-#[derive(Debug, Default)]
+#[inline(always)]
+fn mix64(x: u64) -> u32 {
+    let x = (x ^ (x >> 29)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    ((x >> 32) ^ x) as u32
+}
+
+/// Hash of a (normalized) key, consistent with [`key_eq`]: numbers by
+/// value (all NaNs alike), strings by contents (cached per string),
+/// objects / symbols / other primitives by identity.
+#[inline]
+pub fn hash_key(k: &Value) -> u32 {
+    match k.v() {
+        V::Number(n) => mix64(if n.is_nan() { f64::NAN.to_bits() } else { n.to_bits() }),
+        V::String(s) => s.hash32(),
+        V::BigInt(b) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            b.hash(&mut h);
+            mix64(h.finish())
+        }
+        _ => mix64(k.bits()),
+    }
+}
+
+/// SameValueZero on normalized keys.
+#[inline]
+pub fn key_eq(a: &Value, b: &Value) -> bool {
+    if a.bits() == b.bits() {
+        return true;
+    }
+    match (a.v(), b.v()) {
+        (V::Number(x), V::Number(y)) => x == y || (x.is_nan() && y.is_nan()),
+        (V::String(x), V::String(y)) => x == y,
+        (V::BigInt(x), V::BigInt(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// `index` of a finished `MapIterator` (it stays done).
+pub const MAP_ITER_DONE: usize = usize::MAX;
+
+const SLOT_EMPTY: u32 = u32::MAX;
+const SLOT_DELETED: u32 = u32::MAX - 1;
+
+/// Map / Set storage: entries in insertion order (`None` for deleted
+/// ones, so iterators keep their positions) indexed by an open-addressing
+/// hash table of entry numbers. Lookups allocate nothing. Deleted entries
+/// are compacted away once they are the majority and no iteration is in
+/// progress (see `iterators`).
+#[derive(Debug, Default, Clone)]
 pub struct MapData {
     pub entries: Vec<Option<(Value, Value)>>,
-    pub index: HashMap<ValueKey, usize>,
+    hashes: Vec<u32>,
+    table: Vec<u32>,
+    live: usize,
+    table_deleted: usize,
+    /// Unfinished iterators and running `forEach` loops over this
+    /// collection: entry positions must stay put while there are any.
+    pub iterators: u32,
 }
 
 impl MapData {
-    pub fn get(&self, k: &Value) -> Option<&Value> {
-        self.index.get(&ValueKey::from_value(k)).and_then(|&i| self.entries[i].as_ref().map(|(_, v)| v))
-    }
-    pub fn has(&self, k: &Value) -> bool {
-        self.index.contains_key(&ValueKey::from_value(k))
-    }
-    pub fn set(&mut self, k: Value, v: Value) {
-        let key = ValueKey::from_value(&k);
-        let k = match k.v() {
-            V::Number(n) if n == 0.0 => Value::Number(0.0),
-            other => other.to_value(),
-        };
-        if let Some(&i) = self.index.get(&key) {
-            self.entries[i] = Some((k, v));
-        } else {
-            self.index.insert(key, self.entries.len());
-            self.entries.push(Some((k, v)));
+    /// Entry number and table slot of `k` (normalized), if present.
+    #[inline]
+    fn find(&self, k: &Value, h: u32) -> Option<(usize, usize)> {
+        if self.table.is_empty() {
+            return None;
+        }
+        let mask = self.table.len() - 1;
+        let mut i = h as usize & mask;
+        loop {
+            let e = self.table[i];
+            if e == SLOT_EMPTY {
+                return None;
+            }
+            if e != SLOT_DELETED && self.hashes[e as usize] == h {
+                if let Some((key, _)) = &self.entries[e as usize] {
+                    if key_eq(key, k) {
+                        return Some((e as usize, i));
+                    }
+                }
+            }
+            i = (i + 1) & mask;
         }
     }
+
+    fn lookup(&self, k: &Value) -> Option<(usize, usize)> {
+        let k = match k.v() {
+            V::Number(n) if n == 0.0 => Value::Number(0.0),
+            V::Empty => Value::Undefined,
+            _ => k.clone(),
+        };
+        let h = hash_key(&k);
+        self.find(&k, h)
+    }
+
+    fn rebuild(&mut self, cap: usize) {
+        self.table.clear();
+        self.table.resize(cap, SLOT_EMPTY);
+        self.table_deleted = 0;
+        let mask = cap - 1;
+        for (e, entry) in self.entries.iter().enumerate() {
+            if entry.is_some() {
+                let mut i = self.hashes[e] as usize & mask;
+                while self.table[i] != SLOT_EMPTY {
+                    i = (i + 1) & mask;
+                }
+                self.table[i] = e as u32;
+            }
+        }
+    }
+
+    pub fn get(&self, k: &Value) -> Option<&Value> {
+        let (e, _) = self.lookup(k)?;
+        self.entries[e].as_ref().map(|(_, v)| v)
+    }
+    pub fn has(&self, k: &Value) -> bool {
+        self.lookup(k).is_some()
+    }
+    /// Add or update; an existing entry keeps its key and position.
+    pub fn set(&mut self, k: Value, v: Value) {
+        let k = normalize_key(k);
+        let h = hash_key(&k);
+        if let Some((e, _)) = self.find(&k, h) {
+            if let Some(entry) = &mut self.entries[e] {
+                entry.1 = v;
+            }
+            return;
+        }
+        if (self.live + self.table_deleted + 1) * 2 > self.table.len() {
+            self.compact_if_sparse();
+            let want = ((self.live + 1) * 2).next_power_of_two().max(8);
+            let cap = if want > self.table.len() { want } else { self.table.len() };
+            self.rebuild(cap);
+        }
+        let e = self.entries.len() as u32;
+        if e >= SLOT_DELETED {
+            return;
+        }
+        self.entries.push(Some((k, v)));
+        self.hashes.push(h);
+        let mask = self.table.len() - 1;
+        let mut i = h as usize & mask;
+        while self.table[i] != SLOT_EMPTY && self.table[i] != SLOT_DELETED {
+            i = (i + 1) & mask;
+        }
+        if self.table[i] == SLOT_DELETED {
+            self.table_deleted -= 1;
+        }
+        self.table[i] = e;
+        self.live += 1;
+    }
     pub fn delete(&mut self, k: &Value) -> bool {
-        match self.index.remove(&ValueKey::from_value(k)) {
-            Some(i) => {
-                self.entries[i] = None;
+        match self.lookup(k) {
+            Some((e, slot)) => {
+                self.entries[e] = None;
+                self.table[slot] = SLOT_DELETED;
+                self.table_deleted += 1;
+                self.live -= 1;
+                self.compact_if_sparse();
                 true
             }
             None => false,
         }
     }
+    /// Remove every entry. With iterations in progress the positions stay
+    /// (as deleted entries), so iterators see entries added afterwards.
     pub fn clear(&mut self) {
-        self.entries.clear();
-        self.index.clear();
+        if self.iterators == 0 {
+            self.entries.clear();
+            self.hashes.clear();
+            self.table.clear();
+        } else {
+            for e in self.entries.iter_mut() {
+                *e = None;
+            }
+            let cap = self.table.len();
+            self.table.clear();
+            self.table.resize(cap, SLOT_EMPTY);
+        }
+        self.live = 0;
+        self.table_deleted = 0;
     }
     pub fn size(&self) -> usize {
-        self.index.len()
+        self.live
+    }
+    /// Drop deleted entries when they are the majority and nothing
+    /// iterates (positions change).
+    pub fn compact_if_sparse(&mut self) {
+        let dead = self.entries.len() - self.live;
+        if self.iterators != 0 || dead < 16 || dead * 2 < self.entries.len() {
+            return;
+        }
+        let mut w = 0;
+        for r in 0..self.entries.len() {
+            if self.entries[r].is_some() {
+                self.entries.swap(w, r);
+                self.hashes[w] = self.hashes[r];
+                w += 1;
+            }
+        }
+        self.entries.truncate(w);
+        self.hashes.truncate(w);
+        self.entries.shrink_to(w * 2);
+        self.hashes.shrink_to(w * 2);
+        let cap = (w * 2).next_power_of_two().max(8);
+        self.rebuild(cap);
+    }
+    /// A copy without deleted entries or iteration state.
+    pub fn snapshot(&self) -> MapData {
+        let mut d = MapData::default();
+        for (k, v) in self.entries.iter().flatten() {
+            d.set(k.clone(), v.clone());
+        }
+        d
+    }
+    /// An iteration over the entries starts / ends (see `iterators`).
+    pub fn iteration_started(&mut self) {
+        self.iterators += 1;
+    }
+    pub fn iteration_ended(&mut self) {
+        self.iterators = self.iterators.saturating_sub(1);
+        self.compact_if_sparse();
     }
 }
 
@@ -362,7 +522,7 @@ pub enum ObjectKind {
     /// `shape`: the receiver's shape id when the keys were collected by the
     /// fast path (while it is unchanged no key can have been deleted); 0
     /// means every key is re-checked with `[[HasProperty]]`.
-    ForInIterator { keys: Vec<JsStr>, index: usize, object: Option<ObjectId>, shape: u32 },
+    ForInIterator(Box<ForInState>),
     /// Host-defined (DOM nodes etc.)
     Host(Box<dyn Any>),
     /// Reference to a module's top-level binding (an import resolved at
@@ -408,7 +568,7 @@ impl ObjectKind {
             ObjectKind::MapIterator { .. } => "Map Iterator",
             ObjectKind::StringIterator { .. } => "String Iterator",
             ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
-            ObjectKind::ForInIterator { .. } => "ForIn Iterator",
+            ObjectKind::ForInIterator(_) => "ForIn Iterator",
             ObjectKind::Host(_) => "Object",
             ObjectKind::ModuleBinding { .. } => "ModuleBinding",
         }
@@ -423,8 +583,10 @@ pub struct Object {
     pub props: PropertyMap,
     pub extensible: bool,
     pub kind: ObjectKind,
-    /// `Object.prototype.toString` tag override for host objects.
-    pub class_name: Option<&'static str>,
+    /// `Object.prototype.toString` tag override for host objects (an
+    /// index into the interned class names, 0 for none; see
+    /// [`Object::class_name`]).
+    pub class_tag: u16,
     /// [[IsHTMLDDA]] (`document.all`): falsy, `typeof` "undefined", loosely
     /// equal to null and undefined (see [`crate::Realm::make_htmldda`]).
     pub htmldda: bool,
@@ -432,7 +594,14 @@ pub struct Object {
 
 impl Object {
     pub fn new(proto: Option<ObjectId>, kind: ObjectKind) -> Object {
-        Object { proto, props: PropertyMap::new(), extensible: true, kind, class_name: None, htmldda: false }
+        Object { proto, props: PropertyMap::new(), extensible: true, kind, class_tag: 0, htmldda: false }
+    }
+    /// `Object.prototype.toString` tag override for host objects.
+    pub fn class_name(&self) -> Option<&'static str> {
+        class_name_of(self.class_tag)
+    }
+    pub fn set_class_name(&mut self, name: &str) {
+        self.class_tag = intern_class_name(name);
     }
     /// Change the prototype (`[[SetPrototypeOf]]` without checks); keeps
     /// prototype-chain inline caches honest.
@@ -463,6 +632,44 @@ impl Object {
 thread_local! {
     /// Debug aid (RH_DEBUG_GC): what each freed slot held.
     static FREED_INFO: std::cell::RefCell<std::collections::HashMap<u32, String>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Interned host class names (few dozen; shared by all threads).
+static CLASS_NAMES: std::sync::RwLock<Vec<&'static str>> = std::sync::RwLock::new(Vec::new());
+
+/// The tag of a class name (interned once: objects carry two bytes).
+pub fn intern_class_name(name: &str) -> u16 {
+    if let Some(i) = CLASS_NAMES.read().unwrap_or_else(|e| e.into_inner()).iter().position(|n| *n == name) {
+        return i as u16 + 1;
+    }
+    let mut names = CLASS_NAMES.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = names.iter().position(|n| *n == name) {
+        return i as u16 + 1;
+    }
+    if names.len() >= u16::MAX as usize - 1 {
+        return 0;
+    }
+    names.push(Box::leak(name.to_string().into_boxed_str()));
+    names.len() as u16
+}
+
+fn class_name_of(tag: u16) -> Option<&'static str> {
+    if tag == 0 {
+        return None;
+    }
+    CLASS_NAMES.read().unwrap_or_else(|e| e.into_inner()).get(tag as usize - 1).copied()
+}
+
+/// State of a `for-in` enumeration.
+#[derive(Debug)]
+pub struct ForInState {
+    pub keys: Vec<JsStr>,
+    pub index: usize,
+    pub object: Option<ObjectId>,
+    /// The receiver's shape id when the keys were collected by the fast
+    /// path (while it is unchanged no key can have been deleted); 0 means
+    /// every key is re-checked with `[[HasProperty]]`.
+    pub shape: u32,
 }
 
 /// Bytes of one heap slot (an object's inline part).
@@ -558,12 +765,19 @@ impl Heap {
         }
         let mut freed = 0;
         let debug = std::env::var_os("RH_DEBUG_GC").is_some();
+        // Unfinished iterators that die end their iteration.
+        let mut ended: Vec<u32> = Vec::new();
         for (i, slot) in self.objects.iter_mut().enumerate() {
             if slot.is_some() && !self.marks[i] {
+                if let Some(Object { kind: ObjectKind::MapIterator { target, index, .. }, .. }) = slot {
+                    if *index != MAP_ITER_DONE {
+                        ended.push(target.0);
+                    }
+                }
                 if debug {
                     let o = slot.as_ref().unwrap();
                     let keys: Vec<String> = o.props.iter().take(6).map(|(k, _)| format!("{k:?}")).collect();
-                    FREED_INFO.with(|m| m.borrow_mut().insert(i as u32, format!("{} {:?} props={:?}", o.kind.name(), o.class_name, keys)));
+                    FREED_INFO.with(|m| m.borrow_mut().insert(i as u32, format!("{} {:?} props={:?}", o.kind.name(), o.class_name(), keys)));
                 }
                 if let Some(o) = slot.as_mut() {
                     o.props.recycle();
@@ -571,6 +785,11 @@ impl Heap {
                 *slot = None;
                 self.free.push(i as u32);
                 freed += 1;
+            }
+        }
+        for t in ended {
+            if let Some(Object { kind: ObjectKind::Map(m) | ObjectKind::Set(m) | ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = &mut self.objects[t as usize] {
+                m.iteration_ended();
             }
         }
         self.live_count -= freed;
@@ -679,7 +898,7 @@ pub fn trace_object(obj: &Object, out: &mut Vec<Value>) {
         ObjectKind::ArrayIterator { target, .. } => push_val(out, target),
         ObjectKind::MapIterator { target, .. } => out.push(Value::Object(*target)),
         ObjectKind::RegExpStringIterator { regexp, .. } => out.push(Value::Object(*regexp)),
-        ObjectKind::ForInIterator { object, .. } => push_id(out, *object),
+        ObjectKind::ForInIterator(f) => push_id(out, f.object),
         ObjectKind::ModuleBinding { scope, .. } => out.push(Value::Object(*scope)),
         _ => {}
     }

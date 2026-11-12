@@ -79,7 +79,7 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             in_passive: false,
         }),
     );
-    realm.set_class_name(id, Box::leak(class.to_string().into_boxed_str()));
+    realm.set_class_name(id, class);
     // Detail fields as own data properties.
     let wheel = match &init.detail {
         Some(EventDetail::Wheel { x, y, dx, dy, ctrl, shift, alt, meta }) => Some((EventDetail::Mouse { x: *x, y: *y, button: 0, ctrl: *ctrl, shift: *shift, alt: *alt, meta: *meta }, *dx, *dy)),

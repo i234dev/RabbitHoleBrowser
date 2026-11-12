@@ -1646,3 +1646,66 @@ fn direct_eval_sees_caller_scope() {
     eq("(function () { var loc = 1; var e = eval; return e('typeof loc'); })()", "undefined");
     throws("(function () { eval('var 1x'); })()", "SyntaxError");
 }
+
+/// Map / Set hash table: SameValueZero keys, insertion order, deletion and
+/// compaction while iterators are live.
+#[test]
+fn map_set_keys_and_iteration() {
+    eq("new Map([[-0, 'a']]).get(0) + new Map([[0, 'b']]).get(-0)", "ab");
+    eq("Object.is([...new Set([-0])][0], 0) && Object.is(new Map().set(-0, 1).keys().next().value, 0)", "true");
+    eq("var m = new Map([[NaN, 1]]); m.set(NaN, 2); m.get(NaN) + ':' + m.size + ':' + new Set([NaN, 0 / 0, NaN]).size", "2:1:1");
+    eq("var m = new Map(); m.set('a' + 'b', 1); m.get('ab') + ':' + m.has('a' + 'b') + ':' + m.has('ba')", "1:true:false");
+    eq("var k = {}, m = new Map([[k, 1], [{}, 2]]); m.get(k) + ':' + m.get({}) + ':' + new Map([[1n, 'x']]).get(1n)", "1:undefined:x");
+    eq("var m = new Map([['1', 's'], [1, 'n'], [true, 'b'], [null, 'z'], [undefined, 'u']]); [m.get('1'), m.get(1), m.get(true), m.get(null), m.get(undefined), m.size].join()", "s,n,b,z,u,5");
+    eq("var m = new Map([[1, 1], [2, 2], [3, 3]]); var out = []; for (var [k] of m) { out.push(k); if (k === 1) m.delete(2); } out.join()", "1,3");
+    eq("var s = new Set([1]); var out = []; for (var v of s) { out.push(v); if (v < 4) s.add(v + 1); } out.join()", "1,2,3,4");
+    eq("var s = new Set([1, 2, 3]); var it = s.values(); it.next(); s.clear(); s.add(9); it.next().value + ':' + s.size", "9:1");
+    eq("var m = new Map(); for (let i = 0; i < 100; i++) m.set(i, i); var it = m.keys(); it.next(); for (let i = 0; i < 90; i++) m.delete(i); [...it].join() + ':' + m.size", "90,91,92,93,94,95,96,97,98,99:10");
+    eq("var m = new Map(); for (let i = 0; i < 1000; i++) { m.set(i, i); m.delete(i - 1); } [...m.keys()].join() + ':' + m.size + ':' + m.get(999)", "999:1:999");
+    eq("var s = new Set([1]); var it = s.values(); it.next(); it.next(); s.add(2); it.next().done", "true");
+    eq("var m = new Map([[1, 'a'], [2, 'b'], [3, 'c']]); var seen = []; m.forEach(function (v, k) { seen.push(v); if (k === 1) { m.delete(2); m.set(4, 'd'); } }); seen.join()", "a,c,d");
+    eq("var s = new Set(); for (let i = 0; i < 50; i++) s.add('k' + i); for (let i = 0; i < 45; i++) s.delete('k' + i); s.add('k0'); [...s].join()", "k45,k46,k47,k48,k49,k0");
+    eq("var m = new Map(); for (let i = 0; i < 40; i++) m.set(i, i); for (let i = 0; i < 39; i++) m.delete(i); var c = structuredClone(m); c.size + ':' + c.get(39)", "1:39");
+    eq("var s = new Set([3, 1, 2]); s.delete(1); s.add(1); [...s].join() + ':' + [...s.entries()].map(e => e.join('=')).join()", "3,2,1:3=3,2=2,1=1");
+}
+
+/// Iteration fast paths (array / generator / string / Map iterators driven
+/// without result objects) behave like the protocol.
+#[test]
+fn iterator_fast_paths() {
+    eq("Array.prototype[Symbol.iterator] = function* () { yield 42; }; var [a] = [1]; a", "42");
+    eq("Object.getPrototypeOf([][Symbol.iterator]()).next = function () { return { done: true }; }; var r = []; for (var x of [1, 2]) r.push(x); r.length", "0");
+    eq("var [a, b] = [, 2]; String(a) + b", "undefined2");
+    eq("Array.prototype[0] = 'p'; var [x] = [,]; x", "p");
+    eq("var arr = [1]; Object.defineProperty(arr, 1, { get() { return 'g'; } }); [...arr].join()", "1,g");
+    eq("function* g() { yield 1; return 2; } [...g()].join()", "1");
+    eq("[...'a\u{1F600}b'].length", "3");
+    eq("var m = new Map([[1, 'a'], [2, 'b']]); var r = []; for (const [k, v] of m) r.push(k + v); r.join()", "1a,2b");
+    eq("function f() { return [...arguments].join(); } f(1, 2, 3)", "1,2,3");
+    eq("function* g() { var x = yield 1; yield x * 2; } var it = g(); it.next(); it.next(21).value", "42");
+    eq("var log = []; var it = { [Symbol.iterator]() { return { i: 0, next() { return { value: this.i, done: this.i++ > 2 }; }, return() { log.push('closed'); return {}; } }; } }; for (var v of it) { if (v === 1) break; } log.join()", "closed");
+    eq("function* g() { try { yield 1; yield 2; } finally { } } var r = []; for (var v of g()) { r.push(v); break; } r.join()", "1");
+    eq("var a = [1, 2, 3]; var r = []; for (var v of a) { r.push(v); if (v === 1) a.push(4); } r.join()", "1,2,3,4");
+    eq("var it = [1, 2][Symbol.iterator](); it.next(); it.next(); it.next(); it.next().done", "true");
+    eq("var [p, ...q] = 'xyz'; p + q.join('')", "xyz");
+}
+
+/// Regular expression fast paths: compiled case folding, class bitmaps,
+/// start-character skipping, anchors, and the result-free replace / match
+/// / test paths.
+#[test]
+fn regexp_fast_paths() {
+    eq("/AbC/i.test('xaBc') + ':' + /[a-z]+/i.exec('12ABC')[0] + ':' + /[^a-z]/i.test('Q')", "true:ABC:false");
+    eq("/\\u212A/i.test('k') + ':' + /\\u212A/iu.test('k') + ':' + /\u{df}/i.test('SS')", "false:true:false");
+    eq("var r = /a/y; r.lastIndex = 1; var t1 = r.test('ba'); var li = r.lastIndex; var t2 = r.test('ba'); t1 + ':' + li + ':' + t2 + ':' + r.lastIndex", "true:2:false:0");
+    eq("/^b/.test('ab') + ':' + /^b/m.test('a\\nb') + ':' + 'aab'.replace(/^a/g, 'x')", "false:true:xab");
+    eq("/[xy]z|q/.exec('aaqxz').index + ':' + /[\u{e9}]/.test('caf\u{e9}') + ':' + /\\bfoo/.exec('a foo').index", "2:true:2");
+    eq("'a-b-c'.replace(/-/g, '+') + ':' + 'abc'.replace(/b/g, '[$&]') + ':' + 'abc'.replace(/x*/g, '-')", "a+b+c:a[b]c:-a-b-c-");
+    eq("'aXbX'.match(/x/gi).join() + ':' + 'abc'.match(/z/g) + ':' + 'abc'.match(/x*/g).length", "X,X:null:4");
+    eq("var r = /b/g; r.lastIndex = 2; 'abcb'.match(r).length + ':' + r.lastIndex", "2:0");
+    eq("/./u.exec('\u{1F600}')[0].length + ':' + '\u{1F600}\u{1F600}'.replace(/(?:)/gu, '-').length", "2:7");
+    eq("('agggtaaaxTTTACCCT'.match(/agggtaaa|tttaccct/ig) || []).length", "2");
+    eq("'x'.replace(/(x)/, '$1$1') + ':' + 'abc'.replace(/(?<l>b)/, '[$<l>]')", "xx:a[b]c");
+    eq("var r = /a/g; r.exec('aa'); r.test('aa') + ':' + r.lastIndex", "true:2");
+    eq("/(b)/.test('abc'); RegExp.$1", "b");
+}

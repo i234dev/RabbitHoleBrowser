@@ -25,7 +25,10 @@ pub(crate) struct StrBox {
 
 pub(crate) enum StrInner {
     Flat(Box<[u16]>),
-    Rope { left: JsStr, right: JsStr, len: usize, flat: std::cell::OnceCell<Box<[u16]>> },
+    /// A concatenation, flattened on first read of its units; the parts
+    /// are released then (`None` afterwards), so a string built by many
+    /// `+=` does not keep every intermediate piece alive once used.
+    Rope { parts: std::cell::UnsafeCell<Option<(JsStr, JsStr)>>, len: usize, flat: std::cell::OnceCell<Box<[u16]>> },
 }
 
 impl Clone for JsStr {
@@ -96,18 +99,21 @@ impl Drop for StrInner {
         // children that are ropes themselves need it; the placeholder left
         // behind is created here (not taken from a thread-local: strings
         // can be dropped while thread-local storage is being torn down).
-        let StrInner::Rope { left, right, .. } = self else { return };
-        let is_rope = |s: &JsStr| matches!(s.inner(), StrInner::Rope { .. });
-        if !is_rope(left) && !is_rope(right) {
+        let StrInner::Rope { parts, .. } = self else { return };
+        let Some((left, right)) = parts.get_mut().take() else { return };
+        // SAFETY: reading the children's parts (nothing mutates them here).
+        let deep = |s: &JsStr| matches!(s.inner(), StrInner::Rope { parts, .. } if unsafe { (*parts.get()).is_some() });
+        if !deep(&left) && !deep(&right) {
             return;
         }
-        let hole = JsStr::from_inner(StrInner::Flat(Box::default()));
-        let mut stack = vec![std::mem::replace(left, hole.clone()), std::mem::replace(right, hole.clone())];
+        let mut stack = vec![left, right];
         while let Some(s) = stack.pop() {
             if let Ok(mut inner) = Rc::try_unwrap(s.into_rc()) {
-                if let StrInner::Rope { left, right, .. } = &mut inner.s {
-                    stack.push(std::mem::replace(left, hole.clone()));
-                    stack.push(std::mem::replace(right, hole.clone()));
+                if let StrInner::Rope { parts, .. } = &mut inner.s {
+                    if let Some((l, r)) = parts.get_mut().take() {
+                        stack.push(l);
+                        stack.push(r);
+                    }
                 }
             }
         }
@@ -196,7 +202,18 @@ impl JsStr {
     pub fn as_units(&self) -> &[u16] {
         match self.inner() {
             StrInner::Flat(b) => b,
-            StrInner::Rope { flat, .. } => flat.get_or_init(|| self.flatten()),
+            StrInner::Rope { flat, parts, .. } => {
+                if let Some(f) = flat.get() {
+                    return f;
+                }
+                let f = self.flatten();
+                let _ = flat.set(f);
+                // SAFETY: no reference into the parts outlives `flatten`
+                // (readers of a rope with `flat` set never look at them).
+                let old = unsafe { (*parts.get()).take() };
+                drop(StrInner::Rope { parts: std::cell::UnsafeCell::new(old), len: 0, flat: std::cell::OnceCell::new() });
+                flat.get().map(|b| &**b).unwrap_or(&[])
+            }
         }
     }
     fn flatten(&self) -> Box<[u16]> {
@@ -206,10 +223,11 @@ impl JsStr {
         while let Some(s) = stack.pop() {
             match s.inner() {
                 StrInner::Flat(b) => out.extend_from_slice(b),
-                StrInner::Rope { left, right, flat, .. } => {
+                StrInner::Rope { parts, flat, .. } => {
                     if let Some(f) = flat.get() {
                         out.extend_from_slice(f);
-                    } else {
+                    // SAFETY: parts are only taken after `flat` is set.
+                    } else if let Some((left, right)) = unsafe { &*parts.get() } {
                         stack.push(right);
                         stack.push(left);
                     }
@@ -245,7 +263,7 @@ impl JsStr {
             v.extend_from_slice(other.as_units());
             return JsStr::from_inner(StrInner::Flat(v.into()));
         }
-        JsStr::from_inner(StrInner::Rope { left: self.clone(), right: other.clone(), len, flat: std::cell::OnceCell::new() })
+        JsStr::from_inner(StrInner::Rope { parts: std::cell::UnsafeCell::new(Some((self.clone(), other.clone()))), len, flat: std::cell::OnceCell::new() })
     }
     pub fn slice(&self, start: usize, end: usize) -> JsStr {
         let end = end.min(self.len());

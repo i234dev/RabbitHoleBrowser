@@ -1183,6 +1183,9 @@ impl Realm {
 
     /// IteratorStep: Some(value) or None when done.
     pub fn iterator_step(&mut self, it: &Value, next: &Value) -> JsResult<Option<Value>> {
+        if let Some(r) = crate::builtins::iterator::fast_step(self, it, next) {
+            return r;
+        }
         let r = self.call(next.clone(), it.clone(), &[])?;
         if !r.is_object() {
             return self.type_error("Iterator result is not an object");

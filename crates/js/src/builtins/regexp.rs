@@ -79,6 +79,36 @@ fn fast_replace(realm: &mut Realm, rx: ObjectId, s: &JsStr, rep: &Value, functio
         return Ok(None);
     }
     let rxv = Value::Object(rx);
+    let regex = match &realm.obj(rx).kind {
+        ObjectKind::RegExp(d) => d.regex.clone(),
+        _ => unreachable!(),
+    };
+    // A replacement string without `$` patterns is inserted as is.
+    if !functional && !rep_str.as_units().contains(&(b'$' as u16)) {
+        let units = s.as_units();
+        let mut out: Vec<u16> = Vec::with_capacity(units.len());
+        let (mut pos, mut next_pos) = (0usize, 0usize);
+        let mut last = None;
+        while pos <= units.len() {
+            let Some(m) = regex.exec_utf16(units, pos) else { break };
+            let (a, b) = (m.start(), m.end());
+            out.extend_from_slice(&units[next_pos..a]);
+            out.extend_from_slice(rep_str.as_units());
+            next_pos = b;
+            last = Some(m);
+            if !global {
+                break;
+            }
+            pos = if a == b { advance_index(s, b, unicode) } else { b };
+        }
+        if global {
+            set_last_index(realm, &rxv, 0)?;
+        }
+        let Some(m) = last else { return Ok(Some(Value::String(s.clone()))) };
+        realm.regexp_last = Some((s.clone(), m.captures));
+        out.extend_from_slice(&units[next_pos..]);
+        return Ok(Some(Value::String(JsStr::from_units(out))));
+    }
     // (start, end, captures) of every match.
     let mut found: Vec<(usize, usize, Vec<Option<(usize, usize)>>)> = Vec::new();
     let mut pos = 0usize;
@@ -86,11 +116,7 @@ fn fast_replace(realm: &mut Realm, rx: ObjectId, s: &JsStr, rep: &Value, functio
         if pos > s.len() {
             break;
         }
-        let m = match &realm.obj(rx).kind {
-            ObjectKind::RegExp(d) => d.regex.exec_utf16(s.as_units(), pos),
-            _ => unreachable!(),
-        };
-        let Some(m) = m else { break };
+        let Some(m) = regex.exec_utf16(s.as_units(), pos) else { break };
         let (a, b) = (m.start(), m.end());
         let caps: Vec<Option<(usize, usize)>> = m.captures.iter().skip(1).cloned().collect();
         realm.regexp_last = Some((s.clone(), m.captures));
@@ -313,6 +339,40 @@ fn set_last_index(realm: &mut Realm, rx: &Value, v: usize) -> JsResult<()> {
 }
 
 /// RegExpBuiltinExec: returns the match array or null.
+/// RegExpBuiltinExec up to the match: reads and updates `lastIndex`.
+fn builtin_match(realm: &mut Realm, rx: ObjectId, s: &JsStr) -> JsResult<Option<crate::regex::Match>> {
+    let (global, sticky) = match &realm.obj(rx).kind {
+        ObjectKind::RegExp(d) => (d.regex.flags.global, d.regex.flags.sticky),
+        _ => unreachable!(),
+    };
+    let rxv = Value::Object(rx);
+    let last_index = if global || sticky { get_last_index(realm, &rxv)? } else { 0 };
+    if last_index > s.len() {
+        if global || sticky {
+            set_last_index(realm, &rxv, 0)?;
+        }
+        return Ok(None);
+    }
+    let m = match &realm.obj(rx).kind {
+        ObjectKind::RegExp(d) => d.regex.exec_utf16(s.as_units(), last_index),
+        _ => unreachable!(),
+    };
+    let Some(m) = m else {
+        if global || sticky {
+            set_last_index(realm, &rxv, 0)?;
+        }
+        return Ok(None);
+    };
+    if sticky && m.start() != last_index {
+        set_last_index(realm, &rxv, 0)?;
+        return Ok(None);
+    }
+    if global || sticky {
+        set_last_index(realm, &rxv, m.end())?;
+    }
+    Ok(Some(m))
+}
+
 pub fn builtin_exec(realm: &mut Realm, rx: ObjectId, s: &JsStr) -> JsResult<Value> {
     let (global, sticky, has_indices) = match &realm.obj(rx).kind {
         ObjectKind::RegExp(d) => (d.regex.flags.global, d.regex.flags.sticky, d.regex.flags.has_indices),
@@ -435,6 +495,17 @@ fn test(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         return realm.type_error("RegExp.prototype.test called on incompatible receiver");
     }
     let s = realm.to_string(arg(args, 0))?;
+    if let Some(id) = pristine(realm, &this) {
+        // No result array needed.
+        let m = builtin_match(realm, id, &s)?;
+        return Ok(Value::Bool(match m {
+            Some(m) => {
+                realm.regexp_last = Some((s, m.captures));
+                true
+            }
+            None => false,
+        }));
+    }
     let r = regexp_exec(realm, this, &s)?;
     Ok(Value::Bool(!r.is_null()))
 }
@@ -536,6 +607,30 @@ fn symbol_match(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
         return realm.type_error("RegExp.prototype[Symbol.match] called on non-object");
     }
     let s = realm.to_string(arg(args, 0))?;
+    if let Some(id) = pristine(realm, &this) {
+        let regex = match &realm.obj(id).kind {
+            ObjectKind::RegExp(d) => d.regex.clone(),
+            _ => unreachable!(),
+        };
+        if regex.flags.global && !regex.flags.sticky {
+            // The matched strings straight from the engine.
+            set_last_index(realm, &this, 0)?;
+            let units = s.as_units();
+            let mut results = Vec::new();
+            let mut pos = 0usize;
+            let mut last = None;
+            while pos <= units.len() {
+                let Some(m) = regex.exec_utf16(units, pos) else { break };
+                let (a, b) = (m.start(), m.end());
+                results.push(Value::String(s.slice(a, b)));
+                pos = if a == b { advance_index(&s, b, regex.flags.unicode) } else { b };
+                last = Some(m);
+            }
+            let Some(m) = last else { return Ok(Value::Null) };
+            realm.regexp_last = Some((s.clone(), m.captures));
+            return Ok(realm.new_array_value(results));
+        }
+    }
     let flags = realm.get_str(this.clone(), "flags")?;
     let flags = realm.to_rust_string(flags)?;
     if !flags.contains('g') {
