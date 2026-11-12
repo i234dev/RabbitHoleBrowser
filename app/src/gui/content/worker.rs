@@ -92,8 +92,21 @@ struct Painted {
 }
 
 pub(super) fn run(tab_id: u64, epoch: u64, config: ContentConfig, sink: Sink, rx: Receiver<Inbox>, tx: Sender<Inbox>, busy: Arc<AtomicU64>) {
-    let mut w = Worker::new(tab_id, epoch, config, sink, tx, busy);
-    w.main_loop(rx);
+    // A Rust panic anywhere in the page's engine (parsing, style, layout,
+    // a VM bug) ends only this tab's thread: the UI is told so it can show
+    // a crash page and start a fresh content thread.
+    let crash_sink = sink.clone();
+    let crash_busy = busy.clone();
+    let r = rabbithole_js::panics::catch(move || {
+        let mut w = Worker::new(tab_id, epoch, config, sink, tx, busy);
+        w.main_loop(rx);
+    });
+    if let Err((msg, loc)) = r {
+        crash_busy.store(0, Ordering::Relaxed);
+        let at = if loc.is_empty() { String::new() } else { format!(" at {loc}") };
+        eprintln!("rabbithole: tab {tab_id} crashed: {msg}{at}");
+        crash_sink(tab_id, epoch, FromContent::Crashed(format!("{msg}{at}")));
+    }
 }
 
 struct Worker {
@@ -483,6 +496,8 @@ impl Worker {
                 loader::spawn_download(self.engine.loader.clone(), req, self.download_prefs(), move |d| sink(tab_id, epoch, FromContent::Download(d)));
             }
             ToContent::Shutdown => self.quit = true,
+            #[cfg(test)]
+            ToContent::Crash => panic!("deliberate content thread crash"),
         }
     }
 

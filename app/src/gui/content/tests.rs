@@ -74,6 +74,26 @@ fn is_frame(m: &FromContent) -> bool {
 
 const TALL: &str = "<html><body style='margin:0'><div style='height:5000px;background:linear-gradient(red,blue)'>tall</div></body></html>";
 
+/// A Rust panic on a content thread is reported as `Crashed` (instead of
+/// the tab silently freezing or the process going down), and other tabs
+/// keep working.
+#[test]
+fn content_thread_panic_reports_crash() {
+    let (sink, rx) = sink();
+    let h = spawn(41, &sink);
+    let other = spawn(42, &sink);
+    load(&h, "<p>hello</p>");
+    assert!(wait_for(&rx, 41, Duration::from_secs(20), is_frame).is_some(), "first frame");
+    h.send(ToContent::Crash);
+    let crashed = wait_for(&rx, 41, Duration::from_secs(20), |m| matches!(m, FromContent::Crashed(_)));
+    match crashed {
+        Some((_, FromContent::Crashed(reason))) => assert!(reason.contains("deliberate content thread crash") && reason.contains("worker.rs"), "{reason}"),
+        _ => panic!("no Crashed message"),
+    }
+    load(&other, "<p>still alive</p>");
+    assert!(wait_for(&rx, 42, Duration::from_secs(20), is_frame).is_some(), "other tab keeps painting");
+}
+
 #[test]
 fn first_frame_and_commit_for_html() {
     let (sink, rx) = sink();

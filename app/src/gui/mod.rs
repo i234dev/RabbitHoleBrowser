@@ -1588,6 +1588,7 @@ impl App {
             }
             FromContent::Download(_) => {}
             FromContent::Consent(ev) => self.on_consent(idx, ev),
+            FromContent::Crashed(reason) => self.restart_content(idx, &format!("Tab crashed: {reason}")),
         }
     }
 

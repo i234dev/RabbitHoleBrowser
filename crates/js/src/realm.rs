@@ -319,6 +319,7 @@ impl Realm {
     pub fn new() -> Realm {
         crate::sampler::start_from_env();
         crate::alloc::enable_for_this_thread();
+        crate::panics::install_hook();
         let mut heap = Heap::new();
         let object_proto = heap.alloc(Object::new(None, ObjectKind::Ordinary));
         let function_proto = heap.alloc(Object::new(

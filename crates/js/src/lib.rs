@@ -36,6 +36,7 @@ pub mod ic;
 pub mod interop;
 pub mod lexer;
 pub mod modules;
+pub mod panics;
 pub mod parser;
 pub mod realm;
 pub mod regex;
@@ -50,6 +51,8 @@ pub mod vm;
 mod tests;
 #[cfg(test)]
 mod tests_vm;
+#[cfg(test)]
+mod tests_panic;
 
 pub use heap::{NativeFn, ObjectKind, Property, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN, WRITABLE};
 pub use interop::JsResult;

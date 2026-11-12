@@ -36,6 +36,16 @@ pub struct Frame {
     pub extra: Option<Box<FrameExtra>>,
 }
 
+/// Interpreter stack heights when a native function was entered (see
+/// `Realm::recover_from_panic`).
+struct PanicMark {
+    frames: usize,
+    vstack: usize,
+    new_target: usize,
+    join: usize,
+    job_roots: usize,
+}
+
 /// The rarely used parts of a frame.
 #[derive(Default)]
 pub struct FrameExtra {
@@ -209,7 +219,14 @@ impl Realm {
         if !construct {
             self.new_target_stack.push(Value::Undefined);
         }
-        let r = func(self, this, args);
+        // A Rust panic inside the native (a host binding bug) becomes a
+        // catchable JS error here instead of unwinding through the
+        // interpreter and killing the thread.
+        let mark = PanicMark { frames: self.frames.len(), vstack: self.vstack.len(), new_target: self.new_target_stack.len(), join: self.join_stack.len(), job_roots: self.job_roots.len() };
+        let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(self, this, args))) {
+            Ok(r) => r,
+            Err(payload) => Err(self.recover_from_panic(&*payload, &mark, id)),
+        };
         if crate::realm::take_post_native() {
             if let Some(h) = self.post_native {
                 h(self);
@@ -221,6 +238,42 @@ impl Realm {
         self.current_callee = saved;
         self.native_depth -= 1;
         r
+    }
+
+    /// Restore the interpreter state saved at `mark` after a native function
+    /// panicked (frames it pushed through nested calls are dropped, their
+    /// generators completed) and build the error thrown in its place.
+    #[cold]
+    #[inline(never)]
+    fn recover_from_panic(&mut self, payload: &(dyn std::any::Any + Send), mark: &PanicMark, callee: ObjectId) -> Value {
+        let (msg, loc) = crate::panics::describe(payload);
+        while self.frames.len() > mark.frames {
+            let popped = self.frames.pop().expect("frame");
+            if let Some(g) = popped.generator() {
+                if let Some(o) = self.heap.try_get_mut(g) {
+                    if let ObjectKind::Generator(gd) = &mut o.kind {
+                        gd.state = GeneratorState::Completed;
+                        gd.frame = None;
+                    }
+                }
+            }
+        }
+        self.vstack.truncate(mark.vstack);
+        // Slots the native's caller owns must still exist (the native may
+        // have been entered with arguments still on the stack).
+        if self.vstack.len() < mark.vstack {
+            self.vstack.resize(mark.vstack, Value::Undefined);
+        }
+        self.new_target_stack.truncate(mark.new_target);
+        self.join_stack.truncate(mark.join);
+        self.job_roots.truncate(mark.job_roots);
+        let name = match self.heap.try_get(callee).map(|o| &o.kind) {
+            Some(ObjectKind::Native(n)) if !n.name.is_empty() => n.name.to_rust_string(),
+            _ => "<native>".to_string(),
+        };
+        let at = if loc.is_empty() { String::new() } else { format!(" at {loc}") };
+        self.console_emit("error", format!("internal error in {name}(): {msg}{at} (Rust panic caught; the page keeps running)"));
+        self.new_error("Error", &format!("internal error: {msg}"))
     }
 
     /// `[[Construct]]`.

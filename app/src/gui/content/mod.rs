@@ -169,6 +169,9 @@ pub enum ToContent {
     /// Save the URL to disk (save link / image as).
     SaveUrl(Url),
     Shutdown,
+    /// Panic on the content thread (tests of the crash recovery).
+    #[cfg(test)]
+    Crash,
 }
 
 /// What the UI should know about the page to route input.
@@ -225,6 +228,9 @@ pub enum FromContent {
     /// A cookie-consent dialog was handled automatically (or found and
     /// left alone).
     Consent(crate::autocookies::ConsentEvent),
+    /// The content thread died from a Rust panic (message and location);
+    /// it no longer answers, the UI shows a crash page in a new one.
+    Crashed(String),
 }
 
 /// Callback receiving a tab's messages: (tab id, epoch, message). Called

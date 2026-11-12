@@ -556,6 +556,8 @@ pub enum ErrorKind {
     Http(u16),
     BadAddress,
     Unsupported,
+    /// The tab's content thread died (a browser bug, not the site's).
+    Crashed,
     Other,
 }
 
@@ -565,6 +567,8 @@ pub fn classify_error(error: &str) -> ErrorKind {
     let e = error.to_ascii_lowercase();
     if e.starts_with("blocked ad/tracker") {
         ErrorKind::Blocked
+    } else if e.starts_with("tab crashed") {
+        ErrorKind::Crashed
     } else if let Some(code) = e.strip_prefix("http error ").and_then(|c| c.trim().parse().ok()) {
         ErrorKind::Http(code)
     } else if e.contains("certificate") || e.contains("tls") || e.contains("handshake") || e.contains("alert") || e.contains("ssl") {
@@ -611,6 +615,7 @@ pub fn error_page(url: &str, error: &str) -> String {
         ErrorKind::Http(code) => ("!", format!("HTTP error {code}"), format!("<b>{host}</b> answered with status {code}."), &[]),
         ErrorKind::BadAddress => ("?", "Invalid address".into(), "The address could not be understood.".into(), &[]),
         ErrorKind::Unsupported => ("?", "Can’t open this kind of address".into(), "RabbitHole does not support this URL scheme.".into(), &[]),
+        ErrorKind::Crashed => ("!", "This tab crashed".into(), format!("RabbitHole hit an internal error while showing <b>{host}</b> and stopped this tab; the rest of the browser is unaffected."), &["Reload the page to try again.", "If it keeps happening, the details below help to report the bug."]),
         ErrorKind::Other => ("!", "This page could not be loaded".into(), format!("Something went wrong while loading <b>{host}</b>."), &[]),
     };
     let tips: String = if tips.is_empty() { String::new() } else { format!("<ul style=\"list-style:disc;padding-left:20px\">{}</ul>", tips.iter().map(|t| format!("<li style=\"background:none;border:none;padding:2px\">{t}</li>")).collect::<String>()) };
@@ -620,8 +625,9 @@ pub fn error_page(url: &str, error: &str) -> String {
     } else {
         String::new()
     };
+    let retry = if kind == ErrorKind::Crashed { "Reload" } else { "Retry" };
     let body = format!(
-        "<div class=\"err\"><div class=\"icon\">{icon}</div><h1>{}</h1><p>{text}</p>{tips}<p style=\"margin-top:22px\"><a class=\"btn\" href=\"{}\">Retry</a>{home}{extra}<a class=\"btn2\" href=\"about:home\">Home</a></p><div class=\"details\">URL: <code>{}</code><br>Error: <code>{}</code></div></div>",
+        "<div class=\"err\"><div class=\"icon\">{icon}</div><h1>{}</h1><p>{text}</p>{tips}<p style=\"margin-top:22px\"><a class=\"btn\" href=\"{}\">{retry}</a>{home}{extra}<a class=\"btn2\" href=\"about:home\">Home</a></p><div class=\"details\">URL: <code>{}</code><br>Error: <code>{}</code></div></div>",
         escape(&title),
         escape(url),
         escape(url),
@@ -734,6 +740,14 @@ mod tests {
         assert!(history_page(&History::default(), "").contains("No pages visited"));
         assert_eq!(human_size(2048), "2.0 KB");
         assert_eq!(human_size(100), "100 B");
+    }
+
+    #[test]
+    fn crash_page_offers_reload() {
+        let page = error_page("https://example.com/a", "Tab crashed: index out of bounds at x.rs:1:2");
+        assert!(page.contains("This tab crashed"), "{page}");
+        assert!(page.contains("href=\"https://example.com/a\">Reload</a>"), "{page}");
+        assert!(page.contains("index out of bounds"));
     }
 
     #[test]
