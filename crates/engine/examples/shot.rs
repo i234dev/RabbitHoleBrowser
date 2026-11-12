@@ -94,7 +94,26 @@ fn main() {
     // Let timers run for a bit (like a browser would) before painting.
     let mut page = page;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(std::env::var("RH_JS_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(300));
+    // RH_PROGRESS=<js>: evaluated and printed every 10 s while waiting;
+    // RH_DONE=<js>: stop waiting once it evaluates to true.
+    let progress = std::env::var("RH_PROGRESS").ok();
+    let done = std::env::var("RH_DONE").ok();
+    let mut next_report = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
+        if std::time::Instant::now() >= next_report {
+            next_report = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            if let Some(js) = &progress {
+                eprintln!("[progress {:?}] {}", t0.elapsed(), engine.eval_in_page(&mut page, js));
+                for (level, msg) in page.take_console() {
+                    eprintln!("[console.{level}] {msg}");
+                }
+            }
+            if let Some(js) = &done {
+                if engine.eval_in_page(&mut page, js) == "true" {
+                    break;
+                }
+            }
+        }
         match page.next_script_due() {
             Some(due) => {
                 let now = engine.start.elapsed().as_secs_f64() * 1000.0;
