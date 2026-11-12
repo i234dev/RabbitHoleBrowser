@@ -824,6 +824,103 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
 
     /// Mirror the line's fragments for `direction: rtl` (visual order is
     /// reversed; no bidi reordering of mixed-direction text).
+    /// Bidi reordering of a left-to-right line (UAX #9, simplified to one
+    /// embedding level): runs of right-to-left letters (with the neutrals
+    /// between them, and atomic boxes inside them) are put in reverse
+    /// order by mirroring their positions within the span they occupy.
+    /// The text of each run is shaped right to left by the font code.
+    fn reorder_rtl_runs(&mut self) {
+        let has_rtl = self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { text, .. } if text.chars().any(is_rtl_letter)));
+        if !has_rtl {
+            return;
+        }
+        // Split text fragments into pieces of one direction.
+        let frags = std::mem::take(&mut self.cur.frags);
+        let mut units: Vec<(PF, u8)> = Vec::new(); // 0 neutral, 1 LTR, 2 RTL
+        for f in frags {
+            let (text, item) = match &f.kind {
+                PFKind::Text { text, item } => (text.clone(), *item),
+                PFKind::Box(_) => {
+                    units.push((f, 0));
+                    continue;
+                }
+            };
+            let classes: Vec<u8> = text.chars().map(char_dir).collect();
+            if !classes.contains(&2) {
+                let c = if classes.contains(&1) { 1 } else { 0 };
+                units.push((f, c));
+                continue;
+            }
+            // Neutrals between RTL letters are RTL, others go with the
+            // left-to-right text.
+            let mut resolved = classes.clone();
+            let mut prev = 0u8;
+            for i in 0..classes.len() {
+                if classes[i] == 0 {
+                    let next = classes[i + 1..].iter().copied().find(|c| *c != 0).unwrap_or(0);
+                    resolved[i] = if prev == 2 && next == 2 { 2 } else { 1 };
+                } else {
+                    prev = classes[i];
+                }
+            }
+            let style = self.style(item).clone();
+            let font = self.lay.font_for(&style);
+            let ls = style.letter_spacing;
+            let chars: Vec<(usize, char)> = text.char_indices().collect();
+            let mut start = 0usize;
+            let mut x = f.x;
+            let mut i = 0;
+            while i < chars.len() {
+                let dir = resolved[i];
+                let mut j = i;
+                while j < chars.len() && resolved[j] == dir {
+                    j += 1;
+                }
+                let end = if j < chars.len() { chars[j].0 } else { text.len() };
+                let piece = &text[start..end];
+                let w = if j >= chars.len() && start == 0 {
+                    f.w
+                } else if j >= chars.len() {
+                    (f.x + f.w - x).max(0.0)
+                } else {
+                    self.lay.measurer.width(font, style.font_size, piece) + ls * piece.chars().count() as f32
+                };
+                units.push((PF { x, w, kind: PFKind::Text { text: piece.to_string(), item } }, dir));
+                x += w;
+                start = end;
+                i = j;
+            }
+        }
+        // Atomic boxes between RTL runs belong to them.
+        let n = units.len();
+        for i in 0..n {
+            if units[i].1 == 0 {
+                let prev = units[..i].iter().rev().map(|u| u.1).find(|c| *c != 0).unwrap_or(1);
+                let next = units[i + 1..].iter().map(|u| u.1).find(|c| *c != 0).unwrap_or(1);
+                units[i].1 = if prev == 2 && next == 2 { 2 } else { 1 };
+            }
+        }
+        // Mirror every maximal RTL sequence within its span.
+        let mut i = 0;
+        while i < n {
+            if units[i].1 != 2 {
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while j < n && units[j].1 == 2 {
+                j += 1;
+            }
+            let s = units[i].0.x;
+            let e = units[j - 1].0.x + units[j - 1].0.w;
+            for u in &mut units[i..j] {
+                u.0.x = s + e - (u.0.x + u.0.w);
+            }
+            i = j;
+        }
+        self.cur.frags = units.into_iter().map(|u| u.0).collect();
+    }
+
     fn mirror_line(&mut self) {
         let (l, r) = (self.cur.left, self.cur.right);
         let used = self.cur.x - l;
@@ -868,6 +965,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
         if self.cstyle.direction == Direction::Rtl {
             self.mirror_line();
+        } else {
+            self.reorder_rtl_runs();
         }
 
         // Vertical metrics.
@@ -1103,4 +1202,20 @@ fn needs_bg(style: &ComputedStyle) -> bool {
         || !style.background_layers.is_empty()
         || !style.box_shadow.is_empty()
         || style.outline_width > 0.0
+}
+
+/// A strong right-to-left letter (Hebrew, Arabic, Syriac, Thaana, NKo, ...).
+fn is_rtl_letter(ch: char) -> bool {
+    matches!(ch as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF) && ch.is_alphabetic()
+}
+
+/// Bidi class of a character: 2 right-to-left, 1 left-to-right, 0 neutral.
+fn char_dir(ch: char) -> u8 {
+    if is_rtl_letter(ch) {
+        2
+    } else if ch.is_alphanumeric() {
+        1
+    } else {
+        0
+    }
 }

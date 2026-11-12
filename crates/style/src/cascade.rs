@@ -1024,8 +1024,8 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
                 }
             }
             _ => match a.as_str() {
-                "left" | "right" | "center" | "justify" => css.push_str(&format!("text-align:{a};")),
-                "middle" => css.push_str("text-align:center;"),
+                "left" | "right" | "justify" => css.push_str(&format!("text-align:{a};")),
+                "center" | "middle" => css.push_str("text-align:-webkit-center;"),
                 _ => {}
             },
         }
@@ -1251,7 +1251,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "letter-spacing" => to.letter_spacing = from.letter_spacing,
         "word-spacing" => to.word_spacing = from.word_spacing,
-        "text-align" => to.text_align = from.text_align,
+        "text-align" => {
+            to.text_align = from.text_align;
+            to.text_align_webkit_center = from.text_align_webkit_center;
+        }
         "text-decoration" => {
             to.text_decoration = from.text_decoration;
             to.text_decoration_color = from.text_decoration_color;
@@ -2145,6 +2148,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     "justify" | "justify-all" => TextAlign::Justify,
                     _ => return,
                 };
+                style.text_align_webkit_center = matches!(kw.as_str(), "-webkit-center" | "-moz-center");
             }
         }
         "text-transform" => {

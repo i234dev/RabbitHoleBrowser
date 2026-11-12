@@ -724,6 +724,9 @@ pub struct ComputedStyle {
     pub letter_spacing: f32,
     pub word_spacing: f32,
     pub text_align: TextAlign,
+    /// `text-align: -webkit-center` (`<center>`, `align=center`): also
+    /// centers block-level children with non-auto margins. Inherited.
+    pub text_align_webkit_center: bool,
     pub text_decoration: TextDecoration,
     pub text_transform: TextTransform,
     pub text_indent: Length,
@@ -890,6 +893,7 @@ impl ComputedStyle {
             letter_spacing: 0.0,
             word_spacing: 0.0,
             text_align: TextAlign::Left,
+            text_align_webkit_center: false,
             text_decoration: TextDecoration::default(),
             text_transform: TextTransform::None,
             text_indent: Length::ZERO,
@@ -991,6 +995,7 @@ impl ComputedStyle {
             letter_spacing: parent.letter_spacing,
             word_spacing: parent.word_spacing,
             text_align: parent.text_align,
+            text_align_webkit_center: parent.text_align_webkit_center,
             // Not inherited per spec, but decorations propagate to all
             // descendant inline content, which amounts to the same thing
             // for a renderer without pseudo-boxes.
@@ -1037,6 +1042,7 @@ impl ComputedStyle {
             && self.letter_spacing == o.letter_spacing
             && self.word_spacing == o.word_spacing
             && self.text_align == o.text_align
+            && self.text_align_webkit_center == o.text_align_webkit_center
             && self.text_decoration == o.text_decoration
             && self.text_transform == o.text_transform
             && self.text_indent == o.text_indent

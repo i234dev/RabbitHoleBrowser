@@ -46,7 +46,7 @@ article h1, aside h1, nav h1, section h1 { font-size: 1.5em; margin: 0.83em 0; }
 hr { color: gray; border-style: solid; border-width: 1px; margin: 0.5em auto; overflow: hidden; }
 fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 2px solid #c0c0c0; }
 legend { padding: 0 2px; }
-center { text-align: center; }
+center { text-align: -webkit-center; }
 
 /* ---- phrasing content ---- */
 cite, dfn, em, i, var { font-style: italic; }

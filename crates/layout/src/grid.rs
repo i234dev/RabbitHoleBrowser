@@ -9,6 +9,7 @@ use crate::float::Bfc;
 use crate::tree::{BoxKind, Flow, LayoutBox};
 use rabbithole_style::{BoxSizing, ComputedStyle, ContentDistribution, GridAutoFlow, GridLine, ItemAlign, Length, TrackListItem, TrackSize};
 use std::collections::HashSet;
+use rabbithole_gfx::Rect;
 
 /// A track sizing function (§11.1).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -638,6 +639,62 @@ impl<'a> Layouter<'a> {
             let (ax, aw) = span_size(&cols.tracks, &col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
             let (ay, ah) = span_size(&rows.tracks, &row_pos, it.area.row.0 as usize, it.area.row.1 as usize);
             self.layout_grid_item(b, it, ax + content_x, ay + content_y, aw, ah, cbw);
+        }
+
+        // Absolutely positioned children of a positioned grid container use
+        // the grid area of their line placement as containing block (§9.1);
+        // an auto line is the padding edge.
+        if style.position != rabbithole_style::Position::Static {
+            let pad = crate::block::resolve_edges(&style.padding, cbw);
+            let content_h = cb.height.unwrap_or(rows_extent);
+            let (px0, px1) = (content_x - pad.left, content_x + cbw + pad.right);
+            let (py0, py1) = (content_y - pad.top, content_y + content_h + pad.bottom);
+            let line_x = |pos: &[f32], tracks: &[Track], i: i32| -> f32 {
+                if tracks.is_empty() {
+                    return 0.0;
+                }
+                let i = i.clamp(0, tracks.len() as i32) as usize;
+                if i < tracks.len() {
+                    pos[i]
+                } else {
+                    pos[tracks.len() - 1] + tracks[tracks.len() - 1].base
+                }
+            };
+            let n_cols = cols.tracks.len() as i32 + 1;
+            let n_rows = rows.tracks.len() as i32 + 1;
+            for c in b.children.iter() {
+                if c.flow != Flow::Absolute {
+                    continue;
+                }
+                let Some(node) = c.node else { continue };
+                let s = &c.style;
+                let axis = |start: &rabbithole_style::GridLine, end: &rabbithole_style::GridLine, names: &[Vec<String>], n: i32| -> (Option<i32>, Option<i32>) {
+                    let a = match line_spec(start, names, n, false) {
+                        LineSpec::Line(l) => Some(l),
+                        _ => None,
+                    };
+                    let e = match line_spec(end, names, n, true) {
+                        LineSpec::Line(l) => Some(l),
+                        LineSpec::Span(k) => a.map(|a| a + k),
+                        LineSpec::Auto => None,
+                    };
+                    let a = match (a, line_spec(start, names, n, false)) {
+                        (None, LineSpec::Span(k)) => e.map(|e| e - k),
+                        (a, _) => a,
+                    };
+                    (a, e)
+                };
+                let (c0, c1) = axis(&s.grid_column_start, &s.grid_column_end, &cols.names, n_cols);
+                let (r0, r1) = axis(&s.grid_row_start, &s.grid_row_end, &rows.names, n_rows);
+                if c0.is_none() && c1.is_none() && r0.is_none() && r1.is_none() {
+                    continue;
+                }
+                let x0 = c0.map(|l| content_x + line_x(&col_pos, &cols.tracks, l)).unwrap_or(px0);
+                let x1 = c1.map(|l| content_x + line_x(&col_pos, &cols.tracks, l)).unwrap_or(px1);
+                let y0 = r0.map(|l| content_y + line_x(&row_pos, &rows.tracks, l)).unwrap_or(py0);
+                let y1 = r1.map(|l| content_y + line_x(&row_pos, &rows.tracks, l)).unwrap_or(py1);
+                self.abs_cb.insert(node, Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)));
+            }
         }
 
         rows_extent.max(0.0)

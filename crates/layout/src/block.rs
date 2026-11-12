@@ -43,6 +43,11 @@ pub(crate) struct Layouter<'a> {
     pub font_ext: bool,
     /// Cache of family-list lookups: (families joined, weight, italic) → font.
     font_cache: HashMap<(String, u16, bool), FontId>,
+    /// Containing blocks of absolutely positioned grid children placed by
+    /// grid lines (their grid area), set by the grid layout.
+    pub(crate) abs_cb: HashMap<rabbithole_dom::NodeId, Rect>,
+    /// The block children being laid out have a `-webkit-center` parent.
+    center_blocks: bool,
 }
 
 pub(crate) fn resolve_edges(e: &Edges<Length>, base: f32) -> Edges<f32> {
@@ -168,6 +173,8 @@ impl<'a> Layouter<'a> {
             forced_content_height: None,
             font_ext: crate::paint::font_ext_available(ctx.fonts),
             font_cache: HashMap::new(),
+            abs_cb: HashMap::new(),
+            center_blocks: false,
         }
     }
 
@@ -566,6 +573,17 @@ impl<'a> Layouter<'a> {
             };
             if center {
                 crate::table::translate_contents(b, 0.0, (h - content_h) / 2.0);
+            } else if h > content_h && matches!(b.formatting, Formatting::Block | Formatting::Inline) && b.kind != BoxKind::TableCell {
+                // `align-content` on a block container (CSS Align §5.4):
+                // the contents as one alignment subject.
+                let shift = match style.align_content {
+                    rabbithole_style::ContentDistribution::Center | rabbithole_style::ContentDistribution::SpaceAround | rabbithole_style::ContentDistribution::SpaceEvenly => (h - content_h) / 2.0,
+                    rabbithole_style::ContentDistribution::FlexEnd => h - content_h,
+                    _ => 0.0,
+                };
+                if shift > 0.0 {
+                    crate::table::translate_contents(b, 0.0, shift);
+                }
             }
         }
         if explicit_h.is_some() || (h - content_h).abs() > 0.01 {
@@ -670,6 +688,13 @@ impl<'a> Layouter<'a> {
     /// `at_top`, the parent's top margin chain is still open — those margins
     /// were already applied when the parent was positioned.
     fn layout_block_children(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
+        let saved = std::mem::replace(&mut self.center_blocks, b.style.text_align_webkit_center);
+        let h = self.layout_block_children_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+        self.center_blocks = saved;
+        h
+    }
+
+    fn layout_block_children_inner(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         let content_y = b.content_rect.y;
         let content_x = b.content_rect.x;
         let mut cursor = content_y;
@@ -796,6 +821,12 @@ impl<'a> Layouter<'a> {
                 }
                 Some(w) => {
                     let rem = cbw - w - pb_h;
+                    // `-webkit-center` parents center the margin box of
+                    // children with fixed margins (Blink).
+                    if let (Some(l), Some(r), true) = (ml, mr, self.center_blocks) {
+                        let start = ((rem - l - r) / 2.0).max(0.0) + l;
+                        return (w, start, rem - start);
+                    }
                     match (ml, mr) {
                         (None, None) => {
                             if rem > 0.0 {
@@ -976,7 +1007,8 @@ impl<'a> Layouter<'a> {
         let mut found = false;
         for i in 0..b.children.len() {
             if b.children[i].flow == Flow::Absolute {
-                self.layout_absolute(&mut b.children[i], cb);
+                let area = b.children[i].node.and_then(|n| self.abs_cb.get(&n).copied());
+                self.layout_absolute(&mut b.children[i], area.unwrap_or(cb));
                 found = true;
             } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below {
                 // Kept boxes remember having none (their subtree is
