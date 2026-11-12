@@ -1677,6 +1677,8 @@ fn direct_eval_annexb_private_generators() {
     eq("function f(a = b, b) {} try { f(); 'no' } catch (e) { e.name }", "ReferenceError");
     eq("function f(a, b = a + 1) { a = 5; return a + b; } f(1)", "7");
     eq("var g = (x = () => y, y = 2) => x(); g()", "2");
+    eq("function f(p = eval('var arguments')) {} try { f(); 'no' } catch (e) { e.name }", "SyntaxError");
+    eq("function f(p = eval('var q = 1'), r = q) { return r; } f()", "1");
     // Assignment targets are evaluated before the iterator steps.
     eq("var log = []; var o = { set x(v) { log.push('set ' + v); } }; function t() { log.push('ref'); return o; } var it = { [Symbol.iterator]() { return { next() { log.push('next'); return { value: 1, done: false }; }, return() { log.push('ret'); return {}; } }; } }; [t().x] = it; log.join()", "ref,next,set 1,ret");
     eq("var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { done: false }; }, return() { closed++; return {}; } }; } }; function th() { throw 'lhs'; } try { [...{}[th()]] = it; } catch (e) {} closed", "1");

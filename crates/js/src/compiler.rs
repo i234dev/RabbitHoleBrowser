@@ -149,6 +149,9 @@ pub struct EvalSite {
     pub in_method: bool,
     pub in_derived_ctor: bool,
     pub in_field_init: bool,
+    /// The call is in a parameter initializer of a non-arrow function:
+    /// eval code may not declare `var arguments`.
+    pub in_params: bool,
 }
 
 /// What a lazy [`FunctionCode`] keeps to compile its function on first
@@ -257,6 +260,8 @@ struct FnState {
     /// Index of the scope holding the function's `var`s (1 when parameter
     /// expressions give the body its own variable environment).
     var_scope: usize,
+    /// Compiling the parameter initializers.
+    in_params: bool,
 }
 
 impl FnState {
@@ -301,6 +306,7 @@ impl FnState {
             is_eval: false,
             annexb: Default::default(),
             var_scope: 0,
+            in_params: false,
         }
     }
 }
@@ -469,7 +475,7 @@ pub fn compile_eval(program: &Program, site: &EvalSite, source: &str) -> CResult
     // Sloppy eval code has no variable environment of its own.
     fs.scopes[0].is_function = strict;
     c.fns.push(fs);
-    c.compile_eval_body(program, strict)?;
+    c.compile_eval_body(program, strict, site.in_params)?;
     c.check_internal()?;
     let fs = c.fns.pop().unwrap();
     Ok(Rc::new(finish(fs, None)))
@@ -1529,7 +1535,7 @@ impl Compiler {
     // ----------------------------------------------------------------- eval
 
     /// The body of direct eval code (see [`compile_eval`]).
-    fn compile_eval_body(&mut self, program: &Program, strict: bool) -> CResult<()> {
+    fn compile_eval_body(&mut self, program: &Program, strict: bool, site_in_params: bool) -> CResult<()> {
         let body = &program.body;
         let mut vars = Vec::new();
         Self::collect_var_names(body, &mut vars);
@@ -1560,6 +1566,9 @@ impl Compiler {
         } else {
             for (n, k) in &lex {
                 self.declare(n, *k);
+            }
+            if site_in_params && var_like.iter().any(|n| n == "arguments") {
+                return self.err("'arguments' cannot be declared by eval code in parameters");
             }
             // Var names the caller's lexical bindings would clash with.
             for n in &var_like {
@@ -1888,11 +1897,13 @@ impl Compiler {
             self.emit_init_loc(loc);
         }
         // Parameter destructuring / defaults.
+        self.fs().in_params = true;
         for (loc, p) in complex {
             // Rest arguments arrive as an array in the hidden binding.
             self.emit_load_loc(loc);
             self.compile_pattern_store(&p.pattern, true)?;
         }
+        self.fs().in_params = false;
         // Simple params with defaults: `function f(a = 1)`
         // (handled above since `Assign` patterns are complex).
         if separate_vars {
@@ -1988,7 +1999,8 @@ impl Compiler {
             }
             break;
         }
-        EvalSite { env, strict, class_depth, in_function: ctx.0, in_method: ctx.1, in_derived_ctor: ctx.2, in_field_init: ctx.3 }
+        let in_params = self.fs_ref().in_params && !self.fs_ref().flags.is_arrow;
+        EvalSite { env, strict, class_depth, in_function: ctx.0, in_method: ctx.1, in_derived_ctor: ctx.2, in_field_init: ctx.3, in_params }
     }
 
     /// The body of `if`/`else`: a function declaration there (Annex B.3.4)

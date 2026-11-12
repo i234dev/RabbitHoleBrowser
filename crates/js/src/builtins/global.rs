@@ -383,7 +383,7 @@ fn eval(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
             return Err(realm.new_error("SyntaxError", &msg));
         }
     };
-    let site = crate::compiler::EvalSite { env: None, strict: false, class_depth: 0, in_function: false, in_method: false, in_derived_ctor: false, in_field_init: false };
+    let site = crate::compiler::EvalSite { env: None, strict: false, class_depth: 0, in_function: false, in_method: false, in_derived_ctor: false, in_field_init: false, in_params: false };
     let code = match crate::compiler::compile_eval(&program, &site, &src) {
         Ok(c) => c,
         Err(e) => return Err(realm.new_error("SyntaxError", &e.message)),
