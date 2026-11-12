@@ -234,6 +234,9 @@ pub enum Clear {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlign {
+    /// `start` (the initial value): left in ltr, right in rtl.
+    Start,
+    End,
     Left,
     Right,
     Center,
@@ -1112,7 +1115,7 @@ impl ComputedStyle {
             line_height_number: None,
             letter_spacing: 0.0,
             word_spacing: 0.0,
-            text_align: TextAlign::Left,
+            text_align: TextAlign::Start,
             text_align_webkit_center: false,
             text_decoration: TextDecoration::default(),
             text_transform: TextTransform::None,

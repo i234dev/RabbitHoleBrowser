@@ -2428,8 +2428,10 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         "text-align" => {
             if let Some(kw) = values::ident(c0) {
                 style.text_align = match kw.as_str() {
-                    "left" | "start" | "-webkit-left" | "-moz-left" => TextAlign::Left,
-                    "right" | "end" | "-webkit-right" | "-moz-right" => TextAlign::Right,
+                    "start" => TextAlign::Start,
+                    "end" => TextAlign::End,
+                    "left" | "-webkit-left" | "-moz-left" => TextAlign::Left,
+                    "right" | "-webkit-right" | "-moz-right" => TextAlign::Right,
                     "center" | "-webkit-center" | "-moz-center" => TextAlign::Center,
                     "justify" | "justify-all" => TextAlign::Justify,
                     _ => return,

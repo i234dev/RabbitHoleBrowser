@@ -1207,13 +1207,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // Content was mirrored to the right edge (start); `right` means
             // the end (left) edge.
             match self.cstyle.text_align {
-                TextAlign::Right => -free.max(0.0),
+                TextAlign::End | TextAlign::Left => -free.max(0.0),
                 TextAlign::Center => -(free / 2.0).max(0.0),
                 _ => 0.0,
             }
         } else {
             match self.cstyle.text_align {
-                TextAlign::Right => free.max(0.0),
+                TextAlign::End | TextAlign::Right => free.max(0.0),
                 TextAlign::Center => (free / 2.0).max(0.0),
                 _ => 0.0,
             }

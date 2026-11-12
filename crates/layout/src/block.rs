@@ -48,6 +48,9 @@ pub(crate) struct Layouter<'a> {
     pub(crate) abs_cb: HashMap<rabbithole_dom::NodeId, Rect>,
     /// The block children being laid out have a `-webkit-center` parent.
     center_blocks: bool,
+    /// The containing block of the block children being laid out is
+    /// right-to-left (over-constrained margins resolve by its direction).
+    cb_rtl: bool,
 }
 
 pub(crate) fn resolve_edges(e: &Edges<Length>, base: f32) -> Edges<f32> {
@@ -176,6 +179,7 @@ impl<'a> Layouter<'a> {
             font_cache: HashMap::new(),
             abs_cb: HashMap::new(),
             center_blocks: false,
+            cb_rtl: false,
         }
     }
 
@@ -698,8 +702,10 @@ impl<'a> Layouter<'a> {
     /// were already applied when the parent was positioned.
     fn layout_block_children(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         let saved = std::mem::replace(&mut self.center_blocks, b.style.text_align_webkit_center);
+        let saved_rtl = std::mem::replace(&mut self.cb_rtl, b.style.direction == rabbithole_style::Direction::Rtl);
         let h = self.layout_block_children_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
         self.center_blocks = saved;
+        self.cb_rtl = saved_rtl;
         h
     }
 
@@ -846,7 +852,7 @@ impl<'a> Layouter<'a> {
                         }
                         (None, Some(r)) => (w, (rem - r).max(0.0), r),
                         (Some(l), None) => (w, l, rem - l),
-                        (Some(_), Some(r)) if style.direction == rabbithole_style::Direction::Rtl => (w, rem - r, r),
+                        (Some(_), Some(r)) if self.cb_rtl => (w, rem - r, r),
                         (Some(l), Some(_)) => (w, l, rem - l),
                     }
                 }

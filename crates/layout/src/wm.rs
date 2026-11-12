@@ -49,6 +49,14 @@ pub(crate) fn transposed_as(style: &ComputedStyle, mode: WritingMode) -> Compute
     s.min_height = style.min_width;
     s.max_width = style.max_height;
     s.max_height = style.max_width;
+    // aspect-ratio is width / height: inverted in logical space, and a
+    // definite logical height gives the logical width.
+    if let Some(r) = style.aspect_ratio.filter(|r| *r > 0.0) {
+        s.aspect_ratio = Some(1.0 / r);
+        if let (Length::Auto, Length::Px(h)) = (s.width, s.height) {
+            s.width = Length::Px(h / r);
+        }
+    }
     s.overflow_x = style.overflow_y;
     s.overflow_y = style.overflow_x;
     // Corners: [top-left, top-right, bottom-right, bottom-left], (h, v).
@@ -244,8 +252,11 @@ pub(crate) fn prepare(root: LayoutBox, body: Option<rabbithole_dom::NodeId>) -> 
     let mut root = root;
     // The principal writing mode comes from the body when there is one
     // (CSS Writing Modes 3 §8): the root is laid out in it.
+    // Layout, paint or size containment on the root or the body stops it
+    // (CSS Contain 1 §3).
+    let contained = |s: &ComputedStyle| s.contain_layout || s.contain_paint || s.contain_size;
     if let Some(bs) = root.children.iter().find(|c| c.node.is_some() && c.node == body).map(|c| c.style.clone()) {
-        if bs.writing_mode != root.style.writing_mode && !root.style.layout_transposed && !root.wm_wrapper {
+        if bs.writing_mode != root.style.writing_mode && !contained(&bs) && !contained(&root.style) && !root.style.layout_transposed && !root.wm_wrapper {
             let mut s = (*root.style).clone();
             s.writing_mode = bs.writing_mode;
             root.style = Rc::new(s);
