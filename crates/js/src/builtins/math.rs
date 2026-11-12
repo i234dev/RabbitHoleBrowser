@@ -70,22 +70,179 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(m, "min", 2, min);
     realm.define_method(m, "hypot", 2, hypot);
     realm.define_method(m, "random", 0, random);
+    unary!("f16round", f16_round);
+    realm.define_method(m, "sumPrecise", 1, sum_precise);
+}
+
+/// The nearest binary16 value (ties to even), as a double.
+pub(crate) fn f16_round(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() || x == 0.0 {
+        return x;
+    }
+    let a = x.abs();
+    let r = if a >= 65520.0 {
+        f64::INFINITY
+    } else {
+        let e = ((a.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+        // Spacing of binary16 values around `a` (subnormals below 2^-14).
+        let q = if e < -14 { 2f64.powi(-24) } else { 2f64.powi(e - 10) };
+        (a / q).round_ties_even() * q
+    };
+    if x < 0.0 { -r } else { r }
+}
+
+/// An exact sum of doubles: a two's-complement integer counting units of
+/// 2^-1074 (wide enough for 2^53 maximal doubles).
+struct ExactSum {
+    limbs: [u64; 36],
+}
+
+impl ExactSum {
+    fn add(&mut self, d: f64) {
+        let bits = d.to_bits();
+        let e = ((bits >> 52) & 0x7ff) as usize;
+        let frac = bits & ((1u64 << 52) - 1);
+        let (m, s) = if e == 0 { (frac, 0) } else { (frac | (1 << 52), e - 1) };
+        let (i, sh) = (s / 64, s % 64);
+        let lo = m << sh;
+        let hi = if sh == 0 { 0 } else { m >> (64 - sh) };
+        if d < 0.0 {
+            let (r, b0) = self.limbs[i].overflowing_sub(lo);
+            self.limbs[i] = r;
+            let (r, b1) = self.limbs[i + 1].overflowing_sub(hi);
+            let (r, b2) = r.overflowing_sub(b0 as u64);
+            self.limbs[i + 1] = r;
+            let mut borrow = b1 || b2;
+            let mut j = i + 2;
+            while borrow && j < self.limbs.len() {
+                let (r, b) = self.limbs[j].overflowing_sub(1);
+                self.limbs[j] = r;
+                borrow = b;
+                j += 1;
+            }
+        } else {
+            let (r, c0) = self.limbs[i].overflowing_add(lo);
+            self.limbs[i] = r;
+            let (r, c1) = self.limbs[i + 1].overflowing_add(hi);
+            let (r, c2) = r.overflowing_add(c0 as u64);
+            self.limbs[i + 1] = r;
+            let mut carry = c1 || c2;
+            let mut j = i + 2;
+            while carry && j < self.limbs.len() {
+                let (r, c) = self.limbs[j].overflowing_add(1);
+                self.limbs[j] = r;
+                carry = c;
+                j += 1;
+            }
+        }
+    }
+
+    /// The sum rounded to the nearest double (ties to even).
+    fn to_f64(&self) -> f64 {
+        let neg = self.limbs[self.limbs.len() - 1] >> 63 == 1;
+        let mut mag = self.limbs;
+        if neg {
+            // Two's-complement negation.
+            let mut carry = true;
+            for l in mag.iter_mut() {
+                let (r, c) = (!*l).overflowing_add(carry as u64);
+                *l = r;
+                carry = c;
+            }
+        }
+        let Some(top) = mag.iter().rposition(|&l| l != 0) else { return 0.0 };
+        let bitlen = top * 64 + (64 - mag[top].leading_zeros() as usize);
+        let bit = |k: usize| (mag[k / 64] >> (k % 64)) & 1;
+        let r = if bitlen <= 53 {
+            (mag[0] as f64) * f64::from_bits(1)
+        } else {
+            let shift = bitlen - 53;
+            let mut m: u64 = 0;
+            for k in (shift..bitlen).rev() {
+                m = (m << 1) | bit(k);
+            }
+            let half = bit(shift - 1) == 1;
+            let sticky = (0..shift - 1).any(|k| bit(k) == 1);
+            let mut exp = shift as i32 - 1074;
+            if half && (sticky || m & 1 == 1) {
+                m += 1;
+                if m == 1 << 53 {
+                    m >>= 1;
+                    exp += 1;
+                }
+            }
+            let mut x = m as f64;
+            while exp > 1000 {
+                x *= 2f64.powi(1000);
+                exp -= 1000;
+            }
+            x * 2f64.powi(exp)
+        };
+        if neg { -r } else { r }
+    }
+}
+
+/// Math.sumPrecise(items): the exactly rounded sum of an iterable of numbers.
+fn sum_precise(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let items = arg(args, 0);
+    if items.is_nullish() {
+        return realm.type_error("Math.sumPrecise requires an iterable");
+    }
+    let (it, next) = realm.get_iterator(items)?;
+    // States: minus-zero, finite, +inf, -inf, NaN.
+    let (mut minus_zero, mut pos_inf, mut neg_inf, mut nan) = (true, false, false, false);
+    let mut sum = ExactSum { limbs: [0; 36] };
+    let mut count: u64 = 0;
+    while let Some(v) = realm.iterator_step(&it, &next)? {
+        count += 1;
+        let n = match v.v() {
+            crate::value::V::Number(n) if count < (1u64 << 53) => n,
+            _ => {
+                let _ = realm.iterator_close(&it);
+                return realm.type_error("Math.sumPrecise: every item must be a number");
+            }
+        };
+        if nan {
+            continue;
+        }
+        if n.is_nan() {
+            nan = true;
+        } else if n == f64::INFINITY {
+            pos_inf = true;
+            nan = neg_inf;
+        } else if n == f64::NEG_INFINITY {
+            neg_inf = true;
+            nan = pos_inf;
+        } else if !(n == 0.0 && n.is_sign_negative()) {
+            minus_zero = false;
+            if n != 0.0 {
+                sum.add(n);
+            }
+        }
+    }
+    Ok(Value::Number(if nan {
+        f64::NAN
+    } else if pos_inf {
+        f64::INFINITY
+    } else if neg_inf {
+        f64::NEG_INFINITY
+    } else if minus_zero {
+        -0.0
+    } else {
+        sum.to_f64()
+    }))
 }
 
 fn js_round(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
+    if x.is_nan() || x.is_infinite() || x == 0.0 {
         return x;
-    }
-    if x == 0.0 {
-        return x;
-    }
-    if x > 0.0 && x < 0.5 {
-        return 0.0;
     }
     if x < 0.0 && x >= -0.5 {
         return -0.0;
     }
-    (x + 0.5).floor()
+    // floor(x) + (fraction >= 0.5), without the rounding error of x + 0.5.
+    let f = x.floor();
+    if x - f >= 0.5 { f + 1.0 } else { f }
 }
 
 fn atan2(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
