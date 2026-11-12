@@ -992,7 +992,9 @@ impl Realm {
             rest_arr = Some(self.new_array_value(rest));
         }
         if code.arguments_loc.is_some() {
-            arguments_obj = Some(self.create_arguments_object(args, if flags.is_strict { None } else { Some(id) }));
+            // Unmapped arguments (strict code or non-simple parameters) have
+            // the poison-pill callee.
+            arguments_obj = Some(self.create_arguments_object(args, if flags.is_strict || !flags.has_simple_params { None } else { Some(id) }));
         } else if flags.is_arrow {
             arguments_obj = arrow_args;
         }
@@ -2664,7 +2666,7 @@ impl Realm {
         }
         // Anything else: an equivalent (unobservable) arguments object.
         let args = self.vstack[bottom..bottom + argc].to_vec();
-        let callee = if f.code().flags.is_strict { None } else { f.func };
+        let callee = if f.code().flags.is_strict || !f.code().flags.has_simple_params { None } else { f.func };
         let ao = self.create_arguments_object(&args, callee);
         let key = self.to_property_key(key)?;
         self.get(ao, key)

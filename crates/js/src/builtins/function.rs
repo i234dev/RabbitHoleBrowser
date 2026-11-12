@@ -142,7 +142,14 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
             _ if c.code.flags.is_class_constructor => format!("class {} {{ [native code] }}", c.code.name),
             _ => format!("function {}() {{ [native code] }}", c.code.name),
         },
-        ObjectKind::Native(n) => format!("function {}() {{ [native code] }}", n.name),
+        ObjectKind::Native(n) => {
+            // NativeFunction syntax: the name only when it is an (optionally
+            // get/set-prefixed) identifier name or a [symbol] name.
+            let name = n.name.to_rust_string();
+            let bare = name.strip_prefix("get ").or_else(|| name.strip_prefix("set ")).unwrap_or(&name);
+            let ok = bare.starts_with('[') && bare.ends_with(']') || bare.chars().enumerate().all(|(i, c)| c == '$' || c == '_' || c.is_alphabetic() || (i > 0 && c.is_alphanumeric()));
+            if ok { format!("function {}() {{ [native code] }}", name) } else { "function () { [native code] }".to_string() }
+        }
         _ => "function () { [native code] }".to_string(),
     };
     Ok(Value::str(&s))

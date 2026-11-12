@@ -475,6 +475,33 @@ fn record_keys(realm: &mut Realm, r: &SetRecord) -> JsResult<(Value, Value)> {
     Ok((it, next))
 }
 
+/// Whether `pred` holds for some element of the set, visiting the set's
+/// entries by index while `pred` (which may run JavaScript) changes it:
+/// deleted elements are skipped, added ones are visited.
+fn any_live_element(realm: &mut Realm, id: ObjectId, mut pred: impl FnMut(&mut Realm, &Value) -> JsResult<bool>) -> JsResult<bool> {
+    data_mut(realm, id).iteration_started();
+    let mut i = 0;
+    let mut result = Ok(false);
+    while i < entry_count(realm, id) {
+        if let Some((k, _)) = entry_at(realm, id, i) {
+            match pred(realm, &k) {
+                Ok(true) => {
+                    result = Ok(true);
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        i += 1;
+    }
+    data_mut(realm, id).iteration_ended();
+    result
+}
+
 fn set_values_vec(realm: &Realm, id: ObjectId) -> Vec<Value> {
     data(realm, id).entries.iter().flatten().map(|(k, _)| k.clone()).collect()
 }
@@ -548,6 +575,11 @@ fn set_symmetric_difference(realm: &mut Realm, this: Value, args: &[Value]) -> J
     let rid = result.as_object().unwrap();
     let (it, next) = record_keys(realm, &other)?;
     while let Some(v) = realm.iterator_step(&it, &next)? {
+        // Keys are canonicalized (-0 becomes +0).
+        let v = match v.v() {
+            V::Number(n) if n == 0.0 => Value::Number(0.0),
+            _ => v,
+        };
         if data(realm, id).has(&v) {
             data_mut(realm, rid).delete(&v);
         } else {
@@ -566,12 +598,8 @@ fn set_is_subset_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
     if data(realm, id).size() as f64 > other.size {
         return Ok(Value::Bool(false));
     }
-    for v in set_values_vec(realm, id) {
-        if !record_has(realm, &other, &v)? {
-            return Ok(Value::Bool(false));
-        }
-    }
-    Ok(Value::Bool(true))
+    let r = any_live_element(realm, id, |realm, v| Ok(!record_has(realm, &other, v)?))?;
+    Ok(Value::Bool(!r))
 }
 
 fn set_is_superset_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -594,10 +622,8 @@ fn set_is_disjoint_from(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     let id = this_coll(realm, &this, Kind::Set, "isDisjointFrom")?;
     let other = get_set_record(realm, arg(args, 0))?;
     if data(realm, id).size() as f64 <= other.size {
-        for v in set_values_vec(realm, id) {
-            if record_has(realm, &other, &v)? {
-                return Ok(Value::Bool(false));
-            }
+        if any_live_element(realm, id, |realm, v| record_has(realm, &other, v))? {
+            return Ok(Value::Bool(false));
         }
     } else {
         let (it, next) = record_keys(realm, &other)?;
