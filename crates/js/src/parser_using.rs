@@ -48,6 +48,12 @@ fn call(pos: Pos, f: &str, args: Vec<Expr>) -> Expr {
     }
 }
 
+/// `const %usingTmp = e;`: a runtime call as a declaration, which (unlike
+/// an expression statement) leaves the completion value alone.
+fn call_stmt(e: Expr) -> Stmt {
+    const_decl(e.pos, Pattern::Identifier(Name::new("%usingTmp")), e)
+}
+
 fn expr_stmt(e: Expr) -> Stmt {
     Stmt { pos: e.pos, kind: StmtKind::Expr(e) }
 }
@@ -71,7 +77,7 @@ pub(super) fn using_decl_hint(s: &Stmt) -> Option<f64> {
 }
 
 fn catch_record(pos: Pos) -> Option<Box<(Option<Pattern>, Vec<Stmt>)>> {
-    Some(Box::new((Some(Pattern::Identifier(Name::new(ERR))), vec![expr_stmt(call(pos, "%UsingError", vec![ident(pos, CAP), ident(pos, ERR)]))])))
+    Some(Box::new((Some(Pattern::Identifier(Name::new(ERR))), vec![call_stmt(call(pos, "%UsingError", vec![ident(pos, CAP), ident(pos, ERR)]))])))
 }
 
 /// Wrap `inner` (which registers resources on `%using`) in the
@@ -80,13 +86,13 @@ fn wrap(pos: Pos, inner: Vec<Stmt>, is_async: bool) -> Vec<Stmt> {
     let mut fin = Vec::new();
     if is_async {
         let awaited = Expr { pos, kind: ExprKind::Await(Box::new(call(pos, "%UsingValue", vec![ident(pos, CAP)]))) };
-        let step = Stmt { pos, kind: StmtKind::Try { block: vec![expr_stmt(awaited)], handler: catch_record(pos), finalizer: None } };
+        let step = Stmt { pos, kind: StmtKind::Try { block: vec![call_stmt(awaited)], handler: catch_record(pos), finalizer: None } };
         fin.push(Stmt {
             pos,
             kind: StmtKind::While { test: Box::new(call(pos, "%UsingStep", vec![ident(pos, CAP)])), body: Box::new(Stmt { pos, kind: StmtKind::Block(vec![step]) }) },
         });
     }
-    fin.push(expr_stmt(call(pos, "%UsingDispose", vec![ident(pos, CAP)])));
+    fin.push(call_stmt(call(pos, "%UsingDispose", vec![ident(pos, CAP)])));
     vec![
         const_decl(pos, Pattern::Identifier(Name::new(CAP)), call(pos, "%UsingNew", vec![])),
         Stmt { pos, kind: StmtKind::Try { block: inner, handler: catch_record(pos), finalizer: Some(fin) } },
@@ -120,8 +126,14 @@ fn expand_decl(s: Stmt, out: &mut Vec<Stmt>) {
             Pattern::Identifier(n) => n.clone(),
             _ => continue,
         };
-        out.push(const_decl(pos, d.target, init));
-        out.push(expr_stmt(call(pos, "%UsingAdd", vec![ident(pos, CAP), Expr { pos, kind: ExprKind::Identifier(name) }, hint])));
+        // `const x = init, %usingAdd_x = %UsingAdd(%using, x, hint);`: a
+        // declaration, so the block's completion value stays untouched.
+        let add = call(pos, "%UsingAdd", vec![ident(pos, CAP), Expr { pos, kind: ExprKind::Identifier(name.clone()) }, hint]);
+        let reg = VarDeclarator { target: Pattern::Identifier(Name::new(&format!("%usingAdd_{}", name.as_str()))), init: Some(add) };
+        out.push(Stmt {
+            pos,
+            kind: StmtKind::VarDecl(VarDecl { kind: VarKind::Const, declarations: vec![VarDeclarator { target: d.target, init: Some(init) }, reg] }),
+        });
     }
 }
 
@@ -336,10 +348,14 @@ impl Parser<'_> {
             return Ok(false);
         }
         if in_for && name.as_str() == "of" {
-            // `for (using of of xs)` / `for (using of = ...;` declare `of`;
-            // `for (using of xs)` iterates into the identifier `using`.
+            // `for (using of ...` is a for-of over the identifier `using`
+            // (`for (using of of xs)` too); `for (await using of of xs)`
+            // declares `of`.
             self.advance()?;
-            return Ok(self.is_ident("of") || self.is_punct("=") || self.is_punct(";"));
+            if self.is_punct("=") || self.is_punct(";") {
+                return Ok(true);
+            }
+            return Ok(hint == HINT_ASYNC && self.is_ident("of"));
         }
         Ok(true)
     }
@@ -360,6 +376,9 @@ impl Parser<'_> {
                 return Err(self.error("using declarations may not contain binding patterns"));
             }
             let name = self.expect_binding_identifier()?;
+            if name.as_str() == "await" && self.ctx.in_class_body && !self.ctx.in_function {
+                return Err(self.error_at(pos, "'await' is not a valid identifier name in a class static block"));
+            }
             if name.as_str() == "let" {
                 return Err(self.error_at(pos, "let is disallowed as a lexically bound name"));
             }

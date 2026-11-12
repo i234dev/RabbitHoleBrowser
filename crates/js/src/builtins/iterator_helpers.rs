@@ -635,6 +635,9 @@ fn limit_arg(realm: &mut Realm, this: &Value, limit: Value) -> JsResult<f64> {
     if n < 0.0 {
         return close_range_error(realm, this, "limit must be positive");
     }
+    if n.is_finite() && n > 9007199254740991.0 {
+        return close_range_error(realm, this, "limit is too large");
+    }
     Ok(n)
 }
 
@@ -658,7 +661,10 @@ fn size_arg(realm: &mut Realm, this: &Value, v: &Value, what: &str) -> JsResult<
         V::Number(n) => n,
         _ => return close_type_error(realm, this, &format!("{} must be a number", what)),
     };
-    if !(n.is_finite() && n.trunc() == n && n >= 1.0 && n <= 4294967295.0) {
+    if !(n.is_finite() && n.trunc() == n) {
+        return close_type_error(realm, this, &format!("{} must be an integer", what));
+    }
+    if !(n >= 1.0 && n <= 4294967295.0) {
         return close_range_error(realm, this, &format!("{} must be an integer in [1, 2^32-1]", what));
     }
     Ok(n)
@@ -821,7 +827,7 @@ fn async_iterator_dispose(realm: &mut Realm, this: Value, _args: &[Value]) -> Js
         match realm.get_method(this.clone(), PropertyKey::str("return"))? {
             None => Ok(None),
             Some(f) => {
-                let result = realm.call(f, this.clone(), &[Value::Undefined])?;
+                let result = realm.call(f, this.clone(), &[])?;
                 Ok(Some(crate::builtins::promise::promise_resolve(realm, result)?))
             }
         }
