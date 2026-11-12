@@ -495,7 +495,8 @@ impl Stringifier {
         }
         // unwrap wrappers
         if let V::Object(id) = value.v() {
-            if is_raw_json_object(realm, id) {
+            // Raw JSON objects have a null prototype (cheap pre-check).
+            if realm.obj(id).proto.is_none() && is_raw_json_object(realm, id) {
                 let raw = realm.get_str(value.clone(), "rawJSON")?;
                 let raw = realm.to_string(raw)?;
                 out.push_str(&raw.to_rust_string());

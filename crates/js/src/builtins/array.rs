@@ -1372,7 +1372,16 @@ fn sort(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     for (i, v) in sorted.into_iter().enumerate() {
         set_i(realm, id, i, v)?;
     }
-    delete_range_down(realm, id, n, n + holes)?;
+    // The holes go last, deleted in ascending order.
+    if let Some(keys) = sparse_keys(realm, id, n, n + holes) {
+        for k in keys {
+            del_i(realm, id, k)?;
+        }
+    } else {
+        for i in n..n + holes {
+            del_i(realm, id, i)?;
+        }
+    }
     Ok(Value::Object(id))
 }
 

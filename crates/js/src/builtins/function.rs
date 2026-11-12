@@ -62,7 +62,8 @@ fn throw_type_error(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult
     // (browsers give such functions own null-valued properties).
     if let V::Object(id) = this.v() {
         if let ObjectKind::Function(c) = &realm.obj(id).kind {
-            if !c.code.flags.is_strict {
+            let f = &c.code.flags;
+            if !f.is_strict && !f.is_arrow && !f.is_async && !f.is_generator && !f.is_method && !f.is_class_constructor {
                 return Ok(Value::Null);
             }
         }
