@@ -693,6 +693,11 @@ impl Default for Heap {
 }
 
 impl Heap {
+    /// Offset of the object table (a `Vec<Option<Object>>`) in the heap,
+    /// for native code.
+    #[cfg(feature = "jit")]
+    pub(crate) const OBJECTS_OFFSET: usize = std::mem::offset_of!(Heap, objects);
+
     pub fn new() -> Heap {
         Heap { objects: Vec::with_capacity(1024), free: Vec::new(), marks: Vec::new(), allocated_since_gc: 0, live_count: 0, collections: 1 }
     }

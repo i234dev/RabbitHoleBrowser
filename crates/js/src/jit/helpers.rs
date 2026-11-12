@@ -35,21 +35,21 @@ pub(crate) const CTX_TICK: i32 = 24;
 pub(crate) const CTX_PC: i32 = 40;
 
 /// Continue with the instruction's continuation in native code.
-pub(crate) const ST_NEXT: u32 = 0;
+pub(crate) const ST_NEXT: usize = 0;
 /// Frames were pushed or popped: back to the run loop (exit native code).
-pub(crate) const ST_RELOAD: u32 = 1;
+pub(crate) const ST_RELOAD: usize = 1;
 /// The run loop is over (`loop_end` holds its result).
-pub(crate) const ST_DONE: u32 = 2;
+pub(crate) const ST_DONE: usize = 2;
 /// Continue in the interpreter at the frame's pc.
-pub(crate) const ST_INTERP: u32 = 3;
+pub(crate) const ST_INTERP: usize = 3;
 /// A helper panicked (payload in `Realm::jit`).
-pub(crate) const ST_PANIC: u32 = 4;
+pub(crate) const ST_PANIC: usize = 4;
 /// Continue native code at `ctx.pc` (the instruction jumped).
-pub(crate) const ST_JUMP: u32 = 5;
+pub(crate) const ST_JUMP: usize = 5;
 
 /// Entry of a compiled function: `(ctx, pc) -> status` (never `ST_NEXT`
 /// or `ST_JUMP`).
-pub(crate) type Entry = unsafe extern "sysv64" fn(*mut Ctx, u32) -> u32;
+pub(crate) type Entry = unsafe extern "sysv64" fn(*mut Ctx, u32) -> usize;
 
 impl Realm {
     /// Run-loop hook at each (re)load of the running frame (`pc` is its
@@ -175,7 +175,7 @@ impl Realm {
 /// Run a helper body with the realm, catching panics, and refresh
 /// `ctx.slots` when native code continues.
 #[inline(always)]
-unsafe fn guard(ctx: *mut Ctx, f: impl FnOnce(&mut Realm, *mut Ctx) -> u32) -> u32 {
+unsafe fn guard(ctx: *mut Ctx, f: impl FnOnce(&mut Realm, *mut Ctx) -> usize) -> usize {
     let realm = (*ctx).realm;
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *realm, ctx))) {
         Ok(st) => {
@@ -183,6 +183,13 @@ unsafe fn guard(ctx: *mut Ctx, f: impl FnOnce(&mut Realm, *mut Ctx) -> u32) -> u
                 let r = &mut *realm;
                 let b = r.frames.last().map(|f| f.base as usize).unwrap_or(0);
                 (*ctx).slots = r.vstack.as_mut_ptr().add(b);
+            } else if st == ST_RELOAD {
+                // A call pushed a frame or a return popped one: continue
+                // with the new last frame's native code when it has some.
+                let a = switch_frame(ctx);
+                if a != 0 {
+                    return a;
+                }
             }
             st
         }
@@ -196,7 +203,7 @@ unsafe fn guard(ctx: *mut Ctx, f: impl FnOnce(&mut Realm, *mut Ctx) -> u32) -> u
 /// Status for native code after an out-of-line step of the instruction at
 /// `pc`: continue with the next one, or wherever the instruction jumped.
 #[inline(always)]
-fn status(r: &mut Realm, ctx: *mut Ctx, c: Ctl, pc: u32) -> u32 {
+fn status(r: &mut Realm, ctx: *mut Ctx, c: Ctl, pc: u32) -> usize {
     match c {
         Ctl::Next => {
             // SAFETY: native code runs the last frame.
@@ -235,7 +242,7 @@ unsafe fn op_at(ctx: *mut Ctx, pc: u32) -> Op {
 
 /// Generic helper: the instruction at `pc`, completely, as the
 /// interpreter's out-of-line path runs it.
-pub(crate) unsafe extern "sysv64" fn h_exec(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_exec(ctx: *mut Ctx, pc: u32) -> usize {
     guard(ctx, |r, ctx| {
         let c = r.exec_at(pc as usize + 1);
         status(r, ctx, c, pc)
@@ -244,7 +251,7 @@ pub(crate) unsafe extern "sysv64" fn h_exec(ctx: *mut Ctx, pc: u32) -> u32 {
 
 /// The slow path of `IncJumpIfLt*` (`IncR r, r`); native code continues
 /// with the loop test that follows.
-pub(crate) unsafe extern "sysv64" fn h_inc(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_inc(ctx: *mut Ctx, pc: u32) -> usize {
     guard(ctx, |r, ctx| {
         let reg = match op_at(ctx, pc) {
             Op::IncJumpIfLtRK(x, _, _) | Op::IncJumpIfLtRR(x, _, _) => x,
@@ -257,7 +264,7 @@ pub(crate) unsafe extern "sysv64" fn h_inc(ctx: *mut Ctx, pc: u32) -> u32 {
 
 /// Safe point at a backward jump or call; `fpc` is the frame pc to sync
 /// (the jump target, or the call's own resume pc).
-pub(crate) unsafe extern "sysv64" fn h_tick(ctx: *mut Ctx, fpc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_tick(ctx: *mut Ctx, fpc: u32) -> usize {
     guard(ctx, |r, _| {
         let c = r.tick_slow_jit(fpc as usize);
         match c {
@@ -269,7 +276,7 @@ pub(crate) unsafe extern "sysv64" fn h_tick(ctx: *mut Ctx, fpc: u32) -> u32 {
 }
 
 /// `ReturnR`: pop the frame (back to the run loop).
-pub(crate) unsafe extern "sysv64" fn h_return(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_return(ctx: *mut Ctx, pc: u32) -> usize {
     guard(ctx, |r, ctx| {
         let s = match op_at(ctx, pc) {
             Op::ReturnR(s) => s,
@@ -283,7 +290,7 @@ pub(crate) unsafe extern "sysv64" fn h_return(ctx: *mut Ctx, pc: u32) -> u32 {
 
 /// `CallR`: calls of natives complete here; JavaScript callees get their
 /// frame pushed and run from the run loop.
-pub(crate) unsafe extern "sysv64" fn h_call(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_call(ctx: *mut Ctx, pc: u32) -> usize {
     guard(ctx, |r, ctx| {
         let (b, argc, cic) = match op_at(ctx, pc) {
             Op::CallR(b, argc, cic, _) => (b, argc, cic),
@@ -295,7 +302,7 @@ pub(crate) unsafe extern "sysv64" fn h_call(ctx: *mut Ctx, pc: u32) -> u32 {
 }
 
 /// `NewR`.
-pub(crate) unsafe extern "sysv64" fn h_new(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_new(ctx: *mut Ctx, pc: u32) -> usize {
     guard(ctx, |r, ctx| {
         let (b, argc) = match op_at(ctx, pc) {
             Op::NewR(b, argc) => (b, argc),
@@ -308,7 +315,7 @@ pub(crate) unsafe extern "sysv64" fn h_new(ctx: *mut Ctx, pc: u32) -> u32 {
 
 /// Property, global, element, scope and `this` instructions: the run
 /// loop's inline-cache fast paths, then the full instruction.
-pub(crate) unsafe extern "sysv64" fn h_access(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_access(ctx: *mut Ctx, pc: u32) -> usize {
     guard(ctx, |r, ctx| {
         let c = r.step_access(&*(*ctx).code, (*ctx).slots, pc as usize);
         status(r, ctx, c, pc)
@@ -316,10 +323,12 @@ pub(crate) unsafe extern "sysv64" fn h_access(ctx: *mut Ctx, pc: u32) -> u32 {
 }
 
 /// After a call pushed a frame or a return popped one: the address of the
-/// new last frame's native code (inner entry, ctx rewritten for it) to
-/// continue without leaving native code, or 0 to go back to the run loop.
-/// Counts and compiles like the run loop's hook.
-pub(crate) unsafe extern "sysv64" fn h_switch(ctx: *mut Ctx) -> usize {
+/// new last frame's native code (inner entry, ctx rewritten for it, the pc
+/// to enter at in `ctx.pc`) to continue without leaving native code, or 0
+/// to go back to the run loop. Counts and compiles like the run loop's
+/// hook.
+#[inline(never)]
+unsafe fn switch_frame(ctx: *mut Ctx) -> usize {
     let r = &mut *(*ctx).realm;
     let Some(f) = r.frames.last() else { return 0 };
     let code: &FunctionCode = f.code.as_ref();
@@ -360,7 +369,7 @@ pub(crate) unsafe extern "sysv64" fn h_switch(ctx: *mut Ctx) -> usize {
 /// an inline-cache hit neither throws nor runs JavaScript nor moves the
 /// value stack. Anything else takes [`h_access`].
 #[inline(always)]
-unsafe fn fast_access(ctx: *mut Ctx, pc: u32, f: impl FnOnce(&mut Realm, &FunctionCode, *mut Value) -> bool) -> u32 {
+unsafe fn fast_access(ctx: *mut Ctx, pc: u32, f: impl FnOnce(&mut Realm, &FunctionCode, *mut Value) -> bool) -> usize {
     // No unwinding guard here: an inline-cache hit only reads and writes
     // plain data (a panic in it would be memory corruption, and aborts);
     // the miss path runs guarded.
@@ -376,7 +385,7 @@ unsafe fn fast_access(ctx: *mut Ctx, pc: u32, f: impl FnOnce(&mut Realm, &Functi
 
 /// `AddRR` / `AddRK` of two strings (concatenation); anything else in
 /// full.
-pub(crate) unsafe extern "sysv64" fn h_add(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_add(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |_, code, slots| {
         let (d, a, b) = match *code.ops.get_unchecked(pc as usize) {
             Op::AddRR(d, a, b) => (d, &*slots.add(a as usize), &*slots.add(b as usize)),
@@ -395,7 +404,7 @@ pub(crate) unsafe extern "sysv64" fn h_add(ctx: *mut Ctx, pc: u32) -> u32 {
 }
 
 /// `GetGlobalR` hit.
-pub(crate) unsafe extern "sysv64" fn h_get_global(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_get_global(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |r, code, slots| {
         let Op::GetGlobalR(d, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
         let key = code.constants.get_unchecked(*code.ic_keys.get_unchecked(ic as usize) as usize).as_js_str_unchecked();
@@ -411,7 +420,7 @@ pub(crate) unsafe extern "sysv64" fn h_get_global(ctx: *mut Ctx, pc: u32) -> u32
 }
 
 /// `SetGlobalR` hit.
-pub(crate) unsafe extern "sysv64" fn h_set_global(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_set_global(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |r, code, slots| {
         let Op::SetGlobalR(s, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
         let val = &*slots.add(s as usize);
@@ -430,7 +439,7 @@ pub(crate) unsafe extern "sysv64" fn h_set_global(ctx: *mut Ctx, pc: u32) -> u32
 }
 
 /// `GetPropR` hit on a data property (own, prototype, primitive, length).
-pub(crate) unsafe extern "sysv64" fn h_get_prop(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_get_prop(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |r, code, slots| {
         let Op::GetPropR(d, o, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
         let rec = code.ics.get_unchecked(ic as usize).get();
@@ -456,7 +465,7 @@ pub(crate) unsafe extern "sysv64" fn h_get_prop(ctx: *mut Ctx, pc: u32) -> u32 {
 }
 
 /// `SetPropR` hit on a writable data property or a cached transition.
-pub(crate) unsafe extern "sysv64" fn h_set_prop(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_set_prop(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |r, code, slots| {
         let Op::SetPropR(o, v, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
         let rec = code.ics.get_unchecked(ic as usize).get();
@@ -475,8 +484,68 @@ pub(crate) unsafe extern "sysv64" fn h_set_prop(ctx: *mut Ctx, pc: u32) -> u32 {
     })
 }
 
+/// The scope `depth` levels up the running frame's scope chain (`None`:
+/// something unexpected; the full instruction decides).
+#[inline(always)]
+fn scope_up(r: &Realm, depth: u16) -> Option<&crate::heap::ScopeData> {
+    // SAFETY: native code runs the last frame.
+    let mut id = unsafe { r.frames.last().unwrap_unchecked() }.scope;
+    let mut n = depth;
+    loop {
+        let crate::heap::ObjectKind::Scope(sd) = &r.heap.try_get(id)?.kind else { return None };
+        if n == 0 {
+            return Some(sd);
+        }
+        id = sd.parent?;
+        n -= 1;
+    }
+}
+
+/// `GetLocalR`: a closure variable (no JavaScript runs, nothing throws).
+pub(crate) unsafe extern "sysv64" fn h_get_local(ctx: *mut Ctx, pc: u32) -> usize {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::GetLocalR(d, depth, s) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let Some(v) = scope_up(r, depth).and_then(|sd| sd.slots.get(s as usize)) else { return false };
+        let v = if v.is_empty() { Value::Undefined } else { v.clone() };
+        *slots.add(d as usize) = v;
+        true
+    })
+}
+
+/// `SetLocalR`: store into a closure variable.
+pub(crate) unsafe extern "sysv64" fn h_set_local(ctx: *mut Ctx, pc: u32) -> usize {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::SetLocalR(v, depth, s) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let val = (*slots.add(v as usize)).undef_if_empty();
+        // SAFETY: native code runs the last frame.
+        let mut id = r.frames.last().unwrap_unchecked().scope;
+        for _ in 0..depth {
+            match r.heap.try_get(id).map(|o| &o.kind) {
+                Some(crate::heap::ObjectKind::Scope(sd)) => match sd.parent {
+                    Some(p) => id = p,
+                    None => return false,
+                },
+                _ => return false,
+            }
+        }
+        match r.heap.try_get_mut(id).map(|o| &mut o.kind) {
+            Some(crate::heap::ObjectKind::Scope(sd)) => match sd.slots.get_mut(s as usize) {
+                Some(slot) => {
+                    // The old value is dropped after the store (a string
+                    // drop runs no JavaScript).
+                    let old = std::mem::replace(slot, val);
+                    drop(old);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    })
+}
+
 /// `GetElemR` on arrays / typed arrays / strings with an index in range.
-pub(crate) unsafe extern "sysv64" fn h_get_elem(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_get_elem(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |r, code, slots| {
         let Op::GetElemR(d, o, k) = *code.ops.get_unchecked(pc as usize) else { return false };
         match r.get_elem_fast(&*slots.add(o as usize), &*slots.add(k as usize)) {
@@ -490,7 +559,7 @@ pub(crate) unsafe extern "sysv64" fn h_get_elem(ctx: *mut Ctx, pc: u32) -> u32 {
 }
 
 /// `SetElemR` on arrays / typed arrays with an index in range.
-pub(crate) unsafe extern "sysv64" fn h_set_elem(ctx: *mut Ctx, pc: u32) -> u32 {
+pub(crate) unsafe extern "sysv64" fn h_set_elem(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |r, code, slots| {
         let Op::SetElemR(o, k, v) = *code.ops.get_unchecked(pc as usize) else { return false };
         let val = (*slots.add(v as usize)).clone();
@@ -522,6 +591,12 @@ pub(crate) unsafe extern "sysv64" fn h_strict_eq(ctx: *mut Ctx, a: u64, b: u64) 
     let a = std::mem::ManuallyDrop::new(Value::from_raw_bits(a));
     let b = std::mem::ManuallyDrop::new(Value::from_raw_bits(b));
     r.strict_equals(&a, &b) as u32
+}
+
+/// Release the last reference of a string or BigInt (native code found
+/// its count at 1 and restored it). Pure: no JavaScript runs.
+pub(crate) unsafe extern "sysv64" fn h_drop(bits: u64) {
+    drop(Value::from_raw_bits(bits));
 }
 
 /// `x % y` for numbers (pure).

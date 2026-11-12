@@ -37,6 +37,8 @@ pub(crate) use emit::PHASE;
 pub(crate) const PHASE: u8 = 0;
 mod debug;
 mod helpers;
+#[cfg(target_arch = "x86_64")]
+mod layout;
 
 
 /// Process-wide options, read once from the environment.
@@ -92,6 +94,32 @@ pub fn options() -> &'static Options {
             stats: var("RABBITHOLE_JIT_STATS").is_some(),
             gc_stress: var("RH_GC_STRESS").is_some(),
         }
+    })
+}
+
+/// Native code adjusts the reference counts of strings and BigInts inline:
+/// the strong count of an `Rc` is the word 16 bytes before the pointer
+/// `Rc::into_raw` gives (`RcInner` is `repr(C)`: strong, weak, value).
+/// Checked once at run time; when it does not hold, values with a count
+/// take helpers.
+pub(crate) fn rc_inline() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        use crate::value::{JsStr, Value};
+        let probe = |v: Value| -> bool {
+            let p = (v.bits() & 0x0000_FFFF_FFFF_FFFF) as *const usize;
+            // SAFETY: `p` points into a live `Rc` allocation (the counts
+            // precede the value).
+            unsafe {
+                let c0 = std::ptr::read_volatile(p.sub(2));
+                let w = v.clone();
+                let c1 = std::ptr::read_volatile(p.sub(2));
+                drop(w);
+                let c2 = std::ptr::read_volatile(p.sub(2));
+                c1 == c0 + 1 && c2 == c0 && c0 >= 1
+            }
+        };
+        probe(Value::String(JsStr::from("rc probe"))) && probe(Value::BigInt(std::rc::Rc::new(crate::bigint::BigInt::from_i64(7))))
     })
 }
 
