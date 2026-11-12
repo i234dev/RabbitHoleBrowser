@@ -1637,6 +1637,11 @@ fn direct_eval_annexb_private_generators() {
     eq("class A { #x = 1; static rd(o) { return o.#x; } } try { A.rd({}); } catch (e) { e.name }", "TypeError");
     eq("class A { #m() {} static has(o) { return #m in o; } } [A.has(new A()), A.has(A.prototype)].join()", "true,false");
     eq("function* g([a]) {} try { g(null); 'no' } catch (e) { e.name }", "TypeError");
+    // generator.return runs finally blocks; destructuring closes iterators.
+    eq("var log = []; function* g() { try { yield 1; } finally { log.push('f'); } } var it = g(); it.next(); var r = it.return(5); log.join() + r.value + r.done", "f5true");
+    eq("var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { closed++; return {}; } }; } }; try { var [a = (() => { throw 1; })()] = [undefined]; } catch (e) {} var [b] = it; closed", "1");
+    eq("var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { closed++; return {}; } }; } }; try { var [{}] = { [Symbol.iterator]() { return { next() { return { value: null, done: false }; }, return() { closed++; return {}; } }; } }; } catch (e) {} closed", "1");
+    eq("try { (({}) => 1)(null); 'no' } catch (e) { e.name }", "TypeError");
 }
 
 /// Unicode identifiers: Other_ID_Start (U+2118, in ESPN's bundle),

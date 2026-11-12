@@ -165,6 +165,8 @@ enum ExitCtx {
     Finally { body: Rc<Vec<Stmt>>, try_index: usize, scopes: usize },
     /// Close the for-of iterator held in hidden slots.
     IterClose { iter: u16, next: u16 },
+    /// Close an array destructuring's iterator unless it is done.
+    DestructClose { iter: u16, next: u16 },
 }
 
 #[derive(Debug)]
@@ -2250,6 +2252,9 @@ impl Compiler {
                     self.emit(Op::GetReg(*next));
                     self.emit(Op::IteratorClose);
                 }
+                ExitCtx::DestructClose { iter, next } => {
+                    self.emit(Op::IteratorCloseIfNotDoneReg(*iter, *next));
+                }
                 ExitCtx::Finally { body, try_index, scopes } => {
                     // Inline the finalizer with inner contexts removed and the
                     // owning try's handler ranges suspended.
@@ -2726,6 +2731,12 @@ impl Compiler {
                     return self.compile_object_pattern_dynamic_rest(properties, rest.as_deref().unwrap(), is_decl);
                 }
                 let mut rest_keys: Vec<u32> = Vec::new();
+                if properties.is_empty() {
+                    // RequireObjectCoercible: `({} = null)` throws.
+                    self.emit(Op::Dup);
+                    self.emit(Op::ToObject);
+                    self.emit(Op::Pop);
+                }
                 for p in properties {
                     self.emit(Op::Dup);
                     match &p.key {
@@ -2763,21 +2774,42 @@ impl Compiler {
                 Ok(())
             }
             Pattern::Array { elements, rest } => {
+                // The iterator lives in registers; an abrupt completion
+                // while destructuring closes it (unless it is done).
                 self.emit(Op::GetIterator);
-                for el in elements {
-                    self.emit(Op::IteratorStep);
-                    match el {
-                        Some(p) => self.compile_pattern_store(p, is_decl)?,
-                        None => {
-                            self.emit(Op::Pop);
+                let iter = self.hidden_slot("diter");
+                let next = self.hidden_slot("dnext");
+                self.emit(Op::SetReg(next));
+                self.emit(Op::SetReg(iter));
+                let try_start = self.here() as u32;
+                self.fs().exits.push(ExitCtx::DestructClose { iter, next });
+                let r: CResult<()> = (|| {
+                    for el in elements {
+                        self.emit(Op::IteratorStepReg(iter, next));
+                        match el {
+                            Some(p) => self.compile_pattern_store(p, is_decl)?,
+                            None => {
+                                self.emit(Op::Pop);
+                            }
                         }
                     }
-                }
-                if let Some(r) = rest {
-                    self.emit(Op::IteratorRest);
-                    self.compile_pattern_store(r, is_decl)?;
-                }
-                self.emit(Op::IteratorCloseIfNotDone);
+                    if let Some(r) = rest {
+                        self.emit(Op::IteratorRestReg(iter, next));
+                        self.compile_pattern_store(r, is_decl)?;
+                    }
+                    Ok(())
+                })();
+                self.fs().exits.pop();
+                r?;
+                let try_end = self.here() as u32;
+                self.emit(Op::IteratorCloseIfNotDoneReg(iter, next));
+                let done = self.emit(Op::Jump(0));
+                let handler_pc = self.here() as u32;
+                let scope_depth = self.fs_ref().scope_depth;
+                self.emit(Op::IteratorCloseOnThrow(iter, next));
+                self.emit(Op::Throw);
+                self.fs().handlers.push(Handler { start: try_start, end: try_end, target: handler_pc, stack_depth: 0, scope_depth });
+                self.patch_jump(done);
                 Ok(())
             }
         }
@@ -3235,10 +3267,20 @@ impl Compiler {
                     self.emit(Op::Pop);
                     self.emit(Op::Swap);
                     self.emit(Op::Pop);
-                } else if self.fs_ref().flags.is_async {
-                    self.emit(Op::AsyncYield);
                 } else {
-                    self.emit(Op::Yield);
+                    let is_async = self.fs_ref().flags.is_async;
+                    self.emit(if is_async { Op::AsyncYield } else { Op::Yield });
+                    // `generator.return(v)` resumes here with a return
+                    // completion: run the finally blocks / iterator closes
+                    // a `return v` at this point would.
+                    self.emit(Op::ResumeIsReturn);
+                    let j = self.emit(Op::JumpIfFalse(0));
+                    if is_async {
+                        self.emit(Op::Await);
+                    }
+                    self.emit_exits(0)?;
+                    self.emit(Op::Return);
+                    self.patch_jump(j);
                 }
             }
             ExprKind::Await(a) => {

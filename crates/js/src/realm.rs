@@ -199,6 +199,8 @@ pub struct Realm {
     pub heap_limit: usize,
     /// Call-site index set by `Op::EvalSite` for the following `CallEval`.
     pub(crate) eval_site: u32,
+    /// A generator is being resumed by `return()` (see `Op::ResumeIsReturn`).
+    pub(crate) resume_return: bool,
     /// Host hook for `import()` / modules (unused by the core).
     pub host_data: Option<Box<dyn Any>>,
     /// Extra GC roots maintained by the host (e.g. DOM node wrappers).
@@ -425,6 +427,7 @@ impl Realm {
             max_native_depth: 100_000,
             heap_limit: 60_000_000,
             eval_site: u32::MAX,
+            resume_return: false,
             host_data: None,
             extra_roots: Vec::new(),
             ops_executed: 0,

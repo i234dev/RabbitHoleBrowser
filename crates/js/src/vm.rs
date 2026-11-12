@@ -1195,10 +1195,17 @@ impl Realm {
                     self.vstack[slot] = value.clone();
                 }
                 ResumeMode::Return => {
-                    // Finally blocks are not run (inline-finally compilation).
-                    self.vstack.truncate(frame.bottom());
-                    set_state(self, GeneratorState::Completed, None);
-                    return Ok(Step::Return(value));
+                    if matches!(frame.code().ops.get(frame.pc), Some(Op::ResumeIsReturn)) {
+                        // The yield has a compiled return path (finally
+                        // blocks, iterator closes): resume into it.
+                        let slot = frame.base as usize + frame.extra.as_ref().map_or(0, |e| e.resume_slot as usize);
+                        self.vstack[slot] = value.clone();
+                        self.resume_return = true;
+                    } else {
+                        self.vstack.truncate(frame.bottom());
+                        set_state(self, GeneratorState::Completed, None);
+                        return Ok(Step::Return(value));
+                    }
                 }
                 ResumeMode::Throw => {}
             }
@@ -3905,6 +3912,59 @@ impl Realm {
                     let a = self.new_array(items);
                     push!(Value::Object(a));
                 }
+                Op::IteratorStepReg(ri, rn) => {
+                    let next = sl!(rn).clone();
+                    if next.is_empty() {
+                        push!(Value::Undefined);
+                    } else {
+                        let it = sl!(ri).clone();
+                        match self.iterator_step(&it, &next) {
+                            Ok(Some(v)) => push!(v),
+                            Ok(None) => {
+                                sl!(rn) = Value::Empty;
+                                push!(Value::Undefined);
+                            }
+                            Err(e) => {
+                                sl!(rn) = Value::Empty;
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+                Op::IteratorRestReg(ri, rn) => {
+                    let next = sl!(rn).clone();
+                    let mut items = Vec::new();
+                    if !next.is_empty() {
+                        let it = sl!(ri).clone();
+                        loop {
+                            match self.iterator_step(&it, &next) {
+                                Ok(Some(v)) => items.push(v),
+                                Ok(None) => break,
+                                Err(e) => {
+                                    sl!(rn) = Value::Empty;
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        sl!(rn) = Value::Empty;
+                    }
+                    let a = self.new_array(items);
+                    push!(Value::Object(a));
+                }
+                Op::IteratorCloseIfNotDoneReg(ri, rn) => {
+                    if !sl!(rn).is_empty() {
+                        sl!(rn) = Value::Empty;
+                        let it = sl!(ri).clone();
+                        self.iterator_close(&it)?;
+                    }
+                }
+                Op::IteratorCloseOnThrow(ri, rn) => {
+                    if !sl!(rn).is_empty() && !self.terminating {
+                        sl!(rn) = Value::Empty;
+                        let it = sl!(ri).clone();
+                        let _ = self.iterator_close(&it);
+                    }
+                }
                 Op::IteratorCloseIfNotDone => {
                     let next = pop!();
                     let it = pop!();
@@ -3935,6 +3995,10 @@ impl Realm {
                             push!(Value::Bool(true));
                         }
                     }
+                }
+                Op::ResumeIsReturn => {
+                    let r = std::mem::replace(&mut self.resume_return, false);
+                    push!(Value::Bool(r));
                 }
                 Op::EvalSite(i) => {
                     self.eval_site = i;

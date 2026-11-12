@@ -261,6 +261,22 @@ pub enum Op {
     /// proto -> template (moves proto's private methods/accessors out)
     TakePrivate,
 
+    // --- array destructuring with the iterator in registers (iter, next;
+    // `next` becomes empty once the iterator is done or failed)
+    /// -> value (undefined once done)
+    IteratorStepReg(u16, u16),
+    /// -> array of the remaining values
+    IteratorRestReg(u16, u16),
+    /// Close the iterator unless done (errors propagate).
+    IteratorCloseIfNotDoneReg(u16, u16),
+    /// exception -> exception: close the iterator unless done, ignoring
+    /// errors from `return` (abrupt destructuring).
+    IteratorCloseOnThrow(u16, u16),
+
+    /// -> whether the generator was just resumed by `return()` (the
+    /// resumed value is then a return value; see `generator_resume_raw`)
+    ResumeIsReturn,
+
     // --- direct eval
     /// The next `CallEval` is call site `eval_sites[i]` of this function.
     EvalSite(u32),
@@ -792,7 +808,10 @@ impl Op {
             CopyPrivate => (2, 1),
             TakePrivate => (1, 1),
             EvalSite(_) | DeclareEvalGlobalVar(_) => (0, 0),
-            NewEvalVars => (0, 1),
+            NewEvalVars | ResumeIsReturn => (0, 1),
+            IteratorStepReg(..) | IteratorRestReg(..) => (0, 1),
+            IteratorCloseIfNotDoneReg(..) => (0, 0),
+            IteratorCloseOnThrow(..) => (1, 1),
             DeclareEvalVar(_) => (1, 0),
             IteratorNextWith => (3, 3),
             StoreCompletion => (1, 0),
