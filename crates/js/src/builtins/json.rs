@@ -523,7 +523,7 @@ impl Stringifier {
             }
             V::BigInt(_) => return realm.type_error("Do not know how to serialize a BigInt"),
             V::Object(id) if !realm.is_callable(&value) => {
-                if array::is_array_value(realm, &value) {
+                if array::is_array_checked(realm, &value)? {
                     self.serialize_array(realm, id, out)?;
                 } else {
                     self.serialize_object(realm, id, out)?;
@@ -621,10 +621,13 @@ fn stringify(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     let mut st = Stringifier { replacer_fn: None, allow_list: None, gap: String::new(), indent: String::new(), stack: Vec::new() };
     if realm.is_callable(&replacer) {
         st.replacer_fn = Some(replacer);
-    } else if array::is_array_value(realm, &replacer) {
-        let items = realm.create_list_from_array_like(replacer)?;
+    } else if array::is_array_checked(realm, &replacer)? {
+        // Each element is read after the previous one was converted.
+        let rid = replacer.as_object().unwrap();
+        let len = realm.length_of(replacer.clone())?;
         let mut list: Vec<PropertyKey> = Vec::new();
-        for it in items {
+        for k in 0..len {
+            let it = realm.get(Value::Object(rid), array::key_of(k))?;
             let k = match it.v() {
                 V::String(s) => Some(PropertyKey::String(s.clone())),
                 V::Number(n) => Some(PropertyKey::String(JsStr::new(&number_to_string(n)))),
