@@ -91,6 +91,9 @@ pub enum DisplayItem {
     /// Offscreen layer for `opacity`; `PopLayer` composites it.
     PushLayer(Rect),
     PopLayer(f32),
+    /// Mask of the layer closed by the next `PopLayer` (`mask-image`):
+    /// the alpha of these items scales the layer's contribution.
+    LayerMask(Vec<DisplayItem>),
     /// Items inside are in viewport coordinates (not scrolled).
     PushFixed,
     PopFixed,
@@ -401,15 +404,38 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.scope = saved_scope;
             return;
         }
+        let mask = self.mask_items(root);
+        let layer = layer || mask.is_some();
         if layer {
             self.list.push(DisplayItem::PushLayer(root.subtree_bounds()));
         }
         self.paint_stacking_context_inner(root);
+        if let Some(items) = mask {
+            self.list.push(DisplayItem::LayerMask(items));
+        }
         if layer {
             self.list.push(DisplayItem::PopLayer(opacity));
         }
         self.pop_wrappers(pushed_matrix, pushed_transform);
         self.scope = saved_scope;
+    }
+
+    /// The mask of a box with `mask-image` layers: its mask layers painted
+    /// like backgrounds (only their alpha matters). An image that has not
+    /// loaded yet masks everything out, like in browsers.
+    fn mask_items(&self, b: &LayoutBox) -> Option<Vec<DisplayItem>> {
+        if b.style.mask_layers.is_empty() || b.rect.is_empty() {
+            return None;
+        }
+        let mut style = (*b.style).clone();
+        style.background_layers = b.style.mask_layers.clone();
+        style.background_color = Color::TRANSPARENT;
+        style.background_image = None;
+        let geom = BoxGeometry { border: b.rect, padding: b.padding_rect(), content: b.content_rect, radii: [(0.0, 0.0); 4], border_width: style.border_width };
+        let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
+        let mut tmp = DisplayList::default();
+        background::paint_backgrounds(&mut tmp, &geom, &style, self.ctx.background_images, vp);
+        Some(tmp.items)
     }
 
     /// The contents of a stacking context in CSS 2.1 Appendix E order
@@ -681,15 +707,27 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         if style.visibility == Visibility::Hidden || rect.is_empty() || !self.visible(&rect) {
             return;
         }
+        let mut radii = box_radii(b);
+        if crate::widgets::native_rounding(b, self.ctx) {
+            radii = [(2.0, 2.0); 4];
+        }
         let geom = BoxGeometry {
             border: rect,
             padding: b.padding_rect(),
             content: b.content_rect,
-            radii: box_radii(b),
+            radii,
             border_width: style.border_width,
         };
         let vp = Rect::new(self.ctx.page_scroll.0, self.ctx.page_scroll.1, self.ctx.viewport_width, self.ctx.viewport_height);
+        let widget = crate::widgets::widget(b, self.ctx);
         background::paint_box_shadows(self.list, &geom, &style.box_shadow, false);
+        if let Some(crate::widgets::Widget::Replace(items)) = widget {
+            // Native checkbox / radio / slider / progress / meter.
+            for it in items {
+                self.list.push(it);
+            }
+            return;
+        }
         if !skip_bg {
             background::paint_backgrounds(self.list, &geom, style, self.ctx.background_images, vp);
         }
@@ -705,6 +743,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 styles: [bs.top, bs.right, bs.bottom, bs.left],
                 radii: geom.radii,
             });
+        }
+        if let Some(crate::widgets::Widget::Overlay(items)) = widget {
+            for it in items {
+                self.list.push(it);
+            }
         }
     }
 

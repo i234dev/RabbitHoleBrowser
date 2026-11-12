@@ -451,7 +451,7 @@ pub fn parse_color_component(c: &[Token]) -> Option<ColorValue> {
             match l.as_str() {
                 "transparent" => Some(ColorValue::Color(Color::TRANSPARENT)),
                 "currentcolor" => Some(ColorValue::CurrentColor),
-                _ => named_color(&l).map(ColorValue::Color),
+                _ => named_color(&l).or_else(|| crate::color_spaces::system_color(&l)).map(ColorValue::Color),
             }
         }
         [Token::Hash(h)] => hex_color(h).map(ColorValue::Color),
@@ -460,7 +460,7 @@ pub fn parse_color_component(c: &[Token]) -> Option<ColorValue> {
             match lf.as_str() {
                 "rgb" | "rgba" => parse_rgb(c).map(ColorValue::Color),
                 "hsl" | "hsla" => parse_hsl(c).map(ColorValue::Color),
-                _ => None,
+                other => crate::color_spaces::parse_function(other, c),
             }
         }
         _ => None,
@@ -576,6 +576,10 @@ fn parse_hsl(c: &[Token]) -> Option<Color> {
     let a = alpha_value(alpha)?;
     let (r, g, b) = hsl_to_rgb(h, s, l);
     Some(Color::rgba(to_u8(r * 255.0), to_u8(g * 255.0), to_u8(b * 255.0), to_u8(a * 255.0)))
+}
+
+pub(crate) fn hsl_to_rgb_pub(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    hsl_to_rgb(h, s, l)
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {

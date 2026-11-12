@@ -89,43 +89,72 @@ th { font-weight: bold; text-align: center; }
 table[border] td, table[border] th { border: 1px solid #a0a0a0; }
 table[border] { border: 1px solid #808080; }
 
-/* ---- form controls ---- */
-input, select, button, textarea, meter, progress {
-  display: inline-block; font-family: sans-serif; font-size: 13.333px; font-style: normal;
+/* ---- form controls ----
+   Geometry and colors of Blink's (refreshed) controls. Blink lays text
+   fields and buttons out with a 2px border of which it paints 1px; here
+   the border is 1px and the padding 1px larger, which gives the same
+   boxes (a 13.333px text field is 21px tall). Checkboxes, radios, sliders,
+   progress bars and meters are painted natively (layout's widgets.rs). */
+input, select, button, textarea {
+  display: inline-block; margin: 0; font-family: sans-serif; font-size: 13.333px; font-style: normal;
   font-weight: normal; line-height: normal; letter-spacing: normal; word-spacing: normal;
-  text-transform: none; text-indent: 0; text-align: left; text-decoration: none; color: initial;
-  white-space: nowrap; vertical-align: middle; appearance: auto;
-  user-select: none; overflow: hidden; text-overflow: clip;
+  text-transform: none; text-indent: 0; text-align: start; text-decoration: none; text-shadow: none;
+  color: black; appearance: auto; text-overflow: clip;
 }
-input, textarea, select { border: 1px solid #767676; padding: 1px 2px; background-color: white; border-radius: 2px; }
-/* Text fields and textareas are content-box like in other browsers (author
-   `height` + `padding` add up); the rest are border-box. */
-input { width: calc(20ch - 6px); height: calc(1.6em - 4px); user-select: text; }
-select, button, meter, progress, input[type=search i], input[type=checkbox i], input[type=radio i], input[type=submit i],
-input[type=button i], input[type=reset i], input[type=image i], input[type=file i], input[type=color i], input[type=range i] { box-sizing: border-box; }
-input[type=checkbox i], input[type=radio i] { width: 13px; height: 13px; padding: 0; margin: 3px 3px 3px 4px; border-radius: 2px; background-color: white; }
-input[type=radio i] { border-radius: 50%; }
-input[type=submit i], input[type=button i], input[type=reset i], button, input[type=file i]::file-selector-button {
-  border: 1px solid #767676; background-color: #efefef; padding: 1px 6px; width: auto; height: auto;
-  text-align: center; cursor: pointer; border-radius: 2px; user-select: none;
+input, select, textarea { white-space: nowrap; overflow: hidden; }
+input { border: 1px solid #767676; padding: 2px 3px; background-color: white; width: 11em; cursor: text; }
+input[type=search i] { box-sizing: border-box; width: calc(11em + 8px); }
+input[type=hidden i] { display: none; }
+input[type=checkbox i], input[type=radio i] {
+  box-sizing: border-box; width: 13px; height: 13px; padding: 0; border: none;
+  background-color: transparent; margin: 3px 3px 3px 4px; cursor: default; overflow: visible;
 }
-button { white-space: normal; }
-input[type=range i], input[type=color i] { width: 129px; height: 1.6em; }
-input[type=search i] { width: 20ch; height: 1.6em; }
-input[type=file i] { width: auto; }
-input[type=image i] { border: none; padding: 0; background-color: transparent; width: auto; height: auto; }
-select { padding: 1px 4px; width: auto; min-width: 8ch; border-radius: 2px; }
-textarea { width: 20ch; white-space: pre-wrap; user-select: text; resize: both; overflow: auto; }
+input[type=radio i] { margin: 3px 3px 0 5px; }
+input[type=range i] {
+  box-sizing: border-box; width: 129px; height: 16px; margin: 2px; padding: 0; border: none;
+  background-color: transparent; color: #101010; cursor: default;
+}
+input[type=color i] {
+  box-sizing: border-box; width: 50px; height: 27px; padding: 1px 2px; border: 1px solid #767676;
+  background-color: #efefef; cursor: default;
+}
+input[type=file i] { width: auto; padding: 0; border: none; background-color: transparent; color: inherit; cursor: default; }
+input[type=file i]::file-selector-button {
+  border: 1px solid #767676; border-radius: 2px; background-color: #efefef; color: black; padding: 1px 6px;
+  margin: 0 4px 0 0; white-space: pre; text-align: center; font: inherit; cursor: default;
+}
+input[type=image i] { border: none; padding: 0; background-color: transparent; width: auto; height: auto; cursor: pointer; }
+input[type=submit i], input[type=button i], input[type=reset i], button {
+  box-sizing: border-box; border: 1px solid #767676; background-color: #efefef; padding: 2px 7px;
+  width: auto; height: auto; text-align: center; cursor: pointer; user-select: none;
+}
+input[type=submit i], input[type=button i], input[type=reset i] { white-space: pre; }
+button:hover, input[type=submit i]:hover, input[type=button i]:hover, input[type=reset i]:hover, input[type=color i]:hover { background-color: #e5e5e5; border-color: #4f4f4f; }
+button:active, input[type=submit i]:active, input[type=button i]:active, input[type=reset i]:active, input[type=color i]:active { background-color: #f5f5f5; border-color: #8d8d8d; }
+select {
+  box-sizing: border-box; border: 1px solid #767676; background-color: white;
+  padding: 1px 0 1px 4px; white-space: pre; cursor: default;
+}
+select[multiple], select[size]:not([size="1"]):not([size="0"]):not([size=""]) { padding: 0; }
+textarea {
+  font-family: monospace; border: 1px solid #767676; padding: 2px; background-color: white;
+  width: calc(20ch + 15px); white-space: pre-wrap; overflow-wrap: break-word; resize: both; overflow: auto; cursor: text;
+}
 input::placeholder, textarea::placeholder { color: #757575; }
-input:disabled, textarea:disabled, select:disabled, button:disabled { color: #8a8a8a; background-color: #f5f5f5; cursor: default; }
-:focus-visible { outline: 2px solid #005fcc; outline-offset: 1px; }
-input:focus, textarea:focus, select:focus { outline: 2px solid #005fcc; outline-offset: -1px; }
+input:hover, textarea:hover, select:hover { border-color: #4f4f4f; }
+input:disabled, textarea:disabled, select:disabled { color: #6d6d6d; background-color: rgba(239, 239, 239, 0.3); border-color: rgba(118, 118, 118, 0.3); cursor: default; }
+button:disabled, input[type=submit i]:disabled, input[type=button i]:disabled, input[type=reset i]:disabled {
+  color: rgba(16, 16, 16, 0.3); background-color: rgba(239, 239, 239, 0.3); border-color: rgba(118, 118, 118, 0.3);
+}
+input[type=checkbox i]:disabled, input[type=radio i]:disabled, input[type=range i]:disabled, input[type=file i]:disabled { background-color: transparent; }
+:focus-visible { outline: 2px solid #101010; outline-offset: 1px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; }
 label { cursor: default; }
 optgroup, option { display: block; }
 select option { display: none; }
-progress { appearance: auto; }
-progress::-webkit-progress-bar { background-color: #e6e6e6; }
-meter { appearance: auto; }
+progress, meter { display: inline-block; box-sizing: border-box; height: 1em; vertical-align: -0.2em; appearance: auto; }
+progress { width: 10em; }
+meter { width: 5em; }
 
 /* ---- embedded content ---- */
 img, video, audio, canvas, embed, iframe, svg, math, picture, source { display: inline-block; }
@@ -139,7 +168,6 @@ audio[controls] { display: inline-block; width: 300px; height: 54px; background-
 /* ---- misc ---- */
 details > summary:first-of-type { display: list-item; list-style-type: none; }
 details:not([open]) > :not(summary) { display: none; }
-progress, meter { width: 10em; height: 1em; border: 1px solid #767676; background-color: #e6e6e6; border-radius: 3px; display: inline-block; }
 marquee { display: block; overflow: hidden; white-space: nowrap; }
 dialog[open] { display: block; position: absolute; left: 0; right: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 1em; background-color: white; color: black; }
 details > summary::marker { content: "\25B8 "; }

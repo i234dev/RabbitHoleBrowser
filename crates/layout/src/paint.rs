@@ -123,6 +123,8 @@ struct State {
     frames: Vec<Frame>,
     clips: Vec<bool>,
     layers: Vec<bool>,
+    /// Alpha mask for the layer about to be closed (`mask-image`).
+    mask: Option<Vec<u8>>,
     /// Saved translation while inside the fixed layer.
     fixed_saved: Option<(f32, f32)>,
     /// Canvas offset of `position: fixed` content (the viewport origin).
@@ -161,6 +163,7 @@ fn paint_view(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scro
         frames: Vec::new(),
         clips: Vec::new(),
         layers: Vec::new(),
+        mask: None,
         fixed_saved: None,
         fixed_origin,
         ext: gfx_ext_available(),
@@ -184,6 +187,41 @@ fn paint_view(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scro
             canvas.end_layer(1.0);
         }
     }
+}
+
+/// Alpha (one byte per pixel of the open layer's device bounds) of mask
+/// items: they are painted over black and over white with the current
+/// transform; where a pixel ends up the same on both, the mask is opaque.
+fn layer_mask_alpha(items: &[DisplayItem], canvas: &Canvas, fonts: &FontContext, st: &State) -> Option<Vec<u8>> {
+    let (x0, y0, w, h) = canvas.layer_bounds()?;
+    if w == 0 || h == 0 {
+        return Some(Vec::new());
+    }
+    let m = rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, -(x0 as f32), -(y0 as f32)], canvas.transform());
+    let render = |bg: Color| {
+        let mut c = Canvas::new(w as u32, h as u32);
+        c.clear(bg);
+        c.push_transform(m);
+        let mut s = State { dx: st.dx, dy: st.dy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None };
+        let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
+        for it in items {
+            paint_item(it, &mut c, fonts, &mut s, all);
+        }
+        c.data
+    };
+    let black = render(Color::BLACK);
+    let white = render(Color::WHITE);
+    Some(
+        black
+            .iter()
+            .zip(white.iter())
+            .map(|(b, wh)| {
+                // Per channel: white - black = 255·(1 - alpha).
+                let g = |v: u32| ((v >> 8) & 0xff) as i32;
+                (255 - (g(*wh) - g(*b))).clamp(0, 255) as u8
+            })
+            .collect(),
+    )
 }
 
 fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: &mut State, view: Rect) {
@@ -247,7 +285,16 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
         }
         DisplayItem::PopLayer(opacity) => {
             if let Some(true) = st.layers.pop() {
-                canvas.end_layer(*opacity);
+                match st.mask.take() {
+                    Some(alpha) => canvas.end_layer_masked(*opacity, &alpha),
+                    None => canvas.end_layer(*opacity),
+                }
+            }
+        }
+        DisplayItem::LayerMask(items) => {
+            st.mask = None;
+            if st.layers.last() == Some(&true) {
+                st.mask = layer_mask_alpha(items, canvas, fonts, st);
             }
         }
         DisplayItem::PushFixed => {
@@ -463,8 +510,8 @@ fn draw_text_basic(canvas: &mut Canvas, fonts: &FontContext, font: FontId, size:
             if bmp.width == 0 || bmp.height == 0 {
                 continue;
             }
-            let gx = (px + g.x).round() as i32 + bmp.left;
-            let gy = py.round() as i32 - bmp.top;
+            let gx = (px + g.x + g.dx).round() as i32 + bmp.left;
+            let gy = (py - g.dy).round() as i32 - bmp.top;
             canvas.draw_glyph(&bmp, gx, gy, color);
         }
     }
@@ -498,20 +545,19 @@ fn draw_decoration_line(canvas: &mut Canvas, ax: f32, ay: f32, bx: f32, by: f32,
             }
         }
         TextDecorationStyle::Wavy => {
-            // Zig-zag approximation of a wave.
+            // A sine wave (Blink: amplitude ~1.5× the thickness, a period
+            // of ~6× it), stroked as one polyline.
             let amp = (width * 1.5).max(1.0);
-            let step = (width * 2.0).max(2.0);
-            let mut x = x0;
-            let mut up = true;
-            let mut guard = 0;
-            while x < x1 && guard < 100_000 {
-                let nx = (x + step).min(x1);
-                let (ya, yb) = if up { (ay + amp, ay - amp) } else { (ay - amp, ay + amp) };
-                canvas.draw_line(x, ya, nx, yb, width, color);
-                x = nx;
-                up = !up;
-                guard += 1;
+            let period = (width * 6.0).max(6.0);
+            let mut path = vec![rabbithole_gfx::PathSeg::MoveTo(Point { x: x0, y: ay })];
+            let n = (((x1 - x0) / 1.0).ceil() as usize).min(100_000);
+            for i in 1..=n {
+                let x = (x0 + i as f32).min(x1);
+                let y = ay - amp * ((x - x0) / period * std::f32::consts::TAU).sin();
+                path.push(rabbithole_gfx::PathSeg::LineTo(Point { x, y }));
             }
+            let style = rabbithole_gfx::StrokeStyle { width: width.max(1.0), ..Default::default() };
+            canvas.stroke_path(&path, &style, &Paint::Solid(color));
         }
     }
 }

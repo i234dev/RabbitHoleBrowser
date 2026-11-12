@@ -451,8 +451,8 @@ impl Canvas {
             if bm.is_empty() {
                 continue;
             }
-            let gx = (origin.x + g.x).round() as i32 + bm.left;
-            let gy = baseline - bm.top;
+            let gx = (origin.x + g.x + g.dx).round() as i32 + bm.left;
+            let gy = baseline - (g.dy.round() as i32) - bm.top;
             for by in 0..bm.height as i32 {
                 let my = gy + by - y0;
                 if my < 0 || my >= h as i32 {
@@ -512,14 +512,25 @@ impl Canvas {
             let glyphs = fonts.shape(font, rsize, run, letter_spacing * sf);
             for g in &glyphs {
                 if g.glyph != ZERO_WIDTH_GLYPH {
+                    if aligned && shear == 0.0 {
+                        if let Some(cg) = fonts.color_glyph(g.font, g.glyph, rsize) {
+                            // Emoji: draw the color image in device space.
+                            let gx = origin.x + pen + g.x + g.dx;
+                            let r = Rect::new(gx + cg.left, origin.y - g.dy - cg.top, cg.width, cg.height);
+                            self.transforms.push(IDENTITY);
+                            self.draw_image(&cg.image, r, color.a as f32 / 255.0);
+                            self.transforms.pop();
+                            continue;
+                        }
+                    }
                     if aligned {
-                        let gx = origin.x + pen + g.x;
+                        let gx = origin.x + pen + g.x + g.dx;
                         let frac = gx.fract();
                         let quarter = ((frac * 4.0).round() as u8) % 4;
                         let bm = fonts.rasterize_subpixel(g.font, g.glyph, rsize, quarter);
                         if !bm.is_empty() {
                             let base_x = gx.floor() as i32 + bm.left;
-                            let base_y = origin.y.round() as i32 - bm.top;
+                            let base_y = (origin.y - g.dy).round() as i32 - bm.top;
                             if shear == 0.0 {
                                 self.draw_glyph(&bm, base_x, base_y, color);
                             } else {
@@ -532,7 +543,7 @@ impl Canvas {
                         let bm = fonts.rasterize(g.font, g.glyph, rsize);
                         if !bm.is_empty() {
                             // Glyph origin on the baseline in device space.
-                            let along = Point::new(pen + g.x, 0.0);
+                            let along = Point::new(pen + g.x + g.dx, 0.0);
                             let o = Point::new(origin.x + rot[0] * along.x, origin.y + rot[1] * along.x);
                             let local = [1.0, 0.0, -shear, 1.0, bm.left as f32 + shear * bm.top as f32, -(bm.top as f32)];
                             let mm = multiply(&[rot[0], rot[1], rot[2], rot[3], o.x, o.y], &local);
@@ -736,6 +747,33 @@ impl Canvas {
             saved.extend_from_slice(&self.data[row..row + w]);
         }
         self.layers.push(Layer { x0, y0, w, h, saved });
+    }
+
+    /// Device bounds (x0, y0, w, h) of the innermost open layer.
+    pub fn layer_bounds(&self) -> Option<(i32, i32, usize, usize)> {
+        self.layers.last().map(|l| (l.x0, l.y0, l.w, l.h))
+    }
+
+    /// End a layer, compositing each pixel with `opacity` × `alpha` (one
+    /// byte per pixel of the layer bounds, CSS `mask-image`).
+    pub fn end_layer_masked(&mut self, opacity: f32, alpha: &[u8]) {
+        let Some(layer) = self.layers.pop() else { return };
+        if alpha.len() != layer.w * layer.h {
+            return;
+        }
+        let op = opacity.clamp(0.0, 1.0);
+        let cw = self.width as usize;
+        for y in 0..layer.h {
+            let row = (layer.y0 as usize + y) * cw + layer.x0 as usize;
+            for x in 0..layer.w {
+                let drawn = self.data[row + x];
+                let bg = layer.saved[y * layer.w + x];
+                if drawn != bg {
+                    let a = (alpha[y * layer.w + x] as f32 * op + 0.5) as u32;
+                    self.data[row + x] = blend(bg, Color::from_u32(drawn), a);
+                }
+            }
+        }
     }
 
     pub fn end_layer(&mut self, opacity: f32) {

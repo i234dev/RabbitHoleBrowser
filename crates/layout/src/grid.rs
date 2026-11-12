@@ -974,6 +974,18 @@ impl<'a> Layouter<'a> {
                     }
                 }
             };
+            // The minimum contribution uses the automatic minimum size,
+            // which is zero for scroll containers, or an explicit
+            // `min-width` (§6.6): `overflow: hidden` / `min-width: 0` items
+            // do not blow `1fr` tracks up to their content (carousels).
+            let min = match child.style.min_width {
+                Length::Px(m) if child.kind != BoxKind::Image => {
+                    let m = if bb { (m - it.edges.pb_h).max(0.0) } else { m };
+                    m.min(min)
+                }
+                Length::Auto if child.kind != BoxKind::Image && crate::flex::is_scroll_container(&child.style) => 0.0,
+                _ => min,
+            };
             let (min, max) = (min + extras, max.max(min) + extras);
             out.push(Contribution {
                 start: it.area.col.0.max(0) as usize,

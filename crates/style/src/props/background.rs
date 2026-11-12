@@ -462,7 +462,61 @@ fn set_each<T: Clone>(style: &mut ComputedStyle, vals: Vec<T>, f: impl Fn(&mut B
     }
 }
 
+/// `mask-*` properties: the same grammar as the `background-*` ones, applied
+/// to the mask layers (origin defaults to the border box). Mode and
+/// compositing keywords are accepted and ignored.
+fn apply_mask(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) -> bool {
+    let bg_name = match name.strip_prefix("-webkit-").unwrap_or(name) {
+        "mask" => "background",
+        "mask-image" => "background-image",
+        "mask-size" => "background-size",
+        "mask-position" => "background-position",
+        "mask-position-x" => "background-position-x",
+        "mask-position-y" => "background-position-y",
+        "mask-repeat" => "background-repeat",
+        "mask-origin" => "background-origin",
+        "mask-clip" => "background-clip",
+        "mask-mode" | "mask-composite" | "mask-type" | "mask-border" | "mask-box-image" | "mask-border-source" | "mask-box-image-source" => return true,
+        _ => return false,
+    };
+    const IGNORED: &[&str] = &["alpha", "luminance", "match-source", "add", "subtract", "intersect", "exclude", "source-over", "source-in", "source-out", "xor", "no-clip"];
+    let kept: Vec<&[Token]> = if bg_name == "background" {
+        comps.iter().copied().filter(|c| !values::ident(c).is_some_and(|k| IGNORED.contains(&k.as_str()))).collect()
+    } else {
+        comps.to_vec()
+    };
+    if kept.is_empty() {
+        return true;
+    }
+    let had = style.mask_layers.len();
+    let saved_color = style.background_color;
+    let saved_image = style.background_image.take();
+    std::mem::swap(&mut style.background_layers, &mut style.mask_layers);
+    apply(bg_name, &kept, style, ctx);
+    std::mem::swap(&mut style.background_layers, &mut style.mask_layers);
+    style.background_color = saved_color;
+    style.background_image = saved_image;
+    if matches!(bg_name, "background" | "background-image") {
+        // New layers are positioned against the border box, unless the
+        // shorthand named a box.
+        let named_box = bg_name == "background" && kept.iter().any(|c| parse_box(c).is_some());
+        for (i, l) in style.mask_layers.iter_mut().enumerate() {
+            if !named_box && (bg_name == "background" || i >= had) {
+                l.origin = BoxArea::BorderBox;
+            }
+        }
+        style.mask_layers.retain(|l| !matches!(l.image, BackgroundImage::None));
+    }
+    if style.mask_layers.iter().any(|l| !matches!(l.image, BackgroundImage::None)) {
+        style.creates_stacking_context = true;
+    }
+    true
+}
+
 pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &ApplyCtx) -> bool {
+    if name.contains("mask") {
+        return apply_mask(name, comps, style, ctx);
+    }
     let name = match name {
         "-webkit-background-size" => "background-size",
         "-webkit-background-clip" | "-moz-background-clip" => "background-clip",

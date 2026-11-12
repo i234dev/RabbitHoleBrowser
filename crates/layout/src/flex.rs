@@ -178,7 +178,7 @@ fn other(axis: Axis) -> Axis {
     }
 }
 
-fn is_scroll_container(style: &ComputedStyle) -> bool {
+pub(crate) fn is_scroll_container(style: &ComputedStyle) -> bool {
     !matches!(style.overflow_x, Overflow::Visible) || !matches!(style.overflow_y, Overflow::Visible)
 }
 

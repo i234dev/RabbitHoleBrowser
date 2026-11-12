@@ -216,7 +216,7 @@ fn main() {
                 D::Rect { .. } => "Rect", D::RectRadii { .. } => "RectRadii", D::Border { .. } => "Border", D::BoxShadow { .. } => "BoxShadow",
                 D::Text { .. } => "Text", D::Image { .. } => "Image", D::ImageTiled { .. } => "ImageTiled", D::Line { .. } => "Line",
                 D::PushClip(_) | D::PushClipRounded(..) | D::PopClip => "Clip", D::PushTransform(_) | D::PopTransform => "Transform",
-                D::PushLayer(_) | D::PopLayer(_) => "Layer", D::PushFixed | D::PopFixed => "Fixed",
+                D::PushLayer(_) | D::PopLayer(_) | D::LayerMask(_) => "Layer", D::PushFixed | D::PopFixed => "Fixed",
             };
             let single = DisplayList { items: vec![it.clone()], ..Default::default() };
             let t = std::time::Instant::now();

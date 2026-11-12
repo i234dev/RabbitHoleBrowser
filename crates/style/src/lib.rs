@@ -13,6 +13,7 @@ mod tests_props;
 mod tests_errors;
 pub mod ua;
 pub mod values;
+mod color_spaces;
 
 pub use computed::*;
 pub use restyle::{RestyleOutcome, StyleChange, StyleEngine};

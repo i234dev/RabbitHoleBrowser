@@ -195,6 +195,25 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 };
             }
         }
+        "accent-color" => {
+            if values::ident(c0).is_some_and(|k| k == "auto") {
+                style.accent_color = None;
+            } else if comps.len() == 1 {
+                match values::parse_color_component(c0) {
+                    Some(values::ColorValue::Color(c)) => style.accent_color = Some(c),
+                    Some(values::ColorValue::CurrentColor) => style.accent_color = Some(style.color),
+                    None => {}
+                }
+            }
+        }
+        "color-scheme" => {
+            // The first of `light` / `dark` listed is the preferred scheme
+            // (we render light: `dark` alone or first switches controls).
+            let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
+            if !kws.is_empty() {
+                style.color_scheme_dark = kws.iter().find(|k| *k == "light" || *k == "dark").is_some_and(|k| k == "dark");
+            }
+        }
         "appearance" => {
             if let Some(kw) = values::ident(c0) {
                 style.appearance = if kw == "none" { Appearance::None } else { Appearance::Auto };
@@ -382,7 +401,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         | "scroll-padding-top" | "scroll-margin-bottom" | "scroll-margin-left" | "scroll-margin-right" | "scrollbar-width"
         | "scrollbar-color" | "scrollbar-gutter" | "columns" | "column-count" | "column-width" | "column-gap-x" | "column-rule"
         | "column-span" | "column-fill" | "break-inside" | "break-before" | "break-after" | "page-break-inside"
-        | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color" | "accent-color" | "color-scheme"
+        | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color"
         | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"
         | "-ms-touch-action" | "speak" | "orphans" | "widows" | "page" | "size" | "marks" | "quotes-x" | "all-x"
         | "content-visibility" | "contain-intrinsic-size" | "container" | "container-type" | "container-name" | "view-transition-name"

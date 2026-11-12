@@ -839,8 +839,8 @@ fn canvas_fill_text(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
         let mut bb = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         for g in &glyphs {
             let bm = fc.rasterize(g.font, g.glyph, dev_size);
-            let gx = ox + dir.0 * g.x as f64;
-            let gy = oy + dir.1 * g.x as f64;
+            let gx = ox + dir.0 * (g.x + g.dx) as f64;
+            let gy = oy + dir.1 * (g.x + g.dx) as f64 - g.dy as f64;
             let left = gx.round() as i32 + bm.left;
             let top = gy.round() as i32 - bm.top;
             for yy in 0..bm.height as i32 {

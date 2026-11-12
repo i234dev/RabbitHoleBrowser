@@ -15,6 +15,7 @@ mod home;
 pub mod images;
 pub mod incremental;
 pub mod pointer;
+pub mod reftest;
 pub mod scripting;
 pub mod select;
 mod text;
@@ -197,7 +198,7 @@ impl Default for Loader {
             load_scripts: true,
             max_images: 120,
             max_background_images: 40,
-            max_fonts: 16,
+            max_fonts: 24,
             device_pixel_ratio: 1.0,
             initiator: None,
             prefetch_images: true,
@@ -334,7 +335,7 @@ impl Loader {
             eprintln!("[load] background images {:?}", t.elapsed());
         }
         let t = std::time::Instant::now();
-        let fonts = if self.load_fonts { self.load_fonts(&styles) } else { Vec::new() };
+        let fonts = if self.load_fonts { self.load_fonts(&doc, &styles) } else { Vec::new() };
         if debug {
             eprintln!("[load] fonts {:?}", t.elapsed());
         }
@@ -630,7 +631,7 @@ impl Loader {
         let mut keys: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
         let mut consider = |s: &rabbithole_style::ComputedStyle| {
-            for layer in &s.background_layers {
+            for layer in s.background_layers.iter().chain(s.mask_layers.iter()) {
                 if let rabbithole_style::BackgroundImage::Url(u) = &layer.image {
                     if seen.insert(u.clone()) {
                         keys.push(u.clone());
@@ -733,10 +734,60 @@ impl Loader {
 
     // ------------------------------------------------------------- fonts
 
-    fn load_fonts(&self, styles: &StyledTree) -> Vec<LoadedFont> {
+    fn load_fonts(&self, doc: &Document, styles: &StyledTree) -> Vec<LoadedFont> {
         if styles.font_faces.is_empty() {
             return Vec::new();
         }
+        // Characters the page shows (text and generated content), so faces
+        // whose `unicode-range` covers none of them are not fetched (font
+        // services split each family into a dozen script subsets, which
+        // would use up the font budget before icon fonts are reached).
+        let mut used_chars = vec![0u64; 65536 / 64];
+        let mut astral: HashSet<u32> = HashSet::new();
+        let mut note = |s: &str| {
+            for ch in s.chars() {
+                let c = ch as u32;
+                if c < 65536 {
+                    used_chars[(c / 64) as usize] |= 1 << (c % 64);
+                } else {
+                    astral.insert(c);
+                }
+            }
+        };
+        for n in 0..doc.node_count() {
+            if let rabbithole_dom::NodeData::Text(t) = &doc.node(n).data {
+                note(t);
+            }
+        }
+        for s in styles.before.iter().flatten().chain(styles.after.iter().flatten()) {
+            if let rabbithole_style::Content::Items(items) = &s.content {
+                for it in items {
+                    if let rabbithole_style::ContentItem::String(t) = it {
+                        note(t);
+                    }
+                }
+            }
+        }
+        // Form controls show their values and placeholders.
+        for n in 0..doc.node_count() {
+            if let Some(el) = doc.element(n) {
+                for a in ["value", "placeholder", "alt"] {
+                    if let Some(v) = el.attr(a) {
+                        note(v);
+                    }
+                }
+            }
+        }
+        let covers = |ranges: &Option<Vec<(u32, u32)>>| -> bool {
+            let Some(ranges) = ranges else { return true };
+            ranges.iter().any(|&(lo, hi)| {
+                if astral.iter().any(|c| *c >= lo && *c <= hi) {
+                    return true;
+                }
+                let hi = hi.min(65535);
+                (lo..=hi).any(|c| used_chars[(c / 64) as usize] & (1 << (c % 64)) != 0)
+            })
+        };
         // Only fetch families that some element actually asks for.
         let mut used: HashSet<String> = HashSet::new();
         for s in styles
@@ -752,7 +803,7 @@ impl Loader {
         }
         let mut picked: Vec<(FontFace, Url)> = Vec::new();
         for face in &styles.font_faces {
-            if !used.contains(&face.family.to_ascii_lowercase()) {
+            if !used.contains(&face.family.to_ascii_lowercase()) || !covers(&face.unicode_range) {
                 continue;
             }
             // Prefer woff2, then woff, then ttf/otf; skip eot/svg.

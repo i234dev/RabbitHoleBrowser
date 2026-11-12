@@ -19,6 +19,7 @@ mod inline;
 mod intrinsic;
 mod table;
 mod text;
+mod widgets;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

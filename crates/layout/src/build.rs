@@ -5,7 +5,7 @@ use crate::tree::{BoxKind, Flow, Formatting, InlineItem, LayoutBox};
 use crate::{pseudo_style, LayoutContext};
 use rabbithole_css::PseudoElement;
 use rabbithole_dom::{Document, NodeData, NodeId};
-use rabbithole_style::{ComputedStyle, Content, ContentItem, Display, Float, ListStyleType, Position};
+use rabbithole_style::{Color, ComputedStyle, Content, ContentItem, Display, Float, ListStyleType, Position};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -372,24 +372,48 @@ impl<'a> Builder<'a> {
         // (`::before` / `::after`) wraps the element's children; counters
         // created by the children live in this element's scope.
         self.counters.borrow_mut().enter();
-        let before = self.build_pseudo(node, PseudoElement::Before, kind == BoxKind::TableRow);
+        // Text fields, text areas and menus show no generated content (like
+        // Blink: only buttons, checkboxes and radios render it).
+        let no_generated = match tag {
+            "textarea" | "select" => true,
+            "input" => !matches!(input_type(doc, node).as_str(), "checkbox" | "radio"),
+            _ => false,
+        };
+        let before = if no_generated { None } else { self.build_pseudo(node, PseudoElement::Before, kind == BoxKind::TableRow) };
         let mut children = match tag {
             "input" => self.build_input(node, &style),
-            "select" => self.build_select(node, &style),
-            "textarea" => {
-                let mut t = LayoutBox::new(BoxKind::Text, None, style.clone());
-                // The edited ("dirty") value, else the default value (the
-                // text content).
-                let mut value = doc.control_value(node).map(str::to_string).unwrap_or_else(|| doc.text_content(node));
-                if value.is_empty() {
-                    value = doc.attr(node, "placeholder").unwrap_or("").to_string();
+            "select" => {
+                let (kids, min_w) = self.build_select(node, &style);
+                if let Some(w) = min_w {
+                    // Wide enough for the longest option (a menu sizes to
+                    // its options, not to the selected one).
+                    let mut s = (*style).clone();
+                    s.min_width = rabbithole_style::Length::Px(match s.min_width {
+                        rabbithole_style::Length::Px(m) => m.max(w),
+                        _ => w,
+                    });
+                    b.style = Rc::new(s);
                 }
-                t.text = Some(Rc::from(value.as_str()));
+                kids
+            }
+            "textarea" => {
+                // The edited ("dirty") value, else the default value (the
+                // text content); the placeholder when empty.
+                let value = doc.control_value(node).map(str::to_string).unwrap_or_else(|| doc.text_content(node));
+                let mut t;
+                if value.is_empty() {
+                    let ph = doc.attr(node, "placeholder").unwrap_or("");
+                    t = LayoutBox::new(BoxKind::Text, None, self.placeholder_style(node, &style));
+                    t.text = Some(Rc::from(if ph.is_empty() { "\u{200B}" } else { ph }));
+                } else {
+                    t = LayoutBox::new(BoxKind::Text, None, style.clone());
+                    t.text = Some(Rc::from(value.as_str()));
+                }
                 vec![t]
             }
             _ => self.build_children(node, &style, kind == BoxKind::TableRow),
         };
-        let after = self.build_pseudo(node, PseudoElement::After, kind == BoxKind::TableRow);
+        let after = if no_generated { None } else { self.build_pseudo(node, PseudoElement::After, kind == BoxKind::TableRow) };
         self.counters.borrow_mut().leave();
         if let Some(bf) = before {
             children.insert(0, bf);
@@ -497,43 +521,158 @@ impl<'a> Builder<'a> {
         Some(b)
     }
 
+    /// Style of the placeholder text of a text field: its `::placeholder`
+    /// style (carried in the marker slot for `input` / `textarea`), else
+    /// the field's style.
+    fn placeholder_style(&self, node: NodeId, style: &Rc<ComputedStyle>) -> Rc<ComputedStyle> {
+        self.ctx.styles.pseudo(node, PseudoElement::Marker).cloned().unwrap_or_else(|| style.clone())
+    }
+
+    fn text_box(style: Rc<ComputedStyle>, text: &str) -> LayoutBox {
+        let mut t = LayoutBox::new(BoxKind::Text, None, style);
+        t.text = Some(Rc::from(text));
+        t
+    }
+
     fn build_input(&self, node: NodeId, style: &Rc<ComputedStyle>) -> Vec<LayoutBox> {
         let doc = self.doc();
-        let ty = doc.attr(node, "type").unwrap_or("text").to_ascii_lowercase();
+        let ty = input_type(doc, node);
+        let appearance_none = style.appearance == rabbithole_style::Appearance::None;
         let text = match ty.as_str() {
             "submit" => doc.attr(node, "value").unwrap_or("Submit").to_string(),
             "reset" => doc.attr(node, "value").unwrap_or("Reset").to_string(),
             "button" => doc.attr(node, "value").unwrap_or("").to_string(),
-            "checkbox" | "radio" | "range" | "color" | "file" | "image" => String::new(),
-            _ => doc
-                .control_value(node)
-                .filter(|v| !v.is_empty())
-                .or_else(|| doc.attr(node, "placeholder"))
-                .unwrap_or("")
-                .to_string(),
+            "checkbox" | "radio" | "range" | "color" | "image" | "hidden" => return Vec::new(),
+            "file" => {
+                // "Choose File" button and the selection label.
+                let mut s = ComputedStyle::inherit_from(style);
+                s.display = Display::InlineBlock;
+                s.white_space = rabbithole_style::WhiteSpace::Pre;
+                if !appearance_none {
+                    let c = Color::rgb(118, 118, 118);
+                    s.border_width = rabbithole_style::Edges::all(1.0);
+                    s.border_style = rabbithole_style::Edges::all(rabbithole_style::BorderStyle::Solid);
+                    s.border_color = rabbithole_style::Edges::all(c);
+                    s.background_color = Color::rgb(239, 239, 239);
+                    s.border_radius = 2.0;
+                    s.border_radii = [(rabbithole_style::Length::Px(2.0), rabbithole_style::Length::Px(2.0)); 4];
+                    s.padding = rabbithole_style::Edges {
+                        top: rabbithole_style::Length::Px(1.0),
+                        right: rabbithole_style::Length::Px(6.0),
+                        bottom: rabbithole_style::Length::Px(1.0),
+                        left: rabbithole_style::Length::Px(6.0),
+                    };
+                }
+                s.margin.right = rabbithole_style::Length::Px(4.0);
+                // `::file-selector-button` (the UA sheet gives it the look
+                // of a button).
+                if let Some(ps) = self.ctx.styles.pseudo(node, PseudoElement::Marker) {
+                    s = (**ps).clone();
+                    if !matches!(s.display, Display::None | Display::InlineFlex | Display::InlineGrid) {
+                        s.display = Display::InlineBlock;
+                    }
+                }
+                if s.display == Display::None {
+                    let label = if doc.attr(node, "multiple").is_some() { "No files chosen" } else { "No file chosen" };
+                    return vec![Self::text_box(style.clone(), label)];
+                }
+                let s = Rc::new(s);
+                let mut btn = LayoutBox::new(BoxKind::InlineBlock, None, s.clone());
+                btn.bfc_root = true;
+                let multiple = doc.attr(node, "multiple").is_some();
+                self.finish_container(&mut btn, vec![Self::text_box(s, if multiple { "Choose Files" } else { "Choose File" })], false);
+                let label = if multiple { "No files chosen" } else { "No file chosen" };
+                return vec![btn, Self::text_box(style.clone(), label)];
+            }
+            "date" | "month" | "week" | "time" | "datetime-local" => {
+                let v = doc.control_value(node).unwrap_or("").trim().to_string();
+                format_date_value(&ty, &v)
+            }
+            "password" => doc.control_value(node).map(|v| "\u{2022}".repeat(v.chars().count())).unwrap_or_default(),
+            _ => doc.control_value(node).unwrap_or("").to_string(),
         };
         if text.is_empty() {
-            return Vec::new();
+            if matches!(ty.as_str(), "submit" | "reset" | "button") {
+                // An empty button keeps the height of a line.
+                return vec![Self::text_box(style.clone(), "\u{200B}")];
+            }
+            // An empty field keeps one line of height (and its baseline);
+            // the placeholder is shown in its own style.
+            let ph = doc.attr(node, "placeholder").map(|p| p.replace(['\n', '\r'], "")).unwrap_or_default();
+            if !ph.is_empty() {
+                return vec![Self::text_box(self.placeholder_style(node, style), &ph)];
+            }
+            return vec![Self::text_box(style.clone(), "\u{200B}")];
         }
-        let mut t = LayoutBox::new(BoxKind::Text, None, style.clone());
-        t.text = Some(Rc::from(text.as_str()));
-        vec![t]
+        vec![Self::text_box(style.clone(), &text)]
     }
 
-    fn build_select(&self, node: NodeId, style: &Rc<ComputedStyle>) -> Vec<LayoutBox> {
+    /// The menu's children and, for a drop-down, the width (border box
+    /// when `box-sizing: border-box`, else content box) fitting its
+    /// longest option and the arrow.
+    fn build_select(&self, node: NodeId, style: &Rc<ComputedStyle>) -> (Vec<LayoutBox>, Option<f32>) {
         let doc = self.doc();
         let options: Vec<NodeId> = doc.descendants(node).filter(|&n| doc.is_element(n, "option")).collect();
-        let chosen = options
-            .iter()
-            .copied()
-            .find(|&o| doc.attr(o, "selected").is_some())
-            .or_else(|| options.first().copied());
-        let text = chosen
-            .map(|o| doc.text_content(o).split_whitespace().collect::<Vec<_>>().join(" "))
-            .unwrap_or_default();
-        let mut t = LayoutBox::new(BoxKind::Text, None, style.clone());
-        t.text = Some(Rc::from(format!("{text} ▾").as_str()));
-        vec![t]
+        let label = |o: NodeId| -> String {
+            let t = doc.attr(o, "label").map(str::to_string).unwrap_or_else(|| doc.text_content(o));
+            t.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let multiple = doc.attr(node, "multiple").is_some();
+        let size = doc.attr(node, "size").and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0);
+        if multiple || size > 1 {
+            // List box: every option on its own row, selected ones
+            // highlighted.
+            let mut rows = Vec::new();
+            for &o in &options {
+                let mut s = ComputedStyle::inherit_from(style);
+                s.display = Display::Block;
+                s.white_space = rabbithole_style::WhiteSpace::Pre;
+                s.padding = rabbithole_style::Edges {
+                    top: rabbithole_style::Length::ZERO,
+                    right: rabbithole_style::Length::Px(2.0),
+                    bottom: rabbithole_style::Length::Px(1.0),
+                    left: rabbithole_style::Length::Px(2.0),
+                };
+                if doc.attr(o, "selected").is_some() {
+                    s.background_color = Color::rgb(206, 206, 206);
+                }
+                if doc.attr(o, "disabled").is_some() {
+                    s.color = Color::rgba(16, 16, 16, 77);
+                }
+                let s = Rc::new(s);
+                let mut row = LayoutBox::new(BoxKind::Block, None, s.clone());
+                let text = label(o);
+                self.finish_container(&mut row, vec![Self::text_box(s, if text.is_empty() { "\u{200B}" } else { &text })], false);
+                rows.push(row);
+            }
+            if !style.width.is_auto() {
+                return (rows, None);
+            }
+            // Wide enough for the longest option and a scroll bar.
+            let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            let widest = options.iter().map(|&o| self.ctx.fonts.measure(font, style.font_size, &label(o))).fold(0.0f32, f32::max);
+            let mut w = widest.ceil() + 4.0 + 16.0;
+            if style.box_sizing == rabbithole_style::BoxSizing::BorderBox {
+                let px = |l: rabbithole_style::Length| if let rabbithole_style::Length::Px(v) = l { v } else { 0.0 };
+                w += px(style.padding.left) + px(style.padding.right) + style.border_width.left + style.border_width.right;
+            }
+            return (rows, Some(w));
+        }
+        let chosen = options.iter().copied().rev().find(|&o| doc.attr(o, "selected").is_some()).or_else(|| options.first().copied());
+        let text = chosen.map(label).unwrap_or_default();
+        let t = Self::text_box(style.clone(), if text.is_empty() { "\u{200B}" } else { &text });
+        if !style.width.is_auto() {
+            return (vec![t], None);
+        }
+        let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+        let widest = options.iter().map(|&o| self.ctx.fonts.measure(font, style.font_size, &label(o))).fold(0.0f32, f32::max);
+        let arrow = if style.appearance == rabbithole_style::Appearance::None { 0.0 } else { SELECT_ARROW_WIDTH };
+        let mut w = widest.ceil() + arrow;
+        if style.box_sizing == rabbithole_style::BoxSizing::BorderBox {
+            let px = |l: rabbithole_style::Length| if let rabbithole_style::Length::Px(v) = l { v } else { 0.0 };
+            w += px(style.padding.left) + px(style.padding.right) + style.border_width.left + style.border_width.right;
+        }
+        (vec![t], Some(w))
     }
 
     /// Decide block vs inline formatting for a container and wrap inline
@@ -882,6 +1021,70 @@ fn anonymous_style(parent: &ComputedStyle, display: Display) -> ComputedStyle {
     let mut s = ComputedStyle::inherit_from(parent);
     s.display = display;
     s
+}
+
+/// Width reserved for the drop-down arrow of a `<select>` (painted by the
+/// display list at the right of the content box).
+pub(crate) const SELECT_ARROW_WIDTH: f32 = 20.0;
+
+/// The `type` of an `<input>`, lower-cased (`text` when missing or
+/// unknown).
+pub(crate) fn input_type(doc: &Document, node: NodeId) -> String {
+    const KNOWN: &[&str] = &[
+        "hidden", "text", "search", "tel", "url", "email", "password", "date", "month", "week", "time", "datetime-local", "number", "range", "color", "checkbox", "radio",
+        "file", "submit", "image", "reset", "button",
+    ];
+    let t = doc.attr(node, "type").map(|t| t.trim().to_ascii_lowercase()).unwrap_or_default();
+    if KNOWN.contains(&t.as_str()) {
+        t
+    } else {
+        "text".into()
+    }
+}
+
+/// What a date/time field shows: its value in the en-US format, or the
+/// format mask when empty.
+fn format_date_value(ty: &str, v: &str) -> String {
+    let parts: Vec<&str> = v.split(['-', 'T', ':', 'W']).collect();
+    let time = |h: &str, m: &str| -> Option<String> {
+        let h: u32 = h.parse().ok()?;
+        let m: u32 = m.get(..2)?.parse().ok()?;
+        let (h12, ampm) = match h {
+            0 => (12, "AM"),
+            1..=11 => (h, "AM"),
+            12 => (12, "PM"),
+            _ => (h - 12, "PM"),
+        };
+        Some(format!("{h12:02}:{m:02} {ampm}"))
+    };
+    let date = |y: &str, mo: &str, d: &str| -> Option<String> {
+        let (y, mo, d): (u32, u32, u32) = (y.parse().ok()?, mo.parse().ok()?, d.parse().ok()?);
+        Some(format!("{mo:02}/{d:02}/{y:04}"))
+    };
+    let shown = match ty {
+        "date" if parts.len() == 3 => date(parts[0], parts[1], parts[2]),
+        "time" if parts.len() >= 2 => time(parts[0], parts[1]),
+        "datetime-local" if parts.len() >= 5 => date(parts[0], parts[1], parts[2]).zip(time(parts[3], parts[4])).map(|(d, t)| format!("{d}, {t}")),
+        "month" if parts.len() == 2 => {
+            const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            parts[1].parse::<usize>().ok().filter(|m| (1..=12).contains(m)).map(|m| format!("{} {}", MONTHS[m - 1], parts[0]))
+        }
+        "week" if v.contains("-W") => {
+            let (y, w) = v.split_once("-W").unwrap_or(("", ""));
+            Some(format!("Week {w}, {y}"))
+        }
+        _ => None,
+    };
+    shown.unwrap_or_else(|| {
+        match ty {
+            "date" => "mm/dd/yyyy",
+            "time" => "--:-- --",
+            "datetime-local" => "mm/dd/yyyy, --:-- --",
+            "month" => "--------- ----",
+            _ => "Week --, ----",
+        }
+        .to_string()
+    })
 }
 
 /// A copy of `style` without borders and padding (rows, row groups and

@@ -48,6 +48,25 @@ pub enum Pseudo {
     Enabled,
     Disabled,
     Checked,
+    /// Form-control states (HTML "Selectors" section).
+    Indeterminate,
+    PlaceholderShown,
+    Required,
+    Optional,
+    ReadOnly,
+    ReadWrite,
+    Valid,
+    Invalid,
+    InRange,
+    OutOfRange,
+    Default,
+    /// `:open` (open `<details>` / `<dialog>`).
+    Open,
+    /// `:modal`, `:popover-open`, `:fullscreen`, `:autofill`, ... states
+    /// we are never in, but which are valid selectors.
+    NeverState,
+    /// `:scope` outside scoped contexts is `:root`.
+    Scope,
     /// Dynamic states; matched against `MatchState` (never when unset).
     Hover,
     Active,
@@ -115,6 +134,12 @@ pub enum PseudoElement {
     Placeholder,
     Selection,
     Backdrop,
+    /// `::-webkit-slider-thumb` / `::-moz-range-thumb`.
+    SliderThumb,
+    /// `::-webkit-progress-value` / `::-moz-progress-bar`.
+    ProgressValue,
+    /// `::file-selector-button` / `::-webkit-file-upload-button`.
+    FileSelectorButton,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -420,6 +445,9 @@ impl<'a> SelectorParser<'a> {
                     "placeholder" | "-webkit-input-placeholder" | "-moz-placeholder" => Some(PseudoElement::Placeholder),
                     "selection" | "-moz-selection" => Some(PseudoElement::Selection),
                     "backdrop" => Some(PseudoElement::Backdrop),
+                    "-webkit-slider-thumb" | "-moz-range-thumb" => Some(PseudoElement::SliderThumb),
+                    "-webkit-progress-value" | "-moz-progress-bar" => Some(PseudoElement::ProgressValue),
+                    "file-selector-button" | "-webkit-file-upload-button" => Some(PseudoElement::FileSelectorButton),
                     _ => None,
                 };
                 if let Some(e) = element {
@@ -444,6 +472,22 @@ impl<'a> SelectorParser<'a> {
                     "enabled" => Pseudo::Enabled,
                     "disabled" => Pseudo::Disabled,
                     "checked" => Pseudo::Checked,
+                    "indeterminate" => Pseudo::Indeterminate,
+                    "placeholder-shown" | "-moz-placeholder-shown" => Pseudo::PlaceholderShown,
+                    "required" => Pseudo::Required,
+                    "optional" => Pseudo::Optional,
+                    "read-only" | "-moz-read-only" => Pseudo::ReadOnly,
+                    "read-write" | "-moz-read-write" => Pseudo::ReadWrite,
+                    "valid" => Pseudo::Valid,
+                    "invalid" => Pseudo::Invalid,
+                    "in-range" => Pseudo::InRange,
+                    "out-of-range" => Pseudo::OutOfRange,
+                    "default" => Pseudo::Default,
+                    "open" => Pseudo::Open,
+                    "scope" => Pseudo::Scope,
+                    "modal" | "popover-open" | "fullscreen" | "-webkit-full-screen" | "picture-in-picture" | "autofill" | "-webkit-autofill" | "user-invalid"
+                    | "user-valid" | "-moz-ui-invalid" | "-moz-ui-valid" | "blank" | "closed" | "playing" | "paused" | "seeking" | "buffering" | "stalled" | "muted"
+                    | "volume-locked" | "target-within" | "local-link" | "current" | "past" | "future" | "-moz-focusring" => Pseudo::NeverState,
                     "hover" => Pseudo::Hover,
                     "active" => Pseudo::Active,
                     "focus" => Pseudo::Focus,
@@ -930,11 +974,15 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
                 }
                 found
             }
-            Pseudo::Enabled => {
-                matches!(el.tag.as_str(), "input" | "button" | "select" | "textarea" | "option" | "fieldset")
-                    && el.attr("disabled").is_none()
+            Pseudo::Enabled | Pseudo::Disabled => {
+                let disabled = match el.tag.as_str() {
+                    "input" | "button" | "select" | "textarea" | "fieldset" => Some(is_disabled_control(doc, node)),
+                    "optgroup" => Some(el.attr("disabled").is_some()),
+                    "option" => Some(el.attr("disabled").is_some() || doc.parent(node).is_some_and(|p| doc.is_element(p, "optgroup") && doc.attr(p, "disabled").is_some())),
+                    _ => None,
+                };
+                disabled == Some(matches!(p, Pseudo::Disabled))
             }
-            Pseudo::Disabled => el.attr("disabled").is_some(),
             // Checkboxes and radio buttons by checkedness; options by
             // selectedness.
             Pseudo::Checked => match el.tag.as_str() {
@@ -942,6 +990,47 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
                 "option" => el.attr("selected").is_some(),
                 _ => false,
             },
+            Pseudo::Indeterminate => match el.tag.as_str() {
+                "input" => {
+                    let t = input_type(el);
+                    (t == "checkbox" && el.attr("data-rh-indeterminate").is_some()) || (t == "radio" && radio_group_unchecked(doc, node))
+                }
+                "progress" => parse_num(el.attr("value")).is_none(),
+                _ => false,
+            },
+            Pseudo::PlaceholderShown => {
+                matches!(el.tag.as_str(), "input" | "textarea")
+                    && el.attr("placeholder").is_some()
+                    && (el.tag == "textarea" || is_text_input(&input_type(el)))
+                    && control_value_of(doc, node).is_empty()
+            }
+            Pseudo::Required => is_requirable(el) && el.attr("required").is_some(),
+            Pseudo::Optional => is_requirable(el) && el.attr("required").is_none(),
+            Pseudo::ReadWrite => is_read_write(doc, node),
+            Pseudo::ReadOnly => !is_read_write(doc, node),
+            Pseudo::Valid | Pseudo::Invalid => {
+                let (candidate, invalid) = match el.tag.as_str() {
+                    "form" | "fieldset" => (true, doc.descendants(node).skip(1).any(|d| is_invalid_control(doc, d))),
+                    _ => (is_validation_candidate(doc, node), is_invalid_control(doc, node)),
+                };
+                candidate && (invalid == matches!(p, Pseudo::Invalid))
+            }
+            Pseudo::InRange | Pseudo::OutOfRange => match range_state(doc, node) {
+                Some(out) => out == matches!(p, Pseudo::OutOfRange),
+                None => false,
+            },
+            Pseudo::Default => match el.tag.as_str() {
+                "input" => {
+                    let t = input_type(el);
+                    (matches!(t.as_str(), "checkbox" | "radio") && el.attr("checked").is_some()) || (matches!(t.as_str(), "submit" | "image") && is_default_button(doc, node))
+                }
+                "button" => is_default_button(doc, node),
+                "option" => el.attr("selected").is_some(),
+                _ => false,
+            },
+            Pseudo::Open => matches!(el.tag.as_str(), "details" | "dialog") && el.attr("open").is_some(),
+            Pseudo::NeverState => false,
+            Pseudo::Scope => doc.parent(node).map(|p| matches!(doc.node(p).data, NodeData::Document)).unwrap_or(false),
             Pseudo::Hover => MatchState::is_or_contains(doc, state.hovered, node),
             Pseudo::Active => MatchState::is_or_contains(doc, state.active, node),
             Pseudo::Focus => state.focused == Some(node),
@@ -976,6 +1065,229 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
         }
     }
     true
+}
+
+fn input_type(el: &rabbithole_dom::ElementData) -> String {
+    el.attr("type").map(|t| t.trim().to_ascii_lowercase()).unwrap_or_else(|| "text".into())
+}
+
+const KNOWN_INPUT_TYPES: &[&str] = &[
+    "hidden", "text", "search", "tel", "url", "email", "password", "date", "month", "week", "time", "datetime-local", "number", "range", "color", "checkbox", "radio", "file",
+    "submit", "image", "reset", "button",
+];
+
+/// Text-entry input types (an unknown type is `text`).
+fn is_text_input(t: &str) -> bool {
+    matches!(t, "text" | "search" | "url" | "tel" | "email" | "password" | "number") || !KNOWN_INPUT_TYPES.contains(&t)
+}
+
+fn control_value_of(doc: &Document, node: NodeId) -> String {
+    if doc.is_element(node, "textarea") {
+        return doc.control_value(node).map(str::to_string).unwrap_or_else(|| doc.text_content(node));
+    }
+    doc.control_value(node).unwrap_or("").to_string()
+}
+
+/// Elements `required` applies to.
+fn is_requirable(el: &rabbithole_dom::ElementData) -> bool {
+    match el.tag.as_str() {
+        "select" | "textarea" => true,
+        "input" => !matches!(input_type(el).as_str(), "hidden" | "range" | "color" | "submit" | "image" | "reset" | "button"),
+        _ => false,
+    }
+}
+
+fn is_disabled_control(doc: &Document, node: NodeId) -> bool {
+    if doc.attr(node, "disabled").is_some() {
+        return true;
+    }
+    // Inside a disabled fieldset (but not inside its first legend).
+    let mut child = node;
+    let mut cur = doc.parent(node);
+    while let Some(p) = cur {
+        if doc.is_element(p, "fieldset") && doc.attr(p, "disabled").is_some() {
+            let first_legend = doc.child_elements(p).find(|&c| doc.is_element(c, "legend"));
+            if first_legend != Some(child) {
+                return true;
+            }
+        }
+        child = p;
+        cur = doc.parent(p);
+    }
+    false
+}
+
+fn is_read_write(doc: &Document, node: NodeId) -> bool {
+    let Some(el) = doc.element(node) else { return false };
+    match el.tag.as_str() {
+        "textarea" => el.attr("readonly").is_none() && !is_disabled_control(doc, node),
+        "input" => {
+            let t = input_type(el);
+            let mutable = is_text_input(&t) || matches!(t.as_str(), "date" | "month" | "week" | "time" | "datetime-local");
+            mutable && el.attr("readonly").is_none() && !is_disabled_control(doc, node)
+        }
+        _ => {
+            // Editing hosts and their descendants.
+            let mut cur = Some(node);
+            while let Some(n) = cur {
+                if let Some(v) = doc.attr(n, "contenteditable") {
+                    return !v.trim().eq_ignore_ascii_case("false");
+                }
+                cur = doc.parent(n);
+            }
+            false
+        }
+    }
+}
+
+/// Submittable elements that take part in constraint validation.
+fn is_validation_candidate(doc: &Document, node: NodeId) -> bool {
+    let Some(el) = doc.element(node) else { return false };
+    let ok = match el.tag.as_str() {
+        "select" | "textarea" => true,
+        "button" => !matches!(el.attr("type").map(|t| t.trim().to_ascii_lowercase()).as_deref(), Some("button" | "reset")),
+        "input" => !matches!(input_type(el).as_str(), "hidden" | "reset" | "button"),
+        _ => false,
+    };
+    if !ok || is_disabled_control(doc, node) {
+        return false;
+    }
+    if matches!(el.tag.as_str(), "input" | "textarea") && el.attr("readonly").is_some() {
+        return false;
+    }
+    let mut cur = doc.parent(node);
+    while let Some(p) = cur {
+        if doc.is_element(p, "datalist") {
+            return false;
+        }
+        cur = doc.parent(p);
+    }
+    true
+}
+
+fn parse_num(v: Option<&str>) -> Option<f64> {
+    v.and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite())
+}
+
+/// `Some(out_of_range)` for inputs with a range limitation.
+fn range_state(doc: &Document, node: NodeId) -> Option<bool> {
+    let el = doc.element(node)?;
+    let t = input_type(el);
+    if el.tag != "input" || !matches!(t.as_str(), "number" | "range") {
+        return None;
+    }
+    let min = parse_num(el.attr("min"));
+    let max = parse_num(el.attr("max"));
+    if t == "number" && min.is_none() && max.is_none() {
+        return None;
+    }
+    let Some(v) = parse_num(doc.control_value(node)) else { return Some(false) };
+    Some((t == "number" && min.is_some_and(|m| v < m)) || (t == "number" && max.is_some_and(|m| v > m)))
+}
+
+fn is_invalid_control(doc: &Document, node: NodeId) -> bool {
+    if !is_validation_candidate(doc, node) {
+        return false;
+    }
+    let Some(el) = doc.element(node) else { return false };
+    if el.attr("data-rh-custom-validity").is_some_and(|m| !m.is_empty()) {
+        return true;
+    }
+    match el.tag.as_str() {
+        "textarea" => el.attr("required").is_some() && control_value_of(doc, node).is_empty(),
+        "select" => {
+            if el.attr("required").is_none() || el.attr("multiple").is_some() {
+                return el.attr("required").is_some() && !doc.descendants(node).any(|o| doc.is_element(o, "option") && doc.attr(o, "selected").is_some());
+            }
+            // A required single select showing its placeholder option
+            // (first option, empty value) is invalid.
+            let options: Vec<NodeId> = doc.descendants(node).filter(|&o| doc.is_element(o, "option")).collect();
+            let shown = options.iter().copied().rev().find(|&o| doc.attr(o, "selected").is_some()).or_else(|| options.first().copied());
+            let size = parse_num(el.attr("size")).unwrap_or(1.0);
+            match shown {
+                None => true,
+                Some(o) => {
+                    size <= 1.0
+                        && Some(o) == options.first().copied()
+                        && doc.attr(o, "value").map(|v| v.is_empty()).unwrap_or_else(|| doc.text_content(o).trim().is_empty())
+                }
+            }
+        }
+        "input" => {
+            let t = input_type(el);
+            let required = el.attr("required").is_some();
+            if t == "checkbox" {
+                return required && !doc.is_checked(node);
+            }
+            if t == "radio" {
+                return required && radio_group_unchecked(doc, node);
+            }
+            let v = doc.control_value(node).unwrap_or("");
+            if v.is_empty() {
+                return required && !matches!(t.as_str(), "range" | "color" | "submit" | "image");
+            }
+            match t.as_str() {
+                "email" => {
+                    let check = |a: &str| {
+                        let a = a.trim();
+                        let (local, domain) = a.split_once('@').unwrap_or(("", ""));
+                        !local.is_empty() && !domain.is_empty() && !domain.contains('@') && !domain.starts_with('.') && !domain.ends_with('.') && !a.contains(char::is_whitespace)
+                    };
+                    if el.attr("multiple").is_some() {
+                        !v.split(',').all(check)
+                    } else {
+                        !check(v)
+                    }
+                }
+                "url" => !v
+                    .split_once(':')
+                    .is_some_and(|(scheme, _)| scheme.starts_with(|c: char| c.is_ascii_alphabetic()) && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))),
+                "number" => match parse_num(Some(v)) {
+                    None => false,
+                    Some(n) => parse_num(el.attr("min")).is_some_and(|m| n < m) || parse_num(el.attr("max")).is_some_and(|m| n > m),
+                },
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// A radio button whose group (same name, same form or tree) has no
+/// checked button.
+fn radio_group_unchecked(doc: &Document, node: NodeId) -> bool {
+    if doc.is_checked(node) {
+        return false;
+    }
+    let Some(name) = doc.attr(node, "name").filter(|n| !n.is_empty()) else { return true };
+    let mut root = node;
+    while let Some(p) = doc.parent(root) {
+        root = p;
+        if doc.is_element(p, "form") {
+            break;
+        }
+    }
+    !doc.descendants(root).any(|d| {
+        doc.is_element(d, "input") && doc.attr(d, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("radio")) && doc.attr(d, "name") == Some(name) && doc.is_checked(d)
+    })
+}
+
+/// The form's default button: its first submit button in tree order.
+fn is_default_button(doc: &Document, node: NodeId) -> bool {
+    let mut form = doc.parent(node);
+    while let Some(f) = form {
+        if doc.is_element(f, "form") {
+            break;
+        }
+        form = doc.parent(f);
+    }
+    let Some(form) = form else { return false };
+    let first = doc.descendants(form).find(|&d| match doc.element(d) {
+        Some(e) if e.tag == "button" => !matches!(e.attr("type").map(|t| t.trim().to_ascii_lowercase()).as_deref(), Some("button" | "reset")),
+        Some(e) if e.tag == "input" => matches!(input_type(e).as_str(), "submit" | "image"),
+        _ => false,
+    });
+    first == Some(node)
 }
 
 /// `:has()` support: does any element related to `node` by `comb` match `sel`?

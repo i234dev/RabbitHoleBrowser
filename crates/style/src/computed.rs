@@ -718,6 +718,9 @@ pub struct ComputedStyle {
     pub font_style: FontStyle,
     /// px; None = `normal`
     pub line_height: Option<f32>,
+    /// A unitless `line-height` (the number is inherited, not the px
+    /// value: `line_height` is recomputed for each font size).
+    pub line_height_number: Option<f32>,
     pub letter_spacing: f32,
     pub word_spacing: f32,
     pub text_align: TextAlign,
@@ -768,6 +771,9 @@ pub struct ComputedStyle {
     /// Background layers, first = topmost (CSS order). `background_color`
     /// is painted beneath all layers.
     pub background_layers: Vec<BackgroundLayer>,
+    /// `mask-image` layers (with `mask-size`, `-position`, `-repeat`,
+    /// `-origin`, `-clip`): the alpha of their images masks the box.
+    pub mask_layers: Vec<BackgroundLayer>,
     /// Corner radii (top-left, top-right, bottom-right, bottom-left), each
     /// (horizontal, vertical). `border_radius` keeps the largest for
     /// compatibility with older code paths.
@@ -809,6 +815,11 @@ pub struct ComputedStyle {
     /// `image-rendering: pixelated | crisp-edges` (nearest-neighbour
     /// scaling). Inherited.
     pub image_rendering_pixelated: bool,
+    /// `accent-color` (`None` = auto). Inherited.
+    pub accent_color: Option<Color>,
+    /// `color-scheme` includes `dark` (and not `light` first): native
+    /// controls use dark colors. Inherited.
+    pub color_scheme_dark: bool,
 
     // ---- generated content & counters
     pub content: Content,
@@ -870,6 +881,7 @@ impl ComputedStyle {
             font_weight: 400,
             font_style: FontStyle::Normal,
             line_height: None,
+            line_height_number: None,
             letter_spacing: 0.0,
             word_spacing: 0.0,
             text_align: TextAlign::Left,
@@ -909,6 +921,7 @@ impl ComputedStyle {
             justify_items: ItemAlign::Stretch,
             justify_self: ItemAlign::Auto,
             background_layers: Vec::new(),
+            mask_layers: Vec::new(),
             border_radii: [(Length::ZERO, Length::ZERO); 4],
             box_shadow: Vec::new(),
             text_shadow: Vec::new(),
@@ -935,6 +948,8 @@ impl ComputedStyle {
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
             aspect_ratio: None,
             image_rendering_pixelated: false,
+            accent_color: None,
+            color_scheme_dark: false,
             content: Content::Normal,
             counter_reset: Vec::new(),
             counter_increment: Vec::new(),
@@ -965,6 +980,7 @@ impl ComputedStyle {
             font_weight: parent.font_weight,
             font_style: parent.font_style,
             line_height: parent.line_height,
+            line_height_number: parent.line_height_number,
             letter_spacing: parent.letter_spacing,
             word_spacing: parent.word_spacing,
             text_align: parent.text_align,
@@ -987,6 +1003,8 @@ impl ComputedStyle {
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
             image_rendering_pixelated: parent.image_rendering_pixelated,
+            accent_color: parent.accent_color,
+            color_scheme_dark: parent.color_scheme_dark,
             quotes: parent.quotes.clone(),
             pointer_events: parent.pointer_events,
             user_select: parent.user_select,
@@ -1008,6 +1026,7 @@ impl ComputedStyle {
             && self.font_weight == o.font_weight
             && self.font_style == o.font_style
             && self.line_height == o.line_height
+            && self.line_height_number == o.line_height_number
             && self.letter_spacing == o.letter_spacing
             && self.word_spacing == o.word_spacing
             && self.text_align == o.text_align
@@ -1027,6 +1046,8 @@ impl ComputedStyle {
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
             && self.image_rendering_pixelated == o.image_rendering_pixelated
+            && self.accent_color == o.accent_color
+            && self.color_scheme_dark == o.color_scheme_dark
             && self.quotes == o.quotes
             && self.pointer_events == o.pointer_events
             && self.user_select == o.user_select

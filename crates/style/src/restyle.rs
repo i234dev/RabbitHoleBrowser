@@ -241,6 +241,27 @@ impl InvalidationMap {
                 Pseudo::Empty => self.empty |= rel,
                 Pseudo::Link | Pseudo::AnyLink => *self.attrs.entry("href".into()).or_default() |= rel,
                 Pseudo::Enabled | Pseudo::Disabled => *self.attrs.entry("disabled".into()).or_default() |= rel,
+                // Form states read the value, checkedness and validation
+                // attributes of the element, and (`:invalid` forms and
+                // fieldsets, radio groups, `:default` buttons) of other
+                // elements of its form: treated like `:has()` arguments.
+                Pseudo::Indeterminate
+                | Pseudo::PlaceholderShown
+                | Pseudo::Required
+                | Pseudo::Optional
+                | Pseudo::ReadOnly
+                | Pseudo::ReadWrite
+                | Pseudo::Valid
+                | Pseudo::Invalid
+                | Pseudo::InRange
+                | Pseudo::OutOfRange
+                | Pseudo::Default
+                | Pseudo::Open => {
+                    let rel = if matches!(p, Pseudo::Valid | Pseudo::Invalid | Pseudo::Indeterminate | Pseudo::Default) { rel | R_HAS } else { rel };
+                    for a in ["value", "checked", "placeholder", "required", "readonly", "disabled", "type", "min", "max", "selected", "data-rh-indeterminate", "data-rh-custom-validity", "open", "contenteditable"] {
+                        *self.attrs.entry(a.into()).or_default() |= rel;
+                    }
+                }
                 Pseudo::Checked => {
                     *self.attrs.entry("checked".into()).or_default() |= rel;
                     *self.attrs.entry("selected".into()).or_default() |= rel;

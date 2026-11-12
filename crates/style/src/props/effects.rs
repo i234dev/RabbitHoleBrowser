@@ -344,7 +344,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 style.creates_stacking_context = true;
             }
         }
-        "clip-path" | "clip" | "mask" | "mask-image" | "-webkit-mask-image" | "-webkit-mask" | "perspective" | "perspective-origin"
+        "clip-path" | "clip" | "perspective" | "perspective-origin"
         | "backface-visibility" | "-webkit-backface-visibility" | "transform-style" | "-webkit-transform-style" | "transform-box"
         | "box-reflect" | "-webkit-box-reflect" | "shape-outside" | "shape-margin" => {}
         _ => return false,

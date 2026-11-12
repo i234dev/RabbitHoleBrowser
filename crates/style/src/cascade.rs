@@ -288,6 +288,7 @@ struct ShareKey {
     vars: usize,
     root_fs: u32,
     is_root: bool,
+    slot: Option<PseudoElement>,
     presentational: usize,
     style_attr: usize,
     /// Matched rules: (index identity, rule) pairs.
@@ -389,11 +390,13 @@ pub(crate) fn compute_element<'a>(
         None => decls.none(),
     };
     let is_root = doc.element(node).map(|e| e.tag == "html").unwrap_or(false);
+    let slot = control_pseudo_slot(doc, node);
     let key = share.as_ref().map(|_| ShareKey {
         parent: Rc::as_ptr(parent) as usize,
         vars: Rc::as_ptr(parent_vars) as usize,
         root_fs: root_font_size.to_bits(),
         is_root,
+        slot,
         presentational: Rc::as_ptr(&presentational) as usize,
         style_attr: Rc::as_ptr(&style_attr) as usize,
         rules,
@@ -407,7 +410,7 @@ pub(crate) fn compute_element<'a>(
             return out;
         }
     }
-    let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root);
+    let out = cascade_matched(matched, &presentational, &style_attr, parent, parent_vars, root_font_size, env, opts, is_root, slot);
     if let (Some(cache), Some(k)) = (share, key) {
         if cache.map.len() > 200_000 {
             cache.map.clear();
@@ -415,6 +418,24 @@ pub(crate) fn compute_element<'a>(
         cache.map.insert(k, (out.clone(), parent.clone(), presentational, style_attr));
     }
     out
+}
+
+/// The pseudo-element of a form control whose style is kept in the
+/// element's marker slot (controls have no list markers): text fields'
+/// `::placeholder`, a slider's thumb, a progress bar's value, a file
+/// input's button.
+pub(crate) fn control_pseudo_slot(doc: &Document, node: NodeId) -> Option<PseudoElement> {
+    let el = doc.element(node)?;
+    match el.tag.as_str() {
+        "textarea" => Some(PseudoElement::Placeholder),
+        "progress" => Some(PseudoElement::ProgressValue),
+        "input" => Some(match el.attr("type").map(|t| t.trim().to_ascii_lowercase()).as_deref() {
+            Some("range") => PseudoElement::SliderThumb,
+            Some("file") => PseudoElement::FileSelectorButton,
+            _ => PseudoElement::Placeholder,
+        }),
+        _ => None,
+    }
 }
 
 /// The cascade proper for one element whose matching declarations are
@@ -430,6 +451,7 @@ fn cascade_matched(
     env: &MediaEnv,
     opts: &StyleOptions,
     is_root: bool,
+    slot: Option<PseudoElement>,
 ) -> ElementOut {
 
     let mut local: Vec<Matched> = Vec::with_capacity(matched.len() + presentational.len() + style_attr.len());
@@ -473,7 +495,11 @@ fn cascade_matched(
         return out;
     }
     pseudo_local.sort_by(|a, b| (a.rank, a.specificity, a.order).cmp(&(b.rank, b.specificity, b.order)));
-    for which in [PseudoElement::Before, PseudoElement::After, PseudoElement::Marker] {
+    // Form controls never have markers: their marker slot carries the
+    // style of their own pseudo-element (`::placeholder`, ...).
+    let slot_pseudo = slot.unwrap_or(PseudoElement::Marker);
+    let pseudos = [PseudoElement::Before, PseudoElement::After, slot_pseudo];
+    for which in pseudos {
         let decls: Vec<Matched> = pseudo_local
             .iter()
             .filter(|m| m.pseudo == Some(which))
@@ -485,7 +511,6 @@ fn cascade_matched(
         let root_fs = if is_root { out.style.font_size } else { root_font_size };
         let ps = apply_declarations(&decls, &out.vars, &out.style, root_fs, env, opts, false, true);
         match which {
-            PseudoElement::Marker => out.marker = Some(Rc::new(ps)),
             PseudoElement::Before | PseudoElement::After => {
                 if matches!(ps.content, Content::Items(_)) && !ps.display.is_none() {
                     if which == PseudoElement::Before {
@@ -495,7 +520,7 @@ fn cascade_matched(
                     }
                 }
             }
-            _ => {}
+            _ => out.marker = Some(Rc::new(ps)),
         }
     }
     out
@@ -590,6 +615,11 @@ fn apply_declarations(
         if !st.is_visible() {
             *w = 0.0;
         }
+    }
+    // A unitless line height scales with this element's font size (also
+    // when inherited).
+    if let Some(n) = style.line_height_number {
+        style.line_height = Some((n * style.font_size).max(0.0));
     }
 
     // Blockification (CSS Display §2.7): the root, out-of-flow and floated
@@ -910,7 +940,7 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
         if matches!(ty.as_str(), "" | "text" | "search" | "password" | "email" | "url" | "tel" | "number") {
             if let Some(sz) = el.attr("size").and_then(|v| v.trim().parse::<f32>().ok()) {
                 if sz > 0.0 {
-                    css.push_str(&format!("width:calc({sz}ch + 6px);"));
+                    css.push_str(&format!("width:{}em;", sz * 0.55));
                 }
             }
         }
@@ -918,15 +948,16 @@ fn presentational_css(doc: &Document, node: NodeId) -> Option<String> {
     if tag == "textarea" {
         if let Some(c) = el.attr("cols").and_then(|v| v.trim().parse::<f32>().ok()) {
             if c > 0.0 {
-                css.push_str(&format!("width:calc({c}ch + 6px);"));
+                css.push_str(&format!("width:calc({c}ch + 15px);"));
             }
         }
         // `rows` gives the intrinsic (auto) height, applied by layout.
     }
     if tag == "select" {
-        if let Some(sz) = el.attr("size").and_then(|v| v.trim().parse::<f32>().ok()) {
+        let size = el.attr("size").and_then(|v| v.trim().parse::<f32>().ok()).filter(|s| *s > 1.0).or_else(|| el.attr("multiple").map(|_| 4.0));
+        if let Some(sz) = size {
             if sz > 1.0 {
-                css.push_str(&format!("height:calc({}em + 4px);", sz * 1.3));
+                css.push_str(&format!("height:calc({sz} * (1.15em + 1px) + 2px);"));
             }
         }
     }
@@ -1124,6 +1155,7 @@ fn is_inherited(name: &str) -> bool {
             | "border-collapse" | "border-spacing" | "direction" | "tab-size" | "word-break" | "overflow-wrap" | "word-wrap"
             | "text-shadow" | "quotes" | "pointer-events" | "user-select" | "font-variant" | "font-variant-caps"
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
+            | "accent-color" | "color-scheme"
     )
 }
 
@@ -1184,6 +1216,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.font_weight = from.font_weight;
             to.font_style = from.font_style;
             to.line_height = from.line_height;
+            to.line_height_number = from.line_height_number;
             to.font_variant_small_caps = from.font_variant_small_caps;
         }
         "font-family" => {
@@ -1193,7 +1226,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "font-size" => to.font_size = from.font_size,
         "font-weight" => to.font_weight = from.font_weight,
         "font-style" => to.font_style = from.font_style,
-        "line-height" => to.line_height = from.line_height,
+        "line-height" => {
+            to.line_height = from.line_height;
+            to.line_height_number = from.line_height_number;
+        }
         "letter-spacing" => to.letter_spacing = from.letter_spacing,
         "word-spacing" => to.word_spacing = from.word_spacing,
         "text-align" => to.text_align = from.text_align,
@@ -1278,6 +1314,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.background_layers = from.background_layers.clone();
             to.background_image = from.background_image.clone();
         }
+        "mask" | "-webkit-mask" | "mask-image" | "-webkit-mask-image" | "mask-size" | "-webkit-mask-size" | "mask-position" | "-webkit-mask-position"
+        | "mask-repeat" | "-webkit-mask-repeat" | "mask-origin" | "-webkit-mask-origin" | "mask-clip" | "-webkit-mask-clip" => {
+            to.mask_layers = from.mask_layers.clone();
+        }
         "border-top-left-radius" | "border-top-right-radius" | "border-bottom-right-radius" | "border-bottom-left-radius" => {
             to.border_radii = from.border_radii;
             to.border_radius = from.border_radius;
@@ -1306,6 +1346,8 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "object-position" => to.object_position = from.object_position,
         "aspect-ratio" => to.aspect_ratio = from.aspect_ratio,
         "image-rendering" => to.image_rendering_pixelated = from.image_rendering_pixelated,
+        "accent-color" => to.accent_color = from.accent_color,
+        "color-scheme" => to.color_scheme_dark = from.color_scheme_dark,
         "content" => to.content = from.content.clone(),
         "counter-reset" | "counter-set" => to.counter_reset = from.counter_reset.clone(),
         "counter-increment" => to.counter_increment = from.counter_increment.clone(),
@@ -2030,6 +2072,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     Some(lh) => line_height_of(lh, style.font_size, ctx).unwrap_or(None),
                     None => None,
                 };
+                style.line_height_number = f.line_height.as_deref().and_then(values::number).filter(|n| *n >= 0.0);
                 let fam_comps = values::components(&f.family);
                 if !fam_comps.is_empty() {
                     if let Some(fam) = family_of(&fam_comps) {
@@ -2043,6 +2086,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         "line-height" => {
             if let Some(lh) = line_height_of(c0, style.font_size, ctx) {
                 style.line_height = lh;
+                style.line_height_number = values::number(c0).filter(|n| *n >= 0.0);
             }
         }
         "letter-spacing" | "word-spacing" => {

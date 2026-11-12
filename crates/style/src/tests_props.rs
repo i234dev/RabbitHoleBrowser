@@ -441,7 +441,10 @@ fn ua_form_controls_and_placeholder() {
     assert_eq!(style_of(&cdoc, &ct, "p").cursor, "nw-resize");
     assert_eq!(style_of(&cdoc, &ct, "span").cursor, "help");
     assert_eq!(style_of(&cdoc, &ct, "em").cursor, "default");
-    assert_eq!(b.border_radius, 2.0);
+    // Square in CSS: the 2px rounding of the native look is painted by
+    // layout while the UA colors are untouched (appearance: none and
+    // author-styled buttons are square, like in Blink).
+    assert_eq!(b.border_radius, 0.0);
     let ta = style_of(&doc, &t, "textarea");
     assert_eq!(ta.white_space, WhiteSpace::PreWrap);
     assert_eq!(ta.resize, Resize::Both);

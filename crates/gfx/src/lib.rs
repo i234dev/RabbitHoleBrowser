@@ -13,6 +13,9 @@ pub mod paint;
 pub mod path;
 pub mod raster;
 pub mod stroke;
+mod shaping;
+pub mod color_glyph;
+pub use shaping::ShapeFeatures;
 
 #[cfg(test)]
 mod tests_v02;

@@ -8,7 +8,6 @@ use rabbithole_dom::Document;
 use rabbithole_gfx::{Canvas, FontContext, Image, Paint, Rect};
 use rabbithole_style::{style_tree, StyledTree};
 use std::collections::HashMap;
-use std::rc::Rc;
 
 type Images = HashMap<usize, Arc<Image>>;
 type Bgs = HashMap<String, Arc<Image>>;
@@ -842,9 +841,10 @@ fn text_input_is_content_box_with_centered_text() {
     let line = &q.lines[0];
     let mid = line.rect.y + line.rect.h / 2.0;
     assert!((mid - (q.content_rect.y + 14.0)).abs() < 0.6, "line {:?} content {:?}", line.rect, q.content_rect);
-    // Default text fields keep their usual 1.6em total height.
+    // Text fields are one line (normal line height) plus padding and
+    // border tall.
     let d = inputs[1];
-    assert!((d.rect.h - 13.333 * 1.6).abs() < 0.1, "default height {}", d.rect.h);
+    assert!((d.rect.h - (13.333 * 1.164 + 4.0)).abs() < 0.6, "default height {}", d.rect.h);
     // Buttons stay border-box.
     assert!((inputs[2].rect.h - 40.0).abs() < 0.01, "button {}", inputs[2].rect.h);
 }

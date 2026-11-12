@@ -38,9 +38,13 @@ pub struct ShapedGlyph {
     /// Font actually used (after fallback).
     pub font: FontId,
     pub glyph: u16,
-    /// Horizontal offset from the start of the run.
+    /// Horizontal offset from the start of the run (pen position).
     pub x: f32,
     pub advance: f32,
+    /// Offset of the glyph from its pen position (mark attachment,
+    /// GPOS adjustments); `dy` is upwards.
+    pub dx: f32,
+    pub dy: f32,
     /// Byte offset of the source char in the shaped string.
     pub byte_index: usize,
 }
@@ -111,12 +115,24 @@ pub struct FontContext {
     /// (primary face, char) → face that has the char (None = nowhere)
     fallback_cache: RefCell<HashMap<(usize, char), Option<usize>>>,
     pub(crate) system_loaded: Cell<bool>,
+    /// OpenType shaping state (face data, shaped-run cache).
+    pub(crate) shaping: crate::shaping::ShapingState,
+    /// (face, glyph, size×4) → color rendering (None: not a color glyph).
+    pub(crate) color_cache: RefCell<HashMap<(usize, u16, u32), Option<Rc<crate::color_glyph::ColorGlyph>>>>,
 }
 
 impl Default for FontContext {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Combining marks, variation selectors and joiners: they belong to the
+/// preceding character's cluster.
+fn is_mark_like(ch: char) -> bool {
+    matches!(ch as u32,
+        0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05C7 | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670 | 0x06D6..=0x06ED
+        | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x200C | 0x200D | 0x20D0..=0x20FF | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F | 0xE0100..=0xE01EF)
 }
 
 fn is_zero_width(ch: char) -> bool {
@@ -152,6 +168,8 @@ impl FontContext {
             cache: RefCell::new(HashMap::new()),
             fallback_cache: RefCell::new(HashMap::new()),
             system_loaded: Cell::new(false),
+            shaping: Default::default(),
+            color_cache: RefCell::new(HashMap::new()),
         };
         for (name, family, weight, italic, generic, bytes) in sources {
             let font = fontdue::Font::from_bytes(bytes, fontdue_settings()).expect("bundled font is valid");
@@ -328,6 +346,19 @@ impl FontContext {
                 return Some(idx);
             }
         }
+        // Emoji-presentation characters prefer the system's color emoji
+        // font over the monochrome symbols of the bundled faces.
+        if matches!(ch as u32, 0x1F000..=0x1FAFF) {
+            for fam in crate::font_ext::script_fallback_families(ch) {
+                if let Some(ids) = self.by_family.borrow().get(&fam.to_ascii_lowercase()).cloned() {
+                    if let Some(idx) = self.best_of(&ids, prim_weight, prim_italic) {
+                        if has(idx) {
+                            return Some(idx);
+                        }
+                    }
+                }
+            }
+        }
         // 2. Bundled faces of the same generic, then all bundled.
         let generic = generic.unwrap_or(Family::Sans);
         let bundled_pref: Vec<usize> = match generic {
@@ -369,64 +400,99 @@ impl FontContext {
         None
     }
 
-    /// Shape a run: positions for each char, with per-char font fallback
-    /// when the primary face lacks the glyph. `letter_spacing` is added
-    /// after every glyph.
+    /// Shape a run: glyphs with their pen positions, with per-character
+    /// font fallback when the primary face lacks a glyph. Runs of a face
+    /// with OpenType layout tables are shaped with its GSUB/GPOS
+    /// (ligatures, kerning, marks, joining and Indic forms).
+    /// `letter_spacing` is added after every glyph (and turns off
+    /// ligatures).
     pub fn shape(&self, font: FontId, size: f32, text: &str, letter_spacing: f32) -> Vec<ShapedGlyph> {
+        let features = crate::ShapeFeatures { no_ligatures: letter_spacing.abs() > 0.001, no_kerning: false };
+        self.shape_with(font, size, text, letter_spacing, features)
+    }
+
+    /// [`FontContext::shape`] with explicit font features.
+    pub fn shape_with(&self, font: FontId, size: f32, text: &str, letter_spacing: f32, features: crate::ShapeFeatures) -> Vec<ShapedGlyph> {
         let primary = self.resolve_index(font.0);
         let primary_face = self.face(primary);
         let mut out = Vec::with_capacity(text.len());
         let mut x = 0.0f32;
-        let mut prev: Option<(usize, u16)> = None;
-        let mut cur_face: (usize, Rc<fontdue::Font>) = (primary, Rc::clone(&primary_face));
-        for (byte_index, ch) in text.char_indices() {
-            if is_zero_width(ch) {
-                out.push(ShapedGlyph {
-                    font: FontId(primary),
-                    glyph: ZERO_WIDTH_GLYPH,
-                    x,
-                    advance: 0.0,
-                    byte_index,
-                });
-                prev = None;
+        // Segment the text into runs of one face; tabs and zero-width
+        // characters are runs of their own (`face == usize::MAX`).
+        const SPECIAL: usize = usize::MAX;
+        let mut segs: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, face)
+        for (i, ch) in text.char_indices() {
+            let end = i + ch.len_utf8();
+            let joiner = matches!(ch, '\u{200C}' | '\u{200D}');
+            let face = if ch == '\t' || (is_zero_width(ch) && !joiner) {
+                SPECIAL
+            } else {
+                // Combining marks, variation selectors and joiners stay
+                // with the preceding character's face when it can shape
+                // them.
+                let prev = segs.last().map(|s| s.2).filter(|&f| f != SPECIAL);
+                match prev {
+                    Some(pf) if is_mark_like(ch) && (joiner || self.face(pf).lookup_glyph_index(ch) != 0) => pf,
+                    _ if joiner => prev.unwrap_or(SPECIAL),
+                    _ => self.lookup(primary, ch).0,
+                }
+            };
+            match segs.last_mut() {
+                Some(s) if s.2 == face && face != SPECIAL => s.1 = end,
+                _ => segs.push((i, end, face)),
+            }
+        }
+        for (start, end, face_idx) in segs {
+            let run = &text[start..end];
+            if face_idx == SPECIAL {
+                let ch = run.chars().next().unwrap_or(' ');
+                let adv = if ch == '\t' {
+                    let space = primary_face.lookup_glyph_index(' ');
+                    primary_face.metrics_indexed(space, size).advance_width * 4.0 + letter_spacing
+                } else {
+                    0.0
+                };
+                out.push(ShapedGlyph { font: FontId(primary), glyph: ZERO_WIDTH_GLYPH, x, advance: adv, dx: 0.0, dy: 0.0, byte_index: start });
+                x += adv;
                 continue;
             }
-            if ch == '\t' {
-                let space = primary_face.lookup_glyph_index(' ');
-                let adv = primary_face.metrics_indexed(space, size).advance_width * 4.0;
-                out.push(ShapedGlyph {
-                    font: FontId(primary),
-                    glyph: ZERO_WIDTH_GLYPH,
-                    x,
-                    advance: adv + letter_spacing,
-                    byte_index,
-                });
-                x += adv + letter_spacing;
-                prev = None;
-                continue;
+            if self.wants_shaping(face_idx) {
+                if let Some(units) = self.shape_units(face_idx, run, features) {
+                    let scale = size / units.upem.max(1.0);
+                    for g in &units.glyphs {
+                        let mut adv = g.x_advance as f32 * scale;
+                        if adv != 0.0 {
+                            adv += letter_spacing;
+                        }
+                        out.push(ShapedGlyph {
+                            font: FontId(face_idx),
+                            glyph: g.glyph,
+                            x,
+                            advance: adv,
+                            dx: g.x_offset as f32 * scale,
+                            dy: g.y_offset as f32 * scale,
+                            byte_index: start + g.cluster as usize,
+                        });
+                        x += adv;
+                    }
+                    continue;
+                }
             }
-            let (face_idx, glyph) = self.lookup(primary, ch);
-            if cur_face.0 != face_idx {
-                cur_face = (face_idx, self.face(face_idx));
-            }
-            let face = &cur_face.1;
-            if let Some((pf, pg)) = prev {
-                if pf == face_idx {
+            // No layout tables: advances plus `kern` pairs.
+            let face = self.face(face_idx);
+            let mut prev: Option<u16> = None;
+            for (bi, ch) in run.char_indices() {
+                let glyph = face.lookup_glyph_index(ch);
+                if let Some(pg) = prev {
                     if let Some(k) = face.horizontal_kern_indexed(pg, glyph, size) {
                         x += k;
                     }
                 }
+                let adv = face.metrics_indexed(glyph, size).advance_width + letter_spacing;
+                out.push(ShapedGlyph { font: FontId(face_idx), glyph, x, advance: adv, dx: 0.0, dy: 0.0, byte_index: start + bi });
+                x += adv;
+                prev = Some(glyph);
             }
-            let adv = face.metrics_indexed(glyph, size).advance_width + letter_spacing;
-            out.push(ShapedGlyph {
-                font: FontId(face_idx),
-                glyph,
-                x,
-                advance: adv,
-                byte_index,
-            });
-            x += adv;
-            prev = Some((face_idx, glyph));
         }
         out
     }
@@ -607,6 +673,29 @@ mod tests {
         if !fc.has_glyph(mono, '☃') {
             assert_ne!(g[0].font, mono);
         }
+    }
+
+    #[test]
+    fn opentype_shaping() {
+        let fc = FontContext::new();
+        let f = fc.select(Family::Sans, 400, false);
+        // GPOS kerning pulls "AV" together.
+        let a = fc.measure(f, 40.0, "A");
+        let v = fc.measure(f, 40.0, "V");
+        assert!(fc.measure(f, 40.0, "AV") < a + v - 1.0, "AV is kerned");
+        // Arabic letters take their joining forms (other glyphs than the
+        // isolated ones of the cmap).
+        let word = fc.shape(f, 20.0, "\u{0633}\u{0644}\u{0627}\u{0645}", 0.0);
+        let face = fc.face(f.0);
+        let isolated: Vec<u16> = "\u{0633}\u{0644}\u{0627}\u{0645}".chars().map(|c| face.lookup_glyph_index(c)).collect();
+        assert!(isolated.iter().all(|g| *g != 0), "DejaVu Sans has Arabic");
+        let shaped: Vec<u16> = word.iter().map(|g| g.glyph).collect();
+        assert!(shaped.iter().any(|g| !isolated.contains(g)), "joining forms: {shaped:?} vs {isolated:?}");
+        // Right-to-left: glyphs come out in visual order (last char first).
+        assert!(word.first().unwrap().byte_index > word.last().unwrap().byte_index);
+        // Letter spacing turns ligatures off and is added per glyph.
+        let spaced = fc.shape(f, 16.0, "ff", 3.0);
+        assert_eq!(spaced.len(), 2);
     }
 
     #[test]

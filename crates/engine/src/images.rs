@@ -618,8 +618,8 @@ fn collect_backgrounds(b: &LayoutBox, view: &Rect, have: &HashMap<String, Arc<Im
     if out.len() >= 64 {
         return;
     }
-    if !b.style.background_layers.is_empty() && (!b.rect.intersect(view).is_empty()) {
-        for l in &b.style.background_layers {
+    if !(b.style.background_layers.is_empty() && b.style.mask_layers.is_empty()) && (!b.rect.intersect(view).is_empty()) {
+        for l in b.style.background_layers.iter().chain(b.style.mask_layers.iter()) {
             if let rabbithole_style::BackgroundImage::Url(u) = &l.image {
                 if !have.contains_key(u) && !out.contains(u) {
                     out.push(u.clone());

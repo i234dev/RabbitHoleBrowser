@@ -1,0 +1,2 @@
+# WPT reftests that pass and must keep passing (paths relative to the
+# WPT checkout). Run by tests/reftests.rs when the checkout exists.

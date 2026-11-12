@@ -171,6 +171,18 @@ impl<'a> Layouter<'a> {
         }
     }
 
+    /// Form controls that show one line of text (and keep its height when
+    /// empty).
+    fn is_line_control(&self, n: rabbithole_dom::NodeId) -> bool {
+        let doc = self.ctx.doc;
+        match doc.tag(n) {
+            Some("button") => true,
+            Some("select") => doc.attr(n, "multiple").is_none() && doc.attr(n, "size").and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0) <= 1,
+            Some("input") => !matches!(crate::build::input_type(doc, n).as_str(), "checkbox" | "radio" | "range" | "color" | "image" | "hidden"),
+            _ => false,
+        }
+    }
+
     /// Font for a style: the first available family of `font-family`
     /// (web fonts / system fonts) or the generic fallback.
     pub fn font_for(&mut self, style: &ComputedStyle) -> FontId {
@@ -530,6 +542,11 @@ impl<'a> Layouter<'a> {
             if let Some(fe) = float_extent {
                 h = h.max(fe);
             }
+            // Empty text fields, buttons and menus are one line tall.
+            if b.pseudo.is_none() && h < 0.5 && b.node.is_some_and(|n| self.is_line_control(n)) {
+                let font = self.font_for(&style);
+                h = style.line_height.unwrap_or_else(|| self.ctx.fonts.metrics(font, style.font_size).height());
+            }
         }
         h = self.clamp_height(&style, h, cb.height, pb_v);
         b.rect.h = h + pb_v;
@@ -538,8 +555,16 @@ impl<'a> Layouter<'a> {
         // its content box, whatever its height (Material fields with
         // `height: 28px; padding: 13px 15px`, short boxes with a large
         // line-height, ...). Reused contents were centered already.
-        if !b.reused_layout && b.pseudo.is_none() && !b.lines.is_empty() && (h - content_h).abs() > 0.01 {
-            if b.node.is_some_and(|n| self.ctx.doc.is_element(n, "input")) {
+        if !b.reused_layout && b.pseudo.is_none() && (h - content_h).abs() > 0.01 {
+            // Buttons and drop-down menus center their contents too (when
+            // they fit).
+            let center = match b.node.and_then(|n| self.ctx.doc.tag(n)) {
+                Some("input") => !b.lines.is_empty(),
+                Some("select") => !b.lines.is_empty() && h > content_h,
+                Some("button") => h > content_h && style.display != rabbithole_style::Display::Flex && style.display != rabbithole_style::Display::Grid,
+                _ => false,
+            };
+            if center {
                 crate::table::translate_contents(b, 0.0, (h - content_h) / 2.0);
             }
         }
@@ -552,11 +577,23 @@ impl<'a> Layouter<'a> {
 
         self.place_marker(b);
 
-        b.baseline = if b.clips {
+        // Single-line form controls clip their contents internally but keep
+        // the baseline of their text (Blink, Gecko).
+        let control_baseline = b.pseudo.is_none() && b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("input" | "select" | "button")));
+        b.baseline = if b.clips && !control_baseline {
             None
         } else {
             b.last_baseline().map(|bl| bl - b.rect.y)
         };
+        // An empty one-line control has the baseline its text would have.
+        if control_baseline && b.lines.iter().all(|l| l.fragments.is_empty()) && b.node.is_some_and(|n| self.is_line_control(n)) {
+            let font = self.font_for(&style);
+            let m = self.ctx.fonts.metrics(font, style.font_size);
+            let lh = style.line_height.unwrap_or_else(|| m.height());
+            let half_leading = (lh - (m.ascent + m.descent)) / 2.0;
+            let top = b.content_rect.y + (b.content_rect.h - lh) / 2.0;
+            b.baseline = Some(top + half_leading + m.ascent - b.rect.y);
+        }
 
         if style.position != Position::Static {
             let padding_box = b.padding_rect();

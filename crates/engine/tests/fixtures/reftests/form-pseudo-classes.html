@@ -1,0 +1,25 @@
+<!DOCTYPE html><title>:placeholder-shown, :invalid, :valid, :required, :read-only, :disabled in fieldsets</title>
+<link rel="match" href="green-boxes-ref.html">
+<style>
+body { margin: 0 } fieldset, form { margin: 0; padding: 0; border: 0; min-width: 0 } input, select, textarea { display: none } div { width: 100px; height: 10px; background: red }
+input:placeholder-shown + div, input:not(:placeholder-shown).v + div { background: green }
+input:invalid + div.i, input:valid + div.ok, form:invalid > div.f { background: green }
+input:required + div.r, input:optional + div.o, input:read-only + div.ro, input:read-write + div.rw { background: green }
+input:disabled + div.d, textarea:placeholder-shown + div, select:invalid + div { background: green }
+input:indeterminate + div.ind, input:checked + div.c, input:default + div.def { background: green }
+</style>
+<input placeholder="x"><div></div>
+<input placeholder="x" value="y" class=v><div></div>
+<form><input required class=x><div class=i></div><div class=f></div></form>
+<input type=email value="nope"><div class=i></div>
+<input type=email value="a@b.c"><div class=ok></div>
+<input required><div class=r></div>
+<input><div class=o></div>
+<input readonly><div class=ro></div>
+<input><div class=rw></div>
+<fieldset disabled><input><div class=d></div></fieldset>
+<textarea placeholder="p"></textarea><div></div>
+<select required><option value="">Choose</option><option>A</option></select><div></div>
+<input type=radio name=nothing-checked><div class=ind></div>
+<input type=checkbox checked><div class=c></div>
+<input type=checkbox checked><div class=def></div>
