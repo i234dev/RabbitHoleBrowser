@@ -92,6 +92,10 @@ fn sizing_of(ts: &TrackSize, avail: Option<f32>) -> (Sizing, Sizing) {
                 Some(a) => (Sizing::Fixed((a * p / 100.0).max(0.0)), Sizing::Fixed((a * p / 100.0).max(0.0))),
                 None => (Sizing::Auto, Sizing::Auto),
             },
+            Length::Calc(px, p) => match avail {
+                Some(a) => (Sizing::Fixed((px + a * p / 100.0).max(0.0)), Sizing::Fixed((px + a * p / 100.0).max(0.0))),
+                None => (Sizing::Auto, Sizing::Auto),
+            },
             Length::Auto => (Sizing::Auto, Sizing::Auto),
             Length::MinContent => (Sizing::MinContent, Sizing::MinContent),
             Length::MaxContent => (Sizing::MaxContent, Sizing::MaxContent),
@@ -116,6 +120,7 @@ fn sizing_of(ts: &TrackSize, avail: Option<f32>) -> (Sizing, Sizing) {
             let lim = match l {
                 Length::Px(v) => *v,
                 Length::Percent(p) => avail.map(|a| a * p / 100.0).unwrap_or(f32::INFINITY),
+                Length::Calc(px, p) => avail.map(|a| px + a * p / 100.0).unwrap_or(f32::INFINITY),
                 _ => f32::INFINITY,
             };
             (Sizing::Auto, Sizing::FitContent(lim.max(0.0)))
@@ -1021,7 +1026,7 @@ impl<'a> Layouter<'a> {
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
             let extras = it.edges.pb_h + it.edges.margin_sum(Axis::Row);
             let (min, max) = match resolve_size(child.style.width, Some(cbw), bb, it.edges.pb_h) {
-                Some(w) if !matches!(child.style.width, Length::Percent(_)) => (w, w),
+                Some(w) if !matches!(child.style.width, Length::Percent(_) | Length::Calc(..)) => (w, w),
                 _ => {
                     if child.kind == BoxKind::Image {
                         let (w, _) = self.replaced_size(child, Some(cbw), None, it.edges.pb_h);

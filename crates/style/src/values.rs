@@ -150,7 +150,9 @@ impl LengthValue {
             LengthValue::Ch(v) | LengthValue::Ex(v) => Length::Px(v * ctx.font_size * 0.5),
             LengthValue::Auto => Length::Auto,
             LengthValue::Calc(lin) => {
-                if lin.has_percent() {
+                if lin.has_percent() && lin.px_part(ctx) != 0.0 {
+                    Length::Calc(lin.px_part(ctx), lin.percent)
+                } else if lin.has_percent() {
                     Length::Percent(lin.percent)
                 } else {
                     Length::Px(lin.px_part(ctx))
@@ -720,7 +722,7 @@ mod tests {
     #[test]
     fn calc() {
         assert_eq!(len("calc(10px + 2em)"), Length::Px(42.0));
-        assert_eq!(len("calc(100% - 20px)"), Length::Percent(100.0));
+        assert_eq!(len("calc(100% - 20px)"), Length::Calc(-20.0, 100.0));
         assert_eq!(len("calc(2 * 10px)"), Length::Px(20.0));
         assert_eq!(len("calc((10px + 10px) / 2)"), Length::Px(10.0));
         assert_eq!(len("min(10px, 2em)"), Length::Px(10.0));

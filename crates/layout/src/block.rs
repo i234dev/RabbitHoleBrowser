@@ -111,6 +111,7 @@ fn zero_or_auto_height(l: Length, cb_h: Option<f32>) -> bool {
     match l {
         Length::Px(v) => v == 0.0,
         Length::Percent(p) => p == 0.0 || cb_h.map(|h| h * p == 0.0).unwrap_or(true),
+        Length::Calc(px, p) => cb_h.map(|h| px + h * p / 100.0 == 0.0).unwrap_or(true),
         Length::Auto => true,
         Length::MinContent | Length::MaxContent | Length::FitContent => true,
     }
@@ -271,6 +272,7 @@ impl<'a> Layouter<'a> {
         match b.style.height {
             Length::Px(v) => Some(v),
             Length::Percent(p) => cb_h.map(|h| h * p / 100.0),
+            Length::Calc(px, p) => cb_h.map(|h| px + h * p / 100.0),
             _ => None,
         }
     }
@@ -864,6 +866,7 @@ impl<'a> Layouter<'a> {
         match style.height {
             Length::Px(v) => Some(adj(v.max(0.0))),
             Length::Percent(p) => cb_h.map(|h| adj(h * p / 100.0)),
+            Length::Calc(px, p) => cb_h.map(|h| adj((px + h * p / 100.0).max(0.0))),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         }
     }
@@ -874,6 +877,7 @@ impl<'a> Layouter<'a> {
         let max = match style.max_height {
             Length::Px(v) => Some(v),
             Length::Percent(p) => cb_h.map(|b| b * p / 100.0),
+            Length::Calc(px, p) => cb_h.map(|b| px + b * p / 100.0),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         if let Some(m) = max {
@@ -882,6 +886,7 @@ impl<'a> Layouter<'a> {
         let min = match style.min_height {
             Length::Px(v) => Some(v),
             Length::Percent(p) => cb_h.map(|b| b * p / 100.0),
+            Length::Calc(px, p) => cb_h.map(|b| px + b * p / 100.0),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         if let Some(m) = min {
@@ -909,11 +914,13 @@ impl<'a> Layouter<'a> {
         let sw = match style.width {
             Length::Px(v) => Some(adj_w(v)),
             Length::Percent(p) => cbw.map(|c| adj_w(c * p / 100.0)),
+            Length::Calc(px, p) => cbw.map(|c| adj_w(px + c * p / 100.0)),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         let sh = match style.height {
             Length::Px(v) => Some(v),
             Length::Percent(p) => cb_h.map(|c| c * p / 100.0),
+            Length::Calc(px, p) => cb_h.map(|c| px + c * p / 100.0),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         };
         let (iw, ih) = match (iw > 0.0, ih > 0.0, ratio) {
@@ -939,6 +946,7 @@ impl<'a> Layouter<'a> {
         if let Some(max) = match style.max_width {
             Length::Px(v) => Some(adj_w(v)),
             Length::Percent(p) => cbw.map(|c| adj_w(c * p / 100.0)),
+            Length::Calc(px, p) => cbw.map(|c| adj_w(px + c * p / 100.0)),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         } {
             if w > max {

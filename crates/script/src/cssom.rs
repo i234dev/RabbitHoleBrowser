@@ -302,6 +302,7 @@ fn length_css(l: &Length, base: f32) -> String {
     match l {
         Length::Px(v) => px(*v),
         Length::Percent(p) => px(base * p / 100.0),
+        Length::Calc(v, p) => px(v + base * p / 100.0),
         Length::Auto => "auto".into(),
         Length::MinContent => "min-content".into(),
         Length::MaxContent => "max-content".into(),
@@ -351,7 +352,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     // that interleave style writes and reads don't force full layouts.
     let style = with_env(|env| env.computed_style(n.node));
     let s: std::rc::Rc<ComputedStyle> = style?;
-    let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_));
+    let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_) | rabbithole_style::Length::Calc(..));
     let needs_box = match prop {
         "width" | "height" | "inline-size" | "block-size" => true,
         "transform" => !s.transform.is_empty(),

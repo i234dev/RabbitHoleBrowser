@@ -8,6 +8,9 @@ pub enum Length {
     Px(f32),
     Percent(f32),
     Auto,
+    /// `calc()` mixing a length and a percentage: px + percent% of the
+    /// base (`calc(100% - 20px)` = `Calc(-20, 100)`).
+    Calc(f32, f32),
     /// `min-content` / `max-content` / `fit-content` sizing keywords;
     /// `resolve()` returns None for them, like `Auto`.
     MinContent,
@@ -29,7 +32,17 @@ impl Length {
         match *self {
             Length::Px(v) => Some(v),
             Length::Percent(p) => Some(base * p / 100.0),
+            Length::Calc(px, p) => Some(px + base * p / 100.0),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
+        }
+    }
+    /// Resolve against an optional base: percentages (and calc() with
+    /// percentages) need a definite base.
+    pub fn resolve_definite(&self, base: Option<f32>) -> Option<f32> {
+        match *self {
+            Length::Px(v) => Some(v),
+            Length::Percent(_) | Length::Calc(..) => base.and_then(|b| self.resolve(b)),
+            _ => None,
         }
     }
     pub fn resolve_or(&self, base: f32, default: f32) -> f32 {
