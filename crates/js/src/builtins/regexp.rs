@@ -118,6 +118,32 @@ fn fast_replace(realm: &mut Realm, rx: ObjectId, s: &JsStr, rep: &Value, functio
     if global {
         set_last_index(realm, &rxv, 0)?;
     }
+    // A replacement string without `$` patterns is inserted as is.
+    if !functional && !rep_str.as_units().contains(&(b'$' as u16)) {
+        let units = s.as_units();
+        let mut out: Vec<u16> = Vec::with_capacity(units.len());
+        let (mut pos, mut next_pos) = (0usize, 0usize);
+        let mut last = None;
+        while pos <= units.len() {
+            let Some(m) = regex.exec_utf16(units, pos) else { break };
+            let (a, b) = (m.start(), m.end());
+            out.extend_from_slice(&units[next_pos..a]);
+            out.extend_from_slice(rep_str.as_units());
+            next_pos = b;
+            last = Some(m);
+            if !global {
+                break;
+            }
+            pos = if a == b { advance_index(s, b, unicode) } else { b };
+        }
+        if global {
+            set_last_index(realm, &rxv, 0)?;
+        }
+        let Some(m) = last else { return Ok(Some(Value::String(s.clone()))) };
+        realm.regexp_last = Some((s.clone(), m.captures));
+        out.extend_from_slice(&units[next_pos..]);
+        return Ok(Some(Value::String(JsStr::from_units(out))));
+    }
     // (start, end, captures) of every match.
     let mut found: Vec<(usize, usize, Vec<Option<(usize, usize)>>)> = Vec::new();
     let mut pos = 0usize;

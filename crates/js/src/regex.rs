@@ -160,7 +160,7 @@ pub struct Regex {
     pub source: String,
     pub flags: Flags,
     program: Vec<Inst>,
-    classes: Vec<CharClass>,
+    classes: Vec<ClassProg>,
     group_count: usize,
     group_names: Vec<(String, usize)>,
     /// Distinct group names in order of first appearance, each with every
@@ -171,6 +171,12 @@ pub struct Regex {
     /// Code units one of which is required at the match start, when the
     /// program starts with a literal (used to skip ahead quickly).
     first_units: Option<(u16, u16)>,
+    /// Code units below 256 a match can start with (bit set), and whether
+    /// one can start with a unit above: positions that cannot start a
+    /// match are skipped without running the machine.
+    start_set: Option<([u64; 4], bool)>,
+    /// The pattern starts with `^` (no `m`): only position 0 can match.
+    anchored: bool,
 }
 
 /// Result of a successful match. `captures[0]` is the whole match; other
@@ -267,6 +273,8 @@ impl Regex {
             Some(Inst::Star { single: Single::Char2(a, b), min, .. }) if *min > 0 && unit_ok(*a) && unit_ok(*b) => Some((*a as u16, *b as u16)),
             _ => None,
         };
+        let start_set = if unicode || first_units.is_some() { None } else { start_set(&compiler.program, &compiler.classes) };
+        let anchored = starts_anchored(&compiler.program);
         let mut named_groups: Vec<(String, Vec<usize>)> = Vec::new();
         for (name, idx) in &parser.group_names {
             match named_groups.iter_mut().find(|(n, _)| n == name) {
@@ -284,6 +292,8 @@ impl Regex {
             named_groups,
             registers: compiler.registers,
             first_units,
+            start_set,
+            anchored,
         })
     }
 
@@ -327,12 +337,22 @@ impl Regex {
         if sticky {
             return machine.run_at(start);
         }
+        if self.anchored {
+            return if start == 0 { machine.run_at(0) } else { None };
+        }
         let mut pos = start;
         loop {
             if let Some((a, b)) = self.first_units {
                 let found = if a == b { subject[pos..].iter().position(|&u| u == a) } else { subject[pos..].iter().position(|&u| u == a || u == b) };
                 match found {
                     Some(off) => pos += off,
+                    None => return None,
+                }
+            } else if let Some((bits, high)) = &self.start_set {
+                let high = *high;
+                match subject[pos..].iter().position(|&u| if u < 256 { bits[(u >> 6) as usize] & (1 << (u & 63)) != 0 } else { high }) {
+                    Some(off) => pos += off,
+                    // No match can be empty (see `start_set`).
                     None => return None,
                 }
             }
@@ -778,6 +798,38 @@ impl CharClass {
     #[inline]
     fn matches(&self, c: u32) -> bool {
         ranges_contain(&self.ranges, c) != self.negate
+    }
+}
+
+/// A class in a compiled program: the set plus a bitmap of the code units
+/// below 256 it matches (negation applied).
+#[derive(Debug, Clone)]
+struct ClassProg {
+    cls: CharClass,
+    bits: [u64; 4],
+}
+
+impl ClassProg {
+    fn new(cls: CharClass) -> ClassProg {
+        let mut bits = [0u64; 4];
+        for c in 0..256u32 {
+            if cls.matches(c) {
+                bits[(c >> 6) as usize] |= 1 << (c & 63);
+            }
+        }
+        ClassProg { cls, bits }
+    }
+    #[inline]
+    fn matches(&self, c: u32) -> bool {
+        if c < 256 {
+            self.bits[(c >> 6) as usize] & (1 << (c & 63)) != 0
+        } else {
+            self.cls.matches(c)
+        }
+    }
+    /// Some code unit >= 256 may match.
+    fn matches_high(&self) -> bool {
+        self.cls.negate || self.cls.ranges.last().is_some_and(|&(_, hi)| hi >= 256)
     }
 }
 
@@ -2030,7 +2082,7 @@ enum Inst {
 
 struct Compiler {
     program: Vec<Inst>,
-    classes: Vec<CharClass>,
+    classes: Vec<ClassProg>,
     registers: usize,
 }
 
@@ -2066,7 +2118,7 @@ impl Compiler {
                     }
                 }
                 let id = self.classes.len();
-                self.classes.push(cls.clone());
+                self.classes.push(ClassProg::new(cls.clone()));
                 Single::Class(id)
             }
             _ => return None,
@@ -2301,6 +2353,94 @@ impl Compiler {
         }
         Ok(())
     }
+}
+
+/// Which code units can start a match (see `Regex::start_set`), when
+/// every path from the program start consumes a character before it can
+/// reach `Match` (so no empty match exists) and no lookaround, `.` or
+/// backreference comes first. Non-unicode programs only.
+fn start_set(prog: &[Inst], classes: &[ClassProg]) -> Option<([u64; 4], bool)> {
+    let mut bits = [0u64; 4];
+    let mut high = false;
+    let mut seen = vec![false; prog.len()];
+    let mut work = vec![0usize];
+    let add = |u: u32, bits: &mut [u64; 4], high: &mut bool| {
+        if u < 256 {
+            bits[(u >> 6) as usize] |= 1 << (u & 63);
+        } else {
+            *high = true;
+        }
+    };
+    let add_single = |s: &Single, bits: &mut [u64; 4], high: &mut bool| -> bool {
+        match s {
+            Single::Char(u) => add(*u, bits, high),
+            Single::Char2(a, b) => {
+                add(*a, bits, high);
+                add(*b, bits, high);
+            }
+            Single::Class(id) => {
+                for (w, b) in bits.iter_mut().zip(classes[*id].bits.iter()) {
+                    *w |= b;
+                }
+                *high |= classes[*id].matches_high();
+            }
+            Single::Any { .. } => return false,
+        }
+        true
+    };
+    while let Some(pc) = work.pop() {
+        if pc >= prog.len() || seen[pc] {
+            continue;
+        }
+        seen[pc] = true;
+        match &prog[pc] {
+            Inst::Char { unit, back: false } => add(*unit, &mut bits, &mut high),
+            Inst::Char2 { a, b, back: false } => {
+                add(*a, &mut bits, &mut high);
+                add(*b, &mut bits, &mut high);
+            }
+            Inst::Class { id, back: false } => {
+                if !add_single(&Single::Class(*id), &mut bits, &mut high) {
+                    return None;
+                }
+            }
+            Inst::Star { single, min, .. } => {
+                if !add_single(single, &mut bits, &mut high) {
+                    return None;
+                }
+                if *min == 0 {
+                    work.push(pc + 1);
+                }
+            }
+            Inst::Split { first, second } => {
+                work.push(*first);
+                work.push(*second);
+            }
+            Inst::Jmp(t) => work.push(*t),
+            Inst::CountBranch { min, exit, .. } => {
+                work.push(pc + 1);
+                if *min == 0 {
+                    work.push(*exit);
+                }
+            }
+            Inst::CountNext { head, .. } => work.push(*head),
+            Inst::Save(_) | Inst::ResetCaps { .. } | Inst::SetReg(_) | Inst::CheckProgress(_) | Inst::Assert(_) | Inst::CountInit(_) => work.push(pc + 1),
+            _ => return None,
+        }
+    }
+    Some((bits, high))
+}
+
+/// The program begins with `^` (not multiline) on every path (captures aside).
+fn starts_anchored(prog: &[Inst]) -> bool {
+    for inst in prog {
+        match inst {
+            Inst::Save(_) | Inst::ResetCaps { .. } => continue,
+            Inst::Assert(AssertKind::Start) => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 // --------------------------------------------------------------- machine
