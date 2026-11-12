@@ -194,6 +194,60 @@
   // ------------------------------------------------------- Request/Response
   const used = new WeakSet();
   const bodies = new WeakMap();
+  // `new Response(readableStream)`: the stream is the body; reading the
+  // response drains it (chunks: BufferSource or string).
+  const streamBodies = new WeakMap();
+  const isStream = (b) => !!(b && typeof b === 'object' && g.ReadableStream && b instanceof g.ReadableStream);
+  async function drain(stream) {
+    const reader = stream.getReader();
+    const parts = [];
+    let n = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      let u8;
+      if (typeof value === 'string') u8 = new TextEncoder().encode(value);
+      else if (value instanceof ArrayBuffer) u8 = new Uint8Array(value);
+      else if (ArrayBuffer.isView(value)) u8 = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      else throw new TypeError('Failed to read the body: the stream yielded a chunk that is not a BufferSource');
+      parts.push(u8);
+      n += u8.length;
+    }
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  }
+  if (g.Response) {
+    const NativeResponse = g.Response;
+    const Response = function Response(body, init) {
+      if (!new.target) throw new TypeError("Failed to construct 'Response': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+      if (!isStream(body)) return arguments.length ? new NativeResponse(...arguments) : new NativeResponse();
+      if (body.locked) throw new TypeError("Failed to construct 'Response': Response body object should not be disturbed or locked");
+      const r = new NativeResponse(null, init);
+      streamBodies.set(r, body);
+      return r;
+    };
+    Response.prototype = NativeResponse.prototype;
+    Object.defineProperty(NativeResponse.prototype, 'constructor', { value: Response, writable: true, configurable: true });
+    for (const k of Object.getOwnPropertyNames(NativeResponse)) {
+      if (!['length', 'name', 'prototype', 'arguments', 'caller'].includes(k)) Object.defineProperty(Response, k, Object.getOwnPropertyDescriptor(NativeResponse, k));
+    }
+    define('Response', Response);
+    const origClone = NativeResponse.prototype.clone;
+    if (typeof origClone === 'function') {
+      hidden(NativeResponse.prototype, 'clone', function clone() {
+        const sb = streamBodies.get(this);
+        if (!sb) return origClone.call(this);
+        if (used.has(this)) throw new TypeError("Failed to execute 'clone' on 'Response': Response body is already used");
+        const [a, b] = sb.tee();
+        streamBodies.set(this, a);
+        const c = origClone.call(this);
+        streamBodies.set(c, b);
+        return c;
+      });
+    }
+  }
   for (const C of [g.Request, g.Response]) {
     if (!C) continue;
     for (const m of ['text', 'json', 'arrayBuffer', 'blob', 'formData', 'bytes']) {
@@ -202,6 +256,14 @@
       hidden(C.prototype, m, function () {
         if (used.has(this)) return Promise.reject(new TypeError(`Failed to execute '${m}' on '${C.name}': body stream already read`));
         used.add(this);
+        const sb = streamBodies.get(this);
+        if (sb) {
+          const headers = this.headers;
+          return drain(sb).then((bytes) => {
+            const tmp = new g.Response(bytes, { headers });
+            return m === 'bytes' ? orig.call(tmp).then((b) => new Uint8Array(b)) : orig.call(tmp);
+          });
+        }
         if (m === 'bytes') return orig.call(this).then((b) => new Uint8Array(b));
         return orig.apply(this, arguments);
       });
@@ -209,6 +271,7 @@
     Object.defineProperty(C.prototype, 'bodyUsed', { get() { return used.has(this); }, configurable: true, enumerable: true });
     Object.defineProperty(C.prototype, 'body', {
       get() {
+        if (streamBodies.has(this)) return streamBodies.get(this);
         if (bodies.has(this)) return bodies.get(this);
         const self = this;
         if (C === g.Request && (this.method === 'GET' || this.method === 'HEAD')) return null;

@@ -384,6 +384,13 @@ fn streams_readable_writable_transform() {
           let text = '';
           for await (const s of viaStream) text += s;
           console.log('zip', text, gz === null || gz instanceof ArrayBuffer);
+          // A Response whose body is a ReadableStream reads the stream (the
+          // Svelte playground gunzips the compiler's npm tarball this way).
+          const gzBytes = new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+          const back = await new Response(new Response(gzBytes).body.pipeThrough(new DecompressionStream('gzip'))).text();
+          const mixed = await new Response(new ReadableStream({ start(c) { c.enqueue('s'); c.enqueue(new Uint8Array([33])); c.close(); } })).text();
+          const cl = new Response(ReadableStream.from(['c', 'l'])), cl2 = cl.clone();
+          console.log('gzip', gzBytes[0], gzBytes[1], gzBytes.length < 40, back, mixed, await cl.text(), await cl2.text(), cl instanceof Response);
           const q = new CountQueuingStrategy({ highWaterMark: 3 });
           const ws = new WritableStream({}, q);
           const w = ws.getWriter();
@@ -395,7 +402,7 @@ fn streams_readable_writable_transform() {
         })().catch(e => console.log('ERR ' + e + ' ' + e.stack));
         "#,
     );
-    assert_eq!(out, vec!["read a b true true", "pipe XY", "tee 1,2,3,10,20,30", "zip hello hello hello true", "ws 3 3 true", "byob 1,2 false"]);
+    assert_eq!(out, vec!["read a b true true", "pipe XY", "tee 1,2,3,10,20,30", "zip hello hello hello true", "gzip 31 139 true hello hello hello s! cl cl true", "ws 3 3 true", "byob 1,2 false"]);
 }
 
 #[test]
