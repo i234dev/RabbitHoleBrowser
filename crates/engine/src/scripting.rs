@@ -217,6 +217,10 @@ impl HostEnv for EngineEnv<'_> {
         self.ensure_layout();
         self.page.rect_of(node)
     }
+    fn node_client_rects(&mut self, node: NodeId) -> Vec<Rect> {
+        self.ensure_layout();
+        self.page.client_rects_of(node)
+    }
     fn elements_from_point(&mut self, x: f32, y: f32) -> Option<Vec<NodeId>> {
         self.ensure_layout();
         let t = std::time::Instant::now();

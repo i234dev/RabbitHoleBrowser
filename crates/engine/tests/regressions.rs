@@ -378,3 +378,23 @@ fn inline_element_split_around_a_block_has_the_blocks_rect() {
     // Far below the 600px viewport: not intersecting.
     assert_eq!(eval(&e, &mut page, "log.join(',')"), "false");
 }
+
+/// With text before and after the block, the split inline's rect is the
+/// union of all its fragments (CSSOM View, as in Chrome): the "before" line,
+/// the anonymous block wrapper holding the block and the "after" line; and
+/// `getClientRects()` lists those three fragments, whose union is the
+/// bounding rect.
+#[test]
+fn split_inline_rect_is_the_union_of_its_fragments() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        r#"<style>body{margin:0;font:16px/20px sans-serif}</style><span id=s>before<div id=d>Block</div>after</span>"#,
+    );
+    let r = eval(&e, &mut page, "(function(){ var s = document.getElementById('s').getBoundingClientRect(), d = document.getElementById('d').getBoundingClientRect(); return [s.left, s.width, s.top >= 0 && s.top < 2, s.bottom > 58 && s.bottom <= 60, d.top].join(); })()");
+    // Inline fragments are their font's content area (ascent + descent) inside
+    // the 20px lines, so the union starts just below 0 and ends just above 60.
+    assert_eq!(r, "0,800,true,true,20");
+    let r = eval(&e, &mut page, "(function(){ var rs = document.getElementById('s').getClientRects(), b = document.getElementById('s').getBoundingClientRect(), l = 1e9, t = 1e9, rr = -1e9, bb = -1e9; for (var i = 0; i < rs.length; i++) { l = Math.min(l, rs[i].left); t = Math.min(t, rs[i].top); rr = Math.max(rr, rs[i].right); bb = Math.max(bb, rs[i].bottom); } return [rs.length === 3, l === b.left, t === b.top, rr === b.right, bb === b.bottom].join(); })()");
+    assert_eq!(r, "true,true,true,true,true");
+}

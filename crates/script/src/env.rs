@@ -20,6 +20,11 @@ pub trait HostEnv {
     fn ensure_layout(&mut self);
     /// Border box of a node in document coordinates (after `ensure_layout`).
     fn node_rect(&mut self, node: NodeId) -> Option<Rect>;
+    /// `getClientRects()` boxes of a node (document coordinates): by
+    /// default its border box alone.
+    fn node_client_rects(&mut self, node: NodeId) -> Vec<Rect> {
+        self.node_rect(node).into_iter().collect()
+    }
     /// Elements painted at a viewport point, topmost first (the engine's
     /// paint-order hit test). `None` = not supported (geometric fallback).
     fn elements_from_point(&mut self, _x: f32, _y: f32) -> Option<Vec<NodeId>> {

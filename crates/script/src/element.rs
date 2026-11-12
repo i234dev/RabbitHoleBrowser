@@ -882,13 +882,18 @@ fn e_get_bounding_client_rect(realm: &mut Realm, this: Value, _: &[Value]) -> Js
 
 fn e_get_client_rects(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getClientRects")?;
-    // No box (display:none, detached): an empty list.
-    let has_box = n.doc == 0
-        && with_env(|env| {
+    // No box (display:none, detached): an empty list. An inline element has
+    // one rect per line, plus the blocks split out of it.
+    let boxes = if n.doc == 0 {
+        with_env(|env| {
             env.ensure_layout();
-            env.node_rect(n.node).is_some()
-        });
-    let rects = if has_box { vec![e_get_bounding_client_rect(realm, this, &[])?] } else { Vec::new() };
+            env.node_client_rects(n.node)
+        })
+    } else {
+        Vec::new()
+    };
+    let (sx, sy) = with_env(|env| env.scroll());
+    let rects = boxes.into_iter().map(|r| dom_rect(realm, r.x - sx, r.y - sy, r.w, r.h)).collect();
     rect_list(realm, rects)
 }
 

@@ -1944,6 +1944,31 @@ impl Page {
         })
     }
 
+    /// CSSOM View `getClientRects()` of an element (document coordinates):
+    /// its border box, or for an inline element one rect per line it is on
+    /// plus the boxes of block-level children split out of it (CSS 2.1
+    /// §9.2.1.1), in tree order. Empty without layout.
+    pub fn client_rects_of(&self, node: NodeId) -> Vec<Rect> {
+        if node >= self.doc.nodes.len() {
+            return Vec::new();
+        }
+        if self.layout.box_of(&self.doc, node).is_none()
+            && self.styles.get(node).is_some_and(|s| s.display == rabbithole_style::Display::Inline)
+        {
+            let mut rects = self.layout.inline_client_rects(&self.doc, node);
+            for c in self.doc.flat_child_elements(node) {
+                if let Some(b) = self.layout.box_of(&self.doc, c).filter(|b| b.flow.is_in_flow() && !b.is_inline_level()) {
+                    rects.push(b.rect);
+                }
+            }
+            if !rects.is_empty() {
+                rects.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+                return rects;
+            }
+        }
+        self.rect_of(node).into_iter().collect()
+    }
+
     /// Scroll container under a document point.
     pub fn scroll_container_at(&self, x: f32, y: f32) -> Option<ScrollInfo> {
         self.layout.scroll_container_at(x, y)
