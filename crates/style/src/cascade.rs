@@ -43,6 +43,8 @@ pub(crate) struct IndexedRule {
     /// Bloom-filter hashes of compounds that must match ancestors of the
     /// subject (0 = unused slot); see [`crate::restyle::AncestorBloom`].
     pub(crate) ancestor_hashes: [u32; 4],
+    /// Cascade layer rank (0 = unlayered; layers by first appearance).
+    pub(crate) layer: u32,
 }
 
 /// Rules bucketed by the key of their rightmost compound selector. Owns
@@ -63,8 +65,9 @@ pub(crate) struct RuleIndex {
 }
 
 impl RuleIndex {
-    fn add_sheet(&mut self, rules: &[&StyleRule], is_ua: bool, base: Option<Rc<str>>) {
+    fn add_sheet(&mut self, rules: &[&StyleRule], is_ua: bool, base: Option<Rc<str>>, layers: &HashMap<std::sync::Arc<str>, u32>) {
         for rule in rules {
+            let layer = rule.layer.as_ref().and_then(|l| layers.get(l).copied()).unwrap_or(0);
             let decls: Rc<[Declaration]> = Rc::from(rule.declarations.as_slice());
             for sel in &rule.selectors {
                 let idx = self.rules.len();
@@ -75,6 +78,7 @@ impl RuleIndex {
                     decls: decls.clone(),
                     base: base.clone(),
                     ancestor_hashes: crate::restyle::ancestor_hashes(sel),
+                    layer,
                 });
                 if is_slotted_selector(sel) {
                     self.slotted.push(idx);
@@ -169,20 +173,32 @@ impl ScopeIndex {
     pub(crate) fn build(author: &[Stylesheet], env: &MediaEnv) -> ScopeIndex {
         let mut ua_rules = Vec::new();
         ua_sheet().active_rules(env, &mut ua_rules);
+        // Layer order: first appearance in document order.
+        let mut layers: HashMap<std::sync::Arc<str>, u32> = HashMap::new();
+        for sheet in author.iter().filter(|s| s.shadow_scopes.is_empty()) {
+            let mut rules = Vec::new();
+            sheet.active_rules(env, &mut rules);
+            for r in rules {
+                if let Some(l) = &r.layer {
+                    let n = layers.len() as u32 + 1;
+                    layers.entry(l.clone()).or_insert(n);
+                }
+            }
+        }
         let mut doc = RuleIndex::default();
-        doc.add_sheet(&ua_rules, true, None);
+        doc.add_sheet(&ua_rules, true, None, &layers);
         let mut doc_sources = Vec::new();
         for sheet in author {
             if sheet.shadow_scopes.is_empty() {
                 let mut rules = Vec::new();
                 sheet.active_rules(env, &mut rules);
-                doc.add_sheet(&rules, false, sheet.base_url.as_deref().map(Rc::from));
+                doc.add_sheet(&rules, false, sheet.base_url.as_deref().map(Rc::from), &layers);
                 doc_sources.push(sheet.source_id);
             }
         }
         // Shadow trees without sheets of their own match only UA rules.
         let mut ua_only = RuleIndex::default();
-        ua_only.add_sheet(&ua_rules, true, None);
+        ua_only.add_sheet(&ua_rules, true, None, &layers);
         let mut ix = ScopeIndex { doc, ua_only, shadow: Vec::new(), by_root: HashMap::new(), doc_sources, root_sources: HashMap::new(), groups: HashMap::new() };
         ix.rebuild_shadow(author, env);
         ix
@@ -193,6 +209,10 @@ impl ScopeIndex {
     /// Groups of sheets indexed before are reused; returns the indices of
     /// the groups that were added.
     pub(crate) fn rebuild_shadow(&mut self, author: &[Stylesheet], env: &MediaEnv) -> Vec<usize> {
+        // Layers of shadow-scoped sheets are not ordered (treated as
+        // unlayered).
+        let no_layers: HashMap<std::sync::Arc<str>, u32> = HashMap::new();
+        let layers = &no_layers;
         let mut per_root: std::collections::BTreeMap<NodeId, Vec<usize>> = std::collections::BTreeMap::new();
         for (i, sheet) in author.iter().enumerate() {
             for &r in &sheet.shadow_scopes {
@@ -219,11 +239,11 @@ impl ScopeIndex {
                         ua_sheet().active_rules(env, &mut ua_rules);
                     }
                     let mut ix = RuleIndex::default();
-                    ix.add_sheet(&ua_rules, true, None);
+                    ix.add_sheet(&ua_rules, true, None, layers);
                     for &i in &list {
                         let mut rules = Vec::new();
                         author[i].active_rules(env, &mut rules);
-                        ix.add_sheet(&rules, false, author[i].base_url.as_deref().map(Rc::from));
+                        ix.add_sheet(&rules, false, author[i].base_url.as_deref().map(Rc::from), layers);
                     }
                     self.shadow.push(ix);
                     self.groups.insert(key.clone(), self.shadow.len() - 1);
@@ -371,7 +391,7 @@ pub(crate) fn compute_element<'a>(
                 };
                 matched.push(Matched {
                     rank,
-                    specificity: r.specificity,
+                    specificity: layered(r.specificity, r.layer, d.important),
                     order: ci as u32 + 1,
                     decl: d,
                     base: r.base.as_deref(),
@@ -447,6 +467,19 @@ pub(crate) fn compute_element<'a>(
         cache.map.insert(k, (out.clone(), parent.clone(), presentational, style_attr));
     }
     out
+}
+
+/// Fold the cascade layer into the specificity key (layers rank above
+/// specificity): unlayered rules beat layered ones and later layers beat
+/// earlier ones; `!important` reverses the layer order.
+fn layered(s: Specificity, layer: u32, important: bool) -> Specificity {
+    let rank = match (layer, important) {
+        (0, false) => 0xFFFF,
+        (l, false) => l.min(0xFFFE),
+        (0, true) => 0,
+        (l, true) => 0xFFFF - l.min(0xFFFE),
+    };
+    Specificity((rank << 16) | s.0.min(0xFFFF), s.1, s.2)
 }
 
 /// The pseudo-element of a form control whose style is kept in the

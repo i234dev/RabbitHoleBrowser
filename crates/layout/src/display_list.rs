@@ -424,7 +424,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// like backgrounds (only their alpha matters). An image that has not
     /// loaded yet masks everything out, like in browsers.
     fn mask_items(&self, b: &LayoutBox) -> Option<Vec<DisplayItem>> {
-        if b.style.mask_layers.is_empty() || b.rect.is_empty() {
+        // `none` layers mask nothing; no image at all means no mask.
+        if !b.style.mask_layers.iter().any(|l| !matches!(l.image, rabbithole_style::BackgroundImage::None)) || b.rect.is_empty() {
             return None;
         }
         let mut style = (*b.style).clone();

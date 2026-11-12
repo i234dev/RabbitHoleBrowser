@@ -21,6 +21,10 @@ pub struct Declaration {
 pub struct StyleRule {
     pub selectors: Vec<Selector>,
     pub declarations: Vec<Declaration>,
+    /// Cascade layer (`@layer`, dotted for nested layers); `None` for
+    /// unlayered rules. A rule without selectors only records a layer's
+    /// place in the layer order (`@layer a, b;`).
+    pub layer: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +267,49 @@ impl Stylesheet {
 
 // ---------------------------------------------------------------- parser
 
+thread_local! {
+    static ANON_LAYERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Layer names of an `@layer` prelude (`a.b, c`).
+fn layer_names(prelude: &[Token]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for t in prelude {
+        match t {
+            Token::Ident(s) => cur.push_str(s),
+            Token::Delim('.') => cur.push('.'),
+            Token::Comma => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Put the rules of an `@layer name { }` block (and of the layers nested
+/// in it) into `name`.
+fn assign_layer(rules: &mut [Rule], name: &str) {
+    for r in rules {
+        match r {
+            Rule::Style(s) => {
+                s.layer = Some(match &s.layer {
+                    Some(inner) => std::sync::Arc::from(format!("{name}.{inner}").as_str()),
+                    None => std::sync::Arc::from(name),
+                });
+            }
+            Rule::Media { rules, .. } | Rule::Supports { rules, .. } => assign_layer(rules, name),
+            _ => {}
+        }
+    }
+}
+
 pub fn parse_stylesheet(src: &str) -> Stylesheet {
     // `<style>` text of XHTML documents wrapped in a CDATA section (the
     // XML parser drops the markers; our HTML parser keeps them as text).
@@ -395,8 +442,24 @@ impl<'a> Parser<'a> {
                                         rules: sub.parse_rules(false),
                                     });
                                 }
-                                "layer" | "container" | "scope" => {
-                                    // Treat as transparent grouping (layers lose their ordering semantics).
+                                "layer" => {
+                                    let mut sub = Parser { toks: inner, pos: 0 };
+                                    let mut inner_rules = sub.parse_rules(false);
+                                    let name = layer_names(prelude).into_iter().next().unwrap_or_else(|| {
+                                        // An anonymous layer is unique.
+                                        let n = ANON_LAYERS.with(|c| {
+                                            c.set(c.get() + 1);
+                                            c.get()
+                                        });
+                                        format!("#anon{n}")
+                                    });
+                                    // Register the layer even when it is empty.
+                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(name.as_str())) }));
+                                    assign_layer(&mut inner_rules, &name);
+                                    rules.extend(inner_rules);
+                                }
+                                "container" | "scope" => {
+                                    // Transparent grouping.
                                     let mut sub = Parser { toks: inner, pos: 0 };
                                     rules.extend(sub.parse_rules(false));
                                 }
@@ -431,6 +494,12 @@ impl<'a> Parser<'a> {
                                     rules.push(imp);
                                 }
                             }
+                            if name == "layer" {
+                                // `@layer a, b;` fixes the order of layers.
+                                for n in layer_names(prelude) {
+                                    rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(n.as_str())) }));
+                                }
+                            }
                         }
                     }
                 }
@@ -449,6 +518,7 @@ impl<'a> Parser<'a> {
                             rules.push(Rule::Style(StyleRule {
                                 selectors,
                                 declarations,
+                                layer: None,
                             }));
                         }
                     }

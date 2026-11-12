@@ -489,13 +489,27 @@ fn apply_mask(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &A
         return true;
     }
     let had = style.mask_layers.len();
-    let saved_color = style.background_color;
-    let saved_image = style.background_image.take();
-    std::mem::swap(&mut style.background_layers, &mut style.mask_layers);
-    apply(bg_name, &kept, style, ctx);
-    std::mem::swap(&mut style.background_layers, &mut style.mask_layers);
-    style.background_color = saved_color;
-    style.background_image = saved_image;
+    if bg_name == "background" {
+        // The mask shorthand keeps its `none` layers: their size, position
+        // and repeat apply when `mask-image` sets the image later
+        // (`mask: none 50%/2rem no-repeat; mask-image: url(...)`).
+        let mut out = Vec::new();
+        for layer in values::split_commas(&kept) {
+            match parse_layer(&layer, style.color, ctx) {
+                Some((l, None)) => out.push(l),
+                _ => return true,
+            }
+        }
+        style.mask_layers = out;
+    } else {
+        let saved_color = style.background_color;
+        let saved_image = style.background_image.take();
+        std::mem::swap(&mut style.background_layers, &mut style.mask_layers);
+        apply(bg_name, &kept, style, ctx);
+        std::mem::swap(&mut style.background_layers, &mut style.mask_layers);
+        style.background_color = saved_color;
+        style.background_image = saved_image;
+    }
     if matches!(bg_name, "background" | "background-image") {
         // New layers are positioned against the border box, unless the
         // shorthand named a box.
@@ -505,7 +519,6 @@ fn apply_mask(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &A
                 l.origin = BoxArea::BorderBox;
             }
         }
-        style.mask_layers.retain(|l| !matches!(l.image, BackgroundImage::None));
     }
     if style.mask_layers.iter().any(|l| !matches!(l.image, BackgroundImage::None)) {
         style.creates_stacking_context = true;
