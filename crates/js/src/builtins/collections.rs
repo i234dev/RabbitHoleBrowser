@@ -22,6 +22,8 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(mp, "set", 2, map_set);
     realm.define_method(mp, "has", 1, map_has);
     realm.define_method(mp, "delete", 1, map_delete);
+    realm.define_method(mp, "getOrInsert", 2, map_get_or_insert);
+    realm.define_method(mp, "getOrInsertComputed", 2, map_get_or_insert_computed);
     realm.define_method(mp, "clear", 0, map_clear);
     realm.define_method(mp, "forEach", 1, map_for_each);
     realm.define_method(mp, "keys", 0, map_keys);
@@ -64,6 +66,8 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(wmp, "set", 2, weak_map_set);
     realm.define_method(wmp, "has", 1, weak_map_has);
     realm.define_method(wmp, "delete", 1, weak_map_delete);
+    realm.define_method(wmp, "getOrInsert", 2, weak_map_get_or_insert);
+    realm.define_method(wmp, "getOrInsertComputed", 2, weak_map_get_or_insert_computed);
     realm.define_property(wmp, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("WeakMap"), CONFIGURABLE);
 
     // --------------------------------------------------------- WeakSet
@@ -213,6 +217,49 @@ fn map_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_coll(realm, &this, Kind::Map, "set")?;
     data_mut(realm, id).set(arg(args, 0), arg(args, 1));
     Ok(this)
+}
+
+/// getOrInsert / getOrInsertComputed (upsert) on a Map or WeakMap.
+fn get_or_insert_impl(realm: &mut Realm, this: Value, args: &[Value], kind: Kind, computed: bool) -> JsResult<Value> {
+    let name = if computed { "getOrInsertComputed" } else { "getOrInsert" };
+    let id = this_coll(realm, &this, kind, name)?;
+    let key = arg(args, 0);
+    let cb = arg(args, 1);
+    if computed && !realm.is_callable(&cb) {
+        let d = realm.describe_for_error(&cb);
+        return realm.type_error(&format!("{} is not a function", d));
+    }
+    if kind == Kind::WeakMap {
+        require_object_key(realm, &key, "as weak map key")?;
+    }
+    if let Some(v) = data(realm, id).get(&key) {
+        return Ok(v.clone());
+    }
+    let value = if computed {
+        // The callback sees the canonical key (-0 becomes +0).
+        let k = match key.v() {
+            V::Number(n) if n == 0.0 => Value::Number(0.0),
+            _ => key.clone(),
+        };
+        realm.call(cb, Value::Undefined, &[k])?
+    } else {
+        cb
+    };
+    data_mut(realm, id).set(key, value.clone());
+    Ok(value)
+}
+
+fn map_get_or_insert(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    get_or_insert_impl(realm, this, args, Kind::Map, false)
+}
+fn map_get_or_insert_computed(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    get_or_insert_impl(realm, this, args, Kind::Map, true)
+}
+fn weak_map_get_or_insert(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    get_or_insert_impl(realm, this, args, Kind::WeakMap, false)
+}
+fn weak_map_get_or_insert_computed(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    get_or_insert_impl(realm, this, args, Kind::WeakMap, true)
 }
 
 fn map_has(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -611,6 +658,9 @@ fn weak_set_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
     let iterable = arg(args, 0);
     if !iterable.is_nullish() {
         let adder = realm.get_str(Value::Object(id), "add")?;
+        if !realm.is_callable(&adder) {
+            return realm.type_error("'add' is not a function");
+        }
         let (it, next) = realm.get_iterator(iterable)?;
         while let Some(v) = realm.iterator_step(&it, &next)? {
             if let Err(e) = realm.call(adder.clone(), Value::Object(id), &[v]) {
