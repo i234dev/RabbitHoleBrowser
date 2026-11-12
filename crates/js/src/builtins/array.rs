@@ -12,6 +12,9 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(ctor, "from", 1, from);
     realm.define_method(ctor, "of", 0, of);
     realm.define_accessor(ctor, PropertyKey::Symbol(SYM_SPECIES), Some(species), None, CONFIGURABLE);
+    if let Some(g) = realm.obj(ctor).props.get(&PropertyKey::Symbol(SYM_SPECIES)).and_then(|p| p.getter().and_then(|g| g.as_object())) {
+        realm.intrinsics.others.insert("ArraySpeciesGetter", g);
+    }
     let methods: [(&str, u32, NativeFn); 38] = [
         ("at", 1, at),
         ("concat", 1, concat),
@@ -102,7 +105,7 @@ pub fn is_array_value(realm: &Realm, v: &Value) -> bool {
 }
 
 fn is_array(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(is_array_value(realm, &arg(args, 0))))
+    Ok(Value::Bool(is_array_checked(realm, &arg(args, 0))?))
 }
 
 fn from(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -171,13 +174,46 @@ fn from(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(a)
 }
 
+/// The largest length of an array-like (2^53 - 1).
+const MAX_SAFE_LEN: usize = 9007199254740991;
+
 /// The property key of an integer index (array index or its string).
 pub(crate) fn index_key(i: f64) -> PropertyKey {
-    if i < u32::MAX as f64 {
+    if i >= 0.0 && i < u32::MAX as f64 {
         PropertyKey::index(i as u32)
     } else {
         PropertyKey::String(crate::value::JsStr::new(&crate::value::number_to_string(i)))
     }
+}
+
+/// The property key of integer index `i` (any value up to 2^53 - 1).
+#[inline]
+pub(crate) fn key_of(i: usize) -> PropertyKey {
+    if i < u32::MAX as usize {
+        PropertyKey::index(i as u32)
+    } else {
+        PropertyKey::String(crate::value::JsStr::new(&i.to_string()))
+    }
+}
+
+/// The integer index a property key denotes (canonical decimal below 2^53).
+fn integer_key(k: &PropertyKey) -> Option<usize> {
+    let s = k.as_str()?;
+    if let Some(i) = s.as_array_index() {
+        return Some(i as usize);
+    }
+    let u = s.as_units();
+    if u.is_empty() || u.len() > 16 || (u.len() > 1 && u[0] == b'0' as u16) {
+        return None;
+    }
+    let mut n: usize = 0;
+    for &c in u {
+        if !(b'0' as u16..=b'9' as u16).contains(&c) {
+            return None;
+        }
+        n = n * 10 + (c - b'0' as u16) as usize;
+    }
+    if n <= MAX_SAFE_LEN { Some(n) } else { None }
 }
 
 /// CreateDataPropertyOrThrow(O, i, v).
@@ -230,6 +266,20 @@ fn dense(realm: &Realm, id: ObjectId) -> Option<Vec<Value>> {
     }
 }
 
+/// An array whose elements can be moved around directly: extensible,
+/// writable length, no other own properties and every index below the
+/// length stored in `elements` (holes only when no prototype has
+/// indexed properties, so a hole reads as absent).
+fn simple_dense(realm: &Realm, id: ObjectId) -> bool {
+    let o = realm.obj(id);
+    match &o.kind {
+        ObjectKind::Array { elements, length } if o.extensible && o.props.is_empty() && *length as usize == elements.len() => {
+            !elements.iter().any(|v| v.is_empty()) || o.proto.is_none_or(|p| realm.no_index_properties(p))
+        }
+        _ => false,
+    }
+}
+
 /// A present dense element of an array (no key string needed).
 #[inline]
 fn dense_get(realm: &Realm, id: ObjectId, i: usize) -> Option<Value> {
@@ -246,7 +296,7 @@ fn get_i(realm: &mut Realm, id: ObjectId, i: usize) -> JsResult<Value> {
     if let Some(v) = dense_get(realm, id, i) {
         return Ok(v);
     }
-    realm.get(Value::Object(id), PropertyKey::index(i as u32))
+    realm.get(Value::Object(id), key_of(i))
 }
 
 fn has_i(realm: &mut Realm, id: ObjectId, i: usize) -> JsResult<bool> {
@@ -255,13 +305,22 @@ fn has_i(realm: &mut Realm, id: ObjectId, i: usize) -> JsResult<bool> {
             return Ok(true);
         }
     }
-    realm.has_property(id, &PropertyKey::index(i as u32))
+    realm.has_property(id, &key_of(i))
 }
 
+/// Set(O, i, v, true).
 fn set_i(realm: &mut Realm, id: ObjectId, i: usize, v: Value) -> JsResult<()> {
-    let ok = realm.set(Value::Object(id), PropertyKey::index(i as u32), v)?;
+    let ok = realm.set(Value::Object(id), key_of(i), v)?;
     if !ok {
         return realm.type_error(&format!("Cannot assign to read only property '{}' of object", i));
+    }
+    Ok(())
+}
+
+/// DeletePropertyOrThrow(O, i).
+fn del_i(realm: &mut Realm, id: ObjectId, i: usize) -> JsResult<()> {
+    if !realm.delete_property(id, &key_of(i))? {
+        return realm.type_error(&format!("Cannot delete property '{}' of object", i));
     }
     Ok(())
 }
@@ -270,6 +329,117 @@ fn set_len(realm: &mut Realm, id: ObjectId, len: usize) -> JsResult<()> {
     let ok = realm.set(Value::Object(id), crate::value::names::length(), Value::Number(len as f64))?;
     if !ok {
         return realm.type_error("Cannot assign to read only property 'length' of object");
+    }
+    Ok(())
+}
+
+/// Index ranges longer than this on objects with few indexed properties
+/// are walked through their existing keys (see `sparse_keys`).
+const SPARSE_RANGE: usize = 1 << 16;
+
+/// The integer keys in `[lo, hi)` of an object whose other indices are
+/// unobservably absent, ascending: an ordinary object or array whose own
+/// indexed properties are all data properties and whose prototypes have
+/// no indexed properties. `None` when the range is short (a plain loop is
+/// as fast) or visiting only these keys could be observed.
+fn sparse_keys(realm: &Realm, id: ObjectId, lo: usize, hi: usize) -> Option<Vec<usize>> {
+    if hi <= lo || hi - lo <= SPARSE_RANGE {
+        return None;
+    }
+    let o = realm.obj(id);
+    let mut out = Vec::new();
+    match &o.kind {
+        ObjectKind::Ordinary => {}
+        ObjectKind::Array { elements, .. } => {
+            for (i, v) in elements.iter().enumerate().take(hi).skip(lo) {
+                if !v.is_empty() {
+                    out.push(i);
+                }
+            }
+        }
+        _ => return None,
+    }
+    if let Some(p) = o.proto {
+        if !realm.no_index_properties(p) {
+            return None;
+        }
+    }
+    for (k, p) in o.props.iter() {
+        if let Some(i) = integer_key(k) {
+            if p.is_accessor() {
+                return None;
+            }
+            if i >= lo && i < hi {
+                out.push(i);
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
+
+/// Move the elements in `[lo, hi)` (ascending, or descending when `down`)
+/// to `index + delta`: Set the target when the source is present, else
+/// DeletePropertyOrThrow it (the loops of copyWithin, shift, unshift and
+/// splice).
+fn move_range(realm: &mut Realm, id: ObjectId, lo: usize, hi: usize, delta: isize, down: bool) -> JsResult<()> {
+    if hi <= lo {
+        return Ok(());
+    }
+    if let Some(keys) = sparse_keys(realm, id, lo, hi) {
+        let tlo = (lo as isize + delta) as usize;
+        let thi = (hi as isize + delta) as usize;
+        if let Some(targets) = sparse_keys(realm, id, tlo, thi) {
+            // Sources that exist, plus sources whose existing target goes.
+            let mut todo = keys;
+            todo.extend(targets.into_iter().map(|t| (t as isize - delta) as usize));
+            todo.sort_unstable();
+            todo.dedup();
+            if down {
+                todo.reverse();
+            }
+            for f in todo {
+                move_one(realm, id, f, (f as isize + delta) as usize)?;
+            }
+            return Ok(());
+        }
+    }
+    if down {
+        let mut f = hi;
+        while f > lo {
+            f -= 1;
+            move_one(realm, id, f, (f as isize + delta) as usize)?;
+        }
+    } else {
+        for f in lo..hi {
+            move_one(realm, id, f, (f as isize + delta) as usize)?;
+        }
+    }
+    Ok(())
+}
+
+fn move_one(realm: &mut Realm, id: ObjectId, from: usize, to: usize) -> JsResult<()> {
+    if has_i(realm, id, from)? {
+        let v = get_i(realm, id, from)?;
+        set_i(realm, id, to, v)
+    } else {
+        del_i(realm, id, to)
+    }
+}
+
+/// DeletePropertyOrThrow for every index in `[lo, hi)`, descending.
+fn delete_range_down(realm: &mut Realm, id: ObjectId, lo: usize, hi: usize) -> JsResult<()> {
+    if let Some(keys) = sparse_keys(realm, id, lo, hi) {
+        for k in keys.into_iter().rev() {
+            del_i(realm, id, k)?;
+        }
+        return Ok(());
+    }
+    let mut k = hi;
+    while k > lo {
+        k -= 1;
+        del_i(realm, id, k)?;
     }
     Ok(())
 }
@@ -283,46 +453,109 @@ fn callback(realm: &mut Realm, args: &[Value], name: &str) -> JsResult<Value> {
     Ok(f)
 }
 
-/// Create the result array for species-aware methods.
-fn species_create(realm: &mut Realm, original: ObjectId, len: usize) -> JsResult<ObjectId> {
-    if !is_array_value(realm, &Value::Object(original)) {
-        return Ok(realm.new_array(vec![]));
+/// IsArray(v): proxies answer for their target (revoked ones throw).
+pub(crate) fn is_array_checked(realm: &mut Realm, v: &Value) -> JsResult<bool> {
+    let mut cur = match v.v() {
+        V::Object(id) => id,
+        _ => return Ok(false),
+    };
+    loop {
+        match &realm.obj(cur).kind {
+            ObjectKind::Array { .. } => return Ok(true),
+            ObjectKind::Proxy { target, revoked, .. } => {
+                if *revoked {
+                    return realm.type_error("Cannot perform 'IsArray' on a proxy that has been revoked");
+                }
+                cur = *target;
+            }
+            _ => return Ok(false),
+        }
     }
-    let c = realm.get_str(Value::Object(original), "constructor")?;
+}
+
+/// ArrayCreate(len) with the intrinsic prototype.
+fn array_create(realm: &mut Realm, len: usize) -> JsResult<ObjectId> {
+    if len > u32::MAX as usize {
+        return realm.range_error("Invalid array length");
+    }
+    let proto = realm.intrinsics.array_proto;
+    Ok(realm.alloc(Object::new(Some(proto), ObjectKind::Array { elements: Vec::new(), length: len as u32 })))
+}
+
+/// `o` is a plain array whose `constructor[Symbol.species]` is the
+/// unmodified intrinsic one (ArraySpeciesCreate is then ArrayCreate and
+/// its lookups are unobservable).
+fn species_is_default(realm: &Realm, o: ObjectId) -> bool {
+    let ap = realm.intrinsics.array_proto;
+    let obj = realm.obj(o);
+    if !matches!(obj.kind, ObjectKind::Array { .. }) || obj.proto != Some(ap) || obj.props.contains(&crate::value::names::constructor()) {
+        return false;
+    }
+    let ctor = realm.intrinsics.array_ctor;
+    match realm.obj(ap).props.get(&crate::value::names::constructor()) {
+        Some(p) if !p.is_accessor() && p.value.as_object() == Some(ctor) => {}
+        _ => return false,
+    }
+    let Some(getter) = realm.intrinsics.others.get("ArraySpeciesGetter").copied() else { return false };
+    match realm.obj(ctor).props.get(&PropertyKey::Symbol(SYM_SPECIES)) {
+        Some(p) if p.is_accessor() => p.getter().and_then(|g| g.as_object()) == Some(getter),
+        _ => false,
+    }
+}
+
+/// ArraySpeciesCreate(original, len); also whether the result is a fresh
+/// intrinsic array (its elements may then be written directly).
+fn array_species_create(realm: &mut Realm, original: ObjectId, len: usize) -> JsResult<(ObjectId, bool)> {
+    if species_is_default(realm, original) || !is_array_checked(realm, &Value::Object(original))? {
+        return Ok((array_create(realm, len)?, true));
+    }
+    let c = realm.get(Value::Object(original), crate::value::names::constructor())?;
     let c = match c.v() {
         V::Object(cid) => {
             let s = realm.get(Value::Object(cid), PropertyKey::Symbol(SYM_SPECIES))?;
-            if s.is_nullish() {
+            if s.is_null() {
                 Value::Undefined
             } else {
                 s
             }
         }
-        V::Undefined => Value::Undefined,
-        _ => return realm.type_error("constructor is not an object"),
+        _ => c,
     };
-    if c.is_undefined() || c.as_object() == Some(realm.intrinsics.array_ctor) {
-        return Ok(realm.new_array(vec![]));
+    if c.is_undefined() {
+        return Ok((array_create(realm, len)?, true));
     }
     if !realm.is_constructor(&c) {
-        return realm.type_error("species is not a constructor");
+        return realm.type_error("object.constructor[Symbol.species] is not a constructor");
     }
     let r = realm.construct(c, &[Value::Number(len as f64)], Value::Undefined)?;
     match r.v() {
-        V::Object(id) => Ok(id),
+        V::Object(id) => Ok((id, false)),
         _ => realm.type_error("species constructor returned non-object"),
     }
 }
 
+/// Create the result array for species-aware methods.
+fn species_create(realm: &mut Realm, original: ObjectId, len: usize) -> JsResult<ObjectId> {
+    Ok(array_species_create(realm, original, len)?.0)
+}
+
+/// CreateDataPropertyOrThrow(arr, index, v), appending in place when
+/// possible.
 fn push_result(realm: &mut Realm, arr: ObjectId, index: usize, v: Value) -> JsResult<()> {
-    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(arr).kind {
-        if index == elements.len() {
+    let obj = realm.obj_mut(arr);
+    let plain = obj.extensible && obj.props.is_empty();
+    if let ObjectKind::Array { elements, length } = &mut obj.kind {
+        if index == elements.len() && plain && index < u32::MAX as usize - 1 {
             elements.push(v);
-            *length = elements.len() as u32;
+            if (*length as usize) < elements.len() {
+                *length = elements.len() as u32;
+            }
             return Ok(());
         }
     }
-    realm.define_own(arr, PropertyKey::index(index as u32), Property::data(v, ALL))?;
+    if !realm.define_own(arr, key_of(index), Property::data(v, ALL))? {
+        return realm.type_error(&format!("Cannot add property {}, object is not extensible", index));
+    }
     Ok(())
 }
 
@@ -344,30 +577,43 @@ fn is_concat_spreadable(realm: &mut Realm, v: &Value) -> JsResult<bool> {
         if !s.is_undefined() {
             return Ok(s.truthy());
         }
-        return Ok(is_array_value(realm, v));
+        return is_array_checked(realm, v);
     }
     Ok(false)
 }
 
 fn concat(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (id, _) = this_arr(realm, &this)?;
-    let out = species_create(realm, id, 0)?;
+    let id = realm.to_object(this)?;
+    let (out, fresh) = array_species_create(realm, id, 0)?;
     let mut n = 0usize;
     let mut items = vec![Value::Object(id)];
     items.extend_from_slice(args);
     for item in items {
         if is_concat_spreadable(realm, &item)? {
             let iid = item.as_object().unwrap();
-            if let Some(d) = dense(realm, iid) {
-                for v in d {
-                    if !v.is_empty() {
-                        push_result(realm, out, n, v)?;
+            if fresh {
+                if let Some(d) = dense(realm, iid) {
+                    for v in d {
+                        if !v.is_empty() {
+                            push_result(realm, out, n, v)?;
+                        }
+                        n += 1;
                     }
-                    n += 1;
+                    continue;
                 }
-                continue;
             }
             let len = realm.length_of(item.clone())?;
+            if n + len > MAX_SAFE_LEN {
+                return realm.type_error("Invalid array length");
+            }
+            if let Some(keys) = sparse_keys(realm, iid, 0, len) {
+                for k in keys {
+                    let v = get_i(realm, iid, k)?;
+                    push_result(realm, out, n + k, v)?;
+                }
+                n += len;
+                continue;
+            }
             for i in 0..len {
                 if has_i(realm, iid, i)? {
                     let v = get_i(realm, iid, i)?;
@@ -376,6 +622,9 @@ fn concat(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
                 n += 1;
             }
         } else {
+            if n >= MAX_SAFE_LEN {
+                return realm.type_error("Invalid array length");
+            }
             push_result(realm, out, n, item)?;
             n += 1;
         }
@@ -386,22 +635,17 @@ fn concat(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 
 fn copy_within(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
-    let target = realm.relative_index(arg(args, 0), len, 0)?;
-    let start = realm.relative_index(arg(args, 1), len, 0)?;
-    let end = realm.relative_index(arg(args, 2), len, len)?;
-    let count = (end.saturating_sub(start)).min(len - target);
-    let mut buf = Vec::with_capacity(count);
-    for i in 0..count {
-        let present = has_i(realm, id, start + i)?;
-        buf.push(if present { Some(get_i(realm, id, start + i)?) } else { None });
+    let to = realm.relative_index(arg(args, 0), len, 0)?;
+    let from = realm.relative_index(arg(args, 1), len, 0)?;
+    let fin = realm.relative_index(arg(args, 2), len, len)?;
+    let count = fin.saturating_sub(from).min(len - to);
+    if count == 0 {
+        return Ok(Value::Object(id));
     }
-    for (i, v) in buf.into_iter().enumerate() {
-        match v {
-            Some(v) => set_i(realm, id, target + i, v)?,
-            None => {
-                realm.delete_property(id, &PropertyKey::index((target + i) as u32))?;
-            }
-        }
+    if from < to && to < from + count {
+        move_range(realm, id, from, from + count, to as isize - from as isize, true)?;
+    } else {
+        move_range(realm, id, from, from + count, to as isize - from as isize, false)?;
     }
     Ok(Value::Object(id))
 }
@@ -458,6 +702,14 @@ fn fill(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     let start = realm.relative_index(arg(args, 1), len, 0)?;
     let end = realm.relative_index(arg(args, 2), len, len)?;
+    if start < end && simple_dense(realm, id) {
+        if let ObjectKind::Array { elements, .. } = &mut realm.obj_mut(id).kind {
+            for e in &mut elements[start..end] {
+                *e = v.clone();
+            }
+            return Ok(Value::Object(id));
+        }
+    }
     for i in start..end {
         set_i(realm, id, i, v.clone())?;
     }
@@ -520,9 +772,12 @@ fn find_last_index(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     find_impl(realm, this, args, true, true)
 }
 
-fn flatten_into(realm: &mut Realm, out: &mut Vec<Value>, src: ObjectId, depth: f64, mapper: Option<(&Value, &Value)>) -> JsResult<()> {
-    let len = realm.length_of(Value::Object(src))?;
-    for i in 0..len {
+/// FlattenIntoArray: appends to `target` from `next`; returns the next
+/// target index.
+#[allow(clippy::too_many_arguments)]
+fn flatten_into(realm: &mut Realm, target: ObjectId, src: ObjectId, src_len: usize, start: usize, depth: f64, mapper: Option<(&Value, &Value)>) -> JsResult<usize> {
+    let mut n = start;
+    for i in 0..src_len {
         if !has_i(realm, src, i)? {
             continue;
         }
@@ -530,30 +785,36 @@ fn flatten_into(realm: &mut Realm, out: &mut Vec<Value>, src: ObjectId, depth: f
         if let Some((f, t)) = mapper {
             v = realm.call(f.clone(), t.clone(), &[v, Value::Number(i as f64), Value::Object(src)])?;
         }
-        if depth > 0.0 && is_array_value(realm, &v) {
-            flatten_into(realm, out, v.as_object().unwrap(), depth - 1.0, None)?;
+        if depth > 0.0 && is_array_checked(realm, &v)? {
+            let eid = v.as_object().unwrap();
+            let elen = realm.length_of(v.clone())?;
+            n = flatten_into(realm, target, eid, elen, n, depth - 1.0, None)?;
         } else {
-            out.push(v);
+            if n >= MAX_SAFE_LEN {
+                return realm.type_error("Invalid array length");
+            }
+            push_result(realm, target, n, v)?;
+            n += 1;
         }
     }
-    Ok(())
+    Ok(n)
 }
 
 fn flat(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (id, _) = this_arr(realm, &this)?;
-    let depth = if arg(args, 0).is_undefined() { 1.0 } else { to_integer(realm.to_number(arg(args, 0))?) };
-    let mut out = Vec::new();
-    flatten_into(realm, &mut out, id, depth, None)?;
-    Ok(realm.new_array_value(out))
+    let (id, len) = this_arr(realm, &this)?;
+    let depth = if arg(args, 0).is_undefined() { 1.0 } else { to_integer(realm.to_number(arg(args, 0))?).max(0.0) };
+    let out = species_create(realm, id, 0)?;
+    flatten_into(realm, out, id, len, 0, depth, None)?;
+    Ok(Value::Object(out))
 }
 
 fn flat_map(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (id, _) = this_arr(realm, &this)?;
+    let (id, len) = this_arr(realm, &this)?;
     let f = callback(realm, args, "flatMap")?;
     let t = arg(args, 1);
-    let mut out = Vec::new();
-    flatten_into(realm, &mut out, id, 1.0, Some((&f, &t)))?;
-    Ok(realm.new_array_value(out))
+    let out = species_create(realm, id, 0)?;
+    flatten_into(realm, out, id, len, 0, 1.0, Some((&f, &t)))?;
+    Ok(Value::Object(out))
 }
 
 fn for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -578,6 +839,19 @@ fn includes(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     }
     let target = arg(args, 0);
     let start = realm.relative_index(arg(args, 1), len, 0)?;
+    if let Some(keys) = sparse_keys(realm, id, start, len) {
+        // Absent indices read as undefined.
+        if target.is_undefined() && keys.len() < len - start {
+            return Ok(Value::Bool(true));
+        }
+        for k in keys {
+            let v = get_i(realm, id, k)?;
+            if realm.same_value_zero(&v, &target) {
+                return Ok(Value::Bool(true));
+            }
+        }
+        return Ok(Value::Bool(false));
+    }
     for i in start..len {
         let v = get_i(realm, id, i)?;
         if realm.same_value_zero(&v, &target) {
@@ -587,6 +861,26 @@ fn includes(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Bool(false))
 }
 
+/// Strict-equality search of the present elements of a plain array from
+/// `start`; `None` when a hole or a non-array needs the generic loop.
+fn dense_index_of(realm: &Realm, id: ObjectId, start: usize, target: &Value) -> Option<Option<usize>> {
+    let o = realm.obj(id);
+    match &o.kind {
+        ObjectKind::Array { elements, length } if *length as usize == elements.len() && o.props.is_empty() => {
+            for (i, v) in elements.iter().enumerate().skip(start) {
+                if v.is_empty() {
+                    return None;
+                }
+                if realm.strict_equals(v, target) {
+                    return Some(Some(i));
+                }
+            }
+            Some(None)
+        }
+        _ => None,
+    }
+}
+
 fn index_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
     if len == 0 {
@@ -594,10 +888,14 @@ fn index_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     }
     let target = arg(args, 0);
     let start = realm.relative_index(arg(args, 1), len, 0)?;
-    if let Some(d) = dense(realm, id) {
-        for (i, v) in d.iter().enumerate().skip(start) {
-            if realm.strict_equals(v, &target) {
-                return Ok(Value::Number(i as f64));
+    if let Some(r) = dense_index_of(realm, id, start, &target) {
+        return Ok(Value::Number(r.map_or(-1.0, |i| i as f64)));
+    }
+    if let Some(keys) = sparse_keys(realm, id, start, len) {
+        for k in keys {
+            let v = get_i(realm, id, k)?;
+            if realm.strict_equals(&v, &target) {
+                return Ok(Value::Number(k as f64));
             }
         }
         return Ok(Value::Number(-1.0));
@@ -624,15 +922,28 @@ fn last_index_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Val
         let n = to_integer(realm.to_number(arg(args, 1))?);
         from = if n < 0.0 { len as f64 + n } else { n.min(len as f64 - 1.0) };
     }
-    let mut i = from as isize;
-    while i >= 0 {
-        if has_i(realm, id, i as usize)? {
-            let v = get_i(realm, id, i as usize)?;
+    if from < 0.0 {
+        return Ok(Value::Number(-1.0));
+    }
+    let from = from as usize;
+    if let Some(keys) = sparse_keys(realm, id, 0, from + 1) {
+        for k in keys.into_iter().rev() {
+            let v = get_i(realm, id, k)?;
+            if realm.strict_equals(&v, &target) {
+                return Ok(Value::Number(k as f64));
+            }
+        }
+        return Ok(Value::Number(-1.0));
+    }
+    let mut i = from + 1;
+    while i > 0 {
+        i -= 1;
+        if has_i(realm, id, i)? {
+            let v = get_i(realm, id, i)?;
             if realm.strict_equals(&v, &target) {
                 return Ok(Value::Number(i as f64));
             }
         }
-        i -= 1;
     }
     Ok(Value::Number(-1.0))
 }
@@ -643,6 +954,9 @@ fn join(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         Value::Undefined => JsStr::new(","),
         v => realm.to_string(v)?,
     };
+    if len > 1 && (len - 1).saturating_mul(sep.len()) > crate::value::MAX_STRING_LEN {
+        return realm.range_error("Invalid string length");
+    }
     // cycle guard
     if realm.join_stack.contains(&id) {
         return Ok(Value::str(""));
@@ -650,6 +964,21 @@ fn join(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     realm.join_stack.push(id);
     let mut out: Vec<u16> = Vec::new();
     let result = (|| -> JsResult<()> {
+        if sep.is_empty() {
+            if let Some(keys) = sparse_keys(realm, id, 0, len) {
+                for k in keys {
+                    let v = get_i(realm, id, k)?;
+                    if !v.is_nullish() {
+                        let s = realm.to_string(v)?;
+                        out.extend_from_slice(s.as_units());
+                        if out.len() > crate::value::MAX_STRING_LEN {
+                            return realm.range_error("Invalid string length");
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
         for i in 0..len {
             if i > 0 {
                 out.extend_from_slice(sep.as_units());
@@ -658,6 +987,9 @@ fn join(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
             if !v.is_nullish() {
                 let s = realm.to_string(v)?;
                 out.extend_from_slice(s.as_units());
+            }
+            if out.len() > crate::value::MAX_STRING_LEN {
+                return realm.range_error("Invalid string length");
             }
         }
         Ok(())
@@ -678,17 +1010,31 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
 
 fn to_locale_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
-    let mut parts = Vec::new();
-    for i in 0..len {
-        let v = get_i(realm, id, i)?;
-        if v.is_nullish() {
-            parts.push(String::new());
-        } else {
-            let s = realm.invoke(v, "toLocaleString", &[])?;
-            parts.push(realm.to_rust_string(s)?);
-        }
+    if realm.join_stack.contains(&id) {
+        return Ok(Value::str(""));
     }
-    Ok(Value::str(&parts.join(",")))
+    realm.join_stack.push(id);
+    let mut out: Vec<u16> = Vec::new();
+    let result = (|| -> JsResult<()> {
+        for i in 0..len {
+            if i > 0 {
+                out.push(b',' as u16);
+            }
+            let v = get_i(realm, id, i)?;
+            if !v.is_nullish() {
+                let s = realm.invoke(v, "toLocaleString", &[])?;
+                let s = realm.to_string(s)?;
+                out.extend_from_slice(s.as_units());
+            }
+            if out.len() > crate::value::MAX_STRING_LEN {
+                return realm.range_error("Invalid string length");
+            }
+        }
+        Ok(())
+    })();
+    realm.join_stack.pop();
+    result?;
+    Ok(Value::String(JsStr::from_units(out)))
 }
 
 fn map(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -714,35 +1060,49 @@ fn map(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Object(out))
 }
 
+/// An array whose `length` is writable and whose elements all live in
+/// `elements` (`length == elements.len()`) and that may grow or shrink.
+#[inline]
+fn growable(o: &Object) -> bool {
+    o.extensible && matches!(&o.kind, ObjectKind::Array { elements, length } if *length as usize == elements.len()) && !o.props.contains(&crate::value::names::length())
+}
+
 fn pop(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
     if len == 0 {
         set_len(realm, id, 0)?;
         return Ok(Value::Undefined);
     }
-    let extensible = realm.obj(id).extensible;
-    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
-        if *length as usize == elements.len() && extensible {
-            let v = elements.pop().unwrap();
-            *length -= 1;
-            return Ok(if v.is_empty() { Value::Undefined } else { v });
+    let obj = realm.obj_mut(id);
+    if growable(obj) {
+        if let ObjectKind::Array { elements, length } = &mut obj.kind {
+            if elements.last().is_some_and(|v| !v.is_empty()) {
+                let v = elements.pop().unwrap();
+                *length -= 1;
+                return Ok(v);
+            }
         }
     }
     let v = get_i(realm, id, len - 1)?;
-    realm.delete_property(id, &PropertyKey::index((len - 1) as u32))?;
+    del_i(realm, id, len - 1)?;
     set_len(realm, id, len - 1)?;
     Ok(v)
 }
 
 fn push(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
-    let fast = realm.obj(id).extensible && !realm.obj(id).props.contains(&crate::value::names::length());
-    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
-        if *length as usize == elements.len() && fast {
-            elements.extend_from_slice(args);
-            *length = elements.len() as u32;
-            return Ok(Value::Number(*length as f64));
+    let obj = realm.obj_mut(id);
+    if growable(obj) {
+        if let ObjectKind::Array { elements, length } = &mut obj.kind {
+            if elements.len() + args.len() < u32::MAX as usize {
+                elements.extend_from_slice(args);
+                *length = elements.len() as u32;
+                return Ok(Value::Number(*length as f64));
+            }
         }
+    }
+    if len + args.len() > MAX_SAFE_LEN {
+        return realm.type_error("Pushing elements past 2^53 - 1");
     }
     for (i, a) in args.iter().enumerate() {
         set_i(realm, id, len + i, a.clone())?;
@@ -751,16 +1111,140 @@ fn push(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Number((len + args.len()) as f64))
 }
 
+fn reverse(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    let (id, len) = this_arr(realm, &this)?;
+    if simple_dense(realm, id) {
+        if let ObjectKind::Array { elements, .. } = &mut realm.obj_mut(id).kind {
+            elements.reverse();
+            return Ok(Value::Object(id));
+        }
+    }
+    let middle = len / 2;
+    let swap = |realm: &mut Realm, lo: usize| -> JsResult<()> {
+        let hi = len - lo - 1;
+        let lo_has = has_i(realm, id, lo)?;
+        let lo_v = if lo_has { Some(get_i(realm, id, lo)?) } else { None };
+        let hi_has = has_i(realm, id, hi)?;
+        let hi_v = if hi_has { Some(get_i(realm, id, hi)?) } else { None };
+        match (lo_v, hi_v) {
+            (Some(l), Some(h)) => {
+                set_i(realm, id, lo, h)?;
+                set_i(realm, id, hi, l)?;
+            }
+            (None, Some(h)) => {
+                set_i(realm, id, lo, h)?;
+                del_i(realm, id, hi)?;
+            }
+            (Some(l), None) => {
+                del_i(realm, id, lo)?;
+                set_i(realm, id, hi, l)?;
+            }
+            (None, None) => {}
+        }
+        Ok(())
+    };
+    if let Some(keys) = sparse_keys(realm, id, 0, len) {
+        let mut lows: Vec<usize> = keys.into_iter().map(|k| if k < middle { k } else { len - k - 1 }).filter(|&k| k < middle).collect();
+        lows.sort_unstable();
+        lows.dedup();
+        for lo in lows {
+            swap(realm, lo)?;
+        }
+        return Ok(Value::Object(id));
+    }
+    for lo in 0..middle {
+        swap(realm, lo)?;
+    }
+    Ok(Value::Object(id))
+}
+
+fn shift(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    let (id, len) = this_arr(realm, &this)?;
+    if len == 0 {
+        set_len(realm, id, 0)?;
+        return Ok(Value::Undefined);
+    }
+    if simple_dense(realm, id) {
+        if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
+            let v = elements.remove(0);
+            *length -= 1;
+            return Ok(if v.is_empty() { Value::Undefined } else { v });
+        }
+    }
+    let first = get_i(realm, id, 0)?;
+    move_range(realm, id, 1, len, -1, false)?;
+    del_i(realm, id, len - 1)?;
+    set_len(realm, id, len - 1)?;
+    Ok(first)
+}
+
+fn unshift(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let (id, len) = this_arr(realm, &this)?;
+    let n = args.len();
+    if simple_dense(realm, id) && len + n < u32::MAX as usize {
+        if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
+            elements.splice(0..0, args.iter().cloned());
+            *length = elements.len() as u32;
+            return Ok(Value::Number(*length as f64));
+        }
+    }
+    if n > 0 {
+        if len + n > MAX_SAFE_LEN {
+            return realm.type_error("Unshifting elements past 2^53 - 1");
+        }
+        move_range(realm, id, 0, len, n as isize, true)?;
+        for (j, a) in args.iter().enumerate() {
+            set_i(realm, id, j, a.clone())?;
+        }
+    }
+    set_len(realm, id, len + n)?;
+    Ok(Value::Number((len + n) as f64))
+}
+
+fn slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let (id, len) = this_arr(realm, &this)?;
+    let start = realm.relative_index(arg(args, 0), len, 0)?;
+    let end = realm.relative_index(arg(args, 1), len, len)?;
+    let count = end.saturating_sub(start);
+    let (out, fresh) = array_species_create(realm, id, count)?;
+    if fresh {
+        if let Some(d) = dense(realm, id) {
+            let items: Vec<Value> = d[start.min(d.len())..end.min(d.len()).max(start.min(d.len()))].to_vec();
+            if !items.iter().any(|v| v.is_empty()) || realm.obj(id).proto.is_none_or(|p| realm.no_index_properties(p)) {
+                if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(out).kind {
+                    *elements = items;
+                    *length = elements.len() as u32;
+                }
+                return Ok(Value::Object(out));
+            }
+        }
+    }
+    if let Some(keys) = sparse_keys(realm, id, start, end) {
+        for k in keys {
+            let v = get_i(realm, id, k)?;
+            push_result(realm, out, k - start, v)?;
+        }
+        set_len(realm, out, count)?;
+        return Ok(Value::Object(out));
+    }
+    let mut n = 0;
+    for i in start..end {
+        if has_i(realm, id, i)? {
+            let v = get_i(realm, id, i)?;
+            push_result(realm, out, n, v)?;
+        }
+        n += 1;
+    }
+    set_len(realm, out, n)?;
+    Ok(Value::Object(out))
+}
+
 fn reduce_impl(realm: &mut Realm, this: Value, args: &[Value], right: bool) -> JsResult<Value> {
     // GC-safe: the object and the accumulator are rooted.
     let (id, len) = this_arr(realm, &this)?;
     realm.native_root(Value::Object(id));
     let f = callback(realm, args, if right { "reduceRight" } else { "reduce" })?;
-    let mut indices: Vec<usize> = (0..len).collect();
-    if right {
-        indices.reverse();
-    }
-    let mut it = indices.into_iter();
+    let mut it: Box<dyn Iterator<Item = usize>> = if right { Box::new((0..len).rev()) } else { Box::new(0..len) };
     let mut acc = if args.len() >= 2 {
         args[1].clone()
     } else {
@@ -792,128 +1276,6 @@ fn reduce(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 fn reduce_right(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     reduce_impl(realm, this, args, true)
-}
-
-fn reverse(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let (id, len) = this_arr(realm, &this)?;
-    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
-        if *length as usize == elements.len() {
-            elements.reverse();
-            return Ok(Value::Object(id));
-        }
-    }
-    let mut lo = 0;
-    let mut hi = len;
-    while lo + 1 < hi {
-        hi -= 1;
-        let lo_has = has_i(realm, id, lo)?;
-        let hi_has = has_i(realm, id, hi)?;
-        let lo_v = if lo_has { Some(get_i(realm, id, lo)?) } else { None };
-        let hi_v = if hi_has { Some(get_i(realm, id, hi)?) } else { None };
-        match hi_v {
-            Some(v) => set_i(realm, id, lo, v)?,
-            None => {
-                realm.delete_property(id, &PropertyKey::index(lo as u32))?;
-            }
-        }
-        match lo_v {
-            Some(v) => set_i(realm, id, hi, v)?,
-            None => {
-                realm.delete_property(id, &PropertyKey::index(hi as u32))?;
-            }
-        }
-        lo += 1;
-    }
-    Ok(Value::Object(id))
-}
-
-fn shift(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
-    let (id, len) = this_arr(realm, &this)?;
-    if len == 0 {
-        set_len(realm, id, 0)?;
-        return Ok(Value::Undefined);
-    }
-    let extensible = realm.obj(id).extensible;
-    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
-        if *length as usize == elements.len() && extensible {
-            let v = elements.remove(0);
-            *length -= 1;
-            return Ok(if v.is_empty() { Value::Undefined } else { v });
-        }
-    }
-    let first = get_i(realm, id, 0)?;
-    for i in 1..len {
-        if has_i(realm, id, i)? {
-            let v = get_i(realm, id, i)?;
-            set_i(realm, id, i - 1, v)?;
-        } else {
-            realm.delete_property(id, &PropertyKey::index((i - 1) as u32))?;
-        }
-    }
-    realm.delete_property(id, &PropertyKey::index((len - 1) as u32))?;
-    set_len(realm, id, len - 1)?;
-    Ok(first)
-}
-
-fn unshift(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (id, len) = this_arr(realm, &this)?;
-    let extensible = realm.obj(id).extensible;
-    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
-        if *length as usize == elements.len() && extensible {
-            let mut new: Vec<Value> = args.to_vec();
-            new.append(elements);
-            *elements = new;
-            *length = elements.len() as u32;
-            return Ok(Value::Number(*length as f64));
-        }
-    }
-    let n = args.len();
-    if n > 0 {
-        let mut k = len;
-        while k > 0 {
-            k -= 1;
-            if has_i(realm, id, k)? {
-                let v = get_i(realm, id, k)?;
-                set_i(realm, id, k + n, v)?;
-            } else {
-                realm.delete_property(id, &PropertyKey::index((k + n) as u32))?;
-            }
-        }
-        for (j, a) in args.iter().enumerate() {
-            set_i(realm, id, j, a.clone())?;
-        }
-    }
-    set_len(realm, id, len + n)?;
-    Ok(Value::Number((len + n) as f64))
-}
-
-fn slice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (id, len) = this_arr(realm, &this)?;
-    let start = realm.relative_index(arg(args, 0), len, 0)?;
-    let end = realm.relative_index(arg(args, 1), len, len)?;
-    let count = end.saturating_sub(start);
-    let out = species_create(realm, id, count)?;
-    if let Some(d) = dense(realm, id) {
-        let is_plain = matches!(&realm.obj(out).kind, ObjectKind::Array { elements, .. } if elements.is_empty());
-        if is_plain {
-            let items: Vec<Value> = d[start.min(d.len())..end.min(d.len())].to_vec();
-            if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(out).kind {
-                *elements = items;
-                *length = elements.len() as u32;
-            }
-            return Ok(Value::Object(out));
-        }
-    }
-    let mut n = 0;
-    for i in start..end {
-        if has_i(realm, id, i)? {
-            let v = get_i(realm, id, i)?;
-            push_result(realm, out, n, v)?;
-        }
-        n += 1;
-    }
-    set_len(realm, out, n)?;
-    Ok(Value::Object(out))
 }
 
 /// Stable merge sort with a fallible comparator.
@@ -991,11 +1353,18 @@ fn sort(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
     let mut items = Vec::with_capacity(len.min(1 << 16));
     let mut holes = 0;
-    for i in 0..len {
-        if has_i(realm, id, i)? {
-            items.push(get_i(realm, id, i)?);
-        } else {
-            holes += 1;
+    if let Some(keys) = sparse_keys(realm, id, 0, len) {
+        holes = len - keys.len();
+        for k in keys {
+            items.push(get_i(realm, id, k)?);
+        }
+    } else {
+        for i in 0..len {
+            if has_i(realm, id, i)? {
+                items.push(get_i(realm, id, i)?);
+            } else {
+                holes += 1;
+            }
         }
     }
     let sorted = sort_values(realm, items, &cmp)?;
@@ -1003,9 +1372,7 @@ fn sort(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     for (i, v) in sorted.into_iter().enumerate() {
         set_i(realm, id, i, v)?;
     }
-    for i in n..n + holes {
-        realm.delete_property(id, &PropertyKey::index(i as u32))?;
-    }
+    delete_range_down(realm, id, n, n + holes)?;
     Ok(Value::Object(id))
 }
 
@@ -1018,55 +1385,51 @@ fn splice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         len - start
     } else {
         let n = to_integer(realm.to_number(arg(args, 1))?);
-        (n.max(0.0) as usize).min(len - start)
+        (n.max(0.0).min((len - start) as f64)) as usize
     };
-    let items: Vec<Value> = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
-    // Fast path for dense arrays
-    let extensible = realm.obj(id).extensible;
-    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
-        if *length as usize == elements.len() && extensible {
-            let removed: Vec<Value> = elements.splice(start..start + delete_count, items).map(|v| if v.is_empty() { Value::Undefined } else { v }).collect();
-            *length = elements.len() as u32;
-            return Ok(realm.new_array_value(removed));
-        }
+    let items: &[Value] = if args.len() > 2 { &args[2..] } else { &[] };
+    let item_count = items.len();
+    if len + item_count - delete_count > MAX_SAFE_LEN {
+        return realm.type_error("Invalid array length");
     }
-    let removed_arr = species_create(realm, id, delete_count)?;
-    for i in 0..delete_count {
-        if has_i(realm, id, start + i)? {
-            let v = get_i(realm, id, start + i)?;
-            push_result(realm, removed_arr, i, v)?;
+    let (removed_arr, fresh) = array_species_create(realm, id, delete_count)?;
+    // Plain arrays: move the elements directly (unobservable).
+    if fresh && simple_dense(realm, id) && realm.length_of(Value::Object(id))? == len && len + item_count < u32::MAX as usize {
+        let removed: Vec<Value> = if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
+            let r: Vec<Value> = elements.splice(start..start + delete_count, items.iter().cloned()).collect();
+            *length = elements.len() as u32;
+            r
+        } else {
+            unreachable!()
+        };
+        if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(removed_arr).kind {
+            *elements = removed;
+            *length = elements.len() as u32;
+        }
+        return Ok(Value::Object(removed_arr));
+    }
+    if let Some(keys) = sparse_keys(realm, id, start, start + delete_count) {
+        for k in keys {
+            let v = get_i(realm, id, k)?;
+            push_result(realm, removed_arr, k - start, v)?;
+        }
+    } else {
+        for i in 0..delete_count {
+            if has_i(realm, id, start + i)? {
+                let v = get_i(realm, id, start + i)?;
+                push_result(realm, removed_arr, i, v)?;
+            }
         }
     }
     set_len(realm, removed_arr, delete_count)?;
-    let item_count = items.len();
     if item_count < delete_count {
-        for k in start..len - delete_count {
-            let from = k + delete_count;
-            let to = k + item_count;
-            if has_i(realm, id, from)? {
-                let v = get_i(realm, id, from)?;
-                set_i(realm, id, to, v)?;
-            } else {
-                realm.delete_property(id, &PropertyKey::index(to as u32))?;
-            }
-        }
-        for k in (len - delete_count + item_count..len).rev() {
-            realm.delete_property(id, &PropertyKey::index(k as u32))?;
-        }
+        move_range(realm, id, start + delete_count, len, item_count as isize - delete_count as isize, false)?;
+        delete_range_down(realm, id, len - delete_count + item_count, len)?;
     } else if item_count > delete_count {
-        for k in (start..len - delete_count).rev() {
-            let from = k + delete_count;
-            let to = k + item_count;
-            if has_i(realm, id, from)? {
-                let v = get_i(realm, id, from)?;
-                set_i(realm, id, to, v)?;
-            } else {
-                realm.delete_property(id, &PropertyKey::index(to as u32))?;
-            }
-        }
+        move_range(realm, id, start + delete_count, len, (item_count - delete_count) as isize, true)?;
     }
-    for (i, v) in items.into_iter().enumerate() {
-        set_i(realm, id, start + i, v)?;
+    for (i, v) in items.iter().enumerate() {
+        set_i(realm, id, start + i, v.clone())?;
     }
     set_len(realm, id, len - delete_count + item_count)?;
     Ok(Value::Object(removed_arr))
@@ -1114,14 +1477,14 @@ fn to_spliced(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
         len - start
     } else {
         let n = to_integer(realm.to_number(arg(args, 1))?);
-        (n.max(0.0) as usize).min(len - start)
+        (n.max(0.0).min((len - start) as f64)) as usize
     };
     let new_len = (len - skip) as f64 + args.len().saturating_sub(2) as f64;
     if new_len > 9007199254740991.0 {
         return realm.type_error("Invalid array length");
     }
     check_array_create(realm, new_len as usize)?;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity((new_len as usize).min(1 << 16));
     for i in 0..start {
         out.push(get_i(realm, id, i)?);
     }
