@@ -85,6 +85,14 @@ pub fn fast_step(realm: &mut Realm, it: &Value, next: &Value) -> Option<JsResult
         if let ObjectKind::Generator(g) = kind {
             if !g.is_async && g.promise.is_none() {
                 return Some(match realm.generator_resume_raw(iid, ResumeMode::Next, Value::Undefined) {
+                    // A `yield*` handed on an inner result object.
+                    Ok(Step::Yield(r)) if std::mem::replace(&mut realm.yield_raw, false) => (|| {
+                        let done = realm.get(r.clone(), PropertyKey::str("done"))?;
+                        if realm.to_boolean(&done) {
+                            return Ok(None);
+                        }
+                        Ok(Some(realm.get(r, PropertyKey::str("value"))?))
+                    })(),
                     Ok(Step::Yield(v)) => Ok(Some(v)),
                     Ok(Step::Return(_)) => Ok(None),
                     Ok(Step::Await(_)) => realm.type_error("await in a non-async generator"),

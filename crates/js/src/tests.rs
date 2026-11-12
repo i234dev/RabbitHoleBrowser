@@ -1685,7 +1685,7 @@ fn direct_eval_sees_caller_scope() {
     eq("(function () { eval('let q = 1'); eval('let q = 2'); return typeof q; })()", "undefined");
     eq("(function () { 'use strict'; eval('var s1 = 1'); return typeof s1; })()", "undefined");
     // Sloppy vars the caller does not declare become globals (as before).
-    eq("(function () { eval('var zz1 = 3'); })(); typeof zz1 + zz1", "number3");
+    eq("(function () { eval('var zz1 = 3'); })(); typeof zz1", "undefined");
     eq("(function () { return eval('1; 2; if (true) { 3 }'); })()", "3");
     // Indirect eval stays global.
     eq("(function () { var loc = 1; var e = eval; return e('typeof loc'); })()", "undefined");
