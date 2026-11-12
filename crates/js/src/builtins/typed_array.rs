@@ -56,7 +56,7 @@ pub fn register(realm: &mut Realm) {
     realm.define_accessor(abp, "byteLength", Some(array_buffer_byte_length), None, CONFIGURABLE);
     realm.define_accessor(abp, "maxByteLength", Some(array_buffer_byte_length), None, CONFIGURABLE);
     realm.define_accessor(abp, "resizable", Some(return_false), None, CONFIGURABLE);
-    realm.define_accessor(abp, "detached", Some(return_false), None, CONFIGURABLE);
+    realm.define_accessor(abp, "detached", Some(array_buffer_detached), None, CONFIGURABLE);
     realm.define_method(abp, "slice", 2, array_buffer_slice);
     realm.define_property(abp, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("ArrayBuffer"), CONFIGURABLE);
 
@@ -188,6 +188,34 @@ fn return_false(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<V
 }
 
 // ---------------------------------------------------------- ArrayBuffer
+
+thread_local! {
+    /// Buffers whose storage was detached (see [`detach_buffer`]).
+    static DETACHED: RefCell<Vec<std::rc::Weak<RefCell<Vec<u8>>>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Detach an ArrayBuffer's storage: its bytes move out (returned) and the
+/// buffer reports `detached` with length 0. Hosts use it when they replace
+/// the storage, e.g. a WebAssembly memory that grew.
+pub fn detach_buffer(buf: &Rc<RefCell<Vec<u8>>>) -> Vec<u8> {
+    let data = std::mem::take(&mut *buf.borrow_mut());
+    DETACHED.with(|d| {
+        let mut d = d.borrow_mut();
+        d.retain(|w| w.strong_count() > 0);
+        d.push(Rc::downgrade(buf));
+    });
+    data
+}
+
+/// Was the buffer detached with [`detach_buffer`]?
+pub fn is_detached(buf: &Rc<RefCell<Vec<u8>>>) -> bool {
+    DETACHED.with(|d| d.borrow().iter().any(|w| std::ptr::eq(w.as_ptr(), Rc::as_ptr(buf))))
+}
+
+fn array_buffer_detached(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    let (_, b) = this_buffer(realm, &this, "detached")?;
+    Ok(Value::Bool(is_detached(&b)))
+}
 
 pub fn buffer_of(realm: &Realm, id: ObjectId) -> Option<Rc<RefCell<Vec<u8>>>> {
     match &realm.obj(id).kind {
@@ -352,6 +380,9 @@ fn dv_bytes(realm: &mut Realm, this: &Value, args: &[Value], size: usize, method
         return realm.range_error("Offset is outside the bounds of the DataView");
     }
     let buf = buffer_of(realm, t.buffer).unwrap();
+    if t.byte_offset + idx + size > buf.borrow().len() {
+        return realm.type_error("Cannot perform DataView access on a detached ArrayBuffer");
+    }
     Ok((buf, t.byte_offset + idx, little))
 }
 

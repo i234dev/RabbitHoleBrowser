@@ -134,6 +134,61 @@ fn svelte_playground_rollup_wasm() {
     assert_eq!(out, "true\nobject");
 }
 
+/// Rollup's SWC-based parser (the same wasm-bindgen ABI as the playground's
+/// glue): parse a module into rollup's binary AST buffer.
+#[test]
+#[ignore]
+fn svelte_playground_rollup_parse() {
+    if dir().is_none() {
+        return;
+    }
+    let out = run(
+        &[("rollupwasm", "svelte/rollup_bg.wasm")],
+        &[],
+        r#"
+        const heap = Array(128).fill(undefined); heap.push(undefined, null, true, false);
+        let next = heap.length;
+        const add = o => { if (next === heap.length) heap.push(heap.length + 1); const i = next; next = heap[i]; heap[i] = o; return i; };
+        let w;
+        const u8 = () => new Uint8Array(w.memory.buffer);
+        const str = (p, n) => new TextDecoder().decode(u8().subarray(p >>> 0, (p >>> 0) + n));
+        const imports = { './bindings_wasm_bg.js': {
+          __wbg___wbindgen_throw_be289d5034ed271b: (p, n) => { throw Error(str(p, n)); },
+          __wbg_error_7534b8e9a36f1ab4: (p, n) => { out.push('console.error ' + str(p, n)); },
+          __wbg_length_32ed9a279acd054c: i => heap[i].length,
+          __wbg_new_8a6f238a6ece86ea: () => add(new Error()),
+          __wbg_prototypesetcall_bdcdcc5842e4d77d: (p, n, i) => { Uint8Array.prototype.set.call(u8().subarray(p >>> 0, (p >>> 0) + n), heap[i]); },
+          __wbg_stack_0ed75d68575b0f3c: (r, i) => { const b = new TextEncoder().encode(heap[i].stack || ''); const p = w.__wbindgen_export2(b.length, 1) >>> 0; u8().set(b, p); const dv = new DataView(w.memory.buffer); dv.setInt32(r + 4, b.length, true); dv.setInt32(r, p, true); },
+          __wbindgen_object_drop_ref: i => {},
+        } };
+        for (const imp of WebAssembly.Module.imports(new WebAssembly.Module(rollupwasm)))
+          if (!(imp.name in imports[imp.module])) out.push('missing import ' + imp.name);
+        WebAssembly.instantiate(rollupwasm, imports).then(({ instance }) => {
+          w = instance.exports;
+          function parse(code) {
+            const ret = w.__wbindgen_add_to_stack_pointer(-16);
+            try {
+              const b = new TextEncoder().encode(code);
+              const p = w.__wbindgen_export2(b.length, 1) >>> 0;
+              u8().set(b, p);
+              w.parse(ret, p, b.length, false, false);
+              const dv = new DataView(w.memory.buffer);
+              const rp = dv.getInt32(ret, true), rn = dv.getInt32(ret + 4, true);
+              const ast = u8().slice(rp >>> 0, (rp >>> 0) + rn);
+              w.__wbindgen_export(rp, rn, 1);
+              return ast;
+            } finally { w.__wbindgen_add_to_stack_pointer(16); }
+          }
+          const small = parse('import { x } from "./x.js";\nexport const y = x + 1;\nexport default function f(a, ...b) { return [a, ...b].map(v => v * y); }');
+          const big = parse(Array.from({ length: 300 }, (_, i) => `export function f${i}(a) { return a * ${i} + "s${i}".length; }`).join('\n'));
+          const bad = parse('export const = ;');
+          out.push(String(small.length > 100), String(big.length > small.length * 10), String(bad.length > 0));
+        }).catch(e => out.push('error ' + e + ' ' + e.stack));
+        "#,
+    );
+    assert_eq!(out, "true\ntrue\ntrue");
+}
+
 #[test]
 #[ignore]
 fn wasm_bindgen_resvg() {

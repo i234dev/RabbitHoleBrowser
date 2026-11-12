@@ -199,6 +199,16 @@ pub fn zeroed_vec(n: usize) -> Option<Vec<u8>> {
     }
 }
 
+thread_local! {
+    static DETACH_HOOK: Cell<Option<fn(&MemBuf) -> Vec<u8>>> = const { Cell::new(None) };
+}
+
+/// Set how a grown memory detaches its old buffer (the embedder marks the
+/// JavaScript `ArrayBuffer` detached); by default the bytes just move out.
+pub fn set_detach_hook(f: fn(&MemBuf) -> Vec<u8>) {
+    DETACH_HOOK.with(|h| h.set(Some(f)));
+}
+
 pub struct MemInst {
     /// Current buffer; replaced (the old one emptied: detached) on grow.
     pub buf: RefCell<MemBuf>,
@@ -255,7 +265,10 @@ impl MemInst {
         }
         let mut v = zeroed_vec(bytes as usize)?;
         let cur = self.buf.borrow().clone();
-        let old_data = std::mem::take(&mut *cur.borrow_mut());
+        let old_data = match DETACH_HOOK.with(|h| h.get()) {
+            Some(f) => f(&cur),
+            None => std::mem::take(&mut *cur.borrow_mut()),
+        };
         v[..old_data.len()].copy_from_slice(&old_data);
         drop(old_data);
         *self.buf.borrow_mut() = Rc::new(RefCell::new(v));

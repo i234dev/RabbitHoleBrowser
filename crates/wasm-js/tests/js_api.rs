@@ -204,13 +204,15 @@ fn views_of_detached_memory_are_empty() {
         &mut r,
         r#"
         var mem = new WebAssembly.Memory({initial: 1});
-        var b = mem.buffer, v = new Int32Array(b);
+        var b = mem.buffer, v = new Int32Array(b), dv = new DataView(b);
         v[0] = 7;
         mem.grow(1);
-        [b.byteLength, v.byteLength, v.length, v[0], new Int32Array(mem.buffer)[0], mem.buffer.byteLength].join('|')
+        var err = '';
+        try { dv.getInt32(0); } catch (x) { err = x.constructor.name; }
+        [b.byteLength, v.byteLength, v.length, v[0], new Int32Array(mem.buffer)[0], mem.buffer.byteLength, b.detached, mem.buffer.detached, err].join('|')
         "#,
     );
-    assert_eq!(out, "0|0|0||7|131072");
+    assert_eq!(out, "0|0|0||7|131072|true|false|TypeError");
 }
 
 #[test]

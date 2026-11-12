@@ -1199,6 +1199,7 @@ pub fn install(realm: &mut Realm) {
     if realm.intrinsics.others.contains_key("WasmState") {
         return;
     }
+    set_detach_hook(rabbithole_js::builtins::typed_array::detach_buffer);
     let ns = realm.new_object();
     realm.define_method(ns, "validate", 1, wa_validate);
     realm.define_method(ns, "compile", 1, wa_compile);
