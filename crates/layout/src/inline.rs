@@ -580,13 +580,14 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         if break_before {
             self.cur.break_at = Some(self.cur.frags.len());
         }
+        let spaced = self.style(item).word_spacing.abs() > 0.001;
         let appended = if !break_before {
             match self.cur.frags.last_mut() {
                 Some(PF {
                     kind: PFKind::Text { text: t, item: it },
                     w,
                     ..
-                }) if *it == item => {
+                }) if *it == item && !(spaced && (t.ends_with(' ') || text.starts_with(' '))) => {
                     t.push_str(&text);
                     *w += width;
                     true
@@ -735,7 +736,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 PFKind::Text { text, item },
             ) = (out.last_mut(), &f.kind)
             {
-                if *pi == *item && (*px + *pw - f.x).abs() < 0.05 {
+                // With word-spacing the painter cannot place the words of
+                // one run: keep the words apart.
+                let spaced = (pt.ends_with(' ') || text.starts_with(' ')) && item_style(self.items, self.cstyle, *item).word_spacing.abs() > 0.001;
+                if *pi == *item && (*px + *pw - f.x).abs() < 0.05 && !spaced {
                     pt.push_str(text);
                     *pw += f.w;
                     continue;

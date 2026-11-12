@@ -802,6 +802,11 @@ pub struct ComputedStyle {
     pub tab_size: f32,
     /// `-webkit-line-clamp`
     pub line_clamp: Option<u32>,
+    /// `line_clamp` came from `-webkit-line-clamp` (applies only to
+    /// `display: -webkit-box` with `-webkit-box-orient: vertical`).
+    pub line_clamp_prefixed: bool,
+    /// `display: -webkit-box` / `-webkit-inline-box` (legacy flexbox).
+    pub webkit_box: bool,
     /// Actual family names in order (e.g. `["Roboto", "Helvetica Neue"]`),
     /// matched against `@font-face` and system fonts before the generic
     /// `font_family` fallback.
@@ -942,6 +947,8 @@ impl ComputedStyle {
             direction: Direction::Ltr,
             tab_size: 8.0,
             line_clamp: None,
+            line_clamp_prefixed: false,
+            webkit_box: false,
             font_family_list: Vec::new(),
             font_variant_small_caps: false,
             object_fit: ObjectFit::Fill,

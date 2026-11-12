@@ -205,6 +205,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 style.line_clamp = None;
             } else if let Some(n) = values::number(c0) {
                 style.line_clamp = if n >= 1.0 { Some(n as u32) } else { None };
+                style.line_clamp_prefixed = name == "-webkit-line-clamp";
             }
         }
         "font-family" => {

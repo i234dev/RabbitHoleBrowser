@@ -1029,14 +1029,33 @@ impl<'a> Layouter<'a> {
         let mut bfc = Bfc::new();
         self.layout_block(c, &inner_cb, cb.y, &mut bfc, mode);
         self.forced_content_height = None;
-        let x = if let Some(l) = l {
+        // With both insets and a definite size, auto margins share the
+        // remaining space (CSS 2.1 §10.3.7 / §10.6.4: centering with
+        // `inset: 0; margin: auto`).
+        let sized_w = !style.width.is_auto() || c.kind == BoxKind::Image;
+        let sized_h = !style.height.is_auto() || c.kind == BoxKind::Image;
+        let x = if let (Some(l), Some(r), true) = (l, r, sized_w) {
+            let free = cb.w - l - r - c.rect.w;
+            match (style.margin.left.is_auto(), style.margin.right.is_auto()) {
+                (true, true) => cb.x + l + (free / 2.0).max(0.0),
+                (true, false) => cb.x + l + free - mr,
+                _ => cb.x + l + ml,
+            }
+        } else if let Some(l) = l {
             cb.x + l + ml
         } else if let Some(r) = r {
             cb.right() - r - mr - c.rect.w
         } else {
             c.static_pos.0 + ml
         };
-        let y = if let Some(t) = t {
+        let y = if let (Some(t), Some(bt), true) = (t, btm, sized_h) {
+            let free = cb.h - t - bt - c.rect.h;
+            match (style.margin.top.is_auto(), style.margin.bottom.is_auto()) {
+                (true, true) => cb.y + t + free / 2.0,
+                (true, false) => cb.y + t + free - mb,
+                _ => cb.y + t + mt,
+            }
+        } else if let Some(t) = t {
             cb.y + t + mt
         } else if let Some(bt) = btm {
             cb.bottom() - bt - mb - c.rect.h

@@ -437,7 +437,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             }
         }
         DisplayItem::Image { rect, src, image, opacity, pixelated } => {
-            let r = rect.translate(dx, dy);
+            let r = snap(rect.translate(dx, dy), canvas);
             if r.intersect(&view).is_empty() {
                 return;
             }
@@ -462,11 +462,11 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             repeat_y,
             opacity,
         } => {
-            let a = area.translate(dx, dy);
+            let a = snap(area.translate(dx, dy), canvas);
             if a.intersect(&view).is_empty() {
                 return;
             }
-            let o = Point { x: origin.x + dx, y: origin.y + dy };
+            let o = if rabbithole_gfx::path::is_identity(&canvas.transform()) { Point { x: (origin.x + dx).round(), y: (origin.y + dy).round() } } else { Point { x: origin.x + dx, y: origin.y + dy } };
             if st.ext {
                 canvas.draw_image_tiled(image, a, o, *tile, *repeat_x, *repeat_y, *opacity);
             } else {

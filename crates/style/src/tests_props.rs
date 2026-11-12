@@ -46,7 +46,8 @@ fn flex_properties() {
     assert_eq!(s.align_self, ItemAlign::FlexEnd);
     assert_eq!((s.align_items, s.justify_items), (ItemAlign::Center, ItemAlign::FlexStart));
     let s = one("display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; -webkit-flex: 1");
-    assert_eq!(s.display, Display::Flex);
+    // A clamped vertical -webkit-box is laid out as a block of lines.
+    assert_eq!(s.display, Display::FlowRoot);
     assert_eq!(s.flex_direction, FlexDirection::Column);
     assert_eq!(s.line_clamp, Some(3));
     assert_eq!(s.flex_grow, 1.0);

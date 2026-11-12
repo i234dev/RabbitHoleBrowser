@@ -501,7 +501,7 @@ fn text_overflow_ellipsis() {
 #[test]
 fn line_clamp_two_lines() {
     let words: Vec<String> = (0..80).map(|i| format!("word{i}")).collect();
-    let html = format!("<div style='width:200px;overflow:hidden;-webkit-line-clamp:2'>{}</div>", words.join(" "));
+    let html = format!("<div style='width:200px;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2'>{}</div>", words.join(" "));
     let fx = Fixture::new(&html, "");
     let t = fx.layout();
     let d = &fx.find(&t, "div")[0];

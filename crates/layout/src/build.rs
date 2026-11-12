@@ -430,21 +430,44 @@ impl<'a> Builder<'a> {
         }
 
         if kind == BoxKind::Inline {
-            // Inline boxes keep their inline-level children as a tree; any
-            // block-level child is hoisted by splitting (simplified: treated
-            // as inline-block so nothing is lost).
-            for c in &mut children {
+            // Inline boxes keep their inline-level children as a tree. A
+            // block-level child splits the inline (CSS 2.1 §9.2.1.1): the
+            // inline content before and after it become separate inline
+            // boxes of the same element and the block becomes a sibling in
+            // the parent, which then wraps the inline runs in anonymous
+            // blocks.
+            let splits = children.iter().any(|c| matches!(c.kind, BoxKind::Block | BoxKind::Table) && c.flow.is_in_flow());
+            if !splits {
+                b.children = children;
+                b.formatting = Formatting::Inline;
+                out.push(b);
+                return;
+            }
+            let mut run: Vec<LayoutBox> = Vec::new();
+            let mut parts: Vec<LayoutBox> = Vec::new();
+            let make_inline = |kids: Vec<LayoutBox>| {
+                let mut part = LayoutBox::new(BoxKind::Inline, b.node, b.style.clone());
+                part.flow = b.flow;
+                part.children = kids;
+                part.formatting = Formatting::Inline;
+                // Several boxes for one element: never reused as one.
+                part.counter_touch = true;
+                part
+            };
+            for c in children {
                 if matches!(c.kind, BoxKind::Block | BoxKind::Table) && c.flow.is_in_flow() {
-                    c.kind = BoxKind::InlineBlock;
-                    c.bfc_root = true;
-                    // A block inside an inline normally takes the full width;
-                    // emulate by marking it with the flag below.
-                    c.attr_size = (Some(-1.0), None);
+                    if !run.is_empty() || parts.is_empty() {
+                        parts.push(make_inline(std::mem::take(&mut run)));
+                    }
+                    let mut c = c;
+                    c.counter_touch = true;
+                    parts.push(c);
+                } else {
+                    run.push(c);
                 }
             }
-            b.children = children;
-            b.formatting = Formatting::Inline;
-            out.push(b);
+            parts.push(make_inline(run));
+            out.extend(parts);
             return;
         }
 

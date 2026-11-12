@@ -616,6 +616,17 @@ fn apply_declarations(
             *w = 0.0;
         }
     }
+    // `-webkit-line-clamp` only clamps a vertical `-webkit-box`, which is
+    // then laid out as a block of lines (like Blink); the standard
+    // `line-clamp` clamps any block container.
+    if style.line_clamp.is_some() {
+        let vertical_box = style.webkit_box && style.flex_direction == FlexDirection::Column;
+        if vertical_box {
+            style.display = if style.display == Display::InlineFlex { Display::InlineBlock } else { Display::FlowRoot };
+        } else if style.line_clamp_prefixed {
+            style.line_clamp = None;
+        }
+    }
     // A unitless line height scales with this element's font size (also
     // when inherited).
     if let Some(n) = style.line_height_number {
@@ -1162,7 +1173,10 @@ fn is_inherited(name: &str) -> bool {
 /// Copy the field(s) named by `prop` from `from` into `to`.
 fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
     match prop {
-        "display" => to.display = from.display,
+        "display" => {
+            to.display = from.display;
+            to.webkit_box = from.webkit_box;
+        }
         "position" => to.position = from.position,
         "float" => to.float = from.float,
         "clear" => to.clear = from.clear,
@@ -1340,7 +1354,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "text-decoration-thickness" => to.text_decoration_thickness = from.text_decoration_thickness,
         "direction" => to.direction = from.direction,
         "tab-size" => to.tab_size = from.tab_size,
-        "-webkit-line-clamp" | "line-clamp" => to.line_clamp = from.line_clamp,
+        "-webkit-line-clamp" | "line-clamp" => {
+            to.line_clamp = from.line_clamp;
+            to.line_clamp_prefixed = from.line_clamp_prefixed;
+        }
         "font-variant" | "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
@@ -1451,8 +1468,15 @@ fn border_width(c: &[Token], ctx: &LengthContext) -> Option<f32> {
             _ => None,
         };
     }
+    let negative_literal = matches!(c, [Token::Dimension(n, _)] | [Token::Number(n)] if *n < 0.0);
+    if negative_literal {
+        return None;
+    }
     match values::parse_length(c)?.resolve(ctx) {
-        Length::Px(v) => Some(v.max(0.0)),
+        // Widths snap to whole device pixels, never below 1px when not
+        // zero (Blink).
+        Length::Px(v) if v > 0.0 && v < 1.0 => Some(1.0),
+        Length::Px(v) => Some((v.max(0.0) + 0.01).floor()),
         _ => None,
     }
 }
@@ -1770,6 +1794,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         "display" => {
             if let Some(d) = display_of(&comps) {
                 style.display = d;
+                style.webkit_box = comps.len() == 1 && values::ident(comps[0]).is_some_and(|k| k == "-webkit-box" || k == "-webkit-inline-box");
             }
         }
         "position" => {
