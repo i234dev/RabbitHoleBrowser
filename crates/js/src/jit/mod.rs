@@ -61,7 +61,7 @@ pub const DEFAULT_THRESHOLD: u32 = 1000;
 pub const LOOP_WEIGHT: u32 = 100;
 /// Loop OSR: a backward jump caught by the interpreter's safe-point tick
 /// in a hot function continues the frame in native code (stage 2 phase 7).
-pub(crate) const LOOP_OSR: bool = false;
+pub(crate) const LOOP_OSR: bool = true;
 /// Loop-free functions shorter than this are entered from interpreted
 /// callers only when they are already running natively (see
 /// `Slot::from_interp`).
