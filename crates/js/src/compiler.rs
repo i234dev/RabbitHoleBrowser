@@ -2103,7 +2103,16 @@ impl Compiler {
                     // return in async generator awaits the value
                     self.emit(Op::Await);
                 }
-                self.emit_exits(0)?;
+                if self.fs_ref().exits.iter().any(|e| matches!(e, ExitCtx::Finally { .. })) {
+                    // Finalizers run at stack depth 0 (a `try` in one
+                    // assumes so): park the return value meanwhile.
+                    let ret = self.hidden_slot("ret");
+                    self.emit(Op::SetReg(ret));
+                    self.emit_exits(0)?;
+                    self.emit(Op::GetReg(ret));
+                } else {
+                    self.emit_exits(0)?;
+                }
                 self.emit(Op::Return);
             }
             StmtKind::Break(label) => {
