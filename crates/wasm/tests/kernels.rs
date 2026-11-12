@@ -92,6 +92,28 @@ fn lazy_local_reads_across_blocks() {
     assert_eq!(call(&store, &inst, "loop", &[]), Val::I32(10));
 }
 
+/// Unbounded recursion (direct and through call_indirect) traps instead of
+/// overflowing the native stack.
+#[test]
+fn runaway_recursion_traps() {
+    let bin = rabbithole_wasm::text::wat_to_binary(
+        r#"(module
+          (type $proc (func))
+          (table funcref (elem $runaway))
+          (func $runaway (export "runaway") (call_indirect (type $proc) (i32.const 0)))
+          (func $direct (export "direct") (call $direct)))"#,
+    )
+    .unwrap();
+    let m = Rc::new(CompiledModule::new(&bin).unwrap());
+    let store = Store::new();
+    let inst = store.instantiate(&mut NoHost, &m, &[]).unwrap();
+    for name in ["direct", "runaway"] {
+        let Some(Extern::Func(f)) = inst.export(name) else { panic!() };
+        let r = store.call(&mut NoHost, f, &[]);
+        assert!(matches!(r, Err(rabbithole_wasm::Trap::StackExhausted)), "{name}: {r:?}");
+    }
+}
+
 #[test]
 fn kernels_match_reference() {
     let (store, inst) = instance();

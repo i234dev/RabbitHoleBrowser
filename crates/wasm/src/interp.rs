@@ -6,6 +6,32 @@ use crate::runtime::*;
 use crate::types::ValType;
 use std::rc::Rc;
 
+#[cfg(feature = "opcount")]
+thread_local! {
+    static OPCOUNT: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(vec![0; 512]);
+}
+
+#[cfg(feature = "opcount")]
+pub(crate) fn count_op(op: Op) {
+    OPCOUNT.with(|c| c.borrow_mut()[op as usize] += 1);
+}
+
+/// Executed instructions per opcode (with the `opcount` feature), most
+/// frequent first.
+#[cfg(feature = "opcount")]
+pub fn op_counts() -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = OPCOUNT.with(|c| {
+        c.borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, &n)| n > 0)
+            .map(|(i, &n)| (format!("{:?}", unsafe { std::mem::transmute::<u16, Op>(i as u16) }), n))
+            .collect()
+    });
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v
+}
+
 /// Back-edges and calls between interrupt polls.
 const FUEL: u32 = 1 << 16;
 
@@ -29,16 +55,25 @@ fn ensure(store: &Store, n: usize) -> Result<*mut u64, Trap> {
     // interpreter keeps raw pointers and refreshes them).
     let v = unsafe { &mut *store.stack.get() };
     if v.len() < n {
-        if n > store.max_stack_slots {
+        // Allocated once at its maximum size (zeroed pages are committed
+        // lazily): native frames keep raw pointers into it.
+        if n > store.max_stack_slots || !v.is_empty() {
             return Err(Trap::StackExhausted);
         }
-        let new = (n.max(v.len() * 2)).clamp(4096, store.max_stack_slots.max(n));
-        v.resize(new, 0);
+        let layout = std::alloc::Layout::array::<u64>(store.max_stack_slots).map_err(|_| Trap::StackExhausted)?;
+        // SAFETY: non-zero size; owned by the Vec with the same layout.
+        unsafe {
+            let p = std::alloc::alloc_zeroed(layout) as *mut u64;
+            if p.is_null() {
+                return Err(Trap::StackExhausted);
+            }
+            *v = Vec::from_raw_parts(p, store.max_stack_slots, store.max_stack_slots);
+        }
     }
     Ok(v.as_mut_ptr())
 }
 
-fn write_val(p: *mut u64, v: Val) {
+pub(crate) fn write_val(p: *mut u64, v: Val) {
     // SAFETY: callers ensured the stack covers the slots written.
     unsafe {
         match v {
@@ -51,7 +86,7 @@ fn write_val(p: *mut u64, v: Val) {
     }
 }
 
-fn read_val(p: *const u64, t: ValType) -> Val {
+pub(crate) fn read_val(p: *const u64, t: ValType) -> Val {
     // SAFETY: as above.
     unsafe {
         if t == ValType::V128 {
@@ -101,7 +136,7 @@ pub fn invoke(store: &Store, host: &mut dyn Host, func: &Rc<FuncInst>, args: &[V
 }
 
 #[inline]
-fn mem0(inst: *const Instance) -> (*mut u8, usize) {
+pub(crate) fn mem0(inst: *const Instance) -> (*mut u8, usize) {
     // SAFETY: instances live as long as the store.
     let inst = unsafe { &*inst };
     match inst.memories.first() {
@@ -125,12 +160,21 @@ fn enter(store: &Store, code: &Code, fp: usize) -> Result<*mut u64, Trap> {
         let regs = sp.add(fp);
         let ps = code.param_slots as usize;
         let ls = code.local_slots as usize;
-        if ls > ps {
+        if ls - ps <= 16 {
+            for k in ps..ls {
+                *regs.add(k) = 0;
+            }
+        } else {
             std::ptr::write_bytes(regs.add(ps), 0, ls - ps);
         }
         let nc = code.consts.len();
-        if nc > 0 {
-            std::ptr::copy_nonoverlapping(code.consts.as_ptr(), regs.add(code.const_base as usize), nc);
+        let cb = regs.add(code.const_base as usize);
+        if nc <= 16 {
+            for (k, &v) in code.consts.iter().enumerate() {
+                *cb.add(k) = v;
+            }
+        } else {
+            std::ptr::copy_nonoverlapping(code.consts.as_ptr(), cb, nc);
         }
         Ok(regs)
     }
@@ -275,18 +319,18 @@ fn effective(mem: &MemInst, addr: u64, offset: u64, size: usize) -> Result<usize
     Ok(ea as usize)
 }
 
-#[allow(clippy::cognitive_complexity, unused_unsafe)]
-fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, base: usize) -> Result<(), Trap> {
-    let mut frames: Vec<Frame> = Vec::new();
-    let mut inst: *const Instance = Rc::as_ptr(&store.instance(inst_idx));
-    let mut code: *const Code = Rc::as_ptr(code_rc);
-    let mut fp = base;
-    let mut pc: usize = 0;
-    // SAFETY: code and instances are owned by the store for its lifetime.
-    let mut regs = enter(store, unsafe { &*code }, fp)?;
-    let (mut mem_p, mut mem_len) = mem0(inst);
-    let mut fuel = FUEL;
 
+/// Execute one instruction that does not transfer control (everything
+/// but branches, calls, returns and throws). Shared by the interpreter
+/// loop and native code (`jit.rs`) for the instructions it does not
+/// compile.
+///
+/// # Safety
+/// `regs` must be the frame of `code`, `inst` its instance, and
+/// `mem_p`/`mem_len` the current memory 0 of `inst`.
+#[inline(always)]
+#[allow(unused_unsafe, clippy::too_many_arguments)]
+pub(crate) unsafe fn exec_simple(store: &Store, inst: *const Instance, code: *const Code, i: Instr, regs: *mut u64, mem_p: &mut *mut u8, mem_len: &mut usize) -> Result<(), Trap> {
     macro_rules! r {
         ($s:expr) => {
             unsafe { *regs.add($s as usize) }
@@ -318,31 +362,11 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
             ($e) as u64
         };
     }
-    macro_rules! poll {
-        () => {{
-            fuel -= 1;
-            if fuel == 0 {
-                fuel = FUEL;
-                if host.check_interrupt() {
-                    return Err(Trap::Interrupted);
-                }
-            }
-        }};
-    }
-    macro_rules! jump {
-        ($t:expr) => {{
-            let t = $t as usize;
-            if t < pc {
-                poll!();
-            }
-            pc = t;
-        }};
-    }
     macro_rules! ea {
         ($i:expr, $n:expr) => {{
             let ea = r32!($i.b) as usize + $i.c as usize;
-            if ea + $n > mem_len {
-                break Err(Trap::MemoryOutOfBounds);
+            if ea + $n > *mem_len {
+                return Err(Trap::MemoryOutOfBounds);
             }
             ea
         }};
@@ -350,8 +374,8 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
     macro_rules! sea {
         ($i:expr, $n:expr) => {{
             let ea = r32!($i.a) as usize + $i.c as usize;
-            if ea + $n > mem_len {
-                break Err(Trap::MemoryOutOfBounds);
+            if ea + $n > *mem_len {
+                return Err(Trap::MemoryOutOfBounds);
             }
             ea
         }};
@@ -360,286 +384,11 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
         ($e:expr) => {
             match $e {
                 Ok(v) => v,
-                Err(t) => break Err(t),
+                Err(t) => return Err(t),
             }
         };
     }
-
-    // The result of the loop: Ok on return from the entry frame, Err for a
-    // trap or an exception to unwind (handled below the loop).
-    loop {
-        let res: Result<(), Trap> = loop {
-            // SAFETY: translation guarantees pc and all slots are in range.
-            let i = unsafe { *(&*code).instrs.get_unchecked(pc) };
-            pc += 1;
-            match i.op {
-                Op::Unreachable => break Err(Trap::Unreachable),
-                Op::Br => jump!(i.c),
-                Op::BrIfNez => {
-                    if r32!(i.a) != 0 {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrIfEqz => {
-                    if r32!(i.a) == 0 {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrTable => {
-                    let idx = (r32!(i.a)).min(i.c - 1);
-                    let t = unsafe { *(&*code).br_tables.get_unchecked((i.b + idx) as usize) };
-                    jump!(t);
-                }
-                Op::BrI32Eq => {
-                    if r32!(i.a) == r32!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32Ne => {
-                    if r32!(i.a) != r32!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32LtS => {
-                    if (r32!(i.a) as i32) < (r32!(i.b) as i32) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32LtU => {
-                    if r32!(i.a) < r32!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32GtS => {
-                    if (r32!(i.a) as i32) > (r32!(i.b) as i32) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32GtU => {
-                    if r32!(i.a) > r32!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32LeS => {
-                    if (r32!(i.a) as i32) <= (r32!(i.b) as i32) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32LeU => {
-                    if r32!(i.a) <= r32!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32GeS => {
-                    if (r32!(i.a) as i32) >= (r32!(i.b) as i32) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI32GeU => {
-                    if r32!(i.a) >= r32!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64Eq => {
-                    if r!(i.a) == r!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64Ne => {
-                    if r!(i.a) != r!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64LtS => {
-                    if (r!(i.a) as i64) < (r!(i.b) as i64) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64LtU => {
-                    if r!(i.a) < r!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64GtS => {
-                    if (r!(i.a) as i64) > (r!(i.b) as i64) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64GtU => {
-                    if r!(i.a) > r!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64LeS => {
-                    if (r!(i.a) as i64) <= (r!(i.b) as i64) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64LeU => {
-                    if r!(i.a) <= r!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64GeS => {
-                    if (r!(i.a) as i64) >= (r!(i.b) as i64) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64GeU => {
-                    if r!(i.a) >= r!(i.b) {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64Eqz | Op::BrOnNull => {
-                    if r!(i.a) == 0 {
-                        jump!(i.c)
-                    }
-                }
-                Op::BrI64Nez | Op::BrOnNonNull => {
-                    if r!(i.a) != 0 {
-                        jump!(i.c)
-                    }
-                }
-                Op::Return => {
-                    store.depth.set(store.depth.get() - 1);
-                    match frames.pop() {
-                        None => return Ok(()),
-                        Some(f) => {
-                            code = f.code;
-                            pc = f.pc;
-                            fp = f.fp;
-                            regs = unsafe { stack_ptr(store).add(fp) };
-                            if f.inst != inst {
-                                inst = f.inst;
-                                (mem_p, mem_len) = mem0(inst);
-                            }
-                        }
-                    }
-                }
-                Op::Call | Op::CallIndirect | Op::CallRef | Op::ReturnCall | Op::ReturnCallIndirect | Op::ReturnCallRef => {
-                    poll!();
-                    let ins = unsafe { &*inst };
-                    let f: Rc<FuncInst> = match i.op {
-                        Op::Call | Op::ReturnCall => ins.funcs[i.b as usize].clone(),
-                        Op::CallIndirect | Op::ReturnCallIndirect => {
-                            let (canon, ps) = unsafe { (&*code).call_types[i.c as usize] };
-                            let t = &ins.tables[i.b as usize];
-                            let raw = r!(i.a + ps);
-                            let idx = if t.ty.table64 { raw } else { raw as u32 as u64 };
-                            let e = {
-                                let el = t.elems.borrow();
-                                if idx >= el.len() as u64 {
-                                    break Err(Trap::UndefinedElement);
-                                }
-                                el[idx as usize]
-                            };
-                            if e == 0 {
-                                break Err(Trap::UninitializedElement);
-                            }
-                            let f = store.func((e - 1) as u32);
-                            if f.ty != canon && !crate::types::canonical_subtype(f.ty, canon) {
-                                break Err(Trap::IndirectCallTypeMismatch);
-                            }
-                            f
-                        }
-                        _ => {
-                            let (_, ps) = unsafe { (&*code).call_types[i.c as usize] };
-                            let e = r!(i.a + ps);
-                            if e == 0 {
-                                break Err(Trap::NullFunctionReference);
-                            }
-                            store.func((e - 1) as u32)
-                        }
-                    };
-                    let tail = matches!(i.op, Op::ReturnCall | Op::ReturnCallIndirect | Op::ReturnCallRef);
-                    let mut new_fp = fp + i.a as usize;
-                    if tail {
-                        // Move the arguments down to the frame base.
-                        let n = f.ft.param_slots() as usize;
-                        unsafe { std::ptr::copy(regs.add(i.a as usize), regs, n) };
-                        new_fp = fp;
-                    }
-                    match &f.kind {
-                        FuncKind::Wasm { instance, code: c } => {
-                            if tail {
-                                store.depth.set(store.depth.get() - 1);
-                            } else {
-                                frames.push(Frame { code, pc, fp, inst });
-                            }
-                            if *instance != unsafe { (&*inst).index } {
-                                inst = Rc::as_ptr(&store.instance(*instance));
-                                (mem_p, mem_len) = mem0(inst);
-                            }
-                            code = Rc::as_ptr(c);
-                            fp = new_fp;
-                            pc = 0;
-                            regs = match enter(store, unsafe { &*code }, fp) {
-                                Ok(r) => r,
-                                Err(t) => break Err(t),
-                            };
-                        }
-                        FuncKind::Host { .. } => {
-                            let ft = &f.ft;
-                            let mut args = Vec::with_capacity(ft.params.len());
-                            let mut off = new_fp;
-                            let sp = stack_ptr(store);
-                            for &t in ft.params.iter() {
-                                args.push(read_val(unsafe { sp.add(off) }, t));
-                                off += t.slots() as usize;
-                            }
-                            let saved_top = store.stack_top.get();
-                            store.stack_top.set(fp + unsafe { (&*code).frame_slots } as usize + 2);
-                            store.depth.set(store.depth.get() + 1);
-                            let res = host.call_host(store, &f, &args);
-                            store.depth.set(store.depth.get() - 1);
-                            store.stack_top.set(saved_top);
-                            regs = unsafe { stack_ptr(store).add(fp) };
-                            (mem_p, mem_len) = mem0(inst);
-                            let vals = match res {
-                                Ok(v) => v,
-                                Err(t) => break Err(t),
-                            };
-                            let sp = stack_ptr(store);
-                            let mut off = new_fp;
-                            for (v, &t) in vals.iter().zip(ft.results.iter()) {
-                                write_val(unsafe { sp.add(off) }, *v);
-                                off += t.slots() as usize;
-                            }
-                            if tail {
-                                // Return from the current frame.
-                                store.depth.set(store.depth.get() - 1);
-                                match frames.pop() {
-                                    None => return Ok(()),
-                                    Some(fr) => {
-                                        code = fr.code;
-                                        pc = fr.pc;
-                                        fp = fr.fp;
-                                        regs = unsafe { stack_ptr(store).add(fp) };
-                                        if fr.inst != inst {
-                                            inst = fr.inst;
-                                            (mem_p, mem_len) = mem0(inst);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Op::Throw => {
-                    let ins = unsafe { &*inst };
-                    let tag = ins.tags[i.b as usize].clone();
-                    let n = tag.ft.param_slots() as usize;
-                    let payload: Vec<u64> = (0..n).map(|k| r!(i.a as usize + k)).collect();
-                    let e = store.new_exn(tag, payload);
-                    break Err(Trap::Exception(e));
-                }
-                Op::ThrowRef | Op::Rethrow => {
-                    let e = r!(i.a);
-                    if e == 0 {
-                        break Err(Trap::NullReference);
-                    }
-                    break Err(Trap::Exception((e - 1) as u32));
-                }
+    match i.op {
                 Op::Copy => w!(i.a, r!(i.b)),
                 Op::Copy2 => {
                     let (x, y) = (r!(i.b), r!(i.b + 1));
@@ -679,71 +428,71 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                 }
                 Op::I32Load => {
                     let ea = ea!(i, 4);
-                    w!(i.a, unsafe { ld::<u32>(mem_p, ea) } as u64)
+                    w!(i.a, unsafe { ld::<u32>(*mem_p, ea) } as u64)
                 }
                 Op::I64Load => {
                     let ea = ea!(i, 8);
-                    w!(i.a, unsafe { ld::<u64>(mem_p, ea) })
+                    w!(i.a, unsafe { ld::<u64>(*mem_p, ea) })
                 }
                 Op::I32Load8S => {
                     let ea = ea!(i, 1);
-                    w!(i.a, unsafe { ld::<i8>(mem_p, ea) } as i32 as u32 as u64)
+                    w!(i.a, unsafe { ld::<i8>(*mem_p, ea) } as i32 as u32 as u64)
                 }
                 Op::I32Load8U => {
                     let ea = ea!(i, 1);
-                    w!(i.a, unsafe { ld::<u8>(mem_p, ea) } as u64)
+                    w!(i.a, unsafe { ld::<u8>(*mem_p, ea) } as u64)
                 }
                 Op::I32Load16S => {
                     let ea = ea!(i, 2);
-                    w!(i.a, unsafe { ld::<i16>(mem_p, ea) } as i32 as u32 as u64)
+                    w!(i.a, unsafe { ld::<i16>(*mem_p, ea) } as i32 as u32 as u64)
                 }
                 Op::I32Load16U => {
                     let ea = ea!(i, 2);
-                    w!(i.a, unsafe { ld::<u16>(mem_p, ea) } as u64)
+                    w!(i.a, unsafe { ld::<u16>(*mem_p, ea) } as u64)
                 }
                 Op::I64Load8S => {
                     let ea = ea!(i, 1);
-                    w!(i.a, unsafe { ld::<i8>(mem_p, ea) } as i64 as u64)
+                    w!(i.a, unsafe { ld::<i8>(*mem_p, ea) } as i64 as u64)
                 }
                 Op::I64Load8U => {
                     let ea = ea!(i, 1);
-                    w!(i.a, unsafe { ld::<u8>(mem_p, ea) } as u64)
+                    w!(i.a, unsafe { ld::<u8>(*mem_p, ea) } as u64)
                 }
                 Op::I64Load16S => {
                     let ea = ea!(i, 2);
-                    w!(i.a, unsafe { ld::<i16>(mem_p, ea) } as i64 as u64)
+                    w!(i.a, unsafe { ld::<i16>(*mem_p, ea) } as i64 as u64)
                 }
                 Op::I64Load16U => {
                     let ea = ea!(i, 2);
-                    w!(i.a, unsafe { ld::<u16>(mem_p, ea) } as u64)
+                    w!(i.a, unsafe { ld::<u16>(*mem_p, ea) } as u64)
                 }
                 Op::I64Load32S => {
                     let ea = ea!(i, 4);
-                    w!(i.a, unsafe { ld::<i32>(mem_p, ea) } as i64 as u64)
+                    w!(i.a, unsafe { ld::<i32>(*mem_p, ea) } as i64 as u64)
                 }
                 Op::I64Load32U => {
                     let ea = ea!(i, 4);
-                    w!(i.a, unsafe { ld::<u32>(mem_p, ea) } as u64)
+                    w!(i.a, unsafe { ld::<u32>(*mem_p, ea) } as u64)
                 }
                 Op::I32Store => {
                     let ea = sea!(i, 4);
-                    unsafe { st::<u32>(mem_p, ea, r32!(i.b)) }
+                    unsafe { st::<u32>(*mem_p, ea, r32!(i.b)) }
                 }
                 Op::I64Store => {
                     let ea = sea!(i, 8);
-                    unsafe { st::<u64>(mem_p, ea, r!(i.b)) }
+                    unsafe { st::<u64>(*mem_p, ea, r!(i.b)) }
                 }
                 Op::I32Store8 => {
                     let ea = sea!(i, 1);
-                    unsafe { st::<u8>(mem_p, ea, r!(i.b) as u8) }
+                    unsafe { st::<u8>(*mem_p, ea, r!(i.b) as u8) }
                 }
                 Op::I32Store16 => {
                     let ea = sea!(i, 2);
-                    unsafe { st::<u16>(mem_p, ea, r!(i.b) as u16) }
+                    unsafe { st::<u16>(*mem_p, ea, r!(i.b) as u16) }
                 }
                 Op::I64Store32 => {
                     let ea = sea!(i, 4);
-                    unsafe { st::<u32>(mem_p, ea, r!(i.b) as u32) }
+                    unsafe { st::<u32>(*mem_p, ea, r!(i.b) as u32) }
                 }
                 Op::MemLoad => {
                     let ma = unsafe { (&*code).memargs[i.c as usize] };
@@ -810,7 +559,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                         }
                     };
                     w!(i.a, res);
-                    (mem_p, mem_len) = mem0(inst);
+                    (*mem_p, *mem_len) = mem0(inst);
                 }
                 Op::MemoryFill => {
                     let mem = unsafe { &(&*inst).memories[i.b as usize] };
@@ -820,7 +569,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                     let n = if m64 { r!(i.a + 2) } else { r32!(i.a + 2) as u64 };
                     let (p, len) = mem.raw();
                     if d.checked_add(n).is_none_or(|e| e > len as u64) {
-                        break Err(Trap::MemoryOutOfBounds);
+                        return Err(Trap::MemoryOutOfBounds);
                     }
                     unsafe { std::ptr::write_bytes(p.add(d as usize), v, n as usize) };
                 }
@@ -833,7 +582,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                     let (dp, dl) = dm.raw();
                     let (sp, sl) = sm.raw();
                     if d.checked_add(n).is_none_or(|e| e > dl as u64) || s.checked_add(n).is_none_or(|e| e > sl as u64) {
-                        break Err(Trap::MemoryOutOfBounds);
+                        return Err(Trap::MemoryOutOfBounds);
                     }
                     unsafe { std::ptr::copy(sp.add(s as usize), dp.add(d as usize), n as usize) };
                 }
@@ -846,7 +595,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                     let data = ins.data_bytes(i.b);
                     let (p, len) = mem.raw();
                     if d.checked_add(n).is_none_or(|e| e > len as u64) || s + n > data.len() as u64 {
-                        break Err(Trap::MemoryOutOfBounds);
+                        return Err(Trap::MemoryOutOfBounds);
                     }
                     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(s as usize), p.add(d as usize), n as usize) };
                 }
@@ -859,7 +608,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                     let idx = if t.ty.table64 { r!(i.b) } else { r32!(i.b) as u64 };
                     let el = t.elems.borrow();
                     if idx >= el.len() as u64 {
-                        break Err(Trap::TableOutOfBounds);
+                        return Err(Trap::TableOutOfBounds);
                     }
                     let v = el[idx as usize];
                     drop(el);
@@ -870,7 +619,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                     let idx = if t.ty.table64 { r!(i.a) } else { r32!(i.a) as u64 };
                     let mut el = t.elems.borrow_mut();
                     if idx >= el.len() as u64 {
-                        break Err(Trap::TableOutOfBounds);
+                        return Err(Trap::TableOutOfBounds);
                     }
                     el[idx as usize] = r!(i.b);
                 }
@@ -902,7 +651,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                     let n = if t64 { r!(i.a + 2) } else { r32!(i.a + 2) as u64 };
                     let mut el = t.elems.borrow_mut();
                     if d.checked_add(n).is_none_or(|e| e > el.len() as u64) {
-                        break Err(Trap::TableOutOfBounds);
+                        return Err(Trap::TableOutOfBounds);
                     }
                     el[d as usize..(d + n) as usize].fill(v);
                 }
@@ -917,14 +666,14 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                         let mut el = dt.elems.borrow_mut();
                         let len = el.len() as u64;
                         if d.checked_add(n).is_none_or(|e| e > len) || s.checked_add(n).is_none_or(|e| e > len) {
-                            break Err(Trap::TableOutOfBounds);
+                            return Err(Trap::TableOutOfBounds);
                         }
                         el.copy_within(s as usize..(s + n) as usize, d as usize);
                     } else {
                         let src = stt.elems.borrow();
                         let mut dst = dt.elems.borrow_mut();
                         if d.checked_add(n).is_none_or(|e| e > dst.len() as u64) || s.checked_add(n).is_none_or(|e| e > src.len() as u64) {
-                            break Err(Trap::TableOutOfBounds);
+                            return Err(Trap::TableOutOfBounds);
                         }
                         dst[d as usize..(d + n) as usize].copy_from_slice(&src[s as usize..(s + n) as usize]);
                     }
@@ -938,7 +687,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                     let seg = ins.elems.borrow()[i.b as usize].clone();
                     let mut el = t.elems.borrow_mut();
                     if d.checked_add(n).is_none_or(|e| e > el.len() as u64) || s + n > seg.len() as u64 {
-                        break Err(Trap::TableOutOfBounds);
+                        return Err(Trap::TableOutOfBounds);
                     }
                     el[d as usize..(d + n) as usize].copy_from_slice(&seg[s as usize..(s + n) as usize]);
                 }
@@ -953,7 +702,7 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                 }
                 Op::RefAsNonNull => {
                     if r!(i.a) == 0 {
-                        break Err(Trap::NullReference);
+                        return Err(Trap::NullReference);
                     }
                 }
                 Op::RefEq => w!(i.a, b2!(r!(i.b) == r!(i.c))),
@@ -979,31 +728,31 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                 Op::I32DivS => {
                     let (x, y) = (r32!(i.b) as i32, r32!(i.c) as i32);
                     if y == 0 {
-                        break Err(Trap::IntegerDivideByZero);
+                        return Err(Trap::IntegerDivideByZero);
                     }
                     if x == i32::MIN && y == -1 {
-                        break Err(Trap::IntegerOverflow);
+                        return Err(Trap::IntegerOverflow);
                     }
                     w!(i.a, (x / y) as u32 as u64)
                 }
                 Op::I32DivU => {
                     let (x, y) = (r32!(i.b), r32!(i.c));
                     if y == 0 {
-                        break Err(Trap::IntegerDivideByZero);
+                        return Err(Trap::IntegerDivideByZero);
                     }
                     w!(i.a, (x / y) as u64)
                 }
                 Op::I32RemS => {
                     let (x, y) = (r32!(i.b) as i32, r32!(i.c) as i32);
                     if y == 0 {
-                        break Err(Trap::IntegerDivideByZero);
+                        return Err(Trap::IntegerDivideByZero);
                     }
                     w!(i.a, x.wrapping_rem(y) as u32 as u64)
                 }
                 Op::I32RemU => {
                     let (x, y) = (r32!(i.b), r32!(i.c));
                     if y == 0 {
-                        break Err(Trap::IntegerDivideByZero);
+                        return Err(Trap::IntegerDivideByZero);
                     }
                     w!(i.a, (x % y) as u64)
                 }
@@ -1037,31 +786,31 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                 Op::I64DivS => {
                     let (x, y) = (r!(i.b) as i64, r!(i.c) as i64);
                     if y == 0 {
-                        break Err(Trap::IntegerDivideByZero);
+                        return Err(Trap::IntegerDivideByZero);
                     }
                     if x == i64::MIN && y == -1 {
-                        break Err(Trap::IntegerOverflow);
+                        return Err(Trap::IntegerOverflow);
                     }
                     w!(i.a, (x / y) as u64)
                 }
                 Op::I64DivU => {
                     let (x, y) = (r!(i.b), r!(i.c));
                     if y == 0 {
-                        break Err(Trap::IntegerDivideByZero);
+                        return Err(Trap::IntegerDivideByZero);
                     }
                     w!(i.a, x / y)
                 }
                 Op::I64RemS => {
                     let (x, y) = (r!(i.b) as i64, r!(i.c) as i64);
                     if y == 0 {
-                        break Err(Trap::IntegerDivideByZero);
+                        return Err(Trap::IntegerDivideByZero);
                     }
                     w!(i.a, x.wrapping_rem(y) as u64)
                 }
                 Op::I64RemU => {
                     let (x, y) = (r!(i.b), r!(i.c));
                     if y == 0 {
-                        break Err(Trap::IntegerDivideByZero);
+                        return Err(Trap::IntegerDivideByZero);
                     }
                     w!(i.a, x % y)
                 }
@@ -1193,11 +942,439 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                 Op::Atomic => {
                     try_trap!(unsafe { crate::atomics::exec(&*inst, &*code, i, regs) });
                 }
+        _ => unreachable!("control instruction in exec_simple"),
+    }
+    Ok(())
+}
+
+/// Run compiled function `n` (of instance `inst`) with its frame at `fp`.
+///
+/// # Safety
+/// The frame must hold the arguments of the function.
+unsafe fn run_native(store: &Store, host: &mut dyn Host, inst: *const Instance, n: &crate::jit::Compiled, fp: usize) -> Result<(), Trap> {
+    let d = store.depth.get();
+    if d >= store.max_depth {
+        return Err(Trap::StackExhausted);
+    }
+    let mut host_ref: &mut dyn Host = host;
+    let here = &host_ref as *const _ as usize;
+    let outer = store.native_limit.get() == 0;
+    if !outer && here < store.native_limit.get() {
+        // Nested through helpers / the interpreter: the native stack
+        // budget is spent.
+        return Err(Trap::StackExhausted);
+    }
+    if outer {
+        let floor = store.native_floor.get();
+        let floor = if floor == 0 { 0 } else { floor + 64 * 1024 };
+        if here <= floor {
+            return Err(Trap::StackExhausted);
+        }
+        store.native_limit.set(here.saturating_sub(store.native_stack_budget).max(floor).max(1));
+    }
+    let stack = &*store.stack.get();
+    let (mem, len) = mem0(inst);
+    let mut ctx = crate::jit::JitCtx {
+        regs: std::ptr::null_mut(),
+        mem,
+        mem_len: len as u64,
+        globals: (&*inst).global_ptrs.as_ptr(),
+        fuel: FUEL as u64,
+        entries: (&*inst).native.as_ptr(),
+        store,
+        inst,
+        host: &mut host_ref as *mut &mut dyn Host as *mut u8,
+        trap: std::ptr::null_mut(),
+        depth: store.depth.as_ptr(),
+        max_depth: store.max_depth as u64,
+        stack_end: stack.as_ptr().add(stack.len()) as *mut u64,
+        native_limit: store.native_limit.get() as u64,
+        fuel_reset: FUEL as u64,
+    };
+    store.depth.set(d + 1);
+    let r = crate::jit::call(&mut ctx, stack_ptr(store).add(fp), n.entry());
+    store.depth.set(d);
+    if outer {
+        store.native_limit.set(0);
+    }
+    r
+}
+
+/// Run a wasm function with its frame at `base` (interpreted or native).
+pub(crate) fn run_at(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, base: usize) -> Result<(), Trap> {
+    run(store, host, inst_idx, code_rc, base)
+}
+
+#[allow(clippy::cognitive_complexity, unused_unsafe)]
+fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, base: usize) -> Result<(), Trap> {
+    if let Some(n) = crate::jit::compiled(code_rc) {
+        let inst = Rc::as_ptr(&store.instance(inst_idx));
+        ensure(store, base + code_rc.frame_slots as usize + 2)?;
+        // SAFETY: the frame holds the arguments.
+        return unsafe { run_native(store, host, inst, n, base) };
+    }
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut inst: *const Instance = Rc::as_ptr(&store.instance(inst_idx));
+    let mut code: *const Code = Rc::as_ptr(code_rc);
+    let mut fp = base;
+    let mut pc: usize = 0;
+    // SAFETY: code and instances are owned by the store for its lifetime.
+    let mut regs = enter(store, unsafe { &*code }, fp)?;
+    let (mut mem_p, mut mem_len) = mem0(inst);
+    let mut fuel = FUEL;
+
+    macro_rules! r {
+        ($s:expr) => {
+            unsafe { *regs.add($s as usize) }
+        };
+    }
+    macro_rules! w {
+        ($s:expr, $v:expr) => {{
+            let v: u64 = $v;
+            unsafe { *regs.add($s as usize) = v }
+        }};
+    }
+    macro_rules! r32 {
+        ($s:expr) => {
+            r!($s) as u32
+        };
+    }
+    macro_rules! poll {
+        () => {{
+            fuel -= 1;
+            if fuel == 0 {
+                fuel = FUEL;
+                if host.check_interrupt() {
+                    return Err(Trap::Interrupted);
+                }
+            }
+        }};
+    }
+    macro_rules! jump {
+        ($t:expr) => {{
+            let t = $t as usize;
+            if t < pc {
+                poll!();
+            }
+            pc = t;
+        }};
+    }
+
+    // The result of the loop: Ok on return from the entry frame, Err for a
+    // trap or an exception to unwind (handled below the loop).
+    loop {
+        let res: Result<(), Trap> = loop {
+            // SAFETY: translation guarantees pc and all slots are in range.
+            let i = unsafe { *(&*code).instrs.get_unchecked(pc) };
+            pc += 1;
+            #[cfg(feature = "opcount")]
+            OPCOUNT.with(|c| c.borrow_mut()[i.op as usize] += 1);
+            match i.op {
+                Op::Unreachable => break Err(Trap::Unreachable),
+                Op::Br => jump!(i.c),
+                Op::BrIfNez => {
+                    if r32!(i.a) != 0 {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrIfEqz => {
+                    if r32!(i.a) == 0 {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrTable => {
+                    let idx = (r32!(i.a)).min(i.c - 1);
+                    let t = unsafe { *(&*code).br_tables.get_unchecked((i.b + idx) as usize) };
+                    jump!(t);
+                }
+                Op::BrI32Eq => {
+                    if r32!(i.a) == r32!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32Ne => {
+                    if r32!(i.a) != r32!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32LtS => {
+                    if (r32!(i.a) as i32) < (r32!(i.b) as i32) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32LtU => {
+                    if r32!(i.a) < r32!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32GtS => {
+                    if (r32!(i.a) as i32) > (r32!(i.b) as i32) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32GtU => {
+                    if r32!(i.a) > r32!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32LeS => {
+                    if (r32!(i.a) as i32) <= (r32!(i.b) as i32) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32LeU => {
+                    if r32!(i.a) <= r32!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32GeS => {
+                    if (r32!(i.a) as i32) >= (r32!(i.b) as i32) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI32GeU => {
+                    if r32!(i.a) >= r32!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64Eq => {
+                    if r!(i.a) == r!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64Ne => {
+                    if r!(i.a) != r!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64LtS => {
+                    if (r!(i.a) as i64) < (r!(i.b) as i64) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64LtU => {
+                    if r!(i.a) < r!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64GtS => {
+                    if (r!(i.a) as i64) > (r!(i.b) as i64) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64GtU => {
+                    if r!(i.a) > r!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64LeS => {
+                    if (r!(i.a) as i64) <= (r!(i.b) as i64) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64LeU => {
+                    if r!(i.a) <= r!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64GeS => {
+                    if (r!(i.a) as i64) >= (r!(i.b) as i64) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64GeU => {
+                    if r!(i.a) >= r!(i.b) {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64Eqz | Op::BrOnNull => {
+                    if r!(i.a) == 0 {
+                        jump!(i.c)
+                    }
+                }
+                Op::BrI64Nez | Op::BrOnNonNull => {
+                    if r!(i.a) != 0 {
+                        jump!(i.c)
+                    }
+                }
+                Op::Return | Op::Return1 => {
+                    if i.op == Op::Return1 {
+                        w!(0, r!(i.a));
+                    }
+                    store.depth.set(store.depth.get() - 1);
+                    match frames.pop() {
+                        None => return Ok(()),
+                        Some(f) => {
+                            code = f.code;
+                            pc = f.pc;
+                            fp = f.fp;
+                            regs = unsafe { stack_ptr(store).add(fp) };
+                            if f.inst != inst {
+                                inst = f.inst;
+                                (mem_p, mem_len) = mem0(inst);
+                            }
+                        }
+                    }
+                }
+                Op::Call | Op::CallArgs | Op::CallIndirect | Op::CallRef | Op::ReturnCall | Op::ReturnCallIndirect | Op::ReturnCallRef => {
+                    poll!();
+                    let ins = unsafe { &*inst };
+                    if i.op == Op::CallArgs {
+                        let c = unsafe { &*code };
+                        let srcs = unsafe { c.arg_lists.get_unchecked(i.c as usize..i.c as usize + i.x as usize) };
+                        for (k, &s) in srcs.iter().enumerate() {
+                            unsafe { *regs.add(i.a as usize + k) = *regs.add(s as usize) };
+                        }
+                    }
+                    // Functions live as long as the store: no reference
+                    // count traffic per call.
+                    let f: &FuncInst = match i.op {
+                        Op::Call | Op::CallArgs | Op::ReturnCall => unsafe { &*Rc::as_ptr(ins.funcs.get_unchecked(i.b as usize)) },
+                        Op::CallIndirect | Op::ReturnCallIndirect => {
+                            let (canon, ps) = unsafe { (&*code).call_types[i.c as usize] };
+                            let t = &ins.tables[i.b as usize];
+                            let raw = r!(i.a + ps);
+                            let idx = if t.ty.table64 { raw } else { raw as u32 as u64 };
+                            let e = {
+                                let el = t.elems.borrow();
+                                if idx >= el.len() as u64 {
+                                    break Err(Trap::UndefinedElement);
+                                }
+                                el[idx as usize]
+                            };
+                            if e == 0 {
+                                break Err(Trap::UninitializedElement);
+                            }
+                            let f = store.func_ref((e - 1) as u32);
+                            if f.ty != canon && !crate::types::canonical_subtype(f.ty, canon) {
+                                break Err(Trap::IndirectCallTypeMismatch);
+                            }
+                            f
+                        }
+                        _ => {
+                            let (_, ps) = unsafe { (&*code).call_types[i.c as usize] };
+                            let e = r!(i.a + ps);
+                            if e == 0 {
+                                break Err(Trap::NullFunctionReference);
+                            }
+                            store.func_ref((e - 1) as u32)
+                        }
+                    };
+                    let tail = matches!(i.op, Op::ReturnCall | Op::ReturnCallIndirect | Op::ReturnCallRef);
+                    let mut new_fp = fp + i.a as usize;
+                    if tail {
+                        // Move the arguments down to the frame base.
+                        let n = f.ft.param_slots() as usize;
+                        unsafe { std::ptr::copy(regs.add(i.a as usize), regs, n) };
+                        new_fp = fp;
+                    }
+                    match &f.kind {
+                        FuncKind::Wasm { instance, code: c } if !tail && crate::jit::compiled(c).is_some() => {
+                            let n = crate::jit::compiled(c).unwrap();
+                            let ci = if *instance == unsafe { (&*inst).index } { inst } else { Rc::as_ptr(&store.instance(*instance)) };
+                            if let Err(t) = ensure(store, new_fp + c.frame_slots as usize + 2) {
+                                break Err(t);
+                            }
+                            // SAFETY: the arguments are at the call base.
+                            let r = unsafe { run_native(store, host, ci, n, new_fp) };
+                            regs = unsafe { stack_ptr(store).add(fp) };
+                            (mem_p, mem_len) = mem0(inst);
+                            if let Err(t) = r {
+                                break Err(t);
+                            }
+                        }
+                        FuncKind::Wasm { instance, code: c } => {
+                            if tail {
+                                store.depth.set(store.depth.get() - 1);
+                            } else {
+                                frames.push(Frame { code, pc, fp, inst });
+                            }
+                            if *instance != unsafe { (&*inst).index } {
+                                inst = Rc::as_ptr(&store.instance(*instance));
+                                (mem_p, mem_len) = mem0(inst);
+                            }
+                            code = Rc::as_ptr(c);
+                            fp = new_fp;
+                            pc = 0;
+                            regs = match enter(store, unsafe { &*code }, fp) {
+                                Ok(r) => r,
+                                Err(t) => break Err(t),
+                            };
+                        }
+                        FuncKind::Host { .. } => {
+                            let ft = &f.ft;
+                            let mut args = Vec::with_capacity(ft.params.len());
+                            let mut off = new_fp;
+                            let sp = stack_ptr(store);
+                            for &t in ft.params.iter() {
+                                args.push(read_val(unsafe { sp.add(off) }, t));
+                                off += t.slots() as usize;
+                            }
+                            let saved_top = store.stack_top.get();
+                            store.stack_top.set(fp + unsafe { (&*code).frame_slots } as usize + 2);
+                            store.depth.set(store.depth.get() + 1);
+                            let fr = store.func((*f).addr);
+                            let res = host.call_host(store, &fr, &args);
+                            store.depth.set(store.depth.get() - 1);
+                            store.stack_top.set(saved_top);
+                            regs = unsafe { stack_ptr(store).add(fp) };
+                            (mem_p, mem_len) = mem0(inst);
+                            let vals = match res {
+                                Ok(v) => v,
+                                Err(t) => break Err(t),
+                            };
+                            let sp = stack_ptr(store);
+                            let mut off = new_fp;
+                            for (v, &t) in vals.iter().zip(ft.results.iter()) {
+                                write_val(unsafe { sp.add(off) }, *v);
+                                off += t.slots() as usize;
+                            }
+                            if tail {
+                                // Return from the current frame.
+                                store.depth.set(store.depth.get() - 1);
+                                match frames.pop() {
+                                    None => return Ok(()),
+                                    Some(fr) => {
+                                        code = fr.code;
+                                        pc = fr.pc;
+                                        fp = fr.fp;
+                                        regs = unsafe { stack_ptr(store).add(fp) };
+                                        if fr.inst != inst {
+                                            inst = fr.inst;
+                                            (mem_p, mem_len) = mem0(inst);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Op::Throw => {
+                    let ins = unsafe { &*inst };
+                    let tag = ins.tags[i.b as usize].clone();
+                    let n = tag.ft.param_slots() as usize;
+                    let payload: Vec<u64> = (0..n).map(|k| r!(i.a as usize + k)).collect();
+                    let e = store.new_exn(tag, payload);
+                    break Err(Trap::Exception(e));
+                }
+                Op::ThrowRef | Op::Rethrow => {
+                    let e = r!(i.a);
+                    if e == 0 {
+                        break Err(Trap::NullReference);
+                    }
+                    break Err(Trap::Exception((e - 1) as u32));
+                }
                 Op::BrOnCast | Op::BrOnCastFail => {
                     let (h, nullable) = unsafe { (&*code).casts[i.b as usize] };
                     let ok = crate::gc::ref_test(store, r!(i.a), h, nullable);
                     if ok == (i.op == Op::BrOnCast) {
                         jump!(i.c)
+                    }
+                }
+                _ => {
+                    // SAFETY: as for the arms above.
+                    if let Err(t) = unsafe { exec_simple(store, inst, code, i, regs, &mut mem_p, &mut mem_len) } {
+                        break Err(t);
                     }
                 }
             }

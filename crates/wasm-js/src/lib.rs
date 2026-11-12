@@ -506,8 +506,42 @@ fn buffer_source(realm: &mut Realm, v: &Value) -> JsResult<Vec<u8>> {
     }
 }
 
+/// `RH_WASM_STATS=1`: report time spent compiling and running wasm
+/// (calls from JavaScript, including JavaScript imports they call).
+mod stats {
+    use std::cell::Cell;
+    use std::time::Duration;
+    thread_local! {
+        static ON: bool = std::env::var_os("RH_WASM_STATS").is_some();
+        static CALLS: Cell<(u64, Duration, Duration)> = const { Cell::new((0, Duration::ZERO, Duration::ZERO)) };
+    }
+    pub fn enabled() -> bool {
+        ON.with(|o| *o)
+    }
+    pub fn call(d: Duration) {
+        CALLS.with(|c| {
+            let (n, total, reported) = c.get();
+            let (n, total) = (n + 1, total + d);
+            let mut rep = reported;
+            if total - reported >= Duration::from_millis(500) || d >= Duration::from_millis(100) {
+                eprintln!("[wasm] {n} calls from JS, {total:?} in wasm (last call {d:?})");
+                rep = total;
+            }
+            c.set((n, total, rep));
+        });
+    }
+    pub fn compiled(bytes: usize, d: Duration) {
+        eprintln!("[wasm] compiled {bytes} bytes in {d:?}");
+    }
+}
+
 fn compile_bytes(realm: &mut Realm, bytes: &[u8]) -> JsResult<Rc<CompiledModule>> {
-    match CompiledModule::new(bytes) {
+    let t0 = std::time::Instant::now();
+    let r = CompiledModule::new(bytes);
+    if stats::enabled() {
+        stats::compiled(bytes.len(), t0.elapsed());
+    }
+    match r {
         Ok(m) => Ok(Rc::new(m)),
         Err(e) => {
             let msg = match e {
@@ -797,7 +831,12 @@ fn call_export(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     for (i, t) in ft.params.iter().enumerate() {
         vals.push(to_wasm(realm, arg(args, i), *t)?);
     }
-    let res = call_wasm(realm, &f, &vals)?;
+    let t0 = stats::enabled().then(std::time::Instant::now);
+    let res = call_wasm(realm, &f, &vals);
+    if let Some(t0) = t0 {
+        stats::call(t0.elapsed());
+    }
+    let res = res?;
     match res.len() {
         0 => Ok(Value::Undefined),
         1 => Ok(to_js(realm, res[0], ft.results[0])),
@@ -1228,8 +1267,11 @@ pub fn install(realm: &mut Realm) {
 
     let key_exports = realm.new_private_symbol(JsStr::new("wasm exports"));
     let key_buffer = realm.new_private_symbol(JsStr::new("wasm buffer"));
+    let store = Store::new();
+    // Compiled wasm frames stay above the JS engine's stack guard.
+    store.native_floor.set(rabbithole_js::stack::limit());
     let state = State {
-        store: Rc::new(Store::new()),
+        store: Rc::new(store),
         imports: Vec::new(),
         func_objs: HashMap::new(),
         mem_objs: HashMap::new(),

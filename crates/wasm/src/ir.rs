@@ -100,6 +100,11 @@ ops! {
     /// a = base, c = call type
     CallRef = Bii,
     ReturnCall = Bii,
+    /// `Call` that first copies its arguments: x = slot count, a = base,
+    /// b = function index, c = first source slot in `arg_lists`
+    CallArgs = Other,
+    /// Copy one slot (a) to slot 0 and return
+    Return1 = Other,
     ReturnCallIndirect = Bii,
     ReturnCallRef = Bii,
     /// a = base of the payload, b = tag index
@@ -434,9 +439,13 @@ pub struct Code {
     pub call_types: Box<[(u32, u32)]>,
     pub memargs: Box<[MemArg]>,
     pub v128s: Box<[u128]>,
+    /// Source slots of `CallArgs` arguments.
+    pub arg_lists: Box<[u32]>,
     pub handlers: Box<[Handler]>,
     /// (heap type with canonical ids, nullable) of GC casts.
     pub casts: Box<[(crate::types::HeapType, bool)]>,
     /// Module function index (for names in traces).
     pub func_index: u32,
+    /// Native code (compiled on first use; see `jit.rs`).
+    pub jit: std::cell::OnceCell<Option<crate::jit::Compiled>>,
 }

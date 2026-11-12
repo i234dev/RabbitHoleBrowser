@@ -7,12 +7,14 @@
 //! WebAssembly text format (WAT → binary) and the `.wast` script format of
 //! the specification test suite.
 //!
-//! ```ignore
-//! use rabbithole_wasm::{runtime::*, CompiledModule};
+//! ```
+//! use rabbithole_wasm::{runtime::*, CompiledModule, NoHost};
 //! let bytes = rabbithole_wasm::text::wat_to_binary("(module (func (export \"f\") (result i32) i32.const 42))").unwrap();
 //! let m = std::rc::Rc::new(CompiledModule::new(&bytes).unwrap());
 //! let store = Store::new();
 //! let inst = store.instantiate(&mut NoHost, &m, &[]).unwrap();
+//! let Some(Extern::Func(f)) = inst.export("f") else { panic!() };
+//! assert_eq!(store.call(&mut NoHost, f, &[]).unwrap(), vec![Val::I32(42)]);
 //! ```
 
 pub mod atomics;
@@ -20,6 +22,7 @@ pub mod binary;
 pub mod compile;
 pub mod gc;
 pub mod interp;
+pub mod jit;
 pub mod ir;
 pub mod module;
 pub mod runtime;

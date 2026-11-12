@@ -120,6 +120,7 @@ pub(crate) struct FC<'a> {
     call_type_map: HashMap<u32, u32>,
     pub memargs: Vec<MemArg>,
     pub v128s: Vec<u128>,
+    arg_lists: Vec<u32>,
     handlers: Vec<Handler>,
     casts: Vec<(HeapType, bool)>,
     last_pure: Option<usize>,
@@ -191,6 +192,7 @@ pub fn compile_function(cx: &ModuleCtx, def_index: u32) -> Result<Code> {
         call_type_map: HashMap::new(),
         memargs: Vec::new(),
         v128s: Vec::new(),
+        arg_lists: Vec::new(),
         handlers: Vec::new(),
         casts: Vec::new(),
         last_pure: None,
@@ -226,9 +228,11 @@ pub fn compile_function(cx: &ModuleCtx, def_index: u32) -> Result<Code> {
         call_types: fc.call_types.into(),
         memargs: fc.memargs.into(),
         v128s: fc.v128s.into(),
+        arg_lists: fc.arg_lists.into(),
         handlers: fc.handlers.into(),
         casts: fc.casts.into(),
         func_index,
+        jit: Default::default(),
     })
 }
 
@@ -506,9 +510,12 @@ impl<'a> FC<'a> {
         let len = self.stack.len();
         if n == 1 {
             let o = self.stack[len - 1];
+            if o.width() == 1 {
+                self.emit(Instr::new(Op::Return1, o.src(), 0, 0));
+                return;
+            }
             if o.src() != 0 {
-                let op = if o.width() == 2 { Op::Copy2 } else { Op::Copy };
-                self.emit(Instr::new(op, 0, o.src(), 0));
+                self.emit(Instr::new(Op::Copy2, 0, o.src(), 0));
             }
         } else if n > 1 {
             // Branch paths may return: do not change the operand locations
@@ -779,6 +786,42 @@ impl<'a> FC<'a> {
         Ok(self.top_slot())
     }
 
+    /// A direct call; arguments that are not at their stack slots yet are
+    /// copied by the call instruction itself (`CallArgs`).
+    fn direct_call(&mut self, f: u32, ft: &FuncType) -> Result<()> {
+        self.check_top(&ft.params)?;
+        let n = ft.params.len();
+        let len = self.stack.len();
+        let h = self.ctls.last().unwrap().height;
+        let mut srcs: Vec<u32> = Vec::new();
+        let mut lazy = false;
+        if self.live() && len >= n && len - n >= h {
+            for o in &self.stack[len - n..] {
+                if o.loc != Loc::Stack {
+                    lazy = true;
+                }
+                for k in 0..o.width() {
+                    srcs.push(o.src() + k);
+                }
+            }
+        }
+        for t in ft.params.iter().rev() {
+            self.pop_expect(*t)?;
+        }
+        let base = self.top_slot();
+        if lazy && srcs.len() < u16::MAX as usize {
+            let at = self.arg_lists.len() as u32;
+            self.arg_lists.extend_from_slice(&srcs);
+            self.emit(Instr::with_x(Op::CallArgs, srcs.len() as u16, base, f, at));
+        } else {
+            self.emit(Instr::new(Op::Call, base, f, 0));
+        }
+        for &t in ft.results.iter() {
+            self.push(t);
+        }
+        Ok(())
+    }
+
     fn check_return_types(&self, results: &[ValType]) -> Result<()> {
         if results.len() != self.results.len() || !results.iter().zip(self.results.iter()).all(|(a, b)| self.cx.tc.val_sub(*a, *b)) {
             return mismatch("tail call result type");
@@ -888,11 +931,7 @@ impl<'a> FC<'a> {
                         return invalid(format!("unknown function {f}"));
                     };
                     let ft = self.cx.tc.func_type(ty).unwrap().clone();
-                    let base = self.call_args(&ft.params, 0)?;
-                    self.emit(Instr::new(Op::Call, base, f, 0));
-                    for &t in ft.results.iter() {
-                        self.push(t);
-                    }
+                    self.direct_call(f, &ft)?;
                 }
                 0x11 | 0x13 => {
                     let ty = self.r.u32()?;

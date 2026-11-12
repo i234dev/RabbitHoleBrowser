@@ -334,6 +334,11 @@ pub struct Instance {
     pub tables: Vec<Rc<TableInst>>,
     pub memories: Vec<Rc<MemInst>>,
     pub globals: Vec<Rc<GlobalInst>>,
+    /// Value cells of `globals` (for native code).
+    pub global_ptrs: Vec<*mut u64>,
+    /// Native entries of `funcs` that are compiled functions of this
+    /// instance (filled on first call; see jit.rs).
+    pub native: Box<[Cell<*const u8>]>,
     pub tags: Vec<Rc<TagInst>>,
     pub elems: RefCell<Vec<Rc<[u64]>>>,
     pub data_dropped: RefCell<Vec<bool>>,
@@ -383,6 +388,13 @@ pub struct Store {
     pub memory_limit: u64,
     /// Maximum table size in elements.
     pub table_limit: u64,
+    /// Native stack budget of compiled wasm frames (bytes below the
+    /// outermost entry).
+    pub native_stack_budget: usize,
+    /// Lowest native stack address compiled wasm may use (0: unknown);
+    /// embedders set it from their own stack guard.
+    pub native_floor: Cell<usize>,
+    pub(crate) native_limit: Cell<usize>,
 }
 
 impl Default for Store {
@@ -405,11 +417,23 @@ impl Store {
             max_depth: 60_000,
             memory_limit: 4 << 30,
             table_limit: 10_000_000,
+            native_stack_budget: 512 * 1024,
+            native_floor: Cell::new(0),
+            native_limit: Cell::new(0),
         }
     }
 
     pub fn func(&self, addr: u32) -> Rc<FuncInst> {
         self.funcs.borrow()[addr as usize].clone()
+    }
+
+    /// A function by address, borrowed for the store's lifetime (functions
+    /// are never removed).
+    #[inline]
+    pub fn func_ref(&self, addr: u32) -> &FuncInst {
+        let p = Rc::as_ptr(&self.funcs.borrow()[addr as usize]);
+        // SAFETY: the Rc stays in `funcs` until the store is dropped.
+        unsafe { &*p }
     }
 
     pub fn instance(&self, idx: u32) -> Rc<Instance> {
@@ -588,6 +612,8 @@ impl Store {
             };
             exports.push((ex.name.clone(), e));
         }
+        let global_ptrs = globals.iter().map(|g| g.lo.as_ptr()).collect();
+        let native = crate::jit::entry_cells(funcs.len());
         let inst = Rc::new(Instance {
             module: cm.clone(),
             index: inst_index,
@@ -595,6 +621,8 @@ impl Store {
             tables,
             memories,
             globals,
+            global_ptrs,
+            native,
             tags,
             elems: RefCell::new(elems),
             data_dropped: RefCell::new(vec![false; m.datas.len()]),

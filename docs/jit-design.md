@@ -957,3 +957,17 @@ la sección 3 en lugar de añadir un segundo backend:
   SHA-256 de 4096 bloques 440 frente a 2294. Es decir, 2–5× más rápido que
   el JS interpretado sin JIT; una plantilla nativa por `Instr` eliminaría
   el coste del dispatch, que domina en estos bucles.
+- **Nivel base nativo (hecho, `crates/wasm/src/jit.rs`).** Para wasm el
+  emisor de plantillas ya existe: x86-64 (System V en todas las
+  plataformas vía `extern "sysv64"`, también en Windows), una plantilla por
+  `Instr` sobre `[rbx + slot*8]` con rbx = frame, r12/r13 = base/longitud
+  de la memoria 0, r14 = contexto. Las llamadas entre funciones compiladas
+  de la misma instancia son `call` nativas (rbx avanza al frame del
+  llamado); cualquier otra llamada, las instrucciones sin plantilla y los
+  caminos lentos (posibles traps) llaman a helpers que ejecutan el código
+  del propio intérprete para esa instrucción (`exec_simple`), así que la
+  semántica rara es la del intérprete. Los errores se devuelven como
+  estado 1 y cada frame nativo retorna. Las funciones con handlers de
+  excepción o tail calls siguen interpretadas. Con el parser SWC de
+  rollup (playground de Svelte): 3,14 s de CPU interpretado frente a
+  0,64 s nativo (≈5×); toda la suite de especificación pasa igual.

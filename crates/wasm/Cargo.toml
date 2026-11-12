@@ -8,3 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+
+[features]
+# Count executed instructions per opcode (see interp::op_counts).
+opcount = []
