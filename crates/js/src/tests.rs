@@ -1612,3 +1612,37 @@ fn unicode_identifier_characters() {
     eq("var e\u{301} = 4; var x\u{203f}y = 5; e\u{301} + x\u{203f}y", "9");
     eq("var \u{212e}\u{b7} = 1; \u{212e}\u{b7}", "1");
 }
+
+/// Direct `eval` sees the calling function's bindings (SunSpider's
+/// date-format-tofte calls functions declared after a `return` from eval
+/// code built at run time); functions it creates close over that scope.
+#[test]
+fn direct_eval_sees_caller_scope() {
+    eq("(function () { return eval('Y()'); function Y() { return 'ok'; } })()", "ok");
+    eq("(function () { var v = 'v'; let l = 'l'; return eval('v + l'); })()", "vl");
+    eq("(function (p) { return eval('p'); })('param')", "param");
+    eq("var o = { k: 1, m: function (s) { var self = this; function Y() { return self === o; } var a = s.split(''); for (var i = 0; i < a.length; i++) a[i] = eval(a[i] + '()'); return a.join(); } }; o.m('YY')", "true,true");
+    eq("Date.prototype.fmt = function (s) { var self = this; var a = s.split(''); for (var i = 0; i < a.length; i++) a[i] = eval(a[i] + '()'); return a.join(''); function Y() { return self instanceof Date; } }; new Date().fmt('Y')", "true");
+    eq("(function () { var a = 1; eval('a = 5'); return a; })()", "5");
+    eq("(function () { var a = 1; eval('var a = 7'); return a; })()", "7");
+    eq("(function () { var n = 10; var f = eval('(function () { return ++n; })'); f(); return f() + ':' + n; })()", "12:12");
+    eq("(function () { var a = 1; return (function () { var b = 2; return (function () { return eval('a + b'); })(); })(); })()", "3");
+    eq("(function () { let r = 0; { let b = 4; r = eval('b * 2'); } return r; })()", "8");
+    eq("(function () { var fs = []; for (let i = 0; i < 3; i++) fs.push(eval('() => i')); return fs.map(f => f()).join(); })()", "0,1,2");
+    eq("(function (a, b) { return eval('arguments.length + a + b'); })(1, 2)", "5");
+    eq("var o = { v: 9, m: function () { return eval('this.v'); } }; o.m()", "9");
+    eq("var o = { k: 42, m: function () { return (() => eval('this.k'))(); } }; o.m()", "42");
+    eq("(function () { function* g() { var k = 3; yield eval('k * 2'); } return g().next().value; })()", "6");
+    eq("class C { constructor() { this.z = 5; } m() { var w = 2; return eval('this.z * w'); } } new C().m()", "10");
+    eq("(function () { var a = 2; return eval(\"eval('a * 3')\"); })()", "6");
+    eq("(function () { try { throw 7; } catch (err) { return eval('err + 1'); } })()", "8");
+    // Lexical declarations stay inside the eval; strict eval keeps vars too.
+    eq("(function () { eval('let q = 1'); eval('let q = 2'); return typeof q; })()", "undefined");
+    eq("(function () { 'use strict'; eval('var s1 = 1'); return typeof s1; })()", "undefined");
+    // Sloppy vars the caller does not declare become globals (as before).
+    eq("(function () { eval('var zz1 = 3'); })(); typeof zz1 + zz1", "number3");
+    eq("(function () { return eval('1; 2; if (true) { 3 }'); })()", "3");
+    // Indirect eval stays global.
+    eq("(function () { var loc = 1; var e = eval; return e('typeof loc'); })()", "undefined");
+    throws("(function () { eval('var 1x'); })()", "SyntaxError");
+}

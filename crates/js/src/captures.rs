@@ -29,6 +29,17 @@ pub type NameSet = HashSet<String, FxBuild>;
 /// `arguments[i]` / `arguments.length` cannot be served from the frame.
 pub const ARGS_ESCAPE: &str = "\u{0}args";
 
+/// Marker in a function's set: direct `eval` code runs inside it (or inside
+/// a function nested in it) and may reference any of its bindings, so all
+/// of them live in heap scopes, where the eval code finds them.
+pub const EVAL_ALL: &str = "\u{0}eval";
+
+/// Whether `set` makes the binding `name` live in a heap scope.
+#[inline]
+pub fn is_captured(set: &NameSet, name: &str) -> bool {
+    set.contains(name) || set.contains(EVAL_ALL)
+}
+
 fn is_arguments_member(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::Member { object, .. } if matches!(&object.kind, ExprKind::Identifier(n) if n == "arguments"))
 }
@@ -68,6 +79,17 @@ impl Analyzer {
                 self.sets[i].insert(ARGS_ESCAPE.to_string());
                 return;
             }
+        }
+    }
+
+    /// A direct `eval` at the current level: its code may reach every
+    /// binding (and `arguments`) of every enclosing function.
+    fn direct_eval(&mut self) {
+        for (i, set) in self.sets.iter_mut().enumerate() {
+            if i > 0 {
+                set.insert(ARGS_ESCAPE.to_string());
+            }
+            set.insert(EVAL_ALL.to_string());
         }
     }
 
@@ -117,9 +139,7 @@ impl Analyzer {
                 // nested function for every enclosing one. Its own set is
                 // computed when it is parsed (see `analyze_function`).
                 if lb.eval {
-                    for i in 1..self.sets.len() {
-                        self.sets[i].insert(ARGS_ESCAPE.to_string());
-                    }
+                    self.direct_eval();
                 }
                 if f.is_arrow && lb.names.iter().any(|n| n.as_str() == "arguments") {
                     // It may write through the enclosing `arguments`.
@@ -389,10 +409,7 @@ impl Analyzer {
             }
             ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
                 if matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval") {
-                    // Direct eval may reach any enclosing `arguments`.
-                    for i in 1..self.sets.len() {
-                        self.sets[i].insert(ARGS_ESCAPE.to_string());
-                    }
+                    self.direct_eval();
                 }
                 self.expr(callee);
                 self.elements(args);

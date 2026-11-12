@@ -203,6 +203,8 @@ struct FnState {
     filename: Rc<str>,
     source: Option<Rc<str>>,
     class_depth: u32,
+    /// See [`FunctionCode::eval_envs`].
+    eval_envs: Vec<(u32, Rc<LazyScope>)>,
 }
 
 impl FnState {
@@ -243,6 +245,7 @@ impl FnState {
             filename,
             source: None,
             class_depth: 0,
+            eval_envs: Vec::new(),
         }
     }
 }
@@ -270,6 +273,8 @@ pub struct Compiler {
     eager_root: *const Function,
     /// Defer compiling nested functions until their first call.
     lazy: bool,
+    /// Compiling direct `eval` code (see [`compile_eval`]).
+    eval: bool,
 }
 
 /// Name of the hidden binding initialised by `export default <expr>` and
@@ -319,6 +324,7 @@ pub fn compile_lazy(code: &FunctionCode) -> CResult<Rc<FunctionCode>> {
         outer: lz.env.clone(),
         eager_root: Rc::as_ptr(&lz.func),
         lazy: true,
+        eval: false,
     };
     // A transparent parent: no bindings of its own, not a scope at run
     // time; names resolve through `outer`.
@@ -359,6 +365,36 @@ pub fn compile_program_with(program: &Program, filename: &str, source: &str, com
         outer: None,
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
+        eval: false,
+    };
+    let code = c.compile_script(program)?;
+    c.check_internal()?;
+    Ok(code)
+}
+
+/// Compile the code of a direct `eval` whose call site sees the scope
+/// chain `env` (see [`FunctionCode::eval_envs`]). It runs as a script
+/// frame on the caller's scope: names resolve through `env` first, then
+/// globals. In sloppy mode its `var` and function declarations assign the
+/// caller's bindings of those names, or create globals for names the caller
+/// does not bind (bindings cannot be added to a compiled function); its
+/// lexical declarations, and in strict mode all of them, stay local.
+pub fn compile_eval(program: &Program, source: &str, env: Option<Rc<LazyScope>>) -> CResult<Rc<FunctionCode>> {
+    let mut c = Compiler {
+        completion: true,
+        fns: Vec::new(),
+        filename: Rc::from("eval"),
+        source: Rc::from(source),
+        pending_tweak: None,
+        chain_stack: Vec::new(),
+        loose_chain_exits: Vec::new(),
+        module: None,
+        captures: crate::captures::analyze_program(&program.body),
+        internal_error: None,
+        outer: env,
+        eager_root: std::ptr::null(),
+        lazy: lazy_enabled(),
+        eval: true,
     };
     let code = c.compile_script(program)?;
     c.check_internal()?;
@@ -382,6 +418,7 @@ pub fn compile_module(program: &Program, filename: &str, source: &str, module_id
         outer: None,
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
+        eval: false,
     };
     let m = c.compile_module_program(program)?;
     c.check_internal()?;
@@ -493,7 +530,7 @@ impl Compiler {
         if let Some(b) = fs.scopes[si].names.get(name) {
             return b.loc;
         }
-        let heap = fs.force_heap || fs.scopes[si].force_heap || fs.captured.contains(name) || fs.nregs == u16::MAX;
+        let heap = fs.force_heap || fs.scopes[si].force_heap || crate::captures::is_captured(&fs.captured, name) || fs.nregs == u16::MAX;
         let loc = if heap {
             let scope = &mut fs.scopes[si];
             let s = scope.slot_count;
@@ -732,6 +769,7 @@ impl Compiler {
             lazy: Some(Box::new(lazy)),
             compiled: std::cell::OnceCell::new(),
             jit: Default::default(),
+            eval_envs: Vec::new(),
         };
         let parent = self.fs();
         parent.functions.push(Rc::new(code));
@@ -1215,6 +1253,25 @@ impl Compiler {
                 self.emit(Op::Empty);
                 self.emit_init_loc(loc);
             }
+        } else if self.eval {
+            let mut vars = Vec::new();
+            Self::collect_var_names(&program.body, &mut vars);
+            self.fs().scopes[0].materialized = false;
+            let strict = self.fs_ref().flags.is_strict;
+            let mut decls = Self::collect_lexical(&program.body, strict);
+            self.check_duplicates(&decls, &vars)?;
+            if strict {
+                decls.extend(vars.into_iter().map(|v| (v, BindKind::Var)));
+            } else {
+                for v in &vars {
+                    if matches!(self.resolve(v), Resolved::Global) {
+                        let i = self.const_str(v);
+                        self.emit(Op::DeclareGlobalVar(i));
+                    }
+                }
+            }
+            // The eval's own scope (popped with its frame).
+            self.push_block_scope(&decls);
         } else {
             let mut vars = Vec::new();
             Self::collect_var_names(&program.body, &mut vars);
@@ -1427,7 +1484,7 @@ impl Compiler {
         }
         // An `arguments` object referenced from nested arrows must live in
         // the heap scope: declare it now, before the scope layout is fixed.
-        if !f.is_arrow && self.fs_ref().captured.contains("arguments") && !self.fs_ref().scopes[0].names.contains_key("arguments") {
+        if !f.is_arrow && crate::captures::is_captured(&self.fs_ref().captured, "arguments") && !self.fs_ref().scopes[0].names.contains_key("arguments") {
             let loc = self.declare("arguments", BindKind::Hidden);
             self.fs().arguments_loc = Some(loc);
             self.fs().flags.uses_arguments = true;
@@ -2569,9 +2626,21 @@ impl Compiler {
                     }
                 }
                 let is_eval = matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval");
-                let desc = match callee_description(callee) {
-                    Some(d) => self.const_str(&d),
-                    None => crate::bytecode::NO_DESC,
+                let desc = if is_eval {
+                    // A constant of its own identifies the site, which
+                    // records the scope chain its eval code compiles in.
+                    let fs = self.fs();
+                    let i = fs.constants.len() as u32;
+                    fs.constants.push(Value::String(JsStr::intern("eval")));
+                    if let Some(env) = self.env_snapshot() {
+                        self.fs().eval_envs.push((i, env));
+                    }
+                    i
+                } else {
+                    match callee_description(callee) {
+                        Some(d) => self.const_str(&d),
+                        None => crate::bytecode::NO_DESC,
+                    }
                 };
                 self.compile_callee(callee)?;
                 if *optional {
@@ -3602,6 +3671,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         source_span: fs.span,
         filename: fs.filename,
         module,
+        eval_envs: fs.eval_envs,
     };
     code.call_flags = code.compute_call_flags();
     code

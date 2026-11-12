@@ -3294,8 +3294,7 @@ impl Realm {
                     }
                     if let Op::CallEval(..) = op {
                         if f.as_object() == Some(self.intrinsics.eval_fn) {
-                            let strict = frame!().code().flags.is_strict;
-                            let v = self.direct_eval(args.first().cloned().unwrap_or(Value::Undefined), strict)?;
+                            let v = self.direct_eval(args.first().cloned().unwrap_or(Value::Undefined), fi, desc)?;
                             push!(v);
                             return Ok(Flow::Next);
                         }
@@ -4237,14 +4236,50 @@ impl Realm {
         })
     }
 
-    fn direct_eval(&mut self, arg: Value, strict: bool) -> JsResult<Value> {
+    /// Direct `eval(arg)` from frame `fi` at the call site whose
+    /// description constant is `site` (see `FunctionCode::eval_envs`): the
+    /// code is compiled against the scope chain visible there and runs on
+    /// the caller's scope, `this` and `new.target`.
+    fn direct_eval(&mut self, arg: Value, fi: usize, site: u32) -> JsResult<Value> {
         let src = match arg.v() {
             V::String(s) => s.to_rust_string(),
             other => return Ok(other.to_value()),
         };
+        let caller = &self.frames[fi];
+        let strict = caller.code().flags.is_strict;
+        let env = caller.code().eval_envs.iter().find(|(i, _)| *i == site).map(|(_, e)| e.clone());
         let src = if strict { format!("\"use strict\";{}", src) } else { src };
-        let code = self.compile(&src, "eval", false)?;
-        self.run_script(code)
+        let program = match crate::parser::parse_program(&src, false) {
+            Ok(p) => p,
+            Err(e) => return Err(self.new_error("SyntaxError", &e.message)),
+        };
+        let code = match crate::compiler::compile_eval(&program, &src, env) {
+            Ok(c) => c,
+            Err(e) => return Err(self.new_error("SyntaxError", &e.message)),
+        };
+        let caller = &self.frames[fi];
+        let (scope, this, func, new_target) = (caller.scope, caller.this.clone(), caller.func, caller.new_target.clone());
+        let base = self.reserve_slots(code.frame_size());
+        let frame = Frame {
+            code: std::ptr::NonNull::from(&*code),
+            pc: 0,
+            base: base as u32,
+            argc: 0,
+            scope,
+            scope_depth: 0,
+            this,
+            func,
+            new_target,
+            ret_slot: 0,
+            is_construct: false,
+            entry: true,
+            extra: Some(Box::new(FrameExtra { code: Some(code.clone()), ..Default::default() })),
+        };
+        self.push_frame(frame, true)?;
+        match self.run()? {
+            Exit::Return(v) => Ok(v),
+            _ => unreachable!(),
+        }
     }
 
     fn super_call(&mut self, fi: usize, args: Vec<Value>) -> JsResult<Value> {

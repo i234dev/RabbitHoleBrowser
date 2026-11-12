@@ -514,6 +514,9 @@ pub struct FunctionCode {
     pub compiled: std::cell::OnceCell<Rc<FunctionCode>>,
     /// Baseline compiler state (hotness counter, native code).
     pub jit: JitSlot,
+    /// Direct `eval` call sites: (the site's description constant, which
+    /// is unique per site, scope chain visible there).
+    pub eval_envs: Vec<(u32, Rc<crate::compiler::LazyScope>)>,
 }
 
 /// Per-function state of the baseline compiler (empty without the `jit`
