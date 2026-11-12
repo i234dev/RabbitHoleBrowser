@@ -131,8 +131,7 @@ fn classify_all(op: &Op) -> Class {
         Op::CallR(..) | Op::NewR(..) => Native,
         Op::GetGlobalR(..) | Op::SetGlobalR(..) => Native,
         Op::GetPropR(..) | Op::SetPropR(..) => Native,
-        Op::GetElemR(..) => Helper(h_get_elem as *const () as usize, "h_get_elem"),
-        Op::SetElemR(..) => Helper(h_set_elem as *const () as usize, "h_set_elem"),
+        Op::GetElemR(..) | Op::SetElemR(..) => Native,
         Op::LoadThis(..) => Native,
         Op::GetLocalR(..) | Op::SetLocalR(..) | Op::GetLocalChecked(..) => Native,
         Op::DefinePropR(..) => Helper(h_define_prop as *const () as usize, "h_define_prop"),
@@ -179,7 +178,10 @@ fn validate(code: &FunctionCode) -> Result<(), String> {
     for (pc, op) in code.ops.iter().enumerate() {
         let (slots, k, t): (Vec<u16>, Option<u32>, Option<u32>) = match *op {
             Op::Mov(d, s) | Op::MovRaw(d, s) | Op::MovChecked(d, s) | Op::IncR(d, s) | Op::DecR(d, s) | Op::ToNumericR(d, s) | Op::NotR(d, s) | Op::UnR(_, d, s) => (vec![d, s], None, None),
-            Op::CheckInit(r) | Op::ReturnR(r) => (vec![r], None, None),
+            Op::CheckInit(r) | Op::ReturnR(r) | Op::LoadThis(r) => (vec![r], None, None),
+            Op::GetPropR(a, b, _) | Op::SetPropR(a, b, _) | Op::DefinePropR(a, b, _) => (vec![a, b], None, None),
+            Op::GetElemR(a, b, c) | Op::SetElemR(a, b, c) => (vec![a, b, c], None, None),
+            Op::GetLocalR(r, _, _) | Op::SetLocalR(r, _, _) | Op::GetGlobalR(r, _) | Op::SetGlobalR(r, _) => (vec![r], None, None),
             Op::LoadK(d, c) => (vec![d], Some(c), None),
             Op::AddRR(d, a, b) | Op::SubRR(d, a, b) | Op::MulRR(d, a, b) | Op::DivRR(d, a, b) | Op::ModRR(d, a, b) | Op::BinRR(_, d, a, b) | Op::CmpRR(_, d, a, b) => (vec![d, a, b], None, None),
             Op::AddRK(d, a, c) | Op::SubRK(d, a, c) | Op::MulRK(d, a, c) | Op::DivRK(d, a, c) | Op::ModRK(d, a, c) | Op::BinRK(_, d, a, c) | Op::CmpRK(_, d, a, c) => (vec![d, a], Some(c as u32), None),
@@ -868,6 +870,63 @@ impl Gen<'_> {
         self.store(d, slow);
     }
 
+    /// `GetElemR` (`Ok(dst)`) / `SetElemR` (`Err(src)`) of an array
+    /// element in range that is not a hole, with an integer index, inline;
+    /// anything else (typed arrays, strings, appends, holes) through the
+    /// helpers.
+    fn elem(&mut self, pc: usize, o: u16, k: u16, dst: Result<u16, u16>) {
+        let next = self.lbl(pc + 1);
+        let (h, name) = match dst {
+            Ok(_) => (h_get_elem as *const () as usize, "h_get_elem"),
+            Err(_) => (h_set_elem as *const () as usize, "h_set_elem"),
+        };
+        let slow = self.slow(h, name, pc, next);
+        let Some(l) = self.lay else {
+            self.a.jmp(slow);
+            return;
+        };
+        self.object_entry(&l, o, slow);
+        self.a.movzx8(R9, Mem::base(RAX, l.scope_tag));
+        self.a.alu_ri32(Alu::Cmp, R9, l.array_tag_value as i32);
+        self.a.jcc(CC_NE, slow);
+        // r9 = the index: a number with an exact 64-bit integer value
+        // (negative ones fail the unsigned bounds check).
+        self.a.load64(RCX, slot(k));
+        self.a.cmp_rr64(RCX, TAGMIN);
+        self.a.jcc(CC_AE, slow);
+        self.a.movq_x_r(XMM0, RCX);
+        self.a.cvttsd2si64(R9, XMM0);
+        self.a.cvtsi2sd64(XMM1, R9);
+        self.a.ucomisd(XMM0, XMM1);
+        self.a.jcc(CC_NE, slow);
+        self.a.jcc(CC_P, slow);
+        self.a.alu_rm64(Alu::Cmp, R9, Mem::base(RAX, l.array_elems_len));
+        self.a.jcc(CC_AE, slow);
+        self.a.load64(RDX, Mem::base(RAX, l.array_elems_ptr));
+        // rdx = &elements[index]
+        self.a.lea(RDX, Mem::index(RDX, R9, 8, 0));
+        self.a.load64(RAX, Mem::base(RDX, 0));
+        self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+        self.a.cmp_rr64(RAX, RCX);
+        self.a.jcc(CC_E, slow);
+        match dst {
+            Ok(d) => {
+                self.retain_if_counted(RAX, RCX);
+                self.store(d, slow);
+            }
+            Err(v) => {
+                // r8 = the old element; rax = the new one (not the hole)
+                self.a.mov_rr64(R8, RAX);
+                self.a.load64(RAX, slot(v));
+                self.a.cmp_rr64(RAX, RCX);
+                self.a.jcc(CC_E, slow);
+                self.retain_if_counted(RAX, RCX);
+                self.a.store64(Mem::base(RDX, 0), RAX);
+                self.release_if_counted(R8);
+            }
+        }
+    }
+
     /// `GetPropR` through the site's cache: own data properties and data
     /// properties of the prototype (`IC_PROTO` one level up,
     /// `IC_PROTO_DEEP`) inline; anything else through `h_get_prop`.
@@ -1219,6 +1278,8 @@ impl Gen<'_> {
                 self.a.store64(Mem::base(RDX, s as i32 * 8), RAX);
                 self.release_if_counted(RCX);
             }
+            Op::GetElemR(d, o, k) => self.elem(pc, o, k, Ok(d)),
+            Op::SetElemR(o, k, v) => self.elem(pc, o, k, Err(v)),
             Op::GetPropR(d, o, ic) => self.get_prop(pc, d, o, ic),
             Op::SetPropR(o, v, ic) => self.set_prop(pc, o, v, ic),
             Op::GetGlobalR(d, ic) => self.global(pc, ic, Ok(d)),

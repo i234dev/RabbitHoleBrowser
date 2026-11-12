@@ -38,6 +38,12 @@ pub(crate) struct Layout {
     pub scope_tag: i32,
     pub scope_tag_value: u8,
     pub scope_box: i32,
+    /// In an object table entry: the tag byte value of arrays
+    /// (`ObjectKind::Array`, same byte as `scope_tag`) and their
+    /// elements' pointer and length.
+    pub array_tag_value: u8,
+    pub array_elems_ptr: i32,
+    pub array_elems_len: i32,
     /// In `ScopeData`: slots pointer and length, parent id and tag.
     pub sd_slots_ptr: i32,
     pub sd_slots_len: i32,
@@ -133,7 +139,7 @@ fn probe() -> Option<Layout> {
     let (s1, s2) = (scope(Some(ObjectId(0x1122_3344)), 3), scope(None, 0));
     let others = [
         Some(Object::new(None, ObjectKind::Ordinary)),
-        Some(Object::new(None, ObjectKind::Array { elements: vec![crate::value::Value::Number(1.5); 3], length: 3 })),
+        Some(Object::new(None, ObjectKind::Array { elements: { let mut e = vec![crate::value::Value::Number(1.5); 3]; e.reserve_exact(5); e }, length: 3 })),
         Some(Object::new(None, ObjectKind::Array { elements: Vec::new(), length: 0x7fff_ffff })),
     ];
     let box_addr = |e: &Option<Object>| match &e.as_ref()?.kind {
@@ -146,6 +152,26 @@ fn probe() -> Option<Layout> {
     let box_off = (0..=ksize - w).step_by(w).find(|&i| word(&k1, i) == b1 && word(&k2, i) == b2)?;
     let ob: Vec<Vec<u8>> = others.iter().map(bytes).collect();
     let tag = (0..ksize).filter(|i| !(box_off..box_off + w).contains(i)).find(|&i| k1[i] == k2[i] && ob.iter().all(|o| o[i] != k1[i]) && ob[1][i] == ob[2][i])?;
+    // Arrays: the same tag byte tells them apart from scopes and plain
+    // objects; their elements vector is found by its pointer and length.
+    let a1 = &others[1];
+    let ka = bytes(a1);
+    let (ka2, k0) = (bytes(&others[2]), &ob[0]);
+    if ka[tag] != ka2[tag] || ka[tag] == k1[tag] || ka[tag] == k0[tag] {
+        return None;
+    }
+    let (eptr, elen) = match &a1.as_ref()?.kind {
+        ObjectKind::Array { elements, .. } => (elements.as_ptr() as usize, elements.len()),
+        _ => return None,
+    };
+    let ep = (0..=ksize - w).step_by(w).find(|&i| word(&ka, i) == eptr)?;
+    let el = (0..=ksize - w).step_by(w).find(|&i| word(&ka, i) == elen && word(&ka2, i) == 0)?;
+    if (0..=ksize - w).step_by(w).filter(|&i| word(&ka, i) == elen && word(&ka2, i) == 0).count() != 1 {
+        return None;
+    }
+    if [ep, el].iter().any(|&o| (tag..tag + 1).contains(&o) || (o <= tag && tag < o + w)) {
+        return None;
+    }
     let sd = std::mem::offset_of!(crate::heap::ScopeData, slots);
     let (sp, sl) = vec_words::<crate::value::Value>(Vec::new(), crate::value::Value::Undefined)?;
     let parent = std::mem::offset_of!(crate::heap::ScopeData, parent);
@@ -167,6 +193,9 @@ fn probe() -> Option<Layout> {
         scope_tag: i32_of(kind + tag)?,
         scope_tag_value: k1[tag],
         scope_box: i32_of(kind + box_off)?,
+        array_tag_value: ka[tag],
+        array_elems_ptr: i32_of(kind + ep)?,
+        array_elems_len: i32_of(kind + el)?,
         sd_slots_ptr: i32_of(sd + sp * w)?,
         sd_slots_len: i32_of(sd + sl * w)?,
         sd_parent_id: i32_of(parent + id_word * 4)?,
