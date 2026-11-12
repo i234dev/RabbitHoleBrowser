@@ -164,6 +164,11 @@ pub struct HostState {
     pub worker_info: Option<(String, bool, u32)>,
     /// Canvas 2D surfaces.
     pub canvases: crate::canvas2d::CanvasStore,
+    /// Live range / iterator slots of collected handles (see `live.rs`).
+    pub live_freed: crate::live::FreedSlots,
+    /// Documents of this realm opened with `document.open()` and not yet
+    /// closed, with the markup written to them so far.
+    pub open_docs: HashMap<u32, String>,
 }
 
 thread_local! {

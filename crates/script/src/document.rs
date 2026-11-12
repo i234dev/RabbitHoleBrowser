@@ -569,11 +569,6 @@ fn d_writeln(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     write_html(realm, d, &text)
 }
 
-thread_local! {
-    /// Documents opened with `document.open()` (not yet closed) and the
-    /// markup written to them so far.
-    static OPEN_DOCS: std::cell::RefCell<std::collections::HashMap<u32, String>> = std::cell::RefCell::new(std::collections::HashMap::new());
-}
 
 /// Replace the whole content of document `d` with `html` parsed as a new
 /// document (the script-created parser of `document.open()`).
@@ -603,13 +598,15 @@ fn replace_document_content(d: u32, html: &str) {
 fn write_html(realm: &mut Realm, d: u32, html: &str) -> JsResult<Value> {
     // A document opened by `document.open()`: its content is the markup
     // written so far.
-    let open = OPEN_DOCS.with(|o| {
-        let mut o = o.borrow_mut();
-        o.get_mut(&d).map(|buf| {
+    // (Per realm: document numbers are the realm's own.)
+    let open = {
+        let st = state();
+        let mut st = st.borrow_mut();
+        st.open_docs.get_mut(&d).map(|buf| {
             buf.push_str(html);
             buf.clone()
         })
-    });
+    };
     if let Some(markup) = open {
         replace_document_content(d, &markup);
         return Ok(Value::Undefined);
@@ -646,7 +643,7 @@ fn d_open(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
     let parsing = d == 0 && state().borrow().loading;
     if !parsing {
-        OPEN_DOCS.with(|o| o.borrow_mut().insert(d, String::new()));
+        state().borrow_mut().open_docs.insert(d, String::new());
         let root = NodeRef { doc: d, node: Document::ROOT };
         let removed = node::children_of(root);
         with_doc(d, |doc| doc.clear_children(Document::ROOT));
@@ -662,7 +659,8 @@ fn d_open(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 /// still produces html/head/body).
 fn d_close(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
-    if let Some(markup) = OPEN_DOCS.with(|o| o.borrow_mut().remove(&d)) {
+    let markup = state().borrow_mut().open_docs.remove(&d);
+    if let Some(markup) = markup {
         replace_document_content(d, &markup);
     }
     Ok(Value::Undefined)

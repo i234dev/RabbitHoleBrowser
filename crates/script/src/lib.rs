@@ -31,6 +31,8 @@ mod tests;
 mod tests_webapi;
 #[cfg(test)]
 mod tests_media;
+#[cfg(test)]
+mod tests_realms;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};
@@ -255,6 +257,8 @@ impl ScriptHost {
             canvases: Default::default(),
             workers: Default::default(),
             worker_info: worker.clone(),
+            live_freed: Default::default(),
+            open_docs: HashMap::default(),
         }));
         {
             let root_array = state.borrow().root_array;

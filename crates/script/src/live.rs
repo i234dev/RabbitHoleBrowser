@@ -13,38 +13,58 @@ use rabbithole_dom::{BoundaryPoint, Document, IteratorPosition};
 use rabbithole_js::{JsResult, Realm, Value, CONFIGURABLE, ENUMERABLE};
 use std::cell::RefCell;
 
-thread_local! {
-    /// Slots of collected handles: (is iterator, doc, slot).
-    static FREED: RefCell<Vec<(bool, u32, usize)>> = const { RefCell::new(Vec::new()) };
-}
+/// Slots of collected handles of one realm: (is iterator, doc, slot).
+///
+/// Per realm, not per thread: `doc` numbers are the realm's own (its main
+/// document is 0, its `DOMParser` documents 1, 2, ...), and the realms of
+/// a page's frames and of the next page in the tab share the thread. A
+/// thread-wide list let one realm release another realm's slots, in a
+/// document it doesn't have.
+pub(crate) type FreedSlots = std::rc::Rc<RefCell<Vec<(bool, u32, usize)>>>;
 
 /// A live boundary point owned by a JS handle.
 struct PointHandle {
     doc: u32,
     slot: usize,
+    freed: FreedSlots,
 }
 
 /// A live NodeIterator position owned by a JS handle.
 struct IterHandle {
     doc: u32,
     slot: usize,
+    freed: FreedSlots,
 }
+
+/// `slot` of a handle whose slot was already released.
+const RELEASED: usize = usize::MAX;
 
 impl Drop for PointHandle {
     fn drop(&mut self) {
-        let _ = FREED.try_with(|f| f.borrow_mut().push((false, self.doc, self.slot)));
+        if self.slot == RELEASED {
+            return;
+        }
+        if let Ok(mut f) = self.freed.try_borrow_mut() {
+            f.push((false, self.doc, self.slot));
+        }
     }
 }
 
 impl Drop for IterHandle {
     fn drop(&mut self) {
-        let _ = FREED.try_with(|f| f.borrow_mut().push((true, self.doc, self.slot)));
+        if let Ok(mut f) = self.freed.try_borrow_mut() {
+            f.push((true, self.doc, self.slot));
+        }
     }
 }
 
-/// Release the slots of collected handles.
+fn freed_slots() -> FreedSlots {
+    state().borrow().live_freed.clone()
+}
+
+/// Release the slots of this realm's collected handles.
 fn purge() {
-    let freed = FREED.with(|f| std::mem::take(&mut *f.borrow_mut()));
+    let freed = std::mem::take(&mut *freed_slots().borrow_mut());
     for (iter, doc, slot) in freed {
         with_doc(doc, |d| if iter { d.remove_live_iterator(slot) } else { d.remove_live_point(slot) });
     }
@@ -78,7 +98,7 @@ fn live_boundary(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
     let offset = offset_arg(realm, arg(args, 1))?;
     let slot = with_doc(n.doc, |d| d.add_live_point(BoundaryPoint { node: n.node, offset }));
     let o = realm.new_object_with_proto(Some(proto("__LiveBoundary")));
-    realm.set_host_data(o, Box::new(PointHandle { doc: n.doc, slot }));
+    realm.set_host_data(o, Box::new(PointHandle { doc: n.doc, slot, freed: freed_slots() }));
     Ok(Value::Object(o))
 }
 
@@ -105,9 +125,10 @@ fn boundary_node_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
         with_doc(doc, |d| d.remove_live_point(slot));
         let new_slot = with_doc(n.doc, |d| d.add_live_point(BoundaryPoint { node: n.node, offset: p.offset }));
         if let Some(h) = realm.host_data_mut::<PointHandle>(o) {
-            // Replace without running Drop for the slot we just released.
-            let old = std::mem::replace(h, PointHandle { doc: n.doc, slot: new_slot });
-            std::mem::forget(old);
+            // (The slot just released is not queued again.)
+            let freed = h.freed.clone();
+            let mut old = std::mem::replace(h, PointHandle { doc: n.doc, slot: new_slot, freed });
+            old.slot = RELEASED;
         }
     }
     Ok(Value::Undefined)
@@ -137,7 +158,7 @@ fn live_iterator_position(realm: &mut Realm, _this: Value, args: &[Value]) -> Js
     let node = if n.doc == root.doc { n.node } else { root.node };
     let slot = with_doc(root.doc, |d| d.add_live_iterator(IteratorPosition { root: root.node, node, before }));
     let o = realm.new_object_with_proto(Some(proto("__LiveIteratorPosition")));
-    realm.set_host_data(o, Box::new(IterHandle { doc: root.doc, slot }));
+    realm.set_host_data(o, Box::new(IterHandle { doc: root.doc, slot, freed: freed_slots() }));
     Ok(Value::Object(o))
 }
 
