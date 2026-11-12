@@ -24,7 +24,6 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::UnsafeCell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 
 /// Largest request served from size classes.
 pub const MAX_SMALL: usize = 1024;
@@ -104,7 +103,38 @@ struct Pool {
     carve_end: usize,
 }
 
-static POOL: Mutex<Pool> = Mutex::new(Pool { lists: [0; NCLASS], carve: 0, carve_end: 0 });
+/// A spin lock that never allocates. `std::sync::Mutex` must not be used
+/// inside a global allocator: on macOS (and other pthread-backed targets)
+/// it may allocate on first lock, which re-enters this allocator and
+/// recurses until the stack overflows.
+struct PoolLock {
+    locked: std::sync::atomic::AtomicBool,
+    pool: UnsafeCell<Pool>,
+}
+
+// SAFETY: the pool is only reached through `with`, which holds `locked`.
+unsafe impl Sync for PoolLock {}
+
+impl PoolLock {
+    #[inline]
+    fn with<R>(&self, f: impl FnOnce(&mut Pool) -> R) -> R {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+        while self.locked.compare_exchange_weak(false, true, Acquire, Relaxed).is_err() {
+            while self.locked.load(Relaxed) {
+                std::hint::spin_loop();
+            }
+        }
+        // SAFETY: we hold the lock, so this is the only reference.
+        let r = f(unsafe { &mut *self.pool.get() });
+        self.locked.store(false, Release);
+        r
+    }
+}
+
+static POOL: PoolLock = PoolLock {
+    locked: std::sync::atomic::AtomicBool::new(false),
+    pool: UnsafeCell::new(Pool { lists: [0; NCLASS], carve: 0, carve_end: 0 }),
+};
 
 struct Cache {
     enabled: bool,
@@ -137,7 +167,10 @@ unsafe fn set_next(p: *mut u8, n: *mut u8) {
 #[cold]
 unsafe fn refill(c: &mut Cache, k: usize) -> bool {
     let size = class_size(k);
-    let Ok(mut pool) = POOL.lock() else { return false };
+    POOL.with(|pool| refill_locked(pool, c, k, size))
+}
+
+unsafe fn refill_locked(pool: &mut Pool, c: &mut Cache, k: usize, size: usize) -> bool {
     let shared = pool.lists[k];
     if shared != 0 {
         // Take the whole shared list.
@@ -175,10 +208,10 @@ unsafe fn refill(c: &mut Cache, k: usize) -> bool {
 }
 
 unsafe fn free_to_pool(p: *mut u8, k: usize) {
-    if let Ok(mut pool) = POOL.lock() {
+    POOL.with(|pool| {
         set_next(p, pool.lists[k] as *mut u8);
         pool.lists[k] = p as usize;
-    }
+    });
 }
 
 /// The allocator (see the module docs).
