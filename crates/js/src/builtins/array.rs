@@ -152,9 +152,17 @@ fn from(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
             let items = realm.create_list_from_array_like(Value::Object(obj))?;
             return Ok(realm.new_array_value(items));
         }
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(len.min(1 << 20));
+        // `Array.from({length: n}, fn)`: no element to read while the
+        // object (and its prototypes) keep no index properties.
+        let mut holes = realm.no_index_properties(obj);
+        let mut nprops = realm.obj(obj).props.len();
         for i in 0..len {
-            let v = realm.get(Value::Object(obj), index_key(i as f64))?;
+            if holes && realm.obj(obj).props.len() != nprops {
+                holes = realm.no_index_properties(obj);
+                nprops = realm.obj(obj).props.len();
+            }
+            let v = if holes { Value::Undefined } else { realm.get(Value::Object(obj), index_key(i as f64))? };
             out.push(realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])?);
         }
         return Ok(realm.new_array_value(out));
