@@ -101,7 +101,18 @@ pub fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Va
         V::Null => return Ok(Value::str("[object Null]")),
         _ => {
             let id = realm.to_object(this.clone())?;
-            let builtin = class_of(realm, id);
+            let builtin = if let ObjectKind::Proxy { .. } = &realm.obj(id).kind {
+                // A proxy is an Array if its target is, a Function if callable.
+                if super::array::is_array_checked(realm, &Value::Object(id))? {
+                    "Array"
+                } else if realm.is_callable(&Value::Object(id)) {
+                    "Function"
+                } else {
+                    "Object"
+                }
+            } else {
+                class_of(realm, id)
+            };
             let t = realm.get(Value::Object(id), PropertyKey::Symbol(SYM_TO_STRING_TAG))?;
             match t.v() {
                 V::String(s) => s.to_rust_string(),

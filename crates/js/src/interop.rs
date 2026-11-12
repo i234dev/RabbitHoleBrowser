@@ -541,7 +541,7 @@ impl Realm {
         let obj = self.obj_mut(id);
         if let ObjectKind::Array { elements, .. } = &mut obj.kind {
             if let Some(i) = key.as_array_index() {
-                if (i as usize) < elements.len() {
+                if (i as usize) < elements.len() && !elements[i as usize].is_empty() {
                     if i as usize == elements.len() - 1 {
                         elements.pop();
                     } else {
@@ -1350,8 +1350,9 @@ impl Realm {
             _ => return self.type_error("CreateListFromArrayLike called on non-object"),
         };
         if let ObjectKind::Array { elements, length } = &self.obj(id).kind {
-            if *length as usize == elements.len() {
-                return Ok(elements.iter().map(|e| if e.is_empty() { Value::Undefined } else { e.clone() }).collect());
+            // Holes read through the prototype chain (or an own accessor).
+            if *length as usize == elements.len() && !elements.iter().any(|e| e.is_empty()) {
+                return Ok(elements.clone());
             }
         }
         let len = self.get_str(Value::Object(id), "length")?;
