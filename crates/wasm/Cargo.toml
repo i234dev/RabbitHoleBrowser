@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+rabbithole-jit = { path = "../jit" }
 
 [features]
 # Count executed instructions per opcode (see interp::op_counts).

@@ -27,6 +27,7 @@
 use crate::interp::{exec_simple, mem0};
 use crate::ir::*;
 use crate::runtime::*;
+use rabbithole_jit::ExecMem;
 use std::cell::Cell;
 
 /// State shared by native code, its helpers and the interpreter.
@@ -74,7 +75,7 @@ pub struct Compiled {
 
 impl std::fmt::Debug for Compiled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Compiled({} bytes)", self.mem.len)
+        write!(f, "Compiled({} bytes)", self.mem.len())
     }
 }
 
@@ -83,7 +84,7 @@ type Trampoline = unsafe extern "sysv64" fn(*mut JitCtx, *mut u64, *const u8) ->
 impl Compiled {
     pub fn entry(&self) -> *const u8 {
         // SAFETY: inside the allocation.
-        unsafe { self.mem.ptr.add(self.entry) }
+        unsafe { self.mem.ptr().add(self.entry) }
     }
 }
 
@@ -329,99 +330,14 @@ unsafe fn do_call(ctx: &mut JitCtx, code: &Code, pc: u32, regs: *mut u64) -> Res
 
 // ------------------------------------------------------------------ executable memory
 
-struct ExecMem {
-    ptr: *mut u8,
-    len: usize,
-}
-
-#[cfg(unix)]
-mod sys {
-    extern "C" {
-        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-        fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
-        fn munmap(addr: *mut u8, len: usize) -> i32;
-    }
-    const PROT_READ: i32 = 1;
-    const PROT_WRITE: i32 = 2;
-    const PROT_EXEC: i32 = 4;
-    const MAP_PRIVATE: i32 = 2;
-    #[cfg(target_os = "macos")]
-    const MAP_ANON: i32 = 0x1000;
-    #[cfg(not(target_os = "macos"))]
-    const MAP_ANON: i32 = 0x20;
-    pub unsafe fn alloc(len: usize) -> Option<*mut u8> {
-        let p = mmap(std::ptr::null_mut(), len.max(1), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if p.is_null() || p as isize == -1 {
-            return None;
-        }
-        Some(p)
-    }
-    pub unsafe fn protect(p: *mut u8, len: usize) -> bool {
-        mprotect(p, len.max(1), PROT_READ | PROT_EXEC) == 0
-    }
-    pub unsafe fn free(p: *mut u8, len: usize) {
-        munmap(p, len.max(1));
-    }
-}
-
-#[cfg(windows)]
-mod sys {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn VirtualAlloc(addr: *mut u8, size: usize, ty: u32, protect: u32) -> *mut u8;
-        fn VirtualProtect(addr: *mut u8, size: usize, protect: u32, old: *mut u32) -> i32;
-        fn VirtualFree(addr: *mut u8, size: usize, ty: u32) -> i32;
-        fn FlushInstructionCache(process: isize, addr: *const u8, size: usize) -> i32;
-        fn GetCurrentProcess() -> isize;
-    }
-    const MEM_COMMIT: u32 = 0x1000;
-    const MEM_RESERVE: u32 = 0x2000;
-    const MEM_RELEASE: u32 = 0x8000;
-    const PAGE_READWRITE: u32 = 0x04;
-    const PAGE_EXECUTE_READ: u32 = 0x20;
-    pub unsafe fn alloc(len: usize) -> Option<*mut u8> {
-        let p = VirtualAlloc(std::ptr::null_mut(), len.max(1), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if p.is_null() {
-            None
-        } else {
-            Some(p)
-        }
-    }
-    pub unsafe fn protect(p: *mut u8, len: usize) -> bool {
-        let mut old = 0;
-        let ok = VirtualProtect(p, len.max(1), PAGE_EXECUTE_READ, &mut old) != 0;
-        FlushInstructionCache(GetCurrentProcess(), p, len);
-        ok
-    }
-    pub unsafe fn free(p: *mut u8, _len: usize) {
-        VirtualFree(p, 0, MEM_RELEASE);
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-mod sys {
-    pub unsafe fn alloc(_len: usize) -> Option<*mut u8> {
-        None
-    }
-    pub unsafe fn protect(_p: *mut u8, _len: usize) -> bool {
-        false
-    }
-    pub unsafe fn free(_p: *mut u8, _len: usize) {}
-}
-
-impl Drop for ExecMem {
-    fn drop(&mut self) {
-        // SAFETY: allocated by `sys::alloc` with this length.
-        unsafe { sys::free(self.ptr, self.len) }
-    }
-}
+// W^X executable memory (freed on drop) comes from the shared crate.
 
 /// The shared entry trampoline: `(ctx, frame, entry) -> status`.
 fn trampoline() -> *const u8 {
     thread_local! {
         static T: Option<ExecMem> = build_trampoline();
     }
-    T.with(|t| t.as_ref().map(|m| m.ptr as *const u8).unwrap_or(std::ptr::null()))
+    T.with(|t| t.as_ref().map(|m| m.ptr()).unwrap_or(std::ptr::null()))
 }
 
 fn build_trampoline() -> Option<ExecMem> {
@@ -446,21 +362,12 @@ fn build_trampoline() -> Option<ExecMem> {
 /// Map `code`, patch absolute addresses (`abs`: (position, offset)), make
 /// it executable.
 fn finish(code: Vec<u8>, abs: &[(usize, usize)]) -> Option<ExecMem> {
-    let len = code.len();
-    // SAFETY: fresh mapping of `len` bytes, written before protecting.
-    unsafe {
-        let p = sys::alloc(len)?;
-        std::ptr::copy_nonoverlapping(code.as_ptr(), p, len);
+    ExecMem::new(&code, |p, buf| {
         for &(at, off) in abs {
             let v = (p as usize + off) as u64;
-            std::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), p.add(at), 8);
+            buf[at..at + 8].copy_from_slice(&v.to_le_bytes());
         }
-        if !sys::protect(p, len) {
-            sys::free(p, len);
-            return None;
-        }
-        Some(ExecMem { ptr: p, len })
-    }
+    })
 }
 
 // ------------------------------------------------------------------ assembler
