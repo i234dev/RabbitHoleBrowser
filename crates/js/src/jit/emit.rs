@@ -62,7 +62,7 @@ enum Class {
 /// ticks, 4 every non-call instruction (generic helper, property and
 /// global caches), 5 calls and exceptions. Instructions of later phases
 /// make a function not compilable.
-pub(crate) const PHASE: u8 = 4;
+pub(crate) const PHASE: u8 = 5;
 
 fn classify(op: &Op) -> Class {
     let c = classify_all(op);
