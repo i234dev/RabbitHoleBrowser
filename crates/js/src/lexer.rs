@@ -52,8 +52,10 @@ impl Token {
     pub fn is_punct(&self, p: &str) -> bool {
         matches!(&self.kind, TokenKind::Punct(q) if *q == p)
     }
+    /// The token is the identifier `name` written without escapes (as
+    /// keywords must be).
     pub fn is_ident(&self, name: &str) -> bool {
-        matches!(&self.kind, TokenKind::Ident(n) if n == name)
+        matches!(&self.kind, TokenKind::Ident(n) if n == name && self.end - self.start == n.len())
     }
 }
 
@@ -669,6 +671,18 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         let c0 = self.peek_byte().unwrap();
         if c0 == b'0' {
+            // No numeric separators in legacy octal / non-octal decimal
+            // literals (`0_1`, `07_7`, `08_1`).
+            let mut i = 1;
+            while let Some(b) = self.byte_at(i) {
+                if b == b'_' {
+                    return Err(self.err("Numeric separators are not allowed after a leading 0"));
+                }
+                if !b.is_ascii_digit() {
+                    break;
+                }
+                i += 1;
+            }
             match self.byte_at(1) {
                 Some(b'x') | Some(b'X') => return self.scan_radix_number(16, 2),
                 Some(b'o') | Some(b'O') => return self.scan_radix_number(8, 2),
@@ -740,6 +754,9 @@ impl<'a> Lexer<'a> {
             }
         }
         if !is_float && self.peek_byte() == Some(b'n') {
+            if text.len() > 1 && text.starts_with('0') {
+                return Err(self.err("Invalid BigInt literal"));
+            }
             self.pos += 1;
             self.check_after_number()?;
             return Ok(TokenKind::BigInt(text));
