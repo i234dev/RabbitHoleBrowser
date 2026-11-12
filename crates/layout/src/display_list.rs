@@ -1014,12 +1014,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let py = b.style.object_position.1;
         let ox = match px {
             rabbithole_style::Length::Percent(p) => (dest.w - dw) * p / 100.0,
-            rabbithole_style::Length::Calc(px, p) => px + (dest.w - dw) * p / 100.0,
+            l @ (rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_)) => l.resolve_or_zero(dest.w - dw),
             other => other.resolve_or_zero(dest.w),
         };
         let oy = match py {
             rabbithole_style::Length::Percent(p) => (dest.h - dh) * p / 100.0,
-            rabbithole_style::Length::Calc(px, p) => px + (dest.h - dh) * p / 100.0,
+            l @ (rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_)) => l.resolve_or_zero(dest.h - dh),
             other => other.resolve_or_zero(dest.h),
         };
         let placed = Rect::new(dest.x + ox, dest.y + oy, dw, dh);

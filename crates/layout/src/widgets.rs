@@ -89,16 +89,15 @@ fn centered_square(r: Rect, s: f32) -> Rect {
     Rect::new(r.x + (r.w - s) / 2.0, r.y + (r.h - s) / 2.0, s, s)
 }
 
-/// Does `b` show the native look of a text field, button or menu (its
-/// background and border are still the UA's, `appearance` is `auto`, no
-/// author radius)? Those get Blink's 2px rounded corners.
+/// Does `b` show the native look of a text field, button or menu (no
+/// author background or border declarations, `appearance` is `auto`)? Those get Blink's 2px rounded corners.
 pub(crate) fn native_rounding(b: &LayoutBox, ctx: &LayoutContext) -> bool {
     let Some(node) = b.node else { return false };
     if b.pseudo.is_some() {
         return false;
     }
     let s = &b.style;
-    if s.appearance == Appearance::None || s.border_radius > 0.0 || s.border_width.top != 1.0 || s.border_width.left != 1.0 {
+    if s.appearance == Appearance::None || s.author_widget_style || s.border_radius > 0.0 || s.border_width.top != 1.0 || s.border_width.left != 1.0 {
         return false;
     }
     let ua_border = [BORDER, Color::rgb(79, 79, 79), Color::rgb(141, 141, 141), Color::rgba(118, 118, 118, 77)];

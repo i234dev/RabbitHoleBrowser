@@ -11,6 +11,10 @@ pub enum Length {
     /// `calc()` mixing a length and a percentage: px + percent% of the
     /// base (`calc(100% - 20px)` = `Calc(-20, 100)`).
     Calc(f32, f32),
+    /// A math expression mixing percentages with lengths that is not a
+    /// plain sum (`min(100%, 500px)`, `calc(100% - max(10%, 20px))`): an
+    /// index into the interned [`MathNode`] table.
+    Math(u32),
     /// `min-content` / `max-content` / `fit-content` sizing keywords;
     /// `resolve()` returns None for them, like `Auto`.
     MinContent,
@@ -33,6 +37,7 @@ impl Length {
             Length::Px(v) => Some(v),
             Length::Percent(p) => Some(base * p / 100.0),
             Length::Calc(px, p) => Some(px + base * p / 100.0),
+            Length::Math(id) => Some(math_eval(id, base)),
             Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => None,
         }
     }
@@ -41,9 +46,14 @@ impl Length {
     pub fn resolve_definite(&self, base: Option<f32>) -> Option<f32> {
         match *self {
             Length::Px(v) => Some(v),
-            Length::Percent(_) | Length::Calc(..) => base.and_then(|b| self.resolve(b)),
+            Length::Percent(_) | Length::Calc(..) | Length::Math(_) => base.and_then(|b| self.resolve(b)),
             _ => None,
         }
+    }
+    /// Does the value depend on its percentage base (percentage, or calc()
+    /// / math function containing one)?
+    pub fn has_percent(&self) -> bool {
+        matches!(self, Length::Percent(_) | Length::Calc(..) | Length::Math(_))
     }
     pub fn resolve_or(&self, base: f32, default: f32) -> f32 {
         self.resolve(base).unwrap_or(default)
@@ -51,6 +61,105 @@ impl Length {
     pub fn resolve_or_zero(&self, base: f32) -> f32 {
         self.resolve(base).unwrap_or(0.0)
     }
+}
+
+/// A computed math expression over (px, percent) terms, evaluated against
+/// the percentage base at layout time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MathNode {
+    /// px + percent% of the base.
+    Leaf(f32, f32),
+    Sum(Vec<MathNode>),
+    Scale(Box<MathNode>, f32),
+    Min(Vec<MathNode>),
+    Max(Vec<MathNode>),
+    /// `clamp(min, value, max)`.
+    Clamp(Box<[MathNode; 3]>),
+}
+
+impl MathNode {
+    pub fn eval(&self, base: f32) -> f32 {
+        match self {
+            MathNode::Leaf(px, p) => px + base * p / 100.0,
+            MathNode::Sum(v) => v.iter().map(|n| n.eval(base)).sum(),
+            MathNode::Scale(n, f) => n.eval(base) * f,
+            MathNode::Min(v) => v.iter().map(|n| n.eval(base)).fold(f32::INFINITY, f32::min),
+            MathNode::Max(v) => v.iter().map(|n| n.eval(base)).fold(f32::NEG_INFINITY, f32::max),
+            MathNode::Clamp(a) => {
+                let (lo, v, hi) = (a[0].eval(base), a[1].eval(base), a[2].eval(base));
+                v.min(hi).max(lo)
+            }
+        }
+    }
+    /// Does any term depend on the base?
+    pub fn has_percent(&self) -> bool {
+        match self {
+            MathNode::Leaf(_, p) => *p != 0.0,
+            MathNode::Sum(v) | MathNode::Min(v) | MathNode::Max(v) => v.iter().any(|n| n.has_percent()),
+            MathNode::Scale(n, _) => n.has_percent(),
+            MathNode::Clamp(a) => a.iter().any(|n| n.has_percent()),
+        }
+    }
+    /// CSS serialisation (`min(100%, 500px)`, `calc(100% - 20px)`).
+    pub fn to_css(&self) -> String {
+        fn num(v: f32) -> String {
+            format!("{}", (v * 1000.0).round() / 1000.0)
+        }
+        fn inner(n: &MathNode) -> String {
+            match n {
+                MathNode::Leaf(px, p) if *p == 0.0 => format!("{}px", num(*px)),
+                MathNode::Leaf(px, p) if *px == 0.0 => format!("{}%", num(*p)),
+                MathNode::Leaf(px, p) if *px < 0.0 => format!("{}% - {}px", num(*p), num(-px)),
+                MathNode::Leaf(px, p) => format!("{}% + {}px", num(*p), num(*px)),
+                MathNode::Sum(v) => v.iter().map(inner).collect::<Vec<_>>().join(" + "),
+                MathNode::Scale(n, f) => format!("{} * ({})", num(*f), inner(n)),
+                other => other.to_css(),
+            }
+        }
+        let list = |v: &[MathNode]| v.iter().map(inner).collect::<Vec<_>>().join(", ");
+        match self {
+            MathNode::Min(v) => format!("min({})", list(v)),
+            MathNode::Max(v) => format!("max({})", list(v)),
+            MathNode::Clamp(a) => format!("clamp({})", list(&a[..])),
+            MathNode::Leaf(px, p) if *p == 0.0 => format!("{}px", num(*px)),
+            MathNode::Leaf(px, p) if *px == 0.0 => format!("{}%", num(*p)),
+            other => format!("calc({})", inner(other)),
+        }
+    }
+}
+
+struct MathTable {
+    nodes: Vec<std::sync::Arc<MathNode>>,
+    ids: std::collections::HashMap<String, u32>,
+}
+
+static MATH_TABLE: std::sync::LazyLock<std::sync::RwLock<MathTable>> = std::sync::LazyLock::new(|| std::sync::RwLock::new(MathTable { nodes: Vec::new(), ids: std::collections::HashMap::new() }));
+
+/// Intern a math expression, returning its [`Length::Math`] id (equal
+/// expressions share one).
+pub fn intern_math(n: MathNode) -> u32 {
+    let key = format!("{n:?}");
+    if let Some(&id) = MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).ids.get(&key) {
+        return id;
+    }
+    let mut t = MATH_TABLE.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(&id) = t.ids.get(&key) {
+        return id;
+    }
+    let id = t.nodes.len() as u32;
+    t.nodes.push(std::sync::Arc::new(n));
+    t.ids.insert(key, id);
+    id
+}
+
+/// The interned expression `id`.
+pub fn math_node(id: u32) -> Option<std::sync::Arc<MathNode>> {
+    MATH_TABLE.read().unwrap_or_else(|e| e.into_inner()).nodes.get(id as usize).cloned()
+}
+
+/// Evaluate the interned expression `id` against `base`.
+pub fn math_eval(id: u32, base: f32) -> f32 {
+    math_node(id).map(|n| n.eval(base)).unwrap_or(0.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -860,6 +969,11 @@ pub struct ComputedStyle {
     pub user_select: UserSelect,
     pub resize: Resize,
     pub appearance: Appearance,
+    /// Author (non-UA) background or border declarations apply: a text
+    /// field, button or menu then loses its native look (css-ui-4
+    /// "appearance-disabling properties"), even when the values equal the
+    /// UA's.
+    pub author_widget_style: bool,
     pub transitions: Vec<Transition>,
     pub animations: Vec<Animation>,
     pub scroll_margin_top: f32,
@@ -993,6 +1107,7 @@ impl ComputedStyle {
             user_select: UserSelect::Auto,
             resize: Resize::None,
             appearance: Appearance::Auto,
+            author_widget_style: false,
             transitions: Vec::new(),
             animations: Vec::new(),
             scroll_margin_top: 0.0,

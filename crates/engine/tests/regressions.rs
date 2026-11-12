@@ -398,3 +398,42 @@ fn split_inline_rect_is_the_union_of_its_fragments() {
     let r = eval(&e, &mut page, "(function(){ var rs = document.getElementById('s').getClientRects(), b = document.getElementById('s').getBoundingClientRect(), l = 1e9, t = 1e9, rr = -1e9, bb = -1e9; for (var i = 0; i < rs.length; i++) { l = Math.min(l, rs[i].left); t = Math.min(t, rs[i].top); rr = Math.max(rr, rs[i].right); bb = Math.max(bb, rs[i].bottom); } return [rs.length === 3, l === b.left, t === b.top, rr === b.right, bb === b.bottom].join(); })()");
     assert_eq!(r, "true,true,true,true,true");
 }
+
+/// `calc(% ± length)` and min()/max()/clamp() mixing percentages and
+/// lengths resolve against the containing block at layout (a header at
+/// `calc(40% - 140px)` used to get 40%), for widths, heights, margins,
+/// padding, insets and background positions; percentages of an indefinite
+/// height behave as `auto`. getComputedStyle returns used px for box
+/// properties (against the containing block) and keeps calc() for
+/// background-position; the inline style keeps the specified value.
+#[test]
+fn calc_and_math_functions_mix_percentages_and_lengths() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        r#"<div id=cb style="width:600px;height:400px;position:relative">
+             <div id=w style="width:calc(100% - 20px);height:calc(50% + 10px);margin-left:calc(10% - 5px);padding-top:calc(5% + 2px)"></div>
+             <div id=m style="width:min(100%, 500px);height:max(10%, 30px)"></div>
+             <div id=c style="width:clamp(100px, 50%, 250px);height:10px"></div>
+             <div id=n style="width:calc(100% - max(10%, 100px));height:min(calc(100% - 380px), 50px)"></div>
+             <div id=a style="position:absolute;left:calc(50% - 50px);top:calc(25% + 5px);width:100px;height:10px"></div>
+             <div id=bg style="width:100px;height:10px;background-position:calc(100% - 20px) 50%"></div>
+           </div>
+           <div id=narrow style="width:300px"><div id=m2 style="width:min(100%, 500px)">x</div></div>
+           <div id=auto><div id=ih style="height:calc(50% + 10px)">line</div></div>"#,
+    );
+    let r = |id: &str| page.rect_of(by_id(&page, id)).expect("laid out");
+    // 600 - 20 wide; 200 + 10 tall plus padding-top 5% of 600 + 2 = 32.
+    let w = r("w");
+    assert_eq!((w.w, w.h, w.x), (580.0, 242.0, 55.0));
+    assert_eq!((r("m").w, r("m").h), (500.0, 40.0));
+    assert_eq!(r("m2").w, 300.0);
+    assert_eq!(r("c").w, 250.0);
+    assert_eq!((r("n").w, r("n").h), (500.0, 20.0));
+    let (a, cb) = (r("a"), r("cb"));
+    assert_eq!((a.x - cb.x, a.y - cb.y), (250.0, 105.0));
+    // Percentage of an indefinite height: auto (one 20px line).
+    assert_eq!(r("ih").h, 20.0);
+    let cs = eval(&e, &mut page, "(function(){ var g = function (id, p) { return getComputedStyle(document.getElementById(id)).getPropertyValue(p); }; return [g('w', 'width'), g('w', 'height'), g('w', 'margin-left'), g('w', 'padding-top'), g('m', 'width'), g('a', 'left'), g('a', 'top'), g('bg', 'background-position'), document.getElementById('w').style.width, document.getElementById('m').style.width].join('|'); })()");
+    assert_eq!(cs, "580px|210px|55px|32px|500px|250px|105px|calc(100% - 20px) 50%|calc(100% - 20px)|min(100%, 500px)");
+}

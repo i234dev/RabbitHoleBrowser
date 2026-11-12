@@ -469,6 +469,13 @@ pub(crate) fn compute_element<'a>(
     out
 }
 
+/// css-ui-4 appearance-disabling properties: author backgrounds and borders
+/// (longhands and shorthands) devolve a native widget.
+fn disables_native_appearance(name: &str) -> bool {
+    (name.starts_with("background") && name != "background-blend-mode")
+        || (name.starts_with("border") && !matches!(name, "border-collapse" | "border-spacing"))
+}
+
 /// Fold the cascade layer into the specificity key (layers rank above
 /// specificity): unlayered rules beat layered ones and later layers beat
 /// earlier ones; `!important` reverses the layer order.
@@ -601,6 +608,9 @@ fn apply_declarations(
     pseudo: bool,
 ) -> ComputedStyle {
     let mut style = ComputedStyle::inherit_from(parent);
+    style.author_widget_style = local.iter().any(|m| {
+        !matches!(m.rank, Rank::UaNormal | Rank::UaImportant) && disables_native_appearance(&m.decl.name)
+    });
 
     // Substitute var() references up front (shared by both passes).
     let mut resolved: Vec<(&str, std::borrow::Cow<[Token]>, Option<&str>)> = Vec::with_capacity(local.len());
@@ -1439,6 +1449,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.contain_paint = from.contain_paint;
             to.contain_layout = from.contain_layout;
             to.contain_size = from.contain_size;
+            to.creates_stacking_context = from.creates_stacking_context;
         }
         "-webkit-line-clamp" | "line-clamp" => {
             to.line_clamp = from.line_clamp;
@@ -1470,7 +1481,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "caption-side" => to.caption_side_bottom = from.caption_side_bottom,
         "empty-cells" => to.empty_cells_hide = from.empty_cells_hide,
         "scroll-margin-top" => to.scroll_margin_top = from.scroll_margin_top,
-        "filter" | "isolation" | "will-change" | "contain" | "mix-blend-mode" => to.creates_stacking_context = from.creates_stacking_context,
+        "filter" | "isolation" | "will-change" | "mix-blend-mode" => to.creates_stacking_context = from.creates_stacking_context,
         _ => {}
     }
 }

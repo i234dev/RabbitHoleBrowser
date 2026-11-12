@@ -386,7 +386,7 @@ fn tile_size(size: BackgroundSize, intrinsic: Option<(f32, f32)>, area: Rect) ->
 fn bg_position(l: Length, area: f32, tile: f32) -> f32 {
     match l {
         Length::Percent(p) => (area - tile) * p / 100.0,
-        Length::Calc(px, p) => px + (area - tile) * p / 100.0,
+        Length::Calc(..) | Length::Math(_) => l.resolve_or_zero(area - tile),
         other => other.resolve_or_zero(area),
     }
 }

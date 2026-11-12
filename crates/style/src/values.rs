@@ -109,6 +109,132 @@ pub enum LengthValue {
     Calc(Lin),
     /// `min()`, `max()`, `clamp()` with evaluated arguments.
     Math(MathFn, Vec<Lin>),
+    /// A math expression that mixes percentages with lengths through
+    /// `min()`/`max()`/`clamp()` (or nests them inside `calc()`), kept as a
+    /// tree until layout knows the percentage base.
+    Tree(Box<Expr>),
+}
+
+/// A parsed math expression whose leaves are linear unit combinations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Leaf(Lin),
+    Sum(Vec<Expr>),
+    Scale(Box<Expr>, f32),
+    Fn(MathFn, Vec<Expr>),
+}
+
+impl Expr {
+    /// The expression as one linear combination, when it has no math
+    /// function.
+    fn to_lin(&self) -> Option<Lin> {
+        match self {
+            Expr::Leaf(l) => Some(*l),
+            Expr::Sum(v) => {
+                let mut acc = v.first()?.to_lin()?;
+                for e in &v[1..] {
+                    acc = acc.add(e.to_lin()?, 1.0);
+                }
+                Some(acc)
+            }
+            Expr::Scale(e, f) => Some(e.to_lin()?.scale(*f)),
+            Expr::Fn(..) => None,
+        }
+    }
+    fn is_number(&self) -> Option<f32> {
+        match self {
+            Expr::Leaf(l) if l.is_number => Some(l.num),
+            _ => None,
+        }
+    }
+    /// Resolve the font/viewport units of the leaves into a computed tree.
+    fn compute(&self, ctx: &LengthContext) -> crate::computed::MathNode {
+        use crate::computed::MathNode;
+        match self {
+            Expr::Leaf(l) => MathNode::Leaf(l.px_part(ctx), l.percent),
+            Expr::Sum(v) => MathNode::Sum(v.iter().map(|e| e.compute(ctx)).collect()),
+            Expr::Scale(e, f) => MathNode::Scale(Box::new(e.compute(ctx)), *f),
+            Expr::Fn(MathFn::Min, v) => MathNode::Min(v.iter().map(|e| e.compute(ctx)).collect()),
+            Expr::Fn(MathFn::Max, v) => MathNode::Max(v.iter().map(|e| e.compute(ctx)).collect()),
+            Expr::Fn(MathFn::Clamp, v) if v.len() == 3 => MathNode::Clamp(Box::new([v[0].compute(ctx), v[1].compute(ctx), v[2].compute(ctx)])),
+            Expr::Fn(MathFn::Clamp, v) => v.first().map(|e| e.compute(ctx)).unwrap_or(MathNode::Leaf(0.0, 0.0)),
+        }
+    }
+}
+
+/// sum := product (('+' | '-') product)*, keeping math functions.
+fn expr_sum(comps: &[&[Token]]) -> Option<Expr> {
+    let mut i = 0;
+    let mut terms = vec![expr_product(comps, &mut i)?];
+    while i < comps.len() {
+        let sign = match comps[i] {
+            [Token::Delim('+')] => 1.0,
+            [Token::Delim('-')] => -1.0,
+            _ => return None,
+        };
+        i += 1;
+        let rhs = expr_product(comps, &mut i)?;
+        terms.push(if sign < 0.0 { Expr::Scale(Box::new(rhs), -1.0) } else { rhs });
+    }
+    Some(if terms.len() == 1 { terms.pop()? } else { Expr::Sum(terms) })
+}
+
+fn expr_product(comps: &[&[Token]], i: &mut usize) -> Option<Expr> {
+    let mut acc = expr_unit(comps, i)?;
+    while *i < comps.len() {
+        match comps[*i] {
+            [Token::Delim('*')] => {
+                *i += 1;
+                let rhs = expr_unit(comps, i)?;
+                acc = match (acc.is_number(), rhs.is_number()) {
+                    (Some(a), Some(b)) => Expr::Leaf(Lin { num: a * b, is_number: true, ..Lin::default() }),
+                    (_, Some(b)) => Expr::Scale(Box::new(acc), b),
+                    (Some(a), None) => Expr::Scale(Box::new(rhs), a),
+                    (None, None) => return None,
+                };
+            }
+            [Token::Delim('/')] => {
+                *i += 1;
+                let d = expr_unit(comps, i)?.is_number().filter(|d| *d != 0.0)?;
+                acc = match acc.is_number() {
+                    Some(a) => Expr::Leaf(Lin { num: a / d, is_number: true, ..Lin::default() }),
+                    None => Expr::Scale(Box::new(acc), 1.0 / d),
+                };
+            }
+            _ => break,
+        }
+    }
+    Some(acc)
+}
+
+fn expr_unit(comps: &[&[Token]], i: &mut usize) -> Option<Expr> {
+    let c = *comps.get(*i)?;
+    *i += 1;
+    match c {
+        [Token::Number(n)] => Some(Expr::Leaf(Lin { num: *n, is_number: true, ..Lin::default() })),
+        [Token::OpenParen, ..] => expr_sum(&components(strip_function(c))),
+        [Token::Delim('-')] => Some(Expr::Scale(Box::new(expr_unit(comps, i)?), -1.0)),
+        [Token::Function(f), ..] => match f.to_ascii_lowercase().as_str() {
+            "calc" | "-webkit-calc" | "-moz-calc" => expr_sum(&components(strip_function(c))),
+            "min" | "max" | "clamp" => expr_fn(c, f),
+            _ => None,
+        },
+        _ => Some(Expr::Leaf(lin_of(&parse_length(c)?)?)),
+    }
+}
+
+fn expr_fn(c: &[Token], f: &str) -> Option<Expr> {
+    let f = match f.to_ascii_lowercase().as_str() {
+        "min" => MathFn::Min,
+        "max" => MathFn::Max,
+        "clamp" => MathFn::Clamp,
+        _ => return None,
+    };
+    let args = function_args(c).iter().map(|a| expr_sum(a)).collect::<Option<Vec<_>>>()?;
+    if args.is_empty() || (f == MathFn::Clamp && args.len() != 3) {
+        return None;
+    }
+    Some(Expr::Fn(f, args))
 }
 
 impl LengthValue {
@@ -156,6 +282,14 @@ impl LengthValue {
                     Length::Percent(lin.percent)
                 } else {
                     Length::Px(lin.px_part(ctx))
+                }
+            }
+            LengthValue::Tree(e) => {
+                let n = e.compute(ctx);
+                if n.has_percent() {
+                    Length::Math(crate::computed::intern_math(n))
+                } else {
+                    Length::Px(n.eval(0.0))
                 }
             }
             LengthValue::Math(f, args) => {
@@ -294,10 +428,29 @@ pub fn parse_length_opts(c: &[Token], allow_unitless: bool) -> Option<LengthValu
             match lf.as_str() {
                 "calc" | "-webkit-calc" | "-moz-calc" => {
                     let inner = strip_function(c);
-                    let lin = eval_sum(&components(inner))?;
-                    Some(LengthValue::Calc(lin))
+                    match eval_sum(&components(inner)) {
+                        Some(lin) => Some(LengthValue::Calc(lin)),
+                        // Nested min()/max()/clamp(): keep the tree.
+                        None => {
+                            let e = expr_sum(&components(inner))?;
+                            Some(match e.to_lin() {
+                                Some(lin) => LengthValue::Calc(lin),
+                                None => LengthValue::Tree(Box::new(e)),
+                            })
+                        }
+                    }
                 }
                 "min" | "max" | "clamp" => {
+                    // Arguments with percentages or nested math functions
+                    // stay a tree (resolved at layout).
+                    let e = expr_fn(c, f)?;
+                    let flat = match &e {
+                        Expr::Fn(_, args) => args.iter().all(|a| a.to_lin().is_some_and(|l| !l.has_percent())),
+                        _ => false,
+                    };
+                    if !flat {
+                        return Some(LengthValue::Tree(Box::new(e)));
+                    }
                     let args = function_args(c);
                     let mut lins = Vec::new();
                     for a in &args {
@@ -366,7 +519,7 @@ fn lin_of(lv: &LengthValue) -> Option<Lin> {
         LengthValue::Ch(v) | LengthValue::Ex(v) => l.em = *v * 0.5,
         LengthValue::Calc(lin) => l = *lin,
         LengthValue::Math(_, args) => l = *args.first()?,
-        LengthValue::Auto => return None,
+        LengthValue::Tree(_) | LengthValue::Auto => return None,
     }
     Some(l)
 }
@@ -728,6 +881,44 @@ mod tests {
         assert_eq!(len("min(10px, 2em)"), Length::Px(10.0));
         assert_eq!(len("max(10px, 2em)"), Length::Px(32.0));
         assert_eq!(len("clamp(10px, 100px, 20px)"), Length::Px(20.0));
-        assert_eq!(len("min(50%, 30px)"), Length::Px(30.0));
+        // Nested math without percentages still computes to px.
+        assert_eq!(len("calc(min(10px, 2em) + 5px)"), Length::Px(15.0));
+        assert_eq!(len("max(calc(2 * 10px), 1em)"), Length::Px(20.0));
+    }
+
+    /// Math functions mixing percentages and lengths keep their shape until
+    /// the percentage base is known.
+    #[test]
+    fn math_with_percentages() {
+        let at = |s: &str, base: f32| {
+            let l = len(s);
+            assert!(l.has_percent(), "{s} computed to {l:?}");
+            l.resolve(base).unwrap()
+        };
+        assert_eq!((at("min(50%, 30px)", 40.0), at("min(50%, 30px)", 100.0)), (20.0, 30.0));
+        assert_eq!((at("min(100%, 500px)", 300.0), at("min(100%, 500px)", 800.0)), (300.0, 500.0));
+        assert_eq!((at("max(50%, 300px)", 400.0), at("max(50%, 300px)", 1000.0)), (300.0, 500.0));
+        let clamp = "clamp(200px, 50%, 800px)";
+        assert_eq!((at(clamp, 300.0), at(clamp, 1000.0), at(clamp, 2000.0)), (200.0, 500.0, 800.0));
+        let nested = "min(calc(100% - 32px), 1200px)";
+        assert_eq!((at(nested, 500.0), at(nested, 2000.0)), (468.0, 1200.0));
+        let inner = "calc(100% - max(10%, 20px))";
+        assert_eq!((at(inner, 100.0), at(inner, 1000.0)), (80.0, 900.0));
+        let em = "calc(40% - min(2em, 140px) * 2)";
+        assert_eq!(at(em, 1000.0), 400.0 - 64.0);
+        assert_eq!(at("-webkit-calc(100% - 2 * 1em)", 200.0), 168.0);
+        // Equal expressions share one interned entry.
+        assert_eq!(len("min(100%, 500px)"), len("min(100%,500px)"));
+        let css = |s: &str| match len(s) {
+            Length::Math(id) => crate::computed::math_node(id).unwrap().to_css(),
+            Length::Calc(px, p) => crate::computed::MathNode::Leaf(px, p).to_css(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(css("calc(100% - 20px)"), "calc(100% - 20px)");
+        assert_eq!(css("min(100%, 500px)"), "min(100%, 500px)");
+        assert_eq!(css("clamp(10px, 50% + 1em, 100px)"), "clamp(10px, 50% + 16px, 100px)");
+        // Invalid: clamp() needs three arguments.
+        let t = Tokenizer::tokenize("clamp(10%, 20px)");
+        assert!(parse_length(components(&t)[0]).is_none());
     }
 }

@@ -303,6 +303,7 @@ fn length_css(l: &Length, base: f32) -> String {
         Length::Px(v) => px(*v),
         Length::Percent(p) => px(base * p / 100.0),
         Length::Calc(v, p) => px(v + base * p / 100.0),
+        Length::Math(_) => px(l.resolve_or_zero(base)),
         Length::Auto => "auto".into(),
         Length::MinContent => "min-content".into(),
         Length::MaxContent => "max-content".into(),
@@ -342,7 +343,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         // A same-origin frame's document: style values (no layout boxes).
         let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
         let s = with_env(|env| env.frame_computed_style(frame, n.node))?;
-        return Some(computed_from_style(&s, prop, Default::default()));
+        return Some(computed_from_style(&s, prop, Default::default(), Default::default()));
     }
     if n.doc != 0 {
         return None;
@@ -352,7 +353,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     // that interleave style writes and reads don't force full layouts.
     let style = with_env(|env| env.computed_style(n.node));
     let s: std::rc::Rc<ComputedStyle> = style?;
-    let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_) | rabbithole_style::Length::Calc(..));
+    let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_) | rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_));
     let needs_box = match prop {
         "width" | "height" | "inline-size" | "block-size" => true,
         "transform" => !s.transform.is_empty(),
@@ -385,12 +386,59 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         s
     };
     let r = if needs_box { with_env(|env| env.node_rect(n.node)).unwrap_or_default() } else { Default::default() };
-    Some(computed_from_style(&s, prop, r))
+    let pct_padding = [&s.padding.top, &s.padding.right, &s.padding.bottom, &s.padding.left].into_iter().any(|l| pct(l));
+    let cb = if needs_box && prop != "transform" && (!matches!(prop, "width" | "height" | "inline-size" | "block-size") || pct_padding) {
+        containing_block(n.node, &s)
+    } else {
+        Default::default()
+    };
+    Some(computed_from_style(&s, prop, r, cb))
 }
 
-/// A computed value from the style (and the border box `r`, for values
-/// that depend on layout).
-fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect) -> String {
+/// The containing block of `node` (after layout), the base of its
+/// percentage margins, padding, insets and min/max sizes: the padding box
+/// of the nearest positioned ancestor for absolute positioning, the
+/// viewport for fixed, else the parent's content box.
+fn containing_block(node: rabbithole_dom::NodeId, s: &ComputedStyle) -> rabbithole_gfx::Rect {
+    let viewport = || {
+        let (w, h) = with_env(|env| env.viewport());
+        rabbithole_gfx::Rect { x: 0.0, y: 0.0, w, h }
+    };
+    if s.position == Position::Fixed {
+        return viewport();
+    }
+    let abs = s.position == Position::Absolute;
+    let mut cur = with_doc(0, |doc| doc.flat_parent(node));
+    while let Some(p) = cur {
+        let is_element = with_doc(0, |doc| doc.element(p).is_some());
+        if !is_element {
+            break;
+        }
+        let ps = with_env(|env| env.computed_style(p));
+        if let Some(ps) = ps.filter(|ps| ps.display != Display::Contents && (!abs || ps.position != Position::Static)) {
+            if let Some(pr) = with_env(|env| env.node_rect(p)) {
+                let b = &ps.border_width;
+                let (mut x, mut y, mut w, mut h) = (pr.x + b.left, pr.y + b.top, pr.w - b.left - b.right, pr.h - b.top - b.bottom);
+                if !abs {
+                    let pw = w;
+                    let pad = &ps.padding;
+                    let (pl, pt) = (pad.left.resolve_or_zero(pw), pad.top.resolve_or_zero(pw));
+                    x += pl;
+                    y += pt;
+                    w -= pl + pad.right.resolve_or_zero(pw);
+                    h -= pt + pad.bottom.resolve_or_zero(pw);
+                }
+                return rabbithole_gfx::Rect { x, y, w: w.max(0.0), h: h.max(0.0) };
+            }
+        }
+        cur = with_doc(0, |doc| doc.flat_parent(p));
+    }
+    viewport()
+}
+
+/// A computed value from the style (and the border box `r` and the
+/// containing block `cb`, for values that depend on layout).
+fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, cb: rabbithole_gfx::Rect) -> String {
     match prop {
         "display" => display_css(s.display).to_string(),
         "position" => match s.position {
@@ -424,24 +472,24 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect) -
             }
         }
         "line-height" => s.line_height.map(px).unwrap_or_else(|| "normal".into()),
-        "width" => px(r.w - s.border_width.left - s.border_width.right - s.padding.left.resolve_or_zero(r.w) - s.padding.right.resolve_or_zero(r.w)),
-        "height" => px(r.h - s.border_width.top - s.border_width.bottom - s.padding.top.resolve_or_zero(r.w) - s.padding.bottom.resolve_or_zero(r.w)),
-        "margin-top" => length_css(&s.margin.top, r.w),
-        "margin-right" => length_css(&s.margin.right, r.w),
-        "margin-bottom" => length_css(&s.margin.bottom, r.w),
-        "margin-left" => length_css(&s.margin.left, r.w),
-        "padding-top" => length_css(&s.padding.top, r.w),
-        "padding-right" => length_css(&s.padding.right, r.w),
-        "padding-bottom" => length_css(&s.padding.bottom, r.w),
-        "padding-left" => length_css(&s.padding.left, r.w),
+        "width" => px(r.w - s.border_width.left - s.border_width.right - s.padding.left.resolve_or_zero(cb.w) - s.padding.right.resolve_or_zero(cb.w)),
+        "height" => px(r.h - s.border_width.top - s.border_width.bottom - s.padding.top.resolve_or_zero(cb.w) - s.padding.bottom.resolve_or_zero(cb.w)),
+        "margin-top" => length_css(&s.margin.top, cb.w),
+        "margin-right" => length_css(&s.margin.right, cb.w),
+        "margin-bottom" => length_css(&s.margin.bottom, cb.w),
+        "margin-left" => length_css(&s.margin.left, cb.w),
+        "padding-top" => length_css(&s.padding.top, cb.w),
+        "padding-right" => length_css(&s.padding.right, cb.w),
+        "padding-bottom" => length_css(&s.padding.bottom, cb.w),
+        "padding-left" => length_css(&s.padding.left, cb.w),
         "border-top-width" => px(s.border_width.top),
         "border-right-width" => px(s.border_width.right),
         "border-bottom-width" => px(s.border_width.bottom),
         "border-left-width" => px(s.border_width.left),
-        "top" => length_css(&s.inset.top, r.h),
-        "left" => length_css(&s.inset.left, r.w),
-        "right" => length_css(&s.inset.right, r.w),
-        "bottom" => length_css(&s.inset.bottom, r.h),
+        "top" => length_css(&s.inset.top, cb.h),
+        "left" => length_css(&s.inset.left, cb.w),
+        "right" => length_css(&s.inset.right, cb.w),
+        "bottom" => length_css(&s.inset.bottom, cb.h),
         "z-index" => s.z_index.map(|z| z.to_string()).unwrap_or_else(|| "auto".into()),
         "overflow" | "overflow-x" | "overflow-y" => match s.overflow_x {
             rabbithole_style::Overflow::Visible => "visible",
@@ -497,13 +545,45 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect) -
             }
             if parts.is_empty() { "none".into() } else { parts.join(" ") }
         }
-        "border-radius" | "border-top-left-radius" => px(s.border_radius),
+        "border-radius" => px(s.border_radius),
+        "border-top-left-radius" => radius_css(s, 0),
+        "border-top-right-radius" => radius_css(s, 1),
+        "border-bottom-right-radius" => radius_css(s, 2),
+        "border-bottom-left-radius" => radius_css(s, 3),
+        "border-top-style" => border_style_css(s.border_style.top).into(),
+        "border-right-style" => border_style_css(s.border_style.right).into(),
+        "border-bottom-style" => border_style_css(s.border_style.bottom).into(),
+        "border-left-style" => border_style_css(s.border_style.left).into(),
+        p if p.starts_with("border-block-") || p.starts_with("border-inline-") || p.starts_with("border-start-") || p.starts_with("border-end-") => {
+            match physical_border_prop(p, s.direction == rabbithole_style::Direction::Rtl) {
+                Some(phys) => computed_from_style(s, &phys, r, cb),
+                None => String::new(),
+            }
+        }
+        "border-image-source" => "none".into(),
+        "border-image-slice" => "100%".into(),
+        "border-image-width" => "1".into(),
+        "border-image-outset" => "0".into(),
+        "border-image-repeat" => "stretch".into(),
+        "background-attachment" => if s.background_layers.first().is_some_and(|l| l.fixed) { "fixed".into() } else { "scroll".into() },
+        "background-clip" => box_area_css(s.background_layers.first().map_or(rabbithole_style::BoxArea::BorderBox, |l| l.clip)).into(),
+        "background-origin" => box_area_css(s.background_layers.first().map_or(rabbithole_style::BoxArea::PaddingBox, |l| l.origin)).into(),
+        "background-size" => match s.background_layers.first().map(|l| &l.size) {
+            Some(rabbithole_style::BackgroundSize::Cover) => "cover".into(),
+            Some(rabbithole_style::BackgroundSize::Contain) => "contain".into(),
+            Some(rabbithole_style::BackgroundSize::Explicit(w, h)) => format!("{} {}", position_css(w), position_css(h)),
+            _ => "auto".into(),
+        },
+        "background-position" => match s.background_layers.first() {
+            Some(l) => format!("{} {}", position_css(&l.position.0), position_css(&l.position.1)),
+            None => "0% 0%".into(),
+        },
         "direction" => if s.direction == rabbithole_style::Direction::Rtl { "rtl".into() } else { "ltr".into() },
         "background-image" => s.background_image.as_ref().map(|u| format!("url(\"{u}\")")).unwrap_or_else(|| "none".into()),
-        "min-width" => length_css(&s.min_width, r.w),
-        "max-width" => if s.max_width.is_auto() { "none".into() } else { length_css(&s.max_width, r.w) },
-        "min-height" => length_css(&s.min_height, r.h),
-        "max-height" => if s.max_height.is_auto() { "none".into() } else { length_css(&s.max_height, r.h) },
+        "min-width" => length_css(&s.min_width, cb.w),
+        "max-width" => if s.max_width.is_auto() { "none".into() } else { length_css(&s.max_width, cb.w) },
+        "min-height" => length_css(&s.min_height, cb.h),
+        "max-height" => if s.max_height.is_auto() { "none".into() } else { length_css(&s.max_height, cb.h) },
         "letter-spacing" => if s.letter_spacing == 0.0 { "normal".into() } else { px(s.letter_spacing) },
         "text-transform" => match s.text_transform {
             rabbithole_style::TextTransform::None => "none",
@@ -528,6 +608,71 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect) -
         p if p.starts_with("transition-") || p.starts_with("animation-") => timing_css(s, p).unwrap_or_default(),
         _ => String::new(),
     }
+}
+
+fn border_style_css(b: rabbithole_style::BorderStyle) -> &'static str {
+    match b {
+        rabbithole_style::BorderStyle::None => "none",
+        rabbithole_style::BorderStyle::Solid => "solid",
+        rabbithole_style::BorderStyle::Dashed => "dashed",
+        rabbithole_style::BorderStyle::Dotted => "dotted",
+        rabbithole_style::BorderStyle::Double => "double",
+    }
+}
+
+fn box_area_css(a: rabbithole_style::BoxArea) -> &'static str {
+    match a {
+        rabbithole_style::BoxArea::BorderBox => "border-box",
+        rabbithole_style::BoxArea::PaddingBox => "padding-box",
+        rabbithole_style::BoxArea::ContentBox => "content-box",
+    }
+}
+
+/// A background position component: percentages stay percentages.
+fn position_css(l: &Length) -> String {
+    match l {
+        Length::Percent(p) => format!("{p}%"),
+        Length::Calc(v, p) => rabbithole_style::MathNode::Leaf(*v, *p).to_css(),
+        Length::Math(id) => rabbithole_style::math_node(*id).map(|n| n.to_css()).unwrap_or_default(),
+        other => length_css(other, 0.0),
+    }
+}
+
+/// Computed corner radius `i` (top-left, top-right, bottom-right,
+/// bottom-left): one value when both radii are equal.
+fn radius_css(s: &ComputedStyle, i: usize) -> String {
+    let (h, v) = &s.border_radii[i];
+    let (h, v) = (position_css(h), position_css(v));
+    if h == v { h } else { format!("{h} {v}") }
+}
+
+/// The physical longhand of a logical border property, for horizontal
+/// writing mode in direction `rtl` or ltr.
+fn physical_border_prop(p: &str, rtl: bool) -> Option<String> {
+    let (start, end) = if rtl { ("right", "left") } else { ("left", "right") };
+    for (logical, physical) in [
+        ("border-start-start-radius", format!("border-top-{start}-radius")),
+        ("border-start-end-radius", format!("border-top-{end}-radius")),
+        ("border-end-start-radius", format!("border-bottom-{start}-radius")),
+        ("border-end-end-radius", format!("border-bottom-{end}-radius")),
+    ] {
+        if p == logical {
+            return Some(physical);
+        }
+    }
+    let rest = p.strip_prefix("border-")?;
+    let (side, prop) = if let Some(x) = rest.strip_prefix("block-start-") {
+        ("top", x)
+    } else if let Some(x) = rest.strip_prefix("block-end-") {
+        ("bottom", x)
+    } else if let Some(x) = rest.strip_prefix("inline-start-") {
+        (start, x)
+    } else if let Some(x) = rest.strip_prefix("inline-end-") {
+        (end, x)
+    } else {
+        return None;
+    };
+    matches!(prop, "color" | "style" | "width").then(|| format!("border-{side}-{prop}"))
 }
 
 /// Computed `transition-*` / `animation-*` longhands for `getComputedStyle`.

@@ -84,7 +84,7 @@ pub(crate) fn resolve_size(l: Length, avail: Option<f32>, border_box: bool, pb: 
     let v = match l {
         Length::Px(v) => v,
         Length::Percent(p) => avail? * p / 100.0,
-        Length::Calc(px, p) => px + avail? * p / 100.0,
+        Length::Calc(..) | Length::Math(_) => l.resolve(avail?)?,
         _ => return None,
     };
     Some(if border_box { (v - pb).max(0.0) } else { v.max(0.0) })
