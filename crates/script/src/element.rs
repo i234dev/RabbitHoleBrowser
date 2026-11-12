@@ -1340,6 +1340,17 @@ fn input_default_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsRes
     }))
 }
 
+/// `input.defaultValue = v` sets the `value` content attribute; the
+/// current value follows it only while the control is not dirty (React
+/// writes `defaultValue` while restoring an uncontrolled input after an
+/// `input` event: the typed text must survive).
+fn input_default_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "defaultValue")?;
+    let v = arg_str(realm, args, 0)?;
+    set_attribute(n, "value", Some(&v));
+    Ok(Value::Undefined)
+}
+
 fn input_checked_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "checked")?;
     Ok(Value::Bool(with_doc(n.doc, |doc| doc.is_checked(n.node))))
@@ -2177,7 +2188,7 @@ pub(crate) fn install(realm: &mut Realm) {
     // --- HTMLInputElement
     let input = define_class(realm, "HTMLInputElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_accessor(input, "value", Some(input_value_get), Some(input_value_set), ACC);
-    realm.define_accessor(input, "defaultValue", Some(input_default_value_get), Some(input_value_set), ACC);
+    realm.define_accessor(input, "defaultValue", Some(input_default_value_get), Some(input_default_value_set), ACC);
     realm.define_accessor(input, "checked", Some(input_checked_get), Some(input_checked_set), ACC);
     realm.define_accessor(input, "defaultChecked", Some(input_checked_get), Some(input_checked_set), ACC);
     realm.define_accessor(input, "type", Some(input_type_get), Some(input_type_set), ACC);

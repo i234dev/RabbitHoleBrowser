@@ -1337,3 +1337,22 @@ fn child_nodes_is_one_refreshed_node_list() {
     );
     assert_eq!(r, "'true,true,3,2,I,true,1'");
 }
+
+/// `defaultValue` is the `value` content attribute: setting it on a dirty
+/// input keeps the typed value (React restores uncontrolled inputs by
+/// writing `defaultValue` after an `input` event; the TodoMVC-React suite
+/// of Speedometer lost every typed todo).
+#[test]
+fn input_default_value_is_the_value_attribute() {
+    let out = logs_of(
+        "<html><body></body></html>",
+        r#"
+        const i = document.createElement('input');
+        i.value = 'typed'; i.defaultValue = 'def';
+        const j = document.createElement('input');
+        j.defaultValue = 'd'; const before = j.value; j.setAttribute('value', 'e');
+        console.log(i.value, i.getAttribute('value'), before, j.value, j.defaultValue);
+        "#,
+    );
+    assert_eq!(out, vec!["typed def d e e"]);
+}
