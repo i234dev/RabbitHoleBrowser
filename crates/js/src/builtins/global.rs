@@ -376,7 +376,7 @@ fn structured_clone(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 
 fn eval(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let src = match (arg(args, 0)).v() {
-        V::String(s) => s.to_rust_string(),
+        V::String(s) => s.to_source_string(),
         other => return Ok(other.to_value()),
     };
     // Indirect eval: global scope, but its lexical declarations stay in

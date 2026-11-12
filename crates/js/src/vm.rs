@@ -4539,7 +4539,7 @@ impl Realm {
     /// scope (see `compiler::compile_eval`).
     fn direct_eval(&mut self, fi: usize, arg: Value, strict: bool, site: Option<Rc<crate::compiler::EvalSite>>) -> JsResult<Value> {
         let src = match arg.v() {
-            V::String(s) => s.to_rust_string(),
+            V::String(s) => s.to_source_string(),
             other => return Ok(other.to_value()),
         };
         let Some(site) = site else {

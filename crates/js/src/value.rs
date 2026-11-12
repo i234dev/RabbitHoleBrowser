@@ -122,13 +122,52 @@ impl Drop for StrInner {
 
 const ROPE_MIN: usize = 48;
 
+/// Rust strings cannot hold lone surrogates (`"\uD800"` in a string
+/// literal): the lexer stands them in with U+10F800 + (unit - 0xD800), the
+/// last 2048 code points of the supplementary private use area, and
+/// [`JsStr::new`] turns those back into the lone code unit.
+pub fn lone_surrogate_char(unit: u32) -> char {
+    char::from_u32(0x10F800 + (unit - 0xD800)).unwrap_or('\u{fffd}')
+}
+
+fn decode_lone_surrogates(v: &mut Vec<u16>) {
+    let mut out = Vec::with_capacity(v.len());
+    let mut i = 0;
+    while i < v.len() {
+        let u = v[i];
+        if (0xDBFE..=0xDBFF).contains(&u) && i + 1 < v.len() && (0xDC00..0xE000).contains(&v[i + 1]) {
+            let cp = 0x10000 + (((u as u32) - 0xD800) << 10) + (v[i + 1] as u32 - 0xDC00);
+            if cp >= 0x10F800 {
+                out.push((cp - 0x10F800 + 0xD800) as u16);
+                i += 2;
+                continue;
+            }
+        }
+        out.push(u);
+        i += 1;
+    }
+    *v = out;
+}
+
 impl JsStr {
     pub fn new(s: &str) -> JsStr {
         // A UTF-8 string has at most as many UTF-16 units as bytes: one
         // allocation, exact for ASCII (no growth, no shrink).
         let mut v = Vec::with_capacity(s.len());
         v.extend(s.encode_utf16());
+        // U+10F800..U+10FFFF stand for lone surrogates (see
+        // [`lone_surrogate_char`]): only possible after a 0xF4 lead byte.
+        if s.as_bytes().contains(&0xF4) {
+            decode_lone_surrogates(&mut v);
+        }
         JsStr::from_inner(StrInner::Flat(v.into()))
+    }
+
+    /// The text as Rust source for the lexer: like `to_rust_string`, but
+    /// a lone surrogate becomes its [`lone_surrogate_char`] instead of
+    /// U+FFFD, so `eval` keeps it in string literals.
+    pub fn to_source_string(&self) -> String {
+        char::decode_utf16(self.as_units().iter().copied()).map(|r| r.unwrap_or_else(|e| lone_surrogate_char(e.unpaired_surrogate() as u32))).collect()
     }
     pub fn from_units(units: Vec<u16>) -> JsStr {
         JsStr::from_inner(StrInner::Flat(units.into()))

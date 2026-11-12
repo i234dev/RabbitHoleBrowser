@@ -643,9 +643,15 @@ impl<'a> Lexer<'a> {
             }
             self.pos += 1;
             let cp = u32::from_str_radix(hex, 16).map_err(|_| self.err("Invalid Unicode escape sequence"))?;
+            if (0xd800..0xe000).contains(&cp) {
+                return Ok(crate::value::lone_surrogate_char(cp));
+            }
             return char::from_u32(cp).ok_or_else(|| self.err("Invalid Unicode escape sequence"));
         }
         let cp = self.scan_hex_digits(4)?;
+        if (0xd800..0xe000).contains(&cp) {
+            return Ok(crate::value::lone_surrogate_char(cp));
+        }
         Ok(char::from_u32(cp).unwrap_or('\u{fffd}'))
     }
 
@@ -936,7 +942,11 @@ impl<'a> Lexer<'a> {
                         _ => self.pos = save,
                     }
                 }
-                char::from_u32(cp).unwrap_or('\u{fffd}')
+                if (0xd800..0xe000).contains(&cp) {
+                    crate::value::lone_surrogate_char(cp)
+                } else {
+                    char::from_u32(cp).unwrap_or('\u{fffd}')
+                }
             }
             'u' => self.scan_unicode_escape_body()?,
             '\r' => {
