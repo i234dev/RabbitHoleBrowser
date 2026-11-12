@@ -627,12 +627,22 @@ fn apply_declarations(
     // where the style is none/hidden (resolved after all declarations).
     style.border_color = Edges::all(style.color);
     style.border_width = Edges::all(3.0);
-    for (name, value, base) in &resolved {
+    for (i, (name, value, base)) in resolved.iter().enumerate() {
         if *name == "font-size" || *name == "color" {
             continue;
         }
         let ctx = ApplyCtx { len, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
         apply_property(name, value, &mut style, parent, &ctx);
+        if *name == "all" {
+            for (n2, v2, b2) in &resolved[i + 1..] {
+                if *n2 == "color" {
+                    let ctx = ApplyCtx { len, pseudo, base: *b2, document_base: opts.document_base, resolve: opts.resolve_url };
+                    apply_property(n2, v2, &mut style, parent, &ctx);
+                }
+            }
+            style.border_color = Edges::all(style.color);
+            style.border_width = Edges::all(3.0);
+        }
     }
 
     for (w, st) in [
