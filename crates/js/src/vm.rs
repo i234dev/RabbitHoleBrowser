@@ -2595,13 +2595,13 @@ impl Realm {
         };
         let fi = self.frames.len() - 1;
         // SAFETY: `fi` is the running frame.
-        let f = unsafe { self.frames.get_unchecked(fi) };
-        if f.is_construct && !v.is_object() {
-            if f.this.is_empty() {
-                return Err(self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
+        if unsafe { self.frames.get_unchecked(fi) }.is_construct && !v.is_object() {
+            if let Some(e) = self.construct_return_error(&v) {
+                return Err(e);
             }
-            v = f.this.clone();
+            v = unsafe { self.frames.get_unchecked(fi) }.this.clone();
         }
+        let f = unsafe { self.frames.get_unchecked(fi) };
         if !f.entry && fi > 0 {
             // Plain return to the calling frame: drop the frame where it
             // is (no move out of the vector).
@@ -4401,14 +4401,34 @@ impl Realm {
         Ok(())
     }
 
+    /// A constructor returning the non-object `v`: the error, if any
+    /// (a derived constructor may only return undefined, and only once
+    /// `this` is bound). It is thrown to the caller: the constructor's own
+    /// handlers no longer apply.
+    #[cold]
+    fn construct_return_error(&mut self, v: &Value) -> Option<Value> {
+        let f = self.frames.last().unwrap();
+        let derived = f.code().flags.is_derived;
+        let e = if derived && !v.is_undefined() {
+            self.new_error("TypeError", "Derived constructors may only return object or undefined")
+        } else if f.this.is_empty() {
+            self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
+        } else {
+            return None;
+        };
+        let f = self.frames.last_mut().unwrap();
+        f.pc = f.code().ops.len() + 1;
+        Some(e)
+    }
+
     /// Return `v` from the current frame.
     fn do_return(&mut self, mut v: Value) -> JsResult<Flow> {
         let f = self.frames.last().unwrap();
         if f.is_construct && !v.is_object() {
-            if f.this.is_empty() {
-                return Err(self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
+            if let Some(e) = self.construct_return_error(&v) {
+                return Err(e);
             }
-            v = f.this.clone();
+            v = self.frames.last().unwrap().this.clone();
         }
         let f = self.pop_frame();
         if f.entry {

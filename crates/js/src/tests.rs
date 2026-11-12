@@ -1659,6 +1659,10 @@ fn direct_eval_annexb_private_generators() {
     eq("function f(a = b, b) {} try { f(); 'no' } catch (e) { e.name }", "ReferenceError");
     eq("function f(a, b = a + 1) { a = 5; return a + b; } f(1)", "7");
     eq("var g = (x = () => y, y = 2) => x(); g()", "2");
+    // Derived constructors: primitive returns are TypeErrors thrown to the caller.
+    eq("class B {} class C extends B { constructor() { super(); try { return 1; } catch (e) { return {caught: true}; } } } try { new C(); 'no' } catch (e) { e.name }", "TypeError");
+    eq("class B {} class C extends B { constructor() { try { return; } catch (e) {} } } try { new C(); 'no' } catch (e) { e.name }", "ReferenceError");
+    eq("class B { constructor() { return 1; } } typeof new B()", "object");
     // Indirect eval: lexical declarations stay local, vars are deletable globals.
     eq("var a = (0, eval)('let ie = 1; ie + 1'); [a, typeof ie].join()", "2,undefined");
     eq("(0, eval)('var iv = 2; function ifn() { return this; }'); [iv, delete iv, typeof iv, ifn() === globalThis].join()", "2,true,undefined,true");
