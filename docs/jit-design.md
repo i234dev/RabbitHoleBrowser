@@ -1,6 +1,6 @@
 # JIT para el motor JS de RabbitHole: análisis y diseño (Stage 1)
 
-Estado: **análisis y diseño, sin código JIT**. Rama base: `main` @ `3896a9e`.
+Estado: **Stage 1 (análisis y diseño) en las secciones 0–10; Stage 2 implementado, ver "Stage 2: implementación" al final**. Rama base del análisis: `main` @ `3896a9e`.
 También se ha medido la rama de la "ronda 4 de la VM" (`worktree-agent-ac8f2d59ac314de8f` @ `0d121b8`:
 `Value` NaN-boxed de 8 bytes, ICs de cadena de prototipos, caché megamórfica,
 asignador por clases de tamaño, latch de bucle fusionado), porque el JIT se
@@ -975,3 +975,154 @@ la sección 3 en lugar de añadir un segundo backend:
   hello-world tarda 6,5 s con el intérprete y 4,2 s con el nivel nativo; el
   resto del tiempo hasta la vista previa (≈17 s desde la carga) es
   JavaScript, no wasm.
+
+---
+
+## Stage 2: implementación (estado)
+
+Aprobado por el propietario ("todo lo que mejore cobertura, performance o
+fixes es un OK"). Hecho en este orden:
+
+### S2.0 Reestructuración del bucle del intérprete
+
+`run_inner` se partió para que `pc`, la base de slots y el código vivan en
+registros: el bucle (`run_loop`) no devuelve nada (su `JsResult<Exit>` va a
+`Realm::loop_end`; el puntero oculto de retorno ocupaba un registro), las
+instrucciones se emparejan por referencia (copiar el `Op` decodificaba todos
+los campos antes del salto de dispatch), el índice de frame, el
+desplazamiento de slots y la instrucción actual ya no viven a lo largo del
+bucle (los caminos fuera de línea los recalculan y releen `ops[pc-1]`), y
+los pasos fuera de línea son funciones `#[inline(never)]` que devuelven un
+`Ctl` de un byte. `perf.rs`: 750 → 712 ms (−5 %; `global_loop` −15 %,
+`switch` −10 %, `calls`/`fib` −6 %). Speedometer (subconjunto, 6 pares
+alternos): neutro dentro del ruido (±3 %).
+
+### S2.1 Desviaciones respecto al diseño (y por qué)
+
+- **Un solo convenio de llamada**: código nativo y helpers usan
+  `extern "sysv64"` en todas las plataformas x86-64 (como el JIT de wasm);
+  Windows no necesita una segunda variante de plantillas.
+- **Entrada en cualquier frontera de instrucción**: como todo valor vive en
+  el frame, la tabla de entrada permite entrar en cualquier `pc` (no solo
+  0 y puntos de continuación). Eso da gratis la reanudación tras llamadas,
+  la entrada en manejadores de excepción (no hace falta volver al
+  intérprete tras un `catch`) y el OSR de bucles (S2.7).
+- **Cambio de frame sin salir del código nativo**: tras una llamada que
+  empuja un frame JS o un `return`, el helper `h_switch` reescribe el
+  contexto para el nuevo frame y salta a su entrada interna (todas las
+  funciones comparten el mismo prólogo, así que el frame nativo es el
+  mismo): no hay recursión nativa (la profundidad máxima es la del
+  intérprete) y una llamada JS→JS entre funciones compiladas no pasa por el
+  bucle del intérprete.
+- **Propiedad del código**: el código nativo pertenece a su
+  `FunctionCode`; `run_script` mantiene su `Rc` durante todo el `run()` (un
+  `return` del frame de script soltaba el último `Rc` mientras su código
+  nativo aún ejecutaba el epílogo).
+- **Coste cero con el JIT apagado**: `run_loop` es genérico sobre un
+  `const JIT: bool`; con el JIT apagado se ejecuta la instancia sin
+  ganchos, idéntica a un build sin la feature.
+- **Fast paths de acceso**: los helpers genéricos eran más lentos que los
+  fast paths del intérprete (helpers con `catch_unwind`, sincronización de
+  `pc` y recálculo de la base). Se añadieron helpers de acierto de IC sin
+  sincronización (globales, propiedades, elementos, concatenación) y
+  plantillas nativas para `GetGlobalR`/`SetGlobalR` (`IC_GLOBAL_LEX` e
+  `IC_GLOBAL_OBJ`, leyendo `PropIc` — ahora `#[repr(C)]` — y la época de
+  prototipos directamente).
+
+### S2.2 Fases
+
+Cada fase es un commit pequeño y revertible: el compilador entero está en
+`crates/js/src/jit/emit.rs` y `emit::PHASE` decide qué instrucciones admite
+(las de fases posteriores hacen la función no compilable); el OSR de bucles
+está detrás de `jit::LOOP_OSR`.
+
+| Fase | Contenido | Validación |
+|---|---|---|
+| 1 | crate `rabbithole-jit` (memoria W^X, ensamblador con listados), feature `jit`, flags, contadores, estadísticas, trazas, exclusiones, `jitdiff`, `jit-check.sh` | compila con y sin feature (Linux, cross-check Windows); stub `mov eax,0; ret` RX y sin mapeos `rwx`; JIT apagado dentro del ruido |
+| 2 | funciones en línea recta: `LoadK`, `Mov*`, aritmética RR/RK, `CmpRR/RK`, `ReturnR` | tests diferenciales, suite JS a umbral 0 |
+| 3 | saltos (registro), latches fusionados, ticks en saltos hacia atrás | watchdog corta un bucle infinito nativo; GC-stress |
+| 4 | helper genérico (`h_exec`) para todas las instrucciones que no son llamadas, accesos con IC, globales nativas, veracidad/nullish/igualdad estricta | fuzzer diferencial |
+| 5 | `CallR`/`NewR`/llamadas de pila, `ReturnR`, `Throw`, excepciones (la VM desenrolla; el manejador puede estar en código nativo), pánicos capturados en helpers, cambio de frame nativo | suites `js`, `script`, `frameworks` a umbral 0; profundidad de recursión idéntica |
+| 6 | umbral, memoria de código por hilo (16 MB), liberación con la función, coste de compilación medido | test de liberación (miles de funciones) |
+| 7 | OSR de bucles | `perf.rs` con el JIT activado |
+
+### S2.3 Validación
+
+- Suites con `RABBITHOLE_JIT=on` y umbral 0 (todo se compila en la primera
+  ejecución) y umbral 2 (los bucles entran en código nativo a mitad de
+  ejecución): `js` 137/137, `script` 76/76, `frameworks` 66/66, iguales que
+  con el JIT apagado (`scripts/jit-check.sh` compara ambos modos).
+- Tests diferenciales (`tests_jit.rs`): aritmética con NaN/−0/enteros
+  grandes, NaN con carga útil fuera de canon (Float64Array), saltos,
+  veracidad, cadenas y BigInt (contadores de referencias), getters y
+  `valueOf`, excepciones capturadas y no capturadas (mismo mensaje),
+  recursión máxima idéntica, watchdog sobre un bucle nativo infinito,
+  liberación del código, y GC-stress (`RH_GC_STRESS=1`: GC en cada safe
+  point, tick 1).
+- Fuzzer diferencial (`examples/jitdiff`, generador propio con semilla):
+  más de 40 000 programas aleatorios + el corpus de `perf.rs`, 0
+  diferencias. Encontró un fallo del intérprete (no del JIT): `a = a + a`
+  en bucle desbordaba la longitud de la cuerda y hacía pánico; ahora es
+  `RangeError: Invalid string length` como en V8.
+- W^X: test del stub y comprobación de que no existe ningún mapeo `rwx`.
+- Windows: `cargo check --target x86_64-pc-windows-gnu` verde; el código
+  nativo sigue desactivado en Windows hasta probarlo en una máquina real.
+
+### S2.4 Medidas (ms de CPU del hilo, mejor de 3, mínimo de 2 rondas alternas)
+
+`perf.rs` (`main` = antes de Stage 2; VM = intérprete reestructurado; VM+JIT =
+`RABBITHOLE_JIT=on`, umbral 1000, OSR; QuickJS 2025-04-26 compilado con
+`zig cc -O2` fuera del repo, solo como referencia):
+
+| caso | main | VM | VM+JIT | QuickJS | JIT/VM |
+|---|---:|---:|---:|---:|---:|
+| empty_loop | 45,9 | 45,9 | 36,7 | 91,8 | 1,25× |
+| global_loop | 60,4 | 54,2 | 42,0 | 85,1 | 1,29× |
+| local_loop | 19,5 | 18,0 | 14,4 | 22,2 | 1,25× |
+| let_loop | 22,6 | 22,9 | 18,1 | 56,0 | 1,27× |
+| props | 37,6 | 37,1 | 30,8 | 43,3 | 1,20× |
+| array_rw | 34,6 | 33,7 | 28,2 | 65,4 | 1,19× |
+| try_catch | 8,0 | 7,5 | 5,9 | 13,2 | 1,29× |
+| switch | 35,8 | 34,0 | 19,3 | 50,7 | 1,76× |
+| hot_7ops | — | 49,3 | 23,7 | 197,6 | 2,08× |
+| hot_branchy | — | 40,7 | 25,2 | 33,5 | 1,62× |
+| hot_bits | — | 93,9 | 67,2 | 98,2 | 1,40× |
+| hot_array | — | 27,8 | 24,5 | 34,1 | 1,13× |
+| calls / closure_calls / method_calls | 20,9 / 30,3 / 32,4 | 19,9 / 30,1 / 31,7 | 21,9 / 33,9 / 34,1 | 23,0 / 38,3 / 42,5 | 0,89–0,93× |
+| new_objects / push_objects | 65,1 / 36,3 | 61,2 / 36,9 | 65,4 / 39,8 | 77,4 / 66,5 | 0,93–0,94× |
+| strings / string_ops | 5,1 / 39,6 | 5,2 / 41,3 | 6,4 / 53,4 | 16,2 / 33,9 | 0,77–0,81× |
+| for_in | 31,9 | 32,3 | 38,5 | 38,8 | 0,84× |
+| json / array_map / arguments / fib | 49,8 / 56,3 / 27,9 / 17,7 | 50,6 / 56,5 / 27,5 / 16,7 | 52,0 / 57,1 / 27,8 / 17,9 | 96,7 / 53,0 / 162,2 / 12,7 | 0,93–0,99× |
+| **TOTAL** (27 casos) | — | 1014 | 919 | 1607 | 1,10× |
+
+- Compilación: 0,9–2,2 µs/op y ~30 µs por función, de los que ~22 µs son
+  `mmap` + `mprotect` de una página por función (objetivo de diseño
+  ≤ 0,2 µs/op no alcanzado por ese coste fijo; una arena de código lo
+  quitaría). Código: ~70 B/op (objetivo ≤ 100).
+- Memoria: en Speedometer se compilan 261 funciones (≈1,25 MB de código sin
+  contar el redondeo a páginas); límite 16 MB por hilo.
+- Speedometer 3.1 (TodoMVC-jQuery, Charts-chartjs, NewsSite-Next), mismo
+  binario, 5 pares alternos: geomean con el JIT apagado 4605–5119 ms
+  (mediana 4687), encendido 4823–5563 ms (mediana 4958): **≈ +5 %**, peor en
+  Charts (+9 %). Con el JIT el 45–85 % de las muestras están en código
+  nativo, pero hay 0,7–4 M de entradas en código nativo por suite: cada
+  llamada desde código nativo a una función interpretada sale y vuelve a
+  entrar (prólogo, despacho, epílogo, `jit_run`), y los helpers de
+  acceso/llamada cuestan más que los fast paths inline del intérprete.
+
+### S2.5 Estado y recomendación
+
+- El JIT está completo según el diseño (fases 1–6) más OSR de bucles
+  (fase 7), validado (suites a umbral 0 y 2, diferencial, fuzzer,
+  GC-stress), y **sigue desactivado por defecto**: cumple ≥ 2× en el bucle
+  numérico de varias instrucciones (hot_7ops 2,08×) y mejora 1,2–1,8× los
+  bucles de `perf.rs`, pero en páginas reales cuesta ≈ 5 % (objetivo
+  ≤ 3 %), y el código con muchas llamadas o métodos de string es 7–23 %
+  más lento.
+- Siguientes pasos, por retorno esperado: (1) entradas/salidas más
+  baratas — llamar a funciones interpretadas sin salir del código nativo
+  no es posible sin recursión, pero sí bajar la tasa: compilar antes los
+  callees llamados desde código nativo y hacer `jit_run`/prólogo mínimos;
+  (2) fast paths nativos de `GetPropR`/`SetPropR` (`IC_OWN`) y de `CallR`
+  a funciones compiladas; (3) arena de código (coste de compilación);
+  (4) prueba en Windows real para activarlo allí.
