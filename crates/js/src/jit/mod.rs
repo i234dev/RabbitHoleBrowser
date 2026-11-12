@@ -62,6 +62,10 @@ pub const LOOP_WEIGHT: u32 = 100;
 /// Loop OSR: a backward jump caught by the interpreter's safe-point tick
 /// in a hot function continues the frame in native code (stage 2 phase 7).
 pub(crate) const LOOP_OSR: bool = false;
+/// Loop-free functions shorter than this are entered from interpreted
+/// callers only when they are already running natively (see
+/// `Slot::from_interp`).
+pub(crate) const ENTRY_MIN_OPS: usize = 48;
 /// Functions longer than this stay interpreted.
 pub const MAX_OPS: usize = 20_000;
 /// Frames larger than this stay interpreted (slot offsets fit in disp32
@@ -104,6 +108,11 @@ pub struct Slot {
     /// Hotness.
     pub(crate) counter: Cell<u32>,
     pub(crate) state: Cell<u8>,
+    /// Worth entering from the interpreter at a call: the function has a
+    /// loop or is long. A short loop-free function called from interpreted
+    /// code runs faster interpreted than through a native entry and exit;
+    /// from native code (or resumed mid-way) it always runs natively.
+    pub(crate) from_interp: Cell<bool>,
     /// Owner of the native code: freed with the `FunctionCode`, which
     /// outlives every frame running it.
     pub(crate) code: OnceCell<JitCode>,
@@ -261,6 +270,25 @@ fn exclusion(code: &FunctionCode) -> Option<String> {
     None
 }
 
+/// Does `code` have a backward jump?
+fn has_loop(code: &FunctionCode) -> bool {
+    use crate::bytecode::Op;
+    code.ops.iter().enumerate().any(|(pc, op)| {
+        let t = match *op {
+            Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfNullish(t) | Op::JumpIfNotNullishKeep(t) | Op::JumpIfFalseKeep(t) | Op::JumpIfTrueKeep(t) | Op::JumpIfUndefined(t) | Op::JumpIfNotUndefined(t) | Op::JumpIfStrictEq(t) => t,
+            Op::JumpUnlessLtRR(_, _, t) | Op::JumpUnlessLtEqRR(_, _, t) | Op::JumpUnlessGtRR(_, _, t) | Op::JumpUnlessGtEqRR(_, _, t) => t,
+            Op::JumpUnlessLtRK(_, _, t) | Op::JumpUnlessLtEqRK(_, _, t) | Op::JumpUnlessGtRK(_, _, t) | Op::JumpUnlessGtEqRK(_, _, t) => t,
+            Op::JumpIfLtRR(_, _, t) | Op::JumpIfLtEqRR(_, _, t) | Op::JumpIfGtRR(_, _, t) | Op::JumpIfGtEqRR(_, _, t) => t,
+            Op::JumpIfLtRK(_, _, t) | Op::JumpIfLtEqRK(_, _, t) | Op::JumpIfGtRK(_, _, t) | Op::JumpIfGtEqRK(_, _, t) => t,
+            Op::JumpIfStrictEqRR(_, _, t) | Op::JumpIfStrictNotEqRR(_, _, t) | Op::JumpIfStrictEqRK(_, _, t) | Op::JumpIfStrictNotEqRK(_, _, t) => t,
+            Op::IncJumpIfLtRR(_, _, t) | Op::IncJumpIfLtRK(_, _, t) => t,
+            Op::JumpIfTrueR(_, t) | Op::JumpIfFalseR(_, t) | Op::JumpIfNullishR(_, t) | Op::JumpIfNotNullishR(_, t) | Op::JumpIfUndefinedR(_, t) | Op::JumpIfNotUndefinedR(_, t) => t,
+            _ => return false,
+        };
+        (t as usize) <= pc
+    })
+}
+
 fn describe(code: &FunctionCode) -> String {
     let name = code.name.to_rust_string();
     let line = code.positions.first().map(|p| p.line).unwrap_or(0);
@@ -296,6 +324,7 @@ pub(crate) fn compile(code: &FunctionCode, stats: &mut Stats) {
             if let Some(l) = listing {
                 eprintln!("[jit] ---- {} ({} ops, {} bytes at {:p})\n{l}", describe(code), code.ops.len(), mem.len(), mem.ptr());
             }
+            slot.from_interp.set(code.ops.len() >= ENTRY_MIN_OPS || has_loop(code));
             slot.entry.set(mem.ptr() as usize);
             let _ = slot.code.set(JitCode { mem });
             slot.state.set(COMPILED);

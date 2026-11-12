@@ -60,6 +60,10 @@ impl Realm {
     pub(crate) fn jit_reload(&mut self, code: &FunctionCode, pc: usize) -> Ctl {
         let s = &code.jit.s;
         let mut e = s.entry.get();
+        if e != 0 && pc == 0 && !s.from_interp.get() {
+            // A short loop-free function called from interpreted code.
+            return Ctl::Next;
+        }
         if e == 0 {
             if pc != 0 {
                 return Ctl::Next;
@@ -71,7 +75,7 @@ impl Realm {
             }
             compile(code, &mut self.jit.stats);
             e = s.entry.get();
-            if e == 0 {
+            if e == 0 || !s.from_interp.get() {
                 return Ctl::Next;
             }
         }
