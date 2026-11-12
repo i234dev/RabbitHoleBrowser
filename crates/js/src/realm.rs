@@ -192,6 +192,13 @@ pub struct Realm {
     /// Backstop on nested native calls; the real bound is the native
     /// stack itself (see [`crate::stack`]).
     pub max_native_depth: usize,
+    /// Most heap objects a realm may hold (garbage included while native
+    /// code is on the stack and no collection can run); past it running
+    /// script is stopped with an uncatchable "Out of memory" RangeError
+    /// instead of the process aborting on a failed allocation.
+    pub heap_limit: usize,
+    /// Call-site index set by `Op::EvalSite` for the following `CallEval`.
+    pub(crate) eval_site: u32,
     /// Host hook for `import()` / modules (unused by the core).
     pub host_data: Option<Box<dyn Any>>,
     /// Extra GC roots maintained by the host (e.g. DOM node wrappers).
@@ -416,6 +423,8 @@ impl Realm {
             unhandled_rejections: Vec::new(),
             max_frames: 12_500,
             max_native_depth: 100_000,
+            heap_limit: 60_000_000,
+            eval_site: u32::MAX,
             host_data: None,
             extra_roots: Vec::new(),
             ops_executed: 0,

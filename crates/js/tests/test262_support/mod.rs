@@ -432,6 +432,7 @@ fn drain_jobs(realm: &mut Realm) {
 /// Run one mode of a test. Ok(()) on pass, Err(message) otherwise.
 fn run_mode(suite: &Path, abs: &Path, src: &str, meta: &Meta, mode: Mode, deadline: Duration) -> Result<(), String> {
     let mut realm = Realm::new();
+    realm.heap_limit = 4_000_000;
     let console: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = console.clone();
     realm.set_console_sink(Box::new(move |level, text| sink.borrow_mut().push(format!("{level}: {text}"))));
@@ -818,6 +819,11 @@ pub fn summary_text(results: &[Outcome], commit: &str) -> String {
     }
     s.push_str(&format!("test262 {commit}\n"));
     s.push_str(&format!("total {} executed {} pass {} fail {} skip {} => {:.2}%\n", results.len(), total.executed(), total.pass, total.fail, total.skip, total.pct()));
+    let mut no_intl = Counts::default();
+    for r in results.iter().filter(|r| !r.path.starts_with("intl402/")) {
+        no_intl.add(r.status);
+    }
+    s.push_str(&format!("without intl402: executed {} pass {} fail {} skip {} => {:.2}%\n", no_intl.executed(), no_intl.pass, no_intl.fail, no_intl.skip, no_intl.pct()));
     s.push_str(&format!("statuses: {by_status:?}\n"));
     let mut tops: BTreeMap<String, Counts> = BTreeMap::new();
     for (d, c) in &dirs {

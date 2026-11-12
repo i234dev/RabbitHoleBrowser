@@ -287,15 +287,18 @@ fn map_entries(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Valu
 }
 
 fn map_group_by(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let items = arg(args, 0);
+    if items.is_nullish() {
+        return realm.type_error("Map.groupBy called on null or undefined");
+    }
     let cb = arg(args, 1);
     if !realm.is_callable(&cb) {
         return realm.type_error("Map.groupBy: callback is not a function");
     }
-    let items = realm.iterate_to_vec(arg(args, 0))?;
     let proto = realm.intrinsics.others["MapPrototype"];
     let map = realm.alloc(Object::new(Some(proto), ObjectKind::Map(Box::new(MapData::default()))));
     let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
-    for (i, item) in items.into_iter().enumerate() {
+    realm.for_each_iterated(items, |realm, item, i| {
         let key = realm.call(cb.clone(), Value::Undefined, &[item.clone(), Value::Number(i as f64)])?;
         let key = match key.v() {
             V::Number(n) if n == 0.0 => Value::Number(0.0),
@@ -305,7 +308,8 @@ fn map_group_by(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
             Some((_, v)) => v.push(item),
             None => groups.push((key, vec![item])),
         }
-    }
+        Ok(())
+    })?;
     for (k, v) in groups {
         let arr = realm.new_array_value(v);
         data_mut(realm, map).set(k, arr);

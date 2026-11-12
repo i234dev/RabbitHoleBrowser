@@ -1075,10 +1075,40 @@ impl Realm {
         };
         let flags = code.flags;
         let mut frame = self.prepare_frame(id, this, args, Value::Undefined, false)?;
-        // Suspended at its start: the slots wait inside the frame.
-        self.detach_slots(&mut frame);
         let is_async = flags.is_async;
         let is_gen = flags.is_generator;
+        if is_gen {
+            // Run FunctionDeclarationInstantiation now (errors in argument
+            // binding throw from the call); the body starts suspended at
+            // the compiler's initial `Yield`.
+            let fallback = if is_async { self.intrinsics.async_generator_proto } else { self.intrinsics.generator_proto };
+            let gen = self.alloc(Object::new(
+                Some(fallback),
+                ObjectKind::Generator(Box::new(GeneratorData { state: GeneratorState::Executing, frame: None, is_async, promise: None, queue: Default::default() })),
+            ));
+            frame.extra_mut().generator = Some(gen);
+            self.push_frame(frame, true)?;
+            let parked = match self.run() {
+                Ok(Exit::Yield(_, f)) => Some(f),
+                Ok(_) => None,
+                Err(e) => {
+                    if let ObjectKind::Generator(g) = &mut self.obj_mut(gen).kind {
+                        g.state = GeneratorState::Completed;
+                    }
+                    return Err(e);
+                }
+            };
+            if let ObjectKind::Generator(g) = &mut self.obj_mut(gen).kind {
+                g.state = if parked.is_some() { GeneratorState::SuspendedStart } else { GeneratorState::Completed };
+                g.frame = parked;
+            }
+            if let V::Object(p) = self.get(Value::Object(id), names::prototype())?.v() {
+                self.obj_mut(gen).set_proto(Some(p));
+            }
+            return Ok(Value::Object(gen));
+        }
+        // Suspended at its start: the slots wait inside the frame.
+        self.detach_slots(&mut frame);
         let proto = if is_gen {
             // generator object prototype = fn.prototype (if object) else intrinsic
             match (self.get(Value::Object(id), names::prototype())?).v() {
@@ -1153,6 +1183,11 @@ impl Realm {
         };
         set_state(self, GeneratorState::Executing, None);
         self.attach_slots(&mut frame);
+        if state == GeneratorState::SuspendedStart && frame.code().flags.is_generator {
+            // Parked at the initial yield: its result slot is popped.
+            let slot = frame.base as usize + frame.extra.as_ref().map_or(0, |e| e.resume_slot as usize);
+            self.vstack[slot] = Value::Undefined;
+        }
         if state == GeneratorState::SuspendedYield {
             match mode {
                 ResumeMode::Next => {
@@ -1401,6 +1436,9 @@ impl Realm {
     /// poll it): past the deadline, an uncatchable "Script execution timed
     /// out" error to propagate.
     pub fn check_watchdog(&mut self) -> JsResult<()> {
+        if self.heap.live_count > self.heap_limit {
+            return Err(self.out_of_memory());
+        }
         if let Some(d) = self.deadline {
             if self.terminating || self.watch_now() >= d {
                 if !self.terminating && self.apply_watchdog_credit() && self.watch_now() < self.deadline.unwrap_or(d) {
@@ -1411,6 +1449,16 @@ impl Realm {
             }
         }
         Ok(())
+    }
+
+    /// Stop the running script: the heap is over [`Realm::heap_limit`] or
+    /// a native operation would need more memory than it may take. The
+    /// error is uncatchable like a timeout (handlers are skipped while it
+    /// unwinds); the next task starts normally.
+    #[cold]
+    pub fn out_of_memory(&mut self) -> Value {
+        self.terminating = true;
+        self.new_error("RangeError", "Out of memory")
     }
 
     /// The interpreter loop. Register instructions address frame slots
@@ -3235,8 +3283,13 @@ impl Realm {
                             c.home_object = Some(obj);
                         }
                     }
-                    let flags = if flag == 1 { ALL } else { HIDDEN };
-                    self.define_own(obj, key, Property::data(f, flags))?;
+                    if matches!(key, PropertyKey::Symbol(sym) if self.is_private_symbol(sym)) {
+                        // Private method: a non-writable private element.
+                        self.private_define(&Value::Object(obj), &key.to_value(), Property::data(f, 0))?;
+                    } else {
+                        let flags = if flag == 1 { ALL } else { HIDDEN };
+                        self.define_own(obj, key, Property::data(f, flags))?;
+                    }
                 }
                 Op::DefineGetter(flag) | Op::DefineSetter(flag) => {
                     let f = pop!();
@@ -3260,7 +3313,14 @@ impl Realm {
                     } else {
                         s = Some(f);
                     }
-                    let flags = if flag == 1 { ENUMERABLE | CONFIGURABLE } else { CONFIGURABLE };
+                    let private = matches!(key, PropertyKey::Symbol(sym) if self.is_private_symbol(sym));
+                    let flags = if private {
+                        0
+                    } else if flag == 1 {
+                        ENUMERABLE | CONFIGURABLE
+                    } else {
+                        CONFIGURABLE
+                    };
                     self.obj_mut(obj).props.insert(key, Property::accessor(g, s, flags));
                 }
                 Op::CopyDataProps => {
@@ -3328,7 +3388,12 @@ impl Realm {
                     }
                     if let Op::CallEval(..) = op {
                         if f.as_object() == Some(self.intrinsics.eval_fn) {
-                            let v = self.direct_eval(args.first().cloned().unwrap_or(Value::Undefined), fi, desc)?;
+                            let site = std::mem::replace(&mut self.eval_site, u32::MAX);
+                            let site = frame!().code().eval_sites.get(site as usize).cloned();
+                            let strict = frame!().code().flags.is_strict;
+                            let r = self.direct_eval(fi, args.first().cloned().unwrap_or(Value::Undefined), strict, site);
+                            self.give_args(args);
+                            let v = r?;
                             push!(v);
                             return Ok(Flow::Next);
                         }
@@ -3627,7 +3692,7 @@ impl Realm {
                         _ => return self.type_error("Cannot use 'in' operator to search for a private field in a non-object"),
                     };
                     let key = self.to_property_key(sym)?;
-                    let r = self.has_own_property(id, &key);
+                    let r = self.obj(id).props.contains(&key);
                     push!(Value::Bool(r));
                 }
                 Op::NewObject => {
@@ -3870,6 +3935,74 @@ impl Realm {
                             push!(Value::Bool(true));
                         }
                     }
+                }
+                Op::EvalSite(i) => {
+                    self.eval_site = i;
+                }
+                Op::NewEvalVars => {
+                    let o = self.new_object_with_proto(None);
+                    push!(Value::Object(o));
+                }
+                Op::DeclareEvalVar(i) => {
+                    let obj = pop!();
+                    let key = const_key!(i);
+                    if let Some(o) = obj.as_object() {
+                        if !self.obj(o).props.contains(&key) {
+                            self.define_property(o, key, Value::Undefined, WRITABLE | ENUMERABLE | CONFIGURABLE);
+                        }
+                    }
+                }
+                Op::DeclareEvalGlobalVar(i) => {
+                    let key = const_key!(i);
+                    if let Some(name) = key.as_str() {
+                        if self.global_lex.get(name).is_some() {
+                            let n = name.to_rust_string();
+                            return Err(self.new_error("SyntaxError", &format!("Identifier '{n}' has already been declared")));
+                        }
+                    }
+                    let g = self.global;
+                    if !self.has_own_property(g, &key) {
+                        if !self.obj(g).extensible {
+                            let k = self.key_display(&key);
+                            return self.type_error(&format!("Cannot declare global variable '{k}'"));
+                        }
+                        self.define_property(g, key, Value::Undefined, WRITABLE | ENUMERABLE | CONFIGURABLE);
+                    }
+                }
+                Op::GetPrivate => {
+                    let key = pop!();
+                    let obj = pop!();
+                    let v = self.private_get(&obj, &key)?;
+                    push!(v);
+                }
+                Op::GetPrivateKeep => {
+                    let key = self.vstack[sp - 1].clone();
+                    let obj = self.vstack[sp - 2].clone();
+                    let v = self.private_get(&obj, &key)?;
+                    push!(v);
+                }
+                Op::SetPrivate => {
+                    let v = pop!();
+                    let key = pop!();
+                    let obj = pop!();
+                    self.private_set(&obj, &key, v.clone())?;
+                    push!(v);
+                }
+                Op::DefinePrivate => {
+                    let v = pop!();
+                    let key = pop!();
+                    let obj = peek!().clone();
+                    self.private_define(&obj, &key, Property::data(v, WRITABLE))?;
+                }
+                Op::CopyPrivate => {
+                    let template = pop!();
+                    let obj = peek!().clone();
+                    self.private_copy(&obj, &template)?;
+                }
+                Op::TakePrivate => {
+                    let proto = pop!();
+                    let t = self.private_take(&proto);
+                    push!(t);
                 }
                 Op::Yield | Op::AsyncYield => {
                     let v = pop!();
@@ -4268,50 +4401,31 @@ impl Realm {
         })
     }
 
-    /// Direct `eval(arg)` from frame `fi` at the call site whose
-    /// description constant is `site` (see `FunctionCode::eval_envs`): the
-    /// code is compiled against the scope chain visible there and runs on
-    /// the caller's scope, `this` and `new.target`.
-    fn direct_eval(&mut self, arg: Value, fi: usize, site: u32) -> JsResult<Value> {
+    /// Direct `eval(src)` from frame `fi`: the code runs in the caller's
+    /// scope (see `compiler::compile_eval`).
+    fn direct_eval(&mut self, fi: usize, arg: Value, strict: bool, site: Option<Rc<crate::compiler::EvalSite>>) -> JsResult<Value> {
         let src = match arg.v() {
             V::String(s) => s.to_rust_string(),
             other => return Ok(other.to_value()),
         };
-        let caller = &self.frames[fi];
-        let strict = caller.code().flags.is_strict;
-        let env = caller.code().eval_envs.iter().find(|(i, _)| *i == site).map(|(_, e)| e.clone());
-        let src = if strict { format!("\"use strict\";{}", src) } else { src };
-        let program = match crate::parser::parse_program(&src, false) {
-            Ok(p) => p,
-            Err(e) => return Err(self.new_error("SyntaxError", &e.message)),
+        let Some(site) = site else {
+            let src = if strict { format!("\"use strict\";{}", src) } else { src };
+            let code = self.compile(&src, "eval", false)?;
+            return self.run_script(code);
         };
-        let code = match crate::compiler::compile_eval(&program, &src, env) {
+        let program = match crate::parser::parse_eval(&src, site.strict) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!("{} (eval:{}:{})", e.message, e.line, e.column);
+                return Err(self.new_error("SyntaxError", &msg));
+            }
+        };
+        let code = match crate::compiler::compile_eval(&program, &site, &src) {
             Ok(c) => c,
             Err(e) => return Err(self.new_error("SyntaxError", &e.message)),
         };
-        let caller = &self.frames[fi];
-        let (scope, this, func, new_target) = (caller.scope, caller.this.clone(), caller.func, caller.new_target.clone());
-        let base = self.reserve_slots(code.frame_size());
-        let frame = Frame {
-            code: std::ptr::NonNull::from(&*code),
-            pc: 0,
-            base: base as u32,
-            argc: 0,
-            scope,
-            scope_depth: 0,
-            this,
-            func,
-            new_target,
-            ret_slot: 0,
-            is_construct: false,
-            entry: true,
-            extra: Some(Box::new(FrameExtra { code: Some(code.clone()), ..Default::default() })),
-        };
-        self.push_frame(frame, true)?;
-        match self.run()? {
-            Exit::Return(v) => Ok(v),
-            _ => unreachable!(),
-        }
+        let f = self.make_closure(fi, code);
+        self.call(Value::Object(f), Value::Undefined, &[])
     }
 
     fn super_call(&mut self, fi: usize, args: Vec<Value>) -> JsResult<Value> {
@@ -4422,6 +4536,104 @@ impl Realm {
             }
         }
         Ok(())
+    }
+
+    // ------------------------------------------------ private elements
+    //
+    // A private element is an own property keyed by the private name's
+    // symbol: fields are writable data properties, methods non-writable
+    // data properties, accessors accessor properties. They are reached only
+    // through these operations, which read the object's own properties
+    // directly (no prototype chain, no Proxy traps).
+
+    fn private_key(&mut self, key: &Value) -> JsResult<(PropertyKey, String)> {
+        match key.as_symbol() {
+            Some(s) => Ok((PropertyKey::Symbol(s), self.symbol_description(s))),
+            None => self.type_error("invalid private name"),
+        }
+    }
+
+    fn private_lookup(&mut self, obj: &Value, key: &Value, verb: &str) -> JsResult<(ObjectId, PropertyKey, Property)> {
+        let (k, name) = self.private_key(key)?;
+        let found = obj.as_object().and_then(|id| self.obj(id).props.get(&k).cloned().map(|p| (id, p)));
+        match found {
+            Some((id, p)) => Ok((id, k, p)),
+            None => self.type_error(&format!("Cannot {verb} private member {name} from an object whose class did not declare it")),
+        }
+    }
+
+    pub(crate) fn private_get(&mut self, obj: &Value, key: &Value) -> JsResult<Value> {
+        let (_, k, p) = self.private_lookup(obj, key, "read")?;
+        if p.is_accessor() {
+            return match p.getter_cloned() {
+                Some(g) if !g.is_undefined() => self.call(g, obj.clone(), &[]),
+                _ => {
+                    let name = self.key_display(&k);
+                    self.type_error(&format!("'{name}' was defined without a getter"))
+                }
+            };
+        }
+        Ok(p.value)
+    }
+
+    pub(crate) fn private_set(&mut self, obj: &Value, key: &Value, v: Value) -> JsResult<()> {
+        let (id, k, p) = self.private_lookup(obj, key, "write")?;
+        if p.is_accessor() {
+            return match p.setter_cloned() {
+                Some(s) if !s.is_undefined() => self.call(s, obj.clone(), &[v]).map(|_| ()),
+                _ => {
+                    let name = self.key_display(&k);
+                    self.type_error(&format!("'{name}' was defined without a setter"))
+                }
+            };
+        }
+        if !p.writable() {
+            let name = self.key_display(&k);
+            return self.type_error(&format!("Private method '{name}' is not writable"));
+        }
+        if let Some(slot) = self.obj_mut(id).props.get_mut(&k) {
+            slot.value = v;
+        }
+        Ok(())
+    }
+
+    /// PrivateFieldAdd / PrivateMethodOrAccessorAdd.
+    pub(crate) fn private_define(&mut self, obj: &Value, key: &Value, prop: Property) -> JsResult<()> {
+        let (k, name) = self.private_key(key)?;
+        let Some(id) = obj.as_object() else { return self.type_error(&format!("Cannot define private member {name} on a non-object")) };
+        if self.obj(id).props.contains(&k) {
+            return self.type_error(&format!("Cannot initialize {name} twice on the same object"));
+        }
+        self.obj_mut(id).props.insert(k, prop);
+        Ok(())
+    }
+
+    /// Install every private method/accessor of a class (kept on a
+    /// template object) on a new instance.
+    fn private_copy(&mut self, obj: &Value, template: &Value) -> JsResult<()> {
+        let Some(t) = template.as_object() else { return Ok(()) };
+        let items: Vec<(PropertyKey, Property)> = self.obj(t).props.iter().map(|(k, p)| (k.clone(), p.clone())).collect();
+        for (k, p) in items {
+            if let PropertyKey::Symbol(s) = k {
+                self.private_define(obj, &Value::Symbol(s), p)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Move the private-keyed properties the class body defined on its
+    /// prototype into a fresh template object.
+    fn private_take(&mut self, proto: &Value) -> Value {
+        let t = self.new_object_with_proto(None);
+        if let Some(p) = proto.as_object() {
+            let keys: Vec<PropertyKey> = self.obj(p).props.keys().into_iter().filter(|k| matches!(k, PropertyKey::Symbol(s) if self.is_private_symbol(*s))).collect();
+            for k in keys {
+                if let Some(prop) = self.obj_mut(p).props.remove(&k) {
+                    self.obj_mut(t).props.insert(k, prop);
+                }
+            }
+        }
+        Value::Object(t)
     }
 
     pub(crate) fn set_function_name(&mut self, f: &Value, key: &PropertyKey, prefix: &str) {

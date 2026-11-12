@@ -107,6 +107,31 @@ pub struct LazyScope {
     names: HashMap<String, (u16, BindKind), FxBuild>,
     materialized: bool,
     parent: Option<Rc<LazyScope>>,
+    /// A function's top scope (a var scope).
+    is_function: bool,
+    /// The scope's `with` object binding (see [`CScope::with_name`]).
+    with_name: Option<String>,
+    /// The top scope of a script (its names are globals).
+    is_script: bool,
+}
+
+/// Hidden binding of a sloppy function that contains a direct `eval`: an
+/// object (null prototype) holding the `var`s that eval code declares in
+/// the function's variable environment.
+pub const EVAL_VARS: &str = "%evalvars";
+
+/// What a direct `eval` call site knows at compile time.
+#[derive(Debug)]
+pub struct EvalSite {
+    /// The scope chain at the call (heap bindings, with names).
+    pub env: Option<Rc<LazyScope>>,
+    pub strict: bool,
+    pub class_depth: u32,
+    /// Context flags for early errors in the eval code.
+    pub in_function: bool,
+    pub in_method: bool,
+    pub in_derived_ctor: bool,
+    pub in_field_init: bool,
 }
 
 /// What a lazy [`FunctionCode`] keeps to compile its function on first
@@ -203,8 +228,13 @@ struct FnState {
     filename: Rc<str>,
     source: Option<Rc<str>>,
     class_depth: u32,
-    /// See [`FunctionCode::eval_envs`].
-    eval_envs: Vec<(u32, Rc<LazyScope>)>,
+    /// Direct eval call sites in this function.
+    eval_sites: Vec<Rc<EvalSite>>,
+    /// The function compiled from direct eval code.
+    is_eval: bool,
+    /// Annex B.3.3 block function declarations (by node address) that
+    /// also assign a var of the function / script / eval var scope.
+    annexb: std::collections::HashSet<usize>,
 }
 
 impl FnState {
@@ -245,7 +275,9 @@ impl FnState {
             filename,
             source: None,
             class_depth: 0,
-            eval_envs: Vec::new(),
+            eval_sites: Vec::new(),
+            is_eval: false,
+            annexb: Default::default(),
         }
     }
 }
@@ -273,8 +305,6 @@ pub struct Compiler {
     eager_root: *const Function,
     /// Defer compiling nested functions until their first call.
     lazy: bool,
-    /// Compiling direct `eval` code (see [`compile_eval`]).
-    eval: bool,
 }
 
 /// Name of the hidden binding initialised by `export default <expr>` and
@@ -324,7 +354,6 @@ pub fn compile_lazy(code: &FunctionCode) -> CResult<Rc<FunctionCode>> {
         outer: lz.env.clone(),
         eager_root: Rc::as_ptr(&lz.func),
         lazy: true,
-        eval: false,
     };
     // A transparent parent: no bindings of its own, not a scope at run
     // time; names resolve through `outer`.
@@ -365,25 +394,24 @@ pub fn compile_program_with(program: &Program, filename: &str, source: &str, com
         outer: None,
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
-        eval: false,
     };
     let code = c.compile_script(program)?;
     c.check_internal()?;
     Ok(code)
 }
 
-/// Compile the code of a direct `eval` whose call site sees the scope
-/// chain `env` (see [`FunctionCode::eval_envs`]). It runs as a script
-/// frame on the caller's scope: names resolve through `env` first, then
-/// globals. In sloppy mode its `var` and function declarations assign the
-/// caller's bindings of those names, or create globals for names the caller
-/// does not bind (bindings cannot be added to a compiled function); its
-/// lexical declarations, and in strict mode all of them, stay local.
-pub fn compile_eval(program: &Program, source: &str, env: Option<Rc<LazyScope>>) -> CResult<Rc<FunctionCode>> {
+/// Compile direct `eval` code for the call site `site`: an arrow function
+/// (it shares the caller's `this`, `new.target`, `super` and `arguments`)
+/// closed over the caller's scope chain, returning the completion value.
+/// Sloppy eval code declares its `var`s and functions in the caller's
+/// variable environment (EvalDeclarationInstantiation).
+pub fn compile_eval(program: &Program, site: &EvalSite, source: &str) -> CResult<Rc<FunctionCode>> {
+    let strict = site.strict || program.strict;
+    let filename: Rc<str> = Rc::from("eval");
     let mut c = Compiler {
         completion: true,
         fns: Vec::new(),
-        filename: Rc::from("eval"),
+        filename: filename.clone(),
         source: Rc::from(source),
         pending_tweak: None,
         chain_stack: Vec::new(),
@@ -391,14 +419,32 @@ pub fn compile_eval(program: &Program, source: &str, env: Option<Rc<LazyScope>>)
         module: None,
         captures: crate::captures::analyze_program(&program.body),
         internal_error: None,
-        outer: env,
+        outer: site.env.clone(),
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
-        eval: true,
     };
-    let code = c.compile_script(program)?;
+    // A transparent parent (no bindings, no runtime scope).
+    let mut parent = FnState::new("", CodeFlags { is_arrow: true, is_strict: strict, ..Default::default() }, false, filename.clone());
+    parent.scopes[0].materialized = false;
+    parent.scopes[0].is_function = false;
+    parent.class_depth = site.class_depth;
+    c.fns.push(parent);
+    let flags = CodeFlags { is_arrow: true, is_strict: strict, has_simple_params: true, ..Default::default() };
+    let mut fs = FnState::new("", flags, false, filename);
+    fs.is_eval = true;
+    fs.source = Some(c.source.clone());
+    fs.class_depth = site.class_depth;
+    fs.captured = c.captures.get(&std::ptr::null()).cloned().unwrap_or_default();
+    if fs.captured.contains(crate::captures::EVAL_ALL) {
+        fs.force_heap = true;
+    }
+    // Sloppy eval code has no variable environment of its own.
+    fs.scopes[0].is_function = strict;
+    c.fns.push(fs);
+    c.compile_eval_body(program, strict)?;
     c.check_internal()?;
-    Ok(code)
+    let fs = c.fns.pop().unwrap();
+    Ok(Rc::new(finish(fs, None)))
 }
 
 /// Compile an ECMAScript module (see [`CompiledModule`]). `module_id` is
@@ -418,7 +464,6 @@ pub fn compile_module(program: &Program, filename: &str, source: &str, module_id
         outer: None,
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
-        eval: false,
     };
     let m = c.compile_module_program(program)?;
     c.check_internal()?;
@@ -675,6 +720,7 @@ impl Compiler {
         let mut parent = self.outer.clone();
         for fi in 0..self.fns.len() {
             for si in 0..self.fns[fi].scopes.len() {
+                let is_script_top = si == 0 && self.fns[fi].is_script;
                 let sc = &mut self.fns[fi].scopes[si];
                 let fp = (sc.slot_count, sc.materialized, sc.names.len());
                 let reuse = match &sc.snap {
@@ -692,7 +738,14 @@ impl Compiler {
                                 Loc::Reg(_) => None,
                             })
                             .collect();
-                        let n = Rc::new(LazyScope { names, materialized: sc.materialized, parent: parent.clone() });
+                        let n = Rc::new(LazyScope {
+                            names,
+                            materialized: sc.materialized,
+                            parent: parent.clone(),
+                            is_function: sc.is_function,
+                            with_name: sc.with_name.clone(),
+                            is_script: is_script_top,
+                        });
                         sc.snap = Some((fp, n.clone()));
                         n
                     }
@@ -767,9 +820,9 @@ impl Compiler {
             filename: self.fs_ref().filename.clone(),
             module: self.module,
             lazy: Some(Box::new(lazy)),
+            eval_sites: Vec::new(),
             compiled: std::cell::OnceCell::new(),
             jit: Default::default(),
-            eval_envs: Vec::new(),
         };
         let parent = self.fs();
         parent.functions.push(Rc::new(code));
@@ -806,7 +859,7 @@ impl Compiler {
         if name.starts_with('%') || name.starts_with('#') {
             return out;
         }
-        if !self.fns.iter().any(|f| f.scopes.iter().any(|s| s.with_name.is_some())) {
+        if !self.in_with() {
             return out;
         }
         for f in self.fns.iter().rev() {
@@ -819,6 +872,16 @@ impl Compiler {
                 }
             }
         }
+        let mut node = self.outer.clone();
+        while let Some(n) = node {
+            if n.names.contains_key(name) && !n.is_script {
+                return out;
+            }
+            if let Some(w) = &n.with_name {
+                out.push(w.clone());
+            }
+            node = n.parent.clone();
+        }
         out
     }
 
@@ -826,7 +889,17 @@ impl Compiler {
     /// (nested functions are then compiled eagerly, with the `with` scopes
     /// in view)?
     fn in_with(&self) -> bool {
-        self.fns.iter().any(|f| f.scopes.iter().any(|s| s.with_name.is_some()))
+        if self.fns.iter().any(|f| f.scopes.iter().any(|s| s.with_name.is_some())) {
+            return true;
+        }
+        let mut node = self.outer.as_ref();
+        while let Some(n) = node {
+            if n.with_name.is_some() {
+                return true;
+            }
+            node = n.parent.as_ref();
+        }
+        false
     }
 
     /// For each object of `chain`: push it, test `name` on it and jump to
@@ -1126,6 +1199,133 @@ impl Compiler {
         }
     }
 
+    /// Annex B.3.3: plain function declarations nested in blocks (of
+    /// sloppy code) that also get a `var` binding in the enclosing var
+    /// scope — those a `var` of the same name would not make an early
+    /// error. `outer` holds the names that already block it (top-level
+    /// lexical declarations, parameters).
+    fn collect_annexb(stmts: &[Stmt], outer: Vec<String>) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        let mut stack = vec![outer];
+        for s in stmts {
+            Self::annexb_stmt(s, &mut stack, &mut out);
+        }
+        out
+    }
+
+    fn annexb_block(stmts: &[Stmt], stack: &mut Vec<Vec<String>>, out: &mut Vec<(String, usize)>) {
+        for s in stmts {
+            if let StmtKind::FunctionDecl(f) = &s.kind {
+                if f.is_async || f.is_generator {
+                    continue;
+                }
+                if let Some(n) = &f.name {
+                    if !stack.iter().any(|set| set.iter().any(|x| x == &**n)) {
+                        out.push((n.to_string(), Rc::as_ptr(f) as usize));
+                    }
+                }
+            }
+        }
+        let lex: Vec<String> = Self::collect_lexical(stmts, true).into_iter().map(|(n, _)| n).collect();
+        stack.push(lex);
+        for s in stmts {
+            Self::annexb_stmt(s, stack, out);
+        }
+        stack.pop();
+    }
+
+    /// A statement in a position where Annex B allows a function
+    /// declaration (`if (x) function f() {}`, labels): as if in a block.
+    fn annexb_sub(s: &Stmt, stack: &mut Vec<Vec<String>>, out: &mut Vec<(String, usize)>) {
+        if matches!(s.kind, StmtKind::FunctionDecl(_)) {
+            Self::annexb_block(std::slice::from_ref(s), stack, out);
+        } else {
+            Self::annexb_stmt(s, stack, out);
+        }
+    }
+
+    fn annexb_stmt(s: &Stmt, stack: &mut Vec<Vec<String>>, out: &mut Vec<(String, usize)>) {
+        let lexical_names = |kind: VarKind, p: &Pattern| -> Vec<String> {
+            let mut names = Vec::new();
+            if kind != VarKind::Var {
+                Self::collect_pattern_names(p, &mut names);
+            }
+            names
+        };
+        match &s.kind {
+            StmtKind::Block(b) => Self::annexb_block(b, stack, out),
+            StmtKind::If { consequent, alternate, .. } => {
+                Self::annexb_sub(consequent, stack, out);
+                if let Some(a) = alternate {
+                    Self::annexb_sub(a, stack, out);
+                }
+            }
+            StmtKind::For { init, body, .. } => {
+                let mut names = Vec::new();
+                if let Some(ForInit::VarDecl(d)) = init.as_deref() {
+                    for decl in &d.declarations {
+                        names.extend(lexical_names(d.kind, &decl.target));
+                    }
+                }
+                stack.push(names);
+                Self::annexb_stmt(body, stack, out);
+                stack.pop();
+            }
+            StmtKind::ForIn { left, body, .. } | StmtKind::ForOf { left, body, .. } => {
+                let names = match &**left {
+                    ForHead::VarDecl { kind, target } => lexical_names(*kind, target),
+                    _ => Vec::new(),
+                };
+                stack.push(names);
+                Self::annexb_stmt(body, stack, out);
+                stack.pop();
+            }
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } | StmtKind::With { body, .. } => Self::annexb_stmt(body, stack, out),
+            StmtKind::Labeled { body, .. } => Self::annexb_sub(body, stack, out),
+            StmtKind::Try { block, handler, finalizer } => {
+                Self::annexb_block(block, stack, out);
+                if let Some((param, body)) = handler.as_deref() {
+                    // B.3.5: a simple catch parameter does not block `var`.
+                    let mut names = Vec::new();
+                    if let Some(p) = param {
+                        if !matches!(p, Pattern::Identifier(_)) {
+                            Self::collect_pattern_names(p, &mut names);
+                        }
+                    }
+                    stack.push(names);
+                    Self::annexb_block(body, stack, out);
+                    stack.pop();
+                }
+                if let Some(f) = finalizer {
+                    Self::annexb_block(f, stack, out);
+                }
+            }
+            StmtKind::Switch { cases, .. } => {
+                // The case clauses share one block scope.
+                for c in cases {
+                    for s in &c.body {
+                        if let StmtKind::FunctionDecl(f) = &s.kind {
+                            if let (false, false, Some(n)) = (f.is_async, f.is_generator, &f.name) {
+                                if !stack.iter().any(|set| set.iter().any(|x| x == &**n)) {
+                                    out.push((n.to_string(), Rc::as_ptr(f) as usize));
+                                }
+                            }
+                        }
+                    }
+                }
+                let lex: Vec<String> = cases.iter().flat_map(|c| Self::collect_lexical(&c.body, true)).map(|(n, _)| n).collect();
+                stack.push(lex);
+                for c in cases {
+                    for s in &c.body {
+                        Self::annexb_stmt(s, stack, out);
+                    }
+                }
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+
     /// Lexical declarations directly in a statement list.
     fn collect_lexical(stmts: &[Stmt], block_functions: bool) -> Vec<(String, BindKind)> {
         let mut out = Vec::new();
@@ -1234,7 +1434,7 @@ impl Compiler {
         let mut fs = FnState::new("", flags, !program.is_module, filename);
         fs.source = Some(self.source.clone());
         fs.captured = self.captures.get(&std::ptr::null()).cloned().unwrap_or_default();
-        fs.force_heap = program.is_module;
+        fs.force_heap = program.is_module || fs.captured.contains(crate::captures::EVAL_ALL);
         self.fns.push(fs);
 
         if program.is_module {
@@ -1253,25 +1453,6 @@ impl Compiler {
                 self.emit(Op::Empty);
                 self.emit_init_loc(loc);
             }
-        } else if self.eval {
-            let mut vars = Vec::new();
-            Self::collect_var_names(&program.body, &mut vars);
-            self.fs().scopes[0].materialized = false;
-            let strict = self.fs_ref().flags.is_strict;
-            let mut decls = Self::collect_lexical(&program.body, strict);
-            self.check_duplicates(&decls, &vars)?;
-            if strict {
-                decls.extend(vars.into_iter().map(|v| (v, BindKind::Var)));
-            } else {
-                for v in &vars {
-                    if matches!(self.resolve(v), Resolved::Global) {
-                        let i = self.const_str(v);
-                        self.emit(Op::DeclareGlobalVar(i));
-                    }
-                }
-            }
-            // The eval's own scope (popped with its frame).
-            self.push_block_scope(&decls);
         } else {
             let mut vars = Vec::new();
             Self::collect_var_names(&program.body, &mut vars);
@@ -1281,6 +1462,17 @@ impl Compiler {
             }
             let lex = Self::collect_lexical(&program.body, false);
             self.check_duplicates(&lex, &vars)?;
+            if !self.fs_ref().flags.is_strict {
+                // Annex B.3.3.2: block functions also bind a global var.
+                let outer: Vec<String> = lex.iter().map(|(n, _)| n.clone()).collect();
+                for (n, ptr) in Self::collect_annexb(&program.body, outer) {
+                    if !vars.contains(&n) {
+                        let i = self.const_str(&n);
+                        self.emit(Op::DeclareGlobalVar(i));
+                    }
+                    self.fs().annexb.insert(ptr);
+                }
+            }
             for (n, k) in lex {
                 // Track as script-level lexical for emit_init_var.
                 self.fs().scopes[0].names.insert(n.clone(), Binding { loc: SCRIPT_LEX, kind: k, initialized: false });
@@ -1304,6 +1496,135 @@ impl Compiler {
         self.emit(Op::Return);
         let fs = self.fns.pop().unwrap();
         Ok(Rc::new(finish(fs, self.module)))
+    }
+
+    // ----------------------------------------------------------------- eval
+
+    /// The body of direct eval code (see [`compile_eval`]).
+    fn compile_eval_body(&mut self, program: &Program, strict: bool) -> CResult<()> {
+        let body = &program.body;
+        let mut vars = Vec::new();
+        Self::collect_var_names(body, &mut vars);
+        let lex = Self::collect_lexical(body, false);
+        let funcs: Vec<Rc<Function>> = body
+            .iter()
+            .filter_map(|s| match &s.kind {
+                StmtKind::FunctionDecl(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut var_like = vars.clone();
+        for f in &funcs {
+            if let Some(n) = &f.name {
+                var_like.push(n.to_string());
+            }
+        }
+        self.check_duplicates(&lex, &var_like)?;
+        if strict {
+            for v in &vars {
+                self.declare(v, BindKind::Var);
+            }
+            for (n, k) in Self::collect_lexical(body, true) {
+                self.declare(&n, k);
+            }
+            self.eval_scope_entry();
+            self.hoist_functions(body)?;
+        } else {
+            for (n, k) in &lex {
+                self.declare(n, *k);
+            }
+            // Var names the caller's lexical bindings would clash with.
+            for n in &var_like {
+                if self.eval_var_conflict(n) {
+                    return self.err(&format!("Identifier '{}' has already been declared", n));
+                }
+            }
+            let lex_names: Vec<String> = lex.iter().map(|(n, _)| n.clone()).collect();
+            let mut annexb_names = Vec::new();
+            for (n, ptr) in Self::collect_annexb(body, lex_names) {
+                if self.eval_var_conflict(&n) {
+                    continue;
+                }
+                self.fs().annexb.insert(ptr);
+                annexb_names.push(n);
+            }
+            self.eval_scope_entry();
+            let mut declared: Vec<&String> = Vec::new();
+            for n in var_like.iter().chain(annexb_names.iter()) {
+                if !declared.contains(&n) {
+                    declared.push(n);
+                    self.emit_declare_eval_var(n);
+                }
+            }
+            for f in &funcs {
+                let name = f.name.as_deref().unwrap_or("").to_string();
+                let idx = self.compile_function_rc(f, Some(&name))?;
+                self.emit(Op::MakeClosure(idx));
+                self.emit_store_eval_var(&name)?;
+            }
+        }
+        for s in body {
+            self.compile_stmt(s)?;
+        }
+        self.emit(Op::LoadCompletion);
+        self.emit(Op::Return);
+        Ok(())
+    }
+
+    /// Materialize the eval function's scope and put its lexical
+    /// bindings in their TDZ.
+    fn eval_scope_entry(&mut self) {
+        let has_heap = self.fs_ref().scopes[0].slot_count > 0;
+        self.fs().scopes[0].materialized = has_heap;
+        let tdz = self.fs_ref().scopes[0].tdz.clone();
+        for loc in tdz {
+            self.emit(Op::Empty);
+            self.emit_init_loc(loc);
+        }
+    }
+
+    /// Would `var name` in sloppy eval code clash with a lexical binding
+    /// between the eval and its variable environment (EvalDeclarationInstantiation)?
+    fn eval_var_conflict(&self, name: &str) -> bool {
+        let mut node = self.outer.clone();
+        while let Some(n) = node {
+            if let Some(&(_, kind)) = n.names.get(name) {
+                if matches!(kind, BindKind::Let | BindKind::Const | BindKind::Class) {
+                    return true;
+                }
+            }
+            if n.is_function || n.is_script {
+                return false;
+            }
+            node = n.parent.clone();
+        }
+        false
+    }
+
+    /// Instantiate `var name` of sloppy eval code in the caller's variable
+    /// environment, unless a binding exists there already.
+    fn emit_declare_eval_var(&mut self, name: &str) {
+        let mut node = self.outer.clone();
+        while let Some(n) = node {
+            if n.names.contains_key(name) && !n.is_script && n.materialized {
+                return;
+            }
+            if n.is_function || n.is_script {
+                if n.with_name.is_some() {
+                    self.emit_get_var(EVAL_VARS);
+                    let i = self.const_str(name);
+                    self.emit(Op::DeclareEvalVar(i));
+                    return;
+                }
+                if !n.is_script {
+                    return;
+                }
+                break;
+            }
+            node = n.parent.clone();
+        }
+        let i = self.const_str(name);
+        self.emit(Op::DeclareEvalGlobalVar(i));
     }
 
     // --------------------------------------------------------------- module
@@ -1413,8 +1734,20 @@ impl Compiler {
         fs.class_depth = self.fs_ref().class_depth;
         let (captured, temp_keys) = self.captured_for(f);
         fs.captured = captured;
+        if fs.captured.contains(crate::captures::EVAL_ALL) {
+            fs.force_heap = true;
+        }
+        let eval_vars = fs.captured.contains(crate::captures::EVAL_HERE) && !fs.flags.is_strict;
         self.fns.push(fs);
         self.set_pos(f.pos);
+        if eval_vars {
+            // Sloppy direct eval may declare vars here: they live on an
+            // object consulted before enclosing scopes.
+            let loc = self.declare(EVAL_VARS, BindKind::Hidden);
+            self.emit(Op::NewEvalVars);
+            self.emit_init_loc(loc);
+            self.fs().scopes[0].with_name = Some(EVAL_VARS.to_string());
+        }
 
         // Parameters.
         let mut param_count = 0u32;
@@ -1464,6 +1797,19 @@ impl Compiler {
         for (n, k) in &lex {
             self.declare(n, *k);
         }
+        if !self.fs_ref().flags.is_strict {
+            // Annex B.3.3.1: block functions also bind a function-level var.
+            let mut outer: Vec<String> = lex.iter().filter(|(_, k)| *k != BindKind::Function).map(|(n, _)| n.clone()).collect();
+            for p in &f.params {
+                Self::collect_pattern_names(&p.pattern, &mut outer);
+            }
+            for (n, ptr) in Self::collect_annexb(body_stmts, outer) {
+                if n != "arguments" {
+                    self.declare(&n, BindKind::Var);
+                }
+                self.fs().annexb.insert(ptr);
+            }
+        }
         // Rest/pattern params and defaults declare their names as vars too.
         for (_, p) in &complex {
             let mut names = Vec::new();
@@ -1509,6 +1855,14 @@ impl Compiler {
             self.emit(Op::InitFields);
         }
         self.hoist_functions(body_stmts)?;
+        if f.is_generator {
+            // FunctionDeclarationInstantiation (argument binding, defaults,
+            // destructuring) runs at the call: the generator object is
+            // returned from this initial suspension.
+            self.emit(Op::Undefined);
+            self.emit(Op::Yield);
+            self.emit(Op::Pop);
+        }
         match &f.body {
             FunctionBody::Block(b) => {
                 for s in b {
@@ -1562,12 +1916,109 @@ impl Compiler {
         Ok(())
     }
 
+    /// What a direct `eval` here needs to compile its code later.
+    fn eval_site(&mut self) -> EvalSite {
+        let env = self.env_snapshot();
+        let strict = self.fs_ref().flags.is_strict;
+        let class_depth = self.fs_ref().class_depth;
+        // The innermost non-arrow function decides super / new.target.
+        let mut ctx = (false, false, false, false);
+        for f in self.fns.iter().rev() {
+            if f.flags.is_arrow || f.is_eval {
+                continue;
+            }
+            if !f.is_script && !f.is_module_env {
+                ctx = (true, f.flags.is_method || f.flags.is_class_constructor || f.flags.is_field_init, f.flags.is_class_constructor && f.flags.is_derived, f.flags.is_field_init);
+            }
+            break;
+        }
+        EvalSite { env, strict, class_depth, in_function: ctx.0, in_method: ctx.1, in_derived_ctor: ctx.2, in_field_init: ctx.3 }
+    }
+
+    /// The body of `if`/`else`: a function declaration there (Annex B.3.4)
+    /// behaves as if wrapped in a block.
+    fn compile_sub_stmt(&mut self, s: &Stmt) -> CResult<()> {
+        if matches!(s.kind, StmtKind::FunctionDecl(_)) {
+            return self.compile_block(std::slice::from_ref(s));
+        }
+        self.compile_stmt(s)
+    }
+
+    /// Store the top of the stack (pops) into `name` of the var scope
+    /// (function top scope, script globals or the eval's var scope),
+    /// skipping block bindings in between (Annex B.3.3 function copies).
+    fn emit_store_var_scope(&mut self, name: &str) -> CResult<()> {
+        let fs = self.fs_ref();
+        if fs.is_eval {
+            return self.emit_store_eval_var(name);
+        }
+        if fs.is_script {
+            let i = self.const_str(name);
+            self.emit_ic(|ic| Op::SetGlobal(i, ic));
+            return Ok(());
+        }
+        let depth = fs.scopes[1..].iter().filter(|s| s.materialized).count() as u16;
+        let mat0 = fs.scopes[0].materialized;
+        match fs.scopes[0].names.get(name).map(|b| b.loc) {
+            Some(Loc::Reg(r)) => {
+                self.emit(Op::SetReg(r));
+            }
+            Some(Loc::Slot(s)) => {
+                if mat0 {
+                    self.emit(Op::SetLocal(depth, s));
+                } else {
+                    self.emit(Op::Pop);
+                }
+            }
+            None => {
+                self.emit(Op::Pop);
+            }
+        }
+        Ok(())
+    }
+
+    /// Eval code: store into a var of the caller's variable environment
+    /// (an existing binding, the caller's eval-var object or a global).
+    fn emit_store_eval_var(&mut self, name: &str) -> CResult<()> {
+        // Depth of the eval function's own runtime scopes.
+        let own: u16 = self.fns.iter().skip(1).flat_map(|f| f.scopes.iter()).filter(|s| s.materialized).count() as u16;
+        let mut depth = own;
+        let mut node = self.outer.clone();
+        while let Some(n) = node {
+            if let Some(&(slot, _)) = n.names.get(name) {
+                if n.materialized && !n.is_script {
+                    self.emit(Op::SetLocal(depth, slot));
+                    return Ok(());
+                }
+            }
+            if n.is_function || n.is_script {
+                if n.with_name.is_some() {
+                    // The caller's eval-var object.
+                    self.emit_get_var(EVAL_VARS);
+                    self.emit(Op::Swap);
+                    let i = self.const_str(name);
+                    self.emit_ic(|ic| Op::SetProp(i, ic));
+                    self.emit(Op::Pop);
+                    return Ok(());
+                }
+                break;
+            }
+            if n.materialized {
+                depth += 1;
+            }
+            node = n.parent.clone();
+        }
+        let i = self.const_str(name);
+        self.emit_ic(|ic| Op::SetGlobal(i, ic));
+        Ok(())
+    }
+
     fn compile_stmt(&mut self, s: &Stmt) -> CResult<()> {
         self.set_pos(s.pos);
         match &s.kind {
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::Expr(e) => {
-                if self.fns.len() == 1 && self.fs_ref().is_script && self.completion {
+                if self.completion && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval) {
                     self.compile_expr(e)?;
                     self.emit(Op::StoreCompletion);
                 } else {
@@ -1575,7 +2026,15 @@ impl Compiler {
                 }
             }
             StmtKind::VarDecl(d) => self.compile_var_decl(d)?,
-            StmtKind::FunctionDecl(_) => {} // hoisted
+            StmtKind::FunctionDecl(f) => {
+                // Hoisted; an Annex B block function also copies its value
+                // to the var scope's binding when its declaration is reached.
+                if self.fs_ref().annexb.contains(&(Rc::as_ptr(f) as usize)) {
+                    let name = f.name.as_deref().unwrap_or("").to_string();
+                    self.emit_get_var_static(&name);
+                    self.emit_store_var_scope(&name)?;
+                }
+            }
             StmtKind::ClassDecl(c) => {
                 self.compile_class(c)?;
                 let name = c.name.clone().unwrap_or_default();
@@ -1585,11 +2044,11 @@ impl Compiler {
             StmtKind::If { test, consequent, alternate } => {
                 self.compile_expr(test)?;
                 let j = self.emit(Op::JumpIfFalse(0));
-                self.compile_stmt(consequent)?;
+                self.compile_sub_stmt(consequent)?;
                 if let Some(alt) = alternate {
                     let j2 = self.emit(Op::Jump(0));
                     self.patch_jump(j);
-                    self.compile_stmt(alt)?;
+                    self.compile_sub_stmt(alt)?;
                     self.patch_jump(j2);
                 } else {
                     self.patch_jump(j);
@@ -1717,7 +2176,9 @@ impl Compiler {
             match &decl.init {
                 Some(init) => {
                     self.compile_expr_named(init, pattern_name(&decl.target))?;
-                    self.compile_pattern_store(&decl.target, true)?;
+                    // `var x = e` is an assignment to whatever `x` resolves
+                    // to (a `with` object, a var declared by eval...).
+                    self.compile_pattern_store(&decl.target, d.kind != VarKind::Var || !self.in_with())?;
                 }
                 None => {
                     if d.kind != VarKind::Var {
@@ -2235,7 +2696,7 @@ impl Compiler {
                         MemberProp::Private(name) => {
                             self.emit_private_name(name)?;
                             self.emit(Op::Rot3);
-                            self.emit(Op::SetElem);
+                            self.emit(Op::SetPrivate);
                             self.emit(Op::Pop);
                         }
                         MemberProp::Computed(k) => {
@@ -2610,37 +3071,37 @@ impl Compiler {
                     return self.compile_super_call(args);
                 }
                 if let ExprKind::Identifier(n) = &callee.kind {
+                    if n == "%copyprivate" {
+                        // Synthetic: install the class's private methods.
+                        self.emit(Op::This);
+                        self.emit_get_var("%privtpl");
+                        self.emit(Op::CopyPrivate);
+                        return Ok(());
+                    }
                     if n == "%definefield" {
                         // Synthetic class field definition: this[key] = value
                         self.emit(Op::This);
+                        let mut private = false;
                         if let (Some(ArrayElement::Expr(k)), Some(ArrayElement::Expr(v))) = (args.first(), args.get(1)) {
                             self.compile_expr(k)?;
                             let name = match &k.kind {
                                 ExprKind::String(s) => Some(s.as_str()),
+                                ExprKind::Identifier(s) if s.starts_with('#') => {
+                                    private = true;
+                                    Some(&**s)
+                                }
                                 _ => None,
                             };
                             self.compile_expr_named(v, name)?;
                         }
-                        self.emit(Op::DefineElem);
+                        self.emit(if private { Op::DefinePrivate } else { Op::DefineElem });
                         return Ok(());
                     }
                 }
                 let is_eval = matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval");
-                let desc = if is_eval {
-                    // A constant of its own identifies the site, which
-                    // records the scope chain its eval code compiles in.
-                    let fs = self.fs();
-                    let i = fs.constants.len() as u32;
-                    fs.constants.push(Value::String(JsStr::intern("eval")));
-                    if let Some(env) = self.env_snapshot() {
-                        self.fs().eval_envs.push((i, env));
-                    }
-                    i
-                } else {
-                    match callee_description(callee) {
-                        Some(d) => self.const_str(&d),
-                        None => crate::bytecode::NO_DESC,
-                    }
+                let desc = match callee_description(callee) {
+                    Some(d) => self.const_str(&d),
+                    None => crate::bytecode::NO_DESC,
                 };
                 self.compile_callee(callee)?;
                 if *optional {
@@ -2703,7 +3164,7 @@ impl Compiler {
                     }
                     MemberProp::Private(n) => {
                         self.emit_private_name(n)?;
-                        self.emit(Op::GetElem);
+                        self.emit(Op::GetPrivate);
                     }
                     MemberProp::Computed(k) => {
                         self.compile_expr(k)?;
@@ -2846,7 +3307,7 @@ impl Compiler {
                     }
                     MemberProp::Private(n) => {
                         self.emit_private_name(n)?;
-                        self.emit(Op::GetElem);
+                        self.emit(Op::GetPrivate);
                     }
                     MemberProp::Computed(k) => {
                         self.compile_expr(k)?;
@@ -2883,9 +3344,15 @@ impl Compiler {
                 let chain = self.with_chain(n);
                 let ends = self.emit_with_dispatch(n, &chain, &mut |c, w, i| {
                     c.emit_get_var(w);
-                    c.emit(Op::Dup);
-                    c.emit_ic(|ic| Op::GetProp(i, ic));
-                    c.emit(Op::Swap);
+                    if w == EVAL_VARS {
+                        // A var created by direct eval: a plain call.
+                        c.emit_ic(|ic| Op::GetProp(i, ic));
+                        c.emit(Op::Undefined);
+                    } else {
+                        c.emit(Op::Dup);
+                        c.emit_ic(|ic| Op::GetProp(i, ic));
+                        c.emit(Op::Swap);
+                    }
                 });
                 self.emit_get_var_static(n);
                 self.emit(Op::Undefined);
@@ -2928,6 +3395,13 @@ impl Compiler {
                 }
             }
             let n = args.len() as u16;
+            if is_eval && !is_new {
+                let site = self.eval_site();
+                let fs = self.fs();
+                fs.eval_sites.push(Rc::new(site));
+                let idx = (fs.eval_sites.len() - 1) as u32;
+                self.emit(Op::EvalSite(idx));
+            }
             self.emit(if is_new {
                 Op::New(n)
             } else if is_eval {
@@ -2999,10 +3473,10 @@ impl Compiler {
                     }
                     MemberProp::Private(name) => {
                         self.emit_private_name(name)?;
-                        self.emit(Op::GetElemKeep);
+                        self.emit(Op::GetPrivateKeep);
                         self.emit(Op::ToNumeric);
                         self.emit(inc);
-                        self.emit(Op::SetElem);
+                        self.emit(Op::SetPrivate);
                     }
                     MemberProp::Computed(k) => {
                         self.compile_expr(k)?;
@@ -3038,7 +3512,7 @@ impl Compiler {
                             MemberProp::Private(name) => {
                                 self.emit_private_name(name)?;
                                 self.compile_expr(value)?;
-                                self.emit(Op::SetElem);
+                                self.emit(Op::SetPrivate);
                             }
                             MemberProp::Computed(k) => {
                                 self.compile_expr(k)?;
@@ -3138,6 +3612,8 @@ impl Compiler {
                 }
             }
             MemberProp::Private(_) | MemberProp::Computed(_) => {
+                let private = matches!(property, MemberProp::Private(_));
+                let (get_keep, set) = if private { (Op::GetPrivateKeep, Op::SetPrivate) } else { (Op::GetElemKeep, Op::SetElem) };
                 match property {
                     MemberProp::Private(n) => self.emit_private_name(n)?,
                     MemberProp::Computed(k) => {
@@ -3146,7 +3622,7 @@ impl Compiler {
                     }
                     _ => unreachable!(),
                 }
-                self.emit(Op::GetElemKeep);
+                self.emit(get_keep);
                 if logical {
                     let j = match op {
                         AssignOp::And => self.emit(Op::JumpIfFalseKeep(0)),
@@ -3157,7 +3633,7 @@ impl Compiler {
                         self.emit(Op::Pop);
                     }
                     self.compile_expr(value)?;
-                    self.emit(Op::SetElem);
+                    self.emit(set);
                     let end = self.emit(Op::Jump(0));
                     self.patch_jump(j);
                     // stack: obj key val -> val
@@ -3169,7 +3645,7 @@ impl Compiler {
                 } else {
                     self.compile_expr(value)?;
                     self.emit(binop_for_assign(op));
-                    self.emit(Op::SetElem);
+                    self.emit(set);
                 }
             }
         }
@@ -3305,6 +3781,14 @@ impl Compiler {
                 }
             }
         }
+        // Instance private methods/accessors live on a template object
+        // copied into each instance before its fields are initialized.
+        let has_private_methods = c.members.iter().any(|m| {
+            matches!(m, ClassMember::Method { key: PropertyKey::Private(_), is_static: false, .. } | ClassMember::Getter { key: PropertyKey::Private(_), is_static: false, .. } | ClassMember::Setter { key: PropertyKey::Private(_), is_static: false, .. })
+        });
+        if has_private_methods {
+            decls.push(("%privtpl".to_string(), BindKind::Hidden));
+        }
         // Hidden slots for computed field keys (evaluated once).
         let mut computed_field_slots: Vec<String> = Vec::new();
         let mut field_index = 0;
@@ -3347,13 +3831,8 @@ impl Compiler {
             fl.is_derived = has_super;
         })?;
         self.emit(Op::MakeClass(ctor_idx));
-        // stack: ctor proto — initialise the inner class binding before static elements run
-        if let Some(n) = &c.name {
-            self.emit(Op::Swap);
-            self.emit(Op::Dup);
-            self.emit_init_var(n)?;
-            self.emit(Op::Swap);
-        }
+        // stack: ctor proto
+        let mut deferred_static: Vec<(Option<String>, Option<(&PropertyKey, &Option<Expr>)>, Option<&Vec<Stmt>>)> = Vec::new();
         let mut instance_fields: Vec<(&PropertyKey, &Option<Expr>, usize)> = Vec::new();
         let mut computed_i = 0;
         let mut fi = 0;
@@ -3392,15 +3871,40 @@ impl Compiler {
                             instance_fields.push((key, value, computed_i - 1));
                         } else {
                             // static field with computed key
-                            self.emit_static_field(Some(&slot_name), key, value)?;
+                            deferred_static.push((Some(slot_name), Some((key, value)), None));
                         }
                     } else if *is_static {
-                        self.emit_static_field(None, key, value)?;
+                        deferred_static.push((None, Some((key, value)), None));
                     } else {
                         instance_fields.push((key, value, usize::MAX));
                     }
                 }
-                ClassMember::StaticBlock(body) => {
+                ClassMember::StaticBlock(body) => deferred_static.push((None, None, Some(body))),
+            }
+            fi += 1;
+        }
+        let _ = fi;
+        // The inner class binding is initialized once every element is
+        // defined (computed keys see it in its TDZ).
+        if let Some(n) = &c.name {
+            self.emit(Op::Swap);
+            self.emit(Op::Dup);
+            self.emit_init_var(n)?;
+            self.emit(Op::Swap);
+        }
+        if has_private_methods {
+            // stack: ctor proto
+            self.emit(Op::Dup);
+            self.emit(Op::TakePrivate);
+            self.emit_init_var("%privtpl")?;
+        }
+        self.emit_instance_fields(c, &instance_fields, &computed_field_slots, has_private_methods)?;
+        // Static fields and blocks run last, in order.
+        for (slot, field, block) in deferred_static {
+            if let Some((key, value)) = field {
+                self.emit_static_field(slot.as_deref(), key, value)?;
+            }
+            if let Some(body) = block {
                     // run as a method with this = ctor
                     let f = Function {
                         name: None,
@@ -3422,16 +3926,28 @@ impl Compiler {
                     self.emit(Op::Call(0, crate::bytecode::NO_DESC)); // proto ctor result
                     self.emit(Op::Pop);
                     self.emit(Op::Swap); // ctor proto
-                }
             }
-            fi += 1;
         }
-        let _ = fi;
-        // Instance field initializer function.
-        if !instance_fields.is_empty() {
+        self.emit(Op::Pop); // drop proto
+        self.fs().class_depth -= 1;
+        self.pop_block_scope(mat);
+        Ok(())
+    }
+
+    /// The instance field initializer function of a class (private
+    /// methods first, then fields in order). Stack: ctor proto.
+    fn emit_instance_fields(&mut self, c: &Class, instance_fields: &[(&PropertyKey, &Option<Expr>, usize)], computed_field_slots: &[String], has_private_methods: bool) -> CResult<()> {
+        if !instance_fields.is_empty() || has_private_methods {
             let mut stmts: Vec<Stmt> = Vec::new();
             let pos = c.pos;
-            for (key, value, slot_idx) in &instance_fields {
+            if has_private_methods {
+                stmts.push(Stmt { pos, kind: StmtKind::Expr(Expr { pos, kind: ExprKind::Call {
+                    callee: Box::new(Expr { pos, kind: ExprKind::Identifier("%copyprivate".into()) }),
+                    args: vec![],
+                    optional: false,
+                } }) });
+            }
+            for (key, value, slot_idx) in instance_fields {
                 let value_expr = (*value).clone().unwrap_or(Expr { pos, kind: ExprKind::Undefined });
                 let key_expr: ExprKind = match key {
                     PropertyKey::Identifier(n) | PropertyKey::String(n) => ExprKind::String(n.to_string()),
@@ -3454,9 +3970,6 @@ impl Compiler {
             self.emit(Op::MakeClosure(idx));
             self.emit(Op::SetClassFields);
         }
-        self.emit(Op::Pop); // drop proto
-        self.fs().class_depth -= 1;
-        self.pop_block_scope(mat);
         Ok(())
     }
 
@@ -3507,7 +4020,7 @@ impl Compiler {
         self.emit(Op::MakeClosure(idx)); // proto ctor ctor key fn
         self.emit(Op::Rot3); // proto ctor key fn ctor  -- wait: Rot3 a b c -> b c a : (ctor key fn) -> (key fn ctor)
         self.emit(Op::Call(0, crate::bytecode::NO_DESC)); // proto ctor key value
-        self.emit(Op::DefineElem); // proto ctor
+        self.emit(if matches!(key, PropertyKey::Private(_)) { Op::DefinePrivate } else { Op::DefineElem }); // proto ctor
         self.emit(Op::Swap); // ctor proto
         Ok(())
     }
@@ -3662,6 +4175,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         ics: (0..fs.ic_count).map(|_| std::cell::Cell::new(crate::bytecode::PropIc::default())).collect(),
         call_ics: (0..ncalls).map(|_| std::cell::Cell::new(crate::bytecode::CallIc::default())).collect(),
         lazy: None,
+        eval_sites: std::mem::take(&mut fs.eval_sites),
         compiled: std::cell::OnceCell::new(),
         jit: Default::default(),
         ic_keys: ic_keys.into(),
@@ -3671,7 +4185,6 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         source_span: fs.span,
         filename: fs.filename,
         module,
-        eval_envs: fs.eval_envs,
     };
     code.call_flags = code.compute_call_flags();
     code

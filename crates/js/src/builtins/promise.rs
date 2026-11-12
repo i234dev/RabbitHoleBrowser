@@ -143,8 +143,11 @@ pub fn reject_promise(realm: &mut Realm, promise: ObjectId, reason: Value) {
 pub fn promise_resolve(realm: &mut Realm, v: Value) -> JsResult<ObjectId> {
     if let V::Object(id) = v.v() {
         if let ObjectKind::Promise(_) = &realm.obj(id).kind {
-            // Only when its constructor is %Promise% (approximation: accept all promises)
-            return Ok(id);
+            // Only when its constructor is %Promise%.
+            let ctor = realm.get_str(v.clone(), "constructor")?;
+            if ctor.as_object() == Some(realm.intrinsics.promise_ctor) {
+                return Ok(id);
+            }
         }
     }
     let (p, res, _rej) = new_promise_capability(realm);
@@ -318,8 +321,19 @@ fn throw_capture(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<V
 
 fn promise_resolve_static(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
-    if this.as_object() == Some(realm.intrinsics.promise_ctor) || !realm.is_constructor(&this) {
+    if !this.is_object() {
+        return realm.type_error("Promise.resolve called on non-object");
+    }
+    if this.as_object() == Some(realm.intrinsics.promise_ctor) {
         return Ok(Value::Object(promise_resolve(realm, v)?));
+    }
+    if let Some(id) = v.as_object() {
+        if matches!(realm.obj(id).kind, ObjectKind::Promise(_)) {
+            let ctor = realm.get_str(v.clone(), "constructor")?;
+            if realm.same_value(&ctor, &this) {
+                return Ok(v);
+            }
+        }
     }
     // Subclass: new C(resolve => resolve(v))
     let (p, res, _rej) = new_capability_with_ctor(realm, this)?;
@@ -335,9 +349,12 @@ fn promise_reject_static(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
 
 /// NewPromiseCapability(C) for arbitrary constructors.
 fn new_capability_with_ctor(realm: &mut Realm, c: Value) -> JsResult<(Value, Value, Value)> {
-    if c.as_object() == Some(realm.intrinsics.promise_ctor) || !realm.is_constructor(&c) {
+    if c.as_object() == Some(realm.intrinsics.promise_ctor) {
         let (p, res, rej) = new_promise_capability(realm);
         return Ok((Value::Object(p), Value::Object(res), Value::Object(rej)));
+    }
+    if !realm.is_constructor(&c) {
+        return realm.type_error("Promise capability: not a constructor");
     }
     let holder = realm.new_object_with_proto(None);
     let executor = realm.new_native_function_full("", 2, capability_executor, None, vec![Value::Object(holder)], false);
@@ -357,6 +374,10 @@ fn new_capability_with_ctor(realm: &mut Realm, c: Value) -> JsResult<(Value, Val
 fn capability_executor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let holder = realm.current_native().and_then(|n| realm.native_captures(n).first().cloned()).and_then(|v| v.as_object());
     if let Some(h) = holder {
+        let set = |realm: &Realm, k: &str| realm.obj(h).props.get(&PropertyKey::str(k)).map(|p| !p.value.is_undefined()).unwrap_or(false);
+        if set(realm, "resolve") || set(realm, "reject") {
+            return realm.type_error("Promise executor has already been invoked with non-undefined arguments");
+        }
         realm.define_property(h, "resolve", arg(args, 0), ALL);
         realm.define_property(h, "reject", arg(args, 1), ALL);
     }
@@ -372,149 +393,233 @@ fn with_resolvers(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<V
     Ok(Value::Object(o))
 }
 
-/// Shared state for the combinators: (result promise capability, values array, remaining count).
-fn combinator_setup(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<(Value, Value, Value, Vec<Value>, ObjectId)> {
-    let (p, res, rej) = new_capability_with_ctor(realm, this)?;
-    let items = match realm.iterate_to_vec(arg(args, 0)) {
-        Ok(items) => items,
+// ------------------------------------------------------- combinators
+//
+// Promise.all / allSettled / any / race (ECMA-262 §27.2.4): the iterable
+// is stepped one value at a time; an error from the loop body closes the
+// iterator (unless the iterator itself failed) and rejects the result.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Combinator {
+    All,
+    AllSettled,
+    Any,
+    Race,
+}
+
+/// Elements of a hidden array object (the List of values / errors).
+fn list_push(realm: &mut Realm, list: ObjectId, v: Value) {
+    if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(list).kind {
+        elements.push(v);
+        *length = elements.len() as u32;
+    }
+}
+
+fn list_set(realm: &mut Realm, list: ObjectId, i: usize, v: Value) {
+    if let ObjectKind::Array { elements, .. } = &mut realm.obj_mut(list).kind {
+        if let Some(slot) = elements.get_mut(i) {
+            *slot = v;
+        }
+    }
+}
+
+/// CreateArrayFromList(list).
+fn list_to_array(realm: &mut Realm, list: ObjectId) -> Value {
+    let items = match &realm.obj(list).kind {
+        ObjectKind::Array { elements, .. } => elements.clone(),
+        _ => Vec::new(),
+    };
+    realm.new_array_value(items)
+}
+
+/// State shared by the element functions of one combinator call:
+/// slot 0 `values`/`errors` list, slot 1 remaining count, slot 2 resolve
+/// (or reject for `any`).
+fn new_state(realm: &mut Realm, settle: Value) -> ObjectId {
+    let list = realm.new_array(Vec::new());
+    let state = realm.new_object_with_proto(None);
+    realm.define_property(state, "list", Value::Object(list), ALL);
+    realm.define_property(state, "remaining", Value::Number(1.0), ALL);
+    realm.define_property(state, "settle", settle, ALL);
+    state
+}
+
+fn state_list(realm: &Realm, state: ObjectId) -> ObjectId {
+    realm.obj(state).props.get(&PropertyKey::str("list")).and_then(|p| p.value.as_object()).expect("combinator list")
+}
+
+fn state_bump(realm: &mut Realm, state: ObjectId, delta: f64) -> f64 {
+    let n = realm.obj(state).props.get(&PropertyKey::str("remaining")).and_then(|p| p.value.as_number()).unwrap_or(0.0) + delta;
+    realm.define_property(state, "remaining", Value::Number(n), ALL);
+    n
+}
+
+fn state_settle(realm: &Realm, state: ObjectId) -> Value {
+    realm.obj(state).props.get(&PropertyKey::str("settle")).map(|p| p.value.clone()).unwrap_or(Value::Undefined)
+}
+
+/// Finish `all`/`allSettled` (resolve with the values) or `any` (reject
+/// with an AggregateError) once nothing remains.
+fn state_finish(realm: &mut Realm, state: ObjectId, kind: Combinator) -> JsResult<Value> {
+    let list = state_list(realm, state);
+    let arr = list_to_array(realm, list);
+    let settle = state_settle(realm, state);
+    let v = if kind == Combinator::Any {
+        let e = realm.new_error("AggregateError", "All promises were rejected");
+        if let Some(eid) = e.as_object() {
+            realm.define_property(eid, "errors", arr, WRITABLE | CONFIGURABLE);
+        }
+        e
+    } else {
+        arr
+    };
+    realm.call(settle, Value::Undefined, &[v])
+}
+
+fn combinator(realm: &mut Realm, this: Value, args: &[Value], kind: Combinator) -> JsResult<Value> {
+    let c = this;
+    let (p, res, rej) = new_capability_with_ctor(realm, c.clone())?;
+    // GetPromiseResolve(C)
+    let promise_resolve = match realm.get_str(c.clone(), "resolve") {
+        Ok(f) if realm.is_callable(&f) => f,
+        Ok(_) => {
+            let e = realm.throw_type_error("Promise resolve is not a function");
+            realm.call(rej, Value::Undefined, &[e])?;
+            return Ok(p);
+        }
         Err(e) => {
-            realm.call(rej.clone(), Value::Undefined, &[e])?;
-            return Ok((p, res, rej, Vec::new(), realm.new_object_with_proto(None)));
+            realm.call(rej, Value::Undefined, &[e])?;
+            return Ok(p);
         }
     };
-    let state = realm.new_object_with_proto(None);
-    let values = realm.new_array_value(vec![Value::Undefined; items.len()]);
-    realm.define_property(state, "values", values, ALL);
-    realm.define_property(state, "remaining", Value::Number(items.len() as f64), ALL);
-    realm.define_property(state, "resolve", res.clone(), ALL);
-    realm.define_property(state, "reject", rej.clone(), ALL);
-    Ok((p, res, rej, items, state))
+    let (it, next) = match realm.get_iterator(arg(args, 0)) {
+        Ok(x) => x,
+        Err(e) => {
+            realm.call(rej, Value::Undefined, &[e])?;
+            return Ok(p);
+        }
+    };
+    let state = new_state(realm, if kind == Combinator::Any { rej.clone() } else { res.clone() });
+    let mut index = 0usize;
+    let mut iterator_done = false;
+    let r: JsResult<()> = (|| loop {
+        let step = realm.iterator_step(&it, &next);
+        let value = match step {
+            Err(e) => {
+                iterator_done = true;
+                return Err(e);
+            }
+            Ok(None) => {
+                iterator_done = true;
+                if kind != Combinator::Race && state_bump(realm, state, -1.0) == 0.0 {
+                    state_finish(realm, state, kind)?;
+                }
+                return Ok(());
+            }
+            Ok(Some(v)) => v,
+        };
+        if kind != Combinator::Race {
+            let list = state_list(realm, state);
+            list_push(realm, list, Value::Undefined);
+        }
+        let next_promise = realm.call(promise_resolve.clone(), c.clone(), &[value])?;
+        let mk = |realm: &mut Realm, f: NativeFn, called: ObjectId| -> Value {
+            Value::Object(realm.new_native_function_full("", 1, f, None, vec![Value::Object(state), Value::Number(index as f64), Value::Object(called)], false))
+        };
+        let (on_ok, on_err) = match kind {
+            Combinator::Race => (res.clone(), rej.clone()),
+            Combinator::All => {
+                let called = realm.new_object_with_proto(None);
+                (mk(realm, all_element, called), rej.clone())
+            }
+            Combinator::AllSettled => {
+                let called = realm.new_object_with_proto(None);
+                (mk(realm, settled_fulfilled, called), mk(realm, settled_rejected, called))
+            }
+            Combinator::Any => {
+                let called = realm.new_object_with_proto(None);
+                (res.clone(), mk(realm, any_rejected, called))
+            }
+        };
+        if kind != Combinator::Race {
+            state_bump(realm, state, 1.0);
+        }
+        realm.invoke(next_promise, "then", &[on_ok, on_err])?;
+        index += 1;
+    })();
+    if let Err(e) = r {
+        if realm.terminating {
+            return Err(e);
+        }
+        if !iterator_done {
+            let _ = realm.iterator_close(&it);
+        }
+        realm.call(rej, Value::Undefined, &[e])?;
+    }
+    Ok(p)
 }
 
 fn all(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (p, res, rej, items, state) = combinator_setup(realm, this.clone(), args)?;
-    if items.is_empty() {
-        let values = realm.get_str(Value::Object(state), "values").unwrap_or(Value::Undefined);
-        if !values.is_undefined() {
-            realm.call(res, Value::Undefined, &[values])?;
-        }
-        return Ok(p);
-    }
-    for (i, item) in items.into_iter().enumerate() {
-        let next = realm.invoke(this.clone(), "resolve", &[item])?;
-        let on_ok = realm.new_native_function_full("", 1, all_element, None, vec![Value::Object(state), Value::Number(i as f64)], false);
-        realm.invoke(next, "then", &[Value::Object(on_ok), rej.clone()])?;
-    }
-    Ok(p)
-}
-
-fn all_element(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let caps = realm.current_native().map(|n| realm.native_captures(n)).unwrap_or_default();
-    let state = caps.first().and_then(|v| v.as_object()).unwrap();
-    let index = caps.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
-    let done_key = PropertyKey::str(&format!("done{}", index));
-    if realm.has_own_property(state, &done_key) {
-        return Ok(Value::Undefined);
-    }
-    realm.define_property(state, done_key, Value::Bool(true), ALL);
-    let values = realm.get_str(Value::Object(state), "values")?;
-    realm.set(values.clone(), PropertyKey::index(index), arg(args, 0))?;
-    let remaining = realm.get_str(Value::Object(state), "remaining")?.as_number().unwrap_or(0.0) - 1.0;
-    realm.define_property(state, "remaining", Value::Number(remaining), ALL);
-    if remaining <= 0.0 {
-        let res = realm.get_str(Value::Object(state), "resolve")?;
-        realm.call(res, Value::Undefined, &[values])?;
-    }
-    Ok(Value::Undefined)
+    combinator(realm, this, args, Combinator::All)
 }
 
 fn all_settled(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (p, res, _rej, items, state) = combinator_setup(realm, this.clone(), args)?;
-    if items.is_empty() {
-        let values = realm.get_str(Value::Object(state), "values").unwrap_or(Value::Undefined);
-        if !values.is_undefined() {
-            realm.call(res, Value::Undefined, &[values])?;
-        }
-        return Ok(p);
+    combinator(realm, this, args, Combinator::AllSettled)
+}
+
+fn race(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    combinator(realm, this, args, Combinator::Race)
+}
+
+fn any(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    combinator(realm, this, args, Combinator::Any)
+}
+
+/// Element function captures: (state, index, alreadyCalled holder).
+/// Returns None when this element (or its sibling) already ran.
+fn element_enter(realm: &mut Realm) -> Option<(ObjectId, usize)> {
+    let caps = realm.current_native().map(|n| realm.native_captures(n)).unwrap_or_default();
+    let state = caps.first().and_then(|v| v.as_object())?;
+    let index = caps.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
+    let called = caps.get(2).and_then(|v| v.as_object())?;
+    if realm.obj(called).props.get(&PropertyKey::str("called")).is_some() {
+        return None;
     }
-    for (i, item) in items.into_iter().enumerate() {
-        let next = realm.invoke(this.clone(), "resolve", &[item])?;
-        let on_ok = realm.new_native_function_full("", 1, settled_fulfilled, None, vec![Value::Object(state), Value::Number(i as f64)], false);
-        let on_err = realm.new_native_function_full("", 1, settled_rejected, None, vec![Value::Object(state), Value::Number(i as f64)], false);
-        realm.invoke(next, "then", &[Value::Object(on_ok), Value::Object(on_err)])?;
+    realm.define_property(called, "called", Value::Bool(true), ALL);
+    Some((state, index))
+}
+
+fn element_store(realm: &mut Realm, state: ObjectId, index: usize, v: Value, kind: Combinator) -> JsResult<Value> {
+    let list = state_list(realm, state);
+    list_set(realm, list, index, v);
+    if state_bump(realm, state, -1.0) == 0.0 {
+        state_finish(realm, state, kind)?;
     }
-    Ok(p)
+    Ok(Value::Undefined)
+}
+
+fn all_element(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some((state, index)) = element_enter(realm) else { return Ok(Value::Undefined) };
+    element_store(realm, state, index, arg(args, 0), Combinator::All)
 }
 
 fn settled_common(realm: &mut Realm, args: &[Value], fulfilled: bool) -> JsResult<Value> {
-    let caps = realm.current_native().map(|n| realm.native_captures(n)).unwrap_or_default();
-    let state = caps.first().and_then(|v| v.as_object()).unwrap();
-    let index = caps.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
-    let done_key = PropertyKey::str(&format!("done{}", index));
-    if realm.has_own_property(state, &done_key) {
-        return Ok(Value::Undefined);
-    }
-    realm.define_property(state, done_key, Value::Bool(true), ALL);
+    let Some((state, index)) = element_enter(realm) else { return Ok(Value::Undefined) };
     let o = realm.new_object();
     realm.define_property(o, "status", Value::str(if fulfilled { "fulfilled" } else { "rejected" }), ALL);
     realm.define_property(o, if fulfilled { "value" } else { "reason" }, arg(args, 0), ALL);
-    let values = realm.get_str(Value::Object(state), "values")?;
-    realm.set(values.clone(), PropertyKey::index(index), Value::Object(o))?;
-    let remaining = realm.get_str(Value::Object(state), "remaining")?.as_number().unwrap_or(0.0) - 1.0;
-    realm.define_property(state, "remaining", Value::Number(remaining), ALL);
-    if remaining <= 0.0 {
-        let res = realm.get_str(Value::Object(state), "resolve")?;
-        realm.call(res, Value::Undefined, &[values])?;
-    }
-    Ok(Value::Undefined)
+    element_store(realm, state, index, Value::Object(o), Combinator::AllSettled)
 }
 
 fn settled_fulfilled(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     settled_common(realm, args, true)
 }
+
 fn settled_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     settled_common(realm, args, false)
 }
 
-fn race(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (p, res, rej, items, _state) = combinator_setup(realm, this.clone(), args)?;
-    for item in items {
-        let next = realm.invoke(this.clone(), "resolve", &[item])?;
-        realm.invoke(next, "then", &[res.clone(), rej.clone()])?;
-    }
-    Ok(p)
-}
-
-fn any(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (p, res, rej, items, state) = combinator_setup(realm, this.clone(), args)?;
-    if items.is_empty() {
-        let e = realm.new_error("AggregateError", "All promises were rejected");
-        realm.call(rej, Value::Undefined, &[e])?;
-        return Ok(p);
-    }
-    for (i, item) in items.into_iter().enumerate() {
-        let next = realm.invoke(this.clone(), "resolve", &[item])?;
-        let on_err = realm.new_native_function_full("", 1, any_rejected, None, vec![Value::Object(state), Value::Number(i as f64)], false);
-        realm.invoke(next, "then", &[res.clone(), Value::Object(on_err)])?;
-    }
-    Ok(p)
-}
-
 fn any_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let caps = realm.current_native().map(|n| realm.native_captures(n)).unwrap_or_default();
-    let state = caps.first().and_then(|v| v.as_object()).unwrap();
-    let index = caps.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
-    let values = realm.get_str(Value::Object(state), "values")?;
-    realm.set(values.clone(), PropertyKey::index(index), arg(args, 0))?;
-    let remaining = realm.get_str(Value::Object(state), "remaining")?.as_number().unwrap_or(0.0) - 1.0;
-    realm.define_property(state, "remaining", Value::Number(remaining), ALL);
-    if remaining <= 0.0 {
-        let rej = realm.get_str(Value::Object(state), "reject")?;
-        let e = realm.new_error("AggregateError", "All promises were rejected");
-        if let V::Object(eid) = e.v() {
-            realm.define_property(eid, "errors", values, HIDDEN);
-        }
-        realm.call(rej, Value::Undefined, &[e])?;
-    }
-    Ok(Value::Undefined)
+    let Some((state, index)) = element_enter(realm) else { return Ok(Value::Undefined) };
+    element_store(realm, state, index, arg(args, 0), Combinator::Any)
 }

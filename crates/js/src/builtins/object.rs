@@ -505,22 +505,35 @@ fn is(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn from_entries(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let iterable = arg(args, 0);
+    if iterable.is_nullish() {
+        return realm.type_error("Object.fromEntries requires an iterable");
+    }
     let out = realm.new_object();
-    let items = realm.iterate_to_vec(arg(args, 0))?;
-    for item in items {
+    realm.for_each_iterated(iterable, |realm, item, _| {
+        if !item.is_object() {
+            return realm.type_error("Iterator value is not an entry object");
+        }
         let k = realm.get(item.clone(), PropertyKey::index(0))?;
         let v = realm.get(item, PropertyKey::index(1))?;
         let key = realm.to_property_key(k)?;
         realm.define_own(out, key, Property::data(v, ALL))?;
-    }
+        Ok(())
+    })?;
     Ok(Value::Object(out))
 }
 
 fn group_by(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let items = realm.iterate_to_vec(arg(args, 0))?;
+    let items = arg(args, 0);
     let cb = arg(args, 1);
+    if items.is_nullish() {
+        return realm.type_error("Object.groupBy called on null or undefined");
+    }
+    if !realm.is_callable(&cb) {
+        return realm.type_error("Object.groupBy: callback is not a function");
+    }
     let out = realm.new_object_with_proto(None);
-    for (i, item) in items.into_iter().enumerate() {
+    realm.for_each_iterated(items, |realm, item, i| {
         let k = realm.call(cb.clone(), Value::Undefined, &[item.clone(), Value::Number(i as f64)])?;
         let key = realm.to_property_key(k)?;
         let existing = realm.get_own_property(out, &key);
@@ -538,6 +551,7 @@ fn group_by(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
                 realm.define_property(out, key, arr, ALL);
             }
         }
-    }
+        Ok(())
+    })?;
     Ok(Value::Object(out))
 }

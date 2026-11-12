@@ -7,6 +7,11 @@ use crate::realm::*;
 use crate::value::*;
 use std::rc::Rc;
 
+/// Longest list built from an array-like (`apply`, `Reflect.construct`,
+/// typed array sources...): past it a RangeError instead of exhausting
+/// memory (V8 likewise rejects such argument lists).
+pub const MAX_LIST_LENGTH: usize = 1 << 27;
+
 pub type JsResult<T> = Result<T, Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1208,6 +1213,24 @@ impl Realm {
         Ok(())
     }
 
+    /// Step through an iterable, calling `f` with each value and its
+    /// index. When `f` fails the iterator is closed (IfAbruptCloseIterator:
+    /// errors from `return` are dropped) and `f`'s error is returned.
+    pub fn for_each_iterated(&mut self, iterable: Value, mut f: impl FnMut(&mut Realm, Value, usize) -> JsResult<()>) -> JsResult<()> {
+        let (it, next) = self.get_iterator(iterable)?;
+        let mut i = 0;
+        while let Some(v) = self.iterator_step(&it, &next)? {
+            if let Err(e) = f(self, v, i) {
+                if !self.terminating {
+                    let _ = self.iterator_close(&it);
+                }
+                return Err(e);
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
     /// Collect an iterable into a Vec (fast path for plain arrays).
     pub fn iterate_to_vec(&mut self, v: Value) -> JsResult<Vec<Value>> {
         if let V::Object(id) = v.v() {
@@ -1229,6 +1252,9 @@ impl Realm {
         let mark = self.native_roots.len();
         let r = (|| {
             while let Some(x) = self.iterator_step(it, next)? {
+                if self.native_roots.len() - mark >= MAX_LIST_LENGTH {
+                    return Err(self.out_of_memory());
+                }
                 self.native_roots.push(x);
             }
             Ok(())
@@ -1264,11 +1290,14 @@ impl Realm {
         }
         let len = self.get_str(Value::Object(id), "length")?;
         let len = self.to_length(len)?;
+        if len > MAX_LIST_LENGTH {
+            return self.range_error("Too many elements in array-like object");
+        }
         if self.no_index_properties(id) {
             // `{length: n}`: every element reads as undefined.
             return Ok(vec![Value::Undefined; len]);
         }
-        let mut out = Vec::with_capacity(len);
+        let mut out = Vec::with_capacity(len.min(1 << 16));
         for i in 0..len {
             out.push(self.get(Value::Object(id), PropertyKey::index(i as u32))?);
         }

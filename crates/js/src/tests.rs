@@ -1604,6 +1604,41 @@ fn regexp_literal_inside_promise_executor() {
     eq("class P extends Promise {} var r; new P(function () { r = /x/.exec('yx').index; }); r", "1");
 }
 
+/// test262 used to abort the process: built-ins stepping an endless
+/// iterator collected it whole before calling back (Array.from with a
+/// throwing mapper, Promise combinators with a throwing `then`), growing
+/// until an allocation failed. They now step lazily and close the
+/// iterator; runaway heaps and huge array-likes throw instead of aborting.
+#[test]
+fn no_abort_on_endless_iterators_and_huge_lengths() {
+    let endless = "var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { done: false, value: 1 }; }, return() { closed++; return {}; } }; } };";
+    eq(&format!("{endless} try {{ Array.from(it, function () {{ throw 1; }}); }} catch (e) {{}} closed"), "1");
+    eq(&format!("{endless} var p = Promise.resolve(); p.then = function () {{ throw 1; }}; Promise.resolve = function () {{ return p; }}; Promise.all(it); closed"), "1");
+    eq(&format!("{endless} try {{ Object.fromEntries(it); }} catch (e) {{}} closed"), "1");
+    throws("Array.prototype.toReversed.call({ length: 2 ** 32 })", "Invalid array length");
+    throws("Math.max.apply(null, { length: 2 ** 40 })", "RangeError");
+    // A heap past the realm's limit stops the script (uncatchable).
+    let mut realm = Realm::new();
+    realm.heap_limit = 200_000;
+    let r = realm.eval("var keep = []; try { for (;;) keep.push({}); } catch (e) { 'caught' }", "oom.js");
+    let e = r.expect_err("out of memory");
+    assert!(realm.error_to_string(&e).contains("Out of memory"));
+}
+
+/// Direct eval runs in the caller's scope; Annex B block functions; private
+/// brand checks; generator argument binding at the call.
+#[test]
+fn direct_eval_annexb_private_generators() {
+    eq("function f(a) { var b = 2; eval('var c = a + b; function h() { return c * 10; }'); return [c, h(), typeof c].join(); } f(1)", "3,30,number");
+    eq("function f() { let q = 1; return eval('q + 1'); } f()", "2");
+    eq("function f() { 'use strict'; eval('var z = 1'); return typeof z; } f()", "undefined");
+    eq("function f() { let y = 1; { try { eval('var y = 2'); } catch (e) { return e.name; } } } f()", "SyntaxError");
+    eq("function f() { var before = typeof bf; { function bf() {} } return before + ',' + typeof bf; } f()", "undefined,function");
+    eq("class A { #x = 1; static rd(o) { return o.#x; } } try { A.rd({}); } catch (e) { e.name }", "TypeError");
+    eq("class A { #m() {} static has(o) { return #m in o; } } [A.has(new A()), A.has(A.prototype)].join()", "true,false");
+    eq("function* g([a]) {} try { g(null); 'no' } catch (e) { e.name }", "TypeError");
+}
+
 /// Unicode identifiers: Other_ID_Start (U+2118, in ESPN's bundle),
 /// combining marks and connector punctuation inside names.
 #[test]

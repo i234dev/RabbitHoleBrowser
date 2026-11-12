@@ -247,6 +247,31 @@ pub enum Op {
     /// Async generator yield (awaits value first)
     AsyncYield,
 
+    // --- private class elements (keys are private symbols)
+    /// obj key -> value (TypeError when obj lacks the element)
+    GetPrivate,
+    /// obj key -> obj key value
+    GetPrivateKeep,
+    /// obj key value -> value
+    SetPrivate,
+    /// obj key value -> obj (PrivateFieldAdd: TypeError when present)
+    DefinePrivate,
+    /// obj template -> obj (PrivateMethodOrAccessorAdd of each element)
+    CopyPrivate,
+    /// proto -> template (moves proto's private methods/accessors out)
+    TakePrivate,
+
+    // --- direct eval
+    /// The next `CallEval` is call site `eval_sites[i]` of this function.
+    EvalSite(u32),
+    /// -> object holding the vars sloppy eval code declares in this function
+    NewEvalVars,
+    /// evalvars -> (defines var `consts[i]` = undefined unless present)
+    DeclareEvalVar(u32),
+    /// Global var `consts[i]` declared by eval code (SyntaxError when a
+    /// global lexical declaration has the name).
+    DeclareEvalGlobalVar(u32),
+
 
     // --- register forms, produced by `regs::translate`. Operands are
     // absolute frame slots: the function's registers come first, then the
@@ -514,9 +539,8 @@ pub struct FunctionCode {
     pub compiled: std::cell::OnceCell<Rc<FunctionCode>>,
     /// Baseline compiler state (hotness counter, native code).
     pub jit: JitSlot,
-    /// Direct `eval` call sites: (the site's description constant, which
-    /// is unique per site, scope chain visible there).
-    pub eval_envs: Vec<(u32, Rc<crate::compiler::LazyScope>)>,
+    /// Direct `eval` call sites (see `Op::EvalSite`).
+    pub eval_sites: Vec<Rc<crate::compiler::EvalSite>>,
 }
 
 /// Per-function state of the baseline compiler (empty without the `jit`
@@ -762,6 +786,14 @@ impl Op {
             ForInNext => (1, 2),
             IteratorStep | IteratorRest => (2, 3),
             Yield | AsyncYield | Await => (1, 1),
+            GetPrivate => (2, 1),
+            GetPrivateKeep => (2, 3),
+            SetPrivate | DefinePrivate => (3, 1),
+            CopyPrivate => (2, 1),
+            TakePrivate => (1, 1),
+            EvalSite(_) | DeclareEvalGlobalVar(_) => (0, 0),
+            NewEvalVars => (0, 1),
+            DeclareEvalVar(_) => (1, 0),
             IteratorNextWith => (3, 3),
             StoreCompletion => (1, 0),
             LoadCompletion => (0, 1),

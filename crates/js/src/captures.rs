@@ -34,6 +34,11 @@ pub const ARGS_ESCAPE: &str = "\u{0}args";
 /// of them live in heap scopes, where the eval code finds them.
 pub const EVAL_ALL: &str = "\u{0}eval";
 
+/// Marker in a function's set: it contains a direct `eval` call itself
+/// (not only in nested functions): sloppy eval code may add `var`s to its
+/// variable environment.
+pub const EVAL_HERE: &str = "\u{0}evalhere";
+
 /// Whether `set` makes the binding `name` live in a heap scope.
 #[inline]
 pub fn is_captured(set: &NameSet, name: &str) -> bool {
@@ -90,6 +95,9 @@ impl Analyzer {
                 set.insert(ARGS_ESCAPE.to_string());
             }
             set.insert(EVAL_ALL.to_string());
+        }
+        if let Some(set) = self.sets.last_mut() {
+            set.insert(EVAL_HERE.to_string());
         }
     }
 

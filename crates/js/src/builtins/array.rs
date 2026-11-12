@@ -113,18 +113,87 @@ fn from(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     if mapping && !realm.is_callable(&map_fn) {
         return realm.type_error("Array.from: mapper is not a function");
     }
+    let plain = this.as_object() == Some(realm.intrinsics.array_ctor) || !realm.is_constructor(&this);
     let uses_iterator = realm.get_method(source.clone(), PropertyKey::Symbol(SYM_ITERATOR))?.is_some();
-    let items = if uses_iterator {
-        realm.iterate_to_vec(source)?
-    } else {
-        let obj = realm.to_object(source)?;
-        realm.create_list_from_array_like(Value::Object(obj))?
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for (i, v) in items.into_iter().enumerate() {
-        out.push(if mapping { realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])? } else { v });
+    if uses_iterator {
+        if plain {
+            // A fresh array: defining its elements is unobservable, so
+            // collect first (mapping as we go, closing on errors).
+            if !mapping {
+                let items = realm.iterate_to_vec(source)?;
+                return Ok(realm.new_array_value(items));
+            }
+            let mut out = Vec::new();
+            realm.for_each_iterated(source, |realm, v, i| {
+                out.push(realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])?);
+                Ok(())
+            })?;
+            return Ok(realm.new_array_value(out));
+        }
+        let a = realm.construct(this, &[], Value::Undefined)?;
+        let Some(aid) = a.as_object() else { return realm.type_error("Array.from: constructor did not return an object") };
+        let mut count = 0usize;
+        realm.for_each_iterated(source, |realm, v, i| {
+            let v = if mapping { realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])? } else { v };
+            create_data_property_or_throw(realm, aid, i as f64, v)?;
+            count = i + 1;
+            Ok(())
+        })?;
+        set_length_or_throw(realm, a.clone(), count as f64)?;
+        return Ok(a);
     }
-    construct_array_like(realm, this, out)
+    let obj = realm.to_object(source)?;
+    let len = realm.length_of(Value::Object(obj))?;
+    let a = if plain {
+        if len > u32::MAX as usize {
+            return realm.range_error("Invalid array length");
+        }
+        if !mapping {
+            let items = realm.create_list_from_array_like(Value::Object(obj))?;
+            return Ok(realm.new_array_value(items));
+        }
+        let mut out = Vec::new();
+        for i in 0..len {
+            let v = realm.get(Value::Object(obj), index_key(i as f64))?;
+            out.push(realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])?);
+        }
+        return Ok(realm.new_array_value(out));
+    } else {
+        realm.construct(this, &[Value::Number(len as f64)], Value::Undefined)?
+    };
+    let Some(aid) = a.as_object() else { return realm.type_error("Array.from: constructor did not return an object") };
+    for i in 0..len {
+        let v = realm.get(Value::Object(obj), index_key(i as f64))?;
+        let v = if mapping { realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])? } else { v };
+        create_data_property_or_throw(realm, aid, i as f64, v)?;
+    }
+    set_length_or_throw(realm, a.clone(), len as f64)?;
+    Ok(a)
+}
+
+/// The property key of an integer index (array index or its string).
+pub(crate) fn index_key(i: f64) -> PropertyKey {
+    if i < u32::MAX as f64 {
+        PropertyKey::index(i as u32)
+    } else {
+        PropertyKey::String(crate::value::JsStr::new(&crate::value::number_to_string(i)))
+    }
+}
+
+/// CreateDataPropertyOrThrow(O, i, v).
+pub(crate) fn create_data_property_or_throw(realm: &mut Realm, o: ObjectId, i: f64, v: Value) -> JsResult<()> {
+    if !realm.define_own(o, index_key(i), Property::data(v, ALL))? {
+        return realm.type_error(&format!("Cannot define property {}", crate::value::number_to_string(i)));
+    }
+    Ok(())
+}
+
+/// Set(O, "length", len, true).
+pub(crate) fn set_length_or_throw(realm: &mut Realm, o: Value, len: f64) -> JsResult<()> {
+    if !realm.set_str(o, "length", Value::Number(len))? {
+        return realm.type_error("Cannot assign to read only property 'length'");
+    }
+    Ok(())
 }
 
 /// Create the result array via `this` constructor when it is a subclass.
@@ -134,13 +203,11 @@ fn construct_array_like(realm: &mut Realm, ctor: Value, items: Vec<Value>) -> Js
     }
     let len = items.len();
     let obj = realm.construct(ctor, &[Value::Number(len as f64)], Value::Undefined)?;
+    let Some(o) = obj.as_object() else { return realm.type_error("constructor did not return an object") };
     for (i, v) in items.into_iter().enumerate() {
-        let k = PropertyKey::index(i as u32);
-        if let V::Object(o) = obj.v() {
-            realm.define_own(o, k, Property::data(v, ALL))?;
-        }
+        create_data_property_or_throw(realm, o, i as f64, v)?;
     }
-    realm.set_str(obj.clone(), "length", Value::Number(len as f64))?;
+    set_length_or_throw(realm, obj.clone(), len as f64)?;
     Ok(obj)
 }
 
@@ -922,7 +989,7 @@ fn sort(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         return realm.type_error("The comparison function must be either a function or undefined");
     }
     let (id, len) = this_arr(realm, &this)?;
-    let mut items = Vec::with_capacity(len);
+    let mut items = Vec::with_capacity(len.min(1 << 16));
     let mut holes = 0;
     for i in 0..len {
         if has_i(realm, id, i)? {
@@ -1005,9 +1072,18 @@ fn splice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     Ok(Value::Object(removed_arr))
 }
 
+/// ArrayCreate's length check (before any element is read).
+fn check_array_create(realm: &mut Realm, len: usize) -> JsResult<()> {
+    if len > u32::MAX as usize {
+        return realm.range_error("Invalid array length");
+    }
+    Ok(())
+}
+
 fn to_reversed(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
-    let mut out = Vec::with_capacity(len);
+    check_array_create(realm, len)?;
+    let mut out = Vec::with_capacity(len.min(1 << 16));
     for i in (0..len).rev() {
         out.push(get_i(realm, id, i)?);
     }
@@ -1020,7 +1096,8 @@ fn to_sorted(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
         return realm.type_error("The comparison function must be either a function or undefined");
     }
     let (id, len) = this_arr(realm, &this)?;
-    let mut items = Vec::with_capacity(len);
+    check_array_create(realm, len)?;
+    let mut items = Vec::with_capacity(len.min(1 << 16));
     for i in 0..len {
         items.push(get_i(realm, id, i)?);
     }
@@ -1039,6 +1116,11 @@ fn to_spliced(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
         let n = to_integer(realm.to_number(arg(args, 1))?);
         (n.max(0.0) as usize).min(len - start)
     };
+    let new_len = (len - skip) as f64 + args.len().saturating_sub(2) as f64;
+    if new_len > 9007199254740991.0 {
+        return realm.type_error("Invalid array length");
+    }
+    check_array_create(realm, new_len as usize)?;
     let mut out = Vec::new();
     for i in 0..start {
         out.push(get_i(realm, id, i)?);
@@ -1059,7 +1141,8 @@ fn with(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     if k < 0.0 || k >= len as f64 {
         return realm.range_error("Invalid index");
     }
-    let mut out = Vec::with_capacity(len);
+    check_array_create(realm, len)?;
+    let mut out = Vec::with_capacity(len.min(1 << 16));
     for i in 0..len {
         out.push(if i == k as usize { arg(args, 1) } else { get_i(realm, id, i)? });
     }

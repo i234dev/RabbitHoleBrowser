@@ -129,7 +129,8 @@ fn classify_all(op: &Op) -> Class {
         Op::DefinePropR(..) | Op::GetLocalR(..) | Op::SetLocalR(..) | Op::LoadThis(..) | Op::StoreCompletionR(..) => access,
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
-        Op::CallEval(..) => Reject("direct eval"),
+        Op::CallEval(..) | Op::EvalSite(..) | Op::NewEvalVars | Op::DeclareEvalVar(..) | Op::DeclareEvalGlobalVar(..) => Reject("direct eval"),
+        Op::GetPrivate | Op::GetPrivateKeep | Op::SetPrivate | Op::DefinePrivate | Op::CopyPrivate | Op::TakePrivate => exec,
         // Everything else: the interpreter's out-of-line code.
         Op::Const(..) | Op::Undefined | Op::Null | Op::True | Op::False | Op::Empty | Op::Pop | Op::Dup | Op::Dup2 | Op::Swap | Op::Rot3 | Op::Rot4 => exec,
         Op::GetReg(..) | Op::GetRegChecked(..) | Op::SetReg(..) | Op::SetRegChecked(..) => exec,
