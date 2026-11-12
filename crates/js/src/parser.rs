@@ -2725,7 +2725,14 @@ impl<'a> Parser<'a> {
     /// `function [*] [name] ( params ) { body }` — current token is `function`.
     fn parse_function(&mut self, is_async: bool, is_expression: bool, is_declaration: bool) -> PResult<Function> {
         let pos = self.tok.pos;
-        let start = self.tok.start as u32;
+        let mut start = self.tok.start as u32;
+        if is_async {
+            // The source text (toString) starts at `async`.
+            let before = self.lx.source()[..start as usize].trim_end();
+            if before.ends_with("async") {
+                start = (before.len() - 5) as u32;
+            }
+        }
         // Functions right after `(` or `!` are usually called at once
         // (`(function(){...})()`, callbacks): parse them eagerly.
         let eager = !is_async && self.prev_end > 0 && matches!(self.lx.source().as_bytes().get(self.prev_end - 1), Some(b'(') | Some(b'!'));
