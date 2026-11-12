@@ -15,8 +15,10 @@
 //! let inst = store.instantiate(&mut NoHost, &m, &[]).unwrap();
 //! ```
 
+pub mod atomics;
 pub mod binary;
 pub mod compile;
+pub mod gc;
 pub mod interp;
 pub mod ir;
 pub mod module;

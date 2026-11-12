@@ -1187,7 +1187,19 @@ fn run(store: &Store, host: &mut dyn Host, inst_idx: u32, code_rc: &Rc<Code>, ba
                     let mem = unsafe { &(&*inst).memories[ma.memory as usize] };
                     try_trap!(unsafe { crate::simd::mem_op(mem, ma.offset, i, regs) });
                 }
-                Op::Gc => break Err(Trap::Other("unsupported instruction".into())),
+                Op::Gc => {
+                    try_trap!(unsafe { crate::gc::exec(store, &*inst, &*code, i, regs) });
+                }
+                Op::Atomic => {
+                    try_trap!(unsafe { crate::atomics::exec(&*inst, &*code, i, regs) });
+                }
+                Op::BrOnCast | Op::BrOnCastFail => {
+                    let (h, nullable) = unsafe { (&*code).casts[i.b as usize] };
+                    let ok = crate::gc::ref_test(store, r!(i.a), h, nullable);
+                    if ok == (i.op == Op::BrOnCast) {
+                        jump!(i.c)
+                    }
+                }
             }
         };
         // A trap or exception.

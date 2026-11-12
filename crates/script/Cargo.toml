@@ -16,3 +16,4 @@ rabbithole-style.workspace = true
 rabbithole-gfx.workspace = true
 rabbithole-net.workspace = true
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+rabbithole-wasm-js.workspace = true

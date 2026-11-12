@@ -641,13 +641,28 @@ fn species_create(realm: &mut Realm, exemplar: ObjectId, kind: TypedArrayKind, a
     }
 }
 
+/// A typed array whose buffer no longer covers it (its buffer was
+/// detached, e.g. a WebAssembly memory that grew) has length 0.
+fn ta_out_of_bounds(realm: &Realm, t: &TypedArrayData) -> bool {
+    match buffer_of(realm, t.buffer) {
+        Some(b) => t.byte_offset + t.length * t.kind.element_size() > b.borrow().len(),
+        None => true,
+    }
+}
+
 fn ta_byte_length(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let (_, t) = this_ta(realm, &this, "byteLength")?;
+    if ta_out_of_bounds(realm, &t) {
+        return Ok(Value::Number(0.0));
+    }
     Ok(Value::Number((t.length * t.kind.element_size()) as f64))
 }
 
 fn ta_length(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let (_, t) = this_ta(realm, &this, "length")?;
+    if ta_out_of_bounds(realm, &t) {
+        return Ok(Value::Number(0.0));
+    }
     Ok(Value::Number(t.length as f64))
 }
 

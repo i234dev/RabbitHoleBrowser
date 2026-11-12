@@ -145,7 +145,7 @@ fn check_limits(l: Limits, max: u64, what: &str) -> Result<()> {
 }
 
 pub fn check_memory_type(t: &MemoryType) -> Result<()> {
-    let max = if t.memory64 { 1u64 << (64 - t.page_log2 as u32) } else { 1u64 << (32 - t.page_log2 as u32) };
+    let max = if t.memory64 { if t.page_log2 == 0 { u64::MAX } else { 1u64 << (64 - t.page_log2 as u32) } } else { 1u64 << (32 - t.page_log2 as u32) };
     if t.page_log2 != 16 && t.page_log2 != 0 {
         return invalid("invalid custom page size");
     }

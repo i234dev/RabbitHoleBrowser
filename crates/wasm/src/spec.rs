@@ -95,7 +95,8 @@ fn parse_val(sx: &Sx) -> Option<Val> {
             Val::V128(crate::text::wat::v128_const(l, &mut i).ok()?)
         }
         "ref.null" => Val::Ref(0),
-        "ref.extern" | "ref.host" => Val::Ref(num::parse_u64(a?)? + 1),
+        "ref.extern" => Val::Ref(num::parse_u64(a?)? + 1),
+        "ref.host" => Val::Ref((num::parse_u64(a?)? + 1) << 2 | 2),
         _ => return None,
     })
 }
@@ -159,12 +160,22 @@ fn match_result(store: &Store, sx: &Sx, v: &Val) -> bool {
             true
         }
         (Some("ref.null"), Val::Ref(r)) => *r == 0,
-        (Some("ref.extern" | "ref.host"), Val::Ref(r)) => match a {
+        (Some("ref.extern"), Val::Ref(r)) => match a {
             Some(a) => num::parse_u64(a).map(|n| n + 1) == Some(*r),
             None => *r != 0,
         },
+        (Some("ref.host"), Val::Ref(r)) => match a {
+            Some(a) => num::parse_u64(a).map(|n| (n + 1) << 2 | 2) == Some(*r),
+            None => *r != 0,
+        },
+        (Some("ref.i31"), Val::Ref(r)) => *r & 1 == 1,
+        (Some("ref.struct" | "ref.array"), Val::Ref(r)) => match crate::gc::obj_index(*r) {
+            Some(i) => store.gc.borrow()[i].is_array == (sx.head() == Some("ref.array")),
+            None => false,
+        },
+        (Some("ref.eq"), Val::Ref(r)) => *r & 1 == 1 || crate::gc::obj_index(*r).is_some(),
         (Some("ref.func"), Val::Ref(r)) => *r != 0 && (*r as usize) <= store.funcs.borrow().len(),
-        (Some("ref.any" | "ref.eq" | "ref.i31" | "ref.struct" | "ref.array" | "ref.exn"), Val::Ref(r)) => *r != 0,
+        (Some("ref.any" | "ref.exn"), Val::Ref(r)) => *r != 0,
         _ => match parse_val(sx) {
             Some(e) => e == *v,
             None => false,

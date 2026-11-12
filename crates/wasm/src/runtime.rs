@@ -356,6 +356,8 @@ pub struct Store {
     pub funcs: RefCell<Vec<Rc<FuncInst>>>,
     pub instances: RefCell<Vec<Rc<Instance>>>,
     pub exns: RefCell<Vec<Exn>>,
+    /// GC structs and arrays.
+    pub gc: RefCell<Vec<crate::gc::GcObj>>,
     pub(crate) stack: UnsafeCell<Vec<u64>>,
     /// First free value stack slot (nested invocations start there).
     pub(crate) stack_top: Cell<usize>,
@@ -382,6 +384,7 @@ impl Store {
             funcs: RefCell::new(Vec::new()),
             instances: RefCell::new(Vec::new()),
             exns: RefCell::new(Vec::new()),
+            gc: RefCell::new(Vec::new()),
             stack: UnsafeCell::new(Vec::new()),
             stack_top: Cell::new(0),
             depth: Cell::new(0),
@@ -532,13 +535,13 @@ impl Store {
         // Globals (initializers see previous globals).
         for (i, g) in m.global_inits.iter().enumerate() {
             let gt = m.globals[m.num_imported_globals as usize + i];
-            let v = eval_const(g, &globals, &funcs).map_err(InstantiateError::Trap)?;
+            let v = eval_const(self, m, g, &globals, &funcs).map_err(InstantiateError::Trap)?;
             let gt = GlobalType { ty: canon_val(m, gt.ty), mutable: gt.mutable };
             globals.push(Rc::new(GlobalInst::new(gt, v)));
         }
         for (i, tt) in m.tables[m.num_imported_tables as usize..].iter().enumerate() {
             let init = match &m.table_inits[i] {
-                Some(e) => eval_const(e, &globals, &funcs).map_err(InstantiateError::Trap)? as u64,
+                Some(e) => eval_const(self, m, e, &globals, &funcs).map_err(InstantiateError::Trap)? as u64,
                 None => 0,
             };
             let elem = match canon_val(m, ValType::Ref(tt.elem)) {
@@ -556,7 +559,7 @@ impl Store {
         for e in &m.elems {
             let mut v = Vec::with_capacity(e.items.len());
             for it in &e.items {
-                v.push(eval_const(it, &globals, &funcs).map_err(InstantiateError::Trap)? as u64);
+                v.push(eval_const(self, m, it, &globals, &funcs).map_err(InstantiateError::Trap)? as u64);
             }
             elems.push(v.into());
         }
@@ -589,7 +592,7 @@ impl Store {
         for (i, e) in m.elems.iter().enumerate() {
             match &e.mode {
                 ElemMode::Active { table, offset } => {
-                    let off = eval_const(offset, &inst.globals, &inst.funcs).map_err(InstantiateError::Trap)? as u64;
+                    let off = eval_const(self, m, offset, &inst.globals, &inst.funcs).map_err(InstantiateError::Trap)? as u64;
                     let t = &inst.tables[*table as usize];
                     let items = inst.elems.borrow()[i].clone();
                     {
@@ -610,7 +613,7 @@ impl Store {
         }
         for (i, d) in m.datas.iter().enumerate() {
             if let DataMode::Active { memory, offset } = &d.mode {
-                let off = eval_const(offset, &inst.globals, &inst.funcs).map_err(InstantiateError::Trap)? as u64;
+                let off = eval_const(self, m, offset, &inst.globals, &inst.funcs).map_err(InstantiateError::Trap)? as u64;
                 let mem = &inst.memories[*memory as usize];
                 let bytes = &m.bytes[d.data.clone()];
                 let (p, len) = mem.raw();
@@ -702,7 +705,8 @@ fn global_type_ok(m: &Module, have: ValType, want: ValType, mutable: bool) -> bo
 }
 
 /// Evaluate a constant expression.
-pub fn eval_const(e: &ConstExpr, globals: &[Rc<GlobalInst>], funcs: &[Rc<FuncInst>]) -> Result<u128, Trap> {
+pub fn eval_const(store: &Store, m: &Module, e: &ConstExpr, globals: &[Rc<GlobalInst>], funcs: &[Rc<FuncInst>]) -> Result<u128, Trap> {
+    use crate::gc::*;
     let mut st: Vec<u128> = Vec::with_capacity(4);
     for op in &e.ops {
         match *op {
@@ -735,8 +739,80 @@ pub fn eval_const(e: &ConstExpr, globals: &[Rc<GlobalInst>], funcs: &[Rc<FuncIns
                     _ => a.wrapping_mul(b),
                 } as u128);
             }
-            ConstOp::AnyConvertExtern | ConstOp::ExternConvertAny => {}
-            _ => return Err(Trap::Other("unsupported constant expression".into())),
+            ConstOp::AnyConvertExtern => {
+                let v = st.pop().unwrap() as u64;
+                st.push(any_convert_extern(v) as u128);
+            }
+            ConstOp::ExternConvertAny => {
+                let v = st.pop().unwrap() as u64;
+                st.push(extern_convert_any(v) as u128);
+            }
+            ConstOp::RefI31 => {
+                let v = st.pop().unwrap() as u32;
+                st.push(i31_bits(v) as u128);
+            }
+            ConstOp::StructNew(t) | ConstOp::StructNewDefault(t) => {
+                let ty = m.canon[t as usize];
+                let CompType::Struct(fs) = canonical_type(ty).comp else { return Err(Trap::Other("not a struct".into())) };
+                let mut vals: Vec<u128> = Vec::new();
+                if matches!(op, ConstOp::StructNew(_)) {
+                    let at = st.len() - fs.len();
+                    vals = st.split_off(at);
+                } else {
+                    vals.resize(fs.len(), 0);
+                }
+                let mut data = Vec::new();
+                for (f, v) in fs.iter().zip(vals) {
+                    let k = kind_of(f.storage);
+                    data.push(match k {
+                        K_I8 => v as u64 & 0xff,
+                        K_I16 => v as u64 & 0xffff,
+                        _ => v as u64,
+                    });
+                    if k == K_V128 {
+                        data.push((v >> 64) as u64);
+                    }
+                }
+                st.push(alloc(store, GcObj { ty, is_array: false, kind: K_VAL, data }) as u128);
+            }
+            ConstOp::ArrayNew(t) | ConstOp::ArrayNewDefault(t) | ConstOp::ArrayNewFixed(t, _) => {
+                let ty = m.canon[t as usize];
+                let CompType::Array(f) = canonical_type(ty).comp else { return Err(Trap::Other("not an array".into())) };
+                let k = kind_of(f.storage);
+                let elems: Vec<u128> = match *op {
+                    ConstOp::ArrayNewFixed(_, n) => {
+                        let at = st.len() - n as usize;
+                        st.split_off(at)
+                    }
+                    ConstOp::ArrayNew(_) => {
+                        let n = st.pop().unwrap() as u32 as usize;
+                        let v = st.pop().unwrap();
+                        if n > 1 << 24 {
+                            return Err(Trap::Other("out of memory".into()));
+                        }
+                        vec![v; n]
+                    }
+                    _ => {
+                        let n = st.pop().unwrap() as u32 as usize;
+                        if n > 1 << 24 {
+                            return Err(Trap::Other("out of memory".into()));
+                        }
+                        vec![0; n]
+                    }
+                };
+                let mut data = Vec::with_capacity(elems.len());
+                for v in elems {
+                    data.push(match k {
+                        K_I8 => v as u64 & 0xff,
+                        K_I16 => v as u64 & 0xffff,
+                        _ => v as u64,
+                    });
+                    if k == K_V128 {
+                        data.push((v >> 64) as u64);
+                    }
+                }
+                st.push(alloc(store, GcObj { ty, is_array: true, kind: k, data }) as u128);
+            }
         }
     }
     Ok(st.pop().unwrap_or(0))

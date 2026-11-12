@@ -431,6 +431,7 @@ enum Imm {
     Lane,
     MemArgLane(u32),
     Shuffle,
+    Zero,
 }
 
 /// (prefix, opcode, immediates)
@@ -547,6 +548,10 @@ fn lookup(name: &str) -> Option<(Option<u8>, u32, Imm)> {
         _ => {
             if let Some(c) = numeric_opcode(name) {
                 return Some((Option::None, c as u32, Nil));
+            }
+            if let Some(c) = crate::atomics::atomic_opcode(name) {
+                let imm = if c == 3 { Zero } else { MemArg(crate::atomics::natural(c)) };
+                return Some((Some(0xfe), c, imm));
             }
             if let Some(&(_, c)) = crate::simd::SIMD_NAMES.iter().find(|(n, _)| *n == name) {
                 let imm = match c {
@@ -981,6 +986,7 @@ impl Body<'_> {
         }
         match imm {
             Imm::Nil => {}
+            Imm::Zero => self.out.push(0),
             Imm::Label => {
                 let s = self.need(items, i, "label")?;
                 let d = self.label(s)?;
@@ -1758,7 +1764,7 @@ pub fn encode_module(fields: &[Sx]) -> R<Vec<u8>> {
                 }
                 seen_def = true;
                 n_tags += 1;
-                let (t, _) = cx.type_use(l, &mut i, false)?;
+                let (t, _) = cx.type_use(l, &mut i, true)?;
                 if i != l.len() {
                     return err("unexpected token in tag");
                 }
@@ -2156,7 +2162,7 @@ fn encode_import_desc(cx: &mut Ctx, kind: ImportKind, items: &[Sx], k: &mut usiz
         ImportKind::Tag => {
             out.push(4);
             out.push(0);
-            let (t, _) = cx.type_use(items, k, false)?;
+            let (t, _) = cx.type_use(items, k, true)?;
             cx.tag_types.push(t);
             leb_u32(out, t);
         }

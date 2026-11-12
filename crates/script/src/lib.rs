@@ -197,6 +197,7 @@ impl ScriptHost {
     pub(crate) fn new_inner(env: &mut dyn HostEnv, worker: Option<(String, bool, u32)>) -> ScriptHost {
         let mut realm = Realm::new();
         realm.set_task_budget(Some(task_budget()));
+        rabbithole_wasm_js::install(&mut realm);
         let now = env.now_ms();
         let state = Rc::new(RefCell::new(HostState {
             wrappers: HashMap::default(),

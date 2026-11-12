@@ -359,8 +359,13 @@ ops! {
     // ------------------------------------------------------------ misc
     /// Legacy `rethrow`: a = slot holding the caught exception
     Rethrow = Sii,
-    /// GC and other rarely used instructions: x = sub-opcode, see interp
+    /// GC instructions: x = sub-opcode (see `gc.rs`)
     Gc = Other,
+    /// a = reference, b = cast index, c = target
+    BrOnCast = Other,
+    BrOnCastFail = Other,
+    /// Threads proposal: x = sub-opcode, a = base, c = memarg index
+    Atomic = Other,
 }
 
 impl Instr {
@@ -430,6 +435,8 @@ pub struct Code {
     pub memargs: Box<[MemArg]>,
     pub v128s: Box<[u128]>,
     pub handlers: Box<[Handler]>,
+    /// (heap type with canonical ids, nullable) of GC casts.
+    pub casts: Box<[(crate::types::HeapType, bool)]>,
     /// Module function index (for names in traces).
     pub func_index: u32,
 }

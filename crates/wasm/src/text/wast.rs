@@ -25,10 +25,7 @@ impl ModuleDecl {
         match &self.src {
             ModuleSrc::Binary(b) => Ok(b.clone()),
             ModuleSrc::Text(fields) => super::wat::encode_module(fields),
-            ModuleSrc::Quote(q) => {
-                let sx = parse_sexprs(q)?;
-                super::wat::encode_module(&sx)
-            }
+            ModuleSrc::Quote(q) => super::wat_to_binary(q),
         }
     }
 }

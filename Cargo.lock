@@ -1671,6 +1671,7 @@ dependencies = [
  "rabbithole-js",
  "rabbithole-net",
  "rabbithole-style",
+ "rabbithole-wasm-js",
 ]
 
 [[package]]
@@ -1696,6 +1697,14 @@ dependencies = [
 [[package]]
 name = "rabbithole-wasm"
 version = "0.1.0"
+
+[[package]]
+name = "rabbithole-wasm-js"
+version = "0.1.0"
+dependencies = [
+ "rabbithole-js",
+ "rabbithole-wasm",
+]
 
 [[package]]
 name = "rav1d"

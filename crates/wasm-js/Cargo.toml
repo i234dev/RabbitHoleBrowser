@@ -1,0 +1,12 @@
+[package]
+name = "rabbithole-wasm-js"
+description = "RabbitHole browser engine: the WebAssembly JavaScript API (WebAssembly namespace) binding rabbithole-wasm to rabbithole-js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rabbithole-js.workspace = true
+rabbithole-wasm.workspace = true

@@ -121,6 +121,7 @@ pub(crate) struct FC<'a> {
     pub memargs: Vec<MemArg>,
     pub v128s: Vec<u128>,
     handlers: Vec<Handler>,
+    casts: Vec<(HeapType, bool)>,
     last_pure: Option<usize>,
     results: Vec<ValType>,
 }
@@ -191,6 +192,7 @@ pub fn compile_function(cx: &ModuleCtx, def_index: u32) -> Result<Code> {
         memargs: Vec::new(),
         v128s: Vec::new(),
         handlers: Vec::new(),
+        casts: Vec::new(),
         last_pure: None,
         results: ft.results.to_vec(),
     };
@@ -225,6 +227,7 @@ pub fn compile_function(cx: &ModuleCtx, def_index: u32) -> Result<Code> {
         memargs: fc.memargs.into(),
         v128s: fc.v128s.into(),
         handlers: fc.handlers.into(),
+        casts: fc.casts.into(),
         func_index,
     })
 }
@@ -339,6 +342,15 @@ impl<'a> FC<'a> {
         let h = self.ctls.last().unwrap().height;
         for i in len.saturating_sub(n).max(h)..len {
             self.materialize(i);
+        }
+    }
+
+    /// Materialize every operand that lazily reads a local.
+    fn materialize_locals(&mut self) {
+        for i in 0..self.stack.len() {
+            if matches!(self.stack[i].loc, Loc::Local(_)) {
+                self.materialize(i);
+            }
         }
     }
 
@@ -530,6 +542,10 @@ impl<'a> FC<'a> {
     }
 
     fn push_ctl(&mut self, kind: Kind, params: Vec<ValType>, results: Vec<ValType>) -> Result<()> {
+        // Operands that lazily read a local must be copied out now: a
+        // `local.set` inside the block would otherwise materialize them only
+        // on the paths (or loop iterations) that run it.
+        self.materialize_locals();
         // Check and materialize the block parameters.
         self.check_top(&params)?;
         let n = params.len();
@@ -792,6 +808,8 @@ impl<'a> FC<'a> {
                     let (p, r) = self.block_type()?;
                     let c = self.pop_expect(ValType::I32)?;
                     self.check_top(&p)?;
+                    // Before the branch: both arms must see the same locations.
+                    self.materialize_locals();
                     self.materialize_top(p.len());
                     let pc = self.cond_branch(c, false, u32::MAX);
                     self.push_ctl(Kind::If, p, r)?;
@@ -1180,6 +1198,7 @@ impl<'a> FC<'a> {
                     let (types, idx) = self.label_types(l)?;
                     self.check_top(&types)?;
                     self.br_on(o.src(), Op::BrOnNull, Op::BrOnNonNull, &types, 0, idx);
+                    self.retype_top(&types)?;
                     let t = o.ty.map(|t| match t {
                         ValType::Ref(r) => ValType::Ref(RefType { nullable: false, heap: r.heap }),
                         t => t,
@@ -1206,6 +1225,7 @@ impl<'a> FC<'a> {
                         }
                     }
                     self.check_top(rest)?;
+                    self.retype_top(rest)?;
                     // Branch values include the reference (now on top again).
                     self.push_opt(nn, o.loc);
                     let src = o.src();
@@ -1214,11 +1234,55 @@ impl<'a> FC<'a> {
                 }
                 0xfc => self.prefix_fc()?,
                 0xfd => crate::simd::simd_op(self)?,
-                0xfb => return invalid("GC instructions are not supported"),
-                0xfe => return invalid("atomic instructions are not supported"),
+                0xfb => crate::gc::gc_op(self)?,
+                0xfe => crate::atomics::atomic_op(self)?,
                 _ => return malformed(format!("illegal opcode {op:#x}")),
             }
         }
+    }
+
+    // ---- helpers for the GC translator
+
+    pub(crate) fn call_args_pub(&mut self, params: &[ValType]) -> Result<u32> {
+        self.call_args(params, 0)
+    }
+    pub(crate) fn pop_ref_pub(&mut self) -> Result<Operand> {
+        self.pop_ref()
+    }
+    pub(crate) fn push_loc_pub(&mut self, t: ValType, o: Operand) {
+        self.push_opt(Some(t), o.loc);
+    }
+    pub(crate) fn label_types_pub(&self, l: u32) -> Result<(Vec<ValType>, usize)> {
+        self.label_types(l)
+    }
+    pub(crate) fn check_top_pub(&self, types: &[ValType]) -> Result<()> {
+        self.check_top(types)
+    }
+    pub(crate) fn retype_top_pub(&mut self, types: &[ValType]) -> Result<()> {
+        self.retype_top(types)
+    }
+    pub(crate) fn br_on_pub(&mut self, src: u32, b: u32, taken: Op, inverse: Op, types: &[ValType], idx: usize) {
+        self.br_on_b(src, b, taken, inverse, types, 0, idx)
+    }
+    pub(crate) fn cast_index(&mut self, h: HeapType, nullable: bool) -> u32 {
+        if let Some(i) = self.casts.iter().position(|&c| c == (h, nullable)) {
+            return i as u32;
+        }
+        self.casts.push((h, nullable));
+        (self.casts.len() - 1) as u32
+    }
+
+    /// Pop operands of `types` and push them back with those types (same
+    /// locations), as branch instructions do with their label types.
+    fn retype_top(&mut self, types: &[ValType]) -> Result<()> {
+        let mut ops = Vec::with_capacity(types.len());
+        for t in types.iter().rev() {
+            ops.push(self.pop_expect(*t)?);
+        }
+        for (o, t) in ops.into_iter().rev().zip(types) {
+            self.push_opt(Some(*t), o.loc);
+        }
+        Ok(())
     }
 
     /// Replace the last instruction's destination by `slot` when it
@@ -1311,6 +1375,11 @@ impl<'a> FC<'a> {
     /// holds; `inverse` is the opposite test. The branch values are the top
     /// `types.len()` operands below `skip` operands.
     fn br_on(&mut self, src: u32, taken: Op, inverse: Op, types: &[ValType], skip: usize, idx: usize) {
+        self.br_on_b(src, 0, taken, inverse, types, skip, idx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn br_on_b(&mut self, src: u32, b: u32, taken: Op, inverse: Op, types: &[ValType], skip: usize, idx: usize) {
         if !self.live() {
             return;
         }
@@ -1318,14 +1387,14 @@ impl<'a> FC<'a> {
         let mv = if matches!(t, Target::Return) { vec![] } else { self.moves(types.len(), skip, self.ctls[idx].slot) };
         match t {
             Target::Known(pc) if mv.is_empty() => {
-                self.emit(Instr::new(taken, src, 0, pc));
+                self.emit(Instr::new(taken, src, b, pc));
             }
             Target::Pending(ci) if mv.is_empty() => {
-                let pc = self.emit(Instr::new(taken, src, 0, u32::MAX));
+                let pc = self.emit(Instr::new(taken, src, b, u32::MAX));
                 self.add_patch(ci, Patch::Instr(pc));
             }
             _ => {
-                let s = self.emit(Instr::new(inverse, src, 0, u32::MAX));
+                let s = self.emit(Instr::new(inverse, src, b, u32::MAX));
                 self.emit_moves(&mv);
                 self.emit_jump(&t);
                 let here = self.bind_label();

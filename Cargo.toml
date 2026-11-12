@@ -23,6 +23,7 @@ rabbithole-svg = { path = "crates/svg" }
 rabbithole-script = { path = "crates/script" }
 rabbithole-agent = { path = "crates/agent" }
 rabbithole-wasm = { path = "crates/wasm" }
+rabbithole-wasm-js = { path = "crates/wasm-js" }
 
 [profile.release]
 opt-level = 3

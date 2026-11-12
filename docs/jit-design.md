@@ -907,3 +907,47 @@ código de una sola ejecución y Level 1 (sin OSR) no los toca.
   `CLOCK_THREAD_CPUTIME_ID`; código en `mmap` RW → `mprotect` RX.
 - QuickJS: `zig cc -O2 -fwrapv -D_GNU_SOURCE -DCONFIG_VERSION=... runner.c quickjs.c dtoa.c libregexp.c libunicode.c cutils.c -lm -lpthread`,
   con un `runner.c` que evalúa los mismos 21 casos en contextos nuevos.
+
+---
+
+## Apéndice B. WebAssembly sobre el mismo emisor (`crates/wasm`)
+
+El intérprete de WebAssembly (`crates/wasm`, sin JIT por ahora) se diseñó
+para que un futuro nivel nativo reutilice el emisor de plantillas propio de
+la sección 3 en lugar de añadir un segundo backend:
+
+- **Mismo modelo de máquina.** El IR de wasm (`crates/wasm/src/ir.rs`) es de
+  tres direcciones sobre *slots* de 64 bits relativos al puntero de frame:
+  `I32Add a ← b, c` lee `[fp + b*8]` y `[fp + c*8]` y escribe `[fp + a*8]`.
+  Es exactamente la forma que consumen las plantillas de Level 1 (operandos
+  en memoria del frame, sin asignación de registros entre instrucciones), así
+  que cada `Instr` se traduce a una plantilla corta: carga, operación,
+  almacenamiento. `local.get` y las constantes ya no generan movimientos (el
+  consumidor lee el slot del local o el slot de constante), y las
+  comparaciones seguidas de `br_if`/`if` ya vienen fusionadas
+  (`BrI32LtS a, b → destino`), que es lo que una plantilla de salto
+  condicional quiere.
+- **Sin comprobaciones de tipo.** A diferencia de JS no hay fast path ni
+  helper de caída: los tipos son estáticos (validados), así que cada opcode
+  numérico es su plantilla completa. Las únicas salidas al runtime son
+  llamadas a funciones host, `memory.grow`, operaciones de tabla/bulk y
+  traps; todas pueden ir por helpers con el mismo contrato de la sección 5.2
+  (contexto en registro fijo, resultado de error en el retorno).
+- **Memoria lineal.** El intérprete guarda base y longitud de la memoria 0 en
+  variables locales y las recarga tras `memory.grow` o llamadas al host; el
+  código nativo haría lo mismo con dos registros fijos (base, límite), con
+  comprobación de límites explícita `ea + n > len` (no se usan páginas de
+  guarda: no hay manejador de señales propio en Windows).
+- **Llamadas.** Convención sin copia: los argumentos quedan en los slots
+  superiores del llamante y el frame del llamado empieza ahí; los resultados
+  vuelven en los slots `0..n` del llamado. Un JIT conserva la convención (el
+  `fp` del llamado es `fp + base*8`), de modo que código nativo e intérprete
+  pueden llamarse entre sí frame a frame.
+- **Puntos seguros.** Los saltos hacia atrás y las llamadas decrementan un
+  contador y consultan el watchdog del realm (`Realm::check_watchdog`) al
+  llegar a cero; el código nativo emitiría el mismo decremento en cada
+  arista de vuelta.
+- **Excepciones.** Las tablas de handlers son rangos de índices de
+  instrucción; con código nativo se convierten en rangos de PC nativo
+  (misma búsqueda), sin unwind de la pila nativa: el frame de wasm vive en la
+  pila de valores, no en la nativa.

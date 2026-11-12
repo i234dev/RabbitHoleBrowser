@@ -196,6 +196,20 @@ const QUICK: &[&str] = &[
     "utf8-import-field.wast",
     "utf8-import-module.wast",
     "utf8-invalid-encoding.wast",
+    "simd_i32x4_arith.wast",
+    "simd_lane.wast",
+    "struct.wast",
+    "array.wast",
+    "i31.wast",
+    "ref_cast.wast",
+    "br_on_cast.wast",
+    "try_table.wast",
+    "throw.wast",
+    "legacy/try_catch.wast",
+    "return_call.wast",
+    "call_ref.wast",
+    "memory64.wast",
+    "load2.wast",
 ];
 
 #[test]
