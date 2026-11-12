@@ -36,7 +36,13 @@ pub(crate) struct Layout {
     /// In an object table entry: the byte that tells a scope object
     /// (`ObjectKind::Scope`) and its value, and the `Box<ScopeData>`.
     pub scope_tag: i32,
-    pub scope_tag_value: u8,
+    pub scope_tag_value: u64,
+    /// How variants are told apart: `false`, an explicit tag byte at
+    /// `scope_tag` (compare one byte); `true`, a niche in the array
+    /// variant's capacity word at `scope_tag` (scopes have one 64-bit
+    /// value there, every other variant has the top bit set, arrays have
+    /// it clear).
+    pub tag_niche: bool,
     pub scope_box: i32,
     /// In an object table entry: the tag byte value of arrays
     /// (`ObjectKind::Array`, same byte as `scope_tag`) and their
@@ -74,38 +80,38 @@ fn vec_words<T>(mut v: Vec<T>, one: T) -> Option<(usize, usize)> {
     Some((p, l))
 }
 
-fn probe() -> Option<Layout> {
+fn probe() -> Result<Layout, u32> {
     let w = std::mem::size_of::<usize>();
     let i32_of = |x: usize| i32::try_from(x).ok();
     // Object table entry: where the object sits in `Some(object)`.
     let entry = Some(Object::new(Some(ObjectId(0x1234_5678)), ObjectKind::Ordinary));
     let base = &entry as *const Option<Object> as usize;
-    let obj = entry.as_ref()? as *const Object as usize - base;
+    let obj = entry.as_ref().ok_or(1u32)? as *const Object as usize - base;
     let props = obj + std::mem::offset_of!(Object, props);
     // Prototype: `Option<ObjectId>` as two 32-bit words.
     if std::mem::size_of::<Option<ObjectId>>() != 8 {
-        return None;
+        return Err(1000 + line!());
     }
     let words = |o: Option<ObjectId>| -> [u32; 2] {
         // SAFETY: the size is checked above; any bit pattern is a valid [u32; 2].
         unsafe { std::mem::transmute::<Option<ObjectId>, [u32; 2]>(o) }
     };
     let (a, b, none) = (words(Some(ObjectId(0x1234_5678))), words(Some(ObjectId(0x0765_4321))), words(None));
-    let id_word = (0..2).find(|&i| a[i] == 0x1234_5678 && b[i] == 0x0765_4321)?;
+    let id_word = (0..2).find(|&i| a[i] == 0x1234_5678 && b[i] == 0x0765_4321).ok_or(2u32)?;
     let tag_word = 1 - id_word;
     if a[tag_word] != b[tag_word] || none[tag_word] == a[tag_word] {
-        return None;
+        return Err(1000 + line!());
     }
     // Check on the probe object that the tag is where it was measured.
     let proto = obj + std::mem::offset_of!(Object, proto);
     // SAFETY: `proto` is within the probe entry.
     let seen = unsafe { std::ptr::read_unaligned((base + proto + id_word * 4) as *const u32) };
     if seen != 0x1234_5678 {
-        return None;
+        return Err(1000 + line!());
     }
     // Property map values.
-    let (vp, vl) = vec_words::<Property>(Vec::new(), Property::data(crate::value::Value::Undefined, 0))?;
-    let (hp, hl) = vec_words::<Option<Object>>(Vec::new(), None)?;
+    let (vp, vl) = vec_words::<Property>(Vec::new(), Property::data(crate::value::Value::Undefined, 0)).ok_or(3u32)?;
+    let (hp, hl) = vec_words::<Option<Object>>(Vec::new(), None).ok_or(4u32)?;
     let heap = std::mem::offset_of!(Realm, heap) + Heap::OBJECTS_OFFSET;
     let frame = crate::vm::Frame {
         code: std::ptr::NonNull::dangling(),
@@ -122,7 +128,7 @@ fn probe() -> Option<Layout> {
         entry: false,
         extra: None,
     };
-    let (fp, fl) = vec_words::<crate::vm::Frame>(Vec::new(), frame)?;
+    let (fp, fl) = vec_words::<crate::vm::Frame>(Vec::new(), frame).ok_or(5u32)?;
     let frames = std::mem::offset_of!(Realm, frames);
     // Scope objects: where the variant's tag byte and its box are.
     let kind = obj + std::mem::offset_of!(Object, kind);
@@ -146,68 +152,100 @@ fn probe() -> Option<Layout> {
         ObjectKind::Scope(b) => Some(&**b as *const crate::heap::ScopeData as usize),
         _ => None,
     };
-    let (b1, b2) = (box_addr(&s1)?, box_addr(&s2)?);
+    let (b1, b2) = (box_addr(&s1).ok_or(7u32)?, box_addr(&s2).ok_or(8u32)?);
     let (k1, k2) = (bytes(&s1), bytes(&s2));
     let word = |k: &[u8], i: usize| usize::from_ne_bytes(k[i..i + w].try_into().unwrap());
-    let box_off = (0..=ksize - w).step_by(w).find(|&i| word(&k1, i) == b1 && word(&k2, i) == b2)?;
+    let box_off = (0..=ksize - w).step_by(w).find(|&i| word(&k1, i) == b1 && word(&k2, i) == b2).ok_or(9u32)?;
     let ob: Vec<Vec<u8>> = others.iter().map(bytes).collect();
-    let tag = (0..ksize).filter(|i| !(box_off..box_off + w).contains(i)).find(|&i| k1[i] == k2[i] && ob.iter().all(|o| o[i] != k1[i]) && ob[1][i] == ob[2][i])?;
-    // Arrays: the same tag byte tells them apart from scopes and plain
-    // objects; their elements vector is found by its pointer and length.
     let a1 = &others[1];
     let ka = bytes(a1);
     let (ka2, k0) = (bytes(&others[2]), &ob[0]);
-    if ka[tag] != ka2[tag] || ka[tag] == k1[tag] || ka[tag] == k0[tag] {
-        return None;
-    }
-    let (eptr, elen) = match &a1.as_ref()?.kind {
-        ObjectKind::Array { elements, .. } => (elements.as_ptr() as usize, elements.len()),
-        _ => return None,
+    let top = 1usize << (usize::BITS - 1);
+    // An explicit tag byte (equal in both scopes and both arrays, different
+    // between kinds), else a niche in the arrays' capacity word.
+    let byte_tag = (0..ksize).filter(|i| !(box_off..box_off + w).contains(i)).find(|&i| k1[i] == k2[i] && ob.iter().all(|o| o[i] != k1[i]) && ka[i] == ka2[i] && ka[i] != k0[i]);
+    let (tag, tag_niche) = match byte_tag {
+        Some(t) => (t, false),
+        None => {
+            let t = (0..=ksize - w)
+                .step_by(w)
+                .filter(|i| !(box_off..box_off + w).contains(i))
+                .find(|&i| word(&k1, i) == word(&k2, i) && word(&k1, i) & top != 0 && word(k0, i) & top != 0 && word(k0, i) != word(&k1, i) && word(&ka, i) & top == 0 && word(&ka2, i) & top == 0 && word(&ka, i) != word(&ka2, i))
+                .ok_or(10u32)?;
+            (t, true)
+        }
     };
-    let ep = (0..=ksize - w).step_by(w).find(|&i| word(&ka, i) == eptr)?;
-    let el = (0..=ksize - w).step_by(w).find(|&i| word(&ka, i) == elen && word(&ka2, i) == 0)?;
+    // Arrays: their elements vector is found by its pointer and length.
+    let (eptr, elen) = match &a1.as_ref().ok_or(11u32)?.kind {
+        ObjectKind::Array { elements, .. } => (elements.as_ptr() as usize, elements.len()),
+        _ => return Err(11u32),
+    };
+    let ep = (0..=ksize - w).step_by(w).find(|&i| word(&ka, i) == eptr).ok_or(12u32)?;
+    let el = (0..=ksize - w).step_by(w).find(|&i| word(&ka, i) == elen && word(&ka2, i) == 0).ok_or(13u32)?;
     if (0..=ksize - w).step_by(w).filter(|&i| word(&ka, i) == elen && word(&ka2, i) == 0).count() != 1 {
-        return None;
+        return Err(1000 + line!());
     }
-    if [ep, el].iter().any(|&o| (tag..tag + 1).contains(&o) || (o <= tag && tag < o + w)) {
-        return None;
+    if [ep, el].iter().any(|&o| o <= tag && tag < o + w) {
+        return Err(1000 + line!());
     }
     let sd = std::mem::offset_of!(crate::heap::ScopeData, slots);
-    let (sp, sl) = vec_words::<crate::value::Value>(Vec::new(), crate::value::Value::Undefined)?;
+    let (sp, sl) = vec_words::<crate::value::Value>(Vec::new(), crate::value::Value::Undefined).ok_or(14u32)?;
     let parent = std::mem::offset_of!(crate::heap::ScopeData, parent);
-    Some(Layout {
-        heap_ptr: i32_of(heap + hp * w)?,
-        heap_len: i32_of(heap + hl * w)?,
-        obj_size: i32_of(std::mem::size_of::<Option<Object>>())?,
-        sid: i32_of(props + PropertyMap::SID_OFFSET)?,
-        vals_ptr: i32_of(props + PropertyMap::VALUES_OFFSET + vp * w)?,
-        vals_len: i32_of(props + PropertyMap::VALUES_OFFSET + vl * w)?,
-        proto_id: i32_of(proto + id_word * 4)?,
-        proto_tag: i32_of(proto + tag_word * 4)?,
+    Ok(Layout {
+        heap_ptr: i32_of(heap + hp * w).ok_or(15u32)?,
+        heap_len: i32_of(heap + hl * w).ok_or(16u32)?,
+        obj_size: i32_of(std::mem::size_of::<Option<Object>>()).ok_or(17u32)?,
+        sid: i32_of(props + PropertyMap::SID_OFFSET).ok_or(18u32)?,
+        vals_ptr: i32_of(props + PropertyMap::VALUES_OFFSET + vp * w).ok_or(19u32)?,
+        vals_len: i32_of(props + PropertyMap::VALUES_OFFSET + vl * w).ok_or(20u32)?,
+        proto_id: i32_of(proto + id_word * 4).ok_or(21u32)?,
+        proto_tag: i32_of(proto + tag_word * 4).ok_or(22u32)?,
         proto_some: a[tag_word],
-        frames_ptr: i32_of(frames + fp * w)?,
-        frames_len: i32_of(frames + fl * w)?,
-        frame_size: i32_of(std::mem::size_of::<crate::vm::Frame>())?,
-        frame_this: i32_of(std::mem::offset_of!(crate::vm::Frame, this))?,
-        frame_scope: i32_of(std::mem::offset_of!(crate::vm::Frame, scope))?,
-        scope_tag: i32_of(kind + tag)?,
-        scope_tag_value: k1[tag],
-        scope_box: i32_of(kind + box_off)?,
-        array_tag_value: ka[tag],
-        array_elems_ptr: i32_of(kind + ep)?,
-        array_elems_len: i32_of(kind + el)?,
-        sd_slots_ptr: i32_of(sd + sp * w)?,
-        sd_slots_len: i32_of(sd + sl * w)?,
-        sd_parent_id: i32_of(parent + id_word * 4)?,
-        sd_parent_tag: i32_of(parent + tag_word * 4)?,
-        prop_size: i32_of(std::mem::size_of::<Property>())?,
-        prop_value: i32_of(std::mem::offset_of!(Property, value))?,
-        prop_flags: i32_of(std::mem::offset_of!(Property, flags))?,
+        frames_ptr: i32_of(frames + fp * w).ok_or(23u32)?,
+        frames_len: i32_of(frames + fl * w).ok_or(24u32)?,
+        frame_size: i32_of(std::mem::size_of::<crate::vm::Frame>()).ok_or(25u32)?,
+        frame_this: i32_of(std::mem::offset_of!(crate::vm::Frame, this)).ok_or(26u32)?,
+        frame_scope: i32_of(std::mem::offset_of!(crate::vm::Frame, scope)).ok_or(27u32)?,
+        scope_tag: i32_of(kind + tag).ok_or(28u32)?,
+        scope_tag_value: if tag_niche { word(&k1, tag) as u64 } else { k1[tag] as u64 },
+        tag_niche,
+        scope_box: i32_of(kind + box_off).ok_or(29u32)?,
+        array_tag_value: if tag_niche { 0 } else { ka[tag] },
+        array_elems_ptr: i32_of(kind + ep).ok_or(30u32)?,
+        array_elems_len: i32_of(kind + el).ok_or(31u32)?,
+        sd_slots_ptr: i32_of(sd + sp * w).ok_or(32u32)?,
+        sd_slots_len: i32_of(sd + sl * w).ok_or(33u32)?,
+        sd_parent_id: i32_of(parent + id_word * 4).ok_or(34u32)?,
+        sd_parent_tag: i32_of(parent + tag_word * 4).ok_or(35u32)?,
+        prop_size: i32_of(std::mem::size_of::<Property>()).ok_or(36u32)?,
+        prop_value: i32_of(std::mem::offset_of!(Property, value)).ok_or(37u32)?,
+        prop_flags: i32_of(std::mem::offset_of!(Property, flags)).ok_or(38u32)?,
     })
 }
 
 /// The probed layout (`None`: inline object access is off).
 pub(crate) fn get() -> Option<Layout> {
     static L: std::sync::OnceLock<Option<Layout>> = std::sync::OnceLock::new();
-    *L.get_or_init(|| if std::env::var_os("RABBITHOLE_JIT_NO_INLINE_IC").is_some() { None } else { probe() })
+    *L.get_or_init(|| {
+        if std::env::var_os("RABBITHOLE_JIT_NO_INLINE_IC").is_some() {
+            return None;
+        }
+        match probe() {
+            Ok(l) => Some(l),
+            Err(step) => {
+                if super::options().trace {
+                    eprintln!("[jit] object layout probe failed at step {step}: inline object access off");
+                }
+                None
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn layout_probe_succeeds() {
+        assert!(super::probe().is_ok(), "{:?}", super::probe().err());
+    }
 }

@@ -822,6 +822,32 @@ impl Gen<'_> {
         self.a.alu_rm64(Alu::Add, dst, Mem::base(R8, l.heap_ptr));
     }
 
+    /// Flags for `jne` = the object table entry at `rax` is not a scope
+    /// (`scope`) / not an array (`r9` clobbered).
+    fn is_kind(&mut self, l: &super::layout::Layout, scope: bool) {
+        match (l.tag_niche, scope) {
+            (false, true) => {
+                self.a.movzx8(R9, Mem::base(RAX, l.scope_tag));
+                self.a.alu_ri32(Alu::Cmp, R9, l.scope_tag_value as i32);
+            }
+            (false, false) => {
+                self.a.movzx8(R9, Mem::base(RAX, l.scope_tag));
+                self.a.alu_ri32(Alu::Cmp, R9, l.array_tag_value as i32);
+            }
+            (true, true) => {
+                self.a.mov_imm64(R9, l.scope_tag_value);
+                self.a.alu_rm64(Alu::Cmp, R9, Mem::base(RAX, l.scope_tag));
+            }
+            (true, false) => {
+                // Arrays: the capacity word has its top bit clear (sets
+                // ZF iff clear; `jne` takes every other variant).
+                self.a.load64(R9, Mem::base(RAX, l.scope_tag));
+                self.a.shr_ri64(R9, 63);
+                self.a.test_rr64(R9, R9);
+            }
+        }
+    }
+
     /// `rax` = the `ScopeData` `depth` levels up the running frame's scope
     /// chain, or `slow` if some link is not a scope object (`r8` = realm).
     fn scope_data(&mut self, l: &super::layout::Layout, depth: u16, slow: Label) {
@@ -832,8 +858,7 @@ impl Gen<'_> {
         self.a.load32(RDX, Mem::base(RCX, l.frame_scope - l.frame_size));
         for i in 0..=depth {
             self.object_at(l, RAX, RDX, slow);
-            self.a.movzx8(R9, Mem::base(RAX, l.scope_tag));
-            self.a.alu_ri32(Alu::Cmp, R9, l.scope_tag_value as i32);
+            self.is_kind(l, true);
             self.a.jcc(CC_NE, slow);
             self.a.load64(RAX, Mem::base(RAX, l.scope_box));
             if i < depth {
@@ -886,8 +911,7 @@ impl Gen<'_> {
             return;
         };
         self.object_entry(&l, o, slow);
-        self.a.movzx8(R9, Mem::base(RAX, l.scope_tag));
-        self.a.alu_ri32(Alu::Cmp, R9, l.array_tag_value as i32);
+        self.is_kind(&l, false);
         self.a.jcc(CC_NE, slow);
         // r9 = the index: a number with an exact 64-bit integer value
         // (negative ones fail the unsigned bounds check).

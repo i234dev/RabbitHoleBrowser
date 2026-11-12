@@ -308,7 +308,7 @@ impl PropertyMap {
         let mut values = fresh_values();
         values.extend_from_slice(props);
         let sid = shape.id;
-        PropertyMap { repr: Repr::Shaped { shape, values }, sid, in_chain: Cell::new(false) }
+        PropertyMap { repr: Repr::Shaped(shape), values, sid, in_chain: Cell::new(false) }
     }
 
     /// Shape id (shape mode) or key-set id (dictionary mode). Inline caches
