@@ -125,6 +125,18 @@ pub(crate) enum Flow {
     Exit(Exit),
 }
 
+/// What the run loop does after an out-of-line step (a small value
+/// returned in a register; an exit or error waits in `Realm::loop_end`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ctl {
+    /// Continue the last frame at its synced pc (its slots may have moved).
+    Next,
+    /// Frames were pushed or popped: reload the last frame.
+    Reload,
+    /// The loop is over: `loop_end` holds the result.
+    Done,
+}
+
 /// Result of resuming a generator-like frame (frame kept inside the generator object).
 #[derive(Debug)]
 pub enum Step {
@@ -1362,30 +1374,45 @@ impl Realm {
 
     /// The interpreter loop. Register instructions address frame slots
     /// directly (registers, then the operand stack at static depths), so
-    /// the loop keeps only the program counter and the slot base pointer
-    /// in locals. Only fast paths live here; every miss, and every stack
-    /// instruction, goes through [`Realm::exec_op`], which implements each
-    /// instruction completely.
-    #[allow(unused_unsafe)]
+    /// the loop keeps only the code, the program counter and the slot base
+    /// pointer in locals. Only fast paths live here; every miss, and every
+    /// stack instruction, goes through [`Realm::exec_op`], which implements
+    /// each instruction completely.
+    ///
+    /// Register pressure matters more than anything else here: the frame
+    /// index, the frame's slot offset and the current instruction are not
+    /// kept live across the loop (out-of-line paths recompute them from the
+    /// last frame and re-read the instruction at `pc - 1`), and everything
+    /// that is neither a fast path nor straight-line code (calls, returns,
+    /// accessor and setter calls, megamorphic lookups) lives in
+    /// `#[inline(never)]` functions returning a [`Flow`], so the hot values
+    /// stay in callee-saved registers instead of being spilled.
     fn run_inner(&mut self) -> JsResult<Exit> {
+        self.run_loop();
+        // SAFETY: `run_loop` only returns after setting `loop_end`.
+        unsafe { self.loop_end.take().unwrap_unchecked() }
+    }
+
+    /// The loop of [`Realm::run_inner`]. It returns nothing (its result
+    /// goes to `loop_end`): a returned `JsResult<Exit>` is written through
+    /// a hidden pointer that would hold a register for the whole loop.
+    #[allow(unused_unsafe, unused_assignments)]
+    #[inline(never)]
+    fn run_loop(&mut self) {
         'reload: loop {
-            let fi = self.frames.len() - 1;
             // The frame's code, borrowed independently of `self` (no
             // reference count traffic per call / return).
-            // SAFETY: the code of frame `fi` lives as long as the frame (see
-            // `Frame::code`), and this loop runs it only while it is the
-            // last frame: every path that pops or replaces the frame leaves
-            // through `continue 'reload` or a return.
-            let code: &FunctionCode = unsafe { self.frames[fi].code.as_ref() };
+            // SAFETY: the code of the last frame lives as long as the frame
+            // (see `Frame::code`), and this loop runs it only while it is
+            // the last frame: every path that pops or replaces the frame
+            // leaves through `continue 'reload` or a return.
+            let (code, mut pc, mut base): (&FunctionCode, usize, *mut Value) = unsafe {
+                let f = self.frames.last().unwrap_unchecked();
+                debug_assert!(self.vstack.len() >= f.base as usize + f.code().frame_size());
+                (f.code.as_ref(), f.pc, self.vstack.as_mut_ptr().add(f.base as usize))
+            };
             let ops: &[Op] = &code.ops;
             let consts: &[Value] = &code.constants;
-            let mut pc = self.frames[fi].pc;
-            // The frame's slots: the value stack only grows on calls (which
-            // reload) and in out-of-line instructions (`slow!` reloads).
-            let fbase = self.frames[fi].base as usize;
-            debug_assert!(self.vstack.len() >= fbase + code.frame_size());
-            // SAFETY: `fbase` is within the vector.
-            let mut base: *mut Value = unsafe { self.vstack.as_mut_ptr().add(fbase) };
             macro_rules! sl {
                 ($i:expr) => {
                     // SAFETY: operands are slots below `frame_size` (checked
@@ -1402,27 +1429,33 @@ impl Realm {
                     unsafe { consts.get_unchecked($i as usize) }
                 };
             }
-            macro_rules! sync {
+            macro_rules! frame {
                 () => {
-                    // SAFETY: `fi` is the last frame while this loop runs.
-                    unsafe { self.frames.get_unchecked_mut(fi) }.pc = pc
+                    // SAFETY: the running frame is the last one.
+                    unsafe { self.frames.last_mut().unwrap_unchecked() }
                 };
             }
-            macro_rules! tri {
-                ($e:expr) => {
+            // Result of an out-of-line step: `Next` continues the same
+            // frame at its (synced) pc, with the value stack possibly moved.
+            macro_rules! out {
+                ($e:expr) => {{
                     match $e {
-                        Ok(v) => v,
-                        Err(e) => return Err(e),
+                        Ctl::Next => {
+                            let f = frame!();
+                            pc = f.pc;
+                            // SAFETY: the frame's slots are within the vector.
+                            base = unsafe { self.vstack.as_mut_ptr().add(f.base as usize) };
+                        }
+                        Ctl::Reload => continue 'reload,
+                        Ctl::Done => return,
                     }
-                };
+                }};
             }
             macro_rules! tick {
                 () => {
                     self.tick = self.tick.wrapping_sub(1);
                     if self.tick == 0 {
-                        self.tick = TICK_INTERVAL;
-                        sync!();
-                        tri!(self.safepoint());
+                        out!(self.tick_slow(pc));
                     }
                 };
             }
@@ -1437,22 +1470,17 @@ impl Realm {
                     }
                 }};
             }
-            // Out-of-line execution of the current instruction.
+            // Out-of-line execution of the current instruction (re-read
+            // from the code, so it need not stay live).
             macro_rules! slow {
+                () => {{
+                    out!(self.exec_at(pc))
+                }};
+            }
+            // Out-of-line execution of another instruction in its place.
+            macro_rules! slow_op {
                 ($op:expr) => {{
-                    sync!();
-                    match self.exec_op(fi, $op) {
-                        Ok(Flow::Next) => {}
-                        Ok(Flow::Reload) => continue 'reload,
-                        Ok(Flow::Exit(e)) => return Ok(e),
-                        Err(e) => return Err(e),
-                    }
-                    if self.frames.len() != fi + 1 {
-                        continue 'reload;
-                    }
-                    // SAFETY: as in `sync`; the value stack may have moved.
-                    pc = unsafe { self.frames.get_unchecked(fi) }.pc;
-                    base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
+                    out!(self.exec_with(pc, $op))
                 }};
             }
             macro_rules! num2 {
@@ -1484,12 +1512,15 @@ impl Realm {
             'dispatch: loop {
                 // SAFETY: every path ends in a jump, return or throw, so the
                 // program counter stays within the code.
-                let op = unsafe {
+                // Matched by reference: each arm loads its own operands
+                // (a copy of the whole instruction would be decoded into
+                // registers before the dispatch jump, for every arm).
+                let op: &Op = unsafe {
                     debug_assert!(pc < ops.len());
-                    *ops.get_unchecked(pc)
+                    ops.get_unchecked(pc)
                 };
                 pc += 1;
-                match op {
+                match *op {
                     Op::Mov(d, s) => {
                         let v = sl!(s).undef_if_empty();
                         *sl!(d) = v;
@@ -1512,7 +1543,7 @@ impl Realm {
                             *sl!(d) = Value::String(r);
                             continue;
                         }
-                        slow!(op);
+                        slow!();
                     }
                     Op::AddRK(d, a, c) => {
                         if let Some((x, y)) = num_k!(a, c) {
@@ -1524,47 +1555,47 @@ impl Realm {
                             *sl!(d) = Value::String(r);
                             continue;
                         }
-                        slow!(op);
+                        slow!();
                     }
                     Op::SubRR(d, a, b) => match num2!(a, b) {
                         Some((x, y)) => set_num!(d, x - y),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::SubRK(d, a, c) => match num_k!(a, c) {
                         Some((x, y)) => set_num!(d, x - y),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::MulRR(d, a, b) => match num2!(a, b) {
                         Some((x, y)) => set_num!(d, x * y),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::MulRK(d, a, c) => match num_k!(a, c) {
                         Some((x, y)) => set_num!(d, x * y),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::DivRR(d, a, b) => match num2!(a, b) {
                         Some((x, y)) => set_num!(d, x / y),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::DivRK(d, a, c) => match num_k!(a, c) {
                         Some((x, y)) => set_num!(d, x / y),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::ModRR(d, a, b) => match num2!(a, b) {
                         Some((x, y)) => set_num!(d, js_mod(x, y)),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::ModRK(d, a, c) => match num_k!(a, c) {
                         Some((x, y)) => set_num!(d, js_mod(x, y)),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::BinRR(kd, d, a, b) => match num2!(a, b) {
                         Some((x, y)) => set_num!(d, bin_by_index(kd, x, y)),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::BinRK(kd, d, a, c) => match num_k!(a, c) {
                         Some((x, y)) => set_num!(d, bin_by_index(kd, x, y)),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::CmpRR(kd, d, a, b) => {
                         let r = match (kd, num2!(a, b)) {
@@ -1577,7 +1608,7 @@ impl Realm {
                             (4, None) => self.strict_equals(sl!(a), sl!(b)),
                             (5, None) => !self.strict_equals(sl!(a), sl!(b)),
                             _ => {
-                                slow!(op);
+                                slow!();
                                 continue;
                             }
                         };
@@ -1594,7 +1625,7 @@ impl Realm {
                             (4, None) => self.strict_equals(sl!(a), k!(c)),
                             (5, None) => !self.strict_equals(sl!(a), k!(c)),
                             _ => {
-                                slow!(op);
+                                slow!();
                                 continue;
                             }
                         };
@@ -1606,7 +1637,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpUnlessLtRK(a, c, t) => match num_k!(a, c) {
                         Some((x, y)) => {
@@ -1614,7 +1645,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpUnlessLtEqRR(a, b, t) => match num2!(a, b) {
                         Some((x, y)) => {
@@ -1622,7 +1653,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpUnlessLtEqRK(a, c, t) => match num_k!(a, c) {
                         Some((x, y)) => {
@@ -1630,7 +1661,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpUnlessGtRR(a, b, t) => match num2!(a, b) {
                         Some((x, y)) => {
@@ -1638,7 +1669,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpUnlessGtRK(a, c, t) => match num_k!(a, c) {
                         Some((x, y)) => {
@@ -1646,7 +1677,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpUnlessGtEqRR(a, b, t) => match num2!(a, b) {
                         Some((x, y)) => {
@@ -1654,7 +1685,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpUnlessGtEqRK(a, c, t) => match num_k!(a, c) {
                         Some((x, y)) => {
@@ -1662,7 +1693,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfLtRR(a, b, t) => match num2!(a, b) {
                         Some((x, y)) => {
@@ -1670,7 +1701,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfLtRK(a, c, t) => match num_k!(a, c) {
                         Some((x, y)) => {
@@ -1678,7 +1709,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfLtEqRR(a, b, t) => match num2!(a, b) {
                         Some((x, y)) => {
@@ -1686,7 +1717,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfLtEqRK(a, c, t) => match num_k!(a, c) {
                         Some((x, y)) => {
@@ -1694,7 +1725,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfGtRR(a, b, t) => match num2!(a, b) {
                         Some((x, y)) => {
@@ -1702,7 +1733,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfGtRK(a, c, t) => match num_k!(a, c) {
                         Some((x, y)) => {
@@ -1710,7 +1741,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfGtEqRR(a, b, t) => match num2!(a, b) {
                         Some((x, y)) => {
@@ -1718,7 +1749,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfGtEqRK(a, c, t) => match num_k!(a, c) {
                         Some((x, y)) => {
@@ -1726,7 +1757,7 @@ impl Realm {
                                 jump!(t);
                             }
                         }
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::JumpIfStrictEqRR(a, b, t) => {
                         if self.strict_equals(sl!(a), sl!(b)) {
@@ -1776,7 +1807,7 @@ impl Realm {
                             }
                         } else {
                             // The increment, then the test that follows.
-                            slow!(Op::IncR(r, r));
+                            slow_op!(Op::IncR(r, r));
                         }
                     }
                     Op::IncJumpIfLtRR(r, b, t) => {
@@ -1790,16 +1821,16 @@ impl Realm {
                                 pc += 1;
                             }
                         } else {
-                            slow!(Op::IncR(r, r));
+                            slow_op!(Op::IncR(r, r));
                         }
                     }
                     Op::IncR(d, s) => match sl!(s).as_number() {
                         Some(n) => set_num!(d, n + 1.0),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::DecR(d, s) => match sl!(s).as_number() {
                         Some(n) => set_num!(d, n - 1.0),
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::UnR(k, d, s) => match (k, sl!(s).v()) {
                         // Neg, Plus, BitNot of numbers; ToPropertyKey of
@@ -1811,15 +1842,14 @@ impl Realm {
                             let v = sl!(s).clone();
                             *sl!(d) = v;
                         }
-                        _ => slow!(op),
+                        _ => slow!(),
                     },
                     Op::ToNumericR(d, s) => match sl!(s).v() {
                         V::Number(n) => set_num!(d, n),
-                        _ => slow!(op),
+                        _ => slow!(),
                     },
                     Op::LoadThis(d) => {
-                        // SAFETY: as in `sync`.
-                        let v = (unsafe { self.frames.get_unchecked(fi) }.this).undef_if_empty();
+                        let v = frame!().this.undef_if_empty();
                         *sl!(d) = v;
                     }
                     Op::GetPropR(d, o, ic) => {
@@ -1835,94 +1865,43 @@ impl Realm {
                                 _ => None,
                             }
                         } else {
-                            let mut p = self.ic_get(&rec, recv);
-                            if p.is_none() && recv.is_object() {
-                                // Polymorphic site: the shared cache by (shape, key).
-                                let kb = k!(code.ic_keys[ic as usize]).bits();
-                                if let Some(m) = self.mega_get(recv, kb) {
-                                    p = self.ic_get(&m, recv);
-                                }
-                            }
-                            match p {
+                            match self.ic_get(&rec, recv) {
                                 Some(p) if p.flags & ACCESSOR == 0 => Some(p.value.clone()),
-                                Some(p) => {
-                                    // Cached accessor: a native getter (DOM
-                                    // attributes, `ta.length`, ...) is called
-                                    // directly, out of line.
-                                    if let Some(V::Object(g)) = p.getter().map(Value::v) {
-                                        sync!();
-                                        let r = tri!(self.call_cached_getter(g, o as usize, fi));
-                                        // SAFETY: as in `slow`; the getter may have run
-                                        // JavaScript (the value stack may have moved).
-                                        base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
-                                        *sl!(d) = r;
-                                        continue;
-                                    }
-                                    None
-                                }
-                                None => None,
+                                _ => None,
                             }
                         };
                         match hit {
                             Some(v) => *sl!(d) = v,
-                            None => slow!(op),
+                            None => out!(self.get_prop_miss(pc, d, o, ic)),
                         }
                     }
                     Op::SetPropR(o, v, ic) => {
-                        let mut rec = code.ics[ic as usize].get();
+                        let rec = code.ics[ic as usize].get();
                         let val = &*sl!(v);
-                        if !val.is_empty() {
-                            let key = match k!(code.ic_keys[ic as usize]).v() {
-                                V::String(s) => s,
-                                _ => unreachable!(),
-                            };
-                            for attempt in 0..2 {
-                                if attempt == 1 {
-                                    // Polymorphic site: the shared cache by (shape, key).
-                                    match self.mega_get(sl!(o), key.bits() | 1) {
-                                        Some(m) => rec = m,
-                                        None => break,
-                                    }
-                                }
-                                if rec.kind == crate::ic::IC_SETTER {
-                                    if let Some(f) = self.ic_setter(&rec, sl!(o)) {
-                                        let (recv, val) = (sl!(o).clone(), sl!(v).clone());
-                                        sync!();
-                                        tri!(self.call(Value::Object(f), recv, &[val]));
-                                        if self.frames.len() != fi + 1 {
-                                            continue 'reload;
-                                        }
-                                        // SAFETY: as in `slow`.
-                                        base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
-                                        continue 'dispatch;
-                                    }
-                                } else if rec.kind != 0 {
-                                    let val = sl!(v).clone();
-                                    match self.ic_set(&rec, sl!(o), key, val) {
-                                        Ok(()) => continue 'dispatch,
-                                        Err(v) => drop(v),
-                                    }
-                                }
+                        if rec.kind != 0 && rec.kind != crate::ic::IC_SETTER && !val.is_empty() {
+                            // SAFETY: property caches always have a string key.
+                            let key = unsafe { k!(*code.ic_keys.get_unchecked(ic as usize)).as_js_str_unchecked() };
+                            let val = val.clone();
+                            match self.ic_set(&rec, sl!(o), key, val) {
+                                Ok(()) => continue 'dispatch,
+                                Err(v) => drop(v),
                             }
                         }
-                        slow!(op);
+                        out!(self.set_prop_miss(pc, o, v, ic));
                     }
                     Op::DefinePropR(o, v, ic) => {
                         let rec = code.ics[ic as usize].get();
                         let val = &*sl!(v);
                         if rec.kind == crate::ic::IC_ADD && !val.is_empty() {
-                            let key = match k!(code.ic_keys[ic as usize]).v() {
-                                V::String(s) => s,
-                                _ => unreachable!(),
-                            };
+                            // SAFETY: property caches always have a string key.
+                            let key = unsafe { k!(*code.ic_keys.get_unchecked(ic as usize)).as_js_str_unchecked() };
                             let val = val.clone();
-                            if let Err(v) = self.ic_set(&rec, sl!(o), key, val) {
-                                drop(v);
-                                slow!(op);
+                            match self.ic_set(&rec, sl!(o), key, val) {
+                                Ok(()) => continue 'dispatch,
+                                Err(v) => drop(v),
                             }
-                            continue;
                         }
-                        slow!(op);
+                        slow!();
                     }
                     Op::GetGlobalR(d, ic) => {
                         let cell = &code.ics[ic as usize];
@@ -1933,7 +1912,7 @@ impl Realm {
                                 let v = v.clone();
                                 *sl!(d) = v;
                             }
-                            None => slow!(op),
+                            None => slow!(),
                         }
                     }
                     Op::SetGlobalR(s, ic) => {
@@ -1948,11 +1927,11 @@ impl Realm {
                                 Err(v) => drop(v),
                             }
                         }
-                        slow!(op);
+                        slow!();
                     }
                     Op::GetElemR(d, o, kk) => match self.get_elem_fast(sl!(o), sl!(kk)) {
                         Some(v) => *sl!(d) = v,
-                        None => slow!(op),
+                        None => slow!(),
                     },
                     Op::SetElemR(o, kk, v) => {
                         let val = sl!(v).clone();
@@ -1962,130 +1941,358 @@ impl Realm {
                                 Err(v) => drop(v),
                             }
                         }
-                        slow!(op);
+                        slow!();
                     }
                     Op::GetLocalR(d, dp, s) => {
-                        // SAFETY: as in `sync`.
-                        let scope = unsafe { self.frames.get_unchecked(fi) }.scope;
+                        let scope = frame!().scope;
                         let v = self.slot_get(scope, dp, s);
                         *sl!(d) = if v.is_empty() { Value::Undefined } else { v };
                     }
                     Op::SetLocalR(v, dp, s) => {
                         let val = sl!(v).undef_if_empty();
-                        // SAFETY: as in `sync`.
-                        let scope = unsafe { self.frames.get_unchecked(fi) }.scope;
+                        let scope = frame!().scope;
                         self.slot_set(scope, dp, s, val);
                     }
                     Op::StoreCompletionR(s) => {
                         let v = sl!(s).clone();
-                        // SAFETY: as in `sync`.
-                        unsafe { self.frames.get_unchecked_mut(fi) }.extra_mut().completion = v;
+                        frame!().extra_mut().completion = v;
                     }
                     Op::CallR(b, argc, cic, _) => {
                         tick!();
-                        sync!();
-                        if let Some(cell) = code.call_ics.get(cic as usize) {
-                            let rec = cell.get();
-                            let cb = fbase + b as usize;
-                            let callee = sl!(b).bits();
-                            if rec.callee == callee && rec.epoch == self.heap.collections {
-                                // Same closure as last time: no lookup or checks.
-                                let this = sl!(b + 1);
-                                let this = if rec.strict {
-                                    Some(this.undef_if_empty())
-                                } else {
-                                    match this.v() {
-                                        V::Undefined | V::Null | V::Empty => Some(Value::Object(self.global)),
-                                        V::Object(o) => Some(Value::Object(o)),
-                                        _ => None,
-                                    }
-                                };
-                                if let Some(this) = this {
-                                let scope = if rec.scope == u32::MAX { None } else { Some(ObjectId(rec.scope)) };
-                                // SAFETY: the closure owning the code is alive (it is in slot `b`).
-                                let code_ptr = unsafe { std::ptr::NonNull::new_unchecked(rec.code as *mut FunctionCode) };
-                                tri!(self.push_closure_frame(ObjectId(callee as u32), code_ptr, scope, ArgSrc::Stack(cb + 2), argc as usize, this, Value::Undefined, b as u32, false, false));
-                                continue 'reload;
-                                }
-                            }
-                            if tri!(self.try_fast_call(fi, b as usize, argc as usize)) {
-                                self.fill_call_ic(cell, callee);
-                                continue 'reload;
-                            }
-                        } else if tri!(self.try_fast_call(fi, b as usize, argc as usize)) {
-                            continue 'reload;
-                        }
-                        if tri!(self.try_call_indirect(fi, b as usize, argc as usize)) {
-                            continue 'reload;
-                        }
-                        if tri!(self.try_native_call(fi, b as usize, argc as usize)) {
-                            // SAFETY: as in `slow`.
-                            base = unsafe { self.vstack.as_mut_ptr().add(fbase) };
-                            continue;
-                        }
-                        slow!(op);
+                        out!(self.call_r(pc, b, argc, cic));
                     }
                     Op::NewR(b, argc) => {
                         tick!();
-                        sync!();
-                        if tri!(self.try_fast_construct(fi, b as usize, argc as usize)) {
-                            continue 'reload;
-                        }
-                        slow!(op);
+                        out!(self.new_r(pc, b, argc));
                     }
                     Op::ReturnR(s) => {
-                        let mut v = match std::mem::replace(sl!(s), Value::Undefined) {
-                            Value::Empty => Value::Undefined,
-                            v => v,
-                        };
-                        // SAFETY: as in `sync`.
-                        let f = unsafe { self.frames.get_unchecked(fi) };
-                        if f.is_construct && !v.is_object() {
-                            if f.this.is_empty() {
-                                return Err(self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
-                            }
-                            v = f.this.clone();
-                        }
-                        if !f.entry && fi > 0 {
-                            // Plain return to the calling frame: drop the
-                            // frame where it is (no move out of the vector).
-                            let (ret, bottom) = (f.ret_slot as usize, f.bottom());
-                            // SAFETY: `fi` is the last frame; it is dropped
-                            // exactly once after the length excludes it.
-                            unsafe {
-                                self.frames.set_len(fi);
-                                std::ptr::drop_in_place(self.frames.as_mut_ptr().add(fi));
-                            }
-                            self.vstack.truncate(bottom);
-                            // SAFETY: `fi - 1` is the caller (fi > 0).
-                            let at = unsafe { self.frames.get_unchecked(fi - 1) }.base as usize + ret;
-                            self.vstack[at] = v;
-                            continue 'reload;
-                        }
-                        let f = self.pop_frame();
-                        if f.entry {
-                            if let Some(g) = f.generator() {
-                                if let ObjectKind::Generator(gd) = &mut self.obj_mut(g).kind {
-                                    gd.state = GeneratorState::Completed;
-                                    gd.frame = None;
-                                }
-                            }
-                            return Ok(Exit::Return(v));
-                        }
-                        let ret = f.ret_slot as usize;
-                        match self.frames.last() {
-                            Some(caller) => {
-                                let at = caller.base as usize + ret;
-                                self.vstack[at] = v;
-                            }
-                            None => stack_underflow(),
-                        }
-                        continue 'reload;
+                        let v = std::mem::replace(sl!(s), Value::Undefined);
+                        out!(self.return_r(v));
                     }
-                    _ => slow!(op),
+                    _ => slow!(),
                 }
             }
         }
+    }
+
+    /// Convert the result of an out-of-line step for the run loop, keeping
+    /// an exit or error in `loop_end`.
+    #[inline(always)]
+    fn ctl(&mut self, r: JsResult<Flow>) -> Ctl {
+        match r {
+            Ok(Flow::Next) => Ctl::Next,
+            Ok(Flow::Reload) => Ctl::Reload,
+            Ok(Flow::Exit(e)) => {
+                self.loop_end = Some(Ok(e));
+                Ctl::Done
+            }
+            Err(e) => {
+                self.loop_end = Some(Err(e));
+                Ctl::Done
+            }
+        }
+    }
+
+    /// A safe point reached by the run loop's tick counter.
+    #[inline(never)]
+    fn tick_slow(&mut self, pc: usize) -> Ctl {
+        let r = self.tick_slow_impl(pc);
+        self.ctl(r)
+    }
+
+    #[inline(always)]
+    fn tick_slow_impl(&mut self, pc: usize) -> JsResult<Flow> {
+        self.tick = TICK_INTERVAL;
+        // SAFETY: called by the run loop, which has a frame.
+        unsafe { self.frames.last_mut().unwrap_unchecked() }.pc = pc;
+        self.safepoint()?;
+        Ok(Flow::Next)
+    }
+
+    /// Out-of-line execution of the instruction before `pc` in the last
+    /// frame (see [`Realm::exec_op`]).
+    #[inline(never)]
+    fn exec_at(&mut self, pc: usize) -> Ctl {
+        let r = self.exec_at_impl(pc);
+        self.ctl(r)
+    }
+
+    #[inline(always)]
+    fn exec_at_impl(&mut self, pc: usize) -> JsResult<Flow> {
+        let fi = self.frames.len() - 1;
+        // SAFETY: `fi` is the running frame and `pc - 1` its instruction.
+        let op = unsafe {
+            let f = self.frames.get_unchecked_mut(fi);
+            f.pc = pc;
+            *f.code().ops.get_unchecked(pc - 1)
+        };
+        self.exec_in(fi, op)
+    }
+
+    /// Out-of-line execution of `op` in place of the instruction before `pc`.
+    #[inline(never)]
+    fn exec_with(&mut self, pc: usize, op: Op) -> Ctl {
+        let r = self.exec_with_impl(pc, op);
+        self.ctl(r)
+    }
+
+    #[inline(always)]
+    fn exec_with_impl(&mut self, pc: usize, op: Op) -> JsResult<Flow> {
+        let fi = self.frames.len() - 1;
+        // SAFETY: `fi` is the running frame.
+        unsafe { self.frames.get_unchecked_mut(fi) }.pc = pc;
+        self.exec_in(fi, op)
+    }
+
+    #[inline(always)]
+    fn exec_in(&mut self, fi: usize, op: Op) -> JsResult<Flow> {
+        let flow = self.exec_op(fi, op)?;
+        if matches!(flow, Flow::Next) && self.frames.len() != fi + 1 {
+            return Ok(Flow::Reload);
+        }
+        Ok(flow)
+    }
+
+    /// `GetPropR` after an inline-cache miss: the megamorphic cache,
+    /// cached accessors, then the full instruction.
+    #[inline(never)]
+    fn get_prop_miss(&mut self, pc: usize, d: u16, o: u16, ic: u32) -> Ctl {
+        let r = self.get_prop_miss_impl(pc, d, o, ic);
+        self.ctl(r)
+    }
+
+    #[inline(always)]
+    fn get_prop_miss_impl(&mut self, pc: usize, d: u16, o: u16, ic: u32) -> JsResult<Flow> {
+        let fi = self.frames.len() - 1;
+        // SAFETY: `fi` is the running frame.
+        let f = unsafe { self.frames.get_unchecked_mut(fi) };
+        f.pc = pc;
+        // SAFETY: the code outlives this call (the frame stays).
+        let code: &FunctionCode = unsafe { f.code.as_ref() };
+        let fb = f.base as usize;
+        let rec = code.ics[ic as usize].get();
+        let recv = &self.vstack[fb + o as usize];
+        let mut p = if rec.kind == crate::ic::IC_LENGTH { None } else { self.ic_get(&rec, recv) };
+        if p.is_none() && recv.is_object() {
+            // Polymorphic site: the shared cache by (shape, key).
+            let kb = code.constants[code.ic_keys[ic as usize] as usize].bits();
+            if let Some(m) = self.mega_get(recv, kb) {
+                p = self.ic_get(&m, recv);
+            }
+        }
+        match p {
+            Some(p) if p.flags & ACCESSOR == 0 => {
+                let v = p.value.clone();
+                self.vstack[fb + d as usize] = v;
+                return Ok(Flow::Next);
+            }
+            Some(p) => {
+                // Cached accessor: a native getter (DOM attributes,
+                // `ta.length`, ...) is called directly.
+                if let Some(V::Object(g)) = p.getter().map(Value::v) {
+                    let r = self.call_cached_getter(g, o as usize, fi)?;
+                    // The getter may have run JavaScript (the value stack
+                    // may have moved).
+                    let at = self.frames[fi].base as usize + d as usize;
+                    self.vstack[at] = r;
+                    return Ok(Flow::Next);
+                }
+            }
+            None => {}
+        }
+        let op = code.ops[pc - 1];
+        self.exec_in(fi, op)
+    }
+
+    /// `SetPropR` after an inline-cache miss: setters, the megamorphic
+    /// cache, then the full instruction.
+    #[inline(never)]
+    fn set_prop_miss(&mut self, pc: usize, o: u16, v: u16, ic: u32) -> Ctl {
+        let r = self.set_prop_miss_impl(pc, o, v, ic);
+        self.ctl(r)
+    }
+
+    #[inline(always)]
+    fn set_prop_miss_impl(&mut self, pc: usize, o: u16, v: u16, ic: u32) -> JsResult<Flow> {
+        let fi = self.frames.len() - 1;
+        // SAFETY: `fi` is the running frame.
+        let f = unsafe { self.frames.get_unchecked_mut(fi) };
+        f.pc = pc;
+        // SAFETY: the code outlives this call (the frame stays).
+        let code: &FunctionCode = unsafe { f.code.as_ref() };
+        let fb = f.base as usize;
+        let (os, vs) = (fb + o as usize, fb + v as usize);
+        let mut rec = code.ics[ic as usize].get();
+        if !self.vstack[vs].is_empty() {
+            let key = match code.constants[code.ic_keys[ic as usize] as usize].v() {
+                V::String(s) => s,
+                _ => unreachable!(),
+            };
+            for attempt in 0..2 {
+                if attempt == 1 {
+                    // Polymorphic site: the shared cache by (shape, key).
+                    match self.mega_get(&self.vstack[os], key.bits() | 1) {
+                        Some(m) => rec = m,
+                        None => break,
+                    }
+                }
+                if rec.kind == crate::ic::IC_SETTER {
+                    if let Some(f) = self.ic_setter(&rec, &self.vstack[os]) {
+                        let (recv, val) = (self.vstack[os].clone(), self.vstack[vs].clone());
+                        self.call(Value::Object(f), recv, &[val])?;
+                        return Ok(if self.frames.len() != fi + 1 { Flow::Reload } else { Flow::Next });
+                    }
+                } else if rec.kind != 0 {
+                    let val = self.vstack[vs].clone();
+                    let recv = self.vstack[os].clone();
+                    match self.ic_set(&rec, &recv, key, val) {
+                        Ok(()) => return Ok(Flow::Next),
+                        Err(v) => drop(v),
+                    }
+                }
+            }
+        }
+        let op = code.ops[pc - 1];
+        self.exec_in(fi, op)
+    }
+
+    /// `CallR`: call-site cache hit, plain closures, bound/`call`/`apply`
+    /// targets and natives without leaving the loop's frame model; the
+    /// general case through [`Realm::exec_op`].
+    #[inline(always)]
+    fn call_r(&mut self, pc: usize, b: u16, argc: u16, cic: u16) -> Ctl {
+        let r = self.call_r_impl(pc, b, argc, cic);
+        self.ctl(r)
+    }
+
+    #[inline(always)]
+    fn call_r_impl(&mut self, pc: usize, b: u16, argc: u16, cic: u16) -> JsResult<Flow> {
+        let fi = self.frames.len() - 1;
+        // SAFETY: `fi` is the running frame.
+        let f = unsafe { self.frames.get_unchecked_mut(fi) };
+        f.pc = pc;
+        // SAFETY: the code outlives this call (the frame stays).
+        let code: &FunctionCode = unsafe { f.code.as_ref() };
+        let fbase = f.base as usize;
+        if let Some(cell) = code.call_ics.get(cic as usize) {
+            let rec = cell.get();
+            let cb = fbase + b as usize;
+            let callee = self.vstack[cb].bits();
+            if rec.callee == callee && rec.epoch == self.heap.collections {
+                // Same closure as last time: no lookup or checks.
+                let this = &self.vstack[cb + 1];
+                let this = if rec.strict {
+                    Some(this.undef_if_empty())
+                } else {
+                    match this.v() {
+                        V::Undefined | V::Null | V::Empty => Some(Value::Object(self.global)),
+                        V::Object(o) => Some(Value::Object(o)),
+                        _ => None,
+                    }
+                };
+                if let Some(this) = this {
+                    let scope = if rec.scope == u32::MAX { None } else { Some(ObjectId(rec.scope)) };
+                    // SAFETY: the closure owning the code is alive (it is in slot `b`).
+                    let code_ptr = unsafe { std::ptr::NonNull::new_unchecked(rec.code as *mut FunctionCode) };
+                    self.push_closure_frame(ObjectId(callee as u32), code_ptr, scope, ArgSrc::Stack(cb + 2), argc as usize, this, Value::Undefined, b as u32, false, false)?;
+                    return Ok(Flow::Reload);
+                }
+            }
+            if self.try_fast_call(fi, b as usize, argc as usize)? {
+                self.fill_call_ic(cell, callee);
+                return Ok(Flow::Reload);
+            }
+        } else if self.try_fast_call(fi, b as usize, argc as usize)? {
+            return Ok(Flow::Reload);
+        }
+        if self.try_call_indirect(fi, b as usize, argc as usize)? {
+            return Ok(Flow::Reload);
+        }
+        if self.try_native_call(fi, b as usize, argc as usize)? {
+            return Ok(if self.frames.len() != fi + 1 { Flow::Reload } else { Flow::Next });
+        }
+        let op = code.ops[pc - 1];
+        self.exec_in(fi, op)
+    }
+
+    /// `NewR`: plain function constructors, else the general path.
+    #[inline(never)]
+    fn new_r(&mut self, pc: usize, b: u16, argc: u16) -> Ctl {
+        let r = self.new_r_impl(pc, b, argc);
+        self.ctl(r)
+    }
+
+    #[inline(always)]
+    fn new_r_impl(&mut self, pc: usize, b: u16, argc: u16) -> JsResult<Flow> {
+        let fi = self.frames.len() - 1;
+        // SAFETY: `fi` is the running frame.
+        unsafe { self.frames.get_unchecked_mut(fi) }.pc = pc;
+        if self.try_fast_construct(fi, b as usize, argc as usize)? {
+            return Ok(Flow::Reload);
+        }
+        // SAFETY: as above.
+        let op = unsafe { *self.frames.get_unchecked(fi).code().ops.get_unchecked(pc - 1) };
+        self.exec_in(fi, op)
+    }
+
+    /// `ReturnR` of value `v` (already taken out of its slot): pops the
+    /// frame and hands the value to the caller's slot or out of the loop.
+    #[inline(always)]
+    fn return_r(&mut self, v: Value) -> Ctl {
+        let r = self.return_r_impl(v);
+        self.ctl(r)
+    }
+
+    #[inline(always)]
+    fn return_r_impl(&mut self, v: Value) -> JsResult<Flow> {
+        let mut v = match v {
+            Value::Empty => Value::Undefined,
+            v => v,
+        };
+        let fi = self.frames.len() - 1;
+        // SAFETY: `fi` is the running frame.
+        let f = unsafe { self.frames.get_unchecked(fi) };
+        if f.is_construct && !v.is_object() {
+            if f.this.is_empty() {
+                return Err(self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
+            }
+            v = f.this.clone();
+        }
+        if !f.entry && fi > 0 {
+            // Plain return to the calling frame: drop the frame where it
+            // is (no move out of the vector).
+            let (ret, bottom) = (f.ret_slot as usize, f.bottom());
+            // SAFETY: `fi` is the last frame; it is dropped exactly once
+            // after the length excludes it.
+            unsafe {
+                self.frames.set_len(fi);
+                std::ptr::drop_in_place(self.frames.as_mut_ptr().add(fi));
+            }
+            self.vstack.truncate(bottom);
+            // SAFETY: `fi - 1` is the caller (fi > 0).
+            let at = unsafe { self.frames.get_unchecked(fi - 1) }.base as usize + ret;
+            self.vstack[at] = v;
+            return Ok(Flow::Reload);
+        }
+        let f = self.pop_frame();
+        if f.entry {
+            if let Some(g) = f.generator() {
+                if let ObjectKind::Generator(gd) = &mut self.obj_mut(g).kind {
+                    gd.state = GeneratorState::Completed;
+                    gd.frame = None;
+                }
+            }
+            return Ok(Flow::Exit(Exit::Return(v)));
+        }
+        let ret = f.ret_slot as usize;
+        match self.frames.last() {
+            Some(caller) => {
+                let at = caller.base as usize + ret;
+                self.vstack[at] = v;
+            }
+            None => stack_underflow(),
+        }
+        Ok(Flow::Reload)
     }
 
     fn inc_value(&mut self, v: Value, d: f64) -> JsResult<Value> {

@@ -189,6 +189,8 @@ pub struct Realm {
     pub modules: crate::modules::ModuleRegistry,
     /// Countdown to the next GC / watchdog safe point in the VM loop.
     pub(crate) tick: u32,
+    /// How the innermost run loop ended (see `Realm::run_inner`).
+    pub(crate) loop_end: Option<crate::interop::JsResult<crate::vm::Exit>>,
     /// Value slots of all active frames (see `vm::Frame`).
     pub vstack: Vec<Value>,
     /// Reusable buffer for call arguments taken off the operand stack.
@@ -397,6 +399,7 @@ impl Realm {
             join_stack: Vec::new(),
             modules: Default::default(),
             tick: crate::vm::TICK_INTERVAL,
+            loop_end: None,
             vstack: Vec::with_capacity(1 << 14),
             arg_buf: Vec::new(),
             mega: Vec::new(),
