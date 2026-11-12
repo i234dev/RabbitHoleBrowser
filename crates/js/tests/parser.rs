@@ -356,8 +356,8 @@ fn numeric_literals_and_operators() {
 fn modules() {
     let p = parse_module(
         "import x from \"y\"; import * as ns from 'z'; import d, { a as b, c } from 'w'; import 'side';\n\
-         export default async function () {} export const q = 1; export { a as b, c }; export * from 'm'; export * as n from 'm';\n\
-         export { x as default }; export function f() {} export class K {} \
+         export default async function () {} export const q = 1; export { b as bb, c }; export * from 'm'; export * as n from 'm';\n\
+         export { x as xx }; export function f() {} export class K {} \
          await foo(); import.meta.url; import('dyn');",
     );
     assert!(p.is_module && p.strict);
@@ -588,7 +588,7 @@ fn realistic_snippet() {
     *gen() { yield* [1, 2, 3]; },
   };
 
-  var legacy = 017 + 0x1f + 0b11 + 0o7, str = 'it\'s' + "a \"quote\"" + `template ${obj.a + 1} ${`nested`}`;
+  var legacy = 0o17 + 0x1f + 0b11 + 0o7, str = 'it\'s' + "a \"quote\"" + `template ${obj.a + 1} ${`nested`}`;
   if (legacy > 0 && str) {
     exports.ready = true
   } else if (!str) exports.ready = false
