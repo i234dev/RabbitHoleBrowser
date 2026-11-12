@@ -427,6 +427,15 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
             break;
         }
     }
+    if duration.is_nan() {
+        // The container's own duration (e.g. Matroska Segment Info).
+        let mi = format.media_info();
+        if let (Some(tb), Some(d)) = (mi.time_base, mi.duration) {
+            if let Some(time) = tb.calc_duration(d) {
+                duration = secs(time);
+            }
+        }
+    }
     if decoder.is_none() && video.is_none() {
         let codec = tracks.iter().filter_map(|t| t.codec_params.as_ref()?.audio()).map(crate::decode::codec_name).next().unwrap_or("none");
         shared.fail(ERR_SRC_NOT_SUPPORTED, format!("no supported audio or video track (audio codec: {codec})"));
@@ -551,6 +560,11 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
             Ok(None) => {
                 eof = true;
                 shared.sink.set_eos(true);
+                if duration.is_nan() && decoder.is_some() {
+                    // Learnt at the end of the stream.
+                    duration = shared.sink.queued_end();
+                    shared.status().duration = duration;
+                }
                 if shared.status().seeking {
                     finish_seek(shared);
                 }
