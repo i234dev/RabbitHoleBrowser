@@ -12,6 +12,7 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(ep, "toString", 0, to_string);
     let error_ctor = define_ctor(realm, "Error", 1, error_ctor, ep);
     realm.define_method(error_ctor, "captureStackTrace", 1, capture_stack_trace);
+    realm.define_method(error_ctor, "isError", 1, is_error);
     realm.define_property(error_ctor, "stackTraceLimit", Value::Number(10.0), ALL);
     realm.intrinsics.others.insert("Error", error_ctor);
     for kind in KINDS.iter().skip(1) {
@@ -40,6 +41,14 @@ pub fn register(realm: &mut Realm) {
     realm.obj_mut(c).set_proto(Some(error_ctor));
     realm.intrinsics.others.insert("AggregateErrorPrototype", ap);
     realm.intrinsics.others.insert("AggregateError", c);
+}
+
+/// Error.isError(arg): has an [[ErrorData]] internal slot.
+fn is_error(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    Ok(Value::Bool(match arg(args, 0).v() {
+        V::Object(id) => matches!(realm.obj(id).kind, ObjectKind::Error),
+        _ => false,
+    }))
 }
 
 fn make_error(realm: &mut Realm, kind: &str, args: &[Value], msg_index: usize) -> JsResult<Value> {
