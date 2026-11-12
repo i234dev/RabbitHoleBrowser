@@ -255,31 +255,17 @@ fn banners_in_several_languages() {
         ("Wij gebruiken cookies om onze website te verbeteren.", "Alles accepteren", "Alles weigeren", "nl"),
         ("Utilitzem galetes pròpies i de tercers.", "Acceptar-ho tot", "Rebutjar", "ca"),
     ];
+    // One tab at a time (each content thread reserves a large stack).
     let (sink, rx) = sink();
-    let handles: Vec<ContentHandle> = cases
-        .iter()
-        .enumerate()
-        .map(|(i, (text, acc, rej, lang))| {
-            let h = spawn_mode(10 + i as u64, &sink, mode(if i % 2 == 0 { ConsentMode::Reject } else { ConsentMode::Accept }));
-            load_at(&h, &bottom_bar(text, acc, rej), &format!("https://{lang}.example.test/"));
-            h
-        })
-        .collect();
-    // Collect the events of every tab (they arrive in any order).
-    let mut events: std::collections::HashMap<u64, ConsentEvent> = std::collections::HashMap::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while events.len() < cases.len() && Instant::now() < deadline {
-        if let Ok((_, tab, FromContent::Consent(e))) = rx.recv_timeout(Duration::from_millis(200)) {
-            events.insert(tab, e);
-        }
-    }
-    for (i, (_, acc, rej, lang)) in cases.iter().enumerate() {
+    for (i, (text, acc, rej, lang)) in cases.iter().enumerate() {
         let tab = 10 + i as u64;
-        let e = events.remove(&tab).unwrap_or_else(|| panic!("{lang}: no consent event"));
+        let h = spawn_mode(tab, &sink, mode(if i % 2 == 0 { ConsentMode::Reject } else { ConsentMode::Accept }));
+        load_at(&h, &bottom_bar(text, acc, rej), &format!("https://{lang}.example.test/"));
+        let e = consent_event(&rx, tab, Duration::from_secs(15)).unwrap_or_else(|| panic!("{lang}: no consent event"));
         let (want, button, choice) = if i % 2 == 0 { (ConsentOutcome::Rejected, rej, "reject") } else { (ConsentOutcome::Accepted, acc, "accept") };
         assert_eq!(e.outcome, want, "{lang}: {e:?}");
         assert_eq!(&e.button, button, "{lang}");
-        assert_eq!(eval(&handles[i], &rx, tab, "window.__choice"), choice, "{lang}");
+        assert_eq!(eval(&h, &rx, tab, "window.__choice"), choice, "{lang}");
     }
 }
 
