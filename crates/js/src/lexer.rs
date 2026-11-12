@@ -1092,6 +1092,10 @@ impl<'a> Lexer<'a> {
                 return Err(self.err(format!("Invalid regular expression flags '{flags}'")));
             }
         }
+        // Early errors: the pattern must parse.
+        if let Err(e) = crate::regex::validate(&pattern, &flags) {
+            return Err(self.err(format!("Invalid regular expression: /{pattern}/{flags}: {}", e.message)));
+        }
         Ok(Token {
             kind: TokenKind::Regex { pattern, flags },
             start: tok.start,
