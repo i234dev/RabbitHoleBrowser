@@ -177,7 +177,7 @@ fn to_fixed(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (i, fr) = exact_decimal(x);
     let (i, fr) = round_digits(&i, &fr, f as usize);
     let mut out = String::new();
-    if x < 0.0 && (i.bytes().any(|b| b != b'0') || fr.bytes().any(|b| b != b'0')) {
+    if x < 0.0 {
         out.push('-');
     }
     out.push_str(&i);

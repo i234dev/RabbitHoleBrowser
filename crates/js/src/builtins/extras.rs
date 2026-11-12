@@ -325,26 +325,21 @@ fn finalization_unregister(realm: &mut Realm, this: Value, args: &[Value]) -> Js
 // --------------------------------------------------------- Promise.try
 
 fn promise_try(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    if !realm.is_constructor(&this) {
-        return realm.type_error("Promise.try called on non-constructor");
+    if !this.is_object() {
+        return realm.type_error("Promise.try called on non-object");
     }
-    let (p, res, rej) = realm.new_promise();
+    let (p, res, rej) = super::promise::new_capability_with_ctor(realm, this)?;
     let f = arg(args, 0);
     let rest: Vec<Value> = args.iter().skip(1).cloned().collect();
     match realm.call(f, Value::Undefined, &rest) {
         Ok(v) => {
-            realm.call(Value::Object(res), Value::Undefined, &[v])?;
+            realm.call(res, Value::Undefined, &[v])?;
         }
         Err(e) => {
-            realm.call(Value::Object(rej), Value::Undefined, &[e])?;
+            realm.call(rej, Value::Undefined, &[e])?;
         }
     }
-    // Subclass support: resolve through the receiver when it is not %Promise%.
-    if this.as_object() != Some(realm.intrinsics.promise_ctor) {
-        let resolve = realm.get_str(this.clone(), "resolve")?;
-        return realm.call(resolve, this, &[Value::Object(p)]);
-    }
-    Ok(Value::Object(p))
+    Ok(p)
 }
 
 // ------------------------------------------------- RegExp legacy statics

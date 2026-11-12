@@ -400,6 +400,16 @@ fn repeat(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 /// GetSubstitution: expand `$` patterns in a replacement template.
+/// Append to a string under construction, failing with a RangeError (not
+/// an allocation abort) past the maximum string length.
+pub(crate) fn extend_checked(realm: &mut Realm, out: &mut Vec<u16>, units: &[u16]) -> JsResult<()> {
+    if out.len() + units.len() > crate::value::MAX_STRING_LEN || out.try_reserve(units.len()).is_err() {
+        return realm.range_error("Invalid string length");
+    }
+    out.extend_from_slice(units);
+    Ok(())
+}
+
 pub fn get_substitution(realm: &mut Realm, matched: &JsStr, string: &JsStr, position: usize, captures: &[Value], named: &Value, replacement: &JsStr) -> JsResult<JsStr> {
     let r = replacement.as_units();
     let mut out: Vec<u16> = Vec::with_capacity(r.len());
@@ -415,16 +425,16 @@ pub fn get_substitution(realm: &mut Realm, matched: &JsStr, string: &JsStr, posi
                     i += 2;
                 }
                 x if x == b'&' as u16 => {
-                    out.extend_from_slice(matched.as_units());
+                    extend_checked(realm, &mut out, matched.as_units())?;
                     i += 2;
                 }
                 x if x == b'`' as u16 => {
-                    out.extend_from_slice(&string.as_units()[..position.min(string.len())]);
+                    extend_checked(realm, &mut out, &string.as_units()[..position.min(string.len())])?;
                     i += 2;
                 }
                 x if x == b'\'' as u16 => {
                     let tail = (position + matched.len()).min(string.len());
-                    out.extend_from_slice(&string.as_units()[tail..]);
+                    extend_checked(realm, &mut out, &string.as_units()[tail..])?;
                     i += 2;
                 }
                 x if (b'0' as u16..=b'9' as u16).contains(&x) => {
@@ -443,7 +453,7 @@ pub fn get_substitution(realm: &mut Realm, matched: &JsStr, string: &JsStr, posi
                         let cap = &captures[idx - 1];
                         if !cap.is_undefined() {
                             let cs = realm.to_string(cap.clone())?;
-                            out.extend_from_slice(cs.as_units());
+                            extend_checked(realm, &mut out, cs.as_units())?;
                         }
                         i += consumed;
                     } else {
@@ -464,7 +474,7 @@ pub fn get_substitution(realm: &mut Realm, matched: &JsStr, string: &JsStr, posi
                                 let v = realm.get(named.clone(), PropertyKey::String(name))?;
                                 if !v.is_undefined() {
                                     let vs = realm.to_string(v)?;
-                                    out.extend_from_slice(vs.as_units());
+                                    extend_checked(realm, &mut out, vs.as_units())?;
                                 }
                                 i += 3 + off;
                             }

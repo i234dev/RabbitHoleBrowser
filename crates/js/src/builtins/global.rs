@@ -11,8 +11,13 @@ pub fn register(realm: &mut Realm) {
     realm.define_property(g, "Infinity", Value::Number(f64::INFINITY), 0);
     realm.define_method(g, "isNaN", 1, is_nan);
     realm.define_method(g, "isFinite", 1, is_finite);
-    realm.define_method(g, "parseInt", 2, parse_int);
-    realm.define_method(g, "parseFloat", 1, parse_float);
+    let pi = realm.define_method(g, "parseInt", 2, parse_int);
+    let pf = realm.define_method(g, "parseFloat", 1, parse_float);
+    // Number.parseInt / Number.parseFloat are the same function objects.
+    if let Some(n) = realm.obj(g).props.get(&PropertyKey::str("Number")).and_then(|p| p.value.as_object()) {
+        realm.define_property(n, "parseInt", Value::Object(pi), HIDDEN);
+        realm.define_property(n, "parseFloat", Value::Object(pf), HIDDEN);
+    }
     realm.define_method(g, "encodeURIComponent", 1, encode_uri_component);
     realm.define_method(g, "encodeURI", 1, encode_uri);
     realm.define_method(g, "decodeURIComponent", 1, decode_uri_component);

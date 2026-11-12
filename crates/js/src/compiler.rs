@@ -3384,6 +3384,10 @@ impl Compiler {
                     self.emit(Op::Pop);
                 } else {
                     let is_async = self.fs_ref().flags.is_async;
+                    if is_async {
+                        // Yield in an async generator awaits its operand first.
+                        self.emit(Op::Await);
+                    }
                     self.emit(if is_async { Op::AsyncYield } else { Op::Yield });
                     // `generator.return(v)` resumes here with a return
                     // completion: run the finally blocks / iterator closes
