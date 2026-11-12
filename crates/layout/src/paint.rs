@@ -145,6 +145,10 @@ struct State {
     /// Canvas offset of `position: fixed` content (the viewport origin).
     fixed_origin: (f32, f32),
     ext: bool,
+    /// Under canvas transforms: the painted area mapped back into the
+    /// items' coordinates (culling must not compare untransformed rects
+    /// with the device area), one per pushed matrix.
+    views: Vec<Rect>,
 }
 
 pub fn paint(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scroll_x: f32, scroll_y: f32) {
@@ -182,6 +186,7 @@ fn paint_view(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scro
         fixed_saved: None,
         fixed_origin,
         ext: gfx_ext_available(),
+        views: Vec::new(),
     };
     for item in &list.items {
         paint_item(item, canvas, fonts, &mut st, view);
@@ -195,6 +200,7 @@ fn paint_view(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scro
     while let Some(f) = st.frames.pop() {
         if let Frame::Canvas = f {
             canvas.pop_transform();
+            st.views.pop();
         }
     }
     while let Some(l) = st.layers.pop() {
@@ -217,7 +223,7 @@ fn layer_mask_alpha(items: &[DisplayItem], canvas: &Canvas, fonts: &FontContext,
         let mut c = Canvas::new(w as u32, h as u32);
         c.clear(bg);
         c.push_transform(m);
-        let mut s = State { dx: st.dx, dy: st.dy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None };
+        let mut s = State { dx: st.dx, dy: st.dy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, views: Vec::new() };
         let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
         for it in items {
             paint_item(it, &mut c, fonts, &mut s, all);
@@ -239,8 +245,9 @@ fn layer_mask_alpha(items: &[DisplayItem], canvas: &Canvas, fonts: &FontContext,
     )
 }
 
-fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: &mut State, view: Rect) {
+fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: &mut State, device_view: Rect) {
     let (dx, dy) = (st.dx, st.dy);
+    let view = st.views.last().copied().unwrap_or(device_view);
     match item {
         DisplayItem::PushClip(r) => {
             let r = snap(r.translate(dx, dy), canvas);
@@ -275,6 +282,11 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                 let mm = rabbithole_style::multiply_matrix(rabbithole_style::multiply_matrix(t, *m), ti);
                 canvas.push_transform(mm);
                 st.frames.push(Frame::Canvas);
+                let local = match crate::tree::invert_matrix(canvas.transform()) {
+                    Some(inv) => rabbithole_gfx::path::transform_rect_bounds(&inv, device_view),
+                    None => Rect::new(0.0, 0.0, 0.0, 0.0),
+                };
+                st.views.push(local);
             } else {
                 // Approximate unsupported transforms by their translation.
                 st.dx += m[4];
@@ -287,7 +299,10 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                 st.dx -= x;
                 st.dy -= y;
             }
-            Some(Frame::Canvas) => canvas.pop_transform(),
+            Some(Frame::Canvas) => {
+                canvas.pop_transform();
+                st.views.pop();
+            }
             _ => {}
         },
         DisplayItem::PushLayer(bounds) => {

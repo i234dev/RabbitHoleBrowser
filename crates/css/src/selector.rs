@@ -62,6 +62,8 @@ pub enum Pseudo {
     Default,
     /// `:open` (open `<details>` / `<dialog>`).
     Open,
+    /// `:modal` (an element in the document's top layer).
+    Modal,
     /// `:modal`, `:popover-open`, `:fullscreen`, `:autofill`, ... states
     /// we are never in, but which are valid selectors.
     NeverState,
@@ -485,7 +487,8 @@ impl<'a> SelectorParser<'a> {
                     "default" => Pseudo::Default,
                     "open" => Pseudo::Open,
                     "scope" => Pseudo::Scope,
-                    "modal" | "popover-open" | "fullscreen" | "-webkit-full-screen" | "picture-in-picture" | "autofill" | "-webkit-autofill" | "user-invalid"
+                    "modal" => Pseudo::Modal,
+                    "popover-open" | "fullscreen" | "-webkit-full-screen" | "picture-in-picture" | "autofill" | "-webkit-autofill" | "user-invalid"
                     | "user-valid" | "-moz-ui-invalid" | "-moz-ui-valid" | "blank" | "closed" | "playing" | "paused" | "seeking" | "buffering" | "stalled" | "muted"
                     | "volume-locked" | "target-within" | "local-link" | "current" | "past" | "future" | "-moz-focusring" => Pseudo::NeverState,
                     "hover" => Pseudo::Hover,
@@ -1031,6 +1034,7 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
                 _ => false,
             },
             Pseudo::Open => matches!(el.tag.as_str(), "details" | "dialog") && el.attr("open").is_some(),
+            Pseudo::Modal => doc.top_layer.contains(&node),
             Pseudo::NeverState => false,
             Pseudo::Scope => doc.parent(node).map(|p| matches!(doc.node(p).data, NodeData::Document)).unwrap_or(false),
             Pseudo::Hover => MatchState::is_or_contains(doc, state.hovered, node),

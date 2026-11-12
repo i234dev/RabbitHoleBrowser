@@ -247,6 +247,10 @@ pub struct Document {
     /// The document's URL when it differs from its browsing context's
     /// (documents made by `DOMParser` take their creator's URL).
     pub url: Option<String>,
+    /// The top layer (HTML §"top layer"): modal dialogs, in the order they
+    /// were opened (last = topmost). Painted above everything else, each
+    /// over its `::backdrop`; matched by `:modal`.
+    pub top_layer: Vec<NodeId>,
 }
 
 /// What the native media controls show.
@@ -306,6 +310,7 @@ impl Document {
             content_type: "text/html".to_string(),
             attr_namespaces: HashMap::new(),
             url: None,
+            top_layer: Vec::new(),
         }
     }
 

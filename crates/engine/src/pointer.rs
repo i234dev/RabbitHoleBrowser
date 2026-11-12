@@ -266,6 +266,48 @@ impl Engine {
         out
     }
 
+    /// A wheel turned (or a trackpad scrolled) by `(dx, dy)` CSS px over
+    /// viewport point `(x, y)`: a cancelable `wheel` event at the element
+    /// there. Returns whether a listener cancelled it (the embedder then
+    /// does not scroll) and the dispatch's side effects.
+    pub fn wheel(&self, page: &mut Page, x: f32, y: f32, dx: f32, dy: f32, m: Modifiers) -> (bool, ScriptOutcome) {
+        let mut out = ScriptOutcome::default();
+        let Some(target) = page.node_at_viewport(x, y).or_else(|| page.doc.html_element()) else {
+            return (false, out);
+        };
+        let init = EventInit { bubbles: true, cancelable: true, detail: Some(EventDetail::Wheel { x, y, dx, dy, ctrl: m.ctrl, shift: m.shift, alt: m.alt, meta: m.meta }) };
+        let prevented = self.dispatch_into(page, &mut out, target, "wheel", init);
+        (prevented, out)
+    }
+
+    /// Escape with a modal dialog open: a cancelable `cancel` at the
+    /// topmost one, then (unless cancelled) it closes (`close` event).
+    /// None when no modal dialog is open.
+    pub fn cancel_modal(&self, page: &mut Page) -> Option<ScriptOutcome> {
+        let top = page.doc.top_layer.iter().rev().copied().find(|&n| page.doc.is_connected(n))?;
+        let mut out = ScriptOutcome::default();
+        let prevented = self.dispatch_into(page, &mut out, top, "cancel", EventInit::simple(false, true));
+        if !prevented && page.doc.top_layer.contains(&top) {
+            page.doc.top_layer.retain(|&n| n != top);
+            if page.doc.attr(top, "open").is_some() {
+                set_attr(&mut page.doc, top, "open", None);
+                self.restyle(page);
+                out.relayout = true;
+                self.dispatch_into(page, &mut out, top, "close", EventInit::simple(false, false));
+            }
+        }
+        Some(out)
+    }
+
+    /// Do scripts listen for `wheel` (any listener; `blocking`: one that
+    /// may cancel it)?
+    pub fn wheel_listeners(&self, page: &Page) -> (bool, bool) {
+        match page.script.host.as_ref() {
+            Some(h) => (h.any_listener_for("wheel"), h.any_blocking_listener_for("wheel")),
+            None => (false, false),
+        }
+    }
+
     /// A button was pressed at viewport point `(x, y)`: `pointerdown`,
     /// `mousedown`, then (unless cancelled, primary button) focus moves to
     /// the nearest focusable ancestor of the target, or is cleared.

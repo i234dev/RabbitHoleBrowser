@@ -875,7 +875,14 @@ fn dom_rect_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
 
 fn e_get_bounding_client_rect(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getBoundingClientRect")?;
-    let r = node_rect(n);
+    let r = if n.doc == 0 {
+        with_env(|env| {
+            env.ensure_layout();
+            env.node_client_rect(n.node).unwrap_or_default()
+        })
+    } else {
+        node_rect(n)
+    };
     let (sx, sy) = with_env(|env| env.scroll());
     Ok(dom_rect(realm, r.x - sx, r.y - sy, r.w, r.h))
 }
@@ -917,31 +924,102 @@ fn e_offset_height(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
     Ok(Value::Number(node_rect(n).h.round() as f64))
 }
 
+/// `offsetParent` (CSSOM View §7): the nearest ancestor that is a
+/// containing block for positioned descendants (positioned, or with a
+/// transform), a table cell / table for a static element, or the body.
+/// None for the root, the body, fixed elements and elements without a box.
 fn offset_parent_of(n: NodeRef) -> Option<NodeId> {
-    with_doc(n.doc, |doc| {
-        let mut cur = doc.parent(n.node);
-        while let Some(p) = cur {
-            if doc.is_element(p, "body") {
+    if n.doc != 0 {
+        // Script-created / frame documents: no styles here, the body.
+        return with_doc(n.doc, |doc| {
+            let mut cur = doc.parent(n.node);
+            while let Some(p) = cur {
+                if doc.is_element(p, "body") {
+                    return Some(p);
+                }
+                cur = doc.parent(p);
+            }
+            None
+        });
+    }
+    use rabbithole_style::Position;
+    let style = |id: NodeId| with_env(|env| env.computed_style(id));
+    let me = style(n.node)?;
+    if me.display.is_none() || me.position == Position::Fixed {
+        return None;
+    }
+    let (is_root_or_body, mut cur) = with_doc(0, |doc| (doc.is_element(n.node, "html") || doc.is_element(n.node, "body"), doc.flat_parent(n.node)));
+    if is_root_or_body {
+        return None;
+    }
+    let positioned = me.position != Position::Static;
+    while let Some(p) = cur {
+        let (tag, next) = with_doc(0, |doc| (doc.tag(p).map(|t| t.to_ascii_lowercase()), doc.flat_parent(p)));
+        let Some(tag) = tag else {
+            cur = next;
+            continue;
+        };
+        if tag == "body" {
+            return Some(p);
+        }
+        if let Some(s) = style(p) {
+            if s.position != Position::Static || !s.transform.is_empty() {
                 return Some(p);
             }
-            cur = doc.parent(p);
         }
-        None
-    })
+        if !positioned && matches!(tag.as_str(), "td" | "th" | "table") {
+            return Some(p);
+        }
+        cur = next;
+    }
+    None
+}
+
+/// `offsetLeft` / `offsetTop` origin: the offsetParent's padding edge, or
+/// the document origin for no offsetParent and for a static body (as in
+/// browsers: an element in the body is offset from the page, body margin
+/// included).
+fn offset_origin(n: NodeRef) -> (f32, f32) {
+    let Some(p) = offset_parent_of(n) else { return (0.0, 0.0) };
+    let pr = NodeRef { doc: n.doc, node: p };
+    if n.doc != 0 {
+        let r = node_rect(pr);
+        return (r.x, r.y);
+    }
+    let style = with_env(|env| env.computed_style(p));
+    let is_body = with_doc(0, |doc| doc.is_element(p, "body"));
+    match style {
+        Some(s) if is_body && s.position == rabbithole_style::Position::Static => (0.0, 0.0),
+        Some(s) => {
+            let r = node_rect(pr);
+            (r.x + s.border_width.left, r.y + s.border_width.top)
+        }
+        None => (0.0, 0.0),
+    }
+}
+
+fn is_body(n: NodeRef) -> bool {
+    with_doc(n.doc, |doc| doc.is_element(n.node, "body"))
 }
 
 fn e_offset_top(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "offsetTop")?;
+    if is_body(n) {
+        return Ok(Value::Number(0.0));
+    }
     let r = node_rect(n);
-    let py = offset_parent_of(n).map(|p| node_rect(NodeRef { doc: n.doc, node: p }).y).unwrap_or(0.0);
-    Ok(Value::Number((r.y - py).round() as f64))
+    let (_, oy) = offset_origin(n);
+    Ok(Value::Number((r.y - oy).round() as f64))
 }
 
 fn e_offset_left(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "offsetLeft")?;
+    if is_body(n) {
+        return Ok(Value::Number(0.0));
+    }
     let r = node_rect(n);
-    let px = offset_parent_of(n).map(|p| node_rect(NodeRef { doc: n.doc, node: p }).x).unwrap_or(0.0);
-    Ok(Value::Number((r.x - px).round() as f64))
+    let (ox, _) = offset_origin(n);
+    Ok(Value::Number((r.x - ox).round() as f64))
 }
 
 fn e_offset_parent(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -2268,7 +2346,7 @@ pub(crate) fn install(realm: &mut Realm) {
     let dialog = proto("HTMLDialogElement");
     reflect(realm, dialog, "open", "open", Reflect::Bool);
     realm.define_method(dialog, "show", 0, dialog_show);
-    realm.define_method(dialog, "showModal", 0, dialog_show);
+    realm.define_method(dialog, "showModal", 0, dialog_show_modal);
     realm.define_method(dialog, "close", 0, dialog_close);
     let tsec = proto("HTMLTableSectionElement");
     realm.define_method(tsec, "insertRow", 1, table_insert_row);
@@ -2624,8 +2702,31 @@ fn dialog_show(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Undefined)
 }
 
+/// `showModal()`: open the dialog in the top layer (painted above the
+/// page over its `::backdrop`, `:modal`).
+fn dialog_show_modal(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "showModal")?;
+    let (open, modal, connected) = with_doc(n.doc, |doc| (doc.attr(n.node, "open").is_some(), doc.top_layer.contains(&n.node), doc.is_connected(n.node)));
+    if open && modal {
+        return Ok(Value::Undefined);
+    }
+    if open {
+        return Err(crate::misc::dom_exception(realm, "InvalidStateError", "The dialog is already open as a non-modal dialog."));
+    }
+    if !connected {
+        return Err(crate::misc::dom_exception(realm, "InvalidStateError", "The dialog is not connected."));
+    }
+    with_doc(n.doc, |doc| doc.top_layer.push(n.node));
+    set_attribute(n, "open", Some(""));
+    Ok(Value::Undefined)
+}
+
 fn dialog_close(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "close")?;
+    if with_doc(n.doc, |doc| doc.attr(n.node, "open").is_none()) {
+        return Ok(Value::Undefined);
+    }
+    with_doc(n.doc, |doc| doc.top_layer.retain(|&t| t != n.node));
     set_attribute(n, "open", None);
     crate::events::dispatch(realm, TargetKey::Node(n), "close", crate::EventInit::simple(false, false), true);
     Ok(Value::Undefined)

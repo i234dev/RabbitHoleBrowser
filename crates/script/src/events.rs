@@ -81,7 +81,25 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
     );
     realm.set_class_name(id, Box::leak(class.to_string().into_boxed_str()));
     // Detail fields as own data properties.
-    match &init.detail {
+    let wheel = match &init.detail {
+        Some(EventDetail::Wheel { x, y, dx, dy, ctrl, shift, alt, meta }) => Some((EventDetail::Mouse { x: *x, y: *y, button: 0, ctrl: *ctrl, shift: *shift, alt: *alt, meta: *meta }, *dx, *dy)),
+        _ => None,
+    };
+    if let Some((_, dx, dy)) = &wheel {
+        for (k, v) in [
+            ("deltaX", Value::Number(*dx as f64)),
+            ("deltaY", Value::Number(*dy as f64)),
+            ("deltaZ", Value::Number(0.0)),
+            ("deltaMode", Value::Number(0.0)),
+        ] {
+            realm.define_property(id, k, v, ACC);
+        }
+    }
+    let detail = match &wheel {
+        Some((m, _, _)) => Some(m),
+        None => init.detail.as_ref(),
+    };
+    match detail {
         Some(EventDetail::Mouse { x, y, button, ctrl, shift, alt, meta }) => {
             let (sx, sy) = with_env(|env| env.scroll());
             for (k, v) in [
@@ -98,13 +116,13 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
                 ("movementX", Value::Number(0.0)),
                 ("movementY", Value::Number(0.0)),
                 ("button", Value::Number(*button as f64)),
-                ("buttons", Value::Number(if *button == 0 { 1.0 } else if *button == 1 { 4.0 } else { 2.0 })),
+                ("buttons", Value::Number(if wheel.is_some() { 0.0 } else if *button == 0 { 1.0 } else if *button == 1 { 4.0 } else { 2.0 })),
                 ("ctrlKey", Value::Bool(*ctrl)),
                 ("shiftKey", Value::Bool(*shift)),
                 ("altKey", Value::Bool(*alt)),
                 ("metaKey", Value::Bool(*meta)),
                 ("relatedTarget", Value::Null),
-                ("detail", Value::Number(1.0)),
+                ("detail", Value::Number(if wheel.is_some() { 0.0 } else { 1.0 })),
                 ("pointerId", Value::Number(1.0)),
                 ("pointerType", Value::str("mouse")),
                 ("isPrimary", Value::Bool(true)),
@@ -147,7 +165,7 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             realm.define_property(id, "elapsedTime", Value::Number(*elapsed as f64), ACC);
             realm.define_property(id, "pseudoElement", Value::str(pseudo), ACC);
         }
-        Some(EventDetail::None) | None => {}
+        Some(EventDetail::Wheel { .. }) | Some(EventDetail::None) | None => {}
     }
     id
 }
@@ -852,7 +870,10 @@ pub(crate) fn dispatch(realm: &mut Realm, key: TargetKey, event_type: &str, init
 /// `offsetX`/`offsetY` of a mouse event: the pointer relative to the
 /// target's padding edge.
 fn set_mouse_offset(realm: &mut Realm, key: TargetKey, eid: ObjectId, init: &EventInit) {
-    let Some(EventDetail::Mouse { x, y, .. }) = &init.detail else { return };
+    let (x, y) = match &init.detail {
+        Some(EventDetail::Mouse { x, y, .. }) | Some(EventDetail::Wheel { x, y, .. }) => (x, y),
+        _ => return,
+    };
     let TargetKey::Node(n) = key else { return };
     if n.doc != 0 {
         return;
@@ -880,6 +901,7 @@ fn event_class_for(ty: &str, init: &EventInit) -> &'static str {
                 "MouseEvent"
             }
         }
+        Some(EventDetail::Wheel { .. }) => "WheelEvent",
         Some(EventDetail::Key { .. }) => "KeyboardEvent",
         Some(EventDetail::Input { .. }) => "InputEvent",
         Some(EventDetail::Animation { transition: true, .. }) => "TransitionEvent",

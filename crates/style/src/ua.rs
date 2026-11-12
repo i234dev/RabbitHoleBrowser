@@ -170,6 +170,8 @@ details > summary:first-of-type { display: list-item; list-style-type: none; }
 details:not([open]) > :not(summary) { display: none; }
 marquee { display: block; overflow: hidden; white-space: nowrap; }
 dialog[open] { display: block; position: absolute; left: 0; right: 0; width: fit-content; height: fit-content; margin: auto; border: solid; padding: 1em; background-color: white; color: black; }
+dialog:modal { position: fixed; top: 0; bottom: 0; max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em); overflow: auto; }
+dialog:modal::backdrop { background: rgba(0, 0, 0, 0.1); }
 details > summary::marker { content: "\25B8 "; }
 details[open] > summary::marker { content: "\25BE "; }
 ::marker { unicode-bidi: isolate; font-variant-numeric: tabular-nums; white-space: pre; }

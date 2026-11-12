@@ -347,10 +347,11 @@ impl Worker {
         let favicon = page.favicon();
         let images_loading = page.images_in_flight() > 0;
         let key_listeners = page.script.host.as_ref().map(|h| h.any_listener_for("keydown") || h.any_listener_for("keyup") || h.any_listener_for("keypress")).unwrap_or(false);
+        let (wheel_listeners, wheel_blocking) = self.engine.wheel_listeners(page);
         if !lines.is_empty() {
             self.send(FromContent::Console(lines));
         }
-        let state = PageState { editing: self.edit.is_some(), key_listeners, focused: self.focus.is_some(), has_selection: self.selection.is_some() };
+        let state = PageState { editing: self.edit.is_some(), key_listeners, focused: self.focus.is_some(), has_selection: self.selection.is_some(), wheel_listeners, wheel_blocking };
         if state != self.sent_state {
             self.sent_state = state;
             self.send(FromContent::State(state));
@@ -399,7 +400,13 @@ impl Worker {
             ToContent::PointerMove { x, y, mods } => self.pointer_move(x, y, mods),
             ToContent::PointerDown { x, y, button, mods, click_count } => self.pointer_down(x, y, button, mods, click_count),
             ToContent::PointerUp { x, y, button, mods, inside } => self.pointer_up(x, y, button, mods, inside),
-            ToContent::Wheel { x, y, dx, dy } => {
+            ToContent::Wheel { x, y, dx, dy, mods, scrolled: ui_scrolled } => {
+                // Scripts see the wheel first and may cancel the scroll
+                // (custom zoom / pan widgets, carousels, maps).
+                let prevented = self.page_op(|engine, page| engine.wheel(page, x, y, dx, dy, mods)).unwrap_or(false);
+                if prevented || ui_scrolled {
+                    return;
+                }
                 let doc = (x + self.scroll.0, y + self.scroll.1);
                 let (scrolled, container) = match self.page.as_mut() {
                     Some(page) => {
@@ -1238,6 +1245,10 @@ impl Worker {
                         let sel = page.select_between(&self.engine.fonts, anchor, doc);
                         self.selection = if sel.rects.is_empty() { None } else { Some(sel) };
                         self.dirty = true;
+                        // Scripts still see the moves of a selecting drag
+                        // (drag-to-pan maps and timelines, sliders, sortable
+                        // lists listen for pointermove / mousemove).
+                        self.page_op(|engine, page| ((), engine.pointer_move(page, x, y, mods)));
                         return;
                     }
                 }
@@ -1631,6 +1642,11 @@ impl Worker {
             }
         }
         if self.page_key_event(k) {
+            return;
+        }
+        // Escape closes the topmost modal dialog (after its `cancel`).
+        if k.key == "Escape" && self.page_op(|engine, page| engine.cancel_modal(page).map_or((false, ScriptOutcome::default()), |o| (true, o))).unwrap_or(false) {
+            self.dirty = true;
             return;
         }
         if self.edit.is_some() {

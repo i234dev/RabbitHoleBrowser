@@ -544,13 +544,19 @@ impl App {
             return;
         }
         if let Some(css) = self.to_css(self.cursor) {
-            // Inner scroll containers scroll on the content thread; the
-            // page itself scrolls right here.
+            // Inner scroll containers scroll on the content thread, and so
+            // does the page when a script may cancel the wheel; otherwise
+            // the page scrolls right here (passive listeners are told).
             let over_container = self.tab().and_then(|t| t.frame.as_ref().map(|f| f.scroll_container_at(css, t.scroll))).unwrap_or(false);
-            if over_container {
+            let state = self.tab().map(|t| t.state).unwrap_or_default();
+            let mods = self.pointer_modifiers();
+            if over_container || state.wheel_blocking {
                 self.scroll_anim = None;
-                self.send_active(ToContent::Wheel { x: css.0, y: css.1, dx, dy });
+                self.send_active(ToContent::Wheel { x: css.0, y: css.1, dx, dy, mods, scrolled: false });
                 return;
+            }
+            if state.wheel_listeners {
+                self.send_active(ToContent::Wheel { x: css.0, y: css.1, dx, dy, mods, scrolled: true });
             }
         }
         if lines {

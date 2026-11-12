@@ -1969,6 +1969,26 @@ impl Page {
         self.rect_of(node).into_iter().collect()
     }
 
+    /// [`Page::rect_of`] as painted: mapped through the CSS transforms of
+    /// the node and its ancestors (the bounding box of the result).
+    pub fn client_rect_of(&self, node: NodeId) -> Option<Rect> {
+        let mut r = self.rect_of(node)?;
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            if let Some(s) = self.styles.get(n).filter(|s| !s.transform.is_empty()) {
+                if let Some(b) = self.rect_of(n) {
+                    let m = rabbithole_style::transform_matrix(&s.transform, b.w, b.h, s.font_size);
+                    let ox = b.x + s.transform_origin.0.resolve_or_zero(b.w);
+                    let oy = b.y + s.transform_origin.1.resolve_or_zero(b.h);
+                    let full = rabbithole_style::multiply_matrix(rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, ox, oy], m), [1.0, 0.0, 0.0, 1.0, -ox, -oy]);
+                    r = rabbithole_gfx::path::transform_rect_bounds(&full, r);
+                }
+            }
+            cur = self.doc.flat_parent(n);
+        }
+        Some(r)
+    }
+
     /// Scroll container under a document point.
     pub fn scroll_container_at(&self, x: f32, y: f32) -> Option<ScrollInfo> {
         self.layout.scroll_container_at(x, y)

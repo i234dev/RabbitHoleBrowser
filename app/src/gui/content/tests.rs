@@ -232,6 +232,42 @@ fn typing_into_a_text_field() {
     assert_eq!(r.trim(), "'rh:2'");
 }
 
+/// Dragging over text starts a selection, and the page still gets the
+/// pointer moves (drag-to-pan widgets): they used to stop at the drag
+/// threshold. A `wheel` the page cancels doesn't scroll it, and the page
+/// state tells the UI to route the wheel through the page.
+#[test]
+fn drags_report_moves_and_wheels_reach_the_page() {
+    let (sink, rx) = sink();
+    let h = spawn(1, &sink);
+    load(
+        &h,
+        "<html><body style='margin:0;height:3000px'><p id=t style='margin:0;font-size:40px'>drag over this text</p><script>\
+         var moves = 0, wheels = []; var t = document.getElementById('t');\
+         t.addEventListener('pointermove', function (e) { if (e.buttons) moves++; });\
+         t.addEventListener('wheel', function (e) { wheels.push(e.deltaY); e.preventDefault(); }, { passive: false });\
+         </script></body></html>",
+    );
+    // (The state goes out with the first frame, before it.)
+    let (_, st) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::State(s) if s.wheel_blocking)).expect("wheel state");
+    let FromContent::State(st) = st else { unreachable!() };
+    assert!(st.wheel_listeners && st.wheel_blocking);
+    let mods = rabbithole_engine::Modifiers::default();
+    h.send(ToContent::PointerDown { x: 10.0, y: 20.0, button: 0, mods, click_count: 1 });
+    for i in 1..=5 {
+        h.send(ToContent::PointerMove { x: 10.0 + 30.0 * i as f32, y: 20.0, mods });
+        // One move at a time (queued moves are coalesced).
+        h.send(ToContent::Eval("0".into()));
+        wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::EvalResult(_))).expect("eval");
+    }
+    h.send(ToContent::PointerUp { x: 160.0, y: 20.0, button: 0, mods, inside: true });
+    h.send(ToContent::Wheel { x: 20.0, y: 20.0, dx: 0.0, dy: 120.0, mods, scrolled: false });
+    h.send(ToContent::Eval("moves + ':' + wheels.join(',')".into()));
+    let (_, r) = wait_for(&rx, 1, Duration::from_secs(10), |m| matches!(m, FromContent::EvalResult(_))).expect("eval");
+    let FromContent::EvalResult(r) = r else { unreachable!() };
+    assert_eq!(r.trim(), "'5:120'");
+}
+
 #[test]
 fn page_scrolls_are_reported_to_the_ui() {
     let (sink, rx) = sink();

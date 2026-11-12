@@ -142,8 +142,11 @@ pub enum ToContent {
     PointerDown { x: f32, y: f32, button: u8, mods: Modifiers, click_count: u8 },
     /// `inside` = released over the page area.
     PointerUp { x: f32, y: f32, button: u8, mods: Modifiers, inside: bool },
-    /// Wheel over a scroll container (the UI scrolls the page itself).
-    Wheel { x: f32, y: f32, dx: f32, dy: f32 },
+    /// Wheel over a scroll container, or over a page with `wheel`
+    /// listeners: a `wheel` event first; unless cancelled the container
+    /// scrolls (or the page: `ScrollBy` back to the UI). `scrolled`: the UI
+    /// already scrolled the page (only passive listeners: just notify).
+    Wheel { x: f32, y: f32, dx: f32, dy: f32, mods: Modifiers, scrolled: bool },
     Key(KeyInput),
     /// Text typed through the IME.
     Text(String),
@@ -183,6 +186,10 @@ pub struct PageState {
     pub key_listeners: bool,
     /// An element has keyboard focus.
     pub focused: bool,
+    /// Scripts listen for `wheel` (`wheel_blocking`: with a listener that
+    /// may cancel it, so the UI must let the page decide before scrolling).
+    pub wheel_listeners: bool,
+    pub wheel_blocking: bool,
     pub has_selection: bool,
 }
 

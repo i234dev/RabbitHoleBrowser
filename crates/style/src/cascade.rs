@@ -495,6 +495,10 @@ fn layered(s: Specificity, layer: u32, important: bool) -> Specificity {
 /// input's button.
 pub(crate) fn control_pseudo_slot(doc: &Document, node: NodeId) -> Option<PseudoElement> {
     let el = doc.element(node)?;
+    // Elements in the top layer keep their `::backdrop` style there.
+    if doc.top_layer.contains(&node) {
+        return Some(PseudoElement::Backdrop);
+    }
     match el.tag.as_str() {
         "textarea" => Some(PseudoElement::Placeholder),
         "progress" => Some(PseudoElement::ProgressValue),

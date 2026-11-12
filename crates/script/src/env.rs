@@ -25,6 +25,12 @@ pub trait HostEnv {
     fn node_client_rects(&mut self, node: NodeId) -> Vec<Rect> {
         self.node_rect(node).into_iter().collect()
     }
+    /// Bounding box of the border box as painted: mapped through the CSS
+    /// transforms of the node and its ancestors (`getBoundingClientRect`),
+    /// document coordinates.
+    fn node_client_rect(&mut self, node: NodeId) -> Option<Rect> {
+        self.node_rect(node)
+    }
     /// Elements painted at a viewport point, topmost first (the engine's
     /// paint-order hit test). `None` = not supported (geometric fallback).
     fn elements_from_point(&mut self, _x: f32, _y: f32) -> Option<Vec<NodeId>> {

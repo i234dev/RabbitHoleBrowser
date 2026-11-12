@@ -383,7 +383,7 @@ fn infinite_scroll_inside_a_scroll_container() {
     assert!(eval(&h, &rx, "log.join('|')").starts_with("io false 50 500"), "{}", eval(&h, &rx, "log.join('|')"));
     // Wheel over the container (the UI forwards it to the page).
     for _ in 0..12 {
-        h.send(ToContent::Wheel { x: 200.0, y: 200.0, dx: 0.0, dy: 100.0 });
+        h.send(ToContent::Wheel { x: 200.0, y: 200.0, dx: 0.0, dy: 100.0, mods: Modifiers::default(), scrolled: false });
         std::thread::sleep(Duration::from_millis(20));
     }
     let deadline = Instant::now() + Duration::from_secs(10);

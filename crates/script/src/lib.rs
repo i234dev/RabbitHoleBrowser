@@ -106,6 +106,9 @@ pub const TICK_SLICE: std::time::Duration = std::time::Duration::from_millis(100
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventDetail {
     Mouse { x: f32, y: f32, button: u8, ctrl: bool, shift: bool, alt: bool, meta: bool },
+    /// `wheel` (WheelEvent): pointer position and scroll deltas in CSS px
+    /// (`deltaMode` 0).
+    Wheel { x: f32, y: f32, dx: f32, dy: f32, ctrl: bool, shift: bool, alt: bool, meta: bool },
     Key { key: String, code: String, ctrl: bool, shift: bool, alt: bool, meta: bool, repeat: bool },
     Input { data: Option<String> },
     /// `transition*` (TransitionEvent: `name` = propertyName) or
@@ -752,6 +755,13 @@ impl ScriptHost {
     pub fn any_listener_for(&self, event_type: &str) -> bool {
         let st = self.state.borrow();
         st.listener_counts.iter().any(|((_, t), c)| t == event_type && *c > 0)
+    }
+
+    /// Does a listener that may cancel `event_type` (not passive) exist
+    /// anywhere? (Wheel input must wait for those before scrolling.)
+    pub fn any_blocking_listener_for(&self, event_type: &str) -> bool {
+        let st = self.state.borrow();
+        st.listeners.values().flatten().any(|l| l.ty == event_type && !l.passive && !l.removed.get())
     }
 
     /// Does `node` have any listener at all?

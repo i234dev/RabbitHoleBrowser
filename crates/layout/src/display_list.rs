@@ -264,6 +264,15 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
             radius: 0.0,
         });
     }
+    // The top layer (modal dialogs): painted after everything else, in
+    // viewport coordinates, each over its `::backdrop`.
+    let top_layer: Vec<(NodeId, &LayoutBox)> = ctx
+        .doc
+        .top_layer
+        .iter()
+        .filter(|&&n| ctx.doc.is_connected(n))
+        .filter_map(|&n| tree.box_of(ctx.doc, n).filter(|b| b.node == Some(n)).map(|b| (n, b)))
+        .collect();
     let mut p = Painter {
         list: &mut list,
         ctx,
@@ -273,9 +282,12 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         sticky_scrollport: Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height),
         hits: HitList::default(),
         scope: None,
-        hoisted: std::collections::HashSet::new(),
+        hoisted: top_layer.iter().map(|(_, b)| *b as *const LayoutBox as usize).collect(),
     };
     p.paint_stacking_context(root, bounds);
+    for (node, b) in top_layer {
+        p.paint_top_layer(node, b);
+    }
     let hits = std::mem::take(&mut p.hits);
     list.hits = hits;
     list
@@ -365,6 +377,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             return;
         }
         let saved_scope = self.scope;
+        // Culling (`visible`) compares the boxes' own (pre-transform)
+        // coordinates with the painted area: inside the wrappers below, the
+        // area is mapped back into the subtree's coordinates (a scaled-down
+        // container shows children laid out far outside the viewport).
+        let saved_bounds = self.bounds;
         // Sticky displacement, transform and opacity wrappers.
         let (sdx, sdy) = root.sticky_offset(self.sticky_scrollport, cb);
         let start = self.list.items.len();
@@ -376,6 +393,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, 1.0, sdx, sdy]));
             self.push_scope(HitScope::Transform(Some([1.0, 0.0, 0.0, 1.0, -sdx, -sdy])));
             pushed_transform = true;
+            self.bounds = Rect::new(self.bounds.x - sdx, self.bounds.y - sdy, self.bounds.w, self.bounds.h);
             if sticky {
                 self.list.sticky.push(StickyPatch {
                     item: start,
@@ -390,8 +408,14 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let mut pushed_matrix = false;
         if let Some(m) = root.transform_matrix() {
             self.list.push(DisplayItem::PushTransform(m));
-            self.push_scope(HitScope::Transform(crate::tree::invert_matrix(m)));
+            let inverse = crate::tree::invert_matrix(m);
+            self.push_scope(HitScope::Transform(inverse));
             pushed_matrix = true;
+            self.bounds = match inverse {
+                Some(inv) => rabbithole_gfx::path::transform_rect_bounds(&inv, self.bounds),
+                // Flattened to nothing (scale(0)): nothing shows.
+                None => Rect::new(self.bounds.x, self.bounds.y, 0.0, 0.0),
+            };
         }
         let opacity = root.style.opacity.clamp(0.0, 1.0);
         let layer = opacity < 1.0;
@@ -402,6 +426,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.items.truncate(start);
             self.list.sticky.truncate(sticky_start);
             self.scope = saved_scope;
+            self.bounds = saved_bounds;
             return;
         }
         let mask = self.mask_items(root);
@@ -418,6 +443,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         self.pop_wrappers(pushed_matrix, pushed_transform);
         self.scope = saved_scope;
+        self.bounds = saved_bounds;
     }
 
     /// The mask of a box with `mask-image` layers: its mask layers painted
@@ -510,6 +536,36 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         for _ in &d.clips {
             self.list.push(DisplayItem::PopClip);
         }
+        self.scope = saved;
+    }
+
+    /// A top-layer element: its `::backdrop` over the whole viewport (it
+    /// takes the clicks outside the element: they target the element, as
+    /// in browsers), then the element as a stacking context of its own.
+    fn paint_top_layer(&mut self, node: NodeId, b: &'t LayoutBox) {
+        let saved = self.scope;
+        let saved_bounds = self.bounds;
+        self.list.push(DisplayItem::PushFixed);
+        self.push_scope(HitScope::Fixed);
+        let vp = Rect::new(0.0, 0.0, self.ctx.viewport_width, self.ctx.viewport_height);
+        self.bounds = vp;
+        if let Some(bs) = crate::pseudo_style(self.ctx.styles, node, rabbithole_css::PseudoElement::Marker) {
+            if !bs.background_color.is_transparent() && bs.visibility != Visibility::Hidden {
+                self.list.push(DisplayItem::Rect { rect: vp, color: bs.background_color.scale_alpha(bs.opacity.clamp(0.0, 1.0)), radius: 0.0 });
+            }
+        }
+        self.record_hit(vp, Some(node));
+        self.list.fixed_bounds.push(vp);
+        if b.fixed && b.flow == Flow::Absolute {
+            self.paint_stacking_context(b, vp);
+        } else {
+            // Not fixed (author styles): painted where it is, still on top.
+            self.list.push(DisplayItem::PopFixed);
+            self.paint_stacking_context(b, saved_bounds);
+            self.list.push(DisplayItem::PushFixed);
+        }
+        self.list.push(DisplayItem::PopFixed);
+        self.bounds = saved_bounds;
         self.scope = saved;
     }
 

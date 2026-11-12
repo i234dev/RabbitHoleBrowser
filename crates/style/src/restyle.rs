@@ -324,6 +324,7 @@ impl InvalidationMap {
                 | Pseudo::InRange
                 | Pseudo::OutOfRange
                 | Pseudo::Default
+                | Pseudo::Modal
                 | Pseudo::Open => {
                     let rel = if matches!(p, Pseudo::Valid | Pseudo::Invalid | Pseudo::Indeterminate | Pseudo::Default) { rel | R_HAS } else { rel };
                     for a in ["value", "checked", "placeholder", "required", "readonly", "disabled", "type", "min", "max", "selected", "data-rh-indeterminate", "data-rh-custom-validity", "open", "contenteditable"] {
