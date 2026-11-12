@@ -3949,17 +3949,10 @@ impl Realm {
                     let mut items = Vec::new();
                     if !next.is_empty() {
                         let it = sl!(ri).clone();
-                        loop {
-                            match self.iterator_step(&it, &next) {
-                                Ok(Some(v)) => items.push(v),
-                                Ok(None) => break,
-                                Err(e) => {
-                                    sl!(rn) = Value::Empty;
-                                    return Err(e);
-                                }
-                            }
-                        }
+                        // Rooted while the iterator runs (it may collect).
+                        let r = self.collect_iterator(&it, &next);
                         sl!(rn) = Value::Empty;
+                        items = r?;
                     }
                     let a = self.new_array(items);
                     push!(Value::Object(a));

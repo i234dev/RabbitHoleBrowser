@@ -2865,6 +2865,14 @@ impl Compiler {
                 self.fs().exits.push(ExitCtx::DestructClose { iter, next });
                 let r: CResult<()> = (|| {
                     for el in elements {
+                        // A property target is evaluated before the step.
+                        if let Some(p) = el {
+                            if self.emit_member_target_ref(p)? {
+                                self.emit(Op::IteratorStepReg(iter, next));
+                                self.emit_member_target_store(p)?;
+                                continue;
+                            }
+                        }
                         self.emit(Op::IteratorStepReg(iter, next));
                         match el {
                             Some(p) => self.compile_pattern_store(p, is_decl)?,
@@ -2874,8 +2882,13 @@ impl Compiler {
                         }
                     }
                     if let Some(r) = rest {
-                        self.emit(Op::IteratorRestReg(iter, next));
-                        self.compile_pattern_store(r, is_decl)?;
+                        if self.emit_member_target_ref(r)? {
+                            self.emit(Op::IteratorRestReg(iter, next));
+                            self.emit_member_target_store(r)?;
+                        } else {
+                            self.emit(Op::IteratorRestReg(iter, next));
+                            self.compile_pattern_store(r, is_decl)?;
+                        }
                     }
                     Ok(())
                 })();
@@ -3585,6 +3598,64 @@ impl Compiler {
             }
             self.emit(Op::SuperCall(args.len() as u16));
         }
+        Ok(())
+    }
+
+    /// The member expression an assignment-pattern element targets
+    /// (`[a.b = 1] = …`), if any.
+    fn member_target(p: &Pattern) -> Option<(&Expr, &MemberProp, Option<&Expr>)> {
+        let (t, default) = match p {
+            Pattern::Assign { target, default } => (&**target, Some(&**default)),
+            p => (p, None),
+        };
+        match t {
+            Pattern::Expr(e) => match &e.kind {
+                ExprKind::Member { object, property, optional: false } if !matches!(object.kind, ExprKind::Super) => Some((object, property, default)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Evaluate a member target's object (and key) ahead of the value
+    /// (DestructuringAssignmentEvaluation order). False when `p` is not one.
+    fn emit_member_target_ref(&mut self, p: &Pattern) -> CResult<bool> {
+        let Some((object, property, _)) = Self::member_target(p) else { return Ok(false) };
+        self.compile_expr(object)?;
+        match property {
+            MemberProp::Identifier(_) => {}
+            MemberProp::Computed(k) => {
+                self.compile_expr(k)?;
+                self.emit(Op::ToPropertyKey);
+            }
+            MemberProp::Private(n) => self.emit_private_name(n)?,
+        }
+        Ok(true)
+    }
+
+    /// [ref… value] -> []: apply the default, then PutValue.
+    fn emit_member_target_store(&mut self, p: &Pattern) -> CResult<()> {
+        let Some((_, property, default)) = Self::member_target(p) else { return Ok(()) };
+        if let Some(d) = default {
+            self.emit(Op::Dup);
+            let j = self.emit(Op::JumpIfNotUndefined(0));
+            self.emit(Op::Pop);
+            self.compile_expr(d)?;
+            self.patch_jump(j);
+        }
+        match property {
+            MemberProp::Identifier(name) => {
+                let i = self.const_str(name);
+                self.emit_ic(|ic| Op::SetProp(i, ic));
+            }
+            MemberProp::Computed(_) => {
+                self.emit(Op::SetElem);
+            }
+            MemberProp::Private(_) => {
+                self.emit(Op::SetPrivate);
+            }
+        }
+        self.emit(Op::Pop);
         Ok(())
     }
 
