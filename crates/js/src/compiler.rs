@@ -120,6 +120,23 @@ pub struct LazyScope {
 /// the function's variable environment.
 pub const EVAL_VARS: &str = "%evalvars";
 
+impl EvalSite {
+    /// Private names (without `#`) of the classes enclosing the call.
+    pub fn private_names(&self) -> Vec<crate::ast::Name> {
+        let mut out = Vec::new();
+        let mut node = self.env.clone();
+        while let Some(n) = node {
+            for k in n.names.keys() {
+                if let Some(p) = k.strip_prefix('#') {
+                    out.push(p.into());
+                }
+            }
+            node = n.parent.clone();
+        }
+        out
+    }
+}
+
 /// What a direct `eval` call site knows at compile time.
 #[derive(Debug)]
 pub struct EvalSite {
@@ -363,6 +380,10 @@ pub fn compile_lazy(code: &FunctionCode) -> CResult<Rc<FunctionCode>> {
     parent.scopes[0].materialized = false;
     parent.class_depth = lz.class_depth;
     c.fns.push(parent);
+    if code.flags.is_method {
+        // Known while compiling the body (direct eval's `super` checks).
+        c.pending_tweak = Some(Box::new(|fl: &mut CodeFlags| fl.is_method = true));
+    }
     let idx = c.compile_function(&lz.func, Some(&lz.name))?;
     c.check_internal()?;
     let mut parent = c.fns.pop().unwrap();

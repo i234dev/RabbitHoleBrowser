@@ -70,30 +70,6 @@ fn parse_program_unchecked(source: &str, is_module: bool, ctx: &crate::early::Ea
     }
 }
 
-/// Parse direct eval code; `strict` when the calling code is strict.
-pub fn parse_eval(source: &str, strict: bool) -> Result<Program, ParseError> {
-    let parse = |lazy: bool| -> (Result<Program, ParseError>, bool) {
-        let mut p = match Parser::new(source, false) {
-            Ok(p) => p,
-            Err(e) => return (Err(e), false),
-        };
-        if !lazy {
-            p.lazy = false;
-        }
-        p.ctx.strict = strict;
-        let r = p.parse_program();
-        (r, p.skipped)
-    };
-    let mut r = match parse(true) {
-        (Err(_), true) => parse(false).0,
-        (r, _) => r,
-    };
-    if let Ok(p) = &mut r {
-        p.strict |= strict;
-    }
-    r
-}
-
 /// Lazy parsing of function bodies (on unless `RH_EAGER_PARSE` is set).
 fn lazy_parse_enabled() -> bool {
     thread_local!(static LAZY: bool = std::env::var_os("RH_EAGER_PARSE").is_none());

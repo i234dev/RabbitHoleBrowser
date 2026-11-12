@@ -4515,8 +4515,19 @@ impl Realm {
             let code = self.compile(&src, "eval", false)?;
             return self.run_script(code);
         };
-        let program = match crate::parser::parse_eval(&src, site.strict) {
-            Ok(p) => p,
+        let ctx = crate::early::EarlyContext {
+            strict: site.strict,
+            in_function: site.in_function,
+            in_method: site.in_method,
+            in_derived_ctor: site.in_derived_ctor,
+            in_class_field_init: site.in_field_init,
+            private_names: site.private_names(),
+        };
+        let program = match crate::parser::parse_program_in(&src, false, &ctx) {
+            Ok(mut p) => {
+                p.strict |= site.strict;
+                p
+            }
             Err(e) => {
                 let msg = format!("{} (eval:{}:{})", e.message, e.line, e.column);
                 return Err(self.new_error("SyntaxError", &msg));
