@@ -162,7 +162,7 @@ pub fn layout_incremental(prev: LayoutTree, ctx: &LayoutContext, damage: &Layout
             if !tainted.insert(c) {
                 break;
             }
-            cur = doc.parent(c);
+            cur = doc.box_parent(c);
         }
     }
     let mut map = HashMap::new();

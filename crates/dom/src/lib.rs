@@ -154,6 +154,37 @@ impl MutationLog {
     }
 }
 
+/// A value whose every mutable access is stamped with a fresh,
+/// process-wide unique number, so readers can tell cheaply whether it may
+/// have changed (style sources kept outside the node tree).
+#[derive(Debug, Clone, Default)]
+pub struct Tracked<T> {
+    inner: T,
+    stamp: u64,
+}
+
+impl<T> Tracked<T> {
+    /// Changes whenever the value was borrowed mutably.
+    pub fn stamp(&self) -> u64 {
+        self.stamp
+    }
+}
+
+impl<T> std::ops::Deref for Tracked<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> std::ops::DerefMut for Tracked<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.stamp = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        &mut self.inner
+    }
+}
+
 #[derive(Clone)]
 pub struct Document {
     pub nodes: Vec<Node>,
@@ -170,11 +201,11 @@ pub struct Document {
     pub shadow_hosts: HashMap<NodeId, NodeId>,
     /// Texts of constructed stylesheets adopted by the document (key
     /// `Document::ROOT`) or by a shadow root (`adoptedStyleSheets`).
-    pub adopted_styles: HashMap<NodeId, Vec<String>>,
+    pub adopted_styles: Tracked<HashMap<NodeId, Vec<String>>>,
     /// CSSOM-modified sheets of `<style>` / `<link>` elements:
     /// element → (element source text when modified, sheet text to render).
     /// Ignored once the element's own text changes.
-    pub sheet_overrides: HashMap<NodeId, (String, String)>,
+    pub sheet_overrides: Tracked<HashMap<NodeId, (String, String)>>,
     /// Custom elements whose constructor ran (`:defined`).
     pub defined_custom: std::collections::HashSet<NodeId>,
     /// `<template>` element → its content (a parentless `#fragment` node):
@@ -248,8 +279,8 @@ impl Document {
             log: MutationLog::default(),
             shadow_roots: HashMap::new(),
             shadow_hosts: HashMap::new(),
-            adopted_styles: HashMap::new(),
-            sheet_overrides: HashMap::new(),
+            adopted_styles: Tracked::default(),
+            sheet_overrides: Tracked::default(),
             defined_custom: std::collections::HashSet::new(),
             template_contents: HashMap::new(),
             declarative_shadow: HashMap::new(),
@@ -782,6 +813,19 @@ impl Document {
     /// Element children in the flat tree.
     pub fn flat_child_elements(&self, id: NodeId) -> Vec<NodeId> {
         self.flat_children(id).into_iter().filter(|&c| matches!(self.nodes[c].data, NodeData::Element(_))).collect()
+    }
+
+    /// The node whose box contains `id`'s box: the flat-tree parent, the
+    /// host for a shadow root, and the DOM parent for unassigned light
+    /// children of a host (a conservative answer for invalidation).
+    pub fn box_parent(&self, id: NodeId) -> Option<NodeId> {
+        if self.shadow_roots.is_empty() {
+            return self.nodes[id].parent;
+        }
+        if let Some(h) = self.shadow_host(id) {
+            return Some(h);
+        }
+        self.flat_parent(id).or(self.nodes[id].parent)
     }
 
     /// Parent in the flat tree: the assigned slot for children of a shadow

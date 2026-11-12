@@ -117,6 +117,49 @@ fn child_list_changes_with_structural_selectors() {
 }
 
 #[test]
+fn insertions_and_moves_with_positional_selectors() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>
+        p:first-child { color: green } p:last-child { font-weight: bold } p:only-child { font-size: 30px }
+        p:nth-child(3n+1) { margin-left: 20px } p:nth-last-child(2) { padding-left: 7px }
+        span:first-of-type { color: red } span:last-of-type { color: blue } em:only-of-type { color: orange }
+        p + span { margin-left: 3px } p ~ em { margin-left: 5px }
+        </style></head><body><div id="box"><p>a</p></div></body></html>"#,
+    );
+    let bx = id(&page, "box");
+    let mut nodes = vec![page.doc.first_child(bx).unwrap()];
+    for (i, tag) in ["p", "span", "p", "em", "span", "p", "em"].iter().enumerate() {
+        let n = page.doc.create_element(tag, vec![]);
+        let t = page.doc.create_text(&format!("{tag}{i}"));
+        page.doc.append_child(n, t);
+        // Append, prepend, insert in the middle.
+        let reference = match i % 3 {
+            0 => None,
+            1 => page.doc.first_child(bx),
+            _ => nodes.get(nodes.len() / 2).copied(),
+        };
+        page.doc.insert_before(bx, n, reference);
+        nodes.push(n);
+        check(&engine, &mut page, &format!("insert {tag} #{i}"));
+    }
+    // Moves within the parent (removed and inserted in one batch).
+    for k in 0..4 {
+        let n = nodes[k * 2 % nodes.len()];
+        page.doc.detach(n);
+        let reference = if k % 2 == 0 { page.doc.first_child(bx) } else { None };
+        page.doc.insert_before(bx, n, reference);
+        check(&engine, &mut page, &format!("move #{k}"));
+    }
+    // Several insertions in one batch.
+    for tag in ["em", "p", "span"] {
+        let n = page.doc.create_element(tag, vec![]);
+        let reference = page.doc.first_child(bx).and_then(|f| page.doc.next_sibling(f));
+        page.doc.insert_before(bx, n, reference);
+    }
+    check(&engine, &mut page, "batch of insertions");
+}
+
+#[test]
 fn hover_inherit_vars_and_rem() {
     let (engine, mut page) = load(
         r##"<html><head><style>
@@ -424,4 +467,91 @@ fn acid2_incremental_matches_full() {
             check(&engine, &mut page, "class back");
         }
     }
+}
+
+const CARD_SHEET: &str = ":host { display: block; border: 1px solid red } :host(.on) { padding: 10px } ::slotted(.light) { color: blue } .in { margin: 3px } slot[name=title] { font-weight: bold }";
+
+/// Attach a shadow root with an adopted sheet, a named slot with fallback
+/// text and a default slot.
+fn build_shadow(page: &mut Page, host: NodeId) -> NodeId {
+    let root = page.doc.attach_shadow(host);
+    page.doc.adopted_styles.insert(root, vec![CARD_SHEET.to_string()]);
+    let wrap = page.doc.create_element("div", vec![("class".into(), "in".into())]);
+    let title = page.doc.create_element("slot", vec![("name".into(), "title".into())]);
+    let fallback = page.doc.create_text("no title");
+    page.doc.append_child(title, fallback);
+    let body = page.doc.create_element("slot", vec![]);
+    page.doc.append_child(wrap, title);
+    page.doc.append_child(wrap, body);
+    page.doc.append_child(root, wrap);
+    page.doc.defined_custom.insert(host);
+    root
+}
+
+/// Shadow trees: attaching roots, adopted sheets, slot assignment,
+/// fallback content, `:host` / `::slotted` / `:defined` and light-DOM
+/// insertions are restyled incrementally (not a full restyle each time).
+#[test]
+fn shadow_dom_changes_restyle_incrementally() {
+    let (engine, mut page) = load(
+        r#"<html><head><style>
+        x-card { display: block; margin: 4px } x-card:not(:defined) { color: gray }
+        .light { padding: 2px } .big { font-size: 30px }
+        </style></head><body>
+        <div id="feed"><x-card id="c1"><span class="light" slot="title">t1</span><p class="light">body 1</p></x-card></div>
+        <x-card id="c2"><b>light</b></x-card>
+        </body></html>"#,
+    );
+    let feed = id(&page, "feed");
+    let c1 = id(&page, "c1");
+    let c2 = id(&page, "c2");
+    check(&engine, &mut page, "initial");
+    let r1 = build_shadow(&mut page, c1);
+    check(&engine, &mut page, "first shadow root");
+    let full_before = page.incr.stats.style_full;
+    let r2 = build_shadow(&mut page, c2);
+    check(&engine, &mut page, "second shadow root (same sheet)");
+    page.doc.set_attr(c1, "class", Some("on"));
+    check(&engine, &mut page, ":host(.on)");
+    // Light children: insertion, slot reassignment, fallback content.
+    for i in 0..3 {
+        let card = page.doc.create_element("x-card", vec![]);
+        let t = page.doc.create_element("span", vec![("class".into(), "light".into()), ("slot".into(), "title".into())]);
+        let tt = page.doc.create_text(&format!("new {i}"));
+        page.doc.append_child(t, tt);
+        page.doc.append_child(card, t);
+        page.doc.append_child(feed, card);
+        check(&engine, &mut page, "new undefined card in feed");
+        build_shadow(&mut page, card);
+        check(&engine, &mut page, "card upgraded");
+    }
+    let b = page.doc.child_elements(c2).next().unwrap();
+    page.doc.set_attr(b, "slot", Some("title"));
+    check(&engine, &mut page, "slot attribute: fallback hidden");
+    page.doc.set_attr(b, "slot", Some("nowhere"));
+    check(&engine, &mut page, "slot attribute: unassigned, fallback back");
+    page.doc.set_attr(b, "slot", None);
+    page.doc.set_attr(b, "class", Some("light big"));
+    check(&engine, &mut page, "slotted class");
+    // Slot renamed / removed inside the shadow tree.
+    let wrap = page.doc.child_elements(r2).next().unwrap();
+    let title_slot = page.doc.child_elements(wrap).next().unwrap();
+    page.doc.set_attr(title_slot, "name", Some("other"));
+    check(&engine, &mut page, "slot renamed");
+    page.doc.detach(title_slot);
+    check(&engine, &mut page, "slot removed");
+    // A light child removed, a shadow child added.
+    let p = page.doc.child_elements(c1).nth(1).unwrap();
+    page.doc.detach(p);
+    check(&engine, &mut page, "light child removed");
+    let extra = page.doc.create_element("div", vec![("class".into(), "in big".into())]);
+    page.doc.append_child(r1, extra);
+    check(&engine, &mut page, "shadow child added");
+    // The adopted sheets of one root replaced.
+    page.doc.adopted_styles.insert(r1, vec![":host { display: block; margin-left: 40px } .in { color: green }".to_string()]);
+    check(&engine, &mut page, "adopted sheet replaced");
+    // Document-level changes next to shadow trees.
+    page.doc.set_attr(feed, "class", Some("big"));
+    check(&engine, &mut page, "document class");
+    assert_eq!(page.incr.stats.style_full, full_before, "shadow DOM changes must not restyle the whole document");
 }

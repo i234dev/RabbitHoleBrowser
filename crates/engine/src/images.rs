@@ -558,6 +558,8 @@ pub struct ImageState {
     bg_pending: HashSet<String>,
     /// Page scroll at the last sync (scroll-driven syncs are throttled).
     last_sync_scroll: (f32, f32),
+    /// Image elements in the document at a DOM epoch.
+    image_nodes: Option<(u64, Vec<NodeId>)>,
     /// Favicon URL once requested.
     favicon_url: Option<String>,
     /// Decoded favicon (`<link rel=icon>` or `/favicon.ico`).
@@ -573,6 +575,7 @@ impl Default for ImageState {
             tx,
             rx,
             script_nodes: Vec::new(),
+            image_nodes: None,
             events: Vec::new(),
             next_frame: None,
             clock: None,
@@ -699,12 +702,17 @@ impl Engine {
         let vp = page.viewport;
         let dpr = self.device_pixel_ratio;
         let scripting = self.scripting;
-        let mut nodes: Vec<NodeId> = page
-            .doc
-            .shadow_including_descendants(Document::ROOT)
-            .into_iter()
-            .filter(|&n| is_image_element(&page.doc, n) && page.styles.get(n).is_some())
-            .collect();
+        // Image elements of the document: walked again only when the DOM
+        // changed (scrolls and restyles see the same elements).
+        let epoch = page.doc.epoch();
+        if !matches!(&page.image_state.image_nodes, Some((e, _)) if *e == epoch) {
+            let v: Vec<NodeId> = page.doc.shadow_including_descendants(Document::ROOT).into_iter().filter(|&n| is_image_element(&page.doc, n)).collect();
+            page.image_state.image_nodes = Some((epoch, v));
+        }
+        let mut nodes: Vec<NodeId> = match &page.image_state.image_nodes {
+            Some((_, v)) => v.iter().copied().filter(|&n| page.styles.get(n).is_some()).collect(),
+            None => Vec::new(),
+        };
         let attached: HashSet<NodeId> = nodes.iter().copied().collect();
         let script_nodes = std::mem::take(&mut page.image_state.script_nodes);
         for &n in &script_nodes {

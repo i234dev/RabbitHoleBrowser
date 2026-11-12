@@ -155,6 +155,13 @@ pub(crate) struct ScopeIndex {
     ua_only: RuleIndex,
     pub(crate) shadow: Vec<RuleIndex>,
     by_root: HashMap<NodeId, usize>,
+    /// Source ids of the document-level sheets, in order (see
+    /// [`Stylesheet::source_id`]).
+    pub(crate) doc_sources: Vec<u64>,
+    /// Source ids of the sheets of each shadow root.
+    pub(crate) root_sources: HashMap<NodeId, Vec<u64>>,
+    /// Shadow group (by source ids) -> index into `shadow`.
+    groups: HashMap<Vec<u64>, usize>,
 }
 
 impl ScopeIndex {
@@ -162,49 +169,72 @@ impl ScopeIndex {
     pub(crate) fn build(author: &[Stylesheet], env: &MediaEnv) -> ScopeIndex {
         let mut ua_rules = Vec::new();
         ua_sheet().active_rules(env, &mut ua_rules);
-        let mut author_rules: Vec<Vec<&StyleRule>> = Vec::with_capacity(author.len());
-        for sheet in author {
-            let mut rules = Vec::new();
-            sheet.active_rules(env, &mut rules);
-            author_rules.push(rules);
-        }
-        let base = |i: usize| -> Option<Rc<str>> { author[i].base_url.as_deref().map(Rc::from) };
         let mut doc = RuleIndex::default();
         doc.add_sheet(&ua_rules, true, None);
-        let mut per_root: std::collections::BTreeMap<NodeId, Vec<usize>> = std::collections::BTreeMap::new();
-        for (i, (sheet, rules)) in author.iter().zip(&author_rules).enumerate() {
+        let mut doc_sources = Vec::new();
+        for sheet in author {
             if sheet.shadow_scopes.is_empty() {
-                doc.add_sheet(rules, false, base(i));
-            } else {
-                for &r in &sheet.shadow_scopes {
-                    per_root.entry(r).or_default().push(i);
-                }
+                let mut rules = Vec::new();
+                sheet.active_rules(env, &mut rules);
+                doc.add_sheet(&rules, false, sheet.base_url.as_deref().map(Rc::from));
+                doc_sources.push(sheet.source_id);
             }
         }
+        // Shadow trees without sheets of their own match only UA rules.
         let mut ua_only = RuleIndex::default();
-        if !per_root.is_empty() {
-            ua_only.add_sheet(&ua_rules, true, None);
+        ua_only.add_sheet(&ua_rules, true, None);
+        let mut ix = ScopeIndex { doc, ua_only, shadow: Vec::new(), by_root: HashMap::new(), doc_sources, root_sources: HashMap::new(), groups: HashMap::new() };
+        ix.rebuild_shadow(author, env);
+        ix
+    }
+
+    /// Re-index the shadow-root scoped sheets of `author` (the
+    /// document-level sheets must be the ones the index was built with).
+    /// Groups of sheets indexed before are reused; returns the indices of
+    /// the groups that were added.
+    pub(crate) fn rebuild_shadow(&mut self, author: &[Stylesheet], env: &MediaEnv) -> Vec<usize> {
+        let mut per_root: std::collections::BTreeMap<NodeId, Vec<usize>> = std::collections::BTreeMap::new();
+        for (i, sheet) in author.iter().enumerate() {
+            for &r in &sheet.shadow_scopes {
+                per_root.entry(r).or_default().push(i);
+            }
         }
-        let mut shadow: Vec<RuleIndex> = Vec::new();
-        let mut groups: HashMap<Vec<usize>, usize> = HashMap::new();
-        let mut by_root = HashMap::new();
+        let mut ua_rules = Vec::new();
+        // Sheets without a known source cannot be told apart: key them by
+        // position (such groups are never reused).
+        let unknown = author.iter().any(|s| s.source_id == 0);
+        if unknown {
+            self.shadow.clear();
+            self.groups.clear();
+        }
+        self.by_root.clear();
+        self.root_sources.clear();
+        let mut added = Vec::new();
         for (root, list) in per_root {
-            let gi = match groups.get(&list) {
+            let key: Vec<u64> = list.iter().map(|&i| if unknown { i as u64 } else { author[i].source_id }).collect();
+            let gi = match self.groups.get(&key) {
                 Some(&g) => g,
                 None => {
+                    if ua_rules.is_empty() {
+                        ua_sheet().active_rules(env, &mut ua_rules);
+                    }
                     let mut ix = RuleIndex::default();
                     ix.add_sheet(&ua_rules, true, None);
                     for &i in &list {
-                        ix.add_sheet(&author_rules[i], false, base(i));
+                        let mut rules = Vec::new();
+                        author[i].active_rules(env, &mut rules);
+                        ix.add_sheet(&rules, false, author[i].base_url.as_deref().map(Rc::from));
                     }
-                    shadow.push(ix);
-                    groups.insert(list, shadow.len() - 1);
-                    shadow.len() - 1
+                    self.shadow.push(ix);
+                    self.groups.insert(key.clone(), self.shadow.len() - 1);
+                    added.push(self.shadow.len() - 1);
+                    self.shadow.len() - 1
                 }
             };
-            by_root.insert(root, gi);
+            self.by_root.insert(root, gi);
+            self.root_sources.insert(root, key);
         }
-        ScopeIndex { doc, ua_only, shadow, by_root }
+        added
     }
 
     /// The index for the tree rooted at `root` (`None`: the document).
@@ -213,7 +243,6 @@ impl ScopeIndex {
             None => &self.doc,
             Some(r) => match self.by_root.get(&r) {
                 Some(&i) => &self.shadow[i],
-                None if self.ua_only.rules.is_empty() => &self.doc,
                 None => &self.ua_only,
             },
         }

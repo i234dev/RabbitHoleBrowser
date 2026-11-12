@@ -190,19 +190,11 @@ fn side_sheet_signature(doc: &Document) -> u64 {
     if doc.sheet_overrides.is_empty() && doc.adopted_styles.is_empty() && doc.shadow_roots.is_empty() {
         return 0;
     }
+    // Every mutable access to those maps gets a new stamp: no need to hash
+    // their (possibly large) texts on every flush.
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let mut keys: Vec<&NodeId> = doc.sheet_overrides.keys().collect();
-    keys.sort();
-    for k in keys {
-        k.hash(&mut h);
-        doc.sheet_overrides[k].hash(&mut h);
-    }
-    let mut keys: Vec<&NodeId> = doc.adopted_styles.keys().collect();
-    keys.sort();
-    for k in keys {
-        k.hash(&mut h);
-        doc.adopted_styles[k].hash(&mut h);
-    }
+    doc.sheet_overrides.stamp().hash(&mut h);
+    doc.adopted_styles.stamp().hash(&mut h);
     doc.shadow_roots.len().hash(&mut h);
     h.finish() | 1
 }
@@ -263,13 +255,22 @@ impl Engine {
         // node tree (not in the mutation log).
         let side = side_sheet_signature(&page.doc);
         let side_changed = std::mem::replace(&mut page.incr.side_sheets, side) != side;
-        if side_changed || log.overflow || log.entries.iter().any(|m| touches_sheets(&page.doc, m)) {
-            let sig = stylesheet_signature(&page.doc);
+        let touched = log.overflow || log.entries.iter().any(|m| touches_sheets(&page.doc, m));
+        if side_changed || touched {
+            // Only the sheets outside the tree changed (adopted sheets,
+            // shadow roots attached): collect again without hashing every
+            // `<style>` of the document first; the stored signature then
+            // matches no real one, so the next tree change collects again.
+            let sig = if touched { stylesheet_signature(&page.doc) } else { page.sheet_signature ^ 1 };
             if sig != page.sheet_signature {
                 page.sheet_signature = sig;
                 page.sheets = self.loader.collect_stylesheets(&page.doc, &page.base_url);
                 page.has_dynamic_rules = page.sheets.iter().any(sheet_has_dynamic_rules);
-                page.incr.style = None;
+                // Only shadow-root sheets changed (components attached or
+                // adopted sheets): keep the engine, restyle those hosts.
+                if !page.incr.style.as_mut().is_some_and(|se| se.set_sheets(&page.sheets)) {
+                    page.incr.style = None;
+                }
             }
             self.queue_link_events(page);
         }
@@ -286,6 +287,8 @@ impl Engine {
         let fresh = !matches!(&incr.style, Some(se) if se.env_matches(&env));
         let mut anim_changes: Vec<crate::animations::Change> = Vec::new();
         let mut anim_full = fresh;
+        // Elements this flush started rendering (incremental restyles).
+        let mut newly_styled: Vec<NodeId> = Vec::new();
         let anim_snapshot = page.anim.snapshot(&page.styles);
         if fresh {
             let mut se = StyleEngine::new(&page.sheets, &env);
@@ -295,7 +298,7 @@ impl Engine {
             incr.layout_full = true;
         } else {
             let se = incr.style.as_mut().expect("style engine");
-            let had_changes = !log.is_empty() || se_state_differs(se, &state);
+            let had_changes = !log.is_empty() || se_state_differs(se, &state) || se.has_pending(&page.doc);
             if !had_changes {
                 return;
             }
@@ -314,6 +317,9 @@ impl Engine {
                 incr.stats.style_incremental += 1;
                 incr.stats.elements_restyled += out.recomputed as u64;
                 for c in &out.changes {
+                    if c.old.as_ref().is_none_or(|s| s.display.is_none()) {
+                        newly_styled.push(c.node);
+                    }
                     incr.box_dirty.insert(c.node);
                     let display_changed = match (&c.old, &c.new) {
                         (Some(a), Some(b)) => a.display != b.display || a.position != b.position || a.float != b.float,
@@ -322,7 +328,13 @@ impl Engine {
                     if display_changed {
                         // Children's boxes depend on the parent's formatting
                         // context (blockification, table rows, ...).
-                        incr.box_dirty.extend(page.doc.child_elements(c.node));
+                        incr.box_dirty.extend(page.doc.flat_child_elements(c.node));
+                    }
+                }
+                for &n in &out.flat_changed {
+                    incr.box_dirty.insert(n);
+                    if page.doc.shadow_root(n).is_some() {
+                        incr.box_dirty.extend(page.doc.flat_child_elements(n));
                     }
                 }
             }
@@ -338,8 +350,14 @@ impl Engine {
         incr.layout_dirty = true;
         incr.dl_dirty = true;
         page.background = canvas_background(&page.doc, &page.styles);
-        if fresh || log.overflow || log.entries.iter().any(|m| matches!(m, Mutation::Children { .. } | Mutation::Node { .. })) {
-            rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images);
+        if fresh || log.overflow || anim_full {
+            rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images, None);
+        } else {
+            // Only newly rendered elements can be SVGs without an image.
+            let roots: Vec<NodeId> = std::mem::take(&mut newly_styled).into_iter().filter(|&n| page.doc.is_element(n, "svg")).collect();
+            if !roots.is_empty() {
+                rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images, Some(&roots));
+            }
         }
         if anim_full {
             // A full restyle lists no changes: compare the elements with
@@ -630,9 +648,28 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
         *full = true;
         return;
     }
+    let shadow = !doc.shadow_roots.is_empty();
+    // Boxes follow the flat tree: a shadow root's children are laid out in
+    // its host, a host's light children in the slots they are assigned to.
+    let boxed = |n: NodeId| if shadow { doc.shadow_host(n).unwrap_or(n) } else { n };
     let add_with_children = |n: NodeId, dirty: &mut HashSet<NodeId>| {
+        let n = boxed(n);
         dirty.insert(n);
-        dirty.extend(doc.child_elements(n));
+        if !shadow {
+            dirty.extend(doc.child_elements(n));
+            return;
+        }
+        dirty.extend(doc.flat_child_elements(n));
+        if let Some(root) = doc.shadow_root(n) {
+            // Light children (re)assigned: their slots hold the boxes.
+            dirty.extend(doc.descendants(root).filter(|&d| doc.is_element(d, "slot")));
+        }
+    };
+    let host_slots = |host: NodeId, dirty: &mut HashSet<NodeId>| {
+        if let Some(root) = doc.shadow_root(host) {
+            dirty.insert(host);
+            dirty.extend(doc.descendants(root).filter(|&d| doc.is_element(d, "slot")));
+        }
     };
     for m in &log.entries {
         match m {
@@ -643,25 +680,55 @@ fn damage_from_log(doc: &Document, log: &MutationLog, dirty: &mut HashSet<NodeId
                         add_with_children(p, dirty);
                     }
                 }
+                if shadow {
+                    if let Some(p) = doc.parent(*node) {
+                        if name == "slot" {
+                            host_slots(p, dirty);
+                        }
+                    }
+                    if name == "name" && doc.is_element(*node, "slot") {
+                        if let Some(h) = doc.containing_shadow_root(*node).and_then(|r| doc.shadow_host(r)) {
+                            add_with_children(h, dirty);
+                        }
+                    }
+                }
             }
             Mutation::Children { parent, child } => {
-                if doc.element(*parent).is_none() {
+                if doc.element(boxed(*parent)).is_none() {
                     *full = true;
                     continue;
                 }
-                // List markers count siblings.
-                add_with_children(*parent, dirty);
+                let p = boxed(*parent);
+                dirty.insert(p);
                 dirty.insert(*child);
+                // List markers count their `li` siblings; other children
+                // keep their boxes (the parent's box is rebuilt around them).
+                dirty.extend(doc.child_elements(*parent).filter(|&c| doc.is_element(c, "li")));
+                if shadow && p == *parent {
+                    // A light child of a host is laid out in its slot.
+                    host_slots(p, dirty);
+                }
+                if shadow && doc.element(*child).is_some() && doc.descendants(*child).any(|d| doc.is_element(d, "slot")) {
+                    if let Some(h) = doc.containing_shadow_root(*parent).and_then(|r| doc.shadow_host(r)) {
+                        add_with_children(h, dirty);
+                    }
+                }
             }
             Mutation::Text { node } => {
                 if let Some(p) = doc.parent(*node) {
-                    dirty.insert(p);
+                    dirty.insert(boxed(p));
+                    if shadow {
+                        host_slots(p, dirty);
+                    }
                 }
             }
             Mutation::Node { node } => {
                 add_with_children(*node, dirty);
                 if let Some(p) = doc.parent(*node) {
-                    dirty.insert(p);
+                    dirty.insert(boxed(p));
+                    if shadow {
+                        host_slots(p, dirty);
+                    }
                 }
             }
         }

@@ -161,12 +161,23 @@ struct InvalidationMap {
     active: StateDeps,
     focus: StateDeps,
     target: u8,
-    /// `:first-child`, `:nth-*`, `:only-*`, `:last-*`.
-    structural: u8,
+    /// `:first-child` / `:only-child`: an insertion flips the next
+    /// element sibling at most.
+    first: u8,
+    /// `:last-child` / `:only-child`: the previous element sibling.
+    last: u8,
+    /// `:nth-child()`, `:nth-of-type()`, `:*-of-type`: every following
+    /// sibling.
+    nth_fwd: u8,
+    /// `:nth-last-child()`, `:nth-last-of-type()`, `:*-of-type`: every
+    /// preceding sibling.
+    nth_back: u8,
     empty: u8,
     /// Relation of compounds right of a `+`/`~` combinator (elements whose
     /// match changes when a previous sibling is inserted or removed).
     sibling_follow: u8,
+    /// `:defined`.
+    defined: u8,
     /// Some selector uses `:has()`.
     has_has: bool,
     /// Relation of the compounds carrying `:has()` to their subjects; when
@@ -181,6 +192,16 @@ impl InvalidationMap {
             m.add_selector(&r.selector, R_SELF, false);
         }
         m
+    }
+
+    /// Add the selectors of the shadow-scope groups `groups` (dependencies
+    /// are only ever added: a map with extra entries over-approximates).
+    fn add_groups(&mut self, scopes: &ScopeIndex, groups: &[usize]) {
+        for &g in groups {
+            for r in scopes.shadow[g].rules.iter().filter(|r| !r.is_ua) {
+                self.add_selector(&r.selector, R_SELF, false);
+            }
+        }
     }
 
     /// Record the features of `sel`, whose subject relates to the element
@@ -228,17 +249,20 @@ impl InvalidationMap {
                 Pseudo::Active => self.active.add(c, rel),
                 Pseudo::Focus | Pseudo::FocusVisible | Pseudo::FocusWithin => self.focus.add(c, rel),
                 Pseudo::Target => self.target |= rel,
-                Pseudo::FirstChild
-                | Pseudo::LastChild
-                | Pseudo::OnlyChild
-                | Pseudo::FirstOfType
-                | Pseudo::LastOfType
-                | Pseudo::OnlyOfType
-                | Pseudo::NthChild(..)
-                | Pseudo::NthLastChild(..)
-                | Pseudo::NthOfType(..)
-                | Pseudo::NthLastOfType(..) => self.structural |= rel,
+                Pseudo::FirstChild => self.first |= rel,
+                Pseudo::LastChild => self.last |= rel,
+                Pseudo::OnlyChild => {
+                    self.first |= rel;
+                    self.last |= rel;
+                }
+                Pseudo::NthChild(..) | Pseudo::NthOfType(..) | Pseudo::FirstOfType => self.nth_fwd |= rel,
+                Pseudo::NthLastChild(..) | Pseudo::NthLastOfType(..) | Pseudo::LastOfType => self.nth_back |= rel,
+                Pseudo::OnlyOfType => {
+                    self.nth_fwd |= rel;
+                    self.nth_back |= rel;
+                }
                 Pseudo::Empty => self.empty |= rel,
+                Pseudo::Defined => self.defined |= rel,
                 Pseudo::Link | Pseudo::AnyLink => *self.attrs.entry("href".into()).or_default() |= rel,
                 Pseudo::Enabled | Pseudo::Disabled => *self.attrs.entry("disabled".into()).or_default() |= rel,
                 // Form states read the value, checkedness and validation
@@ -334,6 +358,9 @@ const N_DESC: u8 = 4;
 struct Marks<'d> {
     doc: &'d Document,
     need: &'d mut Vec<u8>,
+    /// The document has shadow trees: marks propagate along the flat tree
+    /// (the tree styles are inherited through).
+    shadow: bool,
     global: bool,
     /// `:has()` subjects relate to other elements: any `:has()` change is
     /// global.
@@ -341,18 +368,27 @@ struct Marks<'d> {
 }
 
 impl Marks<'_> {
+    /// The element `node` inherits its style from (flat tree parent).
+    fn up(&self, node: NodeId) -> Option<NodeId> {
+        if self.shadow {
+            self.doc.flat_parent(node)
+        } else {
+            self.doc.parent(node)
+        }
+    }
+
     fn mark(&mut self, node: NodeId, flag: u8) {
-        if node >= self.need.len() || self.doc.element(node).is_none() {
+        if node >= self.need.len() || self.doc.element(node).is_none() || (self.shadow && self.doc.is_shadow_root(node)) {
             return;
         }
         self.need[node] |= flag;
-        let mut cur = self.doc.parent(node);
+        let mut cur = self.up(node);
         while let Some(p) = cur {
             if self.need[p] & N_DESC != 0 {
                 break;
             }
             self.need[p] |= N_DESC;
-            cur = self.doc.parent(p);
+            cur = self.up(p);
         }
     }
 
@@ -397,6 +433,34 @@ impl Marks<'_> {
         }
     }
 
+    /// After `child` was inserted: mark its following (`forward`) or
+    /// preceding element siblings with `all`, and the nearest one with
+    /// `nearest` as well.
+    fn siblings(&mut self, child: NodeId, forward: bool, all: u8, nearest: u8) {
+        if all | nearest == 0 {
+            return;
+        }
+        if (all | nearest) & R_GLOBAL != 0 {
+            self.global = true;
+        }
+        let doc = self.doc;
+        let step = |n: NodeId| if forward { doc.next_sibling(n) } else { doc.prev_sibling(n) };
+        let mut cur = step(child);
+        let mut first = true;
+        while let Some(s) = cur {
+            cur = step(s);
+            if self.doc.element(s).is_none() {
+                continue;
+            }
+            let rel = if first { all | nearest } else { all };
+            first = false;
+            if rel == 0 {
+                break;
+            }
+            self.mark(s, if rel & !R_SELF != 0 { N_SUBTREE } else { N_SELF });
+        }
+    }
+
     /// Mark the element children of `parent` with `rel` (structural and
     /// sibling-combinator dependencies after a child list change).
     fn children(&mut self, parent: NodeId, rel: u8) {
@@ -436,13 +500,23 @@ pub struct RestyleOutcome {
     pub changes: Vec<StyleChange>,
     /// Elements whose style was recomputed (for statistics).
     pub recomputed: usize,
+    /// Elements whose flat-tree children changed without a mutation of
+    /// their own child list (shadow root attached, slot assignment
+    /// changed): their boxes must be rebuilt with their children's.
+    pub flat_changed: Vec<NodeId>,
 }
 
 /// Persistent style resolution state for one document.
 pub struct StyleEngine {
     index: ScopeIndex,
     /// Upgraded custom elements when styles were computed (`:defined`).
-    defined_seen: usize,
+    defined_seen: HashSet<NodeId>,
+    /// Shadow host -> root when styles were computed.
+    shadow_seen: HashMap<NodeId, NodeId>,
+    /// Shadow roots whose sheets changed since the last update.
+    pending_roots: Vec<NodeId>,
+    /// `@keyframes` / `@font-face` must be collected again.
+    aux_dirty: bool,
     inval: InvalidationMap,
     env: MediaEnv,
     /// Custom properties per element (inherited by children).
@@ -480,7 +554,10 @@ impl StyleEngine {
         let inval = InvalidationMap::build(&index);
         StyleEngine {
             index,
-            defined_seen: 0,
+            defined_seen: HashSet::new(),
+            shadow_seen: HashMap::new(),
+            pending_roots: Vec::new(),
+            aux_dirty: false,
             inval,
             env: *env,
             vars: Vec::new(),
@@ -510,17 +587,9 @@ impl StyleEngine {
     /// Style the whole document from scratch.
     pub fn full(&mut self, doc: &Document, author: &[Stylesheet], opts: &StyleOptions) -> StyledTree {
         let mut tree = StyledTree::empty();
-        tree.font_faces = collect_font_faces(author, &self.env, opts);
-        for sheet in author {
-            let mut kf = Vec::new();
-            sheet.keyframes(&mut kf);
-            for (name, frames) in kf {
-                tree.keyframes.insert(
-                    name.to_string(),
-                    frames.iter().map(|f| (f.offsets.clone(), f.declarations.clone())).collect(),
-                );
-            }
-        }
+        self.collect_aux(&mut tree, author, opts);
+        self.shadow_seen = doc.shadow_roots.clone();
+        self.pending_roots.clear();
         let n = doc.nodes.len();
         tree.styles = vec![None; n];
         tree.before = vec![None; n];
@@ -531,19 +600,75 @@ impl StyleEngine {
         self.need = vec![0; n];
         self.state = opts.state.clone();
         self.ready = true;
-        self.defined_seen = doc.defined_custom.len();
+        self.defined_seen = doc.defined_custom.clone();
         self.walk(doc, &mut tree, opts, true, &mut Vec::new());
         tree
+    }
+
+    /// `@font-face` rules and `@keyframes` of `author`.
+    fn collect_aux(&mut self, tree: &mut StyledTree, author: &[Stylesheet], opts: &StyleOptions) {
+        tree.font_faces = collect_font_faces(author, &self.env, opts);
+        tree.keyframes.clear();
+        for sheet in author {
+            let mut kf = Vec::new();
+            sheet.keyframes(&mut kf);
+            for (name, frames) in kf {
+                tree.keyframes.insert(
+                    name.to_string(),
+                    frames.iter().map(|f| (f.offsets.clone(), f.declarations.clone())).collect(),
+                );
+            }
+        }
+        self.aux_dirty = false;
+    }
+
+    /// Is there work for [`StyleEngine::update`] that the mutation log
+    /// does not show (sheets of shadow roots changed, shadow roots
+    /// attached, custom elements upgraded)?
+    pub fn has_pending(&self, doc: &Document) -> bool {
+        !self.pending_roots.is_empty() || self.aux_dirty || doc.shadow_roots.len() != self.shadow_seen.len() || doc.defined_custom.len() != self.defined_seen.len()
+    }
+
+    /// The author sheets were collected again. When the document-level
+    /// sheets are the same ones (by [`Stylesheet::source_id`]) and only
+    /// shadow-root scoped sheets differ, the engine is updated in place and
+    /// the hosts of the affected shadow roots are restyled by the next
+    /// [`StyleEngine::update`]. Returns false when the engine cannot follow
+    /// (the caller must build a new one).
+    pub fn set_sheets(&mut self, author: &[Stylesheet]) -> bool {
+        if !self.ready || author.iter().any(|s| s.source_id == 0) {
+            return false;
+        }
+        let doc_sources = author.iter().filter(|s| s.shadow_scopes.is_empty()).map(|s| s.source_id);
+        if !doc_sources.eq(self.index.doc_sources.iter().copied()) {
+            return false;
+        }
+        let old = std::mem::take(&mut self.index.root_sources);
+        let added = self.index.rebuild_shadow(author, &self.env);
+        self.inval.add_groups(&self.index, &added);
+        for (root, list) in &self.index.root_sources {
+            if old.get(root) != Some(list) {
+                self.pending_roots.push(*root);
+            }
+        }
+        for root in old.keys() {
+            if !self.index.root_sources.contains_key(root) {
+                self.pending_roots.push(*root);
+            }
+        }
+        self.aux_dirty = true;
+        true
     }
 
     /// Bring `tree` up to date after the DOM mutations in `log` and a
     /// dynamic state change to `opts.state`.
     pub fn update(&mut self, doc: &Document, tree: &mut StyledTree, log: &MutationLog, opts: &StyleOptions, author: &[Stylesheet]) -> RestyleOutcome {
-        // Shadow trees (slot assignment, :host, ::slotted) and custom
-        // element upgrades (:defined) are not tracked incrementally yet.
-        if !self.ready || log.overflow || !doc.shadow_roots.is_empty() || doc.defined_custom.len() != self.defined_seen {
+        if !self.ready || log.overflow {
             *tree = self.full(doc, author, opts);
             return RestyleOutcome { full: true, ..Default::default() };
+        }
+        if self.aux_dirty {
+            self.collect_aux(tree, author, opts);
         }
         let n = doc.nodes.len();
         for v in [&mut tree.styles, &mut tree.before, &mut tree.after, &mut tree.marker] {
@@ -557,7 +682,8 @@ impl StyleEngine {
         }
         self.need.clear();
         self.need.resize(n, 0);
-        let global = self.invalidate(doc, tree, log, opts.state);
+        let mut flat_changed = Vec::new();
+        let global = self.invalidate(doc, tree, log, opts.state, &mut flat_changed);
         self.state = opts.state.clone();
         if global {
             *tree = self.full(doc, author, opts);
@@ -565,17 +691,76 @@ impl StyleEngine {
         }
         let mut changes = Vec::new();
         let recomputed = self.walk(doc, tree, opts, false, &mut changes);
-        RestyleOutcome { full: false, changes, recomputed }
+        RestyleOutcome { full: false, changes, recomputed, flat_changed }
     }
 
     /// Turn mutations and state changes into restyle marks; returns true
-    /// when everything must be recomputed.
-    fn invalidate(&mut self, doc: &Document, tree: &mut StyledTree, log: &MutationLog, new_state: &MatchState) -> bool {
+    /// when everything must be recomputed. Elements whose flat-tree
+    /// children changed through shadow DOM are added to `flat_changed`.
+    fn invalidate(&mut self, doc: &Document, tree: &mut StyledTree, log: &MutationLog, new_state: &MatchState, flat_changed: &mut Vec<NodeId>) -> bool {
         let inval = &self.inval;
         let has_global = inval.has_outer & !R_SELF != 0;
-        let mut m = Marks { doc, need: &mut self.need, global: false, has_global };
+        let shadow = !doc.shadow_roots.is_empty() || !self.shadow_seen.is_empty();
+        let mut m = Marks { doc, need: &mut self.need, shadow, global: false, has_global };
         let mut removed: Vec<NodeId> = Vec::new();
+        // Shadow DOM bookkeeping: hosts whose light children changed (slot
+        // assignment / fallback content), hosts whose slots changed, and
+        // light children whose `slot` attribute changed.
+        let mut hosts_light: Vec<NodeId> = Vec::new();
+        let mut hosts_slots: Vec<NodeId> = Vec::new();
+        let mut reassigned: Vec<NodeId> = Vec::new();
+        // Children logged more than once (moved): their old position is
+        // unknown.
+        let mut moved: HashMap<NodeId, u32> = HashMap::new();
+        if inval.first | inval.last | inval.nth_fwd | inval.nth_back | inval.sibling_follow != 0 {
+            for mu in &log.entries {
+                if let Mutation::Children { child, .. } = mu {
+                    *moved.entry(*child).or_default() += 1;
+                }
+            }
+        }
+        let has_slot = |n: NodeId| doc.element(n).is_some() && doc.descendants(n).any(|d| doc.is_element(d, "slot"));
+        let host_of_tree = |n: NodeId| doc.containing_shadow_root(n).and_then(|r| doc.shadow_host(r));
         for mu in &log.entries {
+            if shadow {
+                match mu {
+                    Mutation::Children { parent, child } => {
+                        if let Some(host) = doc.shadow_host(*parent) {
+                            if has_slot(*child) {
+                                hosts_slots.push(host);
+                            }
+                        } else if doc.shadow_root(*parent).is_some() {
+                            hosts_light.push(*parent);
+                        } else if has_slot(*child) {
+                            if let Some(h) = host_of_tree(*parent) {
+                                hosts_slots.push(h);
+                            }
+                        }
+                    }
+                    Mutation::Attr { node, .. } | Mutation::Node { node } => {
+                        let name = match mu {
+                            Mutation::Attr { name, .. } => Some(name.as_str()),
+                            _ => None,
+                        };
+                        if name.map_or(true, |n| n == "slot") {
+                            if let Some(p) = doc.parent(*node).filter(|&p| doc.shadow_root(p).is_some()) {
+                                hosts_light.push(p);
+                                reassigned.push(*node);
+                            }
+                        }
+                        if name.map_or(true, |n| n == "name") && doc.is_element(*node, "slot") {
+                            if let Some(h) = host_of_tree(*node) {
+                                hosts_slots.push(h);
+                            }
+                        }
+                    }
+                    Mutation::Text { node } => {
+                        if let Some(p) = doc.parent(*node).filter(|&p| doc.shadow_root(p).is_some()) {
+                            hosts_light.push(p);
+                        }
+                    }
+                }
+            }
             match mu {
                 Mutation::Attr { node, name, old } => {
                     let node = *node;
@@ -621,7 +806,17 @@ impl StyleEngine {
                         m.has_scope(parent);
                         m.children(parent, R_SELF);
                     }
-                    m.children(parent, inval.structural | inval.sibling_follow);
+                    if doc.element(child).is_some() {
+                        if doc.parent(child) == Some(parent) && moved.get(&child).is_none_or(|&c| c < 2) {
+                            // Inserted: only siblings after it change their
+                            // index, only those before it their index from
+                            // the end.
+                            m.siblings(child, true, inval.nth_fwd | inval.sibling_follow, inval.first);
+                            m.siblings(child, false, inval.nth_back, inval.last);
+                        } else {
+                            m.children(parent, inval.first | inval.last | inval.nth_fwd | inval.nth_back | inval.sibling_follow);
+                        }
+                    }
                     if inval.empty != 0 {
                         m.apply(parent, inval.empty);
                     }
@@ -702,11 +897,90 @@ impl StyleEngine {
                 }
             }
         }
+        if shadow {
+            // Newly attached shadow roots: the host's flat children are now
+            // its shadow tree (and its `:host` rules apply).
+            if doc.shadow_roots.len() != self.shadow_seen.len() {
+                for (&host, &root) in &doc.shadow_roots {
+                    if self.shadow_seen.get(&host) != Some(&root) && doc.is_connected(host) {
+                        hosts_slots.push(host);
+                        m.mark(host, N_SUBTREE);
+                        flat_changed.push(host);
+                    }
+                }
+                self.shadow_seen = doc.shadow_roots.clone();
+            }
+            // Shadow roots whose sheets changed.
+            for root in self.pending_roots.drain(..) {
+                if let Some(h) = doc.shadow_host(root).filter(|&h| doc.is_connected(h)) {
+                    m.mark(h, N_SUBTREE);
+                }
+            }
+            // Slots added, removed or renamed: every light child may have
+            // moved to another slot (or out of the flat tree).
+            hosts_slots.sort_unstable();
+            hosts_slots.dedup();
+            for &h in &hosts_slots {
+                if !doc.is_connected(h) {
+                    continue;
+                }
+                reassigned.extend(doc.children(h));
+                hosts_light.push(h);
+            }
+            for &c in &reassigned {
+                if doc.element(c).is_none() || !doc.is_connected(c) {
+                    continue;
+                }
+                if doc.assigned_slot(c).is_some() {
+                    m.mark(c, N_SUBTREE);
+                } else {
+                    clear_styles(doc, tree, c);
+                }
+            }
+            // Light children changed: a slot's fallback content is rendered
+            // exactly when nothing is assigned to it.
+            hosts_light.sort_unstable();
+            hosts_light.dedup();
+            for &h in &hosts_light {
+                let Some(root) = doc.shadow_root(h) else { continue };
+                if !doc.is_connected(h) {
+                    continue;
+                }
+                flat_changed.push(h);
+                let slots: Vec<NodeId> = doc.descendants(root).filter(|&d| doc.is_element(d, "slot")).collect();
+                for s in slots {
+                    flat_changed.push(s);
+                    if doc.assigned_nodes(s).is_empty() {
+                        m.mark(s, N_SUBTREE);
+                    } else {
+                        let fallback: Vec<NodeId> = doc.children(s).collect();
+                        for c in fallback {
+                            clear_styles(doc, tree, c);
+                        }
+                    }
+                }
+            }
+        }
+        // Custom elements upgraded (or failed): `:defined` flips.
+        if doc.defined_custom.len() != self.defined_seen.len() || (inval.defined != 0 && doc.defined_custom != self.defined_seen) {
+            if inval.defined != 0 {
+                for &e in doc.defined_custom.symmetric_difference(&self.defined_seen) {
+                    if e < doc.nodes.len() && doc.is_connected(e) {
+                        m.apply(e, inval.defined);
+                    }
+                }
+            }
+            self.defined_seen = doc.defined_custom.clone();
+        }
         let global = m.global;
         // Removed subtrees lose their styles (unless re-inserted, which
         // marked them for restyle above).
         for r in removed {
             if doc.is_connected(r) {
+                continue;
+            }
+            if shadow {
+                clear_styles(doc, tree, r);
                 continue;
             }
             for d in doc.descendants(r) {
@@ -827,7 +1101,8 @@ impl StyleEngine {
                 if !all && (!old_hidden || flags & N_DESC != 0) {
                     // Descendants are not rendered (it just got hidden, or
                     // elements were inserted below a hidden one).
-                    for d in doc.descendants(node).skip(1) {
+                    let below: Vec<NodeId> = if doc.shadow_roots.is_empty() { doc.descendants(node).skip(1).collect() } else { doc.shadow_including_descendants(node).into_iter().skip(1).collect() };
+                    for d in below {
                         if d < tree.styles.len() && tree.styles[d].is_some() {
                             tree.styles[d] = None;
                             tree.before[d] = None;
@@ -915,6 +1190,19 @@ impl StyleEngine {
             parent = style;
         }
         Some(parent)
+    }
+}
+
+/// Drop the styles of `node` and everything below it, shadow trees
+/// included (it left the flat tree).
+fn clear_styles(doc: &Document, tree: &mut StyledTree, node: NodeId) {
+    for d in doc.shadow_including_descendants(node) {
+        if d < tree.styles.len() {
+            tree.styles[d] = None;
+            tree.before[d] = None;
+            tree.after[d] = None;
+            tree.marker[d] = None;
+        }
     }
 }
 

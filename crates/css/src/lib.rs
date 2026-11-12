@@ -66,6 +66,10 @@ pub struct Stylesheet {
     /// Shadow roots this sheet is scoped to (`<style>` inside a shadow tree
     /// or adopted by a shadow root). Empty: a document stylesheet.
     pub shadow_scopes: Vec<usize>,
+    /// Identity of the sheet's source (text / URL, media, base) assigned by
+    /// the embedder when it collects sheets; 0 = unknown. Lets the style
+    /// engine tell which sheets changed between two collections.
+    pub source_id: u64,
 }
 
 /// Simplified media query: a disjunction of conjunctions of features.
@@ -275,6 +279,7 @@ pub fn parse_stylesheet(src: &str) -> Stylesheet {
         rules: p.parse_rules(true),
         base_url: None,
         shadow_scopes: Vec::new(),
+        source_id: 0,
     }
 }
 

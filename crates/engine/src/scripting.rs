@@ -54,6 +54,9 @@ pub struct ScriptState {
     pub console: Vec<(String, String)>,
     pub dialogs: Vec<Dialog>,
     pub scripts_ran: bool,
+    /// Page scripts not run yet (load-time scripts run in slices, see
+    /// [`Engine::run_page_scripts_for`]).
+    pub(crate) pending_scripts: Option<std::collections::VecDeque<crate::ScriptSource>>,
     /// Session storage for this page's origin (tab-scoped).
     pub session_storage: HashMap<String, String>,
     /// Answers given to `confirm()` / `prompt()`.
@@ -586,19 +589,35 @@ impl Engine {
     /// Run the page's scripts after load (classic in order, deferred after,
     /// async at the end), fire DOMContentLoaded/load and settle jobs.
     pub fn run_page_scripts(&self, page: &mut Page) -> ScriptOutcome {
-        if !self.scripting || page.script.scripts_ran {
+        if !self.begin_page_scripts(page) {
             return ScriptOutcome::default();
+        }
+        loop {
+            if let Some(out) = self.run_page_scripts_for(page, None) {
+                return out;
+            }
+        }
+    }
+
+    /// Start running the page's load-time scripts: create the script host
+    /// and queue the scripts (classic in order, deferred after, async at
+    /// the end). Returns false when there is nothing to run. Continue with
+    /// [`Engine::run_page_scripts_for`].
+    pub fn begin_page_scripts(&self, page: &mut Page) -> bool {
+        if !self.scripting || page.script.scripts_ran {
+            return false;
         }
         page.script.scripts_ran = true;
         let scripts = std::mem::take(&mut page.scripts);
-        let mut host = {
+        let host = {
             let mut env = EngineEnv { engine: self, page };
             ScriptHost::new(&mut env)
         };
-        let mut classic: Vec<&crate::ScriptSource> = Vec::new();
-        let mut deferred: Vec<&crate::ScriptSource> = Vec::new();
-        let mut asyncs: Vec<&crate::ScriptSource> = Vec::new();
-        for s in &scripts {
+        page.script.host = Some(host);
+        let mut classic = Vec::new();
+        let mut deferred = Vec::new();
+        let mut asyncs = Vec::new();
+        for s in scripts {
             if s.source.trim().is_empty() {
                 continue;
             }
@@ -610,6 +629,26 @@ impl Engine {
                 classic.push(s);
             }
         }
+        page.script.pending_scripts = Some(classic.into_iter().chain(deferred).chain(asyncs).collect());
+        true
+    }
+
+    /// Are load-time scripts still waiting to run?
+    pub fn page_scripts_pending(&self, page: &Page) -> bool {
+        page.script.pending_scripts.is_some()
+    }
+
+    /// Run queued load-time scripts until `slice` has passed (at least one;
+    /// `None`: all of them). The event loop can paint and handle input
+    /// between slices, as a parser yielding between scripts would. Returns
+    /// the outcome once the last script ran and DOMContentLoaded / load
+    /// fired; None while scripts remain.
+    pub fn run_page_scripts_for(&self, page: &mut Page, slice: Option<std::time::Duration>) -> Option<ScriptOutcome> {
+        let mut queue = page.script.pending_scripts.take()?;
+        let Some(mut host) = page.script.host.take() else {
+            return Some(ScriptOutcome::default());
+        };
+        let start = std::time::Instant::now();
         {
             let mut env = EngineEnv { engine: self, page };
             // Watchdog: each script, listener and microtask checkpoint is a
@@ -617,7 +656,7 @@ impl Engine {
             // 2 s per MB for scripts; forced layout and synchronous loads
             // do not count), so a runaway script is stopped without failing
             // the scripts after it.
-            for s in classic.iter().chain(deferred.iter()).chain(asyncs.iter()) {
+            while let Some(s) = queue.pop_front() {
                 let name = s.url.as_ref().map(|u| u.to_string()).unwrap_or_else(|| format!("{}#inline", env.page.url));
                 let debug = std::env::var_os("RH_DEBUG_SCRIPTS").is_some();
                 if debug {
@@ -631,13 +670,26 @@ impl Engine {
                 if debug {
                     eprintln!("[script] done  {} in {:?}", name, t.elapsed());
                 }
+                if slice.is_some_and(|d| start.elapsed() >= d) && !queue.is_empty() {
+                    break;
+                }
             }
-            host.document_ready(&mut env);
-            host.run_jobs(&mut env);
+            if queue.is_empty() {
+                host.document_ready(&mut env);
+                host.run_jobs(&mut env);
+            }
             host.realm().set_deadline(None);
         }
         page.script.host = Some(host);
-        self.settle(page, false)
+        if queue.is_empty() {
+            Some(self.settle(page, false))
+        } else {
+            // The embedder paints what the scripts built so far (painting
+            // flushes style and layout); requests made by the scripts stay
+            // on the page for the final settle.
+            page.script.pending_scripts = Some(queue);
+            None
+        }
     }
 
     /// Run due timers, rAF callbacks and microtasks. Call from the UI loop;

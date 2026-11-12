@@ -447,6 +447,8 @@ impl Loader {
         self.fetch_css_into_cache(&to_fetch);
 
         let mut sheets: Vec<Stylesheet> = Vec::new();
+        let inline_key = format!("{}{base}", self.load_stylesheets as u8);
+        let base_str = base.to_string();
         // Shadow trees of the same component share their sheets: parse each
         // (source) once and list every shadow root it is scoped to.
         let mut shadow_sheet_of: std::collections::HashMap<Src, usize> = std::collections::HashMap::new();
@@ -458,7 +460,7 @@ impl Loader {
                 }
             }
             let parsed = match &s {
-                Src::Inline(text, media) => Some(parsed_sheet_cached(text, media.as_deref(), &format!("{}{base}", self.load_stylesheets as u8), || {
+                Src::Inline(text, media) => Some(parsed_sheet_cached(text, media.as_deref(), &inline_key, || {
                     let mut sheet = rabbithole_css::parse_stylesheet(text);
                     sheet.base_url = Some(base.to_string());
                     self.resolve_imports(&mut sheet, base, 0);
@@ -481,6 +483,15 @@ impl Loader {
                 }
             };
             if let Some(mut sheet) = parsed {
+                sheet.source_id = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    s.hash(&mut h);
+                    self.load_stylesheets.hash(&mut h);
+                    base_str.hash(&mut h);
+                    sheet.rules.len().hash(&mut h);
+                    h.finish() | 1
+                };
                 if let Some(root) = scope {
                     sheet.shadow_scopes = vec![root];
                     shadow_sheet_of.insert(s, sheets.len());
@@ -1214,10 +1225,30 @@ impl Engine {
     /// scripts asked for (navigation, windows, dialogs, scrolling) is left
     /// on the page for the embedder.
     pub fn finish_page_load(&self, page: &mut Page) {
+        self.start_page_load_scripts(page);
+        while !self.continue_page_load(page, None) {}
+    }
+
+    /// [`Engine::finish_page_load`] in steps: queue the load-time scripts,
+    /// then call [`Engine::continue_page_load`] until it returns true
+    /// (painting and handling input in between keeps the page responsive
+    /// while a long list of scripts runs).
+    pub fn start_page_load_scripts(&self, page: &mut Page) {
         if self.scripting && (!page.scripts.is_empty() || has_inline_handlers(&page.doc)) {
+            self.begin_page_scripts(page);
+        }
+    }
+
+    /// Run load-time scripts for about `slice` (`None`: all); once they are
+    /// done, apply `<meta http-equiv=refresh>`. Returns true when the load
+    /// is complete.
+    pub fn continue_page_load(&self, page: &mut Page, slice: Option<std::time::Duration>) -> bool {
+        if self.page_scripts_pending(page) {
+            let Some(out) = self.run_page_scripts_for(page, slice) else {
+                return false;
+            };
             // Keep what the scripts asked for during load (redirects via
             // `location`, `window.open`, dialogs) for the embedder to apply.
-            let out = self.run_page_scripts(page);
             if out.navigation.is_some() {
                 page.script.pending_navigation = out.navigation;
             }
@@ -1238,6 +1269,7 @@ impl Engine {
                 });
             }
         }
+        true
     }
 
     /// Take the navigation a page requested by itself (script redirect or
@@ -1471,9 +1503,15 @@ fn decode_image(bytes: &[u8], content_type: &str, path: &str) -> Option<Image> {
 
 /// Rasterize inline `<svg>` elements of a document into images keyed by
 /// node, so layout/paint treat them as replaced images.
-fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContext, images: &mut HashMap<NodeId, Arc<Image>>) {
+/// Rasterize the rendered outermost `<svg>` elements of the document (or
+/// only the elements `only`) that have no image yet.
+fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContext, images: &mut HashMap<NodeId, Arc<Image>>, only: Option<&[NodeId]>) {
     let mut roots = Vec::new();
-    for n in doc.shadow_including_descendants(Document::ROOT) {
+    let candidates: Vec<NodeId> = match only {
+        None => doc.shadow_including_descendants(Document::ROOT),
+        Some(nodes) => nodes.to_vec(),
+    };
+    for n in candidates {
         if doc.is_element(n, "svg") && styles.get(n).is_some() {
             // Skip svg nested inside another svg.
             let nested = doc.ancestor_or_self(n, |a| a != n && doc.is_element(a, "svg")).is_some();
@@ -1534,6 +1572,7 @@ fn wrap_media(sheet: Stylesheet, media: Option<&str>) -> Stylesheet {
             base_url: sheet.base_url.clone(),
             rules: vec![Rule::Media { query: parse_media_query(m), rules: sheet.rules }],
             shadow_scopes: sheet.shadow_scopes,
+            source_id: sheet.source_id,
         },
     }
 }
