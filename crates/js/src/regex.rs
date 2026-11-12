@@ -616,6 +616,16 @@ fn id_continue() -> &'static Ranges {
     S.get_or_init(|| binary_property("ID_Continue").unwrap_or_default())
 }
 
+/// Unicode ID_Start (for the lexer's identifiers).
+pub fn is_unicode_id_start(c: u32) -> bool {
+    ranges_contain(id_start(), c)
+}
+
+/// Unicode ID_Continue (for the lexer's identifiers).
+pub fn is_unicode_id_continue(c: u32) -> bool {
+    ranges_contain(id_continue(), c)
+}
+
 /// Simple case folding (scf).
 fn simple_fold(c: u32) -> u32 {
     match tables::SCF.binary_search_by_key(&c, |&(k, _)| k) {
