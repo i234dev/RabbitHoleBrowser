@@ -169,8 +169,8 @@ pub fn build(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) -> Op
         Length::Px(v) if v > 0.0 => Some(v),
         _ => None,
     });
-    let viewbox = doc.attr(root, "viewbox").and_then(parse_viewbox);
-    let par = parse_aspect_ratio(doc.attr(root, "preserveaspectratio"));
+    let viewbox = attr_ci(doc, root, "viewbox").and_then(parse_viewbox);
+    let par = parse_aspect_ratio(attr_ci(doc, root, "preserveaspectratio"));
     let vw = width.or(viewbox.map(|v| v.w)).unwrap_or(300.0);
     let vh = height.or(viewbox.map(|v| v.h)).unwrap_or(150.0);
 
@@ -184,8 +184,10 @@ pub fn build(doc: &Document, root: NodeId, style_of: &dyn Fn(NodeId, &str) -> Op
 }
 
 impl<'a> Builder<'a> {
+    /// Attribute lookup ignoring ASCII case: the HTML parser gives SVG
+    /// attributes their camelCase names (`viewBox`), scripts may not.
     fn attr(&self, n: NodeId, name: &str) -> Option<&'a str> {
-        self.doc.attr(n, name)
+        attr_ci(self.doc, n, name)
     }
 
     fn href(&self, n: NodeId) -> Option<String> {
@@ -287,7 +289,8 @@ impl<'a> Builder<'a> {
         if let Some(&idx) = self.built.get(&n) {
             return Some(idx);
         }
-        let tag = self.doc.tag(n)?.to_string();
+        // SVG element names are matched lower-cased (`linearGradient`).
+        let tag = self.doc.tag(n)?.to_ascii_lowercase();
         let spec = self.specified(n);
         let transform = self.attr(n, "transform").map(parse_transform).unwrap_or(IDENTITY);
         let id = self.attr(n, "id").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -633,7 +636,7 @@ impl<'a> Builder<'a> {
                     out.push(Chunk { x: cx, y: cy, dx: cdx, dy: cdy, text, spec: spec.clone() });
                 }
                 NodeData::Element(el) => {
-                    if el.tag == "tspan" || el.tag == "a" || el.tag == "textpath" {
+                    if el.tag == "tspan" || el.tag == "a" || el.tag.eq_ignore_ascii_case("textpath") {
                         let before = out.len();
                         self.collect_text(c, &spec, false, preserve, out, vw, vh, depth + 1);
                         if first && out.len() > before {
@@ -894,4 +897,10 @@ fn compute_bboxes(b: &mut Built) {
         b.nodes[i].bbox = r;
     }
     let _ = multiply;
+}
+
+/// An attribute of `n` by ASCII case-insensitive name (exact match first).
+fn attr_ci<'d>(doc: &'d Document, n: NodeId, name: &str) -> Option<&'d str> {
+    let el = doc.element(n)?;
+    el.attr(name).or_else(|| el.attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str()))
 }

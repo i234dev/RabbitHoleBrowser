@@ -15,3 +15,6 @@ webpki-roots = "1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 brotli-decompressor = "4"
 ruzstd = "0.8"
+
+[dev-dependencies]
+serde_json = "1"

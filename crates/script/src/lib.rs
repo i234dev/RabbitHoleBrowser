@@ -70,6 +70,7 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:svg.js", include_str!("js/svg.js")),
     ("rabbithole:media.js", include_str!("js/media.js")),
     ("rabbithole:webaudio.js", include_str!("js/webaudio.js")),
+    ("rabbithole:observable.js", include_str!("js/observable.js")),
 ];
 
 /// Default watchdog budget of one task (a timer callback, event listener,

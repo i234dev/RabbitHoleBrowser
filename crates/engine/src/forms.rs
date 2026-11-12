@@ -250,12 +250,18 @@ pub fn submission_request(page: &Page, form: NodeId, submitter: Option<NodeId>, 
         }
         "dialog" => return None,
         _ => {
-            // GET: replace the query with the urlencoded data set.
-            let query = fields
-                .iter()
-                .map(|(k, v)| format!("{}={}", rabbithole_net::form_encode(k), rabbithole_net::form_encode(v)))
-                .collect::<Vec<_>>()
-                .join("&");
+            // GET: replace the query with the urlencoded data set, in the
+            // form's encoding (accept-charset, else the document's).
+            use rabbithole_net::encoding::{percent_encode_after_encoding, Encoding};
+            use rabbithole_net::url::{in_set, EncodeSet};
+            let enc = doc
+                .attr(form, "accept-charset")
+                .and_then(|v| v.split_ascii_whitespace().find_map(Encoding::for_label))
+                .or_else(|| Encoding::for_label(&doc.character_set))
+                .unwrap_or(Encoding::UTF_8)
+                .output_encoding();
+            let encode = |s: &str| percent_encode_after_encoding(enc, s, |b| in_set(EncodeSet::FormUrlencoded, b), true);
+            let query = fields.iter().map(|(k, v)| format!("{}={}", encode(k), encode(v))).collect::<Vec<_>>().join("&");
             url.query = Some(query);
             url.fragment = None;
             Request::get(url)

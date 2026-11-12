@@ -379,7 +379,10 @@ fn is_svg_node(doc: &Document, node: NodeId) -> bool {
     match doc.element(node).map(|e| &e.ns) {
         Some(rabbithole_dom::Namespace::Svg) => true,
         // HTML-namespaced nodes parsed into an <svg> subtree by innerHTML.
-        Some(rabbithole_dom::Namespace::Html) => doc.is_element(node, "foreignobject") || doc.ancestor_or_self(node, |n| doc.is_element(n, "svg") || doc.is_element(n, "foreignobject")).map(|a| doc.is_element(a, "svg")).unwrap_or(false),
+        Some(rabbithole_dom::Namespace::Html) => {
+            let fo = |n: NodeId| doc.tag(n).map(|t| t.eq_ignore_ascii_case("foreignobject")).unwrap_or(false);
+            fo(node) || doc.ancestor_or_self(node, |n| doc.is_element(n, "svg") || fo(n)).map(|a| doc.is_element(a, "svg")).unwrap_or(false)
+        }
         _ => false,
     }
 }

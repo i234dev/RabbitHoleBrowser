@@ -35,20 +35,28 @@ fn loc_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let mut u = current_url();
     match which.as_str() {
         "href" => {
-            if let Some(nu) = u.join(&v) {
-                navigate_to(nu, false);
+            match base_url().join(&v) {
+                Some(nu) => navigate_to(nu, false),
+                None => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to set the 'href' property on 'Location': '{v}' is not a valid URL."))),
             }
             return Ok(Value::Undefined);
         }
         "hash" => {
-            let f = v.trim_start_matches('#');
-            let fragment = if f.is_empty() { None } else { Some(f.to_string()) };
+            // Location's hash setter: an empty fragment, then the parser's
+            // fragment state (percent-encoding) on the input.
+            let input = v.strip_prefix('#').unwrap_or(&v);
+            let mut nu = u.clone();
+            if input.is_empty() {
+                nu.fragment = Some(String::new());
+            } else {
+                nu.set_hash(&format!("#{input}"));
+            }
             // Setting the current fragment again does nothing (no
             // navigation, no `hashchange`).
-            if fragment == u.fragment {
+            if nu.fragment.as_deref().unwrap_or("") == u.fragment.as_deref().unwrap_or("") {
                 return Ok(Value::Undefined);
             }
-            u.fragment = fragment;
+            u = nu;
             // Same-document navigation: update the override and fire events.
             let old = current_href();
             state().borrow_mut().location_override = Some(u.to_string());
@@ -59,20 +67,13 @@ fn loc_set(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
             fire_hashchange(realm, &old, &new);
             return Ok(Value::Undefined);
         }
-        "search" => {
-            let q = v.trim_start_matches('?');
-            u.query = if q.is_empty() { None } else { Some(q.to_string()) };
-        }
-        "pathname" => u.path = if v.starts_with('/') { v } else { format!("/{v}") },
-        "protocol" => u.scheme = v.trim_end_matches(':').to_ascii_lowercase(),
-        "host" => {
-            if let Some(nu) = Url::parse_absolute(&format!("{}://{}{}", u.scheme, v, u.path)) {
-                u.host = nu.host;
-                u.port = nu.port;
-            }
-        }
-        "hostname" => u.host = v,
-        "port" => u.port = v.parse().ok(),
+        // The URL setters (URL Standard state overrides).
+        "search" => u.set_search(&v),
+        "pathname" => u.set_pathname(&v),
+        "protocol" => u.set_protocol(&v),
+        "host" => u.set_host(&v),
+        "hostname" => u.set_hostname(&v),
+        "port" => u.set_port(&v),
         _ => {}
     }
     navigate_to(u, false);
@@ -259,7 +260,10 @@ fn nav_vendor(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> 
 fn nav_send_beacon(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     // Fire and forget.
     let url = arg_str(realm, args, 0)?;
-    if let Some(u) = resolve_url(&url) {
+    let Some(u) = resolve_url(&url) else {
+        return Err(realm.throw_type_error(&format!("Failed to execute 'sendBeacon' on 'Navigator': Invalid URL '{url}'")));
+    };
+    {
         let _ = with_env(|env| env.fetch(rabbithole_net::Request::post(u, rabbithole_net::Body::text("text/plain", "")).with_dest(rabbithole_net::Destination::Empty).with_referer(env.document_url())));
     }
     Ok(Value::Bool(true))
@@ -762,8 +766,12 @@ fn win_prompt(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
 
 fn win_open(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let url = arg_str_opt(realm, args, 0)?.unwrap_or_default();
-    if let Some(u) = resolve_url(&url) {
-        with_env(|env| env.open_window(u));
+    if url.is_empty() {
+        return Ok(Value::Null);
+    }
+    match resolve_url(&url) {
+        Some(u) => with_env(|env| env.open_window(u)),
+        None => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to execute 'open' on 'Window': Unable to open a window with invalid URL '{url}'."))),
     }
     Ok(Value::Null)
 }

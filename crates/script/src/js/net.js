@@ -106,8 +106,16 @@
           case 'buffer': result = buf; break;
           case 'binary': { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); result = s; break; }
           case 'text': {
-            let label = encoding || 'utf-8';
-            try { result = new g.TextDecoder(label).decode(bytes); } catch (e) { result = new g.TextDecoder().decode(bytes); }
+            // File API "package data" for text: the encoding argument, else
+            // the type's charset, else UTF-8; a byte order mark wins.
+            const known = (l) => { try { return new g.TextDecoder(l).encoding; } catch (e) { return null; } };
+            let enc = encoding !== undefined ? known(String(encoding)) : null;
+            if (!enc) { const m = /;\s*charset=["']?([^;"'\s]+)/i.exec(blob.type || ''); if (m) enc = known(m[1]); }
+            if (!enc) enc = 'utf-8';
+            if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) enc = 'utf-8';
+            else if (bytes[0] === 0xFE && bytes[1] === 0xFF) enc = 'utf-16be';
+            else if (bytes[0] === 0xFF && bytes[1] === 0xFE) enc = 'utf-16le';
+            result = new g.TextDecoder(enc).decode(bytes);
             break;
           }
           default: {

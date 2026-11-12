@@ -184,6 +184,17 @@ impl HostEnv for EngineEnv<'_> {
         self.page.url.clone()
     }
     fn base_url(&self) -> Url {
+        // The document base URL follows the current `<base href>` (scripts
+        // add and change it); only the head is searched, which is where
+        // base elements live in practice and keeps this cheap.
+        let doc = &self.page.doc;
+        if let Some(head) = doc.head() {
+            if let Some(b) = doc.children(head).find(|&c| doc.is_element(c, "base") && doc.attr(c, "href").is_some()) {
+                if let Some(u) = doc.attr(b, "href").and_then(|h| self.page.url.join(h.trim())) {
+                    return u;
+                }
+            }
+        }
         self.page.base_url.clone()
     }
     fn mark_dom_dirty(&mut self) {

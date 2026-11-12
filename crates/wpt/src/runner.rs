@@ -80,6 +80,118 @@ pub fn parse_report(url: &str, json: &str, ms: u64) -> Option<TestResult> {
 }
 
 const MARKER: &str = "@@WPT@@";
+const TD_MARKER: &str = "@@TD@@";
+
+/// WebDriver key → (DOM key, DOM code).
+fn webdriver_key(c: char) -> (String, String) {
+    let named = match c {
+        '\u{E003}' => Some(("Backspace", "Backspace")),
+        '\u{E004}' => Some(("Tab", "Tab")),
+        '\u{E006}' | '\u{E007}' => Some(("Enter", "Enter")),
+        '\u{E008}' | '\u{E050}' => Some(("Shift", "ShiftLeft")),
+        '\u{E009}' | '\u{E051}' => Some(("Control", "ControlLeft")),
+        '\u{E00A}' | '\u{E052}' => Some(("Alt", "AltLeft")),
+        '\u{E00C}' => Some(("Escape", "Escape")),
+        '\u{E00D}' => Some((" ", "Space")),
+        '\u{E00E}' => Some(("PageUp", "PageUp")),
+        '\u{E00F}' => Some(("PageDown", "PageDown")),
+        '\u{E010}' => Some(("End", "End")),
+        '\u{E011}' => Some(("Home", "Home")),
+        '\u{E012}' => Some(("ArrowLeft", "ArrowLeft")),
+        '\u{E013}' => Some(("ArrowUp", "ArrowUp")),
+        '\u{E014}' => Some(("ArrowRight", "ArrowRight")),
+        '\u{E015}' => Some(("ArrowDown", "ArrowDown")),
+        '\u{E017}' => Some(("Delete", "Delete")),
+        '\u{E03D}' | '\u{E053}' => Some(("Meta", "MetaLeft")),
+        _ => None,
+    };
+    if let Some((k, code)) = named {
+        return (k.to_string(), code.to_string());
+    }
+    let code = if c.is_ascii_alphabetic() {
+        format!("Key{}", c.to_ascii_uppercase())
+    } else if c.is_ascii_digit() {
+        format!("Digit{c}")
+    } else if c == ' ' {
+        "Space".to_string()
+    } else {
+        String::new()
+    };
+    (c.to_string(), code)
+}
+
+fn set_modifier(m: &mut rabbithole_engine::Modifiers, key: &str, down: bool) {
+    match key {
+        "Shift" => m.shift = down,
+        "Control" => m.ctrl = down,
+        "Alt" => m.alt = down,
+        "Meta" => m.meta = down,
+        _ => {}
+    }
+}
+
+/// Perform one test_driver request with the engine's input pipeline.
+fn perform_test_driver(engine: &Engine, page: &mut rabbithole_engine::Page, req: &Value) -> Result<(), String> {
+    let num = |v: &Value| v.as_f64().unwrap_or(0.0) as f32;
+    let mut m = rabbithole_engine::Modifiers::default();
+    match req["action"].as_str().unwrap_or("") {
+        "click" => {
+            let _ = engine.click_at(page, num(&req["x"]), num(&req["y"]), m);
+        }
+        "keys" => {
+            for c in req["keys"].as_str().unwrap_or("").chars() {
+                let (key, code) = webdriver_key(c);
+                let modifier = matches!(key.as_str(), "Shift" | "Control" | "Alt" | "Meta");
+                if modifier {
+                    // Modifier keys stay pressed until the end (WebDriver).
+                    set_modifier(&mut m, &key, true);
+                    let _ = engine.key_input(page, &key, &code, true, m);
+                    continue;
+                }
+                let _ = engine.key_input(page, &key, &code, true, m);
+                let _ = engine.key_input(page, &key, &code, false, m);
+            }
+        }
+        "actions" => {
+            let sources = req["sources"].as_array().cloned().unwrap_or_default();
+            let ticks = sources.iter().map(|s| s["actions"].as_array().map(|a| a.len()).unwrap_or(0)).max().unwrap_or(0);
+            let (mut px, mut py) = (0.0f32, 0.0f32);
+            for i in 0..ticks {
+                for src in &sources {
+                    let Some(a) = src["actions"].as_array().and_then(|a| a.get(i)) else { continue };
+                    let button = a["button"].as_u64().unwrap_or(0) as u8;
+                    match (src["type"].as_str().unwrap_or(""), a["type"].as_str().unwrap_or("")) {
+                        ("pointer", "pointerMove") => {
+                            let (x, y) = if a["origin"].as_str() == Some("pointer") { (px + num(&a["x"]), py + num(&a["y"])) } else { (num(&a["x"]), num(&a["y"])) };
+                            px = x;
+                            py = y;
+                            let _ = engine.pointer_move(page, x, y, m);
+                        }
+                        ("pointer", "pointerDown") => {
+                            let _ = engine.pointer_down(page, px, py, button, m);
+                        }
+                        ("wheel", "scroll") => {
+                            let _ = engine.scroll_at(page, num(&a["x"]), num(&a["y"]), num(&a["deltaX"]), num(&a["deltaY"]));
+                        }
+                        ("pointer", "pointerUp") => {
+                            let _ = engine.pointer_up(page, px, py, button, m);
+                        }
+                        ("key", t @ ("keyDown" | "keyUp")) => {
+                            let c = a["value"].as_str().and_then(|v| v.chars().next()).unwrap_or('\0');
+                            let (key, code) = webdriver_key(c);
+                            set_modifier(&mut m, &key, t == "keyDown");
+                            let _ = engine.key_input(page, &key, &code, t == "keyDown", m);
+                        }
+                        _ => {}
+                    }
+                }
+                let _ = engine.tick(page);
+            }
+        }
+        other => return Err(format!("test_driver action '{other}' is not supported")),
+    }
+    Ok(())
+}
 
 /// Child side: load `url`, run its event loop until the harness reports
 /// (or `timeout` passes, then ask the harness to time out), and print the
@@ -96,11 +208,14 @@ pub fn run_child(url: &str, timeout: Duration, verbose: bool) -> i32 {
             return 0;
         }
     };
-    let check = |page: &mut rabbithole_engine::Page| -> Option<String> {
+    let mut driver_requests: Vec<String> = Vec::new();
+    let check = |page: &mut rabbithole_engine::Page, driver: &mut Vec<String>| -> Option<String> {
         let mut found = None;
         for (level, msg) in page.take_console() {
             if let Some(j) = msg.strip_prefix(MARKER) {
                 found = Some(j.to_string());
+            } else if let Some(j) = msg.strip_prefix(TD_MARKER) {
+                driver.push(j.to_string());
             } else if verbose {
                 eprintln!("[console.{level}] {msg}");
             }
@@ -111,9 +226,19 @@ pub fn run_child(url: &str, timeout: Duration, verbose: bool) -> i32 {
     let mut timed_out = false;
     let mut grace_end = None;
     loop {
-        if let Some(j) = check(&mut page) {
+        if let Some(j) = check(&mut page, &mut driver_requests) {
             println!("{j}");
             return 0;
+        }
+        for r in std::mem::take(&mut driver_requests) {
+            let Ok(req) = serde_json::from_str::<Value>(&r) else { continue };
+            let id = req["id"].as_u64().unwrap_or(0);
+            let res = perform_test_driver(&engine, &mut page, &req);
+            let err = match res {
+                Ok(()) => "null".to_string(),
+                Err(e) => Value::from(e).to_string(),
+            };
+            let _ = engine.eval_in_page(&mut page, &format!("self.__rhTestDriverDone && self.__rhTestDriverDone({id}, {err}); 0"));
         }
         let now = Instant::now();
         if !timed_out && now >= deadline {

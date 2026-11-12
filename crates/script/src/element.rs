@@ -80,8 +80,19 @@ pub(crate) fn reflect(realm: &mut Realm, proto: ObjectId, prop: &str, attr: &'st
 }
 
 /// Set/remove an attribute with mutation records and dirtiness.
+/// The attribute name to use on `n`: lower-cased for HTML elements in
+/// HTML documents (DOM "get an attribute by name").
+fn attr_name_for(n: NodeRef, name: &str) -> String {
+    let lower = with_doc(n.doc, |doc| doc.is_html && doc.element(n.node).map(|e| e.ns == rabbithole_dom::Namespace::Html).unwrap_or(true));
+    if lower {
+        name.to_ascii_lowercase()
+    } else {
+        name.to_string()
+    }
+}
+
 pub(crate) fn set_attribute(n: NodeRef, name: &str, value: Option<&str>) {
-    let name = name.to_ascii_lowercase();
+    let name = attr_name_for(n, name);
     let old = with_doc(n.doc, |doc| {
         let old = doc.attr(n.node, &name).map(|s| s.to_string());
         doc.set_attr(n.node, &name, value);
@@ -96,7 +107,7 @@ pub(crate) fn set_attribute(n: NodeRef, name: &str, value: Option<&str>) {
 }
 
 pub(crate) fn get_attribute(n: NodeRef, name: &str) -> Option<String> {
-    let name = name.to_ascii_lowercase();
+    let name = attr_name_for(n, name);
     with_doc(n.doc, |doc| doc.attr(n.node, &name).map(|s| s.to_string()))
 }
 
@@ -145,11 +156,33 @@ fn e_get_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     })
 }
 
+/// `DOMString? namespace` argument (empty string is null).
+fn ns_arg(realm: &mut Realm, args: &[Value], i: usize) -> JsResult<Option<String>> {
+    Ok(match args.get(i).map(Value::v) {
+        None | Some(V::Null) | Some(V::Undefined) => None,
+        Some(v) => Some(realm.to_rust_string(v.to_value())?).filter(|s| !s.is_empty()),
+    })
+}
+
+/// The stored name of the attribute of `n` with namespace `ns` and local
+/// name `local` (DOM "get an attribute by namespace and local name").
+pub(crate) fn find_attr_ns(n: NodeRef, ns: Option<&str>, local: &str) -> Option<(String, String)> {
+    with_doc(n.doc, |doc| {
+        let e = doc.element(n.node)?;
+        e.attrs.iter().find_map(|(k, v)| {
+            let attr_ns = doc.attr_namespace(n.node, k);
+            let attr_local = if attr_ns.is_some() { k.split_once(':').map(|x| x.1).unwrap_or(k) } else { k.as_str() };
+            (attr_ns == ns && attr_local == local).then(|| (k.clone(), v.clone()))
+        })
+    })
+}
+
 fn e_get_attribute_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getAttributeNS")?;
-    let name = arg_str(realm, args, 1)?;
-    Ok(match get_attribute(n, &name) {
-        Some(v) => Value::str(&v),
+    let ns = ns_arg(realm, args, 0)?;
+    let local = arg_str(realm, args, 1)?;
+    Ok(match find_attr_ns(n, ns.as_deref(), &local) {
+        Some((_, v)) => Value::str(&v),
         None => Value::Null,
     })
 }
@@ -158,8 +191,8 @@ fn e_set_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     let n = this_node(realm, &this, "setAttribute")?;
     let name = arg_str(realm, args, 0)?;
     let value = arg_str(realm, args, 1)?;
-    if name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == '>' || c == '/' || c == '=' || c == '"') {
-        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("'{name}' is not a valid attribute name.")));
+    if !crate::document::valid_attribute_local_name(&name) {
+        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("Failed to execute 'setAttribute' on 'Element': '{name}' is not a valid attribute name.")));
     }
     set_attribute(n, &name, Some(&value));
     Ok(Value::Undefined)
@@ -167,10 +200,34 @@ fn e_set_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
 
 fn e_set_attribute_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "setAttributeNS")?;
-    let name = arg_str(realm, args, 1)?;
-    let name = name.rsplit(':').next().unwrap_or(&name).to_string();
+    let ns = ns_arg(realm, args, 0)?;
+    let qname = arg_str(realm, args, 1)?;
+    let local = match crate::document::validate_and_extract_in(ns.clone(), &qname, true) {
+        Ok((_, _, local)) => local,
+        Err((err, msg)) => return Err(crate::misc::dom_exception(realm, err, &format!("Failed to execute 'setAttributeNS' on 'Element': {msg}"))),
+    };
     let value = arg_str(realm, args, 2)?;
-    set_attribute(n, &name, Some(&value));
+    // An existing attribute with this namespace and local name keeps its
+    // qualified name; otherwise the attribute is added under `qname`.
+    let name = match find_attr_ns(n, ns.as_deref(), &local) {
+        Some((k, _)) => k,
+        None => qname.clone(),
+    };
+    let old = with_doc(n.doc, |doc| {
+        let old = doc.attr(n.node, &name).map(|s| s.to_string());
+        let lower = doc.is_html;
+        // Stored as given (no lower-casing for namespaced attributes).
+        doc.is_html = false;
+        doc.set_attr(n.node, &name, Some(&value));
+        doc.is_html = lower;
+        doc.set_attr_namespace(n.node, &name, ns.as_deref());
+        old
+    });
+    crate::shadow::on_attribute(n, &name, old.clone(), Some(&value));
+    node::record_attribute(n, &name, old);
+    if n.doc == 0 {
+        mark_dirty();
+    }
     Ok(Value::Undefined)
 }
 
@@ -203,6 +260,9 @@ fn e_get_attribute_names(realm: &mut Realm, this: Value, _: &[Value]) -> JsResul
 fn e_toggle_attribute(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "toggleAttribute")?;
     let name = arg_str(realm, args, 0)?;
+    if !crate::document::valid_attribute_local_name(&name) {
+        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("Failed to execute 'toggleAttribute' on 'Element': '{name}' is not a valid attribute name.")));
+    }
     let has = get_attribute(n, &name).is_some();
     let force = args.get(1).filter(|v| !v.is_undefined()).map(|v| realm.to_boolean(v));
     let want = force.unwrap_or(!has);
@@ -275,9 +335,10 @@ pub(crate) struct TokenListRef {
     pub attr: &'static str,
 }
 
+/// The ordered set parser over ASCII whitespace.
 fn tokens_of(n: NodeRef, attr: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for t in get_attribute(n, attr).unwrap_or_default().split_whitespace() {
+    for t in get_attribute(n, attr).unwrap_or_default().split(|c: char| matches!(c, '\t' | '\n' | '\u{c}' | '\r' | ' ')).filter(|t| !t.is_empty()) {
         if !out.iter().any(|x| x == t) {
             out.push(t.to_string());
         }
@@ -295,7 +356,11 @@ fn token_list_ref(realm: &mut Realm, this: &Value) -> JsResult<TokenListRef> {
     }
 }
 
+/// DOMTokenList "update steps": no attribute is created for an empty set.
 fn write_tokens(r: &TokenListRef, tokens: &[String]) {
+    if tokens.is_empty() && get_attribute(r.node, r.attr).is_none() {
+        return;
+    }
     set_attribute(r.node, r.attr, Some(&tokens.join(" ")));
 }
 
@@ -303,7 +368,7 @@ fn check_token(realm: &mut Realm, t: &str) -> JsResult<()> {
     if t.is_empty() {
         return Err(crate::misc::dom_exception(realm, "SyntaxError", "The token provided must not be empty."));
     }
-    if t.contains(char::is_whitespace) {
+    if t.contains(|c: char| matches!(c, '\t' | '\n' | '\u{c}' | '\r' | ' ')) {
         return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", "The token provided contains HTML space characters, which are not valid in tokens."));
     }
     Ok(())
@@ -311,10 +376,14 @@ fn check_token(realm: &mut Realm, t: &str) -> JsResult<()> {
 
 fn tl_add(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let r = token_list_ref(realm, &this)?;
-    let mut tokens = tokens_of(r.node, r.attr);
+    let mut new = Vec::with_capacity(args.len());
     for a in args {
         let t = realm.to_rust_string(a.clone())?;
         check_token(realm, &t)?;
+        new.push(t);
+    }
+    let mut tokens = tokens_of(r.node, r.attr);
+    for t in new {
         if !tokens.contains(&t) {
             tokens.push(t);
         }
@@ -325,12 +394,14 @@ fn tl_add(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 
 fn tl_remove(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let r = token_list_ref(realm, &this)?;
-    let mut tokens = tokens_of(r.node, r.attr);
+    let mut gone = Vec::with_capacity(args.len());
     for a in args {
         let t = realm.to_rust_string(a.clone())?;
         check_token(realm, &t)?;
-        tokens.retain(|x| *x != t);
+        gone.push(t);
     }
+    let mut tokens = tokens_of(r.node, r.attr);
+    tokens.retain(|x| !gone.contains(x));
     write_tokens(&r, &tokens);
     Ok(Value::Undefined)
 }
@@ -345,10 +416,11 @@ fn tl_toggle(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     let want = force.unwrap_or(!has);
     if want && !has {
         tokens.push(t);
+        write_tokens(&r, &tokens);
     } else if !want && has {
         tokens.retain(|x| *x != t);
+        write_tokens(&r, &tokens);
     }
-    write_tokens(&r, &tokens);
     Ok(Value::Bool(want))
 }
 
@@ -382,9 +454,11 @@ fn tl_replace(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value>
 
 fn tl_item(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let r = token_list_ref(realm, &this)?;
-    let i = realm.to_number(arg(args, 0))?;
+    // `unsigned long`: ToUint32 (so -1 is 4294967295).
+    let n = realm.to_number(arg(args, 0))?;
+    let i = if n.is_finite() { (n.trunc().rem_euclid(4294967296.0)) as u64 } else { 0 };
     let tokens = tokens_of(r.node, r.attr);
-    Ok(tokens.get(i.max(0.0) as usize).map(|t| Value::str(t)).unwrap_or(Value::Null))
+    Ok(tokens.get(i as usize).map(|t| Value::str(t)).unwrap_or(Value::Null))
 }
 
 fn tl_length(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -425,7 +499,11 @@ fn tl_iterator(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     realm.invoke(arr, "values", &[])
 }
 
-fn tl_supports(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+fn tl_supports(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let r = token_list_ref(realm, &this)?;
+    if r.attr == "class" {
+        return Err(realm.throw_type_error("Failed to execute 'supports' on 'DOMTokenList': DOMTokenList has no supported tokens."));
+    }
     Ok(Value::Bool(true))
 }
 
@@ -1269,8 +1347,12 @@ fn e_style_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 // -------------------------------------------------------------- subclasses
 
+/// The element's `href` parsed against the base URL with the document's
+/// encoding for the query (HTML "parse a URL").
 fn anchor_url(n: NodeRef) -> Option<rabbithole_net::Url> {
-    get_attribute(n, "href").and_then(|h| resolve_url(&h))
+    let href = get_attribute(n, "href")?;
+    let enc = with_doc(n.doc, |doc| rabbithole_net::encoding::Encoding::for_label(&doc.character_set)).unwrap_or(rabbithole_net::encoding::Encoding::UTF_8);
+    rabbithole_net::url::parse_with_encoding(href.trim(), Some(&base_url()), enc)
 }
 
 fn a_href_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -2656,15 +2738,39 @@ fn e_rejected_promise(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<
 
 fn e_remove_attribute_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "removeAttributeNS")?;
-    let name = arg_str(realm, args, 1)?;
-    set_attribute(n, &name, None);
+    let ns = ns_arg(realm, args, 0)?;
+    let local = arg_str(realm, args, 1)?;
+    if let Some((k, _)) = find_attr_ns(n, ns.as_deref(), &local) {
+        let old = with_doc(n.doc, |doc| {
+            let old = doc.attr(n.node, &k).map(|s| s.to_string());
+            let lower = doc.is_html;
+            doc.is_html = false;
+            doc.set_attr(n.node, &k, None);
+            doc.is_html = lower;
+            old
+        });
+        crate::shadow::on_attribute(n, &k, old.clone(), None);
+        node::record_attribute(n, &k, old);
+        if n.doc == 0 {
+            mark_dirty();
+        }
+    }
     Ok(Value::Undefined)
 }
 
 fn e_has_attribute_ns(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "hasAttributeNS")?;
+    let ns = ns_arg(realm, args, 0)?;
+    let local = arg_str(realm, args, 1)?;
+    Ok(Value::Bool(find_attr_ns(n, ns.as_deref(), &local).is_some()))
+}
+
+/// `__rhNative.attrNamespace(element, storedName)`: the attribute's
+/// namespace URI or null.
+pub(crate) fn attr_namespace_native(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &arg(args, 0)) else { return Ok(Value::Null) };
     let name = arg_str(realm, args, 1)?;
-    Ok(Value::Bool(get_attribute(n, &name).is_some()))
+    Ok(with_doc(n.doc, |doc| doc.attr_namespace(n.node, &name).map(Value::str)).unwrap_or(Value::Null))
 }
 
 fn e_get_attribute_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {

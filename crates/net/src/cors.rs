@@ -161,7 +161,7 @@ pub fn referrer_for(referrer: &Url, target: &Url, policy: ReferrerPolicy) -> Opt
         return None;
     }
     let full = {
-        let s = referrer.without_fragment().to_string();
+        let s = strip_for_referrer(referrer);
         // Browsers strip the referrer to its origin above 4 KB.
         if s.len() > 4096 {
             format!("{}/", referrer.origin())
@@ -461,4 +461,10 @@ mod tests {
         assert!(f.iter().any(|(k, _)| k == "content-type") && f.iter().any(|(k, _)| k == "x-pub"));
         assert!(!f.iter().any(|(k, _)| k == "x-secret" || k == "set-cookie"));
     }
+}
+
+/// A referrer URL as sent: no fragment and no credentials (Referrer
+/// Policy "strip url for use as a referrer").
+fn strip_for_referrer(u: &Url) -> String {
+    Url { username: String::new(), password: String::new(), fragment: None, ..u.clone() }.to_string()
 }

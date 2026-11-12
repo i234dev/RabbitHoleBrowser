@@ -1,37 +1,15 @@
-//! HTML parsing: tokenizer + a forgiving tree builder.
-//!
-//! The tree builder implements the parts of the WHATWG algorithm that matter
-//! for rendering real pages: implied `html`/`head`/`body`, void elements,
-//! implied end tags (`p`, `li`, `dt`/`dd`, `option`, table parts), scope
-//! checks for end tags, raw-text elements and foreign (SVG/MathML) content.
+//! HTML parsing per the WHATWG HTML Standard (§13.2): the tokenizer
+//! state machine and the tree construction stage with all insertion
+//! modes, the adoption agency algorithm, foster parenting, templates,
+//! foreign (SVG/MathML) content and the fragment parsing algorithm.
 
 pub mod entities;
+mod entity_table;
 pub mod tokenizer;
+pub mod xml;
 
 use rabbithole_dom::{DoctypeData, Document, Namespace, NodeData, NodeId, QuirksMode};
-use tokenizer::{RawKind, Token, Tokenizer};
-
-const VOID: &[&str] = &[
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
-    "track", "wbr", "keygen", "command", "basefont", "bgsound", "frame",
-];
-
-/// Start tags that implicitly close an open `<p>`.
-const CLOSES_P: &[&str] = &[
-    "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
-    "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
-    "header", "hgroup", "hr", "main", "menu", "nav", "ol", "p", "pre", "listing", "section",
-    "summary", "table", "ul", "xmp", "search",
-];
-
-const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
-
-/// Elements that stop the search when looking for an element "in scope".
-const SCOPE_BOUNDARY: &[&str] = &[
-    "html", "table", "td", "th", "caption", "applet", "marquee", "object", "template", "svg", "math",
-];
-
-const HEAD_ONLY: &[&str] = &["base", "basefont", "bgsound", "link", "meta", "title", "style", "script", "noframes", "template", "noscript"];
+use tokenizer::{Doctype, State, Token, Tokenizer};
 
 /// Split the text of a DOCTYPE token (after `<!DOCTYPE`) into name, public
 /// and system identifiers. The flag is the tokenizer's "force-quirks" flag
@@ -135,17 +113,11 @@ pub fn parse(input: &str) -> Document {
 /// algorithm requires: its markup creates no elements, so its images,
 /// iframes, styles and overlays never exist in the DOM.
 pub fn parse_with_scripting(input: &str, scripting: bool) -> Document {
-    let mut doc = parse_tree(input, scripting);
+    let mut b = TreeBuilder::new(scripting);
+    b.run(input);
+    let mut doc = b.doc;
     doc.adopt_template_contents(Document::ROOT, true);
     doc
-}
-
-/// Tree construction only (template children still in the tree).
-fn parse_tree(input: &str, scripting: bool) -> Document {
-    let mut builder = TreeBuilder::new();
-    builder.scripting = scripting;
-    builder.run(input);
-    builder.doc
 }
 
 /// Parse an HTML fragment as the children of a `context` element (as
@@ -158,563 +130,2007 @@ pub fn parse_fragment(input: &str, context: &str) -> Document {
 /// [`parse_fragment`] with the scripting flag of the context element's
 /// document (`innerHTML` on a scripted page: `<noscript>` is raw text).
 pub fn parse_fragment_with_scripting(input: &str, context: &str, scripting: bool) -> Document {
-    let ctx = context.to_ascii_lowercase();
-    let (prefix, inner_tag) = match ctx.as_str() {
-        "tr" => ("<table><tbody><tr>", "tr"),
-        "tbody" | "thead" | "tfoot" => ("<table><tbody>", "tbody"),
-        "td" | "th" => ("<table><tbody><tr><td>", "td"),
-        "table" => ("<table>", "table"),
-        "colgroup" => ("<table><colgroup>", "colgroup"),
-        "select" => ("<select>", "select"),
-        "ul" | "ol" => ("<ul>", "ul"),
-        "dl" => ("<dl>", "dl"),
-        _ => ("", ""),
-    };
-    // Fragment parsing (innerHTML) never creates declarative shadow roots.
-    let parse = |s: &str| {
-        let mut d = parse_tree(s, scripting);
-        d.adopt_template_contents(Document::ROOT, false);
-        d
-    };
-    if prefix.is_empty() {
-        // Fragment parsing starts "in body": leading comments and
-        // whitespace belong to the fragment (Svelte's `<!---->` hydration
-        // anchors), not to the document node.
-        let mut doc = parse(&format!("<body>{input}"));
-        // Head-only elements (style/script/meta…) at the start of a
-        // fragment end up in <head>; move them in front of the body content.
-        if let (Some(head), Some(body)) = (doc.head(), doc.body()) {
-            let head_children: Vec<NodeId> = doc.children(head).collect();
-            let first_body = doc.first_child(body);
-            for c in head_children {
-                doc.insert_before(body, c, first_body);
-            }
-        }
-        return doc;
+    let (mut doc, container) = parse_fragment_in(input, context, Namespace::Html, scripting, QuirksMode::NoQuirks);
+    // Old contract: the nodes are the children of a `body` under `html`.
+    let body = doc.create_element("body", vec![]);
+    let kids: Vec<NodeId> = doc.children(container).collect();
+    for k in kids {
+        doc.detach(k);
+        doc.append_child(body, k);
     }
-    let mut doc = parse(&format!("{prefix}{input}"));
-    let Some(body) = doc.body() else { return doc };
-    let inner = doc.find_element(inner_tag);
-    let children: Vec<NodeId> = match inner {
-        Some(n) => doc.children(n).collect(),
-        None => Vec::new(),
-    };
-    doc.clear_children(body);
-    for c in children {
-        doc.detach(c);
-        doc.append_child(body, c);
-    }
+    doc.append_child(container, body);
     doc
 }
 
+/// The HTML fragment parsing algorithm (§13.4) for a context element
+/// with local name `context` in namespace `ns`. Returns the document and
+/// the node whose children are the parsed nodes, in order.
+pub fn parse_fragment_in(input: &str, context: &str, ns: Namespace, scripting: bool, quirks: QuirksMode) -> (Document, NodeId) {
+    let mut b = TreeBuilder::new(scripting);
+    b.doc.quirks_mode = quirks;
+    let ctx = b.doc.create_element_ns(ns.clone(), None, context, vec![]);
+    let html = b.doc.create_element("html", vec![]);
+    b.doc.append_child(Document::ROOT, html);
+    b.open.push(html);
+    b.context = Some(ctx);
+    b.fragment = true;
+    let mut tk = Tokenizer::new(input);
+    if ns == Namespace::Html {
+        match context {
+            "title" | "textarea" => tk.set_state(State::Rcdata),
+            "style" | "xmp" | "iframe" | "noembed" | "noframes" => tk.set_state(State::Rawtext),
+            "script" => tk.set_state(State::ScriptData),
+            "noscript" if scripting => tk.set_state(State::Rawtext),
+            "plaintext" => tk.set_state(State::Plaintext),
+            _ => {}
+        }
+        if context == "template" {
+            b.template_modes.push(Mode::InTemplate);
+        }
+    }
+    b.reset_insertion_mode();
+    b.run_tokens(&mut tk);
+    let mut doc = b.doc;
+    doc.adopt_template_contents(html, false);
+    (doc, html)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mode {
+    Initial,
+    BeforeHtml,
+    BeforeHead,
+    InHead,
+    InHeadNoscript,
+    AfterHead,
+    InBody,
+    Text,
+    InTable,
+    InTableText,
+    InCaption,
+    InColumnGroup,
+    InTableBody,
+    InRow,
+    InCell,
+    InTemplate,
+    AfterBody,
+    InFrameset,
+    AfterFrameset,
+    AfterAfterBody,
+    AfterAfterFrameset,
+}
+
+/// A start tag token (for the list of active formatting elements and
+/// re-created elements).
+#[derive(Clone, Debug)]
+struct Tag {
+    name: String,
+    attrs: Vec<(String, String)>,
+    self_closing: bool,
+}
+
+enum Afe {
+    Marker,
+    El(NodeId, Tag),
+}
+
+enum Tok {
+    Doctype(Doctype),
+    Start(Tag),
+    End(String),
+    Comment(String),
+    /// A homogeneous run: all whitespace, all U+0000, or all other text.
+    Chars(String),
+    Eof,
+}
+
+fn is_ws_str(s: &str) -> bool {
+    s.chars().all(|c| matches!(c, '\t' | '\n' | '\u{c}' | ' ' | '\r'))
+}
+
+const SPECIAL_HTML: &[&str] = &[
+    "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote", "body", "br", "button", "caption", "center",
+    "col", "colgroup", "dd", "details", "dir", "div", "dl", "dt", "embed", "fieldset", "figcaption", "figure", "footer", "form", "frame",
+    "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen", "li", "link",
+    "listing", "main", "marquee", "menu", "meta", "nav", "noembed", "noframes", "noscript", "object", "ol", "p", "param", "plaintext", "pre",
+    "script", "search", "section", "select", "source", "style", "summary", "table", "tbody", "td", "template", "textarea", "tfoot", "th",
+    "thead", "title", "tr", "track", "ul", "wbr", "xmp",
+];
+
+const IMPLIED_END: &[&str] = &["dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc"];
+const IMPLIED_END_THOROUGH: &[&str] = &["caption", "colgroup", "dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc", "tbody", "td", "tfoot", "th", "thead", "tr"];
+
+const SVG_TAGS: &[(&str, &str)] = &[
+    ("altglyph", "altGlyph"), ("altglyphdef", "altGlyphDef"), ("altglyphitem", "altGlyphItem"), ("animatecolor", "animateColor"),
+    ("animatemotion", "animateMotion"), ("animatetransform", "animateTransform"), ("clippath", "clipPath"), ("feblend", "feBlend"),
+    ("fecolormatrix", "feColorMatrix"), ("fecomponenttransfer", "feComponentTransfer"), ("fecomposite", "feComposite"),
+    ("feconvolvematrix", "feConvolveMatrix"), ("fediffuselighting", "feDiffuseLighting"), ("fedisplacementmap", "feDisplacementMap"),
+    ("fedistantlight", "feDistantLight"), ("fedropshadow", "feDropShadow"), ("feflood", "feFlood"), ("fefunca", "feFuncA"),
+    ("fefuncb", "feFuncB"), ("fefuncg", "feFuncG"), ("fefuncr", "feFuncR"), ("fegaussianblur", "feGaussianBlur"), ("feimage", "feImage"),
+    ("femerge", "feMerge"), ("femergenode", "feMergeNode"), ("femorphology", "feMorphology"), ("feoffset", "feOffset"),
+    ("fepointlight", "fePointLight"), ("fespecularlighting", "feSpecularLighting"), ("fespotlight", "feSpotLight"), ("fetile", "feTile"),
+    ("feturbulence", "feTurbulence"), ("foreignobject", "foreignObject"), ("glyphref", "glyphRef"), ("lineargradient", "linearGradient"),
+    ("radialgradient", "radialGradient"), ("textpath", "textPath"),
+];
+
+const SVG_ATTRS: &[(&str, &str)] = &[
+    ("attributename", "attributeName"), ("attributetype", "attributeType"), ("basefrequency", "baseFrequency"), ("baseprofile", "baseProfile"),
+    ("calcmode", "calcMode"), ("clippathunits", "clipPathUnits"), ("diffuseconstant", "diffuseConstant"), ("edgemode", "edgeMode"),
+    ("filterunits", "filterUnits"), ("glyphref", "glyphRef"), ("gradienttransform", "gradientTransform"), ("gradientunits", "gradientUnits"),
+    ("kernelmatrix", "kernelMatrix"), ("kernelunitlength", "kernelUnitLength"), ("keypoints", "keyPoints"), ("keysplines", "keySplines"),
+    ("keytimes", "keyTimes"), ("lengthadjust", "lengthAdjust"), ("limitingconeangle", "limitingConeAngle"), ("markerheight", "markerHeight"),
+    ("markerunits", "markerUnits"), ("markerwidth", "markerWidth"), ("maskcontentunits", "maskContentUnits"), ("maskunits", "maskUnits"),
+    ("numoctaves", "numOctaves"), ("pathlength", "pathLength"), ("patterncontentunits", "patternContentUnits"), ("patterntransform", "patternTransform"),
+    ("patternunits", "patternUnits"), ("pointsatx", "pointsAtX"), ("pointsaty", "pointsAtY"), ("pointsatz", "pointsAtZ"),
+    ("preservealpha", "preserveAlpha"), ("preserveaspectratio", "preserveAspectRatio"), ("primitiveunits", "primitiveUnits"), ("refx", "refX"),
+    ("refy", "refY"), ("repeatcount", "repeatCount"), ("repeatdur", "repeatDur"), ("requiredextensions", "requiredExtensions"),
+    ("requiredfeatures", "requiredFeatures"), ("specularconstant", "specularConstant"), ("specularexponent", "specularExponent"),
+    ("spreadmethod", "spreadMethod"), ("startoffset", "startOffset"), ("stddeviation", "stdDeviation"), ("stitchtiles", "stitchTiles"),
+    ("surfacescale", "surfaceScale"), ("systemlanguage", "systemLanguage"), ("tablevalues", "tableValues"), ("targetx", "targetX"),
+    ("targety", "targetY"), ("textlength", "textLength"), ("viewbox", "viewBox"), ("viewtarget", "viewTarget"), ("xchannelselector", "xChannelSelector"),
+    ("ychannelselector", "yChannelSelector"), ("zoomandpan", "zoomAndPan"),
+];
+
 struct TreeBuilder {
     doc: Document,
-    stack: Vec<NodeId>,
-    html: Option<NodeId>,
+    open: Vec<NodeId>,
+    afe: Vec<Afe>,
+    mode: Mode,
+    original_mode: Mode,
+    template_modes: Vec<Mode>,
     head: Option<NodeId>,
-    body: Option<NodeId>,
-    /// Depth of foreign (svg/math) elements currently open.
-    foreign_depth: usize,
-    /// Pending whitespace-only text seen before body creation.
-    saw_body_content: bool,
-    /// A DOCTYPE token was seen before the first element.
-    saw_doctype: bool,
-    /// The scripting flag: `<noscript>` content is raw text.
+    form: Option<NodeId>,
+    frameset_ok: bool,
     scripting: bool,
+    foster: bool,
+    pending_table_text: Vec<String>,
+    /// Ignore a LF right after `<pre>`, `<listing>`, `<textarea>`.
+    skip_lf: bool,
+    fragment: bool,
+    context: Option<NodeId>,
+    /// Tokenizer state requested by the last start tag.
+    switch_to: Option<State>,
+    done: bool,
 }
 
 impl TreeBuilder {
-    fn new() -> Self {
+    fn new(scripting: bool) -> TreeBuilder {
         TreeBuilder {
             doc: Document::new(),
-            stack: Vec::new(),
-            html: None,
+            open: Vec::new(),
+            afe: Vec::new(),
+            mode: Mode::Initial,
+            original_mode: Mode::Initial,
+            template_modes: Vec::new(),
             head: None,
-            body: None,
-            foreign_depth: 0,
-            saw_body_content: false,
-            saw_doctype: false,
-            scripting: false,
+            form: None,
+            frameset_ok: true,
+            scripting,
+            foster: false,
+            pending_table_text: Vec::new(),
+            skip_lf: false,
+            fragment: false,
+            context: None,
+            switch_to: None,
+            done: false,
         }
-    }
-
-    fn current(&self) -> NodeId {
-        *self.stack.last().unwrap_or(&Document::ROOT)
-    }
-
-    fn current_tag(&self) -> &str {
-        self.doc.tag(self.current()).unwrap_or("")
-    }
-
-    fn ensure_html(&mut self) -> NodeId {
-        if let Some(h) = self.html {
-            return h;
-        }
-        let h = self.doc.create_element("html", vec![]);
-        self.doc.append_child(Document::ROOT, h);
-        self.stack.push(h);
-        self.html = Some(h);
-        h
-    }
-
-    fn ensure_head(&mut self) -> NodeId {
-        if let Some(h) = self.head {
-            return h;
-        }
-        let html = self.ensure_html();
-        let h = self.doc.create_element("head", vec![]);
-        self.doc.append_child(html, h);
-        self.head = Some(h);
-        h
-    }
-
-    fn ensure_body(&mut self) -> NodeId {
-        if let Some(b) = self.body {
-            return b;
-        }
-        self.ensure_head();
-        let html = self.ensure_html();
-        // Pop anything (head) off the stack down to html.
-        while self.stack.len() > 1 {
-            self.stack.pop();
-        }
-        let b = self.doc.create_element("body", vec![]);
-        self.doc.append_child(html, b);
-        self.stack.push(b);
-        self.body = Some(b);
-        self.saw_body_content = true;
-        b
     }
 
     fn run(&mut self, input: &str) {
         let mut tk = Tokenizer::new(input);
+        self.run_tokens(&mut tk);
+    }
+
+    fn run_tokens(&mut self, tk: &mut Tokenizer) {
         loop {
+            tk.allow_cdata = self.adjusted_current().map(|n| !self.is_ns(n, Namespace::Html)).unwrap_or(false);
             let tok = tk.next_token();
+            // "If the next token is a LF, ignore it" (after <pre>, ...).
+            let skip_lf = std::mem::take(&mut self.skip_lf);
             match tok {
-                Token::Eof => break,
-                Token::Doctype(text) => self.doctype(&text),
-                Token::Comment(c) => {
-                    let n = self.doc.create(NodeData::Comment(c));
-                    let parent = self.current();
-                    self.doc.append_child(parent, n);
+                Token::Eof => {
+                    self.dispatch(Tok::Eof);
+                    break;
                 }
-                Token::Text(t) => self.text(t),
-                Token::StartTag {
-                    name,
-                    attrs,
-                    self_closing,
-                } => {
-                    let raw = self.start_tag(&name, attrs, self_closing);
-                    if let Some(kind) = raw {
-                        tk.set_raw(kind, &name);
+                Token::Doctype(d) => self.dispatch(Tok::Doctype(d)),
+                Token::Comment(c) => self.dispatch(Tok::Comment(c)),
+                Token::EndTag { name } => self.dispatch(Tok::End(name)),
+                Token::StartTag { name, attrs, self_closing } => {
+                    self.dispatch(Tok::Start(Tag { name, attrs, self_closing }));
+                    if let Some(s) = self.switch_to.take() {
+                        tk.set_state(s);
                     }
                 }
-                Token::EndTag { name } => self.end_tag(&name),
-            }
-        }
-        // Make sure even an empty document has html/head/body.
-        self.ensure_body();
-        if !self.saw_doctype {
-            self.doc.quirks_mode = QuirksMode::Quirks;
-        }
-    }
-
-    /// "initial" insertion mode: a DOCTYPE before anything else becomes the
-    /// document's DocumentType node and decides the quirks mode.
-    fn doctype(&mut self, text: &str) {
-        if self.saw_doctype || self.html.is_some() {
-            return; // parse error: ignored
-        }
-        self.saw_doctype = true;
-        let (data, force_quirks) = parse_doctype(text);
-        self.doc.quirks_mode = quirks_mode_for(&data, force_quirks);
-        let n = self.doc.create(NodeData::Doctype(data));
-        self.doc.append_child(Document::ROOT, n);
-    }
-
-    fn text(&mut self, t: String) {
-        if self.body.is_none() {
-            // Whitespace before body is dropped; anything else opens the body.
-            if t.trim().is_empty() {
-                // ...except inside <head> ("in head" mode inserts it, and
-                // hydrating frameworks count those text nodes) and its raw
-                // elements like <title>.
-                let cur = self.current_tag().to_string();
-                if cur == "head" || HEAD_ONLY.contains(&cur.as_str()) || self.in_head_container() {
-                    self.append_text(t);
-                }
-                return;
-            }
-            let in_container = self.in_head_container();
-            let cur = self.current_tag().to_string();
-            if !HEAD_ONLY.contains(&cur.as_str()) && !in_container {
-                self.ensure_body();
-            }
-        }
-        self.append_text(t);
-    }
-
-    fn append_text(&mut self, t: String) {
-        let parent = self.current();
-        // Merge with previous text node when possible.
-        if let Some(last) = self.doc.node(parent).last_child {
-            if let NodeData::Text(existing) = &mut self.doc.nodes[last].data {
-                existing.push_str(&t);
-                return;
-            }
-        }
-        let n = self.doc.create_text(&t);
-        self.doc.append_child(parent, n);
-    }
-
-    fn insert_element(&mut self, name: &str, attrs: Vec<(String, String)>, push: bool) -> NodeId {
-        let parent = self.current();
-        // Elements inside <svg>/<math> are in the SVG/MathML namespace
-        // (HTML integration points switch back to HTML).
-        let ns = match name {
-            "svg" => Namespace::Svg,
-            "math" => Namespace::MathMl,
-            _ => match self.doc.element(parent) {
-                Some(p) if p.ns == Namespace::Svg && !matches!(p.tag.as_str(), "foreignobject" | "foreignObject" | "desc" | "title") => Namespace::Svg,
-                Some(p) if p.ns == Namespace::MathMl && !matches!(p.tag.as_str(), "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml") => Namespace::MathMl,
-                _ => Namespace::Html,
-            },
-        };
-        let n = if ns == Namespace::Html { self.doc.create_element(name, attrs) } else { self.doc.create_element_ns(ns, None, &name.to_ascii_lowercase(), attrs) };
-        self.doc.append_child(parent, n);
-        if push {
-            self.stack.push(n);
-        }
-        n
-    }
-
-    /// Is an element with `tag` on the stack above the nearest scope boundary?
-    fn in_scope(&self, tag: &str, extra_boundaries: &[&str]) -> Option<usize> {
-        for (i, &n) in self.stack.iter().enumerate().rev() {
-            let t = self.doc.tag(n).unwrap_or("");
-            if t == tag {
-                return Some(i);
-            }
-            if SCOPE_BOUNDARY.contains(&t) || extra_boundaries.contains(&t) {
-                return None;
-            }
-        }
-        None
-    }
-
-    fn pop_until_including(&mut self, index: usize) {
-        self.stack.truncate(index);
-    }
-
-    fn close_if_in_scope(&mut self, tag: &str, extra: &[&str]) {
-        if let Some(i) = self.in_scope(tag, extra) {
-            self.pop_until_including(i);
-        }
-    }
-
-    fn merge_attrs(&mut self, node: NodeId, attrs: Vec<(String, String)>) {
-        if let Some(el) = self.doc.element_mut(node) {
-            for (k, v) in attrs {
-                if !el.attrs.iter().any(|(n, _)| *n == k) {
-                    el.attrs.push((k, v));
+                Token::Text(mut t) => {
+                    if skip_lf && t.starts_with('\n') {
+                        t.remove(0);
+                    }
+                    self.chars(&t);
                 }
             }
+            if self.done {
+                break;
+            }
+        }
+        self.mirror_selectedcontent();
+    }
+
+    /// A `<selectedcontent>` inside a `<select>` holds a copy of the
+    /// selected option's contents (the last option with `selected`, else
+    /// the first option).
+    fn mirror_selectedcontent(&mut self) {
+        let targets: Vec<NodeId> = self.doc.descendants(Document::ROOT).filter(|&n| self.is_html(n, "selectedcontent")).collect();
+        for sc in targets {
+            let Some(sel) = self.doc.ancestor_or_self(sc, |a| self.is_html(a, "select")) else { continue };
+            let options: Vec<NodeId> = self.doc.descendants(sel).filter(|&n| self.is_html(n, "option")).collect();
+            let chosen = options.iter().rev().find(|&&o| self.doc.attr(o, "selected").is_some()).or(options.first()).copied();
+            let Some(option) = chosen else { continue };
+            self.doc.clear_children(sc);
+            let kids: Vec<NodeId> = self.doc.children(option).collect();
+            for k in kids {
+                let copy = self.doc.clone_subtree(k, true);
+                self.doc.append_child(sc, copy);
+            }
         }
     }
 
-    fn start_tag(&mut self, name: &str, attrs: Vec<(String, String)>, self_closing: bool) -> Option<RawKind> {
-        // Foreign content: keep nesting faithfully, honor self-closing.
-        if self.foreign_depth > 0 {
-            if self_closing {
-                self.insert_element(name, attrs, false);
+    /// Split text into homogeneous runs (whitespace / NUL / other).
+    fn chars(&mut self, t: &str) {
+        let mut start = 0;
+        let mut kind = 3u8;
+        for (i, c) in t.char_indices() {
+            let k = match c {
+                '\t' | '\n' | '\u{c}' | ' ' | '\r' => 0,
+                '\0' => 1,
+                _ => 2,
+            };
+            if k != kind {
+                if i > start {
+                    self.dispatch(Tok::Chars(t[start..i].to_string()));
+                }
+                start = i;
+                kind = k;
+            }
+        }
+        if start < t.len() {
+            self.dispatch(Tok::Chars(t[start..].to_string()));
+        }
+    }
+
+    // ------------------------------------------------------------ helpers
+
+    fn current(&self) -> Option<NodeId> {
+        self.open.last().copied()
+    }
+
+    fn adjusted_current(&self) -> Option<NodeId> {
+        if self.fragment && self.open.len() == 1 {
+            return self.context;
+        }
+        self.current()
+    }
+
+    fn el(&self, n: NodeId) -> (&str, &Namespace) {
+        match self.doc.element(n) {
+            Some(e) => (e.tag.as_str(), &e.ns),
+            None => ("", &Namespace::None),
+        }
+    }
+
+    fn is_ns(&self, n: NodeId, ns: Namespace) -> bool {
+        *self.el(n).1 == ns
+    }
+
+    fn is_html(&self, n: NodeId, name: &str) -> bool {
+        let (t, ns) = self.el(n);
+        *ns == Namespace::Html && t == name
+    }
+
+    fn is_html_any(&self, n: NodeId, names: &[&str]) -> bool {
+        let (t, ns) = self.el(n);
+        *ns == Namespace::Html && names.contains(&t)
+    }
+
+    fn current_is(&self, name: &str) -> bool {
+        self.current().map(|n| self.is_html(n, name)).unwrap_or(false)
+    }
+
+    fn current_is_any(&self, names: &[&str]) -> bool {
+        self.current().map(|n| self.is_html_any(n, names)).unwrap_or(false)
+    }
+
+    fn is_special(&self, n: NodeId) -> bool {
+        let (t, ns) = self.el(n);
+        match ns {
+            Namespace::Html => SPECIAL_HTML.contains(&t),
+            Namespace::MathMl => matches!(t, "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml"),
+            Namespace::Svg => matches!(t, "foreignObject" | "desc" | "title"),
+            _ => false,
+        }
+    }
+
+    fn is_mathml_text_ip(&self, n: NodeId) -> bool {
+        let (t, ns) = self.el(n);
+        *ns == Namespace::MathMl && matches!(t, "mi" | "mo" | "mn" | "ms" | "mtext")
+    }
+
+    fn is_html_ip(&self, n: NodeId) -> bool {
+        let (t, ns) = self.el(n);
+        match ns {
+            Namespace::MathMl if t == "annotation-xml" => self
+                .doc
+                .attr(n, "encoding")
+                .map(|e| e.eq_ignore_ascii_case("text/html") || e.eq_ignore_ascii_case("application/xhtml+xml"))
+                .unwrap_or(false),
+            Namespace::Svg => matches!(t, "foreignObject" | "desc" | "title"),
+            _ => false,
+        }
+    }
+
+    fn scope_boundary(&self, n: NodeId, extra: &[&str]) -> bool {
+        let (t, ns) = self.el(n);
+        match ns {
+            Namespace::Html => matches!(t, "applet" | "caption" | "html" | "table" | "td" | "th" | "marquee" | "object" | "template") || extra.contains(&t),
+            Namespace::MathMl => matches!(t, "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml"),
+            Namespace::Svg => matches!(t, "foreignObject" | "desc" | "title"),
+            _ => false,
+        }
+    }
+
+    fn in_scope_with(&self, names: &[&str], extra: &[&str]) -> bool {
+        for &n in self.open.iter().rev() {
+            if self.is_html_any(n, names) {
+                return true;
+            }
+            if self.scope_boundary(n, extra) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn in_scope(&self, name: &str) -> bool {
+        self.in_scope_with(&[name], &[])
+    }
+
+    fn in_button_scope(&self, name: &str) -> bool {
+        self.in_scope_with(&[name], &["button"])
+    }
+
+    fn in_list_scope(&self, name: &str) -> bool {
+        self.in_scope_with(&[name], &["ol", "ul"])
+    }
+
+    fn in_table_scope(&self, names: &[&str]) -> bool {
+        for &n in self.open.iter().rev() {
+            if self.is_html_any(n, names) {
+                return true;
+            }
+            if self.is_html_any(n, &["html", "table", "template"]) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn node_in_scope(&self, target: NodeId) -> bool {
+        for &n in self.open.iter().rev() {
+            if n == target {
+                return true;
+            }
+            if self.scope_boundary(n, &[]) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn pop(&mut self) -> Option<NodeId> {
+        self.open.pop()
+    }
+
+    fn pop_until(&mut self, name: &str) {
+        while let Some(n) = self.pop() {
+            if self.is_html(n, name) {
+                break;
+            }
+        }
+    }
+
+    fn pop_until_any(&mut self, names: &[&str]) {
+        while let Some(n) = self.pop() {
+            if self.is_html_any(n, names) {
+                break;
+            }
+        }
+    }
+
+    fn pop_until_node(&mut self, target: NodeId) {
+        while let Some(n) = self.pop() {
+            if n == target {
+                break;
+            }
+        }
+    }
+
+    fn generate_implied_end_tags(&mut self, except: Option<&str>) {
+        while let Some(c) = self.current() {
+            let (t, ns) = self.el(c);
+            if *ns == Namespace::Html && IMPLIED_END.contains(&t) && Some(t) != except {
+                self.pop();
             } else {
-                self.insert_element(name, attrs, true);
-                if name == "svg" || name == "math" {
-                    self.foreign_depth += 1;
-                }
-                // Any non-svg element inside svg counts as nested for depth purposes.
-                if name != "svg" && name != "math" {
-                    self.foreign_depth += 1;
-                }
-            }
-            return None;
-        }
-
-        match name {
-            "html" => {
-                let h = self.ensure_html();
-                self.merge_attrs(h, attrs);
-                return None;
-            }
-            "head" => {
-                if self.body.is_none() {
-                    let h = self.ensure_head();
-                    self.merge_attrs(h, attrs);
-                    if !self.stack.contains(&h) {
-                        self.stack.push(h);
-                    }
-                }
-                return None;
-            }
-            "body" => {
-                let b = self.ensure_body();
-                self.merge_attrs(b, attrs);
-                return None;
-            }
-            "frameset" => {
-                self.ensure_body();
-                return None;
-            }
-            _ => {}
-        }
-
-        if HEAD_ONLY.contains(&name) && self.body.is_none() {
-            // Head content before body.
-            let head = self.ensure_head();
-            let on_stack = self.stack.contains(&head);
-            if !on_stack {
-                self.stack.push(head);
-            }
-            let is_void = VOID.contains(&name);
-            self.insert_element(name, attrs, !is_void);
-            let raw = self.raw_kind(name);
-            if raw.is_none() && is_void {
-                // nothing to pop
-            }
-            return raw;
-        }
-
-        // Anything inside a `<noscript>` (without scripting) or a
-        // `<template>` in the head stays there: tracking pixels and fallbacks
-        // don't leak into the body, and template content stays content.
-        if self.body.is_none() && self.in_head_container() {
-            let is_void = VOID.contains(&name);
-            self.insert_element(name, attrs, !is_void && !self_closing);
-            return self.raw_kind(name);
-        }
-
-        // Everything else lives in the body.
-        self.ensure_body();
-
-        // Implied end tags.
-        if CLOSES_P.contains(&name) {
-            self.close_if_in_scope("p", &["button"]);
-        }
-        match name {
-            "li" => self.close_list_item(&["li"], &["ul", "ol", "menu"]),
-            "dt" | "dd" => self.close_list_item(&["dt", "dd"], &["dl"]),
-            "option" => {
-                if self.current_tag() == "option" {
-                    self.stack.pop();
-                }
-            }
-            "optgroup" => {
-                if self.current_tag() == "option" {
-                    self.stack.pop();
-                }
-                if self.current_tag() == "optgroup" {
-                    self.stack.pop();
-                }
-            }
-            "tr" => {
-                self.close_table_part(&["tr", "caption", "colgroup"], &["table", "thead", "tbody", "tfoot"]);
-            }
-            "td" | "th" => {
-                self.close_table_part(&["td", "th", "caption", "colgroup"], &["table", "tr"]);
-            }
-            "thead" | "tbody" | "tfoot" => {
-                self.close_table_part(&["thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup"], &["table"]);
-            }
-            "caption" | "colgroup" => {
-                self.close_table_part(&["thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup"], &["table"]);
-            }
-            "a" => {
-                // Simplified adoption agency: an open <a> is closed first.
-                if let Some(i) = self.stack.iter().rposition(|&n| self.doc.is_element(n, "a")) {
-                    // only within the current block context
-                    let blocked = self.stack[i + 1..]
-                        .iter()
-                        .any(|&n| SCOPE_BOUNDARY.contains(&self.doc.tag(n).unwrap_or("")));
-                    if !blocked {
-                        self.pop_until_including(i);
-                    }
-                }
-            }
-            "button" => self.close_if_in_scope("button", &[]),
-            "form" => {}
-            _ if HEADINGS.contains(&name) => {
-                if HEADINGS.contains(&self.current_tag()) {
-                    self.stack.pop();
-                }
-            }
-            _ => {}
-        }
-
-        if name == "image" {
-            return self.start_tag("img", attrs, self_closing);
-        }
-
-        // Implied table wrappers ("in table" / "in table body" insertion
-        // modes): rows live in a tbody, cells in a row, cols in a colgroup.
-        match (name, self.current_tag()) {
-            ("tr", "table") => {
-                self.insert_element("tbody", Vec::new(), true);
-            }
-            ("td" | "th", "table") => {
-                self.insert_element("tbody", Vec::new(), true);
-                self.insert_element("tr", Vec::new(), true);
-            }
-            ("td" | "th", "tbody" | "thead" | "tfoot") => {
-                self.insert_element("tr", Vec::new(), true);
-            }
-            ("col", "table") => {
-                self.insert_element("colgroup", Vec::new(), true);
-            }
-            _ => {}
-        }
-
-        let is_void = VOID.contains(&name);
-        self.insert_element(name, attrs, !is_void);
-
-        if name == "svg" || name == "math" {
-            if self_closing {
-                self.stack.pop();
-            } else {
-                self.foreign_depth = 1;
-            }
-            return None;
-        }
-
-        self.raw_kind(name)
-    }
-
-    /// Is a `<noscript>` or `<template>` open (their content stays where
-    /// they are, also in the head)?
-    fn in_head_container(&self) -> bool {
-        self.stack.iter().any(|&n| self.doc.element(n).map(|e| e.tag == "noscript" || e.tag == "template").unwrap_or(false))
-    }
-
-    /// Tokenizer state after a start tag.
-    fn raw_kind(&self, name: &str) -> Option<RawKind> {
-        if name == "noscript" && self.scripting {
-            return Some(RawKind::RawText);
-        }
-        raw_kind(name)
-    }
-
-    fn close_list_item(&mut self, items: &[&str], boundaries: &[&str]) {
-        for i in (0..self.stack.len()).rev() {
-            let t = self.doc.tag(self.stack[i]).unwrap_or("").to_string();
-            if items.contains(&t.as_str()) {
-                self.pop_until_including(i);
-                return;
-            }
-            if boundaries.contains(&t.as_str()) || SCOPE_BOUNDARY.contains(&t.as_str()) {
-                return;
-            }
-            // Special (block) elements other than address/div/p stop the search.
-            if is_special_block(&t) && !matches!(t.as_str(), "address" | "div" | "p") {
-                return;
+                break;
             }
         }
     }
 
-    fn close_table_part(&mut self, items: &[&str], boundaries: &[&str]) {
-        for i in (0..self.stack.len()).rev() {
-            let t = self.doc.tag(self.stack[i]).unwrap_or("").to_string();
-            if items.contains(&t.as_str()) {
-                self.pop_until_including(i);
-                return;
-            }
-            if boundaries.contains(&t.as_str()) || t == "html" {
-                return;
-            }
+    fn generate_implied_end_tags_thoroughly(&mut self) {
+        while self.current_is_any(IMPLIED_END_THOROUGH) {
+            self.pop();
         }
     }
 
-    fn end_tag(&mut self, name: &str) {
-        if self.foreign_depth > 0 {
-            if let Some(i) = self.stack.iter().rposition(|&n| self.doc.is_element(n, name)) {
-                let popped = self.stack.len() - i;
-                self.pop_until_including(i);
-                self.foreign_depth = self.foreign_depth.saturating_sub(popped);
-                // Leaving the outermost svg/math resets foreign mode.
-                if !self.stack.iter().any(|&n| self.doc.is_element(n, "svg") || self.doc.is_element(n, "math")) {
-                    self.foreign_depth = 0;
+    fn close_p(&mut self) {
+        self.generate_implied_end_tags(Some("p"));
+        self.pop_until("p");
+    }
+
+    // ------------------------------------------------------------ insertion
+
+    /// The appropriate place for inserting a node: (parent, before).
+    fn insertion_place(&self, override_target: Option<NodeId>) -> (NodeId, Option<NodeId>) {
+        let target = override_target.or(self.current()).unwrap_or(Document::ROOT);
+        if self.foster && self.is_html_any(target, &["table", "tbody", "tfoot", "thead", "tr"]) {
+            let last_template = self.open.iter().rposition(|&n| self.is_html(n, "template"));
+            let last_table = self.open.iter().rposition(|&n| self.is_html(n, "table"));
+            if let Some(tp) = last_template {
+                if last_table.map(|tb| tp > tb).unwrap_or(true) {
+                    return (self.open[tp], None);
                 }
             }
+            let Some(tb) = last_table else { return (self.open[0], None) };
+            let table = self.open[tb];
+            if let Some(parent) = self.doc.parent(table) {
+                return (parent, Some(table));
+            }
+            return (self.open[tb - 1], None);
+        }
+        (target, None)
+    }
+
+    fn insert_at(&mut self, place: (NodeId, Option<NodeId>), node: NodeId) {
+        match place.1 {
+            Some(before) => self.doc.insert_before(place.0, node, Some(before)),
+            None => self.doc.append_child(place.0, node),
+        }
+    }
+
+    fn insert_text(&mut self, s: &str) {
+        let place = self.insertion_place(None);
+        if place.0 == Document::ROOT {
             return;
         }
-        match name {
-            "html" | "body" => {
-                // Ignore: trailing content still goes into body.
-                self.ensure_body();
+        let prev = match place.1 {
+            Some(b) => self.doc.prev_sibling(b),
+            None => self.doc.last_child(place.0),
+        };
+        if let Some(p) = prev {
+            if let NodeData::Text(t) = &mut self.doc.node_mut(p).data {
+                t.push_str(s);
+                return;
             }
-            "head" => {
-                if let Some(h) = self.head {
-                    if let Some(i) = self.stack.iter().rposition(|&n| n == h) {
-                        self.pop_until_including(i);
+        }
+        let t = self.doc.create_text(s);
+        self.insert_at(place, t);
+    }
+
+    fn insert_comment(&mut self, c: String, place: Option<(NodeId, Option<NodeId>)>) {
+        let place = place.unwrap_or_else(|| self.insertion_place(None));
+        let n = self.doc.create(NodeData::Comment(c));
+        self.insert_at(place, n);
+    }
+
+    fn create_element(&mut self, tag: &Tag, ns: Namespace) -> NodeId {
+        if ns == Namespace::Html {
+            self.doc.create_element(&tag.name, tag.attrs.clone())
+        } else {
+            self.doc.create_element_ns(ns, None, &tag.name, tag.attrs.clone())
+        }
+    }
+
+    fn insert_element(&mut self, tag: &Tag, ns: Namespace) -> NodeId {
+        let place = self.insertion_place(None);
+        let el = self.create_element(tag, ns);
+        self.insert_at(place, el);
+        self.open.push(el);
+        el
+    }
+
+    fn insert_html(&mut self, tag: &Tag) -> NodeId {
+        self.insert_element(tag, Namespace::Html)
+    }
+
+    fn insert_html_named(&mut self, name: &str) -> NodeId {
+        self.insert_html(&Tag { name: name.to_string(), attrs: Vec::new(), self_closing: false })
+    }
+
+    fn insert_foreign(&mut self, mut tag: Tag, ns: Namespace) {
+        match ns {
+            Namespace::Svg => {
+                if let Some((_, fixed)) = SVG_TAGS.iter().find(|(l, _)| *l == tag.name) {
+                    tag.name = fixed.to_string();
+                }
+                for (n, _) in tag.attrs.iter_mut() {
+                    if let Some((_, fixed)) = SVG_ATTRS.iter().find(|(l, _)| *l == n.as_str()) {
+                        *n = fixed.to_string();
                     }
                 }
             }
-            "br" => {
-                // </br> is treated as <br>
-                self.start_tag("br", vec![], false);
+            Namespace::MathMl => {
+                for (n, _) in tag.attrs.iter_mut() {
+                    if n == "definitionurl" {
+                        *n = "definitionURL".into();
+                    }
+                }
             }
-            "p" => {
-                if self.in_scope("p", &["button"]).is_some() {
-                    self.close_if_in_scope("p", &["button"]);
+            _ => {}
+        }
+        let self_closing = tag.self_closing;
+        let el = self.insert_element(&tag, ns);
+        // "Adjust foreign attributes": xlink:*, xml:* and xmlns get their
+        // namespaces.
+        for (n, _) in &tag.attrs {
+            let ns = match n.as_str() {
+                "xlink:actuate" | "xlink:arcrole" | "xlink:href" | "xlink:role" | "xlink:show" | "xlink:title" | "xlink:type" => "http://www.w3.org/1999/xlink",
+                "xml:lang" | "xml:space" => "http://www.w3.org/XML/1998/namespace",
+                "xmlns" | "xmlns:xlink" => "http://www.w3.org/2000/xmlns/",
+                _ => continue,
+            };
+            self.doc.set_attr_namespace(el, n, Some(ns));
+        }
+        if self_closing {
+            self.pop();
+        }
+    }
+
+    // --------------------------------------------- active formatting elements
+
+    fn push_afe(&mut self, el: NodeId, tag: &Tag) {
+        // Noah's Ark: at most three identical entries after the last marker.
+        let mut same = Vec::new();
+        for (i, e) in self.afe.iter().enumerate().rev() {
+            match e {
+                Afe::Marker => break,
+                Afe::El(_, t) => {
+                    if t.name == tag.name && attrs_equal(&t.attrs, &tag.attrs) {
+                        same.push(i);
+                    }
+                }
+            }
+        }
+        if same.len() >= 3 {
+            self.afe.remove(*same.last().unwrap());
+        }
+        self.afe.push(Afe::El(el, tag.clone()));
+    }
+
+    fn afe_index(&self, el: NodeId) -> Option<usize> {
+        self.afe.iter().position(|e| matches!(e, Afe::El(n, _) if *n == el))
+    }
+
+    fn clear_afe_to_marker(&mut self) {
+        while let Some(e) = self.afe.pop() {
+            if matches!(e, Afe::Marker) {
+                break;
+            }
+        }
+    }
+
+    fn reconstruct_afe(&mut self) {
+        let Some(last) = self.afe.last() else { return };
+        match last {
+            Afe::Marker => return,
+            Afe::El(n, _) if self.open.contains(n) => return,
+            _ => {}
+        }
+        let mut i = self.afe.len() - 1;
+        loop {
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+            let stop = match &self.afe[i] {
+                Afe::Marker => true,
+                Afe::El(n, _) => self.open.contains(n),
+            };
+            if stop {
+                i += 1;
+                break;
+            }
+        }
+        for j in i..self.afe.len() {
+            let tag = match &self.afe[j] {
+                Afe::El(_, t) => t.clone(),
+                Afe::Marker => continue,
+            };
+            let el = self.insert_html(&tag);
+            self.afe[j] = Afe::El(el, tag);
+        }
+    }
+
+    /// The adoption agency algorithm; false means "act as any other end tag".
+    fn adoption_agency(&mut self, subject: &str) -> bool {
+        if let Some(c) = self.current() {
+            if self.is_html(c, subject) && self.afe_index(c).is_none() {
+                self.pop();
+                return true;
+            }
+        }
+        for _ in 0..8 {
+            // The formatting element: last entry named `subject` after the last marker.
+            let mut fe = None;
+            for e in self.afe.iter().rev() {
+                match e {
+                    Afe::Marker => break,
+                    Afe::El(n, t) if t.name == subject => {
+                        fe = Some(*n);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let Some(fe) = fe else { return false };
+            let Some(fe_stack) = self.open.iter().position(|&n| n == fe) else {
+                if let Some(i) = self.afe_index(fe) {
+                    self.afe.remove(i);
+                }
+                return true;
+            };
+            if !self.node_in_scope(fe) {
+                return true;
+            }
+            let furthest = self.open[fe_stack + 1..].iter().position(|&n| self.is_special(n)).map(|i| fe_stack + 1 + i);
+            let Some(fb_index) = furthest else {
+                self.pop_until_node(fe);
+                if let Some(i) = self.afe_index(fe) {
+                    self.afe.remove(i);
+                }
+                return true;
+            };
+            let furthest_block = self.open[fb_index];
+            let common_ancestor = self.open[fe_stack - 1];
+            // Bookmark: None = the formatting element's position.
+            let mut bookmark_after: Option<NodeId> = None;
+            let mut node_index = fb_index;
+            let mut last_node = furthest_block;
+            let mut counter = 0;
+            loop {
+                counter += 1;
+                node_index -= 1;
+                let node = self.open[node_index];
+                if node == fe {
+                    break;
+                }
+                if counter > 3 {
+                    if let Some(i) = self.afe_index(node) {
+                        self.afe.remove(i);
+                    }
+                }
+                let Some(ai) = self.afe_index(node) else {
+                    self.open.remove(node_index);
+                    continue;
+                };
+                let tag = match &self.afe[ai] {
+                    Afe::El(_, t) => t.clone(),
+                    Afe::Marker => unreachable!(),
+                };
+                let new_el = self.create_element(&tag, Namespace::Html);
+                self.afe[ai] = Afe::El(new_el, tag);
+                self.open[node_index] = new_el;
+                if last_node == furthest_block {
+                    bookmark_after = Some(new_el);
+                }
+                self.doc.detach(last_node);
+                self.doc.append_child(new_el, last_node);
+                last_node = new_el;
+            }
+            self.doc.detach(last_node);
+            let place = self.insertion_place(Some(common_ancestor));
+            self.insert_at(place, last_node);
+            let fe_tag = match self.afe_index(fe).map(|i| &self.afe[i]) {
+                Some(Afe::El(_, t)) => t.clone(),
+                _ => Tag { name: subject.to_string(), attrs: Vec::new(), self_closing: false },
+            };
+            let new_el = self.create_element(&fe_tag, Namespace::Html);
+            let kids: Vec<NodeId> = self.doc.children(furthest_block).collect();
+            for k in kids {
+                self.doc.detach(k);
+                self.doc.append_child(new_el, k);
+            }
+            self.doc.append_child(furthest_block, new_el);
+            match bookmark_after {
+                None => {
+                    if let Some(i) = self.afe_index(fe) {
+                        self.afe[i] = Afe::El(new_el, fe_tag);
+                    }
+                }
+                Some(after) => {
+                    if let Some(i) = self.afe_index(fe) {
+                        self.afe.remove(i);
+                    }
+                    let at = self.afe_index(after).map(|i| i + 1).unwrap_or(self.afe.len());
+                    self.afe.insert(at, Afe::El(new_el, fe_tag));
+                }
+            }
+            if let Some(i) = self.open.iter().position(|&n| n == fe) {
+                self.open.remove(i);
+            }
+            let fbi = self.open.iter().position(|&n| n == furthest_block).unwrap_or(self.open.len() - 1);
+            self.open.insert(fbi + 1, new_el);
+        }
+        true
+    }
+
+    // ------------------------------------------------------------ modes
+
+    fn reset_insertion_mode(&mut self) {
+        let mut i = self.open.len();
+        while i > 0 {
+            i -= 1;
+            let last = i == 0;
+            let node = if last && self.fragment { self.context.unwrap_or(self.open[0]) } else { self.open[i] };
+            let (t, ns) = self.el(node);
+            let t = t.to_string();
+            if *ns != Namespace::Html {
+                if last {
+                    self.mode = Mode::InBody;
+                    return;
+                }
+                continue;
+            }
+            match t.as_str() {
+                "td" | "th" if !last => {
+                    self.mode = Mode::InCell;
+                    return;
+                }
+                "tr" => {
+                    self.mode = Mode::InRow;
+                    return;
+                }
+                "tbody" | "thead" | "tfoot" => {
+                    self.mode = Mode::InTableBody;
+                    return;
+                }
+                "caption" => {
+                    self.mode = Mode::InCaption;
+                    return;
+                }
+                "colgroup" => {
+                    self.mode = Mode::InColumnGroup;
+                    return;
+                }
+                "table" => {
+                    self.mode = Mode::InTable;
+                    return;
+                }
+                "template" => {
+                    self.mode = *self.template_modes.last().unwrap_or(&Mode::InTemplate);
+                    return;
+                }
+                "head" if !last => {
+                    self.mode = Mode::InHead;
+                    return;
+                }
+                "body" => {
+                    self.mode = Mode::InBody;
+                    return;
+                }
+                "frameset" => {
+                    self.mode = Mode::InFrameset;
+                    return;
+                }
+                "html" => {
+                    self.mode = if self.head.is_none() { Mode::BeforeHead } else { Mode::AfterHead };
+                    return;
+                }
+                _ => {}
+            }
+            if last {
+                self.mode = Mode::InBody;
+                return;
+            }
+        }
+        self.mode = Mode::InBody;
+    }
+
+    /// Tree construction dispatcher: foreign content or the current mode.
+    fn dispatch(&mut self, tok: Tok) {
+        let Some(acn) = self.adjusted_current() else {
+            return self.process(self.mode, tok);
+        };
+        let html = self.is_ns(acn, Namespace::Html);
+        let use_mode = html
+            || (self.is_mathml_text_ip(acn) && matches!(&tok, Tok::Start(t) if t.name != "mglyph" && t.name != "malignmark"))
+            || (self.is_mathml_text_ip(acn) && matches!(tok, Tok::Chars(_)))
+            || (self.el(acn) == ("annotation-xml", &Namespace::MathMl) && matches!(&tok, Tok::Start(t) if t.name == "svg"))
+            || (self.is_html_ip(acn) && matches!(tok, Tok::Start(_) | Tok::Chars(_)))
+            || matches!(tok, Tok::Eof);
+        if use_mode {
+            self.process(self.mode, tok)
+        } else {
+            self.foreign(tok)
+        }
+    }
+
+    fn foreign(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(s) => {
+                if s.starts_with('\0') {
+                    let r: String = s.chars().map(|_| '\u{fffd}').collect();
+                    self.insert_text(&r);
                 } else {
-                    // Spec: insert an empty <p>. Harmless to ignore.
+                    if !is_ws_str(&s) {
+                        self.frameset_ok = false;
+                    }
+                    self.insert_text(&s);
                 }
             }
-            _ if HEADINGS.contains(&name) => {
-                // Any heading end tag closes the innermost open heading.
-                for i in (0..self.stack.len()).rev() {
-                    let t = self.doc.tag(self.stack[i]).unwrap_or("");
-                    if HEADINGS.contains(&t) {
-                        self.pop_until_including(i);
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t)
+                if matches!(
+                    t.name.as_str(),
+                    "b" | "big" | "blockquote" | "body" | "br" | "center" | "code" | "dd" | "div" | "dl" | "dt" | "em" | "embed" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "head" | "hr" | "i" | "img" | "li" | "listing" | "menu" | "meta" | "nobr" | "ol" | "p" | "pre" | "ruby" | "s" | "small" | "span" | "strong" | "strike" | "sub" | "sup" | "table" | "tt" | "u" | "ul" | "var"
+                ) || (t.name == "font" && t.attrs.iter().any(|(n, _)| n == "color" || n == "face" || n == "size")) =>
+            {
+                self.pop_foreign_until_html();
+                self.process(self.mode, tok);
+            }
+            Tok::End(ref n) if n == "br" || n == "p" => {
+                self.pop_foreign_until_html();
+                self.process(self.mode, tok);
+            }
+            Tok::Start(t) => {
+                let acn = self.adjusted_current().unwrap();
+                let ns = self.el(acn).1.clone();
+                self.insert_foreign(t, ns);
+            }
+            Tok::End(name) => {
+                let Some(mut idx) = self.open.len().checked_sub(1) else { return };
+                loop {
+                    let node = self.open[idx];
+                    if idx == 0 {
                         return;
                     }
-                    if SCOPE_BOUNDARY.contains(&t) {
+                    if self.el(node).0.to_ascii_lowercase() == name {
+                        self.pop_until_node(node);
                         return;
+                    }
+                    idx -= 1;
+                    if self.is_ns(self.open[idx], Namespace::Html) {
+                        break;
                     }
                 }
+                self.process(self.mode, Tok::End(name));
+            }
+            Tok::Eof => self.process(self.mode, Tok::Eof),
+        }
+    }
+
+    fn pop_foreign_until_html(&mut self) {
+        while let Some(c) = self.current() {
+            if self.is_mathml_text_ip(c) || self.is_html_ip(c) || self.is_ns(c, Namespace::Html) {
+                break;
+            }
+            self.pop();
+        }
+    }
+
+    fn process(&mut self, mode: Mode, tok: Tok) {
+        match mode {
+            Mode::Initial => self.initial(tok),
+            Mode::BeforeHtml => self.before_html(tok),
+            Mode::BeforeHead => self.before_head(tok),
+            Mode::InHead => self.in_head(tok),
+            Mode::InHeadNoscript => self.in_head_noscript(tok),
+            Mode::AfterHead => self.after_head(tok),
+            Mode::InBody => self.in_body(tok),
+            Mode::Text => self.text_mode(tok),
+            Mode::InTable => self.in_table(tok),
+            Mode::InTableText => self.in_table_text(tok),
+            Mode::InCaption => self.in_caption(tok),
+            Mode::InColumnGroup => self.in_column_group(tok),
+            Mode::InTableBody => self.in_table_body(tok),
+            Mode::InRow => self.in_row(tok),
+            Mode::InCell => self.in_cell(tok),
+            Mode::InTemplate => self.in_template(tok),
+            Mode::AfterBody => self.after_body(tok),
+            Mode::InFrameset => self.in_frameset(tok),
+            Mode::AfterFrameset => self.after_frameset(tok),
+            Mode::AfterAfterBody => self.after_after_body(tok),
+            Mode::AfterAfterFrameset => self.after_after_frameset(tok),
+        }
+    }
+
+    fn reprocess(&mut self, tok: Tok) {
+        self.process(self.mode, tok)
+    }
+
+    fn initial(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(ref s) if is_ws_str(s) => {}
+            Tok::Comment(c) => self.insert_comment(c, Some((Document::ROOT, None))),
+            Tok::Doctype(d) => {
+                let data = DoctypeData { name: d.name.clone().unwrap_or_default(), public_id: d.public_id.clone().unwrap_or_default(), system_id: d.system_id.clone().unwrap_or_default() };
+                let n = self.doc.create(NodeData::Doctype(data.clone()));
+                self.doc.append_child(Document::ROOT, n);
+                self.doc.quirks_mode = doctype_quirks(&d);
+                self.mode = Mode::BeforeHtml;
             }
             _ => {
-                // Generic: find matching element within scope and pop to it.
-                let extra: &[&str] = if matches!(name, "li" | "dt" | "dd") { &["ul", "ol", "dl"] } else { &[] };
-                let boundary_free = matches!(name, "td" | "th" | "tr" | "table" | "caption" | "tbody" | "thead" | "tfoot" | "svg" | "math" | "object" | "template" | "marquee" | "applet");
-                let found = if boundary_free {
-                    self.stack.iter().rposition(|&n| self.doc.is_element(n, name))
-                } else {
-                    self.in_scope(name, extra)
-                };
-                if let Some(i) = found {
-                    self.pop_until_including(i);
+                self.doc.quirks_mode = QuirksMode::Quirks;
+                self.mode = Mode::BeforeHtml;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn before_html(&mut self, tok: Tok) {
+        match tok {
+            Tok::Doctype(_) => {}
+            Tok::Comment(c) => self.insert_comment(c, Some((Document::ROOT, None))),
+            Tok::Chars(ref s) if is_ws_str(s) => {}
+            Tok::Start(ref t) if t.name == "html" => {
+                let el = self.create_element(t, Namespace::Html);
+                self.doc.append_child(Document::ROOT, el);
+                self.open.push(el);
+                self.mode = Mode::BeforeHead;
+            }
+            Tok::End(ref n) if !matches!(n.as_str(), "head" | "body" | "html" | "br") => {}
+            _ => {
+                let el = self.doc.create_element("html", vec![]);
+                self.doc.append_child(Document::ROOT, el);
+                self.open.push(el);
+                self.mode = Mode::BeforeHead;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn before_head(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(ref s) if is_ws_str(s) => {}
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::Start(ref t) if t.name == "head" => {
+                let h = self.insert_html(t);
+                self.head = Some(h);
+                self.mode = Mode::InHead;
+            }
+            Tok::End(ref n) if !matches!(n.as_str(), "head" | "body" | "html" | "br") => {}
+            _ => {
+                let h = self.insert_html_named("head");
+                self.head = Some(h);
+                self.mode = Mode::InHead;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn in_head(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(ref s) if is_ws_str(s) => self.insert_text(s),
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::Start(ref t) if matches!(t.name.as_str(), "base" | "basefont" | "bgsound" | "link" | "meta") => {
+                self.insert_html(t);
+                self.pop();
+            }
+            Tok::Start(ref t) if t.name == "title" => self.generic_raw(t, State::Rcdata),
+            Tok::Start(ref t) if (t.name == "noscript" && self.scripting) || t.name == "noframes" || t.name == "style" => self.generic_raw(t, State::Rawtext),
+            Tok::Start(ref t) if t.name == "noscript" => {
+                self.insert_html(t);
+                self.mode = Mode::InHeadNoscript;
+            }
+            Tok::Start(ref t) if t.name == "script" => {
+                let place = self.insertion_place(None);
+                let el = self.create_element(t, Namespace::Html);
+                self.insert_at(place, el);
+                self.open.push(el);
+                self.switch_to = Some(State::ScriptData);
+                self.original_mode = self.mode;
+                self.mode = Mode::Text;
+            }
+            Tok::End(ref n) if n == "head" => {
+                self.pop();
+                self.mode = Mode::AfterHead;
+            }
+            Tok::Start(ref t) if t.name == "template" => {
+                self.insert_html(t);
+                self.afe.push(Afe::Marker);
+                self.mode = Mode::InTemplate;
+                self.template_modes.push(Mode::InTemplate);
+            }
+            Tok::End(ref n) if n == "template" => {
+                if !self.has_template() {
+                    return;
+                }
+                self.generate_implied_end_tags_thoroughly();
+                self.pop_until("template");
+                self.clear_afe_to_marker();
+                self.template_modes.pop();
+                self.reset_insertion_mode();
+            }
+            Tok::Start(ref t) if t.name == "head" => {}
+            Tok::End(ref n) if !matches!(n.as_str(), "body" | "html" | "br") => {}
+            _ => {
+                self.pop();
+                self.mode = Mode::AfterHead;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn generic_raw(&mut self, t: &Tag, state: State) {
+        self.insert_html(t);
+        self.switch_to = Some(state);
+        self.original_mode = self.mode;
+        self.mode = Mode::Text;
+    }
+
+    fn in_head_noscript(&mut self, tok: Tok) {
+        match tok {
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::End(ref n) if n == "noscript" => {
+                self.pop();
+                self.mode = Mode::InHead;
+            }
+            Tok::Chars(ref s) if is_ws_str(s) => self.in_head(tok),
+            Tok::Comment(_) => self.in_head(tok),
+            Tok::Start(ref t) if matches!(t.name.as_str(), "basefont" | "bgsound" | "link" | "meta" | "noframes" | "style") => self.in_head(tok),
+            Tok::Start(ref t) if t.name == "head" || t.name == "noscript" => {}
+            Tok::End(ref n) if n != "br" => {}
+            _ => {
+                self.pop();
+                self.mode = Mode::InHead;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn after_head(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(ref s) if is_ws_str(s) => self.insert_text(s),
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::Start(ref t) if t.name == "body" => {
+                self.insert_html(t);
+                self.frameset_ok = false;
+                self.mode = Mode::InBody;
+            }
+            Tok::Start(ref t) if t.name == "frameset" => {
+                self.insert_html(t);
+                self.mode = Mode::InFrameset;
+            }
+            Tok::Start(ref t)
+                if matches!(t.name.as_str(), "base" | "basefont" | "bgsound" | "link" | "meta" | "noframes" | "script" | "style" | "template" | "title") =>
+            {
+                let Some(head) = self.head else { return };
+                self.open.push(head);
+                self.in_head(tok);
+                if let Some(i) = self.open.iter().rposition(|&n| n == head) {
+                    self.open.remove(i);
                 }
             }
+            Tok::End(ref n) if n == "template" => self.in_head(tok),
+            Tok::Start(ref t) if t.name == "head" => {}
+            Tok::End(ref n) if !matches!(n.as_str(), "body" | "html" | "br") => {}
+            _ => {
+                self.insert_html_named("body");
+                self.mode = Mode::InBody;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn any_other_end_in_body(&mut self, name: &str) {
+        let mut i = self.open.len();
+        while i > 0 {
+            i -= 1;
+            let node = self.open[i];
+            if self.is_html(node, name) {
+                self.generate_implied_end_tags(Some(name));
+                self.pop_until_node(node);
+                return;
+            }
+            if self.is_special(node) {
+                return;
+            }
+        }
+    }
+
+    /// A template element is open (or is the fragment's context).
+    fn has_template(&self) -> bool {
+        self.open.iter().any(|&n| self.is_html(n, "template")) || (self.fragment && self.context.map(|c| self.is_html(c, "template")).unwrap_or(false))
+    }
+
+    fn select_in_scope(&self) -> bool {
+        self.in_scope("select")
+    }
+
+    fn in_body(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(s) => {
+                if s.starts_with('\0') {
+                    return;
+                }
+                self.reconstruct_afe();
+                if !is_ws_str(&s) {
+                    self.frameset_ok = false;
+                }
+                self.insert_text(&s);
+            }
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(t) => self.in_body_start(t),
+            Tok::End(n) => self.in_body_end(n),
+            Tok::Eof => {
+                if !self.template_modes.is_empty() {
+                    return self.in_template(Tok::Eof);
+                }
+                self.done = true;
+            }
+        }
+    }
+
+    fn in_body_start(&mut self, t: Tag) {
+        let name = t.name.clone();
+        match name.as_str() {
+            "html" => {
+                if self.has_template() {
+                    return;
+                }
+                if let Some(&html) = self.open.first() {
+                    for (k, v) in &t.attrs {
+                        if self.doc.attr(html, k).is_none() {
+                            self.doc.set_attr(html, k, Some(v));
+                        }
+                    }
+                }
+            }
+            "base" | "basefont" | "bgsound" | "link" | "meta" | "noframes" | "script" | "style" | "template" | "title" => self.in_head(Tok::Start(t)),
+            "body" => {
+                if self.open.len() < 2 || !self.is_html(self.open[1], "body") || self.has_template() {
+                    return;
+                }
+                self.frameset_ok = false;
+                let body = self.open[1];
+                for (k, v) in &t.attrs {
+                    if self.doc.attr(body, k).is_none() {
+                        self.doc.set_attr(body, k, Some(v));
+                    }
+                }
+            }
+            "frameset" => {
+                if self.open.len() < 2 || !self.is_html(self.open[1], "body") || !self.frameset_ok {
+                    return;
+                }
+                let body = self.open[1];
+                self.doc.detach(body);
+                self.open.truncate(1);
+                self.insert_html(&t);
+                self.mode = Mode::InFrameset;
+            }
+            "address" | "article" | "aside" | "blockquote" | "center" | "details" | "dialog" | "dir" | "div" | "dl" | "fieldset" | "figcaption" | "figure"
+            | "footer" | "header" | "hgroup" | "main" | "menu" | "nav" | "ol" | "p" | "search" | "section" | "summary" | "ul" => {
+                if self.in_button_scope("p") {
+                    self.close_p();
+                }
+                self.insert_html(&t);
+            }
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                if self.in_button_scope("p") {
+                    self.close_p();
+                }
+                if self.current_is_any(&["h1", "h2", "h3", "h4", "h5", "h6"]) {
+                    self.pop();
+                }
+                self.insert_html(&t);
+            }
+            "pre" | "listing" => {
+                if self.in_button_scope("p") {
+                    self.close_p();
+                }
+                self.insert_html(&t);
+                self.skip_lf = true;
+                self.frameset_ok = false;
+            }
+            "form" => {
+                let in_template = self.has_template();
+                if self.form.is_some() && !in_template {
+                    return;
+                }
+                if self.in_button_scope("p") {
+                    self.close_p();
+                }
+                let f = self.insert_html(&t);
+                if !in_template {
+                    self.form = Some(f);
+                }
+            }
+            "li" | "dd" | "dt" => {
+                self.frameset_ok = false;
+                let names: &[&str] = if name == "li" { &["li"] } else { &["dd", "dt"] };
+                let mut i = self.open.len();
+                while i > 0 {
+                    i -= 1;
+                    let node = self.open[i];
+                    if self.is_html_any(node, names) {
+                        let nt = self.el(node).0.to_string();
+                        self.generate_implied_end_tags(Some(&nt));
+                        self.pop_until(&nt);
+                        break;
+                    }
+                    if self.is_special(node) && !self.is_html_any(node, &["address", "div", "p"]) {
+                        break;
+                    }
+                }
+                if self.in_button_scope("p") {
+                    self.close_p();
+                }
+                self.insert_html(&t);
+            }
+            "plaintext" => {
+                if self.in_button_scope("p") {
+                    self.close_p();
+                }
+                self.insert_html(&t);
+                self.switch_to = Some(State::Plaintext);
+            }
+            "button" => {
+                if self.in_scope("button") {
+                    self.generate_implied_end_tags(None);
+                    self.pop_until("button");
+                }
+                self.reconstruct_afe();
+                self.insert_html(&t);
+                self.frameset_ok = false;
+            }
+            "a" => {
+                let mut existing = None;
+                for e in self.afe.iter().rev() {
+                    match e {
+                        Afe::Marker => break,
+                        Afe::El(n, tg) if tg.name == "a" => {
+                            existing = Some(*n);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(a) = existing {
+                    self.adoption_agency("a");
+                    if let Some(i) = self.afe_index(a) {
+                        self.afe.remove(i);
+                    }
+                    if let Some(i) = self.open.iter().position(|&n| n == a) {
+                        self.open.remove(i);
+                    }
+                }
+                self.reconstruct_afe();
+                let el = self.insert_html(&t);
+                self.push_afe(el, &t);
+            }
+            "b" | "big" | "code" | "em" | "font" | "i" | "s" | "small" | "strike" | "strong" | "tt" | "u" => {
+                self.reconstruct_afe();
+                let el = self.insert_html(&t);
+                self.push_afe(el, &t);
+            }
+            "nobr" => {
+                self.reconstruct_afe();
+                if self.in_scope("nobr") {
+                    if !self.adoption_agency("nobr") {
+                        self.any_other_end_in_body("nobr");
+                    }
+                    self.reconstruct_afe();
+                }
+                let el = self.insert_html(&t);
+                self.push_afe(el, &t);
+            }
+            "applet" | "marquee" | "object" => {
+                self.reconstruct_afe();
+                self.insert_html(&t);
+                self.afe.push(Afe::Marker);
+                self.frameset_ok = false;
+            }
+            "table" => {
+                if self.doc.quirks_mode != QuirksMode::Quirks && self.in_button_scope("p") {
+                    self.close_p();
+                }
+                self.insert_html(&t);
+                self.frameset_ok = false;
+                self.mode = Mode::InTable;
+            }
+            "area" | "br" | "embed" | "img" | "keygen" | "wbr" => {
+                self.reconstruct_afe();
+                self.insert_html(&t);
+                self.pop();
+                self.frameset_ok = false;
+            }
+            "input" => {
+                if self.fragment && self.context.map(|c| self.is_html(c, "select")).unwrap_or(false) {
+                    return;
+                }
+                if self.select_in_scope() {
+                    self.pop_until("select");
+                }
+                self.reconstruct_afe();
+                self.insert_html(&t);
+                self.pop();
+                let hidden = t.attrs.iter().any(|(k, v)| k == "type" && v.eq_ignore_ascii_case("hidden"));
+                if !hidden {
+                    self.frameset_ok = false;
+                }
+            }
+            "param" | "source" | "track" => {
+                self.insert_html(&t);
+                self.pop();
+            }
+            "hr" => {
+                if self.in_button_scope("p") {
+                    self.close_p();
+                }
+                if self.select_in_scope() {
+                    self.generate_implied_end_tags(None);
+                }
+                self.insert_html(&t);
+                self.pop();
+                self.frameset_ok = false;
+            }
+            "image" => {
+                let mut t2 = t;
+                t2.name = "img".into();
+                self.in_body_start(t2);
+            }
+            "textarea" => {
+                self.insert_html(&t);
+                self.skip_lf = true;
+                self.switch_to = Some(State::Rcdata);
+                self.original_mode = self.mode;
+                self.frameset_ok = false;
+                self.mode = Mode::Text;
+            }
+            "xmp" => {
+                if self.in_button_scope("p") {
+                    self.close_p();
+                }
+                self.reconstruct_afe();
+                self.frameset_ok = false;
+                self.generic_raw(&t, State::Rawtext);
+            }
+            "iframe" => {
+                self.frameset_ok = false;
+                self.generic_raw(&t, State::Rawtext);
+            }
+            "noembed" => self.generic_raw(&t, State::Rawtext),
+            "noscript" if self.scripting => self.generic_raw(&t, State::Rawtext),
+            "select" => {
+                if self.fragment && self.context.map(|c| self.is_html(c, "select")).unwrap_or(false) {
+                    return;
+                }
+                if self.select_in_scope() {
+                    self.pop_until("select");
+                    return;
+                }
+                self.reconstruct_afe();
+                self.insert_html(&t);
+                self.frameset_ok = false;
+            }
+            "option" => {
+                if self.select_in_scope() {
+                    self.generate_implied_end_tags(Some("optgroup"));
+                } else if self.current_is("option") {
+                    self.pop();
+                }
+                self.reconstruct_afe();
+                self.insert_html(&t);
+            }
+            "optgroup" => {
+                if self.select_in_scope() {
+                    self.generate_implied_end_tags(None);
+                } else if self.current_is("option") {
+                    self.pop();
+                }
+                self.reconstruct_afe();
+                self.insert_html(&t);
+            }
+            "rb" | "rtc" => {
+                if self.in_scope("ruby") {
+                    self.generate_implied_end_tags(None);
+                }
+                self.insert_html(&t);
+            }
+            "rp" | "rt" => {
+                if self.in_scope("ruby") {
+                    self.generate_implied_end_tags(Some("rtc"));
+                }
+                self.insert_html(&t);
+            }
+            "math" => {
+                self.reconstruct_afe();
+                self.insert_foreign(t, Namespace::MathMl);
+            }
+            "svg" => {
+                self.reconstruct_afe();
+                self.insert_foreign(t, Namespace::Svg);
+            }
+            "caption" | "col" | "colgroup" | "frame" | "head" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr" => {}
+            _ => {
+                self.reconstruct_afe();
+                self.insert_html(&t);
+            }
+        }
+    }
+
+    fn in_body_end(&mut self, name: String) {
+        match name.as_str() {
+            "template" => self.in_head(Tok::End(name)),
+            "body" | "html" => {
+                if !self.in_scope("body") {
+                    return;
+                }
+                self.mode = Mode::AfterBody;
+                if name == "html" {
+                    self.reprocess(Tok::End(name));
+                }
+            }
+            "address" | "article" | "aside" | "blockquote" | "button" | "center" | "details" | "dialog" | "dir" | "div" | "dl" | "fieldset"
+            | "figcaption" | "figure" | "footer" | "header" | "hgroup" | "listing" | "main" | "menu" | "nav" | "ol" | "pre" | "search"
+            | "section" | "select" | "summary" | "ul" => {
+                if !self.in_scope(&name) {
+                    return;
+                }
+                self.generate_implied_end_tags(None);
+                self.pop_until(&name);
+            }
+            "form" => {
+                if !self.has_template() {
+                    let node = self.form.take();
+                    let Some(node) = node else { return };
+                    if !self.node_in_scope(node) {
+                        return;
+                    }
+                    self.generate_implied_end_tags(None);
+                    if let Some(i) = self.open.iter().position(|&n| n == node) {
+                        self.open.remove(i);
+                    }
+                } else {
+                    if !self.in_scope("form") {
+                        return;
+                    }
+                    self.generate_implied_end_tags(None);
+                    self.pop_until("form");
+                }
+            }
+            "p" => {
+                if !self.in_button_scope("p") {
+                    self.insert_html_named("p");
+                }
+                self.close_p();
+            }
+            "li" => {
+                if !self.in_list_scope("li") {
+                    return;
+                }
+                self.generate_implied_end_tags(Some("li"));
+                self.pop_until("li");
+            }
+            "dd" | "dt" => {
+                if !self.in_scope(&name) {
+                    return;
+                }
+                self.generate_implied_end_tags(Some(&name));
+                self.pop_until(&name);
+            }
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                let hs = ["h1", "h2", "h3", "h4", "h5", "h6"];
+                if !self.in_scope_with(&hs, &[]) {
+                    return;
+                }
+                self.generate_implied_end_tags(None);
+                self.pop_until_any(&hs);
+            }
+            "a" | "b" | "big" | "code" | "em" | "font" | "i" | "nobr" | "s" | "small" | "strike" | "strong" | "tt" | "u" => {
+                if !self.adoption_agency(&name) {
+                    self.any_other_end_in_body(&name);
+                }
+            }
+            "applet" | "marquee" | "object" => {
+                if !self.in_scope(&name) {
+                    return;
+                }
+                self.generate_implied_end_tags(None);
+                self.pop_until(&name);
+                self.clear_afe_to_marker();
+            }
+            "br" => {
+                self.in_body_start(Tag { name: "br".into(), attrs: Vec::new(), self_closing: false });
+            }
+            _ => self.any_other_end_in_body(&name),
+        }
+    }
+
+    fn text_mode(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(s) => self.insert_text(&s),
+            Tok::Eof => {
+                self.pop();
+                self.mode = self.original_mode;
+                self.reprocess(Tok::Eof);
+            }
+            Tok::End(_) => {
+                self.pop();
+                self.mode = self.original_mode;
+            }
+            _ => {}
+        }
+    }
+
+    fn clear_to_table_context(&mut self, names: &[&str]) {
+        while let Some(c) = self.current() {
+            if self.is_html_any(c, names) {
+                break;
+            }
+            self.pop();
+        }
+    }
+
+    fn in_table(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(_) if self.current_is_any(&["table", "tbody", "template", "tfoot", "thead", "tr"]) => {
+                self.pending_table_text.clear();
+                self.original_mode = self.mode;
+                self.mode = Mode::InTableText;
+                self.reprocess(tok);
+            }
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "caption" => {
+                self.clear_to_table_context(&["table", "template", "html"]);
+                self.afe.push(Afe::Marker);
+                self.insert_html(t);
+                self.mode = Mode::InCaption;
+            }
+            Tok::Start(ref t) if t.name == "colgroup" => {
+                self.clear_to_table_context(&["table", "template", "html"]);
+                self.insert_html(t);
+                self.mode = Mode::InColumnGroup;
+            }
+            Tok::Start(ref t) if t.name == "col" => {
+                self.clear_to_table_context(&["table", "template", "html"]);
+                self.insert_html_named("colgroup");
+                self.mode = Mode::InColumnGroup;
+                self.reprocess(tok);
+            }
+            Tok::Start(ref t) if matches!(t.name.as_str(), "tbody" | "tfoot" | "thead") => {
+                self.clear_to_table_context(&["table", "template", "html"]);
+                self.insert_html(t);
+                self.mode = Mode::InTableBody;
+            }
+            Tok::Start(ref t) if matches!(t.name.as_str(), "td" | "th" | "tr") => {
+                self.clear_to_table_context(&["table", "template", "html"]);
+                self.insert_html_named("tbody");
+                self.mode = Mode::InTableBody;
+                self.reprocess(tok);
+            }
+            Tok::Start(ref t) if t.name == "table" => {
+                if !self.in_table_scope(&["table"]) {
+                    return;
+                }
+                self.pop_until("table");
+                self.reset_insertion_mode();
+                self.reprocess(tok);
+            }
+            Tok::End(ref n) if n == "table" => {
+                if !self.in_table_scope(&["table"]) {
+                    return;
+                }
+                self.pop_until("table");
+                self.reset_insertion_mode();
+            }
+            Tok::End(ref n) if matches!(n.as_str(), "body" | "caption" | "col" | "colgroup" | "html" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") => {}
+            Tok::Start(ref t) if matches!(t.name.as_str(), "style" | "script" | "template") => self.in_head(tok),
+            Tok::End(ref n) if n == "template" => self.in_head(tok),
+            Tok::Start(ref t) if t.name == "input" && t.attrs.iter().any(|(k, v)| k == "type" && v.eq_ignore_ascii_case("hidden")) => {
+                self.insert_html(t);
+                self.pop();
+            }
+            Tok::Start(ref t) if t.name == "form" => {
+                let in_template = self.has_template();
+                if self.form.is_some() && !in_template {
+                    return;
+                }
+                let f = self.insert_html(t);
+                if !in_template {
+                    self.form = Some(f);
+                }
+                self.pop();
+            }
+            Tok::Eof => self.in_body(tok),
+            _ => {
+                self.foster = true;
+                self.in_body(tok);
+                self.foster = false;
+            }
+        }
+    }
+
+    fn in_table_text(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(s) => {
+                if s.starts_with('\0') {
+                    return;
+                }
+                self.pending_table_text.push(s);
+            }
+            _ => {
+                let pending = std::mem::take(&mut self.pending_table_text);
+                if pending.iter().any(|s| !is_ws_str(s)) {
+                    for s in pending {
+                        self.foster = true;
+                        self.in_body(Tok::Chars(s));
+                        self.foster = false;
+                    }
+                } else {
+                    for s in pending {
+                        self.insert_text(&s);
+                    }
+                }
+                self.mode = self.original_mode;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn in_caption(&mut self, tok: Tok) {
+        match tok {
+            Tok::End(ref n) if n == "caption" => {
+                if !self.in_table_scope(&["caption"]) {
+                    return;
+                }
+                self.generate_implied_end_tags(None);
+                self.pop_until("caption");
+                self.clear_afe_to_marker();
+                self.mode = Mode::InTable;
+            }
+            Tok::Start(ref t) if matches!(t.name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") => {
+                if !self.in_table_scope(&["caption"]) {
+                    return;
+                }
+                self.generate_implied_end_tags(None);
+                self.pop_until("caption");
+                self.clear_afe_to_marker();
+                self.mode = Mode::InTable;
+                self.reprocess(tok);
+            }
+            Tok::End(ref n) if n == "table" => {
+                if !self.in_table_scope(&["caption"]) {
+                    return;
+                }
+                self.generate_implied_end_tags(None);
+                self.pop_until("caption");
+                self.clear_afe_to_marker();
+                self.mode = Mode::InTable;
+                self.reprocess(tok);
+            }
+            Tok::End(ref n) if matches!(n.as_str(), "body" | "col" | "colgroup" | "html" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") => {}
+            _ => self.in_body(tok),
+        }
+    }
+
+    fn in_column_group(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(ref s) if is_ws_str(s) => self.insert_text(s),
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::Start(ref t) if t.name == "col" => {
+                self.insert_html(t);
+                self.pop();
+            }
+            Tok::End(ref n) if n == "colgroup" => {
+                if !self.current_is("colgroup") {
+                    return;
+                }
+                self.pop();
+                self.mode = Mode::InTable;
+            }
+            Tok::End(ref n) if n == "col" => {}
+            Tok::Start(ref t) if t.name == "template" => self.in_head(tok),
+            Tok::End(ref n) if n == "template" => self.in_head(tok),
+            Tok::Eof => self.in_body(tok),
+            _ => {
+                if !self.current_is("colgroup") {
+                    return;
+                }
+                self.pop();
+                self.mode = Mode::InTable;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn in_table_body(&mut self, tok: Tok) {
+        match tok {
+            Tok::Start(ref t) if t.name == "tr" => {
+                self.clear_to_table_context(&["tbody", "tfoot", "thead", "template", "html"]);
+                self.insert_html(t);
+                self.mode = Mode::InRow;
+            }
+            Tok::Start(ref t) if t.name == "th" || t.name == "td" => {
+                self.clear_to_table_context(&["tbody", "tfoot", "thead", "template", "html"]);
+                self.insert_html_named("tr");
+                self.mode = Mode::InRow;
+                self.reprocess(tok);
+            }
+            Tok::End(ref n) if matches!(n.as_str(), "tbody" | "tfoot" | "thead") => {
+                if !self.in_table_scope(&[n.as_str()]) {
+                    return;
+                }
+                self.clear_to_table_context(&["tbody", "tfoot", "thead", "template", "html"]);
+                self.pop();
+                self.mode = Mode::InTable;
+            }
+            Tok::Start(ref t) if matches!(t.name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead") => self.table_body_exit(tok),
+            Tok::End(ref n) if n == "table" => self.table_body_exit(tok),
+            Tok::End(ref n) if matches!(n.as_str(), "body" | "caption" | "col" | "colgroup" | "html" | "td" | "th" | "tr") => {}
+            _ => self.in_table(tok),
+        }
+    }
+
+    fn table_body_exit(&mut self, tok: Tok) {
+        if !self.in_table_scope(&["tbody", "thead", "tfoot"]) {
+            return;
+        }
+        self.clear_to_table_context(&["tbody", "tfoot", "thead", "template", "html"]);
+        self.pop();
+        self.mode = Mode::InTable;
+        self.reprocess(tok);
+    }
+
+    fn in_row(&mut self, tok: Tok) {
+        match tok {
+            Tok::Start(ref t) if t.name == "th" || t.name == "td" => {
+                self.clear_to_table_context(&["tr", "template", "html"]);
+                self.insert_html(t);
+                self.mode = Mode::InCell;
+                self.afe.push(Afe::Marker);
+            }
+            Tok::End(ref n) if n == "tr" => {
+                if !self.in_table_scope(&["tr"]) {
+                    return;
+                }
+                self.clear_to_table_context(&["tr", "template", "html"]);
+                self.pop();
+                self.mode = Mode::InTableBody;
+            }
+            Tok::Start(ref t) if matches!(t.name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead" | "tr") => self.row_exit(tok),
+            Tok::End(ref n) if n == "table" => self.row_exit(tok),
+            Tok::End(ref n) if matches!(n.as_str(), "tbody" | "tfoot" | "thead") => {
+                if !self.in_table_scope(&[n.as_str()]) {
+                    return;
+                }
+                if !self.in_table_scope(&["tr"]) {
+                    return;
+                }
+                self.clear_to_table_context(&["tr", "template", "html"]);
+                self.pop();
+                self.mode = Mode::InTableBody;
+                self.reprocess(tok);
+            }
+            Tok::End(ref n) if matches!(n.as_str(), "body" | "caption" | "col" | "colgroup" | "html" | "td" | "th") => {}
+            _ => self.in_table(tok),
+        }
+    }
+
+    fn row_exit(&mut self, tok: Tok) {
+        if !self.in_table_scope(&["tr"]) {
+            return;
+        }
+        self.clear_to_table_context(&["tr", "template", "html"]);
+        self.pop();
+        self.mode = Mode::InTableBody;
+        self.reprocess(tok);
+    }
+
+    fn close_cell(&mut self) {
+        self.generate_implied_end_tags(None);
+        self.pop_until_any(&["td", "th"]);
+        self.clear_afe_to_marker();
+        self.mode = Mode::InRow;
+    }
+
+    fn in_cell(&mut self, tok: Tok) {
+        match tok {
+            Tok::End(ref n) if n == "td" || n == "th" => {
+                if !self.in_table_scope(&[n.as_str()]) {
+                    return;
+                }
+                self.generate_implied_end_tags(None);
+                self.pop_until(n);
+                self.clear_afe_to_marker();
+                self.mode = Mode::InRow;
+            }
+            Tok::Start(ref t) if matches!(t.name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") => {
+                if !self.in_table_scope(&["td", "th"]) {
+                    return;
+                }
+                self.close_cell();
+                self.reprocess(tok);
+            }
+            Tok::End(ref n) if matches!(n.as_str(), "body" | "caption" | "col" | "colgroup" | "html") => {}
+            Tok::End(ref n) if matches!(n.as_str(), "table" | "tbody" | "tfoot" | "thead" | "tr") => {
+                if !self.in_table_scope(&[n.as_str()]) {
+                    return;
+                }
+                self.close_cell();
+                self.reprocess(tok);
+            }
+            _ => self.in_body(tok),
+        }
+    }
+
+    fn in_template(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(_) | Tok::Comment(_) | Tok::Doctype(_) => self.in_body(tok),
+            Tok::Start(ref t)
+                if matches!(t.name.as_str(), "base" | "basefont" | "bgsound" | "link" | "meta" | "noframes" | "script" | "style" | "template" | "title") =>
+            {
+                self.in_head(tok)
+            }
+            Tok::End(ref n) if n == "template" => self.in_head(tok),
+            Tok::Start(ref t) => {
+                let m = match t.name.as_str() {
+                    "caption" | "colgroup" | "tbody" | "tfoot" | "thead" => Mode::InTable,
+                    "col" => Mode::InColumnGroup,
+                    "tr" => Mode::InTableBody,
+                    "td" | "th" => Mode::InRow,
+                    _ => Mode::InBody,
+                };
+                self.template_modes.pop();
+                self.template_modes.push(m);
+                self.mode = m;
+                self.reprocess(tok);
+            }
+            Tok::End(_) => {}
+            Tok::Eof => {
+                if !self.has_template() {
+                    self.done = true;
+                    return;
+                }
+                self.pop_until("template");
+                self.clear_afe_to_marker();
+                self.template_modes.pop();
+                self.reset_insertion_mode();
+                self.reprocess(Tok::Eof);
+            }
+        }
+    }
+
+    fn after_body(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(ref s) if is_ws_str(s) => self.in_body(tok),
+            Tok::Comment(c) => {
+                let html = self.open[0];
+                self.insert_comment(c, Some((html, None)));
+            }
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::End(ref n) if n == "html" => {
+                if self.fragment {
+                    return;
+                }
+                self.mode = Mode::AfterAfterBody;
+            }
+            Tok::Eof => self.done = true,
+            _ => {
+                self.mode = Mode::InBody;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn in_frameset(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(ref s) if is_ws_str(s) => self.insert_text(s),
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::Start(ref t) if t.name == "frameset" => {
+                self.insert_html(t);
+            }
+            Tok::End(ref n) if n == "frameset" => {
+                if self.open.len() == 1 {
+                    return;
+                }
+                self.pop();
+                if !self.fragment && !self.current_is("frameset") {
+                    self.mode = Mode::AfterFrameset;
+                }
+            }
+            Tok::Start(ref t) if t.name == "frame" => {
+                self.insert_html(t);
+                self.pop();
+            }
+            Tok::Start(ref t) if t.name == "noframes" => self.in_head(tok),
+            Tok::Eof => self.done = true,
+            _ => {}
+        }
+    }
+
+    fn after_frameset(&mut self, tok: Tok) {
+        match tok {
+            Tok::Chars(ref s) if is_ws_str(s) => self.insert_text(s),
+            Tok::Comment(c) => self.insert_comment(c, None),
+            Tok::Doctype(_) => {}
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::End(ref n) if n == "html" => self.mode = Mode::AfterAfterFrameset,
+            Tok::Start(ref t) if t.name == "noframes" => self.in_head(tok),
+            Tok::Eof => self.done = true,
+            _ => {}
+        }
+    }
+
+    fn after_after_body(&mut self, tok: Tok) {
+        match tok {
+            Tok::Comment(c) => self.insert_comment(c, Some((Document::ROOT, None))),
+            Tok::Doctype(_) => self.in_body(tok),
+            Tok::Chars(ref s) if is_ws_str(s) => self.in_body(tok),
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::Eof => self.done = true,
+            _ => {
+                self.mode = Mode::InBody;
+                self.reprocess(tok);
+            }
+        }
+    }
+
+    fn after_after_frameset(&mut self, tok: Tok) {
+        match tok {
+            Tok::Comment(c) => self.insert_comment(c, Some((Document::ROOT, None))),
+            Tok::Doctype(_) => self.in_body(tok),
+            Tok::Chars(ref s) if is_ws_str(s) => self.in_body(tok),
+            Tok::Start(ref t) if t.name == "html" => self.in_body(tok),
+            Tok::Eof => self.done = true,
+            Tok::Start(ref t) if t.name == "noframes" => self.in_head(tok),
+            _ => {}
         }
     }
 }
 
-fn raw_kind(name: &str) -> Option<RawKind> {
-    match name {
-        "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" => Some(RawKind::RawText),
-        "textarea" | "title" => Some(RawKind::RcData),
-        "plaintext" => Some(RawKind::PlainText),
-        _ => None,
-    }
+fn attrs_equal(a: &[(String, String)], b: &[(String, String)]) -> bool {
+    a.len() == b.len() && a.iter().all(|x| b.contains(x))
 }
 
-fn is_special_block(tag: &str) -> bool {
-    matches!(
-        tag,
-        "address" | "article" | "aside" | "blockquote" | "body" | "center" | "details" | "dialog" | "dir" | "div" | "dl"
-            | "fieldset" | "figcaption" | "figure" | "footer" | "form" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header"
-            | "hgroup" | "main" | "menu" | "nav" | "ol" | "p" | "pre" | "section" | "summary" | "table" | "ul" | "li"
-            | "dd" | "dt" | "td" | "th" | "tr" | "tbody" | "thead" | "tfoot" | "caption" | "colgroup" | "html" | "head"
-    )
+/// Quirks mode from a DOCTYPE token (identifiers may be missing).
+fn doctype_quirks(d: &Doctype) -> QuirksMode {
+    let data = DoctypeData { name: d.name.clone().unwrap_or_default(), public_id: d.public_id.clone().unwrap_or_default(), system_id: d.system_id.clone().unwrap_or_default() };
+    let public = data.public_id.to_ascii_lowercase();
+    let html401 = public.starts_with("-//w3c//dtd html 4.01 frameset//") || public.starts_with("-//w3c//dtd html 4.01 transitional//");
+    if d.system_id.is_none() && html401 {
+        return QuirksMode::Quirks;
+    }
+    if d.system_id.is_some() && html401 {
+        // Limited quirks when a system identifier is present.
+        let system_id = if data.system_id.is_empty() { "-".to_string() } else { data.system_id.clone() };
+        let q = quirks_mode_for(&DoctypeData { system_id, ..data.clone() }, d.force_quirks);
+        return if q == QuirksMode::Quirks { q } else { QuirksMode::LimitedQuirks };
+    }
+    quirks_mode_for(&data, d.force_quirks)
 }
 
 #[cfg(test)]
@@ -751,9 +2167,9 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["text(\\n)", "meta", "text(\\n)", "comment(h)", "comment([)", "link", "comment(])", "text( )", "meta", "text( )", "title"]);
-        // Whitespace before <head> and after </head> is not kept.
+        // Whitespace after </head> goes to the html element (as browsers do).
         let html = doc.html_element().unwrap();
-        assert!(doc.children(html).all(|c| doc.element(c).is_some()), "{}", doc.dump());
+        assert_eq!(doc.children(html).filter(|&c| doc.element(c).is_none()).count(), 1, "{}", doc.dump());
     }
 
     #[test]

@@ -802,13 +802,30 @@
     acc(g.HTMLImageElement, 'x', function () { return Math.round(this.getBoundingClientRect().left + scrollX); });
     acc(g.HTMLImageElement, 'y', function () { return Math.round(this.getBoundingClientRect().top + scrollY); });
   }
-  if (g.HTMLAnchorElement) {
-    for (const k of ['username', 'password']) acc(g.HTMLAnchorElement, k, function () { try { return new URL(this.href)[k]; } catch (e) { return ''; } }, function (v) { try { const u = new URL(this.href); u[k] = v; this.href = u.href; } catch (e) {} });
+  // HTMLHyperlinkElementUtils: the components of the element's URL (null
+  // without an href or when it does not parse), and setters that run the
+  // URL setter and write the result back to the href attribute.
+  const hyperlinkURL = (el) => {
+    const h = el.getAttribute('href');
+    if (h === null) return null;
+    try { return new URL(h, document.baseURI); } catch (e) { return null; }
+  };
+  for (const C of [g.HTMLAnchorElement, g.HTMLAreaElement]) {
+    if (!C) continue;
+    for (const k of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) {
+      acc(C, k, function () {
+        const u = hyperlinkURL(this);
+        if (!u) return k === 'protocol' ? ':' : '';
+        return u[k];
+      }, k === 'origin' ? undefined : function (v) {
+        const u = hyperlinkURL(this);
+        if (!u) return;
+        u[k] = v;
+        this.setAttribute('href', u.href);
+      });
+    }
   }
   if (g.HTMLAreaElement) {
-    for (const k of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) {
-      acc(g.HTMLAreaElement, k, function () { try { const u = new URL(this.getAttribute('href') || '', document.baseURI); return this.hasAttribute('href') ? u[k] : ''; } catch (e) { return ''; } }, k === 'origin' ? undefined : function (v) { try { const u = new URL(this.href); u[k] = v; this.href = u.href; } catch (e) {} });
-    }
     acc(g.HTMLAreaElement, 'relList', function () { let m = tokenLists.get(this); if (!m) { m = {}; tokenLists.set(this, m); } return m.rel || (m.rel = makeTokenList(this, 'rel')); });
     method(g.HTMLAreaElement, 'toString', function () { return this.href; });
   }

@@ -527,6 +527,7 @@ impl Engine {
         let base_loader = {
             let mut l = self.loader.clone();
             l.defer_scripts = false;
+            l.xml_documents = true;
             l.initiator = Some(page.url.clone());
             l
         };
@@ -728,7 +729,10 @@ impl Engine {
         // Build at most one arrived document per tick (each runs its
         // scripts on this thread), so input is handled in between.
         let mut installed = false;
-        for i in 0..page.frames.children.len() {
+        // Scripts run while installing or ticking a frame can add or remove
+        // frames: re-check the bound on every step.
+        let mut i = 0;
+        while i < page.frames.children.len() {
             let arrived = match page.frames.children[i].pending.as_ref().filter(|_| !installed).map(|rx| rx.try_recv()) {
                 Some(Ok(r)) => Some(r),
                 Some(Err(TryRecvError::Disconnected)) => Some(Err("load failed".to_string())),
@@ -738,18 +742,26 @@ impl Engine {
                 page.frames.children[i].pending = None;
                 installed = true;
                 self.install_frame(page, i, result, &mut out);
+                if i >= page.frames.children.len() {
+                    break;
+                }
             }
             let now = self.start.elapsed().as_secs_f64() * 1000.0 + 0.5;
             let run = page.frames.children[i].page.as_ref().map(|child| child.next_script_due().map(|d| d <= now).unwrap_or(false) || !child.frames.children.is_empty()).unwrap_or(false);
             if run {
                 if let Some(o) = self.with_child(page, i, |child| self.tick(child)) {
-                    if o.relayout {
-                        page.frames.children[i].dirty = true;
+                    let node = page.frames.children.get_mut(i).map(|c| {
+                        if o.relayout {
+                            c.dirty = true;
+                        }
+                        c.node
+                    });
+                    if let Some(node) = node {
+                        self.frame_side_effects(page, node, o, &mut out);
                     }
-                    let node = page.frames.children[i].node;
-                    self.frame_side_effects(page, node, o, &mut out);
                 }
             }
+            i += 1;
         }
         if page.frame_depth == 0 {
             self.route_frame_messages(page, &mut out);
@@ -858,6 +870,7 @@ impl Engine {
         let vp = Viewport { width: c.size.0.max(1.0), height: c.size.1.max(1.0) };
         let mut loader = self.loader.clone();
         loader.defer_scripts = false;
+        loader.xml_documents = true;
         // The current document stays until the new one arrives.
         let referer = c.page.as_ref().map(|p| p.url.clone());
         let (tx, rx) = std::sync::mpsc::channel();
@@ -986,6 +999,7 @@ impl Engine {
         let vp = Viewport { width: c.size.0.max(1.0), height: c.size.1.max(1.0) };
         let mut loader = self.loader.clone();
         loader.defer_scripts = false;
+        loader.xml_documents = true;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(loader.load_request(&req, vp).map_err(|e| e.to_string()));
@@ -1051,6 +1065,15 @@ impl Engine {
 
 fn c_dirty_paint(engine: &Engine, page: &mut Page) {
     engine.paint_frames(page);
+}
+
+impl Engine {
+    /// Keyboard input for a page without an embedder's editing machinery
+    /// (frames, WebDriver-style test automation): `keydown`/`keyup` to the
+    /// focused element and simple text editing.
+    pub fn key_input(&self, page: &mut Page, key: &str, code: &str, pressed: bool, m: crate::Modifiers) -> ScriptOutcome {
+        key_into_page(self, page, key, code, pressed, m)
+    }
 }
 
 /// Keyboard input for a page without the embedder's editing machinery

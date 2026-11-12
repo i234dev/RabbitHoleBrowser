@@ -11,6 +11,18 @@ use std::rc::Rc;
 
 const ACC: u8 = CONFIGURABLE | ENUMERABLE;
 
+thread_local! {
+    /// DOM "legacy-output-did-listeners-throw flag" of the last dispatches
+    /// (read and reset by `__rhNative.listenersThrew()`; used by IndexedDB).
+    static LISTENER_THREW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `__rhNative.listenersThrew()`: whether a listener threw since the last
+/// call (and reset the flag).
+pub(crate) fn listeners_threw(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(Value::Bool(LISTENER_THREW.with(|c| c.replace(false))))
+}
+
 /// Internal state of an Event object (host data).
 pub struct EventData {
     pub ty: String,
@@ -27,6 +39,11 @@ pub struct EventData {
     pub time_stamp: f64,
     pub dispatching: bool,
     pub path: Vec<Value>,
+    /// DOM "initialized flag": false for `document.createEvent()` events
+    /// until `initEvent()`.
+    pub initialized: bool,
+    /// DOM "in passive listener flag": preventDefault() is ignored.
+    pub in_passive: bool,
 }
 
 fn event_data<'a>(realm: &'a mut Realm, this: &Value) -> JsResult<&'a mut EventData> {
@@ -58,6 +75,8 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             time_stamp: now,
             dispatching: false,
             path: Vec::new(),
+            initialized: true,
+            in_passive: false,
         }),
     );
     realm.set_class_name(id, Box::leak(class.to_string().into_boxed_str()));
@@ -440,7 +459,7 @@ fn ev_return_value(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
 fn ev_return_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let v = realm.to_boolean(&arg(args, 0));
     let d = event_data(realm, &this)?;
-    if !v && d.cancelable {
+    if !v && d.cancelable && !d.in_passive {
         d.default_prevented = true;
     }
     Ok(Value::Undefined)
@@ -457,7 +476,7 @@ fn ev_cancel_bubble_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
 
 fn ev_prevent_default(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let d = event_data(realm, &this)?;
-    if d.cancelable {
+    if d.cancelable && !d.in_passive {
         d.default_prevented = true;
     }
     Ok(Value::Undefined)
@@ -485,7 +504,14 @@ fn ev_init_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Val
     let bubbles = realm.to_boolean(&arg(args, 1));
     let cancelable = realm.to_boolean(&arg(args, 2));
     let d = event_data(realm, &this)?;
+    // DOM "initialize an event" (ignored while dispatching).
     if !d.dispatching {
+        d.initialized = true;
+        d.propagation_stopped = false;
+        d.immediate_stopped = false;
+        d.default_prevented = false;
+        d.is_trusted = false;
+        d.target = Value::Null;
         d.ty = ty;
         d.bubbles = bubbles;
         d.cancelable = cancelable;
@@ -532,16 +558,40 @@ pub(crate) fn target_key(realm: &Realm, this: &Value) -> Option<TargetKey> {
 }
 
 fn listener_options(realm: &mut Realm, v: &Value) -> JsResult<(bool, bool, bool, Option<ObjectId>)> {
+    let (c, o, p, s) = listener_options_raw(realm, v)?;
+    Ok((c, o, p.unwrap_or(false), s))
+}
+
+/// (capture, once, passive if given, signal) of an options argument.
+fn listener_options_raw(realm: &mut Realm, v: &Value) -> JsResult<(bool, bool, Option<bool>, Option<ObjectId>)> {
     match v.v() {
         V::Object(_) => {
             let capture = dict_bool(realm, v, "capture")?.unwrap_or(false);
             let once = dict_bool(realm, v, "once")?.unwrap_or(false);
-            let passive = dict_bool(realm, v, "passive")?.unwrap_or(false);
-            let signal = dict_value(realm, v, "signal")?.as_object();
+            let passive = dict_bool(realm, v, "passive")?;
+            let signal = dict_value(realm, v, "signal")?;
+            let signal = match signal.v() {
+                V::Undefined => None,
+                V::Object(o) => Some(o),
+                _ => return Err(realm.throw_type_error("Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.")),
+            };
             Ok((capture, once, passive, signal))
         }
-        V::Undefined => Ok((false, false, false, None)),
-        other => Ok((realm.to_boolean(&other.to_value()), false, false, None)),
+        V::Undefined | V::Null => Ok((false, false, None, None)),
+        other => Ok((realm.to_boolean(&other.to_value()), false, None, None)),
+    }
+}
+
+/// DOM "default passive value": touch and wheel listeners on the window,
+/// the document, the document element and the body are passive.
+fn default_passive(key: TargetKey, ty: &str) -> bool {
+    if !matches!(ty, "touchstart" | "touchmove" | "wheel" | "mousewheel") {
+        return false;
+    }
+    match key {
+        TargetKey::Window => true,
+        TargetKey::Node(n) => with_doc(n.doc, |doc| n.node == Document::ROOT || doc.html_element() == Some(n.node) || doc.body() == Some(n.node)),
+        _ => false,
     }
 }
 
@@ -554,7 +604,8 @@ fn et_add_event_listener(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
     if !cb.is_object() {
         return Ok(Value::Undefined);
     }
-    let (capture, once, passive, signal) = listener_options(realm, &arg(args, 2))?;
+    let (capture, once, passive, signal) = listener_options_raw(realm, &arg(args, 2))?;
+    let passive = passive.unwrap_or_else(|| default_passive(key, &ty));
     if let Some(sig) = signal {
         if get_hidden(realm, sig, "__aborted").truthy() {
             return Ok(Value::Undefined);
@@ -637,8 +688,8 @@ fn et_dispatch_event(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
     if realm.host_data::<EventData>(eid).is_none() {
         return Err(realm.throw_type_error("parameter 1 is not of type 'Event'."));
     }
-    if realm.host_data::<EventData>(eid).map(|d| d.dispatching).unwrap_or(false) {
-        return Err(crate::misc::dom_exception(realm, "InvalidStateError", "The event is already being dispatched."));
+    if realm.host_data::<EventData>(eid).map(|d| d.dispatching || !d.initialized).unwrap_or(false) {
+        return Err(crate::misc::dom_exception(realm, "InvalidStateError", "Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched or was not initialized."));
     }
     if let Some(d) = realm.host_data_mut::<EventData>(eid) {
         d.is_trusted = false;
@@ -1069,6 +1120,9 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
     d.dispatching = false;
     d.phase = 0;
     d.current_target = Value::Null;
+    // The stop propagation flags are per dispatch.
+    d.propagation_stopped = false;
+    d.immediate_stopped = false;
     // The target stays the one seen from the outermost tree.
     if let Some((_, _, t)) = path.last() {
         d.target = t.clone();
@@ -1113,7 +1167,10 @@ fn run_inline_handler(realm: &mut Realm, key: TargetKey, current: &Value, eid: O
                 }
             }
         }
-        Err(e) => report_error(realm, &e, &format!("on{ty} handler")),
+        Err(e) => {
+            LISTENER_THREW.with(|c| c.set(true));
+            report_error(realm, &e, &format!("on{ty} handler"))
+        }
     }
     true
 }
@@ -1151,17 +1208,26 @@ fn invoke_listeners(realm: &mut Realm, key: TargetKey, current: &Value, eid: Obj
         }
         ran = true;
         let cb = l.callback.clone();
+        if l.passive {
+            if let Some(d) = realm.host_data_mut::<EventData>(eid) {
+                d.in_passive = true;
+            }
+        }
         realm.begin_task();
         let r = if realm.is_callable(&cb) {
             realm.call(cb, current.clone(), &[ev.clone()])
         } else {
             match realm.get_str(cb.clone(), "handleEvent") {
                 Ok(h) if realm.is_callable(&h) => realm.call(h, cb, &[ev.clone()]),
-                Ok(_) => Ok(Value::Undefined),
+                Ok(_) => Err(realm.throw_type_error("The listener's handleEvent is not callable.")),
                 Err(e) => Err(e),
             }
         };
+        if let Some(d) = realm.host_data_mut::<EventData>(eid) {
+            d.in_passive = false;
+        }
         if let Err(e) = r {
+            LISTENER_THREW.with(|c| c.set(true));
             report_error(realm, &e, &format!("{ty} listener"));
         }
     }

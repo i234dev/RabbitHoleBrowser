@@ -86,9 +86,12 @@
     if (Object.prototype.hasOwnProperty.call(AttrC.prototype, k)) delete AttrC.prototype[k];
   }
   acc(AttrC, 'name', function () { return ownName(this); }, undefined, true);
-  acc(AttrC, 'localName', function () { const n = ownName(this); const i = n.indexOf(':'); return i >= 0 ? n.slice(i + 1) : n; }, undefined, true);
-  acc(AttrC, 'prefix', function () { const n = ownName(this); const i = n.indexOf(':'); return i >= 0 ? n.slice(0, i) : null; }, undefined, true);
-  acc(AttrC, 'namespaceURI', function () { const p = this.prefix; return p === 'xlink' ? 'http://www.w3.org/1999/xlink' : p === 'xml' ? 'http://www.w3.org/XML/1998/namespace' : p === 'xmlns' || ownName(this) === 'xmlns' ? 'http://www.w3.org/2000/xmlns/' : null; }, undefined, true);
+  // Namespaced attributes: the element records each attribute's namespace
+  // (null for setAttribute()); prefix and local name split the stored name.
+  const attrNs = (a) => { const s = attrState(a); if (s.el) return N.attrNamespace(s.el, s.name); return s.ns ?? null; };
+  acc(AttrC, 'localName', function () { const n = ownName(this); if (attrNs(this) === null) return n; const i = n.indexOf(':'); return i >= 0 ? n.slice(i + 1) : n; }, undefined, true);
+  acc(AttrC, 'prefix', function () { const n = ownName(this); if (attrNs(this) === null) return null; const i = n.indexOf(':'); return i >= 0 ? n.slice(0, i) : null; }, undefined, true);
+  acc(AttrC, 'namespaceURI', function () { return attrNs(this); }, undefined, true);
   acc(AttrC, 'nodeName', function () { return ownName(this); }, undefined, true);
   const attrValueGet = function () { const s = attrState(this); if (s.el) { const v = s.el.getAttribute(s.name); if (v !== null) return v; } return s.value ?? ''; };
   const attrValueSet = function (v) { const s = attrState(this); v = String(v); if (s.el && s.el.hasAttribute(s.name)) s.el.setAttribute(s.name, v); else if (this[S]) this[S].value = v; };
@@ -103,7 +106,7 @@
   if (g.Document) {
     method(g.Document, 'createAttribute', function (name) {
       name = String(name);
-      if (!/^[^\s"'>/=\x00-\x1f]+$/.test(name)) throw domError(`The localName provided ('${name}') contains an invalid character.`, 'InvalidCharacterError');
+      if (!/^[^\0\t\n\f\r \/=>]+$/.test(name)) throw domError(`The localName provided ('${name}') contains an invalid character.`, 'InvalidCharacterError');
       const a = Object.create(AttrC.prototype);
       hidden(a, S, { el: null, name: name.toLowerCase(), value: '' });
       return a;
@@ -185,12 +188,14 @@
     constructor() { ILLEGAL(); }
     createDocumentType(name, publicId, systemId) {
       name = String(name);
-      N.validateQName(name);
+      // DOM "valid doctype name".
+      if (/[\0\t\n\f\r >]/.test(name)) throw domError(`Failed to execute 'createDocumentType' on 'DOMImplementation': The qualified name provided ('${name}') contains the invalid name-start character.`, 'InvalidCharacterError');
       return N.createDoctype(this[S], name, String(publicId), String(systemId));
     }
     createDocument(ns, qname, doctype) {
       // DOM §4.5.1: an XML document with the doctype and the element.
-      const d = N.createXMLDocument();
+      if (arguments.length < 2) throw new TypeError(`Failed to execute 'createDocument' on 'DOMImplementation': 2 arguments required, but only ${arguments.length} present.`);
+      const d = N.createXMLDocument(ns === null || ns === undefined ? '' : String(ns));
       Object.setPrototypeOf(d, XMLDocument.prototype);
       qname = qname === null || qname === undefined ? '' : String(qname);
       const root = qname ? d.createElementNS(ns, qname) : null;

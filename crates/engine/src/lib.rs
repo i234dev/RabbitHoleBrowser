@@ -125,6 +125,10 @@ pub struct Loader {
     /// `source`, `url` set) so the page can be painted before they arrive;
     /// fetch them with [`Loader::fetch_script_sources`].
     pub defer_scripts: bool,
+    /// Parse `text/xml` / `application/xml` responses as XML documents
+    /// (frames do; top-level views show XML sources as text).
+    /// `application/xhtml+xml` and `image/svg+xml` are always XML.
+    pub xml_documents: bool,
     caches: Arc<Mutex<Caches>>,
 }
 
@@ -204,6 +208,7 @@ impl Default for Loader {
             initiator: None,
             prefetch_images: true,
             defer_scripts: false,
+            xml_documents: false,
             caches: Arc::new(Mutex::new(Caches::default())),
         }
     }
@@ -257,9 +262,19 @@ impl Loader {
     pub fn load_response(&self, resp: Response, viewport: Viewport) -> LoadedPage {
         let ct = resp.content_type.as_str();
         let url = resp.url.clone();
-        let mut page = if ct.starts_with("text/html") || ct.starts_with("application/xhtml") || ct.is_empty() {
-            let html = decode_text(&resp.body, resp.charset.as_deref());
-            self.load_html(&html, url, viewport)
+        let essence = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        let xml = matches!(essence.as_str(), "application/xhtml+xml" | "image/svg+xml") || (self.xml_documents && (essence == "text/xml" || essence == "application/xml" || (essence.ends_with("+xml") && essence.starts_with("application/"))));
+        let mut page = if xml {
+            let (text, encoding) = rabbithole_net::decode_text_with_encoding(&resp.body, resp.charset.as_deref());
+            let mut doc = rabbithole_html::xml::parse_xml(&text);
+            doc.content_type = essence.clone();
+            doc.character_set = encoding.to_string();
+            self.load_document(doc, url, viewport)
+        } else if ct.starts_with("text/html") || ct.starts_with("application/xhtml") || ct.is_empty() {
+            let (html, encoding) = rabbithole_net::decode_text_with_encoding(&resp.body, resp.charset.as_deref());
+            let mut p = self.load_html(&html, url, viewport);
+            p.doc.character_set = encoding.to_string();
+            p
         } else if ct.starts_with("image/") {
             let html = format!(
                 "<html><head><title>{0}</title></head><body style=\"margin:0;background:#222;display:flex;align-items:center;justify-content:center;min-height:100vh\"><img src=\"{0}\" alt=\"image\"></body></html>",
@@ -284,18 +299,27 @@ impl Loader {
             self.load_html(&html, url, viewport)
         };
         page.status = resp.status;
+        let essence = resp.content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        if !essence.is_empty() && (essence.starts_with("text/html") || essence.contains("xml")) {
+            page.doc.content_type = essence;
+        }
         page.content_type = resp.content_type;
         page
     }
 
     /// Prepare a page from HTML source with the given document URL.
     pub fn load_html(&self, html: &str, url: Url, viewport: Viewport) -> LoadedPage {
-        if self.initiator.as_ref() != Some(&url) {
-            let bound = Loader { initiator: Some(url.clone()), ..self.clone() };
-            return bound.load_html(html, url, viewport);
-        }
         // With scripting on, `<noscript>` content is raw text (HTML spec).
         let doc = rabbithole_html::parse_with_scripting(html, self.load_scripts);
+        self.load_document(doc, url, viewport)
+    }
+
+    /// Prepare a page from a parsed document (HTML or XML).
+    pub fn load_document(&self, doc: Document, url: Url, viewport: Viewport) -> LoadedPage {
+        if self.initiator.as_ref() != Some(&url) {
+            let bound = Loader { initiator: Some(url.clone()), ..self.clone() };
+            return bound.load_document(doc, url, viewport);
+        }
         let title = doc.title().unwrap_or_default();
         let base_url = doc
             .find_element("base")

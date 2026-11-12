@@ -236,6 +236,17 @@ pub struct Document {
     /// Playback state of `<audio>` / `<video>` elements for their native
     /// controls (set by the media bindings, read when painting).
     pub media_ui: HashMap<NodeId, MediaUi>,
+    /// The document's character encoding name (`document.characterSet`;
+    /// also the query encoding of its URLs).
+    pub character_set: String,
+    /// The document's content type (`document.contentType`).
+    pub content_type: String,
+    /// Namespaces of namespaced attributes, keyed by (element, qualified
+    /// name as stored in `ElementData::attrs`); absent means no namespace.
+    pub attr_namespaces: HashMap<(NodeId, String), String>,
+    /// The document's URL when it differs from its browsing context's
+    /// (documents made by `DOMParser` take their creator's URL).
+    pub url: Option<String>,
 }
 
 /// What the native media controls show.
@@ -291,6 +302,10 @@ impl Document {
             control_values: HashMap::new(),
             checkedness: HashMap::new(),
             media_ui: HashMap::new(),
+            character_set: "UTF-8".to_string(),
+            content_type: "text/html".to_string(),
+            attr_namespaces: HashMap::new(),
+            url: None,
         }
     }
 
@@ -533,6 +548,7 @@ impl Document {
     pub fn clone_subtree(&mut self, root: NodeId, deep: bool) -> NodeId {
         let data = self.nodes[root].data.clone();
         let copy = self.create(data);
+        self.copy_attr_namespaces_from(None, root, copy);
         if let Some(v) = self.control_values.get(&root).cloned() {
             self.control_values.insert(copy, v);
         }
@@ -562,6 +578,7 @@ impl Document {
     /// is detached.
     pub fn import_subtree(&mut self, other: &Document, root: NodeId) -> NodeId {
         let copy = self.create(other.nodes[root].data.clone());
+        self.copy_attr_namespaces_from(Some(other), root, copy);
         if let Some(v) = other.control_values.get(&root) {
             self.control_values.insert(copy, v.clone());
         }
@@ -591,9 +608,48 @@ impl Document {
     }
 
     /// Set (`Some`) or remove (`None`) an attribute on an element.
+    /// Namespace URI of attribute `qname` (as stored) of element `id`.
+    pub fn attr_namespace(&self, id: NodeId, qname: &str) -> Option<&str> {
+        if self.attr_namespaces.is_empty() {
+            return None;
+        }
+        self.attr_namespaces.get(&(id, qname.to_string())).map(|s| s.as_str())
+    }
+
+    /// Record the namespace of attribute `qname` of `id` (None: no namespace).
+    pub fn set_attr_namespace(&mut self, id: NodeId, qname: &str, ns: Option<&str>) {
+        match ns.filter(|n| !n.is_empty()) {
+            Some(n) => {
+                self.attr_namespaces.insert((id, qname.to_string()), n.to_string());
+            }
+            None => {
+                if !self.attr_namespaces.is_empty() {
+                    self.attr_namespaces.remove(&(id, qname.to_string()));
+                }
+            }
+        }
+    }
+
+    fn copy_attr_namespaces_from(&mut self, other: Option<&Document>, from: NodeId, to: NodeId) {
+        let src = other.unwrap_or(self);
+        if src.attr_namespaces.is_empty() {
+            return;
+        }
+        let entries: Vec<(String, String)> = match &src.nodes[from].data {
+            NodeData::Element(e) => e.attrs.iter().filter_map(|(k, _)| src.attr_namespaces.get(&(from, k.clone())).map(|ns| (k.clone(), ns.clone()))).collect(),
+            _ => Vec::new(),
+        };
+        for (k, ns) in entries {
+            self.attr_namespaces.insert((to, k), ns);
+        }
+    }
+
     pub fn set_attr(&mut self, id: NodeId, name: &str, value: Option<&str>) {
-        let name = name.to_ascii_lowercase();
+        // Names are lower-cased for HTML elements in HTML documents only
+        // (SVG keeps `viewBox`).
+        let is_html = self.is_html;
         let NodeData::Element(el) = &mut self.nodes[id].data else { return };
+        let name = if is_html && el.ns == Namespace::Html { name.to_ascii_lowercase() } else { name.to_string() };
         let old = match value {
             Some(v) => match el.attrs.iter_mut().find(|(k, _)| *k == name) {
                 Some(slot) => {
@@ -611,6 +667,9 @@ impl Document {
                 Some(i) => {
                     let old = el.attrs[i].1.clone();
                     el.attrs.retain(|(k, _)| *k != name);
+                    if !self.attr_namespaces.is_empty() {
+                        self.attr_namespaces.remove(&(id, name.clone()));
+                    }
                     Some(old)
                 }
                 None => return,
@@ -669,7 +728,7 @@ impl Document {
     /// `declarative_shadow`, a `<template shadowrootmode=open|closed>`
     /// instead becomes the shadow root of its parent element.
     pub fn adopt_template_contents(&mut self, root: NodeId, declarative_shadow: bool) {
-        let templates: Vec<NodeId> = self.descendants(root).filter(|&n| self.is_element(n, "template")).collect();
+        let templates: Vec<NodeId> = self.descendants(root).filter(|&n| self.element(n).map(|e| e.tag == "template" && e.ns == Namespace::Html).unwrap_or(false)).collect();
         // Innermost first, so nested templates end up in their parent's content.
         for t in templates.into_iter().rev() {
             let mode = if declarative_shadow { self.attr(t, "shadowrootmode").map(|m| m.to_ascii_lowercase()) } else { None };
@@ -915,8 +974,23 @@ impl Document {
         out
     }
 
+    /// The HTML fragment serialization algorithm (HTML §13.3) for one node.
     fn serialize_into(&self, id: NodeId, out: &mut String) {
-        const VOID: &[&str] = &["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"];
+        const VOID: &[&str] = &[
+            "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr",
+        ];
+        fn escape(s: &str, out: &mut String, attr: bool) {
+            for c in s.chars() {
+                match c {
+                    '&' => out.push_str("&amp;"),
+                    '\u{a0}' => out.push_str("&nbsp;"),
+                    '<' => out.push_str("&lt;"),
+                    '>' => out.push_str("&gt;"),
+                    '"' if attr => out.push_str("&quot;"),
+                    c => out.push(c),
+                }
+            }
+        }
         match &self.nodes[id].data {
             NodeData::Document => {
                 for c in self.children(id) {
@@ -924,21 +998,26 @@ impl Document {
                 }
             }
             NodeData::Element(e) => {
+                let tag = match (&e.ns, &e.prefix) {
+                    (Namespace::Html | Namespace::Svg | Namespace::MathMl, _) | (_, None) => e.tag.clone(),
+                    (_, Some(p)) => format!("{p}:{}", e.tag),
+                };
                 out.push('<');
-                out.push_str(&e.tag);
+                out.push_str(&tag);
                 for (k, v) in &e.attrs {
                     out.push(' ');
                     out.push_str(k);
                     out.push_str("=\"");
-                    out.push_str(&v.replace('&', "&amp;").replace('"', "&quot;"));
+                    escape(v, out, true);
                     out.push('"');
                 }
                 out.push('>');
-                if VOID.contains(&e.tag.as_str()) {
+                let html = e.ns == Namespace::Html;
+                if html && VOID.contains(&e.tag.as_str()) {
                     return;
                 }
-                let raw = matches!(e.tag.as_str(), "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext");
-                let id = self.template_contents.get(&id).copied().unwrap_or(id);
+                let raw = html && matches!(e.tag.as_str(), "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext");
+                let id = if html && e.tag == "template" { self.template_contents.get(&id).copied().unwrap_or(id) } else { id };
                 for c in self.children(id) {
                     if raw {
                         if let NodeData::Text(t) = &self.nodes[c].data {
@@ -949,7 +1028,7 @@ impl Document {
                     self.serialize_into(c, out);
                 }
                 out.push_str("</");
-                out.push_str(&e.tag);
+                out.push_str(&tag);
                 out.push('>');
             }
             NodeData::Text(t) => {
@@ -957,11 +1036,11 @@ impl Document {
                 // the element itself is not part of the output (`innerHTML`
                 // of a `<script type=text/template>`, which templating
                 // libraries read back).
-                let raw = self.nodes[id].parent.and_then(|p| self.tag(p)).map(|tag| matches!(tag, "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext")).unwrap_or(false);
+                let raw = self.nodes[id].parent.and_then(|p| self.element(p)).map(|e| e.ns == Namespace::Html && matches!(e.tag.as_str(), "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext")).unwrap_or(false);
                 if raw {
                     out.push_str(t);
                 } else {
-                    out.push_str(&t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\u{a0}', "&nbsp;"));
+                    escape(t, out, false);
                 }
             }
             NodeData::Comment(c) => {

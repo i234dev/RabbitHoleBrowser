@@ -2208,5 +2208,5 @@ pub(crate) fn about_url() -> Url {
 }
 
 pub(crate) fn about_page(name: &str) -> Url {
-    Url { scheme: "about".to_string(), host: String::new(), port: None, path: name.to_string(), query: None, fragment: None }
+    Url { scheme: "about".to_string(), path: name.to_string(), opaque_path: true, ..Default::default() }
 }

@@ -143,7 +143,7 @@ fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let timeout = f.num("timeout", 6000u64);
+    let timeout = f.num("timeout", 5000u64);
     let opts = RunOptions {
         jobs: f.value("j").or(f.value("jobs")).and_then(|v| v.parse().ok()).unwrap_or(1),
         timeout: Duration::from_millis(timeout),
@@ -155,7 +155,25 @@ fn run(args: &[String]) -> i32 {
     eprintln!("running {} tests from {} at {} with {} jobs", tests.len(), root.display(), base, opts.jobs);
     let quiet = f.has("quiet");
     let started = std::time::Instant::now();
+    // Results are appended to --out as they complete (JSON lines), so a
+    // long run can be inspected while it goes.
+    let out_file = f.value("out").and_then(|p| match std::fs::File::create(p) {
+        Ok(fh) => Some(std::sync::Mutex::new(fh)),
+        Err(e) => {
+            eprintln!("cannot write {p}: {e}");
+            None
+        }
+    });
     let results: Vec<TestResult> = runner::run_all(&base, &tests, &opts, &|n, total, r| {
+        if let Some(fh) = &out_file {
+            let v = serde_json::json!({
+                "url": r.url, "harness": r.harness, "message": r.message, "ms": r.ms,
+                "subtests": r.subtests.iter().map(|s| serde_json::json!({"name": s.name, "status": s.status, "message": s.message})).collect::<Vec<_>>(),
+            });
+            if let Ok(mut fh) = fh.lock() {
+                let _ = writeln!(fh, "{v}");
+            }
+        }
         if quiet {
             return;
         }
@@ -163,20 +181,6 @@ fn run(args: &[String]) -> i32 {
         eprintln!("[{n}/{total}] {:<9} {:>4}/{:<4} {:>6}ms {}", r.harness, p, t, r.ms, r.url);
     });
     eprintln!("finished in {:.0}s", started.elapsed().as_secs_f64());
-    if let Some(out) = f.value("out") {
-        let mut s = String::new();
-        for r in &results {
-            let v = serde_json::json!({
-                "url": r.url, "harness": r.harness, "message": r.message, "ms": r.ms,
-                "subtests": r.subtests.iter().map(|s| serde_json::json!({"name": s.name, "status": s.status, "message": s.message})).collect::<Vec<_>>(),
-            });
-            s.push_str(&v.to_string());
-            s.push('\n');
-        }
-        if let Err(e) = std::fs::write(out, s) {
-            eprintln!("cannot write {out}: {e}");
-        }
-    }
     let entries: Vec<BaselineEntry> = results.iter().map(BaselineEntry::from_result).collect();
     let depth = f.num("depth", 2);
     print!("{}", report::summary_table(&entries, depth));

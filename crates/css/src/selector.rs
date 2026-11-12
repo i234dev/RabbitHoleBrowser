@@ -886,7 +886,9 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
         None => return false,
     };
     if let Some(t) = &c.tag {
-        if t != "*" && *t != el.tag {
+        // Selectors are lower-cased; SVG / XML elements keep their case
+        // (`linearGradient`, `Foo`), so compare without ASCII case.
+        if t != "*" && *t != el.tag && !el.tag.eq_ignore_ascii_case(t) {
             return false;
         }
     }

@@ -39,7 +39,7 @@ pub(crate) fn node_name(n: NodeRef) -> String {
                 Some(p) => format!("{p}:{}", e.tag),
                 None => e.tag.clone(),
             };
-            let html = e.ns == rabbithole_dom::Namespace::Html && doc.is_html && doc.ancestor_or_self(n.node, |a| doc.is_element(a, "svg")).is_none();
+            let html = e.ns == rabbithole_dom::Namespace::Html && doc.is_html;
             if html {
                 qualified.to_ascii_uppercase()
             } else {
@@ -119,7 +119,7 @@ pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first
             if doc.element(n).is_none() {
                 continue;
             }
-            if list.iter().any(|s| rabbithole_css::matches(s, doc, n)) {
+            if list.iter().any(|s| s.pseudo_element.is_none() && rabbithole_css::matches(s, doc, n)) {
                 out.push(NodeRef { doc: root.doc, node: n });
                 if first_only {
                     break;
@@ -132,7 +132,7 @@ pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first
 
 pub(crate) fn element_matches(realm: &mut Realm, n: NodeRef, selectors: &str) -> JsResult<bool> {
     let list = parse_selectors(realm, selectors)?;
-    Ok(with_doc(n.doc, |doc| doc.element(n.node).is_some() && list.iter().any(|s| rabbithole_css::matches(s, doc, n.node))))
+    Ok(with_doc(n.doc, |doc| doc.element(n.node).is_some() && list.iter().any(|s| s.pseudo_element.is_none() && rabbithole_css::matches(s, doc, n.node))))
 }
 
 // ---------------------------------------------------------------- mutation
@@ -668,8 +668,7 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
     }
     // A template's markup is its content's.
     let n = if context == "template" { NodeRef { doc: n.doc, node: with_doc(n.doc, |doc| doc.template_content(n.node)) } } else { n };
-    let frag = rabbithole_html::parse_fragment_with_scripting(html, &context, scripting_doc(n.doc));
-    let frag_body = frag.body().unwrap_or(Document::ROOT);
+    let (frag, frag_body) = parse_fragment_for(n, &context, html);
     let old = children_of(n);
     let added = with_doc(n.doc, |doc| {
         doc.clear_children(n.node);
@@ -704,6 +703,21 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
     Ok(())
 }
 
+/// The HTML fragment parsing algorithm with `ctx` (local name `context`)
+/// as the context element: its namespace and its document's scripting
+/// flag and quirks mode. Returns the parsed document and the node whose
+/// children are the fragment's nodes.
+fn parse_fragment_for(ctx: NodeRef, context: &str, html: &str) -> (Document, rabbithole_dom::NodeId) {
+    let (ns, quirks) = with_doc(ctx.doc, |doc| {
+        let ns = match doc.element(ctx.node) {
+            Some(e) if e.tag != "#fragment" && e.tag != "#shadow-root" => e.ns.clone(),
+            _ => rabbithole_dom::Namespace::Html,
+        };
+        (ns, doc.quirks_mode)
+    });
+    rabbithole_html::parse_fragment_in(html, context, ns, scripting_doc(ctx.doc), quirks)
+}
+
 /// Does the document run scripts? The page and its frames do; auxiliary
 /// documents (DOMParser, `createHTMLDocument`) have scripting disabled, so
 /// `<noscript>` parses as markup there and as raw text here.
@@ -715,8 +729,7 @@ fn scripting_doc(doc: u32) -> bool {
 /// the document of `ctx` (detached, in order).
 pub(crate) fn parse_html_into(ctx: NodeRef, html: &str) -> Vec<NodeRef> {
     let context = tag_of(ctx).filter(|t| t != "#fragment").unwrap_or_else(|| "div".into());
-    let frag = rabbithole_html::parse_fragment_with_scripting(html, &context, scripting_doc(ctx.doc));
-    let frag_body = frag.body().unwrap_or(Document::ROOT);
+    let (frag, frag_body) = parse_fragment_for(ctx, &context, html);
     with_doc(ctx.doc, |doc| {
         let mut out = Vec::new();
         for c in frag.children(frag_body) {
@@ -1157,8 +1170,13 @@ fn n_compare_document_position(realm: &mut Realm, this: Value, args: &[Value]) -
     if o == n {
         return Ok(Value::Number(0.0));
     }
-    if o.doc != n.doc {
-        return Ok(Value::Number(1.0 + 32.0 + 4.0)); // disconnected, implementation-specific
+    // Different trees: DISCONNECTED | IMPLEMENTATION_SPECIFIC plus a
+    // consistent (anticommutative) PRECEDING / FOLLOWING.
+    let rn = with_doc(n.doc, |doc| doc.tree_root(n.node));
+    let ro = with_doc(o.doc, |doc| doc.tree_root(o.node));
+    if o.doc != n.doc || rn != ro {
+        let following = (n.doc, rn) < (o.doc, ro);
+        return Ok(Value::Number(1.0 + 32.0 + if following { 4.0 } else { 2.0 }));
     }
     let r = with_doc(n.doc, |doc| {
         if doc.is_ancestor(o.node, n.node) {
@@ -1167,10 +1185,10 @@ fn n_compare_document_position(realm: &mut Realm, this: Value, args: &[Value]) -
         if doc.is_ancestor(n.node, o.node) {
             return 16.0 + 4.0; // CONTAINED_BY | FOLLOWING
         }
-        // Document order comparison.
+        // Tree order comparison.
         let mut seen_n = false;
         let mut seen_o = false;
-        for d in doc.descendants(Document::ROOT) {
+        for d in doc.descendants(rn) {
             if d == n.node {
                 seen_n = true;
             }

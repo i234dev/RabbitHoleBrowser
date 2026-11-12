@@ -156,13 +156,31 @@
   tag(IDBOpenDBRequest, 'IDBOpenDBRequest');
   N.installHandlers(IDBOpenDBRequest.prototype, ['blocked', 'upgradeneeded']);
   const newRequest = (C, source, tx) => make(C, { result: undefined, error: null, source, transaction: tx, readyState: 'pending' });
+  // The request's events are dispatched from a task here, so promise
+  // reactions of the listeners run after dispatch returns; the spec runs
+  // them (microtask checkpoint) while the transaction is still active.
+  // Deactivate after a few microtask turns so `await` chains in listeners
+  // can keep using the transaction.
+  function deactivateSoon(tx, then) {
+    let turns = 8;
+    const step = () => {
+      if (--turns > 0) { queueMicrotask(step); return; }
+      tx[S].active = false;
+      then();
+    };
+    queueMicrotask(step);
+  }
+  const listenerThrew = () => !!(N.listenersThrew && N.listenersThrew());
   function succeed(req, result) {
     const st = req[S];
     st.readyState = 'done'; st.result = result; st.error = null;
     const tx = st.transaction;
     if (tx) tx[S].active = true;
-    try { req.dispatchEvent(new Event('success')); } catch (e) { if (tx) abortTx(tx, e); }
-    if (tx) { tx[S].active = false; checkCommit(tx); }
+    listenerThrew();
+    let threw = false;
+    try { req.dispatchEvent(new Event('success')); } catch (e) { threw = true; }
+    if (tx && (listenerThrew() || threw) && !tx[S].commitRequested) { tx[S].active = false; abortTx(tx, err('AbortError', 'An exception was thrown in an event handler.')); return; }
+    if (tx) deactivateSoon(tx, () => checkCommit(tx));
   }
   function fail(req, e) {
     const st = req[S];
@@ -170,10 +188,12 @@
     const tx = st.transaction;
     if (tx) tx[S].active = true;
     const ev = new Event('error', { bubbles: true, cancelable: true });
-    const notPrevented = req.dispatchEvent(ev);
+    listenerThrew();
+    let notPrevented = true, threw = false;
+    try { notPrevented = req.dispatchEvent(ev); } catch (x) { threw = true; }
     if (tx) {
-      tx[S].active = false;
-      if (notPrevented) abortTx(tx, e); else checkCommit(tx);
+      if (listenerThrew() || threw) { tx[S].active = false; abortTx(tx, err('AbortError', 'An exception was thrown in an event handler.')); return; }
+      if (notPrevented) { tx[S].active = false; abortTx(tx, e); } else deactivateSoon(tx, () => checkCommit(tx));
     }
   }
 
@@ -391,6 +411,27 @@
   }
   function checkActive(tx, what) { if (!tx[S].active) throw err('TransactionInactiveError', `Failed to execute '${what}': The transaction is not active.`); }
   function checkWritable(tx, what) { if (tx[S].mode === 'readonly') throw err('ReadOnlyError', `Failed to execute '${what}': The transaction is read-only.`); }
+  // getAll()/getAllKeys() take (query, count) or an IDBGetAllOptions
+  // dictionary { query, count, direction }.
+  function getAllArgs(query, count) {
+    if (query !== null && typeof query === 'object' && !(query instanceof IDBKeyRange) && !Array.isArray(query) && !(query instanceof Date) && !(query instanceof ArrayBuffer) && !ArrayBuffer.isView(query)) {
+      const direction = query.direction === undefined ? 'next' : String(query.direction);
+      if (!['next', 'nextunique', 'prev', 'prevunique'].includes(direction)) throw new TypeError(`Failed to read the 'direction' property from 'IDBGetAllOptions': The provided value '${direction}' is not a valid enum value of type IDBCursorDirection.`);
+      return { query: query.query, count: query.count, direction };
+    }
+    return { query, count, direction: 'next' };
+  }
+  // Records in `direction` order; the unique directions keep the first
+  // record (lowest primary key) of each key.
+  function ordered(list, direction) {
+    let l = list;
+    if (direction === 'nextunique' || direction === 'prevunique') {
+      const out = [];
+      for (const e of l) if (!out.length || cmp(out[out.length - 1].key, e.key) !== 0) out.push(e);
+      l = out;
+    }
+    return direction === 'prev' || direction === 'prevunique' ? l.slice().reverse() : l;
+  }
   function recordsIn(list, r, field = 'key') {
     if (!r) return list.slice();
     const st = r[S];
@@ -482,9 +523,9 @@
     }
     get(query) { return this._read('get', query, (s, r) => { const rec = recordsIn(s.records, r)[0]; return rec ? deepCopy(rec.value) : undefined; }, true); }
     getKey(query) { return this._read('getKey', query, (s, r) => { const rec = recordsIn(s.records, r)[0]; return rec ? rec.key : undefined; }, true); }
-    getAll(query, count) { return this._read('getAll', query, (s, r) => limit(recordsIn(s.records, r), count).map((x) => deepCopy(x.value))); }
-    getAllKeys(query, count) { return this._read('getAllKeys', query, (s, r) => limit(recordsIn(s.records, r), count).map((x) => x.key)); }
-    getAllRecords(options = {}) { return this._read('getAllRecords', options.query, (s, r) => { let l = recordsIn(s.records, r); if (options.direction === 'prev' || options.direction === 'prevunique') l = l.reverse(); return limit(l, options.count).map((x) => make(IDBRecord, { key: x.key, primaryKey: x.key, value: deepCopy(x.value) })); }); }
+    getAll(query, count) { const a = getAllArgs(query, count); return this._read('getAll', a.query, (s, r) => limit(ordered(recordsIn(s.records, r), a.direction), a.count).map((x) => deepCopy(x.value))); }
+    getAllKeys(query, count) { const a = getAllArgs(query, count); return this._read('getAllKeys', a.query, (s, r) => limit(ordered(recordsIn(s.records, r), a.direction), a.count).map((x) => x.key)); }
+    getAllRecords(options = {}) { const a = getAllArgs(options || {}); return this._read('getAllRecords', a.query, (s, r) => limit(ordered(recordsIn(s.records, r), a.direction), a.count).map((x) => make(IDBRecord, { key: x.key, primaryKey: x.key, value: deepCopy(x.value) }))); }
     count(query) { return this._read('count', query, (s, r) => recordsIn(s.records, r).length); }
     _read(what, query, fn, needKey) {
       const tx = this[S].tx; checkActive(tx, what);
@@ -544,9 +585,9 @@
     get unique() { return idxData(this).unique; }
     get(query) { return this._read('get', query, (s, idx, r) => { const e = recordsIn(idx.records, r)[0]; if (!e) return undefined; const rec = s.records[lowerBoundIdx(s.records, e.primaryKey)]; return deepCopy(rec.value); }, true); }
     getKey(query) { return this._read('getKey', query, (s, idx, r) => { const e = recordsIn(idx.records, r)[0]; return e ? e.primaryKey : undefined; }, true); }
-    getAll(query, count) { return this._read('getAll', query, (s, idx, r) => limit(recordsIn(idx.records, r), count).map((e) => deepCopy(s.records[lowerBoundIdx(s.records, e.primaryKey)].value))); }
-    getAllKeys(query, count) { return this._read('getAllKeys', query, (s, idx, r) => limit(recordsIn(idx.records, r), count).map((e) => e.primaryKey)); }
-    getAllRecords(options = {}) { return this._read('getAllRecords', options.query, (s, idx, r) => limit(recordsIn(idx.records, r), options.count).map((e) => make(IDBRecord, { key: e.key, primaryKey: e.primaryKey, value: deepCopy(s.records[lowerBoundIdx(s.records, e.primaryKey)].value) }))); }
+    getAll(query, count) { const a = getAllArgs(query, count); return this._read('getAll', a.query, (s, idx, r) => limit(ordered(recordsIn(idx.records, r), a.direction), a.count).map((e) => deepCopy(s.records[lowerBoundIdx(s.records, e.primaryKey)].value))); }
+    getAllKeys(query, count) { const a = getAllArgs(query, count); return this._read('getAllKeys', a.query, (s, idx, r) => limit(ordered(recordsIn(idx.records, r), a.direction), a.count).map((e) => e.primaryKey)); }
+    getAllRecords(options = {}) { const a = getAllArgs(options || {}); return this._read('getAllRecords', a.query, (s, idx, r) => limit(ordered(recordsIn(idx.records, r), a.direction), a.count).map((e) => make(IDBRecord, { key: e.key, primaryKey: e.primaryKey, value: deepCopy(s.records[lowerBoundIdx(s.records, e.primaryKey)].value) }))); }
     count(query) { return this._read('count', query, (s, idx, r) => recordsIn(idx.records, r).length); }
     _read(what, query, fn, needKey) {
       const store = this[S].store, tx = store[S].tx;

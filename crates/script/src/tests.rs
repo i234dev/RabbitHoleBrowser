@@ -1135,12 +1135,14 @@ fn doctype_node_compat_mode_and_xml_documents() {
         doc.body.appendChild(doc.createElementNS('http://www.w3.org/1999/xhtml', 'form'));
         console.log(String(doc), doctype.ownerDocument === doc, doc.firstChild === doctype, doc.title, doc.forms.length, doc.documentElement.tagName);
         let code = 0;
-        try { document.implementation.createDocumentType('a:', '', ''); } catch (e) { code = e.code === e.NAMESPACE_ERR && e.INVALID_ACCESS_ERR === 15 ? 14 : -1; }
+        // Doctype names are only checked for whitespace, NUL and '>' (whatwg/dom#1079).
+        document.implementation.createDocumentType('a:', '', '');
+        try { document.implementation.createDocumentType('a:>', '', ''); } catch (e) { code = e.code === e.INVALID_CHARACTER_ERR && e.INVALID_ACCESS_ERR === 15 ? 5 : -1; }
         console.log(code);
     "#);
     assert_eq!(out[0], "10 html -//W3C//DTD HTML 4.01//EN true CSS1Compat null true");
     assert_eq!(out[1], "[object XMLDocument] true true Sparrow 1 html");
-    assert_eq!(out[2], "14");
+    assert_eq!(out[2], "5");
     let (mut env, mut host) = setup("<p>no doctype</p>");
     let out = run(&mut env, &mut host, "console.log(document.compatMode, document.doctype)");
     assert_eq!(out[0], "BackCompat null");
@@ -1165,7 +1167,7 @@ fn document_children_are_validated_and_namespaces_kept() {
         const e = document.createElementNS('http://ns.example.com/', 'prefix:localName');
         console.log(codes.join(','), e.tagName, e.localName, e.prefix, e.namespaceURI, document.createElement('DIV').tagName);
     "#);
-    assert_eq!(out[0], "3,3,3,0,14,14,14,0,14,5 prefix:localName localName prefix http://ns.example.com/ DIV");
+    assert_eq!(out[0], "3,3,3,0,14,14,14,0,5,5 prefix:localName localName prefix http://ns.example.com/ DIV");
 }
 
 #[test]

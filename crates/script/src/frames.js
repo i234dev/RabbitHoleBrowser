@@ -170,6 +170,11 @@
         // in for them (scripts take JSON / Array from a fresh about:blank
         // iframe to avoid a page's patched ones).
         if (BUILTINS.has(key) && sameOrigin(id)) return g[key];
+        // Interface objects (DOMException, Element, Event, ...): a
+        // same-origin frame's nodes are reflected in this realm with this
+        // realm's prototypes, so this realm's interfaces stand in for the
+        // frame's (`frame.contentWindow.DOMException`, `instanceof`).
+        if (typeof key === 'string' && /^[A-Z]/.test(key) && typeof g[key] === 'function' && sameOrigin(id)) return g[key];
         if (typeof key === 'string' && key !== '') {
           // Named access to a child frame (`parent.frames['name']`).
           const child = info(id, 'named', key);
@@ -186,7 +191,7 @@
         return undefined;
       },
       has(t, key) {
-        return key in t || (BUILTINS.has(key) && sameOrigin(id));
+        return key in t || ((BUILTINS.has(key) || (typeof key === 'string' && /^[A-Z]/.test(key) && typeof g[key] === 'function')) && sameOrigin(id));
       },
       set(t, key, v) {
         if (key === 'location') { info(id, 'navigate', String(v)); return true; }

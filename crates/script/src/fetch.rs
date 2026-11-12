@@ -16,25 +16,15 @@ pub(crate) fn url_component(u: &Url, which: &str) -> String {
     match which {
         "href" => u.to_string(),
         "protocol" => format!("{}:", u.scheme),
-        "host" => u.host_with_port(),
+        "username" => u.username.clone(),
+        "password" => u.password.clone(),
+        "host" => u.host_component(),
         "hostname" => u.host.clone(),
         "port" => u.port.map(|p| p.to_string()).unwrap_or_default(),
-        "pathname" => {
-            if u.is_http() || u.scheme == "file" || u.path.starts_with('/') {
-                u.path.clone()
-            } else {
-                u.path.clone()
-            }
-        }
-        "search" => u.query.as_ref().filter(|q| !q.is_empty()).map(|q| format!("?{q}")).unwrap_or_default(),
-        "hash" => u.fragment.as_ref().filter(|f| !f.is_empty()).map(|f| format!("#{f}")).unwrap_or_default(),
-        // Tuple origins for the special schemes with hosts (URL §4.5);
-        // blob: URLs take the origin of the URL they wrap.
-        "origin" => match u.scheme.as_str() {
-            "ws" | "wss" | "ftp" => format!("{}://{}", u.scheme, u.host_with_port()),
-            "blob" => rabbithole_net::Url::parse_absolute(&u.path).filter(|i| i.is_http()).map(|i| i.origin()).unwrap_or_else(|| "null".into()),
-            _ => u.origin(),
-        },
+        "pathname" => u.pathname(),
+        "search" => u.search(),
+        "hash" => u.hash(),
+        "origin" => u.origin(),
         _ => String::new(),
     }
 }
@@ -90,8 +80,8 @@ fn parse_url_args(realm: &mut Realm, args: &[Value]) -> JsResult<Option<Url>> {
         },
     };
     Ok(match base {
-        Some(b) => b.join(input.trim()),
-        None => Url::parse_absolute(input.trim()),
+        Some(b) => b.join(&input),
+        None => Url::parse_absolute(&input),
     })
 }
 
@@ -141,33 +131,19 @@ fn url_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let mut u = url_data(realm, &this)?;
     let v = arg_str(realm, args, 0)?;
     match which.as_str() {
-        "href" => {
-            if let Some(nu) = Url::parse_absolute(&v) {
-                u = nu;
-            } else {
-                return Err(realm.throw_type_error(&format!("Invalid URL: {v}")));
-            }
-        }
-        "protocol" => u.scheme = v.trim_end_matches(':').to_ascii_lowercase(),
-        "host" => {
-            let (h, p) = match v.rsplit_once(':') {
-                Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.parse::<u16>().ok()),
-                _ => (v.clone(), None),
-            };
-            u.host = h.to_ascii_lowercase();
-            u.port = p.filter(|p| Some(*p) != u.default_port());
-        }
-        "hostname" => u.host = v.to_ascii_lowercase(),
-        "port" => u.port = v.parse::<u16>().ok().filter(|p| Some(*p) != u.default_port()),
-        "pathname" => u.path = if v.starts_with('/') { v } else { format!("/{v}") },
-        "search" => {
-            let q = v.trim_start_matches('?');
-            u.query = if q.is_empty() { None } else { Some(q.to_string()) };
-        }
-        "hash" => {
-            let f = v.trim_start_matches('#');
-            u.fragment = if f.is_empty() { None } else { Some(f.to_string()) };
-        }
+        "href" => match Url::parse_absolute(&v) {
+            Some(nu) => u = nu,
+            None => return Err(realm.throw_type_error(&format!("Failed to set the 'href' property on 'URL': Invalid URL '{v}'"))),
+        },
+        "protocol" => u.set_protocol(&v),
+        "username" => u.set_username(&v),
+        "password" => u.set_password(&v),
+        "host" => u.set_host(&v),
+        "hostname" => u.set_hostname(&v),
+        "port" => u.set_port(&v),
+        "pathname" => u.set_pathname(&v),
+        "search" => u.set_search(&v),
+        "hash" => u.set_hash(&v),
         _ => {}
     }
     set_url_data(realm, &this, u.clone());
@@ -184,16 +160,6 @@ fn url_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
             }
         }
     }
-    Ok(Value::Undefined)
-}
-
-fn url_empty_credential(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    url_data(realm, &this)?;
-    Ok(Value::str(""))
-}
-
-fn url_set_credential(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    url_data(realm, &this)?;
     Ok(Value::Undefined)
 }
 
@@ -231,7 +197,6 @@ fn decode_form(s: &str) -> String {
 }
 
 pub(crate) fn parse_query(q: &str) -> Vec<(String, String)> {
-    let q = q.trim_start_matches('?');
     q.split('&')
         .filter(|p| !p.is_empty())
         .map(|p| match p.split_once('=') {
@@ -281,7 +246,11 @@ fn params_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let init = arg(args, 0);
     let pairs: Vec<(String, String)> = match init.v() {
         V::Undefined | V::Null => Vec::new(),
-        V::String(s) => parse_query(&s.to_rust_string()),
+        // A string init drops one leading "?".
+        V::String(s) => {
+            let s = s.to_rust_string();
+            parse_query(s.strip_prefix('?').unwrap_or(&s))
+        }
         V::Object(o) => {
             if let Some(d) = realm.host_data::<ParamsData>(o) {
                 d.pairs.clone()
@@ -309,7 +278,10 @@ fn params_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
                 out
             }
         }
-        other => parse_query(&realm.to_rust_string(other.to_value())?),
+        other => {
+            let s = realm.to_rust_string(other.to_value())?;
+            parse_query(s.strip_prefix('?').unwrap_or(&s))
+        }
     };
     let o = make_params(realm, pairs, None);
     let p = realm.proto_from_new_target(proto("URLSearchParams"));
@@ -403,8 +375,16 @@ fn params_size(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 fn params_for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = params_of(realm, &this)?;
     let f = arg(args, 0);
-    for (k, v) in params_pairs(realm, o) {
+    if !realm.is_callable(&f) {
+        return Err(realm.throw_type_error("Failed to execute 'forEach' on 'URLSearchParams': The callback provided as parameter 1 is not a function."));
+    }
+    // Iterates the live list (WebIDL iterable): changes made by the
+    // callback are seen.
+    let mut i = 0;
+    loop {
+        let Some((k, v)) = realm.host_data::<ParamsData>(o).and_then(|d| d.pairs.get(i).cloned()) else { break };
         realm.call(f.clone(), arg(args, 1), &[Value::str(&v), Value::str(&k), this.clone()])?;
+        i += 1;
     }
     Ok(Value::Undefined)
 }
@@ -1278,37 +1258,183 @@ pub(crate) fn blob_url_response(url: &str) -> Option<rabbithole_net::Response> {
 fn text_encoder_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     let p = realm.proto_from_new_target(proto("TextEncoder"));
     let o = realm.new_object_with_proto(Some(p));
-    realm.define_property(o, "encoding", Value::str("utf-8"), ACC);
+    realm.set_host_data(o, Box::new(TextEncoderData));
+    realm.set_class_name(o, "TextEncoder");
     Ok(Value::Object(o))
 }
 
-fn text_encoder_encode(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let s = arg_str_opt(realm, args, 0)?.unwrap_or_default();
-    let bytes = s.into_bytes();
-    let ctor = realm.get_str(Value::Object(realm.global()), "Uint8Array")?;
-    if realm.is_constructor(&ctor) {
-        let ab = make_array_buffer(realm, bytes);
-        return realm.construct(ctor, &[ab], Value::Undefined);
+pub(crate) struct TextEncoderData;
+
+fn text_encoder_check(realm: &mut Realm, this: &Value) -> JsResult<()> {
+    match this.v() {
+        V::Object(o) if realm.host_data::<TextEncoderData>(o).is_some() => Ok(()),
+        _ => Err(realm.throw_type_error("Illegal invocation")),
     }
-    let vals: Vec<Value> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
-    Ok(realm.new_array_value(vals))
+}
+
+fn text_encoder_encoding(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    text_encoder_check(realm, &this)?;
+    Ok(Value::str("utf-8"))
+}
+
+fn new_uint8_array(realm: &mut Realm, bytes: Vec<u8>) -> JsResult<Value> {
+    let ctor = realm.get_str(Value::Object(realm.global()), "Uint8Array")?;
+    let ab = make_array_buffer(realm, bytes);
+    realm.construct(ctor, &[ab], Value::Undefined)
+}
+
+fn text_encoder_encode(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    text_encoder_check(realm, &this)?;
+    let s = match args.first().map(|v| v.v()) {
+        None | Some(V::Undefined) => String::new(),
+        Some(_) => arg_str(realm, args, 0)?,
+    };
+    new_uint8_array(realm, s.into_bytes())
+}
+
+fn text_encoder_encode_into(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    text_encoder_check(realm, &this)?;
+    let s = arg_str(realm, args, 0)?;
+    let dest = arg(args, 1);
+    let target = match dest.v() {
+        V::Object(o) => match &realm.obj(o).kind {
+            rabbithole_js::ObjectKind::TypedArray(t) if t.kind == rabbithole_js::heap::TypedArrayKind::Uint8 => Some((t.buffer, t.byte_offset, t.length)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some((buffer, offset, len)) = target else {
+        return Err(realm.throw_type_error("Failed to execute 'encodeInto' on 'TextEncoder': parameter 2 is not of type 'Uint8Array'."));
+    };
+    let (mut read, mut written) = (0usize, 0usize);
+    if let rabbithole_js::ObjectKind::ArrayBuffer(b) = &realm.obj(buffer).kind {
+        let mut b = b.borrow_mut();
+        let avail = len.min(b.len().saturating_sub(offset));
+        let mut buf = [0u8; 4];
+        for c in s.chars() {
+            let enc = c.encode_utf8(&mut buf);
+            if written + enc.len() > avail {
+                break;
+            }
+            b[offset + written..offset + written + enc.len()].copy_from_slice(enc.as_bytes());
+            written += enc.len();
+            read += c.len_utf16();
+        }
+    }
+    let o = realm.new_object();
+    realm.set_str(Value::Object(o), "read", Value::Number(read as f64))?;
+    realm.set_str(Value::Object(o), "written", Value::Number(written as f64))?;
+    Ok(Value::Object(o))
+}
+
+pub(crate) struct TextDecoderData {
+    enc: rabbithole_net::encoding::Encoding,
+    decoder: rabbithole_net::encoding::Decoder,
+    fatal: bool,
+    ignore_bom: bool,
+    bom_seen: bool,
+    do_not_flush: bool,
 }
 
 fn text_decoder_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let label = match args.first().map(|v| v.v()) {
+        None | Some(V::Undefined) => "utf-8".to_string(),
+        Some(_) => arg_str(realm, args, 0)?,
+    };
+    let opts = arg(args, 1);
+    if !matches!(opts.v(), V::Undefined | V::Null | V::Object(_)) {
+        return Err(realm.throw_type_error("Failed to construct 'TextDecoder': The provided value is not of type 'TextDecoderOptions'."));
+    }
+    let fatal = dict_bool(realm, &opts, "fatal")?.unwrap_or(false);
+    let ignore_bom = dict_bool(realm, &opts, "ignoreBOM")?.unwrap_or(false);
+    let enc = match rabbithole_net::encoding::Encoding::for_label(&label) {
+        Some(e) if e != rabbithole_net::encoding::Encoding::REPLACEMENT => e,
+        _ => return Err(realm.throw_range_error(&format!("Failed to construct 'TextDecoder': The encoding label provided ('{label}') is invalid."))),
+    };
     let p = realm.proto_from_new_target(proto("TextDecoder"));
     let o = realm.new_object_with_proto(Some(p));
-    let enc = arg_str_opt(realm, args, 0)?.unwrap_or_else(|| "utf-8".into()).to_ascii_lowercase();
-    realm.define_property(o, "encoding", Value::str(&enc), ACC);
-    realm.define_property(o, "fatal", Value::Bool(false), ACC);
-    realm.define_property(o, "ignoreBOM", Value::Bool(false), ACC);
+    realm.set_host_data(o, Box::new(TextDecoderData { enc, decoder: enc.new_decoder(), fatal, ignore_bom, bom_seen: false, do_not_flush: false }));
+    realm.set_class_name(o, "TextDecoder");
     Ok(Value::Object(o))
 }
 
+fn text_decoder_field(realm: &mut Realm, this: &Value, f: fn(&TextDecoderData) -> Value) -> JsResult<Value> {
+    match this.v() {
+        V::Object(o) => match realm.host_data::<TextDecoderData>(o) {
+            Some(d) => Ok(f(d)),
+            None => Err(realm.throw_type_error("Illegal invocation")),
+        },
+        _ => Err(realm.throw_type_error("Illegal invocation")),
+    }
+}
+
+fn text_decoder_encoding(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    text_decoder_field(realm, &this, |d| Value::str(&d.enc.name().to_ascii_lowercase()))
+}
+
+fn text_decoder_fatal(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    text_decoder_field(realm, &this, |d| Value::Bool(d.fatal))
+}
+
+fn text_decoder_ignore_bom(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    text_decoder_field(realm, &this, |d| Value::Bool(d.ignore_bom))
+}
+
+/// Bytes of an `AllowSharedBufferSource` (copied).
+fn buffer_source_bytes(realm: &mut Realm, v: &Value, what: &str) -> JsResult<Vec<u8>> {
+    let V::Object(o) = v.v() else {
+        return Err(realm.throw_type_error(&format!("{what}: The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")));
+    };
+    let view = match &realm.obj(o).kind {
+        rabbithole_js::ObjectKind::ArrayBuffer(buf) => return Ok(buf.borrow().clone()),
+        rabbithole_js::ObjectKind::TypedArray(t) => Some((t.buffer, t.byte_offset, t.length * t.kind.element_size())),
+        rabbithole_js::ObjectKind::DataView(t) => Some((t.buffer, t.byte_offset, t.length)),
+        _ => None,
+    };
+    let Some((buffer, start, len)) = view else {
+        return Err(realm.throw_type_error(&format!("{what}: The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")));
+    };
+    if let rabbithole_js::ObjectKind::ArrayBuffer(b) = &realm.obj(buffer).kind {
+        let b = b.borrow();
+        let s = start.min(b.len());
+        let e = (start + len).min(b.len());
+        return Ok(b[s..e].to_vec());
+    }
+    Ok(Vec::new())
+}
+
 fn text_decoder_decode(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let (bytes, _) = body_bytes_from_value(realm, &arg(args, 0))?;
-    let enc = realm.get_str(this, "encoding")?;
-    let enc = realm.to_rust_string(enc)?;
-    Ok(Value::str(&rabbithole_net::decode_text(&bytes, Some(&enc))))
+    let V::Object(o) = this.v() else { return Err(realm.throw_type_error("Illegal invocation")) };
+    if realm.host_data::<TextDecoderData>(o).is_none() {
+        return Err(realm.throw_type_error("Illegal invocation"));
+    }
+    let input = arg(args, 0);
+    let bytes = if input.is_undefined() { Vec::new() } else { buffer_source_bytes(realm, &input, "Failed to execute 'decode' on 'TextDecoder'")? };
+    let opts = arg(args, 1);
+    let stream = dict_bool(realm, &opts, "stream")?.unwrap_or(false);
+    let d = realm.host_data_mut::<TextDecoderData>(o).expect("decoder data");
+    if !d.do_not_flush {
+        d.decoder = d.enc.new_decoder();
+        d.bom_seen = false;
+    }
+    d.do_not_flush = stream;
+    let mut out = String::new();
+    let fatal = d.fatal;
+    let res = d.decoder.decode(&bytes, !stream, fatal, &mut out);
+    if res.is_err() {
+        d.decoder = d.enc.new_decoder();
+        d.do_not_flush = false;
+        d.bom_seen = false;
+        return Err(realm.throw_type_error("Failed to execute 'decode' on 'TextDecoder': The encoded data was not valid."));
+    }
+    let unicode = matches!(d.enc.name(), "UTF-8" | "UTF-16BE" | "UTF-16LE");
+    if unicode && !d.ignore_bom && !d.bom_seen && !out.is_empty() {
+        d.bom_seen = true;
+        if out.starts_with('\u{feff}') {
+            out.remove(0);
+        }
+    }
+    Ok(Value::str(&out))
 }
 
 fn atob(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1403,7 +1529,10 @@ fn xhr_open(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = xhr_of(realm, &this)?;
     let method = arg_str(realm, args, 0)?.to_ascii_uppercase();
     let url = arg_str(realm, args, 1)?;
-    let url = resolve_url(&url).map(|u| u.to_string()).unwrap_or(url);
+    let url = match resolve_url(&url) {
+        Some(u) => u.to_string(),
+        None => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to execute 'open' on 'XMLHttpRequest': Invalid URL '{url}'"))),
+    };
     let is_async = args.get(2).map(|v| realm.to_boolean(v)).unwrap_or(true);
     {
         let d = realm.host_data_mut::<XhrData>(o).unwrap();
@@ -1597,16 +1726,12 @@ fn xhr_response_xml(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<V
 pub(crate) fn install(realm: &mut Realm) {
     // URL
     let url = define_class(realm, "URL", None, url_ctor);
-    for comp in ["href", "protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"] {
+    for comp in ["href", "origin", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search", "hash"] {
         let data: std::rc::Rc<dyn std::any::Any> = std::rc::Rc::new(comp.to_string());
         let g = realm.new_native_function_full(&format!("get {comp}"), 0, url_get, Some(data.clone()), vec![], false);
         let s = if comp == "origin" { None } else { Some(Value::Object(realm.new_native_function_full(&format!("set {comp}"), 1, url_set, Some(data), vec![], false))) };
         realm.define_accessor_values(url, comp, Some(Value::Object(g)), s, ACC);
     }
-    // Credentials are not kept in URLs (the network stack drops them):
-    // `username` / `password` read as empty and setting them is accepted.
-    realm.define_accessor(url, "username", Some(url_empty_credential), Some(url_set_credential), ACC);
-    realm.define_accessor(url, "password", Some(url_empty_credential), Some(url_set_credential), ACC);
     realm.define_accessor(url, "searchParams", Some(url_search_params), None, ACC);
     realm.define_method(url, "toString", 0, url_to_string);
     realm.define_method(url, "toJSON", 0, url_to_string);
@@ -1690,9 +1815,14 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "FileReader", Some("EventTarget"), file_reader_ctor);
     // TextEncoder / TextDecoder
     let te = define_class(realm, "TextEncoder", None, text_encoder_ctor);
-    realm.define_method(te, "encode", 1, text_encoder_encode);
+    realm.define_accessor(te, "encoding", Some(text_encoder_encoding), None, ACC);
+    realm.define_method(te, "encode", 0, text_encoder_encode);
+    realm.define_method(te, "encodeInto", 2, text_encoder_encode_into);
     let td = define_class(realm, "TextDecoder", None, text_decoder_ctor);
-    realm.define_method(td, "decode", 1, text_decoder_decode);
+    realm.define_accessor(td, "encoding", Some(text_decoder_encoding), None, ACC);
+    realm.define_accessor(td, "fatal", Some(text_decoder_fatal), None, ACC);
+    realm.define_accessor(td, "ignoreBOM", Some(text_decoder_ignore_bom), None, ACC);
+    realm.define_method(td, "decode", 0, text_decoder_decode);
     realm.define_method(g, "atob", 1, atob);
     realm.define_method(g, "btoa", 1, btoa);
     // XMLHttpRequest

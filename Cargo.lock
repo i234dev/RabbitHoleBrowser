@@ -1659,6 +1659,7 @@ dependencies = [
  "flate2",
  "rustls",
  "ruzstd",
+ "serde_json",
  "webpki-roots",
 ]
 

@@ -85,9 +85,32 @@ fn dom_parser_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Val
 
 fn dom_parser_parse(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let src = arg_str(realm, args, 0)?;
-    let ty = arg_str_opt(realm, args, 1)?.unwrap_or_else(|| "text/html".into());
-    let _ = ty; // XML is parsed with the HTML parser (foreign content handling).
-    Ok(crate::document::new_aux_document(realm, &src))
+    let ty = arg_str(realm, args, 1)?;
+    // The new document's URL is the parser's associated document's.
+    let url = Some(crate::window::current_href());
+    match ty.as_str() {
+        "text/html" => {
+            let mut doc = rabbithole_html::parse(&src);
+            doc.url = url;
+            Ok(crate::document::new_aux_document_from(realm, doc))
+        }
+        "text/xml" | "application/xml" | "application/xhtml+xml" | "image/svg+xml" => {
+            let mut doc = rabbithole_html::xml::parse_xml(&src);
+            doc.content_type = ty.clone();
+            doc.url = url;
+            let v = crate::document::new_aux_document_from(realm, doc);
+            // An XMLDocument.
+            let g = Value::Object(realm.global());
+            let ctor = realm.get_str(g, "XMLDocument")?;
+            if ctor.is_object() {
+                if let (V::Object(o), V::Object(p)) = (v.v(), realm.get_str(ctor, "prototype")?.v()) {
+                    realm.obj_mut(o).set_proto(Some(p));
+                }
+            }
+            Ok(v)
+        }
+        _ => Err(realm.throw_type_error(&format!("Failed to execute 'parseFromString' on 'DOMParser': The provided value '{ty}' is not a valid enum value of type DOMParserSupportedType."))),
+    }
 }
 
 fn xml_serializer_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {

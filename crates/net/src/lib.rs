@@ -9,8 +9,10 @@
 //! and EventSource (`eventsource`) clients.
 
 pub mod url;
+mod idna_table;
 pub mod fetch;
 pub mod charset;
+pub mod encoding;
 pub mod cookies;
 pub mod cache;
 pub mod client;
@@ -36,4 +38,4 @@ pub use websocket::{WebSocket, WsEvent, WsMessage};
 pub use eventsource::{EventSource, SseEvent};
 pub use netlog::{NetLog, NetLogEntry};
 pub use robots::{Robots, BOT_TOKEN};
-pub use charset::{decode_text, sniff_meta_charset};
+pub use charset::{decode_text, decode_text_with_encoding, sniff_meta_charset};

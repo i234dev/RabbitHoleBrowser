@@ -382,7 +382,12 @@ fn respond(req: &Request, cfg: &Config) -> Response {
     if let Some(r) = handlers::handle(req, cfg) {
         return apply_pipes(req, cfg, r, false);
     }
-    let Some(path) = fs_path(cfg, &req.path) else {
+    // wptserve's rewrites.
+    let url_path = match req.path.as_str() {
+        "/resources/WebIDLParser.js" => "/resources/webidl2/lib/webidl2.js",
+        p => p,
+    };
+    let Some(path) = fs_path(cfg, url_path) else {
         return Response::text(400, "bad path");
     };
     if path.is_file() {

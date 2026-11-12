@@ -1,98 +1,36 @@
 //! Bytes -> String with charset detection (BOM, HTTP header hint,
 //! `<meta charset>` sniffing, UTF-8 validation, Windows-1252 fallback).
 
-/// Windows-1252 code points for bytes 0x80..=0x9F (U+FFFD for undefined).
-const WIN1252_HIGH: [char; 32] = [
-    '\u{20AC}', '\u{FFFD}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
-    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{FFFD}', '\u{017D}', '\u{FFFD}',
-    '\u{FFFD}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
-    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{FFFD}', '\u{017E}', '\u{0178}',
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Encoding {
-    Utf8,
-    Windows1252,
-    Latin9,
-    Utf16Le,
-    Utf16Be,
-}
-
-/// Map a charset label to an encoding we can decode. `None` for unknown.
-fn encoding_for_label(label: &str) -> Option<Encoding> {
-    let l = label.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
-    match l.as_str() {
-        "utf-8" | "utf8" | "unicode-1-1-utf-8" => Some(Encoding::Utf8),
-        "iso-8859-1" | "iso8859-1" | "iso_8859-1" | "latin1" | "latin-1" | "l1" | "windows-1252" | "cp1252"
-        | "x-cp1252" | "ascii" | "us-ascii" | "iso-ir-100" | "ibm819" | "cp819" => Some(Encoding::Windows1252),
-        "iso-8859-15" | "iso8859-15" | "latin9" | "latin-9" | "l9" => Some(Encoding::Latin9),
-        "utf-16" | "utf-16le" | "utf16" => Some(Encoding::Utf16Le),
-        "utf-16be" => Some(Encoding::Utf16Be),
-        _ => None,
-    }
-}
-
-fn decode_single_byte(body: &[u8], latin9: bool) -> String {
-    let mut out = String::with_capacity(body.len());
-    for &b in body {
-        let c = if latin9 && b == 0xA4 {
-            '\u{20AC}'
-        } else if (0x80..=0x9F).contains(&b) && !latin9 {
-            WIN1252_HIGH[(b - 0x80) as usize]
-        } else {
-            b as char
-        };
-        out.push(c);
-    }
-    out
-}
-
-fn decode_utf16(body: &[u8], big_endian: bool) -> String {
-    let units: Vec<u16> = body
-        .chunks(2)
-        .map(|c| {
-            let (a, b) = (c[0], *c.get(1).unwrap_or(&0));
-            if big_endian {
-                u16::from_be_bytes([a, b])
-            } else {
-                u16::from_le_bytes([a, b])
-            }
-        })
-        .collect();
-    String::from_utf16_lossy(&units)
-}
-
-fn decode_with(body: &[u8], enc: Encoding) -> String {
-    match enc {
-        Encoding::Utf8 => String::from_utf8_lossy(body).into_owned(),
-        Encoding::Windows1252 => decode_single_byte(body, false),
-        Encoding::Latin9 => decode_single_byte(body, true),
-        Encoding::Utf16Le => decode_utf16(body, false),
-        Encoding::Utf16Be => decode_utf16(body, true),
-    }
-}
+use crate::encoding::{bom_sniff, Encoding};
 
 /// Decode `body` to text. `hint` is the charset from the HTTP header.
+/// Order: byte order mark, the hint, `<meta charset>` in the first 2 KiB,
+/// then UTF-8 when the bytes are valid UTF-8, else windows-1252.
 pub fn decode_text(body: &[u8], hint: Option<&str>) -> String {
-    // Byte order marks win over everything.
-    if let Some(rest) = body.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(rest).into_owned();
+    decode_text_with_encoding(body, hint).0
+}
+
+/// [`decode_text`], also returning the encoding used (its name).
+pub fn decode_text_with_encoding(body: &[u8], hint: Option<&str>) -> (String, &'static str) {
+    if let Some((enc, n)) = bom_sniff(body) {
+        return (enc.decode_without_bom(&body[n..]), enc.name());
     }
-    if let Some(rest) = body.strip_prefix(&[0xFF, 0xFE]) {
-        return decode_utf16(rest, false);
-    }
-    if let Some(rest) = body.strip_prefix(&[0xFE, 0xFF]) {
-        return decode_utf16(rest, true);
-    }
-    let label = hint
-        .map(|h| h.to_string())
-        .or_else(|| sniff_meta_charset(&body[..body.len().min(2048)]));
-    if let Some(enc) = label.as_deref().and_then(encoding_for_label) {
-        return decode_with(body, enc);
+    let label = hint.map(|h| h.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).or_else(|| sniff_meta_charset(&body[..body.len().min(2048)]));
+    if let Some(mut enc) = label.as_deref().and_then(Encoding::for_label) {
+        // A document's encoding is never UTF-16 from a label alone
+        // (HTML "get an encoding" for meta: UTF-16 means UTF-8), nor
+        // `replacement` for text that is plainly UTF-8.
+        if hint.is_none() && (enc == Encoding::UTF_16BE || enc == Encoding::UTF_16LE) {
+            enc = Encoding::UTF_8;
+        }
+        if enc.name() == "x-user-defined" && hint.is_none() {
+            enc = Encoding::WINDOWS_1252;
+        }
+        return (enc.decode_without_bom(body), enc.name());
     }
     match std::str::from_utf8(body) {
-        Ok(s) => s.to_string(),
-        Err(_) => decode_single_byte(body, false),
+        Ok(s) => (s.to_string(), "UTF-8"),
+        Err(_) => (Encoding::WINDOWS_1252.decode_without_bom(body), "windows-1252"),
     }
 }
 
@@ -174,6 +112,13 @@ mod tests {
         assert_eq!(decode_text("é".as_bytes(), Some("windows-1252")), "Ã©");
         // Unknown label with valid utf-8
         assert_eq!(decode_text("é".as_bytes(), Some("x-made-up")), "é");
+        assert_eq!(decode_text(&[0x82, 0xA0], Some("shift_jis")), "あ");
+        assert_eq!(decode_text(&[0xA4, 0xA2], Some("euc-jp")), "あ");
+        assert_eq!(decode_text(&[0xB0, 0xA1], Some("euc-kr")), "가");
+        assert_eq!(decode_text(&[0xA4, 0x40], Some("big5")), "一");
+        assert_eq!(decode_text(&[0x81, 0x30, 0x81, 0x30], Some("gb18030")), "\u{80}");
+        assert_eq!(decode_text(&[0xE4, 0xF6], Some("koi8-r")), "ДЖ");
+        assert_eq!(decode_text(b"\x1b$B$\"\x1b(B", Some("iso-2022-jp")), "あ");
     }
 
     #[test]

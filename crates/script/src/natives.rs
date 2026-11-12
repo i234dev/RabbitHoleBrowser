@@ -369,6 +369,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);
     realm.define_method(o, "imagePixels", 1, image_pixels);
     realm.define_method(o, "installHandlers", 2, install_handlers);
+    realm.define_method(o, "listenersThrew", 0, crate::events::listeners_threw);
     realm.define_method(o, "markHTMLDDA", 1, mark_htmldda);
     realm.define_method(o, "registerProto", 2, register_proto);
     realm.define_method(o, "setRenderHook", 1, set_render_hook);
@@ -385,6 +386,7 @@ pub(crate) fn install(realm: &mut Realm) {
     crate::live::install(realm, o);
     realm.define_method(o, "createDoctype", 4, crate::document::create_doctype);
     realm.define_method(o, "createXMLDocument", 0, crate::document::create_xml_document);
+    realm.define_method(o, "attrNamespace", 2, crate::element::attr_namespace_native);
     realm.define_method(o, "validateQName", 1, crate::document::validate_qname);
     let g = realm.global();
     realm.define_property(g, "__rhNative", Value::Object(o), rabbithole_js::CONFIGURABLE | rabbithole_js::WRITABLE);
