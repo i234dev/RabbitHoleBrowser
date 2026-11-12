@@ -405,95 +405,153 @@ fn async_gen_drive(realm: &mut Realm, gen: ObjectId, mut resume: Option<(ResumeM
 
 // ------------------------------------------------- async-from-sync iterator
 
+const TAG_AFS: u8 = 3;
+const TAG_AFS_CONT: u8 = 4;
+
+/// CreateAsyncFromSyncIterator(syncIteratorRecord).
 pub fn create_async_from_sync_iterator(realm: &mut Realm, it: Value, next: Value) -> Value {
     let proto = realm.intrinsics.others["AsyncFromSyncIteratorPrototype"];
-    let o = realm.new_object_with_proto(Some(proto));
-    realm.define_property(o, "__sync", it, 0);
-    realm.define_property(o, "__next", next, 0);
-    Value::Object(o)
+    let data = SlotData { tag: TAG_AFS, values: vec![it, next], ..Default::default() };
+    Value::Object(super::iterator_helpers::new_slot_object(realm, proto, data))
 }
 
 fn afs_parts(realm: &mut Realm, this: &Value) -> JsResult<(Value, Value)> {
-    let id = this_object(realm, this, "AsyncFromSyncIterator")?;
-    let it = realm.get_str(Value::Object(id), "__sync")?;
-    let next = realm.get_str(Value::Object(id), "__next")?;
-    Ok((it, next))
+    match super::iterator_helpers::slot_object(realm, this, TAG_AFS) {
+        Some(id) => match &realm.obj(id).kind {
+            ObjectKind::Slots(d) => Ok((d.values[0].clone(), d.values[1].clone())),
+            _ => unreachable!(),
+        },
+        None => realm.type_error("AsyncFromSyncIterator method called on incompatible receiver"),
+    }
 }
 
-/// Wrap a sync iterator result: resolve `value` then produce {value, done}.
-fn afs_continue(realm: &mut Realm, result: Value) -> JsResult<Value> {
-    let (p, res, rej) = realm.new_promise();
-    let done = realm.get_str(result.clone(), "done")?.truthy();
-    let value = realm.get_str(result, "value")?;
-    let vp = match crate::builtins::promise::promise_resolve(realm, value) {
-        Ok(vp) => vp,
-        Err(e) => {
-            realm.call(Value::Object(rej), Value::Undefined, &[e])?;
-            return Ok(Value::Object(p));
-        }
-    };
-    let on_ok = realm.new_native_function_full("", 1, afs_unwrap, None, vec![Value::Object(res), Value::Bool(done)], false);
-    realm.invoke(Value::Object(vp), "then", &[Value::Object(on_ok), Value::Object(rej)])?;
+fn rejected_promise(realm: &mut Realm, p: ObjectId, e: Value) -> JsResult<Value> {
+    realm.reject_promise(p, e);
     Ok(Value::Object(p))
 }
 
+/// AsyncFromSyncIteratorContinuation(result, capability, syncIteratorRecord, closeOnRejection).
+fn afs_continue(realm: &mut Realm, p: ObjectId, result: Value, it: Value, close_on_rejection: bool) -> JsResult<Value> {
+    let done = match realm.get_str(result.clone(), "done") {
+        Ok(d) => realm.to_boolean(&d),
+        Err(e) => return rejected_promise(realm, p, e),
+    };
+    let value = match realm.get_str(result, "value") {
+        Ok(v) => v,
+        Err(e) => return rejected_promise(realm, p, e),
+    };
+    let wrapper = match crate::builtins::promise::promise_resolve(realm, value) {
+        Ok(w) => w,
+        Err(e) => {
+            if !done && close_on_rejection {
+                let _ = realm.iterator_close(&it);
+            }
+            return rejected_promise(realm, p, e);
+        }
+    };
+    let close = !done && close_on_rejection;
+    let data = SlotData { tag: TAG_AFS_CONT, values: vec![Value::Object(p), it, Value::Bool(done), Value::Bool(close)], ..Default::default() };
+    let proto = realm.intrinsics.object_proto;
+    let cont = super::iterator_helpers::new_slot_object(realm, proto, data);
+    crate::builtins::promise::perform_then_native(realm, wrapper, afs_unwrap, afs_on_reject, Value::Object(cont));
+    Ok(Value::Object(p))
+}
+
+fn afs_cont_parts(realm: &Realm) -> Option<(ObjectId, Value, bool, bool)> {
+    let cont = realm.current_native().and_then(|n| realm.native_captures(n).into_iter().next())?;
+    let id = cont.as_object()?;
+    match &realm.obj(id).kind {
+        ObjectKind::Slots(d) if d.tag == TAG_AFS_CONT => {
+            Some((d.values[0].as_object()?, d.values[1].clone(), d.values[2].truthy(), d.values[3].truthy()))
+        }
+        _ => None,
+    }
+}
+
 fn afs_unwrap(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let caps = realm.current_native().map(|n| realm.native_captures(n)).unwrap_or_default();
-    let res = caps.first().cloned().unwrap_or(Value::Undefined);
-    let done = caps.get(1).map(|v| v.truthy()).unwrap_or(true);
-    let r = realm.create_iter_result(arg(args, 0), done);
-    realm.call(res, Value::Undefined, &[r])
+    if let Some((p, _it, done, _close)) = afs_cont_parts(realm) {
+        let r = realm.create_iter_result(arg(args, 0), done);
+        realm.resolve_promise(p, r);
+    }
+    Ok(Value::Undefined)
+}
+
+fn afs_on_reject(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    if let Some((p, it, _done, close)) = afs_cont_parts(realm) {
+        if close {
+            // IteratorClose(syncIteratorRecord, ThrowCompletion(error)).
+            let _ = realm.iterator_close(&it);
+        }
+        realm.reject_promise(p, arg(args, 0));
+    }
+    Ok(Value::Undefined)
 }
 
 fn afs_next(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (it, next) = afs_parts(realm, &this)?;
-    match realm.call(next, it, &[arg(args, 0)]) {
-        Ok(r) => afs_continue(realm, r),
-        Err(e) => {
-            let (p, _res, rej) = realm.new_promise();
-            realm.call(Value::Object(rej), Value::Undefined, &[e])?;
-            Ok(Value::Object(p))
+    let p = realm.new_promise_object();
+    let r = if args.is_empty() { realm.call(next, it.clone(), &[]) } else { realm.call(next, it.clone(), &args[..1]) };
+    match r {
+        Ok(r) if r.is_object() => afs_continue(realm, p, r, it, true),
+        Ok(_) => {
+            let e = realm.throw_type_error("Iterator result is not an object");
+            rejected_promise(realm, p, e)
         }
+        Err(e) => rejected_promise(realm, p, e),
     }
 }
 
 fn afs_return(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (it, _next) = afs_parts(realm, &this)?;
-    let ret = realm.get_method(it.clone(), PropertyKey::str("return"))?;
-    match ret {
+    let p = realm.new_promise_object();
+    let ret = match realm.get_method(it.clone(), PropertyKey::str("return")) {
+        Ok(r) => r,
+        Err(e) => return rejected_promise(realm, p, e),
+    };
+    let f = match ret {
         None => {
-            let (p, res, _rej) = realm.new_promise();
             let r = realm.create_iter_result(arg(args, 0), true);
-            realm.call(Value::Object(res), Value::Undefined, &[r])?;
-            Ok(Value::Object(p))
+            realm.resolve_promise(p, r);
+            return Ok(Value::Object(p));
         }
-        Some(f) => match realm.call(f, it, &[arg(args, 0)]) {
-            Ok(r) => afs_continue(realm, r),
-            Err(e) => {
-                let (p, _res, rej) = realm.new_promise();
-                realm.call(Value::Object(rej), Value::Undefined, &[e])?;
-                Ok(Value::Object(p))
-            }
-        },
+        Some(f) => f,
+    };
+    let r = if args.is_empty() { realm.call(f, it.clone(), &[]) } else { realm.call(f, it.clone(), &args[..1]) };
+    match r {
+        Ok(r) if r.is_object() => afs_continue(realm, p, r, it, false),
+        Ok(_) => {
+            let e = realm.throw_type_error("Iterator result is not an object");
+            rejected_promise(realm, p, e)
+        }
+        Err(e) => rejected_promise(realm, p, e),
     }
 }
 
 fn afs_throw(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (it, _next) = afs_parts(realm, &this)?;
-    let th = realm.get_method(it.clone(), PropertyKey::str("throw"))?;
-    match th {
+    let p = realm.new_promise_object();
+    let th = match realm.get_method(it.clone(), PropertyKey::str("throw")) {
+        Ok(t) => t,
+        Err(e) => return rejected_promise(realm, p, e),
+    };
+    let f = match th {
         None => {
-            let (p, _res, rej) = realm.new_promise();
-            realm.call(Value::Object(rej), Value::Undefined, &[arg(args, 0)])?;
-            Ok(Value::Object(p))
-        }
-        Some(f) => match realm.call(f, it, &[arg(args, 0)]) {
-            Ok(r) => afs_continue(realm, r),
-            Err(e) => {
-                let (p, _res, rej) = realm.new_promise();
-                realm.call(Value::Object(rej), Value::Undefined, &[e])?;
-                Ok(Value::Object(p))
+            // Protocol violation: close the iterator, then reject with a TypeError.
+            if let Err(e) = realm.iterator_close(&it) {
+                return rejected_promise(realm, p, e);
             }
-        },
+            let e = realm.throw_type_error("The iterator does not provide a 'throw' method");
+            return rejected_promise(realm, p, e);
+        }
+        Some(f) => f,
+    };
+    let r = if args.is_empty() { realm.call(f, it.clone(), &[]) } else { realm.call(f, it.clone(), &args[..1]) };
+    match r {
+        Ok(r) if r.is_object() => afs_continue(realm, p, r, it, true),
+        Ok(_) => {
+            let e = realm.throw_type_error("Iterator result is not an object");
+            rejected_promise(realm, p, e)
+        }
+        Err(e) => rejected_promise(realm, p, e),
     }
 }

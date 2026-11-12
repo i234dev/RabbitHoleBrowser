@@ -1173,6 +1173,9 @@ impl Realm {
         match method {
             Some(m) => {
                 let it = self.call(m, v, &[])?;
+                if !it.is_object() {
+                    return self.type_error("Result of the Symbol.asyncIterator method is not an object");
+                }
                 let next = self.get_str(it.clone(), "next")?;
                 Ok((it, next))
             }
