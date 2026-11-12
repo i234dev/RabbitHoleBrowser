@@ -970,4 +970,8 @@ la sección 3 en lugar de añadir un segundo backend:
   estado 1 y cada frame nativo retorna. Las funciones con handlers de
   excepción o tail calls siguen interpretadas. Con el parser SWC de
   rollup (playground de Svelte): 3,14 s de CPU interpretado frente a
-  0,64 s nativo (≈5×); toda la suite de especificación pasa igual.
+  0,64 s nativo (≈5×); toda la suite de especificación pasa igual. En el
+  playground completo (página real, worker de bundling) el bundle de
+  hello-world tarda 6,5 s con el intérprete y 4,2 s con el nivel nativo; el
+  resto del tiempo hasta la vista previa (≈17 s desde la carga) es
+  JavaScript, no wasm.
