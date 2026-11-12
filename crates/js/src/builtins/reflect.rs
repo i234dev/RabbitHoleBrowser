@@ -114,6 +114,9 @@ fn own_keys(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
 
 fn prevent_extensions(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = target_obj(realm, &arg(args, 0), "preventExtensions")?;
+    if !super::typed_array::check_integrity(realm, id, false)? {
+        return Ok(Value::Bool(false));
+    }
     realm.obj_mut(id).extensible = false;
     Ok(Value::Bool(true))
 }

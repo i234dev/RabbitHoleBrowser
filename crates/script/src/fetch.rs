@@ -575,13 +575,13 @@ pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(V
                 return Ok((b.bytes.clone(), None));
             }
             match &realm.obj(o).kind {
-                rabbithole_js::ObjectKind::ArrayBuffer(buf) => Ok((buf.borrow().clone(), None)),
+                rabbithole_js::ObjectKind::ArrayBuffer(buf) => Ok((buf.bytes.borrow().clone(), None)),
                 rabbithole_js::ObjectKind::TypedArray(t) => {
                     let buf = realm.obj(t.buffer);
                     if let rabbithole_js::ObjectKind::ArrayBuffer(b) = &buf.kind {
-                        let b = b.borrow();
+                        let b = b.bytes.borrow();
                         let start = t.byte_offset.min(b.len());
-                        let end = (t.byte_offset + t.length * t.kind.element_size()).min(b.len());
+                        let end = (t.byte_offset + rabbithole_js::builtins::typed_array::typed_array_length(realm, t) * t.kind.element_size()).min(b.len());
                         return Ok((b[start..end].to_vec(), None));
                     }
                     Ok((Vec::new(), None))
@@ -705,7 +705,7 @@ pub fn make_array_buffer(realm: &mut Realm, bytes: Vec<u8>) -> Value {
     if realm.is_constructor(&ctor) {
         if let Ok(V::Object(ab)) = realm.construct(ctor, &[Value::Number(bytes.len() as f64)], Value::Undefined).as_ref().map(Value::v) {
             if let rabbithole_js::ObjectKind::ArrayBuffer(buf) = &realm.obj(ab).kind {
-                *buf.borrow_mut() = bytes;
+                *buf.bytes.borrow_mut() = bytes;
                 return Value::Object(ab);
             }
         }
@@ -1298,7 +1298,7 @@ fn text_encoder_encode_into(realm: &mut Realm, this: Value, args: &[Value]) -> J
     let dest = arg(args, 1);
     let target = match dest.v() {
         V::Object(o) => match &realm.obj(o).kind {
-            rabbithole_js::ObjectKind::TypedArray(t) if t.kind == rabbithole_js::heap::TypedArrayKind::Uint8 => Some((t.buffer, t.byte_offset, t.length)),
+            rabbithole_js::ObjectKind::TypedArray(t) if t.kind == rabbithole_js::heap::TypedArrayKind::Uint8 => Some((t.buffer, t.byte_offset, rabbithole_js::builtins::typed_array::typed_array_length(realm, t))),
             _ => None,
         },
         _ => None,
@@ -1308,7 +1308,7 @@ fn text_encoder_encode_into(realm: &mut Realm, this: Value, args: &[Value]) -> J
     };
     let (mut read, mut written) = (0usize, 0usize);
     if let rabbithole_js::ObjectKind::ArrayBuffer(b) = &realm.obj(buffer).kind {
-        let mut b = b.borrow_mut();
+        let mut b = b.bytes.borrow_mut();
         let avail = len.min(b.len().saturating_sub(offset));
         let mut buf = [0u8; 4];
         for c in s.chars() {
@@ -1386,16 +1386,15 @@ fn buffer_source_bytes(realm: &mut Realm, v: &Value, what: &str) -> JsResult<Vec
         return Err(realm.throw_type_error(&format!("{what}: The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")));
     };
     let view = match &realm.obj(o).kind {
-        rabbithole_js::ObjectKind::ArrayBuffer(buf) => return Ok(buf.borrow().clone()),
-        rabbithole_js::ObjectKind::TypedArray(t) => Some((t.buffer, t.byte_offset, t.length * t.kind.element_size())),
-        rabbithole_js::ObjectKind::DataView(t) => Some((t.buffer, t.byte_offset, t.length)),
+        rabbithole_js::ObjectKind::ArrayBuffer(buf) => return Ok(buf.bytes.borrow().clone()),
+        rabbithole_js::ObjectKind::TypedArray(t) | rabbithole_js::ObjectKind::DataView(t) => Some((t.buffer, t.byte_offset, rabbithole_js::builtins::typed_array::typed_array_length(realm, t) * t.kind.element_size())),
         _ => None,
     };
     let Some((buffer, start, len)) = view else {
         return Err(realm.throw_type_error(&format!("{what}: The provided value is not of type '(ArrayBuffer or ArrayBufferView)'.")));
     };
     if let rabbithole_js::ObjectKind::ArrayBuffer(b) = &realm.obj(buffer).kind {
-        let b = b.borrow();
+        let b = b.bytes.borrow();
         let s = start.min(b.len());
         let e = (start + len).min(b.len());
         return Ok(b[s..e].to_vec());

@@ -438,16 +438,22 @@ pub enum TypedArrayKind {
     Float64,
     BigInt64,
     BigUint64,
+    Float16,
 }
 
 impl TypedArrayKind {
     pub fn element_size(&self) -> usize {
         match self {
             TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
-            TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
+            TypedArrayKind::Int16 | TypedArrayKind::Uint16 | TypedArrayKind::Float16 => 2,
             TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
             _ => 8,
         }
+    }
+    /// BigInt64Array / BigUint64Array (content type BigInt).
+    #[inline]
+    pub fn is_bigint(&self) -> bool {
+        matches!(self, TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64)
     }
     pub fn name(&self) -> &'static str {
         match self {
@@ -462,16 +468,68 @@ impl TypedArrayKind {
             TypedArrayKind::Float64 => "Float64Array",
             TypedArrayKind::BigInt64 => "BigInt64Array",
             TypedArrayKind::BigUint64 => "BigUint64Array",
+            TypedArrayKind::Float16 => "Float16Array",
         }
     }
 }
 
-#[derive(Debug)]
+/// A typed array or DataView: a window on an `ArrayBuffer` object.
+#[derive(Debug, Clone, Copy)]
 pub struct TypedArrayData {
+    /// Element type (`Uint8` for a DataView).
     pub kind: TypedArrayKind,
     pub buffer: ObjectId,
     pub byte_offset: usize,
-    pub length: usize,
+    /// Element count (byte count for a DataView); `None` for a view that
+    /// tracks the length of a resizable buffer.
+    pub fixed_length: Option<usize>,
+}
+
+impl TypedArrayData {
+    /// Current length in elements for a buffer of `buf_len` bytes; `None`
+    /// when the view is out of bounds (IsTypedArrayOutOfBounds /
+    /// IsViewOutOfBounds). A detached buffer has `buf_len` 0.
+    #[inline]
+    pub fn length_in(&self, buf_len: usize) -> Option<usize> {
+        let es = self.kind.element_size();
+        match self.fixed_length {
+            Some(n) => {
+                if self.byte_offset + n * es <= buf_len {
+                    Some(n)
+                } else {
+                    None
+                }
+            }
+            None => {
+                if self.byte_offset <= buf_len {
+                    Some((buf_len - self.byte_offset) / es)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// The storage of an `ArrayBuffer` / `SharedArrayBuffer` object.
+#[derive(Debug)]
+pub struct ArrayBufferData {
+    /// The bytes; hosts (WebAssembly memories) may share the `Rc`.
+    pub bytes: Rc<std::cell::RefCell<Vec<u8>>>,
+    /// `Some(max)` for a resizable (growable, when shared) buffer.
+    pub max_byte_length: Option<usize>,
+    pub shared: bool,
+    pub detached: bool,
+    pub immutable: bool,
+}
+
+impl ArrayBufferData {
+    pub fn new(bytes: Vec<u8>) -> Box<ArrayBufferData> {
+        Self::from_rc(Rc::new(std::cell::RefCell::new(bytes)))
+    }
+    pub fn from_rc(bytes: Rc<std::cell::RefCell<Vec<u8>>>) -> Box<ArrayBufferData> {
+        Box::new(ArrayBufferData { bytes, max_byte_length: None, shared: false, detached: false, immutable: false })
+    }
 }
 
 #[derive(Debug)]
@@ -514,7 +572,7 @@ pub enum ObjectKind {
     WeakSet(Box<MapData>),
     Generator(Box<GeneratorData>),
     Promise(Box<PromiseData>),
-    ArrayBuffer(Rc<std::cell::RefCell<Vec<u8>>>),
+    ArrayBuffer(Box<ArrayBufferData>),
     TypedArray(Box<TypedArrayData>),
     DataView(Box<TypedArrayData>),
     Proxy { target: ObjectId, handler: ObjectId, revoked: bool },

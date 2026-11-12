@@ -49,6 +49,7 @@ pub fn register(realm: &mut Realm) {
     unary!("expm1", f64::exp_m1);
     unary!("floor", f64::floor);
     unary!("fround", |x| x as f32 as f64);
+    unary!("f16round", |x| super::typed_array::f16_bits_to_f64(super::typed_array::f64_to_f16_bits(x)));
     unary!("log", f64::ln);
     unary!("log1p", f64::ln_1p);
     unary!("log10", f64::log10);
