@@ -530,6 +530,21 @@ pub enum ObjectKind {
     /// in namespace getters, and is dereferenced on every read so imports
     /// are live bindings.
     ModuleBinding { scope: ObjectId, slot: u32, name: JsStr },
+    /// Internal slots of natively implemented built-ins (iterator helpers,
+    /// disposable stacks, ...); `SlotData::tag` says which.
+    Slots(Box<SlotData>),
+}
+
+/// Generic internal-slot storage: `values` are fixed per-tag slots, `list`
+/// a variable-length list; both are traced by the GC.
+#[derive(Default)]
+pub struct SlotData {
+    pub tag: u8,
+    pub kind: u8,
+    pub state: u8,
+    pub num: [f64; 2],
+    pub values: Vec<Value>,
+    pub list: Vec<Value>,
 }
 
 impl std::fmt::Debug for ObjectKind {
@@ -571,6 +586,7 @@ impl ObjectKind {
             ObjectKind::ForInIterator(_) => "ForIn Iterator",
             ObjectKind::Host(_) => "Object",
             ObjectKind::ModuleBinding { .. } => "ModuleBinding",
+            ObjectKind::Slots(_) => "Object",
         }
     }
     pub fn is_callable(&self) -> bool {
@@ -950,6 +966,11 @@ pub fn trace_object(obj: &Object, out: &mut Vec<Value>) {
         ObjectKind::RegExpStringIterator { regexp, .. } => out.push(Value::Object(*regexp)),
         ObjectKind::ForInIterator(f) => push_id(out, f.object),
         ObjectKind::ModuleBinding { scope, .. } => out.push(Value::Object(*scope)),
+        ObjectKind::Slots(d) => {
+            for v in d.values.iter().chain(d.list.iter()) {
+                push_val(out, v);
+            }
+        }
         _ => {}
     }
 }
