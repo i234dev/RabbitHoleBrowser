@@ -3634,6 +3634,15 @@ impl Compiler {
         self.emit(Op::Rot3);
         self.emit(Op::Dup);
         let st = self.emit(Op::JumpIfUndefined(0));
+        if self.fs_ref().flags.is_strict {
+            // Strict code: the binding must still exist on the object.
+            self.emit(Op::Dup);
+            self.emit(Op::WithHas(i));
+            let ok = self.emit(Op::JumpIfTrue(0));
+            let m = self.const_str(&format!("{name} is not defined"));
+            self.emit(Op::ThrowConst(0, m));
+            self.patch_jump(ok);
+        }
         self.emit(Op::Swap);
         self.emit_ic(|ic| Op::SetProp(i, ic));
         self.emit(Op::Pop);
