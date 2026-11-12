@@ -180,6 +180,14 @@ struct InvalidationMap {
     defined: u8,
     /// Some selector uses `:has()`.
     has_has: bool,
+    /// Tags, classes, ids and attribute names in `:has()` arguments: an
+    /// inserted or removed subtree with none of them cannot change what a
+    /// `:has()` matches (unless `has_any`).
+    /// (Indexed by kind: tags, ids, classes, attribute names.)
+    has_features: [HashSet<String>; 4],
+    /// Some compound in a `:has()` argument matches without any of those
+    /// features (universal, pseudo-classes only, `:not()`).
+    has_any: bool,
     /// Relation of the compounds carrying `:has()` to their subjects; when
     /// not just `R_SELF`, `:has()` changes restyle the whole document.
     has_outer: u8,
@@ -192,6 +200,22 @@ impl InvalidationMap {
             m.add_selector(&r.selector, R_SELF, false);
         }
         m
+    }
+
+    /// Can inserting or removing the subtree at `root` change what some
+    /// `:has()` matches?
+    fn may_affect_has(&self, doc: &Document, root: NodeId) -> bool {
+        if self.has_any {
+            return true;
+        }
+        doc.descendants(root).any(|n| {
+            let Some(el) = doc.element(n) else { return false };
+            let [tags, ids, classes, attrs] = &self.has_features;
+            tags.contains(el.tag.as_str())
+                || el.id().is_some_and(|id| ids.contains(id))
+                || el.attr("class").is_some_and(|c| c.split_ascii_whitespace().any(|c| classes.contains(c)))
+                || el.attrs.iter().any(|(name, _)| attrs.contains(name.as_str()))
+        })
     }
 
     /// Add the selectors of the shadow-scope groups `groups` (dependencies
@@ -234,6 +258,26 @@ impl InvalidationMap {
     }
 
     fn add_compound(&mut self, c: &Compound, rel: u8, in_has: bool) {
+        if in_has {
+            let tag = c.tag.as_ref().filter(|t| *t != "*");
+            let nested = c.pseudos.iter().any(|p| matches!(p, Pseudo::Is(_) | Pseudo::Where(_)));
+            if tag.is_none() && c.id.is_none() && c.classes.is_empty() && c.attrs.is_empty() && !nested {
+                self.has_any = true;
+            }
+            let [tags, ids, classes, attrs] = &mut self.has_features;
+            if let Some(t) = tag {
+                tags.insert(t.to_ascii_lowercase());
+            }
+            if let Some(id) = &c.id {
+                ids.insert(id.clone());
+            }
+            for cls in &c.classes {
+                classes.insert(cls.clone());
+            }
+            for a in &c.attrs {
+                attrs.insert(a.name.clone());
+            }
+        }
         for cls in &c.classes {
             *self.classes.entry(cls.clone()).or_default() |= rel;
         }
@@ -800,7 +844,7 @@ impl StyleEngine {
                     if !doc.is_connected(parent) {
                         continue;
                     }
-                    if inval.has_has {
+                    if inval.has_has && inval.may_affect_has(doc, child) {
                         // The inserted/removed subtree may satisfy or stop
                         // satisfying a `:has()` of the parent chain.
                         m.has_scope(parent);

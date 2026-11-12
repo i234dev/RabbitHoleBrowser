@@ -124,6 +124,7 @@ fn insertions_and_moves_with_positional_selectors() {
         p:nth-child(3n+1) { margin-left: 20px } p:nth-last-child(2) { padding-left: 7px }
         span:first-of-type { color: red } span:last-of-type { color: blue } em:only-of-type { color: orange }
         p + span { margin-left: 3px } p ~ em { margin-left: 5px }
+        div:has(> em) { border-left: 2px solid red } body:has(span.zz) p { color: purple }
         </style></head><body><div id="box"><p>a</p></div></body></html>"#,
     );
     let bx = id(&page, "box");
@@ -157,6 +158,15 @@ fn insertions_and_moves_with_positional_selectors() {
         page.doc.insert_before(bx, n, reference);
     }
     check(&engine, &mut page, "batch of insertions");
+    // `:has()` arguments: only subtrees with their features matter.
+    let zz = page.doc.create_element("span", vec![("class".into(), "zz".into())]);
+    page.doc.append_child(bx, zz);
+    check(&engine, &mut page, ":has(span.zz) appears");
+    page.doc.detach(zz);
+    check(&engine, &mut page, ":has(span.zz) goes");
+    let b = page.doc.create_element("b", vec![]);
+    page.doc.append_child(bx, b);
+    check(&engine, &mut page, "unrelated insertion next to :has() rules");
 }
 
 #[test]
