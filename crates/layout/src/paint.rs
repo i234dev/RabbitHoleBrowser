@@ -61,6 +61,21 @@ fn uniform_radius(r: &Radii) -> Option<f32> {
     }
 }
 
+/// Snap a box to device pixels like Blink does when painting boxes (edges
+/// rounded to the nearest pixel), so adjacent boxes at fractional offsets
+/// do not leave antialiased seams. Only without a canvas transform.
+fn snap(r: Rect, canvas: &Canvas) -> Rect {
+    if !rabbithole_gfx::path::is_identity(&canvas.transform()) {
+        return r;
+    }
+    let (x0, y0) = (r.x.round(), r.y.round());
+    let (x1, y1) = ((r.x + r.w).round(), (r.y + r.h).round());
+    if (x1 <= x0 && r.w > 0.0) || (y1 <= y0 && r.h > 0.0) {
+        return r;
+    }
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
+}
+
 fn is_translation(m: &Matrix) -> bool {
     (m[0] - 1.0).abs() < 1e-6 && m[1].abs() < 1e-6 && m[2].abs() < 1e-6 && (m[3] - 1.0).abs() < 1e-6
 }
@@ -228,7 +243,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
     let (dx, dy) = (st.dx, st.dy);
     match item {
         DisplayItem::PushClip(r) => {
-            let r = r.translate(dx, dy);
+            let r = snap(r.translate(dx, dy), canvas);
             canvas.push_clip(r);
             st.clips.push(true);
         }
@@ -310,7 +325,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             }
         }
         DisplayItem::Rect { rect, color, radius } => {
-            let r = rect.translate(dx, dy);
+            let r = snap(rect.translate(dx, dy), canvas);
             if r.intersect(&view).is_empty() || color.is_transparent() {
                 return;
             }
@@ -321,7 +336,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             }
         }
         DisplayItem::RectRadii { rect, radii, paint } => {
-            let r = rect.translate(dx, dy);
+            let r = snap(rect.translate(dx, dy), canvas);
             if r.intersect(&view).is_empty() {
                 return;
             }
@@ -342,7 +357,7 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
             styles,
             radii,
         } => {
-            let r = rect.translate(dx, dy);
+            let r = snap(rect.translate(dx, dy), canvas);
             if r.intersect(&view).is_empty() {
                 return;
             }

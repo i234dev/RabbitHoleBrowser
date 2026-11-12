@@ -2,6 +2,7 @@
 //! with `@media` evaluation and `@import` discovery.
 
 pub mod selector;
+pub mod supports;
 pub mod tokenizer;
 
 pub use selector::{matches, matches_with, MatchState, PseudoElement, Selector, Specificity};
@@ -259,6 +260,15 @@ impl Stylesheet {
 // ---------------------------------------------------------------- parser
 
 pub fn parse_stylesheet(src: &str) -> Stylesheet {
+    // `<style>` text of XHTML documents wrapped in a CDATA section (the
+    // XML parser drops the markers; our HTML parser keeps them as text).
+    let stripped;
+    let src = if src.contains("<![CDATA[") {
+        stripped = src.replacen("<![CDATA[", "", 1).replace("]]>", "");
+        stripped.as_str()
+    } else {
+        src
+    };
     let toks = Tokenizer::tokenize(src);
     let mut p = Parser { toks: &toks, pos: 0 };
     Stylesheet {
@@ -376,7 +386,7 @@ impl<'a> Parser<'a> {
                                 "supports" => {
                                     let mut sub = Parser { toks: inner, pos: 0 };
                                     rules.push(Rule::Supports {
-                                        matches: evaluate_supports(prelude),
+                                        matches: supports::evaluate(prelude),
                                         rules: sub.parse_rules(false),
                                     });
                                 }
@@ -589,33 +599,6 @@ fn parse_import(prelude: &[Token]) -> Option<Rule> {
     Some(Rule::Import { href, query })
 }
 
-fn evaluate_supports(prelude: &[Token]) -> bool {
-    // We claim support for everything except a few properties we know we
-    // don't implement, so `@supports (display: grid)` style guards are
-    // honoured conservatively.
-    let mut s = String::new();
-    for t in prelude {
-        match t {
-            Token::Ident(i) => {
-                s.push_str(i);
-                s.push(' ');
-            }
-            Token::Function(f) => {
-                s.push_str(f);
-                s.push('(');
-            }
-            _ => {}
-        }
-    }
-    let s = s.to_ascii_lowercase();
-    let negated = s.trim_start().starts_with("not ");
-    let unsupported = s.contains("grid") || s.contains("selector(") || s.contains("container") || s.contains("backdrop-filter");
-    if negated {
-        unsupported
-    } else {
-        !unsupported
-    }
-}
 
 fn parse_media_tokens(toks: &[Token]) -> MediaQuery {
     let toks: Vec<&Token> = toks.iter().filter(|t| **t != Token::Whitespace).collect();
