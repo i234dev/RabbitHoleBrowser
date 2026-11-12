@@ -1207,13 +1207,29 @@ impl<'a> Parser<'a> {
         if (self.is_ident("with") || self.is_ident("assert")) && !self.tok.newline_before {
             self.advance()?;
             self.expect_punct("{")?;
+            // `key: "value"` entries; duplicate keys are an early error.
+            let mut keys: Vec<String> = Vec::new();
             while !self.is_punct("}") {
+                let key = match &self.tok.kind {
+                    TokenKind::Ident(n) => n.to_string(),
+                    TokenKind::Str(s) => s.clone(),
+                    _ => return Err(self.unexpected()),
+                };
+                if keys.contains(&key) {
+                    return Err(self.error(format!("Duplicate import attribute '{key}'")));
+                }
+                keys.push(key);
                 self.advance()?;
-                if self.tok.kind == TokenKind::Eof {
-                    return Err(self.error("Unexpected end of input"));
+                self.expect_punct(":")?;
+                if !matches!(self.tok.kind, TokenKind::Str(_)) {
+                    return Err(self.error("Import attribute values must be strings"));
+                }
+                self.advance()?;
+                if !self.eat_punct(",")? {
+                    break;
                 }
             }
-            self.advance()?;
+            self.expect_punct("}")?;
         }
         Ok(())
     }
