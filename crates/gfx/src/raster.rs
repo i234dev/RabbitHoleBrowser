@@ -264,10 +264,63 @@ impl RoundedBox {
         tl || tr || br || bl
     }
 
+    /// The 4×4 supersampled coverage of a corner cell when all its samples
+    /// lie in one corner's region and are all inside or all outside that
+    /// corner's ellipse (the distance to the ellipse centre is monotonic
+    /// in each coordinate there): 1, 0, or None when it must be sampled.
+    #[inline]
+    fn corner_cell_fast(&self, fx: f32, fy: f32) -> Option<f32> {
+        let r = &self.r;
+        let (sx0, sx1, sy0, sy1) = (fx + 0.125, fx + 0.875, fy + 0.125, fy + 0.875);
+        if sx0 < r.x || sy0 < r.y || sx1 >= r.right() || sy1 >= r.bottom() {
+            return None;
+        }
+        for i in 0..4 {
+            let (rx, ry) = self.radii[i];
+            if rx <= 0.0 || ry <= 0.0 {
+                continue;
+            }
+            let left = i == 0 || i == 3;
+            let top = i == 0 || i == 1;
+            let cx = if left { r.x + rx } else { r.right() - rx };
+            let cy = if top { r.y + ry } else { r.bottom() - ry };
+            let touch_x = if left { sx0 < cx } else { sx1 > cx };
+            let touch_y = if top { sy0 < cy } else { sy1 > cy };
+            if !(touch_x && touch_y) {
+                continue;
+            }
+            // The first corner region the samples reach decides them all
+            // only when it holds all of them.
+            let in_x = if left { sx1 < cx } else { sx0 > cx };
+            let in_y = if top { sy1 < cy } else { sy0 > cy };
+            if !(in_x && in_y) {
+                return None;
+            }
+            let (near_x, far_x) = if left { (sx1, sx0) } else { (sx0, sx1) };
+            let (near_y, far_y) = if top { (sy1, sy0) } else { (sy0, sy1) };
+            let d = |px: f32, py: f32| {
+                let dx = (px - cx) / rx;
+                let dy = (py - cy) / ry;
+                dx * dx + dy * dy
+            };
+            if d(near_x, near_y) > 1.0 {
+                return Some(0.0);
+            }
+            if d(far_x, far_y) <= 1.0 {
+                return Some(1.0);
+            }
+            return None;
+        }
+        None
+    }
+
     pub fn coverage(&self, x: i32, y: i32) -> f32 {
         let fx = x as f32;
         let fy = y as f32;
         if self.in_corner_cell(fx, fy) {
+            if let Some(c) = self.corner_cell_fast(fx, fy) {
+                return c;
+            }
             let mut hits = 0;
             for sy in 0..4 {
                 let py = fy + (sy as f32 + 0.5) / 4.0;
@@ -329,7 +382,14 @@ impl RoundedBox {
                 }
                 continue;
             }
-            for x in x0..x1 {
+            // Between the corner columns the row is a straight run too.
+            let ma = (left_cols.ceil() as i32).max(r.x.ceil() as i32).clamp(x0, x1);
+            let mb = (right_cols.floor() as i32).min(r.right().floor() as i32).clamp(x0, x1);
+            if mb > ma {
+                data[row + (ma - x0) as usize..row + (mb - x0) as usize].fill((cy * 255.0 + 0.5) as u8);
+            }
+            let (ma, mb) = if mb > ma { (ma, mb) } else { (x1, x1) };
+            for x in (x0..ma).chain(mb..x1) {
                 let fx = x as f32;
                 let in_cols = fx < left_cols || fx + 1.0 > right_cols;
                 let c = if in_cols && self.in_corner_cell(fx, fy) {
@@ -419,4 +479,47 @@ pub fn blur_radius_for_sigma(sigma: f32) -> usize {
     // Ideal box width for 3 passes: w = sqrt(12σ²/3 + 1)
     let w = (12.0 * sigma * sigma / 3.0 + 1.0).sqrt();
     (((w - 1.0) / 2.0).round() as usize).max(1)
+}
+
+#[cfg(test)]
+mod rounded_box_tests {
+    use super::RoundedBox;
+    use crate::canvas::Rect;
+
+    /// Reference: plain 4×4 supersampling of every pixel.
+    fn sampled(b: &RoundedBox, x: i32, y: i32) -> f32 {
+        let mut hits = 0;
+        for sy in 0..4 {
+            for sx in 0..4 {
+                if b.inside(x as f32 + (sx as f32 + 0.5) / 4.0, y as f32 + (sy as f32 + 0.5) / 4.0) {
+                    hits += 1;
+                }
+            }
+        }
+        hits as f32 / 16.0
+    }
+
+    #[test]
+    fn fast_paths_match_supersampling() {
+        let mut seed = 12345u32;
+        let mut rnd = |m: f32| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 * m
+        };
+        for _ in 0..300 {
+            let r = Rect::new(rnd(10.0), rnd(10.0), 1.0 + rnd(80.0), 1.0 + rnd(80.0));
+            let radii = [(rnd(50.0), rnd(50.0)), (rnd(50.0), rnd(50.0)), (rnd(50.0), rnd(50.0)), (rnd(50.0), rnd(50.0))];
+            let b = RoundedBox::new(r, radii);
+            let lim = (0, 0, 100, 100);
+            let m = b.mask(lim);
+            for y in r.y.floor() as i32..r.bottom().ceil() as i32 {
+                for x in r.x.floor() as i32..r.right().ceil() as i32 {
+                    let want = if b.in_corner_cell(x as f32, y as f32) { sampled(&b, x, y) } else { b.coverage(x, y) };
+                    assert_eq!(b.coverage(x, y), want, "coverage at {x},{y} of {r:?} {radii:?}");
+                    let mv = m.get(x, y);
+                    assert_eq!(mv, (want * 255.0 + 0.5) as u8, "mask at {x},{y} of {r:?} {radii:?}");
+                }
+            }
+        }
+    }
 }

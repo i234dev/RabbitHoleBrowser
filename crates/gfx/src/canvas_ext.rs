@@ -270,10 +270,23 @@ impl Canvas {
         let mask = self.current_mask();
         let w = self.width as usize;
         let [wt, wr, wb, wl] = dw;
+        // Rows below the inner box's top corners and above its bottom ones
+        // are fully covered by it between its straight edges: nothing to
+        // paint there (only the two side bands of the ring).
+        let hole = inner.map(|i| {
+            let r = i.r;
+            let top = (r.y + i.radii[0].1.max(i.radii[1].1)).ceil() as i32;
+            let bottom = (r.bottom() - i.radii[2].1.max(i.radii[3].1)).floor() as i32;
+            (top, bottom, r.x.ceil() as i32, r.right().floor() as i32)
+        });
         for y in b.y0..b.y1 {
             let row = y as usize * w;
             let py = y as f32 + 0.5;
-            for x in b.x0..b.x1 {
+            let (skip0, skip1) = match hole {
+                Some((top, bottom, x0, x1)) if y >= top && y < bottom && x1 > x0 => (x0, x1),
+                _ => (i32::MAX, i32::MAX),
+            };
+            for x in (b.x0..b.x1.min(skip0)).chain(b.x0.max(skip1)..b.x1) {
                 let cov_outer = outer.coverage(x, y);
                 if cov_outer <= 0.0 {
                     continue;
