@@ -195,6 +195,39 @@ fn watchdog_interrupts_loops() {
     let _ = Value::Undefined;
 }
 
+/// Externref slots are reclaimed when wasm no longer refers to them;
+/// values still held by tables and globals survive the sweeps.
+#[test]
+fn externref_slots_are_reclaimed() {
+    let mut r = realm();
+    define_module(
+        &mut r,
+        "bytes",
+        r#"(module
+            (table (export "t") 4 externref)
+            (global (export "g") (mut externref) (ref.null extern))
+            (func (export "id") (param externref) (result externref) (local.get 0))
+            (func (export "keep") (param externref) (table.set (i32.const 1) (local.get 0))))"#,
+    );
+    r.eval(
+        r#"
+        var e = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+        var kept = {kept: 1}, inGlobal = {g: 1};
+        e.keep(kept);
+        e.g.value = inGlobal;
+        var ok = true;
+        "#,
+        "a.js",
+    )
+    .unwrap();
+    for round in 0..4 {
+        r.eval(&format!("for (let k = 0; k < 5000; k++) {{ const o = {{k, round: {round}}}; if (e.id(o) !== o) ok = false; }}"), "b.js").unwrap();
+        r.run_jobs();
+    }
+    let out = eval_str(&mut r, "[ok, e.t.get(1) === kept, e.g.value === inGlobal, e.id('s'), e.id(null)].join('|')");
+    assert_eq!(out, "true|true|true|s|");
+}
+
 /// Loop-free recursion (native calls) is interruptible too.
 #[test]
 fn watchdog_interrupts_recursion() {

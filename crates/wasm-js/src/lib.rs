@@ -48,8 +48,14 @@ struct State {
     tag_objs: HashMap<usize, Root>,
     gc_objs: HashMap<u64, Root>,
     /// externref values: index + 1 is the reference bits.
-    externs: Vec<Root>,
+    /// (value, object id) of each externref slot; None: free.
+    externs: Vec<Option<(Root, Option<ObjectId>)>>,
+    extern_free: Vec<u32>,
     extern_ids: HashMap<ObjectId, u32>,
+    extern_live: usize,
+    /// Live count that schedules the next sweep.
+    extern_sweep_at: usize,
+    extern_sweep_pending: bool,
     protos: Protos,
     errors: Vec<Root>,
     /// Private keys: instance → exports object, memory → buffer.
@@ -241,7 +247,7 @@ fn to_js(realm: &mut Realm, v: Val, t: ValType) -> Value {
                 if bits & gc::EXTERN_ANY_BIT != 0 {
                     return any_to_js(realm, bits & !gc::EXTERN_ANY_BIT);
                 }
-                st(realm).externs.get((bits - 1) as usize).map(|r| r.value()).unwrap_or(Value::Undefined)
+                extern_value(realm, (bits - 1) as usize)
             } else {
                 any_to_js(realm, bits)
             }
@@ -327,7 +333,7 @@ fn any_to_js(realm: &mut Realm, bits: u64) -> Value {
         return Value::Number(((v as i32) >> 1) as f64);
     }
     if bits & 3 == 2 {
-        return st(realm).externs.get(((bits >> 2) - 1) as usize).map(|r| r.value()).unwrap_or(Value::Undefined);
+        return extern_value(realm, ((bits >> 2) - 1) as usize);
     }
     if let Some(r) = st(realm).gc_objs.get(&bits) {
         return r.value();
@@ -340,23 +346,130 @@ fn any_to_js(realm: &mut Realm, bits: u64) -> Value {
     Value::Object(o)
 }
 
+fn extern_value(realm: &mut Realm, i: usize) -> Value {
+    match st(realm).externs.get(i) {
+        Some(Some((r, _))) => r.value(),
+        _ => Value::Undefined,
+    }
+}
+
 /// The externref bits of a JavaScript value (object identity preserved).
+/// Slots no longer referenced from wasm are reclaimed by [`sweep_externs`].
 fn extern_ref(realm: &mut Realm, v: Value) -> u32 {
-    if let V::Object(id) = v.v() {
+    let oid = match v.v() {
+        V::Object(id) => Some(id),
+        _ => None,
+    };
+    if let Some(id) = oid {
         if let Some(&i) = st(realm).extern_ids.get(&id) {
             return i + 1;
         }
-        let r = realm.root(v.clone());
-        let s = st(realm);
-        let i = s.externs.len() as u32;
-        s.externs.push(r);
-        s.extern_ids.insert(id, i);
-        return i + 1;
     }
     let r = realm.root(v);
     let s = st(realm);
-    s.externs.push(r);
-    s.externs.len() as u32
+    let i = match s.extern_free.pop() {
+        Some(i) => {
+            s.externs[i as usize] = Some((r, oid));
+            i
+        }
+        None => {
+            s.externs.push(Some((r, oid)));
+            (s.externs.len() - 1) as u32
+        }
+    };
+    if let Some(id) = oid {
+        s.extern_ids.insert(id, i);
+    }
+    s.extern_live += 1;
+    if s.extern_live > s.extern_sweep_at && !s.extern_sweep_pending {
+        s.extern_sweep_pending = true;
+        let job = realm.new_native_function("", 0, sweep_job);
+        realm.enqueue_callback(Value::Object(job), Value::Undefined, vec![]);
+    }
+    i + 1
+}
+
+fn sweep_job(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+    sweep_externs(realm);
+    Ok(Value::Undefined)
+}
+
+/// Free externref slots that nothing in wasm refers to any more. Runs as a
+/// job (empty JavaScript stack, so no wasm frame or conversion is in
+/// flight); the scan is conservative (tables, globals, GC objects and
+/// exception payloads; any word that could encode a slot keeps it).
+fn sweep_externs(realm: &mut Realm) {
+    let store = store(realm);
+    st(realm).extern_sweep_pending = false;
+    if store.depth_now() != 0 {
+        return;
+    }
+    let n = st(realm).externs.len();
+    let mut marks = vec![false; n];
+    let mut mark = |bits: u64| {
+        for v in [bits, bits & !gc::EXTERN_ANY_BIT] {
+            if v >= 1 && ((v - 1) as usize) < n {
+                marks[(v - 1) as usize] = true;
+            }
+            if v & 3 == 2 && v >> 2 >= 1 && (((v >> 2) - 1) as usize) < n {
+                marks[((v >> 2) - 1) as usize] = true;
+            }
+        }
+    };
+    let mut tables: Vec<Rc<TableInst>> = Vec::new();
+    let mut globals: Vec<Rc<GlobalInst>> = Vec::new();
+    for inst in store.instances.borrow().iter() {
+        tables.extend(inst.tables.iter().cloned());
+        globals.extend(inst.globals.iter().cloned());
+    }
+    let ids: Vec<ObjectId> = {
+        let s = st(realm);
+        s.table_objs.values().chain(s.global_objs.values()).filter_map(|r| r.object()).collect()
+    };
+    for id in ids {
+        if let Some(t) = realm.host_data::<WTable>(id) {
+            tables.push(t.0.clone());
+        }
+        if let Some(g) = realm.host_data::<WGlobal>(id) {
+            globals.push(g.0.clone());
+        }
+    }
+    for t in &tables {
+        for &e in t.elems.borrow().iter() {
+            mark(e);
+        }
+    }
+    for g in &globals {
+        mark(g.lo.get());
+        mark(g.hi.get());
+    }
+    for o in store.gc.borrow().iter() {
+        for &w in &o.data {
+            mark(w);
+        }
+    }
+    for e in store.exns.borrow().iter() {
+        for &w in &e.payload {
+            mark(w);
+        }
+    }
+    let s = st(realm);
+    let before = s.extern_live;
+    for (i, m) in marks.iter().enumerate() {
+        if !m {
+            if let Some((_, oid)) = s.externs[i].take() {
+                if let Some(id) = oid {
+                    s.extern_ids.remove(&id);
+                }
+                s.extern_free.push(i as u32);
+                s.extern_live -= 1;
+            }
+        }
+    }
+    s.extern_sweep_at = (s.extern_live * 2).max(4096);
+    if stats::enabled() {
+        eprintln!("[wasm] externref sweep: {before} -> {} live slots", s.extern_live);
+    }
 }
 
 fn default_value(realm: &mut Realm, t: ValType) -> JsResult<Val> {
@@ -1280,7 +1393,11 @@ pub fn install(realm: &mut Realm) {
         tag_objs: HashMap::new(),
         gc_objs: HashMap::new(),
         externs: Vec::new(),
+        extern_free: Vec::new(),
         extern_ids: HashMap::new(),
+        extern_live: 0,
+        extern_sweep_at: 4096,
+        extern_sweep_pending: false,
         protos: Protos { module, instance, memory, table, global, tag, exception },
         errors: Vec::new(),
         key_exports,

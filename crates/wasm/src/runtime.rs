@@ -423,6 +423,11 @@ impl Store {
         }
     }
 
+    /// Current call depth (0: no wasm frame is active).
+    pub fn depth_now(&self) -> usize {
+        self.depth.get()
+    }
+
     pub fn func(&self, addr: u32) -> Rc<FuncInst> {
         self.funcs.borrow()[addr as usize].clone()
     }
