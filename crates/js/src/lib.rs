@@ -56,6 +56,8 @@ mod tests;
 mod tests_vm;
 #[cfg(test)]
 mod tests_panic;
+#[cfg(test)]
+mod tests_resources;
 #[cfg(all(test, feature = "jit"))]
 mod tests_jit;
 
