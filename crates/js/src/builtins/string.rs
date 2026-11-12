@@ -51,6 +51,24 @@ pub fn register(realm: &mut Realm) {
     for (name, arity, f) in methods {
         realm.define_method(sp, name, arity, f);
     }
+    // Annex B HTML methods.
+    let html: [(&str, u32, NativeFn); 12] = [
+        ("big", 0, html_big),
+        ("blink", 0, html_blink),
+        ("bold", 0, html_bold),
+        ("fixed", 0, html_fixed),
+        ("fontcolor", 1, html_fontcolor),
+        ("fontsize", 1, html_fontsize),
+        ("italics", 0, html_italics),
+        ("link", 1, html_link),
+        ("small", 0, html_small),
+        ("strike", 0, html_strike),
+        ("sub", 0, html_sub),
+        ("sup", 0, html_sup),
+    ];
+    for (name, arity, f) in html {
+        realm.define_method(sp, name, arity, f);
+    }
     let trim_left = realm.obj(sp).props.get(&PropertyKey::str("trimStart")).unwrap().value.clone();
     realm.define_property(sp, "trimLeft", trim_left, HIDDEN);
     let trim_right = realm.obj(sp).props.get(&PropertyKey::str("trimEnd")).unwrap().value.clone();
@@ -682,10 +700,75 @@ fn to_well_formed(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<V
     Ok(Value::String(JsStr::new(&s.to_rust_string())))
 }
 
+/// CreateHTML (Annex B.2.2.2.1).
+fn create_html(realm: &mut Realm, this: Value, tag: &str, attr: Option<(&str, Value)>) -> JsResult<Value> {
+    if this.is_nullish() {
+        return realm.type_error(&format!("String.prototype.{} called on null or undefined", tag));
+    }
+    let s = realm.to_string(this)?;
+    let mut out: Vec<u16> = Vec::with_capacity(s.len() + 16);
+    out.push(b'<' as u16);
+    out.extend(tag.encode_utf16());
+    if let Some((name, v)) = attr {
+        let v = realm.to_string(v)?;
+        out.push(b' ' as u16);
+        out.extend(name.encode_utf16());
+        out.extend("=\"".encode_utf16());
+        for &u in v.as_units() {
+            if u == b'"' as u16 {
+                out.extend("&quot;".encode_utf16());
+            } else {
+                out.push(u);
+            }
+        }
+        out.push(b'"' as u16);
+    }
+    out.push(b'>' as u16);
+    out.extend_from_slice(s.as_units());
+    out.extend("</".encode_utf16());
+    out.extend(tag.encode_utf16());
+    out.push(b'>' as u16);
+    Ok(Value::String(JsStr::from_units(out)))
+}
+
 fn anchor(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let s = this_str(realm, &this, "anchor")?;
-    let name = realm.to_rust_string(arg(args, 0))?;
-    Ok(Value::str(&format!("<a name=\"{}\">{}</a>", name.replace('"', "&quot;"), s)))
+    create_html(realm, this, "a", Some(("name", arg(args, 0))))
+}
+fn html_big(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "big", None)
+}
+fn html_blink(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "blink", None)
+}
+fn html_bold(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "b", None)
+}
+fn html_fixed(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "tt", None)
+}
+fn html_fontcolor(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "font", Some(("color", arg(args, 0))))
+}
+fn html_fontsize(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "font", Some(("size", arg(args, 0))))
+}
+fn html_italics(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "i", None)
+}
+fn html_link(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "a", Some(("href", arg(args, 0))))
+}
+fn html_small(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "small", None)
+}
+fn html_strike(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "strike", None)
+}
+fn html_sub(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "sub", None)
+}
+fn html_sup(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
+    create_html(realm, this, "sup", None)
 }
 
 fn iterator(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
