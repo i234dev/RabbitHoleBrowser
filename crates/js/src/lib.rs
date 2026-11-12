@@ -60,4 +60,4 @@ pub use modules::{ImportMetaHook, ModuleId, ModuleLoader, ModuleStatus};
 pub use parser::{parse_program, ParseError};
 pub use realm::{exclude_from_watchdog, request_post_native, Realm, Root};
 pub use value::{JsStr, ObjectId, PropertyKey, SymbolId, Value, V};
-pub use vm::ResumeMode;
+pub use vm::{ResumeMode, StackMark};

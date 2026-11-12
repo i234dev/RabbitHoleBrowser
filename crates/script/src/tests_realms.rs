@@ -107,3 +107,23 @@ fn panicking_binding_becomes_a_js_exception() {
     assert!(logs.iter().any(|l| l == "log: timer ran 1"), "{logs:?}");
     assert!(logs.iter().any(|l| l.starts_with("error:") && l.contains("internal error")), "{logs:?}");
 }
+
+/// A panic in an entry point's own Rust code (not inside a native
+/// function: an interpreter or event-dispatch bug) stops that entry point
+/// only; the interpreter stacks are restored and the realm keeps working.
+#[test]
+fn panic_in_an_entry_point_stops_only_that_task() {
+    let (mut env, mut host) = setup("<p>x</p>");
+    run(&mut env, &mut host, "globalThis.n = 1;");
+    let r: Result<(), String> = host.enter(&mut env, |realm| {
+        let _ = realm.eval("n++", "t.js");
+        let v: Vec<u8> = Vec::new();
+        let i = v.len() + 3;
+        let _ = v[i];
+        Ok(())
+    });
+    assert!(matches!(&r, Err(e) if e.starts_with("internal error: index out of bounds")), "{r:?}");
+    assert!(env.errors().iter().any(|e| e.contains("internal error") && e.contains("tests_realms.rs")), "{:?}", env.errors());
+    let out = run(&mut env, &mut host, "console.log(n, [1, 2, 3].map((x) => x * n).join());");
+    assert_eq!(out, vec!["2 2,4,6".to_string()]);
+}

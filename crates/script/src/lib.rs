@@ -137,6 +137,45 @@ pub enum DefaultAction {
     SubmitForm(NodeId, Option<NodeId>),
 }
 
+/// What a [`ScriptHost`] entry point returns when a Rust panic stopped it.
+pub(crate) trait PanicFallback {
+    fn after_panic(msg: &str) -> Self;
+}
+
+impl PanicFallback for () {
+    fn after_panic(_: &str) {}
+}
+
+impl PanicFallback for bool {
+    fn after_panic(_: &str) -> bool {
+        false
+    }
+}
+
+impl PanicFallback for String {
+    fn after_panic(msg: &str) -> String {
+        format!("internal error: {msg}")
+    }
+}
+
+impl<T> PanicFallback for Result<T, String> {
+    fn after_panic(msg: &str) -> Self {
+        Err(format!("internal error: {msg}"))
+    }
+}
+
+impl PanicFallback for DispatchResult {
+    fn after_panic(_: &str) -> DispatchResult {
+        DispatchResult::nothing()
+    }
+}
+
+impl PanicFallback for FrameReply {
+    fn after_panic(msg: &str) -> FrameReply {
+        FrameReply::Error(format!("internal error: {msg}"))
+    }
+}
+
 /// Outcome of a dispatch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispatchResult {
@@ -324,11 +363,25 @@ impl ScriptHost {
         host
     }
 
-    fn enter<R>(&mut self, env: &mut dyn HostEnv, f: impl FnOnce(&mut Realm) -> R) -> R {
+    /// Run `f` in this realm with `env` and the host state active. A Rust
+    /// panic inside (outside any native function, which catch their own:
+    /// an interpreter or event-dispatch bug) stops this entry point only:
+    /// the interpreter stacks are restored, the error is logged, and the
+    /// entry point returns its "nothing happened" value.
+    fn enter<R: PanicFallback>(&mut self, env: &mut dyn HostEnv, f: impl FnOnce(&mut Realm) -> R) -> R {
         let _g = EnvGuard::enter(env);
         let _s = StateGuard::enter(self.state.clone());
-        let r = f(&mut self.realm);
-        r
+        let mark = self.realm.stack_mark();
+        let realm = &mut self.realm;
+        match rabbithole_js::panics::catch(|| f(realm)) {
+            Ok(r) => r,
+            Err((msg, loc)) => {
+                self.realm.unwind_to(&mark);
+                let at = if loc.is_empty() { String::new() } else { format!(" at {loc}") };
+                host::log("error", &format!("internal error: {msg}{at} (Rust panic caught; the page keeps running)"));
+                R::after_panic(&msg)
+            }
+        }
     }
 
     /// Evaluate a classic script or module. Errors are logged and returned.
