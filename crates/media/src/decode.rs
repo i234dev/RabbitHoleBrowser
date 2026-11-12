@@ -34,6 +34,9 @@ impl Pcm {
 
 enum Inner {
     Symphonia(Box<dyn AudioDecoder>),
+    /// HE-AAC and other AAC flavours through Media Foundation (Windows).
+    #[cfg(windows)]
+    MfAac(crate::mf::MfAacDecoder),
     Opus(OpusState),
 }
 
@@ -76,7 +79,24 @@ impl Decoder {
             return Ok(Decoder { inner: Inner::Opus(OpusState::new(params)?) });
         }
         let opts = AudioDecoderOptions::default();
-        let dec = symphonia::default::get_codecs().make_audio_decoder(params, &opts).map_err(|e| format!("unsupported audio codec: {e}"))?;
+        let dec = match symphonia::default::get_codecs().make_audio_decoder(params, &opts) {
+            Ok(d) => d,
+            Err(e) => {
+                #[cfg(windows)]
+                {
+                    use symphonia::core::codecs::audio::well_known::CODEC_ID_AAC;
+                    if params.codec == CODEC_ID_AAC {
+                        let asc = params.extra_data.as_deref().unwrap_or(&[]);
+                        let rate = params.sample_rate.unwrap_or(44_100);
+                        let ch = params.channels.as_ref().map(|c| c.count() as u32).unwrap_or(2);
+                        if let Some(d) = crate::mf::MfAacDecoder::new(asc, rate, ch) {
+                            return Ok(Decoder { inner: Inner::MfAac(d) });
+                        }
+                    }
+                }
+                return Err(format!("unsupported audio codec: {e}"));
+            }
+        };
         Ok(Decoder { inner: Inner::Symphonia(dec) })
     }
 
@@ -100,6 +120,8 @@ impl Decoder {
                 }
             }
             Inner::Opus(o) => o.decode(data),
+            #[cfg(windows)]
+            Inner::MfAac(d) => d.decode(data).map(|(rate, channels, samples)| Pcm { rate, channels, samples }),
         }
     }
 
@@ -108,6 +130,8 @@ impl Decoder {
     pub fn reset(&mut self, at_start: bool) {
         match &mut self.inner {
             Inner::Symphonia(dec) => dec.reset(),
+            #[cfg(windows)]
+            Inner::MfAac(d) => d.reset(),
             Inner::Opus(o) => {
                 if let Some(d) = o.single.as_mut() {
                     d.reset();

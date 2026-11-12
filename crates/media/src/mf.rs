@@ -122,6 +122,9 @@ macro_rules! call {
     }};
 }
 
+mod aac;
+pub use aac::MfAacDecoder;
+
 // IMFAttributes
 const ATTR_GET_UINT32: usize = 7;
 const ATTR_GET_UINT64: usize = 8;
