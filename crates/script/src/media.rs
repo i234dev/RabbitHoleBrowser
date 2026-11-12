@@ -337,7 +337,7 @@ pub(crate) fn can_play_type(t: &str) -> &'static str {
         let name = if name.is_empty() && c == "1" { "pcm" } else { name };
         // Video tracks are demuxed (audio plays, the picture shows the
         // poster) but not decoded: answer only for audio codecs + AV1.
-        if !(audio.contains(&name) || (video_ok && name == "av1")) {
+        if !(audio.contains(&name) || (video_ok && rabbithole_media::video::can_decode_video(name))) {
             return "";
         }
     }

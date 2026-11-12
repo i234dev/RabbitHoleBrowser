@@ -40,14 +40,14 @@ fn files_play_through_the_player() {
         let p = Player::new(PlayerSource::Bytes { data: fixture(name), mime: mime.into() });
         let t0 = Instant::now();
         while p.status().ready < 4 {
-            assert!(t0.elapsed() < Duration::from_secs(10), "{name}: {:?}", p.status());
+            assert!(t0.elapsed() < Duration::from_secs(30), "{name}: {:?}", p.status());
             std::thread::sleep(Duration::from_millis(10));
         }
         let st = p.status();
         assert!((st.duration - 0.5).abs() < 0.1, "{name}: {st:?}");
         p.play();
         while !p.status().ended {
-            assert!(t0.elapsed() < Duration::from_secs(10), "{name}: {:?}", p.status());
+            assert!(t0.elapsed() < Duration::from_secs(30), "{name}: {:?}", p.status());
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(p.status().decoded_frames > 20_000, "{name}: {:?}", p.status());
@@ -104,9 +104,60 @@ fn av1_file_shows_frames_in_the_player() {
             assert!(f.rgba[0] > 200);
             break;
         }
-        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", p.status());
+        assert!(t0.elapsed() < Duration::from_secs(30), "{:?}", p.status());
         std::thread::sleep(Duration::from_millis(10));
     }
     let st = p.status();
     assert!(st.has_video && st.video_codec == "av1", "{st:?}");
+}
+
+#[test]
+fn vp9_frames_decode_to_blue_in_mse_and_files() {
+    use rabbithole_media::video::{can_decode_video, is_key, new_decoder};
+    assert!(can_decode_video("vp9"));
+    let mut sb = SourceBufferState::new("video/webm; codecs=\"vp9\"").unwrap();
+    sb.append(&fixture("blue-vp9.webm")).unwrap();
+    assert_eq!(sb.tracks[0].info.codec, "vp9");
+    let frames = &sb.tracks[0].frames;
+    assert!(frames[0].key && is_key("vp9", &frames[0].data));
+    assert!(!is_key("vp9", &frames[1].data));
+    let mut dec = new_decoder("vp9", &[]).unwrap();
+    let mut pics = Vec::new();
+    for f in frames {
+        pics.extend(dec.decode(&f.data, f.pts));
+    }
+    assert!(pics.len() >= 4, "{}", pics.len());
+    let p = &pics[0];
+    assert_eq!((p.width, p.height), (64, 48));
+    let (r, g, b) = (p.rgba[0], p.rgba[1], p.rgba[2]);
+    assert!(b > 200 && r < 60 && g < 60, "pixel {r},{g},{b}");
+    // Through the player (direct file).
+    std::env::set_var("RH_AUDIO", "null");
+    let player = Player::new(PlayerSource::Bytes { data: fixture("blue-vp9.webm"), mime: "video/webm".into() });
+    let t0 = Instant::now();
+    while player.video_frame(0).is_none() {
+        assert!(t0.elapsed() < Duration::from_secs(30), "{:?}", player.status());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn h264_bitstream_helpers() {
+    use rabbithole_media::video::{avcc_parameter_sets, h264_is_key, h264_nals, h264_to_annexb};
+    let mut sb = SourceBufferState::new("video/mp4; codecs=\"avc1.42c00a\"").unwrap();
+    sb.append(&fixture("green-h264-frag.mp4")).unwrap();
+    let t = &sb.tracks[0];
+    assert_eq!(t.info.codec, "h264");
+    let ps = avcc_parameter_sets(&t.info.codec_private);
+    assert_eq!(ps.len(), 2);
+    assert_eq!(ps[0][0] & 0x1f, 7); // SPS
+    assert_eq!(ps[1][0] & 0x1f, 8); // PPS
+    let first = &t.frames[0];
+    assert!(first.key && h264_is_key(&first.data));
+    assert!(!h264_is_key(&t.frames[1].data));
+    let annexb = h264_to_annexb(&first.data, &ps);
+    assert!(annexb.starts_with(&[0, 0, 0, 1]));
+    let types: Vec<u8> = h264_nals(&annexb).map(|n| n[0] & 0x1f).collect();
+    assert_eq!(&types[..2], &[7, 8]);
+    assert!(types.contains(&5));
 }

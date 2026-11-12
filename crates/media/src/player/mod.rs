@@ -10,7 +10,9 @@ use crate::decode::{Decoder, Pcm};
 use crate::demux::TrackInfo;
 use crate::mse::MseHandle;
 use crate::source::{ByteFetcher, RangedSource};
-use crate::video::{Av1Decoder, VideoFrame};
+use crate::video::VideoFrame;
+#[cfg(test)]
+use crate::video::av1_is_key;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -408,8 +410,11 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
     let video = tracks.iter().find(|t| matches!(t.codec_params, Some(CodecParameters::Video(_))));
     let video_id = video.map(|t| t.id);
     let video_tb = video.and_then(|t| t.time_base);
-    let av1 = matches!(video.and_then(|t| t.codec_params.as_ref()), Some(CodecParameters::Video(v)) if v.codec == symphonia::core::codecs::video::well_known::CODEC_ID_AV1);
-    let vtx = if av1 { spawn_video(shared, None) } else { None };
+    let (vcodec, vconfig) = match video.and_then(|t| t.codec_params.as_ref()) {
+        Some(CodecParameters::Video(v)) => (video_codec_name(v.codec), v.extra_data.first().map(|e| e.data.to_vec()).unwrap_or_default()),
+        _ => (String::new(), Vec::new()),
+    };
+    let vtx = if crate::video::can_decode_video(&vcodec) { spawn_video(shared, None, vcodec.clone(), vconfig) } else { None };
     let mut decoder = audio.and_then(|t| t.codec_params.as_ref()?.audio()).and_then(|a| Decoder::new(a).ok());
     let audio_id = audio.map(|t| t.id);
     let time_base = audio.and_then(|t| t.time_base);
@@ -449,13 +454,7 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
         if let Some(CodecParameters::Video(v)) = video.and_then(|t| t.codec_params.as_ref()) {
             st.video_width = v.width.unwrap_or(0) as u32;
             st.video_height = v.height.unwrap_or(0) as u32;
-            use symphonia::core::codecs::video::well_known::*;
-            st.video_codec = match v.codec {
-                c if c == CODEC_ID_AV1 => "av1".to_string(),
-                c if c == CODEC_ID_VP9 => "vp9".to_string(),
-                c if c == CODEC_ID_H264 => "h264".to_string(),
-                c => format!("{c:?}"),
-            };
+            st.video_codec = video_codec_name(v.codec);
         }
         if let Some(a) = audio.and_then(|t| t.codec_params.as_ref()?.audio()) {
             st.audio_codec = crate::decode::codec_name(a).to_string();
@@ -525,7 +524,7 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
                 if Some(p.track_id) == video_id {
                     if let Some(tx) = &vtx {
                         let pts = video_tb.and_then(|tb| tb.calc_time(p.pts)).map(secs).unwrap_or(0.0);
-                        let key = av1_is_key(&p.data);
+                        let key = crate::video::is_key(&vcodec, &p.data);
                         send_video(shared, tx, VPacket { pts, dts: pts, key, data: p.data.to_vec().into(), gen: shared.seek_gen.load(Ordering::SeqCst) });
                     }
                     continue;
@@ -739,13 +738,13 @@ fn run_mse(shared: &Arc<Shared>, mse: MseHandle) {
         };
         shared.ctl().audio_clock = has_audio && decoder.is_some();
         if !video_started {
-            let av1 = {
+            let decodable = {
                 let m = mse.lock();
-                m.video_track().is_some_and(|(i, j)| crate::video::can_decode_video(&m.buffers[i].tracks[j].info.codec))
+                m.video_track().map(|(i, j)| &m.buffers[i].tracks[j].info).filter(|t| crate::video::can_decode_video(&t.codec)).map(|t| (t.codec.clone(), t.codec_private.clone()))
             };
-            if av1 {
+            if let Some((codec, config)) = decodable {
                 video_started = true;
-                spawn_video(shared, Some(mse.clone()));
+                spawn_video(shared, Some(mse.clone()), codec, config);
             }
         }
         if !has_audio {
@@ -828,46 +827,6 @@ fn run_mse(shared: &Arc<Shared>, mse: MseHandle) {
 
 // ------------------------------------------------------------------ video
 
-/// Does this AV1 temporal unit start with a sequence header (a key frame
-/// in practice)?
-fn av1_is_key(data: &[u8]) -> bool {
-    let mut p = 0usize;
-    while p < data.len() {
-        let h = data[p];
-        let ty = (h >> 3) & 0x0f;
-        if ty == 1 {
-            return true;
-        }
-        let ext = h & 0x04 != 0;
-        let has_size = h & 0x02 != 0;
-        p += 1 + ext as usize;
-        if !has_size {
-            break;
-        }
-        // leb128 size
-        let mut size = 0usize;
-        let mut shift = 0;
-        while p < data.len() {
-            let b = data[p];
-            p += 1;
-            size |= ((b & 0x7f) as usize) << shift;
-            shift += 7;
-            if b & 0x80 == 0 || shift > 56 {
-                break;
-            }
-        }
-        if ty == 6 || ty == 3 {
-            // frame / frame header: frame type is in the first bits; a
-            // KEY_FRAME has frame_type 0 (show_existing_frame = 0).
-            if let Some(&b) = data.get(p) {
-                return b & 0x80 == 0 && (b >> 5) & 0x03 == 0;
-            }
-        }
-        p += size;
-    }
-    false
-}
-
 /// Queue a video packet for the decoder thread (blocks while its queue
 /// is full, giving up on stop / seek).
 fn send_video(shared: &Shared, tx: &std::sync::mpsc::SyncSender<VPacket>, mut pkt: VPacket) {
@@ -888,15 +847,28 @@ fn send_video(shared: &Shared, tx: &std::sync::mpsc::SyncSender<VPacket>, mut pk
 
 /// Start the video decoder / renderer thread: fed by the demuxer through
 /// the returned channel (direct files), or reading the MediaSource.
-fn spawn_video(shared: &Arc<Shared>, mse: Option<MseHandle>) -> Option<std::sync::mpsc::SyncSender<VPacket>> {
+/// Short codec name of a Symphonia video codec id.
+fn video_codec_name(c: symphonia::core::codecs::video::VideoCodecId) -> String {
+    use symphonia::core::codecs::video::well_known::*;
+    match c {
+        c if c == CODEC_ID_AV1 => "av1".to_string(),
+        c if c == CODEC_ID_VP9 => "vp9".to_string(),
+        c if c == CODEC_ID_VP8 => "vp8".to_string(),
+        c if c == CODEC_ID_H264 => "h264".to_string(),
+        c if c == CODEC_ID_HEVC => "hevc".to_string(),
+        c => format!("{c:?}"),
+    }
+}
+
+fn spawn_video(shared: &Arc<Shared>, mse: Option<MseHandle>, codec: String, config: Vec<u8>) -> Option<std::sync::mpsc::SyncSender<VPacket>> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<VPacket>(120);
     let s2 = shared.clone();
-    let spawned = std::thread::Builder::new().name("rh-video".into()).spawn(move || run_video(&s2, rx, mse));
+    let spawned = std::thread::Builder::new().name("rh-video".into()).spawn(move || run_video(&s2, rx, mse, &codec, &config));
     spawned.ok().map(|_| tx)
 }
 
-fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Option<MseHandle>) {
-    let Some(mut dec) = Av1Decoder::new() else { return };
+fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Option<MseHandle>, codec: &str, config: &[u8]) {
+    let Some(mut dec) = crate::video::new_decoder(codec, config) else { return };
     let mut queue: VecDeque<VideoFrame> = VecDeque::new();
     let mut gen = u64::MAX;
     let mut need_key = true;

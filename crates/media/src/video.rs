@@ -31,9 +31,344 @@ impl std::fmt::Debug for VideoFrame {
     }
 }
 
-/// Can this build decode the picture of `codec` ("av1", "vp9", ...)?
+/// Can this build decode the picture of `codec` ("av1", "vp9", "h264")?
+/// AV1 (rav1d) and VP9 (rusty_vp9) everywhere; H.264 through the
+/// operating system's decoder (Media Foundation on Windows).
 pub fn can_decode_video(codec: &str) -> bool {
-    codec == "av1"
+    match codec {
+        "av1" | "vp9" => true,
+        "h264" => h264_available(),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn h264_available() -> bool {
+    crate::mf::h264_available()
+}
+
+#[cfg(not(windows))]
+fn h264_available() -> bool {
+    false
+}
+
+/// A streaming video decoder: one coded frame (access unit) in, the
+/// pictures that came out of it (display order) back.
+pub trait VideoDecoder: Send {
+    fn decode(&mut self, data: &[u8], pts: f64) -> Vec<VideoFrame>;
+    /// Drop decoder state (seek).
+    fn flush(&mut self);
+}
+
+impl VideoDecoder for Av1Decoder {
+    fn decode(&mut self, data: &[u8], pts: f64) -> Vec<VideoFrame> {
+        Av1Decoder::decode(self, data, pts)
+    }
+    fn flush(&mut self) {
+        Av1Decoder::flush(self)
+    }
+}
+
+/// A decoder for `codec`; `config` is the container's codec configuration
+/// (avcC for H.264; unused by AV1 / VP9, whose headers are in-band).
+pub fn new_decoder(codec: &str, config: &[u8]) -> Option<Box<dyn VideoDecoder>> {
+    match codec {
+        "av1" => Av1Decoder::new().map(|d| Box::new(d) as Box<dyn VideoDecoder>),
+        "vp9" => Some(Box::new(Vp9Decoder { dec: rusty_vp9::Vp9Decoder::new() })),
+        #[cfg(windows)]
+        "h264" => crate::mf::MfH264Decoder::new(config).map(|d| Box::new(d) as Box<dyn VideoDecoder>),
+        _ => {
+            let _ = config;
+            None
+        }
+    }
+}
+
+/// Is this coded frame a random access point?
+pub fn is_key(codec: &str, data: &[u8]) -> bool {
+    match codec {
+        "av1" => av1_is_key(data),
+        "vp9" => vp9_is_key(data),
+        "h264" => h264_is_key(data),
+        _ => true,
+    }
+}
+
+/// Does this AV1 temporal unit hold a key frame (a sequence header or a
+/// KEY_FRAME frame header)?
+pub fn av1_is_key(data: &[u8]) -> bool {
+    let mut p = 0usize;
+    while p < data.len() {
+        let h = data[p];
+        let ty = (h >> 3) & 0x0f;
+        if ty == 1 {
+            return true;
+        }
+        let ext = h & 0x04 != 0;
+        let has_size = h & 0x02 != 0;
+        p += 1 + ext as usize;
+        if !has_size {
+            break;
+        }
+        let mut size = 0usize;
+        let mut shift = 0;
+        while p < data.len() {
+            let b = data[p];
+            p += 1;
+            size |= ((b & 0x7f) as usize) << shift;
+            shift += 7;
+            if b & 0x80 == 0 || shift > 56 {
+                break;
+            }
+        }
+        if ty == 6 || ty == 3 {
+            if let Some(&b) = data.get(p) {
+                return b & 0x80 == 0 && (b >> 5) & 0x03 == 0;
+            }
+        }
+        p += size;
+    }
+    false
+}
+
+/// VP9 uncompressed header: frame_marker, profile, show_existing_frame,
+/// frame_type (0 = KEY_FRAME).
+pub fn vp9_is_key(data: &[u8]) -> bool {
+    let Some(&b) = data.first() else { return false };
+    if b >> 6 != 2 {
+        return false;
+    }
+    let profile = ((b >> 5) & 1) | (((b >> 4) & 1) << 1);
+    let mut bit = 3; // next bit position (from the MSB side: 7 - consumed)
+    if profile == 3 {
+        bit -= 1; // reserved zero
+    }
+    let show_existing = (b >> bit) & 1;
+    if show_existing == 1 {
+        return false;
+    }
+    (b >> (bit - 1)) & 1 == 0
+}
+
+/// H.264 access unit (length-prefixed AVCC or Annex B) with an IDR slice.
+pub fn h264_is_key(data: &[u8]) -> bool {
+    h264_nals(data).any(|n| n.first().is_some_and(|h| h & 0x1f == 5))
+}
+
+/// NAL units of an access unit: Annex B (start codes) or 4-byte
+/// length-prefixed (MP4 / Matroska).
+pub fn h264_nals(data: &[u8]) -> Box<dyn Iterator<Item = &[u8]> + '_> {
+    let annexb = data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1]);
+    if annexb {
+        let mut starts = Vec::new();
+        let mut i = 0;
+        while i + 3 <= data.len() {
+            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+                starts.push(i + 3);
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        let mut out: Vec<&[u8]> = Vec::new();
+        for (k, &s) in starts.iter().enumerate() {
+            let mut e = starts.get(k + 1).map(|&n| n - 3).unwrap_or(data.len());
+            while e > s && data[e - 1] == 0 {
+                e -= 1;
+            }
+            out.push(&data[s..e]);
+        }
+        Box::new(out.into_iter())
+    } else {
+        let mut out: Vec<&[u8]> = Vec::new();
+        let mut p = 0;
+        while p + 4 <= data.len() {
+            let n = u32::from_be_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]) as usize;
+            p += 4;
+            if n == 0 || p + n > data.len() {
+                break;
+            }
+            out.push(&data[p..p + n]);
+            p += n;
+        }
+        Box::new(out.into_iter())
+    }
+}
+
+/// SPS / PPS NAL units of an avcC record.
+pub fn avcc_parameter_sets(avcc: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    if avcc.len() < 7 || avcc[0] != 1 {
+        return out;
+    }
+    let mut p = 5;
+    let nsps = (avcc[p] & 0x1f) as usize;
+    p += 1;
+    for _ in 0..nsps {
+        if p + 2 > avcc.len() {
+            return out;
+        }
+        let n = u16::from_be_bytes([avcc[p], avcc[p + 1]]) as usize;
+        p += 2;
+        if p + n > avcc.len() {
+            return out;
+        }
+        out.push(avcc[p..p + n].to_vec());
+        p += n;
+    }
+    if p >= avcc.len() {
+        return out;
+    }
+    let npps = avcc[p] as usize;
+    p += 1;
+    for _ in 0..npps {
+        if p + 2 > avcc.len() {
+            return out;
+        }
+        let n = u16::from_be_bytes([avcc[p], avcc[p + 1]]) as usize;
+        p += 2;
+        if p + n > avcc.len() {
+            return out;
+        }
+        out.push(avcc[p..p + n].to_vec());
+        p += n;
+    }
+    out
+}
+
+/// An access unit as an Annex B byte stream, with the avcC parameter sets
+/// in front of key frames (what OS decoders expect).
+pub fn h264_to_annexb(data: &[u8], param_sets: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 64);
+    if h264_is_key(data) {
+        for ps in param_sets {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(ps);
+        }
+    }
+    for n in h264_nals(data) {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(n);
+    }
+    out
+}
+
+// ------------------------------------------------------------------- VP9
+
+struct Vp9Decoder {
+    dec: rusty_vp9::Vp9Decoder,
+}
+
+impl VideoDecoder for Vp9Decoder {
+    fn decode(&mut self, data: &[u8], pts: f64) -> Vec<VideoFrame> {
+        let mut out = Vec::new();
+        if self.dec.push(data, Some((pts * 1e6).round() as i64)).is_err() {
+            return out;
+        }
+        while let Ok(f) = self.dec.next_frame() {
+            let p = f.pts.map(|t| t as f64 / 1e6).unwrap_or(pts);
+            if f.planes.len() < 3 {
+                continue;
+            }
+            let shift = f.bit_depth.saturating_sub(8);
+            let rgba = yuv_to_rgba(
+                &Planes { y: &f.planes[0], u: &f.planes[1], v: &f.planes[2], strides: [f.strides[0], f.strides[1], f.strides[2]], hbd: f.bit_depth > 8, shift },
+                f.width as usize,
+                f.height as usize,
+                f.subsampling_x as usize,
+                f.subsampling_y as usize,
+                if f.height >= 720 { Matrix::Bt709 } else { Matrix::Bt601 },
+                false,
+            );
+            out.push(VideoFrame { pts: p, width: f.width, height: f.height, rgba: Arc::new(rgba) });
+        }
+        out
+    }
+    fn flush(&mut self) {
+        self.dec = rusty_vp9::Vp9Decoder::new();
+    }
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) enum Matrix {
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
+pub(crate) struct Planes<'a> {
+    pub y: &'a [u8],
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    /// Bytes per row.
+    pub strides: [usize; 3],
+    /// Samples are little-endian u16.
+    pub hbd: bool,
+    /// Right shift to 8 bits.
+    pub shift: u32,
+}
+
+/// Planar YUV → RGBA (integer arithmetic).
+pub(crate) fn yuv_to_rgba(p: &Planes, w: usize, h: usize, ssx: usize, ssy: usize, m: Matrix, full: bool) -> Vec<u8> {
+    let (kr, kb) = match m {
+        Matrix::Bt709 => (0.2126f32, 0.0722f32),
+        Matrix::Bt2020 => (0.2627, 0.0593),
+        Matrix::Bt601 => (0.299, 0.114),
+    };
+    let kg = 1.0 - kr - kb;
+    let (ys, cs, yo) = if full { (1.0f32, 1.0f32, 0i32) } else { (255.0 / 219.0, 255.0 / 224.0, 16) };
+    let crr = (2.0 * (1.0 - kr) * cs * 1024.0) as i32;
+    let cbb = (2.0 * (1.0 - kb) * cs * 1024.0) as i32;
+    let cgr = (2.0 * (1.0 - kr) * kr / kg * cs * 1024.0) as i32;
+    let cgb = (2.0 * (1.0 - kb) * kb / kg * cs * 1024.0) as i32;
+    let yk = (ys * 1024.0) as i32;
+    let get = |plane: &[u8], stride: usize, x: usize, y: usize| -> i32 {
+        if p.hbd {
+            let i = y * stride + x * 2;
+            match plane.get(i..i + 2) {
+                Some(b) => (u16::from_le_bytes([b[0], b[1]]) >> p.shift) as i32,
+                None => 128,
+            }
+        } else {
+            plane.get(y * stride + x).copied().unwrap_or(128) as i32
+        }
+    };
+    let mut rgba = vec![255u8; w * h * 4];
+    for y in 0..h {
+        let cy = y >> ssy;
+        for x in 0..w {
+            let cx = x >> ssx;
+            let yy = (get(p.y, p.strides[0], x, y) - yo) * yk;
+            let u = get(p.u, p.strides[1], cx, cy) - 128;
+            let v = get(p.v, p.strides[2], cx, cy) - 128;
+            let o = (y * w + x) * 4;
+            rgba[o] = ((yy + crr * v) >> 10).clamp(0, 255) as u8;
+            rgba[o + 1] = ((yy - cgr * v - cgb * u) >> 10).clamp(0, 255) as u8;
+            rgba[o + 2] = ((yy + cbb * u) >> 10).clamp(0, 255) as u8;
+        }
+    }
+    rgba
+}
+
+/// NV12 (Y plane + interleaved UV) → RGBA.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn nv12_to_rgba(data: &[u8], stride: usize, w: usize, h: usize, uv_offset: usize, m: Matrix) -> Vec<u8> {
+    // De-interleave the chroma into U and V planes, then reuse the planar path.
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
+    let mut u = vec![128u8; cw * ch];
+    let mut v = vec![128u8; cw * ch];
+    for y in 0..ch {
+        for x in 0..cw {
+            let i = uv_offset + y * stride + x * 2;
+            if let Some(b) = data.get(i..i + 2) {
+                u[y * cw + x] = b[0];
+                v[y * cw + x] = b[1];
+            }
+        }
+    }
+    yuv_to_rgba(&Planes { y: data, u: &u, v: &v, strides: [stride, cw, cw], hbd: false, shift: 0 }, w, h, 1, 1, m, false)
 }
 
 /// A streaming AV1 decoder.
