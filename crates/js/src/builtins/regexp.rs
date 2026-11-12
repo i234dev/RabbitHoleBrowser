@@ -39,34 +39,49 @@ pub fn register(realm: &mut Realm) {
     realm.define_property(rsip, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("RegExp String Iterator"), CONFIGURABLE);
     realm.intrinsics.others.insert("RegExpStringIteratorPrototype", rsip);
     let p = &realm.obj(rp).props;
-    let exec_slot = p.find_slot(&PropertyKey::str("exec"));
-    let flags_slot = p.find_slot(&PropertyKey::str("flags"));
-    if let (Some(es), Some(fs)) = (exec_slot, flags_slot) {
-        let exec_fn = p.slot(es).and_then(|x| x.value.as_object());
-        let flags_fn = p.slot(fs).and_then(|x| x.getter()).and_then(|g| g.as_object());
-        if let (Some(e), Some(f)) = (exec_fn, flags_fn) {
-            realm.regexp_pristine = Some((p.shape_id(), es, e, fs, f));
+    let slot_of = |name: &str| p.find_slot(&PropertyKey::str(name));
+    let exec = slot_of("exec").and_then(|s| Some((s, p.slot(s)?.value.as_object()?)));
+    let mut getters = Vec::new();
+    for name in ["flags", "hasIndices", "global", "ignoreCase", "multiline", "dotAll", "unicode", "unicodeSets", "sticky"] {
+        if let Some(g) = slot_of(name).and_then(|s| Some((s, p.slot(s)?.getter()?.as_object()?))) {
+            getters.push(g);
+        }
+    }
+    if let Some((exec_slot, exec)) = exec {
+        if getters.len() == 9 {
+            realm.regexp_pristine = Some(Box::new(Pristine { shape: p.shape_id(), exec_slot, exec, getters }));
         }
     }
 }
 
+/// `RegExp.prototype` as built: its shape, `exec`, and the getters of
+/// `flags` and of each flag (slot, function).
+pub struct Pristine {
+    shape: u32,
+    exec_slot: u32,
+    exec: ObjectId,
+    getters: Vec<(u32, ObjectId)>,
+}
+
 /// `v` is a RegExp object whose observable protocol is the built-in one:
-/// only its own `lastIndex` (holding a number), and `RegExp.prototype` with
-/// its original keys, `exec` and `flags`. Its flags and matches can then be
-/// used directly.
+/// only its own `lastIndex`, and `RegExp.prototype` with its original keys,
+/// `exec`, `flags` and flag getters. Its flags and matches can then be used
+/// directly.
 fn pristine(realm: &Realm, v: &Value) -> Option<ObjectId> {
-    let (shape, es, e, fs, f) = realm.regexp_pristine?;
+    let pr = realm.regexp_pristine.as_deref()?;
     let id = v.as_object()?;
     let o = realm.obj(id);
     if !matches!(o.kind, ObjectKind::RegExp(_)) || o.props.len() != 1 {
         return None;
     }
     let p = &realm.obj(o.proto?).props;
-    if p.shape_id() != shape {
+    if p.shape_id() != pr.shape || p.slot(pr.exec_slot)?.value.as_object() != Some(pr.exec) {
         return None;
     }
-    if p.slot(es)?.value.as_object() != Some(e) || p.slot(fs)?.getter().and_then(|g| g.as_object()) != Some(f) {
-        return None;
+    for &(slot, g) in &pr.getters {
+        if p.slot(slot)?.getter().and_then(|x| x.as_object()) != Some(g) {
+            return None;
+        }
     }
     Some(id)
 }
@@ -503,7 +518,7 @@ pub fn regexp_exec(realm: &mut Realm, rx: Value, s: &JsStr) -> JsResult<Value> {
     }
     let exec_fn = realm.get_str(rx.clone(), "exec")?;
     if realm.is_callable(&exec_fn) {
-        let builtin = realm.regexp_pristine.map(|(_, _, e, _, _)| e);
+        let builtin = realm.regexp_pristine.as_ref().map(|p| p.exec);
         let is_builtin = exec_fn.as_object().is_some() && exec_fn.as_object() == builtin;
         if !(is_builtin && matches!(rx.v(), V::Object(id) if matches!(realm.obj(id).kind, ObjectKind::RegExp(_)))) {
             let r = realm.call(exec_fn, rx, &[Value::String(s.clone())])?;
@@ -882,11 +897,25 @@ fn symbol_split(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
     let flags = flags_string(realm, &this)?;
     let unicode = flags.contains('u') || flags.contains('v');
     let new_flags = if flags.contains('y') { flags.clone() } else { format!("{}y", flags) };
-    let splitter = if fast.is_some() { Value::Undefined } else { realm.construct(c, &[this.clone(), Value::str(&new_flags)], Value::Undefined)? };
+    let mut splitter = if fast.is_some() { Value::Undefined } else { realm.construct(c, &[this.clone(), Value::str(&new_flags)], Value::Undefined)? };
     // The splitter's matcher is fixed now (ToUint32(limit) may recompile `this`).
-    let fast_regex = fast.map(|id| regex_of(realm, id));
+    let saved = fast.map(|id| match &realm.obj(id).kind {
+        ObjectKind::RegExp(d) => (d.regex.clone(), d.original_source.clone()),
+        _ => unreachable!(),
+    });
     let limit = arg(args, 1);
     let lim = if limit.is_undefined() { u32::MAX as usize } else { realm.to_uint32(limit)? as usize };
+    let mut fast_regex = None;
+    if let Some((regex, src)) = saved {
+        // ToUint32(limit) may also have changed RegExp.prototype: then
+        // materialize the splitter the spec would have built.
+        if pristine(realm, &this).is_some() {
+            fast_regex = Some(regex);
+        } else {
+            let proto = realm.intrinsics.others["RegExpPrototype"];
+            splitter = regexp_alloc(realm, &src, &new_flags, proto, true)?;
+        }
+    }
     let mut parts: Vec<Value> = Vec::new();
     if lim == 0 {
         return Ok(realm.new_array_value(parts));
