@@ -1890,7 +1890,21 @@ impl Page {
         self.incr.cached_rect(node, || {
             if self.layout.box_of(&self.doc, node).is_none() && self.doc.element(node).is_some() {
                 // Inline elements: the union of their line fragments.
-                if let Some(r) = self.incr.cached_inline_rect(node, || self.layout.inline_rect_index(&self.doc)) {
+                let mut rect = self.incr.cached_inline_rect(node, || self.layout.inline_rect_index(&self.doc));
+                // Block-level children split out of an inline element (CSS
+                // 2.1 §9.2.1.1) are part of it too; an inline wrapping only
+                // a block has no fragments of its own at all.
+                if self.styles.get(node).is_some_and(|s| s.display == rabbithole_style::Display::Inline) {
+                    for c in self.doc.flat_child_elements(node) {
+                        if let Some(b) = self.layout.box_of(&self.doc, c).filter(|b| b.flow.is_in_flow() && !b.is_inline_level()) {
+                            rect = Some(match rect {
+                                Some(r) => r.union(&b.rect),
+                                None => b.rect,
+                            });
+                        }
+                    }
+                }
+                if let Some(r) = rect {
                     return Some(r);
                 }
             }

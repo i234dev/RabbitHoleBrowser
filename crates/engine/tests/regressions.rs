@@ -347,3 +347,34 @@ fn grid_tracks_with_mixed_math_functions() {
     assert_eq!((rect("g1").w, rect("g3").w), (210.0, 100.0));
     assert_eq!(rect("g2").x, 210.0);
 }
+
+/// An inline element wrapping a block (a lazy "partial" custom element with
+/// a loading placeholder, slotted into a feed's shadow tree) is split around
+/// the block; it has no box and no line fragments of its own, and its rect
+/// used to fall back to the nearest ancestor box (the whole feed), so its
+/// IntersectionObserver always reported it intersecting and infinite scroll
+/// fetched page after page.
+#[test]
+fn inline_element_split_around_a_block_has_the_blocks_rect() {
+    let mut e = engine(true);
+    let mut page = load(
+        &mut e,
+        "<div id=feed><template shadowrootmode=open><div class=list><slot></slot></div></template>\
+         <div style='height:2000px'>posts</div><x-partial id=xp><div id=ph style='height:30px'>Loading...</div></x-partial></div>\
+         <span id=sp><div id=inner style='height:40px'>block in span</div></span>\
+         <script>var log = []; new IntersectionObserver(function (es) { es.forEach(function (x) { log.push(x.isIntersecting); }); }).observe(document.getElementById('xp'));</script>",
+    );
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = e.tick(&mut page);
+    }
+    let rect = |page: &Page, id: &str| page.rect_of(by_id(page, id)).expect("laid out");
+    let (xp, ph) = (rect(&page, "xp"), rect(&page, "ph"));
+    assert_eq!((xp.y, xp.h), (ph.y, ph.h), "partial {xp:?} placeholder {ph:?}");
+    assert_eq!(ph.y, 2000.0);
+    let (sp, inner) = (rect(&page, "sp"), rect(&page, "inner"));
+    assert_eq!((sp.y, sp.h), (inner.y, inner.h), "span {sp:?} block {inner:?}");
+    assert_eq!(eval(&e, &mut page, "(() => { const r = document.getElementById('xp').getBoundingClientRect(); return r.top + ':' + r.height; })()"), "2000:30");
+    // Far below the 600px viewport: not intersecting.
+    assert_eq!(eval(&e, &mut page, "log.join(',')"), "false");
+}
