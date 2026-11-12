@@ -1656,6 +1656,9 @@ fn direct_eval_annexb_private_generators() {
     eq("var x = 'outside'; var pp, pb; function f(_ = pp = function () { return x; }) { var x = 'inside'; pb = function () { return x; }; } f(); pp() + ',' + pb()", "outside,inside");
     eq("function f(a, b = () => a) { var a; return a + ',' + b(); } f(1)", "1,1");
     eq("function f(a = 1, ...r) { function g() { return a; } return g() + r.length; } f(undefined, 2, 3)", "3");
+    eq("function f(a = b, b) {} try { f(); 'no' } catch (e) { e.name }", "ReferenceError");
+    eq("function f(a, b = a + 1) { a = 5; return a + b; } f(1)", "7");
+    eq("var g = (x = () => y, y = 2) => x(); g()", "2");
     eq("var r = []; for (var i = 0; i < 2; i++) { try { throw 1; } finally { r.push(i); continue; } } r.join()", "0,1");
 }
 

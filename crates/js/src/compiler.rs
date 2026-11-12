@@ -1782,6 +1782,9 @@ impl Compiler {
         let mut seen_default = false;
         let mut param_slots: Vec<Loc> = Vec::new();
         let mut rest_slot: Option<Loc> = None;
+        // Parameter expressions: every parameter is bound in order, in its
+        // TDZ until then (`function f(a = b, b) {}` throws).
+        let simple_params = f.params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest);
         for p in &f.params {
             if !p.rest && !matches!(p.pattern, Pattern::Assign { .. }) && !seen_default {
                 param_count += 1;
@@ -1789,7 +1792,7 @@ impl Compiler {
                 seen_default = true;
             }
             match &p.pattern {
-                Pattern::Identifier(n) if !p.rest => {
+                Pattern::Identifier(n) if !p.rest && simple_params => {
                     let slot = self.declare(n, BindKind::Param);
                     param_slots.push(slot);
                 }
@@ -1855,7 +1858,7 @@ impl Compiler {
             let mut names = Vec::new();
             Self::collect_pattern_names(&p.pattern, &mut names);
             for n in names {
-                self.declare(&n, BindKind::Var);
+                self.declare(&n, if simple_params { BindKind::Var } else { BindKind::Let });
             }
         }
         // Named function expression self-binding. It lives in an outer
