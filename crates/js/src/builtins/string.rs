@@ -285,7 +285,7 @@ fn match_(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         return realm.type_error("String.prototype.match called on null or undefined");
     }
     let pat = arg(args, 0);
-    if !pat.is_nullish() {
+    if pat.is_object() {
         if let Some(m) = realm.get_method(pat.clone(), PropertyKey::Symbol(SYM_MATCH))? {
             return realm.call(m, pat, &[this]);
         }
@@ -302,7 +302,7 @@ fn match_all(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
         return realm.type_error("String.prototype.matchAll called on null or undefined");
     }
     let pat = arg(args, 0);
-    if !pat.is_nullish() {
+    if pat.is_object() {
         if is_regexp(realm, &pat)? {
             let flags = realm.get_str(pat.clone(), "flags")?;
             let flags = realm.to_string(flags)?;
@@ -476,7 +476,7 @@ fn replace(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     }
     let pat = arg(args, 0);
     let rep = arg(args, 1);
-    if !pat.is_nullish() {
+    if pat.is_object() {
         if let Some(m) = realm.get_method(pat.clone(), PropertyKey::Symbol(SYM_REPLACE))? {
             return realm.call(m, pat, &[this, rep]);
         }
@@ -508,7 +508,7 @@ fn replace_all(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     }
     let pat = arg(args, 0);
     let rep = arg(args, 1);
-    if !pat.is_nullish() {
+    if pat.is_object() {
         if is_regexp(realm, &pat)? {
             let flags = realm.get_str(pat.clone(), "flags")?;
             let flags = realm.to_string(flags)?;
@@ -553,7 +553,7 @@ fn search(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         return realm.type_error("String.prototype.search called on null or undefined");
     }
     let pat = arg(args, 0);
-    if !pat.is_nullish() {
+    if pat.is_object() {
         if let Some(m) = realm.get_method(pat.clone(), PropertyKey::Symbol(SYM_SEARCH))? {
             return realm.call(m, pat, &[this]);
         }
@@ -581,7 +581,7 @@ fn split(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     }
     let sep = arg(args, 0);
     let limit = arg(args, 1);
-    if !sep.is_nullish() {
+    if sep.is_object() {
         if let Some(m) = realm.get_method(sep.clone(), PropertyKey::Symbol(SYM_SPLIT))? {
             return realm.call(m, sep, &[this, limit]);
         }
