@@ -705,3 +705,11 @@ fn proxies_never_match_property_caches() {
     eq("function rd(o) { return o.x; } var a = Object.create(null), b = {}, h = { get(t, k) { return k === 'x' ? 'trap' : undefined; } }; var p = new Proxy(Object.create(null), h), q = new Proxy({}, h); [rd(a), rd(a), rd(p), rd(b), rd(b), rd(q), p.x, q['x']].map(String).join()", "undefined,undefined,trap,undefined,undefined,trap,trap,trap");
     eq("function wr(o, v) { o.y = v; } var log = []; var h = { set(t, k, v) { log.push(k + '=' + v); return true; } }; var a = {}; wr(a, 1); wr({}, 2); var p = new Proxy({}, h); wr(p, 3); log.join() + ':' + Object.keys(p).length", "y=3:0");
 }
+
+#[test]
+fn overlong_string_concatenation_throws() {
+    // Doubling a string past the maximum length is a RangeError (it used
+    // to overflow the rope length and panic).
+    throws("var a = 'ab'; for (var i = 0; i < 80; i++) a += a; a.length", "Invalid string length");
+    throws("var a = 'ab'; for (var i = 0; i < 80; i++) a = a + a; a.length", "Invalid string length");
+}

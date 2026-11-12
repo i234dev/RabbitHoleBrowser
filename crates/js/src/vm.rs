@@ -1539,6 +1539,10 @@ impl Realm {
                             continue;
                         }
                         if let (V::String(x), V::String(y)) = (sl!(a).v(), sl!(b).v()) {
+                            if x.len() + y.len() > crate::value::MAX_STRING_LEN {
+                                slow!();
+                                continue;
+                            }
                             let r = x.concat(y);
                             *sl!(d) = Value::String(r);
                             continue;
@@ -1551,6 +1555,10 @@ impl Realm {
                             continue;
                         }
                         if let (V::String(x), V::String(y)) = (sl!(a).v(), k!(c).v()) {
+                            if x.len() + y.len() > crate::value::MAX_STRING_LEN {
+                                slow!();
+                                continue;
+                            }
                             let r = x.concat(y);
                             *sl!(d) = Value::String(r);
                             continue;
@@ -3906,20 +3914,28 @@ impl Realm {
         Ok(Flow::Next)
     }
 
+    /// String concatenation of `+`: a RangeError past the maximum length.
+    fn concat(&mut self, x: &JsStr, y: &JsStr) -> JsResult<Value> {
+        if x.len() + y.len() > crate::value::MAX_STRING_LEN {
+            return self.range_error("Invalid string length");
+        }
+        Ok(Value::String(x.concat(y)))
+    }
+
     /// A binary operator on two values (the slow path of the register
     /// instructions).
     fn binop_values(&mut self, op: Op, a: Value, b: Value) -> JsResult<Value> {
         Ok(match op {
             Op::Add => match (a.v(), b.v()) {
                 (V::Number(x), V::Number(y)) => Value::Number(x + y),
-                (V::String(x), V::String(y)) => Value::String(x.concat(y)),
+                (V::String(x), V::String(y)) => self.concat(x, y)?,
                 (V::String(x), V::Number(_)) => {
                     let y = self.to_string(b.clone())?;
-                    Value::String(x.concat(&y))
+                    self.concat(x, &y)?
                 }
                 (V::Number(_), V::String(y)) => {
                     let x = self.to_string(a.clone())?;
-                    Value::String(x.concat(y))
+                    self.concat(&x, y)?
                 }
                 _ => self.add_slow(a, b)?,
             },
@@ -4423,7 +4439,7 @@ impl Realm {
         if matches!(pa.v(), V::String(_)) || matches!(pb.v(), V::String(_)) {
             let sa = self.to_string(pa)?;
             let sb = self.to_string(pb)?;
-            return Ok(Value::String(sa.concat(&sb)));
+            return self.concat(&sa, &sb);
         }
         let na = self.to_numeric(pa)?;
         let nb = self.to_numeric(pb)?;

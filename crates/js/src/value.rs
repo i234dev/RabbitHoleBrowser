@@ -534,6 +534,9 @@ pub use crate::bigint::BigInt;
 #[derive(PartialEq, Eq)]
 pub struct Value(u64);
 
+/// Longest string `+` builds (longer: RangeError "Invalid string length").
+pub(crate) const MAX_STRING_LEN: usize = 1 << 29;
+
 pub const TAG_MIN: u64 = 0xFFF9_0000_0000_0000;
 const TAG_SPECIAL: u64 = 0xFFF9_0000_0000_0000;
 const TAG_SYMBOL: u64 = 0xFFFA_0000_0000_0000;
