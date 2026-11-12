@@ -98,16 +98,13 @@ impl Realm {
     }
 
     /// Enter native code `entry` of `code` (the last frame's) at `pc`.
-    /// When native code leaves because frames were pushed or popped (a
-    /// call or a return), the new last frame continues here in its own
-    /// native code if it has some, without going back to the run loop
-    /// (the native stack does not grow: each activation returns first).
+    /// Calls and returns between functions with native code continue in
+    /// native code (the helpers switch frames); native code leaves when
+    /// the new last frame has none (the native stack does not grow).
     #[inline(never)]
     pub(crate) fn jit_run(&mut self, code: &FunctionCode, entry: usize, pc: usize) -> Ctl {
-        let mut code: *const FunctionCode = code;
-        let mut entry = entry;
-        let mut pc = pc;
-        loop {
+        let code: *const FunctionCode = code;
+        {
             self.jit.entries += 1;
             if self.jit.stats.enabled {
                 self.jit.stats.entries += 1;
@@ -140,34 +137,10 @@ impl Realm {
                 f(&mut ctx, pc as u32)
             };
             match st {
-                ST_RELOAD => {
-                    // Continue with the new last frame in native code when
-                    // it has (or now gets) some.
-                    let Some(f) = self.frames.last() else { return Ctl::Reload };
-                    // SAFETY: the code of the last frame outlives this use.
-                    let next: &FunctionCode = unsafe { f.code.as_ref() };
-                    let npc = f.pc;
-                    let s = &next.jit.s;
-                    let mut e = s.entry.get();
-                    if e == 0 {
-                        if npc != 0 {
-                            return Ctl::Reload;
-                        }
-                        let n = s.counter.get().saturating_add(1);
-                        s.counter.set(n);
-                        if n < self.jit.threshold || s.state.get() != UNTRIED {
-                            return Ctl::Reload;
-                        }
-                        compile(next, &mut self.jit.stats);
-                        e = s.entry.get();
-                        if e == 0 {
-                            return Ctl::Reload;
-                        }
-                    }
-                    code = next;
-                    entry = e;
-                    pc = npc;
-                }
+                // Frames were pushed or popped and the new last frame has
+                // no native code to continue in (the helper's frame switch
+                // tried, counting and compiling): back to the run loop.
+                ST_RELOAD => return Ctl::Reload,
                 ST_DONE => return Ctl::Done,
                 ST_PANIC => match self.jit.panic.take() {
                     Some(p) => std::panic::resume_unwind(p),
@@ -342,42 +315,51 @@ pub(crate) unsafe extern "sysv64" fn h_access(ctx: *mut Ctx, pc: u32) -> usize {
 /// to enter at in `ctx.pc`) to continue without leaving native code, or 0
 /// to go back to the run loop. Counts and compiles like the run loop's
 /// hook.
-#[inline(never)]
+#[inline(always)]
 unsafe fn switch_frame(ctx: *mut Ctx) -> usize {
     let r = &mut *(*ctx).realm;
     let Some(f) = r.frames.last() else { return 0 };
-    let code: &FunctionCode = f.code.as_ref();
+    let (pc, base) = (f.pc, f.base as usize);
+    // SAFETY: the frame's code outlives the frame (see `Frame::code`).
+    let code: &FunctionCode = &*f.code.as_ptr();
     let s = &code.jit.s;
-    let pc = f.pc;
-    let base = f.base as usize;
-    if s.entry.get() == 0 {
+    let mut e = s.entry.get();
+    if e == 0 {
         if pc != 0 {
             return 0;
         }
-        let n = s.counter.get().saturating_add(1);
-        s.counter.set(n);
-        if n < r.jit.threshold || s.state.get() != UNTRIED {
-            return 0;
-        }
-        // Compilation runs no JavaScript; a panic in it is a bug, left to
-        // the run loop (which compiles again and reports it).
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(code, &mut r.jit.stats))).is_err() {
-            return 0;
-        }
-        if s.entry.get() == 0 {
+        e = switch_compile(r, code);
+        if e == 0 {
             return 0;
         }
     }
-    r.jit.entries += 1;
     if r.jit.stats.enabled {
-        r.jit.stats.entries += 1;
+        r.jit.stats.switches += 1;
     }
     let c = &mut *ctx;
     c.slots = r.vstack.as_mut_ptr().add(base);
     c.consts = code.constants.as_ptr();
     c.code = code;
     c.pc = pc as u32;
-    s.entry.get() + super::emit::INNER_ENTRY
+    e + super::emit::INNER_ENTRY
+}
+
+/// [`switch_frame`] to a fresh activation of a function without native
+/// code: count it and compile it past the threshold; its entry or 0.
+#[inline(never)]
+fn switch_compile(r: &mut Realm, code: &FunctionCode) -> usize {
+    let s = &code.jit.s;
+    let n = s.counter.get().saturating_add(1);
+    s.counter.set(n);
+    if n < r.jit.threshold || s.state.get() != UNTRIED {
+        return 0;
+    }
+    // Compilation runs no JavaScript; a panic in it is a bug, left to the
+    // run loop (which compiles again and reports it).
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(code, &mut r.jit.stats))).is_err() {
+        return 0;
+    }
+    s.entry.get()
 }
 
 /// Fast paths of the most frequent accesses, without syncing the frame:
