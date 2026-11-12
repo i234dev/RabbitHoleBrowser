@@ -17,68 +17,100 @@ It can be used three ways:
 
 _Both images were produced by `rabbithole screenshot`: every pixel comes from RabbitHole's own rasterizer._
 
+## Status (v0.1.5)
+
+RabbitHole is young but already runs real, heavy sites: Google (search and
+sign-in), YouTube (playback with sound and AV1/VP9 video), Wikipedia, GitHub,
+Reddit (infinite scroll), BBC, Hacker News, the Svelte playground (WebAssembly
+bundler in a Worker) and Speedometer 3.1 end to end. Everything below is our own
+code unless noted in [Dependencies](#dependencies).
+
+### Conformance and benchmarks
+
+| Suite | Result | Notes |
+|---|---|---|
+| **test262** (ECMAScript) | **80.2 %** (36,682 / 45,761 run) | first full run before fixes; language 84.4 %, built-ins 79.9 %; Temporal, ShadowRealm and other proposals skipped |
+| **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **75.5 %** (98,867 / 130,962 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
+| **WPT CSS reftests** (pixel comparison) | **52.3 %** (10,269 / 19,627) | committed baseline in `crates/engine/tests/wpt-css-baseline.txt`; CSS2 76.6 %, color 79.4 %, flexbox 59.3 % |
+| **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
+| html5lib tree construction | 1,848 / 1,945 | |
+| WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
+| Acid2 | **0 pixels** different from the reference | |
+| Acid3 | 96 / 100 | |
+| Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 | real apps driven with simulated input |
+| Speedometer 3.1 | 0.148 | headless on a loaded 3-core VM; tracked for regressions, not a fair comparison |
+
 ## Features
 
 **Parsing & styling**
 
-- HTML5-style tokenizer and forgiving tree builder (implied tags, void elements,
-  raw text elements, character references, inline SVG/MathML nesting) plus DOM
-  mutation and serialization (`innerHTML`-ready).
-- CSS: full selector support (combinators, attribute operators, `:nth-*`,
-  `:not`/`:is`/`:where`/`:has`, `:hover`/`:focus`/`:checked`, `::before`/`::after`/
-  `::marker`), specificity, `!important`, `@media`, `@import`, `@supports`,
-  `@font-face`, `@keyframes`, custom properties (`var()`), `calc()`/`min()`/`max()`/
-  `clamp()`, and the whole property set used by real sites: flexbox, grid,
-  multi-layer backgrounds with gradients, border radii, box/text shadows,
-  transforms, outlines, `object-fit`, `aspect-ratio`, generated content with
-  counters and quotes, text-overflow, word-break, logical properties, and more.
+- Spec HTML tokenizer and tree builder (WHATWG parsing algorithm, fragments,
+  templates, declarative shadow DOM), XML parser for XHTML/SVG documents,
+  WHATWG URL parser with IDNA, the full Encoding Standard.
+- CSS: selectors level 4 (`:is`/`:where`/`:has`/`:not`, `:host`/`::slotted`),
+  cascade layers (`@layer`), `@media`/`@supports`/`@font-face`/
+  `@keyframes`, custom properties, `calc()`/`min()`/`max()`/`clamp()` mixing
+  percentages and lengths, modern colors (`oklch`, `lab`, `color-mix`,
+  `light-dark`), containment, CSS transitions and animations.
+- Incremental restyle and relayout (only dirty subtrees, including shadow
+  trees), so pages that mutate the DOM constantly stay responsive.
 
 **Layout & painting**
 
-- Block, inline, float, table (auto column algorithm), **flexbox** (multi-line,
-  grow/shrink, alignment, gaps) and **CSS grid** (explicit/implicit tracks,
-  `repeat()`, `minmax()`, areas, auto-placement) layout.
-- Positioning: relative, absolute, fixed, sticky; scroll containers with inner
-  scrolling; stacking contexts and z-index painting order.
-- Own software rasterizer: anti-aliased paths, strokes, gradients, blurred
-  shadows, per-corner radii, transforms, opacity layers, image scaling and
-  tiling; glyphs rasterized from TrueType/OpenType, WOFF and WOFF2 web fonts and
-  the fonts installed on the system (DejaVu is bundled as the fallback).
-- Own SVG renderer (inline `<svg>` and `.svg` images): paths, shapes, text,
-  gradients, transforms, `use`/`symbol`, clip paths, CSS-styled icons.
+- Block, inline (with block-in-inline splitting), floats, CSS 2.1 tables,
+  flexbox, grid, positioning (relative/absolute/fixed/
+  sticky), stacking contexts, vertical writing modes, Unicode bidi.
+- Own software rasterizer: anti-aliased paths and strokes, gradients, shadows,
+  per-corner radii, 2D/3D-flattened transforms, filters and `backdrop-filter`,
+  masks, opacity layers, the top layer for modal dialogs.
+- Text shaping with OpenType features (ligatures, kerning, Arabic joining,
+  right-to-left runs), color emoji (COLR/CPAL, CBDT, sbix), web fonts
+  (TTF/OTF/WOFF/WOFF2), system font discovery.
+- Form controls drawn with Chrome's look and `appearance` support; images in
+  PNG, JPEG, GIF/APNG/WebP (animated) and AVIF, responsive images and lazy
+  loading; own SVG renderer.
 
-**JavaScript**
+**JavaScript and WebAssembly**
 
-- Own JavaScript engine (`crates/js`): ES2022 parser, bytecode compiler, VM
-  with generators and async/await, mark-and-sweep GC, the standard library
-  (Object/Array/String/Number/Math/JSON/Promise/RegExp/Symbol/Reflect/Proxy/
-  Error, Date, Map/Set, typed arrays, Intl basics) and an ECMAScript regular
-  expression engine.
-- Web platform bindings (`crates/script`, in progress): `window`, `document`,
-  DOM traversal and mutation, events, timers, `fetch`/`XMLHttpRequest`,
-  storage, CSSOM, observers.
+- Own JavaScript engine (`crates/js`): lazy parser and compiler, register-based
+  interpreter with hidden classes and inline caches, 8-byte NaN-boxed values,
+  size-class allocator, mark-and-sweep GC, ES2023 standard library,
+  ES modules, own regular expression engine, and a baseline x86-64 JIT with
+  loop OSR (`--jit=on`, off by default while it is tuned).
+- Own WebAssembly engine (`crates/wasm`): validator, interpreter and a
+  baseline x86-64 compiler; the `WebAssembly` JS API in pages and workers.
+- Web platform (`crates/script`): the full WebIDL surface of DOM, HTML, CSSOM,
+  Shadow DOM and custom elements, events (pointer, keyboard, wheel), observers
+  (Mutation/Intersection/Resize), canvas 2D, fetch/XHR with CORS, WebSocket,
+  EventSource, Streams, IndexedDB, Web Crypto, Workers, iframes with
+  same-origin scripting and `postMessage`, history and Navigation API.
+
+**Media**
+
+- Audio output on Windows (WASAPI), Linux (PulseAudio/PipeWire/ALSA loaded at
+  run time) and macOS (CoreAudio); MP3, AAC, FLAC, Vorbis, Opus, WAV.
+- `<audio>`/`<video>` and Media Source Extensions (YouTube plays), AV1 and VP9
+  video in pure Rust, H.264 and HE-AAC through Windows Media Foundation, Web
+  Audio basics.
 
 **Networking & the browser**
 
-- Own URL parser/resolver, HTTP/HTTPS with pure-Rust TLS, keep-alive connection
-  pool, gzip, manual redirects, cookies (RFC 6265, persisted), form submission
-  (GET/POST, urlencoded and multipart), streaming downloads, `file:`, `data:`
-  and `about:` URLs, charset detection.
-- Browser UI drawn entirely by the engine: tabs, address bar with history
-  suggestions, bookmarks, history, downloads, find in page, text selection and
-  clipboard, zoom and HiDPI, form controls (text fields, checkboxes, radios,
-  selects, buttons), context menu, asynchronous loading with progress.
+- Own HTTP/2 (HPACK, flow control) and HTTP/1.1 over rustls, memory + disk HTTP
+  cache, cookies with SameSite/partitioning, CORS, gzip/deflate/brotli/zstd,
+  WebSocket and EventSource clients.
+- Desktop UI drawn by the engine: tabs (pinning, drag, reopen), omnibox with
+  suggestions, history, bookmarks (Netscape HTML import/export), downloads with
+  pause/resume, settings, session restore, private windows, print to PDF,
+  developer tools (console, elements, network), automatic handling of cookie
+  consent dialogs (`about:autocookies`), crash isolation per tab.
 
 ## Limitations (for now)
 
-- JavaScript: ES modules are supported; some rarer syntax (e.g. object rest
-  with computed keys) is not yet, so very large app bundles may partially fail;
-  no `<canvas>` 2D context, no shadow DOM isolation.
-- No complex text shaping (Latin/Cyrillic/Greek etc. render fine; Arabic and
-  Indic scripts do not), color emoji fonts render blank.
-- CSS animations/transitions are parsed but not run; `backdrop-filter`,
-  3D transforms and `mix-blend-mode` are ignored.
-- File uploads in forms are not supported yet.
+- No WebGL/WebGPU; no Temporal API; Intl is partial.
+- The JIT is off by default (it is not yet faster than the interpreter on
+  Speedometer) and disabled on Windows until tested there.
+- Speedometer score is far from Chrome's; JavaScript speed is the main gap.
+- H.264/HE-AAC video needs Windows (Media Foundation).
 
 ## Building
 
@@ -193,18 +225,26 @@ Claude Desktop (or any MCP client), in its `mcpServers` configuration:
 
 A Cargo workspace; each stage of the pipeline is its own crate:
 
-| Crate            | Role                                                                 |
-|------------------|----------------------------------------------------------------------|
-| `crates/dom`     | Arena-based DOM (nodes, elements, attributes, traversal).            |
-| `crates/html`    | HTML tokenizer, entity decoding and tree builder.                    |
-| `crates/css`     | CSS tokenizer, selector parser/matcher, stylesheet and media queries.|
-| `crates/style`   | User-agent stylesheet, value parsing, cascade and computed styles.   |
-| `crates/gfx`     | Canvas + software rasterizer, fonts and glyph cache, image decoding. |
-| `crates/net`     | URL parsing/resolution, fetching (HTTP(S)/file/data/about), charsets.|
-| `crates/layout`  | Box tree, block/inline layout, display list, painting.               |
-| `crates/engine`  | Glue: load → parse → style → layout → paint, hit testing, text dump. |
-| `crates/agent`   | Agent interface: semantic snapshots, refs, actions, read mode, tools. |
-| `app`            | The `rabbithole` binary: GUI (winit + softbuffer), CLI and MCP server.|
+| Crate              | Role |
+|--------------------|------|
+| `crates/dom`       | Arena DOM, mutation log, top layer. |
+| `crates/html`      | Spec HTML tokenizer/tree builder, XML parser, entities. |
+| `crates/css`       | CSS tokenizer, selectors, stylesheets, media queries. |
+| `crates/style`     | UA stylesheet, cascade (with layers), computed values, incremental restyle. |
+| `crates/layout`    | Box tree, block/inline/flex/grid/table layout, display list, incremental relayout. |
+| `crates/gfx`       | Software rasterizer, fonts and shaping, image decoding, canvas 2D backend. |
+| `crates/svg`       | SVG parsing and rendering. |
+| `crates/net`       | URL, HTTP/2 + HTTP/1.1, cache, cookies, CORS, WebSocket, EventSource. |
+| `crates/js`        | JavaScript engine: parser, compiler, interpreter, GC, builtins, regex, JIT front-end. |
+| `crates/jit`       | Shared W^X executable memory and x86-64 assembler (JS and wasm JITs). |
+| `crates/wasm`      | WebAssembly decoder, validator, interpreter and baseline compiler. |
+| `crates/wasm-js`   | The `WebAssembly` JavaScript API. |
+| `crates/script`    | Web platform bindings for the JS engine (DOM, CSSOM, events, workers, …). |
+| `crates/media`     | Audio output, demuxers/decoders, media elements, MSE. |
+| `crates/engine`    | Glue: load, parse, style, layout, paint, scripting, frames, input, pixel diff. |
+| `crates/agent`     | Agent interface: semantic snapshots, refs, actions, read mode, tools. |
+| `crates/wpt`       | Web Platform Tests runner (`rh-wpt`). |
+| `app`              | The `rabbithole` binary: GUI (winit + softbuffer), CLI and MCP server. |
 
 Pipeline: `net` fetches bytes → `html` builds a `dom::Document` → `css` parses
 stylesheets → `style` computes a `ComputedStyle` per element → `layout`
@@ -223,19 +263,24 @@ the document and CSS are ready; images and scripts arrive afterwards.
 `RH_UI_STATS=1` logs UI-thread stalls, Ctrl+Shift+U shows them on screen, and
 `rabbithole ui-bench <URL> [--legacy]` measures them headlessly.
 
-External crates are limited to platform plumbing, not browser functionality:
-`winit` (windows/input), `softbuffer` (presenting pixels), `fontdue` (TrueType
-glyph rasterization), `image` (PNG/JPEG/GIF/WebP decoding), `ureq` + `rustls`
-(HTTP and TLS), `serde_json` (MCP messages).
+## Dependencies
+
+External crates are limited to platform plumbing and codecs, not browser
+functionality: `winit` (windows/input), `softbuffer` (presenting pixels),
+`rustls`/`ring` (TLS), `image`, `zune-jpeg`, `rav1d`/`avif-parse` and
+`moxcms` (image decoding and color management), `rustybuzz` and `fontdue`
+(OpenType shaping and glyph outlines), `symphonia`, `opus-decoder` and
+`rusty_vp9` (audio/video decoding), compression crates (`flate2`,
+`brotli-decompressor`, `ruzstd`), and `serde_json` for MCP messages.
 
 ## Roadmap
 
-- Floats, proper tables and a real flexbox implementation.
-- Absolute/fixed positioning and `z-index` stacking.
-- Background images, gradients, `border-radius` per corner, box shadows.
-- Text selection, find in page, zoom, tabs, bookmarks and history persistence.
-- Cookies and form submission (GET/POST).
-- A JavaScript engine (the long way down the rabbit hole).
+- JavaScript speed: make the JIT a net win and turn it on; cheaper calls,
+  closures and generators.
+- test262 to 90 %+ (Intl later), WPT DOM and CSS pass rates up (grid,
+  writing modes, CSSOM view, `document.write`, speculative parsing).
+- WebGL, Temporal, full Intl.
+- macOS and Linux packaging; JIT enabled on Windows after real-hardware testing.
 
 ## License
 
