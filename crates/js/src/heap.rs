@@ -90,6 +90,13 @@ pub struct NativeFunction {
     /// Built-ins the interpreter computes inline on `CallR` when the
     /// arguments are simple (see `vm::INTRINSIC_*`); 0 for the others.
     pub intrinsic: u8,
+    /// The garbage collector may run while this native calls back into
+    /// JavaScript: it keeps every object it holds across such calls
+    /// reachable from its receiver, its arguments (rooted for the duration
+    /// of the call) or [`crate::Realm::native_root`] slots. Other natives
+    /// hold values the collector cannot see, so collection waits until
+    /// they return.
+    pub gc_safe: bool,
 }
 
 impl std::fmt::Debug for NativeFunction {
@@ -457,6 +464,9 @@ thread_local! {
     /// Debug aid (RH_DEBUG_GC): what each freed slot held.
     static FREED_INFO: std::cell::RefCell<std::collections::HashMap<u32, String>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
+
+/// Bytes of one heap slot (an object's inline part).
+pub const SLOT_BYTES: usize = std::mem::size_of::<Option<Object>>();
 
 /// Mark-and-sweep garbage collected arena.
 pub struct Heap {

@@ -46,6 +46,8 @@ pub struct StackMark {
     join: usize,
     job_roots: usize,
     native_depth: usize,
+    gc_block: usize,
+    native_roots: usize,
     callee: Option<ObjectId>,
     terminating: bool,
 }
@@ -189,6 +191,7 @@ impl Realm {
                     let frame = self.prepare_frame(id, this, args, Value::Undefined, false)?;
                     self.push_frame(frame, true)?;
                 }
+                self.entry_tick();
                 match self.run()? {
                     Exit::Return(v) => Ok(v),
                     _ => unreachable!("non-generator frame suspended"),
@@ -231,6 +234,14 @@ impl Realm {
             return self.range_error("Maximum call stack size exceeded");
         }
         self.native_depth += 1;
+        let gc_safe = matches!(self.heap.try_get(id).map(|o| &o.kind), Some(ObjectKind::Native(n)) if n.gc_safe);
+        let roots = self.native_roots.len();
+        if gc_safe {
+            self.native_roots.push(this.clone());
+            self.native_roots.extend_from_slice(args);
+        } else {
+            self.gc_block += 1;
+        }
         let saved = self.current_callee.replace(id);
         if !construct {
             self.new_target_stack.push(Value::Undefined);
@@ -252,6 +263,11 @@ impl Realm {
             self.new_target_stack.pop();
         }
         self.current_callee = saved;
+        if gc_safe {
+            self.native_roots.truncate(roots);
+        } else {
+            self.gc_block -= 1;
+        }
         self.native_depth -= 1;
         r
     }
@@ -283,6 +299,8 @@ impl Realm {
             join: self.join_stack.len(),
             job_roots: self.job_roots.len(),
             native_depth: self.native_depth,
+            gc_block: self.gc_block,
+            native_roots: self.native_roots.len(),
             callee: self.current_callee,
             terminating: self.terminating,
         }
@@ -314,6 +332,8 @@ impl Realm {
         self.join_stack.truncate(mark.join);
         self.job_roots.truncate(mark.job_roots);
         self.native_depth = mark.native_depth;
+        self.gc_block = mark.gc_block;
+        self.native_roots.truncate(mark.native_roots);
         self.current_callee = mark.callee;
         self.terminating = mark.terminating;
     }
@@ -1152,6 +1172,7 @@ impl Realm {
             set_state(self, GeneratorState::Completed, None);
             return Err(e);
         }
+        self.entry_tick();
         let result = if mode == ResumeMode::Throw {
             match self.unwind(value) {
                 Ok(()) => self.run(),
@@ -1340,12 +1361,25 @@ impl Realm {
         }
     }
 
+    /// Calls from Rust (callbacks of built-ins, host events) count as calls
+    /// for the collector: a callback without loops or calls of its own,
+    /// run many times by a native, still reaches safe points. Called once
+    /// the callee's frame holds its arguments.
+    #[inline]
+    fn entry_tick(&mut self) {
+        self.tick = self.tick.wrapping_sub(1);
+        if self.tick == 0 {
+            self.tick = self.tick_interval();
+            self.maybe_gc();
+        }
+    }
+
     /// GC / watchdog safe point, reached every few hundred backward jumps
     /// and calls.
     #[inline(never)]
     fn safepoint(&mut self) -> JsResult<()> {
         #[cfg(feature = "jit")]
-        if self.jit.gc_stress && self.gc_enabled && self.native_depth == 0 {
+        if self.jit.gc_stress && self.gc_enabled && self.gc_block == 0 {
             self.gc();
         }
         self.maybe_gc();
@@ -3800,9 +3834,7 @@ impl Realm {
                     let mut items = Vec::new();
                     if !next.is_empty() {
                         let it = self.vstack[n - 2].clone();
-                        while let Some(v) = self.iterator_step(&it, &next)? {
-                            items.push(v);
-                        }
+                        items = self.collect_iterator(&it, &next)?;
                         self.vstack[n - 1] = Value::Empty;
                     }
                     let a = self.new_array(items);

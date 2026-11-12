@@ -139,6 +139,10 @@ impl std::fmt::Debug for Root {
 
 pub type ConsoleSink = Box<dyn FnMut(&str, String)>;
 
+/// Smallest growth of the thread's memory that triggers a collection (see
+/// [`Realm::maybe_gc`]).
+pub const GC_MIN_BYTES: isize = 4 << 20;
+
 pub struct Realm {
     pub heap: Heap,
     pub intrinsics: Intrinsics,
@@ -155,9 +159,19 @@ pub struct Realm {
     pub template_cache: HashMap<(usize, u32), ObjectId>,
     /// Depth of native calls currently on the Rust stack.
     pub native_depth: usize,
+    /// Natives on the Rust stack that are not `gc_safe`: no collection
+    /// while there are any (see [`NativeFunction::gc_safe`]).
+    pub gc_block: usize,
+    /// Receivers, arguments and [`Realm::native_root`] slots of the
+    /// `gc_safe` natives running.
+    pub native_roots: Vec<Value>,
     /// `new.target` for the innermost native constructor call.
     pub new_target_stack: Vec<Value>,
     pub gc_threshold: usize,
+    /// [`crate::alloc::thread_bytes_in_use`] after the last collection, and
+    /// how much it may grow before the next one.
+    gc_bytes_base: isize,
+    pub gc_bytes_budget: isize,
     /// When set, running JavaScript past this instant is interrupted with an
     /// uncatchable "Script execution timed out" error (watchdog).
     pub deadline: Option<std::time::Instant>,
@@ -329,7 +343,7 @@ impl Realm {
         let object_proto = heap.alloc(Object::new(None, ObjectKind::Ordinary));
         let function_proto = heap.alloc(Object::new(
             Some(object_proto),
-            ObjectKind::Native(Box::new(NativeFunction { func: |_, _, _| Ok(Value::Undefined), name: JsStr::empty(), data: None, captures: vec![], is_constructor: false, intrinsic: 0 })),
+            ObjectKind::Native(Box::new(NativeFunction { func: |_, _, _| Ok(Value::Undefined), name: JsStr::empty(), data: None, captures: vec![], is_constructor: false, intrinsic: 0, gc_safe: false })),
         ));
         let mk = |heap: &mut Heap, proto: ObjectId| heap.alloc(Object::new(Some(proto), ObjectKind::Ordinary));
         let array_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::Array { elements: vec![], length: 0 }));
@@ -385,8 +399,12 @@ impl Realm {
             console_sink: None,
             template_cache: HashMap::new(),
             native_depth: 0,
+            gc_block: 0,
+            native_roots: Vec::new(),
             new_target_stack: Vec::new(),
             gc_threshold: 200_000,
+            gc_bytes_base: 0,
+            gc_bytes_budget: GC_MIN_BYTES,
             deadline: None,
             watch_origin: None,
             task_budget: None,
@@ -414,6 +432,14 @@ impl Realm {
         };
         crate::builtins::register_builtins(&mut realm);
         realm.mark_intrinsics();
+        let (ap, gp) = (realm.intrinsics.array_proto, realm.intrinsics.generator_proto);
+        for name in ["forEach", "map", "filter", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "reduce", "reduceRight"] {
+            realm.mark_gc_safe(ap, name);
+        }
+        for name in ["next", "return", "throw"] {
+            realm.mark_gc_safe(gp, name);
+        }
+        realm.gc_bytes_base = crate::alloc::thread_bytes_in_use();
         realm
     }
 
@@ -486,7 +512,7 @@ impl Realm {
     /// (kept alive by the GC).
     pub fn new_native_function_full(&mut self, name: &str, arity: u32, func: NativeFn, data: Option<Rc<dyn Any>>, captures: Vec<Value>, is_constructor: bool) -> ObjectId {
         let proto = self.intrinsics.function_proto;
-        let id = self.alloc(Object::new(Some(proto), ObjectKind::Native(Box::new(NativeFunction { func, name: JsStr::new(name), data, captures, is_constructor, intrinsic: 0 }))));
+        let id = self.alloc(Object::new(Some(proto), ObjectKind::Native(Box::new(NativeFunction { func, name: JsStr::new(name), data, captures, is_constructor, intrinsic: 0, gc_safe: false }))));
         let o = self.heap.get_mut(id);
         o.props.insert(names::length(), Property::data(Value::Number(arity as f64), CONFIGURABLE));
         o.props.insert(names::name(), Property::data(Value::str(name), CONFIGURABLE));
@@ -672,6 +698,30 @@ impl Realm {
 
     // ------------------------------------------------------------- roots
 
+    /// A GC root slot holding `v` for the rest of the running `gc_safe`
+    /// native (see [`NativeFunction::gc_safe`]); update it with
+    /// [`Realm::set_native_root`].
+    pub fn native_root(&mut self, v: Value) -> usize {
+        self.native_roots.push(v);
+        self.native_roots.len() - 1
+    }
+
+    pub fn set_native_root(&mut self, slot: usize, v: Value) {
+        if let Some(s) = self.native_roots.get_mut(slot) {
+            *s = v;
+        }
+    }
+
+    /// Let the collector run while the built-in `holder[name]` calls back
+    /// into JavaScript (it must follow the rules of
+    /// [`NativeFunction::gc_safe`]).
+    pub(crate) fn mark_gc_safe(&mut self, holder: ObjectId, name: &str) {
+        let Some(V::Object(f)) = self.obj(holder).props.get(&PropertyKey::str(name)).map(|p| p.value.clone()).as_ref().map(Value::v) else { return };
+        if let ObjectKind::Native(n) = &mut self.obj_mut(f).kind {
+            n.gc_safe = true;
+        }
+    }
+
     pub fn root(&mut self, value: Value) -> Root {
         let mut t = self.roots.borrow_mut();
         t.next += 1;
@@ -739,6 +789,7 @@ impl Realm {
         }
         tmp.extend(self.roots.borrow().values.values().cloned());
         tmp.extend(self.extra_roots.iter().cloned());
+        tmp.extend(self.native_roots.iter().filter(|v| v.is_object()).cloned());
         for roots in &self.job_roots {
             tmp.extend(roots.iter().cloned());
         }
@@ -827,12 +878,34 @@ impl Realm {
         self.terminating
     }
 
+    /// Collect when enough objects were allocated since the last
+    /// collection, or when this thread's memory grew enough (objects are
+    /// not all the same size: a closure with its scope, an error with its
+    /// stack string or a long string cost far more than a plain object, so
+    /// counting objects alone let garbage reach hundreds of megabytes).
     pub(crate) fn maybe_gc(&mut self) {
-        if self.gc_enabled && self.native_depth == 0 && self.heap.allocated_since_gc > self.gc_threshold && std::env::var_os("RH_NO_GC").is_none() {
-            let freed = self.gc();
-            // Adapt threshold to the live heap size.
-            self.gc_threshold = (self.heap.live_count.max(50_000)).max(freed / 2);
+        if !self.gc_enabled || self.gc_block != 0 {
+            return;
         }
+        let objects = self.heap.allocated_since_gc > self.gc_threshold;
+        // A new object reuses a free heap slot without allocating, so the
+        // slots are counted separately.
+        let grown = crate::alloc::thread_bytes_in_use() - self.gc_bytes_base + (self.heap.allocated_since_gc * crate::heap::SLOT_BYTES) as isize;
+        if !objects && grown <= self.gc_bytes_budget {
+            return;
+        }
+        if std::env::var_os("RH_NO_GC").is_some() {
+            return;
+        }
+        let freed = self.gc();
+        // Adapt the thresholds to the live heap size.
+        self.gc_threshold = (self.heap.live_count.max(50_000)).max(freed / 2);
+        let in_use = crate::alloc::thread_bytes_in_use();
+        if std::env::var_os("RH_GC_TRACE").is_some() {
+            eprintln!("[gc] objects={} freed={freed} live={} heap_slots={} in_use_before={} in_use_after={in_use}", objects, self.heap.live_count, self.heap.len(), self.gc_bytes_base + self.gc_bytes_budget, );
+        }
+        self.gc_bytes_base = in_use;
+        self.gc_bytes_budget = (in_use / 2).max(GC_MIN_BYTES);
     }
 
     // --------------------------------------------------------- evaluation

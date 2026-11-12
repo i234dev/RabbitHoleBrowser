@@ -139,10 +139,35 @@ static POOL: PoolLock = PoolLock {
 struct Cache {
     enabled: bool,
     lists: [*mut u8; NCLASS],
+    /// Bytes allocated minus bytes freed by this thread while enabled
+    /// (see [`thread_bytes_in_use`]).
+    net: isize,
 }
 
 thread_local! {
-    static CACHE: UnsafeCell<Cache> = const { UnsafeCell::new(Cache { enabled: false, lists: [null_mut(); NCLASS] }) };
+    static CACHE: UnsafeCell<Cache> = const { UnsafeCell::new(Cache { enabled: false, lists: [null_mut(); NCLASS], net: 0 }) };
+}
+
+/// Bytes this thread allocated minus the bytes it freed through [`RhAlloc`]
+/// since [`enable_for_this_thread`] (0 when `RhAlloc` is not the global
+/// allocator). Only differences between two readings mean anything: the
+/// garbage collector triggers on how much it grew since the last
+/// collection, so garbage made of big objects (closures, errors with
+/// stacks, strings) is collected before it piles up.
+pub fn thread_bytes_in_use() -> isize {
+    // SAFETY: the cache is only touched by its own thread.
+    CACHE.try_with(|c| unsafe { (*c.get()).net }).unwrap_or(0)
+}
+
+#[inline]
+fn account(delta: isize) {
+    let _ = CACHE.try_with(|c| {
+        // SAFETY: the cache is only touched by its own thread.
+        let c = unsafe { &mut *c.get() };
+        if c.enabled {
+            c.net += delta;
+        }
+    });
 }
 
 /// Serve this thread's small allocations from the size-class allocator
@@ -232,6 +257,7 @@ unsafe impl GlobalAlloc for RhAlloc {
                 }
                 let p = c.lists[k];
                 c.lists[k] = next_of(p);
+                c.net += layout.size() as isize;
                 p
             });
             if let Ok(p) = r {
@@ -240,6 +266,7 @@ unsafe impl GlobalAlloc for RhAlloc {
                 }
             }
         }
+        account(layout.size() as isize);
         System.alloc(layout)
     }
 
@@ -254,6 +281,7 @@ unsafe impl GlobalAlloc for RhAlloc {
                 }
                 set_next(p, c.lists[k]);
                 c.lists[k] = p;
+                c.net -= layout.size() as isize;
                 true
             });
             if done != Ok(true) {
@@ -261,6 +289,7 @@ unsafe impl GlobalAlloc for RhAlloc {
             }
             return;
         }
+        account(-(layout.size() as isize));
         System.dealloc(p, layout)
     }
 
@@ -268,6 +297,7 @@ unsafe impl GlobalAlloc for RhAlloc {
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if layout.size() <= MAX_SMALL && layout.align() <= 16 && is_ours(p) {
             if new_size <= MAX_SMALL && class_of(new_size) == class_of(layout.size()) {
+                account(new_size as isize - layout.size() as isize);
                 return p;
             }
             let q = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
@@ -278,6 +308,7 @@ unsafe impl GlobalAlloc for RhAlloc {
             return q;
         }
         // A system block stays one (`dealloc` tells them apart by address).
+        account(new_size as isize - layout.size() as isize);
         System.realloc(p, layout, new_size)
     }
 }

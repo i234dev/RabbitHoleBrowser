@@ -146,24 +146,32 @@ impl JsStr {
     }
     /// Decimal string of an array index (small ones are cached).
     pub fn from_index(i: u32) -> JsStr {
+        /// Slots of the direct-mapped cache of larger indices: bounded
+        /// memory (a cache of every index below 65536 held ~5 MB of
+        /// strings forever once a script had converted them all).
+        const LARGE_SLOTS: usize = 4096;
         thread_local! {
             static SMALL: Vec<JsStr> = (0..1024u32).map(|i| JsStr::new(&i.to_string())).collect();
-            // Larger indices are cached lazily (bounded).
-            static LARGE: std::cell::RefCell<Vec<Option<JsStr>>> = const { std::cell::RefCell::new(Vec::new()) };
+            static LARGE: std::cell::RefCell<Vec<(u32, Option<JsStr>)>> = const { std::cell::RefCell::new(Vec::new()) };
         }
         if i < 1024 {
             return SMALL.with(|t| t[i as usize].clone());
         }
-        if i < (1 << 16) {
-            return LARGE.with(|t| {
-                let mut t = t.borrow_mut();
-                if t.len() <= i as usize {
-                    t.resize(i as usize + 1, None);
+        LARGE.with(|t| {
+            let mut t = t.borrow_mut();
+            if t.is_empty() {
+                t.resize(LARGE_SLOTS, (0, None));
+            }
+            let e = &mut t[i as usize % LARGE_SLOTS];
+            match &e.1 {
+                Some(s) if e.0 == i => s.clone(),
+                _ => {
+                    let s = JsStr::from_units(Self::index_units(i));
+                    *e = (i, Some(s.clone()));
+                    s
                 }
-                t[i as usize].get_or_insert_with(|| JsStr::from_units(Self::index_units(i))).clone()
-            });
-        }
-        JsStr::from_units(Self::index_units(i))
+            }
+        })
     }
     fn index_units(mut i: u32) -> Vec<u16> {
         let mut buf = [0u16; 10];

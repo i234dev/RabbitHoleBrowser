@@ -353,7 +353,9 @@ fn values(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
 }
 
 fn every(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    // GC-safe: the object is rooted.
     let (id, len) = this_arr(realm, &this)?;
+    realm.native_root(Value::Object(id));
     let f = callback(realm, args, "every")?;
     let t = arg(args, 1);
     for i in 0..len {
@@ -368,7 +370,9 @@ fn every(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn some(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    // GC-safe: the object is rooted.
     let (id, len) = this_arr(realm, &this)?;
+    realm.native_root(Value::Object(id));
     let f = callback(realm, args, "some")?;
     let t = arg(args, 1);
     for i in 0..len {
@@ -394,14 +398,19 @@ fn fill(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn filter(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    // GC-safe: the object, the result and the element are rooted.
     let (id, len) = this_arr(realm, &this)?;
+    realm.native_root(Value::Object(id));
     let f = callback(realm, args, "filter")?;
     let t = arg(args, 1);
     let out = species_create(realm, id, 0)?;
+    realm.native_root(Value::Object(out));
+    let held = realm.native_root(Value::Undefined);
     let mut n = 0;
     for i in 0..len {
         if has_i(realm, id, i)? {
             let v = get_i(realm, id, i)?;
+            realm.set_native_root(held, v.clone());
             if realm.call(f.clone(), t.clone(), &[v.clone(), Value::Number(i as f64), Value::Object(id)])?.truthy() {
                 push_result(realm, out, n, v)?;
                 n += 1;
@@ -413,12 +422,16 @@ fn filter(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn find_impl(realm: &mut Realm, this: Value, args: &[Value], from_end: bool, want_index: bool) -> JsResult<Value> {
+    // GC-safe: the object and the element are rooted.
     let (id, len) = this_arr(realm, &this)?;
+    realm.native_root(Value::Object(id));
     let f = callback(realm, args, "find")?;
     let t = arg(args, 1);
+    let held = realm.native_root(Value::Undefined);
     let mut i: isize = if from_end { len as isize - 1 } else { 0 };
     while i >= 0 && (i as usize) < len {
         let v = get_i(realm, id, i as usize)?;
+        realm.set_native_root(held, v.clone());
         if realm.call(f.clone(), t.clone(), &[v.clone(), Value::Number(i as f64), Value::Object(id)])?.truthy() {
             return Ok(if want_index { Value::Number(i as f64) } else { v });
         }
@@ -477,7 +490,9 @@ fn flat_map(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn for_each(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    // GC-safe (see `NativeFunction::gc_safe`): the object is rooted.
     let (id, len) = this_arr(realm, &this)?;
+    realm.native_root(Value::Object(id));
     let f = callback(realm, args, "forEach")?;
     let t = arg(args, 1);
     for i in 0..len {
@@ -610,10 +625,13 @@ fn to_locale_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult
 }
 
 fn map(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    // GC-safe: the object and the result are rooted.
     let (id, len) = this_arr(realm, &this)?;
+    realm.native_root(Value::Object(id));
     let f = callback(realm, args, "map")?;
     let t = arg(args, 1);
     let out = species_create(realm, id, len)?;
+    realm.native_root(Value::Object(out));
     for i in 0..len {
         if has_i(realm, id, i)? {
             let v = get_i(realm, id, i)?;
@@ -667,7 +685,9 @@ fn push(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 }
 
 fn reduce_impl(realm: &mut Realm, this: Value, args: &[Value], right: bool) -> JsResult<Value> {
+    // GC-safe: the object and the accumulator are rooted.
     let (id, len) = this_arr(realm, &this)?;
+    realm.native_root(Value::Object(id));
     let f = callback(realm, args, if right { "reduceRight" } else { "reduce" })?;
     let mut indices: Vec<usize> = (0..len).collect();
     if right {
@@ -689,10 +709,12 @@ fn reduce_impl(realm: &mut Realm, this: Value, args: &[Value], right: bool) -> J
             None => return realm.type_error("Reduce of empty array with no initial value"),
         }
     };
+    let held = realm.native_root(acc.clone());
     for i in it {
         if has_i(realm, id, i)? {
             let v = get_i(realm, id, i)?;
             acc = realm.call(f.clone(), Value::Undefined, &[acc, v, Value::Number(i as f64), Value::Object(id)])?;
+            realm.set_native_root(held, acc.clone());
         }
     }
     Ok(acc)

@@ -1217,11 +1217,21 @@ impl Realm {
             }
         }
         let (it, next) = self.get_iterator(v)?;
-        let mut out = Vec::new();
-        while let Some(x) = self.iterator_step(&it, &next)? {
-            out.push(x);
-        }
-        Ok(out)
+        self.collect_iterator(&it, &next)
+    }
+
+    /// The remaining values of an iterator. They are GC roots while the
+    /// iterator runs (its `next` may be JavaScript that collects).
+    pub fn collect_iterator(&mut self, it: &Value, next: &Value) -> JsResult<Vec<Value>> {
+        let mark = self.native_roots.len();
+        let r = (|| {
+            while let Some(x) = self.iterator_step(it, next)? {
+                self.native_roots.push(x);
+            }
+            Ok(())
+        })();
+        let out = self.native_roots.split_off(mark);
+        r.map(|_| out)
     }
 
     pub(crate) fn array_iterator_pristine(&self) -> bool {
