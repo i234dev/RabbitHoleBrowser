@@ -412,24 +412,35 @@ fn bigint_value_of(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<
     Ok(realm.new_bigint_value(v))
 }
 
+/// ToBigInt(v).
+pub fn to_bigint_value(realm: &mut Realm, v: Value) -> JsResult<BigInt> {
+    let p = realm.to_primitive(v, crate::interop::Hint::Number)?;
+    match p.v() {
+        V::BigInt(b) => Ok(b.clone()),
+        V::Bool(b) => Ok(BigInt::from_i128(b as i128)),
+        V::String(s) => match BigInt::parse(s.to_rust_string().trim()) {
+            Some(b) => Ok(b),
+            None => realm.new_error("SyntaxError", &format!("Cannot convert {} to a BigInt", s)).pipe_err(),
+        },
+        V::Number(_) => realm.type_error("Cannot convert a Number to a BigInt"),
+        _ => realm.type_error("Cannot convert value to a BigInt"),
+    }
+}
+
 fn as_int_n(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let bits = realm.to_index(arg(args, 0))?;
-    let a = arg(args, 1);
-    let v = match a.v() {
-        V::BigInt(b) => b,
-        _ => return realm.type_error("Cannot convert value to a BigInt"),
-    };
-    let r = v.as_int_n(bits as u64);
-    Ok(realm.new_bigint_value(r))
+    let v = to_bigint_value(realm, arg(args, 1))?;
+    match v.checked_as_int_n(bits as u64) {
+        Some(r) => Ok(realm.new_bigint_value(r)),
+        None => realm.range_error("Maximum BigInt size exceeded"),
+    }
 }
 
 fn as_uint_n(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let bits = realm.to_index(arg(args, 0))?;
-    let a = arg(args, 1);
-    let v = match a.v() {
-        V::BigInt(b) => b,
-        _ => return realm.type_error("Cannot convert value to a BigInt"),
-    };
-    let r = v.as_uint_n(bits as u64);
-    Ok(realm.new_bigint_value(r))
+    let v = to_bigint_value(realm, arg(args, 1))?;
+    match v.checked_as_uint_n(bits as u64) {
+        Some(r) => Ok(realm.new_bigint_value(r)),
+        None => realm.range_error("Maximum BigInt size exceeded"),
+    }
 }

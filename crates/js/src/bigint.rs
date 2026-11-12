@@ -530,6 +530,37 @@ impl BigInt {
     }
 
     /// `BigInt.asUintN(bits, x)`.
+    /// Bits of the magnitude.
+    pub fn bit_length(&self) -> u64 {
+        match self.mag.iter().rposition(|&l| l != 0) {
+            Some(i) => i as u64 * 32 + (32 - self.mag[i].leading_zeros()) as u64,
+            None => 0,
+        }
+    }
+
+    /// `BigInt.asUintN(bits, x)`, or None when the result would be too
+    /// large to represent (a negative value with a huge width).
+    pub fn checked_as_uint_n(&self, bits: u64) -> Option<BigInt> {
+        if !self.neg && bits >= self.bit_length() {
+            return Some(self.clone());
+        }
+        if bits > (1 << 30) {
+            return None;
+        }
+        Some(self.as_uint_n(bits))
+    }
+
+    /// `BigInt.asIntN(bits, x)` without building huge intermediates.
+    pub fn checked_as_int_n(&self, bits: u64) -> Option<BigInt> {
+        if bits > self.bit_length() + 1 {
+            return Some(self.clone());
+        }
+        if bits > (1 << 30) {
+            return None;
+        }
+        Some(self.as_int_n(bits))
+    }
+
     pub fn as_uint_n(&self, bits: u64) -> BigInt {
         if bits == 0 {
             return BigInt::zero();
