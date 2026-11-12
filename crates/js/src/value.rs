@@ -695,6 +695,18 @@ impl Value {
         f64::from_bits(self.0)
     }
 
+    /// A value from its raw bits, without touching reference counts.
+    ///
+    /// # Safety
+    /// `bits` must be the representation of a live value; the result
+    /// shares (does not own) any reference count of it unless the caller
+    /// transfers ownership.
+    #[inline(always)]
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) unsafe fn from_raw_bits(bits: u64) -> Value {
+        Value(bits)
+    }
+
     /// The string of a value known to be one.
     ///
     /// # Safety

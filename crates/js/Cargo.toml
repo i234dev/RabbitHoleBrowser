@@ -7,4 +7,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Baseline x86-64 compiler (docs/jit-design.md); enabled at run time with
+# RABBITHOLE_JIT=on (or the browser's --jit=on).
+jit = ["dep:rabbithole-jit"]
+
 [dependencies]
+rabbithole-jit = { path = "../jit", optional = true }
+
+[[example]]
+name = "jitdiff"
+required-features = ["jit"]

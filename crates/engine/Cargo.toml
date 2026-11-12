@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Baseline JavaScript compiler (off at run time unless enabled).
+jit = ["rabbithole-script/jit"]
+
 [dependencies]
 rabbithole-dom.workspace = true
 rabbithole-html.workspace = true

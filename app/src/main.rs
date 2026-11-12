@@ -68,6 +68,11 @@ COMMON OPTIONS (screenshot, text, links, dump, js):
     --wait <MS>           Let timers run this long after load (default 1000 with JS)
     --verbose             Print the page's console output to stderr
 
+JAVASCRIPT ENGINE (any mode):
+    --jit=on|off          Baseline native-code compiler for hot functions (default off;
+                          also RABBITHOLE_JIT=on)
+    --jit-threshold=N     Hotness needed to compile (default 1000; 0 compiles everything)
+
 The profile (cookies, history, bookmarks, session) lives in the platform
 config directory under `rabbithole/` (override with RABBITHOLE_PROFILE).
 ";
@@ -79,6 +84,19 @@ static ALLOC: rabbithole_js::alloc::RhAlloc = rabbithole_js::alloc::RhAlloc;
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // JavaScript engine switches, read by every realm (set before any
+    // thread starts).
+    args.retain(|a| {
+        if let Some(v) = a.strip_prefix("--jit=") {
+            std::env::set_var("RABBITHOLE_JIT", v);
+            false
+        } else if let Some(v) = a.strip_prefix("--jit-threshold=") {
+            std::env::set_var("RABBITHOLE_JIT_THRESHOLD", v);
+            false
+        } else {
+            true
+        }
+    });
     // Headless subcommands use the standard browser identity (like the
     // GUI); `--bot` opts into the RabbitHoleBot identity + robots.txt.
     const HEADLESS: &[&str] = &["screenshot", "text", "links", "dump", "cookies", "js", "click"];

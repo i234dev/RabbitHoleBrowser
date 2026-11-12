@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-jit"
+description = "RabbitHole browser engine: shared native-code infrastructure for the baseline compilers (W^X executable memory, x86-64 assembler with labels and listings)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

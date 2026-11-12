@@ -11,6 +11,12 @@ authors.workspace = true
 name = "rabbithole"
 path = "src/main.rs"
 
+[features]
+# The baseline JavaScript compiler is built in, and off at run time
+# unless --jit=on / RABBITHOLE_JIT=on.
+default = ["jit"]
+jit = ["rabbithole-js/jit", "rabbithole-engine/jit", "rabbithole-agent/jit"]
+
 [dependencies]
 rabbithole-engine.workspace = true
 rabbithole-gfx.workspace = true

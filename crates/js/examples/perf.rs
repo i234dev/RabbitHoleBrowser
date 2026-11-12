@@ -52,6 +52,14 @@ const CASES: &[(&str, &str)] = &[
     ("try_catch", "var n=0; for (var i=0;i<100000;i++){ try { if (i%10==0) throw i; n++; } catch(e){ n+=2; } } n"),
     ("arguments", "function f(){ return arguments.length+arguments[0]; } var s=0; for (var i=0;i<200000;i++) s+=f(i,2); s"),
     ("switch", "var s=0; for (var i=0;i<500000;i++){ switch(i&3){ case 0: s+=1; break; case 1: s+=2; break; default: s+=3; } } s"),
+    // Hot functions: the loop lives in a function called many times (what
+    // a baseline compiler speeds up without loop OSR).
+    ("hot_numeric", "function f(n){ var s=0; for (var i=0;i<n;i++){ s=(s+i*3)%1000003; } return s; } var t=0; for (var k=0;k<200;k++) t+=f(10000); t"),
+    ("hot_7ops", "function f(n){ var a=1,b=2,c=0; for (var i=0;i<n;i++){ a=a+i; b=b*1.000001; c=c+a-b; a=a/2; b=b-1; c=c*0.5; } return Math.round(c); } var t=0; for (var k=0;k<100;k++) t+=f(20000); t"),
+    ("hot_bits", "function f(n){ var h=0; for (var i=0;i<n;i++){ h=((h<<5)-h+i)|0; h^=h>>>13; } return h; } var t=0; for (var k=0;k<100;k++) t^=f(20000); t"),
+    ("hot_array", "function f(a){ var s=0; for (var i=0;i<a.length;i++) s+=a[i]; return s; } var a=[]; for (var i=0;i<10000;i++) a.push(i); var t=0; for (var k=0;k<100;k++) t+=f(a); t"),
+    ("hot_props", "function g(o){ return o.x+o.y; } function f(o,n){ var s=0; for (var i=0;i<n;i++) s+=g(o); return s; } var o={x:1,y:2}, t=0; for (var k=0;k<100;k++) t+=f(o,5000); t"),
+    ("hot_branchy", "function f(n){ var c=0; for (var i=0;i<n;i++){ if (i%3===0) c+=2; else if (i%5===1) c-=1; else c^=i; } return c; } var t=0; for (var k=0;k<100;k++) t+=f(10000); t"),
 ];
 
 fn main() {

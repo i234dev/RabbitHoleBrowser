@@ -191,6 +191,9 @@ pub struct Realm {
     pub(crate) tick: u32,
     /// How the innermost run loop ended (see `Realm::run_inner`).
     pub(crate) loop_end: Option<crate::interop::JsResult<crate::vm::Exit>>,
+    /// Baseline compiler state.
+    #[cfg(feature = "jit")]
+    pub(crate) jit: crate::jit::State,
     /// Value slots of all active frames (see `vm::Frame`).
     pub vstack: Vec<Value>,
     /// Reusable buffer for call arguments taken off the operand stack.
@@ -398,8 +401,10 @@ impl Realm {
             current_callee: None,
             join_stack: Vec::new(),
             modules: Default::default(),
-            tick: crate::vm::TICK_INTERVAL,
+            tick: if cfg!(feature = "jit") && std::env::var_os("RH_GC_STRESS").is_some() { 1 } else { crate::vm::TICK_INTERVAL },
             loop_end: None,
+            #[cfg(feature = "jit")]
+            jit: Default::default(),
             vstack: Vec::with_capacity(1 << 14),
             arg_buf: Vec::new(),
             mega: Vec::new(),

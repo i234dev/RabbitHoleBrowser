@@ -1341,6 +1341,10 @@ impl Realm {
     /// and calls.
     #[inline(never)]
     fn safepoint(&mut self) -> JsResult<()> {
+        #[cfg(feature = "jit")]
+        if self.jit.gc_stress && self.gc_enabled && self.native_depth == 0 {
+            self.gc();
+        }
         self.maybe_gc();
         if crate::sampler::js::enabled() && crate::sampler::js::take_pending() {
             let frames: Vec<String> = self
@@ -1388,7 +1392,17 @@ impl Realm {
     /// `#[inline(never)]` functions returning a [`Flow`], so the hot values
     /// stay in callee-saved registers instead of being spilled.
     fn run_inner(&mut self) -> JsResult<Exit> {
-        self.run_loop();
+        // With native code (or its statistics) on, the loop instance with
+        // the compiler hooks; otherwise one identical to a build without
+        // the compiler.
+        #[cfg(feature = "jit")]
+        if self.jit.active {
+            self.run_loop::<true>();
+        } else {
+            self.run_loop::<false>();
+        }
+        #[cfg(not(feature = "jit"))]
+        self.run_loop::<false>();
         // SAFETY: `run_loop` only returns after setting `loop_end`.
         unsafe { self.loop_end.take().unwrap_unchecked() }
     }
@@ -1398,7 +1412,7 @@ impl Realm {
     /// a hidden pointer that would hold a register for the whole loop.
     #[allow(unused_unsafe, unused_assignments)]
     #[inline(never)]
-    fn run_loop(&mut self) {
+    fn run_loop<const JIT: bool>(&mut self) {
         'reload: loop {
             // The frame's code, borrowed independently of `self` (no
             // reference count traffic per call / return).
@@ -1411,6 +1425,14 @@ impl Realm {
                 debug_assert!(self.vstack.len() >= f.base as usize + f.code().frame_size());
                 (f.code.as_ref(), f.pc, self.vstack.as_mut_ptr().add(f.base as usize))
             };
+            #[cfg(feature = "jit")]
+            if JIT {
+                match self.jit_reload(code, pc) {
+                    Ctl::Next => {}
+                    Ctl::Reload => continue 'reload,
+                    Ctl::Done => return,
+                }
+            }
             let ops: &[Op] = &code.ops;
             let consts: &[Value] = &code.constants;
             macro_rules! sl {
@@ -1451,11 +1473,16 @@ impl Realm {
                     }
                 }};
             }
+            // `osr`: a backward jump (the frame may continue in native
+            // code); calls tick before running, past their own pc.
             macro_rules! tick {
                 () => {
+                    tick!(false)
+                };
+                ($osr:expr) => {
                     self.tick = self.tick.wrapping_sub(1);
                     if self.tick == 0 {
-                        out!(self.tick_slow(pc));
+                        out!(self.tick_slow(pc, $osr));
                     }
                 };
             }
@@ -1464,7 +1491,7 @@ impl Realm {
                     let t = $t as usize;
                     if t < pc {
                         pc = t;
-                        tick!();
+                        tick!(true);
                     } else {
                         pc = t;
                     }
@@ -1983,6 +2010,141 @@ impl Realm {
         }
     }
 
+    /// One property / global / element / scope / `this` instruction for
+    /// native code: the run loop's fast paths (the same inline caches),
+    /// then the out-of-line paths. `pc` is the instruction's index.
+    #[cfg(feature = "jit")]
+    #[inline(never)]
+    pub(crate) fn step_access(&mut self, code: &FunctionCode, base: *mut Value, pc: usize) -> Ctl {
+        macro_rules! sl {
+            ($i:expr) => {
+                // SAFETY: validated slot operands of the running frame.
+                unsafe { &mut *base.add($i as usize) }
+            };
+        }
+        macro_rules! key {
+            ($ic:expr) => {
+                // SAFETY: property and global caches have a string key.
+                unsafe { code.constants.get_unchecked(*code.ic_keys.get_unchecked($ic as usize) as usize).as_js_str_unchecked() }
+            };
+        }
+        let next = pc + 1;
+        // SAFETY: native code runs the last frame.
+        let f = unsafe { self.frames.last_mut().unwrap_unchecked() };
+        f.pc = next;
+        match code.ops[pc] {
+            Op::GetPropR(d, o, ic) => {
+                let rec = code.ics[ic as usize].get();
+                let recv = &*sl!(o);
+                let hit = if rec.kind == crate::ic::IC_LENGTH {
+                    match recv.v() {
+                        V::String(s) => Some(Value::Number(s.len() as f64)),
+                        V::Object(id) => match self.heap.try_get(id).map(|o| &o.kind) {
+                            Some(ObjectKind::Array { length, .. }) => Some(Value::Number(*length as f64)),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                } else {
+                    match self.ic_get(&rec, recv) {
+                        Some(p) if p.flags & ACCESSOR == 0 => Some(p.value.clone()),
+                        _ => None,
+                    }
+                };
+                match hit {
+                    Some(v) => {
+                        *sl!(d) = v;
+                        Ctl::Next
+                    }
+                    None => self.get_prop_miss(next, d, o, ic),
+                }
+            }
+            Op::SetPropR(o, v, ic) => {
+                let rec = code.ics[ic as usize].get();
+                let val = &*sl!(v);
+                if rec.kind != 0 && rec.kind != crate::ic::IC_SETTER && !val.is_empty() {
+                    let val = val.clone();
+                    match self.ic_set(&rec, sl!(o), key!(ic), val) {
+                        Ok(()) => return Ctl::Next,
+                        Err(v) => drop(v),
+                    }
+                }
+                self.set_prop_miss(next, o, v, ic)
+            }
+            Op::DefinePropR(o, v, ic) => {
+                let rec = code.ics[ic as usize].get();
+                let val = &*sl!(v);
+                if rec.kind == crate::ic::IC_ADD && !val.is_empty() {
+                    let val = val.clone();
+                    match self.ic_set(&rec, sl!(o), key!(ic), val) {
+                        Ok(()) => return Ctl::Next,
+                        Err(v) => drop(v),
+                    }
+                }
+                self.exec_at(next)
+            }
+            Op::GetGlobalR(d, ic) => match self.ic_get_global(&code.ics[ic as usize], key!(ic)) {
+                Some(v) => {
+                    let v = v.clone();
+                    *sl!(d) = v;
+                    Ctl::Next
+                }
+                None => self.exec_at(next),
+            },
+            Op::SetGlobalR(s, ic) => {
+                let val = &*sl!(s);
+                if !val.is_empty() {
+                    let val = val.clone();
+                    match self.ic_set_global(&code.ics[ic as usize], key!(ic), val) {
+                        Ok(()) => return Ctl::Next,
+                        Err(v) => drop(v),
+                    }
+                }
+                self.exec_at(next)
+            }
+            Op::GetElemR(d, o, kk) => match self.get_elem_fast(sl!(o), sl!(kk)) {
+                Some(v) => {
+                    *sl!(d) = v;
+                    Ctl::Next
+                }
+                None => self.exec_at(next),
+            },
+            Op::SetElemR(o, kk, v) => {
+                let val = sl!(v).clone();
+                if !val.is_empty() {
+                    match self.set_elem_fast(sl!(o), sl!(kk), val) {
+                        Ok(()) => return Ctl::Next,
+                        Err(v) => drop(v),
+                    }
+                }
+                self.exec_at(next)
+            }
+            Op::GetLocalR(d, dp, s) => {
+                let scope = f.scope;
+                let v = self.slot_get(scope, dp, s);
+                *sl!(d) = if v.is_empty() { Value::Undefined } else { v };
+                Ctl::Next
+            }
+            Op::SetLocalR(v, dp, s) => {
+                let val = sl!(v).undef_if_empty();
+                let scope = f.scope;
+                self.slot_set(scope, dp, s, val);
+                Ctl::Next
+            }
+            Op::LoadThis(d) => {
+                let v = f.this.undef_if_empty();
+                *sl!(d) = v;
+                Ctl::Next
+            }
+            Op::StoreCompletionR(s) => {
+                let v = sl!(s).clone();
+                f.extra_mut().completion = v;
+                Ctl::Next
+            }
+            _ => self.exec_at(next),
+        }
+    }
+
     /// Convert the result of an out-of-line step for the run loop, keeping
     /// an exit or error in `loop_end`.
     #[inline(always)]
@@ -2003,24 +2165,84 @@ impl Realm {
 
     /// A safe point reached by the run loop's tick counter.
     #[inline(never)]
-    fn tick_slow(&mut self, pc: usize) -> Ctl {
-        let r = self.tick_slow_impl(pc);
+    fn tick_slow(&mut self, pc: usize, osr: bool) -> Ctl {
+        let r = self.tick_slow_impl(pc, osr);
         self.ctl(r)
     }
 
     #[inline(always)]
-    fn tick_slow_impl(&mut self, pc: usize) -> JsResult<Flow> {
-        self.tick = TICK_INTERVAL;
+    fn tick_slow_impl(&mut self, pc: usize, osr: bool) -> JsResult<Flow> {
+        self.tick = self.tick_interval();
         // SAFETY: called by the run loop, which has a frame.
         unsafe { self.frames.last_mut().unwrap_unchecked() }.pc = pc;
         self.safepoint()?;
+        #[cfg(feature = "jit")]
+        if self.jit.active && self.jit_osr(osr) {
+            // Loop OSR: continue the frame in its native code from here
+            // (every value is in the frame: nothing to reconstruct).
+            return Ok(Flow::Reload);
+        }
+        #[cfg(not(feature = "jit"))]
+        let _ = osr;
         Ok(Flow::Next)
+    }
+
+    /// Ticks between safe points (1 under `RH_GC_STRESS`).
+    #[inline(always)]
+    pub(crate) fn tick_interval(&self) -> u32 {
+        #[cfg(feature = "jit")]
+        if self.jit.gc_stress {
+            return 1;
+        }
+        TICK_INTERVAL
+    }
+
+    /// A safe point reached by native code at a backward jump or call;
+    /// `fpc` is the frame pc to sync.
+    #[cfg(feature = "jit")]
+    pub(crate) fn tick_slow_jit(&mut self, fpc: usize) -> Ctl {
+        self.tick = self.tick_interval();
+        // SAFETY: native code runs the last frame.
+        unsafe { self.frames.last_mut().unwrap_unchecked() }.pc = fpc;
+        if self.jit.stats.enabled {
+            self.jit.stats.samples += 1;
+            self.jit.stats.hot_samples += 1;
+            self.jit.stats.jit_samples += 1;
+        }
+        let r = self.safepoint().map(|_| Flow::Next);
+        self.ctl(r)
+    }
+
+    /// Hotness bookkeeping at an interpreter safe-point tick; true when
+    /// the frame should continue in native code (a backward jump, `osr`,
+    /// into a function that has or now gets native code).
+    #[cfg(feature = "jit")]
+    #[inline(never)]
+    fn jit_osr(&mut self, osr: bool) -> bool {
+        // SAFETY: the run loop has a frame; its code outlives this call.
+        let code: &FunctionCode = unsafe { self.frames.last().unwrap_unchecked().code.as_ref() };
+        let s = &code.jit.s;
+        let n = s.counter.get().saturating_add(crate::jit::LOOP_WEIGHT);
+        s.counter.set(n);
+        if self.jit.stats.enabled {
+            self.jit.stats.samples += 1;
+            if n >= self.jit.threshold {
+                self.jit.stats.hot_samples += 1;
+            }
+        }
+        if !self.jit.on || !osr || !crate::jit::LOOP_OSR {
+            return false;
+        }
+        if s.entry.get() == 0 && n >= self.jit.threshold {
+            crate::jit::compile(code, &mut self.jit.stats);
+        }
+        s.entry.get() != 0
     }
 
     /// Out-of-line execution of the instruction before `pc` in the last
     /// frame (see [`Realm::exec_op`]).
     #[inline(never)]
-    fn exec_at(&mut self, pc: usize) -> Ctl {
+    pub(crate) fn exec_at(&mut self, pc: usize) -> Ctl {
         let r = self.exec_at_impl(pc);
         self.ctl(r)
     }
@@ -2039,7 +2261,7 @@ impl Realm {
 
     /// Out-of-line execution of `op` in place of the instruction before `pc`.
     #[inline(never)]
-    fn exec_with(&mut self, pc: usize, op: Op) -> Ctl {
+    pub(crate) fn exec_with(&mut self, pc: usize, op: Op) -> Ctl {
         let r = self.exec_with_impl(pc, op);
         self.ctl(r)
     }
@@ -2064,7 +2286,7 @@ impl Realm {
     /// `GetPropR` after an inline-cache miss: the megamorphic cache,
     /// cached accessors, then the full instruction.
     #[inline(never)]
-    fn get_prop_miss(&mut self, pc: usize, d: u16, o: u16, ic: u32) -> Ctl {
+    pub(crate) fn get_prop_miss(&mut self, pc: usize, d: u16, o: u16, ic: u32) -> Ctl {
         let r = self.get_prop_miss_impl(pc, d, o, ic);
         self.ctl(r)
     }
@@ -2115,7 +2337,7 @@ impl Realm {
     /// `SetPropR` after an inline-cache miss: setters, the megamorphic
     /// cache, then the full instruction.
     #[inline(never)]
-    fn set_prop_miss(&mut self, pc: usize, o: u16, v: u16, ic: u32) -> Ctl {
+    pub(crate) fn set_prop_miss(&mut self, pc: usize, o: u16, v: u16, ic: u32) -> Ctl {
         let r = self.set_prop_miss_impl(pc, o, v, ic);
         self.ctl(r)
     }
@@ -2168,7 +2390,7 @@ impl Realm {
     /// targets and natives without leaving the loop's frame model; the
     /// general case through [`Realm::exec_op`].
     #[inline(always)]
-    fn call_r(&mut self, pc: usize, b: u16, argc: u16, cic: u16) -> Ctl {
+    pub(crate) fn call_r(&mut self, pc: usize, b: u16, argc: u16, cic: u16) -> Ctl {
         let r = self.call_r_impl(pc, b, argc, cic);
         self.ctl(r)
     }
@@ -2225,7 +2447,7 @@ impl Realm {
 
     /// `NewR`: plain function constructors, else the general path.
     #[inline(never)]
-    fn new_r(&mut self, pc: usize, b: u16, argc: u16) -> Ctl {
+    pub(crate) fn new_r(&mut self, pc: usize, b: u16, argc: u16) -> Ctl {
         let r = self.new_r_impl(pc, b, argc);
         self.ctl(r)
     }
@@ -2246,7 +2468,7 @@ impl Realm {
     /// `ReturnR` of value `v` (already taken out of its slot): pops the
     /// frame and hands the value to the caller's slot or out of the loop.
     #[inline(always)]
-    fn return_r(&mut self, v: Value) -> Ctl {
+    pub(crate) fn return_r(&mut self, v: Value) -> Ctl {
         let r = self.return_r_impl(v);
         self.ctl(r)
     }

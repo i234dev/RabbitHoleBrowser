@@ -34,6 +34,8 @@ pub mod compiler;
 pub mod heap;
 pub mod ic;
 pub mod interop;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod lexer;
 pub mod modules;
 pub mod panics;
@@ -53,6 +55,8 @@ mod tests;
 mod tests_vm;
 #[cfg(test)]
 mod tests_panic;
+#[cfg(all(test, feature = "jit"))]
+mod tests_jit;
 
 pub use heap::{NativeFn, ObjectKind, Property, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN, WRITABLE};
 pub use interop::JsResult;

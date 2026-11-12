@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Baseline JavaScript compiler (off at run time unless enabled).
+jit = ["rabbithole-engine/jit"]
+
 [dependencies]
 rabbithole-engine.workspace = true
 serde_json = "1"

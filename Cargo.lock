@@ -1624,8 +1624,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rabbithole-jit"
+version = "0.1.0"
+
+[[package]]
 name = "rabbithole-js"
 version = "0.1.0"
+dependencies = [
+ "rabbithole-jit",
+]
 
 [[package]]
 name = "rabbithole-layout"

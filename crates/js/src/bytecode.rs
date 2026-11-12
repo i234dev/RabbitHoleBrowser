@@ -510,6 +510,22 @@ pub struct FunctionCode {
     pub lazy: Option<Box<crate::compiler::LazyCode>>,
     /// The compiled code of a lazy function, once compiled.
     pub compiled: std::cell::OnceCell<Rc<FunctionCode>>,
+    /// Baseline compiler state (hotness counter, native code).
+    pub jit: JitSlot,
+}
+
+/// Per-function state of the baseline compiler (empty without the `jit`
+/// feature).
+#[derive(Default)]
+pub struct JitSlot {
+    #[cfg(feature = "jit")]
+    pub(crate) s: crate::jit::Slot,
+}
+
+impl std::fmt::Debug for JitSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JitSlot")
+    }
 }
 
 /// `call_flags`: a plain function — not a generator, async function or

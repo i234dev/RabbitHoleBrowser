@@ -731,6 +731,7 @@ impl Compiler {
             module: self.module,
             lazy: Some(Box::new(lazy)),
             compiled: std::cell::OnceCell::new(),
+            jit: Default::default(),
         };
         let parent = self.fs();
         parent.functions.push(Rc::new(code));
@@ -3593,6 +3594,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         call_ics: (0..ncalls).map(|_| std::cell::Cell::new(crate::bytecode::CallIc::default())).collect(),
         lazy: None,
         compiled: std::cell::OnceCell::new(),
+        jit: Default::default(),
         ic_keys: ic_keys.into(),
         depths: tr.depths,
         max_depth: tr.max_depth,
