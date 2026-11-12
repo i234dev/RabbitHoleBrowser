@@ -23,6 +23,9 @@ use crate::gui::pages;
 
 /// Overscan above and below the viewport, in viewport heights.
 const OVERSCAN: f32 = 0.5;
+/// Load-time scripts run in slices of about this long; the frame is
+/// painted and input handled between slices.
+const SCRIPT_SLICE: Duration = Duration::from_millis(50);
 /// Pointer travel (device px) that turns a press into a drag.
 const DRAG_THRESHOLD: f32 = 4.0;
 const LINE_SCROLL: f32 = 40.0;
@@ -107,6 +110,10 @@ struct Worker {
     pending: Option<(Url, bool)>,
     /// The committed page waits for its script sources.
     awaiting_scripts: bool,
+    /// Load-time scripts are running in slices (since when).
+    running_scripts: Option<Instant>,
+    /// The last turn skipped running timers to paint first.
+    tick_deferred: bool,
     /// Load phase after the commit (None: finished).
     load_phase: Option<&'static str>,
     view: ViewSize,
@@ -161,6 +168,8 @@ impl Worker {
             generation: 0,
             pending: None,
             awaiting_scripts: false,
+            running_scripts: None,
+            tick_deferred: false,
             load_phase: None,
             view,
             active: false,
@@ -219,6 +228,14 @@ impl Worker {
             while let Ok(m) = rx.try_recv() {
                 batch.push(m);
             }
+            let t0 = Instant::now();
+            let cpu0 = if debug_content() { rabbithole_js::realm::thread_cpu_time() } else { None };
+            if self.tick_deferred {
+                // Timers held back last turn (a frame went out first) run
+                // before anything that arrived since.
+                self.tick_deferred = false;
+                self.tick_if_due(true);
+            }
             for m in coalesce(batch) {
                 match m {
                     Inbox::Ui(msg) => self.handle(msg),
@@ -228,14 +245,46 @@ impl Worker {
                     return;
                 }
             }
+            let t1 = Instant::now();
             self.flush_scroll_event();
-            self.tick_if_due(timed_out);
+            let t2 = Instant::now();
+            if self.running_scripts.is_some() && t1 - t0 < SCRIPT_SLICE {
+                self.continue_scripts();
+            }
+            // After a long stretch of event handlers or scripts, paint and
+            // send a frame first: due timers run at the start of the next
+            // turn, before the messages that arrived meanwhile.
+            if t0.elapsed() < SCRIPT_SLICE {
+                self.tick_if_due(timed_out);
+            } else {
+                self.tick_deferred = true;
+            }
+            let t3 = Instant::now();
             self.flush();
+            if debug_content() && t0.elapsed() > Duration::from_millis(100) {
+                let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
+                let cpu = match (cpu0, rabbithole_js::realm::thread_cpu_time()) {
+                    (Some(a), Some(b)) => (b.saturating_sub(a)).as_secs_f64() * 1000.0,
+                    _ => -1.0,
+                };
+                eprintln!(
+                    "[content] busy {:.0} ms (cpu {:.0} ms): messages {:.0}, scroll event {:.0}, tick {:.0}, flush/paint {:.0}",
+                    ms(t0, Instant::now()),
+                    cpu,
+                    ms(t0, t1),
+                    ms(t1, t2),
+                    ms(t2, t3),
+                    ms(t3, Instant::now())
+                );
+            }
         }
     }
 
     /// How long to wait for messages before running timers.
     fn next_wakeup(&self) -> Option<Duration> {
+        if self.running_scripts.is_some() || self.tick_deferred {
+            return Some(Duration::ZERO);
+        }
         let mut wait: Option<f64> = None;
         if let Some(due) = self.page.as_ref().and_then(|p| p.next_script_due()) {
             let now = self.engine.start.elapsed().as_secs_f64() * 1000.0;
@@ -531,6 +580,7 @@ impl Worker {
         self.generation += 1;
         self.pending = Some((request.url.clone(), push_history));
         self.awaiting_scripts = false;
+        self.running_scripts = None;
         self.load_phase = None;
         let job = LoadJob {
             loader: self.engine.loader.clone(),
@@ -584,23 +634,41 @@ impl Worker {
                 self.send(FromContent::Loading(Some("Running scripts")));
                 let Some(page) = self.page.as_mut() else { return };
                 page.scripts = scripts;
-                let t = Instant::now();
-                self.engine.finish_page_load(page);
-                debug_time("scripts", t);
-                let out = self.take_load_outcome();
-                self.dirty = true;
-                self.update_title();
-                let images = self.page.as_ref().map(|p| p.images_in_flight() > 0).unwrap_or(false);
-                self.load_phase = if images { Some("Loading images") } else { None };
-                self.send(FromContent::Loading(self.load_phase));
-                if self.scroll == (0.0, 0.0) {
-                    if let Some(f) = self.page.as_ref().and_then(|p| p.url.fragment.clone()) {
-                        self.scroll_to_fragment(&f);
-                    }
-                }
-                self.apply_outcome(out);
+                self.engine.start_page_load_scripts(page);
+                self.running_scripts = Some(Instant::now());
+                self.continue_scripts();
             }
         }
+    }
+
+    /// Run the next slice of load-time scripts; once they are all done,
+    /// finish the load (outcome, title, image phase, fragment).
+    fn continue_scripts(&mut self) {
+        let Some(started) = self.running_scripts else { return };
+        let Some(page) = self.page.as_mut() else {
+            self.running_scripts = None;
+            return;
+        };
+        if !self.engine.continue_page_load(page, Some(SCRIPT_SLICE)) {
+            // Paint what the scripts built so far and handle input before
+            // the next slice.
+            self.dirty = true;
+            return;
+        }
+        self.running_scripts = None;
+        debug_time("scripts", started);
+        let out = self.take_load_outcome();
+        self.dirty = true;
+        self.update_title();
+        let images = self.page.as_ref().map(|p| p.images_in_flight() > 0).unwrap_or(false);
+        self.load_phase = if images { Some("Loading images") } else { None };
+        self.send(FromContent::Loading(self.load_phase));
+        if self.scroll == (0.0, 0.0) {
+            if let Some(f) = self.page.as_ref().and_then(|p| p.url.fragment.clone()) {
+                self.scroll_to_fragment(&f);
+            }
+        }
+        self.apply_outcome(out);
     }
 
     /// Show generated HTML (internal and error pages).
@@ -627,6 +695,7 @@ impl Worker {
     /// A new document replaces the old one.
     fn install(&mut self, page: Page, push_history: bool) {
         self.selection = None;
+        self.running_scripts = None;
         self.edit = None;
         self.focus = None;
         self.press = None;
@@ -1627,10 +1696,14 @@ impl Worker {
     }
 }
 
+fn debug_content() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RH_DEBUG_CONTENT").is_some())
+}
+
 /// `RH_DEBUG_CONTENT=1`: log how long content-thread steps take.
 fn debug_time(what: &str, since: Instant) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("RH_DEBUG_CONTENT").is_some()) {
+    if debug_content() {
         eprintln!("[content {:?}] {what}: {:.1} ms", std::thread::current().name().unwrap_or("?"), since.elapsed().as_secs_f64() * 1000.0);
     }
 }

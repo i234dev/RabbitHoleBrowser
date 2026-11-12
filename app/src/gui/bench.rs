@@ -57,7 +57,7 @@ fn threaded_run(url: Url, duration: Duration) -> Result<(), String> {
         next_download_id: Arc::new(AtomicU64::new(1)),
         view,
         system_fonts: true,
-        console_to_stderr: false,
+        console_to_stderr: std::env::var_os("RH_BENCH_CONSOLE").is_some(),
     };
     let start = Instant::now();
     let handle = ContentHandle::spawn(1, 1, config, sink);
@@ -72,6 +72,8 @@ fn threaded_run(url: Url, duration: Duration) -> Result<(), String> {
     let mut worst = Duration::ZERO;
     let mut busy_max = Duration::ZERO;
     let mut stalls_over_16 = 0u32;
+    // Content-thread busy periods: (start stamp, longest duration seen).
+    let mut periods: Vec<(u64, Duration)> = Vec::new();
     while start.elapsed() < duration {
         let tick = Instant::now();
         while let Ok((t, msg)) = rx.try_recv() {
@@ -104,8 +106,12 @@ fn threaded_run(url: Url, duration: Duration) -> Result<(), String> {
         if spent > Duration::from_millis(16) {
             stalls_over_16 += 1;
         }
-        if let Some(b) = handle.busy_for() {
+        if let (Some(since), Some(b)) = (handle.busy_since(), handle.busy_for()) {
             busy_max = busy_max.max(b);
+            match periods.last_mut() {
+                Some((s, d)) if *s == since => *d = (*d).max(b),
+                _ => periods.push((since, b)),
+            }
         }
         iterations += 1;
         std::thread::sleep(Duration::from_millis(16).saturating_sub(spent));
@@ -118,6 +124,12 @@ fn threaded_run(url: Url, duration: Duration) -> Result<(), String> {
     println!("frames received: {frames}, UI iterations: {iterations}, iterations over 16 ms: {stalls_over_16}");
     println!("worst UI-thread stall: {:.1} ms", worst.as_secs_f64() * 1000.0);
     println!("longest content-thread task seen (off the UI thread): {:.0} ms", busy_max.as_secs_f64() * 1000.0);
+    let over = |ms: u64| periods.iter().filter(|(_, d)| *d >= Duration::from_millis(ms)).count();
+    println!("content-thread busy periods >= 100 ms: {}, >= 500 ms: {}, >= 1 s: {}, >= 2.5 s: {}", over(100), over(500), over(1000), over(2500));
+    let mut top: Vec<Duration> = periods.iter().map(|(_, d)| *d).collect();
+    top.sort_by(|a, b| b.cmp(a));
+    let top: Vec<String> = top.iter().take(8).map(|d| format!("{:.0}", d.as_secs_f64() * 1000.0)).collect();
+    println!("longest busy periods (ms): {}", top.join(" "));
     Ok(())
 }
 
