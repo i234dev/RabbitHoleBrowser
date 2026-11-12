@@ -891,7 +891,16 @@ impl Document {
                 out.push('>');
             }
             NodeData::Text(t) => {
-                out.push_str(&t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\u{a0}', "&nbsp;"));
+                // Text of raw-text elements is serialized as is, also when
+                // the element itself is not part of the output (`innerHTML`
+                // of a `<script type=text/template>`, which templating
+                // libraries read back).
+                let raw = self.nodes[id].parent.and_then(|p| self.tag(p)).map(|tag| matches!(tag, "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext")).unwrap_or(false);
+                if raw {
+                    out.push_str(t);
+                } else {
+                    out.push_str(&t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\u{a0}', "&nbsp;"));
+                }
             }
             NodeData::Comment(c) => {
                 out.push_str("<!--");
@@ -1126,6 +1135,25 @@ impl Iterator for Descendants<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text of a raw-text element is serialized as is by both
+    /// `outerHTML` and `innerHTML` (Backbone / Underscore templates live in
+    /// `<script type="text/template">` and are read with `innerHTML`).
+    #[test]
+    fn raw_text_serialization() {
+        let mut d = Document::new();
+        let s = d.create_element("script", vec![("type".into(), "text/template".into())]);
+        d.append_child(Document::ROOT, s);
+        let t = d.create_text("<li class=\"a\"><%- title %> & co</li>");
+        d.append_child(s, t);
+        assert_eq!(d.serialize(s, false), "<li class=\"a\"><%- title %> & co</li>");
+        assert_eq!(d.serialize(s, true), "<script type=\"text/template\"><li class=\"a\"><%- title %> & co</li></script>");
+        let p = d.create_element("p", vec![]);
+        d.append_child(Document::ROOT, p);
+        let t = d.create_text("a<b & c");
+        d.append_child(p, t);
+        assert_eq!(d.serialize(p, false), "a&lt;b &amp; c");
+    }
 
     #[test]
     fn tree_ops() {
