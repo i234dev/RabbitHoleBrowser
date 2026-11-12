@@ -1356,3 +1356,32 @@ fn input_default_value_is_the_value_attribute() {
     );
     assert_eq!(out, vec!["typed def d e e"]);
 }
+
+/// `contentEditable` is settable (CodeMirror assigns it in strict mode) and
+/// `isContentEditable` inherits; removing every attribute through
+/// `attributes[0]` / `removeAttributeNode` works also after an attribute
+/// was removed and set again (CodeMirror's clearAttributes).
+#[test]
+fn content_editable_and_attribute_node_removal() {
+    let out = logs_of(
+        "<html><body><div id=d contenteditable><span id=s></span></div></body></html>",
+        r#"
+        'use strict';
+        const d = document.getElementById('d'), s = document.getElementById('s');
+        const a = [d.contentEditable, s.contentEditable, s.isContentEditable];
+        d.contentEditable = 'false';
+        a.push(d.getAttribute('contenteditable'), s.isContentEditable);
+        d.contentEditable = 'inherit';
+        a.push(d.hasAttribute('contenteditable'));
+        try { d.contentEditable = 'bogus'; } catch (e) { a.push(e.name); }
+        const el = document.createElement('div');
+        el.setAttribute('class', 'x'); el.setAttribute('title', 't');
+        while (el.attributes.length) el.removeAttributeNode(el.attributes[0]);
+        el.setAttribute('class', 'y');
+        while (el.attributes.length) el.removeAttributeNode(el.attributes[0]);
+        a.push(el.attributes.length);
+        console.log(a.join(' '));
+        "#,
+    );
+    assert_eq!(out, vec!["true inherit true false false false SyntaxError 0"]);
+}

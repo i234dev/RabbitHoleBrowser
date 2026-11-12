@@ -1182,14 +1182,51 @@ fn e_tab_index_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     Ok(Value::Undefined)
 }
 
-fn e_content_editable_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let n = this_node(realm, &this, "contentEditable")?;
-    Ok(Value::str(&get_attribute(n, "contenteditable").unwrap_or_else(|| "inherit".into())))
+/// The `contenteditable` state of an attribute value: Some(true / false)
+/// for a valid keyword, None for `inherit` (missing or invalid).
+fn content_editable_state(v: Option<&str>) -> Option<(bool, &'static str)> {
+    match v?.to_ascii_lowercase().as_str() {
+        "" | "true" => Some((true, "true")),
+        "plaintext-only" => Some((true, "plaintext-only")),
+        "false" => Some((false, "false")),
+        _ => None,
+    }
 }
 
+fn e_content_editable_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "contentEditable")?;
+    let v = get_attribute(n, "contenteditable");
+    Ok(Value::str(content_editable_state(v.as_deref()).map(|(_, k)| k).unwrap_or("inherit")))
+}
+
+/// `contentEditable = "true" | "false" | "plaintext-only" | "inherit"`
+/// (ASCII case-insensitive; anything else is a SyntaxError).
+fn e_content_editable_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "contentEditable")?;
+    let v = arg_str(realm, args, 0)?.to_ascii_lowercase();
+    match v.as_str() {
+        "inherit" => set_attribute(n, "contenteditable", None),
+        "true" | "false" | "plaintext-only" => set_attribute(n, "contenteditable", Some(&v)),
+        _ => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to set the 'contentEditable' property on 'HTMLElement': The value provided ('{v}') is not one of 'true', 'false', 'plaintext-only', or 'inherit'."))),
+    }
+    Ok(Value::Undefined)
+}
+
+/// Editable when the nearest ancestor-or-self with a valid
+/// `contenteditable` value says so.
 fn e_is_content_editable(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "isContentEditable")?;
-    Ok(Value::Bool(get_attribute(n, "contenteditable").map(|v| v != "false").unwrap_or(false)))
+    let editable = with_doc(n.doc, |doc| {
+        let mut cur = Some(n.node);
+        while let Some(c) = cur {
+            if let Some((on, _)) = content_editable_state(doc.attr(c, "contenteditable")) {
+                return on;
+            }
+            cur = doc.parent(c);
+        }
+        false
+    });
+    Ok(Value::Bool(editable))
 }
 
 fn e_animate(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -2074,7 +2111,7 @@ pub(crate) fn install(realm: &mut Realm) {
     hacc(realm, "style", e_style, Some(e_style_set));
     hacc(realm, "hidden", e_hidden_get, Some(e_hidden_set));
     hacc(realm, "tabIndex", e_tab_index_get, Some(e_tab_index_set));
-    hacc(realm, "contentEditable", e_content_editable_get, None);
+    hacc(realm, "contentEditable", e_content_editable_get, Some(e_content_editable_set));
     hacc(realm, "isContentEditable", e_is_content_editable, None);
     hacc(realm, "offsetWidth", e_offset_width, None);
     hacc(realm, "offsetHeight", e_offset_height, None);

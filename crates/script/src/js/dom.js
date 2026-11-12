@@ -71,7 +71,9 @@
     let m = attrCache.get(el);
     if (!m) { m = new Map(); attrCache.set(el, m); }
     let a = m.get(name);
-    if (!a) { a = Object.create(AttrC.prototype); hidden(a, S, { el, name, value: null }); m.set(name, a); }
+    // An Attr removed earlier (removeAttributeNode / removeAttribute) is
+    // detached: an attribute set again later is a new Attr node.
+    if (!a || (a[S] && a[S].el !== el)) { a = Object.create(AttrC.prototype); hidden(a, S, { el, name, value: null }); m.set(name, a); }
     return a;
   }
   const attrState = (a) => {
