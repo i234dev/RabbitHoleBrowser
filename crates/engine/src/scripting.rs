@@ -274,6 +274,9 @@ impl HostEnv for EngineEnv<'_> {
         });
         Some(rx)
     }
+    fn media_fetcher(&mut self) -> Option<rabbithole_net::Fetcher> {
+        Some(self.engine.loader.fetcher.clone())
+    }
     fn open_websocket(&mut self, url: Url, protocols: Vec<String>) -> Option<Result<rabbithole_net::WebSocket, String>> {
         Some(rabbithole_net::WebSocket::connect(&self.engine.loader.fetcher, &url, &protocols, Some(&self.page.url), None))
     }

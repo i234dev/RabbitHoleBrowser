@@ -302,6 +302,7 @@ impl SubtreeClone for Document {
 /// Record a childList mutation for observers watching `parent`.
 pub(crate) fn record_child_list(parent: NodeRef, added: Vec<NodeRef>, removed: Vec<NodeRef>) {
     crate::shadow::on_child_list(parent, &added, &removed);
+    crate::media::note_child_list(parent, &added, &removed);
     let st = state();
     let mut st = st.borrow_mut();
     if st.observers.is_empty() {

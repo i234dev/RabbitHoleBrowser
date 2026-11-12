@@ -1644,6 +1644,7 @@ version = "0.1.0"
 dependencies = [
  "libloading",
  "opus-decoder",
+ "rav1d",
  "symphonia",
  "windows-sys 0.59.0",
 ]
@@ -1669,6 +1670,7 @@ dependencies = [
  "rabbithole-gfx",
  "rabbithole-html",
  "rabbithole-js",
+ "rabbithole-media",
  "rabbithole-net",
  "rabbithole-style",
  "rabbithole-wasm-js",

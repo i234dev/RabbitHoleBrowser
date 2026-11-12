@@ -778,6 +778,7 @@ pub(crate) fn run_pending_reactions(realm: &mut Realm) {
     if has_pending_reactions() {
         drain_ce_reactions(realm);
     }
+    crate::media::run_pending(realm);
 }
 
 /// Run pending work now (entry points / after mutating natives).

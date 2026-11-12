@@ -363,6 +363,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "inflate", 2, native_inflate);
     realm.define_method(o, "deflate", 2, native_deflate);
     crate::sockets::install(realm, o);
+    crate::media::install(realm, o);
     crate::canvas2d::install(realm, o);
     realm.define_method(o, "setScriptFontFaces", 1, set_script_font_faces);
     realm.define_method(o, "setCanvasImage", 4, set_canvas_image);

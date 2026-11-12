@@ -202,6 +202,23 @@ pub struct Document {
     /// script (HTML "dirty checkedness"); the `checked` attribute stays the
     /// default.
     pub checkedness: HashMap<NodeId, bool>,
+    /// Playback state of `<audio>` / `<video>` elements for their native
+    /// controls (set by the media bindings, read when painting).
+    pub media_ui: HashMap<NodeId, MediaUi>,
+}
+
+/// What the native media controls show.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MediaUi {
+    pub paused: bool,
+    /// Seconds.
+    pub time: f64,
+    /// Seconds (NaN unknown, infinite for streams).
+    pub duration: f64,
+    pub muted: bool,
+    pub volume: f64,
+    /// End of the buffered range containing the position (seconds).
+    pub buffered_end: f64,
 }
 
 impl Default for Document {
@@ -242,6 +259,7 @@ impl Document {
             live_iterators: Vec::new(),
             control_values: HashMap::new(),
             checkedness: HashMap::new(),
+            media_ui: HashMap::new(),
         }
     }
 

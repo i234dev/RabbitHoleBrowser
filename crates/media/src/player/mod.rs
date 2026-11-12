@@ -10,7 +10,9 @@ use crate::decode::{Decoder, Pcm};
 use crate::demux::TrackInfo;
 use crate::mse::MseHandle;
 use crate::source::{ByteFetcher, RangedSource};
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::video::{Av1Decoder, VideoFrame};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use symphonia::core::codecs::audio::AudioCodecParameters;
@@ -109,6 +111,27 @@ struct Shared {
     sink: AudioSink,
     stop: AtomicBool,
     source: Mutex<Option<RangedSource>>,
+    /// Bumped by every seek (the video thread flushes on change).
+    seek_gen: AtomicU64,
+    /// The picture to show now.
+    video: Mutex<VideoOut>,
+}
+
+#[derive(Default)]
+struct VideoOut {
+    frame: Option<VideoFrame>,
+    serial: u64,
+    shown: u64,
+    dropped: u64,
+}
+
+/// A coded video frame on its way to the decoder thread.
+struct VPacket {
+    pts: f64,
+    dts: f64,
+    key: bool,
+    data: Arc<[u8]>,
+    gen: u64,
 }
 
 impl Shared {
@@ -163,6 +186,8 @@ impl Player {
             sink: AudioSink::new(),
             stop: AtomicBool::new(false),
             source: Mutex::new(None),
+            seek_gen: AtomicU64::new(0),
+            video: Mutex::new(VideoOut::default()),
         });
         let s2 = shared.clone();
         let spawned = std::thread::Builder::new().name("rh-media".into()).spawn(move || {
@@ -193,6 +218,21 @@ impl Player {
             st.time = self.shared.ctl().seek.unwrap_or(st.time);
         }
         st
+    }
+
+    /// The playback position now (cheaper than [`status`](Self::status)).
+    pub fn time(&self) -> f64 {
+        let (seeking, d) = {
+            let st = self.shared.status();
+            (st.seeking, st.duration)
+        };
+        let t = if seeking { self.shared.ctl().seek.unwrap_or_else(|| self.shared.time()) } else { self.shared.time() };
+        let t = t.max(0.0);
+        if d.is_finite() {
+            t.min(d)
+        } else {
+            t
+        }
     }
 
     pub fn play(&self) {
@@ -230,6 +270,7 @@ impl Player {
             c.wall_at = Instant::now();
         }
         self.shared.sink.flush(t);
+        self.shared.seek_gen.fetch_add(1, Ordering::SeqCst);
         {
             let mut st = self.shared.status();
             st.seeking = true;
@@ -254,6 +295,22 @@ impl Player {
         c.rate = r;
         drop(c);
         self.shared.sink.set_speed(r);
+    }
+
+    /// The current video picture when it changed since `serial`:
+    /// (new serial, frame).
+    pub fn video_frame(&self, serial: u64) -> Option<(u64, VideoFrame)> {
+        let v = self.shared.video.lock().unwrap_or_else(|e| e.into_inner());
+        if v.serial == serial {
+            return None;
+        }
+        v.frame.clone().map(|f| (v.serial, f))
+    }
+
+    /// (frames shown, frames dropped) by the video renderer.
+    pub fn video_stats(&self) -> (u64, u64) {
+        let v = self.shared.video.lock().unwrap_or_else(|e| e.into_inner());
+        (v.shown, v.dropped)
     }
 
     /// Audio frames the mixer consumed from this player.
@@ -349,6 +406,10 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
     let tracks = format.tracks().to_vec();
     let audio = tracks.iter().find(|t| t.codec_params.as_ref().and_then(|p| p.audio()).is_some_and(|a| Decoder::new(a).is_ok()));
     let video = tracks.iter().find(|t| matches!(t.codec_params, Some(CodecParameters::Video(_))));
+    let video_id = video.map(|t| t.id);
+    let video_tb = video.and_then(|t| t.time_base);
+    let av1 = matches!(video.and_then(|t| t.codec_params.as_ref()), Some(CodecParameters::Video(v)) if v.codec == symphonia::core::codecs::video::well_known::CODEC_ID_AV1);
+    let vtx = if av1 { spawn_video(shared, None) } else { None };
     let mut decoder = audio.and_then(|t| t.codec_params.as_ref()?.audio()).and_then(|a| Decoder::new(a).ok());
     let audio_id = audio.map(|t| t.id);
     let time_base = audio.and_then(|t| t.time_base);
@@ -379,7 +440,13 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
         if let Some(CodecParameters::Video(v)) = video.and_then(|t| t.codec_params.as_ref()) {
             st.video_width = v.width.unwrap_or(0) as u32;
             st.video_height = v.height.unwrap_or(0) as u32;
-            st.video_codec = format!("{:?}", v.codec);
+            use symphonia::core::codecs::video::well_known::*;
+            st.video_codec = match v.codec {
+                c if c == CODEC_ID_AV1 => "av1".to_string(),
+                c if c == CODEC_ID_VP9 => "vp9".to_string(),
+                c if c == CODEC_ID_H264 => "h264".to_string(),
+                c => format!("{c:?}"),
+            };
         }
         if let Some(a) = audio.and_then(|t| t.codec_params.as_ref()?.audio()) {
             st.audio_codec = crate::decode::codec_name(a).to_string();
@@ -424,7 +491,7 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
             }
         }
         update_file_status(shared, &src, duration, eof);
-        if decoder.is_none() {
+        if decoder.is_none() && (vtx.is_none() || eof) {
             // Video only (picture not decoded): the wall clock runs.
             if shared.ctl().playing && duration.is_finite() && shared.time() >= duration {
                 end_playback(shared, duration);
@@ -446,6 +513,14 @@ fn run_file(shared: &Arc<Shared>, src: RangedSource, url: &str) {
         match format.next_packet() {
             Ok(Some(p)) => {
                 failures = 0;
+                if Some(p.track_id) == video_id {
+                    if let Some(tx) = &vtx {
+                        let pts = video_tb.and_then(|tb| tb.calc_time(p.pts)).map(secs).unwrap_or(0.0);
+                        let key = av1_is_key(&p.data);
+                        send_video(shared, tx, VPacket { pts, dts: pts, key, data: p.data.to_vec().into(), gen: shared.seek_gen.load(Ordering::SeqCst) });
+                    }
+                    continue;
+                }
                 if Some(p.track_id) != audio_id {
                     continue;
                 }
@@ -576,6 +651,7 @@ fn update_file_status(shared: &Shared, src: &RangedSource, duration: f64, eof: b
 // ------------------------------------------------------------------ MSE
 
 fn run_mse(shared: &Arc<Shared>, mse: MseHandle) {
+    let mut video_started = false;
     let mut decoder: Option<(u64, String, Decoder)> = None;
     // Next media time to decode from.
     let mut cursor = 0.0f64;
@@ -648,6 +724,16 @@ fn run_mse(shared: &Arc<Shared>, mse: MseHandle) {
             (ready, audio.is_some(), next, ended, duration)
         };
         shared.ctl().audio_clock = has_audio && decoder.is_some();
+        if !video_started {
+            let av1 = {
+                let m = mse.lock();
+                m.video_track().is_some_and(|(i, j)| crate::video::can_decode_video(&m.buffers[i].tracks[j].info.codec))
+            };
+            if av1 {
+                video_started = true;
+                spawn_video(shared, Some(mse.clone()));
+            }
+        }
         if !has_audio {
             // Video only: a wall clock that stops when data runs out.
             let dt = last_wall.elapsed().as_secs_f64();
@@ -722,6 +808,166 @@ fn run_mse(shared: &Arc<Shared>, mse: MseHandle) {
                 }
                 shared.nap(20);
             }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ video
+
+/// Does this AV1 temporal unit start with a sequence header (a key frame
+/// in practice)?
+fn av1_is_key(data: &[u8]) -> bool {
+    let mut p = 0usize;
+    while p < data.len() {
+        let h = data[p];
+        let ty = (h >> 3) & 0x0f;
+        if ty == 1 {
+            return true;
+        }
+        let ext = h & 0x04 != 0;
+        let has_size = h & 0x02 != 0;
+        p += 1 + ext as usize;
+        if !has_size {
+            break;
+        }
+        // leb128 size
+        let mut size = 0usize;
+        let mut shift = 0;
+        while p < data.len() {
+            let b = data[p];
+            p += 1;
+            size |= ((b & 0x7f) as usize) << shift;
+            shift += 7;
+            if b & 0x80 == 0 || shift > 56 {
+                break;
+            }
+        }
+        if ty == 6 || ty == 3 {
+            // frame / frame header: frame type is in the first bits; a
+            // KEY_FRAME has frame_type 0 (show_existing_frame = 0).
+            if let Some(&b) = data.get(p) {
+                return b & 0x80 == 0 && (b >> 5) & 0x03 == 0;
+            }
+        }
+        p += size;
+    }
+    false
+}
+
+/// Queue a video packet for the decoder thread (blocks while its queue
+/// is full, giving up on stop / seek).
+fn send_video(shared: &Shared, tx: &std::sync::mpsc::SyncSender<VPacket>, mut pkt: VPacket) {
+    loop {
+        match tx.try_send(pkt) {
+            Ok(()) => return,
+            Err(std::sync::mpsc::TrySendError::Full(p)) => {
+                if shared.stop.load(Ordering::SeqCst) || shared.ctl().seek.is_some() || p.gen != shared.seek_gen.load(Ordering::SeqCst) {
+                    return;
+                }
+                pkt = p;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+/// Start the video decoder / renderer thread: fed by the demuxer through
+/// the returned channel (direct files), or reading the MediaSource.
+fn spawn_video(shared: &Arc<Shared>, mse: Option<MseHandle>) -> Option<std::sync::mpsc::SyncSender<VPacket>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<VPacket>(120);
+    let s2 = shared.clone();
+    let spawned = std::thread::Builder::new().name("rh-video".into()).spawn(move || run_video(&s2, rx, mse));
+    spawned.ok().map(|_| tx)
+}
+
+fn run_video(shared: &Shared, rx: std::sync::mpsc::Receiver<VPacket>, mse: Option<MseHandle>) {
+    let Some(mut dec) = Av1Decoder::new() else { return };
+    let mut queue: VecDeque<VideoFrame> = VecDeque::new();
+    let mut gen = u64::MAX;
+    let mut need_key = true;
+    let mut skip_before = 0.0f64;
+    // MSE: decode-order position in the track buffer.
+    let mut next_dts: Option<f64> = None;
+    loop {
+        if shared.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let g = shared.seek_gen.load(Ordering::SeqCst);
+        if g != gen {
+            gen = g;
+            dec.flush();
+            queue.clear();
+            need_key = true;
+            // A seek leaves its target in the wall clock.
+            skip_before = if gen == 0 { 0.0 } else { shared.ctl().wall_time - 0.001 };
+            next_dts = None;
+        }
+        // Present the latest frame that is due.
+        let t = shared.time();
+        let mut due: Option<VideoFrame> = None;
+        while queue.front().is_some_and(|f| f.pts <= t + 0.005) {
+            if due.is_some() {
+                shared.video.lock().unwrap_or_else(|e| e.into_inner()).dropped += 1;
+            }
+            due = queue.pop_front();
+        }
+        if let Some(f) = due {
+            let mut v = shared.video.lock().unwrap_or_else(|e| e.into_inner());
+            v.frame = Some(f);
+            v.serial += 1;
+            v.shown += 1;
+        }
+        if queue.len() >= 4 {
+            std::thread::sleep(Duration::from_millis(4));
+            continue;
+        }
+        // Next coded frame.
+        let pkt: Option<VPacket> = match &mse {
+            None => match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(p) => Some(p),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                Err(_) => return,
+            },
+            Some(h) => {
+                let m = h.lock();
+                m.video_track().and_then(|(i, j)| {
+                    let tb = &m.buffers[i].tracks[j];
+                    let idx = match next_dts {
+                        Some(d) => tb.frames.partition_point(|f| f.dts <= d + 1e-6),
+                        None => {
+                            // Start at the last key frame at or before the position.
+                            let pos = skip_before.max(0.0) + 0.001;
+                            let upto = tb.frames.partition_point(|f| f.dts <= pos);
+                            (0..upto).rev().find(|&k| tb.frames[k].key).unwrap_or(upto)
+                        }
+                    };
+                    tb.frames.get(idx).map(|f| VPacket { pts: f.pts, dts: f.dts, key: f.key, data: f.data.clone(), gen })
+                })
+            }
+        };
+        let Some(pkt) = pkt else {
+            if mse.is_some() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            continue;
+        };
+        if pkt.gen != gen {
+            continue;
+        }
+        if mse.is_some() {
+            next_dts = Some(pkt.dts);
+        }
+        if need_key && !pkt.key {
+            continue;
+        }
+        need_key = false;
+        for f in dec.decode(&pkt.data, pkt.pts) {
+            if f.pts < skip_before {
+                continue;
+            }
+            let at = queue.partition_point(|q| q.pts <= f.pts);
+            queue.insert(at, f);
         }
     }
 }

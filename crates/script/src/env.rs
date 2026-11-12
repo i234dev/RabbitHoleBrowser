@@ -61,6 +61,11 @@ pub trait HostEnv {
     fn open_event_source(&mut self, _url: Url, _with_credentials: bool) -> Option<Result<rabbithole_net::EventSource, String>> {
         None
     }
+    /// The page's fetcher for media resources (range requests with the
+    /// page's cookies). `None` = an isolated fetcher.
+    fn media_fetcher(&mut self) -> Option<rabbithole_net::Fetcher> {
+        None
+    }
     fn navigate(&mut self, url: Url, replace: bool);
     /// Decoded pixels of a loaded image element: (width, height, RGBA).
     fn image_pixels(&mut self, _node: NodeId) -> Option<(u32, u32, Vec<u8>)> {

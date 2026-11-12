@@ -759,7 +759,10 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 // No native controls: a centred play affordance so the
                 // element does not look like an empty black box.
-                self.paint_big_play(b);
+                let playing = b.node.and_then(|n| self.ctx.doc.media_ui.get(&n)).is_some_and(|u| !u.paused);
+                if !playing {
+                    self.paint_big_play(b);
+                }
             }
         }
     }
@@ -841,9 +844,28 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         };
         self.list.push(DisplayItem::Rect { rect: bar, color: bg, radius: if audio { (h / 2.0).min(27.0) } else { 0.0 } });
         let cy = bar.y + bar.h / 2.0;
-        // Play triangle.
+        // Playback state (set by the media bindings).
+        let ui = b.node.and_then(|n| self.ctx.doc.media_ui.get(&n).copied()).unwrap_or(rabbithole_dom::MediaUi { paused: true, duration: f64::NAN, volume: 1.0, ..Default::default() });
+        // Play triangle / pause bars.
         let px = bar.x + 14.0;
-        self.push_triangle(px, cy, 12.0, fg);
+        if ui.paused {
+            self.push_triangle(px, cy, 12.0, fg);
+        } else {
+            self.list.push(DisplayItem::Rect { rect: Rect::new(px, cy - 6.0, 4.0, 12.0), color: fg, radius: 0.0 });
+            self.list.push(DisplayItem::Rect { rect: Rect::new(px + 7.0, cy - 6.0, 4.0, 12.0), color: fg, radius: 0.0 });
+        }
+        let fmt = |t: f64| -> String {
+            if !t.is_finite() || t < 0.0 {
+                return if t.is_infinite() { "LIVE".into() } else { "0:00".into() };
+            }
+            let s = t.floor() as u64;
+            if s >= 3600 {
+                format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+            } else {
+                format!("{}:{:02}", s / 60, s % 60)
+            }
+        };
+        let label = format!("{} / {}", fmt(ui.time), fmt(ui.duration));
         // Time label.
         let font = self.ctx.fonts.select(rabbithole_gfx::Family::Sans, 400, false);
         let size = 12.0;
@@ -853,7 +875,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             font,
             size,
             color: fg,
-            text: "0:00 / 0:00".into(),
+            text: label,
             letter_spacing: 0.0,
             shadows: Vec::new(),
             small_caps: false,
@@ -863,15 +885,35 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let tl_x = px + 110.0;
         let tl_end = bar.right() - 44.0;
         if tl_end - tl_x > 20.0 {
-            self.list.push(DisplayItem::Rect { rect: Rect::new(tl_x, cy - 2.0, tl_end - tl_x, 4.0), color: track, radius: 2.0 });
-            self.list.push(DisplayItem::Rect { rect: Rect::new(tl_x - 5.0, cy - 5.0, 10.0, 10.0), color: fg, radius: 5.0 });
+            let w = tl_end - tl_x;
+            let frac = |t: f64| if ui.duration.is_finite() && ui.duration > 0.0 { (t / ui.duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
+            self.list.push(DisplayItem::Rect { rect: Rect::new(tl_x, cy - 2.0, w, 4.0), color: track, radius: 2.0 });
+            let buffered = frac(ui.buffered_end);
+            if buffered > 0.0 {
+                self.list.push(DisplayItem::Rect { rect: Rect::new(tl_x, cy - 2.0, w * buffered, 4.0), color: track, radius: 2.0 });
+            }
+            let played = frac(ui.time);
+            if played > 0.0 {
+                self.list.push(DisplayItem::Rect { rect: Rect::new(tl_x, cy - 2.0, w * played, 4.0), color: fg, radius: 2.0 });
+            }
+            self.list.push(DisplayItem::Rect { rect: Rect::new(tl_x + w * played - 5.0, cy - 5.0, 10.0, 10.0), color: fg, radius: 5.0 });
         }
         let vx = bar.right() - 30.0;
         if vx > px + 30.0 {
             self.list.push(DisplayItem::Rect { rect: Rect::new(vx, cy - 3.0, 4.0, 6.0), color: fg, radius: 0.0 });
-            for i in 0..5 {
-                let fi = i as f32;
-                self.list.push(DisplayItem::Rect { rect: Rect::new(vx + 4.0 + fi, cy - 3.0 - fi, 1.0, 6.0 + 2.0 * fi), color: fg, radius: 0.0 });
+            if ui.muted || ui.volume <= 0.0 {
+                // Speaker with a cross.
+                for i in 0..5 {
+                    let fi = i as f32;
+                    self.list.push(DisplayItem::Rect { rect: Rect::new(vx + 7.0 + fi, cy - 3.0 + fi * 1.5, 1.5, 1.5), color: fg, radius: 0.0 });
+                    self.list.push(DisplayItem::Rect { rect: Rect::new(vx + 7.0 + fi, cy + 3.0 - fi * 1.5, 1.5, 1.5), color: fg, radius: 0.0 });
+                }
+            } else {
+                let bars = (ui.volume * 5.0).ceil().clamp(1.0, 5.0) as i32;
+                for i in 0..bars {
+                    let fi = i as f32;
+                    self.list.push(DisplayItem::Rect { rect: Rect::new(vx + 4.0 + fi, cy - 3.0 - fi, 1.0, 6.0 + 2.0 * fi), color: fg, radius: 0.0 });
+                }
             }
         }
     }

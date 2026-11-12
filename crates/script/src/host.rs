@@ -156,6 +156,8 @@ pub struct HostState {
     pub blob_urls: HashMap<String, (Vec<u8>, String)>,
     /// WebSocket / EventSource connections.
     pub sockets: crate::sockets::Sockets,
+    /// Media players and MediaSources.
+    pub media: crate::media::MediaState,
     /// Workers started by this realm / this realm as a worker.
     pub workers: crate::workers::WorkerState,
     /// Set in worker realms: (name, shared, id).

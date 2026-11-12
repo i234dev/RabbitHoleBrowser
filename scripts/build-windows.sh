@@ -11,4 +11,4 @@ cd "$(dirname "$0")/.."
 rustup target add x86_64-pc-windows-gnu >/dev/null
 CC_x86_64_pc_windows_gnu=zigcc-win AR_x86_64_pc_windows_gnu=ar \
   cargo build --release -p rabbithole --target x86_64-pc-windows-gnu
-ls -la target/x86_64-pc-windows-gnu/release/rabbithole.exe
+ls -la "${CARGO_TARGET_DIR:-target}/x86_64-pc-windows-gnu/release/rabbithole.exe"

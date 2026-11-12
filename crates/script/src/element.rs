@@ -88,6 +88,7 @@ pub(crate) fn set_attribute(n: NodeRef, name: &str, value: Option<&str>) {
         old
     });
     crate::shadow::on_attribute(n, &name, old.clone(), value);
+    crate::media::note_attribute(n, &name);
     node::record_attribute(n, &name, old);
     if n.doc == 0 {
         mark_dirty();

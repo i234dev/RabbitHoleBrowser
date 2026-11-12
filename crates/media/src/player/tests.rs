@@ -88,7 +88,9 @@ fn mse_opus_plays_buffered_range() {
     // Plays the first second, then stalls waiting for data.
     let st = wait_for(&p, 5.0, "advance", |s| s.time > 0.5);
     assert!(st.time <= 1.0);
-    std::thread::sleep(Duration::from_millis(800));
+    // (Timing tolerant: the machine may be loaded.)
+    wait_for(&p, 10.0, "the buffered end", |s| s.time >= 0.98);
+    std::thread::sleep(Duration::from_millis(300));
     let st = p.status();
     assert!(st.time <= 1.0 + 1e-6 && st.ready <= 2, "{st:?}");
     // Append the second second and end the stream: playback finishes.
@@ -100,4 +102,22 @@ fn mse_opus_plays_buffered_range() {
     let st = wait_for(&p, 5.0, "ended", |s| s.ended);
     assert!((st.time - 2.0).abs() < 0.05, "{st:?}");
     assert!(st.decoded_frames >= 96_000 - 312, "{st:?}");
+}
+
+#[test]
+fn av1_key_frame_detection() {
+    // Temporal delimiter + sequence header: a key frame.
+    assert!(av1_is_key(&[0x12, 0x00, 0x0A, 0x01, 0x00]));
+    // Temporal delimiter + frame OBU with frame_type INTER.
+    assert!(!av1_is_key(&[0x12, 0x00, 0x32, 0x01, 0b0010_0000]));
+    // Frame OBU with frame_type KEY.
+    assert!(av1_is_key(&[0x32, 0x01, 0b0000_0000]));
+}
+
+#[test]
+fn av1_decoder_opens() {
+    let mut d = crate::video::Av1Decoder::new().expect("rav1d context");
+    // Garbage in: no pictures, no crash.
+    assert!(d.decode(&[0x12, 0x00, 0xff, 0xff], 0.0).is_empty());
+    d.flush();
 }

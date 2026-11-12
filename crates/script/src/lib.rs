@@ -15,6 +15,7 @@ mod host;
 mod misc;
 mod modules;
 mod live;
+mod media;
 mod node;
 mod canvas2d;
 mod natives;
@@ -28,6 +29,8 @@ mod workers;
 mod tests;
 #[cfg(test)]
 mod tests_webapi;
+#[cfg(test)]
+mod tests_media;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};
@@ -65,6 +68,8 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:fonts.js", include_str!("js/fonts.js")),
     ("rabbithole:extras.js", include_str!("js/extras.js")),
     ("rabbithole:svg.js", include_str!("js/svg.js")),
+    ("rabbithole:media.js", include_str!("js/media.js")),
+    ("rabbithole:webaudio.js", include_str!("js/webaudio.js")),
 ];
 
 /// Default watchdog budget of one task (a timer callback, event listener,
@@ -245,6 +250,7 @@ impl ScriptHost {
             factories: HashMap::default(),
             blob_urls: HashMap::default(),
             sockets: Default::default(),
+            media: Default::default(),
             canvases: Default::default(),
             workers: Default::default(),
             worker_info: worker.clone(),
@@ -643,6 +649,12 @@ impl ScriptHost {
         if !st.rafs.is_empty() {
             let frame = st.last_frame + 16.0;
             due = Some(due.map(|d| d.min(frame)).unwrap_or(frame));
+        }
+        if st.media_active() {
+            // Media pipelines are polled by js/media.js timers; keep the
+            // loop responsive.
+            let soon = st.last_tick + 50.0;
+            due = Some(due.map(|d| d.min(soon)).unwrap_or(soon));
         }
         if !st.sockets_idle() {
             // Poll open connections every ~16 ms.
