@@ -56,30 +56,45 @@ impl Realm {
     /// resume point): count fresh activations, compile hot code, and run
     /// native code when there is some. `Ctl::Next`: no native code ran;
     /// interpret the frame from `pc`.
-    #[inline(never)]
+    #[inline(always)]
     pub(crate) fn jit_reload(&mut self, code: &FunctionCode, pc: usize) -> Ctl {
+        // Inlined into the run loop: the common outcomes (interpret a
+        // function without native code, or a short one called from
+        // interpreted code) cost a few loads.
         let s = &code.jit.s;
-        let mut e = s.entry.get();
-        if e != 0 && pc == 0 && !s.from_interp.get() {
-            // A short loop-free function called from interpreted code.
-            return Ctl::Next;
-        }
+        let e = s.entry.get();
         if e == 0 {
             if pc != 0 {
                 return Ctl::Next;
             }
             let n = s.counter.get().saturating_add(1);
             s.counter.set(n);
-            if n < self.jit.threshold || s.state.get() != UNTRIED || !self.jit.on {
+            if n < self.jit.threshold {
                 return Ctl::Next;
             }
-            compile(code, &mut self.jit.stats);
-            e = s.entry.get();
-            if e == 0 || !s.from_interp.get() {
-                return Ctl::Next;
-            }
+            return self.jit_hot(code);
+        }
+        if pc == 0 && !s.from_interp.get() {
+            // A short loop-free function called from interpreted code.
+            return Ctl::Next;
         }
         self.jit_run(code, e, pc)
+    }
+
+    /// A fresh activation of a function past the threshold without native
+    /// code: compile it (once) and run it natively when worthwhile.
+    #[inline(never)]
+    fn jit_hot(&mut self, code: &FunctionCode) -> Ctl {
+        let s = &code.jit.s;
+        if s.state.get() != UNTRIED || !self.jit.on {
+            return Ctl::Next;
+        }
+        compile(code, &mut self.jit.stats);
+        let e = s.entry.get();
+        if e == 0 || !s.from_interp.get() {
+            return Ctl::Next;
+        }
+        self.jit_run(code, e, 0)
     }
 
     /// Enter native code `entry` of `code` (the last frame's) at `pc`.
@@ -544,6 +559,37 @@ pub(crate) unsafe extern "sysv64" fn h_set_local(ctx: *mut Ctx, pc: u32) -> usiz
     })
 }
 
+/// `DefinePropR` adding a property through a cached transition.
+pub(crate) unsafe extern "sysv64" fn h_define_prop(ctx: *mut Ctx, pc: u32) -> usize {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::DefinePropR(o, v, ic) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let rec = code.ics.get_unchecked(ic as usize).get();
+        let val = &*slots.add(v as usize);
+        if rec.kind != crate::ic::IC_ADD || val.is_empty() {
+            return false;
+        }
+        let key = code.constants.get_unchecked(*code.ic_keys.get_unchecked(ic as usize) as usize).as_js_str_unchecked();
+        match r.ic_set(&rec, &*slots.add(o as usize), key, val.clone()) {
+            Ok(()) => true,
+            Err(v) => {
+                drop(v);
+                false
+            }
+        }
+    })
+}
+
+/// `StoreCompletionR` (script completion value).
+pub(crate) unsafe extern "sysv64" fn h_store_completion(ctx: *mut Ctx, pc: u32) -> usize {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::StoreCompletionR(s) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let v = (*slots.add(s as usize)).clone();
+        // SAFETY: native code runs the last frame.
+        r.frames.last_mut().unwrap_unchecked().extra_mut().completion = v;
+        true
+    })
+}
+
 /// `GetElemR` on arrays / typed arrays / strings with an index in range.
 pub(crate) unsafe extern "sysv64" fn h_get_elem(ctx: *mut Ctx, pc: u32) -> usize {
     fast_access(ctx, pc, |r, code, slots| {
@@ -597,6 +643,52 @@ pub(crate) unsafe extern "sysv64" fn h_strict_eq(ctx: *mut Ctx, a: u64, b: u64) 
 /// its count at 1 and restored it). Pure: no JavaScript runs.
 pub(crate) unsafe extern "sysv64" fn h_drop(bits: u64) {
     drop(Value::from_raw_bits(bits));
+}
+
+/// Loose equality of two values native code could not decide, when it
+/// runs no JavaScript: 0 or 1; 2 when it might (objects or booleans
+/// against other types, conversions): the full instruction decides.
+pub(crate) unsafe extern "sysv64" fn h_loose_eq(ctx: *mut Ctx, a: u64, b: u64) -> u32 {
+    use crate::value::V;
+    let r = &*(*ctx).realm;
+    let a = std::mem::ManuallyDrop::new(Value::from_raw_bits(a));
+    let b = std::mem::ManuallyDrop::new(Value::from_raw_bits(b));
+    match (a.v(), b.v()) {
+        (V::Undefined | V::Null | V::Empty, V::Undefined | V::Null | V::Empty) => 1,
+        (V::Undefined | V::Null | V::Empty, V::Object(_)) => r.is_htmldda(&b) as u32,
+        (V::Object(_), V::Undefined | V::Null | V::Empty) => r.is_htmldda(&a) as u32,
+        (V::Undefined | V::Null | V::Empty, _) | (_, V::Undefined | V::Null | V::Empty) => 0,
+        (V::String(_), V::String(_)) | (V::Number(_), V::Number(_)) | (V::Bool(_), V::Bool(_)) | (V::Symbol(_), V::Symbol(_)) | (V::Object(_), V::Object(_)) => r.strict_equals(&a, &b) as u32,
+        (V::Symbol(_), V::String(_) | V::Number(_)) | (V::String(_) | V::Number(_), V::Symbol(_)) => 0,
+        _ => 2,
+    }
+}
+
+thread_local! {
+    /// `typeof` results, shared (no allocation per `typeof`).
+    static TYPEOF: [Value; 8] = ["undefined", "object", "boolean", "number", "string", "symbol", "bigint", "function"].map(|s| Value::String(crate::value::JsStr::intern(s)));
+}
+
+/// `UnR` typeof (pure): anything else in full.
+pub(crate) unsafe extern "sysv64" fn h_unr(ctx: *mut Ctx, pc: u32) -> usize {
+    fast_access(ctx, pc, |r, code, slots| {
+        let Op::UnR(3, d, s) = *code.ops.get_unchecked(pc as usize) else { return false };
+        let t = r.type_of(&*slots.add(s as usize));
+        let i = match t {
+            "undefined" => 0,
+            "object" => 1,
+            "boolean" => 2,
+            "number" => 3,
+            "string" => 4,
+            "symbol" => 5,
+            "bigint" => 6,
+            "function" => 7,
+            _ => return false,
+        };
+        let v = TYPEOF.with(|t| t[i].clone());
+        *slots.add(d as usize) = v;
+        true
+    })
 }
 
 /// `x % y` for numbers (pure).

@@ -109,7 +109,6 @@ fn classify(op: &Op) -> Class {
 fn classify_all(op: &Op) -> Class {
     use Class::*;
     let exec = Helper(h_exec as *const () as usize, "h_exec");
-    let access = Helper(h_access as *const () as usize, "h_access");
     match op {
         // Native templates.
         Op::Mov(..) | Op::MovRaw(..) | Op::LoadK(..) | Op::MovChecked(..) | Op::CheckInit(..) => Native,
@@ -135,16 +134,16 @@ fn classify_all(op: &Op) -> Class {
         Op::GetElemR(..) => Helper(h_get_elem as *const () as usize, "h_get_elem"),
         Op::SetElemR(..) => Helper(h_set_elem as *const () as usize, "h_set_elem"),
         Op::LoadThis(..) => Native,
-        Op::GetLocalR(..) => Helper(h_get_local as *const () as usize, "h_get_local"),
-        Op::SetLocalR(..) => Helper(h_set_local as *const () as usize, "h_set_local"),
-        Op::DefinePropR(..) | Op::StoreCompletionR(..) => access,
+        Op::GetLocalR(..) | Op::SetLocalR(..) | Op::GetLocalChecked(..) => Native,
+        Op::DefinePropR(..) => Helper(h_define_prop as *const () as usize, "h_define_prop"),
+        Op::StoreCompletionR(..) => Helper(h_store_completion as *const () as usize, "h_store_completion"),
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
         Op::CallEval(..) => Reject("direct eval"),
         // Everything else: the interpreter's out-of-line code.
         Op::Const(..) | Op::Undefined | Op::Null | Op::True | Op::False | Op::Empty | Op::Pop | Op::Dup | Op::Dup2 | Op::Swap | Op::Rot3 | Op::Rot4 => exec,
         Op::GetReg(..) | Op::GetRegChecked(..) | Op::SetReg(..) | Op::SetRegChecked(..) => exec,
-        Op::GetLocal(..) | Op::GetLocalChecked(..) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetLocalChecked(..) | Op::GetImport(..) => exec,
+        Op::GetLocal(..) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetLocalChecked(..) | Op::GetImport(..) => exec,
         Op::GetGlobal(..) | Op::SetGlobal(..) | Op::TypeofGlobal(..) | Op::DeclareGlobalVar(..) | Op::DeclareGlobalFunction(..) => exec,
         Op::DeclareGlobalLex(..) | Op::InitGlobalLex(..) | Op::PushScope(..) | Op::PopScope | Op::CopyScope => exec,
         Op::GetProp(..) | Op::SetProp(..) | Op::GetElem | Op::SetElem | Op::GetElemKeep | Op::GetPropKeep(..) | Op::GetMethod(..) => exec,
@@ -541,9 +540,10 @@ impl Gen<'_> {
         let slow = self.exec_slow(pc);
         let done = self.a.label();
         let (yes, no) = (self.a.label(), self.a.label());
-        if kd == 4 || kd == 5 {
-            // Strict (in)equality: numbers inline, anything else through
-            // the runtime's strict_equals (pure).
+        if (4..=7).contains(&kd) {
+            // (In)equality: numbers inline, anything else through the
+            // runtime's strict_equals (pure) or, for loose equality, the
+            // cases that run no JavaScript (h_loose_eq; 2: undecided).
             let generic = self.a.label();
             self.a.load64(RAX, slot(a));
             match b {
@@ -557,7 +557,7 @@ impl Gen<'_> {
             self.a.movq_x_r(XMM0, RAX);
             self.a.movq_x_r(XMM1, RCX);
             self.a.ucomisd(XMM0, XMM1);
-            let (eq, ne) = if kd == 4 { (yes, no) } else { (no, yes) };
+            let (eq, ne) = if kd == 4 || kd == 6 { (yes, no) } else { (no, yes) };
             self.a.jcc(CC_P, ne);
             self.a.jcc(CC_E, eq);
             self.a.jmp(ne);
@@ -565,7 +565,13 @@ impl Gen<'_> {
             self.a.mov_rr64(RDI, CTX);
             self.a.mov_rr64(RSI, RAX);
             self.a.mov_rr64(RDX, RCX);
-            self.a.call_abs(h_strict_eq as *const () as usize, "h_strict_eq");
+            if kd >= 6 {
+                self.a.call_abs(h_loose_eq as *const () as usize, "h_loose_eq");
+                self.a.alu_ri32(Alu::Cmp, RAX, 2);
+                self.a.jcc(CC_E, slow);
+            } else {
+                self.a.call_abs(h_strict_eq as *const () as usize, "h_strict_eq");
+            }
             self.a.test_rr32(RAX, RAX);
             self.a.jcc(CC_NE, eq);
             self.a.jmp(ne);
@@ -814,6 +820,54 @@ impl Gen<'_> {
         self.a.alu_rm64(Alu::Add, dst, Mem::base(R8, l.heap_ptr));
     }
 
+    /// `rax` = the `ScopeData` `depth` levels up the running frame's scope
+    /// chain, or `slow` if some link is not a scope object (`r8` = realm).
+    fn scope_data(&mut self, l: &super::layout::Layout, depth: u16, slow: Label) {
+        self.a.load64(R8, Mem::base(CTX, CTX_REALM));
+        self.a.load64(RCX, Mem::base(R8, l.frames_len));
+        self.a.imul_rri64(RCX, RCX, l.frame_size);
+        self.a.alu_rm64(Alu::Add, RCX, Mem::base(R8, l.frames_ptr));
+        self.a.load32(RDX, Mem::base(RCX, l.frame_scope - l.frame_size));
+        for i in 0..=depth {
+            self.object_at(l, RAX, RDX, slow);
+            self.a.movzx8(R9, Mem::base(RAX, l.scope_tag));
+            self.a.alu_ri32(Alu::Cmp, R9, l.scope_tag_value as i32);
+            self.a.jcc(CC_NE, slow);
+            self.a.load64(RAX, Mem::base(RAX, l.scope_box));
+            if i < depth {
+                self.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.sd_parent_tag), l.proto_some as i32);
+                self.a.jcc(CC_NE, slow);
+                self.a.load32(RDX, Mem::base(RAX, l.sd_parent_id));
+            }
+        }
+    }
+
+    /// Closure variable `s` of the scope `depth` levels up into slot `d`:
+    /// the hole reads as undefined, or (`checked`) takes `slow`.
+    fn get_local(&mut self, d: u16, depth: u16, s: u16, checked: bool, slow: Label) {
+        let Some(l) = self.lay else {
+            self.a.jmp(slow);
+            return;
+        };
+        self.scope_data(&l, depth, slow);
+        self.a.alu_mi64(Alu::Cmp, Mem::base(RAX, l.sd_slots_len), s as i32);
+        self.a.jcc(CC_BE, slow);
+        self.a.load64(RAX, Mem::base(RAX, l.sd_slots_ptr));
+        self.a.load64(RAX, Mem::base(RAX, s as i32 * 8));
+        self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+        self.a.cmp_rr64(RAX, RCX);
+        if checked {
+            self.a.jcc(CC_E, slow);
+        } else {
+            let ok = self.a.label();
+            self.a.jcc(CC_NE, ok);
+            self.a.mov_rr64(RAX, TAGMIN);
+            self.a.bind(ok);
+        }
+        self.retain_if_counted(RAX, RCX);
+        self.store(d, slow);
+    }
+
     /// `GetPropR` through the site's cache: own data properties and data
     /// properties of the prototype (`IC_PROTO` one level up,
     /// `IC_PROTO_DEEP`) inline; anything else through `h_get_prop`.
@@ -822,33 +876,43 @@ impl Gen<'_> {
     /// prototype (or the prototype epoch) still leads to it.
     fn get_prop(&mut self, pc: usize, d: u16, o: u16, ic: u32) {
         let next = self.lbl(pc + 1);
-        let miss = self.slow(h_get_prop as *const () as usize, "h_get_prop", pc, next);
+        // Kinds handled elsewhere (primitives, lengths, absent properties):
+        // the helper's cache paths; a failed check of an inline kind: the
+        // full instruction (megamorphic cache, getters, the lookup).
+        let other = self.slow(h_get_prop as *const () as usize, "h_get_prop", pc, next);
         let (Some(l), Some(cell)) = (self.lay, self.code.ics.get(ic as usize)) else {
-            self.a.jmp(miss);
+            self.a.jmp(other);
             return;
         };
-        let (own, proto, deep, holder) = (self.a.label(), self.a.label(), self.a.label(), self.a.label());
-        self.object_entry(&l, o, miss);
+        let miss = self.slow(h_access as *const () as usize, "h_access", pc, next);
+        let (own, proto, holder, recv) = (self.a.label(), self.a.label(), self.a.label(), self.a.label());
         self.a.mov_imm64(RCX, cell as *const std::cell::Cell<crate::bytecode::PropIc> as u64);
+        self.a.movzx8(RDX, Mem::base(RCX, IC_KIND));
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_OWN as i32);
+        self.a.jcc(CC_E, recv);
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PROTO as i32);
+        self.a.jcc(CC_E, recv);
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PROTO_DEEP as i32);
+        self.a.jcc(CC_NE, other);
+        self.a.bind(recv);
+        // r9 = kind; rax = the receiver's entry with the cached shape
+        self.a.mov_rr64(R9, RDX);
+        self.object_entry(&l, o, other);
         self.a.load32(RDX, Mem::base(RAX, l.sid));
         self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_SHAPE));
         self.a.jcc(CC_NE, miss);
-        self.a.movzx8(RDX, Mem::base(RCX, IC_KIND));
-        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_OWN as i32);
+        self.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_OWN as i32);
         self.a.jcc(CC_E, own);
         // Prototype kinds: never for proxies / namespaces (they have the
         // root shape and forward elsewhere).
         self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_SHAPE), crate::shape::ROOT_SHAPE_ID as i32);
         self.a.jcc(CC_E, miss);
-        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PROTO as i32);
-        self.a.jcc(CC_E, proto);
-        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PROTO_DEEP as i32);
-        self.a.jcc(CC_NE, miss);
-        // IC_PROTO_DEEP: receiver's prototype is `mid`, chain unchanged.
-        self.a.bind(deep);
         self.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
         self.a.jcc(CC_NE, miss);
         self.a.load32(RDX, Mem::base(RAX, l.proto_id));
+        self.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_PROTO as i32);
+        self.a.jcc(CC_E, proto);
+        // IC_PROTO_DEEP: receiver's prototype is `mid`, chain unchanged.
         self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID));
         self.a.jcc(CC_NE, miss);
         self.a.mov_imm64(RDX, crate::shape::proto_epoch_addr() as u64);
@@ -861,9 +925,6 @@ impl Gen<'_> {
         self.a.bind(proto);
         self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_MID), crate::ic::NO_OBJ as i32);
         self.a.jcc(CC_NE, miss);
-        self.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
-        self.a.jcc(CC_NE, miss);
-        self.a.load32(RDX, Mem::base(RAX, l.proto_id));
         self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER));
         self.a.jcc(CC_NE, miss);
         // rdx = holder id: its entry, with the cached shape.
@@ -1001,6 +1062,7 @@ impl Gen<'_> {
                         self.a.cvtsi2sd32(XMM0, RAX);
                         self.store_xmm0(d, slow);
                     }
+                    3 => self.call_helper(h_unr as *const () as usize, "h_unr", pc as u32),
                     _ => self.a.jmp(slow),
                 }
             }
@@ -1118,6 +1180,44 @@ impl Gen<'_> {
                 self.a.bind(ok);
                 self.retain_if_counted(RAX, RCX);
                 self.store(d, slow);
+            }
+            Op::GetLocalR(d, depth, s) => {
+                let slow = self.slow(h_get_local as *const () as usize, "h_get_local", pc, self.lbl(pc + 1));
+                self.get_local(d, depth, s, false, slow);
+            }
+            Op::GetLocalChecked(depth, s) => {
+                // A stack instruction: the value goes to the operand stack
+                // slot at the instruction's static depth.
+                let slow = self.exec_slow(pc);
+                let d = self.code.nregs as usize + self.code.depths.get(pc).copied().unwrap_or(u16::MAX) as usize;
+                if d >= self.code.frame_size() {
+                    self.a.jmp(slow);
+                    return;
+                }
+                self.get_local(d as u16, depth, s, true, slow);
+            }
+            Op::SetLocalR(v, depth, s) => {
+                let slow = self.slow(h_set_local as *const () as usize, "h_set_local", pc, self.lbl(pc + 1));
+                let Some(l) = self.lay else {
+                    self.a.jmp(slow);
+                    return;
+                };
+                self.scope_data(&l, depth, slow);
+                self.a.alu_mi64(Alu::Cmp, Mem::base(RAX, l.sd_slots_len), s as i32);
+                self.a.jcc(CC_BE, slow);
+                self.a.load64(RDX, Mem::base(RAX, l.sd_slots_ptr));
+                // rax = the value (the hole stores undefined), retained
+                self.a.load64(RAX, slot(v));
+                let ok = self.a.label();
+                self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+                self.a.cmp_rr64(RAX, RCX);
+                self.a.jcc(CC_NE, ok);
+                self.a.mov_rr64(RAX, TAGMIN);
+                self.a.bind(ok);
+                self.retain_if_counted(RAX, RCX);
+                self.a.load64(RCX, Mem::base(RDX, s as i32 * 8));
+                self.a.store64(Mem::base(RDX, s as i32 * 8), RAX);
+                self.release_if_counted(RCX);
             }
             Op::GetPropR(d, o, ic) => self.get_prop(pc, d, o, ic),
             Op::SetPropR(o, v, ic) => self.set_prop(pc, o, v, ic),

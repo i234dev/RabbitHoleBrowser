@@ -85,7 +85,7 @@ impl Frame {
         self.extra.as_ref().and_then(|e| e.generator)
     }
 
-    fn extra_mut(&mut self) -> &mut FrameExtra {
+    pub(crate) fn extra_mut(&mut self) -> &mut FrameExtra {
         self.extra.get_or_insert_with(Default::default)
     }
 }

@@ -31,6 +31,18 @@ pub(crate) struct Layout {
     pub frames_len: i32,
     pub frame_size: i32,
     pub frame_this: i32,
+    /// Offset of the frame's scope id.
+    pub frame_scope: i32,
+    /// In an object table entry: the byte that tells a scope object
+    /// (`ObjectKind::Scope`) and its value, and the `Box<ScopeData>`.
+    pub scope_tag: i32,
+    pub scope_tag_value: u8,
+    pub scope_box: i32,
+    /// In `ScopeData`: slots pointer and length, parent id and tag.
+    pub sd_slots_ptr: i32,
+    pub sd_slots_len: i32,
+    pub sd_parent_id: i32,
+    pub sd_parent_tag: i32,
     /// `Property`: size and offsets.
     pub prop_size: i32,
     pub prop_value: i32,
@@ -106,6 +118,37 @@ fn probe() -> Option<Layout> {
     };
     let (fp, fl) = vec_words::<crate::vm::Frame>(Vec::new(), frame)?;
     let frames = std::mem::offset_of!(Realm, frames);
+    // Scope objects: where the variant's tag byte and its box are.
+    let kind = obj + std::mem::offset_of!(Object, kind);
+    let ksize = std::mem::size_of::<ObjectKind>();
+    let scope = |parent: Option<ObjectId>, n: usize| {
+        Some(Object::new(None, ObjectKind::Scope(Box::new(crate::heap::ScopeData { slots: vec![crate::value::Value::Undefined; n], parent, names: None }))))
+    };
+    let bytes = |e: &Option<Object>| -> Vec<u8> {
+        let b = e as *const Option<Object> as *const u8;
+        // SAFETY: reading the bytes of a live value (padding may be
+        // uninitialized in theory; only compared, never interpreted).
+        (0..ksize).map(|i| unsafe { std::ptr::read_volatile(b.add(kind + i)) }).collect()
+    };
+    let (s1, s2) = (scope(Some(ObjectId(0x1122_3344)), 3), scope(None, 0));
+    let others = [
+        Some(Object::new(None, ObjectKind::Ordinary)),
+        Some(Object::new(None, ObjectKind::Array { elements: vec![crate::value::Value::Number(1.5); 3], length: 3 })),
+        Some(Object::new(None, ObjectKind::Array { elements: Vec::new(), length: 0x7fff_ffff })),
+    ];
+    let box_addr = |e: &Option<Object>| match &e.as_ref()?.kind {
+        ObjectKind::Scope(b) => Some(&**b as *const crate::heap::ScopeData as usize),
+        _ => None,
+    };
+    let (b1, b2) = (box_addr(&s1)?, box_addr(&s2)?);
+    let (k1, k2) = (bytes(&s1), bytes(&s2));
+    let word = |k: &[u8], i: usize| usize::from_ne_bytes(k[i..i + w].try_into().unwrap());
+    let box_off = (0..=ksize - w).step_by(w).find(|&i| word(&k1, i) == b1 && word(&k2, i) == b2)?;
+    let ob: Vec<Vec<u8>> = others.iter().map(bytes).collect();
+    let tag = (0..ksize).filter(|i| !(box_off..box_off + w).contains(i)).find(|&i| k1[i] == k2[i] && ob.iter().all(|o| o[i] != k1[i]) && ob[1][i] == ob[2][i])?;
+    let sd = std::mem::offset_of!(crate::heap::ScopeData, slots);
+    let (sp, sl) = vec_words::<crate::value::Value>(Vec::new(), crate::value::Value::Undefined)?;
+    let parent = std::mem::offset_of!(crate::heap::ScopeData, parent);
     Some(Layout {
         heap_ptr: i32_of(heap + hp * w)?,
         heap_len: i32_of(heap + hl * w)?,
@@ -120,6 +163,14 @@ fn probe() -> Option<Layout> {
         frames_len: i32_of(frames + fl * w)?,
         frame_size: i32_of(std::mem::size_of::<crate::vm::Frame>())?,
         frame_this: i32_of(std::mem::offset_of!(crate::vm::Frame, this))?,
+        frame_scope: i32_of(std::mem::offset_of!(crate::vm::Frame, scope))?,
+        scope_tag: i32_of(kind + tag)?,
+        scope_tag_value: k1[tag],
+        scope_box: i32_of(kind + box_off)?,
+        sd_slots_ptr: i32_of(sd + sp * w)?,
+        sd_slots_len: i32_of(sd + sl * w)?,
+        sd_parent_id: i32_of(parent + id_word * 4)?,
+        sd_parent_tag: i32_of(parent + tag_word * 4)?,
         prop_size: i32_of(std::mem::size_of::<Property>())?,
         prop_value: i32_of(std::mem::offset_of!(Property, value))?,
         prop_flags: i32_of(std::mem::offset_of!(Property, flags))?,
