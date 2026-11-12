@@ -173,11 +173,13 @@ fn segment_quad(a: Point, b: Point, hw: f32) -> Contour {
     let nx = -d.y * hw;
     let ny = d.x * hw;
     Contour {
+        // Positive signed area, like `orient` (caps and joins must not
+        // cancel the body under the non-zero rule).
         points: vec![
-            Point::new(a.x + nx, a.y + ny),
-            Point::new(b.x + nx, b.y + ny),
-            Point::new(b.x - nx, b.y - ny),
             Point::new(a.x - nx, a.y - ny),
+            Point::new(b.x - nx, b.y - ny),
+            Point::new(b.x + nx, b.y + ny),
+            Point::new(a.x + nx, a.y + ny),
         ],
         closed: true,
     }
