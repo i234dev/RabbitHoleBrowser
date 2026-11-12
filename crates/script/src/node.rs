@@ -399,7 +399,10 @@ fn with_doc_in_state<R>(st: &HostState, doc: u32, f: impl FnOnce(&Document) -> R
             None => f(&Document::new()),
         })
     } else {
-        f(&st.extra_docs[(doc - 1) as usize])
+        match st.extra_docs.get((doc - 1) as usize) {
+            Some(d) => f(d),
+            None => f(&Document::new()),
+        }
     }
 }
 

@@ -209,8 +209,14 @@ pub(crate) fn with_doc<R>(doc: u32, f: impl FnOnce(&mut Document) -> R) -> R {
     } else {
         let st = state();
         let mut st = st.borrow_mut();
-        let d = &mut st.extra_docs[(doc - 1) as usize];
-        f(d)
+        // A node can outlive or cross into a realm that doesn't own its
+        // document (e.g. a node of a DOMParser document passed between
+        // same-origin frames): treat it like a detached frame document
+        // instead of panicking and taking the whole tab down.
+        match st.extra_docs.get_mut((doc - 1) as usize) {
+            Some(d) => f(d),
+            None => f(&mut Document::new()),
+        }
     }
 }
 
