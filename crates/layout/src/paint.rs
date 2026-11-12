@@ -332,7 +332,8 @@ fn paint_backdrop(rect: Rect, radii: Radii, filters: &[rabbithole_style::FilterO
     // The filter input is the backdrop within the border box; blurs see
     // it extended by mirroring at the box edges (no bleeding in from
     // outside).
-    let e = (crate::filter::spread(filters) * device_scale(&canvas.transform())).ceil() as i32;
+    // Mirroring repeats the box beyond its size: no need for more margin.
+    let e = (crate::filter::spread(filters) * device_scale(&canvas.transform())).ceil().min(w.max(h) as f32) as i32;
     let (pw, ph) = (w + 2 * e as usize, h + 2 * e as usize);
     let mirror = |i: i32, n: usize| -> usize {
         let n = n as i32;
