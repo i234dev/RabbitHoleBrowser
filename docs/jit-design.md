@@ -951,3 +951,9 @@ la sección 3 en lugar de añadir un segundo backend:
   instrucción; con código nativo se convierten en rangos de PC nativo
   (misma búsqueda), sin unwind de la pila nativa: el frame de wasm vive en la
   pila de valores, no en la nativa.
+- **Medidas del intérprete** (`crates/wasm-js/examples/wasm_bench.rs`,
+  máquina cargada, ms de pared): `fib(30)` 393 frente a 1092 del mismo
+  código en nuestro JS; `matmul(128)` f64 392 frente a 780; compresión tipo
+  SHA-256 de 4096 bloques 440 frente a 2294. Es decir, 2–5× más rápido que
+  el JS interpretado sin JIT; una plantilla nativa por `Instr` eliminaría
+  el coste del dispatch, que domina en estos bucles.

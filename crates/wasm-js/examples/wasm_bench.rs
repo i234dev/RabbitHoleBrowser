@@ -60,9 +60,9 @@ fn main() {
     let bin = rabbithole_wasm::text::wat_to_binary(KERNELS).expect("kernels.wat");
     let list: Vec<String> = bin.iter().map(|b| b.to_string()).collect();
     realm.eval(&format!("var bytes = new Uint8Array([{}]);", list.join(",")), "setup.js").unwrap();
-    realm.eval("var w = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports; var K = new Int32Array(w.memory.buffer.slice(0, 256));", "setup.js").unwrap();
+    realm.eval("var w = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports; var ws = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports; var K = new Int32Array(ws.memory.buffer.slice(0, 256));", "setup.js").unwrap();
     realm.eval(JS, "kernels.js").unwrap();
-    let cases = [("fib(30)", "w.fib(30)", "fib(30)"), ("matmul(128)", "w.matmul(128)", "matmul(128)"), ("sha256(4096 blocks)", "w.sha256(4096)", "sha256(4096, K)")];
+    let cases = [("fib(30)", "w.fib(30)", "fib(30)"), ("matmul(128)", "w.matmul(128)", "matmul(128)"), ("sha256(4096 blocks)", "ws.sha256(4096)", "sha256(4096, K)")];
     println!("{:<22} {:>12} {:>12} {:>8}", "kernel", "wasm ms", "js ms", "js/wasm");
     for (name, wasm, js) in cases {
         let (rw, tw) = time(&mut realm, "wasm", wasm);
