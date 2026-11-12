@@ -2103,16 +2103,7 @@ impl Compiler {
                     // return in async generator awaits the value
                     self.emit(Op::Await);
                 }
-                if self.fs_ref().exits.iter().any(|e| matches!(e, ExitCtx::Finally { .. })) {
-                    // Finalizers run at stack depth 0 (a `try` in one
-                    // assumes so): park the return value meanwhile.
-                    let ret = self.hidden_slot("ret");
-                    self.emit(Op::SetReg(ret));
-                    self.emit_exits(0)?;
-                    self.emit(Op::GetReg(ret));
-                } else {
-                    self.emit_exits(0)?;
-                }
+                self.emit_return_exits()?;
                 self.emit(Op::Return);
             }
             StmtKind::Break(label) => {
@@ -2267,6 +2258,21 @@ impl Compiler {
             }
         }
         self.err(if is_continue { "Illegal continue statement" } else { "Illegal break statement" })
+    }
+
+    /// The exits of a `return` (value on the stack): finalizers run at
+    /// stack depth 0 (a `try` in one assumes so), so the value waits in a
+    /// hidden register meanwhile.
+    fn emit_return_exits(&mut self) -> CResult<()> {
+        if self.fs_ref().exits.iter().any(|e| matches!(e, ExitCtx::Finally { .. })) {
+            let ret = self.hidden_slot("ret");
+            self.emit(Op::SetReg(ret));
+            self.emit_exits(0)?;
+            self.emit(Op::GetReg(ret));
+            Ok(())
+        } else {
+            self.emit_exits(0)
+        }
     }
 
     /// Emit the exit actions for contexts above `depth` (innermost first).
@@ -3315,7 +3321,7 @@ impl Compiler {
                     for j in to_return {
                         self.patch_jump(j);
                     }
-                    self.emit_exits(0)?;
+                    self.emit_return_exits()?;
                     self.emit(Op::Return);
                     self.patch_jump(done);
                     // [iter next value] -> value
@@ -3334,7 +3340,7 @@ impl Compiler {
                     if is_async {
                         self.emit(Op::Await);
                     }
-                    self.emit_exits(0)?;
+                    self.emit_return_exits()?;
                     self.emit(Op::Return);
                     self.patch_jump(j);
                 }
