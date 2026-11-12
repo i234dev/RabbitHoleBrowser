@@ -24,6 +24,8 @@ pub enum ConstOp {
     RefI31,
     StructNew(u32),
     StructNewDefault(u32),
+    StructNewDesc(u32),
+    StructNewDefaultDesc(u32),
     ArrayNew(u32),
     ArrayNewDefault(u32),
     ArrayNewFixed(u32, u32),
@@ -107,6 +109,8 @@ pub struct Body {
 
 #[derive(Default, Debug)]
 pub struct Module {
+    /// Imported functions declared with an exact type (custom descriptors).
+    pub exact_funcs: Vec<u32>,
     pub bytes: Rc<[u8]>,
     pub types: Vec<SubType>,
     /// Recursion groups as (first type index, count).

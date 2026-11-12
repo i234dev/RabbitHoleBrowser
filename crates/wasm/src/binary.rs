@@ -179,6 +179,9 @@ impl<'a> Reader<'a> {
         if v >= 0 {
             return Ok(HeapType::Concrete(v as u32));
         }
+        if v & 0x7f == 0x62 {
+            return Ok(HeapType::Exact(self.u32()?));
+        }
         abstract_heap((v & 0x7f) as u8).map_or_else(|| malformed("malformed heap type"), Ok)
     }
 
@@ -316,18 +319,31 @@ impl<'a> Reader<'a> {
     }
 
     fn sub_type(&mut self, b: u8) -> Result<SubType> {
-        match b {
+        let (is_final, supers, mut c) = match b {
             0x50 | 0x4f => {
                 let n = self.u32()?;
                 let mut supers = Vec::new();
                 for _ in 0..n {
                     supers.push(self.u32()?);
                 }
-                let c = self.byte()?;
-                Ok(SubType { is_final: b == 0x4f, supers: supers.into(), comp: self.comp_type(c)? })
+                (b == 0x4f, supers, self.byte()?)
             }
-            _ => Ok(SubType { is_final: true, supers: Box::new([]), comp: self.comp_type(b)? }),
+            _ => (true, Vec::new(), b),
+        };
+        let mut describes = None;
+        let mut descriptor = None;
+        if c == 0x4c {
+            describes = Some(self.u32()?);
+            c = self.byte()?;
         }
+        if c == 0x4d {
+            descriptor = Some(self.u32()?);
+            c = self.byte()?;
+        }
+        if c == 0x4c || c == 0x4d {
+            return malformed("malformed definition type");
+        }
+        Ok(SubType { is_final, supers: supers.into(), describes, descriptor, comp: self.comp_type(c)? })
     }
 
     /// A constant expression up to and including its `end`.
@@ -362,6 +378,8 @@ impl<'a> Reader<'a> {
                     match sub {
                         0 => ConstOp::StructNew(self.u32()?),
                         1 => ConstOp::StructNewDefault(self.u32()?),
+                        32 => ConstOp::StructNewDesc(self.u32()?),
+                        33 => ConstOp::StructNewDefaultDesc(self.u32()?),
                         6 => ConstOp::ArrayNew(self.u32()?),
                         7 => ConstOp::ArrayNewDefault(self.u32()?),
                         8 => {
@@ -672,9 +690,10 @@ pub fn decode(bytes: &[u8]) -> Result<Module> {
     Ok(m)
 }
 
-fn import_desc(s: &mut Reader) -> Result<ImportDesc> {
-    Ok(match s.byte()? {
+fn import_desc(s: &mut Reader) -> Result<(ImportDesc, bool)> {
+    Ok((match s.byte()? {
         0 => ImportDesc::Func(s.u32()?),
+        0x20 => return Ok((ImportDesc::Func(s.u32()?), true)),
         1 => ImportDesc::Table(s.table_type()?),
         2 => ImportDesc::Memory(s.memory_type()?),
         3 => ImportDesc::Global(s.global_type()?),
@@ -685,10 +704,13 @@ fn import_desc(s: &mut Reader) -> Result<ImportDesc> {
             ImportDesc::Tag(s.u32()?)
         }
         _ => return malformed("malformed import kind"),
-    })
+    }, false))
 }
 
-fn add_import(m: &mut Module, module: String, name: String, desc: ImportDesc) {
+fn add_import(m: &mut Module, module: String, name: String, (desc, exact): (ImportDesc, bool)) {
+    if exact {
+        m.exact_funcs.push(m.funcs.len() as u32);
+    }
     match &desc {
         ImportDesc::Func(t) => {
             m.funcs.push(*t);

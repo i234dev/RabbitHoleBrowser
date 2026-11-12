@@ -234,7 +234,7 @@ fn to_js(realm: &mut Realm, v: Val, t: ValType) -> Value {
             };
             let is_func = match heap {
                 HeapType::Func | HeapType::NoFunc => true,
-                HeapType::Concrete(id) => matches!(canonical_type(id).comp, CompType::Func(_)),
+                HeapType::Concrete(id) | HeapType::Exact(id) => matches!(canonical_type(id).comp, CompType::Func(_)),
                 _ => false,
             };
             if is_func {
@@ -272,7 +272,7 @@ fn to_wasm(realm: &mut Realm, v: Value, t: ValType) -> JsResult<Val> {
             }
             let is_func = match r.heap {
                 HeapType::Func | HeapType::NoFunc => true,
-                HeapType::Concrete(id) => matches!(canonical_type(id).comp, CompType::Func(_)),
+                HeapType::Concrete(id) | HeapType::Exact(id) => matches!(canonical_type(id).comp, CompType::Func(_)),
                 _ => false,
             };
             if is_func {
@@ -281,9 +281,10 @@ fn to_wasm(realm: &mut Realm, v: Value, t: ValType) -> JsResult<Val> {
                     _ => None,
                 };
                 let Some(addr) = addr else { return Err(realm.throw_type_error("value is not an exported WebAssembly function")) };
-                if let HeapType::Concrete(want) = r.heap {
+                if let Some(want) = r.heap.index() {
                     let f = store(realm).func(addr);
-                    if !canonical_subtype(f.ty, want) {
+                    let ok = if matches!(r.heap, HeapType::Exact(_)) { f.ty == want } else { canonical_subtype(f.ty, want) };
+                    if !ok {
                         return Err(realm.throw_type_error("function type mismatch"));
                     }
                 }

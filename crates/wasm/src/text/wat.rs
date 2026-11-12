@@ -65,7 +65,7 @@ fn heap_code(h: HeapType) -> Option<u8> {
         HeapType::NoExtern => 0x72,
         HeapType::NoFunc => 0x73,
         HeapType::NoExn => 0x74,
-        HeapType::Concrete(_) => return None,
+        HeapType::Concrete(_) | HeapType::Exact(_) => return None,
     })
 }
 
@@ -75,6 +75,10 @@ pub fn write_heap(out: &mut Vec<u8>, h: HeapType) {
         None => {
             if let HeapType::Concrete(i) = h {
                 leb_s64(out, i as i64);
+            }
+            if let HeapType::Exact(i) = h {
+                out.push(0x62);
+                leb_u32(out, i);
             }
         }
     }
@@ -218,6 +222,13 @@ impl Ctx {
                 _ => return Ok(HeapType::Concrete(self.type_names.resolve(sx, "type")?)),
             };
             return Ok(h);
+        }
+        if sx.is_list_of("exact") {
+            let l = sx.list().unwrap();
+            if l.len() != 2 {
+                return err("malformed exact heap type");
+            }
+            return Ok(HeapType::Exact(self.type_names.resolve(&l[1], "type")?));
         }
         Ok(HeapType::Concrete(self.type_names.resolve(sx, "type")?))
     }
@@ -522,6 +533,12 @@ fn lookup(name: &str) -> Option<(Option<u8>, u32, Imm)> {
         "table.fill" => (Some(0xfc), 17, Table),
         "struct.new" => (Some(0xfb), 0, Type),
         "struct.new_default" => (Some(0xfb), 1, Type),
+        "struct.new_desc" => (Some(0xfb), 32, Type),
+        "struct.new_default_desc" => (Some(0xfb), 33, Type),
+        "ref.get_desc" => (Some(0xfb), 34, Type),
+        "ref.cast_desc_eq" => (Some(0xfb), 35, RefTypeImm),
+        "br_on_cast_desc_eq" => (Some(0xfb), 37, BrCast),
+        "br_on_cast_desc_eq_fail" => (Some(0xfb), 38, BrCast),
         "struct.get" => (Some(0xfb), 2, TypeField),
         "struct.get_s" => (Some(0xfb), 3, TypeField),
         "struct.get_u" => (Some(0xfb), 4, TypeField),
@@ -1455,11 +1472,12 @@ pub fn encode_module(fields: &[Sx]) -> R<Vec<u8>> {
     for t in &type_defs {
         let l = t.list().unwrap();
         let mut names = HashMap::new();
-        let def = l.iter().skip(1).find(|s| matches!(s, Sx::List(_)));
+        let is_comp = |s: &&Sx| matches!(s, Sx::List(_)) && !s.is_list_of("describes") && !s.is_list_of("descriptor");
+        let def = l.iter().skip(1).find(is_comp);
         let mut comp = def;
         if let Some(d) = def {
             if d.is_list_of("sub") {
-                comp = d.list().unwrap().iter().skip(1).find(|s| matches!(s, Sx::List(_)));
+                comp = d.list().unwrap().iter().skip(1).find(is_comp);
             }
         }
         if let Some(c) = comp {
@@ -1487,11 +1505,10 @@ pub fn encode_module(fields: &[Sx]) -> R<Vec<u8>> {
         let l = t.list().unwrap();
         let mut i = 1;
         opt_id(l, &mut i);
-        let Some(def) = l.get(i) else { return err("expected type definition") };
-        if l.len() != i + 1 {
-            return err("unexpected token in type");
+        if l.get(i).is_none() {
+            return err("expected type definition");
         }
-        let st = sub_type(&cx, def)?;
+        let st = sub_type(&cx, &l[i..])?;
         cx.types.push(st);
     }
     cx.rec_groups = groups;
@@ -2159,8 +2176,23 @@ fn global_type(cx: &Ctx, sx: &Sx) -> R<(ValType, bool)> {
 fn encode_import_desc(cx: &mut Ctx, kind: ImportKind, items: &[Sx], k: &mut usize, out: &mut Vec<u8>, global_types: &mut Vec<(ValType, bool)>) -> R<()> {
     match kind {
         ImportKind::Func => {
-            out.push(0);
-            let (t, _) = cx.type_use(items, k, true)?;
+            let t = match items.get(*k) {
+                Some(e) if e.is_list_of("exact") => {
+                    let el = e.list().unwrap();
+                    let mut j = 1;
+                    let (t, _) = cx.type_use(el, &mut j, true)?;
+                    if j != el.len() {
+                        return err("unexpected token in exact type use");
+                    }
+                    *k += 1;
+                    out.push(0x20);
+                    t
+                }
+                _ => {
+                    out.push(0);
+                    cx.type_use(items, k, true)?.0
+                }
+            };
             cx.func_types.push(t);
             leb_u32(out, t);
         }
@@ -2223,8 +2255,35 @@ fn encode_import_desc(cx: &mut Ctx, kind: ImportKind, items: &[Sx], k: &mut usiz
     Ok(())
 }
 
-fn sub_type(cx: &Ctx, def: &Sx) -> R<SubType> {
-    if def.is_list_of("sub") {
+/// `(describes x)? (descriptor y)? comptype` at the end of a type or sub
+/// type definition.
+fn desc_comp(cx: &Ctx, l: &[Sx]) -> R<(Option<u32>, Option<u32>, CompType)> {
+    let mut i = 0;
+    let clause = |name: &str, i: &mut usize| -> R<Option<u32>> {
+        match l.get(*i) {
+            Some(s) if s.is_list_of(name) => {
+                let cl = s.list().unwrap();
+                if cl.len() != 2 {
+                    return err("unexpected token");
+                }
+                *i += 1;
+                Ok(Some(cx.type_names.resolve(&cl[1], "type")?))
+            }
+            _ => Ok(None),
+        }
+    };
+    let describes = clause("describes", &mut i)?;
+    let descriptor = clause("descriptor", &mut i)?;
+    let Some(c) = l.get(i) else { return err("expected composite type") };
+    if l.len() != i + 1 {
+        return err("unexpected token in type");
+    }
+    Ok((describes, descriptor, comp_type(cx, c)?))
+}
+
+fn sub_type(cx: &Ctx, defs: &[Sx]) -> R<SubType> {
+    let def = &defs[0];
+    if defs.len() == 1 && def.is_list_of("sub") {
         let l = def.list().unwrap();
         let mut i = 1;
         let mut is_final = false;
@@ -2240,13 +2299,11 @@ fn sub_type(cx: &Ctx, def: &Sx) -> R<SubType> {
             supers.push(cx.type_names.resolve(s, "type")?);
             i += 1;
         }
-        let Some(c) = l.get(i) else { return err("expected composite type") };
-        if l.len() != i + 1 {
-            return err("unexpected token in sub type");
-        }
-        return Ok(SubType { is_final, supers: supers.into(), comp: comp_type(cx, c)? });
+        let (describes, descriptor, comp) = desc_comp(cx, &l[i..])?;
+        return Ok(SubType { is_final, supers: supers.into(), describes, descriptor, comp });
     }
-    Ok(SubType { is_final: true, supers: Box::new([]), comp: comp_type(cx, def)? })
+    let (describes, descriptor, comp) = desc_comp(cx, defs)?;
+    Ok(SubType { is_final: true, supers: Box::new([]), describes, descriptor, comp })
 }
 
 fn comp_type(cx: &Ctx, c: &Sx) -> R<CompType> {
@@ -2297,6 +2354,14 @@ fn write_sub_type(out: &mut Vec<u8>, st: &SubType) {
         for &s in st.supers.iter() {
             leb_u32(out, s);
         }
+    }
+    if let Some(x) = st.describes {
+        out.push(0x4c);
+        leb_u32(out, x);
+    }
+    if let Some(x) = st.descriptor {
+        out.push(0x4d);
+        leb_u32(out, x);
     }
     let field = |out: &mut Vec<u8>, f: &FieldType| {
         match f.storage {

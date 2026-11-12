@@ -1,5 +1,6 @@
 //! GC proposal: structs, arrays, i31 references, casts and
-//! extern/any conversions.
+//! extern/any conversions; custom descriptors (exact types, descriptor
+//! structs, `ref.get_desc`, `ref.cast_desc_eq`, `br_on_cast_desc_eq`).
 //!
 //! Reference bits in the `any` hierarchy:
 //! * `0`: null;
@@ -33,6 +34,8 @@ pub struct GcObj {
     /// Array element kind.
     pub kind: u8,
     pub data: Vec<u64>,
+    /// Descriptor reference (custom descriptors; 0: none).
+    pub desc: u64,
 }
 
 pub fn kind_of(s: StorageType) -> u8 {
@@ -107,6 +110,16 @@ pub fn ref_test(store: &Store, bits: u64, h: HeapType, nullable: bool) -> bool {
             Some(i) => store.gc.borrow()[i].is_array == (h == HeapType::Array),
             None => false,
         },
+        HeapType::Exact(c) => {
+            if matches!(canonical_type(c).comp, CompType::Func(_)) {
+                store.func((bits - 1) as u32).ty == c
+            } else {
+                match obj_index(bits) {
+                    Some(i) => store.gc.borrow()[i].ty == c,
+                    None => false,
+                }
+            }
+        }
         HeapType::Concrete(c) => {
             if matches!(canonical_type(c).comp, CompType::Func(_)) {
                 let f = store.func((bits - 1) as u32);
@@ -153,6 +166,13 @@ pub const EXTERN_CONVERT_ANY: u16 = 27;
 pub const REF_I31: u16 = 28;
 pub const I31_GET_S: u16 = 29;
 pub const I31_GET_U: u16 = 30;
+pub const STRUCT_NEW_DESC: u16 = 32;
+pub const STRUCT_NEW_DEFAULT_DESC: u16 = 33;
+pub const REF_GET_DESC: u16 = 34;
+pub const REF_CAST_DESC_EQ: u16 = 35;
+pub const REF_CAST_DESC_EQ_NULL: u16 = 36;
+/// Condition of `br_on_cast_desc_eq(_fail)`: x bit 8 = target nullable.
+pub const DESC_TEST: u16 = 37;
 
 fn rt(nullable: bool, heap: HeapType) -> ValType {
     ValType::Ref(RefType { nullable, heap })
@@ -182,6 +202,7 @@ fn field_offset(fs: &[FieldType], f: usize) -> u32 {
 fn canon_heap(fc: &FC, h: HeapType) -> HeapType {
     match h {
         HeapType::Concrete(i) => HeapType::Concrete(fc.cx.m.canon[i as usize]),
+        HeapType::Exact(i) => HeapType::Exact(fc.cx.m.canon[i as usize]),
         o => o,
     }
 }
@@ -201,6 +222,15 @@ fn ref_type_imm(fc: &mut FC, nullable: bool) -> Result<RefType> {
     Ok(RefType { nullable, heap: h })
 }
 
+/// Descriptor operand type of a descriptor cast to heap type `h`.
+fn desc_operand(fc: &FC, h: HeapType) -> Result<ValType> {
+    let Some(t) = h.index() else { return invalid(format!("type {h} does not have a descriptor")) };
+    let Some(d) = fc.cx.m.types.get(t as usize).and_then(|s| s.descriptor) else {
+        return invalid(format!("type {t} does not have a descriptor"));
+    };
+    Ok(rt(true, if matches!(h, HeapType::Exact(_)) { HeapType::Exact(d) } else { HeapType::Concrete(d) }))
+}
+
 pub(crate) fn gc_op(fc: &mut FC) -> Result<()> {
     use ValType::I32;
     let sub = fc.r.u32()?;
@@ -210,18 +240,110 @@ pub(crate) fn gc_op(fc: &mut FC) -> Result<()> {
             let t = fc.r.u32()?;
             let fs = struct_fields(fc, t)?;
             let canon = fc.cx.m.canon[t as usize];
+            if fc.cx.m.types[t as usize].descriptor.is_some() {
+                return invalid("type mismatch: type with a descriptor needs struct.new_desc");
+            }
             if x == STRUCT_NEW {
                 let types: Vec<ValType> = fs.iter().map(|f| f.storage.unpacked()).collect();
                 let base = fc.call_args_pub(&types)?;
-                fc.push(rt(false, HeapType::Concrete(t)));
+                fc.push(rt(false, HeapType::Exact(t)));
                 fc.emit(Instr::with_x(Op::Gc, x, base, canon, 0));
             } else {
                 if fs.iter().any(|f| !f.storage.unpacked().defaultable()) {
                     return invalid("type mismatch: field type is not defaultable");
                 }
-                let d = fc.push(rt(false, HeapType::Concrete(t)));
+                let d = fc.push(rt(false, HeapType::Exact(t)));
                 fc.emit(Instr::with_x(Op::Gc, x, d, canon, 0));
             }
+        }
+        STRUCT_NEW_DESC | STRUCT_NEW_DEFAULT_DESC => {
+            let t = fc.r.u32()?;
+            let fs = struct_fields(fc, t)?;
+            let canon = fc.cx.m.canon[t as usize];
+            let Some(dt) = fc.cx.m.types[t as usize].descriptor else { return invalid(format!("type {t} does not have a descriptor")) };
+            let desc_ty = rt(true, HeapType::Exact(dt));
+            if x == STRUCT_NEW_DESC {
+                let mut types: Vec<ValType> = fs.iter().map(|f| f.storage.unpacked()).collect();
+                let nslots: u32 = types.iter().map(|t| t.slots()).sum();
+                types.push(desc_ty);
+                let base = fc.call_args_pub(&types)?;
+                fc.push(rt(false, HeapType::Exact(t)));
+                fc.emit(Instr::with_x(Op::Gc, x, base, canon, nslots));
+            } else {
+                if fs.iter().any(|f| !f.storage.unpacked().defaultable()) {
+                    return invalid("type mismatch: field type is not defaultable");
+                }
+                let o = fc.pop_expect(desc_ty)?;
+                let d = fc.push(rt(false, HeapType::Exact(t)));
+                fc.emit(Instr::with_x(Op::Gc, x, d, canon, o.src()));
+            }
+        }
+        REF_GET_DESC => {
+            let t = fc.r.u32()?;
+            struct_fields(fc, t)?;
+            let Some(dt) = fc.cx.m.types[t as usize].descriptor else { return invalid("type without descriptor") };
+            let o = fc.pop_expect(rt(true, HeapType::Concrete(t)))?;
+            let exact = match o.ty {
+                // exact only for exactly the inspected type (or bottom)
+                Some(ValType::Ref(r)) => match r.heap {
+                    HeapType::Exact(e) => fc.cx.m.canon[e as usize] == fc.cx.m.canon[t as usize],
+                    HeapType::None => true,
+                    _ => false,
+                },
+                _ => true,
+            };
+            let d = fc.push(rt(false, if exact { HeapType::Exact(dt) } else { HeapType::Concrete(dt) }));
+            fc.emit(Instr::with_x(Op::Gc, x, d, o.src(), 0));
+        }
+        REF_CAST_DESC_EQ | REF_CAST_DESC_EQ_NULL => {
+            let target = ref_type_imm(fc, x == REF_CAST_DESC_EQ_NULL)?;
+            let desc_ty = desc_operand(fc, target.heap)?;
+            let dsc = fc.pop_expect(desc_ty)?;
+            let o = fc.pop_ref_pub()?;
+            if let Some(ValType::Ref(src)) = o.ty {
+                if fc.cx.tc.top(src.heap) != fc.cx.tc.top(target.heap) {
+                    return invalid("type mismatch: cast to a type of another hierarchy");
+                }
+            }
+            fc.emit(Instr::with_x(Op::Gc, x, o.src(), dsc.src(), 0));
+            fc.push_loc_pub(ValType::Ref(target), o);
+        }
+        37 | 38 => {
+            let flags = fc.r.byte()?;
+            if flags > 3 {
+                return malformed("malformed br_on_cast flags");
+            }
+            let l = fc.r.u32()?;
+            let rt1 = ref_type_imm(fc, flags & 1 != 0)?;
+            let rt2 = ref_type_imm(fc, flags & 2 != 0)?;
+            let desc_ty = desc_operand(fc, rt2.heap)?;
+            // custom descriptors: the types only need a common supertype
+            if fc.cx.tc.top(rt1.heap) != fc.cx.tc.top(rt2.heap) {
+                return invalid("type mismatch: br_on_cast types are in different hierarchies");
+            }
+            let (types, idx) = fc.label_types_pub(l)?;
+            let Some((&last, rest)) = types.split_last() else { return invalid("type mismatch: br_on_cast label has no reference result") };
+            let ValType::Ref(_) = last else { return invalid("type mismatch: br_on_cast label has no reference result") };
+            let dsc = fc.pop_expect(desc_ty)?;
+            let o = fc.pop_expect(ValType::Ref(rt1))?;
+            let diff = RefType { nullable: rt1.nullable && !rt2.nullable, heap: rt1.heap };
+            let (branch_ty, fall_ty) = if sub == 37 { (rt2, diff) } else { (diff, rt2) };
+            if !fc.cx.tc.val_sub(ValType::Ref(branch_ty), last) {
+                return invalid("type mismatch: br_on_cast type does not match the label");
+            }
+            fc.check_top_pub(rest)?;
+            fc.retype_top_pub(rest)?;
+            // condition in a scratch slot above the reference
+            fc.push_loc_pub(ValType::Ref(rt1), o);
+            let flag = fc.push(I32);
+            fc.emit(Instr::with_x(Op::Gc, DESC_TEST | (rt2.nullable as u16) << 8, flag, o.src(), dsc.src()));
+            fc.pop()?;
+            fc.pop()?;
+            fc.push_loc_pub(ValType::Ref(branch_ty), o);
+            let (taken, inverse) = if sub == 37 { (Op::BrIfNez, Op::BrIfEqz) } else { (Op::BrIfEqz, Op::BrIfNez) };
+            fc.br_on_pub(flag, 0, taken, inverse, &types, idx);
+            fc.pop()?;
+            fc.push_loc_pub(ValType::Ref(fall_ty), o);
         }
         STRUCT_GET | STRUCT_GET_S | STRUCT_GET_U => {
             let t = fc.r.u32()?;
@@ -260,7 +382,7 @@ pub(crate) fn gc_op(fc: &mut FC) -> Result<()> {
             match x {
                 ARRAY_NEW => {
                     let base = fc.call_args_pub(&[et, I32])?;
-                    fc.push(rt(false, HeapType::Concrete(t)));
+                    fc.push(rt(false, HeapType::Exact(t)));
                     fc.emit(Instr::with_x(Op::Gc, x | k, base, canon, 0));
                 }
                 ARRAY_NEW_DEFAULT => {
@@ -268,7 +390,7 @@ pub(crate) fn gc_op(fc: &mut FC) -> Result<()> {
                         return invalid("type mismatch: array type is not defaultable");
                     }
                     let base = fc.call_args_pub(&[I32])?;
-                    fc.push(rt(false, HeapType::Concrete(t)));
+                    fc.push(rt(false, HeapType::Exact(t)));
                     fc.emit(Instr::with_x(Op::Gc, x | k, base, canon, 0));
                 }
                 _ => {
@@ -278,7 +400,7 @@ pub(crate) fn gc_op(fc: &mut FC) -> Result<()> {
                     }
                     let types = vec![et; n as usize];
                     let base = fc.call_args_pub(&types)?;
-                    fc.push(rt(false, HeapType::Concrete(t)));
+                    fc.push(rt(false, HeapType::Exact(t)));
                     fc.emit(Instr::with_x(Op::Gc, x | k, base, canon, n));
                 }
             }
@@ -302,7 +424,7 @@ pub(crate) fn gc_op(fc: &mut FC) -> Result<()> {
                 e
             };
             let base = fc.call_args_pub(&[I32, I32])?;
-            fc.push(rt(false, HeapType::Concrete(t)));
+            fc.push(rt(false, HeapType::Exact(t)));
             let k = (kind_of(ft.storage) as u16) << 8;
             fc.emit(Instr::with_x(Op::Gc, x | k, base, canon, seg));
         }
@@ -546,8 +668,55 @@ pub unsafe fn exec(store: &Store, inst: &Instance, code: &Code, i: Instr, regs: 
                     off += stride(k);
                 }
             }
-            let bits = alloc(store, GcObj { ty: i.b, is_array: false, kind: K_VAL, data });
+            let bits = alloc(store, GcObj { ty: i.b, is_array: false, kind: K_VAL, data, desc: 0 });
             w(i.a, bits);
+        }
+        STRUCT_NEW_DESC | STRUCT_NEW_DEFAULT_DESC => {
+            let desc = if sub == STRUCT_NEW_DESC { r(i.a + i.c) } else { r(i.c) };
+            if desc == 0 {
+                return Err(Trap::Other("null descriptor reference".into()));
+            }
+            let st = canonical_type(i.b);
+            let CompType::Struct(fs) = &st.comp else { return Err(Trap::Other("not a struct".into())) };
+            let n: usize = fs.iter().map(|f| stride(kind_of(f.storage))).sum();
+            let mut data = vec![0u64; n];
+            if sub == STRUCT_NEW_DESC {
+                let mut off = 0;
+                for f in fs.iter() {
+                    let k = kind_of(f.storage);
+                    data[off] = pack(k, r(i.a + off as u32));
+                    if k == K_V128 {
+                        data[off + 1] = r(i.a + off as u32 + 1);
+                    }
+                    off += stride(k);
+                }
+            }
+            let bits = alloc(store, GcObj { ty: i.b, is_array: false, kind: K_VAL, data, desc });
+            w(i.a, bits);
+        }
+        REF_GET_DESC => {
+            let Some(o) = obj_index(r(i.b)) else { return Err(Trap::NullReference) };
+            let d = store.gc.borrow()[o].desc;
+            w(i.a, d);
+        }
+        REF_CAST_DESC_EQ | REF_CAST_DESC_EQ_NULL | DESC_TEST => {
+            let (v, desc, nullable) = if sub == DESC_TEST { (r(i.b), r(i.c), kind != 0) } else { (r(i.a), r(i.b), sub == REF_CAST_DESC_EQ_NULL) };
+            if desc == 0 {
+                return Err(Trap::Other("null descriptor reference".into()));
+            }
+            let ok = if v == 0 {
+                nullable
+            } else {
+                match obj_index(v) {
+                    Some(o) => store.gc.borrow()[o].desc == desc,
+                    None => false,
+                }
+            };
+            if sub == DESC_TEST {
+                w(i.a, ok as u64);
+            } else if !ok {
+                return Err(Trap::Other("descriptor cast failure".into()));
+            }
         }
         STRUCT_GET | STRUCT_GET_S | STRUCT_GET_U => {
             let Some(o) = obj_index(r(i.b)) else { return Err(Trap::NullReference) };
@@ -622,7 +791,7 @@ pub unsafe fn exec(store: &Store, inst: &Instance, code: &Code, i: Instr, regs: 
                     seg[off as usize..(off + n) as usize].to_vec()
                 }
             };
-            let bits = alloc(store, GcObj { ty: i.b, is_array: true, kind, data });
+            let bits = alloc(store, GcObj { ty: i.b, is_array: true, kind, data, desc: 0 });
             w(i.a, bits);
         }
         ARRAY_GET | ARRAY_GET_S | ARRAY_GET_U => {

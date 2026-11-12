@@ -23,6 +23,19 @@ pub enum HeapType {
     None,
     NoExn,
     Concrete(u32),
+    /// Exact reference to a defined type (custom descriptors): matches
+    /// only that type, not its subtypes.
+    Exact(u32),
+}
+
+impl HeapType {
+    /// The defined type index of `Concrete` and `Exact` heap types.
+    pub fn index(self) -> Option<u32> {
+        match self {
+            HeapType::Concrete(i) | HeapType::Exact(i) => Some(i),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -92,6 +105,7 @@ impl fmt::Display for HeapType {
             HeapType::None => "none",
             HeapType::NoExn => "noexn",
             HeapType::Concrete(i) => return write!(f, "{}", i & !REC_BIT),
+            HeapType::Exact(i) => return write!(f, "(exact {})", i & !REC_BIT),
         };
         f.write_str(s)
     }
@@ -161,12 +175,15 @@ pub enum CompType {
 pub struct SubType {
     pub is_final: bool,
     pub supers: Box<[u32]>,
+    /// Custom descriptors: the type this one describes / its descriptor.
+    pub describes: Option<u32>,
+    pub descriptor: Option<u32>,
     pub comp: CompType,
 }
 
 impl SubType {
     pub fn func(ft: FuncType) -> SubType {
-        SubType { is_final: true, supers: Box::new([]), comp: CompType::Func(ft) }
+        SubType { is_final: true, supers: Box::new([]), describes: None, descriptor: None, comp: CompType::Func(ft) }
     }
     pub fn as_func(&self) -> Option<&FuncType> {
         match &self.comp {
@@ -252,6 +269,7 @@ fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
 fn map_heap(h: HeapType, f: &impl Fn(u32) -> u32) -> HeapType {
     match h {
         HeapType::Concrete(i) => HeapType::Concrete(f(i)),
+        HeapType::Exact(i) => HeapType::Exact(f(i)),
         o => o,
     }
 }
@@ -274,6 +292,8 @@ fn map_sub(s: &SubType, f: &impl Fn(u32) -> u32) -> SubType {
     SubType {
         is_final: s.is_final,
         supers: s.supers.iter().map(|&i| f(i)).collect(),
+        describes: s.describes.map(f),
+        descriptor: s.descriptor.map(f),
         comp: match &s.comp {
             CompType::Func(ft) => CompType::Func(FuncType {
                 params: ft.params.iter().map(|&v| map_val(v, f)).collect(),
@@ -348,6 +368,11 @@ pub fn canonical_subtype(mut a: TypeId, b: TypeId) -> bool {
             None => return false,
         }
     })
+}
+
+/// The descriptor type of a canonical struct type, if it has one.
+pub fn canonical_descriptor(id: TypeId) -> Option<TypeId> {
+    with_registry(|r| r.types.get(id as usize).and_then(|t| t.descriptor))
 }
 
 /// Function type of a canonical id (panics if it is not a function type).

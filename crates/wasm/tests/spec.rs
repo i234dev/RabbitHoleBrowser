@@ -210,6 +210,11 @@ const QUICK: &[&str] = &[
     "call_ref.wast",
     "memory64.wast",
     "load2.wast",
+    "proposals/custom-descriptors/ref_cast_desc_eq.wast",
+    "proposals/custom-descriptors/struct_new_desc.wast",
+    "proposals/custom-descriptors/exact-func-import.wast",
+    "proposals/wide-arithmetic/wide-arithmetic.wast",
+    "proposals/compact-import-section/imports-compact.wast",
 ];
 
 #[test]

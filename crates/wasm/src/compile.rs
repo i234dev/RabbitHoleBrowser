@@ -1216,7 +1216,9 @@ impl<'a> FC<'a> {
                     if !self.cx.refs.contains(&f) {
                         return invalid("undeclared function reference");
                     }
-                    let d = self.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Concrete(ty) }));
+                    let exact = f >= self.cx.m.num_imported_funcs || self.cx.m.exact_funcs.contains(&f);
+                    let heap = if exact { HeapType::Exact(ty) } else { HeapType::Concrete(ty) };
+                    let d = self.push(ValType::Ref(RefType { nullable: false, heap }));
                     self.emit(Instr::new(Op::RefFunc, d, f, 0));
                 }
                 0xd3 => {

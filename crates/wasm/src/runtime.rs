@@ -518,7 +518,8 @@ impl Store {
             match (&imp.desc, ext) {
                 (ImportDesc::Func(t), Extern::Func(f)) => {
                     let want = m.canon[*t as usize];
-                    if !canonical_subtype(f.ty, want) {
+                    let exact = m.exact_funcs.contains(&(funcs.len() as u32));
+                    if if exact { f.ty != want } else { !canonical_subtype(f.ty, want) } {
                         return Err(err("function type mismatch"));
                     }
                     funcs.push(f.clone());
@@ -700,6 +701,7 @@ fn limits_match(cur_min: u64, cur_max: Option<u64>, want: Limits) -> bool {
 pub fn canon_val(m: &Module, v: ValType) -> ValType {
     match v {
         ValType::Ref(RefType { nullable, heap: HeapType::Concrete(i) }) => ValType::Ref(RefType { nullable, heap: HeapType::Concrete(m.canon[i as usize]) }),
+        ValType::Ref(RefType { nullable, heap: HeapType::Exact(i) }) => ValType::Ref(RefType { nullable, heap: HeapType::Exact(m.canon[i as usize]) }),
         o => o,
     }
 }
@@ -715,7 +717,15 @@ pub fn canon_val_sub(a: ValType, b: ValType) -> bool {
             let is_func = |i: u32| matches!(canonical_type(i).comp, CompType::Func(_));
             let is_struct = |i: u32| matches!(canonical_type(i).comp, CompType::Struct(_));
             let is_array = |i: u32| matches!(canonical_type(i).comp, CompType::Array(_));
-            match (x.heap, y.heap) {
+            let xh = match (x.heap, y.heap) {
+                (Exact(p), Exact(q)) => return p == q,
+                (None, Exact(q)) => return !is_func(q),
+                (NoFunc, Exact(q)) => return is_func(q),
+                (_, Exact(_)) => return false,
+                (Exact(p), _) => Concrete(p),
+                (h, _) => h,
+            };
+            match (xh, y.heap) {
                 (p, q) if p == q => true,
                 (Concrete(p), Concrete(q)) => canonical_subtype(p, q),
                 (Concrete(p), Func) => is_func(p),
@@ -797,11 +807,18 @@ pub fn eval_const(store: &Store, m: &Module, e: &ConstExpr, globals: &[Rc<Global
                 let v = st.pop().unwrap() as u32;
                 st.push(i31_bits(v) as u128);
             }
-            ConstOp::StructNew(t) | ConstOp::StructNewDefault(t) => {
+            ConstOp::StructNew(t) | ConstOp::StructNewDefault(t) | ConstOp::StructNewDesc(t) | ConstOp::StructNewDefaultDesc(t) => {
                 let ty = m.canon[t as usize];
                 let CompType::Struct(fs) = canonical_type(ty).comp else { return Err(Trap::Other("not a struct".into())) };
+                let mut desc = 0;
+                if matches!(op, ConstOp::StructNewDesc(_) | ConstOp::StructNewDefaultDesc(_)) {
+                    desc = st.pop().unwrap() as u64;
+                    if desc == 0 {
+                        return Err(Trap::Other("null descriptor reference".into()));
+                    }
+                }
                 let mut vals: Vec<u128> = Vec::new();
-                if matches!(op, ConstOp::StructNew(_)) {
+                if matches!(op, ConstOp::StructNew(_) | ConstOp::StructNewDesc(_)) {
                     let at = st.len() - fs.len();
                     vals = st.split_off(at);
                 } else {
@@ -819,7 +836,7 @@ pub fn eval_const(store: &Store, m: &Module, e: &ConstExpr, globals: &[Rc<Global
                         data.push((v >> 64) as u64);
                     }
                 }
-                st.push(alloc(store, GcObj { ty, is_array: false, kind: K_VAL, data }) as u128);
+                st.push(alloc(store, GcObj { ty, is_array: false, kind: K_VAL, data, desc }) as u128);
             }
             ConstOp::ArrayNew(t) | ConstOp::ArrayNewDefault(t) | ConstOp::ArrayNewFixed(t, _) => {
                 let ty = m.canon[t as usize];
@@ -857,7 +874,7 @@ pub fn eval_const(store: &Store, m: &Module, e: &ConstExpr, globals: &[Rc<Global
                         data.push((v >> 64) as u64);
                     }
                 }
-                st.push(alloc(store, GcObj { ty, is_array: true, kind: k, data }) as u128);
+                st.push(alloc(store, GcObj { ty, is_array: true, kind: k, data, desc: 0 }) as u128);
             }
         }
     }

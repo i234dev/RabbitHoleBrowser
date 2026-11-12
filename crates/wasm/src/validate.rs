@@ -39,7 +39,7 @@ impl<'a> TypeCtx<'a> {
             HeapType::Func | HeapType::NoFunc => HeapType::Func,
             HeapType::Extern | HeapType::NoExtern => HeapType::Extern,
             HeapType::Exn | HeapType::NoExn => HeapType::Exn,
-            HeapType::Concrete(i) => {
+            HeapType::Concrete(i) | HeapType::Exact(i) => {
                 if self.is_func(i) {
                     HeapType::Func
                 } else {
@@ -64,6 +64,17 @@ impl<'a> TypeCtx<'a> {
         use HeapType::*;
         if a == b {
             return true;
+        }
+        if let Exact(y) = b {
+            return match a {
+                Exact(x) => matches!((self.canon.get(x as usize), self.canon.get(y as usize)), (Some(p), Some(q)) if p == q),
+                None => !self.is_func(y),
+                NoFunc => self.is_func(y),
+                _ => false,
+            };
+        }
+        if let Exact(x) = a {
+            return self.heap_sub(Concrete(x), b);
         }
         match (a, b) {
             (Concrete(x), Concrete(y)) => {
@@ -114,7 +125,7 @@ impl<'a> TypeCtx<'a> {
 }
 
 pub fn check_heap(types_len: u32, h: HeapType) -> Result<()> {
-    if let HeapType::Concrete(i) = h {
+    if let Some(i) = h.index() {
         if i >= types_len {
             return invalid(format!("unknown type {i}"));
         }
@@ -171,7 +182,8 @@ pub fn validate(m: &mut Module) -> Result<Vec<crate::ir::Code>> {
         for i in start..end {
             let st = &m.types[i as usize];
             let check = |v: ValType| -> Result<()> {
-                if let ValType::Ref(RefType { heap: HeapType::Concrete(x), .. }) = v {
+                if let ValType::Ref(RefType { heap, .. }) = v {
+                    let Some(x) = heap.index() else { return Ok(()) };
                     if x >= end {
                         return invalid(format!("unknown type {x}"));
                     }
@@ -200,6 +212,36 @@ pub fn validate(m: &mut Module) -> Result<Vec<crate::ir::Code>> {
             if st.supers.len() > 1 {
                 return invalid("multiple supertypes");
             }
+            let is_struct = |t: &SubType| matches!(t.comp, CompType::Struct(_));
+            if let Some(d) = st.descriptor {
+                if d < start || d >= end {
+                    return invalid("descriptor type is outside rec group");
+                }
+                let dt = &m.types[d as usize];
+                if dt.describes != Some(i) {
+                    return invalid("type is not described by its descriptor");
+                }
+                if !is_struct(st) || !is_struct(dt) {
+                    return invalid("descriptor type must be a struct");
+                }
+                if st.is_final != dt.is_final {
+                    return invalid("descriptor and described types have mismatched finality");
+                }
+            }
+            if let Some(x) = st.describes {
+                if x < start || x >= end {
+                    return invalid("described type is outside rec group");
+                }
+                if x >= i {
+                    return invalid("forward use of described type");
+                }
+                if m.types[x as usize].descriptor != Some(i) {
+                    return invalid("described type is not described by descriptor");
+                }
+                if !is_struct(st) {
+                    return invalid("described type must be a struct");
+                }
+            }
             for &s in st.supers.iter() {
                 if s >= i {
                     return invalid(format!("unknown type {s}"));
@@ -217,7 +259,12 @@ pub fn validate(m: &mut Module) -> Result<Vec<crate::ir::Code>> {
                 if sup.is_final {
                     return invalid("sub type of final type");
                 }
-                if !comp_sub(&tc, &st.comp, &sup.comp) {
+                let pair_ok = |a: Option<u32>, b: Option<u32>| match (a, b) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => canonical_subtype(m.canon[a as usize], m.canon[b as usize]),
+                    _ => false,
+                };
+                if !comp_sub(&tc, &st.comp, &sup.comp) || !pair_ok(st.descriptor, sup.descriptor) || !pair_ok(st.describes, sup.describes) {
                     return invalid(format!("sub type {i} does not match super type {s}"));
                 }
             }
@@ -436,7 +483,9 @@ impl ConstCtx<'_> {
                     if f >= self.nfuncs {
                         return invalid(format!("unknown function {f}"));
                     }
-                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Concrete(self.m.funcs[f as usize]) }));
+                    let t = self.m.funcs[f as usize];
+                    let heap = if f >= self.m.num_imported_funcs || self.m.exact_funcs.contains(&f) { HeapType::Exact(t) } else { HeapType::Concrete(t) };
+                    stack.push(ValType::Ref(RefType { nullable: false, heap }));
                 }
                 ConstOp::GlobalGet(g) => {
                     let Some(gt) = self.m.globals.get(g as usize) else {
@@ -464,25 +513,32 @@ impl ConstCtx<'_> {
                     pop(&mut stack, ValType::I32)?;
                     stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::I31 }));
                 }
-                ConstOp::StructNew(t) => {
+                ConstOp::StructNew(t) | ConstOp::StructNewDefault(t) | ConstOp::StructNewDesc(t) | ConstOp::StructNewDefaultDesc(t) => {
                     let Some(CompType::Struct(fs)) = tc.comp(t) else { return invalid(format!("unknown type {t}")) };
-                    for f in fs.iter().rev() {
-                        pop(&mut stack, f.storage.unpacked())?;
+                    let with_desc = matches!(op, ConstOp::StructNewDesc(_) | ConstOp::StructNewDefaultDesc(_));
+                    let desc = self.m.types[t as usize].descriptor;
+                    match (with_desc, desc) {
+                        (false, Some(_)) => return invalid("type with a descriptor requires a descriptor operand"),
+                        (true, None) => return invalid(format!("type {t} does not have a descriptor")),
+                        _ => {}
                     }
-                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Concrete(t) }));
-                }
-                ConstOp::StructNewDefault(t) => {
-                    let Some(CompType::Struct(fs)) = tc.comp(t) else { return invalid(format!("unknown type {t}")) };
-                    if fs.iter().any(|f| !f.storage.unpacked().defaultable()) {
+                    if let Some(d) = desc {
+                        pop(&mut stack, ValType::Ref(RefType { nullable: true, heap: HeapType::Exact(d) }))?;
+                    }
+                    if matches!(op, ConstOp::StructNew(_) | ConstOp::StructNewDesc(_)) {
+                        for f in fs.iter().rev() {
+                            pop(&mut stack, f.storage.unpacked())?;
+                        }
+                    } else if fs.iter().any(|f| !f.storage.unpacked().defaultable()) {
                         return invalid("type mismatch: field type is not defaultable");
                     }
-                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Concrete(t) }));
+                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Exact(t) }));
                 }
                 ConstOp::ArrayNew(t) => {
                     let Some(CompType::Array(f)) = tc.comp(t) else { return invalid(format!("unknown type {t}")) };
                     pop(&mut stack, ValType::I32)?;
                     pop(&mut stack, f.storage.unpacked())?;
-                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Concrete(t) }));
+                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Exact(t) }));
                 }
                 ConstOp::ArrayNewDefault(t) => {
                     let Some(CompType::Array(f)) = tc.comp(t) else { return invalid(format!("unknown type {t}")) };
@@ -490,14 +546,14 @@ impl ConstCtx<'_> {
                         return invalid("type mismatch: array type is not defaultable");
                     }
                     pop(&mut stack, ValType::I32)?;
-                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Concrete(t) }));
+                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Exact(t) }));
                 }
                 ConstOp::ArrayNewFixed(t, n) => {
                     let Some(CompType::Array(f)) = tc.comp(t) else { return invalid(format!("unknown type {t}")) };
                     for _ in 0..n {
                         pop(&mut stack, f.storage.unpacked())?;
                     }
-                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Concrete(t) }));
+                    stack.push(ValType::Ref(RefType { nullable: false, heap: HeapType::Exact(t) }));
                 }
                 ConstOp::AnyConvertExtern => {
                     let nullable = match stack.pop() {
