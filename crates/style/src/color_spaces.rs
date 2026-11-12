@@ -257,7 +257,8 @@ pub fn parse_function(f: &str, c: &[Token]) -> Option<ColorValue> {
             let l = num(vals[0], if ok { 1.0 } else { 100.0 })?;
             let ab_ref = if ok { 0.4 } else { 125.0 };
             let (x, y) = (num(vals[1], ab_ref)?, num(vals[2], ab_ref)?);
-            let lin = if ok { oklab_to_linear(l.max(0.0), x, y) } else { lab_to_linear(l.max(0.0), x, y) };
+            let l = l.clamp(0.0, if ok { 1.0 } else { 100.0 });
+            let lin = if ok { oklab_to_linear(l, x, y) } else { lab_to_linear(l, x, y) };
             to_color(lin, alpha(a)?)
         }
         "lch" | "oklch" => {
@@ -268,7 +269,8 @@ pub fn parse_function(f: &str, c: &[Token]) -> Option<ColorValue> {
             let l = num(vals[0], if ok { 1.0 } else { 100.0 })?;
             let ch = num(vals[1], if ok { 0.4 } else { 150.0 })?.max(0.0);
             let (x, y) = polar(ch, hue(vals[2])?);
-            let lin = if ok { oklab_to_linear(l.max(0.0), x, y) } else { lab_to_linear(l.max(0.0), x, y) };
+            let l = l.clamp(0.0, if ok { 1.0 } else { 100.0 });
+            let lin = if ok { oklab_to_linear(l, x, y) } else { lab_to_linear(l, x, y) };
             to_color(lin, alpha(a)?)
         }
         "color" => {
