@@ -1257,6 +1257,61 @@ fn emit_fast(c: &mut Ctx, pc: u32, i: &Instr) -> bool {
                 c.a.sse(0xf2, 0x11, 0, slot(d));
             }
         }
+        I32Clz | I64Clz => {
+            // bits-1 - bsr(x); x == 0: bsr leaves ZF set -> -1 -> bits
+            let w = i.op == I64Clz;
+            c.a.mov_imm64(RCX, u64::MAX);
+            c.a.op_mem(None, w, &[0x0f, 0xbd], RAX, slot(b)); // bsr
+            c.a.op_rr(None, w, &[0x0f, 0x44], RAX, RCX); // cmovz
+            c.a.mov_imm32(RDX, if w { 63 } else { 31 });
+            c.a.op_rr(None, w, &[0x2b], RDX, RAX); // sub rdx, rax
+            if !w {
+                c.a.op_rr(None, false, &[0x89], RDX, RDX);
+            }
+            c.a.store64(slot(d), RDX);
+        }
+        I32Ctz | I64Ctz => {
+            let w = i.op == I64Ctz;
+            c.a.mov_imm32(RCX, if w { 64 } else { 32 });
+            c.a.op_mem(None, w, &[0x0f, 0xbc], RAX, slot(b)); // bsf
+            c.a.op_rr(None, w, &[0x0f, 0x44], RAX, RCX); // cmovz
+            c.a.op_rr(None, false, &[0x89], RAX, RAX);
+            c.a.store64(slot(d), RAX);
+        }
+        MemoryCopy | MemoryFill if code.mem0_32 && b == 0 && (i.op == MemoryFill || cc_ == 0) => {
+            // operands at d, d+1, d+2 (u32); bounds -> interpreter (traps)
+            let base = d;
+            c.a.load32(RDI, slot(base));
+            c.a.load32(RCX, slot(base + 2));
+            c.a.op_mem(None, true, &[0x8d], RAX, Mem { base: RDI, index: Some(RCX), disp: 0 }); // lea rax,[rdi+rcx]
+            c.a.op_rr(None, true, &[0x3b], RAX, R13);
+            let j = c.a.jcc(CC_A);
+            c.exec_slow(j, pc);
+            if i.op == MemoryFill {
+                c.a.load32(RAX, slot(base + 1));
+                c.a.op_rr(None, true, &[0x03], RDI, R12); // add rdi, r12
+                c.a.buf.extend_from_slice(&[0xf3, 0xaa]); // rep stosb
+            } else {
+                c.a.load32(RSI, slot(base + 1));
+                c.a.op_mem(None, true, &[0x8d], RAX, Mem { base: RSI, index: Some(RCX), disp: 0 });
+                c.a.op_rr(None, true, &[0x3b], RAX, R13);
+                let j = c.a.jcc(CC_A);
+                c.exec_slow(j, pc);
+                // overlapping with dst after src: copy backwards (helper)
+                c.a.op_rr(None, true, &[0x3b], RDI, RSI); // cmp rdi, rsi
+                let fwd = c.a.jcc(CC_BE);
+                c.a.op_rr(None, true, &[0x3b], RDI, RAX); // cmp rdi, rsi+n
+                let fwd2 = c.a.jcc(CC_AE);
+                let back = c.a.jmp();
+                c.exec_slow(back, pc);
+                let here = c.a.pos();
+                c.a.patch(fwd, here);
+                c.a.patch(fwd2, here);
+                c.a.op_rr(None, true, &[0x03], RDI, R12);
+                c.a.op_rr(None, true, &[0x03], RSI, R12);
+                c.a.buf.extend_from_slice(&[0xf3, 0xa4]); // rep movsb
+            }
+        }
         F64PromoteF32 => {
             c.a.buf.extend_from_slice(&[0x66, 0x0f, 0xef, 0xc0]);
             c.a.sse(0xf3, 0x5a, 0, slot(b));

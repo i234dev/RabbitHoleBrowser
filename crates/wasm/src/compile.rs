@@ -232,6 +232,7 @@ pub fn compile_function(cx: &ModuleCtx, def_index: u32) -> Result<Code> {
         handlers: fc.handlers.into(),
         casts: fc.casts.into(),
         func_index,
+        mem0_32: m.memories.first().is_some_and(|t| !t.memory64),
         jit: Default::default(),
     })
 }

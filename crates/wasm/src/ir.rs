@@ -446,6 +446,8 @@ pub struct Code {
     pub casts: Box<[(crate::types::HeapType, bool)]>,
     /// Module function index (for names in traces).
     pub func_index: u32,
+    /// Memory 0 exists and has 32-bit addresses (native bulk memory ops).
+    pub mem0_32: bool,
     /// Native code (compiled on first use; see `jit.rs`).
     pub jit: std::cell::OnceCell<Option<crate::jit::Compiled>>,
 }
