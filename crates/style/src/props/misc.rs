@@ -195,6 +195,14 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 };
             }
         }
+        "content-visibility" => {
+            if let Some(kw) = values::ident(c0) {
+                style.content_visibility_hidden = kw == "hidden";
+                if kw != "visible" {
+                    style.creates_stacking_context = true;
+                }
+            }
+        }
         "accent-color" => {
             if values::ident(c0).is_some_and(|k| k == "auto") {
                 style.accent_color = None;
@@ -404,7 +412,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color"
         | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"
         | "-ms-touch-action" | "speak" | "orphans" | "widows" | "page" | "size" | "marks" | "quotes-x" | "all-x"
-        | "content-visibility" | "contain-intrinsic-size" | "container" | "container-type" | "container-name" | "view-transition-name"
+        | "contain-intrinsic-size" | "container" | "container-type" | "container-name" | "view-transition-name"
         | "anchor-name" | "position-anchor" | "field-sizing" | "forced-color-adjust" | "interpolate-size" | "math-style"
         | "-webkit-box-sizing" | "-moz-box-sizing" | "-webkit-user-drag" | "-webkit-user-modify" | "-webkit-locale"
         | "-webkit-margin-before" | "-webkit-margin-after" | "-webkit-margin-start" | "-webkit-margin-end"

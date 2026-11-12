@@ -125,6 +125,7 @@ pub enum WhiteSpace {
     Pre,
     PreWrap,
     PreLine,
+    BreakSpaces,
 }
 
 impl WhiteSpace {
@@ -132,10 +133,10 @@ impl WhiteSpace {
         matches!(self, WhiteSpace::Normal | WhiteSpace::Nowrap | WhiteSpace::PreLine)
     }
     pub fn wraps(&self) -> bool {
-        matches!(self, WhiteSpace::Normal | WhiteSpace::PreWrap | WhiteSpace::PreLine)
+        matches!(self, WhiteSpace::Normal | WhiteSpace::PreWrap | WhiteSpace::PreLine | WhiteSpace::BreakSpaces)
     }
     pub fn preserves_newlines(&self) -> bool {
-        matches!(self, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine)
+        matches!(self, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine | WhiteSpace::BreakSpaces)
     }
 }
 
@@ -805,6 +806,8 @@ pub struct ComputedStyle {
     pub tab_size: f32,
     /// `-webkit-line-clamp`
     pub line_clamp: Option<u32>,
+    /// `content-visibility: hidden`: the contents are not rendered.
+    pub content_visibility_hidden: bool,
     /// `line_clamp` came from `-webkit-line-clamp` (applies only to
     /// `display: -webkit-box` with `-webkit-box-orient: vertical`).
     pub line_clamp_prefixed: bool,
@@ -951,6 +954,7 @@ impl ComputedStyle {
             direction: Direction::Ltr,
             tab_size: 8.0,
             line_clamp: None,
+            content_visibility_hidden: false,
             line_clamp_prefixed: false,
             webkit_box: false,
             font_family_list: Vec::new(),

@@ -203,7 +203,69 @@ fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLay
     } else {
         list.items.push(DisplayItem::PushClip(clip_rect));
     }
+    let space_x = layer.repeat.0 == BackgroundRepeat::Space;
+    let space_y = layer.repeat.1 == BackgroundRepeat::Space;
     match (&layer.image, image) {
+        (BackgroundImage::Url(_), Some(img)) if space_x || space_y => {
+            // Tile origins along one axis: (start, count, step).
+            let axis = |space: bool, repeat: bool, start: f32, len: f32, size: f32, pos: f32, clip0: f32, clip1: f32| -> Vec<f32> {
+                if space {
+                    let n = (len / size + 0.001).floor();
+                    if n >= 2.0 {
+                        let step = size + (len - n * size) / (n - 1.0);
+                        // Repeat the spaced tiles over the painting area too.
+                        let mut first = start;
+                        while first - step + size > clip0 {
+                            first -= step;
+                        }
+                        let mut out = Vec::new();
+                        let mut x = first;
+                        while x < clip1 && out.len() < 10_000 {
+                            out.push(x);
+                            x += step;
+                        }
+                        return out;
+                    }
+                    if n < 1.0 {
+                        return Vec::new();
+                    }
+                    return vec![start + pos];
+                }
+                if repeat {
+                    let mut first = start + pos;
+                    while first > clip0 {
+                        first -= size;
+                    }
+                    let mut out = Vec::new();
+                    let mut x = first;
+                    while x < clip1 && out.len() < 10_000 {
+                        out.push(x);
+                        x += size;
+                    }
+                    return out;
+                }
+                vec![start + pos]
+            };
+            let xs = axis(space_x, repeat_x, area.x, area.w, tw, px, clip_rect.x, clip_rect.right());
+            let ys = axis(space_y, repeat_y, area.y, area.h, th, py, clip_rect.y, clip_rect.bottom());
+            if xs.len() * ys.len() <= 4096 {
+                for &y in &ys {
+                    for &x in &xs {
+                        let r = Rect::new(x, y, tw, th);
+                        if r.intersect(&clip_rect).is_empty() {
+                            continue;
+                        }
+                        list.items.push(DisplayItem::Image {
+                            rect: r,
+                            src: Rect::new(0.0, 0.0, img.width as f32, img.height as f32),
+                            image: img.clone(),
+                            opacity: 1.0,
+                            pixelated: false,
+                        });
+                    }
+                }
+            }
+        }
         (BackgroundImage::Url(_), Some(img)) => {
             if repeat_x || repeat_y {
                 let mut x0 = tile.x;

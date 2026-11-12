@@ -475,7 +475,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             let fits = self.cur.x + self.pending_w() + width <= self.cur.right + 0.01;
             // Preserved spaces at the end of a `pre-wrap` line hang: they
             // never move to the next line (CSS Text 3 §4.1.3).
-            let hangs = wraps && self.cur.has_content && !text.is_empty() && text.chars().all(|c| c == ' ');
+            let hangs = wraps && self.style(item).white_space != rabbithole_style::WhiteSpace::BreakSpaces && self.cur.has_content && !text.is_empty() && text.chars().all(|c| c == ' ');
             if fits || hangs || (!wraps && !break_before) || guard > 10_000 {
                 self.push_text(text, width, item, break_before);
                 return;

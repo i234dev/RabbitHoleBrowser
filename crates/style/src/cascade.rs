@@ -1391,6 +1391,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "text-decoration-thickness" => to.text_decoration_thickness = from.text_decoration_thickness,
         "direction" => to.direction = from.direction,
         "tab-size" => to.tab_size = from.tab_size,
+        "content-visibility" => to.content_visibility_hidden = from.content_visibility_hidden,
         "-webkit-line-clamp" | "line-clamp" => {
             to.line_clamp = from.line_clamp;
             to.line_clamp_prefixed = from.line_clamp_prefixed;
@@ -1516,6 +1517,12 @@ fn border_width(c: &[Token], ctx: &LengthContext) -> Option<f32> {
         Length::Px(v) => Some((v.max(0.0) + 0.01).floor()),
         _ => None,
     }
+}
+
+/// Not a negative number, length or percentage literal (properties such as
+/// padding reject them).
+fn non_negative(c: &[Token]) -> bool {
+    !matches!(c, [Token::Dimension(n, _)] | [Token::Number(n)] | [Token::Percentage(n)] if *n < 0.0)
 }
 
 fn border_style(c: &[Token]) -> Option<BorderStyle> {
@@ -1879,8 +1886,14 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "flex-flow" => {
+            // Shorthand: omitted longhands reset to their initial values.
+            style.flex_direction = FlexDirection::Row;
+            style.flex_wrap = FlexWrap::NoWrap;
             for c in &comps {
-                apply_property("flex-direction", c, style, parent, ctx);
+                match values::ident(c).as_deref() {
+                    Some("nowrap" | "wrap" | "wrap-reverse") => apply_property("flex-wrap", c, style, parent, ctx),
+                    _ => apply_property("flex-direction", c, style, parent, ctx),
+                }
             }
         }
         "width" | "height" | "min-width" | "min-height" => {
@@ -1966,12 +1979,12 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "padding" => {
-            if let Some(e) = parse_edges(&comps, |c| resolve_len_no_auto(c, ctx)) {
+            if let Some(e) = parse_edges(&comps, |c| non_negative(c).then(|| resolve_len_no_auto(c, ctx)).flatten()) {
                 style.padding = e;
             }
         }
         "padding-top" | "padding-right" | "padding-bottom" | "padding-left" => {
-            if comps.len() == 1 {
+            if comps.len() == 1 && non_negative(c0) {
                 if let Some(l) = resolve_len_no_auto(c0, ctx) {
                     match name {
                         "padding-top" => style.padding.top = l,
@@ -2202,7 +2215,8 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
                     "normal" => WhiteSpace::Normal,
                     "nowrap" => WhiteSpace::Nowrap,
                     "pre" => WhiteSpace::Pre,
-                    "pre-wrap" | "break-spaces" => WhiteSpace::PreWrap,
+                    "pre-wrap" => WhiteSpace::PreWrap,
+                    "break-spaces" => WhiteSpace::BreakSpaces,
                     "pre-line" => WhiteSpace::PreLine,
                     _ => return,
                 };

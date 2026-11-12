@@ -133,7 +133,7 @@ fn inline_content_is_empty(b: &LayoutBox) -> bool {
     for it in &b.items {
         match it {
             InlineItem::Text { text, style, .. } => {
-                let preserve = matches!(style.white_space, WhiteSpace::Pre | WhiteSpace::PreWrap);
+                let preserve = matches!(style.white_space, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces);
                 let preserve_newlines = style.white_space == WhiteSpace::PreLine;
                 for ch in text.chars() {
                     let collapsible = matches!(ch, ' ' | '\t' | '\r' | '\x0c') && !preserve || ch == '\n' && !preserve && !preserve_newlines;
@@ -837,6 +837,7 @@ impl<'a> Layouter<'a> {
                         }
                         (None, Some(r)) => (w, (rem - r).max(0.0), r),
                         (Some(l), None) => (w, l, rem - l),
+                        (Some(_), Some(r)) if style.direction == rabbithole_style::Direction::Rtl => (w, rem - r, r),
                         (Some(l), Some(_)) => (w, l, rem - l),
                     }
                 }

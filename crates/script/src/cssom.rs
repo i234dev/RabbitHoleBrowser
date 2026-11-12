@@ -462,6 +462,7 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect) -
             rabbithole_style::WhiteSpace::Nowrap => "nowrap",
             rabbithole_style::WhiteSpace::Pre => "pre",
             rabbithole_style::WhiteSpace::PreWrap => "pre-wrap",
+            rabbithole_style::WhiteSpace::BreakSpaces => "break-spaces",
             rabbithole_style::WhiteSpace::PreLine => "pre-line",
         }
         .to_string(),

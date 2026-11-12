@@ -72,7 +72,7 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
             out.push(Seg::Word(std::mem::take(word)));
         }
     };
-    let preserve_spaces = matches!(ws, WhiteSpace::Pre | WhiteSpace::PreWrap);
+    let preserve_spaces = matches!(ws, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces);
     let preserve_newlines = ws.preserves_newlines();
     for ch in text.chars() {
         match ch {

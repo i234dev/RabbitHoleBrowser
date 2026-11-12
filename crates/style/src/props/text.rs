@@ -232,7 +232,8 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                             WhiteSpace::Normal
                         }
                     }
-                    "preserve" | "break-spaces" => WhiteSpace::PreWrap,
+                    "preserve" => WhiteSpace::PreWrap,
+                    "break-spaces" => WhiteSpace::BreakSpaces,
                     "preserve-breaks" => WhiteSpace::PreLine,
                     _ => return true,
                 };

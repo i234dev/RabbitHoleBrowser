@@ -379,6 +379,7 @@ impl<'a> Builder<'a> {
             "input" => !matches!(input_type(doc, node).as_str(), "checkbox" | "radio"),
             _ => false,
         };
+        let no_generated = no_generated || style.content_visibility_hidden;
         let before = if no_generated { None } else { self.build_pseudo(node, PseudoElement::Before, kind == BoxKind::TableRow) };
         let mut children = match tag {
             "input" => self.build_input(node, &style),
@@ -411,6 +412,8 @@ impl<'a> Builder<'a> {
                 }
                 vec![t]
             }
+            // `content-visibility: hidden`: no contents at all.
+            _ if style.content_visibility_hidden => Vec::new(),
             _ => self.build_children(node, &style, kind == BoxKind::TableRow),
         };
         let after = if no_generated { None } else { self.build_pseudo(node, PseudoElement::After, kind == BoxKind::TableRow) };
@@ -488,6 +491,11 @@ impl<'a> Builder<'a> {
                     self.finish_row_group(&mut b, children);
                 } else {
                     self.finish_container(&mut b, children, false);
+                    // An empty list item with an inside marker: the marker
+                    // is its inline content.
+                    if b.marker_text.is_some() && b.children.is_empty() && b.items.is_empty() && style.list_style_position == rabbithole_style::ListStylePosition::Inside {
+                        b.formatting = Formatting::Inline;
+                    }
                 }
             }
         }
@@ -798,6 +806,8 @@ impl<'a> Builder<'a> {
     fn finish_flex(&self, b: &mut LayoutBox, children: Vec<LayoutBox>) {
         self.finish_container(b, children, true);
         b.formatting = Formatting::Flex;
+        // Items are laid out and painted in order-modified document order.
+        b.children.sort_by_key(|c| c.style.order);
         for c in &mut b.children {
             if c.flow.is_in_flow() || c.flow.is_float() {
                 // Floats do not float inside flex containers.
@@ -811,6 +821,7 @@ impl<'a> Builder<'a> {
     fn finish_grid(&self, b: &mut LayoutBox, children: Vec<LayoutBox>) {
         self.finish_container(b, children, true);
         b.formatting = Formatting::Grid;
+        b.children.sort_by_key(|c| c.style.order);
         for c in &mut b.children {
             if c.flow.is_in_flow() || c.flow.is_float() {
                 c.flow = Flow::InFlow;
