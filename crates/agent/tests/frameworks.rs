@@ -456,10 +456,14 @@ impl App {
 fn counter(fw: &str) {
     let mut a = App::open(fw, "");
     a.expect_text("#count", "0");
-    for _ in 0..3 {
+    // One click at a time: htmx's counter carries its state in the request
+    // (the hidden input), so a click sent before the previous response was
+    // swapped in posts the old value, in any browser. Waiting for each
+    // update keeps the scenario independent of server and machine speed.
+    for n in 1..=3 {
         a.click("#inc");
+        a.expect_text("#count", &n.to_string());
     }
-    a.expect_text("#count", "3");
     a.click("#dec");
     a.expect_text("#count", "2");
     a.no_errors();
