@@ -65,9 +65,9 @@ pub(crate) struct RuleIndex {
 }
 
 impl RuleIndex {
-    fn add_sheet(&mut self, rules: &[&StyleRule], is_ua: bool, base: Option<Rc<str>>, layers: &HashMap<std::sync::Arc<str>, u32>) {
+    fn add_sheet(&mut self, rules: &[&StyleRule], is_ua: bool, base: Option<Rc<str>>, layers: &HashMap<std::sync::Arc<str>, u32>, sheet: usize) {
         for rule in rules {
-            let layer = rule.layer.as_ref().and_then(|l| layers.get(l).copied()).unwrap_or(0);
+            let layer = rule.layer.as_ref().and_then(|l| layers.get(&layer_key(l, sheet)).copied()).unwrap_or(0);
             let decls: Rc<[Declaration]> = Rc::from(rule.declarations.as_slice());
             for sel in &rule.selectors {
                 let idx = self.rules.len();
@@ -181,24 +181,24 @@ impl ScopeIndex {
             for r in rules {
                 if let Some(l) = &r.layer {
                     let n = layers.len() as u32 + 1;
-                    layers.entry(l.clone()).or_insert(n);
+                    layers.entry(layer_key(l, sheet_no(author, sheet))).or_insert(n);
                 }
             }
         }
         let mut doc = RuleIndex::default();
-        doc.add_sheet(&ua_rules, true, None, &layers);
+        doc.add_sheet(&ua_rules, true, None, &layers, 0);
         let mut doc_sources = Vec::new();
         for sheet in author {
             if sheet.shadow_scopes.is_empty() {
                 let mut rules = Vec::new();
                 sheet.active_rules(env, &mut rules);
-                doc.add_sheet(&rules, false, sheet.base_url.as_deref().map(Rc::from), &layers);
+                doc.add_sheet(&rules, false, sheet.base_url.as_deref().map(Rc::from), &layers, sheet_no(author, sheet));
                 doc_sources.push(sheet.source_id);
             }
         }
         // Shadow trees without sheets of their own match only UA rules.
         let mut ua_only = RuleIndex::default();
-        ua_only.add_sheet(&ua_rules, true, None, &layers);
+        ua_only.add_sheet(&ua_rules, true, None, &layers, 0);
         let mut ix = ScopeIndex { doc, ua_only, shadow: Vec::new(), by_root: HashMap::new(), doc_sources, root_sources: HashMap::new(), groups: HashMap::new() };
         ix.rebuild_shadow(author, env);
         ix
@@ -239,11 +239,11 @@ impl ScopeIndex {
                         ua_sheet().active_rules(env, &mut ua_rules);
                     }
                     let mut ix = RuleIndex::default();
-                    ix.add_sheet(&ua_rules, true, None, layers);
+                    ix.add_sheet(&ua_rules, true, None, layers, 0);
                     for &i in &list {
                         let mut rules = Vec::new();
                         author[i].active_rules(env, &mut rules);
-                        ix.add_sheet(&rules, false, author[i].base_url.as_deref().map(Rc::from), layers);
+                        ix.add_sheet(&rules, false, author[i].base_url.as_deref().map(Rc::from), layers, i);
                     }
                     self.shadow.push(ix);
                     self.groups.insert(key.clone(), self.shadow.len() - 1);
@@ -474,6 +474,22 @@ pub(crate) fn compute_element<'a>(
 fn disables_native_appearance(name: &str) -> bool {
     (name.starts_with("background") && name != "background-blend-mode")
         || (name.starts_with("border") && !matches!(name, "border-collapse" | "border-spacing"))
+}
+
+/// The layer-order key of layer `name` in the author sheet at position
+/// `sheet`: an anonymous layer is distinct in every sheet that holds it,
+/// even when one parsed sheet is shared by several `<link>`s.
+fn layer_key(name: &std::sync::Arc<str>, sheet: usize) -> std::sync::Arc<str> {
+    if name.contains("#anon") {
+        std::sync::Arc::from(format!("{name}@{sheet}"))
+    } else {
+        name.clone()
+    }
+}
+
+/// Position of `sheet` in `author` (by address).
+fn sheet_no(author: &[Stylesheet], sheet: &Stylesheet) -> usize {
+    author.iter().position(|s| std::ptr::eq(s, sheet)).unwrap_or(0)
 }
 
 /// Fold the cascade layer into the specificity key (layers rank above

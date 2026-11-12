@@ -5,7 +5,7 @@ dir css/css-align 25 64
 dir css/css-backgrounds 308 718
 dir css/css-borders 25 123
 dir css/css-box 3 42
-dir css/css-cascade 26 51
+dir css/css-cascade 27 51
 dir css/css-color 247 311
 dir css/css-conditional 103 172
 dir css/css-contain 247 435
@@ -22,7 +22,7 @@ dir css/css-sizing 248 568
 dir css/css-text 468 1550
 dir css/css-text-decor 92 339
 dir css/css-transforms 356 794
-dir css/css-ui 660 962
+dir css/css-ui 736 962
 dir css/css-values 75 192
 dir css/css-writing-modes 172 1162
 dir css/filter-effects 169 370
@@ -2129,7 +2129,6 @@ fail css/css-cascade/all-prop-unset-visited.html
 fail css/css-cascade/import-conditional-002.html
 fail css/css-cascade/important-prop.html
 fail css/css-cascade/layer-slotted-rule.html
-fail css/css-cascade/layer-stylesheet-sharing.html
 fail css/css-cascade/revert-layer-001.html
 fail css/css-cascade/revert-layer-002.html
 fail css/css-cascade/revert-layer-003.html
@@ -7893,92 +7892,16 @@ fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-progress-b
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-progress-border-top-width-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-attachment-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-clip-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-color-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-image-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-origin-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-position-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-background-size-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-block-end-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-block-end-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-block-end-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-block-start-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-block-start-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-block-start-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-bottom-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-bottom-left-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-bottom-right-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-bottom-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-bottom-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-end-end-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-end-start-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-image-outset-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-image-repeat-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-image-slice-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-image-source-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-image-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-inline-end-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-inline-end-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-inline-end-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-inline-start-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-inline-start-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-inline-start-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-left-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-left-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-left-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-right-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-right-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-right-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-start-end-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-start-start-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-top-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-top-left-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-top-right-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-top-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-dropdown-box-border-top-width-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-attachment-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-clip-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-color-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-image-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-origin-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-position-001.html
 fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-background-size-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-block-end-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-block-end-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-block-end-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-block-start-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-block-start-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-block-start-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-bottom-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-bottom-left-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-bottom-right-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-bottom-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-bottom-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-end-end-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-end-start-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-image-outset-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-image-repeat-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-image-slice-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-image-source-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-image-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-inline-end-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-inline-end-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-inline-end-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-inline-start-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-inline-start-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-inline-start-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-left-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-left-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-left-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-right-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-right-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-right-width-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-start-end-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-start-start-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-top-color-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-top-left-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-top-right-radius-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-top-style-001.html
-fail css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-top-width-001.html
 fail css/css-ui/negative-outline-offset.html
 fail css/css-ui/outline-004.html
 fail css/css-ui/outline-010.html

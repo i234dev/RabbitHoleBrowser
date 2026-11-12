@@ -131,3 +131,10 @@ css/css-images/multiple-position-color-stop-linear.html
 css/css-images/object-fit-cover-svg-002i.html
 css/css-images/object-fit-none-png-002o.html
 css/css-images/radial-gradient-line-height-relative-units-003.html
+css/css-cascade/layer-stylesheet-sharing.html
+css/css-cascade/layer-stylesheet-sharing-important.html
+css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-textarea-border-top-style-001.html
+css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-button-background-clip-001.html
+css/css-ui/compute-kind-widget-generated/kind-of-widget-fallback-select-menulist-button-border-top-width-001.html
+css/css-color/lab-l-over-100-1.html
+css/css-color/oklch-l-over-1-2.html

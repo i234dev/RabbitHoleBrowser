@@ -97,7 +97,14 @@ pub(crate) fn native_rounding(b: &LayoutBox, ctx: &LayoutContext) -> bool {
         return false;
     }
     let s = &b.style;
-    if s.appearance == Appearance::None || s.author_widget_style || s.border_radius > 0.0 || s.border_width.top != 1.0 || s.border_width.left != 1.0 {
+    // A drop-down menu with author borders/backgrounds devolves to
+    // `menulist-button`, which keeps this look; text fields, buttons and
+    // list boxes lose it.
+    let dropdown = ctx.doc.tag(node) == Some("select")
+        && ctx.doc.attr(node, "multiple").is_none()
+        && ctx.doc.attr(node, "size").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0) <= 1;
+    let devolved = s.author_widget_style && !dropdown;
+    if s.appearance == Appearance::None || devolved || s.border_radius > 0.0 || s.border_width.top != 1.0 || s.border_width.left != 1.0 {
         return false;
     }
     let ua_border = [BORDER, Color::rgb(79, 79, 79), Color::rgb(141, 141, 141), Color::rgba(118, 118, 118, 77)];
