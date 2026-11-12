@@ -1647,6 +1647,12 @@ fn direct_eval_annexb_private_generators() {
     eq("function* inner() { try { yield 1; } catch (e) { yield 'caught ' + e; } } function* outer() { yield* inner(); } var it = outer(); it.next(); it.throw('x').value", "caught x");
     eq("var res = { value: 1, done: false }; var inner = { [Symbol.iterator]() { return { next() { return res; } }; } }; function* g() { yield* inner; } g().next() === res", "true");
     eq("function* g() { return yield* [1, 2]; } [...g()].join()", "1,2");
+    // References inside `with` resolve once, before the right-hand side.
+    eq("var x = 0; var scope = { x: 1 }; with (scope) { x += (delete scope.x, 2); } scope.x + ',' + x", "3,0");
+    eq("var x = 0; var scope = { x: 1 }; with (scope) { x = (delete scope.x, 2); } scope.x + ',' + x", "2,0");
+    eq("function f() { var x = 0; var inner = (function () { x = (eval('var x;'), 1); return x; })(); return inner + ',' + x; } f()", "undefined,1");
+    eq("var o = { n: 1 }; with (o) { n++; } o.n", "2");
+    eq("var r = []; for (var i = 0; i < 2; i++) { try { throw 1; } finally { r.push(i); continue; } } r.join()", "0,1");
 }
 
 /// Unicode identifiers: Other_ID_Start (U+2118, in ESPN's bundle),

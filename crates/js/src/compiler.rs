@@ -2668,8 +2668,7 @@ impl Compiler {
                 for (s, e) in finally_ranges {
                     self.fs().handlers.push(Handler { start: s, end: e, target: fin_pc, stack_depth: 0, scope_depth });
                 }
-                self.compile_block(f)?;
-                self.emit(Op::Throw);
+                self.compile_finally_rethrow(f)?;
             }
         } else if let Some(f) = &finalizer_rc {
             self.fs().exits.pop();
@@ -2677,13 +2676,24 @@ impl Compiler {
             for (s, e) in catch_ranges {
                 self.fs().handlers.push(Handler { start: s, end: e, target: fin_pc, stack_depth: 0, scope_depth });
             }
-            self.compile_block(f)?;
-            self.emit(Op::Throw);
+            self.compile_finally_rethrow(f)?;
         }
         self.fs().tries.pop();
         for j in end_jumps {
             self.patch_jump(j);
         }
+        Ok(())
+    }
+
+    /// The exception path of a finalizer: the exception waits in a
+    /// register (the finalizer may `break`/`continue`/`return` past the
+    /// rethrow with an empty operand stack), then is rethrown.
+    fn compile_finally_rethrow(&mut self, f: &[Stmt]) -> CResult<()> {
+        let exc = self.hidden_slot("finexc");
+        self.emit(Op::SetReg(exc));
+        self.compile_block(f)?;
+        self.emit(Op::GetReg(exc));
+        self.emit(Op::Throw);
         Ok(())
     }
 
@@ -3523,10 +3533,78 @@ impl Compiler {
         Ok(())
     }
 
+    /// Inside `with` (or a function with eval vars): resolve `name` once,
+    /// pushing its base — the object that has it, or undefined for the
+    /// static binding. Returns false (nothing emitted) outside `with`.
+    fn emit_with_ref(&mut self, name: &str) -> bool {
+        let chain = self.with_chain(name);
+        if chain.is_empty() {
+            return false;
+        }
+        let i = self.const_str(name);
+        let mut done = Vec::new();
+        for w in &chain {
+            self.emit_get_var(w);
+            self.emit(Op::WithHas(i));
+            let skip = self.emit(Op::JumpIfFalse(0));
+            self.emit_get_var(w);
+            done.push(self.emit(Op::Jump(0)));
+            self.patch_jump(skip);
+        }
+        self.emit(Op::Undefined);
+        for j in done {
+            self.patch_jump(j);
+        }
+        true
+    }
+
+    /// [base] -> [base value] for a reference from [`Self::emit_with_ref`].
+    fn emit_ref_get(&mut self, name: &str) {
+        let i = self.const_str(name);
+        self.emit(Op::Dup);
+        let st = self.emit(Op::JumpIfUndefined(0));
+        self.emit(Op::Dup);
+        self.emit_ic(|ic| Op::GetProp(i, ic));
+        let end = self.emit(Op::Jump(0));
+        self.patch_jump(st);
+        self.emit_get_var_static(name);
+        self.patch_jump(end);
+    }
+
+    /// [base value] -> [value] (PutValue on the resolved reference).
+    fn emit_ref_set_keep(&mut self, name: &str) -> CResult<()> {
+        let i = self.const_str(name);
+        // [base v] -> [v v base]; test the base
+        self.emit(Op::Dup);
+        self.emit(Op::Rot3);
+        self.emit(Op::Dup);
+        let st = self.emit(Op::JumpIfUndefined(0));
+        self.emit(Op::Swap);
+        self.emit_ic(|ic| Op::SetProp(i, ic));
+        self.emit(Op::Pop);
+        let end = self.emit(Op::Jump(0));
+        self.patch_jump(st);
+        self.emit(Op::Pop);
+        self.emit_set_var_static(name)?;
+        self.patch_jump(end);
+        Ok(())
+    }
+
     fn compile_update(&mut self, op: UpdateOp, prefix: bool, target: &Expr) -> CResult<()> {
         let inc = if op == UpdateOp::Increment { Op::Inc } else { Op::Dec };
         let undo = if op == UpdateOp::Increment { Op::Dec } else { Op::Inc };
         match &target.kind {
+            ExprKind::Identifier(n) if self.emit_with_ref(n) => {
+                self.emit_ref_get(n);
+                if !prefix {
+                    self.emit(Op::ToNumeric);
+                }
+                self.emit(inc);
+                self.emit_ref_set_keep(n)?;
+                if !prefix {
+                    self.emit(undo);
+                }
+            }
             ExprKind::Identifier(n) => {
                 self.emit_get_var(n);
                 if !prefix {
@@ -3620,12 +3698,46 @@ impl Compiler {
                     }
                 }
             }
+            if let Pattern::Identifier(n) = target {
+                // Inside `with`: the reference is resolved before the value.
+                if self.emit_with_ref(n) {
+                    self.compile_expr_named(value, Some(n))?;
+                    return self.emit_ref_set_keep(n);
+                }
+            }
             let name = pattern_name(target);
             self.compile_expr_named(value, name)?;
             self.emit(Op::Dup);
             return self.compile_pattern_store(target, false);
         }
         let target_expr: &Expr = match target {
+            Pattern::Identifier(n) if self.emit_with_ref(n) => {
+                let logical = matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish);
+                self.emit_ref_get(n);
+                if logical {
+                    let j = match op {
+                        AssignOp::And => self.emit(Op::JumpIfFalseKeep(0)),
+                        AssignOp::Or => self.emit(Op::JumpIfTrueKeep(0)),
+                        _ => self.emit(Op::JumpIfNotNullishKeep(0)),
+                    };
+                    if op != AssignOp::Nullish {
+                        self.emit(Op::Pop);
+                    }
+                    self.compile_expr_named(value, Some(n))?;
+                    self.emit_ref_set_keep(n)?;
+                    let end = self.emit(Op::Jump(0));
+                    self.patch_jump(j);
+                    // [base cur] -> [cur]
+                    self.emit(Op::Swap);
+                    self.emit(Op::Pop);
+                    self.patch_jump(end);
+                } else {
+                    self.compile_expr(value)?;
+                    self.emit(binop_for_assign(op));
+                    self.emit_ref_set_keep(n)?;
+                }
+                return Ok(());
+            }
             Pattern::Identifier(n) => {
                 // simple variable compound assignment
                 let logical = matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish);
