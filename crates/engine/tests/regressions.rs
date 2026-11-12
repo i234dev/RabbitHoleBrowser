@@ -437,3 +437,18 @@ fn calc_and_math_functions_mix_percentages_and_lengths() {
     let cs = eval(&e, &mut page, "(function(){ var g = function (id, p) { return getComputedStyle(document.getElementById(id)).getPropertyValue(p); }; return [g('w', 'width'), g('w', 'height'), g('w', 'margin-left'), g('w', 'padding-top'), g('m', 'width'), g('a', 'left'), g('a', 'top'), g('bg', 'background-position'), document.getElementById('w').style.width, document.getElementById('m').style.width].join('|'); })()");
     assert_eq!(cs, "580px|210px|55px|32px|500px|250px|105px|calc(100% - 20px) 50%|calc(100% - 20px)|min(100%, 500px)");
 }
+
+/// A page split into stacked bands sized with `calc(% - px)` of a 100%
+/// tall body: the bands fill the viewport exactly (the percentage part used
+/// to be taken alone, 40% instead of 40% - 140px, and the page scrolled).
+#[test]
+fn calc_percent_heights_fill_the_viewport_exactly() {
+    let mut e = engine(true);
+    let html = "<!doctype html><html><head><style>html,body{height:100%} body{margin:0;min-height:600px} .top{height:100px;height:calc(40% - 140px)} .bottom{height:calc(60% - 210px)} .center{height:350px}</style></head>\
+                <body><div class=top id=top></div><div class=center id=center></div><div class=bottom id=bottom></div></body></html>";
+    let mut page = e.load_html(html, Url::parse("https://example.test/").unwrap(), Viewport { width: 800.0, height: 900.0 });
+    let r = |id: &str| page.rect_of(by_id(&page, id)).expect("laid out");
+    assert_eq!((r("top").h, r("center").h, r("bottom").h), (220.0, 350.0, 330.0));
+    assert_eq!(r("bottom").y + r("bottom").h, 900.0);
+    assert_eq!(eval(&e, &mut page, "String(document.documentElement.scrollHeight)"), "900");
+}
