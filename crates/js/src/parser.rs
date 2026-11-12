@@ -901,7 +901,7 @@ impl<'a> Parser<'a> {
             body.push(self.parse_statement_list_item()?);
         }
         self.advance()?;
-        Ok(using_decl::lower_statement_list(body, false))
+        self.lower_using_list(body, false)
     }
 
     fn parse_loop_body(&mut self) -> PResult<Stmt> {
@@ -2738,7 +2738,7 @@ impl<'a> Parser<'a> {
             body.push(self.parse_statement_list_item()?);
         }
         self.advance()?;
-        Ok((using_decl::lower_statement_list(body, true), self.ctx.strict))
+        Ok((self.lower_using_list(body, true)?, self.ctx.strict))
     }
 
     /// `function [*] [name] ( params ) { body }` — current token is `function`.

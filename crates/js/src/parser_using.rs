@@ -140,6 +140,85 @@ fn expand_decl(s: Stmt, out: &mut Vec<Stmt>) {
 /// Lower the `using` declarations of a statement list (no-op without any).
 /// Leading directives stay in front when `directives` is set (function
 /// bodies).
+/// VarDeclaredNames of statements (not looking into functions).
+fn var_names(stmts: &[Stmt], out: &mut Vec<Name>) {
+    for s in stmts {
+        var_names_stmt(s, out);
+    }
+}
+
+fn var_names_stmt(s: &Stmt, out: &mut Vec<Name>) {
+    match &s.kind {
+        StmtKind::VarDecl(d) if d.kind == VarKind::Var => {
+            for v in &d.declarations {
+                pattern_names(&v.target, out);
+            }
+        }
+        StmtKind::Block(b) => var_names(b, out),
+        StmtKind::If { consequent, alternate, .. } => {
+            var_names_stmt(consequent, out);
+            if let Some(a) = alternate {
+                var_names_stmt(a, out);
+            }
+        }
+        StmtKind::For { init, body, .. } => {
+            if let Some(i) = init {
+                if let ForInit::VarDecl(d) = &**i {
+                    if d.kind == VarKind::Var {
+                        for v in &d.declarations {
+                            pattern_names(&v.target, out);
+                        }
+                    }
+                }
+            }
+            var_names_stmt(body, out);
+        }
+        StmtKind::ForIn { left, body, .. } | StmtKind::ForOf { left, body, .. } => {
+            if let ForHead::VarDecl { kind: VarKind::Var, target } = &**left {
+                pattern_names(target, out);
+            }
+            var_names_stmt(body, out);
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } | StmtKind::Labeled { body, .. } | StmtKind::With { body, .. } => var_names_stmt(body, out),
+        StmtKind::Try { block, handler, finalizer } => {
+            var_names(block, out);
+            if let Some(h) = handler {
+                var_names(&h.1, out);
+            }
+            if let Some(f) = finalizer {
+                var_names(f, out);
+            }
+        }
+        StmtKind::Switch { cases, .. } => {
+            for c in cases {
+                var_names(&c.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A `using` binding of the list that is also var-declared in it.
+fn using_var_conflict(body: &[Stmt]) -> Option<(Pos, Name)> {
+    let mut lex = Vec::new();
+    for s in body {
+        if using_decl_hint(s).is_some() {
+            if let StmtKind::VarDecl(d) = &s.kind {
+                for v in &d.declarations {
+                    pattern_names(&v.target, &mut lex);
+                }
+            }
+        }
+    }
+    if lex.is_empty() {
+        return None;
+    }
+    let mut vars = Vec::new();
+    var_names(body, &mut vars);
+    let pos = body.first().map(|s| s.pos).unwrap_or_default();
+    vars.into_iter().find(|v| lex.contains(v)).map(|n| (pos, n))
+}
+
 pub(super) fn lower_statement_list(body: Vec<Stmt>, directives: bool) -> Vec<Stmt> {
     if !body.iter().any(|s| using_decl_hint(s).is_some()) {
         return body;
@@ -288,6 +367,14 @@ fn lower_module_with_exports(body: Vec<Stmt>) -> Vec<Stmt> {
 }
 
 impl Parser<'_> {
+    /// Check and lower the `using` declarations of a block / function body.
+    pub(super) fn lower_using_list(&self, body: Vec<Stmt>, directives: bool) -> PResult<Vec<Stmt>> {
+        if let Some((pos, n)) = using_var_conflict(&body) {
+            return Err(self.error_at(pos, format!("Identifier '{}' has already been declared", n.as_str())));
+        }
+        Ok(lower_statement_list(body, directives))
+    }
+
     /// Script / module top level: `using` is an early error in scripts; a
     /// module body is lowered when it exports nothing (imports move to the
     /// front). Otherwise the declarations stay marked and register nothing.
@@ -420,6 +507,13 @@ impl Parser<'_> {
             let right = self.parse_assignment()?;
             self.expect_punct(")")?;
             let body = self.parse_loop_body()?;
+            let mut vars = Vec::new();
+            var_names_stmt(&body, &mut vars);
+            if let Pattern::Identifier(n) = &target {
+                if vars.contains(n) {
+                    return Err(self.error_at(pos, format!("Identifier '{}' has already been declared", n.as_str())));
+                }
+            }
             // for (const %usingValue of right) { using target = %usingValue; body }
             let value = Expr { pos, kind: ExprKind::Number(hint) };
             let marked = Stmt {
