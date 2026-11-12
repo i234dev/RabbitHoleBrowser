@@ -328,18 +328,18 @@ fn promise_try(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
     if !this.is_object() {
         return realm.type_error("Promise.try called on non-object");
     }
-    let (p, res, rej) = super::promise::new_capability_with_ctor(realm, this)?;
     let f = arg(args, 0);
     let rest: Vec<Value> = args.iter().skip(1).cloned().collect();
     match realm.call(f, Value::Undefined, &rest) {
-        Ok(v) => {
-            realm.call(res, Value::Undefined, &[v])?;
-        }
+        // A returned value goes through PromiseResolve(C, value): a promise
+        // of the receiver's constructor is returned as is.
+        Ok(v) => super::promise::promise_resolve_with(realm, this, v),
         Err(e) => {
+            let (p, _res, rej) = super::promise::new_capability_with_ctor(realm, this)?;
             realm.call(rej, Value::Undefined, &[e])?;
+            Ok(p)
         }
     }
-    Ok(p)
 }
 
 // ------------------------------------------------- RegExp legacy statics

@@ -2750,6 +2750,9 @@ impl<'a> Parser<'a> {
             let before = self.lx.source()[..start as usize].trim_end();
             if before.ends_with("async") {
                 start = (before.len() - 5) as u32;
+            } else if self.prev_end >= 5 && self.lx.source().get(self.prev_end - 5..self.prev_end) == Some("async") {
+                // Comments between `async` and `function`.
+                start = (self.prev_end - 5) as u32;
             }
         }
         // Functions right after `(` or `!` are usually called at once

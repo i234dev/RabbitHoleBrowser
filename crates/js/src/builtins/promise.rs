@@ -48,7 +48,7 @@ fn promise_species(realm: &mut Realm, p: ObjectId) -> JsResult<Value> {
 }
 
 /// PromiseResolve(C, x).
-fn promise_resolve_with(realm: &mut Realm, c: Value, v: Value) -> JsResult<Value> {
+pub(crate) fn promise_resolve_with(realm: &mut Realm, c: Value, v: Value) -> JsResult<Value> {
     if c.as_object() == Some(realm.intrinsics.promise_ctor) {
         return Ok(Value::Object(promise_resolve(realm, v)?));
     }
