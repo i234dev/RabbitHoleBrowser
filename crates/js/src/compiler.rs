@@ -254,6 +254,9 @@ struct FnState {
     /// Annex B.3.3 block function declarations (by node address) that
     /// also assign a var of the function / script / eval var scope.
     annexb: std::collections::HashSet<usize>,
+    /// Index of the scope holding the function's `var`s (1 when parameter
+    /// expressions give the body its own variable environment).
+    var_scope: usize,
 }
 
 impl FnState {
@@ -297,6 +300,7 @@ impl FnState {
             eval_sites: Vec::new(),
             is_eval: false,
             annexb: Default::default(),
+            var_scope: 0,
         }
     }
 }
@@ -1813,12 +1817,21 @@ impl Compiler {
         };
         let mut vars = Vec::new();
         Self::collect_var_names(body_stmts, &mut vars);
-        for v in vars {
-            self.declare(&v, BindKind::Var);
-        }
         let lex = Self::collect_lexical(body_stmts, true);
-        for (n, k) in &lex {
-            self.declare(n, *k);
+        // With parameter expressions the body's vars live in an
+        // environment of their own (closures in defaults do not see them).
+        let separate_vars = !f.params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest) && matches!(f.body, FunctionBody::Block(_));
+        let mut body_decls: Vec<(String, BindKind)> = Vec::new();
+        if separate_vars {
+            body_decls.extend(vars.iter().map(|v| (v.clone(), BindKind::Var)));
+            body_decls.extend(lex.iter().cloned());
+        } else {
+            for v in &vars {
+                self.declare(v, BindKind::Var);
+            }
+            for (n, k) in &lex {
+                self.declare(n, *k);
+            }
         }
         if !self.fs_ref().flags.is_strict {
             // Annex B.3.3.1: block functions also bind a function-level var.
@@ -1828,7 +1841,11 @@ impl Compiler {
             }
             for (n, ptr) in Self::collect_annexb(body_stmts, outer) {
                 if n != "arguments" {
-                    self.declare(&n, BindKind::Var);
+                    if separate_vars {
+                        body_decls.push((n.clone(), BindKind::Var));
+                    } else {
+                        self.declare(&n, BindKind::Var);
+                    }
                 }
                 self.fs().annexb.insert(ptr);
             }
@@ -1846,7 +1863,7 @@ impl Compiler {
         // function declaration with the same name shadows it: only bind it
         // when nothing in the body declares the name.
         if let Some(n) = &f.name {
-            if f.self_binding && !self.fs_ref().scopes[0].names.contains_key(&**n) {
+            if f.self_binding && !self.fs_ref().scopes[0].names.contains_key(&**n) && !body_decls.iter().any(|(b, _)| b == &**n) {
                 let loc = self.declare(n, BindKind::Hidden);
                 self.fs().self_loc = Some(loc);
             }
@@ -1874,6 +1891,18 @@ impl Compiler {
         }
         // Simple params with defaults: `function f(a = 1)`
         // (handled above since `Assign` patterns are complex).
+        if separate_vars {
+            // Vars named like a parameter (or `arguments`) start with its value.
+            let copies: Vec<String> = vars.iter().filter(|v| self.fs_ref().scopes[0].names.contains_key(v.as_str())).cloned().collect();
+            for n in &copies {
+                self.emit_get_var(n);
+            }
+            self.push_block_scope_with(&body_decls, false);
+            for n in copies.iter().rev() {
+                self.emit_init_var(n)?;
+            }
+            self.fs().var_scope = self.fs_ref().scopes.len() - 1;
+        }
         if self.fs_ref().flags.is_class_constructor && !self.fs_ref().flags.is_derived {
             self.emit(Op::InitFields);
         }
@@ -1980,9 +2009,10 @@ impl Compiler {
             self.emit_ic(|ic| Op::SetGlobal(i, ic));
             return Ok(());
         }
-        let depth = fs.scopes[1..].iter().filter(|s| s.materialized).count() as u16;
-        let mat0 = fs.scopes[0].materialized;
-        match fs.scopes[0].names.get(name).map(|b| b.loc) {
+        let vs = fs.var_scope;
+        let depth = fs.scopes[vs + 1..].iter().filter(|s| s.materialized).count() as u16;
+        let mat0 = fs.scopes[vs].materialized;
+        match fs.scopes[vs].names.get(name).map(|b| b.loc) {
             Some(Loc::Reg(r)) => {
                 self.emit(Op::SetReg(r));
             }

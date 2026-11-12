@@ -1652,6 +1652,10 @@ fn direct_eval_annexb_private_generators() {
     eq("var x = 0; var scope = { x: 1 }; with (scope) { x = (delete scope.x, 2); } scope.x + ',' + x", "2,0");
     eq("function f() { var x = 0; var inner = (function () { x = (eval('var x;'), 1); return x; })(); return inner + ',' + x; } f()", "undefined,1");
     eq("var o = { n: 1 }; with (o) { n++; } o.n", "2");
+    // Parameter expressions get their own environment.
+    eq("var x = 'outside'; var pp, pb; function f(_ = pp = function () { return x; }) { var x = 'inside'; pb = function () { return x; }; } f(); pp() + ',' + pb()", "outside,inside");
+    eq("function f(a, b = () => a) { var a; return a + ',' + b(); } f(1)", "1,1");
+    eq("function f(a = 1, ...r) { function g() { return a; } return g() + r.length; } f(undefined, 2, 3)", "3");
     eq("var r = []; for (var i = 0; i < 2; i++) { try { throw 1; } finally { r.push(i); continue; } } r.join()", "0,1");
 }
 
