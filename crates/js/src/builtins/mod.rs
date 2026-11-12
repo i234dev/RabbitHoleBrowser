@@ -6,12 +6,14 @@
 pub mod array;
 pub mod collections;
 pub mod date;
+pub mod disposable;
 pub mod error;
 pub mod extras;
 pub mod function;
 pub mod global;
 pub mod intl;
 pub mod iterator;
+pub mod iterator_helpers;
 pub mod json;
 pub mod math;
 pub mod number;
@@ -35,6 +37,7 @@ pub fn register_builtins(realm: &mut Realm) {
     symbol::register(realm);
     error::register(realm);
     iterator::register(realm);
+    iterator_helpers::register(realm);
     array::register(realm);
     string::register(realm);
     number::register(realm);
@@ -49,6 +52,7 @@ pub fn register_builtins(realm: &mut Realm) {
     typed_array::register(realm);
     intl::register(realm);
     extras::register(realm);
+    disposable::register(realm);
 }
 
 /// `args[i]` or undefined.

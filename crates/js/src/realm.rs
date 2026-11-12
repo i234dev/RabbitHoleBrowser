@@ -23,8 +23,10 @@ pub const SYM_MATCH_ALL: SymbolId = SymbolId(9);
 pub const SYM_REPLACE: SymbolId = SymbolId(10);
 pub const SYM_SEARCH: SymbolId = SymbolId(11);
 pub const SYM_SPLIT: SymbolId = SymbolId(12);
+pub const SYM_DISPOSE: SymbolId = SymbolId(13);
+pub const SYM_ASYNC_DISPOSE: SymbolId = SymbolId(14);
 
-pub const WELL_KNOWN_SYMBOLS: [(&str, SymbolId); 13] = [
+pub const WELL_KNOWN_SYMBOLS: [(&str, SymbolId); 15] = [
     ("iterator", SYM_ITERATOR),
     ("asyncIterator", SYM_ASYNC_ITERATOR),
     ("hasInstance", SYM_HAS_INSTANCE),
@@ -38,6 +40,8 @@ pub const WELL_KNOWN_SYMBOLS: [(&str, SymbolId); 13] = [
     ("replace", SYM_REPLACE),
     ("search", SYM_SEARCH),
     ("split", SYM_SPLIT),
+    ("dispose", SYM_DISPOSE),
+    ("asyncDispose", SYM_ASYNC_DISPOSE),
 ];
 
 #[derive(Debug, Clone)]

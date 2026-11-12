@@ -155,6 +155,17 @@ pub fn promise_resolve(realm: &mut Realm, v: Value) -> JsResult<ObjectId> {
     Ok(p)
 }
 
+/// PromiseResolve(C, v) for `finally`, whose C is the species constructor
+/// (not tracked here): any promise object is taken as is.
+fn promise_resolve_lenient(realm: &mut Realm, v: Value) -> JsResult<ObjectId> {
+    if let V::Object(id) = v.v() {
+        if let ObjectKind::Promise(_) = &realm.obj(id).kind {
+            return Ok(id);
+        }
+    }
+    promise_resolve(realm, v)
+}
+
 /// Attach reactions; `capability` is the derived promise (if any).
 fn perform_then(realm: &mut Realm, promise: ObjectId, on_fulfilled: Option<Value>, on_rejected: Option<Value>, capability: Option<(Value, Value, Value)>) {
     let fr = PromiseReaction { handler: on_fulfilled, capability: capability.clone(), native: None, is_reject: false };
@@ -297,7 +308,7 @@ fn finally_fulfilled(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResul
     let f = realm.current_native().and_then(|n| realm.native_captures(n).first().cloned()).unwrap_or(Value::Undefined);
     let value = arg(args, 0);
     let r = realm.call(f, Value::Undefined, &[])?;
-    let p = promise_resolve(realm, r)?;
+    let p = promise_resolve_lenient(realm, r)?;
     let value_thunk = realm.new_native_function_full("", 0, return_capture, None, vec![value], false);
     realm.invoke(Value::Object(p), "then", &[Value::Object(value_thunk)])
 }
@@ -306,7 +317,7 @@ fn finally_rejected(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     let f = realm.current_native().and_then(|n| realm.native_captures(n).first().cloned()).unwrap_or(Value::Undefined);
     let reason = arg(args, 0);
     let r = realm.call(f, Value::Undefined, &[])?;
-    let p = promise_resolve(realm, r)?;
+    let p = promise_resolve_lenient(realm, r)?;
     let thrower = realm.new_native_function_full("", 0, throw_capture, None, vec![reason], false);
     realm.invoke(Value::Object(p), "then", &[Value::Object(thrower)])
 }

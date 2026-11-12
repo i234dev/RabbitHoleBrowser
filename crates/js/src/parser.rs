@@ -9,6 +9,9 @@
 use crate::ast::*;
 use crate::lexer::{LexError, Lexer, LexerState, Token, TokenKind};
 
+#[path = "parser_using.rs"]
+mod using_decl;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
     pub message: String,
@@ -563,6 +566,7 @@ impl<'a> Parser<'a> {
         while self.tok.kind != TokenKind::Eof {
             body.push(self.parse_statement_list_item()?);
         }
+        let body = self.lower_top_level_using(body)?;
         Ok(Program {
             body,
             is_module: self.ctx.is_module,
@@ -615,6 +619,11 @@ impl<'a> Parser<'a> {
 
     fn parse_statement_list_item(&mut self) -> PResult<Stmt> {
         let pos = self.tok.pos;
+        if let Some(hint) = self.using_declaration_start(false)? {
+            let d = self.parse_using_declaration(hint, false)?;
+            self.consume_semicolon()?;
+            return Ok(Stmt { pos, kind: StmtKind::VarDecl(d) });
+        }
         match &self.tok.kind {
             TokenKind::Ident(n) => match keyword_token(&self.tok, n) {
                 "function" => {
@@ -892,7 +901,7 @@ impl<'a> Parser<'a> {
             body.push(self.parse_statement_list_item()?);
         }
         self.advance()?;
-        Ok(body)
+        self.lower_using_list(body, false)
     }
 
     fn parse_loop_body(&mut self) -> PResult<Stmt> {
@@ -959,6 +968,9 @@ impl<'a> Parser<'a> {
             false
         };
         self.expect_punct("(")?;
+        if let Some(hint) = self.using_declaration_start(true)? {
+            return self.parse_for_using(hint, is_await);
+        }
         let mut init: Option<ForInit> = None;
         if self.is_punct(";") {
             // no init
@@ -1103,7 +1115,11 @@ impl<'a> Parser<'a> {
                     if self.tok.kind == TokenKind::Eof {
                         return Err(self.error("Unexpected end of input"));
                     }
-                    body.push(self.parse_statement_list_item()?);
+                    let item = self.parse_statement_list_item()?;
+                    if using_decl::using_decl_hint(&item).is_some() {
+                        return Err(self.error_at(item.pos, "using declarations are not allowed directly in switch case clauses"));
+                    }
+                    body.push(item);
                 }
                 cases.push(SwitchCase { test, body });
             }
@@ -1288,6 +1304,9 @@ impl<'a> Parser<'a> {
             StmtKind::Export(ExportDecl::Named { specifiers, source })
         } else {
             let decl = self.parse_statement_list_item()?;
+            if using_decl::using_decl_hint(&decl).is_some() {
+                return Err(self.error_at(decl.pos, "using declarations cannot be exported"));
+            }
             match decl.kind {
                 StmtKind::VarDecl(_) | StmtKind::FunctionDecl(_) | StmtKind::ClassDecl(_) => {}
                 _ => return Err(self.error_at(decl.pos, "Unexpected token after export")),
@@ -2719,7 +2738,7 @@ impl<'a> Parser<'a> {
             body.push(self.parse_statement_list_item()?);
         }
         self.advance()?;
-        Ok((body, self.ctx.strict))
+        Ok((self.lower_using_list(body, true)?, self.ctx.strict))
     }
 
     /// `function [*] [name] ( params ) { body }` — current token is `function`.
