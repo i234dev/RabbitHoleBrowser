@@ -38,13 +38,31 @@ type PResult<T> = Result<T, ParseError>;
 
 /// Parse a script (or module when `is_module`).
 pub fn parse_program(source: &str, is_module: bool) -> Result<Program, ParseError> {
+    parse_program_in(source, is_module, &crate::early::EarlyContext::default())
+}
+
+/// Parse a program and check its early errors (see [`crate::early`]) in a
+/// context: the default one for scripts and modules, or what direct eval
+/// code inherits from its caller.
+pub fn parse_program_in(source: &str, is_module: bool, ctx: &crate::early::EarlyContext) -> Result<Program, ParseError> {
+    let program = parse_program_unchecked(source, is_module, ctx)?;
+    crate::early::check_program(&program, ctx)?;
+    Ok(program)
+}
+
+fn parse_program_unchecked(source: &str, is_module: bool, ctx: &crate::early::EarlyContext) -> Result<Program, ParseError> {
     let mut p = Parser::new(source, is_module)?;
+    p.set_early_context(ctx);
+    if source.len() < LAZY_MIN_SOURCE {
+        p.lazy = false;
+    }
     match p.parse_program() {
         Ok(program) => Ok(program),
         Err(_) if p.skipped => {
             // The pre-parser skipped function bodies: parse everything to
             // report the error exactly where the full grammar finds it.
             let mut p = Parser::new(source, is_module)?;
+            p.set_early_context(ctx);
             p.lazy = false;
             p.parse_program()
         }
@@ -86,6 +104,15 @@ fn lazy_parse_enabled() -> bool {
 /// them saves little and parsing them later costs a parser setup.
 const LAZY_MIN_BODY: usize = 96;
 
+/// Scripts shorter than this (in bytes) are parsed completely. The
+/// pre-parser only finds where a body ends, so a syntax error inside a
+/// skipped body is reported when the function is first compiled instead of
+/// rejecting the whole script up front as the specification requires. Small
+/// scripts (inline scripts, eval code, `Function` bodies, tests) get the
+/// exact behaviour for a negligible cost; large bundles, where skipping
+/// bodies that never run saves real time, keep lazy parsing.
+const LAZY_MIN_SOURCE: usize = 16 * 1024;
+
 /// Parse the body of a function whose body the pre-parser skipped
 /// ([`FunctionBody::Lazy`]): its statements and resulting strictness.
 /// Functions nested in it are skipped in turn.
@@ -116,11 +143,14 @@ pub fn parse_lazy_body(f: &Function, lb: &LazyBody) -> Result<(Vec<Stmt>, bool),
         lazy: lazy_parse_enabled(),
         skipped: false,
         lazy_src: Some(lb.source.clone()),
+        parenthesized: Default::default(),
+        rest_comma: Default::default(),
     };
     let r = p.parse_function_body_block()?;
     if p.prev_end != lb.end {
         return Err(ParseError { message: "Invalid or unexpected token (lazily parsed function body)".into(), line: lb.line, column: (lb.start - lb.line_start) as u32 + 1 });
     }
+    crate::early::check_lazy_body(f, lb, &r.0, r.1)?;
     Ok(r)
 }
 
@@ -187,6 +217,12 @@ pub struct Parser<'a> {
     skipped: bool,
     /// The source, shared by the skipped bodies (made on first use).
     lazy_src: Option<std::rc::Rc<str>>,
+    /// Positions of object / array literals and assignments written in
+    /// parentheses: not valid destructuring targets (`({a}) = b`).
+    parenthesized: std::collections::HashSet<(u32, u32), crate::value::FxBuild>,
+    /// Positions of spread arguments followed by a comma (`[...a, ]`): not
+    /// valid rest elements.
+    rest_comma: std::collections::HashSet<(u32, u32), crate::value::FxBuild>,
 }
 
 fn is_reserved_word(n: &str) -> bool {
@@ -194,6 +230,25 @@ fn is_reserved_word(n: &str) -> bool {
         n,
         "break" | "case" | "catch" | "class" | "const" | "continue" | "debugger" | "default" | "delete" | "do" | "else" | "enum" | "export" | "extends" | "false" | "finally" | "for" | "function" | "if" | "import" | "in" | "instanceof" | "new" | "null" | "return" | "super" | "switch" | "this" | "throw" | "true" | "try" | "typeof" | "var" | "void" | "while" | "with"
     )
+}
+
+/// A string literal's source text contains a legacy octal escape (`\01`,
+/// `\7`) or a non-octal decimal escape (`\8`, `\9`).
+fn has_legacy_octal_escape(raw: &[u8]) -> bool {
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'\\' {
+            match raw.get(i + 1) {
+                Some(b'1'..=b'9') => return true,
+                Some(b'0') if matches!(raw.get(i + 2), Some(b'0'..=b'9')) => return true,
+                _ => {}
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 fn is_strict_reserved_word(n: &str) -> bool {
@@ -245,6 +300,15 @@ fn assign_op(p: &str) -> Option<AssignOp> {
         "??=" => AssignOp::Nullish,
         _ => return None,
     })
+}
+
+/// The keyword identifier token `t` (spelling `n`) stands for, or "": a
+/// keyword written with Unicode escapes (`var`) is not one.
+fn keyword_token(t: &Token, n: &str) -> &'static str {
+    if t.end - t.start != n.len() {
+        return "";
+    }
+    keyword(n)
 }
 
 /// The keyword an identifier token spells (as a static string), or "".
@@ -307,7 +371,17 @@ impl<'a> Parser<'a> {
             lazy: lazy_parse_enabled(),
             skipped: false,
             lazy_src: None,
+            parenthesized: Default::default(),
+            rest_comma: Default::default(),
         })
+    }
+
+    /// Start in the context of eval code (see [`crate::early::EarlyContext`]).
+    fn set_early_context(&mut self, ctx: &crate::early::EarlyContext) {
+        self.ctx.strict |= ctx.strict;
+        self.ctx.super_prop_ok = ctx.in_method;
+        self.ctx.super_call_ok = ctx.in_derived_ctor;
+        self.ctx.in_class_body = ctx.in_class_field_init;
     }
 
     // ------------------------------------------------------------ helpers
@@ -458,6 +532,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Legacy octal and non-octal decimal literals (`010`, `08`) and the
+    /// matching string escapes are not allowed in strict mode code.
+    fn check_strict_literal(&self) -> PResult<()> {
+        if !self.ctx.strict {
+            return Ok(());
+        }
+        let raw = self.lx.source()[self.tok.start..self.tok.end].as_bytes();
+        let bad = match &self.tok.kind {
+            TokenKind::Number(_) | TokenKind::BigInt(_) => raw.len() > 1 && raw[0] == b'0' && raw[1].is_ascii_digit(),
+            TokenKind::Str(_) => raw.contains(&b'\\') && has_legacy_octal_escape(raw),
+            _ => false,
+        };
+        if bad {
+            return Err(self.error("Octal literals and octal escape sequences are not allowed in strict mode"));
+        }
+        Ok(())
+    }
+
     fn consume_semicolon(&mut self) -> PResult<()> {
         if self.eat_punct(";")? {
             return Ok(());
@@ -506,9 +598,14 @@ impl<'a> Parser<'a> {
     /// `body` and returns whether `"use strict"` was seen.
     fn parse_directives(&mut self, body: &mut Vec<Stmt>) -> PResult<bool> {
         let mut strict = false;
+        // A directive with an octal escape, before or after "use strict".
+        let mut octal: Option<Pos> = None;
         while let TokenKind::Str(s) = &self.tok.kind {
             let raw = &self.lx.source()[self.tok.start..self.tok.end];
             let is_use_strict = raw == "\"use strict\"" || raw == "'use strict'";
+            if octal.is_none() && has_legacy_octal_escape(raw.as_bytes()) {
+                octal = Some(self.tok.pos);
+            }
             let s = s.clone();
             // Only a directive if the statement is exactly the string literal.
             let snap = self.snapshot();
@@ -532,6 +629,9 @@ impl<'a> Parser<'a> {
                 }),
             });
         }
+        if let (true, Some(pos)) = (strict || self.ctx.strict, octal) {
+            return Err(self.error_at(pos, "Octal escape sequences are not allowed in strict mode"));
+        }
         Ok(strict)
     }
 
@@ -540,7 +640,7 @@ impl<'a> Parser<'a> {
     fn parse_statement_list_item(&mut self) -> PResult<Stmt> {
         let pos = self.tok.pos;
         match &self.tok.kind {
-            TokenKind::Ident(n) => match keyword(n) {
+            TokenKind::Ident(n) => match keyword_token(&self.tok, n) {
                 "function" => {
                     let f = self.parse_function(false, false, true)?;
                     return Ok(Stmt { pos, kind: StmtKind::FunctionDecl(std::rc::Rc::new(f)) });
@@ -617,7 +717,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 StmtKind::Empty
             }
-            TokenKind::Ident(name) => match keyword(name) {
+            TokenKind::Ident(name) => match keyword_token(&self.tok, name) {
                 "var" => {
                     let d = self.parse_var_decl(VarKind::Var)?;
                     self.consume_semicolon()?;
@@ -747,9 +847,18 @@ impl<'a> Parser<'a> {
                     StmtKind::VarDecl(d)
                 }
                 "let" if self.let_is_declaration()? => {
-                    let d = self.parse_var_decl(VarKind::Let)?;
-                    self.consume_semicolon()?;
-                    StmtKind::VarDecl(d)
+                    // A single-statement position: `let` on its own line
+                    // is an identifier (ASI), `let [` never starts an
+                    // expression statement, anything else would be a
+                    // declaration.
+                    let snap = self.snapshot();
+                    self.advance()?;
+                    let asi = self.tok.newline_before && !self.is_punct("[");
+                    self.restore(snap);
+                    if !asi {
+                        return Err(self.error("Lexical declaration cannot appear in a single-statement context"));
+                    }
+                    self.parse_expression_statement()?
                 }
                 "import" if self.ctx.is_module && !self.peek_is_punct_any(&["(", "."])? => return self.parse_import(),
                 "export" if self.ctx.is_module => return self.parse_export(),
@@ -919,6 +1028,9 @@ impl<'a> Parser<'a> {
                     if is_of && matches!(expr.kind, ExprKind::Identifier(ref n) if n == "async") && !is_await {
                         // `for (async of ...)` is a syntax error per spec.
                         return Err(self.error_at(start_pos, "The left-hand side of a for-of loop may not be 'async'"));
+                    }
+                    if matches!(expr.kind, ExprKind::Assign { .. }) {
+                        return Err(self.error_at(start_pos, "Invalid left-hand side in for-in/of loop"));
                     }
                     let pattern = self.expr_to_pattern(expr, false)?;
                     return self.parse_for_in_of(ForHead::Pattern(pattern), is_of, is_await);
@@ -1150,10 +1262,13 @@ impl<'a> Parser<'a> {
             StmtKind::Export(ExportDecl::All { source, namespace })
         } else if self.eat_punct("{")? {
             let mut specifiers = Vec::new();
+            // A string local name needs `from` (`export { "a" }` is an error).
+            let mut string_local: Option<Pos> = None;
             while !self.is_punct("}") {
                 let local = match &self.tok.kind {
                     TokenKind::Str(s) => {
                         let s = s.clone();
+                        string_local = string_local.or(Some(self.tok.pos));
                         self.advance()?;
                         s
                     }
@@ -1190,6 +1305,9 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            if let (None, Some(p)) = (&source, string_local) {
+                return Err(self.error_at(p, "A string export name needs a 'from' clause"));
+            }
             self.consume_semicolon()?;
             StmtKind::Export(ExportDecl::Named { specifiers, source })
         } else {
@@ -1270,6 +1388,9 @@ impl<'a> Parser<'a> {
             }
             let key_pos = self.tok.pos;
             let (key, ident_name) = self.parse_property_key()?;
+            if matches!(key, PropertyKey::Private(_)) {
+                return Err(self.error_at(key_pos, "Unexpected private name in binding pattern"));
+            }
             if self.eat_punct(":")? {
                 let value = self.parse_binding_element()?;
                 properties.push(ObjectPatternProp {
@@ -1307,6 +1428,9 @@ impl<'a> Parser<'a> {
     /// pattern. `binding` requires identifiers only (arrow parameters).
     fn expr_to_pattern(&self, expr: Expr, binding: bool) -> PResult<Pattern> {
         let pos = expr.pos;
+        if matches!(expr.kind, ExprKind::Object(_) | ExprKind::Array(_) | ExprKind::Assign { .. }) && self.parenthesized.contains(&(pos.line, pos.column)) {
+            return Err(self.error_at(pos, "Invalid destructuring assignment target"));
+        }
         match expr.kind {
             ExprKind::Identifier(name) => {
                 if self.ctx.strict && (name == "eval" || name == "arguments") {
@@ -1324,10 +1448,15 @@ impl<'a> Parser<'a> {
                         ArrayElement::Hole => out.push(None),
                         ArrayElement::Expr(e) => out.push(Some(self.expr_to_pattern(e, binding)?)),
                         ArrayElement::Spread(e) => {
-                            if i != n - 1 {
+                            if i != n - 1 || self.rest_comma.contains(&(e.pos.line, e.pos.column)) {
                                 return Err(self.error_at(e.pos, "Rest element must be last element"));
                             }
-                            rest = Some(Box::new(self.expr_to_pattern(e, binding)?));
+                            let epos = e.pos;
+                            let r = self.expr_to_pattern(e, binding)?;
+                            if matches!(r, Pattern::Assign { .. }) {
+                                return Err(self.error_at(epos, "Invalid rest element"));
+                            }
+                            rest = Some(Box::new(r));
                         }
                     }
                 }
@@ -1340,10 +1469,15 @@ impl<'a> Parser<'a> {
                 for (i, p) in props.into_iter().enumerate() {
                     match p {
                         ObjectProperty::Spread(e) => {
-                            if i != n - 1 {
+                            if i != n - 1 || self.rest_comma.contains(&(e.pos.line, e.pos.column)) {
                                 return Err(self.error_at(e.pos, "Rest element must be last element"));
                             }
-                            rest = Some(Box::new(self.expr_to_pattern(e, binding)?));
+                            let epos = e.pos;
+                            let r = self.expr_to_pattern(e, binding)?;
+                            if !matches!(r, Pattern::Identifier(_) | Pattern::Expr(_)) {
+                                return Err(self.error_at(epos, "Invalid rest element"));
+                            }
+                            rest = Some(Box::new(r));
                         }
                         ObjectProperty::Property { key, value, shorthand } => {
                             let value = match value {
@@ -1406,8 +1540,9 @@ impl<'a> Parser<'a> {
             return Ok(left);
         };
         let target = if op == AssignOp::Assign {
-            // Object/array literals are only valid targets if they were
-            // literally written (not parenthesized) — we accept both.
+            if matches!(left.kind, ExprKind::Assign { .. }) {
+                return Err(self.error_at(start_pos, "Invalid left-hand side in assignment"));
+            }
             self.expr_to_pattern(left, false)?
         } else {
             match left.kind {
@@ -1453,7 +1588,7 @@ impl<'a> Parser<'a> {
         let pos = self.tok.pos;
         let is_async;
         match &self.tok.kind {
-            TokenKind::Ident(n) if n == "async" => {
+            TokenKind::Ident(n) if n == "async" && self.tok.is_ident("async") => {
                 let snap = self.snapshot();
                 self.advance()?;
                 if self.tok.newline_before {
@@ -1773,6 +1908,11 @@ impl<'a> Parser<'a> {
         let pos = self.tok.pos;
         // `#x in obj`
         let mut left = if let TokenKind::PrivateName(name) = &self.tok.kind {
+            if min_prec > 7 {
+                // `#x in` is a RelationalExpression, not an operand of a
+                // tighter operator (`#x in #y in o`).
+                return Err(self.error_at(pos, "Unexpected private name"));
+            }
             let name = name.clone();
             self.advance()?;
             if !self.is_ident("in") || self.no_in {
@@ -2011,9 +2151,7 @@ impl<'a> Parser<'a> {
         self.advance()?; // new
         if self.eat_punct(".")? {
             self.expect_ident("target")?;
-            if !self.ctx.in_function && !self.ctx.in_class_body {
-                return Err(self.error_at(pos, "new.target expression is not allowed here"));
-            }
+            // Where `new.target` may appear is checked in `early`.
             return Ok(Expr {
                 pos,
                 kind: ExprKind::NewTarget,
@@ -2188,6 +2326,7 @@ impl<'a> Parser<'a> {
         let kind = match &self.tok.kind {
             TokenKind::Number(n) => {
                 let n = *n;
+                self.check_strict_literal()?;
                 self.advance()?;
                 ExprKind::Number(n)
             }
@@ -2195,10 +2334,13 @@ impl<'a> Parser<'a> {
                 TokenKind::BigInt(s) => ExprKind::BigInt(s),
                 _ => unreachable!(),
             },
-            TokenKind::Str(_) => match self.advance()?.kind {
-                TokenKind::Str(s) => ExprKind::String(s),
-                _ => unreachable!(),
-            },
+            TokenKind::Str(_) => {
+                self.check_strict_literal()?;
+                match self.advance()?.kind {
+                    TokenKind::Str(s) => ExprKind::String(s),
+                    _ => unreachable!(),
+                }
+            }
             TokenKind::Template { .. } => {
                 let (quasis, raws, expressions) = self.parse_template_parts(false)?;
                 ExprKind::Template {
@@ -2218,7 +2360,7 @@ impl<'a> Parser<'a> {
             TokenKind::Punct("(") => return self.parse_paren(),
             TokenKind::Punct("[") => return self.parse_array_literal(),
             TokenKind::Punct("{") => return self.parse_object_literal(),
-            TokenKind::Ident(name) => match keyword(name) {
+            TokenKind::Ident(name) => match keyword_token(&self.tok, name) {
                 "this" => {
                     self.advance()?;
                     ExprKind::This
@@ -2268,6 +2410,9 @@ impl<'a> Parser<'a> {
         self.expect_punct("(")?;
         let e = self.with_no_in(false, |p| p.parse_expression())?;
         self.expect_punct(")")?;
+        if matches!(e.kind, ExprKind::Object(_) | ExprKind::Array(_) | ExprKind::Assign { .. }) {
+            self.parenthesized.insert((e.pos.line, e.pos.column));
+        }
         Ok(e)
     }
 
@@ -2317,7 +2462,12 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 let el = if p.eat_punct("...")? {
-                    ArrayElement::Spread(p.parse_assignment()?)
+                    let e = p.parse_assignment()?;
+                    if p.is_punct(",") {
+                        // `[...a,]` is no assignment pattern.
+                        p.rest_comma.insert((e.pos.line, e.pos.column));
+                    }
+                    ArrayElement::Spread(e)
                 } else {
                     ArrayElement::Expr(p.parse_assignment()?)
                 };
@@ -2337,6 +2487,9 @@ impl<'a> Parser<'a> {
     /// Parses a property key. Also returns the identifier text when the key
     /// is a plain identifier (for shorthand detection).
     fn parse_property_key(&mut self) -> PResult<(PropertyKey, Option<Name>)> {
+        if matches!(self.tok.kind, TokenKind::Str(_) | TokenKind::Number(_)) {
+            self.check_strict_literal()?;
+        }
         Ok(match &self.tok.kind {
             TokenKind::Ident(_) | TokenKind::Str(_) | TokenKind::BigInt(_) | TokenKind::PrivateName(_) => match self.advance()?.kind {
                 TokenKind::Ident(n) => (PropertyKey::Identifier(n.clone()), Some(n)),
@@ -2369,7 +2522,11 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 if p.eat_punct("...")? {
-                    props.push(ObjectProperty::Spread(p.parse_assignment()?));
+                    let e = p.parse_assignment()?;
+                    if p.is_punct(",") {
+                        p.rest_comma.insert((e.pos.line, e.pos.column));
+                    }
+                    props.push(ObjectProperty::Spread(e));
                 } else {
                     props.push(p.parse_object_property()?);
                 }
@@ -2453,7 +2610,6 @@ impl<'a> Parser<'a> {
         // Shorthand (possibly with a cover initializer `a = 1` for patterns).
         let name = match ident_name {
             Some(n) if !self.is_reserved(&n) => n,
-            Some(n) if n == "await" || n == "yield" => n,
             _ => return Err(self.error_at(pos, "Invalid shorthand property initializer")),
         };
         let ident = Expr {
