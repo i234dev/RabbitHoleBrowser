@@ -1188,7 +1188,18 @@ impl Realm {
             let slot = frame.base as usize + frame.extra.as_ref().map_or(0, |e| e.resume_slot as usize);
             self.vstack[slot] = Value::Undefined;
         }
-        if state == GeneratorState::SuspendedYield {
+        // `yield*` dispatches every resumption itself.
+        let mut throw_in = mode == ResumeMode::Throw;
+        if state == GeneratorState::SuspendedYield && matches!(frame.code().ops.get(frame.pc), Some(Op::ResumeMode)) {
+            let slot = frame.base as usize + frame.extra.as_ref().map_or(0, |e| e.resume_slot as usize);
+            self.vstack[slot] = value.clone();
+            self.resume_mode = match mode {
+                ResumeMode::Next => 0,
+                ResumeMode::Throw => 1,
+                ResumeMode::Return => 2,
+            };
+            throw_in = false;
+        } else if state == GeneratorState::SuspendedYield {
             match mode {
                 ResumeMode::Next => {
                     let slot = frame.base as usize + frame.extra.as_ref().map_or(0, |e| e.resume_slot as usize);
@@ -1200,7 +1211,7 @@ impl Realm {
                         // blocks, iterator closes): resume into it.
                         let slot = frame.base as usize + frame.extra.as_ref().map_or(0, |e| e.resume_slot as usize);
                         self.vstack[slot] = value.clone();
-                        self.resume_return = true;
+                        self.resume_mode = 2;
                     } else {
                         self.vstack.truncate(frame.bottom());
                         set_state(self, GeneratorState::Completed, None);
@@ -1215,7 +1226,7 @@ impl Realm {
             return Err(e);
         }
         self.entry_tick();
-        let result = if mode == ResumeMode::Throw {
+        let result = if throw_in {
             match self.unwind(value) {
                 Ok(()) => self.run(),
                 Err(e) => Err(e),
@@ -1247,6 +1258,8 @@ impl Realm {
     pub fn generator_resume(&mut self, gen: ObjectId, mode: ResumeMode, value: Value) -> JsResult<Value> {
         match self.generator_resume_raw(gen, mode, value)? {
             Step::Return(v) => Ok(self.create_iter_result(v, true)),
+            // `yield*` hands on the inner iterator's result object as is.
+            Step::Yield(v) if std::mem::replace(&mut self.yield_raw, false) => Ok(v),
             Step::Yield(v) => Ok(self.create_iter_result(v, false)),
             Step::Await(_) => self.type_error("await in a non-async generator"),
         }
@@ -3996,8 +4009,30 @@ impl Realm {
                         }
                     }
                 }
+                Op::YieldStarStep(is_async) => {
+                    let mode = pop!();
+                    let received = pop!();
+                    let next = self.vstack[sp - 1].clone();
+                    let it = self.vstack[sp - 2].clone();
+                    let mode = mode.as_number().unwrap_or(0.0) as u8;
+                    let out = self.yield_star_step(&it, &next, received, mode, is_async)?;
+                    push!(out);
+                }
+                Op::YieldStarCheck => {
+                    let r = pop!();
+                    let mode = self.ystar.1;
+                    let out = self.yield_star_check(r, mode, true)?;
+                    push!(out);
+                }
+                Op::YStarIs(k) => {
+                    push!(Value::Bool(self.ystar.0 == k));
+                }
+                Op::ResumeMode => {
+                    let m = std::mem::replace(&mut self.resume_mode, 0);
+                    push!(Value::Number(m as f64));
+                }
                 Op::ResumeIsReturn => {
-                    let r = std::mem::replace(&mut self.resume_return, false);
+                    let r = std::mem::replace(&mut self.resume_mode, 0) == 2;
                     push!(Value::Bool(r));
                 }
                 Op::EvalSite(i) => {
@@ -4068,8 +4103,11 @@ impl Realm {
                     let t = self.private_take(&proto);
                     push!(t);
                 }
-                Op::Yield | Op::AsyncYield => {
+                Op::Yield | Op::AsyncYield | Op::YieldRaw => {
                     let v = pop!();
+                    if matches!(op, Op::YieldRaw) {
+                        self.yield_raw = true;
+                    }
                     frame!().extra_mut().resume_slot = (sp - fb) as u32;
                     let mut f = self.frames.pop().unwrap();
                     self.detach_slots(&mut f);
@@ -4600,6 +4638,61 @@ impl Realm {
             }
         }
         Ok(())
+    }
+
+    // ----------------------------------------------------------- yield*
+    //
+    // Kinds left in `ystar.0`: 0 yield `out`, 1 done (yield* evaluates to
+    // `out`), 2 return `out`, 3 await `out` then YieldStarCheck, 4 await
+    // `out` then return it.
+
+    fn yield_star_step(&mut self, it: &Value, next: &Value, received: Value, mode: u8, is_async: bool) -> JsResult<Value> {
+        self.ystar = (0, mode);
+        let r = match mode {
+            1 => match self.get_method(it.clone(), PropertyKey::str("throw"))? {
+                Some(m) => self.call(m, it.clone(), &[received])?,
+                None => {
+                    // The delegate cannot take the exception: close it.
+                    if let Some(ret) = self.get_method(it.clone(), PropertyKey::str("return"))? {
+                        let v = self.call(ret, it.clone(), &[])?;
+                        if !is_async && !v.is_object() {
+                            return self.type_error("Iterator result is not an object");
+                        }
+                    }
+                    return self.type_error("The iterator does not provide a 'throw' method");
+                }
+            },
+            2 => match self.get_method(it.clone(), PropertyKey::str("return"))? {
+                Some(m) => self.call(m, it.clone(), &[received])?,
+                None => {
+                    self.ystar = (if is_async { 4 } else { 2 }, mode);
+                    return Ok(received);
+                }
+            },
+            _ => self.call(next.clone(), it.clone(), &[received])?,
+        };
+        if is_async {
+            self.ystar = (3, mode);
+            return Ok(r);
+        }
+        self.yield_star_check(r, mode, false)
+    }
+
+    fn yield_star_check(&mut self, r: Value, mode: u8, is_async: bool) -> JsResult<Value> {
+        if !r.is_object() {
+            return self.type_error("Iterator result is not an object");
+        }
+        let done = self.get(r.clone(), PropertyKey::str("done"))?;
+        if self.to_boolean(&done) {
+            let v = self.get(r, PropertyKey::str("value"))?;
+            self.ystar = (if mode == 2 { 2 } else { 1 }, mode);
+            return Ok(v);
+        }
+        self.ystar = (0, mode);
+        if is_async {
+            return self.get(r, PropertyKey::str("value"));
+        }
+        Ok(r)
     }
 
     // ------------------------------------------------ private elements

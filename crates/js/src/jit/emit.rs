@@ -130,7 +130,7 @@ fn classify_all(op: &Op) -> Class {
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
         Op::CallEval(..) | Op::EvalSite(..) | Op::NewEvalVars | Op::DeclareEvalVar(..) | Op::DeclareEvalGlobalVar(..) => Reject("direct eval"),
-        Op::ResumeIsReturn => Reject("suspends"),
+        Op::ResumeIsReturn | Op::YieldStarStep(..) | Op::YieldStarCheck | Op::YStarIs(..) | Op::YieldRaw | Op::ResumeMode => Reject("suspends"),
         Op::IteratorStepReg(..) | Op::IteratorRestReg(..) | Op::IteratorCloseIfNotDoneReg(..) | Op::IteratorCloseOnThrow(..) => Reject("writes registers out of line"),
         Op::GetPrivate | Op::GetPrivateKeep | Op::SetPrivate | Op::DefinePrivate | Op::CopyPrivate | Op::TakePrivate => exec,
         // Everything else: the interpreter's out-of-line code.

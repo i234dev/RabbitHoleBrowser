@@ -200,7 +200,12 @@ pub struct Realm {
     /// Call-site index set by `Op::EvalSite` for the following `CallEval`.
     pub(crate) eval_site: u32,
     /// A generator is being resumed by `return()` (see `Op::ResumeIsReturn`).
-    pub(crate) resume_return: bool,
+    pub(crate) resume_mode: u8,
+    /// Outcome of the last `Op::YieldStarStep` / `YieldStarCheck`: (kind, mode).
+    pub(crate) ystar: (u8, u8),
+    /// The value the next `Exit::Yield` carries is already an iterator
+    /// result object (`yield*` in a sync generator).
+    pub(crate) yield_raw: bool,
     /// Host hook for `import()` / modules (unused by the core).
     pub host_data: Option<Box<dyn Any>>,
     /// Extra GC roots maintained by the host (e.g. DOM node wrappers).
@@ -427,7 +432,9 @@ impl Realm {
             max_native_depth: 100_000,
             heap_limit: 60_000_000,
             eval_site: u32::MAX,
-            resume_return: false,
+            resume_mode: 0,
+            ystar: (0, 0),
+            yield_raw: false,
             host_data: None,
             extra_roots: Vec::new(),
             ops_executed: 0,

@@ -1642,6 +1642,11 @@ fn direct_eval_annexb_private_generators() {
     eq("var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { closed++; return {}; } }; } }; try { var [a = (() => { throw 1; })()] = [undefined]; } catch (e) {} var [b] = it; closed", "1");
     eq("var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { closed++; return {}; } }; } }; try { var [{}] = { [Symbol.iterator]() { return { next() { return { value: null, done: false }; }, return() { closed++; return {}; } }; } }; } catch (e) {} closed", "1");
     eq("try { (({}) => 1)(null); 'no' } catch (e) { e.name }", "TypeError");
+    // yield* forwards throw/return and hands on the inner result objects.
+    eq("var log = []; function* inner() { try { yield 1; yield 2; } finally { log.push('in'); } } function* outer() { try { var r = yield* inner(); log.push('r' + r); } finally { log.push('out'); } } var it = outer(); it.next(); var x = it.return(9); log.join() + ':' + x.value + x.done", "in,out:9true");
+    eq("function* inner() { try { yield 1; } catch (e) { yield 'caught ' + e; } } function* outer() { yield* inner(); } var it = outer(); it.next(); it.throw('x').value", "caught x");
+    eq("var res = { value: 1, done: false }; var inner = { [Symbol.iterator]() { return { next() { return res; } }; } }; function* g() { yield* inner; } g().next() === res", "true");
+    eq("function* g() { return yield* [1, 2]; } [...g()].join()", "1,2");
 }
 
 /// Unicode identifiers: Other_ID_Start (U+2118, in ESPN's bundle),

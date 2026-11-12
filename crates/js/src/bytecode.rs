@@ -273,6 +273,21 @@ pub enum Op {
     /// errors from `return` (abrupt destructuring).
     IteratorCloseOnThrow(u16, u16),
 
+    // --- yield* (iter next received mode -> iter next out; the outcome
+    // kind is left in `Realm::ystar`, tested with YStarIs)
+    /// One step of the delegation for resumption `mode` (undefined/0 next,
+    /// 1 throw, 2 return); the flag: async generator.
+    YieldStarStep(bool),
+    /// Async: check the awaited inner result.
+    YieldStarCheck,
+    /// -> whether the last yield* step's kind is `k`.
+    YStarIs(u8),
+    /// Yield an inner iterator result object as is (sync yield*).
+    YieldRaw,
+    /// -> the resumption mode (0 next, 1 throw, 2 return) of the yield just
+    /// resumed (the resumed value is on the stack below).
+    ResumeMode,
+
     /// -> whether the generator was just resumed by `return()` (the
     /// resumed value is then a return value; see `generator_resume_raw`)
     ResumeIsReturn,
@@ -809,6 +824,10 @@ impl Op {
             TakePrivate => (1, 1),
             EvalSite(_) | DeclareEvalGlobalVar(_) => (0, 0),
             NewEvalVars | ResumeIsReturn => (0, 1),
+            YieldStarStep(_) => (4, 3),
+            YieldStarCheck => (3, 3),
+            YStarIs(_) | ResumeMode => (0, 1),
+            YieldRaw => (1, 1),
             IteratorStepReg(..) | IteratorRestReg(..) => (0, 1),
             IteratorCloseIfNotDoneReg(..) => (0, 0),
             IteratorCloseOnThrow(..) => (1, 1),

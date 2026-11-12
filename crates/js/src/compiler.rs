@@ -3244,25 +3244,41 @@ impl Compiler {
                 if *delegate {
                     let is_async = self.fs_ref().flags.is_async;
                     self.emit(if is_async { Op::GetAsyncIterator } else { Op::GetIterator });
-                    // [iter next] ; received = undefined
+                    // [iter next received mode]: first a `next(undefined)`.
+                    self.emit(Op::Undefined);
                     self.emit(Op::Undefined);
                     let start = self.here();
-                    self.emit(Op::IteratorNextWith);
+                    self.emit(Op::YieldStarStep(is_async));
+                    // [iter next out]
+                    let mut to_return = Vec::new();
                     if is_async {
+                        self.emit(Op::YStarIs(3));
+                        let l1 = self.emit(Op::JumpIfFalse(0));
                         self.emit(Op::Await);
+                        self.emit(Op::YieldStarCheck);
+                        self.patch_jump(l1);
+                        self.emit(Op::YStarIs(4));
+                        let l2 = self.emit(Op::JumpIfFalse(0));
+                        self.emit(Op::Await);
+                        to_return.push(self.emit(Op::Jump(0)));
+                        self.patch_jump(l2);
                     }
-                    // [iter next result]
-                    self.emit(Op::Dup);
-                    let d = self.const_str("done");
-                    self.emit_ic(|ic| Op::GetProp(d, ic));
-                    let exit = self.emit(Op::JumpIfTrue(0));
-                    let v = self.const_str("value");
-                    self.emit_ic(|ic| Op::GetProp(v, ic));
-                    self.emit(if is_async { Op::AsyncYield } else { Op::Yield });
+                    self.emit(Op::YStarIs(1));
+                    let done = self.emit(Op::JumpIfTrue(0));
+                    self.emit(Op::YStarIs(2));
+                    to_return.push(self.emit(Op::JumpIfTrue(0)));
+                    self.emit(if is_async { Op::AsyncYield } else { Op::YieldRaw });
+                    self.emit(Op::ResumeMode);
                     self.emit(Op::Jump(start as u32));
-                    self.patch_jump(exit);
-                    // [iter next result] -> value
-                    self.emit_ic(|ic| Op::GetProp(v, ic));
+                    // Return completion from the delegate (or `return()`
+                    // without an inner `return`): finally blocks run.
+                    for j in to_return {
+                        self.patch_jump(j);
+                    }
+                    self.emit_exits(0)?;
+                    self.emit(Op::Return);
+                    self.patch_jump(done);
+                    // [iter next value] -> value
                     self.emit(Op::Rot3);
                     self.emit(Op::Pop);
                     self.emit(Op::Swap);
