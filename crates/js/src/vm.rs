@@ -4035,6 +4035,17 @@ impl Realm {
                     let r = std::mem::replace(&mut self.resume_mode, 0) == 2;
                     push!(Value::Bool(r));
                 }
+                Op::DeleteGlobal(i) => {
+                    let key = const_key!(i);
+                    let lexical = key.as_str().map(|n| self.global_lex.get(n).is_some()).unwrap_or(false);
+                    let r = if lexical {
+                        false
+                    } else {
+                        let g = self.global;
+                        self.delete_property(g, &key)?
+                    };
+                    push!(Value::Bool(r));
+                }
                 Op::EvalSite(i) => {
                     self.eval_site = i;
                 }

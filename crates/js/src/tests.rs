@@ -1659,6 +1659,10 @@ fn direct_eval_annexb_private_generators() {
     eq("function f(a = b, b) {} try { f(); 'no' } catch (e) { e.name }", "ReferenceError");
     eq("function f(a, b = a + 1) { a = 5; return a + b; } f(1)", "7");
     eq("var g = (x = () => y, y = 2) => x(); g()", "2");
+    // Indirect eval: lexical declarations stay local, vars are deletable globals.
+    eq("var a = (0, eval)('let ie = 1; ie + 1'); [a, typeof ie].join()", "2,undefined");
+    eq("(0, eval)('var iv = 2; function ifn() { return this; }'); [iv, delete iv, typeof iv, ifn() === globalThis].join()", "2,true,undefined,true");
+    eq("try { (0, eval)('let tz = tz;'); 'no' } catch (e) { e.name }", "ReferenceError");
     eq("var r = []; for (var i = 0; i < 2; i++) { try { throw 1; } finally { r.push(i); continue; } } r.join()", "0,1");
 }
 

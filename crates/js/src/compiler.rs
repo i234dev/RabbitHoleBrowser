@@ -456,7 +456,8 @@ pub fn compile_eval(program: &Program, site: &EvalSite, source: &str) -> CResult
     parent.scopes[0].is_function = false;
     parent.class_depth = site.class_depth;
     c.fns.push(parent);
-    let flags = CodeFlags { is_arrow: true, is_strict: strict, has_simple_params: true, ..Default::default() };
+    // Indirect eval (no caller scope) runs like a script: `this` is the global object.
+    let flags = CodeFlags { is_arrow: true, is_strict: strict, has_simple_params: true, is_script: site.env.is_none(), ..Default::default() };
     let mut fs = FnState::new("", flags, false, filename);
     fs.is_eval = true;
     fs.source = Some(c.source.clone());
@@ -3079,7 +3080,13 @@ impl Compiler {
                             c.emit_get_var(w);
                             c.emit(Op::DeleteProp(i));
                         });
-                        self.emit(Op::False);
+                        if matches!(self.resolve(n), Resolved::Global) {
+                            // A global property (true when unresolvable).
+                            let i = self.const_str(n);
+                            self.emit(Op::DeleteGlobal(i));
+                        } else {
+                            self.emit(Op::False);
+                        }
                         for j in ends {
                             self.patch_jump(j);
                         }

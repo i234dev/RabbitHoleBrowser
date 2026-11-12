@@ -374,7 +374,20 @@ fn eval(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
         V::String(s) => s.to_rust_string(),
         other => return Ok(other.to_value()),
     };
-    let code = realm.compile(&src, "eval", false)?;
+    // Indirect eval: global scope, but its lexical declarations stay in
+    // an environment of their own and its vars are deletable globals.
+    let program = match crate::parser::parse_program_in(&src, false, &Default::default()) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = format!("{} (eval:{}:{})", e.message, e.line, e.column);
+            return Err(realm.new_error("SyntaxError", &msg));
+        }
+    };
+    let site = crate::compiler::EvalSite { env: None, strict: false, class_depth: 0, in_function: false, in_method: false, in_derived_ctor: false, in_field_init: false };
+    let code = match crate::compiler::compile_eval(&program, &site, &src) {
+        Ok(c) => c,
+        Err(e) => return Err(realm.new_error("SyntaxError", &e.message)),
+    };
     realm.run_script(code)
 }
 

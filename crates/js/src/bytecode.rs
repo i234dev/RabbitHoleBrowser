@@ -292,6 +292,9 @@ pub enum Op {
     /// resumed value is then a return value; see `generator_resume_raw`)
     ResumeIsReturn,
 
+    /// -> result of `delete name` for an unbound name (global property).
+    DeleteGlobal(u32),
+
     // --- direct eval
     /// The next `CallEval` is call site `eval_sites[i]` of this function.
     EvalSite(u32),
@@ -823,7 +826,7 @@ impl Op {
             CopyPrivate => (2, 1),
             TakePrivate => (1, 1),
             EvalSite(_) | DeclareEvalGlobalVar(_) => (0, 0),
-            NewEvalVars | ResumeIsReturn => (0, 1),
+            NewEvalVars | ResumeIsReturn | DeleteGlobal(_) => (0, 1),
             YieldStarStep(_) => (4, 3),
             YieldStarCheck => (3, 3),
             YStarIs(_) | ResumeMode => (0, 1),
