@@ -148,21 +148,124 @@
       if (!opts || !opts.serializableShadowRoots) return this.innerHTML;
       return this.innerHTML;
     });
-    method(C, 'appendHTMLUnsafe', function (html) { this.append(fragmentFor(this, html)); });
-    method(C, 'prependHTMLUnsafe', function (html) { this.prepend(fragmentFor(this, html)); });
-    method(C, 'appendHTML', function (html) { this.append(fragmentFor(this, sanitize(String(html)))); });
-    method(C, 'prependHTML', function (html) { this.prepend(fragmentFor(this, sanitize(String(html)))); });
+    for (const [name, pos] of [['appendHTML', 'append'], ['prependHTML', 'prepend']]) {
+      method(C, name + 'Unsafe', function (html, opts) { parseHTMLInto(this, pos, false, html, opts); });
+      method(C, name, function (html, opts) { parseHTMLInto(this, pos, true, html, opts); });
+    }
     void insert;
   }
   for (const C of [E, CD]) {
-    method(C, 'beforeHTMLUnsafe', function (html) { this.before(fragmentFor(this.parentNode, html)); });
-    method(C, 'afterHTMLUnsafe', function (html) { this.after(fragmentFor(this.parentNode, html)); });
-    method(C, 'replaceWithHTMLUnsafe', function (html) { this.replaceWith(fragmentFor(this.parentNode, html)); });
-    method(C, 'beforeHTML', function (html) { this.before(fragmentFor(this.parentNode, sanitize(String(html)))); });
-    method(C, 'afterHTML', function (html) { this.after(fragmentFor(this.parentNode, sanitize(String(html)))); });
-    method(C, 'replaceWithHTML', function (html) { this.replaceWith(fragmentFor(this.parentNode, sanitize(String(html)))); });
+    for (const [name, pos] of [['beforeHTML', 'before'], ['afterHTML', 'after'], ['replaceWithHTML', 'replaceWith']]) {
+      method(C, name + 'Unsafe', function (html, opts) { parseHTMLInto(this, pos, false, html, opts); });
+      method(C, name, function (html, opts) { parseHTMLInto(this, pos, true, html, opts); });
+    }
+  }
+  // {append,prepend,before,after,replaceWith}HTML{,Unsafe}(html, options):
+  // the streaming parser fed all at once. Positional methods on a node
+  // without a parent do nothing; a Document, plain DocumentFragment or
+  // <html> parent is a HierarchyRequestError.
+  function parseHTMLInto(node, pos, safe, html, opts) {
+    if (opts !== undefined && opts !== null && typeof opts !== 'object') throw new TypeError('The options argument must be an object.');
+    const positional = pos === 'before' || pos === 'after' || pos === 'replaceWith';
+    if (positional) {
+      const p = node.parentNode;
+      if (!p) return;
+      if (p.nodeType === 1 && p.namespaceURI === 'http://www.w3.org/1999/xhtml' && (p.localName === 'html' || p.localName === 'template')) {
+        throw domError("Failed to execute: the parent is an html or template element.", 'HierarchyRequestError');
+      }
+    } else if (isHTMLRoot(node)) {
+      throw domError("Failed to execute: cannot insert HTML into an html element.", 'HierarchyRequestError');
+    }
+    let markup;
+    if (safe) {
+      markup = String(html);
+    } else {
+      const iface = positional ? 'Node' : (g.ShadowRoot && node instanceof g.ShadowRoot ? 'ShadowRoot' : 'Element');
+      const r = g.__rhTrustedHTMLSink(html, opts, `${iface} ${pos}HTMLUnsafe`);
+      markup = r.html;
+      opts = r.options;
+    }
+    const runScripts = !safe && !!(opts && opts.runScripts);
+    N.streamOpen(node, pos, { check: true });
+    const cfg = streamSanitizerConfig(opts, safe);
+    const h = N.streamOpen(node, pos, { runScripts });
+    sanitizeCreated(N.streamWrite(h, markup), cfg, safe);
+    sanitizeCreated(N.streamClose(h), cfg, safe);
   }
   void DF;
+
+  // ------------------------------------------- HTML streaming methods
+  // stream{,Append,Prepend,Before,After,ReplaceWith}HTML{,Unsafe}(options):
+  // a WritableStream of strings parsed straight into the live tree by a
+  // streaming fragment parser (__rhNative.streamOpen/Write/Close). The safe
+  // variants never run scripts and sanitize what they insert.
+  function streamSanitizerConfig(opts, safe) {
+    const s = opts && opts.sanitizer;
+    if (s === undefined || s === null || s === 'default') return safe ? { elements: null, removeElements: DEFAULT_REMOVE.slice(), replaceWithChildrenElements: [], attributes: null, removeAttributes: [] } : null;
+    const cfg = (g.Sanitizer && s instanceof g.Sanitizer) ? s.get() : s;
+    if (typeof cfg !== 'object') throw new TypeError("Failed to execute: the sanitizer option is not a Sanitizer or SanitizerConfig.");
+    if (cfg.elements && cfg.removeElements) throw new TypeError("A sanitizer config cannot have both 'elements' and 'removeElements'.");
+    if (cfg.attributes && cfg.removeAttributes) throw new TypeError("A sanitizer config cannot have both 'attributes' and 'removeAttributes'.");
+    const names = (l) => (l ? Array.from(l, (e) => (typeof e === 'string' ? e : e.name)) : null);
+    const out = { elements: names(cfg.elements), removeElements: names(cfg.removeElements) || [], replaceWithChildrenElements: names(cfg.replaceWithChildrenElements) || [], attributes: names(cfg.attributes), removeAttributes: names(cfg.removeAttributes) || [] };
+    if (safe) for (const n of DEFAULT_REMOVE) if (!out.removeElements.includes(n) && !(out.elements && out.elements.includes(n) && n !== 'script')) out.removeElements.push(n);
+    if (safe && !out.removeElements.includes('script')) out.removeElements.push('script');
+    return out;
+  }
+  function sanitizeCreated(els, cfg, safe) {
+    if (!cfg) return;
+    for (const el of els) {
+      const name = el.localName;
+      if (cfg.removeElements.includes(name) || (cfg.elements && !cfg.elements.includes(name))) { el.remove(); continue; }
+      if (cfg.replaceWithChildrenElements.includes(name)) { el.replaceWith(...el.childNodes); continue; }
+      for (const a of Array.from(el.getAttributeNames())) {
+        const v = el.getAttribute(a) || '';
+        if ((safe && (/^on/i.test(a) || ((a === 'href' || a === 'src' || a === 'action' || a === 'formaction') && /^\s*javascript:/i.test(v)))) || cfg.removeAttributes.includes(a) || (cfg.attributes && !cfg.attributes.includes(a))) el.removeAttribute(a);
+      }
+    }
+  }
+  const isHTMLRoot = (n) => n.nodeType === 1 && n.namespaceURI === 'http://www.w3.org/1999/xhtml' && n.localName === 'html';
+  function makeStream(node, pos, safe, opts) {
+    if (opts !== undefined && opts !== null && typeof opts !== 'object') throw new TypeError('The options argument must be an object.');
+    const positional = pos === 'before' || pos === 'after' || pos === 'replaceWith';
+    if (!safe && g.__rhTrustedOptionsSink) {
+      const iface = positional ? 'Node' : (g.ShadowRoot && node instanceof g.ShadowRoot ? 'ShadowRoot' : 'Element');
+      const names = { html: 'streamHTMLUnsafe', append: 'streamAppendHTMLUnsafe', prepend: 'streamPrependHTMLUnsafe', before: 'streamBeforeHTMLUnsafe', after: 'streamAfterHTMLUnsafe', replaceWith: 'streamReplaceWithHTMLUnsafe' };
+      opts = g.__rhTrustedOptionsSink(opts, `${iface} ${names[pos]}`);
+    }
+    if (positional ? (node.parentNode && isHTMLRoot(node.parentNode)) : isHTMLRoot(node)) {
+      throw domError("Failed to execute: cannot stream HTML into an html element.", 'HierarchyRequestError');
+    }
+    const runScripts = !safe && !!(opts && opts.runScripts);
+    N.streamOpen(node, pos, { check: true });
+    const cfg = streamSanitizerConfig(opts, safe);
+    const h = N.streamOpen(node, pos, { runScripts });
+    return new g.WritableStream({
+      write(chunk) {
+        // DOMString conversion (a Symbol throws TypeError).
+        const text = `${chunk}`;
+        sanitizeCreated(N.streamWrite(h, text), cfg, safe);
+      },
+      close() { sanitizeCreated(N.streamClose(h), cfg, safe); },
+      abort() { try { N.streamClose(h); } catch (e) { /* ignore */ } },
+    });
+  }
+  const STREAMS = [['streamHTML', 'html'], ['streamAppendHTML', 'append'], ['streamPrependHTML', 'prepend']];
+  const POSITIONAL_STREAMS = [['streamBeforeHTML', 'before'], ['streamAfterHTML', 'after'], ['streamReplaceWithHTML', 'replaceWith']];
+  if (g.WritableStream) {
+    for (const C of [E, SR]) {
+      for (const [name, pos] of STREAMS) {
+        method(C, name, function (opts) { return makeStream(this, pos, true, opts); });
+        method(C, name + 'Unsafe', function (opts) { return makeStream(this, pos, false, opts); });
+      }
+    }
+    for (const C of [E, CD]) {
+      for (const [name, pos] of POSITIONAL_STREAMS) {
+        method(C, name, function (opts) { return makeStream(this, pos, true, opts); });
+        method(C, name + 'Unsafe', function (opts) { return makeStream(this, pos, false, opts); });
+      }
+    }
+  }
 
   // ------------------------------------------------------------ Sanitizer
 

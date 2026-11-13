@@ -66,6 +66,10 @@ pub struct ScriptState {
     pub link_loads: HashMap<NodeId, String>,
     /// `load`/`error` events for `<link>` elements, fired on the next tick.
     pub link_events: Vec<(NodeId, &'static str)>,
+    /// A script-created parser of this (frame) document finished and its
+    /// window fired `load`: the iframe element in the parent fires `load`
+    /// on the parent's next tick.
+    pub frame_load_pending: bool,
 }
 
 /// Origin-scoped `localStorage`, shared by all pages of an engine and
@@ -549,6 +553,11 @@ impl HostEnv for EngineEnv<'_> {
     fn frame_checkpoint(&mut self) {
         self.engine.frame_microtasks(self.page);
     }
+    fn document_load_complete(&mut self) {
+        if self.page.frame_depth > 0 {
+            self.page.script.frame_load_pending = true;
+        }
+    }
     fn focus_node(&mut self, node: Option<NodeId>) {
         self.page.state.focused = node;
         self.page.state.focus_visible = node.map(|n| self.page.focus_should_be_visible(n)).unwrap_or(false);
@@ -650,6 +659,21 @@ impl Engine {
         }
         page.script.pending_scripts = Some(classic.into_iter().chain(deferred).chain(asyncs).collect());
         true
+    }
+
+    /// Give a loaded page that had no scripts of its own a script host
+    /// (its realm), as after a completed load.
+    pub(crate) fn ensure_script_host(&self, page: &mut Page) {
+        if page.script.host.is_some() || page.script.scripts_ran || page.script.pending_scripts.is_some() {
+            return;
+        }
+        page.script.scripts_ran = true;
+        let mut host = {
+            let mut env = EngineEnv { engine: self, page };
+            ScriptHost::new(&mut env)
+        };
+        host.mark_loaded();
+        page.script.host = Some(host);
     }
 
     /// Are load-time scripts still waiting to run?

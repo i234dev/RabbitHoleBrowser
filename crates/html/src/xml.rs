@@ -15,7 +15,37 @@ struct Parser<'a> {
     doc: Document,
     /// Namespace scopes: (prefix, uri) declarations per open element.
     scopes: Vec<Vec<(String, String)>>,
+    /// Where an XML declaration may appear (after a byte order mark).
+    decl_pos: usize,
+    /// General entities declared in the internal DTD subset.
+    entities: std::collections::HashMap<String, String>,
+    /// The DOCTYPE names an XHTML / MathML DTD: HTML named character
+    /// references are defined (HTML "XML parser" entity DTD).
+    html_entities: bool,
 }
+
+/// Is `s` a QName (`NCName` or `NCName:NCName`)?
+fn is_qname(s: &str) -> bool {
+    let ncname = |p: &str| !p.is_empty() && !p.contains(':') && p.chars().next().map(|c| is_name_start(c) && c != ':').unwrap_or(false);
+    match s.split_once(':') {
+        Some((p, l)) => ncname(p) && ncname(l),
+        None => ncname(s),
+    }
+}
+
+/// Public identifiers of the DTDs for which the HTML parser spec's XML
+/// parser uses the XHTML entity set.
+const XHTML_DTDS: &[&str] = &[
+    "-//W3C//DTD XHTML 1.0 Transitional//EN",
+    "-//W3C//DTD XHTML 1.1//EN",
+    "-//W3C//DTD XHTML 1.0 Strict//EN",
+    "-//W3C//DTD XHTML 1.0 Frameset//EN",
+    "-//W3C//DTD XHTML Basic 1.0//EN",
+    "-//W3C//DTD XHTML 1.1 plus MathML 2.0//EN",
+    "-//W3C//DTD XHTML 1.1 plus MathML 2.0 plus SVG 1.1//EN",
+    "-//W3C//DTD MathML 2.0//EN",
+    "-//WAPFORUM//DTD XHTML Mobile 1.0//EN",
+];
 
 type R<T> = Result<T, String>;
 
@@ -97,10 +127,13 @@ impl<'a> Parser<'a> {
                 "quot" => "\"".to_string(),
                 _ if ent.starts_with("#x") => u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32).map(|c| c.to_string()).ok_or("bad character reference".to_string())?,
                 _ if ent.starts_with('#') => ent[1..].parse::<u32>().ok().and_then(char::from_u32).map(|c| c.to_string()).ok_or("bad character reference".to_string())?,
-                // XHTML documents commonly use HTML named references.
-                _ => match crate::entities::lookup(ent) {
-                    Some(v) => v.to_string(),
-                    None => return self.err(&format!("undefined entity '{ent}'")),
+                _ => match self.entities.get(ent) {
+                    Some(v) => v.clone(),
+                    // XHTML documents with an XHTML DTD use HTML named references.
+                    None => match crate::entities::lookup(ent).filter(|_| self.html_entities) {
+                        Some(v) => v.to_string(),
+                        None => return self.err(&format!("undefined entity '{ent}'")),
+                    },
                 },
             };
             out.push_str(&c);
@@ -131,7 +164,7 @@ impl<'a> Parser<'a> {
         if text.is_empty() {
             return;
         }
-        if let Some(last) = self.doc.last_child(parent) {
+        if let Some(last) = self.doc.last_child(parent).filter(|&l| !self.doc.is_cdata(l)) {
             if let NodeData::Text(t) = &mut self.doc.node_mut(last).data {
                 t.push_str(text);
                 return;
@@ -152,9 +185,28 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         if self.starts("<?") {
-            // Processing instructions (and the XML declaration) are skipped.
+            let start = self.pos;
+            self.pos += 2;
+            let target = self.name()?;
             let Some(end) = self.src[self.pos..].find("?>") else { return self.err("unterminated processing instruction") };
+            let raw = &self.src[self.pos..self.pos + end];
+            if !raw.is_empty() && !raw.starts_with([' ', '\t', '\n', '\r']) {
+                return self.err("expected whitespace after the processing instruction target");
+            }
+            let data = raw.trim_start_matches([' ', '\t', '\n', '\r']).to_string();
             self.pos += end + 2;
+            if target.eq_ignore_ascii_case("xml") {
+                // The XML declaration, only at the very start.
+                if target != "xml" || start != self.decl_pos {
+                    return self.err("misplaced XML declaration");
+                }
+                return Ok(true);
+            }
+            if target.contains(':') {
+                return self.err("a processing instruction target cannot contain ':'");
+            }
+            let n = self.doc.create_pi(&target, &data);
+            self.doc.append_child(parent, n);
             return Ok(true);
         }
         Ok(false)
@@ -183,29 +235,63 @@ impl<'a> Parser<'a> {
         if self.starts("PUBLIC") {
             self.pos += 6;
             public_id = quoted(self)?;
-            self.skip_ws();
-            if matches!(self.peek(), Some(b'"' | b'\'')) {
-                system_id = quoted(self)?;
-            }
+            // PUBLIC needs both literals.
+            system_id = quoted(self)?;
         } else if self.starts("SYSTEM") {
             self.pos += 6;
             system_id = quoted(self)?;
         }
+        self.html_entities = XHTML_DTDS.contains(&public_id.as_str());
         self.skip_ws();
         if self.peek() == Some(b'[') {
-            // Internal subset: skipped (bracket matching, ignoring quotes).
-            let mut depth = 0;
-            while let Some(b) = self.peek() {
-                self.pos += 1;
-                match b {
-                    b'[' => depth += 1,
-                    b']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
+            // Internal subset: general entity declarations with literal
+            // values are kept; everything else is skipped.
+            self.pos += 1;
+            loop {
+                self.skip_ws();
+                match self.peek() {
+                    None => return self.err("unterminated internal subset"),
+                    Some(b']') => {
+                        self.pos += 1;
+                        break;
                     }
                     _ => {}
+                }
+                if self.starts("<!ENTITY") {
+                    self.pos += 8;
+                    self.skip_ws();
+                    let parameter = self.peek() == Some(b'%');
+                    if parameter {
+                        self.pos += 1;
+                        self.skip_ws();
+                    }
+                    let name = self.name()?;
+                    self.skip_ws();
+                    let value = if matches!(self.peek(), Some(b'"' | b'\'')) { Some(quoted(self)?) } else { None };
+                    let end = self.src[self.pos..].find('>').ok_or("unterminated entity declaration".to_string())?;
+                    self.pos += end + 1;
+                    if let (false, Some(v)) = (parameter, value) {
+                        let v = self.decode(&v)?;
+                        self.entities.entry(name).or_insert(v);
+                    }
+                } else if self.starts("<!--") {
+                    let end = self.src[self.pos..].find("-->").ok_or("unterminated comment".to_string())?;
+                    self.pos += end + 3;
+                } else if self.starts("<") {
+                    // Other declarations / processing instructions, quotes respected.
+                    let mut quote: Option<u8> = None;
+                    while let Some(b) = self.peek() {
+                        self.pos += 1;
+                        match (quote, b) {
+                            (None, b'"' | b'\'') => quote = Some(b),
+                            (Some(q), _) if b == q => quote = None,
+                            (None, b'>') => break,
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // Parameter entity references and the like.
+                    self.pos += 1;
                 }
             }
             self.skip_ws();
@@ -286,6 +372,28 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        if !is_qname(&qname) {
+            return self.err(&format!("'{qname}' is not a qualified name"));
+        }
+        for (n, _) in &raw_attrs {
+            if !is_qname(n) || n == "xmlns:" {
+                return self.err(&format!("'{n}' is not a qualified attribute name"));
+            }
+        }
+        // The same expanded name twice is not namespace-well-formed.
+        for (i, (n, _)) in raw_attrs.iter().enumerate() {
+            if let Some((p, l)) = n.split_once(':') {
+                let uri = if p == "xmlns" { Some(XMLNS_NS.to_string()) } else { self.lookup_ns(p) };
+                for (m, _) in &raw_attrs[..i] {
+                    if let Some((q, k)) = m.split_once(':') {
+                        let other = if q == "xmlns" { Some(XMLNS_NS.to_string()) } else { self.lookup_ns(q) };
+                        if k == l && other == uri {
+                            return self.err(&format!("duplicate attribute '{n}'"));
+                        }
+                    }
+                }
+            }
+        }
         let el = self.doc.create_element_ns(ns, prefix, &local, raw_attrs);
         for (n, u) in attr_ns {
             self.doc.set_attr_namespace(el, &n, Some(&u));
@@ -322,7 +430,8 @@ impl<'a> Parser<'a> {
                 let Some(end) = self.src[self.pos..].find("]]>") else { return self.err("unterminated CDATA section") };
                 let t = self.src[self.pos..self.pos + end].to_string();
                 self.pos += end + 3;
-                self.append_text(parent, &t);
+                let n = self.doc.create_cdata(&t);
+                self.doc.append_child(parent, n);
                 continue;
             }
             if self.misc(parent)? {
@@ -349,6 +458,7 @@ impl<'a> Parser<'a> {
         if self.starts("\u{feff}") {
             self.pos += 3;
         }
+        self.decl_pos = self.pos;
         let mut seen_root = false;
         loop {
             self.skip_ws();
@@ -399,7 +509,7 @@ pub fn try_parse_xml(input: &str) -> Result<Document, String> {
     } else {
         input
     };
-    let mut p = Parser { s: input.as_bytes(), src: input, pos: 0, doc: Document::new(), scopes: Vec::new() };
+    let mut p = Parser { s: input.as_bytes(), src: input, pos: 0, doc: Document::new(), scopes: Vec::new(), decl_pos: 0, entities: std::collections::HashMap::new(), html_entities: false };
     p.doc.is_html = false;
     p.doc.content_type = "application/xml".to_string();
     p.document()?;

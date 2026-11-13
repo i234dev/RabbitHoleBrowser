@@ -1033,46 +1033,6 @@ fn default_action_for(realm: &mut Realm, key: TargetKey, ty: &str) -> DefaultAct
     })
 }
 
-/// Perform the default action of a click on `n` through the environment.
-pub(crate) fn run_default_action(realm: &mut Realm, n: NodeRef) {
-    match default_action_for(realm, TargetKey::Node(n), "click") {
-        DefaultAction::Navigate(u) => with_env(|env| env.navigate(u, false)),
-        DefaultAction::SubmitForm(f, s) => {
-            let r = dispatch(realm, TargetKey::Node(NodeRef::main(f)), "submit", EventInit::simple(true, true), true);
-            if !r.default_prevented {
-                with_env(|env| env.submit_form(f, s));
-            }
-        }
-        DefaultAction::None => {
-            // Checkbox / radio activation.
-            {
-                let kind = with_doc(n.doc, |doc| {
-                    if doc.is_element(n.node, "input") {
-                        doc.attr(n.node, "type").map(|t| t.to_ascii_lowercase())
-                    } else {
-                        None
-                    }
-                });
-                match kind.as_deref() {
-                    Some("checkbox") => {
-                        let checked = with_doc(n.doc, |doc| doc.is_checked(n.node));
-                        crate::element::set_checkedness(n, Some(!checked));
-                        dispatch(realm, TargetKey::Node(n), "input", EventInit::simple(true, false), true);
-                        dispatch(realm, TargetKey::Node(n), "change", EventInit::simple(true, false), true);
-                    }
-                    Some("radio") => {
-                        let w = wrap(realm, n);
-                        let _ = realm.set_str(w, "checked", Value::Bool(true));
-                        dispatch(realm, TargetKey::Node(n), "input", EventInit::simple(true, false), true);
-                        dispatch(realm, TargetKey::Node(n), "change", EventInit::simple(true, false), true);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
 /// Dispatch an existing Event object.
 pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, target_override: Option<Value>) -> DispatchResult {
     let composed = realm.host_data::<EventData>(eid).map(|d| d.composed).unwrap_or(false);
@@ -1094,6 +1054,9 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
         (d.ty.clone(), d.bubbles)
     };
     let default_action = default_action_for(realm, key, &ty);
+    // Synthetic clicks: the activation target and its legacy
+    // pre-activation behavior (checkboxes / radios change first).
+    let activation = if is_synthetic_click(realm, eid) { pre_activation(&path, bubbles) } else { None };
     state().borrow_mut().event_stack.push(eid);
     // The event object and the path's targets are only held by this Rust
     // frame between listener calls: keep them alive across GCs that
@@ -1152,6 +1115,14 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
     }
     d.path.clear();
     let default_prevented = d.default_prevented;
+    if let Some(pre) = activation {
+        let target = match key {
+            TargetKey::Node(n) => Some(n),
+            _ => None,
+        };
+        post_activation(realm, pre, default_prevented, target);
+        return DispatchResult { default_prevented, handled, default_action: DefaultAction::None };
+    }
     DispatchResult { default_prevented, handled, default_action: if default_prevented { DefaultAction::None } else { default_action } }
 }
 
@@ -1430,4 +1401,294 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "SecurityPolicyViolationEvent", Some("Event"), generic_sub_event_ctor);
     define_class(realm, "ToggleEvent", Some("Event"), generic_sub_event_ctor);
     let _ = ALL;
+}
+
+// --------------------------------------------------- activation behavior
+
+/// The activation behavior of an element (DOM "activation behavior"; HTML
+/// defines it for links, form controls, labels and summaries).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Activation {
+    Checkbox,
+    Radio,
+    Submit,
+    Reset,
+    Button,
+    Link,
+    Summary,
+    Label,
+}
+
+fn activation_of(doc: &Document, n: NodeId) -> Option<Activation> {
+    let e = doc.element(n)?;
+    if e.ns != rabbithole_dom::Namespace::Html {
+        return None;
+    }
+    let ty = || e.attr("type").map(|t| t.trim().to_ascii_lowercase()).unwrap_or_default();
+    match e.tag.as_str() {
+        "a" | "area" => e.attr("href").map(|_| Activation::Link),
+        "input" => match ty().as_str() {
+            "checkbox" => Some(Activation::Checkbox),
+            "radio" => Some(Activation::Radio),
+            "submit" | "image" => Some(Activation::Submit),
+            "reset" => Some(Activation::Reset),
+            "button" => Some(Activation::Button),
+            _ => None,
+        },
+        "button" => Some(match ty().as_str() {
+            "reset" => Activation::Reset,
+            "button" => Activation::Button,
+            _ => Activation::Submit,
+        }),
+        "label" => Some(Activation::Label),
+        "summary" => {
+            let p = doc.parent(n)?;
+            let first = doc.child_elements(p).find(|&c| doc.element(c).map(|ce| ce.tag == "summary" && ce.ns == rabbithole_dom::Namespace::Html).unwrap_or(false));
+            (doc.is_element(p, "details") && first == Some(n)).then_some(Activation::Summary)
+        }
+        _ => None,
+    }
+}
+
+/// Interactive content (HTML §3.2.5.2.7) for the label activation rule.
+fn is_interactive(doc: &Document, n: NodeId) -> bool {
+    let Some(e) = doc.element(n) else { return false };
+    if e.ns != rabbithole_dom::Namespace::Html {
+        return false;
+    }
+    match e.tag.as_str() {
+        "a" => e.attr("href").is_some(),
+        "input" => !e.attr("type").map(|t| t.eq_ignore_ascii_case("hidden")).unwrap_or(false),
+        "img" | "video" | "audio" => e.attr("usemap").is_some() || (e.tag != "img" && e.attr("controls").is_some()),
+        "button" | "details" | "embed" | "iframe" | "label" | "select" | "textarea" => true,
+        _ => false,
+    }
+}
+
+/// State saved by the legacy-pre-activation behavior (restored by the
+/// legacy-canceled-activation behavior).
+struct PreActivation {
+    node: NodeRef,
+    kind: Activation,
+    /// Checkedness before (checkbox), or the radios of the group that were
+    /// checked (radio).
+    was_checked: bool,
+    group_checked: Vec<NodeRef>,
+}
+
+thread_local! {
+    /// Elements whose `click()` is running ("click in progress flag").
+    static CLICK_IN_PROGRESS: std::cell::RefCell<Vec<NodeRef>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Does event `eid` trigger activation behavior (a synthetic `click`
+/// MouseEvent; trusted clicks are activated by the embedder)?
+fn is_synthetic_click(realm: &mut Realm, eid: ObjectId) -> bool {
+    let (ty, trusted) = match realm.host_data::<EventData>(eid) {
+        Some(d) => (d.ty.clone(), d.is_trusted),
+        None => return false,
+    };
+    if ty != "click" || trusted {
+        return false;
+    }
+    let g = Value::Object(realm.global());
+    let Ok(me) = realm.get_str(g, "MouseEvent") else { return false };
+    realm.instance_of(Value::Object(eid), me).unwrap_or(false)
+}
+
+fn radio_group(n: NodeRef) -> Vec<NodeRef> {
+    with_doc(n.doc, |doc| {
+        let Some(name) = doc.attr(n.node, "name").filter(|s| !s.is_empty()).map(|s| s.to_string()) else { return Vec::new() };
+        let form = doc.ancestor_or_self(n.node, |a| doc.is_element(a, "form"));
+        let scope = form.unwrap_or_else(|| doc.tree_root(n.node));
+        doc.descendants(scope)
+            .filter(|&c| c != n.node && doc.is_element(c, "input") && doc.attr(c, "type").map(|t| t.eq_ignore_ascii_case("radio")).unwrap_or(false) && doc.attr(c, "name") == Some(name.as_str()))
+            .filter(|&c| doc.ancestor_or_self(c, |a| doc.is_element(a, "form")) == form)
+            .map(|node| NodeRef { doc: n.doc, node })
+            .collect()
+    })
+}
+
+/// Pick the activation target on `path` (target first) and run its
+/// legacy-pre-activation behavior.
+fn pre_activation(path: &[(TargetKey, Value, Value)], bubbles: bool) -> Option<PreActivation> {
+    let mut found = None;
+    for (i, (k, _, _)) in path.iter().enumerate() {
+        if i > 0 && !bubbles {
+            break;
+        }
+        let TargetKey::Node(n) = *k else { continue };
+        let kind = with_doc(n.doc, |doc| {
+            // Disabled controls have no activation behavior.
+            let disabled = doc.element(n.node).map(|e| matches!(e.tag.as_str(), "input" | "button") && e.attr("disabled").is_some()).unwrap_or(false);
+            if disabled { None } else { activation_of(doc, n.node) }
+        });
+        if let Some(kind) = kind {
+            found = Some((n, kind));
+            break;
+        }
+    }
+    let (node, kind) = found?;
+    let mut pre = PreActivation { node, kind, was_checked: false, group_checked: Vec::new() };
+    match kind {
+        Activation::Checkbox => {
+            pre.was_checked = with_doc(node.doc, |doc| doc.is_checked(node.node));
+            crate::element::set_checkedness(node, Some(!pre.was_checked));
+        }
+        Activation::Radio => {
+            pre.was_checked = with_doc(node.doc, |doc| doc.is_checked(node.node));
+            let group = radio_group(node);
+            pre.group_checked = group.iter().copied().filter(|g| with_doc(g.doc, |doc| doc.is_checked(g.node))).collect();
+            for g in &group {
+                crate::element::set_checkedness(*g, Some(false));
+            }
+            crate::element::set_checkedness(node, Some(true));
+        }
+        _ => {}
+    }
+    Some(pre)
+}
+
+/// After the dispatch: the activation behavior, or (canceled) the
+/// legacy-canceled-activation behavior.
+fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target: Option<NodeRef>) {
+    let n = pre.node;
+    if canceled {
+        match pre.kind {
+            Activation::Checkbox => crate::element::set_checkedness(n, Some(pre.was_checked)),
+            Activation::Radio => {
+                crate::element::set_checkedness(n, Some(pre.was_checked));
+                for g in pre.group_checked {
+                    crate::element::set_checkedness(g, Some(true));
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+    let connected = with_doc(n.doc, |doc| doc.is_connected(n.node));
+    match pre.kind {
+        Activation::Checkbox | Activation::Radio => {
+            if connected && !(pre.kind == Activation::Radio && pre.was_checked) {
+                let input = EventInit { bubbles: true, cancelable: false, detail: None };
+                dispatch_composed(realm, TargetKey::Node(n), "input", input);
+                dispatch(realm, TargetKey::Node(n), "change", EventInit::simple(true, false), true);
+            }
+        }
+        Activation::Submit | Activation::Reset => {
+            if !connected {
+                return;
+            }
+            let form = with_doc(n.doc, |doc| form_owner(doc, n.node));
+            let Some(f) = form else { return };
+            let fw = wrap(realm, NodeRef { doc: n.doc, node: f });
+            if pre.kind == Activation::Reset {
+                let _ = realm.invoke(fw, "reset", &[]);
+            } else if n.doc == 0 {
+                let r = dispatch(realm, TargetKey::Node(NodeRef::main(f)), "submit", EventInit::simple(true, true), true);
+                if !r.default_prevented {
+                    with_env(|env| env.submit_form(f, Some(n.node)));
+                }
+            }
+        }
+        Activation::Link => {
+            if n.doc != 0 {
+                return;
+            }
+            let href = with_doc(0, |doc| doc.attr(n.node, "href").map(|s| s.to_string()));
+            if let Some(u) = href.and_then(|h| resolve_url(&h)) {
+                with_env(|env| env.navigate(u, false));
+            }
+        }
+        Activation::Summary => {
+            let details = with_doc(n.doc, |doc| doc.parent(n.node));
+            if let Some(d) = details {
+                let dw = wrap(realm, NodeRef { doc: n.doc, node: d });
+                let _ = realm.invoke(dw, "toggleAttribute", &[Value::str("open")]);
+            }
+        }
+        Activation::Label => {
+            // Clicks on interactive content inside the label are theirs.
+            if let Some(t) = target {
+                let inner = with_doc(n.doc, |doc| {
+                    let mut cur = Some(t.node);
+                    while let Some(c) = cur {
+                        if c == n.node {
+                            return false;
+                        }
+                        if is_interactive(doc, c) {
+                            return true;
+                        }
+                        cur = doc.parent(c);
+                    }
+                    false
+                });
+                if inner {
+                    return;
+                }
+            }
+            let control = with_doc(n.doc, |doc| labeled_control(doc, n.node));
+            if let Some(c) = control {
+                let cw = wrap(realm, NodeRef { doc: n.doc, node: c });
+                if target.map(|t| t.node) != Some(c) {
+                    let _ = realm.invoke(cw, "click", &[]);
+                }
+            }
+        }
+        Activation::Button => {}
+    }
+}
+
+/// A `composed` event (`input` events cross shadow boundaries).
+fn dispatch_composed(realm: &mut Realm, key: TargetKey, ty: &str, init: EventInit) {
+    let class = event_class_for(ty, &init);
+    let eid = create_event(realm, class, ty, &init, true);
+    if let Some(d) = realm.host_data_mut::<EventData>(eid) {
+        d.composed = true;
+    }
+    dispatch_object(realm, key, eid, None);
+}
+
+/// The form owner of a form-associated element: its `form` attribute's
+/// target, else its nearest form ancestor.
+fn form_owner(doc: &Document, n: NodeId) -> Option<NodeId> {
+    if let Some(id) = doc.attr(n, "form") {
+        let root = doc.tree_root(n);
+        return doc.descendants(root).find(|&f| doc.is_element(f, "form") && doc.attr(f, "id") == Some(id));
+    }
+    doc.ancestor_or_self(n, |a| a != n && doc.is_element(a, "form"))
+}
+
+/// The labeled control of a label: its `for` target (a labelable
+/// element), else its first labelable descendant.
+fn labeled_control(doc: &Document, label: NodeId) -> Option<NodeId> {
+    let labelable = |c: NodeId| {
+        doc.element(c)
+            .map(|e| e.ns == rabbithole_dom::Namespace::Html && (matches!(e.tag.as_str(), "button" | "meter" | "output" | "progress" | "select" | "textarea") || (e.tag == "input" && !e.attr("type").map(|t| t.eq_ignore_ascii_case("hidden")).unwrap_or(false))))
+            .unwrap_or(false)
+    };
+    if let Some(id) = doc.attr(label, "for") {
+        let root = doc.tree_root(label);
+        return doc.descendants(root).find(|&c| doc.attr(c, "id") == Some(id)).filter(|&c| labelable(c));
+    }
+    doc.descendants(label).find(|&c| c != label && labelable(c))
+}
+
+/// `element.click()` (HTML §6.3.3): fire a synthetic click (activation
+/// runs in the dispatch) unless the element is a disabled form control or
+/// its click is already in progress.
+pub(crate) fn synthetic_click(realm: &mut Realm, n: NodeRef) {
+    let disabled = with_doc(n.doc, |doc| doc.element(n.node).map(|e| matches!(e.tag.as_str(), "input" | "button" | "select" | "textarea" | "fieldset" | "optgroup" | "option") && e.attr("disabled").is_some()).unwrap_or(false));
+    if disabled || CLICK_IN_PROGRESS.with(|c| c.borrow().contains(&n)) {
+        return;
+    }
+    CLICK_IN_PROGRESS.with(|c| c.borrow_mut().push(n));
+    let init = EventInit { bubbles: true, cancelable: true, detail: Some(EventDetail::Mouse { x: 0.0, y: 0.0, button: 0, ctrl: false, shift: false, alt: false, meta: false }) };
+    let class = event_class_for("click", &init);
+    let eid = create_event(realm, class, "click", &init, false);
+    if let Some(d) = realm.host_data_mut::<EventData>(eid) {
+        d.composed = true;
+    }
+    dispatch_object(realm, TargetKey::Node(n), eid, None);
+    CLICK_IN_PROGRESS.with(|c| c.borrow_mut().retain(|x| *x != n));
 }

@@ -1168,14 +1168,37 @@ pub(crate) fn make_blob(realm: &mut Realm, bytes: Vec<u8>, ty: &str) -> Value {
 
 fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let parts = arg(args, 0);
+    let opts = arg(args, 1);
+    if !(parts.is_undefined() || parts.is_object()) {
+        return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value cannot be converted to a sequence."));
+    }
+    if !(opts.is_undefined() || opts.is_null() || opts.is_object()) {
+        return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value is not of type 'BlobPropertyBag'."));
+    }
+    // The dictionary members, in order: endings, type.
+    let native = match dict_str(realm, &opts, "endings")?.as_deref() {
+        None | Some("transparent") => false,
+        Some("native") => true,
+        Some(other) => return Err(realm.throw_type_error(&format!("Failed to construct 'Blob': The provided value '{other}' is not a valid enum value of type EndingType."))),
+    };
+    let ty = dict_str(realm, &opts, "type")?.unwrap_or_default();
     let mut bytes = Vec::new();
     if parts.is_object() {
         for p in realm.iterate_to_vec(parts)? {
+            if native {
+                if let V::String(s) = p.v() {
+                    // Line endings to the platform's (LF).
+                    let s = s.to_rust_string().replace("\r\n", "\n").replace('\r', "\n");
+                    bytes.extend(s.into_bytes());
+                    continue;
+                }
+            }
             let (b, _) = body_bytes_from_value(realm, &p)?;
             bytes.extend(b);
         }
     }
-    let ty = dict_str(realm, &arg(args, 1), "type")?.unwrap_or_default();
+    // The type: lower-cased, or empty when not printable ASCII.
+    let ty = if ty.chars().all(|c| ('\u{20}'..='\u{7e}').contains(&c)) { ty.to_ascii_lowercase() } else { String::new() };
     Ok(make_blob(realm, bytes, &ty))
 }
 

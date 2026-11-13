@@ -600,11 +600,11 @@
     if (!C) continue;
     for (const m of methods) {
       const d = Object.getOwnPropertyDescriptor(C.prototype, m);
-      if (d && typeof d.value === 'function') { const f = d.value; Object.defineProperty(C.prototype, m, { ...d, value: { [m](...a) { if (pendingSheets.size) flushSheets(); return f.apply(this, a); } }[m] }); }
+      if (d && typeof d.value === 'function') { const f = d.value; const w = { [m](...a) { if (pendingSheets.size) flushSheets(); return f.apply(this, a); } }[m]; Object.defineProperty(w, 'length', { value: f.length, configurable: true }); Object.defineProperty(C.prototype, m, { ...d, value: w }); }
     }
     for (const k of getters) {
       const d = Object.getOwnPropertyDescriptor(C.prototype, k);
-      if (d && d.get) { const get = d.get; Object.defineProperty(C.prototype, k, { ...d, get: { [k]() { if (pendingSheets.size) flushSheets(); return get.call(this); } }[k] }); }
+      if (d && d.get) { const get = d.get; const w = { [k]() { if (pendingSheets.size) flushSheets(); return get.call(this); } }[k]; Object.defineProperty(w, 'name', { value: 'get ' + k, configurable: true }); Object.defineProperty(C.prototype, k, { ...d, get: w }); }
     }
   }
 

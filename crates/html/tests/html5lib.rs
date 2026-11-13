@@ -79,7 +79,10 @@ fn serialize(doc: &Document, root: NodeId) -> String {
                     lines.push(format!("|{pad}<!DOCTYPE {}>", d.name));
                 }
             }
-            NodeData::Comment(c) => lines.push(format!("|{pad}<!-- {c} -->")),
+            NodeData::Comment(c) => match doc.pi_target(n) {
+                Some(t) => lines.push(format!("|{pad}<?{t} {c}?>")),
+                None => lines.push(format!("|{pad}<!-- {c} -->")),
+            },
             NodeData::Text(t) => lines.push(format!("|{pad}\"{t}\"")),
             NodeData::Element(e) => {
                 let tag = match e.ns {
@@ -175,4 +178,61 @@ fn html5lib_tree_construction() {
     eprintln!("html5lib: {pass}/{total}");
     // Regression floor (raise as the parser improves).
     assert!(pass * 100 >= total * 94, "html5lib pass rate dropped: {pass}/{total}");
+}
+
+/// Parse a document through the incremental parser, `chunk` characters
+/// per `write` (as `document.write` after `document.open()`).
+fn run_incremental(data: &str, chunk: usize) -> String {
+    let mut doc = Document::new();
+    let mut p = rabbithole_html::Parser::new(true);
+    p.set_insertion_point_at_end();
+    let chars: Vec<char> = data.chars().collect();
+    let drive = |p: &mut rabbithole_html::Parser, doc: &mut Document| loop {
+        match p.run(doc) {
+            rabbithole_html::ParseStatus::Script(_) => continue,
+            _ => break,
+        }
+    };
+    for piece in chars.chunks(chunk.clamp(1, chars.len().max(1))) {
+        p.write(&piece.iter().collect::<String>());
+        drive(&mut p, &mut doc);
+    }
+    p.close();
+    drive(&mut p, &mut doc);
+    assert!(p.is_finished());
+    serialize(&doc, Document::ROOT)
+}
+
+/// The incremental parser builds the same trees as the one-shot parser,
+/// whole and one character per write.
+#[test]
+fn html5lib_incremental_matches() {
+    let root = std::env::var_os("RH_WPT_ROOT").map(std::path::PathBuf::from).unwrap_or_else(|| "/mnt/hdd5tb/rabbithole/suites/wpt-dom".into());
+    let dir = root.join("html/syntax/parsing/resources");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        eprintln!("skipping: no html5lib data at {}", dir.display());
+        return;
+    };
+    let mut files: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e == "dat").unwrap_or(false)).collect();
+    files.sort();
+    let mut bad = Vec::new();
+    let mut n = 0;
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap();
+        for c in parse_dat(&text).iter().filter(|c| !c.script_off && c.fragment.is_none()) {
+            n += 1;
+            let whole = serialize(&rabbithole_html::parse_with_scripting(&c.data, true), Document::ROOT);
+            for chunk in [usize::MAX, 1, 3] {
+                let got = std::panic::catch_unwind(|| run_incremental(&c.data, chunk)).unwrap_or_else(|_| "PANIC".into());
+                if got != whole {
+                    bad.push(format!("--- {} chunk {chunk}\n{}\nwhole:\n{}\nincremental:\n{}\n", f.file_name().unwrap().to_string_lossy(), c.data, whole, got));
+                    break;
+                }
+            }
+        }
+    }
+    for b in bad.iter().take(10) {
+        eprintln!("{b}");
+    }
+    assert!(bad.is_empty(), "{} of {n} documents differ when parsed incrementally", bad.len());
 }

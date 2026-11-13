@@ -526,25 +526,52 @@ fn ret_true(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
 
 // ------------------------------------------------------- screen / viewport
 
-fn screen_width(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+/// Marks the `screen` object (brand check of the Screen attributes).
+struct ScreenData;
+
+fn this_screen(realm: &mut Realm, this: &Value) -> JsResult<()> {
+    match this.v() {
+        V::Object(o) if realm.host_data::<ScreenData>(o).is_some() => Ok(()),
+        _ => Err(realm.throw_type_error("Illegal invocation")),
+    }
+}
+
+fn viewport_width(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Number(with_env(|env| env.viewport().0) as f64))
 }
 
-fn screen_height(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+fn viewport_height(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
     Ok(Value::Number(with_env(|env| env.viewport().1) as f64))
+}
+
+fn screen_width(realm: &mut Realm, this: Value, a: &[Value]) -> JsResult<Value> {
+    this_screen(realm, &this)?;
+    viewport_width(realm, this, a)
+}
+
+fn screen_height(realm: &mut Realm, this: Value, a: &[Value]) -> JsResult<Value> {
+    this_screen(realm, &this)?;
+    viewport_height(realm, this, a)
+}
+
+fn screen_depth(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    this_screen(realm, &this)?;
+    Ok(Value::Number(24.0))
 }
 
 fn make_screen(realm: &mut Realm) -> ObjectId {
     let p = define_class(realm, "Screen", None, illegal_ctor);
     let o = realm.new_object_with_proto(Some(p));
+    realm.set_host_data(o, Box::new(ScreenData));
+    realm.set_class_name(o, "Screen");
     for name in ["width", "availWidth"] {
-        realm.define_accessor(o, name, Some(screen_width), None, ACC);
+        realm.define_accessor(p, name, Some(screen_width), None, ACC);
     }
     for name in ["height", "availHeight"] {
-        realm.define_accessor(o, name, Some(screen_height), None, ACC);
+        realm.define_accessor(p, name, Some(screen_height), None, ACC);
     }
-    realm.define_property(o, "colorDepth", Value::Number(24.0), ACC);
-    realm.define_property(o, "pixelDepth", Value::Number(24.0), ACC);
+    realm.define_accessor(p, "colorDepth", Some(screen_depth), None, ACC);
+    realm.define_accessor(p, "pixelDepth", Some(screen_depth), None, ACC);
     realm.define_property(o, "availLeft", Value::Number(0.0), ACC);
     realm.define_property(o, "availTop", Value::Number(0.0), ACC);
     let orient = object_from(realm, vec![("type", Value::str("landscape-primary")), ("angle", Value::Number(0.0)), ("onchange", Value::Null)]);
@@ -560,11 +587,11 @@ fn make_screen(realm: &mut Realm) -> ObjectId {
 }
 
 fn win_inner_width(realm: &mut Realm, this: Value, a: &[Value]) -> JsResult<Value> {
-    screen_width(realm, this, a)
+    viewport_width(realm, this, a)
 }
 
 fn win_inner_height(realm: &mut Realm, this: Value, a: &[Value]) -> JsResult<Value> {
-    screen_height(realm, this, a)
+    viewport_height(realm, this, a)
 }
 
 fn win_scroll_x(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
@@ -647,6 +674,12 @@ fn add_timer(realm: &mut Realm, cb: Value, delay: f64, args: Vec<Value>, repeat:
     st.next_timer_id += 1;
     st.timers.push(Timer { id, due: now + delay, callback: cb, args, interval: if repeat { Some(delay.max(4.0)) } else { None } });
     id
+}
+
+/// Queue a task on the event loop (a zero-delay timer running native `f`).
+pub(crate) fn queue_task(realm: &mut Realm, name: &str, f: rabbithole_js::NativeFn) {
+    let cb = realm.new_native_function(name, 0, f);
+    add_timer(realm, Value::Object(cb), 0.0, Vec::new(), false);
 }
 
 fn set_timeout(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1170,8 +1203,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_property(g, "crypto", Value::Object(crypto), ACC);
     let vv = object_from(realm, vec![("offsetLeft", Value::Number(0.0)), ("offsetTop", Value::Number(0.0)), ("pageLeft", Value::Number(0.0)), ("pageTop", Value::Number(0.0)), ("scale", Value::Number(1.0))]);
     if let V::Object(v) = vv.v() {
-        realm.define_accessor(v, "width", Some(screen_width), None, ACC);
-        realm.define_accessor(v, "height", Some(screen_height), None, ACC);
+        realm.define_accessor(v, "width", Some(viewport_width), None, ACC);
+        realm.define_accessor(v, "height", Some(viewport_height), None, ACC);
         realm.define_method(v, "addEventListener", 2, noop);
         realm.define_method(v, "removeEventListener", 2, noop);
     }

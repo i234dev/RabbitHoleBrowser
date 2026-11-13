@@ -5,6 +5,7 @@
 //! run scripts, dispatch events, run timers and jobs.
 
 mod cssom;
+mod docparser;
 mod document;
 mod element;
 mod env;
@@ -74,6 +75,7 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:media.js", include_str!("js/media.js")),
     ("rabbithole:webaudio.js", include_str!("js/webaudio.js")),
     ("rabbithole:observable.js", include_str!("js/observable.js")),
+    ("rabbithole:webidl.js", include_str!("js/webidl.js")),
 ];
 
 /// Default watchdog budget of one task (a timer callback, event listener,
@@ -199,6 +201,9 @@ impl DispatchResult {
 /// (see [`HostEnv::frame_call`] and [`ScriptHost::frame_call`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameCall {
+    /// `document.open()` / `write()` / `close()` on the frame's document,
+    /// called from the parent (scripts it writes run in the frame).
+    Document { op: DocumentOp },
     /// Create an event of interface `iface` (`MouseEvent`, ...) with type
     /// `ty` and the init dictionary `init` (JSON) and dispatch it at `node`.
     Dispatch { node: NodeId, iface: String, ty: String, init: String },
@@ -209,6 +214,14 @@ pub enum FrameCall {
     /// Call the frame's global function `name` with the arguments (a
     /// structured clone, serialized).
     CallGlobal { name: String, args: String },
+}
+
+/// A dynamic markup insertion call on a frame's document.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocumentOp {
+    Open,
+    Write(String),
+    Close,
 }
 
 /// Result of a [`FrameCall`].
@@ -301,7 +314,8 @@ impl ScriptHost {
             workers: Default::default(),
             worker_info: worker.clone(),
             live_freed: Default::default(),
-            open_docs: HashMap::default(),
+            doc_parsers: HashMap::default(),
+            throw_on_dynamic_markup: 0,
         }));
         {
             let root_array = state.borrow().root_array;
@@ -449,9 +463,34 @@ impl ScriptHost {
         let doc = host::FRAME_DOC | frame_id as u32;
         let mut st = self.state.borrow_mut();
         st.wrappers.retain(|k, _| k.doc != doc);
+        // Caches keyed by (document, node id): node ids of the new
+        // document start over, so a stale `childNodes` list (stamped with an
+        // epoch the new document can reach again) would be served.
+        st.child_lists.retain(|k, _| k.doc != doc);
+        st.ce_upgraded.retain(|k| k.doc != doc);
+        st.ce_failed.retain(|k| k.doc != doc);
+        st.shadow.info.retain(|k, _| k.doc != doc);
+        st.shadow.slot_cache.retain(|k, _| k.doc != doc);
+        st.shadow.manual.retain(|k, _| k.doc != doc);
         st.listeners.retain(|k, _| !matches!(k, TargetKey::Node(n) if n.doc == doc));
         st.listener_counts.retain(|(k, _), _| !matches!(k, TargetKey::Node(n) if n.doc == doc));
         st.inline_handlers.retain(|(n, _), _| n.doc != doc);
+    }
+
+    /// The document already finished loading (a realm created after the
+    /// fact, e.g. for an initial about:blank frame): `readyState` is
+    /// "complete" and `document.write` opens a new parser.
+    pub fn mark_loaded(&mut self) {
+        let mut st = self.state.borrow_mut();
+        st.loading = false;
+        st.ready_state = "complete";
+    }
+
+    /// The response for a `blob:` URL created by this realm
+    /// (`URL.createObjectURL`), e.g. to navigate a frame to it.
+    pub fn blob_url_response(&self, url: &str) -> Option<rabbithole_net::Response> {
+        let _s = StateGuard::enter(self.state.clone());
+        fetch::blob_url_response(url)
     }
 
     pub fn mark_script_ran(&mut self, node: NodeId) {

@@ -313,6 +313,11 @@ impl Engine {
             if page_origin(child) != origin {
                 return None;
             }
+            // A document without scripts of its own (the initial
+            // about:blank) gets its realm when a parent first scripts it.
+            if child.script.host.is_none() && !child.script.scripts_ran && self.scripting {
+                self.ensure_script_host(child);
+            }
             let mut host = child.script.host.take()?;
             let reply = {
                 let mut env = EngineEnv { engine: self, page: child };
@@ -531,6 +536,14 @@ impl Engine {
             l.initiator = Some(page.url.clone());
             l
         };
+        // A frame without a document and without `src` gets its initial
+        // about:blank document now (not through a later load, which would
+        // replace a document scripts already wrote into and fire a stray
+        // `load`).
+        let blank: Vec<NodeId> = page.frames.children.iter().filter(|c| c.page.is_none() && c.pending.is_none() && c.source == FrameSource::Blank).map(|c| c.node).collect();
+        for node in blank {
+            self.create_blank_frame(page, node);
+        }
         for i in 0..page.frames.children.len() {
             let node = page.frames.children[i].node;
             let size = page.frame_content_rect(node).map(|r| (r.w.max(0.0), r.h.max(0.0)));
@@ -573,6 +586,26 @@ impl Engine {
                             let mut l = loader.load_html(&html, url, vp);
                             l.base_url = base;
                             let _ = tx.send(Ok(Loaded::Page(l)));
+                        });
+                    }
+                    FrameSource::Url(url) if url.scheme == "blob" => {
+                        // Object URLs live in the creating realm's blob URL
+                        // store (this page's or an ancestor's).
+                        let key = url.to_string();
+                        let mut resp = page.script.host.as_ref().and_then(|h| h.blob_url_response(&key));
+                        if resp.is_none() {
+                            for a in crate::frames::ancestors() {
+                                // SAFETY: ancestor pages outlive this call (see AncestorGuard).
+                                let a = unsafe { &*a };
+                                resp = a.script.host.as_ref().and_then(|h| h.blob_url_response(&key));
+                                if resp.is_some() {
+                                    break;
+                                }
+                            }
+                        }
+                        let _ = tx.send(match resp {
+                            Some(r) => Ok(Loaded::Page(loader.load_response(r, vp))),
+                            None => Err("blob URL not found".to_string()),
                         });
                     }
                     FrameSource::Url(url) => {
@@ -760,6 +793,16 @@ impl Engine {
                         self.frame_side_effects(page, node, o, &mut out);
                     }
                 }
+            }
+            // The frame's document finished loading again (document.open /
+            // close): the iframe fires `load` in this document.
+            let reloaded = page.frames.children.get_mut(i).and_then(|c| c.page.as_mut()).map(|p| std::mem::take(&mut p.script.frame_load_pending)).unwrap_or(false);
+            if reloaded && page.script.host.is_some() {
+                let node = page.frames.children[i].node;
+                page.frames.children[i].dirty = true;
+                let o = self.dispatch_event(page, node, "load", EventInit::simple(false, false));
+                out.merge(o);
+                out.relayout = true;
             }
             i += 1;
         }
@@ -1142,7 +1185,7 @@ fn frame_source(page: &Page, node: NodeId) -> FrameSource {
         return FrameSource::Blank;
     }
     match page.resolve(src) {
-        Some(u) if matches!(u.scheme.as_str(), "http" | "https" | "data" | "file" | "about") => FrameSource::Url(u),
+        Some(u) if matches!(u.scheme.as_str(), "http" | "https" | "data" | "file" | "about" | "blob") => FrameSource::Url(u),
         _ => FrameSource::Blank,
     }
 }

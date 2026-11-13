@@ -1421,11 +1421,11 @@ impl Engine {
     /// box that does not clip reports its padding box (nothing scrolled).
     pub fn element_scroll(&self, page: &Page, node: NodeId) -> Option<((f32, f32), (f32, f32))> {
         let b = page.layout.box_of(&page.doc, node)?;
+        let area = scrolling_area(b);
         if b.clips {
-            Some((b.scroll_offset, (b.scroll_width, b.scroll_height)))
+            Some((b.scroll_offset, (area.0.max(b.scroll_width), area.1.max(b.scroll_height))))
         } else {
-            let p = b.padding_rect();
-            Some(((0.0, 0.0), (p.w, p.h)))
+            Some(((0.0, 0.0), area))
         }
     }
 
@@ -2102,4 +2102,64 @@ fn parsed_sheet_cached(text: &str, media: Option<&str>, base: &str, parse: impl 
         c.1.insert(key, sheet.clone());
     });
     sheet
+}
+
+/// The scrolling area of box `b` (CSSOM View "scrolling area"): its padding
+/// box united with the border boxes and line fragments of its content (the
+/// content of nested clipping boxes is clipped by them; fixed boxes do not
+/// count), cut at the edges the scroll origin is at (block start and
+/// inline start, mirrored for `*-reverse` flex containers). Returns the
+/// (width, height) — `scrollWidth` / `scrollHeight`.
+pub(crate) fn scrolling_area(b: &rabbithole_layout::LayoutBox) -> (f32, f32) {
+    use rabbithole_style::{Direction, Display, FlexDirection, WritingMode};
+    let p = b.padding_rect();
+    // Contents of a scrolled box are translated by -scroll_offset.
+    let (ox, oy) = b.scroll_offset;
+    let mut u = (p.x, p.y, p.x + p.w, p.y + p.h);
+    fn add(u: &mut (f32, f32, f32, f32), r: &Rect, dx: f32, dy: f32) {
+        if r.w <= 0.0 && r.h <= 0.0 {
+            return;
+        }
+        u.0 = u.0.min(r.x + dx);
+        u.1 = u.1.min(r.y + dy);
+        u.2 = u.2.max(r.x + r.w + dx);
+        u.3 = u.3.max(r.y + r.h + dy);
+    }
+    fn walk(bx: &rabbithole_layout::LayoutBox, u: &mut (f32, f32, f32, f32), dx: f32, dy: f32) {
+        for line in &bx.lines {
+            for f in &line.fragments {
+                add(u, &f.rect, dx, dy);
+            }
+        }
+        for c in &bx.children {
+            if c.fixed {
+                continue;
+            }
+            add(u, &c.rect, dx, dy);
+            if !c.clips {
+                walk(c, u, dx, dy);
+            }
+        }
+    }
+    walk(b, &mut u, ox, oy);
+    let s = &b.style;
+    let vertical = matches!(s.writing_mode, WritingMode::VerticalRl | WritingMode::VerticalLr | WritingMode::SidewaysLr);
+    let rtl = s.direction == Direction::Rtl;
+    // Where the scroll origin is: the right edge / the bottom edge.
+    let mut from_right = (!vertical && rtl) || s.writing_mode == WritingMode::VerticalRl;
+    let mut from_bottom = vertical && rtl;
+    if matches!(s.display, Display::Flex | Display::InlineFlex) {
+        let reverse = matches!(s.flex_direction, FlexDirection::RowReverse | FlexDirection::ColumnReverse);
+        let main_vertical = matches!(s.flex_direction, FlexDirection::Row | FlexDirection::RowReverse) == vertical;
+        if reverse {
+            if main_vertical {
+                from_bottom = !from_bottom;
+            } else {
+                from_right = !from_right;
+            }
+        }
+    }
+    let w = if from_right { p.x + p.w - u.0 } else { u.2 - p.x };
+    let h = if from_bottom { p.y + p.h - u.1 } else { u.3 - p.y };
+    (w.max(p.w), h.max(p.h))
 }

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 mod live;
+mod xmlser;
+pub use xmlser::{XML_NS, XMLNS_NS};
 pub use live::{BoundaryPoint, IteratorPosition};
 
 pub type NodeId = usize;
@@ -215,6 +217,18 @@ pub struct Document {
     /// (`<template shadowrootmode>`), with whether they are open; the
     /// first `attachShadow()` on the host takes such a root over.
     pub declarative_shadow: HashMap<NodeId, bool>,
+    /// Options of declarative shadow roots: bit 1 clonable, 2 serializable,
+    /// 4 delegatesFocus (absent: none set).
+    pub declarative_shadow_flags: HashMap<NodeId, u8>,
+    /// Text nodes that are CDATA sections (`CDATASection`).
+    pub cdata: std::collections::HashSet<NodeId>,
+    /// Comment nodes that are processing instructions, with their target
+    /// (`ProcessingInstruction`; the data is the comment text).
+    pub pi_targets: HashMap<NodeId, String>,
+    /// Script elements whose "already started" flag is set (parsed by a
+    /// fragment parser or a parser without scripting, or already run);
+    /// copied when the element is cloned or imported.
+    pub script_started: std::collections::HashSet<NodeId>,
     /// Quirks mode decided by the parser from the DOCTYPE.
     pub quirks_mode: QuirksMode,
     /// An HTML document (`false` for XML documents made by
@@ -299,6 +313,10 @@ impl Document {
             defined_custom: std::collections::HashSet::new(),
             template_contents: HashMap::new(),
             declarative_shadow: HashMap::new(),
+            declarative_shadow_flags: HashMap::new(),
+            cdata: std::collections::HashSet::new(),
+            pi_targets: HashMap::new(),
+            script_started: std::collections::HashSet::new(),
             quirks_mode: QuirksMode::NoQuirks,
             is_html: true,
             live_points: Vec::new(),
@@ -396,6 +414,50 @@ impl Document {
 
     pub fn create_text(&mut self, text: &str) -> NodeId {
         self.create(NodeData::Text(text.to_string()))
+    }
+
+    /// A CDATA section node (a text node flagged as CDATA).
+    pub fn create_cdata(&mut self, text: &str) -> NodeId {
+        let n = self.create(NodeData::Text(text.to_string()));
+        self.cdata.insert(n);
+        n
+    }
+
+    /// A processing instruction node (a comment node with a target).
+    pub fn create_pi(&mut self, target: &str, data: &str) -> NodeId {
+        let n = self.create(NodeData::Comment(data.to_string()));
+        self.pi_targets.insert(n, target.to_string());
+        n
+    }
+
+    pub fn is_cdata(&self, id: NodeId) -> bool {
+        !self.cdata.is_empty() && self.cdata.contains(&id)
+    }
+
+    /// The target of processing instruction `id` (None for other nodes).
+    pub fn pi_target(&self, id: NodeId) -> Option<&str> {
+        if self.pi_targets.is_empty() {
+            return None;
+        }
+        self.pi_targets.get(&id).map(|s| s.as_str())
+    }
+
+    /// Copy the CDATA / processing instruction kind of `from` (in `src`)
+    /// to `to`.
+    fn copy_node_kind(&mut self, src: Option<&Document>, from: NodeId, to: NodeId) {
+        let src = src.unwrap_or(self);
+        let cdata = src.is_cdata(from);
+        let target = src.pi_target(from).map(|s| s.to_string());
+        let started = !src.script_started.is_empty() && src.script_started.contains(&from);
+        if cdata {
+            self.cdata.insert(to);
+        }
+        if started {
+            self.script_started.insert(to);
+        }
+        if let Some(t) = target {
+            self.pi_targets.insert(to, t);
+        }
     }
 
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
@@ -554,6 +616,7 @@ impl Document {
         let data = self.nodes[root].data.clone();
         let copy = self.create(data);
         self.copy_attr_namespaces_from(None, root, copy);
+        self.copy_node_kind(None, root, copy);
         if let Some(v) = self.control_values.get(&root).cloned() {
             self.control_values.insert(copy, v);
         }
@@ -584,6 +647,7 @@ impl Document {
     pub fn import_subtree(&mut self, other: &Document, root: NodeId) -> NodeId {
         let copy = self.create(other.nodes[root].data.clone());
         self.copy_attr_namespaces_from(Some(other), root, copy);
+        self.copy_node_kind(Some(other), root, copy);
         if let Some(v) = other.control_values.get(&root) {
             self.control_values.insert(copy, v.clone());
         }
@@ -967,20 +1031,36 @@ impl Document {
 
     /// Serialize a subtree back to HTML (for `innerHTML`/`outerHTML`).
     pub fn serialize(&self, id: NodeId, include_self: bool) -> String {
+        self.serialize_with_shadows(id, include_self, None)
+    }
+
+    /// [`Document::serialize`] with shadow roots: `shadows(host)` gives
+    /// the shadow root to serialize for `host` and the `<template
+    /// shadowrootmode=...>` start tag to put it in (`getHTML()`).
+    pub fn serialize_with_shadows(&self, id: NodeId, include_self: bool, shadows: Option<&dyn Fn(NodeId) -> Option<(NodeId, String)>>) -> String {
         let mut out = String::new();
         if include_self {
-            self.serialize_into(id, &mut out);
+            self.serialize_into(id, &mut out, shadows);
         } else {
+            if let Some(f) = shadows {
+                if let Some((root, open)) = f(id) {
+                    out.push_str(&open);
+                    for c in self.children(root) {
+                        self.serialize_into(c, &mut out, shadows);
+                    }
+                    out.push_str("</template>");
+                }
+            }
             let id = self.template_contents.get(&id).copied().unwrap_or(id);
             for c in self.children(id) {
-                self.serialize_into(c, &mut out);
+                self.serialize_into(c, &mut out, shadows);
             }
         }
         out
     }
 
     /// The HTML fragment serialization algorithm (HTML §13.3) for one node.
-    fn serialize_into(&self, id: NodeId, out: &mut String) {
+    fn serialize_into(&self, id: NodeId, out: &mut String, shadows: Option<&dyn Fn(NodeId) -> Option<(NodeId, String)>>) {
         const VOID: &[&str] = &[
             "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr",
         ];
@@ -999,7 +1079,7 @@ impl Document {
         match &self.nodes[id].data {
             NodeData::Document => {
                 for c in self.children(id) {
-                    self.serialize_into(c, out);
+                    self.serialize_into(c, out, shadows);
                 }
             }
             NodeData::Element(e) => {
@@ -1022,6 +1102,15 @@ impl Document {
                     return;
                 }
                 let raw = html && matches!(e.tag.as_str(), "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext");
+                if let Some(f) = shadows {
+                    if let Some((root, open)) = f(id) {
+                        out.push_str(&open);
+                        for c in self.children(root) {
+                            self.serialize_into(c, out, shadows);
+                        }
+                        out.push_str("</template>");
+                    }
+                }
                 let id = if html && e.tag == "template" { self.template_contents.get(&id).copied().unwrap_or(id) } else { id };
                 for c in self.children(id) {
                     if raw {
@@ -1030,7 +1119,7 @@ impl Document {
                             continue;
                         }
                     }
-                    self.serialize_into(c, out);
+                    self.serialize_into(c, out, shadows);
                 }
                 out.push_str("</");
                 out.push_str(&tag);
@@ -1048,13 +1137,22 @@ impl Document {
                     escape(t, out, false);
                 }
             }
-            NodeData::Comment(c) => {
-                out.push_str("<!--");
-                out.push_str(c);
-                out.push_str("-->");
-            }
+            NodeData::Comment(c) => match self.pi_target(id) {
+                Some(t) => {
+                    out.push_str("<?");
+                    out.push_str(t);
+                    out.push(' ');
+                    out.push_str(c);
+                    out.push_str("?>");
+                }
+                None => {
+                    out.push_str("<!--");
+                    out.push_str(c);
+                    out.push_str("-->");
+                }
+            },
             NodeData::Doctype(d) => {
-                out.push_str("<!DOCTYPE ");
+                out.push_str("<!DOCTYPE "); 
                 out.push_str(&d.name);
                 out.push('>');
             }

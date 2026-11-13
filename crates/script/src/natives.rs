@@ -388,6 +388,9 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(o, "createXMLDocument", 0, crate::document::create_xml_document);
     realm.define_method(o, "attrNamespace", 2, crate::element::attr_namespace_native);
     realm.define_method(o, "validateQName", 1, crate::document::validate_qname);
+    realm.define_method(o, "streamOpen", 3, crate::docparser::stream_open);
+    realm.define_method(o, "streamWrite", 2, crate::docparser::stream_write);
+    realm.define_method(o, "streamClose", 1, crate::docparser::stream_close);
     let g = realm.global();
     realm.define_property(g, "__rhNative", Value::Object(o), rabbithole_js::CONFIGURABLE | rabbithole_js::WRITABLE);
 }

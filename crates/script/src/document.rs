@@ -368,6 +368,39 @@ fn d_create_text_node(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
     Ok(wrap(realm, NodeRef { doc: d, node }))
 }
 
+fn d_create_cdata_section(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    if args.is_empty() {
+        return Err(realm.throw_type_error("Failed to execute 'createCDATASection' on 'Document': 1 argument required, but only 0 present."));
+    }
+    let text = arg_str(realm, args, 0)?;
+    if with_doc(d, |doc| doc.is_html) {
+        return Err(crate::misc::dom_exception(realm, "NotSupportedError", "Failed to execute 'createCDATASection' on 'Document': This operation is not supported for HTML documents."));
+    }
+    if text.contains("]]>") {
+        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", "Failed to execute 'createCDATASection' on 'Document': String cannot contain ']]>' since that is the end delimiter of a CData section."));
+    }
+    let node = with_doc(d, |doc| doc.create_cdata(&text));
+    Ok(wrap(realm, NodeRef { doc: d, node }))
+}
+
+fn d_create_processing_instruction(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let d = this_doc(realm, &this)?;
+    if args.len() < 2 {
+        return Err(realm.throw_type_error(&format!("Failed to execute 'createProcessingInstruction' on 'Document': 2 arguments required, but only {} present.", args.len())));
+    }
+    let target = arg_str(realm, args, 0)?;
+    let data = arg_str(realm, args, 1)?;
+    if !is_xml_name(&target) {
+        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("Failed to execute 'createProcessingInstruction' on 'Document': The target provided ('{target}') is not a valid name.")));
+    }
+    if data.contains("?>") {
+        return Err(crate::misc::dom_exception(realm, "InvalidCharacterError", &format!("Failed to execute 'createProcessingInstruction' on 'Document': The data provided ('{data}') contains '?>'.")));
+    }
+    let node = with_doc(d, |doc| doc.create_pi(&target, &data));
+    Ok(wrap(realm, NodeRef { doc: d, node }))
+}
+
 fn d_create_comment(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
     let text = arg_str_opt(realm, args, 0)?.unwrap_or_default();
@@ -548,8 +581,8 @@ fn d_elements_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
     Ok(realm.new_array_value(if v.is_null() { vec![] } else { vec![v] }))
 }
 
-/// `document.write(...)`: during loading, insert after the current script;
-/// afterwards append to the body.
+/// `document.write(...)` (HTML §8.4.3): markup goes to the document's
+/// script-created parser at its insertion point (see `docparser`).
 fn d_write(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
     let mut text = String::new();
@@ -569,58 +602,24 @@ fn d_writeln(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     write_html(realm, d, &text)
 }
 
-
-/// Replace the whole content of document `d` with `html` parsed as a new
-/// document (the script-created parser of `document.open()`).
-fn replace_document_content(d: u32, html: &str) {
-    // Documents with a browsing context parse with scripting enabled.
-    let parsed = rabbithole_html::parse_with_scripting(html, d == 0 || d & crate::host::FRAME_DOC != 0);
-    let root = NodeRef { doc: d, node: Document::ROOT };
-    let removed = node::children_of(root);
-    let added: Vec<NodeRef> = with_doc(d, |doc| {
-        doc.clear_children(Document::ROOT);
-        doc.quirks_mode = parsed.quirks_mode;
-        parsed
-            .children(Document::ROOT)
-            .map(|c| {
-                let n = doc.import_subtree(&parsed, c);
-                doc.append_child(Document::ROOT, n);
-                NodeRef { doc: d, node: n }
-            })
-            .collect()
-    });
-    node::record_child_list(root, added, removed);
-    if d == 0 {
-        mark_dirty();
-    }
-}
-
 fn write_html(realm: &mut Realm, d: u32, html: &str) -> JsResult<Value> {
-    // A document opened by `document.open()`: its content is the markup
-    // written so far.
-    // (Per realm: document numbers are the realm's own.)
-    let open = {
-        let st = state();
-        let mut st = st.borrow_mut();
-        st.open_docs.get_mut(&d).map(|buf| {
-            buf.push_str(html);
-            buf.clone()
-        })
-    };
-    if let Some(markup) = open {
-        replace_document_content(d, &markup);
-        return Ok(Value::Undefined);
-    }
+    // The page's own load-time parse: the engine parsed the whole page
+    // before running its scripts, so a script's writes are inserted right
+    // after it (or at the end of the body for scripts that are not
+    // parser-inserted).
     let (loading, current) = {
         let st = state();
         let st = st.borrow();
         (st.loading, st.current_script)
     };
-    let body = with_doc(d, |doc| doc.body());
-    let Some(body) = body else { return Ok(Value::Undefined) };
-    let body_ref = NodeRef { doc: d, node: body };
-    let nodes = node::parse_html_into(body_ref, html);
-    if loading && d == 0 {
+    if d == 0 && loading && !crate::docparser::has_insertion_point(0) {
+        if !with_doc(0, |doc| doc.is_html) {
+            return Err(crate::misc::dom_exception(realm, "InvalidStateError", "Failed to execute 'write' on 'Document': Only HTML documents support write()."));
+        }
+        let body = with_doc(d, |doc| doc.body());
+        let Some(body) = body else { return Ok(Value::Undefined) };
+        let body_ref = NodeRef { doc: d, node: body };
+        let nodes = node::parse_html_into(body_ref, html);
         if let Some(cs) = current {
             let (parent, next) = with_doc(0, |doc| (doc.parent(cs.node), doc.next_sibling(cs.node)));
             if let Some(p) = parent {
@@ -630,39 +629,43 @@ fn write_html(realm: &mut Realm, d: u32, html: &str) -> JsResult<Value> {
                 return Ok(Value::Undefined);
             }
         }
+        for n in nodes {
+            insert_node(realm, body_ref, n, None)?;
+        }
+        return Ok(Value::Undefined);
     }
-    for n in nodes {
-        insert_node(realm, body_ref, n, None)?;
+    // Like browsers: an external script that is not parser-inserted (async
+    // or injected) cannot write into a document it did not open.
+    if d == 0 && !crate::docparser::has_insertion_point(0) {
+        if let Some(cs) = current {
+            if with_doc(0, |doc| doc.attr(cs.node, "src").is_some()) {
+                crate::host::log("warn", "Failed to execute 'write' on 'Document': It isn't possible to write into a document from an asynchronously-loaded external script unless it is explicitly opened.");
+                return Ok(Value::Undefined);
+            }
+        }
     }
+    crate::docparser::write(realm, d, html)?;
     Ok(Value::Undefined)
 }
 
-/// `document.open()`: outside of the main document's own parsing, empty
-/// the document and start a new script-created parser (HTML §8.4.1).
-fn d_open(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+/// `document.open()` (HTML §8.4.1): empty the document and start a
+/// script-created parser.
+fn d_open(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
-    let parsing = d == 0 && state().borrow().loading;
-    if !parsing {
-        state().borrow_mut().open_docs.insert(d, String::new());
-        let root = NodeRef { doc: d, node: Document::ROOT };
-        let removed = node::children_of(root);
-        with_doc(d, |doc| doc.clear_children(Document::ROOT));
-        node::record_child_list(root, Vec::new(), removed);
-        if d == 0 {
-            mark_dirty();
-        }
+    // open(url, name, features): window.open.
+    if args.len() >= 3 {
+        let w = realm.global();
+        return realm.invoke(Value::Object(w), "open", args);
     }
+    crate::docparser::open(realm, d)?;
     Ok(this)
 }
 
-/// `document.close()`: finish the script-created parser (an empty write
-/// still produces html/head/body).
+/// `document.close()` (HTML §8.4.2): end the script-created parser's input
+/// and parse to the end.
 fn d_close(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let d = this_doc(realm, &this)?;
-    let markup = state().borrow_mut().open_docs.remove(&d);
-    if let Some(markup) = markup {
-        replace_document_content(d, &markup);
-    }
+    crate::docparser::close(realm, d)?;
     Ok(Value::Undefined)
 }
 
@@ -896,8 +899,8 @@ pub(crate) fn install(realm: &mut Realm) {
     m(realm, "createRange", 0, d_create_range);
     m(realm, "createTreeWalker", 2, d_create_tree_walker);
     m(realm, "createNodeIterator", 2, d_create_node_iterator);
-    m(realm, "createCDATASection", 1, d_create_text_node);
-    m(realm, "createProcessingInstruction", 2, d_create_comment);
+    m(realm, "createCDATASection", 1, d_create_cdata_section);
+    m(realm, "createProcessingInstruction", 2, d_create_processing_instruction);
     m(realm, "importNode", 2, d_import_node);
     m(realm, "adoptNode", 1, d_adopt_node);
     m(realm, "hasFocus", 0, d_has_focus);
