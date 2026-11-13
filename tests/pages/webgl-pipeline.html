@@ -1,0 +1,113 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGL2 framebuffer and instancing pipeline</title>
+<style>
+  body { margin: 24px; background: #101827; color: #e5eaf4; font: 16px sans-serif; }
+  h1 { font-size: 24px; }
+  h2 { font-size: 18px; }
+  .examples { display: flex; gap: 24px; }
+  canvas { display: block; width: 256px; height: 128px; border: 1px solid #65748e; }
+  #status { white-space: pre-wrap; }
+</style>
+<h1>WebGL2 framebuffer and instancing pipeline</h1>
+<p>Two indexed instances render into a texture, then the texture renders onto the page.</p>
+<div class="examples">
+  <div><h2>Canvas before texture presentation</h2><canvas id="default-before" width="4" height="2"></canvas></div>
+  <div><h2>Sampled framebuffer texture</h2><canvas id="pipeline" width="4" height="2"></canvas></div>
+</div>
+<p id="status">Rendering…</p>
+<script>
+(function () {
+  const status = document.getElementById('status');
+  try {
+    const canvas = document.getElementById('pipeline');
+    const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, premultipliedAlpha: false });
+    if (!gl) throw new Error('WebGL2 context unavailable');
+    function compile(kind, source) {
+      const shader = gl.createShader(kind);
+      gl.shaderSource(shader, source); gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+      return shader;
+    }
+    function program(vertex, fragment) {
+      const p = gl.createProgram();
+      gl.attachShader(p, compile(gl.VERTEX_SHADER, vertex));
+      gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fragment));
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+      gl.useProgram(p); return p;
+    }
+    function attribute(location, size, values, divisor) {
+      const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(values), gl.STATIC_DRAW);
+      gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(location); gl.vertexAttribDivisor(location, divisor);
+    }
+    function indices() {
+      const b = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array([0,1,2, 0,2,3]), gl.STATIC_DRAW);
+    }
+    function checkPixel(x, expected, label) {
+      const pixel = new Uint8Array(4);
+      gl.readPixels(x, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      if (Array.from(pixel).join(',') !== expected) throw new Error(label + ': ' + Array.from(pixel).join(','));
+    }
+    function noError(label) {
+      const error = gl.getError();
+      if (error !== gl.NO_ERROR) throw new Error(label + ': GL error ' + error);
+    }
+
+    gl.clearColor(0,0,1,1); gl.clear(gl.COLOR_BUFFER_BIT);
+    const instances = program(
+      '#version 300 es\nlayout(location=0) in vec2 position;layout(location=1) in vec2 offset;layout(location=2) in vec4 color;out vec4 tint;void main(){gl_Position=vec4(position+offset,0.0,1.0);tint=color;}',
+      '#version 300 es\nprecision mediump float;in vec4 tint;out vec4 pixel;void main(){pixel=tint;}');
+    const instanceVAO = gl.createVertexArray(); gl.bindVertexArray(instanceVAO);
+    attribute(0, 2, [-1,-1, 0,-1, 0,1, -1,1], 0);
+    attribute(1, 2, [0,0, 1,0], 1);
+    attribute(2, 4, [1,0,0,1, 0,1,0,1], 1);
+    indices();
+
+    const texture = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 4, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const framebuffer = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('Framebuffer incomplete');
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0, 2);
+    checkPixel(0, '255,0,0,255', 'Left framebuffer instance');
+    checkPixel(3, '0,255,0,255', 'Right framebuffer instance');
+    noError('Instanced framebuffer draw');
+
+    // The read and draw targets are independent. Presentation and Canvas2D
+    // copies must still use the blue default drawing buffer while the FBO is bound.
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    if (gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) !== framebuffer || gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) !== null) throw new Error('Read/draw framebuffer bindings differ from requested state');
+    checkPixel(0, '0,0,255,255', 'Default canvas after offscreen draw');
+    const preview = document.getElementById('default-before').getContext('2d');
+    preview.drawImage(canvas, 0, 0);
+    const blue = preview.getImageData(0,0,1,1).data;
+    if (Array.from(blue).join(',') !== '0,0,255,255') throw new Error('Framebuffer leaked into canvas presentation');
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const sample = program(
+      '#version 300 es\nlayout(location=0) in vec2 position;out vec2 uv;void main(){gl_Position=vec4(position,0.0,1.0);uv=position*0.5+vec2(0.5);}',
+      '#version 300 es\nprecision mediump float;uniform sampler2D image;in vec2 uv;out vec4 pixel;void main(){pixel=texture(image,uv);}');
+    const sampleVAO = gl.createVertexArray(); gl.bindVertexArray(sampleVAO);
+    attribute(0, 2, [-1,-1, 1,-1, 1,1, -1,1], 0); indices();
+    gl.uniform1i(gl.getUniformLocation(sample, 'image'), 0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0);
+    checkPixel(0, '255,0,0,255', 'Left texture sample');
+    checkPixel(3, '0,255,0,255', 'Right texture sample');
+    noError('Framebuffer texture presentation');
+    status.textContent = 'Rendered: red and green instances; blue canvas preserved; texture presented.';
+    console.log('webgl-pipeline: framebuffer, instancing and presentation passed');
+  } catch (error) {
+    status.textContent = 'Rendering error: ' + error.message;
+    console.error(status.textContent);
+  }
+})();
+</script>
