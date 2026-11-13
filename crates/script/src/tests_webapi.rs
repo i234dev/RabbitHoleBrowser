@@ -615,7 +615,7 @@ fn platform_apis() {
             "sched 5 user-blocking true",
             "tt &lt;b> true true",
             "storage true true",
-            "sw NotSupportedError body! 1",
+            "sw TypeError body! 1",
             "dt drag text/plain 1",
             "misc true application/pdf number landscape-primary false denied true undefined true false true true",
             "geo 1 true",
