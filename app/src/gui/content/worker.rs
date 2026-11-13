@@ -1505,6 +1505,7 @@ impl Worker {
         }
         let Some(page) = self.page.as_ref() else { return };
         let focused = page.state.focused;
+        self.focus = focused;
         let editing = self.edit.as_ref().map(|e| e.node);
         if focused == editing {
             return;
@@ -1600,11 +1601,7 @@ impl Worker {
     fn focus_next(&mut self, forward: bool) {
         let Some(page) = self.page.as_ref() else { return };
         let doc = &page.doc;
-        let focusables: Vec<NodeId> = doc
-            .descendants(rabbithole_engine::dom::Document::ROOT)
-            .filter(|&n| page.styles.get(n).is_some())
-            .filter(|&n| rabbithole_engine::forms::is_interactive(doc, n) || (doc.is_element(n, "a") && doc.attr(n, "href").is_some()))
-            .collect();
+        let focusables = page.sequential_focus_order();
         if focusables.is_empty() {
             return;
         }
@@ -1623,10 +1620,9 @@ impl Worker {
         if matches!(kind, ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other) && interactive {
             self.begin_edit(next);
         } else {
-            if let Some(page) = self.page.as_mut() {
-                self.engine.set_focus(page, Some(next));
-            }
             self.focus = Some(next);
+            self.selection = None;
+            self.page_op(|engine, page| ((), engine.focus_element(page, Some(next))));
         }
         if let Some(r) = rect {
             self.scroll_into_view(r);

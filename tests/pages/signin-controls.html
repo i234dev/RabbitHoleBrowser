@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sign-in controls</title>
+<style>
+  body { margin: 40px; background: #eef2f8; color: #202124; font: 16px sans-serif; }
+  main { width: 360px; padding: 28px; border-radius: 16px; background: white; }
+  h1 { margin: 0 0 24px; font-size: 28px; }
+  label { display: block; margin: 16px 0 6px; }
+  input { box-sizing: border-box; width: 100%; padding: 12px; border: 1px solid #666; border-radius: 4px; font-size: 18px; }
+  input:focus { border-color: #185abc; outline: 2px solid #185abc; }
+  #auxiliary { display: none; }
+  button { display: block; margin-top: 24px; padding: 10px 24px; border: 0; border-radius: 18px; background: #185abc; color: white; }
+</style>
+<main>
+  <h1>Sign in</h1>
+  <label for="identity">Account</label><input id="identity" autocomplete="username">
+  <input id="auxiliary" type="password" tabindex="-1" aria-hidden="true">
+  <label for="secret">Password</label><input id="secret" type="password" autocomplete="current-password">
+  <button id="next" type="button">Next</button>
+</main>
+<script>
+var seen = [];
+for (const id of ['identity', 'auxiliary', 'secret', 'next']) {
+  document.getElementById(id).addEventListener('focus', () => seen.push(id));
+}
+</script>
