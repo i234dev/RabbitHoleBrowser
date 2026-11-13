@@ -114,10 +114,9 @@ pub fn parse(input: &str) -> Document {
 /// iframes, styles and overlays never exist in the DOM.
 pub fn parse_with_scripting(input: &str, scripting: bool) -> Document {
     let mut b = TreeBuilder::new(scripting);
+    b.allow_dsd = true;
     b.run(input);
-    let mut doc = b.doc;
-    doc.adopt_template_contents(Document::ROOT, true);
-    doc
+    b.doc
 }
 
 /// Parse an HTML fragment as the children of a `context` element (as
@@ -146,7 +145,15 @@ pub fn parse_fragment_with_scripting(input: &str, context: &str, scripting: bool
 /// with local name `context` in namespace `ns`. Returns the document and
 /// the node whose children are the parsed nodes, in order.
 pub fn parse_fragment_in(input: &str, context: &str, ns: Namespace, scripting: bool, quirks: QuirksMode) -> (Document, NodeId) {
+    parse_fragment_with_options(input, context, ns, scripting, quirks, false)
+}
+
+/// [`parse_fragment_in`]; `declarative_shadow` lets `<template
+/// shadowrootmode>` attach shadow roots (`setHTMLUnsafe`,
+/// `parseHTMLUnsafe`), as the document's "allow declarative shadow roots".
+pub fn parse_fragment_with_options(input: &str, context: &str, ns: Namespace, scripting: bool, quirks: QuirksMode, declarative_shadow: bool) -> (Document, NodeId) {
     let mut b = TreeBuilder::new(scripting);
+    b.allow_dsd = declarative_shadow;
     b.doc.quirks_mode = quirks;
     let ctx = b.doc.create_element_ns(ns.clone(), None, context, vec![]);
     let html = b.doc.create_element("html", vec![]);
@@ -170,9 +177,163 @@ pub fn parse_fragment_in(input: &str, context: &str, ns: Namespace, scripting: b
     }
     b.reset_insertion_mode();
     b.run_tokens(&mut tk);
-    let mut doc = b.doc;
-    doc.adopt_template_contents(html, false);
-    (doc, html)
+    (b.doc, html)
+}
+
+/// What an incremental [`Parser`] stopped for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseStatus {
+    /// All available input (up to the insertion point) was consumed;
+    /// more may come.
+    NeedInput,
+    /// A `<script>` end tag was processed: run the script element, then
+    /// call [`Parser::run`] again.
+    Script(NodeId),
+    /// The end of the stream was reached: parsing is complete.
+    Finished,
+}
+
+/// An incremental, re-entrant HTML document parser working on a live
+/// [`Document`] (the "script-created parser" of `document.open()`, or a
+/// network parser fed in chunks). Input is added with [`Parser::append`]
+/// (network) or [`Parser::write`] (`document.write`, at the insertion
+/// point); [`Parser::run`] tokenizes and builds the tree until the input
+/// runs out, a script must run, or the stream ends.
+pub struct Parser {
+    tb: TreeBuilder,
+    tk: Tokenizer,
+    finished: bool,
+}
+
+impl Parser {
+    /// A parser for a whole document; the document passed to
+    /// [`Parser::run`] must start empty.
+    pub fn new(scripting: bool) -> Parser {
+        let mut tb = TreeBuilder::new(scripting);
+        tb.allow_dsd = true;
+        tb.pause_on_scripts = scripting;
+        Parser { tb, tk: Tokenizer::streaming(), finished: false }
+    }
+
+    /// A streaming fragment parser (`streamHTML()` and friends): the HTML
+    /// fragment parsing algorithm with `context` (an element of the
+    /// document passed to [`Parser::run`], local name `context_tag` in
+    /// namespace `context_ns`) whose nodes go straight into the live node
+    /// `root`, before `before` (None: appended). `form` is the context's
+    /// nearest form ancestor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_fragment(context: NodeId, context_tag: &str, context_ns: Namespace, root: NodeId, before: Option<NodeId>, form: Option<NodeId>, scripting: bool, declarative_shadow: bool) -> Parser {
+        let mut tb = TreeBuilder::new(scripting);
+        tb.allow_dsd = declarative_shadow;
+        tb.stream_container = Some(root);
+        tb.context = Some(context);
+        tb.fragment = true;
+        tb.form = form;
+        tb.root_before = before;
+        tb.live_root = true;
+        let mut tk = Tokenizer::streaming();
+        if context_ns == Namespace::Html {
+            match context_tag {
+                "title" | "textarea" => tk.set_state(State::Rcdata),
+                "style" | "xmp" | "iframe" | "noembed" | "noframes" => tk.set_state(State::Rawtext),
+                "script" => tk.set_state(State::ScriptData),
+                "noscript" if scripting => tk.set_state(State::Rawtext),
+                "plaintext" => tk.set_state(State::Plaintext),
+                _ => {}
+            }
+            tk.set_last_start_tag(context_tag);
+            if context_tag == "template" {
+                tb.template_modes.push(Mode::InTemplate);
+            }
+        }
+        tb.mode_reset_pending = true;
+        Parser { tb, tk, finished: false }
+    }
+
+    /// Add input at the end of the stream.
+    pub fn append(&mut self, text: &str) {
+        self.tk.append(text);
+    }
+
+    /// `document.write`: insert input at the insertion point.
+    pub fn write(&mut self, text: &str) {
+        self.tk.insert(text);
+    }
+
+    /// Insert an explicit EOF at the end of the stream.
+    pub fn close(&mut self) {
+        self.tk.close();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.tk.is_closed()
+    }
+
+    /// Pause at `</script>` end tags ([`ParseStatus::Script`]).
+    pub fn set_pause_on_scripts(&mut self, on: bool) {
+        self.tb.pause_on_scripts = on;
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// The insertion point, if defined.
+    pub fn insertion_point(&self) -> Option<usize> {
+        self.tk.insertion_point()
+    }
+
+    pub fn set_insertion_point_here(&mut self) {
+        self.tk.set_insertion_point_here();
+    }
+
+    pub fn set_insertion_point_at_end(&mut self) {
+        self.tk.set_insertion_point_at_end();
+    }
+
+    pub fn restore_insertion_point(&mut self, ip: Option<usize>) {
+        self.tk.restore_insertion_point(ip);
+    }
+
+    /// Around a parser-inserted script: the insertion point is just after
+    /// it while it runs, then back where it was (moved along by what the
+    /// script wrote).
+    pub fn push_insertion_point_here(&mut self) {
+        self.tk.push_insertion_point_here();
+    }
+
+    pub fn pop_insertion_point(&mut self) {
+        self.tk.pop_insertion_point();
+    }
+
+    /// Run the tokenizer and tree builder on `doc` until the available
+    /// input is consumed, a script must run, or the stream ends.
+    pub fn run(&mut self, doc: &mut Document) -> ParseStatus {
+        if self.finished {
+            return ParseStatus::Finished;
+        }
+        std::mem::swap(doc, &mut self.tb.doc);
+        if std::mem::take(&mut self.tb.mode_reset_pending) {
+            self.tb.merge_floor = self.tb.doc.node_count();
+            if self.tb.stream_container.is_some() && self.tb.open.is_empty() {
+                let html = self.tb.doc.create_element("html", vec![]);
+                self.tb.open.push(html);
+            }
+            self.tb.reset_insertion_mode();
+        }
+        let status = self.tb.run_tokens(&mut self.tk);
+        std::mem::swap(doc, &mut self.tb.doc);
+        if status == ParseStatus::Finished {
+            self.finished = true;
+        }
+        status
+    }
+
+    /// Stop parsing (`document.open` / abort): the parser is finished
+    /// without running the end steps.
+    pub fn abort(&mut self) {
+        self.finished = true;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -291,6 +452,31 @@ struct TreeBuilder {
     /// Tokenizer state requested by the last start tag.
     switch_to: Option<State>,
     done: bool,
+    /// Stop after a `</script>` end tag so the caller can run the script
+    /// (incremental document parsing with scripting).
+    pause_on_scripts: bool,
+    pending_script: Option<NodeId>,
+    /// The comment token being dispatched is a processing instruction
+    /// with this target.
+    pi_target: Option<String>,
+    /// `<template shadowrootmode>` attaches a declarative shadow root.
+    allow_dsd: bool,
+    /// Templates whose contents are a declarative shadow root (they are
+    /// on the stack but not in the tree).
+    dsd_contents: std::collections::HashMap<NodeId, NodeId>,
+    /// Streaming fragment parsing into a live node: insert the root's
+    /// children before this node (None: append).
+    root_before: Option<NodeId>,
+    /// Reset the insertion mode on the first run (fragment parsers need
+    /// the document to look at the context element).
+    mode_reset_pending: bool,
+    /// Nodes below this id existed before the parser started.
+    merge_floor: NodeId,
+    /// The fragment root is a live node (streaming): never changed itself.
+    live_root: bool,
+    /// Streaming: the live node the fragment's root children go into (the
+    /// stack's root is a scratch `html` element).
+    stream_container: Option<NodeId>,
 }
 
 impl TreeBuilder {
@@ -313,6 +499,16 @@ impl TreeBuilder {
             context: None,
             switch_to: None,
             done: false,
+            pause_on_scripts: false,
+            pending_script: None,
+            pi_target: None,
+            allow_dsd: false,
+            dsd_contents: std::collections::HashMap::new(),
+            root_before: None,
+            mode_reset_pending: false,
+            merge_floor: 0,
+            live_root: false,
+            stream_container: None,
         }
     }
 
@@ -321,19 +517,29 @@ impl TreeBuilder {
         self.run_tokens(&mut tk);
     }
 
-    fn run_tokens(&mut self, tk: &mut Tokenizer) {
+    fn run_tokens(&mut self, tk: &mut Tokenizer) -> ParseStatus {
         loop {
             tk.allow_cdata = self.adjusted_current().map(|n| !self.is_ns(n, Namespace::Html)).unwrap_or(false);
             let tok = tk.next_token();
+            if tok == Token::NeedInput {
+                return ParseStatus::NeedInput;
+            }
             // "If the next token is a LF, ignore it" (after <pre>, ...).
             let skip_lf = std::mem::take(&mut self.skip_lf);
             match tok {
+                Token::NeedInput => {}
                 Token::Eof => {
                     self.dispatch(Tok::Eof);
                     break;
                 }
                 Token::Doctype(d) => self.dispatch(Tok::Doctype(d)),
                 Token::Comment(c) => self.dispatch(Tok::Comment(c)),
+                // Inserted wherever a comment would be.
+                Token::ProcessingInstruction { target, data } => {
+                    self.pi_target = Some(target);
+                    self.dispatch(Tok::Comment(data));
+                    self.pi_target = None;
+                }
                 Token::EndTag { name } => self.dispatch(Tok::End(name)),
                 Token::StartTag { name, attrs, self_closing } => {
                     self.dispatch(Tok::Start(Tag { name, attrs, self_closing }));
@@ -351,8 +557,12 @@ impl TreeBuilder {
             if self.done {
                 break;
             }
+            if let Some(s) = self.pending_script.take() {
+                return ParseStatus::Script(s);
+            }
         }
         self.mirror_selectedcontent();
+        ParseStatus::Finished
     }
 
     /// A `<selectedcontent>` inside a `<select>` holds a copy of the
@@ -579,6 +789,24 @@ impl TreeBuilder {
 
     /// The appropriate place for inserting a node: (parent, before).
     fn insertion_place(&self, override_target: Option<NodeId>) -> (NodeId, Option<NodeId>) {
+        let place = self.insertion_place_raw(override_target);
+        // Streaming into a live parent: the root's children go before the
+        // reference node.
+        if let Some(c) = self.stream_container {
+            if self.open.first() == Some(&place.0) {
+                return (c, place.1.or(self.root_before));
+            }
+        }
+        // Inside a template: its template contents (or declarative shadow root).
+        if place.1.is_none() && self.is_html(place.0, "template") {
+            if let Some(&c) = self.dsd_contents.get(&place.0).or_else(|| self.doc.template_contents.get(&place.0)) {
+                return (c, None);
+            }
+        }
+        place
+    }
+
+    fn insertion_place_raw(&self, override_target: Option<NodeId>) -> (NodeId, Option<NodeId>) {
         let target = override_target.or(self.current()).unwrap_or(Document::ROOT);
         if self.foster && self.is_html_any(target, &["table", "tbody", "tfoot", "thead", "tr"]) {
             let last_template = self.open.iter().rposition(|&n| self.is_html(n, "template"));
@@ -614,7 +842,9 @@ impl TreeBuilder {
             Some(b) => self.doc.prev_sibling(b),
             None => self.doc.last_child(place.0),
         };
-        if let Some(p) = prev {
+        // Text nodes the parser did not create (streaming into a live
+        // node) are left alone.
+        if let Some(p) = prev.filter(|&p| p >= self.merge_floor && !self.doc.is_cdata(p)) {
             if let NodeData::Text(t) = &mut self.doc.node_mut(p).data {
                 t.push_str(s);
                 return;
@@ -626,13 +856,20 @@ impl TreeBuilder {
 
     fn insert_comment(&mut self, c: String, place: Option<(NodeId, Option<NodeId>)>) {
         let place = place.unwrap_or_else(|| self.insertion_place(None));
-        let n = self.doc.create(NodeData::Comment(c));
+        let n = match self.pi_target.take() {
+            Some(t) => self.doc.create_pi(&t, &c),
+            None => self.doc.create(NodeData::Comment(c)),
+        };
         self.insert_at(place, n);
     }
 
     fn create_element(&mut self, tag: &Tag, ns: Namespace) -> NodeId {
         if ns == Namespace::Html {
-            self.doc.create_element(&tag.name, tag.attrs.clone())
+            let el = self.doc.create_element(&tag.name, tag.attrs.clone());
+            if tag.name == "template" {
+                self.doc.template_content(el);
+            }
+            el
         } else {
             self.doc.create_element_ns(ns, None, &tag.name, tag.attrs.clone())
         }
@@ -676,7 +913,11 @@ impl TreeBuilder {
             _ => {}
         }
         let self_closing = tag.self_closing;
+        let is_script = tag.name == "script";
         let el = self.insert_element(&tag, ns);
+        if is_script && (self.fragment || !self.scripting) {
+            self.doc.script_started.insert(el);
+        }
         // "Adjust foreign attributes": xlink:*, xml:* and xmlns get their
         // namespaces.
         for (n, _) in &tag.attrs {
@@ -1137,6 +1378,11 @@ impl TreeBuilder {
             Tok::Start(ref t) if t.name == "script" => {
                 let place = self.insertion_place(None);
                 let el = self.create_element(t, Namespace::Html);
+                // Fragment parsers and parsers without scripting make
+                // scripts that never run.
+                if self.fragment || !self.scripting {
+                    self.doc.script_started.insert(el);
+                }
                 self.insert_at(place, el);
                 self.open.push(el);
                 self.switch_to = Some(State::ScriptData);
@@ -1148,10 +1394,11 @@ impl TreeBuilder {
                 self.mode = Mode::AfterHead;
             }
             Tok::Start(ref t) if t.name == "template" => {
-                self.insert_html(t);
                 self.afe.push(Afe::Marker);
+                self.frameset_ok = false;
                 self.mode = Mode::InTemplate;
                 self.template_modes.push(Mode::InTemplate);
+                self.insert_template(t);
             }
             Tok::End(ref n) if n == "template" => {
                 if !self.has_template() {
@@ -1171,6 +1418,51 @@ impl TreeBuilder {
                 self.reprocess(tok);
             }
         }
+    }
+
+    /// Insert a `<template>` start tag: an ordinary template, or a
+    /// declarative shadow root on the adjusted current node.
+    fn insert_template(&mut self, t: &Tag) {
+        let mode = t.attrs.iter().find(|(n, _)| n == "shadowrootmode").map(|(_, v)| v.to_ascii_lowercase());
+        let host = self.adjusted_current();
+        let declarative = self.allow_dsd && matches!(mode.as_deref(), Some("open" | "closed")) && host.is_some() && host != self.open.first().copied();
+        let host = match host {
+            Some(h) if declarative && !self.doc.shadow_roots.contains_key(&h) && self.valid_shadow_host(h) => h,
+            _ => {
+                self.insert_html(t);
+                return;
+            }
+        };
+        let template = self.create_element(t, Namespace::Html);
+        self.open.push(template);
+        let root = self.doc.attach_shadow(host);
+        self.doc.declarative_shadow.insert(root, mode.as_deref() == Some("open"));
+        let flag = |n: &str| t.attrs.iter().any(|(a, _)| a == n);
+        let mut bits = 0u8;
+        if flag("shadowrootclonable") {
+            bits |= 1;
+        }
+        if flag("shadowrootserializable") {
+            bits |= 2;
+        }
+        if flag("shadowrootdelegatesfocus") {
+            bits |= 4;
+        }
+        if bits != 0 {
+            self.doc.declarative_shadow_flags.insert(root, bits);
+        }
+        self.dsd_contents.insert(template, root);
+    }
+
+    /// Elements `attachShadow()` accepts: custom elements (a valid custom
+    /// element name) and a fixed list of HTML elements.
+    fn valid_shadow_host(&self, n: NodeId) -> bool {
+        let (t, ns) = self.el(n);
+        if *ns != Namespace::Html {
+            return false;
+        }
+        matches!(t, "article" | "aside" | "blockquote" | "body" | "div" | "footer" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header" | "main" | "nav" | "p" | "section" | "span")
+            || (t.contains('-') && t.starts_with(|c: char| c.is_ascii_lowercase()) && !matches!(t, "annotation-xml" | "color-profile" | "font-face" | "font-face-src" | "font-face-uri" | "font-face-format" | "font-face-name" | "missing-glyph"))
     }
 
     fn generic_raw(&mut self, t: &Tag, state: State) {
@@ -1294,7 +1586,7 @@ impl TreeBuilder {
                 if self.has_template() {
                     return;
                 }
-                if let Some(&html) = self.open.first() {
+                if let Some(&html) = self.open.first().filter(|_| !self.live_root) {
                     for (k, v) in &t.attrs {
                         if self.doc.attr(html, k).is_none() {
                             self.doc.set_attr(html, k, Some(v));
@@ -1673,8 +1965,13 @@ impl TreeBuilder {
                 self.reprocess(Tok::Eof);
             }
             Tok::End(_) => {
-                self.pop();
+                let el = self.pop();
                 self.mode = self.original_mode;
+                if let Some(el) = el {
+                    if self.pause_on_scripts && self.is_html(el, "script") {
+                        self.pending_script = Some(el);
+                    }
+                }
             }
             _ => {}
         }

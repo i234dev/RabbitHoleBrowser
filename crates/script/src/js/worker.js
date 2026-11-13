@@ -18,6 +18,11 @@
   function DedicatedWorkerGlobalScope() { ILLEGAL(); }
   function SharedWorkerGlobalScope() { ILLEGAL(); }
   const base = Object.getPrototypeOf(g);
+  // No named properties object (elements by id) without a document.
+  if (g.__rhWindowPropsBase !== undefined) {
+    Object.setPrototypeOf(base, g.__rhWindowPropsBase);
+    delete g.__rhWindowPropsBase;
+  }
   WorkerGlobalScope.prototype = Object.create(base);
   DedicatedWorkerGlobalScope.prototype = Object.create(WorkerGlobalScope.prototype);
   SharedWorkerGlobalScope.prototype = Object.create(WorkerGlobalScope.prototype);
@@ -71,7 +76,7 @@
         const href = new URL(String(u), g.location.href).href;
         const src = N.loadScriptSync(href);
         if (src === null) throw domError(`Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at '${href}' failed to load.`, 'NetworkError');
-        (0, eval)(src);
+        N.workerEvalScript(src, href);
       }
     },
   };

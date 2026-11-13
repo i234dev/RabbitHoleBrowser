@@ -1150,6 +1150,39 @@ fn web_animations_and_font_loading() {
     assert!(sorted.contains(&"onfinish true".to_string()), "{out:?}");
 }
 
+#[test]
+fn imported_strict_worker_scripts_share_global_bindings() {
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    let js = |s: &str| (200u16, "text/javascript".to_string(), s.to_string());
+    env.fetches.insert("https://example.test/dir/strict-lib.js".into(), js(
+        "'use strict'; var importedValue = 40; let importedLexical = 1; function importedFunction() { return importedValue + importedLexical; }",
+    ));
+    env.fetches.insert("https://example.test/dir/next-lib.js".into(), js(
+        "'use strict'; importedValue++; importedLexical++;",
+    ));
+    env.fetches.insert("https://example.test/dir/throw-lib.js".into(), js(
+        "'use strict'; throw new TypeError('import failed');",
+    ));
+    env.fetches.insert("https://example.test/dir/after-throw.js".into(), js("importedValue = 100;"));
+    env.fetches.insert("https://example.test/dir/import-worker.js".into(), js(r#"
+        importScripts('strict-lib.js', 'next-lib.js');
+        postMessage([importedFunction(), self.importedValue, typeof self.importedLexical].join(','));
+        try { importScripts('throw-lib.js', 'after-throw.js'); }
+        catch (e) { postMessage(e.name + ':' + e.message + ':' + e.stack.includes('throw-lib.js')); }
+        postMessage('done:' + importedFunction());
+    "#));
+    run(&mut env, &mut host, r#"
+        var w = new Worker('import-worker.js');
+        w.onmessage = function (e) { console.log(e.data); };
+    "#);
+    for t in [1010.0, 1020.0, 1030.0] {
+        host.run_timers(&mut env, t);
+        host.run_jobs(&mut env);
+    }
+    let out: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, text)| text.as_str()).collect();
+    assert_eq!(out, ["43,41,undefined", "TypeError:import failed:true", "done:43"], "logs: {:?}", env.logs);
+}
+
 /// Workers run in their own realm: own globals, no DOM, importScripts,
 /// structured-clone messages both ways, transferred MessagePorts, error
 /// events, terminate(), close(), and SharedWorker connections.

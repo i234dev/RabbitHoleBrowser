@@ -206,6 +206,14 @@ pub trait HostEnv {
     /// [`HostEnv::frame_call`]: same-origin frames share the event loop, so
     /// their microtasks run when this realm's do.
     fn frame_checkpoint(&mut self) {}
+    /// This document finished loading again (a script-created parser of
+    /// `document.open()` reached the end and the window fired `load`): a
+    /// frame's container (`<iframe>`) fires `load` in the parent.
+    fn document_load_complete(&mut self) {}
+    /// A script-created parser replaces the document's pending load.
+    fn document_load_started(&mut self) {}
+    /// Initial insertion delivered a blank iframe's synchronous load.
+    fn frame_initial_load_fired(&mut self, _node: NodeId) {}
 }
 
 type EnvPtr = *mut (dyn HostEnv + 'static);

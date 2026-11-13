@@ -271,7 +271,7 @@
     get name() { return this[S].name; }
     createHTML(input, ...args) { const f = this[S].rules.createHTML; if (!f) throw new TypeError(`Failed to execute 'createHTML' on 'TrustedTypePolicy': Policy ${this[S].name}'s TrustedTypePolicyOptions did not specify a 'createHTML' member.`); return makeTrusted(TrustedHTML, f(String(input), ...args) ?? ''); }
     createScript(input, ...args) { const f = this[S].rules.createScript; if (!f) throw new TypeError(`Failed to execute 'createScript' on 'TrustedTypePolicy': Policy ${this[S].name}'s TrustedTypePolicyOptions did not specify a 'createScript' member.`); return makeTrusted(TrustedScript, f(String(input), ...args) ?? ''); }
-    createParserOptions(options = {}) { const o = Object.create(TrustedHTMLParserOptions.prototype); hidden(o, TT, Object.assign({}, options)); return o; }
+    createParserOptions(options = {}, ...args) { const f = this[S].rules.createParserOptions; const v = f ? f(options, ...args) : options; const o = Object.create(TrustedHTMLParserOptions.prototype); hidden(o, TT, Object.assign({}, v ?? {})); return o; }
     createScriptURL(input, ...args) { const f = this[S].rules.createScriptURL; if (!f) throw new TypeError(`Failed to execute 'createScriptURL' on 'TrustedTypePolicy': Policy ${this[S].name}'s TrustedTypePolicyOptions did not specify a 'createScriptURL' member.`); return makeTrusted(TrustedScriptURL, f(String(input), ...args) ?? ''); }
   }
   tag(TrustedTypePolicy, 'TrustedTypePolicy');
@@ -297,6 +297,55 @@
   define('TrustedTypePolicy', TrustedTypePolicy);
   define('TrustedTypePolicyFactory', TrustedTypePolicyFactory);
   hidden(g, 'trustedTypes', make(TrustedTypePolicyFactory, { default: null }));
+  // Trusted Types enforcement for the HTML parsing sinks (`*HTMLUnsafe`):
+  // with `require-trusted-types-for 'script'` in a CSP <meta>, a string goes
+  // through the default policy's createHTML (or the options through its
+  // createParserOptions), unless it is a TrustedHTML / the options are
+  // TrustedHTMLParserOptions. Returns { html, options } or throws TypeError.
+  const ttEnforced = () => {
+    const d = g.document;
+    if (!d || typeof d.querySelectorAll !== 'function') return false;
+    for (const m of d.querySelectorAll('meta[http-equiv]')) {
+      if (String(m.getAttribute('http-equiv')).toLowerCase() !== 'content-security-policy') continue;
+      if (/(^|;)\s*require-trusted-types-for\s+'script'/i.test(m.getAttribute('content') || '')) return true;
+    }
+    return false;
+  };
+  const unvetted = (o) => !!o && typeof o === 'object' && (o.sanitizer !== undefined || o.runScripts === true);
+  // The options of a streaming sink (`stream*HTMLUnsafe`).
+  hidden(g, '__rhTrustedOptionsSink', function (options, sink) {
+    if (options instanceof TrustedHTMLParserOptions) return Object.assign({}, options[TT]);
+    if (!ttEnforced()) return options;
+    const policy = g.trustedTypes[S].default;
+    const rules = policy ? policy[S].rules : null;
+    if (rules && typeof rules.createParserOptions === 'function') {
+      const r = rules.createParserOptions(options === undefined || options === null ? {} : options, 'TrustedHTMLParserOptions', sink);
+      if (r === null || r === undefined) throw new TypeError(`Failed to execute '${sink}': the default policy's createParserOptions rejected the options.`);
+      return r;
+    }
+    if (unvetted(options)) throw new TypeError(`Failed to execute '${sink}': the parser options need a TrustedHTMLParserOptions.`);
+    return options;
+  });
+  hidden(g, '__rhTrustedHTMLSink', function (html, options, sink) {
+    const vetted = options instanceof TrustedHTMLParserOptions;
+    const opts = vetted ? Object.assign({}, options[TT]) : options;
+    const isTrusted = html instanceof TrustedHTML;
+    const text = isTrusted ? html[TT] : String(html);
+    if (vetted || !ttEnforced()) return { html: text, options: opts };
+    const policy = g.trustedTypes[S].default;
+    const rules = policy ? policy[S].rules : null;
+    if (rules && typeof rules.createParserOptions === 'function') {
+      const r = rules.createParserOptions(opts === undefined || opts === null ? {} : opts, 'TrustedHTMLParserOptions', sink);
+      if (r === null || r === undefined) throw new TypeError(`Failed to execute '${sink}': the default policy's createParserOptions rejected the options.`);
+      return { html: text, options: r };
+    }
+    if (unvetted(opts)) throw new TypeError(`Failed to execute '${sink}': the parser options need a TrustedHTMLParserOptions.`);
+    if (isTrusted) return { html: text, options: opts };
+    if (!rules || typeof rules.createHTML !== 'function') throw new TypeError(`Failed to execute '${sink}': This document requires 'TrustedHTML' assignment.`);
+    const r = rules.createHTML(text, 'TrustedHTML', sink);
+    if (r === null || r === undefined) throw new TypeError(`Failed to execute '${sink}': the default policy's createHTML rejected the input.`);
+    return { html: String(r), options: opts };
+  });
 
   // ------------------------------------------------------------- Fullscreen
   acc(g.Document, 'fullscreenEnabled', function () { return false; });
@@ -335,18 +384,32 @@
   if (MQL) {
     const live = [];
     const nativeMatchMedia = g.matchMedia;
-    acc(MQL, 'media', function () { return ''; });
-    acc(MQL, 'matches', function () { return false; });
+    // MediaQueryList is an EventTarget (the native class was set up before
+    // EventTarget existed).
+    if (g.EventTarget) {
+      Object.setPrototypeOf(MQL.prototype, g.EventTarget.prototype);
+      Object.setPrototypeOf(MQL, g.EventTarget);
+    }
+    // The native list's live `matches` getter evaluates `this.media`.
+    const probe = nativeMatchMedia.call(g, 'all');
+    const nativeMatches = Object.getOwnPropertyDescriptor(probe, 'matches').get;
+    const brand = (m) => { if (!m || typeof m !== 'object' || !Object.prototype.hasOwnProperty.call(m, S)) throw new TypeError('Illegal invocation'); return m[S]; };
+    Object.defineProperty(MQL.prototype, 'media', { get: Object.defineProperty(function () { return brand(this).media; }, 'name', { value: 'get media' }), configurable: true, enumerable: true });
+    Object.defineProperty(MQL.prototype, 'matches', { get: Object.defineProperty(function () { brand(this); return nativeMatches.call(this); }, 'name', { value: 'get matches' }), configurable: true, enumerable: true });
     N.installHandlers(MQL.prototype, ['change']);
-    method(MQL, 'removeListener', function (f) { this.removeEventListener('change', f); }, true);
+    method(MQL, 'addListener', function addListener(f) { brand(this); if (f !== null && f !== undefined) this.addEventListener('change', f); }, true);
+    method(MQL, 'removeListener', function removeListener(f) { brand(this); if (f !== null && f !== undefined) this.removeEventListener('change', f); }, true);
     hidden(g, 'matchMedia', function matchMedia(q) {
       if (arguments.length < 1) throw new TypeError("Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present.");
       const m = nativeMatchMedia.call(g, q);
-      try { delete m.onchange; } catch (e) {}
-      hidden(m, S, { last: m.matches });
+      const media = m.media;
+      for (const k of ['media', 'matches', 'onchange']) { try { delete m[k]; } catch (e) { /* ignore */ } }
+      hidden(m, S, { media, last: false });
+      m[S].last = m.matches;
       live.push(m);
       return m;
     });
+    if (g.MediaQueryListEvent) Object.defineProperty(g.MediaQueryListEvent, 'length', { value: 1, configurable: true });
     g.addEventListener('resize', () => {
       for (let i = live.length - 1; i >= 0; i--) {
         const m = live[i];
@@ -643,4 +706,83 @@
   define('CacheStorage', CacheStorage);
   const caches = make(CacheStorage, new Map());
   Object.defineProperty(g, 'caches', { get() { return caches; }, configurable: true, enumerable: true });
+
+  // Scroll methods return a promise settled when the scroll completes
+  // (CSSOM View): scrolling here is instant, so it is already settled.
+  const promiseScroll = (o, name) => {
+    const d = o && Object.getOwnPropertyDescriptor(o, name);
+    if (!d || typeof d.value !== 'function') return;
+    const f = d.value;
+    const w = { [name](...args) { f.apply(this, args); return Promise.resolve(); } }[name];
+    Object.defineProperty(w, 'length', { value: f.length, configurable: true });
+    Object.defineProperty(o, name, Object.assign({}, d, { value: w }));
+  };
+  if (g.Element) for (const n of ['scroll', 'scrollTo', 'scrollBy', 'scrollIntoView']) promiseScroll(g.Element.prototype, n);
+
+  // Element.checkVisibility(options) (CSSOM View): no box (disconnected,
+  // display: none on it or a flat-tree ancestor, under content-visibility:
+  // hidden) → false; optionally opacity 0 / visibility not visible too.
+  if (g.Element && g.getComputedStyle) {
+    const flatParent = (n) => {
+      if (n.assignedSlot) return n.assignedSlot;
+      const p = n.parentNode;
+      if (p && p.nodeType === 11 && p.host) return p.host;
+      return p && p.nodeType === 1 ? p : null;
+    };
+    // HTMLElement.scrollParent() (CSSOM View): the nearest ancestor scroll
+    // container along the containing block chain (fixed / absolute boxes
+    // skip ancestors that do not contain them); the document's scrolling
+    // element at the root; null for the root and boxless elements.
+    const scrollContainer = (s) => !['visible', 'clip'].includes(s.overflowX || s.overflow) || !['visible', 'clip'].includes(s.overflowY || s.overflow);
+    const fixedCB = (s) => (s.transform && s.transform !== 'none') || /paint|layout|strict|content/.test(s.contain || '') || (s.filter && s.filter !== 'none') || /transform/.test(s.willChange || '');
+    // The `scrollParent` attribute (an accessor, as the IDL has it).
+    if (g.HTMLElement) Object.defineProperty(g.HTMLElement.prototype, 'scrollParent', {
+      get: Object.defineProperty(function () {
+        if (!(this instanceof g.HTMLElement)) throw new TypeError('Illegal invocation');
+        const d = this.ownerDocument;
+        if (!this.isConnected || this === d.documentElement || this === d.scrollingElement) return null;
+        const own = g.getComputedStyle(this);
+        if (own.display === 'none' || own.display === 'contents') return null;
+        let pos = own.position;
+        for (let n = flatParent(this); n; n = flatParent(n)) {
+          if (n === d.documentElement) return pos === 'fixed' ? null : d.scrollingElement;
+          const s = g.getComputedStyle(n);
+          if (s.display === 'contents') continue;
+          if (pos === 'fixed') {
+            if (!fixedCB(s)) continue;
+            pos = s.position;
+          } else if (pos === 'absolute') {
+            if (s.position === 'static' && !fixedCB(s)) continue;
+            pos = s.position;
+          } else {
+            pos = s.position;
+          }
+          if (n !== d.body && scrollContainer(s)) return n;
+        }
+        return pos === 'fixed' ? null : d.scrollingElement;
+      }, 'name', { value: 'get scrollParent' }),
+      configurable: true, enumerable: true,
+    });
+    Object.defineProperty(g.Element.prototype, 'checkVisibility', {
+      value: function checkVisibility(options) {
+        const o = options || {};
+        if (!this.isConnected) return false;
+        const checkOpacity = !!(o.checkOpacity || o.opacityProperty);
+        const checkVis = !!(o.checkVisibilityCSS || o.visibilityProperty);
+        for (let n = this, self = true; n; n = flatParent(n), self = false) {
+          const s = g.getComputedStyle(n);
+          if (s.display === 'none' || (self && s.display === 'contents')) return false;
+          if (!self && s.getPropertyValue('content-visibility') === 'hidden') return false;
+          if (checkOpacity && Number(s.opacity) === 0) return false;
+        }
+        if (checkVis && g.getComputedStyle(this).visibility !== 'visible') return false;
+        return true;
+      },
+      writable: true, configurable: true, enumerable: true,
+    });
+  }
+  for (const n of ['scroll', 'scrollTo', 'scrollBy']) {
+    if (Object.prototype.hasOwnProperty.call(g, n)) promiseScroll(g, n);
+    else if (g.Window) promiseScroll(g.Window.prototype, n);
+  }
 })();

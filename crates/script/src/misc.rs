@@ -98,16 +98,8 @@ fn dom_parser_parse(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
             let mut doc = rabbithole_html::xml::parse_xml(&src);
             doc.content_type = ty.clone();
             doc.url = url;
-            let v = crate::document::new_aux_document_from(realm, doc);
-            // An XMLDocument.
-            let g = Value::Object(realm.global());
-            let ctor = realm.get_str(g, "XMLDocument")?;
-            if ctor.is_object() {
-                if let (V::Object(o), V::Object(p)) = (v.v(), realm.get_str(ctor, "prototype")?.v()) {
-                    realm.obj_mut(o).set_proto(Some(p));
-                }
-            }
-            Ok(v)
+            // An XML document with the Document interface (not XMLDocument).
+            Ok(crate::document::new_aux_document_from(realm, doc))
         }
         _ => Err(realm.throw_type_error(&format!("Failed to execute 'parseFromString' on 'DOMParser': The provided value '{ty}' is not a valid enum value of type DOMParserSupportedType."))),
     }
@@ -119,10 +111,19 @@ fn xml_serializer_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult
 }
 
 fn xml_serializer_serialize(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let Some(n) = node_of(realm, &arg(args, 0)) else {
-        return Err(realm.throw_type_error("parameter 1 is not of type 'Node'"));
+    let v = arg(args, 0);
+    let Some(n) = node_of(realm, &v) else {
+        // An Attr serializes as the empty string.
+        if v.is_object() {
+            let t = realm.get_str(v, "nodeType")?;
+            if matches!(t.v(), V::Number(x) if x == 2.0) {
+                return Ok(Value::str(""));
+            }
+        }
+        return Err(realm.throw_type_error("Failed to execute 'serializeToString' on 'XMLSerializer': parameter 1 is not of type 'Node'."));
     };
-    Ok(Value::str(&with_doc(n.doc, |doc| doc.serialize(n.node, true))))
+    // XMLSerializer does not require well-formedness.
+    Ok(Value::str(&with_doc(n.doc, |doc| doc.serialize_xml(n.node, false)).unwrap_or_default()))
 }
 
 // ------------------------------------------------------------------- Range
@@ -285,17 +286,64 @@ fn range_get_client_rects(realm: &mut Realm, this: Value, _: &[Value]) -> JsResu
     Ok(realm.new_array_value(vec![r]))
 }
 
+/// `__rhNative.contextualFragment(startNode, markup)`: the fragment of
+/// `Range.createContextualFragment()` for a range starting in `startNode`.
+pub(crate) fn contextual_fragment_native(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &arg(args, 0)) else {
+        return Err(realm.throw_type_error("contextualFragment: node expected"));
+    };
+    contextual_fragment(realm, n.doc, Some(n.node), &args[1..])
+}
+
 fn range_create_contextual_fragment(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = range_data(realm, &this)?;
     let d = realm.host_data::<RangeData>(o).unwrap();
     let doc = d.doc;
-    let ctx = d.start.map(|(n, _)| n).unwrap_or_else(|| with_doc(doc, |d| d.body().unwrap_or(Document::ROOT)));
+    let start = d.start.map(|(n, _)| n);
+    contextual_fragment(realm, doc, start, args)
+}
+
+fn contextual_fragment(realm: &mut Realm, doc: u32, start: Option<NodeId>, args: &[Value]) -> JsResult<Value> {
+    if args.is_empty() {
+        return Err(realm.throw_type_error("Failed to execute 'createContextualFragment' on 'Range': 1 argument required, but only 0 present."));
+    }
     let html = arg_str(realm, args, 0)?;
-    let nodes = node::parse_html_into(NodeRef { doc, node: ctx }, &html);
+    // The context: the start node if it is an element, else its parent
+    // element; none (or an HTML document's <html>) parses as <body>.
+    let ctx = with_doc(doc, |d| {
+        let el = start.and_then(|s| if d.element(s).map(|e| !e.tag.starts_with('#')).unwrap_or(false) { Some(s) } else { d.parent(s).filter(|&p| d.element(p).map(|e| !e.tag.starts_with('#')).unwrap_or(false)) });
+        match el {
+            Some(e) if !(d.is_html && d.element(e).map(|x| x.tag == "html" && x.ns == rabbithole_dom::Namespace::Html).unwrap_or(false)) => e,
+            _ => d.create_element("body", vec![]),
+        }
+    });
+    let nodes = match node::try_parse_html_into(NodeRef { doc, node: ctx }, &html) {
+        Ok(n) => n,
+        Err(msg) => return Err(dom_exception(realm, "SyntaxError", &format!("Failed to execute 'createContextualFragment' on 'Range': The provided markup is invalid XML ({msg})."))),
+    };
     let frag = with_doc(doc, |d| {
         let f = d.create_element("#fragment", vec![]);
+        // XML fragments: HTML <html>, <head> and <body> are replaced by
+        // their children (the HTML fragment parser never makes them).
+        fn strip(d: &mut Document, n: NodeId, f: NodeId) {
+            let special = !d.is_html && d.element(n).map(|e| e.ns == rabbithole_dom::Namespace::Html && matches!(e.tag.as_str(), "html" | "head" | "body")).unwrap_or(false);
+            if special {
+                let kids: Vec<NodeId> = d.children(n).collect();
+                for k in kids {
+                    d.detach(k);
+                    strip(d, k, f);
+                }
+            } else {
+                d.append_child(f, n);
+            }
+        }
         for n in nodes {
-            d.append_child(f, n.node);
+            strip(d, n.node, f);
+        }
+        // Its scripts run when inserted (not "already started").
+        let scripts: Vec<NodeId> = d.descendants(f).filter(|&s| d.tag(s) == Some("script")).collect();
+        for s in scripts {
+            d.script_started.remove(&s);
         }
         f
     });

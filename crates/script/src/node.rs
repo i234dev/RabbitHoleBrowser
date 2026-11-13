@@ -10,6 +10,8 @@ use rabbithole_js::{JsResult, ObjectId, Realm, Value, HIDDEN};
 
 pub const ELEMENT_NODE: f64 = 1.0;
 pub const TEXT_NODE: f64 = 3.0;
+pub const CDATA_SECTION_NODE: f64 = 4.0;
+pub const PROCESSING_INSTRUCTION_NODE: f64 = 7.0;
 pub const COMMENT_NODE: f64 = 8.0;
 pub const DOCUMENT_NODE: f64 = 9.0;
 pub const DOCUMENT_TYPE_NODE: f64 = 10.0;
@@ -22,7 +24,9 @@ pub(crate) fn node_type(n: NodeRef) -> f64 {
         NodeData::Document => DOCUMENT_NODE,
         NodeData::Element(e) if e.tag == "#fragment" || e.tag == "#shadow-root" => DOCUMENT_FRAGMENT_NODE,
         NodeData::Element(_) => ELEMENT_NODE,
+        NodeData::Text(_) if doc.is_cdata(n.node) => CDATA_SECTION_NODE,
         NodeData::Text(_) => TEXT_NODE,
+        NodeData::Comment(_) if doc.pi_target(n.node).is_some() => PROCESSING_INSTRUCTION_NODE,
         NodeData::Comment(_) => COMMENT_NODE,
         NodeData::Doctype(_) => DOCUMENT_TYPE_NODE,
     })
@@ -46,8 +50,12 @@ pub(crate) fn node_name(n: NodeRef) -> String {
                 qualified
             }
         }
+        NodeData::Text(_) if doc.is_cdata(n.node) => "#cdata-section".into(),
         NodeData::Text(_) => "#text".into(),
-        NodeData::Comment(_) => "#comment".into(),
+        NodeData::Comment(_) => match doc.pi_target(n.node) {
+            Some(t) => t.to_string(),
+            None => "#comment".into(),
+        },
         NodeData::Doctype(d) => d.name.clone(),
     })
 }
@@ -451,6 +459,7 @@ pub(crate) fn insert_node_checked(realm: &mut Realm, parent: NodeRef, child: Nod
 /// Run newly connected scripts and custom-element reactions.
 fn after_insert_connected(realm: &mut Realm, inserted: &[NodeRef]) -> JsResult<()> {
     let mut scripts = Vec::new();
+    let mut frames = Vec::new();
     {
         let st = state();
         let st = st.borrow();
@@ -460,6 +469,8 @@ fn after_insert_connected(realm: &mut Realm, inserted: &[NodeRef]) -> JsResult<(
                 for d in doc.shadow_including_descendants(n.node) {
                     if doc.is_element(d, "script") && !st.ran_scripts.contains(&d) {
                         scripts.push(d);
+                    } else if doc.is_element(d, "iframe") && doc.attr(d, "src").is_none() && doc.attr(d, "srcdoc").is_none() {
+                        frames.push(d);
                     }
                 }
             }
@@ -468,14 +479,44 @@ fn after_insert_connected(realm: &mut Realm, inserted: &[NodeRef]) -> JsResult<(
     // Custom element reactions (queued by record_child_list) run first:
     // upgrades and connectedCallback in tree order.
     crate::shadow::drain_ce_reactions(realm);
+    // An iframe inserted without `src` gets its initial about:blank
+    // document and fires `load` synchronously (HTML "process the iframe
+    // attributes", initial insertion).
+    for f in frames {
+        if with_env(|env| env.ensure_frame(f)).is_some() && is_connected(NodeRef::main(f)) {
+            with_env(|env| env.frame_initial_load_fired(f));
+            crate::events::dispatch(realm, TargetKey::Node(NodeRef::main(f)), "load", crate::EventInit { bubbles: false, cancelable: false, detail: None }, true);
+        }
+    }
     for s in scripts {
         run_script_element(realm, NodeRef::main(s));
     }
     Ok(())
 }
 
+/// Is `ty` a JavaScript MIME type essence (HTML "JavaScript MIME type")?
+pub(crate) fn is_js_mime(ty: &str) -> bool {
+    matches!(
+        ty,
+        "text/javascript" | "application/javascript" | "text/ecmascript" | "application/ecmascript" | "text/jscript" | "application/x-ecmascript" | "application/x-javascript"
+            | "text/javascript1.0" | "text/javascript1.1" | "text/javascript1.2" | "text/javascript1.3" | "text/javascript1.4" | "text/javascript1.5"
+            | "text/livescript" | "text/x-ecmascript" | "text/x-javascript"
+    )
+}
+
 /// Execute a `<script>` element (inline or external) now.
 pub(crate) fn run_script_element(realm: &mut Realm, n: NodeRef) {
+    run_script_element_with(realm, n, false)
+}
+
+/// [`run_script_element`] for a parser-blocking script of a
+/// script-created parser: an external script is fetched synchronously
+/// and runs before parsing goes on.
+pub(crate) fn run_script_element_sync(realm: &mut Realm, n: NodeRef) {
+    run_script_element_with(realm, n, true)
+}
+
+fn run_script_element_with(realm: &mut Realm, n: NodeRef, sync: bool) {
     if n.doc != 0 {
         return;
     }
@@ -485,6 +526,11 @@ pub(crate) fn run_script_element(realm: &mut Realm, n: NodeRef) {
         if !st.ran_scripts.insert(n.node) {
             return;
         }
+    }
+    // "Already started" (fragment-parsed, from a document without
+    // scripting, or a clone of a script that ran).
+    if !with_doc(0, |doc| doc.script_started.insert(n.node)) {
+        return;
     }
     let (ty, src, inline, nomodule) = with_doc(0, |doc| {
         let ty = doc.attr(n.node, "type").map(|t| t.trim().to_ascii_lowercase()).unwrap_or_default();
@@ -516,7 +562,7 @@ pub(crate) fn run_script_element(realm: &mut Realm, n: NodeRef) {
             let req = with_env(|env| rabbithole_net::Request::get(url.clone()).with_dest(rabbithole_net::Destination::Script).with_referer(env.document_url()));
             // Like browsers, download injected scripts without blocking the
             // inserting script; they run when the download completes.
-            if let Some(rx) = with_env(|env| env.fetch_background(req.clone())) {
+            if let Some(rx) = if sync { None } else { with_env(|env| env.fetch_background(req.clone())) } {
                 state().borrow_mut().pending_script_fetches.push((n, url.to_string(), is_module, rx));
                 return;
             }
@@ -650,25 +696,14 @@ pub(crate) fn set_text_content(n: NodeRef, text: &str) {
 /// Parse HTML and insert the resulting nodes as children of `n`.
 pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsResult<()> {
     let context = tag_of(n).unwrap_or_else(|| "div".into());
-    // Raw text (script, style, ...) and RCDATA (textarea, title) elements
-    // take the markup as text (HTML fragment parsing algorithm, §13.2.6.4).
-    let raw = matches!(context.as_str(), "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext");
-    let rcdata = matches!(context.as_str(), "textarea" | "title");
-    if raw || rcdata {
-        let text = if rcdata { rabbithole_html::entities::decode(html, false) } else { html.to_string() };
-        with_doc(n.doc, |doc| {
-            doc.clear_children(n.node);
-            if !text.is_empty() {
-                let t = doc.create_text(&text);
-                doc.append_child(n.node, t);
-            }
-        });
-        crate::host::mark_dirty();
-        return Ok(());
-    }
-    // A template's markup is its content's.
-    let n = if context == "template" { NodeRef { doc: n.doc, node: with_doc(n.doc, |doc| doc.template_content(n.node)) } } else { n };
-    let (frag, frag_body) = parse_fragment_for(n, &context, html);
+    // A template's markup is its content's (the template stays the
+    // context element).
+    let is_template = with_doc(n.doc, |doc| doc.element(n.node).map(|e| e.tag == "template" && e.ns == rabbithole_dom::Namespace::Html).unwrap_or(false));
+    let (frag, frag_body) = match parse_fragment_for(n, &context, html) {
+        Ok(r) => r,
+        Err(msg) => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to set the 'innerHTML' property on 'Element': The provided markup is invalid XML ({msg})."))),
+    };
+    let n = if is_template { NodeRef { doc: n.doc, node: with_doc(n.doc, |doc| doc.template_content(n.node)) } } else { n };
     let old = children_of(n);
     let added = with_doc(n.doc, |doc| {
         doc.clear_children(n.node);
@@ -699,7 +734,6 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
     if n.doc == 0 {
         mark_dirty();
     }
-    let _ = realm;
     Ok(())
 }
 
@@ -707,15 +741,64 @@ pub(crate) fn set_inner_html(realm: &mut Realm, n: NodeRef, html: &str) -> JsRes
 /// as the context element: its namespace and its document's scripting
 /// flag and quirks mode. Returns the parsed document and the node whose
 /// children are the fragment's nodes.
-fn parse_fragment_for(ctx: NodeRef, context: &str, html: &str) -> (Document, rabbithole_dom::NodeId) {
-    let (ns, quirks) = with_doc(ctx.doc, |doc| {
+fn parse_fragment_for(ctx: NodeRef, context: &str, html: &str) -> Result<(Document, rabbithole_dom::NodeId), String> {
+    let (ns, quirks, is_html) = with_doc(ctx.doc, |doc| {
         let ns = match doc.element(ctx.node) {
             Some(e) if e.tag != "#fragment" && e.tag != "#shadow-root" => e.ns.clone(),
             _ => rabbithole_dom::Namespace::Html,
         };
-        (ns, doc.quirks_mode)
+        (ns, doc.quirks_mode, doc.is_html)
     });
-    rabbithole_html::parse_fragment_in(html, context, ns, scripting_doc(ctx.doc), quirks)
+    if !is_html {
+        return parse_xml_fragment(ctx, html);
+    }
+    Ok(rabbithole_html::parse_fragment_in(html, context, ns, scripting_doc(ctx.doc), quirks))
+}
+
+/// The XML fragment parsing algorithm: the markup inside an element that
+/// declares the context element's in-scope namespaces (its default
+/// namespace and prefixes), parsed by the XML parser.
+fn parse_xml_fragment(ctx: NodeRef, markup: &str) -> Result<(Document, rabbithole_dom::NodeId), String> {
+    let decls: Vec<(String, String)> = with_doc(ctx.doc, |doc| {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        let mut cur = Some(ctx.node);
+        while let Some(n) = cur {
+            if let Some(e) = doc.element(n).filter(|e| !e.tag.starts_with('#')) {
+                let own = (e.prefix.clone().unwrap_or_default(), e.ns.uri().unwrap_or("").to_string());
+                if !seen.iter().any(|(p, _)| *p == own.0) {
+                    seen.push(own);
+                }
+                for (k, v) in &e.attrs {
+                    if doc.attr_namespace(n, k) != Some(rabbithole_dom::XMLNS_NS) {
+                        continue;
+                    }
+                    let p = if k == "xmlns" { String::new() } else { k.strip_prefix("xmlns:").unwrap_or(k).to_string() };
+                    if !seen.iter().any(|(q, _)| *q == p) {
+                        seen.push((p, v.clone()));
+                    }
+                }
+            }
+            cur = doc.parent(n);
+        }
+        seen
+    });
+    let esc = |s: &str| s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+    let mut root = String::from("<rh-fragment-root");
+    for (p, u) in &decls {
+        if p == "xml" || p == "xmlns" {
+            continue;
+        }
+        if p.is_empty() {
+            root.push_str(&format!(" xmlns=\"{}\"", esc(u)));
+        } else if !u.is_empty() {
+            root.push_str(&format!(" xmlns:{p}=\"{}\"", esc(u)));
+        }
+    }
+    root.push('>');
+    let src = format!("{root}{markup}</rh-fragment-root>");
+    let doc = rabbithole_html::xml::try_parse_xml(&src)?;
+    let el = doc.child_elements(Document::ROOT).next().ok_or_else(|| "no root".to_string())?;
+    Ok((doc, el))
 }
 
 /// Does the document run scripts? The page and its frames do; auxiliary
@@ -728,16 +811,22 @@ fn scripting_doc(doc: u32) -> bool {
 /// Nodes produced by parsing `html` in the context of `ctx`, imported into
 /// the document of `ctx` (detached, in order).
 pub(crate) fn parse_html_into(ctx: NodeRef, html: &str) -> Vec<NodeRef> {
+    try_parse_html_into(ctx, html).unwrap_or_default()
+}
+
+/// [`parse_html_into`]; `Err` for markup that is not well-formed XML in an
+/// XML document.
+pub(crate) fn try_parse_html_into(ctx: NodeRef, html: &str) -> Result<Vec<NodeRef>, String> {
     let context = tag_of(ctx).filter(|t| t != "#fragment").unwrap_or_else(|| "div".into());
-    let (frag, frag_body) = parse_fragment_for(ctx, &context, html);
-    with_doc(ctx.doc, |doc| {
+    let (frag, frag_body) = parse_fragment_for(ctx, &context, html)?;
+    Ok(with_doc(ctx.doc, |doc| {
         let mut out = Vec::new();
         for c in frag.children(frag_body) {
             let copy = doc.import_subtree(&frag, c);
             out.push(NodeRef { doc: ctx.doc, node: copy });
         }
         out
-    })
+    }))
 }
 
 /// Convert a `Node | string` argument to a node ref (strings become text nodes).
@@ -1006,8 +1095,30 @@ fn n_is_connected(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
 }
 
 fn n_base_uri(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let _ = this_node(realm, &this, "baseURI")?;
-    Ok(Value::str(&base_url().to_string()))
+    let n = this_node(realm, &this, "baseURI")?;
+    Ok(Value::str(&node_base_url(n).to_string()))
+}
+
+/// The base URL of the document of `n`: the page's for this realm's own
+/// document; otherwise the document's first `<base href>` resolved
+/// against its URL, or its URL (about:blank documents use the page's).
+pub(crate) fn node_base_url(n: NodeRef) -> rabbithole_net::Url {
+    if n.doc == 0 {
+        return base_url();
+    }
+    let doc_url = if n.doc & crate::host::FRAME_DOC != 0 {
+        with_env(|env| env.frame_url((n.doc & !crate::host::FRAME_DOC) as u64))
+    } else {
+        with_doc(n.doc, |doc| doc.url.clone())
+    };
+    let Some(url) = doc_url.and_then(|u| rabbithole_net::Url::parse_absolute(&u)).filter(|u| u.scheme != "about") else {
+        return base_url();
+    };
+    let href = with_doc(n.doc, |doc| doc.descendants(Document::ROOT).find(|&e| doc.element(e).map(|el| el.tag == "base" && el.ns == rabbithole_dom::Namespace::Html && el.attr("href").is_some()).unwrap_or(false)).and_then(|e| doc.attr(e, "href").map(|s| s.to_string())));
+    match href.and_then(|h| url.join(h.trim())) {
+        Some(b) => b,
+        None => url,
+    }
 }
 
 fn n_append_child(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1301,11 +1412,33 @@ fn n_query_selector_all(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
 
 fn n_get_elements_by_tag_name(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "getElementsByTagName")?;
-    let tag = arg_str(realm, args, 0)?.to_ascii_lowercase();
+    // DOM "list of elements with qualified name": in an HTML document, HTML
+    // elements match the lower-cased name and other elements the name as
+    // given.
+    let name = arg_str(realm, args, 0)?;
+    let lower = name.to_ascii_lowercase();
     let found = with_doc(n.doc, |doc| {
+        let html_doc = doc.is_html;
         doc.descendants(n.node)
             .skip(1)
-            .filter(|&d| doc.element(d).is_some() && (tag == "*" || doc.tag(d) == Some(tag.as_str())))
+            .filter(|&d| {
+                let Some(e) = doc.element(d) else { return false };
+                if e.tag.starts_with('#') {
+                    return false;
+                }
+                if name == "*" {
+                    return true;
+                }
+                let matches = |q: &str| match &e.prefix {
+                    Some(p) => q.len() == p.len() + 1 + e.tag.len() && q.starts_with(p.as_str()) && q.as_bytes()[p.len()] == b':' && q.ends_with(e.tag.as_str()),
+                    None => q == e.tag,
+                };
+                if html_doc && e.ns == rabbithole_dom::Namespace::Html {
+                    matches(&lower)
+                } else {
+                    matches(&name)
+                }
+            })
             .map(|d| NodeRef { doc: n.doc, node: d })
             .collect::<Vec<_>>()
     });
@@ -1446,6 +1579,14 @@ fn doctype_field(realm: &mut Realm, this: &Value, f: fn(&rabbithole_dom::Doctype
         NodeData::Doctype(d) => f(d).to_string(),
         _ => String::new(),
     })))
+}
+
+fn pi_target(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "ProcessingInstruction")?;
+    match with_doc(n.doc, |doc| doc.pi_target(n.node).map(|s| s.to_string())) {
+        Some(t) => Ok(Value::str(&t)),
+        None => Err(realm.throw_type_error("Illegal invocation")),
+    }
 }
 
 fn doctype_name(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1598,7 +1739,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(dt, "name", Some(doctype_name), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_accessor(dt, "publicId", Some(doctype_public_id), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_accessor(dt, "systemId", Some(doctype_system_id), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
-    define_class(realm, "ProcessingInstruction", Some("CharacterData"), illegal_ctor);
+    let pi = define_class(realm, "ProcessingInstruction", Some("CharacterData"), illegal_ctor);
+    realm.define_accessor(pi, "target", Some(pi_target), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     let frag = define_class(realm, "DocumentFragment", Some("Node"), fragment_ctor);
     realm.define_method(frag, "getElementById", 1, fragment_get_element_by_id);
 

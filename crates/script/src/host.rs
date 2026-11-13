@@ -166,9 +166,12 @@ pub struct HostState {
     pub canvases: crate::canvas2d::CanvasStore,
     /// Live range / iterator slots of collected handles (see `live.rs`).
     pub live_freed: crate::live::FreedSlots,
-    /// Documents of this realm opened with `document.open()` and not yet
-    /// closed, with the markup written to them so far.
-    pub open_docs: HashMap<u32, String>,
+    /// Script-created parsers (`document.open()`) of this realm's
+    /// documents, until they finish.
+    pub doc_parsers: HashMap<u32, Rc<RefCell<crate::docparser::ActiveParser>>>,
+    /// The "throw-on-dynamic-markup-insertion counter" (raised while the
+    /// parser runs custom element constructors).
+    pub throw_on_dynamic_markup: u32,
 }
 
 thread_local! {
@@ -383,11 +386,6 @@ pub(crate) fn svg_class(tag: &str) -> &'static str {
 fn is_svg_node(doc: &Document, node: NodeId) -> bool {
     match doc.element(node).map(|e| &e.ns) {
         Some(rabbithole_dom::Namespace::Svg) => true,
-        // HTML-namespaced nodes parsed into an <svg> subtree by innerHTML.
-        Some(rabbithole_dom::Namespace::Html) => {
-            let fo = |n: NodeId| doc.tag(n).map(|t| t.eq_ignore_ascii_case("foreignobject")).unwrap_or(false);
-            fo(node) || doc.ancestor_or_self(node, |n| doc.is_element(n, "svg") || fo(n)).map(|a| doc.is_element(a, "svg")).unwrap_or(false)
-        }
         _ => false,
     }
 }
@@ -399,7 +397,9 @@ pub(crate) fn wrap(realm: &mut Realm, n: NodeRef) -> Value {
     }
     let (proto_name, class_name) = with_doc(n.doc, |doc| match &doc.node(n.node).data {
         rabbithole_dom::NodeData::Document => ("Document", "HTMLDocument"),
+        rabbithole_dom::NodeData::Text(_) if doc.is_cdata(n.node) => ("CDATASection", "CDATASection"),
         rabbithole_dom::NodeData::Text(_) => ("Text", "Text"),
+        rabbithole_dom::NodeData::Comment(_) if doc.pi_target(n.node).is_some() => ("ProcessingInstruction", "ProcessingInstruction"),
         rabbithole_dom::NodeData::Comment(_) => ("Comment", "Comment"),
         rabbithole_dom::NodeData::Doctype(_) => ("DocumentType", "DocumentType"),
         rabbithole_dom::NodeData::Element(e) if matches!(e.ns, rabbithole_dom::Namespace::None | rabbithole_dom::Namespace::Other(_)) => ("Element", "Element"),

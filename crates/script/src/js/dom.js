@@ -222,20 +222,70 @@
   define('HTMLDocument', g.Document);
   if (g.ProcessingInstruction) {
     acc(g.ProcessingInstruction, 'target', function () { return this.nodeName; });
-    for (const k of ['getAttribute', 'getAttributeNames', 'hasAttribute', 'hasAttributes', 'removeAttribute', 'setAttribute', 'toggleAttribute']) {
-      method(g.ProcessingInstruction, k, function (name, value) {
-        const m = this[S] || hidden(this, S, new Map()) && this[S];
-        switch (k) {
-          case 'getAttribute': return m.has(String(name)) ? m.get(String(name)) : null;
-          case 'getAttributeNames': return Array.from(m.keys());
-          case 'hasAttribute': return m.has(String(name));
-          case 'hasAttributes': return m.size > 0;
-          case 'removeAttribute': m.delete(String(name)); return undefined;
-          case 'setAttribute': m.set(String(name), String(value)); return undefined;
-          default: if (m.has(String(name)) && value !== true) { m.delete(String(name)); return false; } m.set(String(name), ''); return true;
-        }
-      });
-    }
+    // Processing instruction attributes (declarative partial updates): the
+    // data read as `name="value"` pairs (any malformed pair: none at all);
+    // changing them rewrites the data.
+    const PI_ENT = { amp: '&', quot: '"', lt: '<', gt: '>', apos: "'", nbsp: ' ' };
+    const piParse = (data) => {
+      const out = [];
+      let i = 0;
+      const ws = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+      while (i < data.length) {
+        while (i < data.length && ws(data[i])) i++;
+        if (i >= data.length) break;
+        let j = i;
+        while (j < data.length && data[j] !== '=' && !ws(data[j])) j++;
+        const name = data.slice(i, j);
+        if (!name || data[j] !== '=' || (data[j + 1] !== '"' && data[j + 1] !== "'")) return [];
+        const q = data[j + 1];
+        const end = data.indexOf(q, j + 2);
+        if (end < 0) return [];
+        const raw = data.slice(j + 2, end);
+        out.push([name, raw.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);/g, (m, e) => e[0] === '#' ? String.fromCodePoint(e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)) : (PI_ENT[e] ?? m))]);
+        i = end + 1;
+        if (i < data.length && !ws(data[i])) return [];
+      }
+      return out;
+    };
+    const piEscape = (v) => String(v).replace(/&/g, '&amp;').replace(/ /g, '&nbsp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const piWrite = (pi, attrs) => { pi.data = attrs.map(([n, v]) => `${n}="${piEscape(v)}"`).join(' '); };
+    const piName = (name) => {
+      const n = String(name);
+      if (n === '' || /[\s\0\/>="'<]/.test(n)) throw domError(`Failed to execute on 'ProcessingInstruction': '${n}' is not a valid attribute name.`, 'InvalidCharacterError');
+      return n;
+    };
+    const P = g.ProcessingInstruction;
+    method(P, 'getAttribute', function (name) { const e = piParse(this.data).find(([n]) => n === String(name)); return e ? e[1] : null; });
+    method(P, 'getAttributeNames', function () { return piParse(this.data).map(([n]) => n); });
+    method(P, 'hasAttribute', function (name) { return piParse(this.data).some(([n]) => n === String(name)); });
+    method(P, 'hasAttributes', function () { return piParse(this.data).length > 0; });
+    method(P, 'removeAttribute', function (name) {
+      const attrs = piParse(this.data);
+      const i = attrs.findIndex(([n]) => n === String(name));
+      if (i >= 0) { attrs.splice(i, 1); piWrite(this, attrs); }
+    });
+    method(P, 'setAttribute', function (name, value) {
+      const n = piName(name);
+      const attrs = piParse(this.data);
+      const e = attrs.find(([k]) => k === n);
+      if (e) e[1] = String(value); else attrs.push([n, String(value)]);
+      piWrite(this, attrs);
+    });
+    method(P, 'toggleAttribute', function (name, force) {
+      const n = piName(name);
+      const attrs = piParse(this.data);
+      const i = attrs.findIndex(([k]) => k === n);
+      if (i >= 0) {
+        if (force === true) return true;
+        attrs.splice(i, 1);
+        piWrite(this, attrs);
+        return false;
+      }
+      if (force === false) return false;
+      attrs.push([n, '']);
+      piWrite(this, attrs);
+      return true;
+    });
   }
 
   // ------------------------------------------------------- moveBefore
@@ -425,20 +475,10 @@
       return new g.DOMRect(l, t, r - l, b - t);
     }
     createContextualFragment(html) {
-      const s = this[S];
-      let ctx = s.sc.nodeType === 1 ? s.sc : s.sc.parentElement;
-      if (!ctx || ctx.localName === 'html') ctx = document.body || document.createElement('body');
-      const t = document.createElement('template');
-      t.innerHTML = String(html);
-      const frag = document.importNode(t.content, true);
-      // Scripts created this way run when inserted (unlike innerHTML).
-      for (const old of Array.from(frag.querySelectorAll('script'))) {
-        const sc = document.createElement('script');
-        for (const a of old.getAttributeNames()) sc.setAttribute(a, old.getAttribute(a));
-        sc.textContent = old.textContent;
-        old.replaceWith(sc);
-      }
-      return frag;
+      if (arguments.length < 1) throw new TypeError("Failed to execute 'createContextualFragment' on 'Range': 1 argument required, but only 0 present.");
+      // HTML or XML fragment parsing in the start node's context; the
+      // scripts run when inserted (unlike innerHTML's).
+      return N.contextualFragment(this[S].sc, String(html));
     }
   }
   consts(Range, { START_TO_START: 0, START_TO_END: 1, END_TO_END: 2, END_TO_START: 3 });

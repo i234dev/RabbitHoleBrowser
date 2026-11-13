@@ -21,9 +21,15 @@ pub enum Token {
     StartTag { name: String, attrs: Vec<(String, String)>, self_closing: bool },
     EndTag { name: String },
     Comment(String),
+    /// `<?target data>` (a processing instruction).
+    ProcessingInstruction { target: String, data: String },
     /// A run of character tokens.
     Text(String),
     Eof,
+    /// Incremental input: the tokenizer reached the end of the input
+    /// available so far (or the insertion point) inside a construct it
+    /// cannot finish yet. Feed more input and ask again.
+    NeedInput,
 }
 
 /// Tokenizer states the tree builder switches to.
@@ -109,6 +115,11 @@ pub enum State {
     HexadecimalCharacterReference,
     DecimalCharacterReference,
     NumericCharacterReferenceEnd,
+    /// After `<?`.
+    PiOpen,
+    PiTarget,
+    BeforePiData,
+    PiData,
 }
 
 /// Legacy alias kept for callers that name raw-text kinds.
@@ -160,23 +171,74 @@ pub struct Tokenizer {
     /// namespace, so `<![CDATA[` opens a CDATA section.
     pub allow_cdata: bool,
     eof_emitted: bool,
+    /// No more input will arrive after the end of `input` (an explicit
+    /// EOF): reaching it emits EOF instead of [`Token::NeedInput`].
+    closed: bool,
+    /// The insertion point (`document.write`): input past it is not
+    /// tokenized until it is cleared. None: undefined.
+    insertion_point: Option<usize>,
+    /// Insertion points saved while parser-inserted scripts run.
+    saved_ips: Vec<Option<usize>>,
+    /// Index of a LF that came from a CR at the end of inserted input: a
+    /// LF inserted right after it is dropped (CR LF split across writes).
+    cr_at: Option<usize>,
+    /// The last step ran out of input before the end of the stream.
+    starved: bool,
+    /// Where the current construct started (a data-like state with no
+    /// partial token): restored when the input runs out inside it.
+    mark: Mark,
+}
+
+#[derive(Clone, Copy)]
+struct Mark {
+    pos: usize,
+    state: State,
+    return_state: State,
+    text_len: usize,
+}
+
+fn restartable(s: State) -> bool {
+    matches!(
+        s,
+        State::Data | State::Rcdata | State::Rawtext | State::ScriptData | State::Plaintext | State::ScriptDataEscaped | State::ScriptDataDoubleEscaped | State::CdataSection
+    )
+}
+
+/// Input stream preprocessing: CR LF and lone CR become LF. Returns
+/// whether the input ended with a CR (a LF starting the next piece
+/// belongs to it).
+fn preprocess(input: &str, out: &mut Vec<char>) -> bool {
+    let mut it = input.chars().peekable();
+    let mut trailing_cr = false;
+    while let Some(c) = it.next() {
+        trailing_cr = false;
+        if c == '\r' {
+            if it.peek() == Some(&'\n') {
+                it.next();
+            } else if it.peek().is_none() {
+                trailing_cr = true;
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    trailing_cr
 }
 
 impl Tokenizer {
     /// `input` is preprocessed: CR LF and lone CR become LF.
     pub fn new(input: &str) -> Tokenizer {
-        let mut chars = Vec::with_capacity(input.len());
-        let mut it = input.chars().peekable();
-        while let Some(c) = it.next() {
-            if c == '\r' {
-                if it.peek() == Some(&'\n') {
-                    it.next();
-                }
-                chars.push('\n');
-            } else {
-                chars.push(c);
-            }
-        }
+        let mut t = Tokenizer::streaming();
+        preprocess(input, &mut t.input);
+        t.closed = true;
+        t
+    }
+
+    /// A tokenizer for input that arrives in pieces ([`Tokenizer::append`],
+    /// [`Tokenizer::insert`]) until [`Tokenizer::close`].
+    pub fn streaming() -> Tokenizer {
+        let chars = Vec::new();
         Tokenizer {
             input: chars,
             pos: 0,
@@ -198,7 +260,161 @@ impl Tokenizer {
             last_start_tag: String::new(),
             allow_cdata: false,
             eof_emitted: false,
+            closed: false,
+            insertion_point: None,
+            saved_ips: Vec::new(),
+            cr_at: None,
+            starved: false,
+            mark: Mark { pos: 0, state: State::Data, return_state: State::Data, text_len: 0 },
         }
+    }
+
+    /// Add input at the end of the stream (network data).
+    pub fn append(&mut self, text: &str) {
+        let at = self.input.len();
+        self.insert_chars(at, text);
+    }
+
+    /// `document.write`: insert input just before the insertion point (at
+    /// the end of the stream when it is undefined); the insertion point
+    /// stays after it.
+    pub fn insert(&mut self, text: &str) {
+        let at = self.insertion_point.unwrap_or(self.input.len());
+        let n = self.insert_chars(at, text);
+        if let Some(ip) = self.insertion_point.as_mut() {
+            *ip += n;
+        }
+    }
+
+    fn insert_chars(&mut self, at: usize, text: &str) -> usize {
+        self.compact();
+        let at = at.min(self.input.len());
+        let mut chars = Vec::with_capacity(text.len());
+        let trailing_cr = preprocess(text, &mut chars);
+        if self.cr_at.is_some_and(|i| i + 1 == at) && text.starts_with('\n') {
+            chars.remove(0);
+        }
+        let n = chars.len();
+        for ip in self.saved_ips.iter_mut().flatten() {
+            if *ip >= at {
+                *ip += n;
+            }
+        }
+        if at >= self.input.len() {
+            self.input.extend(chars);
+        } else {
+            self.input.splice(at..at, chars);
+            if let Some(c) = self.cr_at.as_mut() {
+                if *c >= at {
+                    *c += n;
+                }
+            }
+        }
+        if trailing_cr && n > 0 {
+            self.cr_at = Some(at + n - 1);
+        }
+        n
+    }
+
+    /// Drop consumed input (keeps memory flat for long streams).
+    fn compact(&mut self) {
+        let cut = self.pos.min(self.mark.pos).min(self.input.len());
+        if cut < 65536 || cut * 2 < self.input.len() {
+            return;
+        }
+        self.input.drain(..cut);
+        self.pos -= cut;
+        self.mark.pos -= cut;
+        if let Some(ip) = self.insertion_point.as_mut() {
+            *ip = ip.saturating_sub(cut);
+        }
+        for ip in self.saved_ips.iter_mut().flatten() {
+            *ip = ip.saturating_sub(cut);
+        }
+        self.cr_at = self.cr_at.and_then(|c| c.checked_sub(cut));
+    }
+
+    /// Insert an explicit EOF at the end of the stream.
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// The insertion point, if defined.
+    pub fn insertion_point(&self) -> Option<usize> {
+        self.insertion_point
+    }
+
+    /// Set the insertion point just before the next input character.
+    pub fn set_insertion_point_here(&mut self) {
+        self.insertion_point = Some(self.pos.min(self.input.len()));
+    }
+
+    /// Set the insertion point at the end of the stream (`document.open`).
+    pub fn set_insertion_point_at_end(&mut self) {
+        self.insertion_point = Some(self.input.len());
+    }
+
+    pub fn restore_insertion_point(&mut self, ip: Option<usize>) {
+        self.insertion_point = ip.map(|i| i.min(self.input.len()));
+    }
+
+    /// Before running a parser-inserted script: remember the insertion
+    /// point and set it just before the next input character. Input the
+    /// script writes moves the remembered point along.
+    pub fn push_insertion_point_here(&mut self) {
+        self.saved_ips.push(self.insertion_point);
+        self.set_insertion_point_here();
+    }
+
+    /// After the script: back to the remembered insertion point.
+    pub fn pop_insertion_point(&mut self) {
+        let ip = self.saved_ips.pop().flatten();
+        self.restore_insertion_point(ip);
+    }
+
+    /// Input inserted but not tokenized yet.
+    pub fn has_pending_input(&self) -> bool {
+        self.pos < self.input.len()
+    }
+
+    fn limit(&self) -> usize {
+        self.insertion_point.unwrap_or(self.input.len()).min(self.input.len())
+    }
+
+    fn at_eof(&self) -> bool {
+        self.closed && self.limit() >= self.input.len()
+    }
+
+    /// Undo the construct the input ran out in: back to the last mark,
+    /// keeping the characters emitted before it.
+    fn restore(&mut self) {
+        let mut text = String::new();
+        for t in self.queue.drain(..) {
+            if let Token::Text(s) = t {
+                text.push_str(&s);
+            }
+        }
+        text.push_str(&self.text);
+        text.truncate(self.mark.text_len);
+        self.text = text;
+        self.pos = self.mark.pos;
+        self.state = self.mark.state;
+        self.return_state = self.mark.return_state;
+        self.eof_emitted = false;
+        self.tag_name.clear();
+        self.tag_is_end = false;
+        self.tag_self_closing = false;
+        self.attrs.clear();
+        self.attr_name.clear();
+        self.attr_value.clear();
+        self.in_attr = false;
+        self.comment.clear();
+        self.temp.clear();
+        self.doctype = Doctype { name: None, public_id: None, system_id: None, force_quirks: false };
     }
 
     /// Switch to a raw-text state after a start tag (`<script>`, ...).
@@ -218,7 +434,14 @@ impl Tokenizer {
     }
 
     fn next_char(&mut self) -> Option<char> {
-        let c = self.input.get(self.pos).copied();
+        let c = if self.pos < self.limit() {
+            Some(self.input[self.pos])
+        } else {
+            if !self.at_eof() {
+                self.starved = true;
+            }
+            None
+        };
         self.pos += 1;
         c
     }
@@ -228,9 +451,16 @@ impl Tokenizer {
         self.state = s;
     }
 
-    fn lookahead(&self, s: &str, ci: bool) -> bool {
+    fn lookahead(&mut self, s: &str, ci: bool) -> bool {
         let mut i = self.pos;
+        let limit = self.limit();
         for c in s.chars() {
+            if i >= limit {
+                if !self.at_eof() {
+                    self.starved = true;
+                }
+                return false;
+            }
             match self.input.get(i) {
                 Some(&x) if x == c || (ci && x.to_ascii_lowercase() == c.to_ascii_lowercase()) => {}
                 _ => return false,
@@ -307,6 +537,12 @@ impl Tokenizer {
         self.emit(Token::Comment(c));
     }
 
+    fn emit_pi(&mut self) {
+        let target = std::mem::take(&mut self.temp);
+        let data = std::mem::take(&mut self.comment);
+        self.emit(Token::ProcessingInstruction { target, data });
+    }
+
     fn emit_doctype(&mut self) {
         let d = std::mem::replace(&mut self.doctype, Doctype { name: None, public_id: None, system_id: None, force_quirks: false });
         self.emit(Token::Doctype(d));
@@ -335,7 +571,16 @@ impl Tokenizer {
             if self.eof_emitted {
                 return Token::Eof;
             }
+            if restartable(self.state) {
+                self.mark = Mark { pos: self.pos, state: self.state, return_state: self.return_state, text_len: self.text.len() };
+            }
             self.step();
+            if std::mem::take(&mut self.starved) {
+                self.restore();
+                self.flush_text();
+                self.queue.push_back(Token::NeedInput);
+                continue;
+            }
             // Stop at a tag boundary so the tree builder can react before
             // the tokenizer moves on; keep character runs together.
             if !self.queue.is_empty() {
@@ -362,7 +607,8 @@ impl Tokenizer {
                 Some(ch) => {
                     self.emit_char(ch);
                     // Copy the rest of a plain run at once.
-                    while let Some(&n) = self.input.get(self.pos) {
+                    let limit = self.limit();
+                    while let Some(&n) = self.input[..limit].get(self.pos) {
                         if n == '&' || n == '<' {
                             break;
                         }
@@ -408,7 +654,8 @@ impl Tokenizer {
                 }
                 Some('?') => {
                     self.comment.clear();
-                    self.reconsume(State::BogusComment);
+                    self.temp.clear();
+                    self.state = State::PiOpen;
                 }
                 None => {
                     self.emit_char('<');
@@ -776,6 +1023,61 @@ impl Tokenizer {
                 None => self.eof(),
                 Some(_) => self.reconsume(State::BeforeAttributeName),
             },
+            // Processing instructions: `<?` + a target (ASCII letter or
+            // `_`, then ASCII alphanumerics, `-`, `_`; not starting with
+            // "xml"), optional data up to `>` (one trailing `?` dropped).
+            // Anything else is a bogus comment; EOF drops the construct.
+            State::PiOpen => match c {
+                Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => {
+                    self.temp.push(ch);
+                    self.state = State::PiTarget;
+                }
+                None => self.eof(),
+                Some(_) => {
+                    self.comment.push('?');
+                    self.reconsume(State::BogusComment);
+                }
+            },
+            State::PiTarget => match c {
+                Some(ch) if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' => self.temp.push(ch),
+                None => self.eof(),
+                Some(ch) if self.temp.len() >= 3 && self.temp[..3].eq_ignore_ascii_case("xml") || !(is_ws(ch) || ch == '>' || ch == '?') => {
+                    self.comment.push('?');
+                    let t = std::mem::take(&mut self.temp);
+                    self.comment.push_str(&t);
+                    self.reconsume(State::BogusComment);
+                }
+                Some('>') => {
+                    self.state = State::Data;
+                    self.emit_pi();
+                }
+                Some('?') => {
+                    self.comment.push('?');
+                    self.state = State::PiData;
+                }
+                Some(_) => self.state = State::BeforePiData,
+            },
+            State::BeforePiData => match c {
+                Some(ch) if is_ws(ch) => {}
+                Some('>') => {
+                    self.state = State::Data;
+                    self.emit_pi();
+                }
+                None => self.eof(),
+                Some(_) => self.reconsume(State::PiData),
+            },
+            State::PiData => match c {
+                Some('>') => {
+                    if self.comment.ends_with('?') {
+                        self.comment.pop();
+                    }
+                    self.state = State::Data;
+                    self.emit_pi();
+                }
+                Some('\0') => self.comment.push('\u{fffd}'),
+                Some(ch) => self.comment.push(ch),
+                None => self.eof(),
+            },
             State::BogusComment => match c {
                 Some('>') => {
                     self.state = State::Data;
@@ -1132,7 +1434,13 @@ impl Tokenizer {
             }
             State::NamedCharacterReference => {
                 self.pos -= 1;
-                let rest: String = self.input[self.pos..self.input.len().min(self.pos + 48)].iter().collect();
+                let limit = self.limit();
+                let rest: String = self.input[self.pos..limit.min(self.pos + 48)].iter().collect();
+                // The longest match may still grow: wait for more input.
+                if rest.chars().count() < 48 && !self.at_eof() && rest.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    self.starved = true;
+                    return;
+                }
                 match entities::match_prefix(&rest) {
                     Some((used, value)) => {
                         let matched = &rest[..used];

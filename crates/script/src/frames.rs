@@ -118,6 +118,7 @@ pub(crate) fn foreign(realm: &mut Realm, call: crate::FrameCall) -> crate::Frame
         }
         FrameCall::GetGlobal { name } => api_call(realm, "foreignGet", &[Value::str(&name)]),
         FrameCall::CallGlobal { name, args } => api_call(realm, "foreignCall", &[Value::str(&name), Value::str(&args)]),
+        FrameCall::Document { op } => return crate::docparser::foreign_op(realm, op),
     };
     match r {
         Err(e) => FrameReply::Error(realm.error_to_string(&e)),

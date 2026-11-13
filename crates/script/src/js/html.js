@@ -139,30 +139,136 @@
   }
   const E = g.Element, CD = g.CharacterData, SR = g.ShadowRoot, DF = g.DocumentFragment;
   for (const [C, insert] of [[E, true], [SR, true]]) {
-    method(C, 'setHTMLUnsafe', function (html) {
-      if (this instanceof g.HTMLTemplateElement) { this.content.replaceChildren(fragmentFor(this, html)); return; }
-      this.replaceChildren(fragmentFor(this, html));
-    });
-    method(C, 'setHTML', function (html) { this.setHTMLUnsafe(sanitize(String(html))); });
+    // setHTML / setHTMLUnsafe: the children replaced by the markup parsed
+    // with declarative shadow roots allowed.
+    method(C, 'setHTMLUnsafe', function (html, opts) { parseHTMLInto(this, 'html', false, html, opts, true); });
+    method(C, 'setHTML', function (html, opts) { parseHTMLInto(this, 'html', true, html, opts, true); });
     method(C, 'getHTML', function (opts) {
       if (!opts || !opts.serializableShadowRoots) return this.innerHTML;
       return this.innerHTML;
     });
-    method(C, 'appendHTMLUnsafe', function (html) { this.append(fragmentFor(this, html)); });
-    method(C, 'prependHTMLUnsafe', function (html) { this.prepend(fragmentFor(this, html)); });
-    method(C, 'appendHTML', function (html) { this.append(fragmentFor(this, sanitize(String(html)))); });
-    method(C, 'prependHTML', function (html) { this.prepend(fragmentFor(this, sanitize(String(html)))); });
+    for (const [name, pos] of [['appendHTML', 'append'], ['prependHTML', 'prepend']]) {
+      method(C, name + 'Unsafe', function (html, opts) { parseHTMLInto(this, pos, false, html, opts); });
+      method(C, name, function (html, opts) { parseHTMLInto(this, pos, true, html, opts); });
+    }
     void insert;
   }
   for (const C of [E, CD]) {
-    method(C, 'beforeHTMLUnsafe', function (html) { this.before(fragmentFor(this.parentNode, html)); });
-    method(C, 'afterHTMLUnsafe', function (html) { this.after(fragmentFor(this.parentNode, html)); });
-    method(C, 'replaceWithHTMLUnsafe', function (html) { this.replaceWith(fragmentFor(this.parentNode, html)); });
-    method(C, 'beforeHTML', function (html) { this.before(fragmentFor(this.parentNode, sanitize(String(html)))); });
-    method(C, 'afterHTML', function (html) { this.after(fragmentFor(this.parentNode, sanitize(String(html)))); });
-    method(C, 'replaceWithHTML', function (html) { this.replaceWith(fragmentFor(this.parentNode, sanitize(String(html)))); });
+    for (const [name, pos] of [['beforeHTML', 'before'], ['afterHTML', 'after'], ['replaceWithHTML', 'replaceWith']]) {
+      method(C, name + 'Unsafe', function (html, opts) { parseHTMLInto(this, pos, false, html, opts); });
+      method(C, name, function (html, opts) { parseHTMLInto(this, pos, true, html, opts); });
+    }
+  }
+  // {append,prepend,before,after,replaceWith}HTML{,Unsafe}(html, options):
+  // the streaming parser fed all at once. Positional methods on a node
+  // without a parent do nothing; a Document, plain DocumentFragment or
+  // <html> parent is a HierarchyRequestError.
+  function parseHTMLInto(node, pos, safe, html, opts, dsd) {
+    if (opts !== undefined && opts !== null && typeof opts !== 'object') throw new TypeError('The options argument must be an object.');
+    const positional = pos === 'before' || pos === 'after' || pos === 'replaceWith';
+    if (positional) {
+      const p = node.parentNode;
+      if (!p) return;
+      if (p.nodeType === 1 && p.namespaceURI === 'http://www.w3.org/1999/xhtml' && (p.localName === 'html' || p.localName === 'template')) {
+        throw domError("Failed to execute: the parent is an html or template element.", 'HierarchyRequestError');
+      }
+    } else if (pos !== 'html' && isHTMLRoot(node)) {
+      throw domError("Failed to execute: cannot insert HTML into an html element.", 'HierarchyRequestError');
+    }
+    // The safe methods never put markup into a script element.
+    if (safe && isScriptEl(positional ? node.parentNode : node)) return;
+    let markup;
+    if (safe) {
+      markup = String(html);
+    } else {
+      const iface = positional ? 'Node' : (g.ShadowRoot && node instanceof g.ShadowRoot ? 'ShadowRoot' : 'Element');
+      const r = g.__rhTrustedHTMLSink(html, opts, pos === 'html' ? `${iface} setHTMLUnsafe` : `${iface} ${pos}HTMLUnsafe`);
+      markup = r.html;
+      opts = r.options;
+    }
+    const runScripts = !safe && !!(opts && opts.runScripts);
+    N.streamOpen(node, pos, { check: true });
+    const cfg = streamSanitizerConfig(opts, safe);
+    const h = N.streamOpen(node, pos, { runScripts, dsd: !!dsd });
+    sanitizeCreated(N.streamWrite(h, markup), cfg, safe);
+    sanitizeCreated(N.streamClose(h), cfg, safe);
   }
   void DF;
+
+  // ------------------------------------------- HTML streaming methods
+  // stream{,Append,Prepend,Before,After,ReplaceWith}HTML{,Unsafe}(options):
+  // a WritableStream of strings parsed straight into the live tree by a
+  // streaming fragment parser (__rhNative.streamOpen/Write/Close). The safe
+  // variants never run scripts and sanitize what they insert.
+  function streamSanitizerConfig(opts, safe) {
+    const s = opts && opts.sanitizer;
+    if (s === undefined || s === null || s === 'default') return safe ? { elements: null, removeElements: DEFAULT_REMOVE.slice(), replaceWithChildrenElements: [], attributes: null, removeAttributes: [] } : null;
+    const cfg = (g.Sanitizer && s instanceof g.Sanitizer) ? s.get() : s;
+    if (typeof cfg !== 'object') throw new TypeError("Failed to execute: the sanitizer option is not a Sanitizer or SanitizerConfig.");
+    if (cfg.elements && cfg.removeElements) throw new TypeError("A sanitizer config cannot have both 'elements' and 'removeElements'.");
+    if (cfg.attributes && cfg.removeAttributes) throw new TypeError("A sanitizer config cannot have both 'attributes' and 'removeAttributes'.");
+    const names = (l) => (l ? Array.from(l, (e) => (typeof e === 'string' ? e : e.name)) : null);
+    const out = { elements: names(cfg.elements), removeElements: names(cfg.removeElements) || [], replaceWithChildrenElements: names(cfg.replaceWithChildrenElements) || [], attributes: names(cfg.attributes), removeAttributes: names(cfg.removeAttributes) || [] };
+    if (safe) for (const n of DEFAULT_REMOVE) if (!out.removeElements.includes(n) && !(out.elements && out.elements.includes(n) && n !== 'script')) out.removeElements.push(n);
+    if (safe && !out.removeElements.includes('script')) out.removeElements.push('script');
+    return out;
+  }
+  function sanitizeCreated(els, cfg, safe) {
+    if (!cfg) return;
+    for (const el of els) {
+      const name = el.localName;
+      if (cfg.removeElements.includes(name) || (cfg.elements && !cfg.elements.includes(name))) { el.remove(); continue; }
+      if (cfg.replaceWithChildrenElements.includes(name)) { el.replaceWith(...el.childNodes); continue; }
+      for (const a of Array.from(el.getAttributeNames())) {
+        const v = el.getAttribute(a) || '';
+        if ((safe && (/^on/i.test(a) || ((a === 'href' || a === 'src' || a === 'action' || a === 'formaction') && /^\s*javascript:/i.test(v)))) || cfg.removeAttributes.includes(a) || (cfg.attributes && !cfg.attributes.includes(a))) el.removeAttribute(a);
+      }
+    }
+  }
+  const isScriptEl = (n) => !!n && n.nodeType === 1 && n.localName === 'script' && (n.namespaceURI === 'http://www.w3.org/1999/xhtml' || n.namespaceURI === 'http://www.w3.org/2000/svg');
+  const isHTMLRoot = (n) => n.nodeType === 1 && n.namespaceURI === 'http://www.w3.org/1999/xhtml' && n.localName === 'html';
+  function makeStream(node, pos, safe, opts) {
+    if (opts !== undefined && opts !== null && typeof opts !== 'object') throw new TypeError('The options argument must be an object.');
+    const positional = pos === 'before' || pos === 'after' || pos === 'replaceWith';
+    if (!safe && g.__rhTrustedOptionsSink) {
+      const iface = positional ? 'Node' : (g.ShadowRoot && node instanceof g.ShadowRoot ? 'ShadowRoot' : 'Element');
+      const names = { html: 'streamHTMLUnsafe', append: 'streamAppendHTMLUnsafe', prepend: 'streamPrependHTMLUnsafe', before: 'streamBeforeHTMLUnsafe', after: 'streamAfterHTMLUnsafe', replaceWith: 'streamReplaceWithHTMLUnsafe' };
+      opts = g.__rhTrustedOptionsSink(opts, `${iface} ${names[pos]}`);
+    }
+    if (positional ? (node.parentNode && isHTMLRoot(node.parentNode)) : isHTMLRoot(node)) {
+      throw domError("Failed to execute: cannot stream HTML into an html element.", 'HierarchyRequestError');
+    }
+    const runScripts = !safe && !!(opts && opts.runScripts);
+    N.streamOpen(node, pos, { check: true });
+    const cfg = streamSanitizerConfig(opts, safe);
+    if (safe && isScriptEl(positional ? node.parentNode : node)) return new g.WritableStream({ write(chunk) { void `${chunk}`; } });
+    const h = N.streamOpen(node, pos, { runScripts });
+    return new g.WritableStream({
+      write(chunk) {
+        // DOMString conversion (a Symbol throws TypeError).
+        const text = `${chunk}`;
+        sanitizeCreated(N.streamWrite(h, text), cfg, safe);
+      },
+      close() { sanitizeCreated(N.streamClose(h), cfg, safe); },
+      abort() { try { N.streamClose(h); } catch (e) { /* ignore */ } },
+    });
+  }
+  const STREAMS = [['streamHTML', 'html'], ['streamAppendHTML', 'append'], ['streamPrependHTML', 'prepend']];
+  const POSITIONAL_STREAMS = [['streamBeforeHTML', 'before'], ['streamAfterHTML', 'after'], ['streamReplaceWithHTML', 'replaceWith']];
+  if (g.WritableStream) {
+    for (const C of [E, SR]) {
+      for (const [name, pos] of STREAMS) {
+        method(C, name, function (opts) { return makeStream(this, pos, true, opts); });
+        method(C, name + 'Unsafe', function (opts) { return makeStream(this, pos, false, opts); });
+      }
+    }
+    for (const C of [E, CD]) {
+      for (const [name, pos] of POSITIONAL_STREAMS) {
+        method(C, name, function (opts) { return makeStream(this, pos, true, opts); });
+        method(C, name + 'Unsafe', function (opts) { return makeStream(this, pos, false, opts); });
+      }
+    }
+  }
 
   // ------------------------------------------------------------ Sanitizer
 
@@ -239,26 +345,61 @@
   }
   tag(CustomStateSet, 'CustomStateSet');
   const internalsOf = new WeakMap();
+  // Form-associated custom element operations need `static formAssociated`.
+  const faceOnly = (i, what) => {
+    const el = i[S].el;
+    if (!formAssociated(el)) throw domError(`Failed to execute '${what}' on 'ElementInternals': The target element is not a form-associated custom element.`, 'NotSupportedError');
+    return el;
+  };
+  const formOwnerOf = (el) => {
+    const id = el.getAttribute('form');
+    if (id !== null) { const f = el.isConnected ? el.ownerDocument.getElementById(id) : null; return f && f.localName === 'form' ? f : null; }
+    return el.parentElement ? el.parentElement.closest('form') : null;
+  };
+  const disabledFACE = (el) => {
+    if (el.hasAttribute('disabled')) return true;
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.localName === 'fieldset' && p.hasAttribute('disabled')) {
+        // Inside the fieldset's first legend: not disabled by it.
+        const legend = Array.from(p.children).find((c) => c.localName === 'legend');
+        if (!(legend && legend.contains(el))) return true;
+      }
+    }
+    return false;
+  };
   class ElementInternals {
     constructor() { ILLEGAL(); }
-    get shadowRoot() { const r = this[S].el.shadowRoot; return r; }
-    setFormValue(value, state) { this[S].value = value; this[S].state = state === undefined ? value : state; }
-    get form() { return formAssociated(this[S].el) ? this[S].el.closest('form') : null; }
+    get shadowRoot() { return this[S].el.shadowRoot; }
+    setFormValue(value, state) { faceOnly(this, 'setFormValue'); this[S].value = value; this[S].state = state === undefined ? value : state; }
+    get form() { return formOwnerOf(faceOnly(this, 'form')); }
     setValidity(flags = {}, message, anchor) {
+      faceOnly(this, 'setValidity');
       const v = {};
       for (const k of VALIDITY_FLAGS) v[k] = !!flags[k];
       const any = VALIDITY_FLAGS.some((k) => v[k]);
       if (any && (message === undefined || message === '')) throw new TypeError("Failed to execute 'setValidity' on 'ElementInternals': The second argument should not be empty if one or more flags in the first argument are true.");
       this[S].flags = v;
-      this[S].message = any ? String(message) : '';
+      this[S].message = any ? String(message).replace(/\r\n?/g, '\n') : '';
       this[S].anchor = anchor || null;
     }
-    get willValidate() { return formAssociated(this[S].el) && !this[S].el.hasAttribute('disabled') && !this[S].el.hasAttribute('readonly'); }
-    get validity() { return makeValidity(() => Object.assign({ customError: false }, this[S].flags)); }
-    get validationMessage() { return this[S].message; }
-    checkValidity() { return checkValidityOf(this[S].el, this, false); }
-    reportValidity() { return checkValidityOf(this[S].el, this, true); }
-    get labels() { const id = this[S].el.id; return document.querySelectorAll(id ? `label[for="${CSS.escape(id)}"]` : 'label:not(*)'); }
+    get willValidate() {
+      const el = faceOnly(this, 'willValidate');
+      return !disabledFACE(el) && !el.hasAttribute('readonly') && !el.closest('datalist');
+    }
+    get validity() { faceOnly(this, 'validity'); return makeValidity(() => Object.assign({ customError: false }, this[S].flags)); }
+    get validationMessage() { faceOnly(this, 'validationMessage'); return this[S].message; }
+    checkValidity() { return checkValidityOf(faceOnly(this, 'checkValidity'), this, false); }
+    reportValidity() { return checkValidityOf(faceOnly(this, 'reportValidity'), this, true); }
+    get labels() {
+      const el = faceOnly(this, 'labels');
+      const out = [];
+      for (const l of el.ownerDocument.querySelectorAll('label')) {
+        const f = l.getAttribute('for');
+        const labelable = (c) => /^(button|input|meter|output|progress|select|textarea)$/.test(c.localName) || formAssociated(c);
+        if (f !== null ? (f === el.id && el.isConnected) : Array.from(l.querySelectorAll('*')).find(labelable) === el) out.push(l);
+      }
+      return Object.freeze(out);
+    }
     get states() { return this[S].states; }
   }
   tag(ElementInternals, 'ElementInternals');

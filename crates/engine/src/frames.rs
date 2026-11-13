@@ -313,6 +313,11 @@ impl Engine {
             if page_origin(child) != origin {
                 return None;
             }
+            // A document without scripts of its own (the initial
+            // about:blank) gets its realm when a parent first scripts it.
+            if child.script.host.is_none() && !child.script.scripts_ran && self.scripting {
+                self.ensure_script_host(child);
+            }
             let mut host = child.script.host.take()?;
             let reply = {
                 let mut env = EngineEnv { engine: self, page: child };
@@ -417,7 +422,7 @@ impl Page {
 
     /// Any frame load still in progress (this page or below)?
     pub fn frames_loading(&self) -> bool {
-        self.frames.children.iter().any(|c| c.pending.is_some() || c.page.as_ref().map(|p| p.frames_loading()).unwrap_or(false))
+        self.frames.children.iter().any(|c| c.pending.is_some() || c.page.as_ref().map(|p| p.script.frame_load_pending || p.frames_loading()).unwrap_or(false))
     }
 
     pub(crate) fn frames_next_due(&self) -> Option<f64> {
@@ -425,7 +430,7 @@ impl Page {
         // Poll background loads every 25 ms (engine clock).
         let poll = self.image_state.clock.map(|origin| (std::time::Instant::now() + std::time::Duration::from_millis(25)).saturating_duration_since(origin).as_secs_f64() * 1000.0).unwrap_or(0.0);
         for c in &self.frames.children {
-            let d = if c.pending.is_some() { Some(poll) } else { c.page.as_ref().and_then(|p| p.next_script_due()) };
+            let d = if c.pending.is_some() { Some(poll) } else { c.page.as_ref().and_then(|p| if p.script.frame_load_pending { Some(0.0) } else { p.next_script_due() }) };
             if let Some(d) = d {
                 due = Some(due.map(|x: f64| x.min(d)).unwrap_or(d));
             }
@@ -497,6 +502,9 @@ impl Engine {
                     c.source = source;
                     c.pending = None;
                     c.stale = true;
+                    if let Some(p) = c.page.as_mut() {
+                        p.script.frame_load_pending = false;
+                    }
                     changed = true;
                 }
                 None => {
@@ -531,6 +539,14 @@ impl Engine {
             l.initiator = Some(page.url.clone());
             l
         };
+        // A frame without a document and without `src` gets its initial
+        // about:blank document now (not through a later load, which would
+        // replace a document scripts already wrote into and fire a stray
+        // `load`).
+        let blank: Vec<NodeId> = page.frames.children.iter().filter(|c| c.page.is_none() && c.pending.is_none() && c.source == FrameSource::Blank).map(|c| c.node).collect();
+        for node in blank {
+            self.create_blank_frame(page, node);
+        }
         for i in 0..page.frames.children.len() {
             let node = page.frames.children[i].node;
             let size = page.frame_content_rect(node).map(|r| (r.w.max(0.0), r.h.max(0.0)));
@@ -575,6 +591,26 @@ impl Engine {
                             let _ = tx.send(Ok(Loaded::Page(l)));
                         });
                     }
+                    FrameSource::Url(url) if url.scheme == "blob" => {
+                        // Object URLs live in the creating realm's blob URL
+                        // store (this page's or an ancestor's).
+                        let key = url.to_string();
+                        let mut resp = page.script.host.as_ref().and_then(|h| h.blob_url_response(&key));
+                        if resp.is_none() {
+                            for a in crate::frames::ancestors() {
+                                // SAFETY: ancestor pages outlive this call (see AncestorGuard).
+                                let a = unsafe { &*a };
+                                resp = a.script.host.as_ref().and_then(|h| h.blob_url_response(&key));
+                                if resp.is_some() {
+                                    break;
+                                }
+                            }
+                        }
+                        let _ = tx.send(match resp {
+                            Some(r) => Ok(Loaded::Page(loader.load_response(r, vp))),
+                            None => Err("blob URL not found".to_string()),
+                        });
+                    }
                     FrameSource::Url(url) => {
                         let req = Request::get(url).with_referer(page.url.clone());
                         std::thread::spawn(move || {
@@ -603,8 +639,12 @@ impl Engine {
         let loaded = self.loader.load_html("<!doctype html><html><head></head><body></body></html>", Url::parse("about:blank").expect("about:blank"), vp);
         let name = page.doc.attr(node, "name").map(|s| s.to_string());
         self.frame_context.replace(Some(FrameContext { id, depth: page.frame_depth + 1, name, origin: Some(origin_of(page)) }));
-        let child = self.build_page_unscripted(loaded, vp);
+        let mut child = self.build_page_unscripted(loaded, vp);
         self.frame_context.replace(None);
+        // Keep the initial document available synchronously and queue its
+        // load. The no-src insertion steps can deliver it synchronously;
+        // document.open() replaces it with the new parser's load instead.
+        child.script.frame_load_pending = frame_source(page, node) == FrameSource::Blank;
         {
             let mut reg = self.frames.borrow_mut();
             let e = reg.entries.entry(id).or_default();
@@ -760,6 +800,16 @@ impl Engine {
                         self.frame_side_effects(page, node, o, &mut out);
                     }
                 }
+            }
+            // The frame's document finished loading again (document.open /
+            // close): the iframe fires `load` in this document.
+            let reloaded = page.frames.children.get_mut(i).and_then(|c| c.page.as_mut()).map(|p| std::mem::take(&mut p.script.frame_load_pending)).unwrap_or(false);
+            if reloaded && page.script.host.is_some() {
+                let node = page.frames.children[i].node;
+                page.frames.children[i].dirty = true;
+                let o = self.dispatch_event(page, node, "load", EventInit::simple(false, false));
+                out.merge(o);
+                out.relayout = true;
             }
             i += 1;
         }
@@ -1142,7 +1192,7 @@ fn frame_source(page: &Page, node: NodeId) -> FrameSource {
         return FrameSource::Blank;
     }
     match page.resolve(src) {
-        Some(u) if matches!(u.scheme.as_str(), "http" | "https" | "data" | "file" | "about") => FrameSource::Url(u),
+        Some(u) if matches!(u.scheme.as_str(), "http" | "https" | "data" | "file" | "about" | "blob") => FrameSource::Url(u),
         _ => FrameSource::Blank,
     }
 }

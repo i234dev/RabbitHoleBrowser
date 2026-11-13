@@ -74,8 +74,8 @@ pub(crate) fn shadow_info(root: NodeRef) -> Option<ShadowInfo> {
         return Some(i);
     }
     // Declarative shadow roots (parsed): open or closed per the markup.
-    let open = with_doc(root.doc, |doc| doc.declarative_shadow.get(&root.node).copied())?;
-    Some(ShadowInfo { open, delegates_focus: false, manual: false, clonable: false, serializable: true })
+    let (open, bits) = with_doc(root.doc, |doc| doc.declarative_shadow.get(&root.node).map(|&o| (o, doc.declarative_shadow_flags.get(&root.node).copied().unwrap_or(0))))?;
+    Some(ShadowInfo { open, delegates_focus: bits & 4 != 0, manual: false, clonable: bits & 1 != 0, serializable: bits & 2 != 0 })
 }
 
 /// The definition that applies to element `n` (autonomous by tag, or a
@@ -534,7 +534,7 @@ fn sr_serializable(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Valu
 
 fn sr_inner_html_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let r = this_root(realm, &this)?;
-    Ok(Value::str(&with_doc(r.doc, |doc| doc.serialize(r.node, false))))
+    crate::element::fragment_serialize(realm, r, false)
 }
 
 fn sr_inner_html_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -572,6 +572,7 @@ pub(crate) fn retarget(doc: &Document, mut a: NodeId, b: NodeId) -> NodeId {
     }
 }
 
+#[allow(dead_code)]
 fn sr_get_html(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     sr_inner_html_get(realm, this, &[])
 }
@@ -816,7 +817,7 @@ pub(crate) fn install(realm: &mut Realm) {
         realm.define_accessor(sr, name, Some(g), None, ACC);
     }
     realm.define_accessor(sr, "innerHTML", Some(sr_inner_html_get), Some(sr_inner_html_set), ACC);
-    realm.define_method(sr, "getHTML", 0, sr_get_html);
+    realm.define_method(sr, "getHTML", 0, crate::element::get_html);
     realm.define_method(sr, "setHTMLUnsafe", 1, sr_inner_html_set);
     realm.define_method(sr, "elementFromPoint", 2, sr_element_from_point);
     realm.define_method(sr, "elementsFromPoint", 2, sr_elements_from_point);

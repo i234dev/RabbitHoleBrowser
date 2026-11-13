@@ -125,14 +125,7 @@ fn e_local_name(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
 
 fn e_namespace_uri(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "namespaceURI")?;
-    let ns = with_doc(n.doc, |doc| {
-        let e = doc.element(n.node)?;
-        // HTML-namespaced nodes parsed into an <svg> subtree by innerHTML.
-        if e.ns == rabbithole_dom::Namespace::Html && doc.ancestor_or_self(n.node, |a| doc.is_element(a, "svg")).is_some() {
-            return Some(rabbithole_dom::Namespace::SVG.to_string());
-        }
-        e.ns.uri().map(|s| s.to_string())
-    });
+    let ns = with_doc(n.doc, |doc| doc.element(n.node)?.ns.uri().map(|s| s.to_string()));
     Ok(match ns {
         Some(u) => Value::str(&u),
         None => Value::Null,
@@ -665,33 +658,121 @@ fn e_dataset(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 // innerHTML & co --------------------------------------------------------------
 
+/// The fragment serializing algorithm: HTML serialization in HTML
+/// documents, well-formed XML serialization otherwise (InvalidStateError
+/// when the subtree cannot be serialized as XML).
+pub(crate) fn fragment_serialize(realm: &mut Realm, n: NodeRef, include_self: bool) -> JsResult<Value> {
+    let r = with_doc(n.doc, |doc| {
+        if doc.is_html {
+            Ok(doc.serialize(n.node, include_self))
+        } else if include_self {
+            doc.serialize_xml(n.node, true)
+        } else {
+            doc.serialize_xml_children(n.node, true)
+        }
+    });
+    match r {
+        Ok(s) => Ok(Value::str(&s)),
+        Err(msg) => Err(crate::misc::dom_exception(realm, "InvalidStateError", &format!("Failed to serialize the node: {msg}."))),
+    }
+}
+
+/// `getHTML({serializableShadowRoots, shadowRoots})` on an element or a
+/// shadow root: the HTML fragment serialization of its children with the
+/// chosen shadow roots as declarative `<template shadowrootmode>`.
+pub(crate) fn get_html(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &this) else { return Err(realm.throw_type_error("Illegal invocation")) };
+    let opts = arg(args, 0);
+    let mut serializable = false;
+    let mut listed: Vec<NodeRef> = Vec::new();
+    if opts.is_object() {
+        let v = realm.get_str(opts.clone(), "serializableShadowRoots")?;
+        serializable = realm.to_boolean(&v);
+        let roots = realm.get_str(opts, "shadowRoots")?;
+        if roots.is_object() {
+            let len = realm.get_str(roots.clone(), "length")?;
+            let len = realm.to_number(len)? as usize;
+            for i in 0..len {
+                let r = realm.get_str(roots.clone(), &i.to_string())?;
+                match node_of(realm, &r) {
+                    Some(rn) if crate::shadow::is_shadow_root(rn) => listed.push(rn),
+                    _ => return Err(realm.throw_type_error("Failed to execute 'getHTML': shadowRoots must contain ShadowRoot objects.")),
+                }
+            }
+        }
+    }
+    if !with_doc(n.doc, |doc| doc.is_html) {
+        return fragment_serialize(realm, n, false);
+    }
+    let roots: Vec<(NodeId, NodeId)> = with_doc(n.doc, |doc| doc.shadow_roots.iter().map(|(&h, &r)| (h, r)).collect());
+    let mut chosen: std::collections::HashMap<NodeId, (NodeId, String)> = std::collections::HashMap::new();
+    for (host, root) in roots {
+        let rr = NodeRef { doc: n.doc, node: root };
+        let Some(info) = crate::shadow::shadow_info(rr) else { continue };
+        if !((serializable && info.serializable) || listed.contains(&rr)) {
+            continue;
+        }
+        let mut open = format!("<template shadowrootmode=\"{}\"", if info.open { "open" } else { "closed" });
+        if info.delegates_focus {
+            open.push_str(" shadowrootdelegatesfocus=\"\"");
+        }
+        if info.serializable {
+            open.push_str(" shadowrootserializable=\"\"");
+        }
+        if info.clonable {
+            open.push_str(" shadowrootclonable=\"\"");
+        }
+        open.push('>');
+        chosen.insert(host, (root, open));
+    }
+    let f = |h: NodeId| chosen.get(&h).cloned();
+    let s = with_doc(n.doc, |doc| doc.serialize_with_shadows(n.node, false, Some(&f)));
+    Ok(Value::str(&s))
+}
+
+/// A `[LegacyNullToEmptyString] DOMString` argument.
+pub(crate) fn arg_null_to_empty(realm: &mut Realm, args: &[Value], i: usize) -> JsResult<String> {
+    match args.get(i).map(Value::v) {
+        Some(V::Null) => Ok(String::new()),
+        Some(v) => realm.to_rust_string(v.to_value()),
+        None => Ok("undefined".to_string()),
+    }
+}
+
 fn e_inner_html_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "innerHTML")?;
-    Ok(Value::str(&with_doc(n.doc, |doc| doc.serialize(n.node, false))))
+    fragment_serialize(realm, n, false)
 }
 
 fn e_inner_html_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "innerHTML")?;
-    let html = match args.first().map(Value::v) {
-        None | Some(V::Null) | Some(V::Undefined) => String::new(),
-        Some(v) => realm.to_rust_string(v.to_value())?,
-    };
+    let html = arg_null_to_empty(realm, args, 0)?;
     set_inner_html(realm, n, &html)?;
     Ok(Value::Undefined)
 }
 
 fn e_outer_html_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "outerHTML")?;
-    Ok(Value::str(&with_doc(n.doc, |doc| doc.serialize(n.node, true))))
+    fragment_serialize(realm, n, true)
 }
 
 fn e_outer_html_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "outerHTML")?;
-    let html = arg_str(realm, args, 0)?;
+    let html = arg_null_to_empty(realm, args, 0)?;
     let parent = with_doc(n.doc, |doc| doc.parent(n.node));
     let Some(p) = parent else { return Ok(Value::Undefined) };
+    if p == rabbithole_dom::Document::ROOT {
+        return Err(crate::misc::dom_exception(realm, "NoModificationAllowedError", "Failed to set the 'outerHTML' property on 'Element': This element's parent is of type '#document', which is not an element node."));
+    }
     let pref = NodeRef { doc: n.doc, node: p };
-    let nodes = node::parse_html_into(pref, &html);
+    // A fragment parent parses in the context of a <body>.
+    let is_fragment = with_doc(n.doc, |doc| doc.element(p).map(|e| e.tag == "#fragment").unwrap_or(false));
+    let nodes = if is_fragment {
+        let body = with_doc(n.doc, |doc| doc.create_element("body", vec![]));
+        node::parse_html_into(NodeRef { doc: n.doc, node: body }, &html)
+    } else {
+        node::parse_html_into(pref, &html)
+    };
     let next = with_doc(n.doc, |doc| doc.next_sibling(n.node));
     remove_node(n);
     for nn in nodes {
@@ -739,7 +820,28 @@ fn e_insert_adjacent_html(realm: &mut Realm, this: Value, args: &[Value]) -> JsR
     let n = this_node(realm, &this, "insertAdjacentHTML")?;
     let pos = arg_str(realm, args, 0)?.to_ascii_lowercase();
     let html = arg_str(realm, args, 1)?;
-    let nodes = node::parse_html_into(n, &html);
+    // The context: the parent for beforebegin / afterend (which needs an
+    // element-like parent), else the element; <html> parses as <body>.
+    let context = match pos.as_str() {
+        "beforebegin" | "afterend" => {
+            let parent = with_doc(n.doc, |doc| doc.parent(n.node));
+            match parent {
+                Some(p) if p != Document::ROOT => NodeRef { doc: n.doc, node: p },
+                _ => return Err(crate::misc::dom_exception(realm, "NoModificationAllowedError", "Failed to execute 'insertAdjacentHTML' on 'Element': The element has no parent.")),
+            }
+        }
+        "afterbegin" | "beforeend" => n,
+        _ => return Err(crate::misc::dom_exception(realm, "SyntaxError", "The value provided is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.")),
+    };
+    let use_body = with_doc(n.doc, |doc| match doc.element(context.node) {
+        Some(e) => e.tag.starts_with('#') || (doc.is_html && e.tag == "html" && e.ns == rabbithole_dom::Namespace::Html),
+        None => true,
+    });
+    let context = if use_body { NodeRef { doc: n.doc, node: with_doc(n.doc, |doc| doc.create_element("body", vec![])) } } else { context };
+    let nodes = match node::try_parse_html_into(context, &html) {
+        Ok(n) => n,
+        Err(msg) => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to execute 'insertAdjacentHTML' on 'Element': The provided markup is invalid XML ({msg})."))),
+    };
     insert_adjacent(realm, n, &pos, nodes)
 }
 
@@ -1180,20 +1282,116 @@ fn e_scroll_left_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
 
 fn e_scroll_into_view(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollIntoView")?;
-    let r = node_rect(n);
-    let align_top = match args.first().map(Value::v) {
-        Some(V::Bool(b)) => b,
+    // ScrollIntoViewOptions: block "start" / inline "nearest" by default;
+    // `false` is block "end".
+    let (mut block, mut inline) = ("start".to_string(), "nearest".to_string());
+    match args.first().map(Value::v) {
+        Some(V::Bool(false)) => block = "end".into(),
         Some(v) if v.is_object() => {
-            let b = dict_str(realm, &v.to_value(), "block")?;
-            !matches!(b.as_deref(), Some("end") | Some("nearest"))
+            let o = v.to_value();
+            for (key, slot) in [("block", &mut block), ("inline", &mut inline)] {
+                if let Some(s) = dict_str(realm, &o, key)? {
+                    if !matches!(s.as_str(), "start" | "center" | "end" | "nearest") {
+                        return Err(realm.throw_type_error(&format!("Failed to execute 'scrollIntoView' on 'Element': The provided value '{s}' is not a valid enum value of type ScrollLogicalPosition.")));
+                    }
+                    *slot = s;
+                }
+            }
         }
-        _ => true,
-    };
+        _ => {}
+    }
+    if n.doc != 0 || !with_doc(0, |doc| doc.is_connected(n.node)) {
+        return Ok(Value::Undefined);
+    }
+    // The new offset along one axis of a scrollport [lo, hi) for a target
+    // [t0, t1) (all in the same coordinates), from the current offset.
+    fn aligned(cur: f32, lo: f32, hi: f32, t0: f32, t1: f32, how: &str, flip: bool) -> f32 {
+        let how = match (how, flip) {
+            ("start", true) => "end",
+            ("end", true) => "start",
+            (h, _) => h,
+        };
+        match how {
+            "start" => cur + (t0 - lo),
+            "end" => cur + (t1 - hi),
+            "center" => cur + ((t0 + t1) / 2.0 - (lo + hi) / 2.0),
+            _ => {
+                // nearest: no change when the target is inside; otherwise
+                // align the edge it overflows on (the start for a target
+                // larger than the scrollport).
+                if (t0 >= lo && t1 <= hi) || (t0 < lo && t1 > hi) {
+                    cur
+                } else if (t0 < lo) == (t1 - t0 <= hi - lo) {
+                    cur + (t0 - lo)
+                } else {
+                    cur + (t1 - hi)
+                }
+            }
+        }
+    }
+    // Scrolling boxes from the innermost out, then the viewport.
+    let mut cur = with_doc(0, |doc| doc.flat_parent(n.node));
+    while let Some(p) = cur {
+        if p == rabbithole_dom::Document::ROOT {
+            break;
+        }
+        let style = with_env(|env| env.computed_style(p));
+        let is_root = with_doc(0, |doc| doc.is_element(p, "html") || doc.is_element(p, "body"));
+        if let Some(s) = style.filter(|s| !is_root && (matches!(s.overflow_x, rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Hidden) || matches!(s.overflow_y, rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Hidden))) {
+            // A sticky box between the target and this scroller is stuck
+            // in view (its layout rect does not show that): leave it.
+            let stuck = {
+                let mut c = Some(n.node);
+                let mut found = false;
+                while let Some(x) = c {
+                    if x == p {
+                        break;
+                    }
+                    if with_env(|env| env.computed_style(x)).map(|s| s.position == rabbithole_style::Position::Sticky).unwrap_or(false) {
+                        found = true;
+                        break;
+                    }
+                    c = with_doc(0, |doc| doc.flat_parent(x));
+                }
+                found
+            };
+            if stuck {
+                cur = with_doc(0, |doc| doc.flat_parent(p));
+                continue;
+            }
+            if let Some(((sx, sy), _)) = with_env(|env| env.element_scroll(p)) {
+                let t = node_rect(n);
+                let pr = node_rect(NodeRef::main(p));
+                let (bl, bt) = (s.border_width.left, s.border_width.top);
+                let (cw, ch) = client_size(NodeRef::main(p));
+                let (lo_x, lo_y) = (pr.x + bl, pr.y + bt);
+                let vertical = !matches!(s.writing_mode, rabbithole_style::WritingMode::HorizontalTb);
+                let rtl = s.direction == rabbithole_style::Direction::Rtl;
+                let (bx, by) = if vertical { (&block, &inline) } else { (&inline, &block) };
+                let flip_x = if vertical { s.writing_mode == rabbithole_style::WritingMode::VerticalRl } else { rtl };
+                let flip_y = vertical && (rtl != (s.writing_mode == rabbithole_style::WritingMode::SidewaysLr));
+                let nx = aligned(sx, lo_x, lo_x + cw, t.x, t.x + t.w, bx, flip_x);
+                let ny = aligned(sy, lo_y, lo_y + ch, t.y, t.y + t.h, by, flip_y);
+                with_env(|env| env.set_element_scroll(p, nx.max(0.0), ny.max(0.0)));
+            }
+        }
+        cur = with_doc(0, |doc| doc.flat_parent(p));
+    }
+    let t = node_rect(n);
+    let mut c = Some(n.node);
+    while let Some(x) = c {
+        if with_env(|env| env.computed_style(x)).map(|s| s.position == rabbithole_style::Position::Sticky || s.position == rabbithole_style::Position::Fixed).unwrap_or(false) {
+            // Stuck / fixed in the viewport already.
+            return Ok(Value::Undefined);
+        }
+        c = with_doc(0, |doc| doc.flat_parent(x));
+    }
     with_env(|env| {
         let (vw, vh) = env.viewport();
-        let _ = vw;
-        let y = if align_top { r.y } else { (r.y + r.h - vh).max(0.0) };
-        env.set_scroll(0.0, y.max(0.0));
+        let (sx, sy) = env.scroll();
+        let nx = aligned(sx, sx, sx + vw, t.x, t.x + t.w, &inline, false);
+        let ny = aligned(sy, sy, sy + vh, t.y, t.y + t.h, &block, false);
+        env.set_scroll(nx.max(0.0), ny.max(0.0));
     });
     Ok(Value::Undefined)
 }
@@ -1305,14 +1503,7 @@ fn e_click(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     if forward_to_frame(n, "click") {
         return Ok(Value::Undefined);
     }
-    let disabled = get_attribute(n, "disabled").is_some();
-    if disabled {
-        return Ok(Value::Undefined);
-    }
-    let r = crate::events::dispatch(realm, TargetKey::Node(n), "click", crate::EventInit { bubbles: true, cancelable: true, detail: Some(crate::EventDetail::Mouse { x: 0.0, y: 0.0, button: 0, ctrl: false, shift: false, alt: false, meta: false }) }, false);
-    if !r.default_prevented {
-        crate::events::run_default_action(realm, n);
-    }
+    crate::events::synthetic_click(realm, n);
     Ok(Value::Undefined)
 }
 
@@ -2245,6 +2436,7 @@ pub(crate) fn install(realm: &mut Realm) {
     m(realm, "msMatchesSelector", 1, e_matches);
     m(realm, "closest", 1, e_closest);
     m(realm, "insertAdjacentHTML", 2, e_insert_adjacent_html);
+    m(realm, "getHTML", 0, get_html);
     m(realm, "insertAdjacentElement", 2, e_insert_adjacent_element);
     m(realm, "insertAdjacentText", 2, e_insert_adjacent_text);
     m(realm, "getBoundingClientRect", 0, e_get_bounding_client_rect);
