@@ -14,6 +14,7 @@ if [ $# -eq 0 ]; then
   set -- -p rabbithole-js -p rabbithole-script -p rabbithole-agent
 fi
 out=${JIT_CHECK_OUT:-$(mktemp -d)}
+mkdir -p "$out" || exit 1
 run() {
   local mode=$1
   shift
