@@ -766,7 +766,7 @@ fn misc_apis() {
         console.log(CSS.supports('display', 'flex'), CSS.escape('1a'), document.compatMode, document.characterSet);
     "#,
     );
-    assert_eq!(out[0], r#"hi 1 <body><p class="x">hi</p></body>"#);
+    assert_eq!(out[0], r#"hi 1 <body xmlns="http://www.w3.org/1999/xhtml"><p class="x">hi</p></body>"#);
     assert_eq!(out[1], "3");
     assert_eq!(out[2], "P,P,P");
     assert_eq!(out[3], "c");
