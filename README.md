@@ -17,7 +17,7 @@ It can be used three ways:
 
 _Both images were produced by `rabbithole screenshot`: every pixel comes from RabbitHole's own rasterizer._
 
-## Status (v0.1.5)
+## Status (v0.1.6)
 
 RabbitHole is young but already runs real, heavy sites: Google (search and
 sign-in), YouTube (playback with sound and AV1/VP9 video), Wikipedia, GitHub,
