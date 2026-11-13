@@ -754,14 +754,101 @@ pub struct ForInState {
 /// Bytes of one heap slot (an object's inline part).
 pub const SLOT_BYTES: usize = std::mem::size_of::<Option<Object>>();
 
-/// Mark-and-sweep garbage collected arena.
+// Colours of the collector (`Heap::marks`, meaningful during a cycle).
+/// Not reached (yet); freed by the sweep if it stays so.
+const WHITE: u8 = 0;
+/// Reached, waiting in the grey stack to be scanned.
+const GREY: u8 = 1;
+/// A weak collection scanned by the marker: its entries wait for the
+/// ephemeron pass.
+const BLACK_WEAK: u8 = 2;
+/// Scanned (or allocated during the cycle): nothing left to do.
+const BLACK: u8 = 3;
+
+/// Where the incremental collector is (see [`Heap::start_cycle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcPhase {
+    Idle,
+    Marking,
+    Sweeping,
+}
+
+/// How much one collector step may do: a number of work units (objects
+/// scanned or slots swept) and/or a deadline.
+#[derive(Debug, Clone, Copy)]
+pub struct GcBudget {
+    units: usize,
+    deadline: Option<std::time::Instant>,
+}
+
+impl GcBudget {
+    /// Units between two looks at the clock.
+    const CHECK: usize = 64;
+    pub fn unlimited() -> GcBudget {
+        GcBudget { units: usize::MAX, deadline: None }
+    }
+    pub fn units(n: usize) -> GcBudget {
+        GcBudget { units: n.max(1), deadline: None }
+    }
+    pub fn until(deadline: std::time::Instant) -> GcBudget {
+        GcBudget { units: Self::CHECK, deadline: Some(deadline) }
+    }
+    /// Spend `n` units; `true` when the budget is exhausted.
+    #[inline]
+    fn spend(&mut self, n: usize) -> bool {
+        if self.units > n {
+            self.units -= n;
+            return false;
+        }
+        match self.deadline {
+            Some(d) if std::time::Instant::now() < d => {
+                self.units = Self::CHECK;
+                false
+            }
+            _ => {
+                self.units = 0;
+                true
+            }
+        }
+    }
+}
+
+/// Garbage collected arena with an incremental mark-and-sweep collector.
+///
+/// A collection cycle ([`Heap::start_cycle`]) greys the roots, then marks
+/// in steps ([`Heap::mark_step`]) interleaved with the program, then sweeps
+/// in steps ([`Heap::sweep_step`]). Marking is snapshot-at-the-beginning:
+/// everything reachable when the cycle started, plus everything allocated
+/// since (allocated black), survives it. That holds because every change
+/// to an object goes through [`Heap::get_mut`] / [`Heap::try_get_mut`]
+/// (or native code that checks [`Heap::marking`] and takes those paths
+/// while it is set), whose write barrier scans an unscanned object before
+/// it can lose a reference. Roots are not barriered: they are part of the
+/// snapshot. Slots freed by a sweep are reused only once it finishes (and
+/// `collections` moves), so ids stay unique within a cycle.
 pub struct Heap {
     objects: Vec<Option<Object>>,
     free: Vec<u32>,
-    marks: Vec<bool>,
+    marks: Vec<u8>,
+    /// The write barrier is armed (the cycle is marking); read by native
+    /// code, which then leaves stores to the helpers.
+    pub(crate) marking: bool,
+    phase: GcPhase,
+    grey: Vec<u32>,
+    /// Weak collections scanned by the marker (ephemeron pass).
+    weak: Vec<u32>,
+    /// Sweep position and end (the table length when marking finished).
+    sweep_at: usize,
+    sweep_end: usize,
+    /// Slots freed by the running sweep (reused once it finishes).
+    swept: Vec<u32>,
     pub allocated_since_gc: usize,
     pub live_count: usize,
-    /// Collections run so far (object ids are only reused after one).
+    /// Objects allocated since the heap was made (pacing).
+    pub allocated_total: usize,
+    /// Objects freed by the last finished cycle.
+    pub last_freed: usize,
+    /// Collections finished so far (object ids are only reused after one).
     pub collections: u32,
 }
 
@@ -771,29 +858,77 @@ impl Default for Heap {
     }
 }
 
+fn is_weak_kind(k: &ObjectKind) -> bool {
+    matches!(k, ObjectKind::WeakMap(_) | ObjectKind::WeakSet(_))
+}
+
+/// Grey `id` if it is white (allocated-black and out-of-range ids are left).
+#[inline(always)]
+fn shade(marks: &mut [u8], grey: &mut Vec<u32>, id: ObjectId) {
+    if let Some(m) = marks.get_mut(id.0 as usize) {
+        if *m == WHITE {
+            *m = GREY;
+            grey.push(id.0);
+        }
+    }
+}
+
 impl Heap {
     /// Offset of the object table (a `Vec<Option<Object>>`) in the heap,
     /// for native code.
     #[cfg(feature = "jit")]
     pub(crate) const OBJECTS_OFFSET: usize = std::mem::offset_of!(Heap, objects);
+    /// Offset of [`Heap::marking`] (one byte), for native code.
+    #[cfg(feature = "jit")]
+    pub(crate) const MARKING_OFFSET: usize = std::mem::offset_of!(Heap, marking);
 
     pub fn new() -> Heap {
-        Heap { objects: Vec::with_capacity(1024), free: Vec::new(), marks: Vec::new(), allocated_since_gc: 0, live_count: 0, collections: 1 }
+        Heap {
+            objects: Vec::with_capacity(1024),
+            free: Vec::new(),
+            marks: Vec::new(),
+            marking: false,
+            phase: GcPhase::Idle,
+            grey: Vec::new(),
+            weak: Vec::new(),
+            sweep_at: 0,
+            sweep_end: 0,
+            swept: Vec::new(),
+            allocated_since_gc: 0,
+            live_count: 0,
+            allocated_total: 0,
+            last_freed: 0,
+            collections: 1,
+        }
     }
 
     pub fn alloc(&mut self, obj: Object) -> ObjectId {
         self.allocated_since_gc += 1;
+        self.allocated_total += 1;
         self.live_count += 1;
-        if let Some(i) = self.free.pop() {
+        let i = if let Some(i) = self.free.pop() {
             self.objects[i as usize] = Some(obj);
-            ObjectId(i)
+            i
         } else {
             if self.objects.len() == self.objects.capacity() {
                 self.grow();
             }
             self.objects.push(Some(obj));
-            ObjectId((self.objects.len() - 1) as u32)
+            (self.objects.len() - 1) as u32
+        };
+        if self.phase != GcPhase::Idle {
+            self.alloc_black(i as usize);
         }
+        ObjectId(i)
+    }
+
+    /// Objects allocated during a cycle survive it.
+    #[cold]
+    fn alloc_black(&mut self, i: usize) {
+        if i >= self.marks.len() {
+            self.marks.resize(i + 1, WHITE);
+        }
+        self.marks[i] = BLACK;
     }
 
     /// Make room for more slots: double, or (when that much memory is not
@@ -821,18 +956,69 @@ impl Heap {
         }
     }
 
+    /// The object, for changing it (runs the write barrier while marking).
+    #[inline]
     pub fn get_mut(&mut self, id: ObjectId) -> &mut Object {
+        self.barrier(id);
         self.objects[id.0 as usize].as_mut().expect("use of freed object")
     }
 
     #[inline]
     pub fn try_get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
+        self.barrier(id);
         self.objects.get_mut(id.0 as usize).and_then(|o| o.as_mut())
     }
 
     #[inline]
     pub fn try_get(&self, id: ObjectId) -> Option<&Object> {
         self.objects.get(id.0 as usize).and_then(|o| o.as_ref())
+    }
+
+    /// Write barrier: while marking, an object about to change is scanned
+    /// first if it was not yet (snapshot at the beginning: the references
+    /// it held when the cycle started are kept). Callers that write into
+    /// an object without [`Heap::get_mut`] must call it first.
+    #[inline(always)]
+    pub fn barrier(&mut self, id: ObjectId) {
+        if self.marking {
+            if let Some(&m) = self.marks.get(id.0 as usize) {
+                if m != BLACK {
+                    self.barrier_slow(id.0 as usize);
+                }
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn barrier_slow(&mut self, i: usize) {
+        let Heap { objects, marks, grey, weak, .. } = self;
+        if marks[i] == BLACK_WEAK {
+            return;
+        }
+        let Some(obj) = objects[i].as_ref() else { return };
+        visit_refs(obj, &mut |id| shade(marks, grey, id));
+        if is_weak_kind(&obj.kind) {
+            // Its entries wait for the ephemeron pass; values it is about
+            // to lose are shaded by `WeakMap.prototype.set` / `delete`
+            // (see `Heap::shade_value`).
+            marks[i] = BLACK_WEAK;
+            weak.push(i as u32);
+        } else {
+            marks[i] = BLACK;
+        }
+    }
+
+    /// While marking: keep `v` for this cycle. For values about to be
+    /// dropped from a structure the barrier does not see through (the
+    /// entries of weak collections).
+    #[inline]
+    pub fn shade_value(&mut self, v: &Value) {
+        if self.marking {
+            if let Some(id) = v.as_object() {
+                shade(&mut self.marks, &mut self.grey, id);
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -843,82 +1029,122 @@ impl Heap {
         self.objects.is_empty()
     }
 
-    /// Run a collection. `roots` must contain every externally reachable
-    /// object id; everything else reachable is found by tracing.
-    pub fn collect(&mut self, roots: &[ObjectId]) -> usize {
-        self.collections = self.collections.wrapping_add(1).max(1);
-        let stats = crate::gcstats::enabled();
-        let t0 = std::time::Instant::now();
-        self.marks.clear();
-        self.marks.resize(self.objects.len(), false);
-        let mut work: Vec<ObjectId> = Vec::with_capacity(roots.len());
-        for &r in roots {
-            self.mark_push(r, &mut work);
+    pub fn phase(&self) -> GcPhase {
+        self.phase
+    }
+
+    /// Start a collection cycle: everything reachable from `roots` now (or
+    /// allocated from now on) survives it. Finishes a cycle in progress
+    /// first.
+    pub fn start_cycle(&mut self, roots: &[ObjectId]) {
+        if self.phase != GcPhase::Idle {
+            self.finish_cycle();
         }
-        let mut children: Vec<Value> = Vec::new();
-        let mut weak: Vec<ObjectId> = Vec::new();
+        self.marks.clear();
+        self.marks.resize(self.objects.len(), WHITE);
+        self.grey.clear();
+        self.weak.clear();
+        for &r in roots {
+            if self.objects.get(r.0 as usize).is_some_and(|o| o.is_some()) {
+                shade(&mut self.marks, &mut self.grey, r);
+            }
+        }
+        self.allocated_since_gc = 0;
+        self.phase = GcPhase::Marking;
+        self.marking = true;
+    }
+
+    /// Mark within `budget`; `true` once marking is complete (the cycle
+    /// then sweeps).
+    pub fn mark_step(&mut self, budget: &mut GcBudget) -> bool {
+        if self.phase != GcPhase::Marking {
+            return true;
+        }
         loop {
-            while let Some(id) = work.pop() {
-                children.clear();
-                if let Some(obj) = &self.objects[id.0 as usize] {
-                    if matches!(obj.kind, ObjectKind::WeakMap(_) | ObjectKind::WeakSet(_)) {
-                        weak.push(id);
+            {
+                let Heap { objects, marks, grey, weak, .. } = self;
+                while let Some(i) = grey.pop() {
+                    let i = i as usize;
+                    if marks[i] != GREY {
+                        continue;
                     }
-                    trace_object(obj, &mut children);
-                }
-                for v in &children {
-                    if let V::Object(o) = v.v() {
-                        self.mark_push(o, &mut work);
+                    let Some(obj) = objects[i].as_ref() else {
+                        marks[i] = BLACK;
+                        continue;
+                    };
+                    let mut n = 1;
+                    visit_refs(obj, &mut |id| {
+                        n += 1;
+                        shade(marks, grey, id)
+                    });
+                    if is_weak_kind(&obj.kind) {
+                        marks[i] = BLACK_WEAK;
+                        weak.push(i as u32);
+                    } else {
+                        marks[i] = BLACK;
+                    }
+                    if budget.spend(1 + n / 16) {
+                        return false;
                     }
                 }
             }
             // WeakMap / WeakSet entries whose key is reachable keep their
             // value (which may make more keys reachable): repeat until
             // nothing new is marked.
-            children.clear();
-            for &w in &weak {
-                if let Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = &self.objects[w.0 as usize] {
+            let Heap { objects, marks, grey, weak, .. } = self;
+            for &w in weak.iter() {
+                if let Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = &objects[w as usize] {
                     for (k, v) in m.entries.iter().flatten() {
-                        if self.value_alive(k) && !self.value_alive(v) {
-                            children.push(v.clone());
+                        if let Some(vid) = v.as_object() {
+                            let key_alive = match k.as_object() {
+                                Some(kid) => marks.get(kid.0 as usize).is_some_and(|&m| m != WHITE),
+                                None => true,
+                            };
+                            if key_alive {
+                                shade(marks, grey, vid);
+                            }
                         }
                     }
                 }
             }
-            if children.is_empty() {
+            if grey.is_empty() {
                 break;
             }
-            for v in std::mem::take(&mut children) {
-                if let V::Object(o) = v.v() {
-                    self.mark_push(o, &mut work);
-                }
-            }
         }
-        let t1 = std::time::Instant::now();
-        // Entries whose key is unreachable go with it.
-        for &w in &weak {
-            let dead: Vec<Value> = match &self.objects[w.0 as usize] {
-                Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) => m.entries.iter().flatten().filter(|(k, _)| !self.value_alive(k)).map(|(k, _)| k.clone()).collect(),
-                _ => continue,
-            };
-            if let Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = &mut self.objects[w.0 as usize] {
-                for k in &dead {
-                    m.delete(k);
-                }
-            }
+        self.marking = false;
+        self.phase = GcPhase::Sweeping;
+        self.sweep_at = 0;
+        self.sweep_end = self.objects.len();
+        self.swept.clear();
+        true
+    }
+
+    /// Sweep within `budget`: free unmarked objects, drop the entries of
+    /// weak collections whose keys died. `true` once the cycle is done.
+    pub fn sweep_step(&mut self, budget: &mut GcBudget) -> bool {
+        match self.phase {
+            GcPhase::Idle => return true,
+            GcPhase::Marking => return false,
+            GcPhase::Sweeping => {}
         }
-        let t2 = std::time::Instant::now();
-        let mut freed = 0;
         let debug = std::env::var_os("RH_DEBUG_GC").is_some();
-        // Unfinished iterators that die end their iteration.
-        let mut ended: Vec<u32> = Vec::new();
-        for (i, slot) in self.objects.iter_mut().enumerate() {
-            if slot.is_some() && !self.marks[i] {
-                if let Some(Object { kind: ObjectKind::MapIterator { target, index, .. }, .. }) = slot {
-                    if *index != MAP_ITER_DONE {
-                        ended.push(target.0);
+        while self.sweep_at < self.sweep_end {
+            let i = self.sweep_at;
+            self.sweep_at += 1;
+            if self.objects[i].is_none() {
+                continue;
+            }
+            if self.marks[i] == WHITE {
+                // Unfinished iterators that die end their iteration.
+                if let Some(Object { kind: ObjectKind::MapIterator { target, index, .. }, .. }) = &self.objects[i] {
+                    let t = target.0 as usize;
+                    if *index != MAP_ITER_DONE && self.marks.get(t).is_some_and(|&m| m != WHITE) {
+                        if let Some(Object { kind: ObjectKind::Map(m) | ObjectKind::Set(m) | ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = self.objects[t].as_mut() {
+                            m.iteration_ended();
+                        }
                     }
                 }
+                let slot = &mut self.objects[i];
                 if debug {
                     let o = slot.as_ref().unwrap();
                     let keys: Vec<String> = o.props.iter().take(6).map(|(k, _)| format!("{k:?}")).collect();
@@ -928,40 +1154,211 @@ impl Heap {
                     o.props.recycle();
                 }
                 *slot = None;
-                self.free.push(i as u32);
-                freed += 1;
+                self.swept.push(i as u32);
+            } else if let Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = self.objects[i].as_mut() {
+                // Entries whose key is unreachable go with it.
+                let marks = &self.marks;
+                let dead: Vec<Value> = m.entries.iter().flatten().filter(|(k, _)| k.as_object().is_some_and(|o| marks.get(o.0 as usize).is_some_and(|&c| c == WHITE))).map(|(k, _)| k.clone()).collect();
+                for k in &dead {
+                    m.delete(k);
+                }
+            }
+            if budget.spend(1) {
+                return false;
             }
         }
-        for t in ended {
-            if let Some(Object { kind: ObjectKind::Map(m) | ObjectKind::Set(m) | ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = &mut self.objects[t as usize] {
-                m.iteration_ended();
-            }
-        }
+        let freed = self.swept.len();
         self.live_count -= freed;
-        self.allocated_since_gc = 0;
+        self.last_freed = freed;
+        // Reuse low slots first.
+        self.swept.reverse();
+        self.free.append(&mut self.swept);
+        self.collections = self.collections.wrapping_add(1).max(1);
+        self.phase = GcPhase::Idle;
+        true
+    }
+
+    /// Run the cycle in progress to its end; returns the objects it freed.
+    pub fn finish_cycle(&mut self) -> usize {
+        if self.phase == GcPhase::Idle {
+            return 0;
+        }
+        self.mark_step(&mut GcBudget::unlimited());
+        self.sweep_step(&mut GcBudget::unlimited());
+        self.last_freed
+    }
+
+    /// Run a whole collection now. `roots` must contain every externally
+    /// reachable object id; everything else reachable is found by tracing.
+    pub fn collect(&mut self, roots: &[ObjectId]) -> usize {
+        let stats = crate::gcstats::enabled();
+        self.finish_cycle();
+        let t0 = std::time::Instant::now();
+        self.start_cycle(roots);
+        self.mark_step(&mut GcBudget::unlimited());
+        let t1 = std::time::Instant::now();
+        self.sweep_step(&mut GcBudget::unlimited());
         if stats {
             crate::gcstats::record_phase(1, t1 - t0);
-            crate::gcstats::record_phase(2, t2 - t1);
-            crate::gcstats::record_phase(3, t2.elapsed());
+            crate::gcstats::record_phase(3, t1.elapsed());
         }
-        freed
+        self.last_freed
     }
 
-    /// During a collection: whether `v` is marked (non-objects always are).
-    fn value_alive(&self, v: &Value) -> bool {
-        match v.v() {
-            V::Object(o) => self.marks.get(o.0 as usize).copied().unwrap_or(false),
-            _ => true,
-        }
-    }
+}
 
-    fn mark_push(&mut self, id: ObjectId, work: &mut Vec<ObjectId>) {
-        let i = id.0 as usize;
-        if i < self.marks.len() && !self.marks[i] && self.objects[i].is_some() {
-            self.marks[i] = true;
-            work.push(id);
+/// Call `f` with every object directly referenced by `obj` (strong
+/// references: the entries of weak collections are left out).
+#[inline]
+pub fn visit_refs(obj: &Object, f: &mut impl FnMut(ObjectId)) {
+    #[inline(always)]
+    fn val(f: &mut impl FnMut(ObjectId), v: &Value) {
+        if let Some(o) = v.as_object() {
+            f(o);
         }
     }
+    #[inline(always)]
+    fn opt(f: &mut impl FnMut(ObjectId), v: &Option<Value>) {
+        if let Some(v) = v {
+            val(f, v);
+        }
+    }
+    if let Some(p) = obj.proto {
+        f(p);
+    }
+    obj.props.for_each_value(|p| {
+        val(f, &p.value);
+        if let Some(a) = &p.acc {
+            opt(f, &a.getter);
+            opt(f, &a.setter);
+        }
+    });
+    match &obj.kind {
+        ObjectKind::Array { elements, .. } => {
+            for v in elements {
+                val(f, v);
+            }
+        }
+        ObjectKind::Function(c) => {
+            if let Some(s) = c.scope {
+                f(s);
+            }
+            opt(f, &c.this_value);
+            opt(f, &c.new_target);
+            if let Some(h) = c.home_object {
+                f(h);
+            }
+            opt(f, &c.fields);
+            opt(f, &c.arguments);
+        }
+        ObjectKind::Native(n) => {
+            for v in &n.captures {
+                val(f, v);
+            }
+        }
+        ObjectKind::Bound(b) => {
+            f(b.target);
+            val(f, &b.this);
+            for v in &b.args {
+                val(f, v);
+            }
+        }
+        ObjectKind::Scope(s) => {
+            if let Some(p) = s.parent {
+                f(p);
+            }
+            for v in &s.slots {
+                val(f, v);
+            }
+        }
+        ObjectKind::Map(m) | ObjectKind::Set(m) => {
+            for (k, v) in m.entries.iter().flatten() {
+                val(f, k);
+                val(f, v);
+            }
+        }
+        // Ephemerons: an entry keeps its value alive only while its key is
+        // alive otherwise (see `Heap::mark_step`).
+        ObjectKind::WeakMap(_) | ObjectKind::WeakSet(_) => {}
+        ObjectKind::Generator(g) => {
+            if let Some(fr) = &g.frame {
+                visit_frame(fr, f);
+            }
+            if let Some(p) = g.promise {
+                f(p);
+            }
+            for (_, v, p) in &g.queue {
+                val(f, v);
+                f(*p);
+            }
+        }
+        ObjectKind::Promise(p) => {
+            val(f, &p.value);
+            for r in p.fulfill_reactions.iter().chain(p.reject_reactions.iter()) {
+                opt(f, &r.handler);
+                if let Some((a, b, c)) = &r.capability {
+                    val(f, a);
+                    val(f, b);
+                    val(f, c);
+                }
+                if let Some((_, v)) = &r.native {
+                    val(f, v);
+                }
+            }
+        }
+        ObjectKind::TypedArray(t) | ObjectKind::DataView(t) => f(t.buffer),
+        ObjectKind::Proxy { target, handler, .. } => {
+            f(*target);
+            f(*handler);
+        }
+        ObjectKind::ArrayIterator { target, .. } => val(f, target),
+        ObjectKind::MapIterator { target, .. } => f(*target),
+        ObjectKind::RegExpStringIterator { regexp, .. } => f(*regexp),
+        ObjectKind::ForInIterator(s) => {
+            if let Some(o) = s.object {
+                f(o);
+            }
+        }
+        ObjectKind::ModuleBinding { scope, .. } => f(*scope),
+        ObjectKind::Slots(d) => {
+            for v in d.values.iter().chain(d.list.iter()) {
+                val(f, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Objects referenced by a suspended frame (see [`trace_frame`]).
+pub fn visit_frame(fr: &Frame, f: &mut impl FnMut(ObjectId)) {
+    let mut val = |v: &Value| {
+        if let Some(o) = v.as_object() {
+            f(o);
+        }
+    };
+    val(&Value::Object(fr.scope));
+    val(&fr.this);
+    if let Some(func) = fr.func {
+        val(&Value::Object(func));
+    }
+    val(&fr.new_target);
+    if let Some(e) = &fr.extra {
+        if let Some(a) = &e.arguments_obj {
+            val(a);
+        }
+        if let Some(g) = e.generator {
+            val(&Value::Object(g));
+        }
+        val(&e.completion);
+        for v in &e.saved {
+            val(v);
+        }
+    }
+}
+
+/// Collect every value directly referenced by `obj`.
+pub fn trace_object(obj: &Object, out: &mut Vec<Value>) {
+    visit_refs(obj, &mut |id| out.push(Value::Object(id)));
 }
 
 fn push_val(out: &mut Vec<Value>, v: &Value) {
@@ -979,94 +1376,6 @@ fn push_opt(out: &mut Vec<Value>, v: &Option<Value>) {
 fn push_id(out: &mut Vec<Value>, id: Option<ObjectId>) {
     if let Some(id) = id {
         out.push(Value::Object(id));
-    }
-}
-
-/// Collect every value directly referenced by `obj`.
-pub fn trace_object(obj: &Object, out: &mut Vec<Value>) {
-    push_id(out, obj.proto);
-    obj.props.for_each_value(|p| {
-        push_val(out, &p.value);
-        if let Some(g) = p.getter() {
-            push_val(out, g);
-        }
-        if let Some(s) = p.setter() {
-            push_val(out, s);
-        }
-    });
-    match &obj.kind {
-        ObjectKind::Array { elements, .. } => {
-            for v in elements {
-                push_val(out, v);
-            }
-        }
-        ObjectKind::Function(c) => {
-            push_id(out, c.scope);
-            push_opt(out, &c.this_value);
-            push_opt(out, &c.new_target);
-            push_id(out, c.home_object);
-            push_opt(out, &c.fields);
-            push_opt(out, &c.arguments);
-        }
-        ObjectKind::Native(n) => {
-            for v in &n.captures {
-                push_val(out, v);
-            }
-        }
-        ObjectKind::Bound(b) => {
-            out.push(Value::Object(b.target));
-            push_val(out, &b.this);
-            for v in &b.args {
-                push_val(out, v);
-            }
-        }
-        ObjectKind::Scope(s) => {
-            push_id(out, s.parent);
-            for v in &s.slots {
-                push_val(out, v);
-            }
-        }
-        ObjectKind::Map(m) | ObjectKind::Set(m) => {
-            for (k, v) in m.entries.iter().flatten() {
-                push_val(out, k);
-                push_val(out, v);
-            }
-        }
-        // Ephemerons: an entry keeps its value alive only while its key is
-        // alive otherwise (see `Heap::collect`).
-        ObjectKind::WeakMap(_) | ObjectKind::WeakSet(_) => {}
-        ObjectKind::Generator(g) => {
-            if let Some(f) = &g.frame {
-                trace_frame(f, out);
-            }
-            push_id(out, g.promise);
-            for (_, v, p) in &g.queue {
-                push_val(out, v);
-                out.push(Value::Object(*p));
-            }
-        }
-        ObjectKind::Promise(p) => {
-            push_val(out, &p.value);
-            for r in p.fulfill_reactions.iter().chain(p.reject_reactions.iter()) {
-                trace_reaction(r, out);
-            }
-        }
-        ObjectKind::TypedArray(t) | ObjectKind::DataView(t) => out.push(Value::Object(t.buffer)),
-        ObjectKind::Proxy { target, handler, .. } => {
-            out.push(Value::Object(*target));
-            out.push(Value::Object(*handler));
-        }
-        ObjectKind::ArrayIterator { target, .. } => push_val(out, target),
-        ObjectKind::MapIterator { target, .. } => out.push(Value::Object(*target)),
-        ObjectKind::RegExpStringIterator { regexp, .. } => out.push(Value::Object(*regexp)),
-        ObjectKind::ForInIterator(f) => push_id(out, f.object),
-        ObjectKind::ModuleBinding { scope, .. } => out.push(Value::Object(*scope)),
-        ObjectKind::Slots(d) => {
-            for v in d.values.iter().chain(d.list.iter()) {
-                push_val(out, v);
-            }
-        }
-        _ => {}
     }
 }
 

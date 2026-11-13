@@ -750,6 +750,22 @@ impl Engine {
         out
     }
 
+    /// Idle time until `deadline` (nothing due before it): garbage
+    /// collector work for the page's realm and its frames'. Returns
+    /// whether collector work remains.
+    pub fn idle_gc(&self, page: &mut Page, deadline: std::time::Instant) -> bool {
+        let mut more = false;
+        if let Some(h) = page.script.host.as_mut() {
+            more |= h.gc_idle(deadline);
+        }
+        for c in page.frames.children.iter_mut() {
+            if let Some(child) = c.page.as_mut() {
+                more |= self.idle_gc(child, deadline);
+            }
+        }
+        more
+    }
+
     fn tick_scripts(&self, page: &mut Page) -> ScriptOutcome {
         let Some(mut host) = page.script.host.take() else {
             return ScriptOutcome::default();

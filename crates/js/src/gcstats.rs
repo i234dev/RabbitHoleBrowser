@@ -8,14 +8,14 @@ use std::cell::RefCell;
 
 #[derive(Default, Clone)]
 pub struct GcStats {
-    /// Pause lengths in microseconds.
+    /// Lengths of the pauses inside running script, in microseconds.
     pub pauses_us: Vec<u32>,
     /// Completed collection cycles.
     pub cycles: u32,
     /// Microseconds spent in each phase: roots, mark, weak, sweep.
     pub phase_us: [u64; 4],
-    /// Pauses taken from idle time (between tasks) rather than inside
-    /// running script.
+    /// Collector work done in idle time (between tasks; not counted as
+    /// pauses).
     pub idle_pauses: u32,
     pub idle_us: u64,
 }
@@ -36,10 +36,11 @@ pub(crate) fn record_pause(d: std::time::Duration, idle: bool) {
     let us = d.as_micros().min(u32::MAX as u128) as u32;
     let _ = STATS.try_with(|s| {
         let mut s = s.borrow_mut();
-        s.pauses_us.push(us);
         if idle {
             s.idle_pauses += 1;
             s.idle_us += us as u64;
+        } else {
+            s.pauses_us.push(us);
         }
     });
 }
@@ -90,7 +91,7 @@ impl GcStats {
         let hist: Vec<String> = buckets.iter().zip(counts.iter()).filter(|(_, c)| **c > 0).map(|((_, n), c)| format!("{n}:{c}")).collect();
         let ms = |us: u64| us as f64 / 1000.0;
         format!(
-            "[gc-stats] cycles={} pauses={} total={:.1}ms max={:.2}ms p95={:.2}ms p50={:.2}ms idle={}/{:.1}ms phases(roots/mark/weak/sweep)={:.1}/{:.1}/{:.1}/{:.1}ms hist[{}]",
+            "[gc-stats] cycles={} pauses={} total={:.1}ms max={:.2}ms p95={:.2}ms p50={:.2}ms idle={}/{:.1}ms all={:.1}ms phases(roots/mark/weak/sweep)={:.1}/{:.1}/{:.1}/{:.1}ms hist[{}]",
             self.cycles,
             self.pauses_us.len(),
             ms(self.total_us()),
@@ -99,6 +100,7 @@ impl GcStats {
             ms(self.quantile_us(0.5) as u64),
             self.idle_pauses,
             ms(self.idle_us),
+            ms(self.total_us() + self.idle_us),
             ms(self.phase_us[0]),
             ms(self.phase_us[1]),
             ms(self.phase_us[2]),

@@ -760,6 +760,9 @@ impl Realm {
             };
         }
         if ic.kind == IC_GLOBAL_OBJ && ic.holder == crate::shape::proto_epoch() {
+            // The store bypasses `get_mut`: run its write barrier.
+            let g = self.global;
+            self.heap.barrier(g);
             // SAFETY: as in `ic_get_global`; nothing else borrows the
             // property while this store runs.
             let p = unsafe { &mut *(global_cell_ptr(&ic) as *mut Property) };

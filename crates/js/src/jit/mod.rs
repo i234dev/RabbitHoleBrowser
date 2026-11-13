@@ -52,7 +52,6 @@ pub struct Options {
     pub only: Vec<String>,
     pub max: Option<u32>,
     pub stats: bool,
-    pub gc_stress: bool,
     /// Loop-free functions shorter than this run interpreted when called
     /// from interpreted code (`RABBITHOLE_JIT_ENTRY_MIN`, default
     /// [`ENTRY_MIN_OPS`]).
@@ -96,7 +95,6 @@ pub fn options() -> &'static Options {
             only: list("RABBITHOLE_JIT_ONLY"),
             max: var("RABBITHOLE_JIT_MAX").and_then(|v| v.parse().ok()),
             stats: var("RABBITHOLE_JIT_STATS").is_some(),
-            gc_stress: var("RH_GC_STRESS").is_some(),
             entry_min_ops: var("RABBITHOLE_JIT_ENTRY_MIN").and_then(|v| v.parse().ok()).unwrap_or(ENTRY_MIN_OPS),
         }
     })
@@ -167,8 +165,6 @@ pub(crate) struct State {
     /// A panic caught in a helper, resumed once native code has returned.
     pub panic: Option<Box<dyn std::any::Any + Send>>,
     pub stats: Stats,
-    /// `RH_GC_STRESS`: collect at every safe point, one tick apart.
-    pub gc_stress: bool,
     /// Entries into native code.
     pub entries: u64,
 }
@@ -196,7 +192,7 @@ impl Default for State {
     fn default() -> State {
         let o = options();
         debug::install_fault_reporter();
-        State { on: o.on, active: o.on || o.stats, threshold: o.threshold, panic: None, stats: Stats { enabled: o.stats, ..Default::default() }, gc_stress: o.gc_stress, entries: 0 }
+        State { on: o.on, active: o.on || o.stats, threshold: o.threshold, panic: None, stats: Stats { enabled: o.stats, ..Default::default() }, entries: 0 }
     }
 }
 

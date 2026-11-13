@@ -660,6 +660,7 @@ fn weak_map_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
     let id = this_coll(realm, &this, Kind::WeakMap, "set")?;
     let k = arg(args, 0);
     require_object_key(realm, &k, "as weak map key")?;
+    weak_value_barrier(realm, id, &k);
     data_mut(realm, id).set(k, arg(args, 1));
     Ok(this)
 }
@@ -671,7 +672,18 @@ fn weak_map_has(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Valu
 
 fn weak_map_delete(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_coll(realm, &this, Kind::WeakMap, "delete")?;
+    weak_value_barrier(realm, id, &arg(args, 0));
     Ok(Value::Bool(data_mut(realm, id).delete(&arg(args, 0))))
+}
+
+/// While the collector marks, the value an entry is about to lose stays
+/// for this cycle (the program may still hold it; see `Heap::shade_value`).
+fn weak_value_barrier(realm: &mut Realm, id: ObjectId, k: &Value) {
+    if realm.heap.marking {
+        if let Some(old) = data(realm, id).get(k).cloned() {
+            realm.heap.shade_value(&old);
+        }
+    }
 }
 
 // -------------------------------------------------------------- WeakSet

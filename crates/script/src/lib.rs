@@ -820,6 +820,13 @@ impl ScriptHost {
         self.realm.gc();
     }
 
+    /// Garbage collector work in idle time (no script running) until
+    /// `deadline`; returns whether collector work remains (see
+    /// `Realm::gc_idle`).
+    pub fn gc_idle(&mut self, deadline: std::time::Instant) -> bool {
+        self.realm.gc_idle(deadline)
+    }
+
     /// Direct access to the realm (advanced embedders).
     pub fn realm(&mut self) -> &mut Realm {
         &mut self.realm

@@ -123,7 +123,11 @@ fn main() {
             Some(due) => {
                 let now = engine.start.elapsed().as_secs_f64() * 1000.0;
                 if due > now {
-                    std::thread::sleep(std::time::Duration::from_millis(((due - now) as u64).min(50)));
+                    // Idle until the next task: collector work first.
+                    let wait = std::time::Duration::from_micros(((due - now) * 1000.0) as u64).min(std::time::Duration::from_millis(50));
+                    let until = std::time::Instant::now() + wait;
+                    engine.idle_gc(&mut page, until);
+                    std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
                 }
                 let _ = engine.tick(&mut page);
             }

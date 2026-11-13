@@ -87,7 +87,10 @@ pub fn settle(engine: &Engine, page: &mut Page, wait_ms: u64) -> Option<PendingN
             if wait.is_zero() {
                 break;
             }
-            std::thread::sleep(wait);
+            // Idle until the next task: collector work first.
+            let until = Instant::now() + wait;
+            engine.idle_gc(page, until);
+            std::thread::sleep(until.saturating_duration_since(Instant::now()));
             if Instant::now() >= deadline {
                 break;
             }

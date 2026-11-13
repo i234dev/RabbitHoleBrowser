@@ -147,6 +147,67 @@ pub type ConsoleSink = Box<dyn FnMut(&str, String)>;
 /// [`Realm::maybe_gc`]).
 pub const GC_MIN_BYTES: isize = 4 << 20;
 
+/// During a collection cycle, a slice runs once the program allocated this
+/// many objects or bytes since the previous one.
+const GC_SLICE_OBJECTS: usize = 2048;
+const GC_SLICE_BYTES: isize = 512 << 10;
+/// Idle time shorter than this is left alone.
+const GC_IDLE_MIN: std::time::Duration = std::time::Duration::from_micros(300);
+
+/// `RH_GC_STRESS=1`: a whole collection at every safe point.
+pub(crate) const GC_STRESS_FULL: u8 = 1;
+/// `RH_GC_STRESS=inc`: a few units of incremental work at every safe point.
+pub(crate) const GC_STRESS_INCREMENTAL: u8 = 2;
+
+/// Pacing of the incremental collector.
+pub(crate) struct GcPacing {
+    /// `RH_GC_INCREMENTAL=0` collects all at once.
+    pub incremental: bool,
+    /// `RH_NO_GC`: never collect automatically.
+    pub no_gc: bool,
+    /// Length of a slice inside running script (`RH_GC_SLICE_US`).
+    pub slice: std::time::Duration,
+    /// `RH_GC_STRESS` mode (0, [`GC_STRESS_FULL`], [`GC_STRESS_INCREMENTAL`]).
+    pub stress: u8,
+    pub stress_n: u32,
+    /// When the running cycle started, and the allocation counters then.
+    pub cycle_start: std::time::Instant,
+    pub cycle_alloc: usize,
+    pub cycle_bytes: isize,
+    /// Allocation counters at the end of the last slice.
+    pub last_alloc: usize,
+    pub last_bytes: isize,
+    /// Slices of the running cycle, the longest and their total.
+    pub slices: u32,
+    pub max_slice: std::time::Duration,
+    pub work: std::time::Duration,
+}
+
+impl GcPacing {
+    fn from_env() -> GcPacing {
+        let var = |k: &str| std::env::var(k).ok();
+        GcPacing {
+            incremental: var("RH_GC_INCREMENTAL").map(|v| v != "0").unwrap_or(true),
+            no_gc: var("RH_NO_GC").is_some(),
+            slice: std::time::Duration::from_micros(var("RH_GC_SLICE_US").and_then(|v| v.parse().ok()).unwrap_or(1000)),
+            stress: match var("RH_GC_STRESS").as_deref() {
+                None => 0,
+                Some("inc" | "incremental" | "2") => GC_STRESS_INCREMENTAL,
+                Some(_) => GC_STRESS_FULL,
+            },
+            stress_n: 0,
+            cycle_start: std::time::Instant::now(),
+            cycle_alloc: 0,
+            cycle_bytes: 0,
+            last_alloc: 0,
+            last_bytes: 0,
+            slices: 0,
+            max_slice: std::time::Duration::ZERO,
+            work: std::time::Duration::ZERO,
+        }
+    }
+}
+
 pub struct Realm {
     pub heap: Heap,
     pub intrinsics: Intrinsics,
@@ -178,6 +239,8 @@ pub struct Realm {
     /// how much it may grow before the next one.
     gc_bytes_base: isize,
     pub gc_bytes_budget: isize,
+    /// Incremental collector pacing (see [`Realm::maybe_gc`]).
+    pub(crate) gcx: GcPacing,
     /// When set, running JavaScript past this instant is interrupted with an
     /// uncatchable "Script execution timed out" error (watchdog).
     pub deadline: Option<std::time::Instant>,
@@ -425,6 +488,7 @@ impl Realm {
             gc_threshold: 200_000,
             gc_bytes_base: 0,
             gc_bytes_budget: GC_MIN_BYTES,
+            gcx: GcPacing::from_env(),
             deadline: None,
             watch_origin: None,
             task_budget: None,
@@ -444,7 +508,7 @@ impl Realm {
             current_callee: None,
             join_stack: Vec::new(),
             modules: Default::default(),
-            tick: if cfg!(feature = "jit") && std::env::var_os("RH_GC_STRESS").is_some() { 1 } else { crate::vm::TICK_INTERVAL },
+            tick: if std::env::var_os("RH_GC_STRESS").is_some() { 1 } else { crate::vm::TICK_INTERVAL },
             loop_end: None,
             #[cfg(feature = "jit")]
             jit: Default::default(),
@@ -774,10 +838,11 @@ impl Realm {
 
     // --------------------------------------------------------------- GC
 
-    /// Run a full garbage collection now.
-    pub fn gc(&mut self) -> usize {
-        let t0 = std::time::Instant::now();
-        let mut roots: Vec<ObjectId> = Vec::with_capacity(1024);
+    /// Every object the collector must keep besides what they reference:
+    /// intrinsics, the global, frames and their value stack, queued and
+    /// running jobs, handles, host roots, ...
+    fn gc_roots(&self) -> Vec<ObjectId> {
+        let mut roots: Vec<ObjectId> = Vec::with_capacity(1024 + self.extra_roots.len());
         let i = &self.intrinsics;
         roots.extend([
             i.object_proto, i.function_proto, i.array_proto, i.string_proto, i.number_proto, i.boolean_proto, i.symbol_proto,
@@ -790,11 +855,11 @@ impl Realm {
                 roots.push(o);
             }
         }
-        let mut tmp = Vec::new();
         for f in &self.frames {
-            trace_frame(f, &mut tmp);
+            crate::heap::visit_frame(f, &mut |o| roots.push(o));
         }
-        tmp.extend(self.vstack.iter().filter(|v| v.is_object()).cloned());
+        roots.extend(self.vstack.iter().filter_map(|v| v.as_object()));
+        let mut tmp = Vec::new();
         for j in &self.jobs {
             match j {
                 Job::Reaction { reaction, argument } => {
@@ -814,32 +879,219 @@ impl Realm {
             }
         }
         tmp.extend(self.roots.borrow().values.values().cloned());
-        tmp.extend(self.extra_roots.iter().cloned());
-        tmp.extend(self.native_roots.iter().filter(|v| v.is_object()).cloned());
-        for roots in &self.job_roots {
-            tmp.extend(roots.iter().cloned());
+        roots.extend(self.extra_roots.iter().filter_map(|v| v.as_object()));
+        roots.extend(self.native_roots.iter().filter_map(|v| v.as_object()));
+        for r in &self.job_roots {
+            roots.extend(r.iter().filter_map(|v| v.as_object()));
         }
         tmp.extend(self.new_target_stack.iter().cloned());
         tmp.extend(self.unhandled_rejections.iter().cloned());
-        tmp.extend(self.template_cache.values().map(|o| Value::Object(*o)));
+        roots.extend(self.template_cache.values().copied());
         self.modules.trace(&mut tmp);
         if let Some(c) = self.current_callee {
-            tmp.push(Value::Object(c));
+            roots.push(c);
         }
-        for v in tmp {
-            if let V::Object(o) = v.v() {
-                roots.push(o);
-            }
-        }
+        roots.extend(tmp.iter().filter_map(|v| v.as_object()));
+        roots
+    }
+
+    /// Run a full garbage collection now (finishing an incremental cycle
+    /// in progress first); returns the objects freed.
+    pub fn gc(&mut self) -> usize {
+        let t0 = std::time::Instant::now();
+        self.heap.finish_cycle();
+        let roots = self.gc_roots();
         if crate::gcstats::enabled() {
             crate::gcstats::record_phase(0, t0.elapsed());
         }
         let freed = self.heap.collect(&roots);
         if crate::gcstats::enabled() {
             crate::gcstats::record_pause(t0.elapsed(), false);
+        }
+        self.gc_cycle_done(t0);
+        freed
+    }
+
+    /// Thresholds for the next cycle, from the heap left by this one.
+    fn gc_cycle_done(&mut self, cycle_start: std::time::Instant) {
+        let freed = self.heap.last_freed;
+        self.gc_threshold = (self.heap.live_count.max(50_000)).max(freed / 2);
+        let in_use = crate::alloc::thread_bytes_in_use();
+        if crate::gcstats::enabled() {
             crate::gcstats::record_cycle();
         }
-        freed
+        if std::env::var_os("RH_GC_TRACE").is_some() {
+            let p = &self.gcx;
+            eprintln!(
+                "[gc] cycle {:.1}ms slices={} max_slice={:.2}ms work={:.2}ms freed={freed} live={} heap_slots={} in_use_before={} in_use_after={in_use}",
+                cycle_start.elapsed().as_secs_f64() * 1000.0,
+                p.slices,
+                p.max_slice.as_secs_f64() * 1000.0,
+                p.work.as_secs_f64() * 1000.0,
+                self.heap.live_count,
+                self.heap.len(),
+                self.gc_bytes_base + self.gc_bytes_budget,
+            );
+        }
+        self.gc_bytes_base = in_use;
+        self.gc_bytes_budget = (in_use / 2).max(GC_MIN_BYTES);
+    }
+
+    /// Whether the heap grew enough since the last cycle for a new one
+    /// (`num`/`den` of the trigger: an idle-time cycle starts earlier).
+    fn gc_due(&self, num: usize, den: usize) -> bool {
+        if self.heap.allocated_since_gc * den > self.gc_threshold * num {
+            return true;
+        }
+        // A new object reuses a free heap slot without allocating, so the
+        // slots are counted separately.
+        let grown = crate::alloc::thread_bytes_in_use() - self.gc_bytes_base + (self.heap.allocated_since_gc * crate::heap::SLOT_BYTES) as isize;
+        grown * den as isize > self.gc_bytes_budget * num as isize
+    }
+
+    /// One step of the incremental collector (starting a cycle when none
+    /// is running) within `budget`; returns whether the cycle finished.
+    fn gc_slice(&mut self, budget: crate::heap::GcBudget, idle: bool) -> bool {
+        let t0 = std::time::Instant::now();
+        let mut budget = budget;
+        let stats = crate::gcstats::enabled();
+        if self.heap.phase() == crate::heap::GcPhase::Idle {
+            let roots = self.gc_roots();
+            self.heap.start_cycle(&roots);
+            self.gcx.cycle_start = t0;
+            self.gcx.cycle_alloc = self.heap.allocated_total;
+            self.gcx.cycle_bytes = crate::alloc::thread_bytes_in_use();
+            self.gcx.slices = 0;
+            self.gcx.max_slice = std::time::Duration::ZERO;
+            self.gcx.work = std::time::Duration::ZERO;
+            if stats {
+                crate::gcstats::record_phase(0, t0.elapsed());
+            }
+        }
+        let mut done = false;
+        if self.heap.phase() == crate::heap::GcPhase::Marking {
+            let tm = std::time::Instant::now();
+            self.heap.mark_step(&mut budget);
+            if stats {
+                crate::gcstats::record_phase(1, tm.elapsed());
+            }
+        }
+        if self.heap.phase() == crate::heap::GcPhase::Sweeping {
+            let ts = std::time::Instant::now();
+            done = self.heap.sweep_step(&mut budget);
+            if stats {
+                crate::gcstats::record_phase(3, ts.elapsed());
+            }
+        }
+        let spent = t0.elapsed();
+        if stats {
+            crate::gcstats::record_pause(spent, idle);
+        }
+        let p = &mut self.gcx;
+        p.slices += 1;
+        p.max_slice = p.max_slice.max(spent);
+        p.work += spent;
+        p.last_alloc = self.heap.allocated_total;
+        p.last_bytes = crate::alloc::thread_bytes_in_use();
+        if done {
+            let start = self.gcx.cycle_start;
+            self.gc_cycle_done(start);
+        }
+        done
+    }
+
+    /// Collect when enough objects were allocated since the last
+    /// collection, or when this thread's memory grew enough (objects are
+    /// not all the same size: a closure with its scope, an error with its
+    /// stack string or a long string cost far more than a plain object, so
+    /// counting objects alone let garbage reach hundreds of megabytes).
+    ///
+    /// Collections are incremental: a cycle starts when the heap grew
+    /// enough, then runs in slices of `RH_GC_SLICE_US` (1 ms) paced by
+    /// allocation, and in idle time between tasks ([`Realm::gc_idle`]).
+    pub(crate) fn maybe_gc(&mut self) {
+        if !self.gc_enabled || self.gc_block != 0 {
+            return;
+        }
+        if self.gcx.stress == GC_STRESS_INCREMENTAL {
+            // A few units of work at every safe point.
+            self.gcx.stress_n = self.gcx.stress_n.wrapping_add(1);
+            let units = 1 + (self.gcx.stress_n.wrapping_mul(7919) % 48) as usize;
+            self.gc_slice(crate::heap::GcBudget::units(units), false);
+            return;
+        }
+        if self.heap.phase() != crate::heap::GcPhase::Idle {
+            self.gc_pace();
+            return;
+        }
+        if !self.gc_due(1, 1) || self.gcx.no_gc {
+            return;
+        }
+        if !self.gcx.incremental {
+            self.gc();
+            return;
+        }
+        let slice = self.gcx.slice;
+        self.gc_slice(crate::heap::GcBudget::until(std::time::Instant::now() + slice), false);
+    }
+
+    /// During a cycle: a slice once the program allocated enough since the
+    /// last one; longer slices when allocation outpaces the collector, and
+    /// the rest of the cycle at once when the heap ran far past its budget.
+    fn gc_pace(&mut self) {
+        let p = &self.gcx;
+        let alloc = self.heap.allocated_total - p.last_alloc;
+        let bytes = crate::alloc::thread_bytes_in_use() - p.last_bytes;
+        if alloc < GC_SLICE_OBJECTS && bytes < GC_SLICE_BYTES {
+            return;
+        }
+        let during = (self.heap.allocated_total - p.cycle_alloc) as isize;
+        let grown = crate::alloc::thread_bytes_in_use() - p.cycle_bytes;
+        let objects = self.gc_threshold.max(1) as isize;
+        let budget_bytes = self.gc_bytes_budget.max(1);
+        // How far into the next cycle's allowance this one has run.
+        let pressure = (during * 4 / objects).max(grown * 4 / budget_bytes);
+        let mut slice = p.slice;
+        if pressure >= 16 {
+            let t0 = std::time::Instant::now();
+            self.heap.finish_cycle();
+            if crate::gcstats::enabled() {
+                crate::gcstats::record_pause(t0.elapsed(), false);
+            }
+            self.gcx.slices += 1;
+            self.gc_cycle_done(self.gcx.cycle_start);
+            return;
+        }
+        if pressure >= 4 {
+            slice *= (pressure as u32 / 2).min(8);
+        }
+        self.gc_slice(crate::heap::GcBudget::until(std::time::Instant::now() + slice), false);
+    }
+
+    /// Collector work in idle time (no script running), until `deadline`:
+    /// continue the running cycle, or start one when the heap is past half
+    /// its trigger. Returns whether collector work remains.
+    pub fn gc_idle(&mut self, deadline: std::time::Instant) -> bool {
+        if !self.gc_enabled || self.gc_block != 0 || self.native_depth > 0 || !self.frames.is_empty() || self.gcx.no_gc || !self.gcx.incremental || self.gcx.stress != 0 {
+            return false;
+        }
+        loop {
+            let now = std::time::Instant::now();
+            if deadline <= now + GC_IDLE_MIN {
+                return self.heap.phase() != crate::heap::GcPhase::Idle;
+            }
+            if self.heap.phase() == crate::heap::GcPhase::Idle && !self.gc_due(1, 2) {
+                return false;
+            }
+            if self.gc_slice(crate::heap::GcBudget::until(deadline), true) {
+                return false;
+            }
+        }
+    }
+
+    /// Whether a collection cycle is in progress.
+    pub fn gc_in_progress(&self) -> bool {
+        self.heap.phase() != crate::heap::GcPhase::Idle
     }
 
     /// Called by the VM at safe points.
@@ -910,36 +1162,6 @@ impl Realm {
     /// Did the last run hit the deadline?
     pub fn timed_out(&self) -> bool {
         self.terminating
-    }
-
-    /// Collect when enough objects were allocated since the last
-    /// collection, or when this thread's memory grew enough (objects are
-    /// not all the same size: a closure with its scope, an error with its
-    /// stack string or a long string cost far more than a plain object, so
-    /// counting objects alone let garbage reach hundreds of megabytes).
-    pub(crate) fn maybe_gc(&mut self) {
-        if !self.gc_enabled || self.gc_block != 0 {
-            return;
-        }
-        let objects = self.heap.allocated_since_gc > self.gc_threshold;
-        // A new object reuses a free heap slot without allocating, so the
-        // slots are counted separately.
-        let grown = crate::alloc::thread_bytes_in_use() - self.gc_bytes_base + (self.heap.allocated_since_gc * crate::heap::SLOT_BYTES) as isize;
-        if !objects && grown <= self.gc_bytes_budget {
-            return;
-        }
-        if std::env::var_os("RH_NO_GC").is_some() {
-            return;
-        }
-        let freed = self.gc();
-        // Adapt the thresholds to the live heap size.
-        self.gc_threshold = (self.heap.live_count.max(50_000)).max(freed / 2);
-        let in_use = crate::alloc::thread_bytes_in_use();
-        if std::env::var_os("RH_GC_TRACE").is_some() {
-            eprintln!("[gc] {:.2}ms objects={} freed={freed} live={} heap_slots={} in_use_before={} in_use_after={in_use}", crate::gcstats::snapshot().pauses_us.last().copied().unwrap_or(0) as f64 / 1000.0, objects, self.heap.live_count, self.heap.len(), self.gc_bytes_base + self.gc_bytes_budget, );
-        }
-        self.gc_bytes_base = in_use;
-        self.gc_bytes_budget = (in_use / 2).max(GC_MIN_BYTES);
     }
 
     // --------------------------------------------------------- evaluation

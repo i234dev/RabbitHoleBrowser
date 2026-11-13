@@ -2,7 +2,7 @@
 //! scripts, timers and input handling, and paints frames.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,9 @@ const OVERSCAN: f32 = 0.5;
 /// Load-time scripts run in slices of about this long; the frame is
 /// painted and input handled between slices.
 const SCRIPT_SLICE: Duration = Duration::from_millis(50);
+/// Longest garbage collector step taken from idle time: input waits at
+/// most this long.
+const IDLE_GC_STEP: Duration = Duration::from_millis(4);
 /// Pointer travel (device px) that turns a press into a drag.
 const DRAG_THRESHOLD: f32 = 4.0;
 const LINE_SCROLL: f32 = 40.0;
@@ -231,7 +234,16 @@ impl Worker {
     fn main_loop(&mut self, rx: Receiver<Inbox>) {
         loop {
             self.busy.store(0, Ordering::Relaxed);
-            let first = match self.next_wakeup() {
+            let wake = self.next_wakeup();
+            // Idle: garbage collector work in short steps, messages first.
+            let first = if self.idle_gc(wake) {
+                match rx.try_recv() {
+                    Ok(m) => Some(m),
+                    Err(TryRecvError::Empty) => continue,
+                    Err(TryRecvError::Disconnected) => return,
+                }
+            } else {
+                match wake {
                 Some(d) => match rx.recv_timeout(d) {
                     Ok(m) => Some(m),
                     Err(RecvTimeoutError::Timeout) => None,
@@ -241,6 +253,7 @@ impl Worker {
                     Ok(m) => Some(m),
                     Err(_) => return,
                 },
+                }
             };
             self.busy.store(now_ms(), Ordering::Relaxed);
             let timed_out = first.is_none();
@@ -299,6 +312,19 @@ impl Worker {
                 );
             }
         }
+    }
+
+    /// Collector work while nothing is due for at least a millisecond, in
+    /// steps of at most [`IDLE_GC_STEP`]; returns whether it did some and
+    /// more remains (the loop then checks for messages and comes back).
+    fn idle_gc(&mut self, wake: Option<Duration>) -> bool {
+        let step = match wake {
+            Some(d) if d < Duration::from_millis(1) => return false,
+            Some(d) => d.min(IDLE_GC_STEP),
+            None => IDLE_GC_STEP,
+        };
+        let Some(page) = self.page.as_mut() else { return false };
+        self.engine.idle_gc(page, Instant::now() + step)
     }
 
     /// How long to wait for messages before running timers.

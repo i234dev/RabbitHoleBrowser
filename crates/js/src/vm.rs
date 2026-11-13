@@ -1438,8 +1438,7 @@ impl Realm {
     /// and calls.
     #[inline(never)]
     fn safepoint(&mut self) -> JsResult<()> {
-        #[cfg(feature = "jit")]
-        if self.jit.gc_stress && self.gc_enabled && self.gc_block == 0 {
+        if self.gcx.stress == crate::realm::GC_STRESS_FULL && self.gc_enabled && self.gc_block == 0 {
             self.gc();
         }
         self.maybe_gc();
@@ -2300,8 +2299,7 @@ impl Realm {
     /// Ticks between safe points (1 under `RH_GC_STRESS`).
     #[inline(always)]
     pub(crate) fn tick_interval(&self) -> u32 {
-        #[cfg(feature = "jit")]
-        if self.jit.gc_stress {
+        if self.gcx.stress != 0 {
             return 1;
         }
         TICK_INTERVAL

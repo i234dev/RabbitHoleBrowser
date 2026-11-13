@@ -1816,7 +1816,11 @@ fn weak_collections_drop_entries_with_their_keys() {
         (function () { var k2 = {}; wm.set(keep, { inner: k2 }); wm.set(k2, 'chained'); })();
         (function () { for (var i = 0; i < 1000; i++) { var o = {}; wm.set(o, [i]); ws.add(o); } })();
         ws.add(keep); [wm, ws]";
+    // No collection while the entries are made (`RH_GC_STRESS` would drop
+    // the dead keys' entries before they are counted).
+    realm.gc_enabled = false;
     let v = realm.eval(src, "weak.js").unwrap();
+    realm.gc_enabled = true;
     let arr = v.as_object().unwrap();
     let (wm, ws) = match &realm.obj(arr).kind {
         crate::heap::ObjectKind::Array { elements, .. } => (elements[0].as_object().unwrap(), elements[1].as_object().unwrap()),

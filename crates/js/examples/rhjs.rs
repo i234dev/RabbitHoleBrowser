@@ -48,6 +48,7 @@ fn main() {
         }
         realm.run_jobs();
     }
+    rabbithole_js::gcstats::report();
     let rejections = realm.take_unhandled_rejections();
     if let Some(r) = rejections.first() {
         let msg = realm.error_to_string(r);
