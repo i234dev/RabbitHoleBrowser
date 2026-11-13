@@ -394,6 +394,29 @@ impl LayoutBox {
         )
     }
 
+    /// Axes constrained by this box's overflow clip. Unlike scrollable
+    /// overflow, `clip` can leave the other axis visibly overflowing.
+    pub(crate) fn overflow_clip_axes(&self) -> (bool, bool) {
+        use rabbithole_style::Overflow::{Clip, Visible};
+        if !self.clips {
+            (false, false)
+        } else if self.style.contain_paint {
+            (true, true)
+        } else {
+            match (self.style.overflow_x, self.style.overflow_y) {
+                (Clip, Visible) => (true, false),
+                (Visible, Clip) => (false, true),
+                _ => (true, true),
+            }
+        }
+    }
+
+    fn overflow_contains(&self, x: f32, y: f32) -> bool {
+        let (clip_x, clip_y) = self.overflow_clip_axes();
+        (!clip_x || (x >= self.rect.x && x < self.rect.right()))
+            && (!clip_y || (y >= self.rect.y && y < self.rect.bottom()))
+    }
+
     /// Does this box establish a stacking context (CSS 2.1 Appendix E)?
     pub fn is_stacking_context(&self) -> bool {
         self.style.is_stacking_context() || self.fixed || self.wm_transform.is_some()
@@ -927,7 +950,7 @@ impl LayoutTree {
     /// coordinates) whose content exceeds its padding box.
     pub fn scroll_container_at(&self, x: f32, y: f32) -> Option<ScrollInfo> {
         fn walk(b: &LayoutBox, x: f32, y: f32) -> Option<ScrollInfo> {
-            if b.clips && !b.rect.contains(x, y) {
+            if !b.overflow_contains(x, y) {
                 return None;
             }
             for c in b.children.iter().rev() {
@@ -1033,7 +1056,7 @@ impl Hit {
         if found.is_some() {
             return found;
         }
-        if b.clips && !b.rect.contains(x, y) {
+        if !b.overflow_contains(x, y) {
             return None;
         }
         if b.formatting == Formatting::Inline {

@@ -401,11 +401,27 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
     }
 
+    /// Overflow clipping in local coordinates, bounded by the painting area.
+    fn overflow_clip_rect(&self, b: &LayoutBox) -> Rect {
+        let pr = b.padding_rect();
+        let (clip_x, clip_y) = b.overflow_clip_axes();
+        // The unconstrained axis needs only cover the current painting area.
+        // Bounds are already mapped back through any ancestor transforms.
+        Rect::new(
+            if clip_x { pr.x } else { self.bounds.x },
+            if clip_y { pr.y } else { self.bounds.y },
+            if clip_x { pr.w } else { self.bounds.w },
+            if clip_y { pr.h } else { self.bounds.h },
+        )
+    }
+
     /// Push an overflow clip (paint + hit scope); returns the scope to
     /// restore with `pop_clip`.
-    fn push_clip(&mut self, b: &LayoutBox, pr: Rect) -> Option<u32> {
+    fn push_clip(&mut self, b: &LayoutBox) -> Option<u32> {
+        let pr = self.overflow_clip_rect(b);
         let radii = background::inner_radii(box_radii(b), &b.style.border_width);
-        if radii.iter().any(|(h, v)| *h > 0.0 && *v > 0.0) {
+        // CSS Overflow 3: a clip/visible pair does not round the content clip.
+        if b.overflow_clip_axes() == (true, true) && radii.iter().any(|(h, v)| *h > 0.0 && *v > 0.0) {
             self.list.push(DisplayItem::PushClipRounded(pr, radii));
         } else {
             self.list.push(DisplayItem::PushClip(pr));
@@ -556,7 +572,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         let mut deferred: Vec<Deferred<'t>> = Vec::new();
         let mut order = 0usize;
         let (flow_clips, abs_clips) = if root.clips && !root.rect.is_empty() && !std::ptr::eq(root, self.root) {
-            let pr = root.padding_rect();
+            let pr = self.overflow_clip_rect(root);
             let abs = if root.is_positioned() || root.transform_matrix().is_some() { vec![pr] } else { Vec::new() };
             (vec![pr], abs)
         } else {
@@ -698,7 +714,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 if Self::is_pseudo_stacking(c) {
                     let mut inner = clips;
                     if c.clips && !c.rect.is_empty() {
-                        inner.push(c.padding_rect());
+                        inner.push(self.overflow_clip_rect(c));
                     }
                     self.collect_hoisted(c, c.padding_rect(), out, order, &inner, &inner);
                 }
@@ -707,7 +723,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 // sticky, stacking) descendants but not absolutely
                 // positioned ones (their containing block is outside it).
                 let mut fc = flow_clips.to_vec();
-                fc.push(c.padding_rect());
+                fc.push(self.overflow_clip_rect(c));
                 self.collect_deferred(c, cb_for_children, out, order, &fc, abs_clips);
             } else {
                 self.collect_deferred(c, cb_for_children, out, order, flow_clips, abs_clips);
@@ -759,13 +775,13 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 if Self::is_pseudo_stacking(c) {
                     let mut inner = clips.to_vec();
                     if c.clips && !c.rect.is_empty() {
-                        inner.push(c.padding_rect());
+                        inner.push(self.overflow_clip_rect(c));
                     }
                     self.collect_hoisted(c, c.padding_rect(), out, order, &inner, &inner);
                 }
             } else if c.clips && !c.rect.is_empty() {
                 let mut fc = flow_clips.to_vec();
-                fc.push(c.padding_rect());
+                fc.push(self.overflow_clip_rect(c));
                 self.collect_hoisted(c, cb_for_children, out, order, &fc, abs_clips);
             } else {
                 self.collect_hoisted(c, cb_for_children, out, order, flow_clips, abs_clips);
@@ -815,7 +831,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
         let clip = b.clips && !b.rect.is_empty();
-        let saved_scope = if clip { Some(self.push_clip(b, b.padding_rect())) } else { None };
+        let saved_scope = if clip { Some(self.push_clip(b)) } else { None };
         if phase == Phase::Floats {
             for c in b.children.iter().filter(|c| c.flow.is_float() && !Self::is_deferred(c)) {
                 self.paint_float_or_atomic(c);

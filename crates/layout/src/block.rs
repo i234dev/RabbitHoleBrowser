@@ -1233,7 +1233,8 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
     if b.flow == Flow::Absolute && b.fixed {
         return r;
     }
-    if b.clips || b.wm_transform.is_some() {
+    let (clip_x, clip_y) = b.overflow_clip_axes();
+    if (clip_x && clip_y) || b.wm_transform.is_some() {
         return r;
     }
     for line in &b.lines {
@@ -1243,6 +1244,15 @@ pub(crate) fn content_bounds(b: &LayoutBox) -> Rect {
     }
     for c in &b.children {
         r = r.union(&content_bounds(c));
+    }
+    let outer = b.margin_rect();
+    if clip_x {
+        r.x = outer.x;
+        r.w = outer.w;
+    }
+    if clip_y {
+        r.y = outer.y;
+        r.h = outer.h;
     }
     r
 }
@@ -1254,19 +1264,20 @@ fn bounds(b: &LayoutBox) -> (f32, f32) {
     }
     let mut r = b.rect.right();
     let mut btm = b.rect.bottom();
-    if b.clips || b.wm_transform.is_some() {
+    let (clip_x, clip_y) = b.overflow_clip_axes();
+    if (clip_x && clip_y) || b.wm_transform.is_some() {
         return (r, btm);
     }
     for line in &b.lines {
         for f in &line.fragments {
-            r = r.max(f.rect.right());
-            btm = btm.max(f.rect.bottom());
+            if !clip_x { r = r.max(f.rect.right()); }
+            if !clip_y { btm = btm.max(f.rect.bottom()); }
         }
     }
     for c in &b.children {
         let (cr, cb) = bounds(c);
-        r = r.max(cr);
-        btm = btm.max(cb);
+        if !clip_x { r = r.max(cr); }
+        if !clip_y { btm = btm.max(cb); }
     }
     (r, btm)
 }

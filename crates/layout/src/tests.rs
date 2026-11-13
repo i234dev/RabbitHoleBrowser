@@ -262,6 +262,69 @@ fn overflow_hidden_keeps_height() {
 }
 
 #[test]
+fn overflow_clip_keeps_the_other_axis_visible_in_paint_and_hits() {
+    for (overflow, visible, clipped) in [
+        ("overflow-x:clip", (50, 30), (30, 50)),
+        ("overflow-y:clip", (30, 50), (50, 30)),
+    ] {
+        let fx = Fixture::new(
+            "<div id=outer><div id=child></div></div>",
+            &format!("html,body{{margin:0}} #outer{{position:relative;margin:40px;width:40px;height:40px;background:black;{overflow}}} #child{{position:relative;left:-20px;top:-20px;width:80px;height:80px;background:green;opacity:0.5}}"),
+        );
+        let list = fx.display_list();
+        let mut canvas = Canvas::new(160, 160);
+        paint(&list, &mut canvas, &fx.fonts, 0.0, 0.0);
+        let pixel = |(x, y): (usize, usize)| canvas.data[y * 160 + x];
+        assert_ne!(pixel(visible), 0xffffff, "{overflow}");
+        assert_eq!(pixel(clipped), 0xffffff, "{overflow}");
+        let child = fx.doc.element_by_id("child").unwrap();
+        assert_eq!(list.hits.hit_test(visible.0 as f32, visible.1 as f32, (0.0, 0.0)), Some(child), "{overflow}");
+        assert_ne!(list.hits.hit_test(clipped.0 as f32, clipped.1 as f32, (0.0, 0.0)), Some(child), "{overflow}");
+        let tree = fx.layout();
+        assert_eq!(tree.node_at(visible.0 as f32, visible.1 as f32), Some(child), "{overflow}");
+        assert_ne!(tree.node_at(clipped.0 as f32, clipped.1 as f32), Some(child), "{overflow}");
+    }
+}
+
+#[test]
+fn single_axis_overflow_clip_does_not_round_the_content_clip() {
+    for overflow in ["overflow-x:clip", "overflow-y:clip", "overflow:clip"] {
+        let fx = Fixture::new(
+            "<div id=outer><div></div></div>",
+            &format!("html,body{{margin:0}} #outer{{margin:40px;width:40px;height:40px;background:red;border-radius:50%;{overflow}}} #outer>div{{width:40px;height:40px;background:green}}"),
+        );
+        let mut canvas = Canvas::new(160, 160);
+        paint(&fx.display_list(), &mut canvas, &fx.fonts, 0.0, 0.0);
+        let corner = canvas.data[41 * 160 + 41];
+        if overflow == "overflow:clip" {
+            assert_ne!(corner, 0x008000);
+        } else {
+            assert_eq!(corner, 0x008000, "{overflow}");
+        }
+    }
+}
+
+#[test]
+fn overflow_clip_propagates_visible_axis_scrollable_overflow() {
+    let fx = Fixture::new(
+        "<div id=scroller><div id=clip><div id=child></div></div></div>",
+        "html,body{margin:0} #scroller{width:100px;height:50px;overflow:auto} #clip{width:50px;height:50px;overflow-x:clip} #child{width:200px;height:100px}",
+    );
+    let tree = fx.layout();
+    let scroller = fx.find(&tree, "div")[0];
+    assert!((scroller.scroll_width - 100.0).abs() < 0.01);
+    assert!((scroller.scroll_height - 100.0).abs() < 0.01, "height={}", scroller.scroll_height);
+    for (overflow, expected) in [("overflow-x:clip", (800.0, 700.0)), ("overflow-y:clip", (900.0, 600.0))] {
+        let fx = Fixture::new(
+            "<div id=clip><div></div></div>",
+            &format!("html,body{{margin:0}} #clip{{width:50px;height:50px;{overflow}}} #clip>div{{width:900px;height:700px}}"),
+        );
+        let tree = fx.layout();
+        assert_eq!((tree.width, tree.height), expected, "{overflow}");
+    }
+}
+
+#[test]
 fn table_columns_align() {
     let html = "<table><tr><td>a</td><td>bbbbbbbbbb</td></tr><tr><td>cccccc</td><td>d</td></tr></table>";
     let fx = Fixture::new(html, "td{padding:2px}");
