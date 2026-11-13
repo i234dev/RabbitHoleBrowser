@@ -835,3 +835,83 @@ fn origin_only_initiator_preserves_cors_and_samesite_without_a_referrer() {
     f.request(&Request::get(server.url("/baseline"))).unwrap();
     assert_eq!(server.requests().pop().unwrap().header("cookie"), Some("strict=one"), "positive control: Strict cookie was stored and same-site requests still send it");
 }
+
+#[test]
+fn referrer_follow_discards_hidden_source_across_weaker_redirect_policy() {
+    let a_origin = Arc::new(Mutex::new(String::new()));
+    let b_origin = Arc::new(Mutex::new(String::new()));
+    let target_b = b_origin.clone();
+    let a = serve(Arc::new(move |request: &Req| {
+        if request.path == "/seed" { return (200, hv(&[("set-cookie", "strict=one; SameSite=Strict; Path=/")]), b"ok".to_vec()); }
+        if let Some(case) = request.path.strip_prefix("/start/") {
+            let policy = if case == "none" { "no-referrer" } else { "strict-origin" };
+            return (302, vec![("location".into(), format!("{}/bounce/{case}", target_b.lock().unwrap())), ("referrer-policy".into(), policy.into())], Vec::new());
+        }
+        (200, Vec::new(), b"ok".to_vec())
+    }));
+    *a_origin.lock().unwrap() = a.origin();
+    let target_a = a_origin.clone();
+    let b = serve(Arc::new(move |request: &Req| {
+        if let Some(case) = request.path.strip_prefix("/bounce/") {
+            return (302, vec![("location".into(), format!("{}/final/{case}", target_a.lock().unwrap())), ("referrer-policy".into(), "unsafe-url".into())], Vec::new());
+        }
+        (200, Vec::new(), b"ok".to_vec())
+    }));
+    *b_origin.lock().unwrap() = b.origin().replace("127.0.0.1", "localhost");
+    let mut fetcher = fetcher();
+    fetcher.cookies = Some(Arc::new(Mutex::new(CookieJar::new())));
+    fetcher.request(&Request::get(a.url("/seed"))).unwrap();
+    let source = a.url("/private-source?query=secret-value#hidden");
+    fetcher.request(&Request::get(a.url("/control")).with_referer(source.clone()).with_referrer_policy(ReferrerPolicy::UnsafeUrl)).unwrap();
+    let control = a.requests().into_iter().find(|r| r.path == "/control").unwrap();
+    assert_eq!(control.header("referer"), Some(format!("{}/private-source?query=secret-value", a.origin()).as_str()));
+    assert_eq!(control.header("cookie"), Some("strict=one"));
+    for case in ["none", "origin"] {
+        fetcher.request(&Request::get(a.url(&format!("/start/{case}"))).with_referer(source.clone())).unwrap();
+    }
+    let seen = a.requests();
+    let final_refs: Vec<_> = ["none", "origin"].into_iter().map(|case| seen.iter().find(|r| r.path == format!("/final/{case}")).unwrap().header("referer").map(str::to_string)).collect();
+    assert_eq!(final_refs, [None, Some(format!("{}/", a.origin()))], "unsafe-url must not restore a source discarded at an earlier redirect");
+    for request in seen.iter().filter(|r| r.path.starts_with("/final/")) {
+        assert_eq!(request.header("sec-fetch-site"), Some("cross-site"));
+        assert_eq!(request.header("cookie"), None, "referrer privacy must not turn the redirect chain into same-site");
+    }
+    let seen = b.requests();
+    assert_eq!(seen.iter().find(|r| r.path == "/bounce/none").unwrap().header("referer"), None);
+    assert_eq!(seen.iter().find(|r| r.path == "/bounce/origin").unwrap().header("referer"), Some(format!("{}/", a.origin()).as_str()));
+}
+
+#[test]
+fn referrer_follow_preflight_uses_remaining_source_and_preserves_request_origin() {
+    let a_origin = Arc::new(Mutex::new(String::new()));
+    let b_origin = Arc::new(Mutex::new(String::new()));
+    let target_b = b_origin.clone();
+    let a = serve(Arc::new(move |request: &Req| {
+        let mut headers = hv(&[("access-control-allow-methods", "GET"), ("access-control-allow-headers", "x-probe"), ("access-control-allow-credentials", "true")]);
+        headers.push(("access-control-allow-origin".into(), request.header("origin").unwrap_or("null").into()));
+        if request.path == "/start" { headers.extend([("location".into(), format!("{}/bounce", target_b.lock().unwrap())), ("referrer-policy".into(), "strict-origin".into())]); return (302, headers, Vec::new()); }
+        (200, headers, b"ok".to_vec())
+    }));
+    *a_origin.lock().unwrap() = a.origin();
+    let target_a = a_origin.clone();
+    let b = serve(Arc::new(move |request: &Req| {
+        let mut headers = hv(&[("access-control-allow-methods", "GET"), ("access-control-allow-headers", "x-probe"), ("access-control-allow-credentials", "true")]);
+        headers.push(("access-control-allow-origin".into(), request.header("origin").unwrap_or("null").into()));
+        if request.method != "OPTIONS" { headers.extend([("location".into(), format!("{}/final", target_a.lock().unwrap())), ("referrer-policy".into(), "unsafe-url".into())]); return (302, headers, Vec::new()); }
+        (200, headers, Vec::new())
+    }));
+    *b_origin.lock().unwrap() = b.origin().replace("127.0.0.1", "localhost");
+    let request = Request::get(a.url("/start")).with_referer(a.url("/private-source?query=secret-value#hidden")).with_header("X-Probe", "yes").with_dest(Destination::Empty).with_mode(RequestMode::Cors, CredentialsMode::Include);
+    assert_eq!(fetcher().fetch_api(&request).unwrap().kind, ResponseType::Cors);
+    let seen = a.requests();
+    let final_requests: Vec<_> = seen.iter().filter(|r| r.path == "/final").collect();
+    assert!(final_requests.iter().any(|r| r.method == "OPTIONS"), "real preflight required");
+    assert!(final_requests.iter().any(|r| r.method == "GET"));
+    for request in final_requests {
+        assert_eq!(request.header("referer"), Some(format!("{}/", a.origin()).as_str()), "both OPTIONS and GET must use the irreversibly filtered source");
+        assert_eq!(request.header("origin"), Some("null"), "redirect-origin taint must remain unchanged");
+    }
+    let seen = b.requests();
+    assert!(seen.iter().any(|r| r.method == "OPTIONS"));
+    assert!(seen.iter().all(|r| r.header("origin") == Some(a.origin().as_str())), "original CORS identity must survive source filtering");
+}

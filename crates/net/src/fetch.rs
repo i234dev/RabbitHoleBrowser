@@ -1234,7 +1234,16 @@ impl Fetcher {
     }
 
     /// CORS preflight for a non-simple cross-origin request.
-    fn preflight(&self, req: &Request, method: &str, url: &Url, origin: &str, include_creds: bool, unsafe_headers: &[String]) -> Result<(), FetchError> {
+    fn preflight(
+        &self,
+        req: &Request,
+        method: &str,
+        url: &Url,
+        origin: &str,
+        unsafe_headers: &[String],
+        referer: Option<&str>,
+    ) -> Result<(), FetchError> {
+        let include_creds = req.credentials == CredentialsMode::Include;
         if let Some(p) = self.net.preflight.get(origin, url, include_creds) {
             if p.allows(method, unsafe_headers, include_creds).is_ok() {
                 return Ok(());
@@ -1252,8 +1261,10 @@ impl Fetcher {
         h.push(("Sec-Fetch-Mode".into(), "cors".into()));
         h.push(("Sec-Fetch-Site".into(), worse_site(req.navigation_redirect.as_ref().map(|context| context.site).unwrap_or("none"), fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), url)).into()));
         h.push(("Sec-Fetch-Dest".into(), "empty".into()));
-        if let Some(r) = req.referer.as_ref().and_then(|r| cors::referrer_for(r, url, req.referrer_policy)) {
-            h.push(("Referer".into(), r));
+        // Preflight shares the current hop's already-filtered referrer. Never
+        // reconstruct it from the original request after an earlier redirect.
+        if let Some(r) = referer {
+            h.push(("Referer".into(), r.to_string()));
         }
         h.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
         h.push(("Accept-Language".into(), self.accept_language.clone()));
@@ -1280,6 +1291,9 @@ impl Fetcher {
         let mut url = req.url.without_fragment();
         let mut body = req.body.clone();
         let mut policy = req.referrer_policy;
+        // Referrer state is destructive across redirects. Keep it separate
+        // from the original initiator used for Origin, Fetch Metadata and cookies.
+        let mut referrer_source = req.referer.clone();
         let mut url_list = vec![url.clone()];
         let mut tainting = ResponseType::Basic;
         let mut tainted_origin = false;
@@ -1290,6 +1304,8 @@ impl Fetcher {
         if let Some(context) = &req.navigation_redirect { cookie_ctx.same_site_chain &= context.same_site_chain; }
         let author_headers: Vec<(String, String)> = req.headers.iter().filter(|(k, _)| !(req.mode.is_some() && cors::is_forbidden_request_header(k))).cloned().collect();
         for _hop in 0..20 {
+            let referer = referrer_source.as_ref().and_then(|r| cors::referrer_for(r, &url, policy));
+            referrer_source = referer.as_deref().and_then(Url::parse_absolute);
             let same_origin = origin_str.as_ref().map(|o| *o == url.origin()).unwrap_or(true);
             if api {
                 if tainting == ResponseType::Basic && same_origin && !tainted_origin {
@@ -1324,7 +1340,7 @@ impl Fetcher {
                 }
                 let unsafe_headers = cors::unsafe_request_header_names(&probe);
                 if !cors::is_simple_method(&method) || !unsafe_headers.is_empty() {
-                    self.preflight(req, &method, &url, &origin_value, req.credentials == CredentialsMode::Include, &unsafe_headers)?;
+                    self.preflight(req, &method, &url, &origin_value, &unsafe_headers, referer.as_deref())?;
                 }
             }
             // Origin header: CORS requests, and unsafe methods.
@@ -1340,7 +1356,6 @@ impl Fetcher {
             } else {
                 None
             };
-            let referer = req.referer.as_ref().and_then(|r| cors::referrer_for(r, &url, policy));
             let cookie = if include_creds {
                 self.cookies.as_ref().and_then(|jar| jar.lock().unwrap().header_for_context(&url, &cookie_ctx))
             } else {
