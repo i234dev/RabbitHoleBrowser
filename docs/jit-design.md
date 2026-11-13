@@ -12,8 +12,8 @@ más abajo conserva sus medidas y recomendaciones de entonces.
 | 1. Infraestructura | Memoria W^X, ensamblador propio, flags, trazas, estadísticas y validación diferencial | Mantener paridad y comprobar el coste con JIT apagado en cada cambio |
 | 2. Código numérico lineal | Constantes, registros, aritmética, comparaciones y retornos | El objetivo original de coste de compilación no está alcanzado |
 | 3. Control de flujo | Saltos, latches fusionados, ticks y watchdog | Mantener las pruebas de interrupción y GC-stress |
-| 4. Valores dinámicos | Helpers y caminos nativos por tipo; cachés de propiedades/globales | No consta el millón de programas diferenciales exigido por el plan original |
-| 5. Llamadas y excepciones | Llamadas JS/nativas, retornos, constructores, excepciones y cambio de frame sin recursión nativa | Reducir el coste de llamadas y probar ejecución real en Windows |
+| 4. Valores dinámicos | Helpers y caminos nativos por tipo; cachés de propiedades/globales; millón diferencial comprobado en `8fd6578` | Mantener paridad y ampliar cobertura del generador; el millón no equivale a conformidad completa |
+| 5. Llamadas y excepciones | Llamadas JS/nativas, retornos, constructores, excepciones, cambio de frame sin recursión nativa y operandos estáticos | Medir el binario final tras simplificar llamadas y probar ejecución real en Windows |
 | 6. Tiering | Umbrales, exclusiones, fallos cacheados, límite de código por hilo y liberación con la función | Objetivos de carga de páginas, tamaño/coste de compilación y arena de código |
 | 7. OSR | Entrada en código nativo durante un bucle interpretado (`LOOP_OSR`) | Mantener paridad al entrar en mitad de la función |
 | 8. Rendimiento | Accesos, variables de closure y contadores de referencias en código nativo | Llamadas/retornos y reanudación; demostrar mejora global repetible |
@@ -45,12 +45,66 @@ construirá sobre la representación que exista cuando se empiece.
   pasó 125 pruebas de layout, 14 incrementales y el subset CSS de 181 casos.
 - `jitdiff`: 40 000 programas aleatorios repartidos en cuatro semillas y
   16 programas del corpus de rendimiento; intérprete y umbrales 0/2 producen
-  resultados idénticos. El millón de programas del plan original sigue pendiente.
+  resultados idénticos. El gate posterior del millón se detalla a continuación.
 - `jit-check.sh` rechaza cualquier fallo de Cargo, aunque ambos modos fallen
   igual, y crea la carpeta de resultados cuando se configura explícitamente.
 - Las comparaciones de rendimiento deben fijar afinidad en máquinas con
   núcleos de distinta velocidad: medir CPU del hilo no elimina esa variación.
   No se ha activado el JIT por defecto ni se ha añadido un backend ARM64.
+
+## Operandos estáticos y gate del millón
+
+La revisión `8fd657859336b22379335078522a0308be159b25` incorpora los operandos
+de `CallR` y el registro fuente de `ReturnR` como inmediatos del código generado.
+Los helpers evitan releer y decodificar esos operandos de `code.ops`; conservan
+`call_r`/`return_r`, los frames, la captura de pánicos, las excepciones, los
+puntos de GC y el watchdog. No añade campos al estado ni cambia la reanudación.
+
+Sobre esa revisión, en Linux x86-64:
+
+- **1 000 000 de programas aleatorios distintos, cero diferencias** entre el
+  intérprete y JIT con umbrales 0 y 2. Se ejecutaron ocho particiones de 125 000
+  programas con semillas iniciales `1`, `125001`, `250001`, `375001`, `500001`,
+  `625001`, `750001` y `875001`: cubren exactamente las semillas 1–1 000 000.
+  Los ocho procesos terminaron con código 0; sus contadores finales y el
+  manifiesto suman el millón. Los 100 115 programas con excepción no capturada
+  dieron el mismo resultado en los tres modos; no son diferencias del JIT.
+- El binario congelado de `jitdiff` tiene SHA-256
+  `778381450bacb422d8de0c9dd8506269e21eeee5a3bbd57d3c39f07d86f08026`.
+  Se conservaron el manifiesto, los ocho logs y los rangos de semillas. No se
+  atribuye esta ejecución a cambios posteriores a `8fd6578`.
+- El paquete JS pasa **193 pruebas con JIT apagado y 193 encendido**, con
+  resultados idénticos; incluye 172 unitarias, GC de memoria, 18 del parser
+  y dos del harness test262. No se repitió el corpus completo de test262.
+  Las 14 pruebas JIT también pasan con umbral 0 y `RH_GC_STRESS=inc`.
+  Una regresión nueva cubre 300 parámetros, 300 sitios de llamada y retornos
+  de strings desde registros que exceden el rango de un byte.
+
+El millón compara contra el intérprete propio; no demuestra por sí solo
+conformidad de JavaScript ni cobertura exhaustiva de los programas posibles.
+
+Antes de limpiar la implementación se compararon ocho rondas alternas del
+**mismo binario experimental**, fijado a CPU 0 y sin otras compilaciones.
+Cada ronda ejecutó los 27 casos de `perf.rs`, incluidos parseo y compilación
+JIT. Los operandos estáticos redujeron el tiempo de `calls` un 4,54 %, de
+`closure_calls` un 5,18 % y de `method_calls` un 3,13 %. El total pasó de
+390,285 a 389,410 ms de CPU del hilo (−0,22 %: paridad práctica);
+`push_objects` y `array_map` empeoraron un 1,97 % y un 1,75 % respectivamente.
+
+El RSS máximo fue de unos 38 MiB en ambos modos. En una pasada separada de
+estadísticas, agregando 81 realms, se compilaron las mismas 111 funciones y
+2367 instrucciones: 370 512 → 370 836 bytes de código (+0,087 %) y
+3,44 → 3,81 ms de compilación. Esa pasada única y redondeada no permite
+concluir un cambio robusto del coste de compilación. `MAP_NS` es acumulativo
+por hilo y no debe sumarse como si fuera un contador por realm.
+
+Estas cifras corresponden al experimento; **la medición sin contención del
+binario final tras quitar el interruptor experimental sigue pendiente**.
+No se afirma una mejora global de la versión final. En el experimento,
+`push_objects` con JIT alcanzó solo 0,9123× el throughput del intérprete,
+por debajo del gate de 0,95×. No se ha repetido Speedometer para este cambio;
+los gates de páginas, coste de compilación y memoria ejecutable siguen
+abiertos. **El JIT continúa apagado por defecto.**
 
 ## Resumen histórico del estudio
 
