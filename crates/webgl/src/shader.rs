@@ -7,6 +7,7 @@ pub(crate) enum Ty {
     // Integer literals can be converted by constructors, not assigned or
     // used in arithmetic as if they were floating-point values.
     IntLiteral,
+    Sampler2D,
     Float,
     Vec2,
     Vec3,
@@ -16,6 +17,7 @@ pub(crate) enum Ty {
 impl Ty {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
+            "sampler2D" => Self::Sampler2D,
             "float" => Self::Float,
             "vec2" => Self::Vec2,
             "vec3" => Self::Vec3,
@@ -26,7 +28,7 @@ impl Ty {
     }
     pub fn n(self) -> usize {
         match self {
-            Self::IntLiteral | Self::Float => 1,
+            Self::IntLiteral | Self::Sampler2D | Self::Float => 1,
             Self::Vec2 => 2,
             Self::Vec3 => 3,
             Self::Vec4 => 4,
@@ -74,6 +76,7 @@ struct Expr {
 #[derive(Clone, Debug)]
 enum ExprKind {
     Number(f32),
+    Texture(Box<Expr>, Box<Expr>),
     Name(String),
     Swizzle(Box<Expr>, Vec<usize>),
     Neg(Box<Expr>),
@@ -89,32 +92,50 @@ pub(crate) struct Shader {
     pub cost: usize,
 }
 impl Shader {
-    pub fn run(&self, mut env: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    pub fn run(&self, env: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+        self.run_with_sampler(env, &|_, _| {
+            unreachable!("vertex shaders cannot sample textures")
+        })
+    }
+    pub fn run_with_sampler(
+        &self,
+        mut env: BTreeMap<String, Value>,
+        sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
+    ) -> BTreeMap<String, Value> {
         for (name, sym) in &self.symbols {
             env.entry(name.clone())
                 .or_insert_with(|| Value::zero(sym.ty));
         }
         for (name, expr) in &self.statements {
-            let v = expr.eval(&env);
+            let v = expr.eval(&env, sample);
             env.insert(name.clone(), v);
         }
         env
     }
 }
 impl Expr {
-    fn eval(&self, env: &BTreeMap<String, Value>) -> Value {
+    fn eval(
+        &self,
+        env: &BTreeMap<String, Value>,
+        sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
+    ) -> Value {
         match &self.kind {
+            ExprKind::Texture(unit, uv) => {
+                let unit = unit.eval(env, sample);
+                let uv = uv.eval(env, sample);
+                Value::from(Ty::Vec4, &sample(unit.v[0] as i32, [uv.v[0], uv.v[1]]))
+            }
             ExprKind::Number(n) => Value::from(self.ty, &[*n]),
             ExprKind::Name(n) => env[n],
             ExprKind::Neg(e) => {
-                let mut r = e.eval(env);
+                let mut r = e.eval(env, sample);
                 for v in &mut r.v[..r.ty.n()] {
                     *v = -*v;
                 }
                 r
             }
             ExprKind::Swizzle(e, ix) => {
-                let a = e.eval(env);
+                let a = e.eval(env, sample);
                 let mut r = Value::zero(self.ty);
                 for (i, &j) in ix.iter().enumerate() {
                     r.v[i] = a.v[j];
@@ -122,7 +143,7 @@ impl Expr {
                 r
             }
             ExprKind::Construct(args) => {
-                let values: Vec<_> = args.iter().map(|a| a.eval(env)).collect();
+                let values: Vec<_> = args.iter().map(|a| a.eval(env, sample)).collect();
                 let mut r = Value::zero(self.ty);
                 if values.len() == 1 && matches!(values[0].ty, Ty::Float | Ty::IntLiteral) {
                     if self.ty == Ty::Mat4 {
@@ -146,7 +167,7 @@ impl Expr {
                 r
             }
             ExprKind::Binary(op, a, b) => {
-                let (a, b) = (a.eval(env), b.eval(env));
+                let (a, b) = (a.eval(env, sample), b.eval(env, sample));
                 let mut r = Value::zero(self.ty);
                 if *op == '*' && a.ty == Ty::Mat4 && b.ty == Ty::Vec4 {
                     for row in 0..4 {
@@ -321,6 +342,9 @@ impl Parser {
         Ty::parse(&n).ok_or_else(|| format!("unsupported type {n}"))
     }
     fn declare(&mut self, name: String, ty: Ty, qual: Qual) -> Result<(), String> {
+        if ty == Ty::Sampler2D && (qual != Qual::Uniform || self.vertex) {
+            return Err("sampler2D is supported only as a fragment uniform".into());
+        }
         if name.starts_with("gl_")
             || Ty::parse(&name).is_some()
             || matches!(
@@ -379,19 +403,47 @@ impl Parser {
             },
             Tok::P('-') => {
                 let e = self.expr(3)?;
+                if e.ty == Ty::Sampler2D {
+                    return Err("samplers cannot be negated".into());
+                }
                 Expr {
                     ty: e.ty,
                     kind: ExprKind::Neg(Box::new(e)),
                 }
             }
-            Tok::P('+') => self.expr(3)?,
+            Tok::P('+') => {
+                let e = self.expr(3)?;
+                if e.ty == Ty::Sampler2D {
+                    return Err("samplers are opaque".into());
+                }
+                e
+            }
             Tok::P('(') => {
                 let e = self.expr(0)?;
                 self.expect(Tok::P(')'))?;
                 e
             }
             Tok::Id(name) => {
-                if let Some(ty) = Ty::parse(&name) {
+                if name == "texture2D" {
+                    if self.vertex {
+                        return Err("vertex texture sampling is unsupported".into());
+                    }
+                    self.expect(Tok::P('('))?;
+                    let unit = self.expr(0)?;
+                    self.expect(Tok::P(','))?;
+                    let uv = self.expr(0)?;
+                    self.expect(Tok::P(')'))?;
+                    if unit.ty != Ty::Sampler2D || uv.ty != Ty::Vec2 {
+                        return Err("texture2D requires sampler2D and vec2 arguments".into());
+                    }
+                    Expr {
+                        ty: Ty::Vec4,
+                        kind: ExprKind::Texture(Box::new(unit), Box::new(uv)),
+                    }
+                } else if let Some(ty) = Ty::parse(&name) {
+                    if ty == Ty::Sampler2D {
+                        return Err("samplers cannot be constructed".into());
+                    }
                     self.expect(Tok::P('('))?;
                     let mut args = Vec::new();
                     loop {
@@ -416,6 +468,9 @@ impl Parser {
                     }
                     if ty == Ty::Float && !scalar {
                         return Err("float constructors require a scalar argument".into());
+                    }
+                    if args.iter().any(|a| a.ty == Ty::Sampler2D) {
+                        return Err("samplers cannot be converted".into());
                     }
                     if args.iter().any(|a| a.ty == Ty::Mat4) {
                         return Err("matrix conversion constructors are unsupported".into());
@@ -446,7 +501,10 @@ impl Parser {
         };
         loop {
             if self.eat('.') {
-                if matches!(left.ty, Ty::Mat4 | Ty::Float | Ty::IntLiteral) {
+                if matches!(
+                    left.ty,
+                    Ty::Mat4 | Ty::Float | Ty::IntLiteral | Ty::Sampler2D
+                ) {
                     return Err("swizzles require a vector".into());
                 }
                 let s = self.id()?;
@@ -487,6 +545,9 @@ impl Parser {
             }
             self.pos += 1;
             let right = self.expr(prec + 1)?;
+            if left.ty == Ty::Sampler2D || right.ty == Ty::Sampler2D {
+                return Err("samplers are opaque".into());
+            }
             if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
                 return Err(
                     "integer arithmetic and implicit integer-to-float conversion are unsupported"

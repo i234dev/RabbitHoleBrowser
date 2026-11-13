@@ -3,8 +3,10 @@
 pub mod gl;
 mod raster;
 mod shader;
+mod texture;
 use shader::{Qual, Shader, Ty, Value};
 use std::collections::BTreeMap;
+pub use texture::MAX_TEXTURE_UNITS;
 
 pub const MAX_DIMENSION: u32 = 4096;
 pub const MAX_PIXELS: usize = 4_194_304;
@@ -111,6 +113,7 @@ fn active_info(name: &str, ty: Ty) -> ActiveInfo {
         size: 1,
         kind: match ty {
             Ty::IntLiteral => unreachable!("literal types are not interface variables"),
+            Ty::Sampler2D => gl::SAMPLER_2D,
             Ty::Float => gl::FLOAT,
             Ty::Vec2 => gl::FLOAT_VEC2,
             Ty::Vec3 => gl::FLOAT_VEC3,
@@ -148,6 +151,10 @@ pub struct Context {
     current_program: u32,
     attributes: [Attribute; MAX_VERTEX_ATTRIBS as usize],
     buffer_bytes: usize,
+    textures: BTreeMap<u32, texture::Texture>,
+    bound_textures: [u32; MAX_TEXTURE_UNITS as usize],
+    active_texture_unit: usize,
+    texture_bytes: usize,
 }
 fn filled<T: Clone>(n: usize, v: T) -> Result<Vec<T>> {
     let mut out = Vec::new();
@@ -201,6 +208,10 @@ impl Context {
             current_program: 0,
             attributes: [Attribute::default(); MAX_VERTEX_ATTRIBS as usize],
             buffer_bytes: 0,
+            textures: BTreeMap::new(),
+            bound_textures: [0; MAX_TEXTURE_UNITS as usize],
+            active_texture_unit: 0,
+            texture_bytes: 0,
         })
     }
     pub fn dimensions(&self) -> (u32, u32) {
@@ -676,7 +687,7 @@ impl Context {
             return Ok(());
         }
         let u = self.uniform_mut(location)?;
-        if u.ty == Ty::Mat4 || u.ty.n() != values.len() {
+        if matches!(u.ty, Ty::Mat4 | Ty::Sampler2D) || u.ty.n() != values.len() {
             return Err(Error::InvalidOperation);
         }
         u.value = Value::from(u.ty, values);

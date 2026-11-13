@@ -84,6 +84,7 @@ impl Context {
             .ok_or(Error::InvalidOperation)?
             .clone();
         self.validate_arrays(indices.iter().copied().max())?;
+        self.validate_samplers(&executable)?;
         if indices.len() < 3 {
             return Ok(());
         }
@@ -295,7 +296,9 @@ impl Context {
                     "gl_FragCoord".into(),
                     Value::from(Ty::Vec4, &[px as f32, py as f32, depth, iw as f32]),
                 );
-                let out = e.fragment.run(env);
+                let out = e
+                    .fragment
+                    .run_with_sampler(env, &|unit, uv| self.sample_texture(unit, uv));
                 let color = out["gl_FragColor"];
                 for k in 0..4 {
                     if self.color_mask[k] {

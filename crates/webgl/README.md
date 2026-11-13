@@ -51,10 +51,11 @@ Vertex shaders must write `gl_Position`; fragment shaders must write
 `gl_FragColor` and can read `gl_FragCoord`. Active cross-stage varying types and
 shared uniform types must agree. Uniforms start at zero after linking.
 
-Not implemented: textures/samplers, GLSL functions or control flow, arrays,
+Not implemented: general GLSL functions or control flow, arrays,
 integer/bool variables, derivatives, discard, swizzle assignments, framebuffer
 objects, stencil, blending, points/lines, culling, multisampling, extensions or
-WebGL 2. Textures and shader sampling are rejected, never synthesized.
+WebGL 2. Texture sampling has the explicit bounded subset below. Unsupported
+shader operations are rejected, never synthesized.
 
 ## Limits and verification
 
@@ -69,3 +70,30 @@ bounded; they are not a claim of WebGL conformance.
 triangles, perspective interpolation, clipping, depth, normalized attributes,
 scissor/masks, resize/readback orientation, shader/link errors and invalid buffer
 ranges/resource lifetimes. Browser bindings have additional integration tests.
+
+## Texture milestone
+
+RGBA8 2D texture storage with level-zero uploads/sub-updates, zero initialization,
+8 texture units, texture deletion, and actual fragment `sampler2D` /
+`texture2D(sampler, vec2)` evaluation. Sampler uniforms use `uniform_i32` and
+appear in program reflection as `SAMPLER_2D`. Upload rows start at the lower-left;
+the bindings handle DOM conversion and pixel-unpack flags before calling here.
+Textures have a separate 64 MiB total storage budget and the framebuffer size
+limits apply to each image.
+
+Nearest-neighbor sampling supports clamp-to-edge, repeat and mirrored-repeat;
+non-power-of-two images require clamp-to-edge in both dimensions under WebGL 1
+completeness rules. Missing/uninitialized or NPOT-repeat textures sample opaque
+black, as required for incomplete textures; allocated zero-filled images sample
+their actual transparent zero pixels.
+
+**Set both MIN_FILTER and MAG_FILTER to NEAREST.** Object defaults retain GL's
+real mipmapped-min/linear-mag defaults, but linear and mipmapped filtering are
+not implemented: setting those filters reports an error; drawing a defined image
+with unsupported default filters reports INVALID_OPERATION without changing
+pixels. No derivative-based LOD, mipmap generation, cube maps, compressed data,
+vertex texture sampling or texture extensions are claimed.
+
+`tests/textures.rs` verifies texel values/orientation, sub-updates, texture units,
+reflection, wrapping, NPOT behavior, resource bounds, explicit unsupported-state
+errors and malformed sampler shaders.
