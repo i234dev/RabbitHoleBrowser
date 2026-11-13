@@ -3,7 +3,9 @@
 //!
 //! Without arguments it uses the framework bundles of the agent test
 //! fixtures. Reports the best of several rounds of `parse_program` and of
-//! `Realm::compile` (parse + early errors + top-level compile) over all files.
+//! `Realm::compile` (parse + early errors + top-level compile; with
+//! `RH_LAZY_CHECKED=1` it waits for the off-thread complete parse of large
+//! scripts) over all files, and of that complete parse alone.
 #[global_allocator]
 static ALLOC: rabbithole_js::alloc::RhAlloc = rabbithole_js::alloc::RhAlloc;
 
@@ -30,6 +32,7 @@ fn main() {
     let mut best_parse = f64::MAX;
     let mut best_compile = f64::MAX;
     let mut best_early = f64::MAX;
+    let mut best_full = f64::MAX;
     let programs: Vec<_> = sources.iter().map(|s| rabbithole_js::parse_program(s, false).expect("parse")).collect();
     for _ in 0..rounds {
         let t = Instant::now();
@@ -42,6 +45,11 @@ fn main() {
             rabbithole_js::parse_program(s, false).expect("parse");
         }
         best_parse = best_parse.min(t.elapsed().as_secs_f64() * 1000.0);
+        let t = Instant::now();
+        for s in &sources {
+            rabbithole_js::parser::validate_program(s, false).expect("full parse");
+        }
+        best_full = best_full.min(t.elapsed().as_secs_f64() * 1000.0);
         let mut realm = rabbithole_js::Realm::new();
         let t = Instant::now();
         for s in &sources {
@@ -53,4 +61,5 @@ fn main() {
     println!("parse          {:>8.2} ms  ({:.1} MB/s)", best_parse, bytes as f64 / 1e6 / (best_parse / 1000.0));
     println!("parse+compile  {:>8.2} ms  ({:.1} MB/s)", best_compile, bytes as f64 / 1e6 / (best_compile / 1000.0));
     println!("early errors   {:>8.2} ms  (of parse)", best_early);
+    println!("full parse     {:>8.2} ms  (no body skipped, early errors; the off-thread check of large scripts)", best_full);
 }

@@ -53,6 +53,60 @@ pub fn parse_program_in(source: &str, is_module: bool, ctx: &crate::early::Early
     Ok(program)
 }
 
+/// Whether parsing `len` bytes of source skips function bodies (whose
+/// early errors [`validate_program`] then finds).
+pub fn skips_bodies(len: usize) -> bool {
+    len >= LAZY_MIN_SOURCE && lazy_parse_enabled()
+}
+
+/// A complete parse of a program (no body skipped) and its early errors,
+/// discarding the tree: what makes a script whose function bodies were
+/// skipped fail at load like the specification requires.
+pub fn validate_program(source: &str, is_module: bool) -> Result<(), ParseError> {
+    let mut p = Parser::new(source, is_module)?;
+    p.lazy = false;
+    let program = p.parse_program()?;
+    crate::early::check_program(&program, &crate::early::EarlyContext::default())?;
+    Ok(())
+}
+
+/// Start [`validate_program`] on a thread of its own when parsing
+/// `source` will skip function bodies: the main thread parses lazily and
+/// compiles meanwhile, then [`Validation::finish`] waits for the verdict.
+///
+/// Opt-in (`RH_LAZY_CHECKED=1`): the complete parse costs about 4× the
+/// lazy one (framework bundles: 38 ms against 9.4 ms for 1.27 MB), so
+/// waiting for it makes loading large scripts ~5× slower than lazy
+/// parse + compile; until there is a cheaper complete check (a parser
+/// mode that builds no tree, or bodies validated on several threads),
+/// early errors in skipped bodies are reported when the function is first
+/// compiled unless this is on.
+pub fn validate_in_background(source: &str, is_module: bool) -> Option<Validation> {
+    thread_local!(static ON: bool = std::env::var_os("RH_LAZY_CHECKED").is_some());
+    if !skips_bodies(source.len()) || !ON.with(|o| *o) {
+        return None;
+    }
+    let src: std::sync::Arc<str> = std::sync::Arc::from(source);
+    // The parser recurses with the nesting of the source: a large stack
+    // (reserved, not committed).
+    std::thread::Builder::new()
+        .name("js-validate".into())
+        .stack_size(256 << 20)
+        .spawn(move || validate_program(&src, is_module).err())
+        .ok()
+        .map(Validation)
+}
+
+/// A background [`validate_program`] (see [`validate_in_background`]).
+pub struct Validation(std::thread::JoinHandle<Option<ParseError>>);
+
+impl Validation {
+    /// The early error the complete parse found, if any.
+    pub fn finish(self) -> Option<ParseError> {
+        self.0.join().ok().flatten()
+    }
+}
+
 fn parse_program_unchecked(source: &str, is_module: bool, ctx: &crate::early::EarlyContext) -> Result<Program, ParseError> {
     let mut p = Parser::new(source, is_module)?;
     p.set_early_context(ctx);
@@ -1043,20 +1097,25 @@ impl<'a> Parser<'a> {
             } else {
                 let start_pos = self.tok.pos;
                 let starts_with_let = self.is_ident("let");
+                // `async` written plainly (not escaped, not parenthesized).
+                let plain_async = self.is_ident("async") && self.lx.source().get(self.tok.start..self.tok.end) == Some("async");
                 let expr = self.with_no_in(true, |p| p.parse_expression())?;
                 if self.is_ident("of") || self.is_ident("in") {
                     let is_of = self.is_ident("of");
                     if is_of && starts_with_let {
                         return Err(self.error_at(start_pos, "The left-hand side of a for-of loop may not be 'let'"));
                     }
-                    if is_of && matches!(expr.kind, ExprKind::Identifier(ref n) if n == "async") && !is_await {
+                    if is_of && plain_async && !self.parenthesized.contains(&(expr.pos.line, expr.pos.column)) && matches!(expr.kind, ExprKind::Identifier(ref n) if n == "async") && !is_await {
                         // `for (async of ...)` is a syntax error per spec.
                         return Err(self.error_at(start_pos, "The left-hand side of a for-of loop may not be 'async'"));
                     }
                     if matches!(expr.kind, ExprKind::Assign { .. }) {
                         return Err(self.error_at(start_pos, "Invalid left-hand side in for-in/of loop"));
                     }
-                    let pattern = self.expr_to_pattern(expr, false)?;
+                    let pattern = match self.web_compat_call_target(expr) {
+                        Ok(p) => p,
+                        Err(expr) => self.expr_to_pattern(expr, false)?,
+                    };
                     return self.parse_for_in_of(ForHead::Pattern(pattern), is_of, is_await);
                 }
                 init = Some(ForInit::Expr(expr));
@@ -1541,6 +1600,10 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Pattern::Object { properties, rest })
             }
+            // (a web-compat call target is never a destructuring target)
+            ExprKind::Assign { op: AssignOp::Assign, target, .. } if matches!(&*target, Pattern::Expr(e) if matches!(e.kind, ExprKind::Call { .. })) => {
+                Err(self.error_at(pos, "Invalid destructuring assignment target"))
+            }
             ExprKind::Assign {
                 op: AssignOp::Assign,
                 target,
@@ -1589,6 +1652,15 @@ impl<'a> Parser<'a> {
         };
         let Some(op) = op else {
             return Ok(left);
+        };
+        let logical = matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish);
+        let left = match if logical { Err(left) } else { self.web_compat_call_target(left) } {
+            Ok(p) => {
+                self.advance()?;
+                let value = Box::new(self.parse_assignment()?);
+                return Ok(Expr { pos, kind: ExprKind::Assign { op, target: Box::new(p), value } });
+            }
+            Err(left) => left,
         };
         let target = if op == AssignOp::Assign {
             if matches!(left.kind, ExprKind::Assign { .. }) {
@@ -2116,7 +2188,20 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
+    /// Runtime Errors for Function Call Assignment Targets (web browsers):
+    /// in sloppy code `f() = v`, `f() += v`, `f()++` and `for (f() of …)`
+    /// parse, and throw a ReferenceError after the call.
+    fn web_compat_call_target(&self, e: Expr) -> Result<Pattern, Expr> {
+        if !self.ctx.strict && matches!(&e.kind, ExprKind::Call { optional: false, callee, .. } if !matches!(callee.kind, ExprKind::Super)) {
+            return Ok(Pattern::Expr(Box::new(e)));
+        }
+        Err(e)
+    }
+
     fn check_simple_target(&self, e: &Expr) -> PResult<()> {
+        if !self.ctx.strict && matches!(&e.kind, ExprKind::Call { optional: false, callee, .. } if !matches!(callee.kind, ExprKind::Super)) {
+            return Ok(());
+        }
         match &e.kind {
             ExprKind::Identifier(n) => {
                 if self.ctx.strict && (n == "eval" || n == "arguments") {

@@ -1945,3 +1945,21 @@ fn lone_surrogates_are_lossless() {
     eq("function f(a) { a = 2; return arguments[0]; } function g(a) { arguments[0] = 3; return a; } function h(a) { 'use strict'; a = 2; return arguments[0]; } [f(1), g(1), h(1)].join()", "2,3,1");
     eq("function f(a) { delete arguments[0]; arguments[0] = 5; return a; } function g(a) { Object.defineProperty(arguments, '0', { writable: false }); a = 9; return arguments[0]; } [f(1), g(1)].join()", "1,1");
 }
+
+/// A large script whose function body the lazy parse skips: the complete
+/// check (`parser::validate_program`, run off-thread with RH_LAZY_CHECKED)
+/// finds the early error in the body.
+#[test]
+fn complete_parse_finds_errors_in_skipped_bodies() {
+    let filler = "var x = [".to_string() + &"1, ".repeat(9000) + "];\n";
+    let bad = format!("{filler}function f() {{ let a; let a; return 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26 + 27 + 28; }}\n");
+    assert!(crate::parser::skips_bodies(bad.len()));
+    assert!(crate::parser::parse_program(&bad, false).is_ok(), "the lazy parse skips the body");
+    assert!(crate::parser::validate_program(&bad, false).is_err());
+    let good = bad.replace("let a; let a;", "let a; let b;");
+    assert!(crate::parser::validate_program(&good, false).is_ok());
+    // Web-compat call assignment targets throw at run time.
+    eq("function f() { return {}; } var r = []; for (var t of [0, 1, 2]) { try { if (t == 0) f() = 1; else if (t == 1) f()++; else for (f() of [1]); } catch (e) { r.push(e.name); } } r.join()", "ReferenceError,ReferenceError,ReferenceError");
+    throws("[f() = 1] = []", "SyntaxError");
+    throws("'use strict'; f() = 1", "SyntaxError");
+}

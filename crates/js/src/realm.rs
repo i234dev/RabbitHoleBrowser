@@ -1224,6 +1224,9 @@ impl Realm {
     /// Compile source already in source-escaped form (`eval`, `Function`:
     /// see [`crate::value::SOURCE_ESC`]).
     pub(crate) fn compile_escaped(&mut self, source: &str, filename: &str, is_module: bool, completion: bool) -> Result<Rc<FunctionCode>, Value> {
+        // Bodies the lazy parse skips are checked by a complete parse on
+        // another thread meanwhile: their early errors reject the script.
+        let validation = crate::parser::validate_in_background(source, is_module);
         let program = match crate::parser::parse_program(source, is_module) {
             Ok(p) => p,
             Err(e) => {
@@ -1231,7 +1234,12 @@ impl Realm {
                 return Err(self.new_error("SyntaxError", &msg));
             }
         };
-        match crate::compiler::compile_program_with(&program, filename, source, completion) {
+        let r = crate::compiler::compile_program_with(&program, filename, source, completion);
+        if let Some(e) = validation.and_then(|v| v.finish()) {
+            let msg = format!("{} ({}:{}:{})", e.message, filename, e.line, e.column);
+            return Err(self.new_error("SyntaxError", &msg));
+        }
+        match r {
             Ok(c) => {
                 self.adopt_code(&c);
                 Ok(c)

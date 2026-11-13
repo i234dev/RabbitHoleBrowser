@@ -2985,6 +2985,12 @@ impl Compiler {
                     Ok(())
                 }
                 ExprKind::Identifier(n) => self.emit_set_var(n),
+                ExprKind::Call { .. } => {
+                    // value -> (web-compat call target: throws after the call)
+                    self.emit_call_target_error(e)?;
+                    self.emit(Op::Pop);
+                    Ok(())
+                }
                 _ => self.err("Invalid assignment target"),
             },
             Pattern::Assign { target, default } => {
@@ -3795,6 +3801,16 @@ impl Compiler {
         Ok(())
     }
 
+    /// Evaluate the call of a web-compat call assignment target, then throw
+    /// the ReferenceError (stack neutral).
+    fn emit_call_target_error(&mut self, call: &Expr) -> CResult<()> {
+        self.compile_expr(call)?;
+        let m = self.const_str("Invalid left-hand side in assignment");
+        self.emit(Op::ThrowConst(0, m));
+        self.emit(Op::Pop);
+        Ok(())
+    }
+
     /// `this` as the `this` expression evaluates it.
     fn emit_this(&mut self) {
         let derived = self.fs_ref().flags.is_derived;
@@ -4014,6 +4030,10 @@ impl Compiler {
                     self.emit(undo);
                 }
             }
+            ExprKind::Call { .. } => {
+                self.emit_call_target_error(target)?;
+                self.emit(Op::Undefined);
+            }
             ExprKind::Member { object, property, .. } if matches!(object.kind, ExprKind::Super) => {
                 self.emit_super_ref(property)?;
                 self.emit_super_get_keep(property);
@@ -4061,6 +4081,15 @@ impl Compiler {
     }
 
     fn compile_assign(&mut self, op: AssignOp, target: &Pattern, value: &Expr) -> CResult<()> {
+        if let Pattern::Expr(e) = target {
+            if let ExprKind::Call { .. } = e.kind {
+                // Web-compat call target: the call runs, then the
+                // reference is invalid (the value is not evaluated).
+                self.emit_call_target_error(e)?;
+                self.emit(Op::Undefined);
+                return Ok(());
+            }
+        }
         if op == AssignOp::Assign {
             // Member targets evaluate object/key before the value.
             if let Pattern::Expr(e) = target {
