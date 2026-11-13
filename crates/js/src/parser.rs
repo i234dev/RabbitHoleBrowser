@@ -529,6 +529,42 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// A string module export name must be well-formed Unicode: no lone
+    /// surrogate escapes (`"\uD83D"`).
+    fn check_module_export_name(&self) -> PResult<()> {
+        let raw = self.lx.source()[self.tok.start..self.tok.end].as_bytes();
+        if !raw.contains(&b'\\') {
+            return Ok(());
+        }
+        // Code units written as escapes, in order (others as 0).
+        let mut units: Vec<u32> = Vec::new();
+        let mut i = 0;
+        while i < raw.len() {
+            if raw[i] == b'\\' && raw.get(i + 1) == Some(&b'u') {
+                let (v, len) = if raw.get(i + 2) == Some(&b'{') {
+                    let end = raw[i..].iter().position(|&b| b == b'}').map(|p| i + p).unwrap_or(raw.len());
+                    (std::str::from_utf8(&raw[i + 3..end]).ok().and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0), end + 1 - i)
+                } else {
+                    (std::str::from_utf8(raw.get(i + 2..i + 6).unwrap_or(b"")).ok().and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0), 6)
+                };
+                units.push(v);
+                i += len;
+            } else {
+                units.push(0);
+                i += if raw[i] == b'\\' { 2 } else { 1 };
+            }
+        }
+        let mut k = 0;
+        while k < units.len() {
+            match units[k] {
+                0xD800..=0xDBFF if matches!(units.get(k + 1), Some(0xDC00..=0xDFFF)) => k += 2,
+                0xD800..=0xDFFF => return Err(self.error("Module export names must be well-formed Unicode strings")),
+                _ => k += 1,
+            }
+        }
+        Ok(())
+    }
+
     fn consume_semicolon(&mut self) -> PResult<()> {
         if self.eat_punct(";")? {
             return Ok(());
@@ -1163,6 +1199,7 @@ impl<'a> Parser<'a> {
                 let imported = match &self.tok.kind {
                     TokenKind::Str(s) => {
                         let s = s.clone();
+                        self.check_module_export_name()?;
                         self.advance()?;
                         s
                     }
@@ -1277,6 +1314,7 @@ impl<'a> Parser<'a> {
                     TokenKind::Str(s) => {
                         let s = s.clone();
                         string_local = string_local.or(Some(self.tok.pos));
+                        self.check_module_export_name()?;
                         self.advance()?;
                         s
                     }
@@ -1286,6 +1324,7 @@ impl<'a> Parser<'a> {
                     match &self.tok.kind {
                         TokenKind::Str(s) => {
                             let s = s.clone();
+                            self.check_module_export_name()?;
                             self.advance()?;
                             s
                         }
