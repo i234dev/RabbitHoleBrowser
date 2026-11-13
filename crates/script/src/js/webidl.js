@@ -86,7 +86,7 @@
       },
       defineProperty() { return false; },
       deleteProperty(t, k) { return named(k) === undefined && Reflect.deleteProperty(t, k); },
-      setPrototypeOf() { return false; },
+      setPrototypeOf(t, p) { return Reflect.getPrototypeOf(t) === p; },
       preventExtensions() { return false; },
     });
     try {
