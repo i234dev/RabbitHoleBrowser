@@ -1,4 +1,4 @@
-//! Bounded RGBA8 texture storage and actual nearest-neighbor sampling.
+//! Bounded RGBA8 texture storage with nearest-neighbor and bilinear sampling.
 use super::*;
 pub const MAX_TEXTURE_UNITS: u32 = 8;
 const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
@@ -149,7 +149,7 @@ impl Context {
         let value = value as u32;
         match pname {
             gl::TEXTURE_MIN_FILTER | gl::TEXTURE_MAG_FILTER => {
-                if value != gl::NEAREST {
+                if !matches!(value, gl::NEAREST | gl::LINEAR) {
                     return Err(Error::InvalidEnum);
                 }
                 if pname == gl::TEXTURE_MIN_FILTER {
@@ -225,7 +225,12 @@ impl Context {
                     return Err(Error::InvalidOperation);
                 };
                 if let Some(t) = self.textures.get(&id) {
-                    if t.width > 0 && t.height > 0 && (t.min != gl::NEAREST || t.mag != gl::NEAREST)
+                    // The rasterizer does not yet calculate texture-coordinate
+                    // derivatives. Equal min/mag filters have unambiguous
+                    // sampling; mixed filters and mipmaps fail before drawing.
+                    if t.width > 0
+                        && t.height > 0
+                        && (!matches!(t.min, gl::NEAREST | gl::LINEAR) || t.min != t.mag)
                     {
                         return Err(Error::InvalidOperation);
                     }
@@ -253,11 +258,51 @@ impl Context {
         {
             return black;
         }
+        if t.min == gl::LINEAR {
+            let (x0, x1, a) = linear_axis(uv[0], t.width, t.wrap_s);
+            let (y0, y1, b) = linear_axis(uv[1], t.height, t.wrap_t);
+            let texel = |x: u32, y: u32, channel: usize| {
+                t.pixels[(y as usize * t.width as usize + x as usize) * 4 + channel] as f32
+            };
+            return std::array::from_fn(|i| {
+                let bottom = texel(x0, y0, i) * (1. - a) + texel(x1, y0, i) * a;
+                let top = texel(x0, y1, i) * (1. - a) + texel(x1, y1, i) * a;
+                (bottom * (1. - b) + top * b) / 255.
+            });
+        }
         let x = coordinate(uv[0], t.width, t.wrap_s);
         let y = coordinate(uv[1], t.height, t.wrap_t);
         let offset = (y as usize * t.width as usize + x as usize) * 4;
         std::array::from_fn(|i| t.pixels[offset + i] as f32 / 255.)
     }
+}
+// Normalized coordinates address texel centers at (i + 0.5) / size.
+// Fold coordinates before multiplying to avoid overflow for large finite UVs.
+// Mirrored repeat reflects at texel edges; after folding, clamping the two
+// taps repeats the edge texel across each reflection, including negative UVs.
+fn linear_axis(v: f32, size: u32, wrap: u32) -> (u32, u32, f32) {
+    let c = match wrap {
+        gl::REPEAT => v.rem_euclid(1.),
+        gl::MIRRORED_REPEAT => {
+            let v = v.rem_euclid(2.);
+            if v > 1. {
+                2. - v
+            } else {
+                v
+            }
+        }
+        _ => v.clamp(0., 1.),
+    };
+    let position = c * size as f32 - 0.5;
+    let low = position.floor();
+    let index = |i: i32| {
+        if wrap == gl::REPEAT {
+            i.rem_euclid(size as i32) as u32
+        } else {
+            i.clamp(0, size as i32 - 1) as u32
+        }
+    };
+    (index(low as i32), index(low as i32 + 1), position - low)
 }
 fn coordinate(v: f32, size: u32, wrap: u32) -> u32 {
     let c = match wrap {

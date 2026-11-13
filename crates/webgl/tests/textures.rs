@@ -201,7 +201,7 @@ fn unsupported_filters_fail_explicitly_and_leave_pixels_untouched() {
     );
     assert_eq!(pixel(&c, 0, 0), [0, 0, 255, 255]);
     assert_eq!(
-        c.tex_parameter_i(TEXTURE_2D, TEXTURE_MIN_FILTER, LINEAR as i32),
+        c.tex_parameter_i(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST_MIPMAP_LINEAR as i32),
         Err(Error::InvalidEnum)
     );
     c.tex_parameter_i(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST as i32)
