@@ -169,6 +169,8 @@ pub struct LazyCode {
     module: Option<u32>,
     filename: Rc<str>,
     source: Rc<str>,
+    /// See [`Compiler::outer_ctx`].
+    outer_ctx: (bool, bool, bool, bool),
 }
 
 impl CScope {
@@ -355,6 +357,10 @@ pub struct Compiler {
     eager_root: *const Function,
     /// Defer compiling nested functions until their first call.
     lazy: bool,
+    /// (in_function, in_method, in_derived_ctor, in_field_init) of the
+    /// innermost non-arrow function enclosing the code being compiled
+    /// from outside it (eval code, a lazily compiled nested function).
+    outer_ctx: (bool, bool, bool, bool),
 }
 
 /// Name of the hidden binding initialised by `export default <expr>` and
@@ -404,6 +410,7 @@ pub fn compile_lazy(code: &FunctionCode) -> CResult<Rc<FunctionCode>> {
         outer: lz.env.clone(),
         eager_root: Rc::as_ptr(&lz.func),
         lazy: true,
+        outer_ctx: lz.outer_ctx,
     };
     // A transparent parent: no bindings of its own, not a scope at run
     // time; names resolve through `outer`.
@@ -448,6 +455,7 @@ pub fn compile_program_with(program: &Program, filename: &str, source: &str, com
         outer: None,
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
+        outer_ctx: Default::default(),
     };
     let code = c.compile_script(program)?;
     c.check_internal()?;
@@ -476,6 +484,7 @@ pub fn compile_eval(program: &Program, site: &EvalSite, source: &str) -> CResult
         outer: site.env.clone(),
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
+        outer_ctx: (site.in_function, site.in_method, site.in_derived_ctor, site.in_field_init),
     };
     // A transparent parent (no bindings, no runtime scope).
     let mut parent = FnState::new("", CodeFlags { is_arrow: true, is_strict: strict, ..Default::default() }, false, filename.clone());
@@ -519,6 +528,7 @@ pub fn compile_module(program: &Program, filename: &str, source: &str, module_id
         outer: None,
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
+        outer_ctx: Default::default(),
     };
     let m = c.compile_module_program(program)?;
     c.check_internal()?;
@@ -846,6 +856,7 @@ impl Compiler {
             module: self.module,
             filename: self.fs_ref().filename.clone(),
             source: self.source.clone(),
+            outer_ctx: self.function_ctx(),
         };
         let code = FunctionCode {
             name: JsStr::from_source(&fname),
@@ -2118,21 +2129,26 @@ impl Compiler {
     }
 
     /// What a direct `eval` here needs to compile its code later.
-    fn eval_site(&mut self) -> EvalSite {
-        let env = self.env_snapshot();
-        let strict = self.fs_ref().flags.is_strict;
-        let class_depth = self.fs_ref().class_depth;
-        // The innermost non-arrow function decides super / new.target.
-        let mut ctx = (false, false, false, false);
+    /// The innermost non-arrow function decides super / new.target (see
+    /// [`Compiler::outer_ctx`] for the part outside this compilation).
+    fn function_ctx(&self) -> (bool, bool, bool, bool) {
         for f in self.fns.iter().rev() {
             if f.flags.is_arrow || f.is_eval {
                 continue;
             }
             if !f.is_script && !f.is_module_env {
-                ctx = (true, f.flags.is_method || f.flags.is_class_constructor || f.flags.is_field_init, f.flags.is_class_constructor && f.flags.is_derived, f.flags.is_field_init);
+                return (true, f.flags.is_method || f.flags.is_class_constructor || f.flags.is_field_init, f.flags.is_class_constructor && f.flags.is_derived, f.flags.is_field_init);
             }
             break;
         }
+        self.outer_ctx
+    }
+
+    fn eval_site(&mut self) -> EvalSite {
+        let env = self.env_snapshot();
+        let strict = self.fs_ref().flags.is_strict;
+        let class_depth = self.fs_ref().class_depth;
+        let ctx = self.function_ctx();
         let in_params = self.fs_ref().in_params && !self.fs_ref().flags.is_arrow;
         EvalSite { env, strict, class_depth, in_function: ctx.0, in_method: ctx.1, in_derived_ctor: ctx.2, in_field_init: ctx.3, in_params }
     }

@@ -1084,8 +1084,18 @@ impl<'a> Parser<'a> {
                     if d.init.is_some() && (is_of || self.ctx.strict || kind != VarKind::Var || !matches!(d.target, Pattern::Identifier(_))) {
                         return Err(self.error("for-in/of loop variable declaration may not have an initializer"));
                     }
+                    let init = d.init.map(|i| (d.target.clone(), i));
                     let head = ForHead::VarDecl { kind, target: d.target };
-                    return self.parse_for_in_of(head, is_of, is_await);
+                    let mut stmt = self.parse_for_in_of(head, is_of, is_await)?;
+                    if let (Some((target, init)), StmtKind::ForIn { right, .. }) = (init, &mut stmt) {
+                        // Annex B `for (var x = init in obj)`: the initializer
+                        // is assigned before the object expression runs.
+                        let pos = right.pos;
+                        let assign = Expr { pos, kind: ExprKind::Assign { op: AssignOp::Assign, target: Box::new(target), value: Box::new(init) } };
+                        let obj = std::mem::replace(&mut **right, Expr { pos, kind: ExprKind::Undefined });
+                        **right = Expr { pos, kind: ExprKind::Sequence(vec![assign, obj]) };
+                    }
+                    return Ok(stmt);
                 }
                 // Validate missing initializers now that we know it's a plain for.
                 for d in &decl.declarations {
@@ -1662,6 +1672,9 @@ impl<'a> Parser<'a> {
             }
             Err(left) => left,
         };
+        // `(x) = function () {}` does not name the function (the target is
+        // not an IdentifierRef; see NamedEvaluation in AssignmentExpression).
+        let paren_ident = matches!(left.kind, ExprKind::Identifier(_)) && self.parenthesized.contains(&(left.pos.line, left.pos.column));
         let target = if op == AssignOp::Assign {
             if matches!(left.kind, ExprKind::Assign { .. }) {
                 return Err(self.error_at(start_pos, "Invalid left-hand side in assignment"));
@@ -1674,7 +1687,12 @@ impl<'a> Parser<'a> {
             }
         };
         self.advance()?;
-        let value = Box::new(self.parse_assignment()?);
+        let mut value = Box::new(self.parse_assignment()?);
+        if paren_ident && matches!(value.kind, ExprKind::Function(_) | ExprKind::Arrow(_) | ExprKind::Class(_)) {
+            // (a one-element sequence: evaluated as is, but not named)
+            let vpos = value.pos;
+            value = Box::new(Expr { pos: vpos, kind: ExprKind::Sequence(vec![*value]) });
+        }
         Ok(Expr {
             pos,
             kind: ExprKind::Assign { op, target: Box::new(target), value },
@@ -2553,7 +2571,7 @@ impl<'a> Parser<'a> {
         self.expect_punct("(")?;
         let e = self.with_no_in(false, |p| p.parse_expression())?;
         self.expect_punct(")")?;
-        if matches!(e.kind, ExprKind::Object(_) | ExprKind::Array(_) | ExprKind::Assign { .. }) {
+        if matches!(e.kind, ExprKind::Object(_) | ExprKind::Array(_) | ExprKind::Assign { .. } | ExprKind::Identifier(_)) {
             self.parenthesized.insert((e.pos.line, e.pos.column));
         }
         Ok(e)
@@ -2696,6 +2714,8 @@ impl<'a> Parser<'a> {
 
     fn parse_object_property(&mut self) -> PResult<ObjectProperty> {
         let pos = self.tok.pos;
+        // (the source text of a method starts at its modifiers)
+        let start = self.tok.start as u32;
         // Modifiers
         let mut is_async = false;
         let mut is_generator = false;
@@ -2727,7 +2747,8 @@ impl<'a> Parser<'a> {
             return Err(self.error_at(pos, "Private names are not allowed in object literals"));
         }
         if self.is_punct("(") {
-            let f = self.parse_method_function(pos, is_async, is_generator, accessor, false)?;
+            let mut f = self.parse_method_function(pos, is_async, is_generator, accessor, false)?;
+            f.span = (start, self.prev_end as u32);
             let value = match accessor {
                 Some(true) => PropertyValue::Getter(std::rc::Rc::new(f)),
                 Some(false) => PropertyValue::Setter(std::rc::Rc::new(f)),
@@ -3035,6 +3056,7 @@ impl<'a> Parser<'a> {
                 self.restore(snap);
             }
         }
+        let start = self.tok.start as u32;
         let mut is_async = false;
         let mut is_generator = false;
         let mut accessor: Option<bool> = None;
@@ -3073,7 +3095,8 @@ impl<'a> Parser<'a> {
                 let f = self.parse_method_function(pos, false, false, None, derived)?;
                 return Ok(ClassMember::Constructor(f));
             }
-            let f = self.parse_method_function(pos, is_async, is_generator, accessor, false)?;
+            let mut f = self.parse_method_function(pos, is_async, is_generator, accessor, false)?;
+            f.span = (start, self.prev_end as u32);
             return Ok(match accessor {
                 Some(true) => ClassMember::Getter { key, value: std::rc::Rc::new(f), is_static },
                 Some(false) => ClassMember::Setter { key, value: std::rc::Rc::new(f), is_static },

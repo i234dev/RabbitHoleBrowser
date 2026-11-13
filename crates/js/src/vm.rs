@@ -4426,6 +4426,12 @@ impl Realm {
                     let v = pop!();
                     let key = pop!();
                     let obj = peek!().clone();
+                    // (A static field's anonymous function takes its name.)
+                    if let (V::Object(fid), V::Symbol(sym)) = (v.v(), key.v()) {
+                        if matches!(&self.obj(fid).kind, ObjectKind::Function(c) if c.code.name.is_empty()) {
+                            self.set_function_name(&v, &PropertyKey::Symbol(sym), "");
+                        }
+                    }
                     self.private_define(&obj, &key, Property::data(v, WRITABLE))?;
                 }
                 Op::CopyPrivate => {
@@ -5212,7 +5218,8 @@ impl Realm {
             };
             let name = if prefix.is_empty() { base } else { format!("{} {}", prefix, base) };
             let existing = self.obj(id).props.get(&PropertyKey::str("name")).map(|p| p.value.clone());
-            let keep = matches!(existing.as_ref().map(Value::v), Some(V::String(s)) if !s.is_empty());
+            // (An accessor is always renamed: its static name lacks the prefix.)
+            let keep = prefix.is_empty() && matches!(existing.as_ref().map(Value::v), Some(V::String(s)) if !s.is_empty());
             if !keep {
                 self.define_property(id, "name", Value::str(&name), CONFIGURABLE);
             }

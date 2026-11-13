@@ -160,7 +160,8 @@ pub fn parse_meta(src: &str) -> Meta {
     let Some(end) = src[start..].find("---*/") else { return meta };
     let yaml = &src[start + 5..start + end];
     let mut key = String::new();
-    for line in yaml.lines() {
+    // (Lines may end in CR alone: line-terminator tests.)
+    for line in yaml.split(['\n', '\r']) {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
