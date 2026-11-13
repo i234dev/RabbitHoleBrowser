@@ -1338,6 +1338,27 @@ fn e_scroll_into_view(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
         let style = with_env(|env| env.computed_style(p));
         let is_root = with_doc(0, |doc| doc.is_element(p, "html") || doc.is_element(p, "body"));
         if let Some(s) = style.filter(|s| !is_root && (matches!(s.overflow_x, rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Hidden) || matches!(s.overflow_y, rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Hidden))) {
+            // A sticky box between the target and this scroller is stuck
+            // in view (its layout rect does not show that): leave it.
+            let stuck = {
+                let mut c = Some(n.node);
+                let mut found = false;
+                while let Some(x) = c {
+                    if x == p {
+                        break;
+                    }
+                    if with_env(|env| env.computed_style(x)).map(|s| s.position == rabbithole_style::Position::Sticky).unwrap_or(false) {
+                        found = true;
+                        break;
+                    }
+                    c = with_doc(0, |doc| doc.flat_parent(x));
+                }
+                found
+            };
+            if stuck {
+                cur = with_doc(0, |doc| doc.flat_parent(p));
+                continue;
+            }
             if let Some(((sx, sy), _)) = with_env(|env| env.element_scroll(p)) {
                 let t = node_rect(n);
                 let pr = node_rect(NodeRef::main(p));
@@ -1357,6 +1378,14 @@ fn e_scroll_into_view(realm: &mut Realm, this: Value, args: &[Value]) -> JsResul
         cur = with_doc(0, |doc| doc.flat_parent(p));
     }
     let t = node_rect(n);
+    let mut c = Some(n.node);
+    while let Some(x) = c {
+        if with_env(|env| env.computed_style(x)).map(|s| s.position == rabbithole_style::Position::Sticky || s.position == rabbithole_style::Position::Fixed).unwrap_or(false) {
+            // Stuck / fixed in the viewport already.
+            return Ok(Value::Undefined);
+        }
+        c = with_doc(0, |doc| doc.flat_parent(x));
+    }
     with_env(|env| {
         let (vw, vh) = env.viewport();
         let (sx, sy) = env.scroll();

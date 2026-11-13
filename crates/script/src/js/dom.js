@@ -475,20 +475,10 @@
       return new g.DOMRect(l, t, r - l, b - t);
     }
     createContextualFragment(html) {
-      const s = this[S];
-      let ctx = s.sc.nodeType === 1 ? s.sc : s.sc.parentElement;
-      if (!ctx || ctx.localName === 'html') ctx = document.body || document.createElement('body');
-      const t = document.createElement('template');
-      t.innerHTML = String(html);
-      const frag = document.importNode(t.content, true);
-      // Scripts created this way run when inserted (unlike innerHTML).
-      for (const old of Array.from(frag.querySelectorAll('script'))) {
-        const sc = document.createElement('script');
-        for (const a of old.getAttributeNames()) sc.setAttribute(a, old.getAttribute(a));
-        sc.textContent = old.textContent;
-        old.replaceWith(sc);
-      }
-      return frag;
+      if (arguments.length < 1) throw new TypeError("Failed to execute 'createContextualFragment' on 'Range': 1 argument required, but only 0 present.");
+      // HTML or XML fragment parsing in the start node's context; the
+      // scripts run when inserted (unlike innerHTML's).
+      return N.contextualFragment(this[S].sc, String(html));
     }
   }
   consts(Range, { START_TO_START: 0, START_TO_END: 1, END_TO_END: 2, END_TO_START: 3 });

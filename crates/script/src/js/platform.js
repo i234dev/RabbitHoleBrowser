@@ -735,8 +735,10 @@
     // element at the root; null for the root and boxless elements.
     const scrollContainer = (s) => !['visible', 'clip'].includes(s.overflowX || s.overflow) || !['visible', 'clip'].includes(s.overflowY || s.overflow);
     const fixedCB = (s) => (s.transform && s.transform !== 'none') || /paint|layout|strict|content/.test(s.contain || '') || (s.filter && s.filter !== 'none') || /transform/.test(s.willChange || '');
+    // The `scrollParent` attribute (an accessor, as the IDL has it).
     if (g.HTMLElement) Object.defineProperty(g.HTMLElement.prototype, 'scrollParent', {
-      value: function scrollParent() {
+      get: Object.defineProperty(function () {
+        if (!(this instanceof g.HTMLElement)) throw new TypeError('Illegal invocation');
         const d = this.ownerDocument;
         if (!this.isConnected || this === d.documentElement || this === d.scrollingElement) return null;
         const own = g.getComputedStyle(this);
@@ -758,8 +760,8 @@
           if (n !== d.body && scrollContainer(s)) return n;
         }
         return pos === 'fixed' ? null : d.scrollingElement;
-      },
-      writable: true, configurable: true, enumerable: true,
+      }, 'name', { value: 'get scrollParent' }),
+      configurable: true, enumerable: true,
     });
     Object.defineProperty(g.Element.prototype, 'checkVisibility', {
       value: function checkVisibility(options) {

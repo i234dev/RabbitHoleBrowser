@@ -286,11 +286,24 @@ fn range_get_client_rects(realm: &mut Realm, this: Value, _: &[Value]) -> JsResu
     Ok(realm.new_array_value(vec![r]))
 }
 
+/// `__rhNative.contextualFragment(startNode, markup)`: the fragment of
+/// `Range.createContextualFragment()` for a range starting in `startNode`.
+pub(crate) fn contextual_fragment_native(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let Some(n) = node_of(realm, &arg(args, 0)) else {
+        return Err(realm.throw_type_error("contextualFragment: node expected"));
+    };
+    contextual_fragment(realm, n.doc, Some(n.node), &args[1..])
+}
+
 fn range_create_contextual_fragment(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let o = range_data(realm, &this)?;
     let d = realm.host_data::<RangeData>(o).unwrap();
     let doc = d.doc;
     let start = d.start.map(|(n, _)| n);
+    contextual_fragment(realm, doc, start, args)
+}
+
+fn contextual_fragment(realm: &mut Realm, doc: u32, start: Option<NodeId>, args: &[Value]) -> JsResult<Value> {
     if args.is_empty() {
         return Err(realm.throw_type_error("Failed to execute 'createContextualFragment' on 'Range': 1 argument required, but only 0 present."));
     }

@@ -546,9 +546,6 @@ fn d_element_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     }
     let x = realm.to_number(arg(args, 0))?;
     let y = realm.to_number(arg(args, 1))?;
-    if !x.is_finite() || !y.is_finite() {
-        return Err(realm.throw_type_error("Failed to execute 'elementFromPoint' on 'Document': The provided double value is non-finite."));
-    }
     // Points outside the viewport hit nothing.
     let (vw, vh) = with_env(|env| env.viewport());
     if x < 0.0 || y < 0.0 || x > vw as f64 || y > vh as f64 {

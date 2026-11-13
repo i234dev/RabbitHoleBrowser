@@ -225,7 +225,7 @@ impl Parser {
     pub fn new_fragment(context: NodeId, context_tag: &str, context_ns: Namespace, root: NodeId, before: Option<NodeId>, form: Option<NodeId>, scripting: bool, declarative_shadow: bool) -> Parser {
         let mut tb = TreeBuilder::new(scripting);
         tb.allow_dsd = declarative_shadow;
-        tb.open.push(root);
+        tb.stream_container = Some(root);
         tb.context = Some(context);
         tb.fragment = true;
         tb.form = form;
@@ -315,6 +315,10 @@ impl Parser {
         std::mem::swap(doc, &mut self.tb.doc);
         if std::mem::take(&mut self.tb.mode_reset_pending) {
             self.tb.merge_floor = self.tb.doc.node_count();
+            if self.tb.stream_container.is_some() && self.tb.open.is_empty() {
+                let html = self.tb.doc.create_element("html", vec![]);
+                self.tb.open.push(html);
+            }
             self.tb.reset_insertion_mode();
         }
         let status = self.tb.run_tokens(&mut self.tk);
@@ -470,6 +474,9 @@ struct TreeBuilder {
     merge_floor: NodeId,
     /// The fragment root is a live node (streaming): never changed itself.
     live_root: bool,
+    /// Streaming: the live node the fragment's root children go into (the
+    /// stack's root is a scratch `html` element).
+    stream_container: Option<NodeId>,
 }
 
 impl TreeBuilder {
@@ -501,6 +508,7 @@ impl TreeBuilder {
             mode_reset_pending: false,
             merge_floor: 0,
             live_root: false,
+            stream_container: None,
         }
     }
 
@@ -613,10 +621,6 @@ impl TreeBuilder {
     }
 
     fn el(&self, n: NodeId) -> (&str, &Namespace) {
-        // A fragment parser's root stands for the `html` element.
-        if self.fragment && self.open.first() == Some(&n) {
-            return ("html", &Namespace::Html);
-        }
         match self.doc.element(n) {
             Some(e) => (e.tag.as_str(), &e.ns),
             None => ("", &Namespace::None),
@@ -788,8 +792,10 @@ impl TreeBuilder {
         let place = self.insertion_place_raw(override_target);
         // Streaming into a live parent: the root's children go before the
         // reference node.
-        if place.1.is_none() && self.root_before.is_some() && self.open.first() == Some(&place.0) {
-            return (place.0, self.root_before);
+        if let Some(c) = self.stream_container {
+            if self.open.first() == Some(&place.0) {
+                return (c, place.1.or(self.root_before));
+            }
         }
         // Inside a template: its template contents (or declarative shadow root).
         if place.1.is_none() && self.is_html(place.0, "template") {
