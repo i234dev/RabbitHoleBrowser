@@ -948,3 +948,38 @@ fn webgl2_instancing_ranges_negative_counts_and_zero_instances_are_atomic() {
     );
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
+
+#[test]
+fn webgl2_joint_framebuffer_instances_leave_default_canvas_pixels_unchanged() {
+    let (mut env, mut host) = setup("<!doctype html><body></body>");
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+// Private joint regression to add after both feature branches are integrated.
+// Expected logs: red FBO pixel, green FBO pixel, blue default canvas pixel, no error.
+const canvas=document.createElement('canvas');canvas.width=4;canvas.height=2;
+const gl=canvas.getContext('webgl2',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);
+function compile(type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+const p=gl.createProgram();
+gl.attachShader(p,compile(gl.VERTEX_SHADER,'attribute vec2 position;attribute vec2 offset;attribute vec3 color;varying vec3 tint;void main(){gl_Position=vec4(position+offset,0.0,1.0);tint=color;}'));
+gl.attachShader(p,compile(gl.FRAGMENT_SHADER,'precision mediump float;varying vec3 tint;void main(){gl_FragColor=vec4(tint,1.0);}'));
+gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));gl.useProgram(p);
+function attribute(name,size,data,divisor){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(data),gl.STATIC_DRAW);const a=gl.getAttribLocation(p,name);gl.vertexAttribPointer(a,size,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(a);gl.vertexAttribDivisor(a,divisor);}
+attribute('position',2,[-.45,-1,.45,-1,0,1],0);
+attribute('offset',2,[-.5,0,.5,0],1);
+attribute('color',3,[1,0,0,0,1,0],1);
+const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,2,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+gl.drawArraysInstanced(gl.TRIANGLES,0,3,2);
+const pixel=new Uint8Array(4);
+for(const x of [0,3]){gl.readPixels(x,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);console.log(Array.from(pixel).join(','));}
+const copy=document.createElement('canvas');copy.width=4;copy.height=2;const ctx=copy.getContext('2d');ctx.drawImage(canvas,0,0);console.log(Array.from(ctx.getImageData(0,0,1,1).data).join(','));
+console.log(gl.getError());
+
+"#,
+    );
+    assert_eq!(out, ["255,0,0,255", "0,255,0,255", "0,0,255,255", "0"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}

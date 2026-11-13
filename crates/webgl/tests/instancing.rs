@@ -160,3 +160,49 @@ fn instancing_is_webgl2_only_and_integer_instance_builtin_is_rejected() {
     assert!(!c.shader_compile_status(s).unwrap());
     assert!(!c.shader_info_log(s).unwrap().is_empty());
 }
+
+#[test]
+fn combined_instancing_uses_fbo_once_preserves_default_and_restores_error_state() {
+    let mut c = scene();
+    c.set_alpha_channel(false);
+    c.set_depth_channel(false);
+    c.enable_depth_test(true);
+    c.clear_color([0., 0., 1., 1.]);
+    c.clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT).unwrap();
+    attr(&mut c, 2, 4, &[1., 0., 0., 0.5, 0., 1., 0., 0.5], 1);
+    let texture = c.create_texture();
+    c.bind_texture(TEXTURE_2D, texture).unwrap();
+    c.tex_image_2d(TEXTURE_2D, 0, RGBA, 16, 8, 0, RGBA, UNSIGNED_BYTE, None)
+        .unwrap();
+    let framebuffer = c.create_framebuffer();
+    c.bind_framebuffer(FRAMEBUFFER, framebuffer).unwrap();
+    c.framebuffer_texture_2d(FRAMEBUFFER, COLOR_ATTACHMENT0, TEXTURE_2D, texture, 0)
+        .unwrap();
+    let depth = c.create_renderbuffer();
+    c.bind_renderbuffer(RENDERBUFFER, depth).unwrap();
+    c.renderbuffer_storage(RENDERBUFFER, DEPTH_COMPONENT16, 16, 8)
+        .unwrap();
+    c.framebuffer_renderbuffer(FRAMEBUFFER, DEPTH_ATTACHMENT, RENDERBUFFER, depth)
+        .unwrap();
+    c.clear(DEPTH_BUFFER_BIT).unwrap();
+    c.draw_arrays_instanced(TRIANGLES, 0, 3, 2).unwrap();
+    assert_eq!(pixel(&c, 4), [255, 0, 0, 128]);
+    assert_eq!(pixel(&c, 12), [0, 255, 0, 128]);
+    c.bind_framebuffer(READ_FRAMEBUFFER, 0).unwrap();
+    assert_eq!(pixel(&c, 4), [0, 0, 255, 255]);
+    assert_eq!(pixel(&c, 12), [0, 0, 255, 255]);
+    assert_eq!(
+        c.draw_arrays_instanced(TRIANGLES, 0, 3, 3),
+        Err(Error::InvalidOperation)
+    );
+    assert_eq!(pixel(&c, 4), [0, 0, 255, 255]);
+    c.bind_framebuffer(READ_FRAMEBUFFER, framebuffer).unwrap();
+    assert_eq!(pixel(&c, 4), [255, 0, 0, 128]);
+    assert_eq!(pixel(&c, 12), [0, 255, 0, 128]);
+    assert_eq!(c.viewport_rect(), [0, 0, 16, 8]);
+    c.bind_framebuffer(FRAMEBUFFER, 0).unwrap();
+    // Requested DEPTH_TEST remains enabled, but this default drawing buffer
+    // has no depth channel; restoring its state must not access FBO storage.
+    c.draw_arrays_instanced(TRIANGLES, 0, 3, 2).unwrap();
+    assert_eq!(pixel(&c, 4), [255, 0, 0, 255]);
+}

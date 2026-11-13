@@ -80,7 +80,7 @@ fn clip(vertices: [Vertex; 3]) -> Vec<Vertex> {
 }
 impl Context {
     pub(super) fn draw(&mut self, mode: u32, indices: &[u32]) -> Result<()> {
-        self.with_draw_framebuffer(|ctx| ctx.draw_instances(mode, indices, 1))
+        self.draw_instances(mode, indices, 1)
     }
     pub(super) fn draw_instances(
         &mut self,
@@ -88,6 +88,9 @@ impl Context {
         indices: &[u32],
         instances: u32,
     ) -> Result<()> {
+        self.with_draw_framebuffer(|ctx| ctx.draw_instances_current(mode, indices, instances))
+    }
+    fn draw_instances_current(&mut self, mode: u32, indices: &[u32], instances: u32) -> Result<()> {
         let executable = self
             .programs
             .get(&self.current_program)
