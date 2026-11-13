@@ -386,3 +386,25 @@ fn service_worker_abort_signal_reaches_request_clone_and_delayed_forwarding() {
     assert!(!output.iter().any(|s| s.contains("must not forward")));
     assert!(host.next_due().is_none());
 }
+
+#[test]
+fn aborted_fetch_wait_until_survives_skip_waiting_and_unregister() {
+    let (mut env, mut host) = controlled_worker(r#"
+        onfetch = event => {
+            event.respondWith(new Promise((resolve,reject) => event.request.signal.addEventListener('abort',()=>reject(event.request.signal.reason))));
+            event.waitUntil(new Promise(resolve => {
+                function poll() { caches.match('release-gate').then(response => { if(response)resolve();else setTimeout(poll,10); }); }
+                poll();
+            }).then(()=>caches.open('lifetime').then(cache=>cache.put('after-abort',new Response('completed old event')))));
+        };
+    "#);
+    run(&mut env,&mut host,"var controller=new AbortController(), reason={stop:true};fetch('old-event',{signal:controller.signal}).catch(()=>{});var old=navigator.serviceWorker.controller;");
+    drive_fetch(&mut env,&mut host,2);
+    run(&mut env,&mut host,"controller.abort(reason);");
+    drive_fetch(&mut env,&mut host,2);
+    env.fetches.insert("https://example.test/dir/sw.js".into(),(200,"text/javascript".into(),"skipWaiting();onfetch=e=>e.respondWith(new Response('new'));".into()));
+    run(&mut env,&mut host,"registration.update();");drive_fetch(&mut env,&mut host,15);
+    assert_eq!(run(&mut env,&mut host,"console.log(old.state, navigator.serviceWorker.controller===old);registration.unregister();caches.open('lifetime').then(cache=>cache.put('release-gate',new Response('release')));"),["redundant false"]);
+    drive_fetch(&mut env,&mut host,25);
+    assert_eq!(run(&mut env,&mut host,"caches.match('after-abort').then(response=>response ? response.text() : 'missing').then(console.log);"),["completed old event"]);
+}

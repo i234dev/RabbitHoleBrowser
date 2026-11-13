@@ -279,3 +279,25 @@ fn aborted_fetch_propagates_worker_signal_and_never_forwards_delayed_request_to_
     assert!(observed,"worker clone did not observe deserialized AbortError");
     assert!(!server.requests.lock().unwrap().iter().any(|(path,_)|path=="/app/never"));
 }
+
+#[test]
+fn aborted_old_worker_wait_until_survives_replacement_unregister_and_client_drop() {
+    let start="<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let worker=r#"onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{
+      e.respondWith(new Promise((resolve,reject)=>e.request.signal.addEventListener('abort',()=>reject(e.request.signal.reason))));
+      e.waitUntil(caches.open('lifetime').then(cache=>cache.put('/event-seen',new Response('yes'))));
+      e.waitUntil(new Promise(resolve=>{function poll(){caches.match('/release-gate').then(r=>{if(r)resolve();else setTimeout(poll,10);});}poll();}).then(()=>caches.open('lifetime').then(cache=>cache.put('/after-abort',new Response('completed old event')))));
+    };"#;
+    let replacement="skipWaiting();onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>e.respondWith(new Response('new'));";
+    let observer="<!doctype html><script>var completed; caches.open('lifetime').then(cache=>cache.put('/release-gate',new Response('release')));function poll(){caches.match('/after-abort').then(r=>{if(r)r.text().then(text=>completed=text);else setTimeout(poll,10);});}poll();</script>";
+    let server=Server::new(&[("/app/start.html","text/html",start,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/new-sw.js","text/javascript",replacement,&[]),("/observer.html","text/html",observer,&[])]);
+    let mut engine=engine();let vp=Viewport{width:320.0,height:240.0};
+    let mut page=engine.load(&format!("{}/app/start.html",server.origin),vp).unwrap();wait(&engine,&mut page,"controlled===true");
+    engine.eval_in_page(&mut page,"var controller=new AbortController(),eventSeen=false,replaced=false,removed=false;fetch('old-event',{signal:controller.signal}).catch(()=>{});function check(){caches.match('/event-seen').then(r=>{if(r)eventSeen=true;else setTimeout(check,5);});}check();");
+    wait(&engine,&mut page,"eventSeen===true");
+    engine.eval_in_page(&mut page,"controller.abort({stop:true});navigator.serviceWorker.register('new-sw.js').then(registration=>{function check(){if(registration.active&&registration.active.state==='activated'&&registration.active.scriptURL.endsWith('/new-sw.js')){replaced=true;registration.unregister().then(value=>removed=value);}else setTimeout(check,5);}check();});");
+    wait(&engine,&mut page,"replaced===true&&removed===true");drop(page);
+    let mut observer=engine.load(&format!("{}/observer.html",server.origin),vp).unwrap();
+    wait(&engine,&mut observer,"completed==='completed old event'");
+    assert!(!server.requests.lock().unwrap().iter().any(|(path,_)|path=="/app/old-event"));
+}

@@ -136,7 +136,7 @@ impl Notice {
 impl Store {
     fn id(&mut self) -> u64 { self.next += 1; self.next }
     fn prune_fetches(&mut self) {
-        self.fetches.retain(|_, f| !f.cancelled.get() || (f.dispatched && !f.abort_notified));
+        self.fetches.retain(|_, f| retain_fetch(f));
         let obsolete: Vec<u64> = self.runtimes.keys().filter(|id| self.workers[*id].state == "redundant" && !fetch_work(self, **id)).copied().collect();
         for id in obsolete { self.runtimes.remove(&id); }
     }
@@ -145,7 +145,7 @@ impl Store {
             !r.registered
                 && !self.clients.values().any(|c| c.controller.is_some_and(|id| self.workers[&id].registration == r.id))
                 && !self.workers.values().any(|w| w.registration == r.id && matches!(w.state, "parsed" | "installing" | "activating"))
-                && !self.fetches.values().any(|f| self.workers[&f.worker].registration == r.id && !f.lifetime_done && (!f.cancelled.get() || (f.dispatched && !f.abort_notified)))
+                && !self.fetches.values().any(|f| self.workers[&f.worker].registration == r.id && retain_fetch(f))
         }).map(|r| r.id).collect();
         for registration in registrations {
             let r = self.registrations.get_mut(&registration).unwrap();
@@ -351,6 +351,7 @@ fn fetch_identity(realm: &mut Realm, args: &[Value]) -> JsResult<(Rc<RefCell<Sto
 }
 fn fetch_response(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let (store, id) = fetch_identity(realm, args)?;
+    if store.borrow().fetches[&id].cancelled.get() { return Err(exception(realm, "AbortError", "Fetch response is no longer consumed")); }
     let request = store.borrow().fetches[&id].request.clone();
     let value = arg(args, 1); let o = value.as_object().filter(|o| realm.obj(*o).class_name() == Some("Response")).ok_or_else(|| realm.throw_type_error("respondWith requires a Response"))?;
     realm.native_root(value.clone());
@@ -373,7 +374,7 @@ fn fetch_response(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value
     Ok(Value::Undefined)
 }
 fn fetch_failed(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
-    if let Ok((store, id)) = fetch_identity(realm, args) { store.borrow_mut().fetches.get_mut(&id).unwrap().result = Some(Err("Service worker respondWith rejected or returned an invalid response".into())); }
+    if let Ok((store, id)) = fetch_identity(realm, args) { let mut s = store.borrow_mut(); let task = s.fetches.get_mut(&id).unwrap(); if !task.cancelled.get() { task.result = Some(Err("Service worker respondWith rejected or returned an invalid response".into())); } }
     Ok(Value::Undefined)
 }
 fn fetch_fallback(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
@@ -385,7 +386,10 @@ fn fetch_done(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     if let Ok((store, id)) = fetch_identity(realm, args) { store.borrow_mut().fetches.get_mut(&id).unwrap().lifetime_done = true; }
     Ok(Value::Undefined)
 }
-fn fetch_work(s: &Store, worker: u64) -> bool { s.fetches.values().any(|f| f.worker == worker && (!f.cancelled.get() || (f.dispatched && !f.abort_notified))) }
+// Cancellation ends delivery, not ExtendableEvent's explicit lifetime. In
+// particular an old redundant worker still owns its outstanding waitUntil work.
+fn retain_fetch(task: &FetchTask) -> bool { !task.cancelled.get() || (task.dispatched && (!task.abort_notified || !task.lifetime_done)) }
+fn fetch_work(s: &Store, worker: u64) -> bool { s.fetches.values().any(|f| f.worker == worker && retain_fetch(f)) }
 fn worker_fetch_hook(runtime: &mut Runtime, env: &mut dyn HostEnv, name: &str, args: &[Value]) {
     let mut wenv = WorkerEnv { outer: env, doc: &mut runtime.doc, url: runtime.url.clone(), errors: runtime.errors.clone(), service_worker: None };
     runtime.host.enter(&mut wenv, |realm| {
@@ -405,7 +409,7 @@ fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Run
         worker_fetch_hook(runtime, env, "__sw_fetch_abort", &[Value::Number(id as f64), Value::str(&reason)]);
         if let Some(f) = registry.0.borrow_mut().fetches.get_mut(&id) { f.abort_notified = true; }
     }
-    registry.0.borrow_mut().fetches.retain(|_, f| !f.cancelled.get() || (f.dispatched && !f.abort_notified));
+    registry.0.borrow_mut().fetches.retain(|_, f| retain_fetch(f));
     let ids: Vec<u64> = registry.0.borrow().fetches.iter().filter(|(_, f)| f.worker == worker && !f.dispatched).map(|(&id, _)| id).collect();
     for id in ids {
         let (req, client) = {
@@ -440,7 +444,15 @@ fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Run
     let ids: Vec<u64> = registry.0.borrow().fetches.iter().filter(|(_, f)| f.worker == worker).map(|(&id, _)| id).collect();
     for id in ids {
         let mut task = registry.0.borrow_mut().fetches.remove(&id).unwrap();
-        if task.cancelled.get() { continue; }
+        if task.cancelled.get() {
+            // Drop the client channel, abandoned response bytes and network
+            // receiver immediately. Keep only event lifetime bookkeeping.
+            task.sender = None; task.network = None; task.result = None; task.fallback = false;
+            task.request.body = None; task.request.headers.clear(); task.cancelled.reason.borrow_mut().take();
+            if !task.lifetime_done { registry.0.borrow_mut().fetches.insert(id, task); }
+            else { worker_fetch_hook(runtime, env, "__sw_fetch_complete", &[Value::Number(id as f64)]); }
+            continue;
+        }
         if task.fallback && task.result.is_none() && task.network.is_none() {
             task.fallback = false;
             if let Some(rx) = env.fetch_background(task.request.clone()) { task.network = Some(rx); }
@@ -698,7 +710,7 @@ impl ScriptHost {
         let s = registry.0.borrow();
         let c = context_of(self);
         if !s.jobs.is_empty() || c.client.is_some_and(|id| s.clients.get(&id).is_some_and(|c| !c.events.is_empty())) { return Some(0.0); }
-        if s.fetches.values().any(|f| f.cancelled.get() || (!f.dispatched && matches!(s.workers[&f.worker].state, "activated" | "redundant")) || f.result.is_some() || f.fallback) { return Some(0.0); }
+        if s.fetches.values().any(|f| (f.cancelled.get() && !f.abort_notified) || (!f.dispatched && matches!(s.workers[&f.worker].state, "activated" | "redundant")) || f.result.is_some() || f.fallback) { return Some(0.0); }
         let mut due: Option<f64> = if s.fetches.values().any(|f| f.network.is_some()) { Some(self.state.borrow().last_tick + 10.0) } else { None };
         for (&id, r) in &s.runtimes {
             let immediate = match r.phase {
