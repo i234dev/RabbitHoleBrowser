@@ -71,7 +71,7 @@ pub(crate) const LOOP_OSR: bool = true;
 /// Loop-free functions shorter than this are entered from interpreted
 /// callers only when they are already running natively (see
 /// `Slot::from_interp`).
-pub(crate) const ENTRY_MIN_OPS: usize = 48;
+pub(crate) const ENTRY_MIN_OPS: usize = 24;
 /// Functions longer than this stay interpreted.
 pub const MAX_OPS: usize = 20_000;
 /// Frames larger than this stay interpreted (slot offsets fit in disp32
