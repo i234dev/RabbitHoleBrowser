@@ -3429,17 +3429,14 @@ impl Realm {
                             _ => false,
                         };
                         if anonymous {
-                            let has_name = self.obj(fid).props.get(&PropertyKey::str("name")).map(|p| matches!(p.value.v(), V::String(s) if !s.is_empty())).unwrap_or(false);
-                            if !has_name {
-                                let name = match &key {
-                                    PropertyKey::String(s) => Value::String(s.clone()),
-                                    PropertyKey::Symbol(sym) => Value::str(&format!("[{}]", self.symbol_description(*sym))),
-                                };
-                                self.define_property(fid, "name", name, CONFIGURABLE);
-                            }
+                            self.set_function_name(&v, &key, "");
                         }
                     }
-                    self.define_own(obj, key, Property::data(v, ALL))?;
+                    // CreateDataPropertyOrThrow (a static field `prototype`).
+                    if !self.define_own(obj, key.clone(), Property::data(v, ALL))? {
+                        let k = self.key_display(&key);
+                        return self.type_error(&format!("Cannot define property {k}"));
+                    }
                 }
                 Op::DefineMethod(flag) => {
                     let f = pop!();
@@ -3457,7 +3454,10 @@ impl Realm {
                         self.private_define(&Value::Object(obj), &key.to_value(), Property::data(f, 0))?;
                     } else {
                         let flags = if flag == 1 { ALL } else { HIDDEN };
-                        self.define_own(obj, key, Property::data(f, flags))?;
+                        if !self.define_own(obj, key.clone(), Property::data(f, flags))? {
+                            let k = self.key_display(&key);
+                            return self.type_error(&format!("Cannot redefine property: {k}"));
+                        }
                     }
                 }
                 Op::DefineGetter(flag) | Op::DefineSetter(flag) => {
@@ -3490,6 +3490,12 @@ impl Realm {
                     } else {
                         CONFIGURABLE
                     };
+                    if existing.as_ref().is_some_and(|p| !p.configurable()) && !private {
+                        // DefinePropertyOrThrow over a non-configurable
+                        // property (a static `prototype` accessor).
+                        let k = self.key_display(&key);
+                        return self.type_error(&format!("Cannot redefine property: {k}"));
+                    }
                     self.obj_mut(obj).props.insert(key, Property::accessor(g, s, flags));
                 }
                 Op::CopyDataProps => {
@@ -3642,6 +3648,53 @@ impl Realm {
                     sp = base;
                     let v = self.super_call(fi, args)?;
                     push!(v);
+                }
+                Op::SuperCtor => {
+                    let f = self.vstack[sp - 1].clone();
+                    let parent = match f.v() {
+                        V::Object(o) => match self.get_prototype_of(o)? {
+                            Some(p) => Value::Object(p),
+                            None => Value::Null,
+                        },
+                        _ => Value::Null,
+                    };
+                    push!(parent);
+                }
+                Op::SuperCallWith(argc) => {
+                    let base = sp - argc as usize;
+                    let args: Vec<Value> = (base..sp).map(|i| std::mem::replace(&mut self.vstack[i], Value::Undefined)).collect();
+                    sp = base;
+                    let parent = pop!();
+                    let v = self.super_construct(fi, parent, &args)?;
+                    push!(v);
+                }
+                Op::SuperCallWithSpread => {
+                    let arr = pop!();
+                    let args = self.create_list_from_array_like(arr)?;
+                    let parent = pop!();
+                    let v = self.super_construct(fi, parent, &args)?;
+                    push!(v);
+                }
+                Op::BindThis => {
+                    let r = self.vstack[sp - 1].clone();
+                    if !frame!().this.is_empty() {
+                        return Err(self.new_error("ReferenceError", "Super constructor may only be called once"));
+                    }
+                    frame!().this = r;
+                }
+                Op::BindThisSlot(d, s) => {
+                    let r = self.vstack[sp - 1].clone();
+                    let scope = frame!().scope;
+                    if !self.slot_get(scope, d, s).is_empty() {
+                        return Err(self.new_error("ReferenceError", "Super constructor may only be called once"));
+                    }
+                    self.slot_set(scope, d, s, r);
+                }
+                Op::InitFieldsOf => {
+                    let r = pop!();
+                    let f = pop!();
+                    self.run_field_initializers(f.as_object(), r.clone())?;
+                    push!(r);
                 }
                 Op::SuperCallSpread => {
                     let arr = pop!();
@@ -4631,6 +4684,13 @@ impl Realm {
     #[cold]
     fn construct_return_error(&mut self, v: &Value) -> Option<Value> {
         let f = self.frames.last().unwrap();
+        if let Some(s) = f.code().this_slot {
+            // The `this` binding arrows / eval code may have bound.
+            let scope = self.scope_at(f.scope, f.scope_depth as u16);
+            let t = self.slot_get(scope, 0, s);
+            self.frames.last_mut().unwrap().this = t;
+        }
+        let f = self.frames.last().unwrap();
         let derived = f.code().flags.is_derived;
         // Thrown in the caller's realm (after the callee's context is gone).
         let n = self.frames.len();
@@ -4820,6 +4880,16 @@ impl Realm {
         self.frames[fi].this = result.clone();
         self.run_field_initializers(Some(func), result.clone())?;
         Ok(result)
+    }
+
+    /// IsConstructor(parent) and Construct(parent, args, new.target) for a
+    /// `super(...)` call.
+    fn super_construct(&mut self, fi: usize, parent: Value, args: &[Value]) -> JsResult<Value> {
+        if !self.is_constructor(&parent) {
+            return self.type_error("Super constructor is not a constructor");
+        }
+        let nt = self.frames[fi].new_target.clone();
+        self.construct(parent, args, nt)
     }
 
     fn run_field_initializers(&mut self, func: Option<ObjectId>, this: Value) -> JsResult<()> {
@@ -5075,6 +5145,9 @@ impl Realm {
                 PropertyKey::Symbol(s) => {
                     if self.is_private_symbol(*s) {
                         self.symbol_description(*s)
+                    } else if self.symbols.get(s.0 as usize).is_some_and(|i| i.description.is_none()) {
+                        // A symbol without description names it "".
+                        String::new()
                     } else {
                         format!("[{}]", self.symbol_description(*s))
                     }
@@ -5223,7 +5296,7 @@ impl Realm {
     fn own_enumerable(&mut self, c: ObjectId, k: &PropertyKey) -> JsResult<bool> {
         let obj = self.obj(c);
         match &obj.kind {
-            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) => {
+            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) | ObjectKind::ModuleNamespace | ObjectKind::MappedArguments(_) => {
                 Ok(self.get_own_property_any(c, k)?.map(|p| p.enumerable()).unwrap_or(false))
             }
             _ => Ok(obj.props.get(k).map(|p| p.enumerable()).unwrap_or(false)),

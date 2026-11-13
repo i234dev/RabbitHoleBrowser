@@ -38,6 +38,10 @@ pub const ARGS_USED: &str = "\u{0}argsused";
 /// function itself, which the frame serves without an object).
 pub const ARGS_OBJ: &str = "\u{0}argsobj";
 
+/// Marker in a function's own set: an arrow function is nested in it
+/// (through arrows only): its `this` / `super()` may be used from there.
+pub const HAS_ARROW: &str = "\u{0}arrow";
+
 /// Marker in a function's set: direct `eval` code runs inside it (or inside
 /// a function nested in it) and may reference any of its bindings, so all
 /// of them live in heap scopes, where the eval code finds them.
@@ -149,6 +153,14 @@ impl Analyzer {
     }
 
     fn function(&mut self, f: &Function) {
+        if f.is_arrow {
+            for i in (1..self.sets.len()).rev() {
+                if !self.arrow[i] {
+                    self.sets[i].insert(HAS_ARROW.to_string());
+                    break;
+                }
+            }
+        }
         self.stack.push(f as *const Function);
         self.arrow.push(f.is_arrow);
         self.sets.push(NameSet::default());

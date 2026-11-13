@@ -108,6 +108,20 @@ pub enum Op {
     /// home ... fn -> home ... fn: the function's [[HomeObject]] is the
     /// value `n` slots below it (static class elements).
     SetHome(u8),
+    /// SuperCall in steps (spec order): f -> f parent (GetSuperConstructor)
+    SuperCtor,
+    /// f parent args... -> f result (IsConstructor check, Construct)
+    SuperCallWith(u16),
+    /// f parent argsarray -> f result
+    SuperCallWithSpread,
+    /// f result -> f result: BindThisValue on the frame (ReferenceError
+    /// when already bound)
+    BindThis,
+    /// f result -> f result: BindThisValue on the `%this` slot of a
+    /// derived constructor whose arrows / eval code call `super()`
+    BindThisSlot(u16, u16),
+    /// f result -> result: InitializeInstanceElements(result, f)
+    InitFieldsOf,
     /// this base -> this base value
     GetSuperPropKeep(u32),
     /// this key base -> this propertykey base value
@@ -567,6 +581,10 @@ pub struct FunctionCode {
     pub arg_map: Option<Box<[Option<VarLoc>]>>,
     /// A script's top-level declarations (see `Op::GlobalDeclCheck`).
     pub global_decls: Option<Box<GlobalDecls>>,
+    /// Derived constructors whose arrows or eval code use `this` or call
+    /// `super()`: the function-scope slot of the `this` binding (the
+    /// frame's `this` is synchronised from it when constructing returns).
+    pub this_slot: Option<u16>,
     /// Binding receiving the rest parameter array, if any.
     pub rest_loc: Option<VarLoc>,
     /// Binding holding the `arguments` object, if used.
@@ -842,6 +860,11 @@ impl Op {
             CopyDataPropsExcluding => (3, 1),
             SetProtoLiteral => (2, 1),
             SuperBase => (0, 1),
+            SuperCtor => (1, 2),
+            SuperCallWith(argc) => (argc as u32 + 2, 2),
+            SuperCallWithSpread => (3, 2),
+            BindThis | BindThisSlot(..) => (2, 2),
+            InitFieldsOf => (2, 1),
             SetHome(n) => (n as u32 + 1, n as u32 + 1),
             GetSuperProp(_) => (2, 1),
             SetSuperProp(_) | GetSuperElem => (3, 1),

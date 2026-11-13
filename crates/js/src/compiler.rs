@@ -37,6 +37,9 @@ enum BindKind {
     Class,
     /// Hidden compiler temporaries (never TDZ-checked).
     Hidden,
+    /// A named function expression's own name: immutable, assignments are
+    /// ignored (sloppy) or throw (strict), from nested functions too.
+    SelfName,
     /// Private name symbol.
     Private,
     /// Module import binding: the slot holds a reference to the exporter's
@@ -236,6 +239,9 @@ struct FnState {
     /// `FunctionCode::arg_map`).
     arg_map: Option<Vec<Option<Loc>>>,
     global_decls: Option<Box<crate::bytecode::GlobalDecls>>,
+    /// Derived constructor with `%this` / `%ctor` bindings (see
+    /// `FunctionCode::this_slot`).
+    this_slot: Option<u16>,
     rest_loc: Option<Loc>,
     arguments_loc: Option<Loc>,
     self_loc: Option<Loc>,
@@ -299,6 +305,7 @@ impl FnState {
             param_locs: Vec::new(),
             arg_map: None,
             global_decls: None,
+            this_slot: None,
             rest_loc: None,
             arguments_loc: None,
             self_loc: None,
@@ -854,6 +861,7 @@ impl Compiler {
             param_locs: Vec::new(),
             arg_map: None,
             global_decls: None,
+            this_slot: None,
             rest_loc: None,
             arguments_loc: None,
             self_loc: None,
@@ -1036,11 +1044,7 @@ impl Compiler {
         // A named function expression's own name is an immutable binding:
         // assigning to it is ignored (sloppy) or a TypeError (strict).
         let resolved = self.resolve(name);
-        let is_self = match (&resolved, self.fs_ref().self_loc) {
-            (Resolved::Local { depth: 0, slot, kind: BindKind::Hidden }, Some(Loc::Slot(s))) => *slot == s,
-            (Resolved::Reg { reg, kind: BindKind::Hidden }, Some(Loc::Reg(r))) => *reg == r,
-            _ => false,
-        };
+        let is_self = matches!(resolved, Resolved::Local { kind: BindKind::SelfName, .. } | Resolved::Reg { kind: BindKind::SelfName, .. });
         if is_self && name != "arguments" {
             if self.fs_ref().flags.is_strict {
                 self.emit(Op::Pop);
@@ -1863,6 +1867,13 @@ impl Compiler {
             }
             fs.captured = Rc::new(set);
         }
+        let this_bindings = fs.flags.is_derived && fs.flags.is_class_constructor && (fs.captured.contains(crate::captures::HAS_ARROW) || fs.captured.contains(crate::captures::EVAL_ALL));
+        if this_bindings {
+            let mut set = (*fs.captured).clone();
+            set.insert(THIS_BINDING.to_string());
+            set.insert(CTOR_BINDING.to_string());
+            fs.captured = Rc::new(set);
+        }
         let eval_vars = fs.captured.contains(crate::captures::EVAL_HERE) && !fs.flags.is_strict;
         self.fns.push(fs);
         self.set_pos(f.pos);
@@ -1972,10 +1983,20 @@ impl Compiler {
         // when nothing in the body declares the name.
         if let Some(n) = &f.name {
             if f.self_binding && !self.fs_ref().scopes[0].names.contains_key(&**n) && !body_decls.iter().any(|(b, _)| b == &**n) {
-                let loc = self.declare(n, BindKind::Hidden);
+                let loc = self.declare(n, BindKind::SelfName);
                 self.fs().self_loc = Some(loc);
             }
         }
+        let ctor_loc = if this_bindings {
+            // `this` is a TDZ binding arrows and eval code share; `%ctor`
+            // is the constructor (the active function of their super()).
+            if let Loc::Slot(s) = self.declare(THIS_BINDING, BindKind::Let) {
+                self.fs().this_slot = Some(s);
+            }
+            Some(self.declare(CTOR_BINDING, BindKind::Hidden))
+        } else {
+            None
+        };
         // An `arguments` object referenced from nested arrows must live in
         // the heap scope: declare it now, before the scope layout is fixed.
         if !f.is_arrow && crate::captures::is_captured(&self.fs_ref().captured, "arguments") && !self.fs_ref().scopes[0].names.contains_key("arguments") {
@@ -1989,6 +2010,10 @@ impl Compiler {
         let tdz = self.fs_ref().scopes[0].tdz.clone();
         for loc in tdz {
             self.emit(Op::Empty);
+            self.emit_init_loc(loc);
+        }
+        if let Some(loc) = ctor_loc {
+            self.emit(Op::Callee);
             self.emit_init_loc(loc);
         }
         // Parameter destructuring / defaults.
@@ -3167,10 +3192,7 @@ impl Compiler {
             ExprKind::Undefined => {
                 self.emit(Op::Undefined);
             }
-            ExprKind::This => {
-                let derived = self.fs_ref().flags.is_derived;
-                self.emit(if derived { Op::ThisChecked } else { Op::This });
-            }
+            ExprKind::This => self.emit_this(),
             ExprKind::Super => return self.err("'super' keyword unexpected here"),
             ExprKind::Bool(b) => {
                 self.emit(if *b { Op::True } else { Op::False });
@@ -3772,6 +3794,26 @@ impl Compiler {
 
     fn compile_super_call(&mut self, args: &[ArrayElement]) -> CResult<()> {
         let has_spread = args.iter().any(|a| matches!(a, ArrayElement::Spread(_)));
+        let slot = self.this_from_binding();
+        // GetSuperConstructor before the arguments; IsConstructor and
+        // Construct after; then BindThisValue, then the fields.
+        if slot {
+            // The constructor, for arrows / eval code (or a constructor
+            // that has them).
+            self.emit_get_var(CTOR_BINDING);
+        } else {
+            self.emit(Op::Callee);
+        }
+        self.emit(Op::SuperCtor);
+        if let [ArrayElement::Spread(Expr { kind: ExprKind::Identifier(n), .. })] = args {
+            if &**n == "%args" {
+                // The default derived constructor passes its arguments on
+                // as they are (no iteration).
+                self.emit_get_var("%args");
+                self.emit(Op::SuperCallWithSpread);
+                return self.finish_super_call(slot);
+            }
+        }
         if has_spread {
             self.emit(Op::NewArray(0));
             for a in args {
@@ -3789,15 +3831,29 @@ impl Compiler {
                     }
                 }
             }
-            self.emit(Op::SuperCallSpread);
+            self.emit(Op::SuperCallWithSpread);
         } else {
             for a in args {
                 if let ArrayElement::Expr(x) = a {
                     self.compile_expr(x)?;
                 }
             }
-            self.emit(Op::SuperCall(args.len() as u16));
+            self.emit(Op::SuperCallWith(args.len() as u16));
         }
+        self.finish_super_call(slot)
+    }
+
+    /// f result -> result: BindThisValue, then the instance fields.
+    fn finish_super_call(&mut self, slot: bool) -> CResult<()> {
+        match (slot, self.resolve(THIS_BINDING)) {
+            (true, Resolved::Local { depth, slot, .. }) => {
+                self.emit(Op::BindThisSlot(depth, slot));
+            }
+            _ => {
+                self.emit(Op::BindThis);
+            }
+        }
+        self.emit(Op::InitFieldsOf);
         Ok(())
     }
 
@@ -3813,8 +3869,30 @@ impl Compiler {
 
     /// `this` as the `this` expression evaluates it.
     fn emit_this(&mut self) {
+        if self.this_from_binding() {
+            self.emit_get_var(THIS_BINDING);
+            return;
+        }
         let derived = self.fs_ref().flags.is_derived;
         self.emit(if derived { Op::ThisChecked } else { Op::This });
+    }
+
+    /// Whether `this` (and `super()`) here go through the `%this` binding
+    /// of a derived constructor (from the constructor, its arrows or eval
+    /// code in them).
+    fn this_from_binding(&mut self) -> bool {
+        for (i, fs) in self.fns.iter().enumerate().rev() {
+            if i == 0 && self.outer.is_some() {
+                // The transparent parent of a lazily compiled function or
+                // of eval code: look through to the enclosing bindings.
+                break;
+            }
+            if !fs.flags.is_arrow {
+                return fs.this_slot.is_some();
+            }
+        }
+        // Lazily compiled arrows and eval code: the enclosing bindings.
+        matches!(self.resolve(THIS_BINDING), Resolved::Local { .. })
     }
 
     /// A super reference: `this` (its binding checked first), the key
@@ -4673,6 +4751,11 @@ impl Compiler {
     }
 }
 
+/// Hidden bindings of derived constructors whose arrows or eval code use
+/// `this` / call `super()` (see `FunctionCode::this_slot`).
+const THIS_BINDING: &str = "%this";
+const CTOR_BINDING: &str = "%ctor";
+
 fn binop_for_assign(op: AssignOp) -> Op {
     match op {
         AssignOp::Add => Op::Add,
@@ -4732,14 +4815,14 @@ fn synth_constructor(derived: bool, pos: Pos) -> Function {
     if derived {
         Function {
             name: None,
-            params: vec![Param { pattern: Pattern::Identifier("args".into()), rest: true }],
+            params: vec![Param { pattern: Pattern::Identifier("%args".into()), rest: true }],
             body: FunctionBody::Block(vec![Stmt {
                 pos,
                 kind: StmtKind::Expr(Expr {
                     pos,
                     kind: ExprKind::Call {
                         callee: Box::new(Expr { pos, kind: ExprKind::Super }),
-                        args: vec![ArrayElement::Spread(Expr { pos, kind: ExprKind::Identifier("args".into()) })],
+                        args: vec![ArrayElement::Spread(Expr { pos, kind: ExprKind::Identifier("%args".into()) })],
                         optional: false,
                     },
                 }),
@@ -4813,6 +4896,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         param_locs: fs.param_locs.iter().map(|l| l.to_var_loc()).collect(),
         arg_map: fs.arg_map.as_ref().map(|m| m.iter().map(|l| l.map(|l| l.to_var_loc())).collect()),
         global_decls: fs.global_decls.take(),
+        this_slot: fs.this_slot,
         rest_loc: fs.rest_loc.map(|l| l.to_var_loc()),
         arguments_loc: fs.arguments_loc.map(|l| l.to_var_loc()),
         self_loc: fs.self_loc.map(|l| l.to_var_loc()),

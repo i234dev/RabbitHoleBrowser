@@ -435,7 +435,7 @@ fn test_integrity_level(realm: &mut Realm, id: ObjectId, frozen: bool) -> JsResu
 fn freeze(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     if let V::Object(id) = v.v() {
-        if let ObjectKind::Proxy { .. } | ObjectKind::MappedArguments(_) = &realm.obj(id).kind {
+        if let ObjectKind::Proxy { .. } | ObjectKind::MappedArguments(_) | ObjectKind::ModuleNamespace = &realm.obj(id).kind {
             if !set_integrity_level(realm, id, true)? {
                 return realm.type_error("Object.freeze: cannot prevent extensions");
             }
