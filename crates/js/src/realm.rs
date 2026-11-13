@@ -1217,6 +1217,13 @@ impl Realm {
     }
 
     fn compile_with(&mut self, source: &str, filename: &str, is_module: bool, completion: bool) -> Result<Rc<FunctionCode>, Value> {
+        let source = crate::value::escape_source(source);
+        self.compile_escaped(&source, filename, is_module, completion)
+    }
+
+    /// Compile source already in source-escaped form (`eval`, `Function`:
+    /// see [`crate::value::SOURCE_ESC`]).
+    pub(crate) fn compile_escaped(&mut self, source: &str, filename: &str, is_module: bool, completion: bool) -> Result<Rc<FunctionCode>, Value> {
         let program = match crate::parser::parse_program(source, is_module) {
             Ok(p) => p,
             Err(e) => {
@@ -1334,6 +1341,13 @@ impl Realm {
 
     /// Prototype for an object created by a native constructor, honouring
     /// subclassing via `new.target.prototype`; falls back to `default`.
+    /// [`Realm::proto_from_new_target`] with abrupt completions of
+    /// `new.target.prototype` (or a revoked proxy) propagated.
+    pub fn proto_from_new_target_checked(&mut self, default: ObjectId) -> crate::interop::JsResult<ObjectId> {
+        let nt = self.new_target();
+        self.proto_from_ctor(nt, default)
+    }
+
     pub fn proto_from_new_target(&mut self, default: ObjectId) -> ObjectId {
         let nt = self.new_target();
         self.proto_from_ctor(nt, default).unwrap_or(default)

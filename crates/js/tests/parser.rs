@@ -374,7 +374,7 @@ fn modules() {
     assert!(matches!(p.body[8].kind, StmtKind::Export(ExportDecl::All { namespace: Some(_), .. })));
     assert!(matches!(stmt_expr(&p, 12).kind, ExprKind::Await(_)));
     assert!(matches!(stmt_expr(&p, 13).kind, ExprKind::Member { .. }));
-    assert!(matches!(stmt_expr(&p, 14).kind, ExprKind::DynamicImport(_)));
+    assert!(matches!(stmt_expr(&p, 14).kind, ExprKind::DynamicImport(..)));
     assert!(parse_program("import x from 'y'", false).is_err());
     assert!(parse_program("export default 1", false).is_err());
     // scripts still parse dynamic import

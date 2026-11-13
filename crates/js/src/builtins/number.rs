@@ -73,7 +73,7 @@ fn number_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     };
     if realm.is_construct_call() {
         let default = realm.intrinsics.number_proto;
-        let proto = realm.proto_from_new_target(default);
+        let proto = realm.proto_from_new_target_checked(default)?;
         return Ok(Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::Number(n)))));
     }
     Ok(Value::Number(n))
@@ -324,7 +324,7 @@ fn boolean_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     let b = arg(args, 0).truthy();
     if realm.is_construct_call() {
         let default = realm.intrinsics.boolean_proto;
-        let proto = realm.proto_from_new_target(default);
+        let proto = realm.proto_from_new_target_checked(default)?;
         return Ok(Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::Boolean(b)))));
     }
     Ok(Value::Bool(b))

@@ -135,7 +135,7 @@ fn new_collection(realm: &mut Realm, kind: Kind) -> JsResult<ObjectId> {
         Kind::WeakMap => "WeakMapPrototype",
         Kind::WeakSet => "WeakSetPrototype",
     }];
-    let proto = realm.proto_from_new_target(default);
+    let proto = realm.proto_from_new_target_checked(default)?;
     let d = Box::new(MapData::default());
     let k = match kind {
         Kind::Map => ObjectKind::Map(d),

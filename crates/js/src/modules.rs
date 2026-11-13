@@ -308,6 +308,7 @@ impl Realm {
 
     /// Parse and compile a module. The record starts `Unlinked`.
     pub fn compile_module(&mut self, source: &str, url: &str) -> JsResult<ModuleId> {
+        let source: &str = &crate::value::escape_source(source);
         let program = match crate::parser::parse_program(source, true) {
             Ok(p) => p,
             Err(e) => {
@@ -637,7 +638,38 @@ impl Realm {
         }
         self.define_property(ns, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("Module"), 0);
         self.obj_mut(ns).extensible = false;
+        self.obj_mut(ns).kind = ObjectKind::ModuleNamespace;
         Ok(ns)
+    }
+
+    /// [[GetOwnProperty]] of a namespace object: an export reads its
+    /// binding (a ReferenceError in its TDZ) as a writable, enumerable,
+    /// non-configurable data property.
+    pub(crate) fn namespace_get_own(&mut self, ns: ObjectId, key: &PropertyKey) -> JsResult<Option<Property>> {
+        let Some(p) = self.obj(ns).props.get(key).cloned() else { return Ok(None) };
+        if key.is_symbol() || !p.is_accessor() {
+            return Ok(Some(p));
+        }
+        let v = match p.getter_cloned() {
+            Some(g) => self.call(g, Value::Object(ns), &[])?,
+            None => Value::Undefined,
+        };
+        Ok(Some(Property::data(v, WRITABLE | ENUMERABLE)))
+    }
+
+    /// [[DefineOwnProperty]] of a namespace object.
+    pub(crate) fn namespace_define(&mut self, ns: ObjectId, key: PropertyKey, desc: crate::descriptor::PropDesc) -> JsResult<bool> {
+        if key.is_symbol() {
+            return self.ordinary_define_own_pub(ns, key, desc);
+        }
+        let Some(cur) = self.namespace_get_own(ns, &key)? else { return Ok(false) };
+        if desc.configurable == Some(true) || desc.enumerable == Some(false) || desc.is_accessor() || desc.writable == Some(false) {
+            return Ok(false);
+        }
+        Ok(match &desc.value {
+            Some(v) => self.same_value(v, &cur.value),
+            None => true,
+        })
     }
 
     // ------------------------------------------------------- import.meta
@@ -823,9 +855,10 @@ impl Realm {
 
     /// `import(specifier)`: returns a promise for the namespace. Loading
     /// happens in a job so the importing code continues first.
-    pub(crate) fn start_dynamic_import(&mut self, specifier: Value, referrer: &str) -> ObjectId {
+    pub(crate) fn start_dynamic_import(&mut self, specifier: Value, referrer: &str, options: Value) -> ObjectId {
         let promise = self.new_promise_object();
-        match self.to_string(specifier) {
+        let r = self.to_string(specifier).and_then(|s| self.check_import_options(options).map(|_| s));
+        match r {
             Ok(s) => {
                 let job = self.new_native_function_full("", 0, dynamic_import_job, None, vec![Value::Object(promise), Value::String(s), Value::str(referrer)], false);
                 self.enqueue_callback(Value::Object(job), Value::Undefined, Vec::new());
@@ -833,6 +866,27 @@ impl Realm {
             Err(e) => self.reject_promise(promise, e),
         }
         promise
+    }
+
+    /// The options argument of `import()`: an object whose `with` is
+    /// undefined or an object of string values (EvaluateImportCall).
+    fn check_import_options(&mut self, options: Value) -> JsResult<()> {
+        if options.is_undefined() {
+            return Ok(());
+        }
+        let V::Object(o) = options.v() else { return self.type_error("The second argument of import() must be an object") };
+        let attrs = self.get(Value::Object(o), PropertyKey::str("with"))?;
+        if attrs.is_undefined() {
+            return Ok(());
+        }
+        let V::Object(a) = attrs.v() else { return self.type_error("The 'with' option of import() must be an object") };
+        for k in self.own_enumerable_string_keys(a)? {
+            let v = self.get(Value::Object(a), k)?;
+            if !matches!(v.v(), V::String(_)) {
+                return self.type_error("Import attribute values must be strings");
+            }
+        }
+        Ok(())
     }
 
     /// Load + link + evaluate for `import()`; returns the module and its

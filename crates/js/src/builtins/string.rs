@@ -87,7 +87,7 @@ fn string_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     };
     if realm.is_construct_call() {
         let default = realm.intrinsics.string_proto;
-        let proto = realm.proto_from_new_target(default);
+        let proto = realm.proto_from_new_target_checked(default)?;
         return Ok(Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::String(s)))));
     }
     Ok(Value::String(s))

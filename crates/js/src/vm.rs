@@ -4031,7 +4031,14 @@ impl Realm {
                 Op::DynamicImport => {
                     let specifier = pop!();
                     let referrer = frame!().code().filename.clone();
-                    let p = self.start_dynamic_import(specifier, &referrer);
+                    let p = self.start_dynamic_import(specifier, &referrer, Value::Undefined);
+                    push!(Value::Object(p));
+                }
+                Op::DynamicImportWith => {
+                    let options = pop!();
+                    let specifier = pop!();
+                    let referrer = frame!().code().filename.clone();
+                    let p = self.start_dynamic_import(specifier, &referrer, options);
                     push!(Value::Object(p));
                 }
                 Op::GetIterator => {
@@ -4161,6 +4168,13 @@ impl Realm {
                     let _next = pop!();
                     let it = pop!();
                     self.iterator_close(&it)?;
+                }
+                Op::IteratorCloseQuiet => {
+                    let _next = pop!();
+                    let it = pop!();
+                    if !self.terminating {
+                        let _ = self.iterator_close(&it);
+                    }
                 }
                 Op::ForInStart => {
                     let v = pop!();
@@ -4745,7 +4759,7 @@ impl Realm {
         };
         let Some(site) = site else {
             let src = if strict { format!("\"use strict\";{}", src) } else { src };
-            let code = self.compile(&src, "eval", false)?;
+            let code = self.compile_escaped(&src, "eval", false, true)?;
             return self.run_script(code);
         };
         let ctx = crate::early::EarlyContext {

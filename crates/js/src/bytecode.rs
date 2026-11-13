@@ -230,6 +230,8 @@ pub enum Op {
     /// Push the current function object
     Callee,
     ImportMeta,
+    /// specifier options -> promise (`import(s, options)`)
+    DynamicImportWith,
     DynamicImport,
 
     // --- iteration
@@ -253,6 +255,9 @@ pub enum Op {
     IteratorRest,
     /// Close iterator only if not done: iterator next ->
     IteratorCloseIfNotDone,
+    /// iter next -> (): IteratorClose for a throw completion (errors of
+    /// `return` are ignored).
+    IteratorCloseQuiet,
 
     // --- generators / async
     /// value -> received
@@ -869,10 +874,11 @@ impl Op {
             InitFields => (0, 0),
             This | ThisChecked | NewTarget | Arguments | ArgsLength | Callee | ImportMeta => (0, 1),
             ArgsGet | DynamicImport => (1, 1),
+            DynamicImportWith => (2, 1),
             GetIterator | GetAsyncIterator => (1, 2),
             IteratorNextResult => (2, 1),
             IteratorNext => (2, 2),
-            IteratorClose | IteratorCloseIfNotDone => (2, 0),
+            IteratorClose | IteratorCloseIfNotDone | IteratorCloseQuiet => (2, 0),
             ForInStart => (1, 1),
             ForInNext => (1, 2),
             IteratorStep | IteratorRest => (2, 3),

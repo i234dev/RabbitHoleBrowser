@@ -157,7 +157,7 @@ fn to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value>
         }
         _ => "function () { [native code] }".to_string(),
     };
-    Ok(Value::str(&s))
+    Ok(Value::String(JsStr::from_source(&s)))
 }
 
 fn has_instance(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -175,12 +175,12 @@ pub fn create_dynamic_function(realm: &mut Realm, args: &[Value], kind: &str) ->
     let mut body = String::new();
     if !args.is_empty() {
         for a in &args[..args.len() - 1] {
-            params.push(realm.to_rust_string(a.clone())?);
+            params.push(realm.to_string(a.clone())?.to_source_string());
         }
-        body = realm.to_rust_string(args[args.len() - 1].clone())?;
+        body = realm.to_string(args[args.len() - 1].clone())?.to_source_string();
     }
     let src = format!("({} anonymous({}\n) {{\n{}\n}})", kind, params.join(","), body);
-    let code = realm.compile(&src, "Function", false)?;
+    let code = realm.compile_escaped(&src, "Function", false, true)?;
     let nt = realm.new_target();
     let proto = if nt.is_object() {
         let fallback = match kind {

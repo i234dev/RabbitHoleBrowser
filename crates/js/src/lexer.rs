@@ -102,6 +102,9 @@ pub struct Lexer<'a> {
     /// the parse proper reuses them instead of scanning again. A token
     /// depends only on where scanning starts, so entries stay valid.
     cache: std::collections::HashMap<usize, (Token, LexerState), crate::value::FxBuild>,
+    /// The escape just scanned was a lone surrogate (`\uD800`): the
+    /// caller appends it in source-escaped form (see `value::SOURCE_ESC`).
+    lone_surrogate: Option<u16>,
 }
 
 // Punctuators ordered longest-first so greedy matching works.
@@ -143,6 +146,7 @@ impl<'a> Lexer<'a> {
             names: std::collections::HashMap::default(),
             recording: false,
             cache: std::collections::HashMap::default(),
+            lone_surrogate: None,
         };
         // Hashbang
         if src.starts_with("#!") {
@@ -613,7 +617,7 @@ impl<'a> Lexer<'a> {
                 }
                 self.pos += 2;
                 let ch = self.scan_unicode_escape_body()?;
-                let ok = if first { is_id_start(ch) } else { is_id_part(ch) };
+                let ok = self.lone_surrogate.take().is_none() && if first { is_id_start(ch) } else { is_id_part(ch) };
                 if !ok {
                     return Err(self.err("Invalid identifier escape"));
                 }
@@ -644,13 +648,15 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
             let cp = u32::from_str_radix(hex, 16).map_err(|_| self.err("Invalid Unicode escape sequence"))?;
             if (0xd800..0xe000).contains(&cp) {
-                return Ok(crate::value::lone_surrogate_char(cp));
+                self.lone_surrogate = Some(cp as u16);
+                return Ok('\0');
             }
             return char::from_u32(cp).ok_or_else(|| self.err("Invalid Unicode escape sequence"));
         }
         let cp = self.scan_hex_digits(4)?;
         if (0xd800..0xe000).contains(&cp) {
-            return Ok(crate::value::lone_surrogate_char(cp));
+            self.lone_surrogate = Some(cp as u16);
+            return Ok('\0');
         }
         Ok(char::from_u32(cp).unwrap_or('\u{fffd}'))
     }
@@ -868,7 +874,10 @@ impl<'a> Lexer<'a> {
                 '\\' => {
                     self.pos += 1;
                     if let Some(ch) = self.scan_escape(false)? {
-                        out.push(ch);
+                        match self.lone_surrogate.take() {
+                            Some(u) => crate::value::push_lone_surrogate(&mut out, u),
+                            None => out.push(ch),
+                        }
                     }
                 }
                 '\n' | '\r' => return Err(self.err("Unterminated string literal")),
@@ -943,7 +952,8 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 if (0xd800..0xe000).contains(&cp) {
-                    crate::value::lone_surrogate_char(cp)
+                    self.lone_surrogate = Some(cp as u16);
+                    '\0'
                 } else {
                     char::from_u32(cp).unwrap_or('\u{fffd}')
                 }
@@ -989,8 +999,12 @@ impl<'a> Lexer<'a> {
                     let save_line = (self.line, self.line_start);
                     match self.scan_escape(true) {
                         Ok(Some(ch)) => {
+                            let lone = self.lone_surrogate.take();
                             if let Some(ck) = cooked.as_mut() {
-                                ck.push(ch);
+                                match lone {
+                                    Some(u) => crate::value::push_lone_surrogate(ck, u),
+                                    None => ck.push(ch),
+                                }
                             }
                         }
                         Ok(None) => {}

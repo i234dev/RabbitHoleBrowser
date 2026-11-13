@@ -55,7 +55,7 @@ fn locals_and_captures() {
     // TDZ re-armed when a block is re-entered.
     throws("(function() { for (var i = 0; i < 2; i++) { if (i == 1) { z; } let z = i; } })()", "before initialization");
     // arguments object and captured arguments in arrows.
-    eq("function f(a) { a = 9; return arguments[0]; } f(1)", "1");
+    eq("function f(a) { a = 9; return arguments[0]; } f(1)", "9");
     eq("function f() { var g = () => arguments.length; return g(); } f(1, 2, 3)", "3");
     // Named function expression self binding.
     eq("var f = function fact(n) { return n < 2 ? 1 : n * fact(n - 1); }; f(6)", "720");
@@ -257,9 +257,9 @@ fn arguments_direct_reads() {
     eq("function f(a) { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; } f(1, 2, 3, 4)", "10");
     // Babel-style default parameters.
     eq("function f() { var a = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : 5; return a; } f() + f(1) + f(undefined)", "11");
-    // Arguments are not mapped to parameters (same as the object path).
-    eq("function f(a, b) { a = 10; return arguments[0] + arguments[1]; } f(1, 2)", "3");
-    eq("function f(a) { a = 10; var o = arguments; return arguments[0] + o[0]; } f(1)", "2");
+    // Sloppy functions with simple parameters map arguments to parameters.
+    eq("function f(a, b) { a = 10; return arguments[0] + arguments[1]; } f(1, 2)", "12");
+    eq("function f(a) { a = 10; var o = arguments; return arguments[0] + o[0]; } f(1)", "20");
     eq("function f(a) { 'use strict'; a = 10; return arguments[0]; } f(1)", "1");
     eq("function f(a = 0) { a = 10; return arguments[0]; } f(1)", "1");
     eq("function f(a, b) { b = 5; return arguments[1]; } String(f(1))", "undefined");

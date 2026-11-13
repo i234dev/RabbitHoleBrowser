@@ -49,7 +49,7 @@ fn object_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let nt = realm.new_target();
     if let V::Object(nt) = nt.v() {
         if nt != realm.intrinsics.object_ctor {
-            let proto = realm.proto_from_new_target(realm.intrinsics.object_proto);
+            let proto = realm.proto_from_new_target_checked(realm.intrinsics.object_proto)?;
             return Ok(Value::Object(realm.new_object_with_proto(Some(proto))));
         }
     }

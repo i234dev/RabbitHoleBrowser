@@ -422,7 +422,7 @@ impl Realm {
     /// Create or replace an own property; returns false if not allowed.
     pub fn define_own(&mut self, id: ObjectId, key: PropertyKey, prop: Property) -> JsResult<bool> {
         match &self.obj(id).kind {
-            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::TypedArray(_) | ObjectKind::MappedArguments(_) => {
+            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::TypedArray(_) | ObjectKind::MappedArguments(_) | ObjectKind::ModuleNamespace => {
                 return self.define_own_desc(id, key, crate::descriptor::PropDesc::from_property(&prop));
             }
             _ => {}
@@ -596,8 +596,8 @@ impl Realm {
             if k.is_symbol() {
                 continue;
             }
-            let enumerable = if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
-                match self.proxy_get_own_property(id, &k)? {
+            let enumerable = if let ObjectKind::Proxy { .. } | ObjectKind::ModuleNamespace = &self.obj(id).kind {
+                match self.get_own_property_any(id, &k)? {
                     Some(p) => p.enumerable(),
                     None => false,
                 }
@@ -616,8 +616,10 @@ impl Realm {
 
     /// Resolve the own property of any object kind including proxies.
     pub fn get_own_property_any(&mut self, id: ObjectId, key: &PropertyKey) -> JsResult<Option<Property>> {
-        if let ObjectKind::Proxy { .. } = &self.obj(id).kind {
-            return self.proxy_get_own_property(id, key);
+        match &self.obj(id).kind {
+            ObjectKind::Proxy { .. } => return self.proxy_get_own_property(id, key),
+            ObjectKind::ModuleNamespace => return self.namespace_get_own(id, key),
+            _ => {}
         }
         Ok(self.get_own_property(id, key))
     }

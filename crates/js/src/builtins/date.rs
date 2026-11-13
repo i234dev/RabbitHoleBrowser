@@ -1295,7 +1295,7 @@ fn date_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
 
 fn finish_ctor(realm: &mut Realm, t: f64) -> JsResult<Value> {
     let default = realm.intrinsics.others["DatePrototype"];
-    let proto = realm.proto_from_new_target(default);
+    let proto = realm.proto_from_new_target_checked(default)?;
     Ok(Value::Object(realm.alloc(Object::new(Some(proto), ObjectKind::Date(time_clip(t))))))
 }
 

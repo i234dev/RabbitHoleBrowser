@@ -1084,7 +1084,11 @@ impl<'a> Checker<'a> {
                     MemberProp::Computed(x) => self.expr(x),
                 }
             }
-            ExprKind::OptionalChain(x) | ExprKind::Spread(x) | ExprKind::DynamicImport(x) => self.expr(x),
+            ExprKind::OptionalChain(x) | ExprKind::Spread(x) | ExprKind::DynamicImport(x, None) => self.expr(x),
+            ExprKind::DynamicImport(x, Some(o)) => {
+                self.expr(x)?;
+                self.expr(o)
+            }
             ExprKind::Sequence(xs) => {
                 for x in xs {
                     self.expr(x)?;

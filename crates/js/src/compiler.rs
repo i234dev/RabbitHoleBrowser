@@ -294,7 +294,7 @@ impl FnState {
             tries: Vec::new(),
             loops: Vec::new(),
             flags,
-            name: JsStr::new(name),
+            name: JsStr::from_source(name),
             param_count: 0,
             param_locs: Vec::new(),
             arg_map: None,
@@ -579,7 +579,7 @@ impl Compiler {
             return i;
         }
         let i = fs.constants.len() as u32;
-        fs.constants.push(Value::String(JsStr::intern(s)));
+        fs.constants.push(Value::String(JsStr::intern_source(s)));
         fs.const_strings.insert(s.to_string(), i);
         i
     }
@@ -841,7 +841,7 @@ impl Compiler {
             source: self.source.clone(),
         };
         let code = FunctionCode {
-            name: JsStr::new(&fname),
+            name: JsStr::from_source(&fname),
             ops: Vec::new(),
             positions: Vec::new(),
             constants: Vec::new(),
@@ -2596,6 +2596,19 @@ impl Compiler {
         Ok(())
     }
 
+    /// The expression of a for-in/of head: evaluated with the loop's
+    /// lexical names in their TDZ (`for (let x of [x])` throws).
+    fn compile_for_head_expr(&mut self, left: &ForHead, right: &Expr) -> CResult<()> {
+        let tdz = Self::for_head_decls(left);
+        if tdz.is_empty() {
+            return self.compile_expr(right);
+        }
+        let mat = self.push_block_scope(&tdz);
+        self.compile_expr(right)?;
+        self.pop_block_scope(mat);
+        Ok(())
+    }
+
     fn for_head_decls(left: &ForHead) -> Vec<(String, BindKind)> {
         match left {
             ForHead::VarDecl { kind, target } if *kind != VarKind::Var => {
@@ -2665,7 +2678,7 @@ impl Compiler {
 
     fn compile_for_in(&mut self, left: &ForHead, right: &Expr, body: &Stmt, label: Option<String>) -> CResult<()> {
         let it = self.hidden_slot("forin");
-        self.compile_expr(right)?;
+        self.compile_for_head_expr(left, right)?;
         self.emit(Op::ForInStart);
         self.emit(Op::SetReg(it));
         let start = self.here();
@@ -2697,7 +2710,7 @@ impl Compiler {
     fn compile_for_of(&mut self, left: &ForHead, right: &Expr, body: &Stmt, is_await: bool, label: Option<String>) -> CResult<()> {
         let iter = self.hidden_slot("iter");
         let next = self.hidden_slot("next");
-        self.compile_expr(right)?;
+        self.compile_for_head_expr(left, right)?;
         self.emit(if is_await { Op::GetAsyncIterator } else { Op::GetIterator });
         self.emit(Op::SetReg(next));
         self.emit(Op::SetReg(iter));
@@ -2745,7 +2758,8 @@ impl Compiler {
         let scope_depth = self.fs_ref().scope_depth;
         self.emit(Op::GetReg(iter));
         self.emit(Op::GetReg(next));
-        self.emit(Op::IteratorClose);
+        // A throw completion wins over anything closing the iterator does.
+        self.emit(Op::IteratorCloseQuiet);
         self.emit(Op::Throw);
         self.fs().handlers.push(Handler { start: try_start, end: try_end, target: handler_pc, stack_depth: 0, scope_depth });
         self.patch_jump(exit);
@@ -3182,7 +3196,7 @@ impl Compiler {
                 self.compile_callee(tag)?;
                 let fs = self.fs();
                 let idx = fs.templates.len() as u32;
-                fs.templates.push((quasis.iter().map(|q| q.as_ref().map(|s| JsStr::new(s))).collect(), raws.iter().map(|r| JsStr::new(r)).collect()));
+                fs.templates.push((quasis.iter().map(|q| q.as_ref().map(|s| JsStr::from_source(s))).collect(), raws.iter().map(|r| JsStr::from_source(r)).collect()));
                 self.emit(Op::TemplateObject(idx));
                 for ex in expressions.iter() {
                     self.compile_expr(ex)?;
@@ -3591,9 +3605,17 @@ impl Compiler {
             ExprKind::ImportMeta => {
                 self.emit(Op::ImportMeta);
             }
-            ExprKind::DynamicImport(a) => {
+            ExprKind::DynamicImport(a, options) => {
                 self.compile_expr(a)?;
-                self.emit(Op::DynamicImport);
+                match options {
+                    Some(o) => {
+                        self.compile_expr(o)?;
+                        self.emit(Op::DynamicImportWith);
+                    }
+                    None => {
+                        self.emit(Op::DynamicImport);
+                    }
+                }
             }
         }
         Ok(())

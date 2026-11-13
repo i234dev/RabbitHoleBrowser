@@ -377,7 +377,8 @@ pub enum ExprKind {
     /// `import.meta`
     ImportMeta,
     /// `import(expr)`
-    DynamicImport(Box<Expr>),
+    /// `import(specifier, options?)`
+    DynamicImport(Box<Expr>, Option<Box<Expr>>),
     /// `#priv in obj`
     PrivateIn {
         name: Name,

@@ -229,7 +229,7 @@ fn weak_ref_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
         return realm.type_error("WeakRef: invalid target");
     }
     let default = realm.intrinsics.others["WeakRefPrototype"];
-    let proto = realm.proto_from_new_target(default);
+    let proto = realm.proto_from_new_target_checked(default)?;
     let id = realm.new_object_with_proto(Some(proto));
     realm.set_class_name(id, "WeakRef");
     let key = weak_ref_key(realm);
@@ -257,7 +257,7 @@ fn finalization_registry_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -
         return realm.type_error("FinalizationRegistry: cleanup must be callable");
     }
     let default = realm.intrinsics.others["FinalizationRegistryPrototype"];
-    let proto = realm.proto_from_new_target(default);
+    let proto = realm.proto_from_new_target_checked(default)?;
     let id = realm.new_object_with_proto(Some(proto));
     realm.set_class_name(id, "FinalizationRegistry");
     // Registered unregister tokens (cleanup callbacks never run).

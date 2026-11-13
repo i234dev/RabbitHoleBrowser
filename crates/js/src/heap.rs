@@ -615,6 +615,10 @@ pub enum ObjectKind {
     /// in namespace getters, and is dereferenced on every read so imports
     /// are live bindings.
     ModuleBinding { scope: ObjectId, slot: u32, name: JsStr },
+    /// A module namespace object: its exports are stored as accessors
+    /// over the live bindings but behave as writable, non-configurable
+    /// data properties (see `Realm::namespace_get_own`).
+    ModuleNamespace,
     /// Internal slots of natively implemented built-ins (iterator helpers,
     /// disposable stacks, ...); `SlotData::tag` says which.
     Slots(Box<SlotData>),
@@ -671,6 +675,7 @@ impl ObjectKind {
             ObjectKind::ForInIterator(_) => "ForIn Iterator",
             ObjectKind::Host(_) => "Object",
             ObjectKind::ModuleBinding { .. } => "ModuleBinding",
+            ObjectKind::ModuleNamespace => "Module",
             ObjectKind::Slots(_) => "Object",
         }
     }

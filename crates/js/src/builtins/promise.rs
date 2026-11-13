@@ -297,7 +297,7 @@ fn promise_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
         return realm.type_error("Promise resolver is not a function");
     }
     let default_proto = realm.intrinsics.promise_proto;
-    let proto = realm.proto_from_new_target(default_proto);
+    let proto = realm.proto_from_new_target_checked(default_proto)?;
     let p = realm.alloc(Object::new(Some(proto), ObjectKind::Promise(Box::new(PromiseData { state: PromiseState::Pending, value: Value::Undefined, fulfill_reactions: vec![], reject_reactions: vec![], handled: false }))));
     let (res, rej) = create_resolving_functions(realm, p);
     if let Err(e) = realm.call(executor, Value::Undefined, &[Value::Object(res), Value::Object(rej)]) {

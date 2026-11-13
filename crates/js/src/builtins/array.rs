@@ -74,7 +74,7 @@ fn species(_realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> 
 
 fn array_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let default = realm.intrinsics.array_proto;
-    let proto = realm.proto_from_new_target(default);
+    let proto = realm.proto_from_new_target_checked(default)?;
     let arr = if args.len() == 1 {
         match args[0].v() {
             V::Number(n) => {

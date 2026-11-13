@@ -1925,3 +1925,23 @@ fn write_barrier_keeps_reference_moved_to_scanned_object() {
     heap.finish_cycle();
     assert!(heap.try_get(fresh).is_none());
 }
+
+/// Lone surrogates have a lossless source representation: a real
+/// supplementary private-use or noncharacter code point from a Rust string
+/// stays itself, and lone surrogates survive literals, eval, `Function`
+/// and `Function.prototype.toString`.
+#[test]
+fn lone_surrogates_are_lossless() {
+    let mut realm = Realm::new();
+    let s = crate::value::JsStr::new("\u{10F800}\u{10FFFF}\u{10F000}");
+    assert_eq!(s.as_units().len(), 6);
+    let g = realm.global();
+    realm.define_property(g, "hs", Value::String(s), crate::heap::ALL);
+    let r = realm.eval("[hs.length, hs.codePointAt(0).toString(16), hs.codePointAt(2).toString(16), '\u{10F800}\u{10FFFF}'.length, '\u{10FFFF}\u{10F000}'.codePointAt(2).toString(16)].join()", "s.js").unwrap();
+    assert_eq!(realm.to_string(r).unwrap().to_rust_string(), "6,10f800,10ffff,4,10f000");
+    eq(r#"var s = '\uD800' + '\u{10FFFF}' + '\uDC00'; [s.length, eval("'" + s + "'") === s, eval('`' + s + '`') === s, Function('return "' + s + '"')() === s].join()"#, "4,true,true,true");
+    eq(r#"var f = eval('(function () { return "' + '\uDBFF' + '"; })'); [f.toString().length, f.toString().indexOf('\uDBFF') > 0].join()"#, "27,true");
+    // Mapped arguments alias parameters in sloppy functions only.
+    eq("function f(a) { a = 2; return arguments[0]; } function g(a) { arguments[0] = 3; return a; } function h(a) { 'use strict'; a = 2; return arguments[0]; } [f(1), g(1), h(1)].join()", "2,3,1");
+    eq("function f(a) { delete arguments[0]; arguments[0] = 5; return a; } function g(a) { Object.defineProperty(arguments, '0', { writable: false }); a = 9; return arguments[0]; } [f(1), g(1)].join()", "1,1");
+}

@@ -203,7 +203,7 @@ fn iterator_ctor(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<V
         _ => return realm.type_error("Iterator is an abstract class and cannot be constructed directly"),
     }
     let ip = realm.intrinsics.iterator_proto;
-    let proto = realm.proto_from_new_target(ip);
+    let proto = realm.proto_from_new_target_checked(ip)?;
     Ok(Value::Object(realm.new_object_with_proto(Some(proto))))
 }
 

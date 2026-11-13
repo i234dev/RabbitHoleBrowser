@@ -1181,6 +1181,7 @@ impl<'a> Parser<'a> {
         if let TokenKind::Str(s) = &self.tok.kind {
             decl.source = s.clone();
             self.advance()?;
+            self.skip_import_attributes()?;
             self.consume_semicolon()?;
             return Ok(Stmt { pos, kind: StmtKind::Import(decl) });
         }
@@ -1241,7 +1242,7 @@ impl<'a> Parser<'a> {
 
     /// `with { type: "json" }` / legacy `assert { ... }` — parsed and ignored.
     fn skip_import_attributes(&mut self) -> PResult<()> {
-        if (self.is_ident("with") || self.is_ident("assert")) && !self.tok.newline_before {
+        if self.is_ident("with") || (self.is_ident("assert") && !self.tok.newline_before) {
             self.advance()?;
             self.expect_punct("{")?;
             // `key: "value"` entries; duplicate keys are an early error.
@@ -2180,14 +2181,15 @@ impl<'a> Parser<'a> {
                 self.expect_punct("(")?;
                 let arg = self.with_no_in(false, |p| p.parse_assignment())?;
                 // Optional second argument (import attributes).
+                let mut options = None;
                 if self.eat_punct(",")? && !self.is_punct(")") {
-                    self.with_no_in(false, |p| p.parse_assignment())?;
+                    options = Some(Box::new(self.with_no_in(false, |p| p.parse_assignment())?));
                     self.eat_punct(",")?;
                 }
                 self.expect_punct(")")?;
                 Expr {
                     pos,
-                    kind: ExprKind::DynamicImport(Box::new(arg)),
+                    kind: ExprKind::DynamicImport(Box::new(arg), options),
                 }
             }
         } else {

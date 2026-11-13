@@ -53,7 +53,7 @@ fn is_error(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
 
 fn make_error(realm: &mut Realm, kind: &str, args: &[Value], msg_index: usize) -> JsResult<Value> {
     let default_proto = realm.error_proto_for(kind);
-    let proto = realm.proto_from_new_target(default_proto);
+    let proto = realm.proto_from_new_target_checked(default_proto)?;
     let id = realm.alloc(Object::new(Some(proto), ObjectKind::Error));
     let msg = arg(args, msg_index);
     let msg_str = if msg.is_undefined() {

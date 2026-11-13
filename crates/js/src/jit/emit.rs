@@ -164,9 +164,9 @@ fn classify_all(op: &Op) -> Class {
         Op::ToNumeric | Op::ToString | Op::ToPropertyKey | Op::PrivateIn(..) | Op::NewObject | Op::NewArray(..) | Op::ArrayPush => exec,
         Op::ArrayHole | Op::ArraySpread | Op::NewRegExp(..) | Op::TemplateObject(..) | Op::MakeClosure(..) | Op::MakeClass(..) => exec,
         Op::SetClassFields | Op::NewPrivateName(..) | Op::InitFields | Op::This | Op::ThisChecked | Op::NewTarget | Op::Arguments => exec,
-        Op::ArgsLength | Op::ArgsGet | Op::Callee | Op::ImportMeta | Op::DynamicImport | Op::GetIterator | Op::GetAsyncIterator => exec,
+        Op::ArgsLength | Op::ArgsGet | Op::Callee | Op::ImportMeta | Op::DynamicImport | Op::DynamicImportWith | Op::GetIterator | Op::GetAsyncIterator => exec,
         Op::IteratorNextResult | Op::IteratorNext | Op::IteratorClose | Op::ForInStart | Op::ForInNext | Op::IteratorStep => exec,
-        Op::IteratorRest | Op::IteratorCloseIfNotDone | Op::StoreCompletion | Op::LoadCompletion => exec,
+        Op::IteratorRest | Op::IteratorCloseIfNotDone | Op::IteratorCloseQuiet | Op::StoreCompletion | Op::LoadCompletion => exec,
     }
 }
 

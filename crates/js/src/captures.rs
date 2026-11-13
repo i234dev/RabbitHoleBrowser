@@ -478,7 +478,11 @@ impl Analyzer {
                     MemberProp::Computed(k) => self.expr(k),
                 }
             }
-            ExprKind::OptionalChain(x) | ExprKind::Spread(x) | ExprKind::Await(x) | ExprKind::DynamicImport(x) => self.expr(x),
+            ExprKind::OptionalChain(x) | ExprKind::Spread(x) | ExprKind::Await(x) | ExprKind::DynamicImport(x, None) => self.expr(x),
+            ExprKind::DynamicImport(x, Some(o)) => {
+                self.expr(x);
+                self.expr(o);
+            }
             ExprKind::Sequence(list) => {
                 for x in list {
                     self.expr(x);
