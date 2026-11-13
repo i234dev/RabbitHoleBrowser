@@ -11,6 +11,10 @@ use std::rc::Rc;
 /// Services the embedding engine offers to the bindings. One instance is
 /// passed into every `ScriptHost` entry point.
 pub trait HostEnv {
+    /// In-memory registrations shared by this browser engine across pages.
+    fn service_worker_registry(&self) -> Option<crate::ServiceWorkerRegistry> { None }
+    /// Set only while constructing a service worker's isolated realm.
+    fn service_worker_scope(&self) -> Option<crate::ServiceWorkerScope> { None }
     fn doc(&mut self) -> &mut Document;
     fn document_url(&self) -> Url;
     fn base_url(&self) -> Url;

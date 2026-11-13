@@ -1002,6 +1002,8 @@ impl Loader {
 
 /// Owns the fonts and builds/paints pages. Single-threaded.
 pub struct Engine {
+    /// Registrations survive document navigation within this Engine; no disk persistence yet.
+    pub service_workers: rabbithole_script::ServiceWorkerRegistry,
     pub fonts: Rc<FontContext>,
     pub loader: Loader,
     /// Run page scripts (JavaScript) when building pages.
@@ -1102,6 +1104,7 @@ impl Engine {
         let fonts = Rc::new(fonts);
         rabbithole_style::values::set_unit_fonts(Some(fonts.clone()));
         Engine {
+            service_workers: Default::default(),
             fonts,
             loader: Loader::new(),
             scripting: true,
@@ -1122,6 +1125,7 @@ impl Engine {
         let fonts = Rc::new(FontContext::new());
         rabbithole_style::values::set_unit_fonts(Some(fonts.clone()));
         Engine {
+            service_workers: Default::default(),
             fonts,
             loader: Loader::new(),
             scripting: true,

@@ -1,0 +1,135 @@
+//! Actual loopback HTTP scripts, not stubbed registrations or fake activation.
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::time::{Duration, Instant};
+use rabbithole_engine::{Engine, Page, Viewport};
+
+struct Server {
+    origin: String,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    requests: Arc<Mutex<Vec<(String, String)>>>,
+}
+impl Server {
+    fn new(routes: &[(&str, &str, &str, &[(&str, &str)])]) -> Self {
+        let routes: BTreeMap<String, (String, String, Vec<(String, String)>)> = routes.iter().map(|(path, mime, body, headers)| ((*path).into(), ((*mime).into(), (*body).into(), headers.iter().map(|(k,v)| ((*k).into(),(*v).into())).collect()))).collect();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let halt = stop.clone(); let seen = requests.clone();
+        let thread = std::thread::spawn(move || {
+            while !halt.load(Ordering::Relaxed) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(v) => v,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => { std::thread::sleep(Duration::from_millis(1)); continue; }
+                    Err(_) => break,
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                if reader.read_line(&mut first).is_err() { continue; }
+                let path = first.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" { break; }
+                    headers.push_str(&line);
+                }
+                seen.lock().unwrap().push((path.clone(), headers));
+                let (status, mime, body, extra) = match routes.get(path.split('?').next().unwrap()) {
+                    Some((mime, body, extra)) => (200, mime.as_str(), body.as_str(), extra.as_slice()),
+                    None => (404, "text/plain", "not found", &[][..]),
+                };
+                let _ = write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+                for (name, value) in extra { let _ = write!(stream, "{name}: {value}\r\n"); }
+                let _ = write!(stream, "\r\n{body}");
+            }
+        });
+        Self { origin, stop, requests, thread: Some(thread) }
+    }
+}
+impl Drop for Server {
+    fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); if let Some(t) = self.thread.take() { let _ = t.join(); } }
+}
+fn engine() -> Engine {
+    let mut engine = Engine::new_bundled_fonts_only();
+    engine.scripting = true; engine.loader.load_scripts = true; engine
+}
+fn wait(engine: &Engine, page: &mut Page, condition: &str) {
+    let end = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < end {
+        if engine.eval_in_page(page, condition) == "true" { return; }
+        engine.tick(page); std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("condition did not settle: {condition}; console={:?}", page.take_console());
+}
+
+#[test]
+fn real_service_worker_script_activates_and_survives_document_navigation() {
+    let first = r#"<!doctype html><script>
+      var installed = false, states = [];
+      navigator.serviceWorker.register('sw.js').then(r => {
+        const worker = r.installing;
+        if(worker) worker.onstatechange = () => states.push(worker.state);
+      });
+      navigator.serviceWorker.ready.then(r => installed = r.active.state === 'activated' && navigator.serviceWorker.controller === r.active);
+    </script>"#;
+    let worker = r#"self.addEventListener('install', e => {
+      e.waitUntil(fetch('install.txt').then(r => r.text()).then(text => {
+        console.log('install-data', text, typeof document, typeof window);
+        return new Promise(resolve => setTimeout(resolve, 25));
+      }));
+    });
+    self.addEventListener('activate', e => e.waitUntil(clients.claim()));"#;
+    let next = r#"<!doctype html><script>
+      var controlled = false;
+      navigator.serviceWorker.ready.then(r => controlled = navigator.serviceWorker.controller === r.active);
+    </script>"#;
+    let server = Server::new(&[
+        ("/app/index.html", "text/html", first, &[]),
+        ("/app/sw.js", "text/javascript", worker, &[]),
+        ("/app/install.txt", "text/plain", "local-install-response", &[]),
+        ("/app/next.html", "text/html", next, &[]),
+    ]);
+    let mut engine = engine();
+    let vp = Viewport { width: 640.0, height: 480.0 };
+    let mut page = engine.load(&format!("{}/app/index.html", server.origin), vp).unwrap();
+    wait(&engine, &mut page, "installed === true");
+    assert!(page.take_console().iter().any(|(_, text)| text.contains("install-data local-install-response undefined undefined")));
+    assert_eq!(engine.eval_in_page(&mut page, "states.join(',')"), "'installed,activating,activated'");
+    drop(page);
+    let mut page = engine.load(&format!("{}/app/next.html", server.origin), vp).unwrap();
+    wait(&engine, &mut page, "controlled === true");
+    engine.eval_in_page(&mut page, "var removed; navigator.serviceWorker.getRegistration().then(async r => removed = [await r.unregister(), await r.unregister(), navigator.serviceWorker.controller !== null].join(','));");
+    wait(&engine, &mut page, "typeof removed === 'string'");
+    assert_eq!(engine.eval_in_page(&mut page, "removed"), "'true,false,true'");
+    drop(page);
+    let mut page = engine.load(&format!("{}/app/next.html", server.origin), vp).unwrap();
+    assert_eq!(engine.eval_in_page(&mut page, "navigator.serviceWorker.controller === null"), "true");
+    engine.eval_in_page(&mut page, "var registrations; navigator.serviceWorker.getRegistrations().then(r => registrations = r.length);");
+    wait(&engine, &mut page, "registrations === 0");
+    let requests = server.requests.lock().unwrap();
+    let script: Vec<_> = requests.iter().filter(|(path, _)| path == "/app/sw.js").collect();
+    assert_eq!(script.len(), 1, "registration was retained across navigation");
+    assert!(script[0].1.to_ascii_lowercase().contains("service-worker: script"));
+}
+
+#[test]
+fn service_worker_allowed_header_extends_scope_without_controlling_first_page() {
+    let page = r#"<!doctype html><script>
+      var active = false;
+      navigator.serviceWorker.register('/scripts/sw.js', {scope:'/'});
+      navigator.serviceWorker.ready.then(r => active = r.active.state === 'activated' && navigator.serviceWorker.controller === null);
+    </script>"#;
+    let server = Server::new(&[
+        ("/app/index.html", "text/html", page, &[]),
+        ("/scripts/sw.js", "text/javascript", "oninstall = e => e.waitUntil(Promise.resolve());", &[("Service-Worker-Allowed", "/")]),
+    ]);
+    let mut engine = engine();
+    let mut page = engine.load(&format!("{}/app/index.html", server.origin), Viewport { width: 640.0, height: 480.0 }).unwrap();
+    wait(&engine, &mut page, "active === true");
+}

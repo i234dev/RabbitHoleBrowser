@@ -626,43 +626,120 @@
   if (!console.dirxml) hidden(console, 'dirxml', function dirxml(...args) { console.log(...args); });
 
   // ---------------------------------------------------- Service workers
-  class ServiceWorker extends g.EventTarget { constructor() { super(); ILLEGAL(); } get scriptURL() { return this[S].url; } get state() { return 'redundant'; } postMessage() {} }
+  const swWorkers = new Map(), swRegistrations = new Map(), swPending = new Map();
+  const swSnapshot = () => N.swSnapshot();
+  const swRegData = (id) => swSnapshot().registrations.find(r => r.id === id);
+  const swWorkerData = (id) => swSnapshot().workers.find(w => w.id === id);
+  const swBase = () => g.document ? g.document.baseURI : g.location.href;
+  const swError = (name, message) => name === 'TypeError' ? new TypeError(message) : domError(message, name);
+  class ServiceWorker extends g.EventTarget {
+    constructor() { super(); ILLEGAL(); }
+    get scriptURL() { const w = swWorkerData(this[S].id); return w ? w.script : ''; }
+    get state() { const w = swWorkerData(this[S].id); return w ? w.state : 'redundant'; }
+    postMessage(message) { throw domError('Service worker messaging is not implemented yet.', 'NotSupportedError'); }
+  }
   tag(ServiceWorker, 'ServiceWorker');
   N.installHandlers(ServiceWorker.prototype, ['statechange', 'error']);
+  const swWorker = id => {
+    if (id === null || id === undefined) return null;
+    if (!swWorkers.has(id)) swWorkers.set(id, make(ServiceWorker, { id }));
+    return swWorkers.get(id);
+  };
+  class NavigationPreloadManager {
+    constructor() { ILLEGAL(); }
+    enable() { return Promise.reject(domError('Navigation preload is not implemented.', 'NotSupportedError')); }
+    disable() { return Promise.resolve(); }
+    setHeaderValue() { return Promise.reject(domError('Navigation preload is not implemented.', 'NotSupportedError')); }
+    getState() { return Promise.resolve({ enabled: false, headerValue: 'true' }); }
+  }
+  tag(NavigationPreloadManager, 'NavigationPreloadManager');
+  function swRegister(url, options, update) {
+    return new Promise((resolve, reject) => {
+      try {
+        if (options !== undefined && options !== null && typeof options !== 'object' && typeof options !== 'function') throw new TypeError('Service worker options must be a dictionary.');
+        options = options || {};
+        const script = new URL(`${url}`, swBase());
+        const scope = new URL(options.scope === undefined ? './' : `${options.scope}`, options.scope === undefined ? script.href : swBase());
+        const type = options.type === undefined ? 'classic' : `${options.type}`;
+        if (type !== 'classic' && type !== 'module') throw new TypeError('Invalid service worker type.');
+        if (type === 'module') throw domError('Module service workers are not implemented yet.', 'NotSupportedError');
+        const cache = options.updateViaCache === undefined ? 'imports' : `${options.updateViaCache}`;
+        if (!['imports', 'all', 'none'].includes(cache)) throw new TypeError('Invalid updateViaCache value.');
+        const id = N.swRegister(script.href, scope.href, cache, !!update);
+        swPending.set(id, { resolve, reject });
+      } catch (e) { reject(e); }
+    });
+  }
   class ServiceWorkerRegistration extends g.EventTarget {
     constructor() { super(); ILLEGAL(); }
-    get installing() { return null; } get waiting() { return null; } get active() { return null; }
+    get installing() { const r = swRegData(this[S].id); return swWorker(r && r.installing); }
+    get waiting() { const r = swRegData(this[S].id); return swWorker(r && r.waiting); }
+    get active() { const r = swRegData(this[S].id); return swWorker(r && r.active); }
     get navigationPreload() { return this[S].preload; }
-    get scope() { return this[S].scope; }
-    get updateViaCache() { return 'imports'; }
+    get scope() { const r = swRegData(this[S].id); return r ? r.scope : ''; }
+    get updateViaCache() { const r = swRegData(this[S].id); return r ? r.cache : 'imports'; }
     get cookies() { return null; }
-    update() { return Promise.resolve(this); }
-    unregister() { return Promise.resolve(true); }
+    update() {
+      const r = swRegData(this[S].id);
+      if (!r || !r.registered) return Promise.reject(domError('The registration was unregistered.', 'InvalidStateError'));
+      return swRegister(r.script, { scope: r.scope, updateViaCache: r.cache }, true);
+    }
+    unregister() { return Promise.resolve(N.swUnregister(this[S].id)); }
     showNotification() { return Promise.reject(new TypeError('No notification permission has been granted for this origin.')); }
     getNotifications() { return Promise.resolve([]); }
   }
   tag(ServiceWorkerRegistration, 'ServiceWorkerRegistration');
   N.installHandlers(ServiceWorkerRegistration.prototype, ['updatefound']);
-  class NavigationPreloadManager { constructor() { ILLEGAL(); } enable() { return Promise.resolve(); } disable() { return Promise.resolve(); } setHeaderValue() { return Promise.resolve(); } getState() { return Promise.resolve({ enabled: false, headerValue: 'true' }); } }
-  tag(NavigationPreloadManager, 'NavigationPreloadManager');
-  // Service workers cannot run here: registration fails like in a context
-  // where they are disabled; `ready` never settles (no active worker).
+  const swRegistration = id => {
+    if (id === null || id === undefined) return null;
+    if (!swRegistrations.has(id)) swRegistrations.set(id, make(ServiceWorkerRegistration, { id, preload: make(NavigationPreloadManager) }));
+    return swRegistrations.get(id);
+  };
   class ServiceWorkerContainer extends g.EventTarget {
     constructor() { super(); ILLEGAL(); }
-    get controller() { return null; }
-    get ready() { return this[S].ready; }
-    register(url) { return Promise.reject(domError(`Failed to register a ServiceWorker for scope ('${new URL('./', new URL(String(url), document.baseURI)).href}') with script ('${new URL(String(url), document.baseURI).href}'): The operation is not supported.`, 'NotSupportedError')); }
-    getRegistration() { return Promise.resolve(undefined); }
-    getRegistrations() { return Promise.resolve([]); }
+    get controller() { return swWorker(swSnapshot().controller); }
+    get ready() { swReady(); return this[S].ready; }
+    register(url, options = {}) { if (!arguments.length) return Promise.reject(new TypeError('A service worker script URL is required.')); return swRegister(url, options, false); }
+    getRegistration(url = undefined) {
+      return Promise.resolve().then(() => {
+        const target = new URL(url === undefined ? g.location.href : `${url}`, swBase());
+        if (target.origin !== g.location.origin) throw domError('The client URL has a different origin.', 'SecurityError');
+        const regs = swSnapshot().registrations.filter(r => r.registered && target.href.startsWith(r.scope));
+        regs.sort((a, b) => b.scope.length - a.scope.length);
+        return regs.length ? swRegistration(regs[0].id) : undefined;
+      });
+    }
+    getRegistrations() { return Promise.resolve(swSnapshot().registrations.filter(r => r.registered).map(r => swRegistration(r.id))); }
     startMessages() {}
   }
   tag(ServiceWorkerContainer, 'ServiceWorkerContainer');
   N.installHandlers(ServiceWorkerContainer.prototype, ['controllerchange', 'message', 'messageerror']);
   for (const [n, C] of [['ServiceWorker', ServiceWorker], ['ServiceWorkerRegistration', ServiceWorkerRegistration], ['ServiceWorkerContainer', ServiceWorkerContainer], ['NavigationPreloadManager', NavigationPreloadManager]]) define(n, C);
-  setNav('serviceWorker', make(ServiceWorkerContainer, { ready: new Promise(() => {}) }));
+  let readyResolve;
+  const swContainer = make(ServiceWorkerContainer, { ready: new Promise(resolve => { readyResolve = resolve; }), settled: false });
+  function swReady() {
+    if (swContainer[S].settled) return;
+    const id = swSnapshot().ready;
+    if (id !== null) { swContainer[S].settled = true; readyResolve(swRegistration(id)); }
+  }
+  N.registerProto('__sw_notify', function () {
+    for (const e of N.swTakeEvents()) {
+      if (e.kind === 'resolve' || e.kind === 'reject') {
+        const p = swPending.get(e.id);
+        if (p) { swPending.delete(e.id); e.kind === 'resolve' ? p.resolve(swRegistration(e.value)) : p.reject(swError(e.name, e.message)); }
+      } else if (e.kind === 'updatefound') {
+        const r = swRegistrations.get(e.id); if (r) r.dispatchEvent(new Event('updatefound'));
+      } else if (e.kind === 'state') {
+        const w = swWorkers.get(e.id); if (w) w.dispatchEvent(new Event('statechange'));
+      } else if (e.kind === 'controller') swContainer.dispatchEvent(new Event('controllerchange'));
+    }
+    swReady();
+  });
+  setNav('serviceWorker', swContainer);
+  hidden(g, '__rhSW', { registration: swRegistration, worker: swWorker });
 
   // Cache Storage: functional, in memory for the page's lifetime.
-  const reqKey = (r) => { const u = new URL(r instanceof g.Request ? r.url : String(r), document.baseURI); u.hash = ''; return u.href; };
+  const reqKey = (r) => { const u = new URL(r instanceof g.Request ? r.url : String(r), (g.document ? g.document.baseURI : g.location.href)); u.hash = ''; return u.href; };
   class Cache {
     constructor() { ILLEGAL(); }
     match(req, opts = {}) { return this.matchAll(req, opts).then((l) => l[0]); }

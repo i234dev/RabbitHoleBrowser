@@ -855,7 +855,7 @@ fn win_origin(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> 
 }
 
 fn win_is_secure(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Bool(current_url().scheme == "https"))
+    Ok(Value::Bool(crate::service_worker::trustworthy(&current_url())))
 }
 
 fn win_structured_clone(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {

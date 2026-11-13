@@ -66,13 +66,18 @@ pub(crate) struct WorkerInstance {
 /// The environment of a worker realm: no document of its own (an empty
 /// one), the script URL as base, everything else from the owner.
 pub(crate) struct WorkerEnv<'a> {
-    outer: &'a mut dyn HostEnv,
-    doc: &'a mut Document,
-    url: Url,
-    errors: Rc<RefCell<Vec<String>>>,
+    pub(crate) outer: &'a mut dyn HostEnv,
+    pub(crate) doc: &'a mut Document,
+    pub(crate) url: Url,
+    pub(crate) errors: Rc<RefCell<Vec<String>>>,
+    pub(crate) service_worker: Option<crate::ServiceWorkerScope>,
 }
 
 impl HostEnv for WorkerEnv<'_> {
+    fn service_worker_registry(&self) -> Option<crate::ServiceWorkerRegistry> {
+        self.service_worker.as_ref().and_then(|s| s.registry()).or_else(|| self.outer.service_worker_registry())
+    }
+    fn service_worker_scope(&self) -> Option<crate::ServiceWorkerScope> { self.service_worker.clone() }
     fn doc(&mut self) -> &mut Document {
         self.doc
     }
@@ -220,6 +225,7 @@ fn eval_imported_script(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRe
 }
 
 pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
+    crate::service_worker::install_natives(realm, n);
     realm.define_method(n, "workerStart", 4, worker_start);
     realm.define_method(n, "workerSend", 2, worker_send);
     realm.define_method(n, "workerTerminate", 1, worker_terminate);
@@ -263,7 +269,7 @@ fn error_message(message: &str, url: &str) -> String {
 
 impl ScriptHost {
     /// Create the realm of a worker whose script is at `url`.
-    fn new_worker(env: &mut dyn HostEnv, name: &str, shared: bool, id: u32) -> ScriptHost {
+    pub(crate) fn new_worker(env: &mut dyn HostEnv, name: &str, shared: bool, id: u32) -> ScriptHost {
         ScriptHost::new_inner(env, Some((name.to_string(), shared, id)))
     }
 
@@ -296,7 +302,7 @@ impl ScriptHost {
                 let mut out = Vec::new();
                 let closing;
                 {
-                    let mut wenv = WorkerEnv { outer: &mut *env, doc: &mut w.doc, url: w.url.clone(), errors: w.errors.clone() };
+                    let mut wenv = WorkerEnv { outer: &mut *env, doc: &mut w.doc, url: w.url.clone(), errors: w.errors.clone(), service_worker: None };
                     let host = &mut w.host;
                     for text in inbox {
                         host.enter(&mut wenv, |realm| {
@@ -384,7 +390,7 @@ impl ScriptHost {
         let errors = Rc::new(RefCell::new(Vec::new()));
         let mut doc = Document::new();
         let host = {
-            let mut wenv = WorkerEnv { outer: &mut *env, doc: &mut doc, url: u.clone(), errors: errors.clone() };
+            let mut wenv = WorkerEnv { outer: &mut *env, doc: &mut doc, url: u.clone(), errors: errors.clone(), service_worker: None };
             let mut host = Box::new(ScriptHost::new_worker(&mut wenv, name, shared.is_some(), id));
             let _ = host.run_script(&mut wenv, &source, url, module);
             host.run_jobs(&mut wenv);

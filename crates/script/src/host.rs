@@ -162,6 +162,7 @@ pub struct HostState {
     pub workers: crate::workers::WorkerState,
     /// Set in worker realms: (name, shared, id).
     pub worker_info: Option<(String, bool, u32)>,
+    pub service_worker: crate::service_worker::Context,
     /// Canvas 2D surfaces.
     pub canvases: crate::canvas2d::CanvasStore,
     /// Live range / iterator slots of collected handles (see `live.rs`).

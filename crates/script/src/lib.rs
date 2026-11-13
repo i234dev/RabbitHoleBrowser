@@ -25,6 +25,8 @@ mod observers;
 mod shadow;
 mod window;
 mod workers;
+mod service_worker;
+pub use service_worker::{ServiceWorkerRegistry, ServiceWorkerScope};
 
 #[cfg(test)]
 mod tests;
@@ -34,6 +36,8 @@ mod tests_webapi;
 mod tests_media;
 #[cfg(test)]
 mod tests_realms;
+#[cfg(test)]
+mod tests_service_worker;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};
@@ -246,6 +250,7 @@ pub struct ScriptHost {
     state: Rc<RefCell<HostState>>,
     /// Dedicated / shared workers this realm started (see [`workers`]).
     workers: Vec<workers::WorkerInstance>,
+    service_workers: Option<ServiceWorkerRegistry>,
 }
 
 /// Worker realms: the worker global scope (after the window APIs).
@@ -259,6 +264,8 @@ impl ScriptHost {
 
     /// `worker`: (name, shared, id) for a worker realm.
     pub(crate) fn new_inner(env: &mut dyn HostEnv, worker: Option<(String, bool, u32)>) -> ScriptHost {
+        let (service_context, service_registry) = service_worker::new_context(env);
+        let service_scope = service_worker::is_worker(&service_context);
         let mut realm = Realm::new();
         realm.set_task_budget(Some(task_budget()));
         rabbithole_wasm_js::install(&mut realm);
@@ -313,6 +320,7 @@ impl ScriptHost {
             canvases: Default::default(),
             workers: Default::default(),
             worker_info: worker.clone(),
+            service_worker: service_context,
             live_freed: Default::default(),
             doc_parsers: HashMap::default(),
             throw_on_dynamic_markup: 0,
@@ -329,7 +337,7 @@ impl ScriptHost {
                 eprintln!("[console.{level}] {text}");
             }
         }));
-        let mut host = ScriptHost { realm, state, workers: Vec::new() };
+        let mut host = ScriptHost { realm, state, workers: Vec::new(), service_workers: service_registry };
         {
             let _g = EnvGuard::enter(env);
             let _s = StateGuard::enter(host.state.clone());
@@ -375,8 +383,13 @@ impl ScriptHost {
                     let msg = realm.error_to_string(&e);
                     eprintln!("[rabbithole] worker.js failed: {msg}");
                 }
+                if service_scope {
+                    if let Err(e) = realm.eval(include_str!("js/service_worker.js"), "rabbithole:service_worker.js") {
+                        eprintln!("[rabbithole] service_worker.js failed: {}", realm.error_to_string(&e));
+                    }
+                }
             }
-            let _ = realm.eval("delete globalThis.__rhNative; delete globalThis.__rhClone", "rabbithole:cleanup");
+            let _ = realm.eval("delete globalThis.__rhNative; delete globalThis.__rhClone; delete globalThis.__rhSW", "rabbithole:cleanup");
         }
         host
     }
@@ -739,7 +752,9 @@ impl ScriptHost {
             ran
         });
         let workers = !self.workers.is_empty() || self.has_worker_work();
-        own | (workers && self.pump_workers(env, now_ms))
+        let ran_workers = workers && self.pump_workers(env, now_ms);
+        let ran_service_workers = self.pump_service_workers(env, now_ms);
+        own | ran_workers | ran_service_workers
     }
 
     /// Earliest time (ms, same clock as `now_ms`) at which a timer or
@@ -780,6 +795,9 @@ impl ScriptHost {
             due = Some(due.map(|d| d.min(now)).unwrap_or(now));
         }
         if let Some(w) = self.workers_next_due() {
+            due = Some(due.map(|d| d.min(w)).unwrap_or(w));
+        }
+        if let Some(w) = self.service_workers_due() {
             due = Some(due.map(|d| d.min(w)).unwrap_or(w));
         }
         due
@@ -876,4 +894,8 @@ impl Default for DispatchResult {
     fn default() -> Self {
         DispatchResult::nothing()
     }
+}
+
+impl Drop for ScriptHost {
+    fn drop(&mut self) { service_worker::drop_context(&self.state.borrow().service_worker); }
 }

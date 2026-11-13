@@ -184,6 +184,9 @@ pub struct EngineEnv<'a> {
 }
 
 impl HostEnv for EngineEnv<'_> {
+    fn service_worker_registry(&self) -> Option<rabbithole_script::ServiceWorkerRegistry> {
+        Some(self.engine.service_workers.clone())
+    }
     fn doc(&mut self) -> &mut Document {
         &mut self.page.doc
     }
