@@ -51,9 +51,21 @@ overloads, with checked argument counts, types and expression budgets:
   `clamp`, `mix`, `step`, `smoothstep`.
 - Geometry: `length`, `distance`, `dot`, `normalize`, `cross`.
 
-These built-ins do not implement user-defined functions, loops, conditionals,
-arrays, general integer/bool arithmetic or derivatives. Unsupported overloads
-fail shader compilation.
+User helpers support `float` and `vec2/3/4` results and up to eight named
+parameters of those types, copied by value with ordinary or `in` syntax. Helpers
+may execute initialized local declarations, local/parameter assignments and one
+final `return`. Definitions precede callers and `main`; nested calls to earlier
+helpers work in both language versions. Uniforms, attributes and fragment inputs
+are read from the global environment even when a caller shadows their names.
+Helpers cannot write globals or read mutable outputs.
+
+The evaluator shares helper bodies and charges every call site, argument and
+transitive body against its expression budget. There are at most 16 helpers and
+16 nested calls. Recursion, forward calls, prototypes, overloading, `out`/`inout`/
+`const` parameters, general control flow and statements after the final return
+are rejected. See [the backend limits](../crates/webgl/README.md#glsl-subset).
+Unsupported built-in overloads, arrays, general integer/bool arithmetic and
+derivatives also fail shader compilation.
 
 ## WebGL2 context milestone
 
@@ -135,9 +147,8 @@ textures also need clamp-to-edge wrapping for completeness.
 ## Current limits
 
 Stencil, culling, points/lines, multiple color attachments/MRT, blits,
-multisampling, cube maps, mipmaps and compressed textures remain unsupported. User-defined GLSL
-functions, control flow, arrays, integer/bool variables, derivatives and
-discard are unavailable. Context creation does not imply that arbitrary
+multisampling, cube maps, mipmaps and compressed textures remain unsupported. General GLSL
+control flow, arrays, integer/bool variables, derivatives and discard are unavailable. Context creation does not imply that arbitrary
 WebGL applications can run.
 
 Drawing-buffer dimensions are at most 4096 per axis and 4,194,304 pixels in
@@ -161,7 +172,7 @@ texture while preserving a second canvas. The
 [joint pipeline demo](../tests/pages/webgl-pipeline.html) renders two indexed
 instances into a texture, then presents it alongside the unchanged default
 canvas snapshot. Backend tests assert pixel values for clipping, interpolation,
-depth, blending, textures, math built-ins, instancing and invalid operations.
+depth, blending, textures, math built-ins, user helpers, instancing and invalid operations.
 Script tests cover API conversion, resource ownership, readback, context exclusivity,
 resize and canvas integration; engine tests verify actual page pixels.
 These focused checks complement the existing conformance baselines and do

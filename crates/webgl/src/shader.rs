@@ -1,6 +1,11 @@
 //! A deliberately bounded, versioned GLSL ES 1.00 / 3.00 subset. Unsupported grammar
 //! produces a compile error; it is never replaced with a canned shader.
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+const MAX_FUNCTIONS: usize = 16;
+const MAX_PARAMETERS: usize = 8;
+const MAX_CALL_DEPTH: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ty {
@@ -78,11 +83,48 @@ enum ExprKind {
     Number(f32),
     Texture(Box<Expr>, Box<Expr>),
     Name(String),
+    Global(String),
     Swizzle(Box<Expr>, Vec<usize>),
     Neg(Box<Expr>),
     Binary(char, Box<Expr>, Box<Expr>),
     Construct(Vec<Expr>),
     Builtin(Builtin, Vec<Expr>),
+    Call(Arc<Function>, Vec<Expr>),
+}
+
+/// Definitions form a DAG: calls can target only a previously defined helper.
+/// Sharing bodies avoids exponential AST expansion while costs include every call.
+#[derive(Clone, Debug)]
+struct Function {
+    result_type: Ty,
+    parameters: Vec<(String, Ty)>,
+    locals: BTreeMap<String, Symbol>,
+    globals: BTreeSet<String>,
+    statements: Vec<(String, Expr)>,
+    result: Expr,
+    cost: usize,
+    call_depth: usize,
+}
+impl Function {
+    fn eval(
+        &self,
+        globals: &BTreeMap<String, Value>,
+        values: &[Value],
+        sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
+    ) -> Value {
+        let mut env = BTreeMap::new();
+        for (name, symbol) in &self.locals {
+            env.insert(name.clone(), Value::zero(symbol.ty));
+        }
+        for ((name, _), value) in self.parameters.iter().zip(values) {
+            env.insert(name.clone(), *value);
+        }
+        for (name, expression) in &self.statements {
+            let value = expression.eval(&env, globals, sample);
+            env.insert(name.clone(), value);
+        }
+        self.result.eval(&env, globals, sample)
+    }
 }
 
 /// Floating-point overloads shared by GLSL ES 1.00 and 3.00, sections 8.1–8.4.
@@ -303,6 +345,7 @@ pub(crate) struct Shader {
     pub symbols: BTreeMap<String, Symbol>,
     pub reads: BTreeSet<String>,
     pub writes: BTreeSet<String>,
+    function_globals: BTreeSet<String>,
     statements: Vec<(String, Expr)>,
     pub cost: usize,
 }
@@ -321,8 +364,15 @@ impl Shader {
             env.entry(name.clone())
                 .or_insert_with(|| Value::zero(sym.ty));
         }
+        // Ordinary shaders keep the zero-allocation empty map. Helpers capture
+        // only immutable globals they actually read, not the caller's locals.
+        let globals = self
+            .function_globals
+            .iter()
+            .map(|name| (name.clone(), env[name]))
+            .collect();
         for (name, expr) in &self.statements {
-            let v = expr.eval(&env, sample);
+            let v = expr.eval(&env, &globals, sample);
             env.insert(name.clone(), v);
         }
         env
@@ -332,32 +382,41 @@ impl Expr {
     fn eval(
         &self,
         env: &BTreeMap<String, Value>,
+        globals: &BTreeMap<String, Value>,
         sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
     ) -> Value {
         match &self.kind {
+            ExprKind::Call(function, args) => {
+                let mut values = [Value::zero(Ty::Float); MAX_PARAMETERS];
+                for (i, arg) in args.iter().enumerate() {
+                    values[i] = arg.eval(env, globals, sample);
+                }
+                function.eval(globals, &values[..args.len()], sample)
+            }
             ExprKind::Builtin(function, args) => {
                 let mut values = [Value::zero(Ty::Float); 3];
                 for (i, arg) in args.iter().enumerate() {
-                    values[i] = arg.eval(env, sample);
+                    values[i] = arg.eval(env, globals, sample);
                 }
                 function.eval(self.ty, &values[..args.len()])
             }
             ExprKind::Texture(unit, uv) => {
-                let unit = unit.eval(env, sample);
-                let uv = uv.eval(env, sample);
+                let unit = unit.eval(env, globals, sample);
+                let uv = uv.eval(env, globals, sample);
                 Value::from(Ty::Vec4, &sample(unit.v[0] as i32, [uv.v[0], uv.v[1]]))
             }
             ExprKind::Number(n) => Value::from(self.ty, &[*n]),
             ExprKind::Name(n) => env[n],
+            ExprKind::Global(n) => globals[n],
             ExprKind::Neg(e) => {
-                let mut r = e.eval(env, sample);
+                let mut r = e.eval(env, globals, sample);
                 for v in &mut r.v[..r.ty.n()] {
                     *v = -*v;
                 }
                 r
             }
             ExprKind::Swizzle(e, ix) => {
-                let a = e.eval(env, sample);
+                let a = e.eval(env, globals, sample);
                 let mut r = Value::zero(self.ty);
                 for (i, &j) in ix.iter().enumerate() {
                     r.v[i] = a.v[j];
@@ -365,7 +424,7 @@ impl Expr {
                 r
             }
             ExprKind::Construct(args) => {
-                let values: Vec<_> = args.iter().map(|a| a.eval(env, sample)).collect();
+                let values: Vec<_> = args.iter().map(|a| a.eval(env, globals, sample)).collect();
                 let mut r = Value::zero(self.ty);
                 if values.len() == 1 && matches!(values[0].ty, Ty::Float | Ty::IntLiteral) {
                     if self.ty == Ty::Mat4 {
@@ -389,7 +448,7 @@ impl Expr {
                 r
             }
             ExprKind::Binary(op, a, b) => {
-                let (a, b) = (a.eval(env, sample), b.eval(env, sample));
+                let (a, b) = (a.eval(env, globals, sample), b.eval(env, globals, sample));
                 let mut r = Value::zero(self.ty);
                 if *op == '*' && a.ty == Ty::Mat4 && b.ty == Ty::Vec4 {
                     for row in 0..4 {
@@ -538,6 +597,11 @@ struct Parser {
     vertex: bool,
     shader: Shader,
     depth: usize,
+    functions: BTreeMap<String, Arc<Function>>,
+    locals: Option<BTreeMap<String, Symbol>>,
+    function_globals: Option<BTreeSet<String>>,
+    function_name: Option<String>,
+    function_depth: usize,
 }
 impl Parser {
     fn peek(&self) -> &Tok {
@@ -570,6 +634,42 @@ impl Parser {
         } else {
             false
         }
+    }
+    fn eat_id(&mut self, name: &str) -> bool {
+        if *self.peek() == Tok::Id(name.into()) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn variable(&self, name: &str) -> Option<&Symbol> {
+        self.locals
+            .as_ref()
+            .and_then(|locals| locals.get(name))
+            .or_else(|| self.shader.symbols.get(name))
+    }
+    fn read_globals(&mut self, names: impl IntoIterator<Item = String>) {
+        if let Some(reads) = self.function_globals.as_mut() {
+            reads.extend(names);
+        } else {
+            self.shader.reads.extend(names);
+        }
+    }
+    fn read_name(&mut self, name: &str) -> Result<(), String> {
+        if let Some(locals) = &self.locals {
+            if locals.contains_key(name) {
+                return Ok(());
+            }
+            let symbol = &self.shader.symbols[name];
+            if !matches!(symbol.qual, Qual::Uniform | Qual::Attribute | Qual::Input)
+                && !(symbol.qual == Qual::Varying && !self.vertex)
+            {
+                return Err(format!("helpers cannot read mutable global {name}"));
+            }
+        }
+        self.read_globals([name.to_string()]);
+        Ok(())
     }
     fn ty(&mut self) -> Result<Ty, String> {
         let mut n = self.id()?;
@@ -625,14 +725,169 @@ impl Parser {
                     | "mediump"
                     | "highp"
             )
-            || self.shader.symbols.contains_key(&name)
+            || self.locals.as_ref().map_or_else(
+                || self.shader.symbols.contains_key(&name),
+                |locals| locals.contains_key(&name),
+            )
+            || (qual != Qual::Local && self.functions.contains_key(&name))
         {
             return Err(format!("invalid or duplicate declaration {name}"));
         }
-        if self.shader.symbols.len() >= 64 {
+        if self
+            .locals
+            .as_ref()
+            .map_or(self.shader.symbols.len(), BTreeMap::len)
+            >= 64
+        {
             return Err("too many shader variables".into());
         }
-        self.shader.symbols.insert(name, Symbol { ty, qual });
+        if let Some(locals) = self.locals.as_mut() {
+            locals.insert(name, Symbol { ty, qual });
+        } else {
+            self.shader.symbols.insert(name, Symbol { ty, qual });
+        }
+        Ok(())
+    }
+    fn assignment(&mut self) -> Result<(String, Expr), String> {
+        let first = self.id()?;
+        let (name, declaration) = if Ty::parse(&first).is_some()
+            || matches!(first.as_str(), "lowp" | "mediump" | "highp")
+        {
+            self.pos -= 1;
+            let ty = self.ty()?;
+            let name = self.id()?;
+            (name, Some(ty))
+        } else {
+            (first, None)
+        };
+        let sym = if let Some(ty) = declaration {
+            Symbol {
+                ty,
+                qual: Qual::Local,
+            }
+        } else {
+            self.variable(&name)
+                .ok_or_else(|| format!("unknown assignment target {name}"))?
+                .clone()
+        };
+        if declaration.is_none()
+            && self
+                .locals
+                .as_ref()
+                .is_some_and(|locals| !locals.contains_key(&name))
+        {
+            return Err(format!("helpers cannot write global {name}"));
+        }
+        if matches!(sym.qual, Qual::Attribute | Qual::Uniform | Qual::Input)
+            || (sym.qual == Qual::Varying && !self.vertex)
+        {
+            return Err(format!("{name} is read-only"));
+        }
+        self.expect(Tok::P('='))?;
+        let expr = self.expr(0)?;
+        if expr.ty != sym.ty {
+            return Err(format!("assignment type mismatch for {name}"));
+        }
+        self.expect(Tok::P(';'))?;
+        if let Some(ty) = declaration {
+            // GLSL ES 1.00 section 4.2 and 3.00 section 4.2.2: the new
+            // name becomes visible only after its initializer. Until then,
+            // an outer variable or helper of the same name remains visible.
+            self.declare(name.clone(), ty, Qual::Local)?;
+        }
+        Ok((name, expr))
+    }
+    fn function(&mut self, name: String, result_type: Ty) -> Result<(), String> {
+        if self.functions.len() >= MAX_FUNCTIONS {
+            return Err("too many user functions".into());
+        }
+        if Builtin::parse(&name).is_some() || matches!(name.as_str(), "texture" | "texture2D") {
+            return Err("redefining or overloading built-in functions is unsupported".into());
+        }
+        if self.functions.contains_key(&name) {
+            return Err("user function overloading/redefinition is unsupported".into());
+        }
+        // Reuse global identifier validation without making a function a variable.
+        self.declare(name.clone(), result_type, Qual::Uniform)?;
+        self.shader.symbols.remove(&name);
+        self.locals = Some(BTreeMap::new());
+        self.function_globals = Some(BTreeSet::new());
+        self.function_name = Some(name.clone());
+        self.function_depth = 1;
+        let outer_cost = std::mem::replace(&mut self.shader.cost, 0);
+        self.expect(Tok::P('('))?;
+        let mut parameters = Vec::new();
+        if self.eat_id("void") {
+            self.expect(Tok::P(')'))?;
+        } else if !self.eat(')') {
+            loop {
+                if parameters.len() >= MAX_PARAMETERS {
+                    return Err("too many function parameters".into());
+                }
+                if matches!(self.peek(), Tok::Id(q) if matches!(q.as_str(), "out" | "inout" | "const"))
+                {
+                    return Err("only ordinary or in function parameters are supported".into());
+                }
+                self.eat_id("in");
+                let ty = self.ty()?;
+                if !matches!(ty, Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+                    return Err("function parameters require float or vector types".into());
+                }
+                let parameter = self.id()?;
+                self.declare(parameter.clone(), ty, Qual::Local)?;
+                parameters.push((parameter, ty));
+                if self.eat(')') {
+                    break;
+                }
+                self.expect(Tok::P(','))?;
+            }
+        }
+        if self.eat(';') {
+            return Err("function prototypes are unsupported; define helpers before use".into());
+        }
+        self.expect(Tok::P('{'))?;
+        let mut statements = Vec::new();
+        let result = loop {
+            if self.eat_id("return") {
+                let result = self.expr(0)?;
+                if result.ty != result_type {
+                    return Err(format!("return type mismatch in {name}"));
+                }
+                self.expect(Tok::P(';'))?;
+                self.expect(Tok::P('}'))?;
+                break result;
+            }
+            if self.eat('}') {
+                return Err("user function requires one final return expression".into());
+            }
+            if statements.len() >= 128 {
+                return Err("too many function statements".into());
+            }
+            statements.push(self.assignment()?);
+        };
+        let locals = self.locals.take().unwrap();
+        let globals = self.function_globals.take().unwrap();
+        let cost = self.shader.cost + parameters.len() + locals.len() + globals.len() + 1;
+        if cost > 512 {
+            return Err("function exceeds expression budget".into());
+        }
+        let call_depth = self.function_depth;
+        self.function_name = None;
+        self.function_depth = 0;
+        self.shader.cost = outer_cost;
+        self.functions.insert(
+            name,
+            Arc::new(Function {
+                result_type,
+                parameters,
+                locals,
+                globals,
+                statements,
+                result,
+                cost,
+                call_depth,
+            }),
+        );
         Ok(())
     }
     fn expr(&mut self, min_prec: u8) -> Result<Expr, String> {
@@ -673,7 +928,7 @@ impl Parser {
             }
             Tok::Id(name) => {
                 if (name == "texture2D" || name == "texture") && *self.peek() == Tok::P('(') {
-                    if self.shader.symbols.contains_key(&name) {
+                    if self.variable(&name).is_some() {
                         return Err(format!("{name} is a variable, not a callable function"));
                     }
                     let expected = if self.shader.version == 100 {
@@ -705,7 +960,7 @@ impl Parser {
                 } else if let Some(function) =
                     Builtin::parse(&name).filter(|_| *self.peek() == Tok::P('('))
                 {
-                    if self.shader.symbols.contains_key(&name) {
+                    if self.variable(&name).is_some() {
                         return Err(format!("{name} is a variable, not a callable function"));
                     }
                     self.expect(Tok::P('('))?;
@@ -771,25 +1026,79 @@ impl Parser {
                         ty,
                         kind: ExprKind::Construct(args),
                     }
+                } else if *self.peek() == Tok::P('(') {
+                    if self.variable(&name).is_some() {
+                        return Err(format!("{name} is a variable, not a callable function"));
+                    }
+                    if self.function_name.as_deref() == Some(&name) {
+                        return Err("recursive functions are unsupported".into());
+                    }
+                    let function = self.functions.get(&name).cloned().ok_or_else(|| format!("helper {name} must be defined before use; forward calls and recursion are unsupported"))?;
+                    self.expect(Tok::P('('))?;
+                    let mut args = Vec::new();
+                    if !self.eat(')') {
+                        loop {
+                            if args.len() >= MAX_PARAMETERS {
+                                return Err("too many function arguments".into());
+                            }
+                            args.push(self.expr(0)?);
+                            if self.eat(')') {
+                                break;
+                            }
+                            self.expect(Tok::P(','))?;
+                        }
+                    }
+                    if args.len() != function.parameters.len()
+                        || args
+                            .iter()
+                            .zip(&function.parameters)
+                            .any(|(arg, (_, ty))| arg.ty != *ty)
+                    {
+                        return Err(format!(
+                            "argument types or count do not match function {name}"
+                        ));
+                    }
+                    let call_depth =
+                        function.call_depth + usize::from(self.function_name.is_some());
+                    if call_depth > MAX_CALL_DEPTH {
+                        return Err("user function call nesting exceeds limit".into());
+                    }
+                    self.function_depth = self.function_depth.max(call_depth);
+                    self.shader.cost += function.cost;
+                    if self.shader.cost > 512 {
+                        return Err("shader exceeds expression budget".into());
+                    }
+                    if self.function_name.is_none() {
+                        self.shader
+                            .function_globals
+                            .extend(function.globals.iter().cloned());
+                    }
+                    self.read_globals(function.globals.iter().cloned());
+                    Expr {
+                        ty: function.result_type,
+                        kind: ExprKind::Call(function, args),
+                    }
                 } else {
                     let sym = self
-                        .shader
-                        .symbols
-                        .get(&name)
+                        .variable(&name)
                         .ok_or_else(|| format!("unknown variable {name}"))?;
                     let ty = sym.ty;
-                    self.shader.reads.insert(name.clone());
+                    let global = self
+                        .locals
+                        .as_ref()
+                        .is_some_and(|locals| !locals.contains_key(&name));
+                    self.read_name(&name)?;
                     Expr {
                         ty,
-                        kind: ExprKind::Name(name),
+                        kind: if global {
+                            ExprKind::Global(name)
+                        } else {
+                            ExprKind::Name(name)
+                        },
                     }
                 }
             }
-            _ => {
-                return Err(
-                    "expected expression; control flow and functions are not supported".into(),
-                )
-            }
+            _ => return Err("expected expression; general control flow is not supported".into()),
         };
         loop {
             if self.eat('.') {
@@ -894,10 +1203,16 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             symbols: BTreeMap::new(),
             reads: BTreeSet::new(),
             writes: BTreeSet::new(),
+            function_globals: BTreeSet::new(),
             statements: Vec::new(),
             cost: 0,
         },
         depth: 0,
+        functions: BTreeMap::new(),
+        locals: None,
+        function_globals: None,
+        function_name: None,
+        function_depth: 0,
     };
     if vertex || version == 100 {
         p.shader.symbols.insert(
@@ -953,12 +1268,29 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             p.expect(Tok::P(';'))?;
             continue;
         }
+        if matches!(
+            n.as_str(),
+            "float" | "vec2" | "vec3" | "vec4" | "lowp" | "mediump" | "highp"
+        ) {
+            if location.is_some() {
+                return Err("layout cannot qualify a user function".into());
+            }
+            p.pos -= 1;
+            let result_type = p.ty()?;
+            if !matches!(result_type, Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+                return Err("functions must return float or vector types".into());
+            }
+            let name = p.id()?;
+            p.function(name, result_type)?;
+            continue;
+        }
         if n == "void" {
             if location.is_some() {
                 return Err("layout cannot qualify main".into());
             }
             p.expect(Tok::Id("main".into()))?;
             p.expect(Tok::P('('))?;
+            p.eat_id("void");
             p.expect(Tok::P(')'))?;
             p.expect(Tok::P('{'))?;
             break;
@@ -1015,35 +1347,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         if p.shader.statements.len() >= 128 {
             return Err("too many shader statements".into());
         }
-        let first = p.id()?;
-        let name = if Ty::parse(&first).is_some()
-            || matches!(first.as_str(), "lowp" | "mediump" | "highp")
-        {
-            p.pos -= 1;
-            let ty = p.ty()?;
-            let name = p.id()?;
-            p.declare(name.clone(), ty, Qual::Local)?;
-            name
-        } else {
-            first
-        };
-        let sym = p
-            .shader
-            .symbols
-            .get(&name)
-            .ok_or_else(|| format!("unknown assignment target {name}"))?
-            .clone();
-        if matches!(sym.qual, Qual::Attribute | Qual::Uniform | Qual::Input)
-            || (sym.qual == Qual::Varying && !vertex)
-        {
-            return Err(format!("{name} is read-only"));
-        }
-        p.expect(Tok::P('='))?;
-        let expr = p.expr(0)?;
-        if expr.ty != sym.ty {
-            return Err(format!("assignment type mismatch for {name}"));
-        }
-        p.expect(Tok::P(';'))?;
+        let (name, expr) = p.assignment()?;
         p.shader.writes.insert(name.clone());
         p.shader.statements.push((name, expr));
     }

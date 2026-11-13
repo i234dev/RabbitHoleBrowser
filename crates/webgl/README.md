@@ -58,7 +58,26 @@ shared uniform types must agree. Uniforms start at zero after linking.
 The evaluator also supports 32 typed float/vector math built-ins, with checked
 argument counts, types and expression costs. See
 [the supported functions](../../docs/webgl.md#shader-language-subset).
-User-defined functions, control flow, arrays, integer/bool variables, derivatives,
+User helpers may return `float` or `vec2/3/4`, take up to eight named parameters
+of those types by value (ordinary or `in` parameters), and use initialized locals
+plus one final `return` expression. Precision qualifiers and zero-argument helpers
+are accepted. Definitions must precede their callers and `main`; helpers may call
+earlier helpers, the math built-ins and supported fragment texture operations.
+They can read immutable globals such as uniforms, vertex attributes and fragment
+inputs. Parameters and locals may shadow globals; nested calls read the original
+global environment rather than capturing a caller's local values. Helpers cannot
+write globals or read mutable outputs. These calls follow the supported portion
+of [GLSL ES function definitions and input parameters](https://registry.khronos.org/OpenGL/specs/es/2.0/GLSL_ES_Specification_1.00.pdf), section 6.1.
+
+At most 16 helpers and 16 nested function calls are supported. Function bodies
+share immutable ASTs; the 512-unit expression budget includes every nested call
+site, argument, body and local binding so shared bodies do not hide exponential
+execution. Unused helpers do not activate their referenced uniforms. Recursion,
+forward calls, prototypes, overloading/redefinition, `out`/`inout`/`const`
+parameters, extra statements after the final return and general control flow are
+rejected with diagnostics; they are not silently ignored.
+
+General control flow, arrays, integer/bool variables, derivatives,
 discard, swizzle assignments, stencil, points/lines, culling, multisampling and
 extensions remain unsupported. Texture sampling has the explicit bounded subset
 below. Unsupported shader operations fail compilation with diagnostics.

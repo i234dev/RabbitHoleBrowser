@@ -1,6 +1,45 @@
 //! WebGL bindings exercise the real software backend through JavaScript.
 use crate::tests::{run, setup};
 
+#[test]
+fn webgl_user_shader_helpers_preserve_scopes_types_and_pixel_results() {
+    let (mut env, mut host) =
+        setup("<canvas id=a width=1 height=1></canvas><canvas id=b width=1 height=1></canvas>");
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+      for (const [id, version] of [['a',1],['b',2]]) {
+        const gl=document.getElementById(id).getContext(version===2?'webgl2':'webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+        const prefix=version===2?'#version 300 es\n':'';
+        const vertex=prefix+(version===2?'in':'attribute')+' vec2 position;vec2 copy(in vec2 value){return value;}void main(){gl_Position=vec4(copy(position),0.0,1.0);}';
+        const target=version===2?'pixel':'gl_FragColor';
+        const fragment=prefix+'precision mediump float;'+(version===2?'out vec4 pixel;':'')+'uniform float gain;float globalGain(){float gain=gain;return gain;}float nested(float gain){float local=gain;gain=0.0;return local+globalGain();}vec4 shade(in vec4 color){return color*nested(0.25);}vec4 color(){vec4 shade=shade(vec4(1.0,0.5,0.25,1.0));return shade;}void main(){'+target+'=color();}';
+        function compile(kind,source){const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+        const p=gl.createProgram();gl.attachShader(p,compile(gl.VERTEX_SHADER,vertex));gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fragment));gl.linkProgram(p);
+        if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));gl.useProgram(p);
+        const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+        const position=gl.getAttribLocation(p,'position');gl.vertexAttribPointer(position,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(position);
+        const gain=gl.getUniformLocation(p,'gain');gl.uniform1f(gain,0.25);gl.drawArrays(gl.TRIANGLES,0,3);
+        const bytes=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,bytes);console.log(version,gain!==null,Array.from(bytes).join(','));
+        const invalid=gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(invalid,prefix+'precision mediump float;'+(version===2?'out vec4 pixel;':'')+'float f(float x){return f(x);}void main(){'+target+'=vec4(f(1.0));}');gl.compileShader(invalid);
+        console.log(!gl.getShaderParameter(invalid,gl.COMPILE_STATUS),gl.getShaderInfoLog(invalid).includes('recursive'),gl.getError());
+      }
+    "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "1 true 128,64,32,128",
+            "true true 0",
+            "2 true 128,64,32,128",
+            "true true 0"
+        ]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
 const SHADERS: &str = r#"
 function shader(gl, type, source) {
   const object = gl.createShader(type);
