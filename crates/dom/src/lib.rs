@@ -1152,7 +1152,7 @@ impl Document {
                 }
             },
             NodeData::Doctype(d) => {
-                out.push_str("<!DOCTYPE "); 
+                out.push_str("<!DOCTYPE ");
                 out.push_str(&d.name);
                 out.push('>');
             }
