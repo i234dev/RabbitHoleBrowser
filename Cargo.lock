@@ -1644,6 +1644,7 @@ dependencies = [
  "rabbithole-gfx",
  "rabbithole-html",
  "rabbithole-style",
+ "unicode-properties",
 ]
 
 [[package]]

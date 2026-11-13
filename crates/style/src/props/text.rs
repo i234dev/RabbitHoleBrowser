@@ -50,6 +50,41 @@ fn decoration_style(kw: &str) -> Option<TextDecorationStyle> {
     })
 }
 
+fn emphasis_keyword(k: &str) -> bool {
+    matches!(k, "none" | "filled" | "open" | "dot" | "circle" | "double-circle" | "triangle" | "sesame")
+}
+
+/// `text-emphasis-style`: none | [filled | open] || [dot | circle |
+/// double-circle | triangle | sesame] | <string>.
+fn emphasis_style(comps: &[&[Token]]) -> Option<EmphasisStyle> {
+    if let [[Token::String(s)]] = comps {
+        return Some(EmphasisStyle::Custom(s.to_string()));
+    }
+    let (mut open, mut shape): (Option<bool>, Option<u8>) = (None, None);
+    for c in comps {
+        match values::ident(c).as_deref() {
+            Some("none") if comps.len() == 1 => return Some(EmphasisStyle::None),
+            Some("filled") if open.is_none() => open = Some(false),
+            Some("open") if open.is_none() => open = Some(true),
+            Some(k) if shape.is_none() => {
+                shape = Some(match k {
+                    "dot" => 1,
+                    "circle" => 2,
+                    "double-circle" => 3,
+                    "triangle" => 4,
+                    "sesame" => 5,
+                    _ => return None,
+                })
+            }
+            _ => return None,
+        }
+    }
+    if open.is_none() && shape.is_none() {
+        return None;
+    }
+    Some(EmphasisStyle::Shape { open: open.unwrap_or(false), shape: shape.unwrap_or(0) })
+}
+
 pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) -> bool {
     let name = match name {
         "word-wrap" => "overflow-wrap",
@@ -61,6 +96,11 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         "-webkit-text-size-adjust" | "-ms-text-size-adjust" | "-moz-text-size-adjust" => "text-size-adjust",
         "-webkit-hyphens" | "-ms-hyphens" => "hyphens",
         "-webkit-font-feature-settings" => "font-feature-settings",
+        "-webkit-text-emphasis" => "text-emphasis",
+        "-webkit-text-emphasis-style" => "text-emphasis-style",
+        "-webkit-text-emphasis-color" => "text-emphasis-color",
+        "-webkit-text-emphasis-position" => "text-emphasis-position",
+        "-webkit-ruby-position" => "ruby-position",
         n => n,
     };
     let c0 = comps[0];
@@ -320,6 +360,85 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             }
             style.font_variation_settings = out;
         }
+        "text-emphasis-style" => match emphasis_style(comps) {
+            Some(s) => style.text_emphasis_style = s,
+            None => return true,
+        },
+        "text-emphasis-color" => {
+            if values::is_ident(c0, "currentcolor") {
+                style.text_emphasis_color = None;
+            } else if let Some(ColorValue::Color(col)) = values::parse_color_component(c0) {
+                style.text_emphasis_color = Some(col);
+            }
+        }
+        "text-emphasis" => {
+            // style || color
+            let mut color: Option<Option<rabbithole_gfx::Color>> = None;
+            let mut rest: Vec<&[Token]> = Vec::new();
+            for c in comps {
+                if values::is_ident(c, "currentcolor") {
+                    color = Some(None);
+                } else if let (None, Some(ColorValue::Color(col))) = (values::ident(c).filter(|k| emphasis_keyword(k)), values::parse_color_component(c)) {
+                    color = Some(Some(col));
+                } else {
+                    rest.push(c);
+                }
+            }
+            let st = if rest.is_empty() { Some(EmphasisStyle::None) } else { emphasis_style(&rest) };
+            match st {
+                Some(s) => {
+                    style.text_emphasis_style = s;
+                    style.text_emphasis_color = color.unwrap_or(None);
+                }
+                None => return true,
+            }
+        }
+        "text-emphasis-position" => {
+            let (mut over, mut side) = (None, None);
+            for c in comps {
+                match values::ident(c).as_deref() {
+                    Some("over") if over.is_none() => over = Some(true),
+                    Some("under") if over.is_none() => over = Some(false),
+                    Some("right") if side.is_none() => side = Some(true),
+                    Some("left") if side.is_none() => side = Some(false),
+                    Some("auto") if comps.len() == 1 => {
+                        over = Some(true);
+                        side = Some(true);
+                    }
+                    _ => return true,
+                }
+            }
+            let Some(o) = over else { return true };
+            style.text_emphasis_over = o;
+            style.text_emphasis_right = side.unwrap_or(true);
+        }
+        "text-wrap-style" => match values::ident(c0).as_deref() {
+            Some("balance") => style.text_wrap_balance = true,
+            Some("auto" | "stable" | "pretty") => style.text_wrap_balance = false,
+            _ => return true,
+        },
+        "font-synthesis" | "font-synthesis-style" => {
+            let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
+            style.font_synthesis_style = if name == "font-synthesis" {
+                kws.iter().any(|k| k == "style")
+            } else {
+                kws.iter().any(|k| k == "auto" || k == "oblique-only")
+            };
+        }
+        "line-break" | "-webkit-line-break" => {
+            style.line_break = match values::ident(c0).as_deref() {
+                Some("auto" | "normal") => 0,
+                Some("loose") => 1,
+                Some("strict") => 2,
+                Some("anywhere") => 3,
+                _ => return true,
+            }
+        }
+        "ruby-position" => match values::ident(c0).as_deref() {
+            Some("over") | Some("alternate") | Some("inter-character") => style.ruby_under = false,
+            Some("under") => style.ruby_under = true,
+            _ => return true,
+        },
         "white-space-collapse" => {
             if let Some(kw) = values::ident(c0) {
                 style.white_space = match kw.as_str() {
@@ -338,11 +457,10 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             }
         }
         "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
-        | "font-optical-sizing" | "font-synthesis" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-emphasis"
-        | "text-emphasis-style" | "text-emphasis-color" | "text-orientation"
+        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
-        | "font-variant-east-asian" | "font-variant-position" | "line-break" | "word-spacing-x" | "ruby-position"
-        | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter" | "text-autospace" | "text-wrap-style"
+        | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"
+        | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter" | "text-autospace"
         | "-webkit-text-fill-color" | "-webkit-text-stroke" | "-webkit-text-stroke-width" | "-webkit-text-stroke-color"
         | "-webkit-tap-highlight-color" | "-webkit-touch-callout" | "text-decoration-skip-ink" | "text-decoration-skip" => {}
         _ => return false,

@@ -94,6 +94,9 @@ pub enum DisplayItem {
     /// Mask of the layer closed by the next `PopLayer` (`mask-image`):
     /// the alpha of these items scales the layer's contribution.
     LayerMask(Vec<DisplayItem>),
+    /// Blend mode (`mix-blend-mode`) of the layer closed by the next
+    /// `PopLayer`.
+    LayerBlend(u8),
     /// `filter`: `items` (the element's painting) rendered offscreen
     /// within `bounds` and filtered before being composited.
     Filtered {
@@ -269,6 +272,16 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
             bg = body.style.background_color;
         }
     } else {
+        root_bg_painted = true;
+    }
+    // The root's opacity also fades the canvas background over the white
+    // page backdrop (CSS Compositing 1 §4.1: the root group blends with
+    // it).
+    let root_opacity = root.style.opacity.clamp(0.0, 1.0);
+    if root_opacity < 1.0 && !bg.is_transparent() {
+        let a = bg.a as f32 / 255.0 * root_opacity;
+        let mix = |c: u8| (255.0 * (1.0 - a) + c as f32 * a + 0.5) as u8;
+        bg = Color::rgb(mix(bg.r), mix(bg.g), mix(bg.b));
         root_bg_painted = true;
     }
     if !bg.is_transparent() {
@@ -450,7 +463,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             };
         }
         let opacity = root.style.opacity.clamp(0.0, 1.0);
-        let layer = opacity < 1.0;
+        let layer = opacity < 1.0 || root.style.mix_blend_mode != 0;
         if layer && opacity <= 0.0 {
             // Invisible but still hit-testable (transparent overlays,
             // styled file inputs, ...): record hits, drop the paint.
@@ -485,6 +498,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         if let Some(items) = mask {
             self.list.push(DisplayItem::LayerMask(items));
+        }
+        if root.style.mix_blend_mode != 0 {
+            self.list.push(DisplayItem::LayerBlend(root.style.mix_blend_mode));
         }
         if layer {
             self.list.push(DisplayItem::PopLayer(opacity));
@@ -1224,6 +1240,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         shadows,
                         small_caps,
                         oblique,
+                        emphasis,
                     } => {
                         if *hidden {
                             continue;
@@ -1261,6 +1278,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         if self.flipped {
                             self.list.push(DisplayItem::PopTransform);
                         }
+                        if let Some(e) = emphasis {
+                            self.paint_emphasis(f.rect, *font, *size, text, *letter_spacing, e);
+                        }
                     }
                     FragmentKind::Box(i) => {
                         let c = &b.children[*i];
@@ -1269,6 +1289,52 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Paint emphasis marks centered over (or under) each character of a
+    /// text fragment, at half the font size, touching the glyph box.
+    fn paint_emphasis(&mut self, rect: Rect, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, e: &crate::tree::Emphasis) {
+        let fonts = self.ctx.fonts;
+        let msize = size / 2.0;
+        let mm = fonts.metrics(font, msize);
+        let mw = fonts.measure(font, msize, &e.mark);
+        let y = if e.over { rect.y - mm.descent } else { rect.bottom() + mm.ascent };
+        let glyphs = fonts.shape(font, size, text, letter_spacing);
+        let mut i = 0;
+        while i < glyphs.len() {
+            let g = glyphs[i];
+            let mut adv = g.advance;
+            let mut j = i + 1;
+            while j < glyphs.len() && glyphs[j].byte_index == g.byte_index {
+                adv += glyphs[j].advance;
+                j += 1;
+            }
+            i = j;
+            let Some(ch) = text.get(g.byte_index..).and_then(|t| t.chars().next()) else { continue };
+            if emphasis_skips(ch) {
+                continue;
+            }
+            let x = rect.x + g.x + (adv - letter_spacing - mw) / 2.0;
+            if self.flipped {
+                let cy = y - mm.ascent + (mm.ascent + mm.descent) / 2.0;
+                self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * cy]));
+            }
+            self.list.push(DisplayItem::Text {
+                x,
+                y,
+                font,
+                size: msize,
+                color: e.color,
+                text: e.mark.to_string(),
+                letter_spacing: 0.0,
+                shadows: Vec::new(),
+                small_caps: false,
+                oblique: false,
+            });
+            if self.flipped {
+                self.list.push(DisplayItem::PopTransform);
             }
         }
     }
@@ -1334,4 +1400,13 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             }
         }
     }
+}
+
+/// Characters that get no emphasis mark: separators, controls and
+/// punctuation, other (format, unassigned...) characters (CSS Text
+/// Decoration 3 §3.1: Unicode categories Z*, P* and C*).
+fn emphasis_skips(c: char) -> bool {
+    use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
+    c.is_whitespace()
+        || matches!(c.general_category_group(), GeneralCategoryGroup::Punctuation | GeneralCategoryGroup::Separator | GeneralCategoryGroup::Other)
 }

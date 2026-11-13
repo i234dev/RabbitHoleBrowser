@@ -817,6 +817,30 @@ impl Canvas {
         }
     }
 
+    /// End a layer, compositing what it drew with blend mode `mode` (CSS
+    /// Compositing 1 §10; see [`blend_mode_index`]) and `opacity` × the
+    /// optional mask `alpha`.
+    pub fn end_layer_blend(&mut self, opacity: f32, mode: u8, alpha: Option<&[u8]>) {
+        let Some(layer) = self.layers.pop() else { return };
+        if alpha.is_some_and(|a| a.len() != layer.w * layer.h) {
+            return;
+        }
+        let op = opacity.clamp(0.0, 1.0);
+        let cw = self.width as usize;
+        for y in 0..layer.h {
+            let row = (layer.y0 as usize + y) * cw + layer.x0 as usize;
+            for x in 0..layer.w {
+                let drawn = self.data[row + x];
+                let bg = layer.saved[y * layer.w + x];
+                if drawn != bg {
+                    let mixed = blend_pixel(mode, bg, drawn);
+                    let a = (alpha.map(|a| a[y * layer.w + x] as f32).unwrap_or(255.0) * op + 0.5) as u32;
+                    self.data[row + x] = blend(bg, Color::from_u32(mixed), a);
+                }
+            }
+        }
+    }
+
     pub fn end_layer(&mut self, opacity: f32) {
         let Some(layer) = self.layers.pop() else { return };
         let op = opacity.clamp(0.0, 1.0);
@@ -981,3 +1005,126 @@ pub fn stroke_outline(path: &[PathSeg], style: &StrokeStyle) -> Polylines {
 
 #[allow(dead_code)]
 fn _bounds_unused(_: Bounds) {}
+
+/// Index of a `<blend-mode>` keyword (0 = normal), for
+/// [`Canvas::end_layer_blend`].
+pub fn blend_mode_index(name: &str) -> Option<u8> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "normal" => 0,
+        "multiply" => 1,
+        "screen" => 2,
+        "overlay" => 3,
+        "darken" => 4,
+        "lighten" => 5,
+        "color-dodge" => 6,
+        "color-burn" => 7,
+        "hard-light" => 8,
+        "soft-light" => 9,
+        "difference" => 10,
+        "exclusion" => 11,
+        "hue" => 12,
+        "saturation" => 13,
+        "color" => 14,
+        "luminosity" => 15,
+        "plus-lighter" => 16,
+        "plus-darker" => 17,
+        _ => return None,
+    })
+}
+
+/// Blend an opaque source pixel over an opaque backdrop pixel with blend
+/// mode `mode` (0x00RRGGBB pixels).
+pub fn blend_pixel(mode: u8, backdrop: u32, source: u32) -> u32 {
+    let ch = |p: u32, s: u32| ((p >> s) & 0xff) as f32 / 255.0;
+    let cb = [ch(backdrop, 16), ch(backdrop, 8), ch(backdrop, 0)];
+    let cs = [ch(source, 16), ch(source, 8), ch(source, 0)];
+    fn sep(mode: u8, b: f32, s: f32) -> f32 {
+        let multiply = |b: f32, s: f32| b * s;
+        let screen = |b: f32, s: f32| b + s - b * s;
+        let hard = |b: f32, s: f32| if s <= 0.5 { multiply(b, 2.0 * s) } else { screen(b, 2.0 * s - 1.0) };
+        match mode {
+            1 => multiply(b, s),
+            2 => screen(b, s),
+            3 => hard(s, b),
+            4 => b.min(s),
+            5 => b.max(s),
+            6 => {
+                if b <= 0.0 {
+                    0.0
+                } else if s >= 1.0 {
+                    1.0
+                } else {
+                    (b / (1.0 - s)).min(1.0)
+                }
+            }
+            7 => {
+                if b >= 1.0 {
+                    1.0
+                } else if s <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - ((1.0 - b) / s).min(1.0)
+                }
+            }
+            8 => hard(b, s),
+            9 => {
+                if s <= 0.5 {
+                    b - (1.0 - 2.0 * s) * b * (1.0 - b)
+                } else {
+                    let d = if b <= 0.25 { ((16.0 * b - 12.0) * b + 4.0) * b } else { b.sqrt() };
+                    b + (2.0 * s - 1.0) * (d - b)
+                }
+            }
+            10 => (b - s).abs(),
+            11 => b + s - 2.0 * b * s,
+            16 => (b + s).min(1.0),
+            17 => (b + s - 1.0).max(0.0),
+            _ => s,
+        }
+    }
+    fn lum(c: [f32; 3]) -> f32 {
+        0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+    }
+    fn clip(c: [f32; 3]) -> [f32; 3] {
+        let l = lum(c);
+        let n = c[0].min(c[1]).min(c[2]);
+        let x = c[0].max(c[1]).max(c[2]);
+        let mut o = c;
+        for v in o.iter_mut() {
+            if n < 0.0 {
+                *v = l + (*v - l) * l / (l - n);
+            }
+            if x > 1.0 {
+                *v = l + (*v - l) * (1.0 - l) / (x - l);
+            }
+        }
+        o
+    }
+    fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+        let d = l - lum(c);
+        clip([c[0] + d, c[1] + d, c[2] + d])
+    }
+    fn sat(c: [f32; 3]) -> f32 {
+        c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+    }
+    fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+        let mut idx = [0usize, 1, 2];
+        idx.sort_by(|a, b| c[*a].partial_cmp(&c[*b]).unwrap_or(std::cmp::Ordering::Equal));
+        let (mn, md, mx) = (idx[0], idx[1], idx[2]);
+        let mut o = [0.0; 3];
+        if c[mx] > c[mn] {
+            o[md] = (c[md] - c[mn]) * s / (c[mx] - c[mn]);
+            o[mx] = s;
+        }
+        o
+    }
+    let out = match mode {
+        12 => set_lum(set_sat(cs, sat(cb)), lum(cb)),
+        13 => set_lum(set_sat(cb, sat(cs)), lum(cb)),
+        14 => set_lum(cs, lum(cb)),
+        15 => set_lum(cb, lum(cs)),
+        _ => [sep(mode, cb[0], cs[0]), sep(mode, cb[1], cs[1]), sep(mode, cb[2], cs[2])],
+    };
+    let q = |v: f32| ((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32) & 0xff;
+    (q(out[0]) << 16) | (q(out[1]) << 8) | q(out[2])
+}

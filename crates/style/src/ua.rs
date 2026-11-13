@@ -183,7 +183,8 @@ hr[color], hr[noshade] { border-style: solid; }
 textarea[cols] { width: auto; }
 textarea[rows] { height: auto; }
 ruby { display: inline; }
-rt { display: inline; font-size: 50%; }
+rt { display: inline; font-size: 50%; text-emphasis: none; }
+rp { display: none; }
 noscript { display: inline; }
 @media (scripting: enabled) { noscript { display: none !important; } }
 "#;

@@ -2,7 +2,7 @@
 
 use crate::block::{Cb, Layouter};
 use crate::float::Bfc;
-use crate::text::{segment_tabs, transform, Collapser, Seg};
+use crate::text::{cjk_break_between, segment_tabs, split_cjk, transform, Collapser, Seg};
 use crate::tree::{DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{FontId, Rect};
@@ -174,6 +174,23 @@ fn open_parents(items: &[InlineItem], container: &ComputedStyle) -> Vec<Option<u
     out
 }
 
+/// The emphasis marks of text in `style`, with the side resolved in the
+/// line's logical space (vertical lines are laid out turned: the right
+/// side is the logical top in `vertical-rl`, the bottom in `vertical-lr`
+/// and `sideways-lr`).
+pub(crate) fn emphasis_of(style: &ComputedStyle) -> Option<crate::tree::Emphasis> {
+    let vertical = style.writing_mode.is_vertical();
+    let mark = style.text_emphasis_style.mark(vertical)?;
+    let over = if !vertical {
+        style.text_emphasis_over
+    } else if style.writing_mode == rabbithole_style::WritingMode::VerticalRl {
+        style.text_emphasis_right
+    } else {
+        !style.text_emphasis_right
+    };
+    Some(crate::tree::Emphasis { mark: Rc::from(mark.as_str()), color: style.text_emphasis_color.unwrap_or(style.color), over })
+}
+
 /// Split a word after hyphens so `foo-bar` can wrap after the dash.
 fn split_hyphens(w: &str) -> Vec<(String, bool)> {
     if w.len() < 3 || !w.contains('-') {
@@ -204,7 +221,7 @@ impl<'a> Layouter<'a> {
         let font = self.font_for(style);
         let size = style.font_size;
         let m = self.ctx.fonts.metrics(font, size);
-        let lh = style.line_height_px();
+        let lh = if style.line_height_tight { m.ascent + m.descent } else { style.line_height_px() };
         let half = (lh - (m.ascent + m.descent)) / 2.0;
         TextMetrics {
             asc: m.ascent,
@@ -231,6 +248,9 @@ impl<'a> Layouter<'a> {
         let mut stack: Vec<usize> = Vec::new();
         let mut pieces = Vec::new();
         let mut prev_break_opp = true;
+        // Last character of the previous word (breaks between ideographs
+        // need no space).
+        let mut prev_char: Option<char> = None;
         let mut segs = Vec::new();
         for (i, item) in items.iter().enumerate() {
             match item {
@@ -243,11 +263,34 @@ impl<'a> Layouter<'a> {
                     segs.clear();
                     segment_tabs(&t, ws, &mut col, &mut segs, style.tab_size.max(1.0) as usize);
                     let ls = style.letter_spacing;
+                    let keep_all = style.word_break == rabbithole_style::WordBreak::KeepAll;
+                    let strict = style.line_break == 2;
+                    let anywhere = style.line_break == 3;
                     for seg in segs.drain(..) {
                         match seg {
                             Seg::Word(w) => {
                                 let is_space_word = w.chars().all(|c| c == ' ');
+                                // A break between the previous word and this
+                                // one (ideographs break without spaces).
+                                if wraps && !prev_break_opp {
+                                    if let (Some(p), Some(c)) = (prev_char, w.chars().next()) {
+                                        if p != ' ' && c != ' ' && (anywhere || cjk_break_between(p, c, keep_all, strict)) {
+                                            prev_break_opp = true;
+                                        }
+                                    }
+                                }
+                                prev_char = w.chars().last();
+                                let mut parts: Vec<(String, bool)> = Vec::new();
                                 for (part, continuation) in split_hyphens(&w) {
+                                    if wraps && !is_space_word {
+                                        for (k, p) in split_cjk(&part, keep_all, strict, anywhere).into_iter().enumerate() {
+                                            parts.push((p, continuation || k > 0));
+                                        }
+                                    } else {
+                                        parts.push((part, continuation));
+                                    }
+                                }
+                                for (part, continuation) in parts {
                                     let width = self.measurer.width(font, size, &part) + ls * part.chars().count() as f32;
                                     // A break opportunity before a word comes from the
                                     // preceding whitespace (owned by whatever element
@@ -268,10 +311,12 @@ impl<'a> Layouter<'a> {
                                 let width = self.measurer.space_width(font, size) + style.word_spacing;
                                 pieces.push(Piece::Space { width, item: i });
                                 prev_break_opp = wraps;
+                                prev_char = Some(' ');
                             }
                             Seg::Break => {
                                 pieces.push(Piece::Break);
                                 prev_break_opp = true;
+                                prev_char = None;
                             }
                         }
                     }
@@ -286,6 +331,7 @@ impl<'a> Layouter<'a> {
                     }
                 }
                 InlineItem::Atomic(c) => {
+                    prev_char = None;
                     pieces.push(Piece::Atomic(*c));
                     prev_break_opp = container_wraps;
                     // An atomic box interrupts the whitespace sequence, so a
@@ -336,8 +382,18 @@ impl<'a> Layouter<'a> {
         let max_lines = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
         let (rel, rel_kids) = relative_offsets(&items, b.children.len(), cb.width, cb.height);
         let parent_open = open_parents(&items, &cstyle);
-        let inset_seen = std::collections::HashSet::new();
+        let bidi_items = items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal));
+        // `text-wrap: balance` (CSS Text 4 §6.1.2): the narrowest wrap
+        // width that keeps the line count, found by bisection over trial
+        // layouts (paragraphs of at most 6 lines without floats).
+        let balance = cstyle.text_wrap_balance && cstyle.white_space.wraps() && max_lines.is_none() && !items.iter().any(|it| matches!(it, InlineItem::Float(_)));
+        let mut wrap_limit: Option<f32> = None;
+        let mut passes = if balance { 14 } else { 0 };
+        let (mut lo, mut hi, mut want) = (0.0f32, cb.width, 0usize);
+        let mut first_pass = true;
+        loop {
         let mut lines = Vec::new();
+        let max_used;
         let height = {
             let mut il = InlineLayout {
                 lay: self,
@@ -359,25 +415,60 @@ impl<'a> Layouter<'a> {
                 max_lines,
                 final_flush: false,
                 done: false,
-                bidi_items: items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal)),
-                rel,
-                rel_kids,
-                parent_open,
-                inset_seen,
+                bidi_items,
+                rel: rel.clone(),
+                rel_kids: rel_kids.clone(),
+                parent_open: parent_open.clone(),
+                inset_seen: std::collections::HashSet::new(),
                 inset_fixups: Vec::new(),
                 inset_total: std::collections::HashMap::new(),
+                wrap_limit,
+                max_used: 0.0,
             };
             let h = il.run(&pieces);
             il.resolve_insets();
+            max_used = il.max_used;
             h
         };
+        if passes > 0 {
+            let n = lines.len();
+            if first_pass {
+                first_pass = false;
+                if (2..=6).contains(&n) {
+                    want = n;
+                    hi = max_used.min(cb.width);
+                    lo = 0.0;
+                } else {
+                    passes = 0;
+                }
+            } else {
+                passes -= 1;
+                let fits = n <= want && max_used <= wrap_limit.unwrap_or(f32::MAX) + 0.01;
+                if fits {
+                    hi = wrap_limit.unwrap_or(hi);
+                } else {
+                    lo = wrap_limit.unwrap_or(lo);
+                }
+            }
+            if passes > 1 && hi - lo > 0.5 {
+                wrap_limit = Some((lo + hi) / 2.0);
+                continue;
+            }
+            if passes > 0 && wrap_limit != Some(hi) {
+                // The final layout at the narrowest width that fits.
+                wrap_limit = Some(hi);
+                passes = 0;
+                continue;
+            }
+        }
         if inserted_marker {
             pieces.remove(0);
         }
         b.pieces = Some(pieces);
         b.items = items;
         b.lines = lines;
-        height
+        return height;
+        }
     }
 }
 
@@ -423,6 +514,9 @@ struct Line {
     open: Vec<OpenInline>,
     /// Index of the first fragment of the current unbreakable run.
     break_at: Option<usize>,
+    /// The line's end for alignment (`right` may be narrower when lines
+    /// are balanced).
+    align_right: f32,
 }
 
 struct InlineLayout<'l, 'a> {
@@ -454,6 +548,11 @@ struct InlineLayout<'l, 'a> {
     /// Relative offsets per item / atomic child (see [`relative_offsets`]).
     rel: Vec<(f32, f32)>,
     rel_kids: Vec<(f32, f32)>,
+    /// Lines wrap at this width (`text-wrap: balance`) but align in the
+    /// full one.
+    wrap_limit: Option<f32>,
+    /// Widest line content (trailing hanging spaces excluded).
+    max_used: f32,
     /// See [`open_parents`].
     parent_open: Vec<Option<usize>>,
     /// Inline elements with decoration insets already met on a line.
@@ -564,7 +663,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
         self.cur.y = y;
         self.cur.left = l;
-        self.cur.right = r;
+        self.cur.align_right = r;
+        self.cur.right = match self.wrap_limit {
+            Some(w) => r.min(l + w + if self.first_line { self.indent.max(0.0) } else { 0.0 }),
+            None => r,
+        };
         self.cur.x = l + if self.first_line { self.indent } else { 0.0 };
         self.cur.frags.clear();
         self.cur.bg.clear();
@@ -864,7 +967,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
         let shift = l - self.cur.left;
         self.cur.left = l;
-        self.cur.right = r;
+        self.cur.right = match self.wrap_limit {
+            Some(w) => r.min(l + w),
+            None => r,
+        };
+        self.cur.align_right = r;
         self.cur.x += shift;
         for o in &mut self.cur.open {
             o.start_x += shift;
@@ -955,7 +1062,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             ..
         }) = self.cur.frags.last_mut()
         {
-            if text.ends_with(' ') && text.len() > 1 {
+            // Preserved spaces stay (they hang or overflow instead; right-
+            // to-left lines still drop one, their hanging is not modelled).
+            let preserved = matches!(
+                item_style(self.items, self.cstyle, *item).white_space,
+                rabbithole_style::WhiteSpace::PreWrap | rabbithole_style::WhiteSpace::BreakSpaces
+            ) && self.cstyle.direction != Direction::Rtl;
+            if text.ends_with(' ') && text.len() > 1 && !preserved {
                 text.pop();
                 let style = item_style(self.items, self.cstyle, *item).clone();
                 let font = self.lay.font_for(&style);
@@ -1323,9 +1436,20 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         VerticalAlign::Length(v) => v,
                         _ => 0.0,
                     };
+                    let (mut above, mut below) = (tm.above + shift, tm.below - shift);
+                    // Emphasis marks need room beside the glyphs.
+                    if let Some(e) = emphasis_of(&style) {
+                        let m = self.lay.ctx.fonts.metrics(tm.font, tm.size / 2.0);
+                        let mh = m.ascent + m.descent;
+                        if e.over {
+                            above = above.max(tm.asc + shift + mh);
+                        } else {
+                            below = below.max(tm.desc - shift + mh);
+                        }
+                    }
                     FM {
-                        above: tm.above + shift,
-                        below: tm.below - shift,
+                        above,
+                        below,
                         mode: 0,
                         shift,
                         tm: Some(tm),
@@ -1394,9 +1518,27 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let y = self.cur.y;
         let baseline = y + a;
 
-        // Horizontal alignment.
-        let used = self.cur.x - self.cur.left;
-        let free = (self.cur.right - self.cur.left) - used;
+        // Horizontal alignment. Preserved spaces at the end of a `pre-wrap`
+        // line hang: what overflows the line does not count.
+        let mut hang = 0.0;
+        let trailing = match self.cur.frags.last() {
+            Some(PF { kind: PFKind::Text { text, item }, w, .. }) if text.ends_with(' ') => Some((*item, text.chars().rev().take_while(|c| *c == ' ').count(), *w)),
+            _ => None,
+        };
+        if let Some((item, n, w)) = trailing {
+            let st = self.style(item).clone();
+            if st.white_space == rabbithole_style::WhiteSpace::PreWrap {
+                let font = self.lay.font_for(&st);
+                let sw = self.lay.measurer.space_width(font, st.font_size) + st.letter_spacing;
+                let spaces = (sw * n as f32).min(w);
+                // At a soft wrap they hang unconditionally; before a forced
+                // break (or the end of the paragraph) only what overflows.
+                hang = if forced || self.final_flush { (self.cur.x - self.cur.right).clamp(0.0, spaces) } else { spaces };
+            }
+        }
+        let used = self.cur.x - self.cur.left - hang;
+        self.max_used = self.max_used.max(used);
+        let free = (self.cur.align_right - self.cur.left) - used;
         let rtl = self.cstyle.direction == Direction::Rtl;
         let shift_x = if rtl {
             // Content was mirrored to the right edge (start); `right` means
@@ -1532,6 +1674,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             shadows: style.text_shadow.clone(),
                             small_caps: style.font_variant_small_caps,
                             oblique,
+                            emphasis: if item == MARKER_ITEM { None } else { emphasis_of(&style) },
                         },
                     });
                 }
@@ -1563,7 +1706,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             *self.inset_total.entry(*o).or_insert(0.0) += hi - lo;
         }
         self.lines.push(LineBox {
-            rect: Rect::new(self.cur.left, y, (self.cur.right - self.cur.left).max(0.0), h),
+            rect: Rect::new(self.cur.left, y, (self.cur.align_right - self.cur.left).max(0.0), h),
             baseline,
             fragments,
         });

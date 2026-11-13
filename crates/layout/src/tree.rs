@@ -88,6 +88,16 @@ pub enum InlineItem {
     Break,
 }
 
+/// Emphasis marks over (or under) each typographic character of a text
+/// fragment (CSS Text Decoration 3 §3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Emphasis {
+    pub mark: Rc<str>,
+    pub color: Color,
+    /// On the logical top side (else the bottom).
+    pub over: bool,
+}
+
 /// The text decorations drawn over a text fragment.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecorationInfo {
@@ -131,6 +141,8 @@ pub enum FragmentKind {
         small_caps: bool,
         /// Synthetic oblique (italic requested, upright face chosen).
         oblique: bool,
+        /// `text-emphasis` marks.
+        emphasis: Option<Emphasis>,
     },
     /// Background / border segment of an inline element.
     InlineBox {
@@ -280,6 +292,8 @@ pub struct LayoutBox {
     /// A wrapper's physical background layers (images and gradients of the
     /// box it wraps, painted unturned).
     pub(crate) wm_background: Option<Rc<ComputedStyle>>,
+    /// Ruby layout role: 1 = a base/annotation pair box, 2 = its base.
+    pub(crate) ruby: u8,
 }
 
 /// Orientation of a writing-mode wrapper's contents relative to the space
@@ -339,6 +353,7 @@ impl LayoutBox {
             built_from: None,
             counter_io: None,
             wm_wrapper: false,
+            ruby: 0,
             wm_transform: None,
             wm_kind: WmKind::Cw,
             wm_background: None,

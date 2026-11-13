@@ -7,6 +7,7 @@ use rabbithole_css::PseudoElement;
 use rabbithole_dom::{Document, NodeData, NodeId};
 use rabbithole_style::{Color, ComputedStyle, Content, ContentItem, Display, Float, ListStyleType, Position};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 const REPLACED: &[&str] = &["img", "svg", "video", "canvas", "iframe", "embed", "object", "audio"];
@@ -443,6 +444,9 @@ impl<'a> Builder<'a> {
             // boxes of the same element and the block becomes a sibling in
             // the parent, which then wraps the inline runs in anonymous
             // blocks.
+            if tag == "ruby" && children.iter().any(|c| c.kind == BoxKind::Inline && c.node.is_some_and(|n| doc.tag(n) == Some("rt"))) {
+                children = self.ruby_pairs(children, &style);
+            }
             let splits = children.iter().any(|c| matches!(c.kind, BoxKind::Block | BoxKind::Table) && c.flow.is_in_flow());
             if !splits {
                 b.children = children;
@@ -801,6 +805,84 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The contents of a `<ruby>`: each run of base content followed by an
+    /// `<rt>` becomes an atomic pair box (CSS Ruby 1, simplified): the
+    /// annotation is a block centered over (`ruby-position: under`: under)
+    /// the base, both with lines as tall as their glyphs, and the pair takes
+    /// its baseline from the base. Content after the last `<rt>` stays
+    /// inline.
+    fn ruby_pairs(&self, children: Vec<LayoutBox>, ruby_style: &Rc<ComputedStyle>) -> Vec<LayoutBox> {
+        let doc = self.doc();
+        let is_rt = |c: &LayoutBox| c.kind == BoxKind::Inline && c.pseudo.is_none() && c.node.is_some_and(|n| doc.tag(n) == Some("rt"));
+        let mut out = Vec::new();
+        let mut base: Vec<LayoutBox> = Vec::new();
+        for c in children {
+            if is_rt(&c) {
+                let b = std::mem::take(&mut base);
+                out.push(self.ruby_pair(b, c, ruby_style));
+            } else {
+                base.push(c);
+            }
+        }
+        out.extend(base);
+        out
+    }
+
+    fn ruby_pair(&self, mut base: Vec<LayoutBox>, mut rt: LayoutBox, ruby_style: &Rc<ComputedStyle>) -> LayoutBox {
+        let mut ps = ComputedStyle::inherit_from(ruby_style);
+        ps.display = Display::InlineBlock;
+        ps.line_height_tight = true;
+        ps.text_align = rabbithole_style::TextAlign::Center;
+        ps.white_space = rabbithole_style::WhiteSpace::Nowrap;
+        let ps = Rc::new(ps);
+        let mut pair = LayoutBox::new(BoxKind::InlineBlock, None, ps.clone());
+        pair.bfc_root = true;
+        pair.counter_touch = true;
+        pair.ruby = 1;
+        // Whitespace around a base does not count.
+        while base.first().is_some_and(is_whitespace_text) {
+            base.remove(0);
+        }
+        while base.last().is_some_and(is_whitespace_text) {
+            base.pop();
+        }
+        let mut cache = HashMap::new();
+        for c in &mut base {
+            tighten(c, &mut cache);
+        }
+        let mut bs = ComputedStyle::inherit_from(&ps);
+        bs.display = Display::Block;
+        let mut bblk = LayoutBox::new(BoxKind::AnonymousBlock, None, Rc::new(bs));
+        bblk.ruby = 2;
+        self.finish_container(&mut bblk, base, false);
+        if bblk.items.is_empty() && bblk.children.is_empty() {
+            // An empty base still gives the pair a line (and a baseline).
+            let mut t = LayoutBox::new(BoxKind::Text, None, bblk.style.clone());
+            t.text = Some(Rc::from("\u{200B}"));
+            self.finish_container(&mut bblk, vec![t], false);
+        }
+        let mut rs = (*rt.style).clone();
+        rs.display = Display::Block;
+        rs.line_height_tight = true;
+        // Size containment does not apply to internal ruby boxes.
+        rs.contain_size = false;
+        rs.text_align = rabbithole_style::TextAlign::Center;
+        rs.white_space = rabbithole_style::WhiteSpace::Nowrap;
+        let mut ablk = LayoutBox::new(BoxKind::Block, rt.node, Rc::new(rs));
+        ablk.counter_touch = true;
+        let mut kids = std::mem::take(&mut rt.children);
+        for c in &mut kids {
+            tighten(c, &mut cache);
+        }
+        self.finish_container(&mut ablk, kids, false);
+        // `over` is the line's over side: the logical top, except in
+        // `vertical-lr` (laid out turned) where it is the logical bottom.
+        let under = ruby_style.ruby_under != (ruby_style.writing_mode == rabbithole_style::WritingMode::VerticalLr);
+        pair.children = if under { vec![bblk, ablk] } else { vec![ablk, bblk] };
+        pair.formatting = Formatting::Block;
+        pair
+    }
+
     /// Wrap an inline run in an anonymous block (dropping whitespace-only runs).
     fn flush_run(&self, run: &mut Vec<LayoutBox>, out: &mut Vec<LayoutBox>, parent_style: &Rc<ComputedStyle>) {
         if run.is_empty() {
@@ -1069,6 +1151,28 @@ impl<'a> Builder<'a> {
         wrapper.children.push(table);
         wrapper.children.extend(bottom);
         wrapper
+    }
+}
+
+/// Give the text of a ruby base or annotation lines as tall as its glyphs.
+fn tighten(b: &mut LayoutBox, cache: &mut HashMap<*const ComputedStyle, Rc<ComputedStyle>>) {
+    if !matches!(b.kind, BoxKind::Text | BoxKind::Inline | BoxKind::LineBreak) {
+        return;
+    }
+    if !b.style.line_height_tight {
+        let key = Rc::as_ptr(&b.style);
+        let s = cache
+            .entry(key)
+            .or_insert_with(|| {
+                let mut s = (*b.style).clone();
+                s.line_height_tight = true;
+                Rc::new(s)
+            })
+            .clone();
+        b.style = s;
+    }
+    for c in &mut b.children {
+        tighten(c, cache);
     }
 }
 

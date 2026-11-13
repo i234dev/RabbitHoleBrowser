@@ -1099,8 +1099,10 @@ impl Engine {
     pub fn new() -> Engine {
         let fonts = FontContext::new();
         fonts.load_system_fonts();
+        let fonts = Rc::new(fonts);
+        rabbithole_style::values::set_unit_fonts(Some(fonts.clone()));
         Engine {
-            fonts: Rc::new(fonts),
+            fonts,
             loader: Loader::new(),
             scripting: true,
             console_to_stderr: std::env::var("RH_JS_LOG").is_ok(),
@@ -1117,8 +1119,10 @@ impl Engine {
 
     /// Engine without system font discovery (faster startup for tests/CLI).
     pub fn new_bundled_fonts_only() -> Engine {
+        let fonts = Rc::new(FontContext::new());
+        rabbithole_style::values::set_unit_fonts(Some(fonts.clone()));
         Engine {
-            fonts: Rc::new(FontContext::new()),
+            fonts,
             loader: Loader::new(),
             scripting: true,
             console_to_stderr: std::env::var("RH_JS_LOG").is_ok(),

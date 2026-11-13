@@ -12,6 +12,7 @@ rabbithole-dom.workspace = true
 rabbithole-css.workspace = true
 rabbithole-style.workspace = true
 rabbithole-gfx.workspace = true
+unicode-properties = { version = "0.1.3", default-features = false, features = ["general-category"] }
 [dev-dependencies]
 rabbithole-html.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }

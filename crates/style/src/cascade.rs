@@ -270,6 +270,7 @@ impl ScopeIndex {
 }
 
 pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> StyledTree {
+    crate::values::clear_unit_cache();
     let mut engine = crate::restyle::StyleEngine::new(author, env);
     engine.full(doc, author, opts)
 }
@@ -649,11 +650,15 @@ fn apply_declarations(
     }
 
     // Pass 1: font-size (em resolves against the parent's font-size).
+    let (pch, pex, pic) = crate::values::font_units(parent);
     let parent_ctx = LengthContext {
         font_size: parent.font_size,
         root_font_size,
         viewport_w: env.width,
         viewport_h: env.height,
+        ch: pch,
+        ex: pex,
+        ic: pic,
     };
     for (name, value, _) in &resolved {
         match *name {
@@ -668,6 +673,17 @@ fn apply_declarations(
             _ => {}
         }
     }
+    // The element's font (for `ch` / `ex`): family, weight and style
+    // applied ahead of the other declarations (applied again in order).
+    let mut font_probe = style.clone();
+    for (name, value, base) in &resolved {
+        if matches!(*name, "font" | "font-family" | "font-weight" | "font-style") {
+            let ctx = ApplyCtx { len: parent_ctx, pseudo, base: *base, document_base: opts.document_base, resolve: opts.resolve_url };
+            apply_property(name, value, &mut font_probe, parent, &ctx);
+        }
+    }
+    let (ch, ex, ic) = crate::values::font_units(&font_probe);
+    drop(font_probe);
 
     // Pass 2: everything else.
     let len = LengthContext {
@@ -675,6 +691,9 @@ fn apply_declarations(
         root_font_size: if is_root { style.font_size } else { root_font_size },
         viewport_w: env.width,
         viewport_h: env.height,
+        ch,
+        ex,
+        ic,
     };
     // `color` first: `currentcolor` in every other property (borders,
     // backgrounds, shadows...) is the element's final color, whatever the
@@ -812,7 +831,8 @@ pub fn apply_decorations(style: &mut ComputedStyle, parent: &ComputedStyle) {
 /// declarations. `var()` references are left unresolved (dropped).
 pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declaration], root_font_size: f32, viewport: (f32, f32)) -> ComputedStyle {
     let mut style = base.clone();
-    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1 };
+    let (ch, ex, ic) = crate::values::font_units(base);
+    let len = LengthContext { font_size: base.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch, ex, ic };
     let keep = |_: &str, raw: &str| Some(raw.to_string());
     let ctx = ApplyCtx { len, pseudo: false, base: None, document_base: "", resolve: &keep };
     for d in decls {
@@ -820,7 +840,8 @@ pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declara
             continue;
         }
         if d.name == "font-size" {
-            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1 };
+            let (pch, pex, pic) = crate::values::font_units(parent);
+            let pctx = LengthContext { font_size: parent.font_size, root_font_size, viewport_w: viewport.0, viewport_h: viewport.1, ch: pch, ex: pex, ic: pic };
             apply_font_size(&d.value, &mut style, parent, &pctx);
             continue;
         }
@@ -1372,7 +1393,9 @@ fn is_inherited(name: &str) -> bool {
             | "border-collapse" | "border-spacing" | "direction" | "tab-size" | "word-break" | "overflow-wrap" | "word-wrap"
             | "text-shadow" | "quotes" | "pointer-events" | "user-select" | "font-variant" | "font-variant-caps"
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
-            | "accent-color" | "color-scheme" | "font-variation-settings"
+            | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
+            | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style"
+            | "font-synthesis" | "font-synthesis-style"
     )
 }
 
@@ -1465,6 +1488,24 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.text_decoration_thickness_from_font = from.text_decoration_thickness_from_font;
         }
         "text-underline-offset" => to.text_underline_offset = from.text_underline_offset,
+        "text-emphasis" => {
+            to.text_emphasis_style = from.text_emphasis_style.clone();
+            to.text_emphasis_color = from.text_emphasis_color;
+        }
+        "text-emphasis-style" => to.text_emphasis_style = from.text_emphasis_style.clone(),
+        "text-emphasis-color" => to.text_emphasis_color = from.text_emphasis_color,
+        "text-emphasis-position" => {
+            to.text_emphasis_over = from.text_emphasis_over;
+            to.text_emphasis_right = from.text_emphasis_right;
+        }
+        "ruby-position" => to.ruby_under = from.ruby_under,
+        "text-wrap-style" => to.text_wrap_balance = from.text_wrap_balance,
+        "text-wrap" => {
+            to.text_wrap_balance = from.text_wrap_balance;
+            to.white_space = from.white_space;
+        }
+        "font-synthesis" | "font-synthesis-style" => to.font_synthesis_style = from.font_synthesis_style,
+        "line-break" => to.line_break = from.line_break,
         "text-underline-position" => to.text_underline_position = from.text_underline_position,
         "text-decoration-inset" => to.text_decoration_inset = from.text_decoration_inset,
         "text-decoration-line" => to.text_decoration = from.text_decoration,
@@ -1634,7 +1675,11 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "caption-side" => to.caption_side_bottom = from.caption_side_bottom,
         "empty-cells" => to.empty_cells_hide = from.empty_cells_hide,
         "scroll-margin-top" => to.scroll_margin_top = from.scroll_margin_top,
-        "isolation" | "will-change" | "mix-blend-mode" => to.creates_stacking_context = from.creates_stacking_context,
+        "isolation" | "will-change" => to.creates_stacking_context = from.creates_stacking_context,
+        "mix-blend-mode" => {
+            to.creates_stacking_context = from.creates_stacking_context;
+            to.mix_blend_mode = from.mix_blend_mode;
+        }
         _ => {}
     }
 }
@@ -2525,7 +2570,11 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
         }
         "text-wrap" | "text-wrap-mode" => {
-            if let Some(kw) = values::ident(c0) {
+            if name == "text-wrap" {
+                // The shorthand resets text-wrap-style.
+                style.text_wrap_balance = comps.iter().any(|c| values::is_ident(c, "balance"));
+            }
+            for kw in comps.iter().filter_map(|c| values::ident(c)) {
                 match kw.as_str() {
                     "nowrap" => {
                         if style.white_space == WhiteSpace::Normal {

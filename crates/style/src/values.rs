@@ -20,6 +20,43 @@ pub struct LengthContext {
     pub root_font_size: f32,
     pub viewport_w: f32,
     pub viewport_h: f32,
+    /// `ch`, `ex` and `ic` of the element's font, in em.
+    pub ch: f32,
+    pub ex: f32,
+    pub ic: f32,
+}
+
+thread_local! {
+    static UNIT_FONTS: std::cell::RefCell<Option<std::rc::Rc<rabbithole_gfx::FontContext>>> = const { std::cell::RefCell::new(None) };
+    static UNIT_CACHE: std::cell::RefCell<std::collections::HashMap<(String, u8, u16, bool, usize), (f32, f32, f32)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Fonts used to resolve the font-relative units `ch` and `ex` on this
+/// thread (without them both are 0.5em).
+pub fn set_unit_fonts(fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>) {
+    UNIT_FONTS.with(|f| *f.borrow_mut() = fonts);
+    UNIT_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// Forget the cached `ch` / `ex` (fonts were added).
+pub fn clear_unit_cache() {
+    UNIT_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// `ch` (advance of "0") and `ex` (x-height) of a style's first available
+/// font, in em.
+pub fn font_units(style: &crate::ComputedStyle) -> (f32, f32, f32) {
+    UNIT_FONTS.with(|f| {
+        let f = f.borrow();
+        let Some(fonts) = f.as_ref() else { return (0.5, 0.5, 1.0) };
+        let key = (style.font_family_list.join(","), style.font_family as u8, style.font_weight, style.is_italic(), fonts.face_count());
+        if let Some(v) = UNIT_CACHE.with(|c| c.borrow().get(&key).copied()) {
+            return v;
+        }
+        let v = fonts.unit_metrics(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+        UNIT_CACHE.with(|c| c.borrow_mut().insert(key, v));
+        v
+    })
 }
 
 /// A linear combination of length units, the result of evaluating a
@@ -36,6 +73,9 @@ pub struct Lin {
     pub vh: f32,
     pub vmin: f32,
     pub vmax: f32,
+    pub ch: f32,
+    pub ex: f32,
+    pub ic: f32,
     /// True when this is a bare number (no unit at all).
     pub is_number: bool,
 }
@@ -52,6 +92,9 @@ impl Lin {
             vh: self.vh + sign * o.vh,
             vmin: self.vmin + sign * o.vmin,
             vmax: self.vmax + sign * o.vmax,
+            ch: self.ch + sign * o.ch,
+            ex: self.ex + sign * o.ex,
+            ic: self.ic + sign * o.ic,
             is_number: self.is_number && o.is_number,
         }
     }
@@ -66,6 +109,9 @@ impl Lin {
             vh: self.vh * f,
             vmin: self.vmin * f,
             vmax: self.vmax * f,
+            ch: self.ch * f,
+            ex: self.ex * f,
+            ic: self.ic * f,
             is_number: self.is_number,
         }
     }
@@ -81,6 +127,9 @@ impl Lin {
             + self.vh * ctx.viewport_h / 100.0
             + self.vmin * ctx.viewport_w.min(ctx.viewport_h) / 100.0
             + self.vmax * ctx.viewport_w.max(ctx.viewport_h) / 100.0
+            + self.ch * ctx.font_size * ctx.ch
+            + self.ex * ctx.font_size * ctx.ex
+            + self.ic * ctx.font_size * ctx.ic
     }
 }
 
@@ -103,6 +152,7 @@ pub enum LengthValue {
     Vmin(f32),
     Vmax(f32),
     Ch(f32),
+    Ic(f32),
     Ex(f32),
     Auto,
     /// Evaluated `calc()` expression.
@@ -273,7 +323,9 @@ impl LengthValue {
             LengthValue::Vh(v) => Length::Px(v * ctx.viewport_h / 100.0),
             LengthValue::Vmin(v) => Length::Px(v * ctx.viewport_w.min(ctx.viewport_h) / 100.0),
             LengthValue::Vmax(v) => Length::Px(v * ctx.viewport_w.max(ctx.viewport_h) / 100.0),
-            LengthValue::Ch(v) | LengthValue::Ex(v) => Length::Px(v * ctx.font_size * 0.5),
+            LengthValue::Ch(v) => Length::Px(v * ctx.font_size * ctx.ch),
+            LengthValue::Ex(v) => Length::Px(v * ctx.font_size * ctx.ex),
+            LengthValue::Ic(v) => Length::Px(v * ctx.font_size * ctx.ic),
             LengthValue::Auto => Length::Auto,
             LengthValue::Calc(lin) => {
                 if lin.has_percent() && lin.px_part(ctx) != 0.0 {
@@ -495,6 +547,7 @@ fn dimension(v: f32, unit: &str) -> Option<LengthValue> {
         "vmax" => LengthValue::Vmax(v),
         "ch" => LengthValue::Ch(v),
         "ex" => LengthValue::Ex(v),
+        "ic" => LengthValue::Ic(v),
         "pt" => LengthValue::Px(v * 4.0 / 3.0),
         "pc" => LengthValue::Px(v * 16.0),
         "cm" => LengthValue::Px(v * 96.0 / 2.54),
@@ -516,7 +569,9 @@ fn lin_of(lv: &LengthValue) -> Option<Lin> {
         LengthValue::Vh(v) => l.vh = *v,
         LengthValue::Vmin(v) => l.vmin = *v,
         LengthValue::Vmax(v) => l.vmax = *v,
-        LengthValue::Ch(v) | LengthValue::Ex(v) => l.em = *v * 0.5,
+        LengthValue::Ch(v) => l.ch = *v,
+        LengthValue::Ex(v) => l.ex = *v,
+        LengthValue::Ic(v) => l.ic = *v,
         LengthValue::Calc(lin) => l = *lin,
         LengthValue::Math(_, args) => l = *args.first()?,
         LengthValue::Tree(_) | LengthValue::Auto => return None,
@@ -818,7 +873,7 @@ mod tests {
     use rabbithole_css::Tokenizer;
 
     fn ctx() -> LengthContext {
-        LengthContext { font_size: 16.0, root_font_size: 16.0, viewport_w: 1000.0, viewport_h: 500.0 }
+        LengthContext { font_size: 16.0, root_font_size: 16.0, viewport_w: 1000.0, viewport_h: 500.0, ch: 0.5, ex: 0.5, ic: 1.0 }
     }
 
     fn len(s: &str) -> Length {

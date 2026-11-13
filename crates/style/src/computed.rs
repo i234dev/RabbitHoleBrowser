@@ -376,6 +376,58 @@ impl TextDecoration {
     }
 }
 
+/// `text-emphasis-style` (inherited).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum EmphasisStyle {
+    #[default]
+    None,
+    /// A shape: 0 = the writing mode's default (circle horizontally,
+    /// sesame vertically), 1 dot, 2 circle, 3 double-circle, 4 triangle,
+    /// 5 sesame.
+    Shape { open: bool, shape: u8 },
+    /// A `<string>` mark (its first grapheme cluster).
+    Custom(String),
+}
+
+impl EmphasisStyle {
+    /// The mark drawn, for a horizontal (`vertical` false) or vertical line.
+    pub fn mark(&self, vertical: bool) -> Option<String> {
+        match self {
+            EmphasisStyle::None => None,
+            EmphasisStyle::Custom(s) => {
+                let mut it = s.chars();
+                let first = it.next()?;
+                let mut m = first.to_string();
+                // Keep combining marks / variation selectors with the base.
+                for c in it {
+                    if matches!(c as u32, 0x300..=0x36F | 0xFE00..=0xFE0F | 0x200D | 0x3099 | 0x309A) {
+                        m.push(c);
+                    } else {
+                        break;
+                    }
+                }
+                Some(m)
+            }
+            EmphasisStyle::Shape { open, shape } => {
+                let shape = if *shape == 0 { if vertical { 5 } else { 2 } } else { *shape };
+                let c = match (shape, open) {
+                    (1, false) => '\u{2022}',
+                    (1, true) => '\u{25E6}',
+                    (2, false) => '\u{25CF}',
+                    (2, true) => '\u{25CB}',
+                    (3, false) => '\u{25C9}',
+                    (3, true) => '\u{25CE}',
+                    (4, false) => '\u{25B2}',
+                    (4, true) => '\u{25B3}',
+                    (5, false) => '\u{FE45}',
+                    _ => '\u{FE46}',
+                };
+                Some(c.to_string())
+            }
+        }
+    }
+}
+
 /// `text-underline-offset` (inherited).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum UnderlineOffset {
@@ -1057,6 +1109,29 @@ pub struct ComputedStyle {
     pub text_decoration_inset: (Length, Length),
     /// `text-underline-offset` (inherited).
     pub text_underline_offset: UnderlineOffset,
+    /// `text-emphasis-style` (inherited).
+    pub text_emphasis_style: EmphasisStyle,
+    /// `text-emphasis-color` (inherited; `None` = currentcolor).
+    pub text_emphasis_color: Option<Color>,
+    /// `text-emphasis-position` (inherited): `over` (else under) and
+    /// `right` (else left).
+    pub text_emphasis_over: bool,
+    pub text_emphasis_right: bool,
+    /// `ruby-position: under` (inherited).
+    pub ruby_under: bool,
+    /// `mix-blend-mode` (see `rabbithole_gfx::blend_mode_index`; 0 =
+    /// normal).
+    pub mix_blend_mode: u8,
+    /// `text-wrap-style: balance` (inherited).
+    pub text_wrap_balance: bool,
+    /// `font-synthesis` allows a synthesized oblique (inherited).
+    pub font_synthesis_style: bool,
+    /// `line-break` (inherited): 0 auto/normal, 1 loose, 2 strict,
+    /// 3 anywhere.
+    pub line_break: u8,
+    /// Layout-internal: lines are as tall as the font's ascent + descent
+    /// (ruby bases and annotations).
+    pub line_height_tight: bool,
     /// `text-underline-position` (inherited).
     pub text_underline_position: UnderlinePosition,
     /// Decorations painted on this element's text (inherited: computed
@@ -1243,6 +1318,16 @@ impl ComputedStyle {
             text_decoration_thickness_from_font: false,
             text_decoration_inset: (Length::ZERO, Length::ZERO),
             text_underline_offset: UnderlineOffset::Auto,
+            text_emphasis_style: EmphasisStyle::None,
+            text_emphasis_color: None,
+            text_emphasis_over: true,
+            text_emphasis_right: true,
+            ruby_under: false,
+            mix_blend_mode: 0,
+            text_wrap_balance: false,
+            font_synthesis_style: true,
+            line_break: 0,
+            line_height_tight: false,
             text_underline_position: UnderlinePosition::default(),
             applied_decorations: Vec::new(),
             direction: Direction::Ltr,
@@ -1308,6 +1393,15 @@ impl ComputedStyle {
             // draws propagate through `applied_decorations`.
             applied_decorations: parent.applied_decorations.clone(),
             text_underline_offset: parent.text_underline_offset,
+            text_emphasis_style: parent.text_emphasis_style.clone(),
+            text_emphasis_color: parent.text_emphasis_color,
+            text_emphasis_over: parent.text_emphasis_over,
+            text_emphasis_right: parent.text_emphasis_right,
+            ruby_under: parent.ruby_under,
+            text_wrap_balance: parent.text_wrap_balance,
+            font_synthesis_style: parent.font_synthesis_style,
+            line_break: parent.line_break,
+            line_height_tight: parent.line_height_tight,
             text_underline_position: parent.text_underline_position,
             text_transform: parent.text_transform,
             text_indent: parent.text_indent,
@@ -1356,6 +1450,15 @@ impl ComputedStyle {
             && self.text_align_webkit_center == o.text_align_webkit_center
             && self.applied_decorations == o.applied_decorations
             && self.text_underline_offset == o.text_underline_offset
+            && self.text_emphasis_style == o.text_emphasis_style
+            && self.text_emphasis_color == o.text_emphasis_color
+            && self.text_emphasis_over == o.text_emphasis_over
+            && self.text_emphasis_right == o.text_emphasis_right
+            && self.ruby_under == o.ruby_under
+            && self.text_wrap_balance == o.text_wrap_balance
+            && self.font_synthesis_style == o.font_synthesis_style
+            && self.line_break == o.line_break
+            && self.line_height_tight == o.line_height_tight
             && self.text_underline_position == o.text_underline_position
             && self.text_transform == o.text_transform
             && self.text_indent == o.text_indent

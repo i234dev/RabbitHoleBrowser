@@ -212,7 +212,7 @@ impl<'a> Layouter<'a> {
 
     /// Does `font` need a synthetic slant for an italic request?
     pub fn synthetic_oblique(&self, font: FontId, style: &ComputedStyle) -> bool {
-        style.is_italic() && self.font_ext && self.ctx.fonts.needs_synthetic_italic(font, true)
+        style.is_italic() && style.font_synthesis_style && self.font_ext && self.ctx.fonts.needs_synthetic_italic(font, true)
     }
 
     pub fn layout_document(&mut self) -> LayoutTree {
@@ -613,6 +613,9 @@ impl<'a> Layouter<'a> {
         let control_baseline = b.pseudo.is_none() && b.node.is_some_and(|n| matches!(self.ctx.doc.tag(n), Some("input" | "select" | "button")));
         b.baseline = if b.clips && !control_baseline {
             None
+        } else if b.ruby == 1 {
+            // A ruby pair aligns by its base.
+            b.children.iter().find(|c| c.ruby == 2).and_then(|c| c.last_baseline()).map(|bl| bl - b.rect.y)
         } else {
             b.last_baseline().map(|bl| bl - b.rect.y)
         };
