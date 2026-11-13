@@ -452,3 +452,24 @@ fn calc_percent_heights_fill_the_viewport_exactly() {
     assert_eq!(r("bottom").y + r("bottom").h, 900.0);
     assert_eq!(eval(&e, &mut page, "String(document.documentElement.scrollHeight)"), "900");
 }
+
+/// A media element's `textTracks` lists its `<track>` children's tracks
+/// and is indexable (svelte.dev sets `video.textTracks[0].mode` on startup;
+/// the list was always empty, so it threw and showed its error screen).
+#[test]
+fn media_text_tracks_include_track_children() {
+    let mut e = engine(true);
+    let mut page = load_doc(
+        &mut e,
+        "<video id=v><track kind=captions srclang=en default><track id=t2 kind=bogus></video><script>
+           var v = document.getElementById('v');
+           var tt = v.textTracks;
+           var before = [tt.length, tt[0].mode, tt[0].kind, tt[1].kind, tt[1].mode, tt[1].id].join();
+           tt[0].mode = 'hidden';
+           var extra = v.addTextTrack('subtitles', 'x', 'fr');
+           window.r = before + '|' + [v.textTracks.length, v.textTracks === tt, tt[0] === v.querySelector('track').track,
+             tt[0].mode, tt[2] === extra, tt.getTrackById('t2') === tt[1]].join();
+         </script>",
+    );
+    assert_eq!(eval(&e, &mut page, "r"), "2,showing,captions,metadata,disabled,t2|3,true,true,hidden,true,true");
+}
