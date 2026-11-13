@@ -253,7 +253,8 @@ impl Context {
         if t.width == 0 || t.height == 0 {
             return black;
         }
-        if (!t.width.is_power_of_two() || !t.height.is_power_of_two())
+        if self.context_version == 1
+            && (!t.width.is_power_of_two() || !t.height.is_power_of_two())
             && (t.wrap_s != gl::CLAMP_TO_EDGE || t.wrap_t != gl::CLAMP_TO_EDGE)
         {
             return black;

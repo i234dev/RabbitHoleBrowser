@@ -5,6 +5,7 @@ pub mod gl;
 mod raster;
 mod shader;
 mod texture;
+mod vertex_array;
 use shader::{Qual, Shader, Ty, Value};
 use std::collections::BTreeMap;
 pub use texture::MAX_TEXTURE_UNITS;
@@ -73,6 +74,7 @@ struct Executable {
 #[derive(Debug, Default)]
 struct Buffer {
     target: Option<u32>,
+    deleted: bool,
     bytes: Vec<u8>,
 }
 #[derive(Clone, Copy, Debug)]
@@ -84,7 +86,6 @@ struct Attribute {
     normalized: bool,
     stride: u32,
     offset: usize,
-    constant: [f32; 4],
 }
 impl Default for Attribute {
     fn default() -> Self {
@@ -96,7 +97,6 @@ impl Default for Attribute {
             normalized: false,
             stride: 0,
             offset: 0,
-            constant: [0., 0., 0., 1.],
         }
     }
 }
@@ -144,7 +144,11 @@ pub struct Context {
     depth_mask: bool,
     depth_test: bool,
     depth_func: u32,
+    context_version: u32,
     max_glsl_version: u32,
+    current_vertex_array: u32,
+    vertex_arrays: BTreeMap<u32, vertex_array::VertexArray>,
+    attribute_constants: [[f32; 4]; MAX_VERTEX_ATTRIBS as usize],
     next_id: u32,
     next_location: i32,
     shaders: BTreeMap<u32, ShaderObject>,
@@ -204,7 +208,11 @@ impl Context {
             depth_mask: true,
             depth_test: false,
             depth_func: gl::LESS,
+            context_version: 1,
             max_glsl_version: 100,
+            current_vertex_array: 0,
+            vertex_arrays: BTreeMap::from([(0, vertex_array::VertexArray::default())]),
+            attribute_constants: [[0., 0., 0., 1.]; MAX_VERTEX_ATTRIBS as usize],
             next_id: 1,
             next_location: 0,
             shaders: BTreeMap::new(),
@@ -769,7 +777,7 @@ impl Context {
         }
         if id != 0 {
             let b = self.buffers.get_mut(&id).ok_or(Error::InvalidOperation)?;
-            if b.target.is_some_and(|t| t != target) {
+            if b.deleted || b.target.is_some_and(|t| t != target) {
                 return Err(Error::InvalidOperation);
             }
             b.target = Some(target);
@@ -779,6 +787,7 @@ impl Context {
         } else {
             self.element_buffer = id;
         }
+        self.collect_deleted_buffers();
         Ok(())
     }
     fn bound_buffer(&self, target: u32) -> Result<u32> {
@@ -824,8 +833,7 @@ impl Context {
         if id == 0 {
             return Ok(());
         }
-        let b = self.buffers.remove(&id).ok_or(Error::InvalidValue)?;
-        self.buffer_bytes -= b.bytes.len();
+        self.buffers.get_mut(&id).ok_or(Error::InvalidValue)?.deleted = true;
         if self.array_buffer == id {
             self.array_buffer = 0;
         }
@@ -837,6 +845,7 @@ impl Context {
                 a.buffer = 0;
             }
         }
+        self.collect_deleted_buffers();
         Ok(())
     }
     pub fn vertex_attrib_pointer(
@@ -862,6 +871,7 @@ impl Context {
         a.normalized = normalized;
         a.stride = stride;
         a.offset = offset;
+        self.collect_deleted_buffers();
         Ok(())
     }
     pub fn enable_vertex_attrib_array(&mut self, index: u32, enabled: bool) -> Result<()> {
@@ -872,10 +882,7 @@ impl Context {
         Ok(())
     }
     pub fn vertex_attrib(&mut self, index: u32, value: [f32; 4]) -> Result<()> {
-        self.attributes
-            .get_mut(index as usize)
-            .ok_or(Error::InvalidValue)?
-            .constant = value;
+        *self.attribute_constants.get_mut(index as usize).ok_or(Error::InvalidValue)? = value;
         Ok(())
     }
     pub fn draw_arrays(&mut self, mode: u32, first: u32, count: u32) -> Result<()> {
@@ -895,6 +902,7 @@ impl Context {
         let size = match kind {
             gl::UNSIGNED_BYTE => 1,
             gl::UNSIGNED_SHORT => 2,
+            gl::UNSIGNED_INT if self.context_version == 2 => 4,
             _ => return Err(Error::InvalidEnum),
         };
         if offset % size != 0 {
@@ -908,12 +916,28 @@ impl Context {
         let src = b.get(offset..end).ok_or(Error::InvalidOperation)?;
         let indices: Vec<u32> = if size == 1 {
             src.iter().map(|v| *v as u32).collect()
-        } else {
+        } else if size == 2 {
             src.chunks_exact(2)
                 .map(|v| u16::from_le_bytes([v[0], v[1]]) as u32)
                 .collect()
+        } else {
+            src.chunks_exact(4).map(|v| u32::from_le_bytes(v.try_into().unwrap())).collect()
         };
-        self.draw(mode, &indices)
+        if self.context_version == 2 {
+            let restart = match size { 1 => u8::MAX as u32, 2 => u16::MAX as u32, _ => u32::MAX };
+            let mut triangles = Vec::new();
+            for segment in indices.split(|index| *index == restart) {
+                match mode {
+                    gl::TRIANGLES => triangles.extend(segment.chunks_exact(3).flatten().copied()),
+                    gl::TRIANGLE_FAN => { for i in 2..segment.len() { triangles.extend([segment[0], segment[i-1], segment[i]]); } },
+                    gl::TRIANGLE_STRIP => { for i in 2..segment.len() { triangles.extend(if i % 2 == 0 { [segment[i-2],segment[i-1],segment[i]] } else { [segment[i-1],segment[i-2],segment[i]] }); } },
+                    _ => unreachable!(),
+                }
+            }
+            // Check incomplete primitive references too, before any fragment writes.
+            self.validate_arrays(indices.iter().copied().filter(|index| *index != restart).max())?;
+            self.draw(gl::TRIANGLES, &triangles)
+        } else { self.draw(mode, &indices) }
     }
     fn validate_arrays(&self, max: Option<u32>) -> Result<()> {
         for a in &self.attributes {
@@ -941,7 +965,7 @@ impl Context {
     }
     fn attribute_value(&self, index: u32, vertex: u32, ty: Ty) -> Value {
         let a = self.attributes[index as usize];
-        let mut v = a.constant;
+        let mut v = self.attribute_constants[index as usize];
         if a.enabled {
             v = [0., 0., 0., 1.];
             let unit = scalar_size(a.kind).unwrap();

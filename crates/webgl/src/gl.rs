@@ -75,3 +75,6 @@ pub const BLEND_DST_RGB: u32 = 0x80C8;
 pub const BLEND_SRC_RGB: u32 = 0x80C9;
 pub const BLEND_DST_ALPHA: u32 = 0x80CA;
 pub const BLEND_SRC_ALPHA: u32 = 0x80CB;
+
+pub const UNSIGNED_INT: u32 = 0x1405;
+pub const VERTEX_ARRAY_BINDING: u32 = 0x85B5;

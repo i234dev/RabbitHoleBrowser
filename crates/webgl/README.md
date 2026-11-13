@@ -57,8 +57,7 @@ shared uniform types must agree. Uniforms start at zero after linking.
 
 Not implemented: general GLSL functions or control flow, arrays,
 integer/bool variables, derivatives, discard, swizzle assignments, framebuffer
-objects, stencil, points/lines, culling, multisampling, extensions or
-WebGL 2. Texture sampling has the explicit bounded subset below. Unsupported
+objects, stencil, points/lines, culling, multisampling, extensions. Texture sampling has the explicit bounded subset below. Unsupported
 shader operations are rejected, never synthesized.
 
 ## Limits and verification
@@ -133,3 +132,29 @@ Token limits are 256 characters in the default backend mode and 1024 in mode
 are rejected. `tests/glsl300.rs` verifies colored/textured triangles, named
 outputs, location precedence/alias errors, mixed-version links, source-version
 restrictions, token limits, and legacy-100 rendering under the optional mode.
+
+
+## Experimental WebGL2 context milestone
+
+`Context::new_webgl2` selects a distinct context version and admits the GLSL ES
+3.00 subset above. `new_with_glsl_version(..., 300)` alone remains a WebGL1
+backend context: a source-language ceiling is not a context version.
+
+The WebGL2 milestone adds vertex array objects with captured attribute pointers,
+enables and element-array bindings. ARRAY_BUFFER and generic attribute constants
+remain global. Deleting a buffer detaches current bindings while storage remains
+alive for inactive VAOs that still reference it; deleting those VAOs releases
+otherwise unused storage. UNSIGNED_INT element indices have checked alignment
+and bounds. Fixed primitive restart applies to byte, short and uint indices in
+WebGL2, including strips/fans, and never changes WebGL1 index semantics. NPOT
+textures can repeat in WebGL2 within the supported texture/filter subset.
+
+JavaScript has a distinct experimental `WebGL2RenderingContext`; it preserves
+canvas context exclusivity and rejects unimplemented commands and extra offset
+upload/readback overloads. This is not a conformant WebGL2 implementation or a
+Three.js compatibility claim. Instancing, integer attributes/uniforms, framebuffer
+objects/MRT, 3D textures, UBOs, queries, samplers, synchronization and transform
+feedback remain unsupported. Existing software limits still apply.
+
+`tests/vertex_arrays.rs` and the script WebGL tests check actual GLSL300 pixels,
+VAO switching/resource lifetimes, 32-bit indices, restart and WebGL1 isolation.
