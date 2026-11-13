@@ -132,3 +132,47 @@ fn service_worker_evaluation_errors_reject_registration_and_invalid_event_lifeti
     tick(&mut env, &mut host, 15);
     assert!(logs(&env).iter().any(|s| s.ends_with("lifetime InvalidStateError")));
 }
+
+#[test]
+fn service_worker_cache_bytes_are_shared_with_page_and_readers_are_independent() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), r#"
+        oninstall = event => event.waitUntil(caches.open('worker-cache').then(cache => cache.put('asset.bin', new Response(new Uint8Array([0, 128, 255]), { status: 201, headers: { 'x-cache-test': 'worker' } }))));
+    "#.into()));
+    run(&mut env, &mut host, "navigator.serviceWorker.register('sw.js');");
+    tick(&mut env, &mut host, 15);
+    let out = run(&mut env, &mut host, r#"
+        (async () => {
+            const cache = await caches.open('worker-cache');
+            const response = await cache.match('asset.bin');
+            console.log('cache', response.status, response.headers.get('x-cache-test'), Array.from(new Uint8Array(await response.arrayBuffer())).join(','));
+            console.log('independent', Array.from(new Uint8Array(await (await caches.match('asset.bin')).arrayBuffer())).join(','));
+            console.log('deleted', await caches.delete('worker-cache'), await caches.has('worker-cache'), (await caches.open('worker-cache').then(c => c.keys())).length, (await cache.keys()).length);
+        })().catch(e => console.log('error', e.name, e.message));
+    "#);
+    assert_eq!(out, ["cache 201 worker 0,128,255", "independent 0,128,255", "deleted true false 0 1"]);
+}
+
+#[test]
+fn service_worker_cache_respects_vary_search_methods_and_rejected_writes() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        (async () => {
+            const cache = await caches.open('vary');
+            const en = new Request('/asset?v=1', { headers: { 'accept-language': 'en' } });
+            const es = new Request('/asset?v=1', { headers: { 'accept-language': 'es' } });
+            const response = new Response('english', { headers: { vary: 'Accept-Language' } });
+            await cache.put(en, response);
+            console.log('consumed', response.bodyUsed);
+            await cache.put(es, new Response('spanish', { headers: { vary: 'Accept-Language' } }));
+            console.log('vary', await (await cache.match(en)).text(), await (await cache.match(es)).text(), (await cache.keys()).length);
+            console.log('query', await cache.match('/asset?v=2') === undefined, await (await cache.match(new Request('/asset?v=2', {headers:{'accept-language':'en'}}), {ignoreSearch:true})).text());
+            console.log('method', await cache.match(new Request('/asset?v=1', {method:'POST'})) === undefined);
+            for (const [request, response] of [['/bad', new Response('x', {status:206})], ['/bad', new Response('x', {headers:{vary:'*'}})], [new Request('/bad', {method:'POST'}), new Response('x')]]) {
+                try { await cache.put(request, response); } catch(e) { console.log('rejected', e.name); }
+            }
+            console.log('remaining', (await cache.keys()).length, await cache.delete(en), (await cache.keys()).length);
+        })().catch(e => console.log('error', e.name, e.message));
+    "#);
+    assert_eq!(out, ["consumed true", "vary english spanish 2", "query true english", "method true", "rejected TypeError", "rejected TypeError", "rejected TypeError", "remaining 2 true 1"]);
+}

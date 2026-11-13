@@ -738,50 +738,111 @@
   setNav('serviceWorker', swContainer);
   hidden(g, '__rhSW', { registration: swRegistration, worker: swWorker });
 
-  // Cache Storage: functional, in memory for the page's lifetime.
-  const reqKey = (r) => { const u = new URL(r instanceof g.Request ? r.url : String(r), (g.document ? g.document.baseURI : g.location.href)); u.hash = ''; return u.href; };
+  // Cache Storage shares byte records by origin with this Engine's workers.
+  const cacheOp = (op, id = 0, key = '', value = '') => N.cacheOperation(op, id, key, value);
+  const cacheRequest = input => input instanceof g.Request ? input : new g.Request(input);
+  const cacheURL = req => { const u = new URL(req.url); u.hash = ''; return u.href; };
+  const cacheEntries = id => cacheOp('entries', id).map(e => ({ key: e.key, record: JSON.parse(e.record) }));
+  const cacheMatches = (record, request, opts) => {
+    if (!request) return true;
+    if (!opts.ignoreMethod && request.method !== 'GET') return false;
+    let query = cacheURL(request), stored = record.request.url;
+    if (opts.ignoreSearch) { query = query.split('?')[0]; stored = stored.split('?')[0]; }
+    if (query !== stored) return false;
+    if (!opts.ignoreVary) {
+      const vary = new g.Headers(record.response.headers).get('vary');
+      const previous = new g.Headers(record.request.headers);
+      if (vary) for (const name of vary.split(',').map(n => n.trim().toLowerCase())) {
+        if (name === '*' || previous.get(name) !== request.headers.get(name)) return false;
+      }
+    }
+    return true;
+  };
+  const cacheDecode = record => {
+    const data = record.response;
+    // Constructing from bytes gives each reader its own unconsumed body.
+    const response = new g.Response(new Uint8Array(data.bytes), { headers: data.headers });
+    for (const name of ['status', 'statusText', 'url', 'type', 'redirected']) Object.defineProperty(response, name, { value: data[name], configurable: true, enumerable: true });
+    Object.defineProperty(response, 'ok', { value: data.status >= 200 && data.status < 300, configurable: true, enumerable: true });
+    return response;
+  };
+  const cacheEncode = (input, response) => {
+    const request = cacheRequest(input);
+    const url = new URL(request.url);
+    if (!['http:', 'https:'].includes(url.protocol) || request.method !== 'GET') throw new TypeError('Cache requests must use HTTP(S) and GET.');
+    if (!(response instanceof g.Response)) throw new TypeError('Cache.put requires a Response.');
+    if (response.status === 206) throw new TypeError('Partial responses cannot be cached.');
+    if ((response.headers.get('vary') || '').split(',').some(n => n.trim() === '*')) throw new TypeError('Responses with Vary: * cannot be cached.');
+    const record = {
+      request: { url: cacheURL(request), headers: Array.from(request.headers.entries()) },
+      response: { status: response.status, statusText: response.statusText, headers: Array.from(response.headers.entries()), url: response.url, type: response.type, redirected: response.redirected, bytes: [] },
+    };
+    return response.arrayBuffer().then(buffer => {
+      record.response.bytes = Array.from(new Uint8Array(buffer));
+      return { request, record };
+    });
+  };
+  const cacheStore = (id, request, record) => {
+    for (const entry of cacheEntries(id)) if (cacheMatches(entry.record, request, {})) cacheOp('remove', id, entry.key);
+    const key = JSON.stringify(record.request);
+    cacheOp('put', id, key, JSON.stringify(record));
+  };
   class Cache {
     constructor() { ILLEGAL(); }
-    match(req, opts = {}) { return this.matchAll(req, opts).then((l) => l[0]); }
+    match(req, opts = {}) { return this.matchAll(req, opts).then(list => list[0]); }
     matchAll(req, opts = {}) {
-      const out = [];
-      for (const [k, v] of this[S]) {
-        if (req !== undefined) {
-          let key = reqKey(req), stored = k;
-          if (opts.ignoreSearch) { key = key.split('?')[0]; stored = stored.split('?')[0]; }
-          if (key !== stored) continue;
-          if (!opts.ignoreMethod && req instanceof g.Request && req.method !== 'GET' && req.method !== 'HEAD') continue;
-        }
-        out.push(v.response.clone());
-      }
-      return Promise.resolve(out);
+      return Promise.resolve().then(() => {
+        const request = req === undefined ? null : cacheRequest(req);
+        return cacheEntries(this[S]).filter(e => cacheMatches(e.record, request, opts)).map(e => cacheDecode(e.record));
+      });
     }
     add(req) { return this.addAll([req]); }
     addAll(reqs) {
-      return Promise.all(Array.from(reqs).map((r) => g.fetch(r).then((resp) => { if (!resp.ok) throw new TypeError("Failed to execute 'addAll' on 'Cache': Request failed"); return [r, resp]; }))).then((pairs) => { for (const [r, resp] of pairs) this[S].set(reqKey(r), { response: resp }); });
+      return Promise.resolve().then(() => {
+        const requests = Array.from(reqs, cacheRequest);
+        const urls = requests.map(cacheURL);
+        if (new Set(urls).size !== urls.length) throw new TypeError('Cache.addAll cannot contain duplicate requests.');
+        for (const r of requests) if (r.method !== 'GET' || !['http:', 'https:'].includes(new URL(r.url).protocol)) throw new TypeError('Cache requests must use HTTP(S) and GET.');
+        return Promise.all(requests.map(request => g.fetch(request).then(response => {
+          if (!response.ok) throw new TypeError('Cache.addAll request failed.');
+          return cacheEncode(request, response);
+        })));
+      }).then(entries => { for (const e of entries) cacheStore(this[S], e.request, e.record); });
     }
-    put(req, resp) {
-      if (!(resp instanceof g.Response)) return Promise.reject(new TypeError("Failed to execute 'put' on 'Cache': parameter 2 is not of type 'Response'."));
-      if (resp.status === 206) return Promise.reject(new TypeError("Failed to execute 'put' on 'Cache': Partial response (status code 206) is unsupported"));
-      this[S].set(reqKey(req), { response: resp.clone() });
-      return Promise.resolve();
+    put(req, response) { return Promise.resolve().then(() => cacheEncode(req, response)).then(e => cacheStore(this[S], e.request, e.record)); }
+    delete(req, opts = {}) {
+      return Promise.resolve().then(() => {
+        const request = cacheRequest(req);
+        let deleted = false;
+        for (const entry of cacheEntries(this[S])) if (cacheMatches(entry.record, request, opts)) { cacheOp('remove', this[S], entry.key); deleted = true; }
+        return deleted;
+      });
     }
-    delete(req) { return Promise.resolve(this[S].delete(reqKey(req))); }
-    keys(req) { return Promise.resolve(Array.from(this[S].keys()).filter((k) => req === undefined || k === reqKey(req)).map((k) => new g.Request(k))); }
+    keys(req, opts = {}) {
+      return Promise.resolve().then(() => {
+        const request = req === undefined ? null : cacheRequest(req);
+        return cacheEntries(this[S]).filter(e => cacheMatches(e.record, request, opts)).map(e => new g.Request(e.record.request.url, { headers: e.record.request.headers }));
+      });
+    }
   }
   tag(Cache, 'Cache');
   class CacheStorage {
     constructor() { ILLEGAL(); }
-    match(req, opts = {}) { const names = opts.cacheName ? [opts.cacheName] : Array.from(this[S].keys()); return names.reduce((p, n) => p.then((hit) => hit || (this[S].has(n) ? this[S].get(n).match(req, opts) : undefined)), Promise.resolve(undefined)); }
-    has(name) { return Promise.resolve(this[S].has(String(name))); }
-    open(name) { name = String(name); if (!this[S].has(name)) this[S].set(name, make(Cache, new Map())); const c = this[S].get(name); hidden(c, S, c[S]); return Promise.resolve(c); }
-    delete(name) { return Promise.resolve(this[S].delete(String(name))); }
-    keys() { return Promise.resolve(Array.from(this[S].keys())); }
+    match(req, opts = {}) {
+      return Promise.resolve().then(() => {
+        const names = opts.cacheName !== undefined ? [String(opts.cacheName)] : cacheOp('names');
+        return names.reduce((p, name) => p.then(hit => hit || (cacheOp('names').includes(name) ? make(Cache, cacheOp('open', 0, name)).match(req, opts) : undefined)), Promise.resolve(undefined));
+      });
+    }
+    has(name) { return Promise.resolve().then(() => cacheOp('names').includes(String(name))); }
+    open(name) { return Promise.resolve().then(() => make(Cache, cacheOp('open', 0, String(name)))); }
+    delete(name) { return Promise.resolve().then(() => cacheOp('delete', 0, String(name))); }
+    keys() { return Promise.resolve().then(() => cacheOp('names')); }
   }
   tag(CacheStorage, 'CacheStorage');
   define('Cache', Cache);
   define('CacheStorage', CacheStorage);
-  const caches = make(CacheStorage, new Map());
+  const caches = make(CacheStorage);
   Object.defineProperty(g, 'caches', { get() { return caches; }, configurable: true, enumerable: true });
 
   // Scroll methods return a promise settled when the scroll completes

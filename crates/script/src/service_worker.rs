@@ -45,6 +45,12 @@ struct Store {
     workers: BTreeMap<u64, Worker>,
     runtimes: BTreeMap<u64, Runtime>,
     jobs: VecDeque<Job>,
+    cache_names: BTreeMap<String, Vec<(String, u64)>>,
+    caches: BTreeMap<u64, CacheRecord>,
+}
+struct CacheRecord {
+    origin: String,
+    entries: Vec<(String, String)>,
 }
 struct Client {
     url: Url,
@@ -256,6 +262,7 @@ fn take_events(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
     Ok(realm.new_array_value(out))
 }
 pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
+    realm.define_method(n, "cacheOperation", 4, cache_operation);
     realm.define_method(n, "swRegister", 4, register);
     realm.define_method(n, "swUnregister", 1, unregister);
     realm.define_method(n, "swSnapshot", 0, snapshot);
@@ -263,6 +270,60 @@ pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
     realm.define_method(n, "swEventDone", 1, event_done);
     realm.define_method(n, "swSkipWaiting", 0, skip_waiting);
     realm.define_method(n, "swClaim", 0, claim);
+}
+
+// Serialized response records cross realms without retaining any foreign GC
+// values. Cache objects keep their storage identity even after name deletion.
+fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let op = arg_str(realm, args, 0)?;
+    let key = arg_str(realm, args, 2)?;
+    let payload = arg_str(realm, args, 3)?;
+    let id = realm.to_number(arg(args, 1))? as u64;
+    let url = with_env(|e| e.document_url());
+    if !trustworthy(&url) { return Err(exception(realm, "SecurityError", "Cache Storage requires a secure, non-opaque origin")); }
+    let origin = url.origin();
+    let store = registry(realm)?;
+    let mut s = store.borrow_mut();
+    match op.as_str() {
+        "names" => {
+            let names = s.cache_names.get(&origin).map(|names| names.iter().map(|(n, _)| Value::str(n)).collect()).unwrap_or_default();
+            Ok(realm.new_array_value(names))
+        }
+        "open" => {
+            if let Some(id) = s.cache_names.get(&origin).and_then(|names| names.iter().find(|(name, _)| name == &key).map(|(_, id)| *id)) { return Ok(Value::Number(id as f64)); }
+            let id = s.id();
+            s.caches.insert(id, CacheRecord { origin: origin.clone(), entries: Vec::new() });
+            s.cache_names.entry(origin).or_default().push((key, id));
+            Ok(Value::Number(id as f64))
+        }
+        "delete" => {
+            let names = s.cache_names.entry(origin).or_default();
+            let found = names.iter().position(|(name, _)| name == &key);
+            if let Some(i) = found { names.remove(i); }
+            Ok(Value::Bool(found.is_some()))
+        }
+        _ => {
+            let cache = s.caches.get_mut(&id).filter(|cache| cache.origin == origin).ok_or_else(|| realm.throw_type_error("Invalid cache storage identity"))?;
+            match op.as_str() {
+                "entries" => {
+                    let mut out = Vec::new();
+                    for (key, payload) in &cache.entries { out.push(object(realm, &[("key", Value::str(key)), ("record", Value::str(payload))])); }
+                    Ok(realm.new_array_value(out))
+                }
+                "put" => {
+                    if let Some(entry) = cache.entries.iter_mut().find(|(k, _)| *k == key) { entry.1 = payload; }
+                    else { cache.entries.push((key, payload)); }
+                    Ok(Value::Undefined)
+                }
+                "remove" => {
+                    let found = cache.entries.iter().position(|(k, _)| *k == key);
+                    if let Some(i) = found { cache.entries.remove(i); }
+                    Ok(Value::Bool(found.is_some()))
+                }
+                _ => Err(realm.throw_type_error("Unknown cache operation")),
+            }
+        }
+    }
 }
 
 fn reject_job(s: &mut Store, job: &Job, name: &str, message: &str) {

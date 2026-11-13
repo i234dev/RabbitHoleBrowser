@@ -81,7 +81,7 @@ fn real_service_worker_script_activates_and_survives_document_navigation() {
     let worker = r#"self.addEventListener('install', e => {
       e.waitUntil(fetch('install.txt').then(r => r.text()).then(text => {
         console.log('install-data', text, typeof document, typeof window);
-        return new Promise(resolve => setTimeout(resolve, 25));
+        return caches.open('install-cache').then(cache => cache.put('cached.txt', new Response(text))).then(() => new Promise(resolve => setTimeout(resolve, 25)));
       }));
     });
     self.addEventListener('activate', e => e.waitUntil(clients.claim()));"#;
@@ -101,9 +101,13 @@ fn real_service_worker_script_activates_and_survives_document_navigation() {
     wait(&engine, &mut page, "installed === true");
     assert!(page.take_console().iter().any(|(_, text)| text.contains("install-data local-install-response undefined undefined")));
     assert_eq!(engine.eval_in_page(&mut page, "states.join(',')"), "'installed,activating,activated'");
+    engine.eval_in_page(&mut page, "var cached; caches.match('cached.txt').then(r => r.text()).then(t => cached = t);");
+    wait(&engine, &mut page, "cached === 'local-install-response'");
     drop(page);
     let mut page = engine.load(&format!("{}/app/next.html", server.origin), vp).unwrap();
     wait(&engine, &mut page, "controlled === true");
+    engine.eval_in_page(&mut page, "var cached; caches.match('cached.txt').then(r => r.text()).then(t => cached = t);");
+    wait(&engine, &mut page, "cached === 'local-install-response'");
     engine.eval_in_page(&mut page, "var removed; navigator.serviceWorker.getRegistration().then(async r => removed = [await r.unregister(), await r.unregister(), navigator.serviceWorker.controller !== null].join(','));");
     wait(&engine, &mut page, "typeof removed === 'string'");
     assert_eq!(engine.eval_in_page(&mut page, "removed"), "'true,false,true'");
@@ -132,4 +136,24 @@ fn service_worker_allowed_header_extends_scope_without_controlling_first_page() 
     let mut engine = engine();
     let mut page = engine.load(&format!("{}/app/index.html", server.origin), Viewport { width: 640.0, height: 480.0 }).unwrap();
     wait(&engine, &mut page, "active === true");
+}
+
+#[test]
+fn cache_storage_is_origin_partitioned_and_survives_navigation() {
+    let html = "<!doctype html><body>local cache fixture";
+    let server = Server::new(&[("/page.html", "text/html", html, &[])]);
+    let other = Server::new(&[("/page.html", "text/html", html, &[])]);
+    let mut engine = engine();
+    let vp = Viewport { width: 320.0, height: 240.0 };
+    let mut page = engine.load(&format!("{}/page.html", server.origin), vp).unwrap();
+    engine.eval_in_page(&mut page, "var stored = false; caches.open('shared').then(c => c.put('/key', new Response('origin-one'))).then(() => stored = true);");
+    wait(&engine, &mut page, "stored === true");
+    drop(page);
+    let mut page = engine.load(&format!("{}/page.html", other.origin), vp).unwrap();
+    engine.eval_in_page(&mut page, "var isolated = false; caches.keys().then(keys => isolated = keys.length === 0);");
+    wait(&engine, &mut page, "isolated === true");
+    drop(page);
+    let mut page = engine.load(&format!("{}/page.html", server.origin), vp).unwrap();
+    engine.eval_in_page(&mut page, "var recovered; caches.match('/key').then(r => r.text()).then(text => recovered = text);");
+    wait(&engine, &mut page, "recovered === 'origin-one'");
 }

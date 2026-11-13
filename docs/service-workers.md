@@ -29,9 +29,17 @@ client enumeration, navigation preload, and fetch interception are not implement
 unsupported exposed operations reject explicitly. Installing a worker therefore
 does not yet provide offline navigation or intercept network requests.
 
-Cache Storage currently retains its existing per-realm, in-memory implementation;
-page and service-worker caches are not shared yet. Do not rely on a worker's
-cache being visible to its controlled page.
+Cache Storage shares response bytes and request metadata by origin within the
+Engine, including between documents and service-worker realms. Each match creates
+a fresh response body. Cache handles remain usable after their name is deleted;
+opening that name again creates a new cache. Request matching supports `Vary`,
+`ignoreVary`, `ignoreSearch`, and `ignoreMethod`. Invalid writes (non-GET, non-HTTP,
+partial responses, and `Vary: *`) reject without changing stored entries.
+
+Cache Storage is also memory-only, without disk persistence, quota accounting,
+eviction, or storage partitioning beyond origin. Deleted cache handles retain
+their byte storage until the Engine is dropped. HTTP cache policy remains
+separate from the explicit Cache API.
 
 Validation uses local HTTP fixtures in `crates/engine/tests/service_workers.rs`
 and focused lifecycle tests in `crates/script/src/tests_service_worker.rs`.
