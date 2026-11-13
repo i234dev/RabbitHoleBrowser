@@ -1541,7 +1541,24 @@ mod tests {
         assert!(Url::parse("hello world").is_none());
         assert!(Url::parse("").is_none());
         assert!(Url::parse("justaword").is_none());
-        assert_eq!(Url::parse("/tmp").unwrap().to_string(), "file:///tmp");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_user_input_local_path() {
+        // The root exists on every Unix host; /tmp is neither guaranteed to
+        // exist nor an absolute native path on Windows.
+        assert_eq!(Url::parse("/").unwrap().to_string(), "file:///");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_url_windows_path() {
+        // File URL parsing does not require the target to exist. Keep the
+        // drive prefix when converting a URL to a native Windows path.
+        let url = Url::parse("file:///C:/Users/example/a%20b.html").unwrap();
+        assert_eq!(url.to_string(), "file:///C:/Users/example/a%20b.html");
+        assert_eq!(url.file_path().unwrap(), PathBuf::from(r"C:\Users\example\a b.html"));
     }
 
     #[test]
