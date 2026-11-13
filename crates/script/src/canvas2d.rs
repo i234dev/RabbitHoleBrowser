@@ -26,7 +26,8 @@ pub struct Surface {
 
 #[derive(Default)]
 pub struct CanvasStore {
-    surfaces: HashMap<u32, Surface>,
+    pub(crate) surfaces: HashMap<u32, Surface>,
+    pub(crate) webgl: crate::webgl::WebGlStore,
     next: u32,
 }
 
@@ -41,7 +42,7 @@ fn fonts() -> Rc<FontContext> {
     FALLBACK_FONTS.with(|f| f.borrow_mut().get_or_insert_with(|| Rc::new(FontContext::new())).clone())
 }
 
-fn store<R>(f: impl FnOnce(&mut CanvasStore) -> R) -> R {
+pub(crate) fn store<R>(f: impl FnOnce(&mut CanvasStore) -> R) -> R {
     let st = state();
     let mut st = st.borrow_mut();
     f(&mut st.canvases)
@@ -445,6 +446,11 @@ fn with_surface<R>(realm: &mut Realm, id: &Value, f: impl FnOnce(&mut Realm, &mu
 fn canvas_resize(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let w = num(realm, args, 1)?.max(0.0) as u32;
     let h = num(realm, args, 2)?.max(0.0) as u32;
+    let id = num(realm, args, 0)? as u32;
+    if store(|st| st.webgl.contexts.contains_key(&id)) {
+        crate::webgl::resize_surface(id, w, h).map_err(|_| realm.throw_range_error("Canvas drawing buffer is too large"))?;
+        return Ok(Value::Undefined);
+    }
     with_surface(realm, &arg(args, 0), |_, s| {
         s.width = w;
         s.height = h;
@@ -465,7 +471,7 @@ fn canvas_free_clip(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 
 fn canvas_free(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = num(realm, args, 0)? as u32;
-    store(|st| st.surfaces.remove(&id));
+    store(|st| { st.webgl.contexts.remove(&id); st.surfaces.remove(&id) });
     Ok(Value::Undefined)
 }
 

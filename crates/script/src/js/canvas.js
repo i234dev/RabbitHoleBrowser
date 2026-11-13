@@ -5,7 +5,8 @@
 // engine fonts), Path2D (incl. SVG path data), TextMetrics, ImageData,
 // ImageBitmap / createImageBitmap, ImageBitmapRenderingContext, toDataURL /
 // toBlob (PNG, JPEG). The bitmap of a connected <canvas> is handed to the
-// engine for painting. WebGL / WebGPU contexts are unsupported (null).
+// engine for painting. Experimental software WebGL1 is in webgl.js;
+// WebGL2 / WebGPU contexts remain unavailable.
 (function () {
   'use strict';
   const g = globalThis;
@@ -339,8 +340,11 @@
     else if (s.width !== w || s.height !== h) {
       // Resizing a canvas clears it and resets the context.
       s.width = w; s.height = h;
-      N.canvasResize(s.id, w, h);
-      if (s.ctx) resetState(s.ctx);
+      if (s.mode === 'webgl') N.resizeWebGLSurface(s, w, h);
+      else {
+        N.canvasResize(s.id, w, h);
+        if (s.ctx) resetState(s.ctx);
+      }
       markDirty(s);
     }
     return s;
@@ -355,9 +359,17 @@
   }
   function flushCanvases() {
     flushQueued = false;
-    for (const s of pendingFlush) if (s.owner.isConnected) N.canvasPresent(s.id, s.owner);
+    for (const s of pendingFlush) if (s.owner.isConnected) {
+      N.canvasPresent(s.id, s.owner);
+      if (s.mode === 'webgl') N.webglSurfacePresented(s);
+    }
     pendingFlush.clear();
   }
+
+  // Internal shared surface hooks: WebGL presents actual pixels through
+  // the same canvas pipeline, including drawImage and PNG/JPEG encoding.
+  hidden(N, 'canvasMarkDirty', markDirty);
+  hidden(N, 'canvasSurface', surfaceOf);
 
   // ------------------------------------------------ CanvasRenderingContext2D
   const DEFAULT_STATE = () => ({ fillStyle: '#000000', fill: [0, 0, 0, 1], strokeStyle: '#000000', stroke: [0, 0, 0, 1], globalAlpha: 1, globalCompositeOperation: 'source-over', lineWidth: 1, lineCap: 'butt', lineJoin: 'miter', miterLimit: 10, lineDash: [], lineDashOffset: 0, font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', direction: 'inherit', letterSpacing: '0px', wordSpacing: '0px', fontKerning: 'auto', fontStretch: 'normal', fontVariantCaps: 'normal', textRendering: 'auto', shadowBlur: 0, shadowColor: 'rgba(0, 0, 0, 0)', shadow: [0, 0, 0, 0], shadowOffsetX: 0, shadowOffsetY: 0, filter: 'none', imageSmoothingEnabled: true, imageSmoothingQuality: 'low', lang: 'inherit', m: [1, 0, 0, 1, 0, 0], clip: null });
@@ -611,7 +623,7 @@
 
   const b64 = (bytes) => { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); return g.btoa(s); };
   const mimeOf = (type) => (String(type || '').toLowerCase() === 'image/jpeg' ? 'image/jpeg' : 'image/png');
-  function encode(s, type, quality) { const b = s.width && s.height ? N.canvasEncode(s.id, mimeOf(type), quality === undefined ? 0.92 : +quality) : null; return b ? new Uint8Array(b) : null; }
+  function encode(s, type, quality) { const b = s.width && s.height && !s.lost ? N.canvasEncode(s.id, mimeOf(type), quality === undefined ? 0.92 : +quality) : null; return b ? new Uint8Array(b) : null; }
 
   // -------------------------------------------------------- HTMLCanvasElement
   const contexts = new WeakMap();
@@ -620,12 +632,14 @@
     hidden(ctx, S, { canvas: owner, surface, attrs: { alpha: attrs.alpha !== false, colorSpace: attrs.colorSpace || 'srgb', desynchronized: !!attrs.desynchronized, willReadFrequently: !!attrs.willReadFrequently, colorType: 'unorm8' } });
     resetState(ctx);
     surface.ctx = ctx;
+    surface.mode = '2d';
     return ctx;
   }
   const CE = g.HTMLCanvasElement;
   hidden(CE.prototype, 'getContext', function getContext(type, attrs = {}) {
     if (arguments.length < 1) throw new TypeError("Failed to execute 'getContext' on 'HTMLCanvasElement': 1 argument required, but only 0 present.");
     type = String(type);
+    if (type === 'experimental-webgl') type = 'webgl';
     const rec = contexts.get(this);
     if (rec) return rec.type === type ? rec.ctx : null;
     if (type === '2d') {
@@ -635,13 +649,40 @@
     }
     if (type === 'bitmaprenderer') {
       const ctx = Object.create(ImageBitmapRenderingContext.prototype);
-      hidden(ctx, S, { canvas: this, surface: surfaceOf(this) });
+      const surface = surfaceOf(this); hidden(ctx, S, { canvas: this, surface });
+      surface.ctx = ctx; surface.mode = type;
       contexts.set(this, { type, ctx });
       return ctx;
     }
-    // WebGL / WebGPU contexts are not available.
+    if (type === 'webgl') {
+      const limits = N.webglLimits(), w = this.width >>> 0, h = this.height >>> 0;
+      if (Math.max(w, 1) > limits.maxDimension || Math.max(h, 1) > limits.maxDimension || Math.max(w, 1) * Math.max(h, 1) > limits.maxPixels) {
+        this.dispatchEvent(new g.WebGLContextEvent('webglcontextcreationerror', { statusMessage: 'Drawing buffer exceeds the software renderer limits' }));
+        return null;
+      }
+      const ctx = N.makeWebGLContext(this, surfaceOf(this), attrs || {});
+      if (ctx) contexts.set(this, { type, ctx });
+      return ctx;
+    }
     return null;
   });
+  // Setting either reflected dimension clears a WebGL drawing buffer even
+  // when its numeric value is unchanged, while retaining GL object state.
+  for (const dimension of ['width', 'height']) {
+    const descriptor = Object.getOwnPropertyDescriptor(CE.prototype, dimension);
+    if (descriptor && descriptor.set) Object.defineProperty(CE.prototype, dimension, {
+      ...descriptor,
+      set(value) {
+        descriptor.set.call(this, value);
+        const surface = surfaces.get(this);
+        if (surface && surface.mode === 'webgl') {
+          surface.width = this.width >>> 0; surface.height = this.height >>> 0;
+          N.resizeWebGLSurface(surface, surface.width, surface.height);
+          markDirty(surface);
+        }
+      },
+    });
+  }
   hidden(CE.prototype, 'toDataURL', function toDataURL(type, quality) {
     const s = surfaceOf(this);
     const bytes = encode(s, type, quality);
@@ -659,14 +700,16 @@
   class OffscreenCanvas extends g.EventTarget {
     constructor(w, h) { super(); hidden(this, S, { surface: newSurface(w >>> 0, h >>> 0, this), ctx: null, type: null }); }
     get width() { return this[S].surface.width; }
-    set width(v) { const s = this[S].surface; s.width = v >>> 0; N.canvasResize(s.id, s.width, s.height); if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
+    set width(v) { const s = this[S].surface; s.width = v >>> 0; if (this[S].type !== 'webgl') N.canvasResize(s.id, s.width, s.height); if (this[S].type === 'webgl') N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
     get height() { return this[S].surface.height; }
-    set height(v) { const s = this[S].surface; s.height = v >>> 0; N.canvasResize(s.id, s.width, s.height); if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
+    set height(v) { const s = this[S].surface; s.height = v >>> 0; if (this[S].type !== 'webgl') N.canvasResize(s.id, s.width, s.height); if (this[S].type === 'webgl') N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
     getContext(type, attrs = {}) {
       type = String(type);
+      if (type === 'experimental-webgl') type = 'webgl';
       if (this[S].ctx) return this[S].type === type ? this[S].ctx : null;
       if (type === '2d') { this[S].ctx = makeContext(this, this[S].surface, attrs || {}, OffscreenCanvasRenderingContext2D); this[S].type = type; return this[S].ctx; }
-      if (type === 'bitmaprenderer') { const c = Object.create(ImageBitmapRenderingContext.prototype); hidden(c, S, { canvas: this, surface: this[S].surface }); this[S].ctx = c; this[S].type = type; return c; }
+      if (type === 'bitmaprenderer') { const c = Object.create(ImageBitmapRenderingContext.prototype); hidden(c, S, { canvas: this, surface: this[S].surface }); this[S].surface.ctx = c; this[S].surface.mode = type; this[S].ctx = c; this[S].type = type; return c; }
+      if (type === 'webgl') { const c = N.makeWebGLContext(this, this[S].surface, attrs || {}); if (c) { this[S].ctx = c; this[S].type = type; } return c; }
       return null;
     }
     transferToImageBitmap() { const s = this[S].surface; const bm = makeBitmap(s.width, s.height, pixelsOf(s)); N.canvasResize(s.id, s.width, s.height); return bm; }

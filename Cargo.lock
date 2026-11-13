@@ -1685,6 +1685,7 @@ dependencies = [
  "rabbithole-net",
  "rabbithole-style",
  "rabbithole-wasm-js",
+ "rabbithole-webgl",
 ]
 
 [[package]]
@@ -1721,6 +1722,10 @@ dependencies = [
  "rabbithole-js",
  "rabbithole-wasm",
 ]
+
+[[package]]
+name = "rabbithole-webgl"
+version = "0.1.5"
 
 [[package]]
 name = "rabbithole-wpt"

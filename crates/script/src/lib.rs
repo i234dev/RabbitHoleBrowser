@@ -19,6 +19,7 @@ mod live;
 mod media;
 mod node;
 mod canvas2d;
+mod webgl;
 mod natives;
 mod sockets;
 mod observers;
@@ -38,6 +39,8 @@ mod tests_media;
 mod tests_realms;
 #[cfg(test)]
 mod tests_service_worker;
+#[cfg(test)]
+mod tests_webgl;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};
@@ -71,6 +74,7 @@ const JS_APIS: &[(&str, &str)] = &[
     ("rabbithole:idb.js", include_str!("js/idb.js")),
     ("rabbithole:crypto.js", include_str!("js/crypto.js")),
     ("rabbithole:canvas.js", include_str!("js/canvas.js")),
+    ("rabbithole:webgl.js", include_str!("js/webgl.js")),
     ("rabbithole:navigation.js", include_str!("js/navigation.js")),
     ("rabbithole:animations.js", include_str!("js/animations.js")),
     ("rabbithole:fonts.js", include_str!("js/fonts.js")),
