@@ -1503,6 +1503,12 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     }
     a.finish_labels();
     let listing = a.listing();
+    // The final function must fit as well: checking only the current
+    // total before emitting permits the last mapping to exceed the budget.
+    let mapped_len = ExecMem::mapped_len_for(a.buf.len()).ok_or("invalid executable mapping size")?;
+    if mapped_len > super::MAX_CODE_BYTES.saturating_sub(super::code_bytes()) {
+        return Err("code memory limit".into());
+    }
     let t = std::time::Instant::now();
     let mem = ExecMem::new(&a.buf, |_, _| {}).ok_or("executable memory unavailable")?;
     super::MAP_NS.with(|m| m.set(m.get() + t.elapsed().as_nanos() as u64));

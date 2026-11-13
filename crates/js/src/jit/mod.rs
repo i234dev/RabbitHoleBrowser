@@ -396,3 +396,60 @@ impl Realm {
         crate::vm::Ctl::Next
     }
 }
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod budget_tests {
+    use super::*;
+
+    struct RestoreCodeBytes(usize);
+    impl Drop for RestoreCodeBytes {
+        fn drop(&mut self) {
+            CODE_BYTES.with(|n| n.set(self.0));
+        }
+    }
+
+    #[test]
+    fn projected_mapping_cannot_exceed_code_budget() {
+        if !rabbithole_jit::supported() { return; }
+        let _restore = RestoreCodeBytes(code_bytes());
+        let mut realm = Realm::new();
+        realm.set_jit(true, 0);
+        let code = realm.compile("21 + 21", "budget.js", false).unwrap();
+        // The small function's bytes fit in the remaining space, but
+        // the page-rounded mapping would cross the limit by one byte.
+        let remaining = rabbithole_jit::ExecMem::mapped_len_for(1).unwrap() - 1;
+        let baseline = MAX_CODE_BYTES - remaining;
+        CODE_BYTES.with(|n| n.set(baseline));
+        let mut stats = Stats::default();
+        compile(&code, &mut stats);
+        assert_eq!(code.jit.s.state.get(), REJECTED);
+        assert_eq!(code.jit.s.entry.get(), 0);
+        assert!(code.jit.s.code.get().is_none());
+        assert_eq!(stats.compiled, 0);
+        assert_eq!(code_bytes(), baseline);
+        // Rejecting compilation leaves the same script runnable by the VM.
+        let result = realm.run_script(code).unwrap();
+        assert_eq!(realm.to_string(result).unwrap().to_rust_string(), "42");
+    }
+
+    #[test]
+    fn final_page_fits_exactly_and_is_released() {
+        if !rabbithole_jit::supported() { return; }
+        let _restore = RestoreCodeBytes(code_bytes());
+        let page = rabbithole_jit::ExecMem::mapped_len_for(1).unwrap();
+        let baseline = MAX_CODE_BYTES - page;
+        CODE_BYTES.with(|n| n.set(baseline));
+        {
+            let mut realm = Realm::new();
+            let code = realm.compile("21 + 21", "last-page.js", false).unwrap();
+            let mut stats = Stats::default();
+            compile(&code, &mut stats);
+            assert_eq!(code.jit.s.state.get(), COMPILED);
+            assert_eq!(stats.compiled, 1);
+            assert_eq!(code_bytes(), MAX_CODE_BYTES);
+            let result = realm.run_script(code).unwrap();
+            assert_eq!(realm.to_string(result).unwrap().to_rust_string(), "42");
+        }
+        assert_eq!(code_bytes(), baseline);
+    }
+}
