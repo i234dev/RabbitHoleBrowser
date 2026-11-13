@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGL render-to-texture</title>
+<style>body{background:#101827;color:#e5eaf4;font:16px sans-serif;margin:24px}canvas{width:256px;height:256px;border:1px solid #65748e}#untouched{width:128px;height:128px}</style>
+<h1>WebGL render-to-texture</h1>
+<p>The triangle is drawn into a texture, then sampled into the left canvas.</p>
+<canvas id="scene" width="64" height="64"></canvas>
+<canvas id="untouched" width="16" height="16"></canvas>
+<p>The right canvas stays blue while its offscreen framebuffer is cleared red.</p>
+<script>
+(function(){
+  function shader(gl,type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+  function program(gl,vs,fs){const p=gl.createProgram();gl.attachShader(p,shader(gl,gl.VERTEX_SHADER,vs));gl.attachShader(p,shader(gl,gl.FRAGMENT_SHADER,fs));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));gl.useProgram(p);return p;}
+  function attribute(gl,p,name,size,values){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(values),gl.STATIC_DRAW);const a=gl.getAttribLocation(p,name);gl.vertexAttribPointer(a,size,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(a);}
+  function target(gl,size){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,size,size,0,gl.RGBA,gl.UNSIGNED_BYTE,null);const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error('Incomplete framebuffer');return t;}
+  try{
+    const gl=document.getElementById('scene').getContext('webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+    const texture=target(gl,64);
+    const p=program(gl,'attribute vec2 position;void main(){gl_Position=vec4(position,0.0,1.0);}','precision mediump float;void main(){gl_FragColor=vec4(1.0,0.0,0.0,1.0);}');
+    attribute(gl,p,'position',2,[-1,-1,1,-1,0,1]);gl.drawArrays(gl.TRIANGLES,0,3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+    const q=program(gl,'attribute vec2 position;varying vec2 uv;void main(){gl_Position=vec4(position,0.0,1.0);uv=position*0.5+vec2(0.5);}','precision mediump float;uniform sampler2D image;varying vec2 uv;void main(){gl_FragColor=texture2D(image,uv);}');
+    attribute(gl,q,'position',2,[-1,-1,1,-1,-1,1,1,1]);gl.bindTexture(gl.TEXTURE_2D,texture);gl.uniform1i(gl.getUniformLocation(q,'image'),0);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    const other=document.getElementById('untouched').getContext('webgl',{preserveDrawingBuffer:true});
+    other.clearColor(0,0,1,1);other.clear(other.COLOR_BUFFER_BIT);target(other,16);other.clearColor(1,0,0,1);other.clear(other.COLOR_BUFFER_BIT);
+    if(gl.getError()||other.getError())throw new Error('A rendering command failed');
+  }catch(error){console.error(error.message);}
+})();
+</script>
