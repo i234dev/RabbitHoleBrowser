@@ -157,3 +157,93 @@ fn cache_storage_is_origin_partitioned_and_survives_navigation() {
     engine.eval_in_page(&mut page, "var recovered; caches.match('/key').then(r => r.text()).then(text => recovered = text);");
     wait(&engine, &mut page, "recovered === 'origin-one'");
 }
+
+#[test]
+fn controlled_window_fetch_intercepts_real_cache_bytes_and_uses_worker_network_fallback() {
+    let html = r#"<!doctype html><script>
+      var controlled = false;
+      navigator.serviceWorker.register('sw.js');
+      navigator.serviceWorker.ready.then(r => controlled = navigator.serviceWorker.controller === r.active);
+    </script>"#;
+    let worker = r#"
+      oninstall = e => e.waitUntil(caches.open('assets').then(c => c.put('cached', new Response('from-worker-cache'))));
+      onactivate = e => e.waitUntil(clients.claim());
+      onfetch = e => {
+        const path = new URL(e.request.url).pathname;
+        if(path.endsWith('/cached')) e.respondWith(caches.match(e.request));
+        else if(path.endsWith('/worker-network')) e.respondWith(fetch(e.request));
+        else if(path.endsWith('/reject')) e.respondWith(Promise.reject(new Error('no fallback')));
+        else if(path.endsWith('/invalid')) e.respondWith(Promise.resolve({status:200}));
+        else if(path.endsWith('/binary')) e.respondWith(new Response(new Uint8Array([0,128,255]), {status:202,statusText:'Worker bytes',headers:{'x-worker':'yes'}}));
+        else if(path.endsWith('/async')) {
+          e.respondWith(new Promise(resolve => setTimeout(() => resolve(new Response('async-response')), 30)));
+          e.waitUntil(new Promise(resolve => setTimeout(resolve, 150)).then(() => caches.open('assets').then(c => c.put('later', new Response('done')))));
+        }
+      };
+    "#;
+    let server = Server::new(&[
+        ("/app/page.html", "text/html", html, &[]),
+        ("/app/sw.js", "text/javascript", worker, &[]),
+        ("/app/cached", "text/plain", "uncontrolled-network", &[]),
+        ("/app/fallback", "text/plain", "plain-network", &[]),
+        ("/app/worker-network", "text/plain", "worker-network-response", &[]),
+        ("/outside/page.html", "text/html", "<!doctype html><body>outside scope", &[]),
+    ]);
+    let mut engine = engine(); let vp = Viewport {width:320.0,height:240.0};
+    let mut page = engine.load(&format!("{}/app/page.html", server.origin), vp).unwrap();
+    wait(&engine, &mut page, "controlled === true");
+    engine.eval_in_page(&mut page, r#"
+      var result, bytes;
+      Promise.all(['cached','fallback','worker-network','reject','invalid','async'].map(path => fetch(path).then(r => r.text(),e => e.name))).then(v => result = v.join('|'));
+      fetch('binary').then(async r => bytes = [r.status,r.statusText,r.headers.get('x-worker'),Array.from(new Uint8Array(await r.arrayBuffer())).join(',')].join('|'));
+    "#);
+    wait(&engine, &mut page, "typeof result === 'string' && typeof bytes === 'string'");
+    assert_eq!(engine.eval_in_page(&mut page, "result"), "'from-worker-cache|plain-network|worker-network-response|TypeError|TypeError|async-response'");
+    assert_eq!(engine.eval_in_page(&mut page, "bytes"), "'202|Worker bytes|yes|0,128,255'");
+    engine.eval_in_page(&mut page, "var lifetimeDone = false; function checkLifetime(){ caches.match('later').then(r => { if(r) lifetimeDone = true; else setTimeout(checkLifetime,10); }); } checkLifetime();");
+    wait(&engine, &mut page, "lifetimeDone === true");
+    {
+        let requests = server.requests.lock().unwrap();
+        assert!(!requests.iter().any(|(path,_)| ["/app/cached","/app/binary","/app/reject","/app/invalid","/app/async"].contains(&path.as_str())), "cached/synthetic/rejected requests must not reach network: {requests:?}");
+        assert_eq!(requests.iter().filter(|(path,_)| path == "/app/worker-network").count(),1,"worker fetch must not recurse");
+    }
+    drop(page);
+    let mut page = engine.load(&format!("{}/outside/page.html", server.origin),vp).unwrap();
+    engine.eval_in_page(&mut page,"var outside; fetch('/app/cached').then(r=>r.text()).then(t=>outside=t);");
+    wait(&engine,&mut page,"outside === 'uncontrolled-network'");
+    assert_eq!(server.requests.lock().unwrap().iter().filter(|(path,_)| path == "/app/cached").count(),1);
+}
+
+#[test]
+fn intercepted_fetch_preserves_credentials_and_rejects_unsafe_no_cors_before_network() {
+    let cross = Server::new(&[("/unsafe","text/plain","must not reach",&[])]);
+    let html = r#"<!doctype html><script>
+      var controlled=false; navigator.serviceWorker.register('sw.js');
+      navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);
+    </script>"#;
+    let worker = "onactivate=e=>e.waitUntil(clients.claim()); onfetch=e=>e.respondWith(fetch(e.request.clone()));";
+    let server=Server::new(&[("/app/page.html","text/html",html,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/network","text/plain","ok",&[])]);
+    let mut engine=engine();
+    let mut page=engine.load(&format!("{}/app/page.html",server.origin),Viewport{width:320.0,height:240.0}).unwrap();
+    wait(&engine,&mut page,"controlled===true");
+    engine.eval_in_page(&mut page,"document.cookie='sw-secret=present; Path=/'; var done=false; fetch(new Request('network?omit',{credentials:'omit'})).then(()=>fetch('network?include',{credentials:'include'})).then(()=>done=true);");
+    wait(&engine,&mut page,"done===true");
+    {
+        let requests=server.requests.lock().unwrap();
+        let omit=&requests.iter().find(|(path,_)|path=="/app/network?omit").unwrap().1;
+        let include=&requests.iter().find(|(path,_)|path=="/app/network?include").unwrap().1;
+        assert!(!omit.to_ascii_lowercase().contains("cookie:"),"{omit}");
+        assert!(include.contains("sw-secret=present"),"{include}");
+    }
+    let source=format!(r#"var rejected; Promise.all([
+      fetch('{}/unsafe',{{mode:'no-cors',headers:{{'x-custom':'unsafe'}}}}),
+      fetch('{}/unsafe',{{mode:'no-cors',method:'POST',body:'{{}}',headers:{{'content-type':'application/json'}}}}),
+      fetch('{}/unsafe',{{mode:'same-origin'}}),
+      fetch('{}/unsafe')
+    ].map(p=>p.then(()=>false,e=>e instanceof TypeError))).then(v=>rejected=v.every(Boolean));"#,cross.origin,cross.origin,cross.origin,cross.origin);
+    engine.eval_in_page(&mut page,&source);
+    wait(&engine,&mut page,"rejected===true");
+    let requests=cross.requests.lock().unwrap();
+    assert_eq!(requests.len(),1,"only the ordinary CORS fetch may reach the cross-origin server: {requests:?}");
+    assert!(!requests[0].1.to_ascii_lowercase().contains("x-custom:"));
+}

@@ -306,6 +306,42 @@
     };
   }
 
+  // Abort rejects with the original reason. Transport cancellation remains an
+  // environment concern; dropping the native SW receiver cancels interception.
+  const fetchNative = g.fetch;
+  hidden(g, 'fetch', function fetch(input, init) {
+    let signal;
+    try {
+      const fromInit = init ? init.signal : undefined;
+      signal = fromInit !== undefined ? fromInit : (input instanceof g.Request ? input.signal : undefined);
+      if (signal !== undefined && signal !== null && !(signal instanceof g.AbortSignal)) throw new TypeError('Invalid fetch signal.');
+      if (signal && signal.aborted) return Promise.reject(signal.reason);
+    } catch (e) { return Promise.reject(e); }
+    if (!signal) return fetchNative.call(this, input, init);
+    return new Promise((resolve, reject) => {
+      let nativePromise, done = false;
+      const abort = () => {
+        if (done) return;
+        done = true;
+        signal.removeEventListener('abort', abort);
+        if (nativePromise) N.cancelFetch(nativePromise);
+        reject(signal.reason);
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) { abort(); return; }
+      try { nativePromise = fetchNative.call(this, input, init, signal); }
+      catch (e) { done = true; signal.removeEventListener('abort', abort); reject(e); return; }
+      if (done) { N.cancelFetch(nativePromise); nativePromise.catch(() => {}); return; }
+      nativePromise.then(response => {
+        if (done) return;
+        done = true; signal.removeEventListener('abort', abort); resolve(response);
+      }, error => {
+        if (done) return;
+        done = true; signal.removeEventListener('abort', abort); reject(error);
+      });
+    });
+  });
+
   // fetchLater (deferred fetching): sent immediately on pagehide is not
   // possible here; requests are queued and sent when the page unloads.
   class FetchLaterResult { constructor() { ILLEGAL(); } get activated() { return this[S].activated; } }

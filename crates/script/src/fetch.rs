@@ -605,6 +605,7 @@ pub(crate) fn make_response(realm: &mut Realm, url: &str, status: u16, status_te
     let o = realm.new_object_with_proto(Some(p));
     realm.set_host_data(o, Box::new(BodyData { bytes: body, used: false }));
     realm.set_class_name(o, "Response");
+    realm.native_root(Value::Object(o));
     let h = make_headers(realm, headers);
     realm.define_property(o, "url", Value::str(url), ACC);
     realm.define_property(o, "status", Value::Number(status as f64), ACC);
@@ -638,7 +639,7 @@ fn status_text(status: u16) -> &'static str {
     }
 }
 
-fn take_body(realm: &mut Realm, this: &Value) -> JsResult<Vec<u8>> {
+pub(crate) fn take_body(realm: &mut Realm, this: &Value) -> JsResult<Vec<u8>> {
     let V::Object(o) = this.v() else {
         return Err(realm.throw_type_error("Illegal invocation"));
     };
@@ -863,6 +864,7 @@ fn request_parts(realm: &mut Realm, input: &Value, init: &Value) -> JsResult<(St
 fn request_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let (url, method, headers, body) = request_parts(realm, &arg(args, 0), &arg(args, 1))?;
     let req = make_request(realm, &url, &method, headers, body);
+    realm.native_root(req.clone());
     // `signal` follows init.signal, else the input Request's signal.
     let mut signal = Value::Undefined;
     if let init @ V::Object(_) = (arg(args, 1)).v() {
@@ -878,12 +880,27 @@ fn request_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
     if let (V::Object(o), V::Object(_)) = (req.v(), signal.v()) {
         realm.define_property(o, "signal", signal, ACC);
     }
+    if let Some(o) = req.as_object() {
+        for name in ["mode", "credentials", "redirect"] {
+            let mut value = if let Some(init) = arg(args, 1).as_object() { realm.get_str(Value::Object(init), name)? } else { Value::Undefined };
+            if value.is_undefined() && arg(args, 0).as_object().is_some_and(|id| realm.obj(id).class_name() == Some("Request")) { value = realm.get_str(arg(args, 0), name)?; }
+            if !value.is_undefined() { realm.define_property(o, name, value, ACC); }
+        }
+    }
     Ok(req)
 }
 
 fn request_clone(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let (url, method, headers, body) = request_parts(realm, &this, &Value::Undefined)?;
-    Ok(make_request(realm, &url, &method, headers, body))
+    let request = make_request(realm, &url, &method, headers, body);
+    realm.native_root(request.clone());
+    if let Some(o) = request.as_object() {
+        for name in ["mode", "credentials", "redirect", "signal"] {
+            let value = realm.get_str(this.clone(), name)?;
+            if !value.is_undefined() { realm.define_property(o, name, value, ACC); }
+        }
+    }
+    Ok(request)
 }
 
 /// Where the result of a background request goes.
@@ -894,9 +911,61 @@ pub(crate) enum FetchSink {
     Xhr(ObjectId),
 }
 
+/// Owned bytes/metadata only: no Value or heap identity crosses worker realms.
+pub(crate) struct FetchReply {
+    pub response: rabbithole_net::Response,
+    pub status_text: String,
+    pub response_type: String,
+    pub redirected: bool,
+}
+impl From<rabbithole_net::Response> for FetchReply {
+    fn from(response: rabbithole_net::Response) -> Self {
+        let status_text = status_text(response.status).to_string();
+        let response_type = if response.status == 0 { "opaque" } else { "basic" }.into();
+        Self { response, status_text, response_type, redirected: false }
+    }
+}
+pub(crate) enum FetchReceiver {
+    Network(std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>),
+    Worker(std::sync::mpsc::Receiver<Result<FetchReply, String>>),
+}
+impl FetchReceiver {
+    fn try_recv(&self) -> Result<Result<FetchReply, String>, std::sync::mpsc::TryRecvError> {
+        match self {
+            Self::Network(rx) => rx.try_recv().map(|r| r.map(FetchReply::from)),
+            Self::Worker(rx) => rx.try_recv(),
+        }
+    }
+}
 pub(crate) struct PendingFetch {
-    pub rx: std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>,
+    pub rx: FetchReceiver,
     pub sink: FetchSink,
+    pub promise: Option<ObjectId>,
+    pub cancellation: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+}
+fn reply_object(realm: &mut Realm, reply: FetchReply) -> Value {
+    let r = reply.response;
+    let url = if matches!(reply.response_type.as_str(), "opaque" | "opaqueredirect") { String::new() } else { r.url.to_string() };
+    let value = make_response(realm, &url, r.status, &reply.status_text, r.headers, r.body, &reply.response_type);
+    if let Some(o) = value.as_object() { realm.define_property(o, "redirected", Value::Bool(reply.redirected), ACC); }
+    value
+}
+/// Called only in the owning realm by the AbortSignal wrapper.
+pub(crate) fn cancel_fetch(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let id = arg(args, 0).as_object();
+    let pending = {
+        let st = state(); let mut st = st.borrow_mut();
+        let index = st.pending_fetches.iter().position(|p| p.promise.is_some() && p.promise == id);
+        index.map(|i| st.pending_fetches.remove(i))
+    };
+    if let Some(p) = pending {
+        if let Some(cancelled) = p.cancellation { cancelled.set(true); }
+        if let FetchSink::Promise(resolve, reject, _) = p.sink {
+            crate::host::unroot_value(realm, &resolve);
+            crate::host::unroot_value(realm, &reject);
+        }
+    }
+    Ok(Value::Undefined)
 }
 
 /// Build the network request for a script-initiated fetch.
@@ -940,7 +1009,7 @@ fn start_background(url: &str, method: &str, headers: &[(String, String)], body:
 /// Deliver finished background requests (called from the timer loop).
 /// Returns whether any completed.
 pub(crate) fn run_ready_fetches(realm: &mut Realm) -> bool {
-    let ready: Vec<(FetchSink, Result<rabbithole_net::Response, String>)> = {
+    let ready: Vec<(FetchSink, Result<FetchReply, String>)> = {
         let st = state();
         let mut st = st.borrow_mut();
         let mut out = Vec::new();
@@ -966,8 +1035,7 @@ pub(crate) fn run_ready_fetches(realm: &mut Realm) -> bool {
             FetchSink::Promise(resolve, reject, _url) => {
                 match r {
                     Ok(resp) => {
-                        let st = status_text(resp.status).to_string();
-                        let resp_obj = make_response(realm, &resp.url.to_string(), resp.status, &st, resp.headers.clone(), resp.body, "basic");
+                        let resp_obj = reply_object(realm, resp);
                         let _ = realm.call(resolve.clone(), Value::Undefined, &[resp_obj]);
                     }
                     Err(e) => {
@@ -980,7 +1048,7 @@ pub(crate) fn run_ready_fetches(realm: &mut Realm) -> bool {
             }
             FetchSink::Xhr(o) => {
                 if realm.host_data::<XhrData>(o).map(|d| d.sent).unwrap_or(false) {
-                    xhr_store_result(realm, o, r);
+                    xhr_store_result(realm, o, r.map(|reply| reply.response));
                     xhr_finish_events(realm, o);
                 }
                 crate::host::unroot_value(realm, &Value::Object(o));
@@ -1015,21 +1083,64 @@ fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
         }
     };
     let (p, resolve, reject) = realm.new_promise();
-    // Network requests run in the background; the promise settles from
-    // the event loop when the response arrives.
-    if let Some(rx) = start_background(&url, &method, &headers, &body) {
-        let (resolve, reject) = (Value::Object(resolve), Value::Object(reject));
-        crate::host::root_value(realm, &resolve);
-        crate::host::root_value(realm, &reject);
-        state().borrow_mut().pending_fetches.push(PendingFetch { rx, sink: FetchSink::Promise(resolve, reject, url.clone()) });
-        return Ok(Value::Object(p));
+    for id in [p, resolve, reject] { realm.native_root(Value::Object(id)); }
+    let request = (|| -> JsResult<Request> {
+        let mut req = build_request(&url, &method, &headers, &body).map_err(|e| realm.throw_type_error(&e))?;
+        let input = arg(args, 0); let init = arg(args, 1);
+        let option = |realm: &mut Realm, name: &str| -> JsResult<Option<String>> {
+            let mut v = if init.as_object().is_some() { realm.get_str(init.clone(), name)? } else { Value::Undefined };
+            if v.is_undefined() && input.as_object().is_some_and(|o| realm.obj(o).class_name() == Some("Request")) { v = realm.get_str(input.clone(), name)?; }
+            if v.is_undefined() { Ok(None) } else { Ok(Some(realm.to_rust_string(v)?)) }
+        };
+        if let Some(v) = option(realm, "mode")? {
+            req.mode = Some(rabbithole_net::RequestMode::parse(&v).filter(|m| *m != rabbithole_net::RequestMode::Navigate).ok_or_else(|| realm.throw_type_error("Invalid fetch mode"))?);
+        }
+        if let Some(v) = option(realm, "credentials")? { req.credentials = rabbithole_net::CredentialsMode::parse(&v).ok_or_else(|| realm.throw_type_error("Invalid fetch credentials"))?; }
+        if let Some(v) = option(realm, "redirect")? { req.redirect = rabbithole_net::RedirectMode::parse(&v).ok_or_else(|| realm.throw_type_error("Invalid fetch redirect"))?; }
+        if let Some((_, content_type)) = headers.iter().find(|(name, _)| name == "content-type") {
+            if !req.headers.iter().any(|(name, _)| name == "content-type") { req.headers.push(("content-type".into(), content_type.clone())); }
+        }
+        if req.mode == Some(rabbithole_net::RequestMode::SameOrigin) && req.referer.as_ref().is_some_and(|client| client.origin() != req.url.origin()) {
+            return Err(realm.throw_type_error("Cross-origin fetch is forbidden in same-origin mode"));
+        }
+        if req.mode == Some(rabbithole_net::RequestMode::NoCors) && (!matches!(req.method.as_str(), "GET" | "HEAD" | "POST") || !rabbithole_net::cors::unsafe_request_header_names(&req.headers).is_empty() || req.body.as_ref().is_some_and(|b| !rabbithole_net::cors::unsafe_request_header_names(&[("content-type".into(), b.content_type.clone())]).is_empty())) {
+            return Err(realm.throw_type_error("Unsafe request method or headers are unsupported in no-cors mode"));
+        }
+        Ok(req)
+    })();
+    let request = match request {
+        Ok(req) => req,
+        Err(e) => { realm.call(Value::Object(reject), Value::Undefined, &[e])?; return Ok(Value::Object(p)); }
+    };
+    // Option/URL getters can synchronously abort while the wrapper is inside
+    // this native call. Observe it again before queuing SW work or network I/O.
+    let signal = arg(args, 2);
+    if signal.as_object().is_some() {
+        let aborted = realm.get_str(signal.clone(), "aborted")?;
+        if realm.to_boolean(&aborted) {
+            let reason = realm.get_str(signal, "reason")?;
+            realm.call(Value::Object(reject), Value::Undefined, &[reason])?;
+            return Ok(Value::Object(p));
+        }
     }
-    match do_fetch(&url, &method, &headers, &body) {
+    if !url.starts_with("blob:") {
+        let interception = crate::service_worker::intercept_fetch(&request);
+        let (rx, cancellation) = if let Some((rx, token)) = interception {
+            (Some(FetchReceiver::Worker(rx)), Some(token))
+        } else { (with_env(|env| env.fetch_background(request.clone())).map(FetchReceiver::Network), None) };
+        if let Some(rx) = rx {
+            let (resolve, reject) = (Value::Object(resolve), Value::Object(reject));
+            crate::host::root_value(realm, &resolve);
+            crate::host::root_value(realm, &reject);
+            state().borrow_mut().pending_fetches.push(PendingFetch { rx, sink: FetchSink::Promise(resolve, reject, url.clone()), promise: Some(p), cancellation });
+            return Ok(Value::Object(p));
+        }
+    }
+    let result = if url.starts_with("blob:") { do_fetch(&url, &method, &headers, &body) } else { with_env(|env| env.fetch(request)) };
+    match result {
         Ok(resp) => {
-            let st = status_text(resp.status).to_string();
-            let hdrs = resp.headers.clone();
-            let r = make_response(realm, &resp.url.to_string(), resp.status, &st, hdrs, resp.body, "basic");
-            realm.call(Value::Object(resolve), Value::Undefined, &[r])?;
+            let value = reply_object(realm, resp.into());
+            realm.call(Value::Object(resolve), Value::Undefined, &[value])?;
         }
         Err(e) => {
             let err = realm.new_error("TypeError", &format!("Failed to fetch: {e}"));
@@ -1663,7 +1774,7 @@ fn xhr_deliver(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> 
             };
             if let Some(rx) = start_background(&url, &method, &headers, &body) {
                 crate::host::root_value(realm, &Value::Object(o));
-                state().borrow_mut().pending_fetches.push(PendingFetch { rx, sink: FetchSink::Xhr(o) });
+                state().borrow_mut().pending_fetches.push(PendingFetch { rx: FetchReceiver::Network(rx), sink: FetchSink::Xhr(o), promise: None, cancellation: None });
                 return Ok(Value::Undefined);
             }
             xhr_perform(realm, o);

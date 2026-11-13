@@ -225,3 +225,140 @@ fn service_worker_unregistered_during_install_finishes_lifetime_without_activati
     assert!(!output.iter().any(|s| s.contains("must not activate")));
     assert_eq!(run(&mut env, &mut host, "console.log(worker.state, registration.installing, registration.waiting, registration.active, ready, navigator.serviceWorker.controller);"), ["redundant null null null false null"]);
 }
+
+fn drive_fetch(env: &mut MockEnv, host: &mut ScriptHost, turns: usize) {
+    for _ in 0..turns { env.now += 10.0; let now = env.now; host.run_timers(env, now); host.run_jobs(env); }
+}
+fn controlled_worker(source: &str) -> (MockEnv, ScriptHost) {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), format!("onactivate = e => e.waitUntil(clients.claim());\n{source}")));
+    run(&mut env, &mut host, "var registration; navigator.serviceWorker.register('sw.js').then(r => registration = r);");
+    drive_fetch(&mut env, &mut host, 15);
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.serviceWorker.controller.state);"), ["activated"]);
+    (env, host)
+}
+
+#[test]
+fn service_worker_fetch_cache_and_wait_until_have_independent_lifetimes() {
+    let (mut env, mut host) = controlled_worker(r#"
+        oninstall = e => e.waitUntil(caches.open('assets').then(c => c.put('cached.bin', new Response(new Uint8Array([0,128,255]), {status:201, statusText:'Cached', headers:{'x-sw':'cache'}}))));
+        onfetch = e => {
+            e.respondWith(caches.match(e.request));
+            e.waitUntil(new Promise(resolve => setTimeout(resolve, 200)).then(() => caches.open('assets').then(c => c.put('later', new Response('lifetime complete')))));
+        };
+    "#);
+    run(&mut env, &mut host, "var result; fetch('cached.bin').then(async r => result = [r.status,r.statusText,r.headers.get('x-sw'),Array.from(new Uint8Array(await r.arrayBuffer())).join(',')].join('|'));");
+    drive_fetch(&mut env, &mut host, 3);
+    assert_eq!(run(&mut env, &mut host, "console.log(result); caches.match('later').then(r => console.log(r === undefined));"), ["201|Cached|cache|0,128,255", "true"]);
+    drive_fetch(&mut env, &mut host, 30);
+    assert_eq!(run(&mut env, &mut host, "caches.match('later').then(r => r.text()).then(console.log);"), ["lifetime complete"]);
+}
+
+#[test]
+fn service_worker_fetch_fallback_async_errors_and_dispatch_contract() {
+    let (mut env, mut host) = controlled_worker(r#"
+        addEventListener('fetch', e => {
+            const path = new URL(e.request.url).pathname;
+            e.handled.catch(error => console.log('handled-error', path, error.name));
+            if (path.endsWith('/reject')) e.respondWith(Promise.reject(new Error('no')));
+            else if (path.endsWith('/invalid')) e.respondWith(Promise.resolve({status:200}));
+            else if (path.endsWith('/cancel')) e.preventDefault();
+            else if (path.endsWith('/async')) e.respondWith(new Promise(resolve => setTimeout(() => resolve(new Response('async')), 30)));
+            else if (path.endsWith('/once')) {
+                e.respondWith(new Response('first'));
+                try { e.respondWith(new Response('second')); } catch(error) { console.log('once', error.name); }
+            } else if (path.endsWith('/late')) {
+                e.waitUntil(new Promise(resolve => setTimeout(resolve, 20)));
+                queueMicrotask(() => { try { e.respondWith(new Response('too late')); } catch(error) { console.log('late', error.name); } });
+            }
+        });
+        addEventListener('fetch', e => console.log('second-listener', new URL(e.request.url).pathname));
+    "#);
+    for path in ["fallback", "late"] { env.fetches.insert(format!("https://example.test/dir/{path}"), (200, "text/plain".into(), "network".into())); }
+    run(&mut env, &mut host, "var results; Promise.all(['fallback','reject','invalid','async','once','late','cancel'].map(path => fetch(path).then(r => r.text(), e => e.name))).then(r => results = r.join('|'));");
+    drive_fetch(&mut env, &mut host, 30);
+    assert_eq!(run(&mut env, &mut host, "console.log(results);"), ["network|TypeError|TypeError|async|first|network|TypeError"]);
+    let output = logs(&env);
+    assert!(output.iter().any(|s| s.ends_with("once InvalidStateError")));
+    assert!(output.iter().any(|s| s.ends_with("late InvalidStateError")));
+    assert!(output.iter().any(|s| s.ends_with("handled-error /dir/reject NetworkError")));
+    assert!(output.iter().any(|s| s.ends_with("handled-error /dir/cancel NetworkError")));
+    assert!(!output.iter().any(|s| s.ends_with("second-listener /dir/once")));
+    assert!(output.iter().any(|s| s.ends_with("second-listener /dir/fallback")));
+}
+
+#[test]
+fn service_worker_fetch_abort_preserves_reason_and_drops_unconsumed_interceptions() {
+    let (mut env, mut host) = controlled_worker("onfetch = e => { console.log('fetch-dispatched'); e.respondWith(new Promise(() => {})); };");
+    let output = run(&mut env, &mut host, r#"
+        var initial = new AbortController(), later = new AbortController(), during = new AbortController(), reason = {why:'stop'}, results = [];
+        initial.abort(reason);
+        fetch('never-initial', {signal: initial.signal}).catch(e => results.push(e === reason));
+        fetch('never-later', {signal: later.signal}).catch(e => results.push(e === reason));
+        fetch('never-getter', {signal:during.signal,get mode(){during.abort(reason);return 'cors';}}).catch(e => results.push(e === reason));
+    "#);
+    assert!(output.is_empty());
+    drive_fetch(&mut env, &mut host, 2);
+    run(&mut env, &mut host, "later.abort(reason);");
+    drive_fetch(&mut env, &mut host, 3);
+    assert_eq!(run(&mut env, &mut host, "console.log(results.join(','));"), ["true,true,true"]);
+    assert_eq!(logs(&env).iter().filter(|s| s.ends_with("fetch-dispatched")).count(), 1);
+    assert!(host.next_due().is_none(), "aborted request must not retain a busy pending channel");
+}
+
+#[test]
+fn service_worker_fetch_policy_getters_are_rooted_and_roundtrip_through_clone() {
+    let (mut env, mut host) = controlled_worker(r#"
+        onfetch = e => e.respondWith(Promise.resolve().then(() => {
+            const request = e.request.clone();
+            return new Response([request.mode,request.credentials,request.redirect].join('|'));
+        }));
+    "#);
+    run(&mut env, &mut host, r#"
+        var effects = [], result;
+        const options = {
+            get mode() { effects.push('mode'); for(let i=0;i<500;i++) ({value:new Array(8)}); return 'same-origin'; },
+            get credentials() { effects.push('credentials'); for(let i=0;i<500;i++) ({value:new Array(8)}); return 'omit'; },
+            redirect:'error'
+        };
+        const request = new Request('policy', options);
+        fetch(request).then(r => r.text()).then(t => result = t);
+    "#);
+    drive_fetch(&mut env, &mut host, 15);
+    assert_eq!(run(&mut env, &mut host, "console.log(result, effects.join(','));"), ["same-origin|omit|error mode,credentials"]);
+}
+
+#[test]
+fn service_worker_old_fetch_and_wait_until_survive_replacement_and_unregister() {
+    let (mut env, mut host) = controlled_worker(r#"
+        onfetch = e => {
+            e.respondWith(new Promise(resolve => setTimeout(() => resolve(new Response('old')), 200)));
+            e.waitUntil(new Promise(resolve => setTimeout(resolve, 400)).then(() => caches.open('old').then(c => c.put('finished', new Response('old-event-complete')))));
+        };
+    "#);
+    run(&mut env, &mut host, "var old = navigator.serviceWorker.controller, result; fetch('slow').then(r => r.text()).then(t => result = t);");
+    drive_fetch(&mut env, &mut host, 2);
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), "skipWaiting(); onfetch = e => e.respondWith(new Response('new'));".into()));
+    run(&mut env, &mut host, "registration.update();");
+    drive_fetch(&mut env, &mut host, 12);
+    assert_eq!(run(&mut env, &mut host, "console.log(old.state, typeof result); registration.unregister();"), ["redundant undefined"]);
+    drive_fetch(&mut env, &mut host, 40);
+    assert_eq!(run(&mut env, &mut host, "console.log(result); caches.match('finished').then(r => r.text()).then(console.log);"), ["old", "old-event-complete"]);
+    run(&mut env, &mut host, "fetch('next').then(r => r.text()).then(console.log);");
+    drive_fetch(&mut env, &mut host, 3);
+    assert!(logs(&env).iter().any(|s| s == "new"));
+}
+
+#[test]
+fn service_worker_fetch_waits_for_activation_without_falling_through_to_network() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), r#"
+        onactivate = e => { e.waitUntil(clients.claim()); e.waitUntil(new Promise(resolve => setTimeout(resolve, 200))); };
+        onfetch = e => e.respondWith(new Response('after-activation'));
+    "#.into()));
+    run(&mut env, &mut host, "var response; navigator.serviceWorker.oncontrollerchange = () => fetch('activation-pending').then(r => r.text()).then(t => response = t); navigator.serviceWorker.register('sw.js');");
+    drive_fetch(&mut env, &mut host, 15);
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.serviceWorker.controller.state, typeof response);"), ["activating undefined"]);
+    drive_fetch(&mut env, &mut host, 20);
+    assert_eq!(run(&mut env, &mut host, "console.log(response);"), ["after-activation"]);
+}

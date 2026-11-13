@@ -14,6 +14,7 @@
     if (s.closed || s.dispatching || s.pending) return;
     s.closed = true;
     if (s.report) N.swEventDone(!s.failed);
+    if (s.fetchId !== undefined) N.swFetchDone(s.fetchId);
   }
   class ExtendableEvent extends g.Event {
     constructor(type, init = {}) {
@@ -30,13 +31,60 @@
   Object.defineProperty(ExtendableEvent.prototype, Symbol.toStringTag, { value: 'ExtendableEvent', configurable: true });
   Object.defineProperty(g, 'ExtendableEvent', { value: ExtendableEvent, configurable: true, writable: true });
   const dispatch = g.EventTarget.prototype.dispatchEvent;
-  N.installHandlers(g, ['install', 'activate', 'message', 'messageerror']);
+  N.installHandlers(g, ['install', 'activate', 'fetch', 'message', 'messageerror']);
   N.registerProto('__sw_dispatch', function (type) {
     const e = new ExtendableEvent(type), s = lifetime.get(e);
     s.dispatching = true; s.report = true;
     dispatch.call(g, e);
     s.dispatching = false;
     queueMicrotask(() => finish(e));
+  });
+  const fetchState = new WeakMap();
+  class FetchEvent extends ExtendableEvent {
+    constructor(type, init = {}) {
+      super(type, init);
+      if (!(init.request instanceof g.Request)) throw new TypeError('FetchEvent requires a Request.');
+      let resolve, reject;
+      const handled = new Promise((a, b) => { resolve = a; reject = b; });
+      handled.catch(() => {});
+      fetchState.set(this, { request: init.request, clientId: init.clientId || '', handled, resolve, reject, entered: false });
+    }
+    get request() { return fetchState.get(this).request; }
+    get clientId() { return fetchState.get(this).clientId; }
+    get resultingClientId() { return ''; }
+    get replacesClientId() { return ''; }
+    get preloadResponse() { return Promise.resolve(undefined); }
+    get handled() { return fetchState.get(this).handled; }
+    respondWith(value) {
+      const state = fetchState.get(this), event = lifetime.get(this);
+      if (!state || !event.dispatching || state.entered || event.fetchId === undefined) throw new DOMException('respondWith must be called once during fetch dispatch.', 'InvalidStateError');
+      state.entered = true;
+      g.Event.prototype.stopImmediatePropagation.call(this);
+      const response = Promise.resolve(value).then(r => {
+        N.swFetchResponse(event.fetchId, r);
+        state.resolve();
+      }, e => { throw e; }).catch(error => {
+        N.swFetchFailed(event.fetchId);
+        state.reject(new DOMException('Service worker response failed.', 'NetworkError'));
+        throw error;
+      });
+      this.waitUntil(response);
+    }
+  }
+  Object.defineProperty(FetchEvent.prototype, Symbol.toStringTag, { value: 'FetchEvent', configurable: true });
+  Object.defineProperty(g, 'FetchEvent', { value: FetchEvent, configurable: true, writable: true });
+  N.registerProto('__sw_fetch', function (id, request, clientId) {
+    const event = new FetchEvent('fetch', { request, clientId, cancelable: true });
+    const state = fetchState.get(event), life = lifetime.get(event);
+    life.dispatching = true; life.fetchId = id;
+    dispatch.call(g, event);
+    life.dispatching = false;
+    // respondWith is synchronous even if waitUntil still keeps this event alive.
+    if (!state.entered) {
+      if (event.defaultPrevented) { const error = new DOMException('Fetch event was canceled.', 'NetworkError'); N.swFetchFailed(id); state.reject(error); }
+      else { N.swFetchFallback(id); state.resolve(); }
+    }
+    queueMicrotask(() => finish(event));
   });
   Object.defineProperty(g, 'registration', { get() { return api.registration(info.registration); }, configurable: true });
   Object.defineProperty(g, 'serviceWorker', { get() { return api.worker(info.worker); }, configurable: true });

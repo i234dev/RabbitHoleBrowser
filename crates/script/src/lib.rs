@@ -901,5 +901,8 @@ impl Default for DispatchResult {
 }
 
 impl Drop for ScriptHost {
-    fn drop(&mut self) { service_worker::drop_context(&self.state.borrow().service_worker); }
+    fn drop(&mut self) {
+        for pending in &self.state.borrow().pending_fetches { if let Some(token) = &pending.cancellation { token.set(true); } }
+        service_worker::drop_context(&self.state.borrow().service_worker);
+    }
 }
