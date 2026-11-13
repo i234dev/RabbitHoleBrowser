@@ -98,13 +98,51 @@ estadísticas, agregando 81 realms, se compilaron las mismas 111 funciones y
 concluir un cambio robusto del coste de compilación. `MAP_NS` es acumulativo
 por hilo y no debe sumarse como si fuera un contador por realm.
 
-Estas cifras corresponden al experimento; **la medición sin contención del
-binario final tras quitar el interruptor experimental sigue pendiente**.
-No se afirma una mejora global de la versión final. En el experimento,
-`push_objects` con JIT alcanzó solo 0,9123× el throughput del intérprete,
-por debajo del gate de 0,95×. No se ha repetido Speedometer para este cambio;
-los gates de páginas, coste de compilación y memoria ejecutable siguen
-abiertos. **El JIT continúa apagado por defecto.**
+Estas cifras corresponden al experimento, antes de quitar el interruptor y
+los helpers duplicados. En él, `push_objects` con JIT alcanzó solo 0,9123×
+el throughput del intérprete, por debajo del gate de 0,95×.
+
+### Medición del binario final
+
+El 14 de noviembre de 2026 se compararon los binarios congelados anteriores
+al cambio y de `8fd6578`, sobre Intel Core i7-12700H, Linux x86-64, afinidad
+CPU 0 y sin compilaciones, fuzz ni otros tests activos. Se alternaron ocho
+rondas de cuatro modos: anterior apagado/encendido y final apagado/encendido.
+Son los 27 casos de `perf.rs`; cada dato es la mediana de ocho mínimos de tres
+evaluaciones en realms nuevos, con parseo y compilación JIT incluidos. El JIT
+usó su umbral predeterminado de 1000. Se midió CPU del hilo; las anomalías del
+reloj de pared de WSL hacen que los tiempos de `/usr/bin/time` no sean una
+fuente válida de duración para esta comparación.
+
+| Modo | Anterior | Final | Cambio de tiempo |
+|---|---:|---:|---:|
+| JIT apagado, suma de los 27 casos | 585,285 ms | 574,160 ms | −1,90 % |
+| JIT encendido, suma de los 27 casos | 387,310 ms | 382,945 ms | −1,13 % |
+
+Con JIT encendido, `calls` pasó de 9,035 a 8,255 ms (−8,63 %),
+`closure_calls` de 11,015 a 10,380 ms (−5,76 %) y `method_calls` de
+11,335 a 10,830 ms (−4,46 %). Sus controles apagados también cambiaron
+−2,40 %, −5,89 % y −5,46 % respectivamente. La mejora mayor del total
+apagado impide atribuir una mejora global específica al JIT. La comparación
+experimental dentro del mismo binario y esta comparación entre binarios
+finales son evidencias distintas y no deben confundirse.
+
+El RSS máximo mediano con JIT fue 38 296 → 38 396 KiB. En una pasada separada
+de estadísticas, las mismas 111 funciones y 2367 instrucciones ocuparon
+370 512 → 370 836 bytes; la suma de compilación fue 2,86 → 2,90 ms.
+El tiempo acumulado final de mapeo del hilo fue 1,38 → 1,39 ms, sin sumar
+sus valores intermedios. Esa única pasada no demuestra una mejora robusta
+del coste de compilación. Los logs registran los 32 procesos, estadísticas
+separadas y estos SHA-256:
+
+- Anterior: `6b7c9af467db7cd76ee96ac1fb1d0039fce7d01ed16c501a1f68890bc8edfe9d`.
+- Final: `4afc429579a566f54c4ea1b27ccf193c3276d8111d1069829df6ba383cfa7d51`.
+
+En esta tanda final el mínimo de throughput JIT/intérprete fue 0,9571×
+(`push_objects`), frente al 0,9123× observado en el experimento. No se ha
+repetido Speedometer para este cambio ni se ha demostrado una mejora global
+específica del JIT. Los gates de rendimiento, páginas, coste de compilación
+y memoria ejecutable siguen abiertos. **El JIT continúa apagado por defecto.**
 
 ## Resumen histórico del estudio
 
