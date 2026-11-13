@@ -194,6 +194,9 @@ struct TryCtx {
     /// Completed ranges + an open start.
     ranges: Vec<(u32, u32)>,
     open_start: Option<u32>,
+    /// `exits.len()` when the try started: a jump to exit depth `d` leaves
+    /// this try when `exit_depth >= d`.
+    exit_depth: usize,
 }
 
 #[derive(Debug)]
@@ -2336,6 +2339,30 @@ impl Compiler {
 
     /// Emit the exit actions for contexts above `depth` (innermost first).
     fn emit_exits(&mut self, depth: usize) -> CResult<()> {
+        // The code of the exits runs outside the tries being left: their
+        // handlers must not cover it (an iterator close that throws while
+        // `return` leaves a for-of is not caught by a try in its body).
+        let here = self.here() as u32;
+        let mut left = Vec::new();
+        for (t, tc) in self.fs().tries.iter_mut().enumerate() {
+            if tc.exit_depth >= depth {
+                if let Some(s) = tc.open_start.take() {
+                    if here > s {
+                        tc.ranges.push((s, here));
+                    }
+                    left.push(t);
+                }
+            }
+        }
+        let r = self.emit_exits_inner(depth);
+        let here = self.here() as u32;
+        for t in left {
+            self.fs().tries[t].open_start = Some(here);
+        }
+        r
+    }
+
+    fn emit_exits_inner(&mut self, depth: usize) -> CResult<()> {
         let exits: Vec<ExitCtx> = self.fs_ref().exits[depth..].to_vec();
         for (i, ctx) in exits.iter().enumerate().rev() {
             match ctx {
@@ -2356,14 +2383,15 @@ impl Compiler {
                     let saved_exits = self.fs().exits.split_off(depth + i);
                     let saved_scope_depth = self.fs_ref().scope_depth;
                     let n_tries = self.fs_ref().tries.len();
-                    let suspended: Vec<usize> = (*try_index..n_tries).collect();
+                    let mut suspended: Vec<usize> = Vec::new();
                     let here = self.here() as u32;
-                    for &t in &suspended {
+                    for t in *try_index..n_tries {
                         let tc = &mut self.fs().tries[t];
                         if let Some(s) = tc.open_start.take() {
                             if here > s {
                                 tc.ranges.push((s, here));
                             }
+                            suspended.push(t);
                         }
                     }
                     // Scopes popped by the exits above are reflected in scope_depth for handler bookkeeping.
@@ -2688,7 +2716,8 @@ impl Compiler {
         let scope_depth = self.fs_ref().scope_depth;
         let scopes = self.fs_ref().scopes.len();
         let start = self.here() as u32;
-        self.fs().tries.push(TryCtx { ranges: Vec::new(), open_start: Some(start) });
+        let exit_depth = self.fs_ref().exits.len();
+        self.fs().tries.push(TryCtx { ranges: Vec::new(), open_start: Some(start), exit_depth });
         if let Some(f) = &finalizer_rc {
             self.fs().exits.push(ExitCtx::Finally { body: f.clone(), try_index, scopes });
         }
