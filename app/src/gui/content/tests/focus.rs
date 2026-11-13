@@ -30,6 +30,7 @@ fn tab_skips_auxiliary_password_and_types_into_visible_password() {
     for character in ["a", "é", "😀"] { key(&h, character, false); }
     assert_eq!(eval(&h, &rx, "document.getElementById('secret').value+'|'+document.getElementById('auxiliary').value").trim(), "'aé😀|'");
     if let Ok(path) = std::env::var("RH_FOCUS_SCREENSHOT") {
+        h.send(ToContent::SetActive(true));
         let (_, frame) = wait_for(&rx, 1, Duration::from_secs(20), is_frame).expect("paint after typing");
         let FromContent::Frame(frame) = frame else { unreachable!() };
         let pixels = &frame.canvas;
