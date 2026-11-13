@@ -535,6 +535,20 @@ impl ArrayBufferData {
     }
 }
 
+/// The parameter map of a mapped arguments object: index `i` reads and
+/// writes slot `slots[i]` of the function scope `scope` while mapped
+/// ([`ArgMap::UNMAPPED`] once deleted, redefined as an accessor or made
+/// non-writable).
+#[derive(Debug)]
+pub struct ArgMap {
+    pub scope: ObjectId,
+    pub slots: Vec<u32>,
+}
+
+impl ArgMap {
+    pub const UNMAPPED: u32 = u32::MAX;
+}
+
 #[derive(Debug)]
 pub struct RegExpData {
     /// Compiled program, shared by every RegExp with the same source and
@@ -564,6 +578,9 @@ pub enum ObjectKind {
     Scope(Box<ScopeData>),
     Error,
     Arguments,
+    /// A sloppy function's arguments object whose index properties alias
+    /// the parameters (see `Realm::create_arguments_object`).
+    MappedArguments(Box<ArgMap>),
     Boolean(bool),
     Number(f64),
     String(JsStr),
@@ -629,7 +646,7 @@ impl ObjectKind {
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) => "Function",
             ObjectKind::Scope(_) => "Scope",
             ObjectKind::Error => "Error",
-            ObjectKind::Arguments => "Arguments",
+            ObjectKind::Arguments | ObjectKind::MappedArguments(_) => "Arguments",
             ObjectKind::Boolean(_) => "Boolean",
             ObjectKind::Number(_) => "Number",
             ObjectKind::String(_) => "String",
@@ -1329,6 +1346,7 @@ pub fn visit_refs(obj: &Object, f: &mut impl FnMut(ObjectId)) {
             }
         }
         ObjectKind::ModuleBinding { scope, .. } => f(*scope),
+        ObjectKind::MappedArguments(m) => f(m.scope),
         ObjectKind::Slots(d) => {
             for v in d.values.iter().chain(d.list.iter()) {
                 val(f, v);

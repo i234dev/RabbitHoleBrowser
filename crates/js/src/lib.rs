@@ -25,6 +25,7 @@
 //! host keeps across calls must be kept alive with [`Realm::root`].
 
 pub mod alloc;
+mod arguments;
 pub mod ast;
 pub mod bigint;
 pub mod builtins;

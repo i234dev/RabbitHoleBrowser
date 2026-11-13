@@ -74,7 +74,13 @@ impl Realm {
                     return crate::builtins::typed_array_get(self, t, i).map(|v| Property::data(v, flags));
                 }
             }
-            ObjectKind::Arguments => {}
+            ObjectKind::MappedArguments(_) => {
+                if let Some(m) = self.mapped_arg(id, key) {
+                    let mut p = obj.props.get(key).cloned()?;
+                    p.value = self.mapped_arg_read(m);
+                    return Some(p);
+                }
+            }
             _ => {}
         }
         obj.props.get(key).cloned()
@@ -153,7 +159,7 @@ impl Realm {
             let obj = self.obj(cur);
             match &obj.kind {
                 ObjectKind::Proxy { .. } => return self.proxy_get(cur, key, receiver),
-                ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) => {
+                ObjectKind::Array { .. } | ObjectKind::String(_) | ObjectKind::TypedArray(_) | ObjectKind::MappedArguments(_) => {
                     // A typed array answers every canonical numeric key itself.
                     if let ObjectKind::TypedArray(t) = &obj.kind {
                         if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(key) {
@@ -250,6 +256,11 @@ impl Realm {
     }
 
     pub fn set_on_object(&mut self, id: ObjectId, key: PropertyKey, value: Value, receiver: Value) -> JsResult<bool> {
+        if receiver.as_object() == Some(id) {
+            if let Some(m) = self.mapped_arg(id, &key) {
+                self.mapped_arg_write(m, value.clone());
+            }
+        }
         if let ObjectKind::TypedArray(t) = &self.obj(id).kind {
             if let Some(n) = crate::builtins::typed_array::canonical_numeric_index(&key) {
                 let t = **t;
@@ -411,7 +422,7 @@ impl Realm {
     /// Create or replace an own property; returns false if not allowed.
     pub fn define_own(&mut self, id: ObjectId, key: PropertyKey, prop: Property) -> JsResult<bool> {
         match &self.obj(id).kind {
-            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::TypedArray(_) => {
+            ObjectKind::Proxy { .. } | ObjectKind::Array { .. } | ObjectKind::TypedArray(_) | ObjectKind::MappedArguments(_) => {
                 return self.define_own_desc(id, key, crate::descriptor::PropDesc::from_property(&prop));
             }
             _ => {}
@@ -495,6 +506,9 @@ impl Realm {
             Some(p) if !p.configurable() => Ok(false),
             Some(_) => {
                 obj.props.remove(key);
+                if let ObjectKind::MappedArguments(_) = &obj.kind {
+                    self.unmap_arg(id, key);
+                }
                 Ok(true)
             }
             None => Ok(true),

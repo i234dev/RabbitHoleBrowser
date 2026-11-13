@@ -213,6 +213,11 @@ impl Realm {
     pub fn define_own_desc(&mut self, id: ObjectId, key: PropertyKey, desc: PropDesc) -> JsResult<bool> {
         match &self.obj(id).kind {
             ObjectKind::Proxy { .. } => return self.proxy_define_desc(id, key, desc),
+            ObjectKind::MappedArguments(_) => {
+                if let Some(r) = self.mapped_args_define(id, key.clone(), desc.clone())? {
+                    return Ok(r);
+                }
+            }
             ObjectKind::Array { .. } => {
                 if let PropertyKey::String(s) = &key {
                     if s.eq_str("length") {
@@ -258,6 +263,10 @@ impl Realm {
             }
             _ => {}
         }
+        self.ordinary_define_own(id, key, desc)
+    }
+
+    pub(crate) fn ordinary_define_own_pub(&mut self, id: ObjectId, key: PropertyKey, desc: PropDesc) -> JsResult<bool> {
         self.ordinary_define_own(id, key, desc)
     }
 

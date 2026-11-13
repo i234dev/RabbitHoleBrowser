@@ -29,6 +29,15 @@ pub type NameSet = HashSet<String, FxBuild>;
 /// `arguments[i]` / `arguments.length` cannot be served from the frame.
 pub const ARGS_ESCAPE: &str = "\u{0}args";
 
+/// Marker in a function's own set: it refers to its `arguments` (directly
+/// or from nested arrows).
+pub const ARGS_USED: &str = "\u{0}argsused";
+
+/// Marker in a function's own set: its `arguments` object may be created
+/// (a use other than `arguments[k]` / `arguments.length` reads in the
+/// function itself, which the frame serves without an object).
+pub const ARGS_OBJ: &str = "\u{0}argsobj";
+
 /// Marker in a function's set: direct `eval` code runs inside it (or inside
 /// a function nested in it) and may reference any of its bindings, so all
 /// of them live in heap scopes, where the eval code finds them.
@@ -82,6 +91,21 @@ impl Analyzer {
         for i in (1..self.sets.len()).rev() {
             if !self.arrow[i] {
                 self.sets[i].insert(ARGS_ESCAPE.to_string());
+                return;
+            }
+        }
+    }
+
+    /// A reference to `arguments` at the current level (`obj`: one the
+    /// frame cannot serve without an arguments object).
+    fn args_mark(&mut self, obj: bool) {
+        let last = self.sets.len() - 1;
+        for i in (1..self.sets.len()).rev() {
+            if !self.arrow[i] {
+                self.sets[i].insert(ARGS_USED.to_string());
+                if obj || i != last {
+                    self.sets[i].insert(ARGS_OBJ.to_string());
+                }
                 return;
             }
         }
@@ -152,6 +176,7 @@ impl Analyzer {
                 if f.is_arrow && lb.names.iter().any(|n| n.as_str() == "arguments") {
                     // It may write through the enclosing `arguments`.
                     self.args_escape();
+                    self.args_mark(true);
                 }
                 for n in lb.names.iter() {
                     self.name(n);
@@ -359,7 +384,23 @@ impl Analyzer {
 
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Identifier(n) => self.name(n),
+            ExprKind::Identifier(n) => {
+                if n == "arguments" {
+                    self.args_mark(true);
+                }
+                self.name(n)
+            }
+            ExprKind::Member { object, property: property @ (MemberProp::Identifier(_) | MemberProp::Computed(_)), optional: false }
+                if matches!(&object.kind, ExprKind::Identifier(n) if n == "arguments") && !matches!(property, MemberProp::Identifier(p) if p != "length") =>
+            {
+                // `arguments[k]` / `arguments.length`: served by the frame
+                // unless written through (see `target_expr`).
+                self.args_mark(false);
+                self.name("arguments");
+                if let MemberProp::Computed(k) = property {
+                    self.expr(k);
+                }
+            }
             ExprKind::Null
             | ExprKind::Undefined
             | ExprKind::This
@@ -377,6 +418,9 @@ impl Analyzer {
                 }
             }
             ExprKind::TaggedTemplate { tag, expressions, .. } => {
+                if is_arguments_member(tag) {
+                    self.args_mark(true);
+                }
                 self.expr(tag);
                 for x in expressions.iter() {
                     self.expr(x);
@@ -418,6 +462,10 @@ impl Analyzer {
             ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
                 if matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval") {
                     self.direct_eval();
+                }
+                if is_arguments_member(callee) {
+                    // `arguments[k]()`: the object is the receiver.
+                    self.args_mark(true);
                 }
                 self.expr(callee);
                 self.elements(args);

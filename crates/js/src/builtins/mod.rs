@@ -105,7 +105,7 @@ pub fn class_of(realm: &Realm, id: ObjectId) -> &'static str {
         ObjectKind::String(_) => "String",
         ObjectKind::Date(_) => "Date",
         ObjectKind::RegExp(_) => "RegExp",
-        ObjectKind::Arguments => "Arguments",
+        ObjectKind::Arguments | ObjectKind::MappedArguments(_) => "Arguments",
         _ => "Object",
     }
 }

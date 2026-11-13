@@ -231,6 +231,10 @@ struct FnState {
     name: JsStr,
     param_count: u32,
     param_locs: Vec<Loc>,
+    /// Sloppy simple parameter lists whose `arguments` is used: the
+    /// parameter binding each argument index aliases (see
+    /// `FunctionCode::arg_map`).
+    arg_map: Option<Vec<Option<Loc>>>,
     rest_loc: Option<Loc>,
     arguments_loc: Option<Loc>,
     self_loc: Option<Loc>,
@@ -292,6 +296,7 @@ impl FnState {
             name: JsStr::new(name),
             param_count: 0,
             param_locs: Vec::new(),
+            arg_map: None,
             rest_loc: None,
             arguments_loc: None,
             self_loc: None,
@@ -678,7 +683,9 @@ impl Compiler {
         if fs.flags.is_arrow || fs.is_script || fs.is_module_env || fs.flags.is_field_init || fs.force_heap {
             return false;
         }
-        if fs.captured.contains(crate::captures::ARGS_ESCAPE) {
+        // An arguments object that may exist is the only truth (it can be
+        // redefined, extended or unmapped through).
+        if fs.captured.contains(crate::captures::ARGS_ESCAPE) || fs.captured.contains(crate::captures::ARGS_OBJ) {
             return false;
         }
         fs.scopes.iter().all(|sc| sc.names.get("arguments").is_none_or(|b| matches!(b.kind, BindKind::Hidden)))
@@ -843,6 +850,7 @@ impl Compiler {
             nregs: 0,
             reg_names: Vec::new(),
             param_locs: Vec::new(),
+            arg_map: None,
             rest_loc: None,
             arguments_loc: None,
             self_loc: None,
@@ -1782,6 +1790,25 @@ impl Compiler {
         if fs.captured.contains(crate::captures::EVAL_ALL) {
             fs.force_heap = true;
         }
+        // Mapped arguments: a sloppy function with a simple parameter list
+        // using `arguments` aliases its parameters. When an arguments
+        // object may exist the parameters live in the scope object it maps
+        // to; `arguments[k]` reads served by the frame read the parameter
+        // bindings wherever they are.
+        let simple = f.params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest);
+        let mapped = {
+            let c = &fs.captured;
+            !fs.flags.is_strict && !f.is_arrow && simple && !f.params.is_empty() && (c.contains(crate::captures::ARGS_USED) || c.contains(crate::captures::ARGS_ESCAPE))
+        };
+        if mapped && (fs.captured.contains(crate::captures::ARGS_OBJ) || fs.captured.contains(crate::captures::ARGS_ESCAPE)) {
+            let mut set = (*fs.captured).clone();
+            for p in &f.params {
+                if let Pattern::Identifier(n) = &p.pattern {
+                    set.insert(n.to_string());
+                }
+            }
+            fs.captured = Rc::new(set);
+        }
         let eval_vars = fs.captured.contains(crate::captures::EVAL_HERE) && !fs.flags.is_strict;
         self.fns.push(fs);
         self.set_pos(f.pos);
@@ -1829,6 +1856,12 @@ impl Compiler {
             }
         }
         self.fs().param_count = param_count;
+        if mapped {
+            // A repeated name maps only its last occurrence.
+            let names: Vec<&str> = f.params.iter().map(|p| if let Pattern::Identifier(n) = &p.pattern { &**n } else { "" }).collect();
+            let map = (0..names.len()).map(|i| if names[i + 1..].contains(&names[i]) { None } else { param_slots.get(i).copied() }).collect();
+            self.fs().arg_map = Some(map);
+        }
         self.fs().param_locs = param_slots;
         self.fs().rest_loc = rest_slot;
         // Vars and lexicals.
@@ -4574,6 +4607,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         nregs: fs.nregs as u32,
         reg_names: fs.reg_names,
         param_locs: fs.param_locs.iter().map(|l| l.to_var_loc()).collect(),
+        arg_map: fs.arg_map.as_ref().map(|m| m.iter().map(|l| l.map(|l| l.to_var_loc())).collect()),
         rest_loc: fs.rest_loc.map(|l| l.to_var_loc()),
         arguments_loc: fs.arguments_loc.map(|l| l.to_var_loc()),
         self_loc: fs.self_loc.map(|l| l.to_var_loc()),

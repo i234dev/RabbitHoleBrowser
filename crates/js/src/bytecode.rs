@@ -534,6 +534,11 @@ pub struct FunctionCode {
     pub reg_names: Vec<JsStr>,
     /// Location of each positional parameter, in order.
     pub param_locs: Vec<VarLoc>,
+    /// Sloppy functions with a simple parameter list that use `arguments`:
+    /// the parameter binding argument `i` aliases (`None`: a name repeated
+    /// later in the list). Parameters an arguments object may map live in
+    /// the function scope (`VarLoc::Slot`).
+    pub arg_map: Option<Box<[Option<VarLoc>]>>,
     /// Binding receiving the rest parameter array, if any.
     pub rest_loc: Option<VarLoc>,
     /// Binding holding the `arguments` object, if used.

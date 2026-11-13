@@ -1055,6 +1055,14 @@ impl Realm {
                 None => self.alloc(Object::new(None, ObjectKind::Scope(Box::new(ScopeData { slots, parent: None, names: None })))),
             }
         };
+        if let (Some(map), Some(V::Object(ao)), true) = (&code.arg_map, arguments_obj.as_ref().map(Value::v), nslots > 0) {
+            // Mapped arguments: index i aliases parameter i while both exist.
+            let n = args.len().min(map.len());
+            let slots: Vec<u32> = map[..n].iter().map(|l| if let Some(VarLoc::Slot(s)) = l { *s as u32 } else { ArgMap::UNMAPPED }).collect();
+            if slots.iter().any(|&s| s != ArgMap::UNMAPPED) {
+                self.obj_mut(ao).kind = ObjectKind::MappedArguments(Box::new(ArgMap { scope, slots }));
+            }
+        }
         Ok(Frame {
             code: std::ptr::NonNull::from(&*code),
             pc: 0,
@@ -2706,20 +2714,46 @@ impl Realm {
         })
     }
 
+    /// The current value of the parameter binding `loc` of frame `fi`.
+    fn read_param(&self, fi: usize, loc: VarLoc) -> Value {
+        let f = &self.frames[fi];
+        match loc {
+            VarLoc::Reg(r) => self.vstack[f.base as usize + r as usize].clone(),
+            VarLoc::Slot(s) => {
+                let scope = self.scope_at(f.scope, f.scope_depth as u16);
+                match &self.heap.get(scope).kind {
+                    ObjectKind::Scope(sd) => sd.slots.get(s as usize).cloned().unwrap_or(Value::Undefined),
+                    _ => Value::Undefined,
+                }
+            }
+        }
+    }
+
     /// `arguments[key]` read of an `args_direct` frame.
     fn args_get(&mut self, fi: usize, key: Value) -> JsResult<Value> {
         let f = &self.frames[fi];
         let (bottom, argc) = (f.bottom(), f.argc as usize);
         if let V::Number(n) = key.v() {
             let i = n as usize;
-            // Like the arguments objects this engine creates, reads are
-            // not mapped to the parameters.
             if i as f64 == n && i < argc {
+                // A sloppy function's argument reads its parameter (the
+                // binding may have been assigned since).
+                if let Some(Some(loc)) = f.code().arg_map.as_ref().and_then(|m| m.get(i)) {
+                    return Ok(self.read_param(fi, *loc));
+                }
                 return Ok(self.vstack[bottom + i].clone());
             }
         }
         // Anything else: an equivalent (unobservable) arguments object.
-        let args = self.vstack[bottom..bottom + argc].to_vec();
+        let mut args = self.vstack[bottom..bottom + argc].to_vec();
+        if let Some(map) = self.frames[fi].code().arg_map.as_ref() {
+            for (i, a) in args.iter_mut().enumerate() {
+                if let Some(Some(loc)) = map.get(i) {
+                    *a = self.read_param(fi, *loc);
+                }
+            }
+        }
+        let f = &self.frames[fi];
         let callee = if f.code().flags.is_strict || !f.code().flags.has_simple_params { None } else { f.func };
         let ao = self.create_arguments_object(&args, callee);
         let key = self.to_property_key(key)?;
@@ -5074,7 +5108,7 @@ impl Realm {
     fn for_in_fast_keys(&self, id: ObjectId) -> Option<(Vec<JsStr>, u32)> {
         let obj = self.heap.try_get(id)?;
         let elements = match &obj.kind {
-            ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Error | ObjectKind::Arguments => None,
+            ObjectKind::Ordinary | ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Error | ObjectKind::Arguments | ObjectKind::MappedArguments(_) => None,
             ObjectKind::Array { elements, length } if *length as usize == elements.len() => Some(elements),
             _ => return None,
         };
