@@ -349,7 +349,7 @@
     }
     return s;
   }
-  const pixelsOf = (s) => (s.width && s.height ? new Uint8ClampedArray(N.canvasGetImageData(s.id, 0, 0, s.width, s.height)) : new Uint8ClampedArray(0));
+  const pixelsOf = (s) => (!s.lost && s.width && s.height ? new Uint8ClampedArray(N.canvasGetImageData(s.id, 0, 0, s.width, s.height)) : new Uint8ClampedArray(0));
   const pendingFlush = new Set();
   let flushQueued = false;
   function markDirty(s) {
@@ -601,8 +601,8 @@
   }
   // Pixels of a CanvasImageSource: { width, height, data }.
   function sourcePixels(image) {
-    if (image instanceof g.HTMLCanvasElement) { const s = surfaceOf(image); return s.width && s.height ? { width: s.width, height: s.height, data: pixelsOf(s) } : null; }
-    if (image instanceof OffscreenCanvas) { const s = image[S].surface; return s.width && s.height ? { width: s.width, height: s.height, data: pixelsOf(s) } : null; }
+    if (image instanceof g.HTMLCanvasElement) { const s = surfaceOf(image); if (s.lost) throw domError('The WebGL drawing buffer is lost.', 'InvalidStateError'); return s.width && s.height ? { width: s.width, height: s.height, data: pixelsOf(s) } : null; }
+    if (image instanceof OffscreenCanvas) { const s = image[S].surface; if (s.lost) throw domError('The WebGL drawing buffer is lost.', 'InvalidStateError'); return s.width && s.height ? { width: s.width, height: s.height, data: pixelsOf(s) } : null; }
     if (image instanceof ImageBitmap) { if (image[S].closed) throw domError('The image source is detached.', 'InvalidStateError'); return image[S]; }
     if (image instanceof ImageData) return { width: image.width, height: image.height, data: image.data };
     if (image instanceof g.HTMLImageElement || (g.SVGImageElement && image instanceof g.SVGImageElement)) {
@@ -613,6 +613,8 @@
     if (image instanceof g.HTMLVideoElement) return null;
     throw new TypeError("The provided value is not of type '(CSSImageValue or HTMLCanvasElement or HTMLImageElement or HTMLVideoElement or ImageBitmap or OffscreenCanvas or SVGImageElement or VideoFrame)'.");
   }
+
+  hidden(N, 'canvasSourcePixels', sourcePixels);
 
   class TextMetrics { constructor() { ILLEGAL(); } }
   for (const k of ['width', 'actualBoundingBoxLeft', 'actualBoundingBoxRight', 'fontBoundingBoxAscent', 'fontBoundingBoxDescent', 'actualBoundingBoxAscent', 'actualBoundingBoxDescent', 'emHeightAscent', 'emHeightDescent', 'hangingBaseline', 'alphabeticBaseline', 'ideographicBaseline']) Object.defineProperty(TextMetrics.prototype, k, { get() { return this[S][k]; }, configurable: true, enumerable: true });
@@ -657,10 +659,10 @@
     if (type === 'webgl') {
       const limits = N.webglLimits(), w = this.width >>> 0, h = this.height >>> 0;
       if (Math.max(w, 1) > limits.maxDimension || Math.max(h, 1) > limits.maxDimension || Math.max(w, 1) * Math.max(h, 1) > limits.maxPixels) {
-        this.dispatchEvent(new g.WebGLContextEvent('webglcontextcreationerror', { statusMessage: 'Drawing buffer exceeds the software renderer limits' }));
+        this.dispatchEvent(new g.WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'Drawing buffer exceeds the software renderer limits' }));
         return null;
       }
-      const ctx = N.makeWebGLContext(this, surfaceOf(this), attrs || {});
+      const ctx = N.makeWebGLContext(this, surfaceOf(this), attrs === null ? {} : attrs);
       if (ctx) contexts.set(this, { type, ctx });
       return ctx;
     }
@@ -709,7 +711,7 @@
       if (this[S].ctx) return this[S].type === type ? this[S].ctx : null;
       if (type === '2d') { this[S].ctx = makeContext(this, this[S].surface, attrs || {}, OffscreenCanvasRenderingContext2D); this[S].type = type; return this[S].ctx; }
       if (type === 'bitmaprenderer') { const c = Object.create(ImageBitmapRenderingContext.prototype); hidden(c, S, { canvas: this, surface: this[S].surface }); this[S].surface.ctx = c; this[S].surface.mode = type; this[S].ctx = c; this[S].type = type; return c; }
-      if (type === 'webgl') { const c = N.makeWebGLContext(this, this[S].surface, attrs || {}); if (c) { this[S].ctx = c; this[S].type = type; } return c; }
+      if (type === 'webgl') { const c = N.makeWebGLContext(this, this[S].surface, attrs === null ? {} : attrs); if (c) { this[S].ctx = c; this[S].type = type; } return c; }
       return null;
     }
     transferToImageBitmap() { const s = this[S].surface; const bm = makeBitmap(s.width, s.height, pixelsOf(s)); N.canvasResize(s.id, s.width, s.height); return bm; }

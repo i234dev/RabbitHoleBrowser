@@ -11,6 +11,9 @@ use rabbithole_webgl::Context;
 use std::collections::HashMap;
 
 const INVALID_OPERATION: u32 = 0x0502;
+// Limit a single upload before copying JS-owned bytes. The backend also
+// enforces its own aggregate resource budget across all buffer objects.
+const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct WebGlStore {
@@ -38,7 +41,11 @@ impl DrawingContext {
                 // compositor; Canvas2D's source surfaces use straight RGBA.
                 let a = pixel[3] as u32;
                 for channel in &mut pixel[..3] {
-                    *channel = if a == 0 { 0 } else { ((*channel as u32 * 255 + a / 2) / a).min(255) as u8 };
+                    *channel = if a == 0 {
+                        0
+                    } else {
+                        ((*channel as u32 * 255 + a / 2) / a).min(255) as u8
+                    };
                 }
             }
         }
@@ -51,6 +58,8 @@ enum Reply {
     Bool(bool),
     Text(String),
     Bytes(Vec<u8>),
+    Infos(Vec<rabbithole_webgl::ActiveInfo>),
+    Values(Vec<f32>),
 }
 
 type GlResult = Result<Reply, u32>;
@@ -62,9 +71,35 @@ fn response(realm: &mut Realm, result: GlResult) -> Value {
         Ok(Reply::Bool(b)) => (0, Value::Bool(b)),
         Ok(Reply::Text(s)) => (0, Value::str(&s)),
         Ok(Reply::Bytes(b)) => (0, crate::fetch::make_array_buffer(realm, b)),
+        Ok(Reply::Values(values)) => (
+            0,
+            crate::fetch::make_array_buffer(
+                realm,
+                values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            ),
+        ),
+        Ok(Reply::Infos(infos)) => {
+            let values = infos
+                .into_iter()
+                .map(|info| {
+                    object_from(
+                        realm,
+                        vec![
+                            ("name", Value::str(&info.name)),
+                            ("size", Value::Number(info.size as f64)),
+                            ("type", Value::Number(info.kind as f64)),
+                        ],
+                    )
+                })
+                .collect();
+            (0, realm.new_array_value(values))
+        }
         Err(e) => (e, Value::Null),
     };
-    object_from(realm, vec![("error", Value::Number(error as f64)), ("value", value)])
+    object_from(
+        realm,
+        vec![("error", Value::Number(error as f64)), ("value", value)],
+    )
 }
 
 fn number(realm: &mut Realm, args: &[Value], i: usize) -> JsResult<f64> {
@@ -72,19 +107,46 @@ fn number(realm: &mut Realm, args: &[Value], i: usize) -> JsResult<f64> {
 }
 
 fn byte_source(realm: &mut Realm, value: &Value) -> JsResult<Vec<u8>> {
-    let Some(id) = value.as_object() else { return Err(realm.throw_type_error("WebGL: expected an ArrayBuffer or ArrayBufferView")) };
-    if !matches!(realm.obj(id).kind, rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_)) {
-        return Err(realm.throw_type_error("WebGL: expected an ArrayBuffer or typed array"));
+    let Some(id) = value.as_object() else {
+        return Err(realm.throw_type_error("WebGL: expected an ArrayBuffer or ArrayBufferView"));
+    };
+    let length = match &realm.obj(id).kind {
+        rabbithole_js::ObjectKind::ArrayBuffer(buffer) => buffer.bytes.borrow().len(),
+        rabbithole_js::ObjectKind::TypedArray(view) => {
+            rabbithole_js::builtins::typed_array::typed_array_length(realm, view)
+                .saturating_mul(view.kind.element_size())
+        }
+        _ => return Err(realm.throw_type_error("WebGL: expected an ArrayBuffer or typed array")),
+    };
+    if length > MAX_UPLOAD_BYTES {
+        return Err(realm.throw_range_error("WebGL upload exceeds the renderer's memory limit"));
     }
     Ok(crate::fetch::body_bytes_from_value(realm, value)?.0)
 }
 
 fn limits(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(object_from(realm, vec![
-        ("maxDimension", Value::Number(rabbithole_webgl::MAX_DIMENSION as f64)),
-        ("maxPixels", Value::Number(rabbithole_webgl::MAX_PIXELS as f64)),
-        ("maxVertexAttribs", Value::Number(rabbithole_webgl::MAX_VERTEX_ATTRIBS as f64)),
-    ]))
+    Ok(object_from(
+        realm,
+        vec![
+            ("maxUploadBytes", Value::Number(MAX_UPLOAD_BYTES as f64)),
+            (
+                "maxDimension",
+                Value::Number(rabbithole_webgl::MAX_DIMENSION as f64),
+            ),
+            (
+                "maxPixels",
+                Value::Number(rabbithole_webgl::MAX_PIXELS as f64),
+            ),
+            (
+                "maxVertexAttribs",
+                Value::Number(rabbithole_webgl::MAX_VERTEX_ATTRIBS as f64),
+            ),
+            (
+                "maxTextureUnits",
+                Value::Number(rabbithole_webgl::MAX_TEXTURE_UNITS as f64),
+            ),
+        ],
+    ))
 }
 
 fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
@@ -98,7 +160,11 @@ fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
             if !store.surfaces.contains_key(&id) || store.webgl.contexts.contains_key(&id) {
                 return Err(INVALID_OPERATION);
             }
-            let context = DrawingContext { ctx, alpha, premultiplied };
+            let context = DrawingContext {
+                ctx,
+                alpha,
+                premultiplied,
+            };
             context.sync(store.surfaces.get_mut(&id).expect("checked canvas"));
             store.webgl.contexts.insert(id, context);
             Ok(Reply::Void)
@@ -110,8 +176,13 @@ fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 pub(crate) fn resize_surface(id: u32, w: u32, h: u32) -> Result<(), u32> {
     canvas2d::store(|store| {
         let record = store.webgl.contexts.get_mut(&id).ok_or(INVALID_OPERATION)?;
-        record.ctx.resize(w.max(1), h.max(1)).map_err(|e| e.code())?;
-        if let Some(surface) = store.surfaces.get_mut(&id) { record.sync(surface); }
+        record
+            .ctx
+            .resize(w.max(1), h.max(1))
+            .map_err(|e| e.code())?;
+        if let Some(surface) = store.surfaces.get_mut(&id) {
+            record.sync(surface);
+        }
         Ok(())
     })
 }
@@ -120,7 +191,10 @@ fn resize(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let id = number(realm, args, 0)? as u32;
     let w = number(realm, args, 1)? as u32;
     let h = number(realm, args, 2)? as u32;
-    Ok(response(realm, resize_surface(id, w, h).map(|_| Reply::Void)))
+    Ok(response(
+        realm,
+        resize_surface(id, w, h).map(|_| Reply::Void),
+    ))
 }
 
 fn lose(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
@@ -152,83 +226,398 @@ fn discard(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 // Parse every argument before borrowing host state: ToNumber/ToString may
 // execute arbitrary page JavaScript, including more canvas commands.
 enum Command {
-    CreateShader(u32), ShaderSource(u32, String), CompileShader(u32), ShaderStatus(u32), ShaderLog(u32), DeleteShader(u32),
-    CreateProgram, AttachShader(u32, u32), LinkProgram(u32), ProgramStatus(u32), ProgramLog(u32), UseProgram(u32), DeleteProgram(u32),
-    AttribLocation(u32, String), BindAttrib(u32, u32, String), UniformLocation(u32, String), Uniform(i32, Vec<f32>), Matrix(i32, bool, Vec<f32>),
-    CreateBuffer, BindBuffer(u32, u32), BufferData(u32, Vec<u8>), BufferSize(u32, usize), BufferSubData(u32, usize, Vec<u8>), DeleteBuffer(u32),
-    AttribPointer(u32, u32, u32, bool, u32, usize), EnableAttrib(u32, bool), Attrib(u32, [f32; 4]),
-    Viewport(i32, i32, u32, u32), Scissor(i32, i32, u32, u32), EnableScissor(bool), EnableDepth(bool), DepthMask(bool), DepthFunc(u32), ColorMask([bool; 4]),
-    ClearColor([f32; 4]), ClearDepth(f32), Clear(u32), DrawArrays(u32, u32, u32), DrawElements(u32, u32, u32, usize),
-    ReadPixels(i32, i32, u32, u32), Width, Height,
+    CreateShader(u32),
+    ShaderSource(u32, String),
+    CompileShader(u32),
+    ShaderStatus(u32),
+    ShaderLog(u32),
+    IsShader(u32),
+    GetShaderSource(u32),
+    DeleteShader(u32),
+    CreateProgram,
+    AttachShader(u32, u32),
+    LinkProgram(u32),
+    ProgramStatus(u32),
+    ProgramLog(u32),
+    IsProgram(u32),
+    UseProgram(u32),
+    DeleteProgram(u32),
+    AttribLocation(u32, String),
+    BindAttrib(u32, u32, String),
+    UniformLocation(u32, String),
+    Uniform(i32, Vec<f32>),
+    Matrix(i32, bool, Vec<f32>),
+    CreateBuffer,
+    BindBuffer(u32, u32),
+    BufferData(u32, Vec<u8>),
+    BufferSize(u32, usize),
+    BufferSubData(u32, usize, Vec<u8>),
+    DeleteBuffer(u32),
+    AttribPointer(u32, u32, u32, bool, u32, usize),
+    EnableAttrib(u32, bool),
+    Attrib(u32, [f32; 4]),
+    Viewport(i32, i32, u32, u32),
+    Scissor(i32, i32, u32, u32),
+    EnableScissor(bool),
+    EnableDepth(bool),
+    DepthMask(bool),
+    DepthFunc(u32),
+    ColorMask([bool; 4]),
+    ClearColor([f32; 4]),
+    ClearDepth(f32),
+    Clear(u32),
+    DrawArrays(u32, u32, u32),
+    DrawElements(u32, u32, u32, usize),
+    ReadPixels(i32, i32, u32, u32),
+    Width,
+    Height,
+    ActiveAttribs(u32),
+    ActiveUniforms(u32),
+    GetUniform(u32, i32),
+    UniformI(i32, Vec<i32>),
+    CreateTexture,
+    ActiveTexture(u32),
+    BindTexture(u32, u32),
+    DeleteTexture(u32),
+    TexParameter(u32, u32, i32),
+    GetTexParameter(u32, u32),
+    TexImage(u32, i32, u32, u32, u32, i32, u32, u32, Option<Vec<u8>>),
+    TexSubImage(u32, i32, i32, i32, u32, u32, u32, u32, Vec<u8>),
 }
 
 impl Command {
     fn parse(realm: &mut Realm, op: &str, args: &[Value]) -> JsResult<Option<Self>> {
-        macro_rules! n { ($i:expr) => { number(realm, args, $i)? }; }
-        macro_rules! u { ($i:expr) => { n!($i) as u32 }; }
-        macro_rules! b { ($i:expr) => { realm.to_boolean(&arg(args, $i)) }; }
+        macro_rules! n {
+            ($i:expr) => {
+                number(realm, args, $i)?
+            };
+        }
+        macro_rules! u {
+            ($i:expr) => {
+                n!($i) as u32
+            };
+        }
+        macro_rules! b {
+            ($i:expr) => {
+                realm.to_boolean(&arg(args, $i))
+            };
+        }
         let floats = |realm: &mut Realm, i| -> JsResult<Vec<f32>> {
             let bytes = byte_source(realm, &arg(args, i))?;
-            Ok(bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect())
+            Ok(bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect())
         };
         Ok(Some(match op {
             "createShader" => Self::CreateShader(u!(2)),
             "shaderSource" => Self::ShaderSource(u!(2), arg_str(realm, args, 3)?),
-            "compileShader" => Self::CompileShader(u!(2)), "shaderStatus" => Self::ShaderStatus(u!(2)), "shaderLog" => Self::ShaderLog(u!(2)), "deleteShader" => Self::DeleteShader(u!(2)),
-            "createProgram" => Self::CreateProgram, "attachShader" => Self::AttachShader(u!(2), u!(3)), "linkProgram" => Self::LinkProgram(u!(2)),
-            "programStatus" => Self::ProgramStatus(u!(2)), "programLog" => Self::ProgramLog(u!(2)), "useProgram" => Self::UseProgram(u!(2)), "deleteProgram" => Self::DeleteProgram(u!(2)),
-            "attribLocation" => Self::AttribLocation(u!(2), arg_str(realm, args, 3)?), "bindAttrib" => Self::BindAttrib(u!(2), u!(3), arg_str(realm, args, 4)?), "uniformLocation" => Self::UniformLocation(u!(2), arg_str(realm, args, 3)?),
-            "uniform" => Self::Uniform(n!(2) as i32, floats(realm, 3)?), "matrix4" => Self::Matrix(n!(2) as i32, b!(3), floats(realm, 4)?),
-            "createBuffer" => Self::CreateBuffer, "bindBuffer" => Self::BindBuffer(u!(2), u!(3)),
-            "bufferData" => Self::BufferData(u!(2), byte_source(realm, &arg(args, 3))?), "bufferSize" => Self::BufferSize(u!(2), n!(3) as usize),
-            "bufferSubData" => Self::BufferSubData(u!(2), n!(3) as usize, byte_source(realm, &arg(args, 4))?), "deleteBuffer" => Self::DeleteBuffer(u!(2)),
-            "attribPointer" => Self::AttribPointer(u!(2), u!(3), u!(4), b!(5), u!(6), n!(7) as usize), "enableAttrib" => Self::EnableAttrib(u!(2), b!(3)),
-            "attrib" => Self::Attrib(u!(2), [n!(3) as f32, n!(4) as f32, n!(5) as f32, n!(6) as f32]),
-            "viewport" => Self::Viewport(n!(2) as i32, n!(3) as i32, u!(4), u!(5)), "scissor" => Self::Scissor(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
-            "enableScissor" => Self::EnableScissor(b!(2)), "enableDepth" => Self::EnableDepth(b!(2)), "depthMask" => Self::DepthMask(b!(2)), "depthFunc" => Self::DepthFunc(u!(2)),
-            "colorMask" => Self::ColorMask([b!(2), b!(3), b!(4), b!(5)]), "clearColor" => Self::ClearColor([n!(2) as f32, n!(3) as f32, n!(4) as f32, n!(5) as f32]),
-            "clearDepth" => Self::ClearDepth(n!(2) as f32), "clear" => Self::Clear(u!(2)), "drawArrays" => Self::DrawArrays(u!(2), u!(3), u!(4)),
-            "drawElements" => Self::DrawElements(u!(2), u!(3), u!(4), n!(5) as usize), "readPixels" => Self::ReadPixels(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
-            "width" => Self::Width, "height" => Self::Height,
+            "compileShader" => Self::CompileShader(u!(2)),
+            "shaderStatus" => Self::ShaderStatus(u!(2)),
+            "shaderLog" => Self::ShaderLog(u!(2)),
+            "isShader" => Self::IsShader(u!(2)),
+            "getShaderSource" => Self::GetShaderSource(u!(2)),
+            "deleteShader" => Self::DeleteShader(u!(2)),
+            "createProgram" => Self::CreateProgram,
+            "attachShader" => Self::AttachShader(u!(2), u!(3)),
+            "linkProgram" => Self::LinkProgram(u!(2)),
+            "programStatus" => Self::ProgramStatus(u!(2)),
+            "programLog" => Self::ProgramLog(u!(2)),
+            "isProgram" => Self::IsProgram(u!(2)),
+            "useProgram" => Self::UseProgram(u!(2)),
+            "deleteProgram" => Self::DeleteProgram(u!(2)),
+            "attribLocation" => Self::AttribLocation(u!(2), arg_str(realm, args, 3)?),
+            "bindAttrib" => Self::BindAttrib(u!(2), u!(3), arg_str(realm, args, 4)?),
+            "uniformLocation" => Self::UniformLocation(u!(2), arg_str(realm, args, 3)?),
+            "uniform" => Self::Uniform(n!(2) as i32, floats(realm, 3)?),
+            "matrix4" => Self::Matrix(n!(2) as i32, b!(3), floats(realm, 4)?),
+            "createBuffer" => Self::CreateBuffer,
+            "bindBuffer" => Self::BindBuffer(u!(2), u!(3)),
+            "bufferData" => Self::BufferData(u!(2), byte_source(realm, &arg(args, 3))?),
+            "bufferSize" => Self::BufferSize(u!(2), n!(3) as usize),
+            "bufferSubData" => {
+                Self::BufferSubData(u!(2), n!(3) as usize, byte_source(realm, &arg(args, 4))?)
+            }
+            "deleteBuffer" => Self::DeleteBuffer(u!(2)),
+            "attribPointer" => {
+                Self::AttribPointer(u!(2), u!(3), u!(4), b!(5), u!(6), n!(7) as usize)
+            }
+            "enableAttrib" => Self::EnableAttrib(u!(2), b!(3)),
+            "attrib" => Self::Attrib(
+                u!(2),
+                [n!(3) as f32, n!(4) as f32, n!(5) as f32, n!(6) as f32],
+            ),
+            "viewport" => Self::Viewport(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
+            "scissor" => Self::Scissor(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
+            "enableScissor" => Self::EnableScissor(b!(2)),
+            "enableDepth" => Self::EnableDepth(b!(2)),
+            "depthMask" => Self::DepthMask(b!(2)),
+            "depthFunc" => Self::DepthFunc(u!(2)),
+            "colorMask" => Self::ColorMask([b!(2), b!(3), b!(4), b!(5)]),
+            "clearColor" => {
+                Self::ClearColor([n!(2) as f32, n!(3) as f32, n!(4) as f32, n!(5) as f32])
+            }
+            "clearDepth" => Self::ClearDepth(n!(2) as f32),
+            "clear" => Self::Clear(u!(2)),
+            "drawArrays" => Self::DrawArrays(u!(2), u!(3), u!(4)),
+            "drawElements" => Self::DrawElements(u!(2), u!(3), u!(4), n!(5) as usize),
+            "readPixels" => Self::ReadPixels(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
+            "width" => Self::Width,
+            "height" => Self::Height,
+            "activeAttribs" => Self::ActiveAttribs(u!(2)),
+            "activeUniforms" => Self::ActiveUniforms(u!(2)),
+            "getUniform" => Self::GetUniform(u!(2), n!(3) as i32),
+            "uniformI" => Self::UniformI(
+                n!(2) as i32,
+                byte_source(realm, &arg(args, 3))?
+                    .chunks_exact(4)
+                    .map(|v| i32::from_le_bytes(v.try_into().unwrap()))
+                    .collect(),
+            ),
+            "createTexture" => Self::CreateTexture,
+            "activeTexture" => Self::ActiveTexture(u!(2)),
+            "bindTexture" => Self::BindTexture(u!(2), u!(3)),
+            "deleteTexture" => Self::DeleteTexture(u!(2)),
+            "texParameter" => Self::TexParameter(u!(2), u!(3), n!(4) as i32),
+            "getTexParameter" => Self::GetTexParameter(u!(2), u!(3)),
+            "texImage" => Self::TexImage(
+                u!(2),
+                n!(3) as i32,
+                u!(4),
+                u!(5),
+                u!(6),
+                n!(7) as i32,
+                u!(8),
+                u!(9),
+                if arg(args, 10).is_nullish() {
+                    None
+                } else {
+                    Some(byte_source(realm, &arg(args, 10))?)
+                },
+            ),
+            "texSubImage" => Self::TexSubImage(
+                u!(2),
+                n!(3) as i32,
+                n!(4) as i32,
+                n!(5) as i32,
+                u!(6),
+                u!(7),
+                u!(8),
+                u!(9),
+                byte_source(realm, &arg(args, 10))?,
+            ),
             _ => return Ok(None),
         }))
     }
 
-    fn draws(&self) -> bool { matches!(self, Self::Clear(_) | Self::DrawArrays(..) | Self::DrawElements(..)) }
+    fn draws(&self) -> bool {
+        matches!(
+            self,
+            Self::Clear(_) | Self::DrawArrays(..) | Self::DrawElements(..)
+        )
+    }
 
     fn execute(self, record: &mut DrawingContext) -> GlResult {
         let ctx = &mut record.ctx;
         let result: Result<Reply, rabbithole_webgl::Error> = (|| {
             Ok(match self {
                 Self::CreateShader(kind) => Reply::Number(ctx.create_shader(kind)? as f64),
-                Self::ShaderSource(id, source) => { ctx.shader_source(id, &source)?; Reply::Void },
-                Self::CompileShader(id) => { ctx.compile_shader(id)?; Reply::Void },
-                Self::ShaderStatus(id) => Reply::Bool(ctx.shader_compile_status(id)?), Self::ShaderLog(id) => Reply::Text(ctx.shader_info_log(id)?.to_string()),
-                Self::DeleteShader(id) => { ctx.delete_shader(id)?; Reply::Void },
-                Self::CreateProgram => Reply::Number(ctx.create_program() as f64), Self::AttachShader(p, s) => { ctx.attach_shader(p, s)?; Reply::Void },
-                Self::LinkProgram(p) => { ctx.link_program(p)?; Reply::Void }, Self::ProgramStatus(p) => Reply::Bool(ctx.program_link_status(p)?), Self::ProgramLog(p) => Reply::Text(ctx.program_info_log(p)?.to_string()),
-                Self::UseProgram(p) => { ctx.use_program(p)?; Reply::Void }, Self::DeleteProgram(p) => { ctx.delete_program(p)?; Reply::Void },
-                Self::AttribLocation(p, name) => Reply::Number(ctx.get_attrib_location(p, &name)? as f64),
-                Self::BindAttrib(p, index, name) => { ctx.bind_attrib_location(p, index, &name)?; Reply::Void },
-                Self::UniformLocation(p, name) => Reply::Number(ctx.get_uniform_location(p, &name)?.unwrap_or(-1) as f64),
-                Self::Uniform(location, values) => { ctx.uniform_f32(location, &values)?; Reply::Void }, Self::Matrix(location, transpose, values) => { ctx.uniform_matrix4fv(location, transpose, &values)?; Reply::Void },
-                Self::CreateBuffer => Reply::Number(ctx.create_buffer() as f64), Self::BindBuffer(target, buffer) => { ctx.bind_buffer(target, buffer)?; Reply::Void },
-                Self::BufferData(target, bytes) => { ctx.buffer_data(target, &bytes)?; Reply::Void }, Self::BufferSize(target, size) => { ctx.buffer_data_size(target, size)?; Reply::Void },
-                Self::BufferSubData(target, offset, bytes) => { ctx.buffer_sub_data(target, offset, &bytes)?; Reply::Void }, Self::DeleteBuffer(id) => { ctx.delete_buffer(id)?; Reply::Void },
-                Self::AttribPointer(index, size, ty, normalize, stride, offset) => { ctx.vertex_attrib_pointer(index, size, ty, normalize, stride, offset)?; Reply::Void },
-                Self::EnableAttrib(index, enabled) => { ctx.enable_vertex_attrib_array(index, enabled)?; Reply::Void }, Self::Attrib(index, value) => { ctx.vertex_attrib(index, value)?; Reply::Void },
-                Self::Viewport(x, y, w, h) => { ctx.viewport(x, y, w, h)?; Reply::Void }, Self::Scissor(x, y, w, h) => { ctx.scissor(x, y, w, h)?; Reply::Void },
-                Self::EnableScissor(enabled) => { ctx.enable_scissor(enabled); Reply::Void }, Self::EnableDepth(enabled) => { ctx.enable_depth_test(enabled); Reply::Void },
-                Self::DepthMask(enabled) => { ctx.depth_mask(enabled); Reply::Void }, Self::DepthFunc(func) => { ctx.depth_func(func)?; Reply::Void },
-                Self::ColorMask(mask) => { ctx.color_mask(mask); Reply::Void }, Self::ClearColor(color) => { ctx.clear_color(color); Reply::Void }, Self::ClearDepth(value) => { ctx.clear_depth(value); Reply::Void },
-                Self::Clear(mask) => { ctx.clear(mask)?; Reply::Void }, Self::DrawArrays(mode, first, count) => { ctx.draw_arrays(mode, first, count)?; Reply::Void },
-                Self::DrawElements(mode, count, ty, offset) => { ctx.draw_elements(mode, count, ty, offset)?; Reply::Void },
+                Self::ShaderSource(id, source) => {
+                    ctx.shader_source(id, &source)?;
+                    Reply::Void
+                }
+                Self::CompileShader(id) => {
+                    ctx.compile_shader(id)?;
+                    Reply::Void
+                }
+                Self::ShaderStatus(id) => Reply::Bool(ctx.shader_compile_status(id)?),
+                Self::ShaderLog(id) => Reply::Text(ctx.shader_info_log(id)?.to_string()),
+                Self::IsShader(id) => Reply::Bool(ctx.shader_compile_status(id).is_ok()),
+                Self::GetShaderSource(id) => Reply::Text(ctx.shader_source_text(id)?.to_string()),
+                Self::DeleteShader(id) => {
+                    ctx.delete_shader(id)?;
+                    Reply::Void
+                }
+                Self::CreateProgram => Reply::Number(ctx.create_program() as f64),
+                Self::AttachShader(p, s) => {
+                    ctx.attach_shader(p, s)?;
+                    Reply::Void
+                }
+                Self::LinkProgram(p) => {
+                    ctx.link_program(p)?;
+                    Reply::Void
+                }
+                Self::ProgramStatus(p) => Reply::Bool(ctx.program_link_status(p)?),
+                Self::ProgramLog(p) => Reply::Text(ctx.program_info_log(p)?.to_string()),
+                Self::IsProgram(p) => Reply::Bool(ctx.program_link_status(p).is_ok()),
+                Self::UseProgram(p) => {
+                    ctx.use_program(p)?;
+                    Reply::Void
+                }
+                Self::DeleteProgram(p) => {
+                    ctx.delete_program(p)?;
+                    Reply::Void
+                }
+                Self::AttribLocation(p, name) => {
+                    Reply::Number(ctx.get_attrib_location(p, &name)? as f64)
+                }
+                Self::BindAttrib(p, index, name) => {
+                    ctx.bind_attrib_location(p, index, &name)?;
+                    Reply::Void
+                }
+                Self::UniformLocation(p, name) => {
+                    Reply::Number(ctx.get_uniform_location(p, &name)?.unwrap_or(-1) as f64)
+                }
+                Self::Uniform(location, values) => {
+                    ctx.uniform_f32(location, &values)?;
+                    Reply::Void
+                }
+                Self::Matrix(location, transpose, values) => {
+                    ctx.uniform_matrix4fv(location, transpose, &values)?;
+                    Reply::Void
+                }
+                Self::CreateBuffer => Reply::Number(ctx.create_buffer() as f64),
+                Self::BindBuffer(target, buffer) => {
+                    ctx.bind_buffer(target, buffer)?;
+                    Reply::Void
+                }
+                Self::BufferData(target, bytes) => {
+                    ctx.buffer_data(target, &bytes)?;
+                    Reply::Void
+                }
+                Self::BufferSize(target, size) => {
+                    ctx.buffer_data_size(target, size)?;
+                    Reply::Void
+                }
+                Self::BufferSubData(target, offset, bytes) => {
+                    ctx.buffer_sub_data(target, offset, &bytes)?;
+                    Reply::Void
+                }
+                Self::DeleteBuffer(id) => {
+                    ctx.delete_buffer(id)?;
+                    Reply::Void
+                }
+                Self::AttribPointer(index, size, ty, normalize, stride, offset) => {
+                    ctx.vertex_attrib_pointer(index, size, ty, normalize, stride, offset)?;
+                    Reply::Void
+                }
+                Self::EnableAttrib(index, enabled) => {
+                    ctx.enable_vertex_attrib_array(index, enabled)?;
+                    Reply::Void
+                }
+                Self::Attrib(index, value) => {
+                    ctx.vertex_attrib(index, value)?;
+                    Reply::Void
+                }
+                Self::Viewport(x, y, w, h) => {
+                    ctx.viewport(x, y, w, h)?;
+                    Reply::Void
+                }
+                Self::Scissor(x, y, w, h) => {
+                    ctx.scissor(x, y, w, h)?;
+                    Reply::Void
+                }
+                Self::EnableScissor(enabled) => {
+                    ctx.enable_scissor(enabled);
+                    Reply::Void
+                }
+                Self::EnableDepth(enabled) => {
+                    ctx.enable_depth_test(enabled);
+                    Reply::Void
+                }
+                Self::DepthMask(enabled) => {
+                    ctx.depth_mask(enabled);
+                    Reply::Void
+                }
+                Self::DepthFunc(func) => {
+                    ctx.depth_func(func)?;
+                    Reply::Void
+                }
+                Self::ColorMask(mask) => {
+                    ctx.color_mask(mask);
+                    Reply::Void
+                }
+                Self::ClearColor(color) => {
+                    ctx.clear_color(color);
+                    Reply::Void
+                }
+                Self::ClearDepth(value) => {
+                    ctx.clear_depth(value);
+                    Reply::Void
+                }
+                Self::Clear(mask) => {
+                    ctx.clear(mask)?;
+                    Reply::Void
+                }
+                Self::DrawArrays(mode, first, count) => {
+                    ctx.draw_arrays(mode, first, count)?;
+                    Reply::Void
+                }
+                Self::DrawElements(mode, count, ty, offset) => {
+                    ctx.draw_elements(mode, count, ty, offset)?;
+                    Reply::Void
+                }
                 Self::ReadPixels(x, y, w, h) => {
                     let mut bytes = ctx.read_pixels(x, y, w, h)?;
-                    if !record.alpha { for pixel in bytes.chunks_exact_mut(4) { pixel[3] = 255; } }
+                    if !record.alpha {
+                        let (bw, bh) = ctx.dimensions();
+                        for (i, pixel) in bytes.chunks_exact_mut(4).enumerate() {
+                            let px = x as i64 + (i % w.max(1) as usize) as i64;
+                            let py = y as i64 + (i / w.max(1) as usize) as i64;
+                            if px >= 0 && py >= 0 && px < bw as i64 && py < bh as i64 {
+                                pixel[3] = 255;
+                            }
+                        }
+                    }
                     Reply::Bytes(bytes)
-                },
-                Self::Width => Reply::Number(ctx.dimensions().0 as f64), Self::Height => Reply::Number(ctx.dimensions().1 as f64),
+                }
+                Self::Width => Reply::Number(ctx.dimensions().0 as f64),
+                Self::Height => Reply::Number(ctx.dimensions().1 as f64),
+                Self::ActiveAttribs(p) => Reply::Infos(ctx.active_attributes(p)?),
+                Self::ActiveUniforms(p) => Reply::Infos(ctx.active_uniforms(p)?),
+                Self::GetUniform(p, location) => Reply::Values(ctx.get_uniform(p, location)?),
+                Self::UniformI(location, values) => {
+                    ctx.uniform_i32(location, &values)?;
+                    Reply::Void
+                }
+                Self::CreateTexture => Reply::Number(ctx.create_texture() as f64),
+                Self::ActiveTexture(unit) => {
+                    ctx.active_texture(unit)?;
+                    Reply::Void
+                }
+                Self::BindTexture(target, id) => {
+                    ctx.bind_texture(target, id)?;
+                    Reply::Void
+                }
+                Self::DeleteTexture(id) => {
+                    ctx.delete_texture(id)?;
+                    Reply::Void
+                }
+                Self::TexParameter(target, name, value) => {
+                    ctx.tex_parameter_i(target, name, value)?;
+                    Reply::Void
+                }
+                Self::GetTexParameter(target, name) => {
+                    Reply::Number(ctx.texture_parameter(target, name)? as f64)
+                }
+                Self::TexImage(target, level, internal, w, h, border, format, ty, data) => {
+                    ctx.tex_image_2d(
+                        target,
+                        level,
+                        internal,
+                        w,
+                        h,
+                        border,
+                        format,
+                        ty,
+                        data.as_deref(),
+                    )?;
+                    Reply::Void
+                }
+                Self::TexSubImage(target, level, x, y, w, h, format, ty, data) => {
+                    ctx.tex_sub_image_2d(target, level, x, y, w, h, format, ty, &data)?;
+                    Reply::Void
+                }
             })
         })();
         result.map_err(|e| e.code())
@@ -238,13 +627,17 @@ impl Command {
 fn command(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let id = number(realm, args, 0)? as u32;
     let op = arg_str(realm, args, 1)?;
-    let Some(command) = Command::parse(realm, &op, args)? else { return Ok(response(realm, Err(INVALID_OPERATION))) };
+    let Some(command) = Command::parse(realm, &op, args)? else {
+        return Ok(response(realm, Err(INVALID_OPERATION)));
+    };
     let draws = command.draws();
     let result = canvas2d::store(|store| {
         let record = store.webgl.contexts.get_mut(&id).ok_or(INVALID_OPERATION)?;
         let result = command.execute(record);
         if draws && result.is_ok() {
-            if let Some(surface) = store.surfaces.get_mut(&id) { record.sync(surface); }
+            if let Some(surface) = store.surfaces.get_mut(&id) {
+                record.sync(surface);
+            }
         }
         result
     });

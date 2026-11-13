@@ -753,7 +753,7 @@ fn canvas_2d_rasterizes_and_encodes() {
         const mid = ctx.getImageData(10, 0, 1, 1).data[0];
         console.log('gradient', mid > 100 && mid < 160, ctx.measureText('hello').width > 0, ctx.lineWidth, ctx.canvas === c);
         const url = c.toDataURL();
-        console.log('png', url.startsWith('data:image/png;base64,iVBORw0KGgo'), document.createElement('canvas').getContext('webgl'), c.getContext('2d') === ctx);
+        console.log('png', url.startsWith('data:image/png;base64,iVBORw0KGgo'), c.getContext('webgl'), c.getContext('2d') === ctx);
         const off = new OffscreenCanvas(4, 4);
         const octx = off.getContext('2d');
         octx.fillStyle = '#0f0'; octx.fillRect(0, 0, 4, 4);

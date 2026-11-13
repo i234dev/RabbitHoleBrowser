@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>RabbitHole experimental WebGL1</title>
+<style>
+  body { margin: 24px; font: 16px sans-serif; color: #e5eaf4; background: #101827; }
+  h1 { font-size: 26px; }
+  .examples { display: flex; gap: 24px; }
+  canvas { display: block; width: 256px; height: 192px; border: 1px solid #65748e; }
+  #status { white-space: pre-wrap; }
+</style>
+<h1>Experimental WebGL1</h1>
+<p>A triangle and an RGBA texture, drawn with shaders and vertex buffers.</p>
+<div class="examples">
+  <div><h2>Interpolated colors</h2><canvas id="triangle" width="256" height="192"></canvas></div>
+  <div><h2>Nearest texture sampling</h2><canvas id="texture" width="256" height="192"></canvas></div>
+</div>
+<p id="status">Creating contexts…</p>
+<script>
+(function () {
+  const status = document.getElementById('status');
+  function compile(gl, kind, source) {
+    const shader = gl.createShader(kind);
+    gl.shaderSource(shader, source); gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    return shader;
+  }
+  function program(gl, vertex, fragment) {
+    const result = gl.createProgram();
+    gl.attachShader(result, compile(gl, gl.VERTEX_SHADER, vertex));
+    gl.attachShader(result, compile(gl, gl.FRAGMENT_SHADER, fragment));
+    gl.linkProgram(result);
+    if (!gl.getProgramParameter(result, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(result));
+    gl.useProgram(result); return result;
+  }
+  function attribute(gl, p, name, size, values) {
+    const buffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(values), gl.STATIC_DRAW);
+    const location = gl.getAttribLocation(p, name);
+    gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(location);
+  }
+  try {
+    const gl = document.getElementById('triangle').getContext('webgl', { preserveDrawingBuffer: true });
+    const tex = document.getElementById('texture').getContext('webgl', { preserveDrawingBuffer: true });
+    if (!gl || !tex) throw new Error('WebGL1 context creation failed');
+    gl.clearColor(.025, .04, .08, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    const p = program(gl,
+      'attribute vec2 position; attribute vec3 color; varying vec3 vColor; void main(){gl_Position=vec4(position,0.0,1.0);vColor=color;}',
+      'precision mediump float; varying vec3 vColor; void main(){gl_FragColor=vec4(vColor,1.0);}');
+    attribute(gl, p, 'position', 2, [-.85,-.8, .85,-.8, 0,.85]);
+    attribute(gl, p, 'color', 3, [1,.1,.15, .1,1,.25, .2,.35,1]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const t = program(tex,
+      'attribute vec2 position; attribute vec2 uv; varying vec2 vUv; void main(){gl_Position=vec4(position,0.0,1.0);vUv=uv;}',
+      'precision mediump float; uniform sampler2D image; varying vec2 vUv; void main(){gl_FragColor=texture2D(image,vUv);}');
+    attribute(tex, t, 'position', 2, [-1,-1, 1,-1, -1,1, 1,1]);
+    attribute(tex, t, 'uv', 2, [0,0, 1,0, 0,1, 1,1]);
+    const image = tex.createTexture(); tex.bindTexture(tex.TEXTURE_2D, image);
+    tex.texParameteri(tex.TEXTURE_2D, tex.TEXTURE_MIN_FILTER, tex.NEAREST);
+    tex.texParameteri(tex.TEXTURE_2D, tex.TEXTURE_MAG_FILTER, tex.NEAREST);
+    tex.texImage2D(tex.TEXTURE_2D, 0, tex.RGBA, 2, 2, 0, tex.RGBA, tex.UNSIGNED_BYTE,
+      new Uint8Array([255,80,100,255, 50,210,130,255, 50,110,240,255, 255,220,80,255]));
+    tex.uniform1i(tex.getUniformLocation(t, 'image'), 0); tex.drawArrays(tex.TRIANGLE_STRIP, 0, 4);
+    if (gl.getError() || tex.getError()) throw new Error('A rendering command failed');
+    status.textContent = 'WebGL1 rendered both examples.\n' + gl.getParameter(gl.RENDERER) + '\nWebGL2 is not advertised by this implementation.';
+  } catch (error) { status.textContent = 'Rendering error: ' + error.message; }
+})();
+</script>

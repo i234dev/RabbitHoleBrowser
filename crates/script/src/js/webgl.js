@@ -30,7 +30,11 @@
     IMPLEMENTATION_COLOR_READ_TYPE: 0x8B9A, IMPLEMENTATION_COLOR_READ_FORMAT: 0x8B9B,
     VERTEX_ATTRIB_ARRAY_ENABLED: 0x8622, VERTEX_ATTRIB_ARRAY_SIZE: 0x8623, VERTEX_ATTRIB_ARRAY_STRIDE: 0x8624, VERTEX_ATTRIB_ARRAY_TYPE: 0x8625, CURRENT_VERTEX_ATTRIB: 0x8626, VERTEX_ATTRIB_ARRAY_NORMALIZED: 0x886A, VERTEX_ATTRIB_ARRAY_POINTER: 0x8645, VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: 0x889F,
     FRAMEBUFFER: 0x8D40, RENDERBUFFER: 0x8D41, FRAMEBUFFER_BINDING: 0x8CA6, RENDERBUFFER_BINDING: 0x8CA7, FRAMEBUFFER_COMPLETE: 0x8CD5,
-    TEXTURE_2D: 0x0DE1, TEXTURE_CUBE_MAP: 0x8513, TEXTURE0: 0x84C0,
+    TEXTURE_2D: 0x0DE1, TEXTURE_CUBE_MAP: 0x8513, TEXTURE0: 0x84C0, ACTIVE_TEXTURE: 0x84E0, TEXTURE_BINDING_2D: 0x8069,
+    TEXTURE_MIN_FILTER: 0x2801, TEXTURE_MAG_FILTER: 0x2800, TEXTURE_WRAP_S: 0x2802, TEXTURE_WRAP_T: 0x2803,
+    NEAREST: 0x2600, LINEAR: 0x2601, NEAREST_MIPMAP_LINEAR: 0x2702, NEAREST_MIPMAP_NEAREST: 0x2700, LINEAR_MIPMAP_NEAREST: 0x2701, LINEAR_MIPMAP_LINEAR: 0x2703,
+    CLAMP_TO_EDGE: 0x812F, REPEAT: 0x2901, MIRRORED_REPEAT: 0x8370, SAMPLER_2D: 0x8B5E,
+    MAX_TEXTURE_IMAGE_UNITS: 0x8872, MAX_COMBINED_TEXTURE_IMAGE_UNITS: 0x8B4D,
   };
   for (let i = 1; i < 32; i++) GL['TEXTURE' + i] = GL.TEXTURE0 + i;
   const clamp = (v) => Math.max(0, Math.min(1, Number.isNaN(v) ? 0 : v));
@@ -70,7 +74,7 @@
   }
   function wrap(s, kind, id, extra = {}) {
     if (!id) { flag(s, GL.OUT_OF_MEMORY); return null; }
-    const C = { Shader: WebGLShader, Program: WebGLProgram, Buffer: WebGLBuffer }[kind];
+    const C = { Shader: WebGLShader, Program: WebGLProgram, Buffer: WebGLBuffer, Texture: WebGLTexture }[kind];
     const object = Object.create(C.prototype);
     objects.set(object, { context: s, kind, id, deleted: false, ...extra });
     return object;
@@ -101,23 +105,39 @@
     if (location.context !== s || s.program !== location.program || p.generation !== location.generation) { flag(s, GL.INVALID_OPERATION); return null; }
     return location;
   }
-  const floats = (value) => value instanceof Float32Array ? value : new Float32Array(value);
+  function floats(value) {
+    if (value instanceof Float32Array) return value;
+    if (value === null || typeof value !== 'object' || typeof value[Symbol.iterator] !== 'function') throw new TypeError('Expected a Float32Array or a sequence of numbers');
+    const values = [];
+    for (const n of value) { values.push(+(n)); if (values.length > 16) break; }
+    return new Float32Array(values);
+  }
+  function ints(value) {
+    if (value instanceof Int32Array) return value;
+    if (value === null || typeof value !== 'object' || typeof value[Symbol.iterator] !== 'function') throw new TypeError('Expected an Int32Array or a sequence of integers');
+    const values = [];
+    for (const n of value) { values.push(+(n) | 0); if (values.length > 16) break; }
+    return new Int32Array(values);
+  }
   function matrix(s, location, transpose, data) {
     const loc = uniformLocation(s, location);
     if (!loc) return;
     data = floats(data);
     if (transpose) { flag(s, GL.INVALID_VALUE); return; }
+    if (data.length !== 16) { flag(s, GL.INVALID_OPERATION); return; }
     call(s, 'matrix4', loc.id, false, data);
   }
   function uniform(s, location, data) {
     const loc = uniformLocation(s, location);
-    if (loc) call(s, 'uniform', loc.id, floats(data));
+    if (loc) { data = floats(data); if (data.length > 4) { flag(s, GL.INVALID_OPERATION); return; } call(s, 'uniform', loc.id, data); }
   }
   function changed(s, result) { if (!result.error) N.canvasMarkDirty(s.surface); }
 
-  class WebGLShader { constructor() { illegal(); } }
-  class WebGLProgram { constructor() { illegal(); } }
-  class WebGLBuffer { constructor() { illegal(); } }
+  class WebGLObject { constructor() { illegal(); } }
+  class WebGLShader extends WebGLObject { constructor() { illegal(); } }
+  class WebGLProgram extends WebGLObject { constructor() { illegal(); } }
+  class WebGLBuffer extends WebGLObject { constructor() { illegal(); } }
+  class WebGLTexture extends WebGLObject { constructor() { illegal(); } }
   class WebGLUniformLocation { constructor() { illegal(); } }
   class WebGLActiveInfo { constructor() { illegal(); } }
   class WebGLShaderPrecisionFormat { constructor() { illegal(); } }
@@ -129,22 +149,23 @@
     get canvas() { return state(this).canvas; }
     get drawingBufferWidth() { const s = state(this); return s.lost ? 0 : call(s, 'width').value || 0; }
     get drawingBufferHeight() { const s = state(this); return s.lost ? 0 : call(s, 'height').value || 0; }
-    getContextAttributes() { const s = state(this); return s.lost ? null : { ...s.attrs }; }
-    isContextLost() { return state(this).lost; }
-    getError() { const s = state(this); return s.errors.length ? s.errors.shift() : GL.NO_ERROR; }
+    getContextAttributes() { const s = state(this); syncSize(s); return s.lost ? null : { ...s.attrs }; }
+    isContextLost() { const s = state(this); syncSize(s); return s.lost; }
+    getError() { const s = state(this); syncSize(s); return s.errors.length ? s.errors.shift() : GL.NO_ERROR; }
     getSupportedExtensions() { const s = state(this); return s.lost ? null : []; }
-    getExtension(name) { state(this); String(name); return null; }
-    createShader(type) { required('createShader', 1, arguments); const s = state(this), r = call(s, 'createShader', type >>> 0); return r.error ? null : wrap(s, 'Shader', r.value, { type: type >>> 0, source: '' }); }
+    getExtension(name) { required('getExtension', 1, arguments); state(this); String(name); return null; }
+    createShader(type) { required('createShader', 1, arguments); const s = state(this); type >>>= 0; const r = call(s, 'createShader', type); return r.error ? null : wrap(s, 'Shader', r.value, { type, source: '' }); }
     shaderSource(shader, source) { required('shaderSource', 2, arguments); const s = state(this), o = owned(s, shader, 'Shader'); source = String(source); if (o && !call(s, 'shaderSource', o.id, source).error) o.source = source; }
     compileShader(shader) { required('compileShader', 1, arguments); const s = state(this), o = owned(s, shader, 'Shader'); if (o) call(s, 'compileShader', o.id); }
     getShaderParameter(shader, pname) {
       required('getShaderParameter', 2, arguments); const s = state(this), o = owned(s, shader, 'Shader', false, true); if (!o) return null;
+      if (o.deleted && !call(s, 'isShader', o.id).value) { flag(s, GL.INVALID_VALUE); return null; }
       switch (pname >>> 0) { case GL.COMPILE_STATUS: return call(s, 'shaderStatus', o.id).value; case GL.SHADER_TYPE: return o.type; case GL.DELETE_STATUS: return o.deleted; default: flag(s, GL.INVALID_ENUM); return null; }
     }
     getShaderInfoLog(shader) { required('getShaderInfoLog', 1, arguments); const s = state(this), o = owned(s, shader, 'Shader', false, true); return o ? call(s, 'shaderLog', o.id).value : null; }
-    getShaderSource(shader) { required('getShaderSource', 1, arguments); const s = state(this), o = owned(s, shader, 'Shader', false, true); return o ? o.source : null; }
+    getShaderSource(shader) { required('getShaderSource', 1, arguments); const s = state(this), o = owned(s, shader, 'Shader', false, true); return o ? call(s, 'getShaderSource', o.id).value : null; }
     deleteShader(shader) { required('deleteShader', 1, arguments); const s = state(this); if (shader === null) return; const o = owned(s, shader, 'Shader', false, true); if (o && !o.deleted && !call(s, 'deleteShader', o.id).error) o.deleted = true; }
-    isShader(shader) { const s = state(this), o = objects.get(shader); return !!o && o.context === s && o.kind === 'Shader' && !o.deleted && !s.lost; }
+    isShader(shader) { required('isShader', 1, arguments); const s = state(this), o = objects.get(shader); return !!o && o.context === s && o.kind === 'Shader' && !s.lost && !!call(s, 'isShader', o.id).value; }
     createProgram() { const s = state(this), r = call(s, 'createProgram'); return r.error ? null : wrap(s, 'Program', r.value, { shaders: new Set(), generation: 0 }); }
     attachShader(program, shader) { required('attachShader', 2, arguments); const s = state(this), p = owned(s, program, 'Program'), o = owned(s, shader, 'Shader'); if (p && o && !call(s, 'attachShader', p.id, o.id).error) p.shaders.add(shader); }
     getAttachedShaders(program) { const s = state(this), p = owned(s, program, 'Program', false, true); return p ? Array.from(p.shaders) : null; }
@@ -152,27 +173,41 @@
     linkProgram(program) { required('linkProgram', 1, arguments); const s = state(this), p = owned(s, program, 'Program'); if (p && !call(s, 'linkProgram', p.id).error) p.generation++; }
     getProgramParameter(program, pname) {
       required('getProgramParameter', 2, arguments); const s = state(this), p = owned(s, program, 'Program', false, true); if (!p) return null;
+      if (p.deleted && !call(s, 'isProgram', p.id).value) { flag(s, GL.INVALID_VALUE); return null; }
       switch (pname >>> 0) {
         case GL.LINK_STATUS: return call(s, 'programStatus', p.id).value;
         case GL.DELETE_STATUS: return p.deleted;
         case GL.ATTACHED_SHADERS: return p.shaders.size;
+        case GL.ACTIVE_ATTRIBUTES: { const r = call(s, 'activeAttribs', p.id); return r.error ? null : r.value.length; }
+        case GL.ACTIVE_UNIFORMS: { const r = call(s, 'activeUniforms', p.id); return r.error ? null : r.value.length; }
         default: flag(s, GL.INVALID_ENUM); return null;
       }
     }
     getProgramInfoLog(program) { const s = state(this), p = owned(s, program, 'Program', false, true); return p ? call(s, 'programLog', p.id).value : null; }
     useProgram(program) { required('useProgram', 1, arguments); const s = state(this), p = owned(s, program, 'Program', true); if (p && !call(s, 'useProgram', p.id).error) s.program = program; }
     deleteProgram(program) { required('deleteProgram', 1, arguments); const s = state(this); if (program === null) return; const p = owned(s, program, 'Program', false, true); if (p && !p.deleted && !call(s, 'deleteProgram', p.id).error) p.deleted = true; }
-    isProgram(program) { const s = state(this), p = objects.get(program); return !!p && p.context === s && p.kind === 'Program' && !p.deleted && !s.lost; }
+    isProgram(program) { required('isProgram', 1, arguments); const s = state(this), p = objects.get(program); return !!p && p.context === s && p.kind === 'Program' && !s.lost && !!call(s, 'isProgram', p.id).value; }
     getAttribLocation(program, name) { required('getAttribLocation', 2, arguments); const s = state(this), p = owned(s, program, 'Program'); if (!p) return -1; const r = call(s, 'attribLocation', p.id, String(name)); return r.error ? -1 : r.value; }
     getUniformLocation(program, name) {
       required('getUniformLocation', 2, arguments); const s = state(this), p = owned(s, program, 'Program'); if (!p) return null;
       const r = call(s, 'uniformLocation', p.id, String(name)); if (r.error || r.value < 0) return null;
       const location = Object.create(WebGLUniformLocation.prototype); locations.set(location, { context: s, program, generation: p.generation, id: r.value }); return location;
     }
-    uniform1f(location, x) { required('uniform1f', 2, arguments); uniform(state(this), location, [Number(x)]); }
-    uniform2f(location, x, y) { required('uniform2f', 3, arguments); uniform(state(this), location, [Number(x), Number(y)]); }
-    uniform3f(location, x, y, z) { required('uniform3f', 4, arguments); uniform(state(this), location, [Number(x), Number(y), Number(z)]); }
-    uniform4f(location, x, y, z, w) { required('uniform4f', 5, arguments); uniform(state(this), location, [Number(x), Number(y), Number(z), Number(w)]); }
+    getActiveAttrib(program, index) { required('getActiveAttrib', 2, arguments); return activeInfo(state(this), program, index, 'activeAttribs'); }
+    getActiveUniform(program, index) { required('getActiveUniform', 2, arguments); return activeInfo(state(this), program, index, 'activeUniforms'); }
+    getUniform(program, location) {
+      required('getUniform', 2, arguments); const s = state(this), p = owned(s, program, 'Program'); if (!p) return null;
+      const loc = locations.get(location); if (!loc) throw new TypeError('Expected WebGLUniformLocation');
+      if (loc.context !== s || loc.program !== program || loc.generation !== p.generation) { flag(s, GL.INVALID_OPERATION); return null; }
+      const r = call(s, 'getUniform', p.id, loc.id); if (r.error) return null;
+      const values = new Float32Array(r.value); return values.length === 1 ? values[0] : values;
+    }
+    uniform1i(location, value) { required('uniform1i', 2, arguments); const s = state(this), loc = uniformLocation(s, location); if (loc) call(s, 'uniformI', loc.id, new Int32Array([value | 0])); }
+    uniform1iv(location, values) { required('uniform1iv', 2, arguments); const s = state(this), loc = uniformLocation(s, location); if (!loc) return; values = ints(values); if (values.length !== 1) { flag(s, GL.INVALID_OPERATION); return; } call(s, 'uniformI', loc.id, values); }
+    uniform1f(location, x) { required('uniform1f', 2, arguments); uniform(state(this), location, [+(x)]); }
+    uniform2f(location, x, y) { required('uniform2f', 3, arguments); uniform(state(this), location, [+(x), +(y)]); }
+    uniform3f(location, x, y, z) { required('uniform3f', 4, arguments); uniform(state(this), location, [+(x), +(y), +(z)]); }
+    uniform4f(location, x, y, z, w) { required('uniform4f', 5, arguments); uniform(state(this), location, [+(x), +(y), +(z), +(w)]); }
     uniform1fv(location, value) { required('uniform1fv', 2, arguments); uniform(state(this), location, value); }
     uniform2fv(location, value) { required('uniform2fv', 2, arguments); uniform(state(this), location, value); }
     uniform3fv(location, value) { required('uniform3fv', 2, arguments); uniform(state(this), location, value); }
@@ -184,39 +219,39 @@
       if (b && !call(s, 'bindBuffer', target, b.id).error) { s.bindings[target] = object; if (object) b.target = target; }
     }
     bufferData(target, data, usage) {
-      required('bufferData', 3, arguments); const s = state(this), b = buffer(s, target); if (!b) return;
+      required('bufferData', 3, arguments); const s = state(this); target >>>= 0; const b = buffer(s, target); if (!b) return;
       usage >>>= 0; if (![GL.STATIC_DRAW, GL.DYNAMIC_DRAW, GL.STREAM_DRAW].includes(usage)) { flag(s, GL.INVALID_ENUM); return; }
       let r, size;
-      if (typeof data === 'number') { size = offset(s, data); if (size === null) return; r = call(s, 'bufferSize', target >>> 0, size); }
-      else { const bytes = data === null ? new Uint8Array(0) : dataView(data); size = bytes.byteLength; r = call(s, 'bufferData', target >>> 0, bytes); }
+      if (typeof data === 'number') { size = offset(s, data); if (size === null) return; if (size > limits.maxUploadBytes) { flag(s, GL.OUT_OF_MEMORY); return; } r = call(s, 'bufferSize', target, size); }
+      else { const bytes = data === null ? new Uint8Array(0) : dataView(data); size = bytes.byteLength; if (size > limits.maxUploadBytes) { flag(s, GL.OUT_OF_MEMORY); return; } r = call(s, 'bufferData', target, bytes); }
       if (!r.error) { b.size = size; b.usage = usage; }
     }
-    bufferSubData(target, destination, data) { required('bufferSubData', 3, arguments); const s = state(this); if (!buffer(s, target)) return; destination = offset(s, destination); if (destination !== null) call(s, 'bufferSubData', target >>> 0, destination, dataView(data)); }
+    bufferSubData(target, destination, data) { required('bufferSubData', 3, arguments); const s = state(this); target >>>= 0; const b = buffer(s, target); if (!b) return; destination = offset(s, destination); if (destination === null) return; const bytes = dataView(data); if (destination + bytes.byteLength > b.size) { flag(s, GL.INVALID_VALUE); return; } call(s, 'bufferSubData', target, destination, bytes); }
     getBufferParameter(target, pname) { required('getBufferParameter', 2, arguments); const s = state(this), b = buffer(s, target); if (!b) return null; if ((pname >>> 0) === GL.BUFFER_SIZE) return b.size; if ((pname >>> 0) === GL.BUFFER_USAGE) return b.usage; flag(s, GL.INVALID_ENUM); return null; }
     deleteBuffer(object) {
       required('deleteBuffer', 1, arguments); const s = state(this); if (object === null) return; const b = owned(s, object, 'Buffer', false, true);
       if (b && !b.deleted && !call(s, 'deleteBuffer', b.id).error) { b.deleted = true; for (const key of Object.keys(s.bindings)) if (s.bindings[key] === object) s.bindings[key] = null; for (const a of s.attribs) if (a.buffer === object) a.buffer = null; }
     }
-    isBuffer(object) { const s = state(this), b = objects.get(object); return !!b && b.context === s && b.kind === 'Buffer' && !b.deleted && b.target !== null && !s.lost; }
+    isBuffer(object) { required('isBuffer', 1, arguments); const s = state(this), b = objects.get(object); return !!b && b.context === s && b.kind === 'Buffer' && !b.deleted && b.target !== null && !s.lost; }
     vertexAttribPointer(location, size, type, normalized, stride, byteOffset) {
       required('vertexAttribPointer', 6, arguments); const s = state(this), i = index(s, location); if (i === null) return; size |= 0; stride |= 0; byteOffset = offset(s, byteOffset); if (byteOffset === null) return;
       if (size < 1 || size > 4 || stride < 0 || stride > 255) { flag(s, GL.INVALID_VALUE); return; }
       if (!call(s, 'attribPointer', i, size, type >>> 0, !!normalized, stride, byteOffset).error) Object.assign(s.attribs[i], { size, type: type >>> 0, normalized: !!normalized, stride, offset: byteOffset, buffer: s.bindings[GL.ARRAY_BUFFER] || null });
     }
-    enableVertexAttribArray(location) { const s = state(this), i = index(s, location); if (i !== null && !call(s, 'enableAttrib', i, true).error) s.attribs[i].enabled = true; }
-    disableVertexAttribArray(location) { const s = state(this), i = index(s, location); if (i !== null && !call(s, 'enableAttrib', i, false).error) s.attribs[i].enabled = false; }
+    enableVertexAttribArray(location) { required('enableVertexAttribArray', 1, arguments); const s = state(this), i = index(s, location); if (i !== null && !call(s, 'enableAttrib', i, true).error) s.attribs[i].enabled = true; }
+    disableVertexAttribArray(location) { required('disableVertexAttribArray', 1, arguments); const s = state(this), i = index(s, location); if (i !== null && !call(s, 'enableAttrib', i, false).error) s.attribs[i].enabled = false; }
     getVertexAttrib(location, pname) {
-      const s = state(this), i = index(s, location); if (i === null) return null; const a = s.attribs[i];
+      required('getVertexAttrib', 2, arguments); const s = state(this), i = index(s, location); if (i === null) return null; const a = s.attribs[i];
       switch (pname >>> 0) { case GL.VERTEX_ATTRIB_ARRAY_ENABLED: return a.enabled; case GL.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: return a.buffer; case GL.VERTEX_ATTRIB_ARRAY_SIZE: return a.size; case GL.VERTEX_ATTRIB_ARRAY_TYPE: return a.type; case GL.VERTEX_ATTRIB_ARRAY_NORMALIZED: return a.normalized; case GL.VERTEX_ATTRIB_ARRAY_STRIDE: return a.stride; case GL.CURRENT_VERTEX_ATTRIB: return new Float32Array(a.current); default: flag(s, GL.INVALID_ENUM); return null; }
     }
-    getVertexAttribOffset(location, pname) { const s = state(this), i = index(s, location); if (i === null) return 0; if ((pname >>> 0) !== GL.VERTEX_ATTRIB_ARRAY_POINTER) { flag(s, GL.INVALID_ENUM); return 0; } return s.attribs[i].offset; }
+    getVertexAttribOffset(location, pname) { required('getVertexAttribOffset', 2, arguments); const s = state(this), i = index(s, location); if (i === null) return 0; if ((pname >>> 0) !== GL.VERTEX_ATTRIB_ARRAY_POINTER) { flag(s, GL.INVALID_ENUM); return 0; } return s.attribs[i].offset; }
     viewport(x, y, width, height) { required('viewport', 4, arguments); const s = state(this); width |= 0; height |= 0; if (width < 0 || height < 0) { flag(s, GL.INVALID_VALUE); return; } x |= 0; y |= 0; if (!call(s, 'viewport', x, y, width, height).error) s.viewport = [x, y, Math.min(width, limits.maxDimension), Math.min(height, limits.maxDimension)]; }
     scissor(x, y, width, height) { required('scissor', 4, arguments); const s = state(this); width |= 0; height |= 0; if (width < 0 || height < 0) { flag(s, GL.INVALID_VALUE); return; } x |= 0; y |= 0; if (!call(s, 'scissor', x, y, width, height).error) s.scissor = [x, y, width, height]; }
-    enable(cap) { capability(state(this), cap >>> 0, true); }
-    disable(cap) { capability(state(this), cap >>> 0, false); }
-    isEnabled(cap) { const s = state(this); cap >>>= 0; if (cap === GL.SCISSOR_TEST) return s.scissorEnabled; if (cap === GL.DEPTH_TEST) return s.depthEnabled; flag(s, GL.INVALID_ENUM); return false; }
-    clearColor(r, green, b, a) { required('clearColor', 4, arguments); const s = state(this), color = [Number(r), Number(green), Number(b), Number(a)]; if (!call(s, 'clearColor', ...color).error) s.clearColor = color.map(clamp); }
-    clearDepth(depth) { required('clearDepth', 1, arguments); const s = state(this); depth = Number(depth); if (!call(s, 'clearDepth', depth).error) s.clearDepth = clamp(depth); }
+    enable(cap) { required('enable', 1, arguments); capability(state(this), cap >>> 0, true); }
+    disable(cap) { required('disable', 1, arguments); capability(state(this), cap >>> 0, false); }
+    isEnabled(cap) { required('isEnabled', 1, arguments); const s = state(this); cap >>>= 0; if (cap === GL.SCISSOR_TEST) return s.scissorEnabled; if (cap === GL.DEPTH_TEST) return s.depthEnabled; flag(s, GL.INVALID_ENUM); return false; }
+    clearColor(r, green, b, a) { required('clearColor', 4, arguments); const s = state(this), color = [+(r), +(green), +(b), +(a)]; if (!call(s, 'clearColor', ...color).error) s.clearColor = color.map(clamp); }
+    clearDepth(depth) { required('clearDepth', 1, arguments); const s = state(this); depth = +(depth); if (!call(s, 'clearDepth', depth).error) s.clearDepth = clamp(depth); }
     colorMask(r, green, b, a) { required('colorMask', 4, arguments); const s = state(this), mask = [!!r, !!green, !!b, !!a]; if (!call(s, 'colorMask', ...mask).error) s.colorMask = mask; }
     depthMask(value) { required('depthMask', 1, arguments); const s = state(this); if (!call(s, 'depthMask', !!value).error) s.depthMask = !!value; }
     depthFunc(func) { required('depthFunc', 1, arguments); const s = state(this); if (!call(s, 'depthFunc', func >>> 0).error) s.depthFunc = func >>> 0; }
@@ -226,16 +261,31 @@
     readPixels(x, y, width, height, format, type, pixels) {
       required('readPixels', 7, arguments); const s = state(this); width |= 0; height |= 0; x |= 0; y |= 0;
       if (width < 0 || height < 0) { flag(s, GL.INVALID_VALUE); return; }
-      if ((format >>> 0) !== GL.RGBA || (type >>> 0) !== GL.UNSIGNED_BYTE) { flag(s, GL.INVALID_ENUM); return; }
+      if ((format >>> 0) !== GL.RGBA || (type >>> 0) !== GL.UNSIGNED_BYTE) { flag(s, GL.INVALID_OPERATION); return; }
       if (pixels !== null && !ArrayBuffer.isView(pixels)) throw new TypeError('Expected an ArrayBufferView');
-      if (!(pixels instanceof Uint8Array)) { flag(s, GL.INVALID_OPERATION); return; }
+      if (pixels === null) { flag(s, GL.INVALID_VALUE); return; }
+      if (!(pixels instanceof Uint8Array) && !(pixels instanceof Uint8ClampedArray)) { flag(s, GL.INVALID_OPERATION); return; }
       const row = width * 4, stride = Math.ceil(row / s.packAlignment) * s.packAlignment;
       const length = height ? (height - 1) * stride + row : 0;
       if (!Number.isSafeInteger(length) || length > pixels.byteLength) { flag(s, GL.INVALID_OPERATION); return; }
       const r = call(s, 'readPixels', x, y, width, height); if (r.error) return;
       const bytes = new Uint8Array(r.value);
-      for (let y = 0; y < height; y++) pixels.set(bytes.subarray(y * row, (y + 1) * row), y * stride);
+      const bw = call(s, 'width').value, bh = call(s, 'height').value;
+      const first = Math.max(0, -x), last = Math.min(width, bw - x);
+      for (let iy = 0; iy < height; iy++) if (y + iy >= 0 && y + iy < bh && last > first) {
+        pixels.set(bytes.subarray(iy * row + first * 4, iy * row + last * 4), iy * stride + first * 4);
+      }
     }
+    createTexture() { const s = state(this), r = call(s, 'createTexture'); return r.error ? null : wrap(s, 'Texture', r.value, { bound: false }); }
+    activeTexture(unit) { required('activeTexture', 1, arguments); const s = state(this); unit >>>= 0; if (!call(s, 'activeTexture', unit).error) s.activeTexture = unit - GL.TEXTURE0; }
+    bindTexture(target, object) { required('bindTexture', 2, arguments); const s = state(this), t = owned(s, object, 'Texture', true); target >>>= 0; if (t && !call(s, 'bindTexture', target, t.id).error) { s.textures[s.activeTexture] = object; if (object) t.bound = true; } }
+    deleteTexture(object) { required('deleteTexture', 1, arguments); const s = state(this); if (object === null) return; const t = owned(s, object, 'Texture', false, true); if (t && !t.deleted && !call(s, 'deleteTexture', t.id).error) { t.deleted = true; for (let i = 0; i < s.textures.length; i++) if (s.textures[i] === object) s.textures[i] = null; } }
+    isTexture(object) { required('isTexture', 1, arguments); const s = state(this), t = objects.get(object); return !!t && t.context === s && t.kind === 'Texture' && t.bound && !t.deleted && !s.lost; }
+    texParameteri(target, pname, value) { required('texParameteri', 3, arguments); call(state(this), 'texParameter', target >>> 0, pname >>> 0, value | 0); }
+    texParameterf(target, pname, value) { required('texParameterf', 3, arguments); const s = state(this); value = +(value); if (!Number.isInteger(value)) { flag(s, GL.INVALID_ENUM); return; } call(s, 'texParameter', target >>> 0, pname >>> 0, value); }
+    getTexParameter(target, pname) { required('getTexParameter', 2, arguments); return call(state(this), 'getTexParameter', target >>> 0, pname >>> 0).value; }
+    texImage2D(...args) { uploadTexture(state(this), false, args); }
+    texSubImage2D(...args) { uploadTexture(state(this), true, args); }
     pixelStorei(pname, value) {
       required('pixelStorei', 2, arguments); const s = state(this); pname >>>= 0;
       if (pname === GL.PACK_ALIGNMENT || pname === GL.UNPACK_ALIGNMENT) { value |= 0; if (![1, 2, 4, 8].includes(value)) { flag(s, GL.INVALID_VALUE); return; } if (pname === GL.PACK_ALIGNMENT) s.packAlignment = value; else s.unpackAlignment = value; return; }
@@ -252,7 +302,9 @@
         case GL.SHADER_COMPILER: return true;
         case GL.MAX_VERTEX_ATTRIBS: return limits.maxVertexAttribs;
         case GL.MAX_VIEWPORT_DIMS: return new Int32Array([limits.maxDimension, limits.maxDimension]);
-        case GL.MAX_RENDERBUFFER_SIZE: return limits.maxDimension;
+        case GL.MAX_RENDERBUFFER_SIZE: case GL.MAX_TEXTURE_SIZE: return limits.maxDimension;
+        case GL.MAX_TEXTURE_IMAGE_UNITS: case GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS: return limits.maxTextureUnits;
+        case GL.ACTIVE_TEXTURE: return GL.TEXTURE0 + s.activeTexture; case GL.TEXTURE_BINDING_2D: return s.textures[s.activeTexture] || null;
         case GL.VIEWPORT: return new Int32Array(s.viewport); case GL.SCISSOR_BOX: return new Int32Array(s.scissor);
         case GL.SCISSOR_TEST: return s.scissorEnabled; case GL.DEPTH_TEST: return s.depthEnabled;
         case GL.COLOR_CLEAR_VALUE: return new Float32Array(s.clearColor); case GL.COLOR_WRITEMASK: return s.colorMask.slice();
@@ -269,14 +321,61 @@
       }
     }
     getShaderPrecisionFormat(shaderType, precisionType) {
-      const s = state(this); if (![GL.VERTEX_SHADER, GL.FRAGMENT_SHADER].includes(shaderType >>> 0) || ![GL.LOW_FLOAT, GL.MEDIUM_FLOAT, GL.HIGH_FLOAT].includes(precisionType >>> 0)) { flag(s, GL.INVALID_ENUM); return null; }
+      required('getShaderPrecisionFormat', 2, arguments); const s = state(this); if (![GL.VERTEX_SHADER, GL.FRAGMENT_SHADER].includes(shaderType >>> 0) || ![GL.LOW_FLOAT, GL.MEDIUM_FLOAT, GL.HIGH_FLOAT].includes(precisionType >>> 0)) { flag(s, GL.INVALID_ENUM); return null; }
       return Object.assign(Object.create(WebGLShaderPrecisionFormat.prototype), { rangeMin: 127, rangeMax: 127, precision: 23 });
     }
-    bindFramebuffer(target, framebuffer) { const s = state(this); if ((target >>> 0) !== GL.FRAMEBUFFER) { flag(s, GL.INVALID_ENUM); return; } if (framebuffer !== null) flag(s, GL.INVALID_OPERATION); }
-    checkFramebufferStatus(target) { const s = state(this); if ((target >>> 0) !== GL.FRAMEBUFFER) { flag(s, GL.INVALID_ENUM); return 0; } return s.lost ? 0 : GL.FRAMEBUFFER_COMPLETE; }
+    bindFramebuffer(target, framebuffer) { required('bindFramebuffer', 2, arguments); const s = state(this); if ((target >>> 0) !== GL.FRAMEBUFFER) { flag(s, GL.INVALID_ENUM); return; } if (framebuffer !== null) flag(s, GL.INVALID_OPERATION); }
+    checkFramebufferStatus(target) { required('checkFramebufferStatus', 1, arguments); const s = state(this); if ((target >>> 0) !== GL.FRAMEBUFFER) { flag(s, GL.INVALID_ENUM); return 0; } return s.lost ? 0 : GL.FRAMEBUFFER_COMPLETE; }
     flush() { const s = state(this); syncSize(s); if (!s.lost) N.canvasMarkDirty(s.surface); }
     finish() { const s = state(this); syncSize(s); if (!s.lost) N.canvasMarkDirty(s.surface); }
   }
+
+  function activeInfo(s, program, index, command) {
+    const p = owned(s, program, 'Program'); if (!p) return null;
+    const r = call(s, command, p.id); if (r.error) return null; index >>>= 0;
+    if (index >= r.value.length) { flag(s, GL.INVALID_VALUE); return null; }
+    const item = r.value[index], result = Object.create(WebGLActiveInfo.prototype);
+    for (const key of ['name', 'size', 'type']) Object.defineProperty(result, key, { value: item[key], enumerable: true });
+    return result;
+  }
+  function uploadTexture(s, sub, args) {
+    const typed = args.length === 9;
+    const sourced = sub ? args.length === 7 : args.length === 6;
+    if (!typed && !sourced) throw new TypeError('No matching texImage2D/texSubImage2D overload');
+    const target = args[0] >>> 0, level = args[1] | 0;
+    let width, height, border = 0, internal, format, type, pixels, bitmap = false;
+    const x = sub ? args[2] | 0 : 0, y = sub ? args[3] | 0 : 0;
+    if (typed) {
+      width = args[sub ? 4 : 3] | 0; height = args[sub ? 5 : 4] | 0; border = sub ? 0 : args[5] | 0;
+      internal = sub ? 0 : args[2] >>> 0; format = args[6] >>> 0; type = args[7] >>> 0; pixels = args[8];
+      if (pixels != null && !ArrayBuffer.isView(pixels)) throw new TypeError('Expected an ArrayBufferView');
+      if (pixels != null && !(pixels instanceof Uint8Array) && !(pixels instanceof Uint8ClampedArray)) { flag(s, GL.INVALID_OPERATION); return; }
+    } else {
+      internal = sub ? 0 : args[2] >>> 0; format = args[sub ? 4 : 3] >>> 0; type = args[sub ? 5 : 4] >>> 0;
+      const source = args[sub ? 6 : 5]; bitmap = source instanceof g.ImageBitmap;
+      const image = N.canvasSourcePixels(source); if (!image) { flag(s, GL.INVALID_VALUE); return; }
+      if (source.colorSpace && source.colorSpace !== 'srgb' && s.unpackColorspace !== GL.NONE) { flag(s, GL.INVALID_OPERATION); return; }
+      width = image.width; height = image.height; pixels = image.data;
+    }
+    if (width < 0 || height < 0 || border !== 0 || (sub && (x < 0 || y < 0))) { flag(s, GL.INVALID_VALUE); return; }
+    if (width > limits.maxDimension || height > limits.maxDimension || width * height > limits.maxPixels) { flag(s, GL.OUT_OF_MEMORY); return; }
+    if (format !== GL.RGBA || type !== GL.UNSIGNED_BYTE || (!sub && internal !== GL.RGBA)) { flag(s, GL.INVALID_ENUM); return; }
+    let bytes = null;
+    if (pixels != null) {
+      const source = dataView(pixels), row = width * 4, stride = typed ? Math.ceil(row / s.unpackAlignment) * s.unpackAlignment : row;
+      const length = height ? (height - 1) * stride + row : 0;
+      if (length > source.byteLength) { flag(s, GL.INVALID_OPERATION); return; }
+      bytes = new Uint8Array(width * height * 4);
+      for (let iy = 0; iy < height; iy++) {
+        const from = (!bitmap && s.flipY ? height - iy - 1 : iy) * stride;
+        bytes.set(source.subarray(from, from + row), iy * row);
+      }
+      if (!bitmap && s.unpackPremultiplied) for (let i = 0; i < bytes.length; i += 4) for (let c = 0; c < 3; c++) bytes[i + c] = Math.round(bytes[i + c] * bytes[i + 3] / 255);
+    } else if (sub) { flag(s, GL.INVALID_VALUE); return; }
+    if (sub) call(s, 'texSubImage', target, level, x, y, width, height, format, type, bytes);
+    else call(s, 'texImage', target, level, internal, width, height, border, format, type, bytes);
+  }
+
   function capability(s, cap, enabled) {
     if (cap === GL.SCISSOR_TEST) { if (!call(s, 'enableScissor', enabled).error) s.scissorEnabled = enabled; return; }
     if (cap === GL.DEPTH_TEST) { if (!call(s, 'enableDepth', enabled && s.attrs.depth).error) s.depthEnabled = enabled; return; }
@@ -284,33 +383,35 @@
   }
   for (let size = 1; size <= 4; size++) {
     hidden(WebGLRenderingContext.prototype, 'vertexAttrib' + size + 'f', function (location, ...values) {
-      const s = state(this), i = index(s, location); if (i === null) return; const v = [0, 0, 0, 1]; for (let j = 0; j < size; j++) v[j] = Number(values[j]); if (!call(s, 'attrib', i, ...v).error) s.attribs[i].current = v;
+      required('vertexAttrib' + size + 'f', size + 1, arguments); const s = state(this), i = index(s, location); if (i === null) return; const v = [0, 0, 0, 1]; for (let j = 0; j < size; j++) v[j] = +(values[j]); if (!call(s, 'attrib', i, ...v).error) s.attribs[i].current = v;
     });
     hidden(WebGLRenderingContext.prototype, 'vertexAttrib' + size + 'fv', function (location, values) {
-      const s = state(this), i = index(s, location); if (i === null) return; values = floats(values); if (values.length < size) { flag(s, GL.INVALID_VALUE); return; } const v = [0, 0, 0, 1]; for (let j = 0; j < size; j++) v[j] = values[j]; if (!call(s, 'attrib', i, ...v).error) s.attribs[i].current = v;
+      required('vertexAttrib' + size + 'fv', 2, arguments); const s = state(this), i = index(s, location); if (i === null) return; values = floats(values); if (values.length < size) { flag(s, GL.INVALID_VALUE); return; } const v = [0, 0, 0, 1]; for (let j = 0; j < size; j++) v[j] = values[j]; if (!call(s, 'attrib', i, ...v).error) s.attribs[i].current = v;
     });
   }
   // These operations are deliberately unavailable until their rendering
   // semantics exist. Libraries get an observable GL error, never fake IDs.
-  for (const name of ['createTexture', 'createFramebuffer', 'createRenderbuffer', 'getActiveAttrib', 'getActiveUniform', 'getUniform']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); return null; });
-  for (const name of ['activeTexture', 'bindTexture', 'deleteTexture', 'texImage2D', 'texSubImage2D', 'texParameteri', 'texParameterf', 'generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'bindRenderbuffer', 'deleteFramebuffer', 'deleteRenderbuffer', 'framebufferTexture2D', 'framebufferRenderbuffer', 'renderbufferStorage', 'blendFunc', 'blendFuncSeparate', 'blendEquation', 'blendEquationSeparate', 'blendColor', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform1i', 'uniform2i', 'uniform3i', 'uniform4i', 'uniform1iv', 'uniform2iv', 'uniform3iv', 'uniform4iv', 'uniformMatrix2fv', 'uniformMatrix3fv']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
+  for (const name of ['createFramebuffer', 'createRenderbuffer']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); return null; });
+  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'bindRenderbuffer', 'deleteFramebuffer', 'deleteRenderbuffer', 'framebufferTexture2D', 'framebufferRenderbuffer', 'renderbufferStorage', 'blendFunc', 'blendFuncSeparate', 'blendEquation', 'blendEquationSeparate', 'blendColor', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform2i', 'uniform3i', 'uniform4i', 'uniform2iv', 'uniform3iv', 'uniform4iv', 'uniformMatrix2fv', 'uniformMatrix3fv']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
   for (const [name, value] of Object.entries(GL)) {
     Object.defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
     Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
   }
-  for (const C of [WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
+  for (const C of [WebGLObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
   hidden(N, 'makeWebGLContext', function (canvas, surface, options) {
     if (options !== null && typeof options !== 'object' && typeof options !== 'function') throw new TypeError('WebGL context attributes must be a dictionary');
-    const attrs = { alpha: options.alpha !== false, depth: options.depth !== false, stencil: false, antialias: false, premultipliedAlpha: options.premultipliedAlpha !== false, preserveDrawingBuffer: !!options.preserveDrawingBuffer, powerPreference: String(options.powerPreference || 'default'), failIfMajorPerformanceCaveat: !!options.failIfMajorPerformanceCaveat, desynchronized: false };
+    const alpha = options.alpha, depth = options.depth, premultipliedAlpha = options.premultipliedAlpha, powerPreference = options.powerPreference;
+    const attrs = { alpha: alpha === undefined ? true : !!alpha, depth: depth === undefined ? true : !!depth, stencil: false, antialias: false, premultipliedAlpha: premultipliedAlpha === undefined ? true : !!premultipliedAlpha, preserveDrawingBuffer: !!options.preserveDrawingBuffer, powerPreference: powerPreference === undefined ? 'default' : String(powerPreference), failIfMajorPerformanceCaveat: !!options.failIfMajorPerformanceCaveat, desynchronized: false };
+    if (!['default', 'high-performance', 'low-power'].includes(attrs.powerPreference)) throw new TypeError('Invalid WebGL powerPreference');
     // Dictionary getters may have recursively selected another context.
     if (surface.ctx) return null;
     const w = surface.width, h = surface.height;
     if (Math.max(w, 1) > limits.maxDimension || Math.max(h, 1) > limits.maxDimension || Math.max(w, 1) * Math.max(h, 1) > limits.maxPixels) return null;
-    if (attrs.failIfMajorPerformanceCaveat) return null;
+    if (attrs.failIfMajorPerformanceCaveat) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'The software renderer is a major performance caveat' })); return null; }
     const result = N.webglNew(surface.id, w, h, attrs.alpha, attrs.premultipliedAlpha);
-    if (result.error) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { statusMessage: 'Software drawing buffer creation failed' })); return null; }
+    if (result.error) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'Software drawing buffer creation failed' })); return null; }
     const ctx = Object.create(WebGLRenderingContext.prototype);
-    const s = { canvas, surface, attrs, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, current: [0, 0, 0, 1] })) };
+    const s = { canvas, surface, attrs, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, current: [0, 0, 0, 1] })) };
     contexts.set(ctx, s); surface.ctx = ctx; surface.mode = 'webgl';
     N.canvasMarkDirty(surface);
     return ctx;
