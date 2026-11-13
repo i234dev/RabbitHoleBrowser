@@ -17,7 +17,8 @@ client URL yet.
 `ready`, `controller`, `getRegistration()`, `getRegistrations()`, `update()`, and
 `unregister()` reflect the live registry. A new document can acquire a matching
 active controller. Unregistering prevents future matching without clearing an
-already controlled document. An update waits while the previous worker controls
+already controlled document. The worker becomes redundant once no client uses
+the registration and lifecycle promises have settled. An update waits while the previous worker controls
 a client, unless the new script calls `skipWaiting()`.
 
 The registry belongs to an `Engine` and survives document navigation within that

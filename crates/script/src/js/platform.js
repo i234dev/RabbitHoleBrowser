@@ -728,7 +728,11 @@
         const p = swPending.get(e.id);
         if (p) { swPending.delete(e.id); e.kind === 'resolve' ? p.resolve(swRegistration(e.value)) : p.reject(swError(e.name, e.message)); }
       } else if (e.kind === 'updatefound') {
-        const r = swRegistrations.get(e.id); if (r) r.dispatchEvent(new Event('updatefound'));
+        const r = swRegistrations.get(e.id);
+        // Let register() reactions attach listeners before updatefound. The
+        // host drains this microtask before dispatching install or advancing
+        // the lifecycle, so installing still identifies the new worker.
+        if (r) queueMicrotask(() => r.dispatchEvent(new Event('updatefound')));
       } else if (e.kind === 'state') {
         const w = swWorkers.get(e.id); if (w) w.dispatchEvent(new Event('statechange'));
       } else if (e.kind === 'controller') swContainer.dispatchEvent(new Event('controllerchange'));

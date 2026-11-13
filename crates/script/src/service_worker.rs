@@ -108,6 +108,22 @@ impl Notice {
 
 impl Store {
     fn id(&mut self) -> u64 { self.next += 1; self.next }
+    fn clear_unregistered(&mut self) {
+        let registrations: Vec<u64> = self.registrations.values().filter(|r| {
+            !r.registered
+                && !self.clients.values().any(|c| c.controller.is_some_and(|id| self.workers[&id].registration == r.id))
+                && !self.workers.values().any(|w| w.registration == r.id && matches!(w.state, "parsed" | "installing" | "activating"))
+        }).map(|r| r.id).collect();
+        for registration in registrations {
+            let r = self.registrations.get_mut(&registration).unwrap();
+            let workers: Vec<u64> = [r.installing.take(), r.waiting.take(), r.active.take()].into_iter().flatten().collect();
+            for worker in workers {
+                self.set_state(worker, "redundant");
+                self.runtimes.remove(&worker);
+            }
+        }
+    }
+
     fn matching(&self, url: &Url) -> Option<u64> {
         let text = url.without_fragment().to_string();
         self.registrations.values().filter(|r| r.registered && r.scope.origin() == url.origin() && text.starts_with(&r.scope.to_string()))
@@ -141,7 +157,7 @@ pub(crate) fn new_context(env: &mut dyn HostEnv) -> (Context, Option<ServiceWork
     (Context { registry: Rc::downgrade(&registry.0), client: Some(id), worker: None }, Some(registry))
 }
 pub(crate) fn drop_context(context: &Context) {
-    if let (Some(id), Some(store)) = (context.client, context.registry.upgrade()) { store.borrow_mut().clients.remove(&id); }
+    if let (Some(id), Some(store)) = (context.client, context.registry.upgrade()) { let mut s = store.borrow_mut(); s.clients.remove(&id); s.clear_unregistered(); }
 }
 pub(crate) fn is_worker(context: &Context) -> bool { context.worker.is_some() }
 impl ServiceWorkerScope {
@@ -194,6 +210,7 @@ fn unregister(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
         Some(r) if r.scope.origin() == origin => std::mem::replace(&mut r.registered, false),
         _ => false,
     };
+    s.clear_unregistered();
     Ok(Value::Bool(removed))
 }
 fn event_done(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
@@ -495,8 +512,9 @@ impl ScriptHost {
             let Some(mut runtime) = runtime else { continue };
             if registry.0.borrow().workers[&id].state == "redundant" { continue; }
             ran |= !matches!(runtime.phase, Phase::Active);
-            if advance(&registry, env, id, &mut runtime, now) { registry.0.borrow_mut().runtimes.insert(id, runtime); }
+            if advance(&registry, env, id, &mut runtime, now) && registry.0.borrow().workers[&id].state != "redundant" { registry.0.borrow_mut().runtimes.insert(id, runtime); }
         }
+        registry.0.borrow_mut().clear_unregistered();
         notify(self, env);
         ran
     }

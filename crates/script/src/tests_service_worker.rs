@@ -176,3 +176,50 @@ fn service_worker_cache_respects_vary_search_methods_and_rejected_writes() {
     "#);
     assert_eq!(out, ["consumed true", "vary english spanish 2", "query true english", "method true", "rejected TypeError", "rejected TypeError", "rejected TypeError", "remaining 2 true 1"]);
 }
+
+#[test]
+fn service_worker_updatefound_follows_register_reactions_before_installing_is_cleared() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), "oninstall = e => e.waitUntil(Promise.resolve());".into()));
+    run(&mut env, &mut host, r#"
+        var registration, worker, found = 0, order = [], observed = [];
+        navigator.serviceWorker.register('sw.js').then(r => {
+            registration = r;
+            worker = r.installing;
+            order.push('registered');
+            r.onupdatefound = () => {
+                found++;
+                order.push('updatefound');
+                console.log('identity', r.installing === worker, r.installing.state);
+                worker.onstatechange = () => observed.push(worker.state);
+            };
+        });
+    "#);
+    tick(&mut env, &mut host, 15);
+    assert!(logs(&env).iter().any(|s| s == "identity true installing"));
+    assert_eq!(run(&mut env, &mut host, "console.log(found, order.join(','), observed.join(','), registration.installing);"), ["1 registered,updatefound installed,activating,activated null"]);
+    run(&mut env, &mut host, "registration.update(); navigator.serviceWorker.register('sw.js');");
+    tick(&mut env, &mut host, 15);
+    assert_eq!(run(&mut env, &mut host, "console.log(found, worker === registration.active);"), ["1 true"]);
+}
+
+#[test]
+fn service_worker_unregistered_during_install_finishes_lifetime_without_activating() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), "oninstall = e => e.waitUntil(new Promise(resolve => setTimeout(() => { console.log('install settled'); resolve(); }, 30))); onactivate = () => console.log('must not activate');".into()));
+    run(&mut env, &mut host, r#"
+        var worker, registration, ready = false;
+        navigator.serviceWorker.ready.then(() => ready = true);
+        navigator.serviceWorker.register('sw.js').then(r => {
+            registration = r;
+            worker = r.installing;
+            r.unregister().then(value => console.log('removed', value));
+        });
+    "#);
+    tick(&mut env, &mut host, 20);
+    let output = logs(&env);
+    assert!(output.iter().any(|s| s == "removed true"));
+    assert!(output.iter().any(|s| s.ends_with("install settled")));
+    assert!(!output.iter().any(|s| s.contains("must not activate")));
+    assert_eq!(run(&mut env, &mut host, "console.log(worker.state, registration.installing, registration.waiting, registration.active, ready, navigator.serviceWorker.controller);"), ["redundant null null null false null"]);
+}
