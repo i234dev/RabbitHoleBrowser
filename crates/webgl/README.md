@@ -153,9 +153,32 @@ textures can repeat in WebGL2 within the supported texture/filter subset.
 JavaScript has a distinct experimental `WebGL2RenderingContext`; it preserves
 canvas context exclusivity and rejects unimplemented commands and extra offset
 upload/readback overloads. This is not a conformant WebGL2 implementation or a
-Three.js compatibility claim. Instancing, integer attributes/uniforms, framebuffer
+Three.js compatibility claim. Integer attributes/uniforms, framebuffer
 objects/MRT, 3D textures, UBOs, queries, samplers, synchronization and transform
 feedback remain unsupported. Existing software limits still apply.
 
 `tests/vertex_arrays.rs` and the script WebGL tests check actual GLSL300 pixels,
 VAO switching/resource lifetimes, 32-bit indices, restart and WebGL1 isolation.
+
+
+## Instancing through vertex attributes
+
+WebGL2 `vertexAttribDivisor`, `drawArraysInstanced` and `drawElementsInstanced`
+advance enabled attributes by `floor(instance/divisor)` when the divisor is
+nonzero. A zero divisor remains vertex-indexed. Divisors belong to the bound
+VAO; generic constant attributes remain context-global. Non-instanced draws use
+instance zero for divisor attributes. Indexed draws preserve all supported index
+widths and fixed primitive restart.
+
+Every instance's attribute range, aggregate vertex work, fragment work and
+prepared geometry budget is checked before the first framebuffer write. Current
+software limits are 1024 instances, 262,144 evaluated vertex references, 32 Mi
+weighted work units and 64 MiB of prepared triangle data per draw. A rejected
+batch leaves existing pixels and depth intact. WebGL1 and its extensions do not
+expose instancing.
+
+`gl_InstanceID` is explicitly unsupported until the shader evaluator has real
+integer types; it fails shader compilation rather than being simulated as a
+float. This milestone uses actual divisor attributes for per-instance positions,
+colors and other data. See `tests/instancing.rs` for pixel, divisor, VAO, restart,
+range and atomic-budget regressions.

@@ -78,3 +78,5 @@ pub const BLEND_SRC_ALPHA: u32 = 0x80CB;
 
 pub const UNSIGNED_INT: u32 = 0x1405;
 pub const VERTEX_ARRAY_BINDING: u32 = 0x85B5;
+
+pub const VERTEX_ATTRIB_ARRAY_DIVISOR: u32 = 0x88FE;

@@ -86,6 +86,7 @@ struct Attribute {
     normalized: bool,
     stride: u32,
     offset: usize,
+    divisor: u32,
 }
 impl Default for Attribute {
     fn default() -> Self {
@@ -97,6 +98,7 @@ impl Default for Attribute {
             normalized: false,
             stride: 0,
             offset: 0,
+            divisor: 0,
         }
     }
 }
@@ -891,6 +893,57 @@ impl Context {
             .ok_or(Error::InvalidValue)? = value;
         Ok(())
     }
+    pub fn vertex_attrib_divisor(&mut self, index: u32, divisor: u32) -> Result<()> {
+        if self.context_version != 2 {
+            return Err(Error::InvalidOperation);
+        }
+        self.attributes
+            .get_mut(index as usize)
+            .ok_or(Error::InvalidValue)?
+            .divisor = divisor;
+        Ok(())
+    }
+    pub fn vertex_attrib_divisor_value(&self, index: u32) -> Result<u32> {
+        if self.context_version != 2 {
+            return Err(Error::InvalidOperation);
+        }
+        Ok(self
+            .attributes
+            .get(index as usize)
+            .ok_or(Error::InvalidValue)?
+            .divisor)
+    }
+    pub fn draw_arrays_instanced(
+        &mut self,
+        mode: u32,
+        first: u32,
+        count: u32,
+        instances: u32,
+    ) -> Result<()> {
+        if self.context_version != 2 {
+            return Err(Error::InvalidOperation);
+        }
+        validate_mode(mode)?;
+        if count > MAX_DRAW_VERTICES {
+            return Err(Error::OutOfMemory);
+        }
+        let end = first.checked_add(count).ok_or(Error::InvalidValue)?;
+        let indices: Vec<u32> = (first..end).collect();
+        self.draw_instances(mode, &indices, instances)
+    }
+    pub fn draw_elements_instanced(
+        &mut self,
+        mode: u32,
+        count: u32,
+        kind: u32,
+        offset: usize,
+        instances: u32,
+    ) -> Result<()> {
+        if self.context_version != 2 {
+            return Err(Error::InvalidOperation);
+        }
+        self.draw_elements_instances(mode, count, kind, offset, instances)
+    }
     pub fn draw_arrays(&mut self, mode: u32, first: u32, count: u32) -> Result<()> {
         validate_mode(mode)?;
         if count > MAX_DRAW_VERTICES {
@@ -901,6 +954,16 @@ impl Context {
         self.draw(mode, &indices)
     }
     pub fn draw_elements(&mut self, mode: u32, count: u32, kind: u32, offset: usize) -> Result<()> {
+        self.draw_elements_instances(mode, count, kind, offset, 1)
+    }
+    fn draw_elements_instances(
+        &mut self,
+        mode: u32,
+        count: u32,
+        kind: u32,
+        offset: usize,
+        instances: u32,
+    ) -> Result<()> {
         validate_mode(mode)?;
         if count > MAX_DRAW_VERTICES {
             return Err(Error::OutOfMemory);
@@ -959,23 +1022,29 @@ impl Context {
                 }
             }
             // Check incomplete primitive references too, before any fragment writes.
-            self.validate_arrays(
+            self.validate_arrays_for_instances(
                 indices
                     .iter()
                     .copied()
                     .filter(|index| *index != restart)
                     .max(),
+                instances,
             )?;
-            self.draw(gl::TRIANGLES, &triangles)
+            self.draw_instances(gl::TRIANGLES, &triangles, instances)
         } else {
-            self.draw(mode, &indices)
+            self.draw_instances(mode, &indices, instances)
         }
     }
-    fn validate_arrays(&self, max: Option<u32>) -> Result<()> {
+    fn validate_arrays_for_instances(&self, max_vertex: Option<u32>, instances: u32) -> Result<()> {
         for a in &self.attributes {
             if a.enabled {
                 let b = self.buffers.get(&a.buffer).ok_or(Error::InvalidOperation)?;
-                if let Some(max) = max {
+                if let Some(max_vertex) = max_vertex.filter(|_| instances != 0) {
+                    let max = if a.divisor == 0 {
+                        max_vertex
+                    } else {
+                        (instances - 1) / a.divisor
+                    };
                     let unit = scalar_size(a.kind)?;
                     let stride = if a.stride == 0 {
                         a.size as usize * unit
@@ -995,7 +1064,7 @@ impl Context {
         }
         Ok(())
     }
-    fn attribute_value(&self, index: u32, vertex: u32, ty: Ty) -> Value {
+    fn attribute_value(&self, index: u32, vertex: u32, instance: u32, ty: Ty) -> Value {
         let a = self.attributes[index as usize];
         let mut v = self.attribute_constants[index as usize];
         if a.enabled {
@@ -1006,7 +1075,12 @@ impl Context {
             } else {
                 a.stride as usize
             };
-            let offset = a.offset + vertex as usize * stride;
+            let element = if a.divisor == 0 {
+                vertex
+            } else {
+                instance / a.divisor
+            };
+            let offset = a.offset + element as usize * stride;
             let b = &self.buffers[&a.buffer].bytes;
             for i in 0..a.size as usize {
                 let p = offset + i * unit;

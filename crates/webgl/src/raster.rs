@@ -1,6 +1,9 @@
 //! Homogeneous clipping, perspective interpolation and triangle rasterization.
 use super::*;
 const MAX_WORK: usize = 32 * 1024 * 1024;
+const MAX_INSTANCES: u32 = 1024;
+const MAX_INSTANCE_VERTICES: usize = 262_144;
+const MAX_PREPARED_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone)]
 struct Vertex {
     position: [f64; 4],
@@ -77,145 +80,181 @@ fn clip(vertices: [Vertex; 3]) -> Vec<Vertex> {
 }
 impl Context {
     pub(super) fn draw(&mut self, mode: u32, indices: &[u32]) -> Result<()> {
+        self.draw_instances(mode, indices, 1)
+    }
+    pub(super) fn draw_instances(
+        &mut self,
+        mode: u32,
+        indices: &[u32],
+        instances: u32,
+    ) -> Result<()> {
         let executable = self
             .programs
             .get(&self.current_program)
             .and_then(|p| p.executable.as_ref())
             .ok_or(Error::InvalidOperation)?
             .clone();
-        self.validate_arrays(indices.iter().copied().max())?;
+        self.validate_arrays_for_instances(indices.iter().copied().max(), instances)?;
         self.validate_samplers(&executable)?;
-        if indices.len() < 3 {
+        if indices.len() < 3 || instances == 0 {
             return Ok(());
         }
         let mut uniforms = BTreeMap::new();
         for u in &executable.uniforms {
             uniforms.insert(u.name.clone(), u.value);
         }
-        let mut vertices = Vec::with_capacity(indices.len());
-        for &index in indices {
-            let mut env = uniforms.clone();
-            for (name, &location) in &executable.attributes {
-                let ty = executable.vertex.symbols[name].ty;
-                env.insert(name.clone(), self.attribute_value(location, index, ty));
-            }
-            let env = executable.vertex.run(env);
-            let value = env["gl_Position"];
-            let position = std::array::from_fn(|i| value.v[i] as f64);
-            let mut varyings = Vec::new();
-            for (name, ty) in &executable.varyings {
-                varyings.extend(env[name].v[..ty.n()].iter().map(|v| *v as f64));
-            }
-            vertices.push(Vertex { position, varyings });
-        }
-        let mut work = indices
+        let vertex_work = indices
             .len()
+            .checked_mul(instances as usize)
+            .ok_or(Error::OutOfMemory)?;
+        let mut work = vertex_work
             .checked_mul(executable.vertex.cost.max(1))
             .ok_or(Error::OutOfMemory)?;
+        if instances > MAX_INSTANCES || vertex_work > MAX_INSTANCE_VERTICES || work > MAX_WORK {
+            return Err(Error::OutOfMemory);
+        }
         let rect = self.clip_rect(true);
         if rect[0] >= rect[2] || rect[1] >= rect[3] {
             return Ok(());
         }
         let mut triangles = Vec::new();
-        let count = if mode == gl::TRIANGLES {
-            vertices.len() / 3
-        } else {
-            vertices.len() - 2
-        };
-        for i in 0..count {
-            let ix = match mode {
-                gl::TRIANGLES => [i * 3, i * 3 + 1, i * 3 + 2],
-                gl::TRIANGLE_FAN => [0, i + 1, i + 2],
-                _ => {
-                    if i % 2 == 0 {
-                        [i, i + 1, i + 2]
-                    } else {
-                        [i + 1, i, i + 2]
-                    }
+        let mut prepared_bytes = 0usize;
+        for instance in 0..instances {
+            let mut vertices = Vec::new();
+            vertices
+                .try_reserve_exact(indices.len())
+                .map_err(|_| Error::OutOfMemory)?;
+            for &index in indices {
+                let mut env = uniforms.clone();
+                for (name, &location) in &executable.attributes {
+                    let ty = executable.vertex.symbols[name].ty;
+                    env.insert(
+                        name.clone(),
+                        self.attribute_value(location, index, instance, ty),
+                    );
                 }
+                let env = executable.vertex.run(env);
+                let value = env["gl_Position"];
+                let position = std::array::from_fn(|i| value.v[i] as f64);
+                let mut varyings = Vec::new();
+                for (name, ty) in &executable.varyings {
+                    varyings.extend(env[name].v[..ty.n()].iter().map(|v| *v as f64));
+                }
+                vertices.push(Vertex { position, varyings });
+            }
+            let count = if mode == gl::TRIANGLES {
+                vertices.len() / 3
+            } else {
+                vertices.len() - 2
             };
-            let input = ix.map(|i| vertices[i].clone());
-            if input
-                .iter()
-                .any(|v| v.position.iter().any(|v| !v.is_finite()))
-            {
-                continue;
-            }
-            let polygon = clip(input);
-            for i in 1..polygon.len().saturating_sub(1) {
-                let p = [&polygon[0], &polygon[i], &polygon[i + 1]];
-                if p.iter().any(|v| v.position[3] <= 0.) {
-                    continue;
-                }
-                let mut v = p.map(|v| {
-                    let iw = 1. / v.position[3];
-                    Screen {
-                        position: [
-                            self.viewport[0] as f64
-                                + (v.position[0] * iw + 1.) * 0.5 * self.viewport[2] as f64,
-                            self.viewport[1] as f64
-                                + (v.position[1] * iw + 1.) * 0.5 * self.viewport[3] as f64,
-                            v.position[2] * iw,
-                        ],
-                        inverse_w: iw,
-                        varyings: v.varyings.clone(),
+            for i in 0..count {
+                let ix = match mode {
+                    gl::TRIANGLES => [i * 3, i * 3 + 1, i * 3 + 2],
+                    gl::TRIANGLE_FAN => [0, i + 1, i + 2],
+                    _ => {
+                        if i % 2 == 0 {
+                            [i, i + 1, i + 2]
+                        } else {
+                            [i + 1, i, i + 2]
+                        }
                     }
-                });
-                let mut area = edge(&v[0], &v[1], v[2].position[0], v[2].position[1]);
-                if area == 0. || !area.is_finite() {
+                };
+                let input = ix.map(|i| vertices[i].clone());
+                if input
+                    .iter()
+                    .any(|v| v.position.iter().any(|v| !v.is_finite()))
+                {
                     continue;
                 }
-                if area < 0. {
-                    v.swap(1, 2);
-                    area = -area;
+                let polygon = clip(input);
+                for i in 1..polygon.len().saturating_sub(1) {
+                    let p = [&polygon[0], &polygon[i], &polygon[i + 1]];
+                    if p.iter().any(|v| v.position[3] <= 0.) {
+                        continue;
+                    }
+                    let mut v = p.map(|v| {
+                        let iw = 1. / v.position[3];
+                        Screen {
+                            position: [
+                                self.viewport[0] as f64
+                                    + (v.position[0] * iw + 1.) * 0.5 * self.viewport[2] as f64,
+                                self.viewport[1] as f64
+                                    + (v.position[1] * iw + 1.) * 0.5 * self.viewport[3] as f64,
+                                v.position[2] * iw,
+                            ],
+                            inverse_w: iw,
+                            varyings: v.varyings.clone(),
+                        }
+                    });
+                    let mut area = edge(&v[0], &v[1], v[2].position[0], v[2].position[1]);
+                    if area == 0. || !area.is_finite() {
+                        continue;
+                    }
+                    if area < 0. {
+                        v.swap(1, 2);
+                        area = -area;
+                    }
+                    let minx = v
+                        .iter()
+                        .map(|v| v.position[0])
+                        .fold(f64::INFINITY, f64::min)
+                        .floor() as i64;
+                    let miny = v
+                        .iter()
+                        .map(|v| v.position[1])
+                        .fold(f64::INFINITY, f64::min)
+                        .floor() as i64;
+                    let maxx = v
+                        .iter()
+                        .map(|v| v.position[0])
+                        .fold(f64::NEG_INFINITY, f64::max)
+                        .ceil() as i64;
+                    let maxy = v
+                        .iter()
+                        .map(|v| v.position[1])
+                        .fold(f64::NEG_INFINITY, f64::max)
+                        .ceil() as i64;
+                    let bounds = [
+                        minx.max(rect[0]),
+                        miny.max(rect[1]),
+                        maxx.min(rect[2]),
+                        maxy.min(rect[3]),
+                    ];
+                    if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+                        continue;
+                    }
+                    let samples =
+                        (bounds[2] - bounds[0]) as usize * (bounds[3] - bounds[1]) as usize;
+                    work = work
+                        .checked_add(
+                            samples
+                                .saturating_mul(executable.fragment.cost + v[0].varyings.len() + 1),
+                        )
+                        .ok_or(Error::OutOfMemory)?;
+                    if work > MAX_WORK {
+                        return Err(Error::OutOfMemory);
+                    }
+                    let bytes = std::mem::size_of::<Triangle>()
+                        + v.iter()
+                            .map(|v| v.varyings.len() * std::mem::size_of::<f64>())
+                            .sum::<usize>();
+                    prepared_bytes = prepared_bytes
+                        .checked_add(bytes)
+                        .ok_or(Error::OutOfMemory)?;
+                    if prepared_bytes > MAX_PREPARED_BYTES {
+                        return Err(Error::OutOfMemory);
+                    }
+                    triangles.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
+                    triangles.push(Triangle {
+                        vertices: v,
+                        bounds,
+                        area,
+                    });
                 }
-                let minx = v
-                    .iter()
-                    .map(|v| v.position[0])
-                    .fold(f64::INFINITY, f64::min)
-                    .floor() as i64;
-                let miny = v
-                    .iter()
-                    .map(|v| v.position[1])
-                    .fold(f64::INFINITY, f64::min)
-                    .floor() as i64;
-                let maxx = v
-                    .iter()
-                    .map(|v| v.position[0])
-                    .fold(f64::NEG_INFINITY, f64::max)
-                    .ceil() as i64;
-                let maxy = v
-                    .iter()
-                    .map(|v| v.position[1])
-                    .fold(f64::NEG_INFINITY, f64::max)
-                    .ceil() as i64;
-                let bounds = [
-                    minx.max(rect[0]),
-                    miny.max(rect[1]),
-                    maxx.min(rect[2]),
-                    maxy.min(rect[3]),
-                ];
-                if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
-                    continue;
-                }
-                let samples = (bounds[2] - bounds[0]) as usize * (bounds[3] - bounds[1]) as usize;
-                work = work
-                    .checked_add(
-                        samples.saturating_mul(executable.fragment.cost + v[0].varyings.len() + 1),
-                    )
-                    .ok_or(Error::OutOfMemory)?;
-                if work > MAX_WORK {
-                    return Err(Error::OutOfMemory);
-                }
-                triangles.push(Triangle {
-                    vertices: v,
-                    bounds,
-                    area,
-                });
             }
-        }
-        // All array ranges, indices and resource budgets were checked
-        // before the first pixel changes. Error draws leave the buffer intact.
+        } // Prepare every instance before the first framebuffer write.
+          // All array ranges, indices and resource budgets were checked
+          // before the first pixel changes. Error draws leave the buffer intact.
         for triangle in triangles {
             self.rasterize(&triangle, &executable, &uniforms);
         }
