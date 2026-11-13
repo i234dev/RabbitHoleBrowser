@@ -40,7 +40,7 @@ fn eval(h:&ContentHandle,rx:&Received,tab:u64,source:&str)->String{
 }
 fn until(h:&ContentHandle,rx:&Received,tab:u64,source:&str){
     let deadline=Instant::now()+Duration::from_secs(15);
-    loop{if eval(h,rx,tab,source)=="true"{return;}assert!(Instant::now()<deadline,"condition: {source}");std::thread::sleep(Duration::from_millis(10));}
+    loop{if eval(h,rx,tab,source)=="true"{return;}assert!(Instant::now()<deadline,"condition: {source}; state={}",eval(h,rx,tab,"JSON.stringify({phase:typeof setupPhase==='undefined'?null:setupPhase,error:typeof setupError==='undefined'?null:setupError,configured:typeof configured==='undefined'?null:configured})"));std::thread::sleep(Duration::from_millis(10));}
 }
 fn navigate(h:&ContentHandle,target:&str){h.send(ToContent::Navigate{request:Request::get(url(target)),push_history:true});}
 fn committed(rx:&Received,tab:u64,title:&str){
@@ -149,7 +149,7 @@ fn gui_manual_redirects_apply_response_policy_and_preserve_cross_site_taint(){
     let mut settings=config(ViewSize::new(800,600,1.0));settings.loader.fetcher.cookies=Some(Arc::new(Mutex::new(rabbithole_engine::net::CookieJar::new())));
     let h=ContentHandle::spawn(77,1,settings,sink);h.send(ToContent::SetActive(true));
     navigate(&h,&format!("{}/app/start",a.origin));committed(&rx,77,"Start");until(&h,&rx,77,"controlled===true");
-    eval(&h,&rx,77,&format!("var configured=false;caches.open('settings').then(c=>c.put('target',new Response('{}'+'/app/hop'))).then(()=>fetch('baseline')).then(()=>configured=true);",b_origin));until(&h,&rx,77,"configured===true");
+    eval(&h,&rx,77,&format!("var configured=false,setupPhase='cache',setupError='',heartbeat=setInterval(()=>{{}},1);caches.open('settings').then(c=>c.put('target',new Response('{}'+'/app/hop'))).then(()=>{{setupPhase='baseline';return fetch('baseline');}}).then(()=>{{setupPhase='done';configured=true;}},error=>{{setupPhase='error';setupError=String(error);}});",b_origin));until(&h,&rx,77,"configured===true");
     assert!(a.requests.lock().unwrap().iter().any(|(path,headers)|path=="/app/baseline"&&headers.contains("strict=one")),"positive control: same-site baseline sends stored Strict cookie");
     navigate(&h,&format!("{b_origin}/app/start"));committed(&rx,77,"Start");until(&h,&rx,77,"controlled===true");
     let source=url(&format!("{}/private?query=secret-value",a.origin));h.send(ToContent::LoadHtml{html:"<!doctype html><title>Before bounce</title>".into(),url:source.clone(),push_history:true});committed(&rx,77,"Before bounce");

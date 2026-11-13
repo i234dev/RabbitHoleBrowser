@@ -63,6 +63,8 @@ pub(crate) struct Context {
 #[derive(Default)]
 struct Store {
     next: u64,
+    /// Polling deadlines follow actual worker polls, not arbitrary Window ticks.
+    last_poll: f64,
     clients: BTreeMap<u64, Client>,
     registrations: BTreeMap<u64, Registration>,
     workers: BTreeMap<u64, Worker>,
@@ -730,7 +732,7 @@ fn pump_runtimes(registry: &ServiceWorkerRegistry, env: &mut dyn HostEnv, now: f
             pump_fetches(registry, id, &mut runtime, env);
             if keep && (registry.0.borrow().workers[&id].state != "redundant" || fetch_work(&registry.0.borrow(), id)) { registry.0.borrow_mut().runtimes.insert(id, runtime); }
         }
-        registry.0.borrow_mut().clear_unregistered();
+        { let mut s = registry.0.borrow_mut(); s.last_poll = now; s.clear_unregistered(); }
         ran
 }
 impl ServiceWorkerRegistry {
@@ -891,7 +893,7 @@ impl ScriptHost {
         let c = context_of(self);
         if !s.jobs.is_empty() || c.client.is_some_and(|id| s.clients.get(&id).is_some_and(|c| !c.events.is_empty())) { return Some(0.0); }
         if s.fetches.values().any(|f| (f.cancelled.get() && !f.abort_notified) || (!f.dispatched && matches!(s.workers[&f.worker].state, "activated" | "redundant")) || f.result.is_some() || f.fallback) { return Some(0.0); }
-        let mut due: Option<f64> = if s.fetches.values().any(|f| f.network.is_some()) { Some(self.state.borrow().last_tick + 10.0) } else { None };
+        let mut due: Option<f64> = if s.fetches.values().any(|f| f.network.is_some()) { Some(s.last_poll + 10.0) } else { None };
         for (&id, r) in &s.runtimes {
             let immediate = match r.phase {
                 Phase::Install | Phase::Activate => true,
