@@ -12,6 +12,12 @@
     NO_ERROR: 0, INVALID_ENUM: 0x0500, INVALID_VALUE: 0x0501, INVALID_OPERATION: 0x0502, OUT_OF_MEMORY: 0x0505, INVALID_FRAMEBUFFER_OPERATION: 0x0506, CONTEXT_LOST_WEBGL: 0x9242,
     DEPTH_BUFFER_BIT: 0x0100, STENCIL_BUFFER_BIT: 0x0400, COLOR_BUFFER_BIT: 0x4000,
     POINTS: 0, LINES: 1, LINE_LOOP: 2, LINE_STRIP: 3, TRIANGLES: 4, TRIANGLE_STRIP: 5, TRIANGLE_FAN: 6,
+    SRC_COLOR: 0x0300, ONE_MINUS_SRC_COLOR: 0x0301, SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303,
+    DST_ALPHA: 0x0304, ONE_MINUS_DST_ALPHA: 0x0305, DST_COLOR: 0x0306, ONE_MINUS_DST_COLOR: 0x0307, SRC_ALPHA_SATURATE: 0x0308,
+    CONSTANT_COLOR: 0x8001, ONE_MINUS_CONSTANT_COLOR: 0x8002, CONSTANT_ALPHA: 0x8003, ONE_MINUS_CONSTANT_ALPHA: 0x8004,
+    FUNC_ADD: 0x8006, FUNC_SUBTRACT: 0x800A, FUNC_REVERSE_SUBTRACT: 0x800B, BLEND_COLOR: 0x8005,
+    BLEND_EQUATION: 0x8009, BLEND_EQUATION_RGB: 0x8009, BLEND_EQUATION_ALPHA: 0x883D,
+    BLEND_DST_RGB: 0x80C8, BLEND_SRC_RGB: 0x80C9, BLEND_DST_ALPHA: 0x80CA, BLEND_SRC_ALPHA: 0x80CB,
     ZERO: 0, ONE: 1, NONE: 0, BYTE: 0x1400, UNSIGNED_BYTE: 0x1401, SHORT: 0x1402, UNSIGNED_SHORT: 0x1403, INT: 0x1404, UNSIGNED_INT: 0x1405, FLOAT: 0x1406,
     ARRAY_BUFFER: 0x8892, ELEMENT_ARRAY_BUFFER: 0x8893, ARRAY_BUFFER_BINDING: 0x8894, ELEMENT_ARRAY_BUFFER_BINDING: 0x8895,
     STREAM_DRAW: 0x88E0, STATIC_DRAW: 0x88E4, DYNAMIC_DRAW: 0x88E8, BUFFER_SIZE: 0x8764, BUFFER_USAGE: 0x8765,
@@ -249,7 +255,27 @@
     scissor(x, y, width, height) { required('scissor', 4, arguments); const s = state(this); width |= 0; height |= 0; if (width < 0 || height < 0) { flag(s, GL.INVALID_VALUE); return; } x |= 0; y |= 0; if (!call(s, 'scissor', x, y, width, height).error) s.scissor = [x, y, width, height]; }
     enable(cap) { required('enable', 1, arguments); capability(state(this), cap >>> 0, true); }
     disable(cap) { required('disable', 1, arguments); capability(state(this), cap >>> 0, false); }
-    isEnabled(cap) { required('isEnabled', 1, arguments); const s = state(this); cap >>>= 0; if (cap === GL.SCISSOR_TEST) return s.scissorEnabled; if (cap === GL.DEPTH_TEST) return s.depthEnabled; flag(s, GL.INVALID_ENUM); return false; }
+    isEnabled(cap) { required('isEnabled', 1, arguments); const s = state(this); cap >>>= 0; syncSize(s); if (s.lost) return false; if (cap === GL.SCISSOR_TEST) return s.scissorEnabled; if (cap === GL.DEPTH_TEST) return s.depthEnabled; if (cap === GL.BLEND) return s.blendEnabled; flag(s, GL.INVALID_ENUM); return false; }
+    blendFunc(source, destination) {
+      required('blendFunc', 2, arguments); const s = state(this); source >>>= 0; destination >>>= 0;
+      if (!call(s, 'blendFunc', source, destination, source, destination).error) s.blendFactors = [source, destination, source, destination];
+    }
+    blendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha) {
+      required('blendFuncSeparate', 4, arguments); const s = state(this); srcRGB >>>= 0; dstRGB >>>= 0; srcAlpha >>>= 0; dstAlpha >>>= 0;
+      if (!call(s, 'blendFunc', srcRGB, dstRGB, srcAlpha, dstAlpha).error) s.blendFactors = [srcRGB, dstRGB, srcAlpha, dstAlpha];
+    }
+    blendEquation(equation) {
+      required('blendEquation', 1, arguments); const s = state(this); equation >>>= 0;
+      if (!call(s, 'blendEquation', equation, equation).error) s.blendEquations = [equation, equation];
+    }
+    blendEquationSeparate(rgb, alpha) {
+      required('blendEquationSeparate', 2, arguments); const s = state(this); rgb >>>= 0; alpha >>>= 0;
+      if (!call(s, 'blendEquation', rgb, alpha).error) s.blendEquations = [rgb, alpha];
+    }
+    blendColor(r, green, b, a) {
+      required('blendColor', 4, arguments); const s = state(this), color = new Float32Array([+r, +green, +b, +a]);
+      if (!call(s, 'blendColor', ...color).error) s.blendColor = Array.from(color, clamp);
+    }
     clearColor(r, green, b, a) { required('clearColor', 4, arguments); const s = state(this), color = [+(r), +(green), +(b), +(a)]; if (!call(s, 'clearColor', ...color).error) s.clearColor = color.map(clamp); }
     clearDepth(depth) { required('clearDepth', 1, arguments); const s = state(this); depth = +(depth); if (!call(s, 'clearDepth', depth).error) s.clearDepth = clamp(depth); }
     colorMask(r, green, b, a) { required('colorMask', 4, arguments); const s = state(this), mask = [!!r, !!green, !!b, !!a]; if (!call(s, 'colorMask', ...mask).error) s.colorMask = mask; }
@@ -306,6 +332,11 @@
         case GL.MAX_TEXTURE_IMAGE_UNITS: case GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS: return limits.maxTextureUnits;
         case GL.ACTIVE_TEXTURE: return GL.TEXTURE0 + s.activeTexture; case GL.TEXTURE_BINDING_2D: return s.textures[s.activeTexture] || null;
         case GL.VIEWPORT: return new Int32Array(s.viewport); case GL.SCISSOR_BOX: return new Int32Array(s.scissor);
+        case GL.BLEND: return s.blendEnabled;
+        case GL.BLEND_SRC_RGB: return s.blendFactors[0]; case GL.BLEND_DST_RGB: return s.blendFactors[1];
+        case GL.BLEND_SRC_ALPHA: return s.blendFactors[2]; case GL.BLEND_DST_ALPHA: return s.blendFactors[3];
+        case GL.BLEND_EQUATION_RGB: return s.blendEquations[0]; case GL.BLEND_EQUATION_ALPHA: return s.blendEquations[1];
+        case GL.BLEND_COLOR: return new Float32Array(s.blendColor);
         case GL.SCISSOR_TEST: return s.scissorEnabled; case GL.DEPTH_TEST: return s.depthEnabled;
         case GL.COLOR_CLEAR_VALUE: return new Float32Array(s.clearColor); case GL.COLOR_WRITEMASK: return s.colorMask.slice();
         case GL.DEPTH_CLEAR_VALUE: return s.clearDepth; case GL.DEPTH_WRITEMASK: return s.depthMask; case GL.DEPTH_FUNC: return s.depthFunc;
@@ -378,6 +409,7 @@
 
   function capability(s, cap, enabled) {
     if (cap === GL.SCISSOR_TEST) { if (!call(s, 'enableScissor', enabled).error) s.scissorEnabled = enabled; return; }
+    if (cap === GL.BLEND) { if (!call(s, 'enableBlend', enabled).error) s.blendEnabled = enabled; return; }
     if (cap === GL.DEPTH_TEST) { if (!call(s, 'enableDepth', enabled && s.attrs.depth).error) s.depthEnabled = enabled; return; }
     flag(s, [GL.BLEND, GL.CULL_FACE, GL.STENCIL_TEST, GL.DITHER, GL.POLYGON_OFFSET_FILL, GL.SAMPLE_ALPHA_TO_COVERAGE, GL.SAMPLE_COVERAGE].includes(cap) ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
   }
@@ -392,7 +424,7 @@
   // These operations are deliberately unavailable until their rendering
   // semantics exist. Libraries get an observable GL error, never fake IDs.
   for (const name of ['createFramebuffer', 'createRenderbuffer']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); return null; });
-  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'bindRenderbuffer', 'deleteFramebuffer', 'deleteRenderbuffer', 'framebufferTexture2D', 'framebufferRenderbuffer', 'renderbufferStorage', 'blendFunc', 'blendFuncSeparate', 'blendEquation', 'blendEquationSeparate', 'blendColor', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform2i', 'uniform3i', 'uniform4i', 'uniform2iv', 'uniform3iv', 'uniform4iv', 'uniformMatrix2fv', 'uniformMatrix3fv']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
+  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'bindRenderbuffer', 'deleteFramebuffer', 'deleteRenderbuffer', 'framebufferTexture2D', 'framebufferRenderbuffer', 'renderbufferStorage', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform2i', 'uniform3i', 'uniform4i', 'uniform2iv', 'uniform3iv', 'uniform4iv', 'uniformMatrix2fv', 'uniformMatrix3fv']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
   for (const [name, value] of Object.entries(GL)) {
     Object.defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
     Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
@@ -411,7 +443,7 @@
     const result = N.webglNew(surface.id, w, h, attrs.alpha, attrs.premultipliedAlpha);
     if (result.error) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'Software drawing buffer creation failed' })); return null; }
     const ctx = Object.create(WebGLRenderingContext.prototype);
-    const s = { canvas, surface, attrs, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, current: [0, 0, 0, 1] })) };
+    const s = { canvas, surface, attrs, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, blendEnabled: false, blendFactors: [GL.ONE, GL.ZERO, GL.ONE, GL.ZERO], blendEquations: [GL.FUNC_ADD, GL.FUNC_ADD], blendColor: [0, 0, 0, 0], clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, current: [0, 0, 0, 1] })) };
     contexts.set(ctx, s); surface.ctx = ctx; surface.mode = 'webgl';
     N.canvasMarkDirty(surface);
     return ctx;

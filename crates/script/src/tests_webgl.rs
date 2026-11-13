@@ -97,7 +97,7 @@ fn webgl_objects_errors_and_shader_failures_are_observable() {
       let threw=false;try{gl.bindBuffer(gl.ARRAY_BUFFER,bad);}catch(e){threw=e instanceof TypeError;}console.log(threw);
       gl.compileShader(other.createShader(gl.VERTEX_SHADER));console.log(gl.getError()===gl.INVALID_OPERATION);
       console.log(gl.createFramebuffer()===null,gl.getError()===gl.INVALID_OPERATION);
-      gl.enable(gl.BLEND);console.log(gl.getError()===gl.INVALID_OPERATION);
+      gl.enable(gl.CULL_FACE);console.log(gl.getError()===gl.INVALID_OPERATION);
       const data=new Uint8Array([17,18,19,20]);gl.readPixels(0,0,2,2,gl.RGBA,gl.UNSIGNED_BYTE,data);
       console.log(gl.getError()===gl.INVALID_OPERATION,Array.from(data).join(','));
       let constructor=false;try{new WebGLBuffer();}catch(e){constructor=e instanceof TypeError;}console.log(constructor);
@@ -441,4 +441,102 @@ fn webgl_linear_texture_filtering_reads_interpolated_pixels() {
       gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,data);console.log(Array.from(data).join(','));
     "#);
     assert_eq!(run(&mut env, &mut host, &source), ["255,0,0,255", "128,128,128,255", "0,0,255,255", "0 true true", "true", "128,128,128,255"]);
+}
+
+#[test]
+fn webgl_blending_state_validates_enums_atomically_and_converts_once() {
+    let (mut env, mut host) = setup("<canvas id=a width=4 height=4></canvas>");
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+      const gl=document.getElementById('a').getContext('webgl',{preserveDrawingBuffer:true});
+      console.log(gl.isEnabled(gl.BLEND),gl.getParameter(gl.BLEND),gl.getParameter(gl.BLEND_SRC_RGB)===gl.ONE,gl.getParameter(gl.BLEND_DST_ALPHA)===gl.ZERO,gl.getParameter(gl.BLEND_EQUATION)===gl.FUNC_ADD);
+      gl.enable(gl.BLEND);console.log(gl.isEnabled(gl.BLEND),gl.getParameter(gl.BLEND),gl.getError());
+      let count=0;gl.blendFunc({valueOf(){count++;return gl.SRC_ALPHA;}},gl.ONE_MINUS_SRC_ALPHA);
+      console.log(count,gl.getParameter(gl.BLEND_SRC_RGB)===gl.SRC_ALPHA,gl.getParameter(gl.BLEND_SRC_ALPHA)===gl.SRC_ALPHA);
+      gl.blendFuncSeparate(gl.CONSTANT_COLOR,gl.CONSTANT_ALPHA,gl.ONE,gl.ZERO);
+      console.log(gl.getError()===gl.INVALID_OPERATION,gl.getParameter(gl.BLEND_SRC_RGB)===gl.SRC_ALPHA);
+      gl.blendFuncSeparate(gl.ONE,gl.ZERO,gl.CONSTANT_COLOR,gl.CONSTANT_ALPHA);console.log(gl.getError());
+      gl.blendFuncSeparate(gl.ONE,gl.SRC_ALPHA_SATURATE,gl.ONE,gl.ZERO);console.log(gl.getError()===gl.INVALID_ENUM,gl.getParameter(gl.BLEND_DST_ALPHA)===gl.CONSTANT_ALPHA);
+      gl.blendEquationSeparate(gl.FUNC_SUBTRACT,0x8007);console.log(gl.getError()===gl.INVALID_ENUM,gl.getParameter(gl.BLEND_EQUATION_RGB)===gl.FUNC_ADD);
+      gl.blendEquationSeparate(gl.FUNC_REVERSE_SUBTRACT,gl.FUNC_SUBTRACT);console.log(gl.getParameter(gl.BLEND_EQUATION_RGB)===gl.FUNC_REVERSE_SUBTRACT,gl.getParameter(gl.BLEND_EQUATION_ALPHA)===gl.FUNC_SUBTRACT);
+      gl.blendColor(-1,2,0.25,NaN);const c=gl.getParameter(gl.BLEND_COLOR);c[2]=0;console.log(Array.from(gl.getParameter(gl.BLEND_COLOR)).join(','));
+      let errors=0;for(const f of [()=>gl.blendFunc(1),()=>gl.blendFuncSeparate(1,0,1),()=>gl.blendEquation(),()=>gl.blendEquationSeparate(1),()=>gl.blendColor(1,0,0),()=>gl.blendColor(1n,0,0,0)]){try{f();}catch(e){if(e instanceof TypeError)errors++;}}
+      gl.disable(gl.BLEND);console.log(errors,gl.isEnabled(gl.BLEND),gl.getError());
+      document.getElementById('a').width=4;console.log(gl.getParameter(gl.BLEND_EQUATION_RGB)===gl.FUNC_REVERSE_SUBTRACT,gl.getParameter(gl.BLEND_SRC_ALPHA)===gl.CONSTANT_COLOR);
+      gl.enable(gl.BLEND);document.getElementById('a').width=5000;console.log(gl.isEnabled(gl.BLEND),gl.getParameter(gl.BLEND));
+    "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "false false true true true",
+            "true true 0",
+            "1 true true",
+            "true true",
+            "0",
+            "true true",
+            "true true",
+            "true true",
+            "0,1,0.25,0",
+            "6 false 0",
+            "true true",
+            "false null"
+        ]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn webgl_blending_draws_real_pixels_and_clear_ignores_equations() {
+    let (mut env, mut host) = setup("<canvas id=a width=4 height=4></canvas>");
+    run(&mut env, &mut host, SHADERS);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+      const gl=document.getElementById('a').getContext('webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+      const p=triangleProgram(gl),fs=gl.getAttachedShaders(p).find(s=>gl.getShaderParameter(s,gl.SHADER_TYPE)===gl.FRAGMENT_SHADER);
+      gl.shaderSource(fs,'precision mediump float; uniform vec4 color; void main(){gl_FragColor=color;}');gl.compileShader(fs);gl.linkProgram(p);gl.useProgram(p);
+      const color=gl.getUniformLocation(p,'color'),pixel=new Uint8Array(4);
+      const sample=()=>{gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return Array.from(pixel).join(',');};
+      gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
+      gl.uniform4f(color,1,0,0,0.5);gl.drawArrays(gl.TRIANGLES,0,3);console.log(sample(),gl.getError());
+      gl.blendEquation(gl.FUNC_REVERSE_SUBTRACT);gl.clearColor(0.25,0.5,0.75,0.5);gl.clear(gl.COLOR_BUFFER_BIT);console.log(sample());
+      gl.blendFunc(gl.ONE,gl.ONE);gl.uniform4f(color,0.125,0.25,0.5,0.25);gl.drawArrays(gl.TRIANGLES,0,3);console.log(sample());
+      gl.disable(gl.BLEND);gl.uniform4f(color,1,0,0,0.5);gl.drawArrays(gl.TRIANGLES,0,3);console.log(sample());
+    "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "128,0,128,255 0",
+            "64,128,191,128",
+            "32,64,64,64",
+            "255,0,0,128"
+        ]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn webgl_blending_rgb_only_destination_alpha_and_canvas_premultiplication() {
+    let (mut env,mut host)=setup("<canvas id=a width=4 height=4></canvas><canvas id=b width=4 height=4></canvas><canvas id=c width=4 height=4></canvas>");
+    run(&mut env, &mut host, SHADERS);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+      for(const id of ['a','b','c']){
+        const gl=document.getElementById(id).getContext('webgl',{preserveDrawingBuffer:true,alpha:id!=='a',premultipliedAlpha:id==='c'}),p=triangleProgram(gl);
+        gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.enable(gl.BLEND);
+        gl.blendFunc(gl.DST_ALPHA,gl.ZERO);gl.drawArrays(gl.TRIANGLES,0,3);
+        const pixel=new Uint8Array(4);gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);console.log(Array.from(pixel).join(','),gl.getError());
+      }
+    "#,
+    );
+    assert_eq!(out, ["255,0,0,255 0", "0,0,0,0 0", "0,0,0,0 0"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
 }

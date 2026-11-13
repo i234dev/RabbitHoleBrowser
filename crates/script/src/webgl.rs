@@ -155,21 +155,24 @@ fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let h = (number(realm, args, 2)? as u32).max(1);
     let alpha = realm.to_boolean(&arg(args, 3));
     let premultiplied = realm.to_boolean(&arg(args, 4));
-    let result = Context::new(w, h).map_err(|e| e.code()).and_then(|ctx| {
-        canvas2d::store(|store| {
-            if !store.surfaces.contains_key(&id) || store.webgl.contexts.contains_key(&id) {
-                return Err(INVALID_OPERATION);
-            }
-            let context = DrawingContext {
-                ctx,
-                alpha,
-                premultiplied,
-            };
-            context.sync(store.surfaces.get_mut(&id).expect("checked canvas"));
-            store.webgl.contexts.insert(id, context);
-            Ok(Reply::Void)
-        })
-    });
+    let result = Context::new(w, h)
+        .map_err(|e| e.code())
+        .and_then(|mut ctx| {
+            ctx.set_alpha_channel(alpha);
+            canvas2d::store(|store| {
+                if !store.surfaces.contains_key(&id) || store.webgl.contexts.contains_key(&id) {
+                    return Err(INVALID_OPERATION);
+                }
+                let context = DrawingContext {
+                    ctx,
+                    alpha,
+                    premultiplied,
+                };
+                context.sync(store.surfaces.get_mut(&id).expect("checked canvas"));
+                store.webgl.contexts.insert(id, context);
+                Ok(Reply::Void)
+            })
+        });
     Ok(response(realm, result))
 }
 
@@ -260,6 +263,10 @@ enum Command {
     Scissor(i32, i32, u32, u32),
     EnableScissor(bool),
     EnableDepth(bool),
+    EnableBlend(bool),
+    BlendFunc(u32, u32, u32, u32),
+    BlendEquation(u32, u32),
+    BlendColor([f32; 4]),
     DepthMask(bool),
     DepthFunc(u32),
     ColorMask([bool; 4]),
@@ -351,6 +358,12 @@ impl Command {
             "scissor" => Self::Scissor(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
             "enableScissor" => Self::EnableScissor(b!(2)),
             "enableDepth" => Self::EnableDepth(b!(2)),
+            "enableBlend" => Self::EnableBlend(b!(2)),
+            "blendFunc" => Self::BlendFunc(u!(2), u!(3), u!(4), u!(5)),
+            "blendEquation" => Self::BlendEquation(u!(2), u!(3)),
+            "blendColor" => {
+                Self::BlendColor([n!(2) as f32, n!(3) as f32, n!(4) as f32, n!(5) as f32])
+            }
             "depthMask" => Self::DepthMask(b!(2)),
             "depthFunc" => Self::DepthFunc(u!(2)),
             "colorMask" => Self::ColorMask([b!(2), b!(3), b!(4), b!(5)]),
@@ -523,6 +536,22 @@ impl Command {
                 }
                 Self::EnableDepth(enabled) => {
                     ctx.enable_depth_test(enabled);
+                    Reply::Void
+                }
+                Self::EnableBlend(enabled) => {
+                    ctx.enable_blend(enabled);
+                    Reply::Void
+                }
+                Self::BlendFunc(sr, dr, sa, da) => {
+                    ctx.blend_func_separate(sr, dr, sa, da)?;
+                    Reply::Void
+                }
+                Self::BlendEquation(rgb, alpha) => {
+                    ctx.blend_equation_separate(rgb, alpha)?;
+                    Reply::Void
+                }
+                Self::BlendColor(color) => {
+                    ctx.blend_color(color);
                     Reply::Void
                 }
                 Self::DepthMask(enabled) => {
