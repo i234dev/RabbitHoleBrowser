@@ -37,12 +37,12 @@ code unless noted in [Dependencies](#dependencies).
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
 | Acid2 | **0 pixels** different from the reference | |
 | Acid3 | 96 / 100 | |
-| Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 | real apps driven with simulated input |
-| Speedometer 3.1 | 0.148 | headless on a loaded 3-core VM; tracked for regressions, not a fair comparison |
+| Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 in both modes | functional DOM/input checks on 2026-11-14 (Europe/Madrid), v0.1.7; JIT off and JIT on with incremental-GC stress; not a timing benchmark |
+| Speedometer 3.1 | **2.19 ± 0.065** | 2026-11-14 (Europe/Madrid); 20 default workloads, 3 iterations; headless release v0.1.7, JIT off, i7-12700H/WSL2, CPU 0; [method and scope](docs/benchmarks/speedometer-2026-11-14.md) |
 
 The built-in start page shows the complete compiled version and the latest
 dated results from the committed records. Baseline-derived counts refresh at
-build time; historical performance results retain their measurement context.
+build time; performance results retain their measurement context.
 See [measurement sources and updates](tools/metrics/README.md).
 
 ## Features
@@ -144,7 +144,8 @@ See [measurement sources and updates](tools/metrics/README.md).
 - No Temporal API; Intl is partial.
 - The JIT is off by default while compatibility and performance acceptance
   gates remain open, and disabled on Windows until tested there.
-- Speedometer score is far from Chrome's; JavaScript speed is the main gap.
+- A same-machine Speedometer comparison with Chrome has not been measured.
+  The recorded score covers the documented headless, three-iteration setup.
 - H.264/HE-AAC video needs Windows (Media Foundation).
 
 ## Building
