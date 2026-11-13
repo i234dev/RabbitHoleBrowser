@@ -2294,6 +2294,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(html, "focus", 0, e_focus);
     realm.define_method(html, "blur", 0, e_blur);
     realm.define_method(html, "click", 0, e_click);
+    // Dispatches like the host's own clicks (see `dispatchEvent`).
+    realm.mark_gc_safe(html, "click");
     realm.define_method(html, "showPopover", 0, e_noop);
     realm.define_method(html, "hidePopover", 0, e_noop);
     realm.define_method(html, "togglePopover", 0, e_noop);

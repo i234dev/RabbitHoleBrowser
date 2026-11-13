@@ -1126,3 +1126,112 @@ está detrás de `jit::LOOP_OSR`.
   (2) fast paths nativos de `GetPropR`/`SetPropR` (`IC_OWN`) y de `CallR`
   a funciones compiladas; (3) arena de código (coste de compilación);
   (4) prueba en Windows real para activarlo allí.
+
+### S2.6 Fase 8: accesos y llamadas en código nativo (rendimiento)
+
+Medido antes de tocar nada (Speedometer, perfiles `RH_PROF` JIT
+apagado/encendido del mismo binario y contadores por instrucción en los
+helpers): el código nativo en sí era solo ~2 % de las muestras; lo que
+costaba eran los helpers (`h_call`, `h_return`, `h_get_prop`,
+`step_access`, `h_exec`), que hacían lo mismo que los fast paths del
+intérprete más una llamada. Las transiciones nativo→interpretado eran
+pocas (≈ 140 k por suite; el contador `entries` incluía las llamadas
+entre funciones nativas, ahora separadas como `native calls/returns`).
+Por frecuencia en las tres suites: `GetLocalR` 7,2 M, `GetPropR`
+8,1 M (4,7 M fallos de caché), `GetElemR` 4,4 M, `GetLocalChecked`
+2,8 M, `Mov`/`MovRaw`/`LoadK` con strings 2,6 M (iban al helper genérico
+por el contador de referencias), `LoadThis` 1 M, `DefinePropR` 0,9 M,
+`SetLocalR` 0,8 M, `CmpRK` no numérico 0,7 M, `typeof` 0,6 M.
+
+Cambios (todos en `crates/js/src/jit` salvo lo indicado):
+
+- **Contadores de referencias en línea**: strings y BigInts se copian y
+  sueltan en código nativo (`Rc`: el contador fuerte está 16 bytes antes
+  del puntero; se comprueba una vez al arrancar y si no se cumple se
+  vuelve a los helpers). Un `store` suelta el valor viejo; el último
+  `Rc` lo libera `h_drop`.
+- **Disposición de objetos sondeada en tiempo de ejecución**
+  (`jit/layout.rs`): tabla de objetos, `PropertyMap` (sus valores en
+  modo forma salen del enum: `values` vive en el struct, vacío en modo
+  diccionario), prototipo (`Option<ObjectId>`), etiqueta del variante
+  `Scope`/`Array` de `ObjectKind` (byte de etiqueta o nicho en la
+  capacidad del vector del array, según cómo lo disponga rustc), frames.
+  Se mide sobre instancias vivas, no se asume; un test exige que la sonda
+  funcione. `RABBITHOLE_JIT_NO_INLINE_IC=1` lo desactiva.
+- **En línea**: `GetPropR` (`IC_OWN`; `IC_PROTO`/`IC_PROTO_DEEP` fuera
+  de línea), `SetPropR` (`IC_OWN`), `GetElemR`/`SetElemR` de arrays
+  (índice entero en rango, sin huecos), `GetLocalR`/`GetLocalChecked`/
+  `SetLocalR` (recorren la cadena de scopes), `LoadThis`, `==`/`!=` con
+  null/undefined y entre tipos iguales (helper puro `h_loose_eq`),
+  `typeof` (helper puro con strings compartidos). Helpers ligeros para
+  `DefinePropR` y `StoreCompletionR`. Un fallo de un tipo de caché en
+  línea va directo a la instrucción completa.
+- **Cambio de frame**: un helper que empuja o saca un frame devuelve la
+  dirección del código nativo del nuevo frame (una llamada en vez de
+  dos); el gancho del bucle del intérprete está en línea y solo compila
+  fuera de línea.
+- **Intérprete** (`vm.rs`): un sitio de caché vacío adopta el registro
+  megamórfico que lo resolvió. Antes, un sitio monomórfico cuya primera
+  consulta acertaba en la caché compartida no se llenaba nunca y tomaba
+  el camino lento siempre (p. ej. `Math.cos` en `canvas.js`: cada arco
+  fallaba 9 veces).
+
+Validación: `jit-check` (js, script, frameworks) a umbral 0 y 2
+idéntico al intérprete; `jitdiff` 48 000 programas + GC-stress 300 + los
+corpus nuevos de igualdad laxa/arrays/cachés (también como tests en
+`tests_jit.rs`), 0 diferencias.
+
+Medidas (mismo binario, JIT apagado/encendido alternos, mismo equipo,
+bajo el `heavy.lock`):
+
+| | antes (S2.4) | ahora |
+|---|---:|---:|
+| `perf.rs` total VM+JIT / VM | 1,10× | **1,27×** |
+| peor caso de `perf.rs` | 0,77× (string_ops) | **0,96×** (push_objects; array_map 0,97–0,99) |
+| props / prop_set / array_rw | 1,20 / — / 1,19× | 1,85 / 1,71 / 1,56× |
+| closure_calls / method_calls / calls / fib | 0,89–0,93× | 1,22 / 1,25 / 1,06 / 1,04× |
+| strings / string_ops / for_in | 0,77–0,84× | 1,17 / 1,05 / 1,04× |
+| Speedometer (subconjunto), geomean JIT/VM | +5 % | **+1,3 … +2,1 %** (6–8 rondas) |
+| ídem sin GC (`RH_NO_GC=1`) | — | **+1,0 %**; con `ENTRY_MIN` 24: −0,3 % |
+
+- TodoMVC y NewsSite quedan en paridad (±1 %); las partes síncronas de
+  Charts también (−1 … +1 %). Lo que queda en Charts está en las fases
+  asíncronas («Draw opaque scatter/Async» 30 → 143 ms, «Show
+  tooltip/Async» +135 ms) y no es CPU de JavaScript: con el JIT una
+  recolección completa (≈ 600 k objetos, ~100 ms) cae dentro de la
+  ventana medida en vez de después (`RH_GC_TRACE`: 15 colecciones frente
+  a 14 con el mismo total de objetos liberados en la página aislada, que
+  da imágenes idénticas y tiempos iguales con y sin JIT). Sin GC, Charts
+  con JIT queda en 0,997×.
+- `ENTRY_MIN_OPS` pasa de 48 a 24 (funciones sin bucle de ≥ 24
+  instrucciones se ejecutan en nativo también desde llamadores
+  interpretados): −0,3 … −0,8 % en Speedometer, `perf.rs` igual.
+- Coste de compilación: ~190 B de código por instrucción (antes ~75; las
+  plantillas de accesos en línea son largas), 1,4–1,7 µs/instrucción de
+  los que la mitad es `mmap`+`mprotect` por función. Por suite son
+  4–25 ms: la arena de código no se hizo; se pospone (necesitaría doble
+  mapeo RW/RX para no tener que cambiar la protección de páginas que
+  pueden estar ejecutándose).
+- `tests_webapi::indexeddb_in_memory` falla a veces a umbral 0 en paralelo
+  y con carga (3 de 5 en el equipo remoto, nunca solo): el test avanza
+  tres turnos de temporizadores con rebanadas de tiempo real y, con todo
+  compilado en la primera ejecución, no le da tiempo. No es una
+  diferencia de semántica (a umbral 2 y sin carga pasa).
+
+### S2.7 Estado
+
+- Criterios para activarlo por defecto (`perf.rs` sin casos < 0,95× y
+  Speedometer ≥ 0 %): `perf.rs` se cumple; Speedometer queda en +1–2 %
+  con GC (el resto es la recolección desplazada de Charts) y en paridad
+  sin GC. **El JIT sigue desactivado por defecto**; cambiarlo es una
+  línea (`Options::on` en `jit/mod.rs`) y en Windows debe seguir
+  apagado hasta probarlo en una máquina real.
+- Siguientes pasos: (1) llamadas: `h_call`/`h_return` son ahora lo más
+  caro del código nativo en páginas (≈ 15 % de su tiempo); un empuje de
+  frame en línea dependerá de la disposición de `Frame`, que está
+  cambiando; (2) despachar la entrada tras una llamada sin tabla (la
+  entrada y el despacho son ~15 % del tiempo en código nativo);
+  (3) arena de código con doble mapeo; (4) disparo de la GC menos
+  sensible al momento (por bytes y objetos a la vez) para que mover el
+  trabajo no mueva colecciones enteras dentro de las ventanas medidas.
+

@@ -10,6 +10,8 @@ pub fn register(realm: &mut Realm) {
     realm.define_property(r, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("Reflect"), CONFIGURABLE);
     realm.define_method(r, "apply", 3, apply);
     realm.define_method(r, "construct", 2, construct);
+    realm.mark_gc_safe(r, "apply");
+    realm.mark_gc_safe(r, "construct");
     realm.define_method(r, "defineProperty", 3, define_property);
     realm.define_method(r, "deleteProperty", 2, delete_property);
     realm.define_method(r, "get", 2, get);

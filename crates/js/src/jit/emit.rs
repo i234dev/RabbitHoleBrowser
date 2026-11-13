@@ -245,6 +245,11 @@ enum Stub {
     /// Release the reference-counted value whose bits are in `reg`, then
     /// continue at `resume`.
     Release { from: Label, reg: u8, resume: Label },
+    /// `GetPropR` of a prototype kind (out of line: the own-property
+    /// path stays short): `rcx` = the cache record, `rax` = the
+    /// receiver's entry (shape checked), `r9` = the kind; continues at
+    /// `own` with `rax` = the holder's entry, or at `miss`.
+    ProtoGet { from: Label, own: Label, miss: Label, l: super::layout::Layout },
 }
 
 struct Gen<'a> {
@@ -972,7 +977,7 @@ impl Gen<'_> {
             return;
         };
         let miss = self.slow(h_access as *const () as usize, "h_access", pc, next);
-        let (own, proto, holder, recv) = (self.a.label(), self.a.label(), self.a.label(), self.a.label());
+        let (own, recv) = (self.a.label(), self.a.label());
         self.a.mov_imm64(RCX, cell as *const std::cell::Cell<crate::bytecode::PropIc> as u64);
         self.a.movzx8(RDX, Mem::base(RCX, IC_KIND));
         self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_OWN as i32);
@@ -989,37 +994,9 @@ impl Gen<'_> {
         self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_SHAPE));
         self.a.jcc(CC_NE, miss);
         self.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_OWN as i32);
-        self.a.jcc(CC_E, own);
-        // Prototype kinds: never for proxies / namespaces (they have the
-        // root shape and forward elsewhere).
-        self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_SHAPE), crate::shape::ROOT_SHAPE_ID as i32);
-        self.a.jcc(CC_E, miss);
-        self.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
-        self.a.jcc(CC_NE, miss);
-        self.a.load32(RDX, Mem::base(RAX, l.proto_id));
-        self.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_PROTO as i32);
-        self.a.jcc(CC_E, proto);
-        // IC_PROTO_DEEP: receiver's prototype is `mid`, chain unchanged.
-        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID));
-        self.a.jcc(CC_NE, miss);
-        self.a.mov_imm64(RDX, crate::shape::proto_epoch_addr() as u64);
-        self.a.load32(RDX, Mem::base(RDX, 0));
-        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID_SHAPE));
-        self.a.jcc(CC_NE, miss);
-        self.a.load32(RDX, Mem::base(RCX, IC_HOLDER));
-        self.a.jmp(holder);
-        // IC_PROTO (one level, no `mid`): receiver's prototype is `holder`.
-        self.a.bind(proto);
-        self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_MID), crate::ic::NO_OBJ as i32);
-        self.a.jcc(CC_NE, miss);
-        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER));
-        self.a.jcc(CC_NE, miss);
-        // rdx = holder id: its entry, with the cached shape.
-        self.a.bind(holder);
-        self.object_at(&l, RAX, RDX, miss);
-        self.a.load32(RDX, Mem::base(RAX, l.sid));
-        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER_SHAPE));
-        self.a.jcc(CC_NE, miss);
+        let proto = self.a.label();
+        self.a.jcc(CC_NE, proto);
+        self.stubs.push(Stub::ProtoGet { from: proto, own, miss, l });
         // rax = entry holding the property in `slot` (shape mode only: a
         // dictionary has no values here).
         self.a.bind(own);
@@ -1390,6 +1367,41 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
                 g.a.bind(from);
                 g.call_helper(helper, name, arg);
                 g.a.jmp(resume);
+            }
+            Stub::ProtoGet { from, own, miss, l } => {
+                g.a.bind(from);
+                let (proto, holder) = (g.a.label(), g.a.label());
+        // Prototype kinds: never for proxies / namespaces (they have the
+        // root shape and forward elsewhere).
+        g.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_SHAPE), crate::shape::ROOT_SHAPE_ID as i32);
+        g.a.jcc(CC_E, miss);
+        g.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
+        g.a.jcc(CC_NE, miss);
+        g.a.load32(RDX, Mem::base(RAX, l.proto_id));
+        g.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_PROTO as i32);
+        g.a.jcc(CC_E, proto);
+        // IC_PROTO_DEEP: receiver's prototype is `mid`, chain unchanged.
+        g.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID));
+        g.a.jcc(CC_NE, miss);
+        g.a.mov_imm64(RDX, crate::shape::proto_epoch_addr() as u64);
+        g.a.load32(RDX, Mem::base(RDX, 0));
+        g.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID_SHAPE));
+        g.a.jcc(CC_NE, miss);
+        g.a.load32(RDX, Mem::base(RCX, IC_HOLDER));
+        g.a.jmp(holder);
+        // IC_PROTO (one level, no `mid`): receiver's prototype is `holder`.
+        g.a.bind(proto);
+        g.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_MID), crate::ic::NO_OBJ as i32);
+        g.a.jcc(CC_NE, miss);
+        g.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER));
+        g.a.jcc(CC_NE, miss);
+        // rdx = holder id: its entry, with the cached shape.
+        g.a.bind(holder);
+        g.object_at(&l, RAX, RDX, miss);
+        g.a.load32(RDX, Mem::base(RAX, l.sid));
+        g.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER_SHAPE));
+        g.a.jcc(CC_NE, miss);
+                g.a.jmp(own);
             }
             Stub::Release { from, reg, resume } => {
                 // Last reference: restore the count and let Rust free it.

@@ -788,9 +788,27 @@ impl Heap {
             self.objects[i as usize] = Some(obj);
             ObjectId(i)
         } else {
+            if self.objects.len() == self.objects.capacity() {
+                self.grow();
+            }
             self.objects.push(Some(obj));
             ObjectId((self.objects.len() - 1) as u32)
         }
+    }
+
+    /// Make room for more slots: double, or (when that much memory is not
+    /// available) grow in smaller steps; out of memory, unwind with a panic
+    /// (a catchable error at the nearest native call or host entry point)
+    /// instead of aborting the process.
+    #[cold]
+    fn grow(&mut self) {
+        let cap = self.objects.capacity();
+        for extra in [cap.max(1024), cap / 4, cap / 16, 1024] {
+            if extra > 0 && self.objects.try_reserve_exact(extra).is_ok() {
+                return;
+            }
+        }
+        panic!("out of memory: the JavaScript heap cannot grow past {cap} objects");
     }
 
     pub fn get(&self, id: ObjectId) -> &Object {

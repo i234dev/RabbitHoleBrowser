@@ -372,6 +372,35 @@ fn dispatch_event_from_script_and_custom_events() {
     assert_eq!(out[4], "13 13 Enter");
 }
 
+/// Listeners of `dispatchEvent` (a framework's whole work loop, posted
+/// through a MessageChannel) run with the collector enabled: their garbage
+/// is collected (a news site's render grew the heap to millions of objects
+/// and the process aborted on a 370 MB heap reallocation), and the event,
+/// its path and the remaining listeners survive the collections.
+#[test]
+fn collection_runs_inside_dispatch_event_listeners() {
+    let (mut env, mut host) = setup(r#"<div id="d"><span id="s"></span></div>"#);
+    host.realm().gc_threshold = 1000;
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+        const s = document.getElementById('s');
+        const log = [];
+        s.addEventListener('work', e => { let t = 0; for (let i = 0; i < 300000; i++) { const o = { a: [i] }; t += o.a[0] & 1; } log.push('target:' + t + ':' + e.detail.k); });
+        document.getElementById('d').addEventListener('work', e => log.push('bubble:' + (e.target === s) + ':' + e.detail.k));
+        const et = new EventTarget();
+        et.addEventListener('work', function () { let t = 0; for (let i = 0; i < 300000; i++) t += [i].length; log.push('et:' + t); });
+        const r1 = s.dispatchEvent(new CustomEvent('work', { detail: { k: 'x' }, bubbles: true }));
+        const r2 = et.dispatchEvent(new Event('work'));
+        console.log(log.join(), r1, r2);
+    "#,
+    );
+    assert_eq!(out[0], "target:150000:x,bubble:true:x,et:300000 true true");
+    let slots = host.realm().heap.len();
+    assert!(slots < 200_000, "heap grew to {slots} slots");
+}
+
 #[test]
 fn timers_intervals_and_microtasks() {
     let (mut env, mut host) = setup("<div></div>");

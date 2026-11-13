@@ -740,7 +740,7 @@ impl Realm {
     /// Let the collector run while the built-in `holder[name]` calls back
     /// into JavaScript (it must follow the rules of
     /// [`NativeFunction::gc_safe`]).
-    pub(crate) fn mark_gc_safe(&mut self, holder: ObjectId, name: &str) {
+    pub fn mark_gc_safe(&mut self, holder: ObjectId, name: &str) {
         let Some(V::Object(f)) = self.obj(holder).props.get(&PropertyKey::str(name)).map(|p| p.value.clone()).as_ref().map(Value::v) else { return };
         if let ObjectKind::Native(n) = &mut self.obj_mut(f).kind {
             n.gc_safe = true;

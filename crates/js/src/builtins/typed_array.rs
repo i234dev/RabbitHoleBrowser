@@ -407,11 +407,22 @@ fn detach_object(realm: &mut Realm, id: ObjectId) -> Vec<u8> {
     }
 }
 
-/// Allocate a new `ArrayBuffer` of `len` zeroed bytes. Panics only through
-/// allocation failure of absurd sizes; prefer [`try_allocate_buffer`].
-pub fn allocate_buffer(realm: &mut Realm, len: usize, proto: Option<ObjectId>) -> ObjectId {
+/// Allocate a new `ArrayBuffer` of `len` zeroed bytes (RangeError when the
+/// memory is not available).
+pub fn allocate_buffer(realm: &mut Realm, len: usize, proto: Option<ObjectId>) -> JsResult<ObjectId> {
     let proto = proto.unwrap_or_else(|| realm.intrinsics.others["ArrayBufferPrototype"]);
-    realm.alloc(Object::new(Some(proto), ObjectKind::ArrayBuffer(ArrayBufferData::new(vec![0u8; len]))))
+    let Some(bytes) = zeroed_bytes(len) else {
+        return realm.range_error("Array buffer allocation failed");
+    };
+    Ok(realm.alloc(Object::new(Some(proto), ObjectKind::ArrayBuffer(ArrayBufferData::new(bytes)))))
+}
+
+/// `len` zero bytes, or `None` when the allocation fails.
+pub fn zeroed_bytes(len: usize) -> Option<Vec<u8>> {
+    let mut v: Vec<u8> = Vec::new();
+    v.try_reserve_exact(len).ok()?;
+    v.resize(len, 0);
+    Some(v)
 }
 
 /// Allocate a new `ArrayBuffer` of `len` zeroed bytes; RangeError when too big.

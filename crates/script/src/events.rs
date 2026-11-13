@@ -731,6 +731,7 @@ fn dispatch_into_frame(realm: &mut Realm, n: NodeRef, eid: ObjectId, ev: &Value)
         Some(api) => {
             let f = realm.get_str(Value::Object(api), "eventInit")?;
             let pair = realm.call(f, Value::Object(api), &[ev.clone()])?;
+            let _pair_root = realm.root(pair.clone());
             let iface = realm.get_str(pair.clone(), "0")?;
             let init = realm.get_str(pair, "1")?;
             (realm.to_rust_string(iface)?, realm.to_rust_string(init)?)
@@ -1370,6 +1371,11 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_method(et, "addEventListener", 2, et_add_event_listener);
     realm.define_method(et, "removeEventListener", 2, et_remove_event_listener);
     realm.define_method(et, "dispatchEvent", 1, et_dispatch_event);
+    // Listeners may run whole applications (a framework's scheduler posts
+    // its work loop through a MessageChannel): the dispatch roots the
+    // event and its path (as for events the host dispatches), so the
+    // collector may run inside it.
+    realm.mark_gc_safe(et, "dispatchEvent");
 
     let ev = define_class(realm, "Event", None, event_ctor);
     let acc = |realm: &mut Realm, name: &str, g: rabbithole_js::NativeFn| realm.define_accessor(ev, name, Some(g), None, ACC);

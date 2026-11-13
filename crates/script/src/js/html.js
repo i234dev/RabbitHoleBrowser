@@ -674,6 +674,22 @@
   }
   tag(VTTCue, 'VTTCue');
 
+  // The TextTrack of a <track> element (created on first use; a track
+  // marked `default` starts showing, others disabled, as after the
+  // media element's automatic track selection).
+  const trackOfElement = new WeakMap();
+  function elementTrack(el) {
+    let t = trackOfElement.get(el);
+    if (!t) {
+      const k = (el.getAttribute('kind') || '').toLowerCase();
+      const kind = el.hasAttribute('kind') ? (['subtitles', 'captions', 'descriptions', 'chapters', 'metadata'].includes(k) ? k : 'metadata') : 'subtitles';
+      t = newTextTrack(kind, el.getAttribute('label'), el.getAttribute('srclang'));
+      t[S].id = el.id || '';
+      t[S].mode = el.hasAttribute('default') && (kind === 'subtitles' || kind === 'captions') ? 'showing' : 'disabled';
+      trackOfElement.set(el, t);
+    }
+    return t;
+  }
   const ME = g.HTMLMediaElement;
   if (ME) {
     const NET = { NETWORK_EMPTY: 0, NETWORK_IDLE: 1, NETWORK_LOADING: 2, NETWORK_NO_SOURCE: 3, HAVE_NOTHING: 0, HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2, HAVE_FUTURE_DATA: 3, HAVE_ENOUGH_DATA: 4 };
@@ -702,7 +718,21 @@
     acc(ME, 'seekable', function () { return timeRanges([]); });
     acc(ME, 'audioTracks', function () { return ms(this).audio; });
     acc(ME, 'videoTracks', function () { return ms(this).video; });
-    acc(ME, 'textTracks', function () { return ms(this).text; });
+    // The element's text tracks: its <track> children's (in tree order),
+    // then the ones added with addTextTrack(); also readable by index.
+    acc(ME, 'textTracks', function () {
+      const m = ms(this);
+      const list = m.text, arr = list[S];
+      const added = m.addedText || (m.addedText = []);
+      const now = [];
+      for (let c = this.firstElementChild; c; c = c.nextElementSibling) if (c.localName === 'track' && c.namespaceURI === 'http://www.w3.org/1999/xhtml') now.push(elementTrack(c));
+      now.push(...added);
+      for (let i = now.length; i < arr.length; i++) delete list[i];
+      arr.length = 0;
+      arr.push(...now);
+      for (let i = 0; i < now.length; i++) Object.defineProperty(list, i, { value: now[i], enumerable: true, configurable: true });
+      return list;
+    });
     acc(ME, 'loading', function () { const v = (this.getAttribute('loading') || '').toLowerCase(); return v === 'lazy' ? 'lazy' : 'eager'; }, function (v) { this.setAttribute('loading', v); });
     acc(ME, 'sinkId', function () { return ''; });
     acc(ME, 'mediaKeys', function () { return null; });
@@ -723,7 +753,7 @@
     method(ME, 'pause', function () { const m = ms(this); if (!m.paused) { m.paused = true; this.dispatchEvent(new Event('pause')); } }, true);
     method(ME, 'load', function () { ms(this).time = 0; this.dispatchEvent(new Event('emptied')); }, true);
     method(ME, 'canPlayType', function () { return ''; }, true);
-    method(ME, 'addTextTrack', function (kind, label, language) { const t = newTextTrack(kind, label, language); ms(this).text[S].push(t); return t; }, true);
+    method(ME, 'addTextTrack', function (kind, label, language) { const t = newTextTrack(kind, label, language); const m = ms(this); (m.addedText || (m.addedText = [])).push(t); m.text[S].push(t); return t; }, true);
   }
   if (g.HTMLVideoElement) {
     const V = g.HTMLVideoElement;
@@ -748,9 +778,8 @@
   if (g.HTMLTrackElement) {
     const TE = g.HTMLTrackElement;
     for (const [k, v] of Object.entries({ NONE: 0, LOADING: 1, LOADED: 2, ERROR: 3 })) { Object.defineProperty(TE, k, { value: v, enumerable: true }); Object.defineProperty(TE.prototype, k, { value: v, enumerable: true, configurable: true }); }
-    const tracks = new WeakMap();
     acc(TE, 'readyState', function () { return 0; });
-    acc(TE, 'track', function () { let t = tracks.get(this); if (!t) { t = newTextTrack(this.getAttribute('kind') || 'subtitles', this.getAttribute('label'), this.getAttribute('srclang')); tracks.set(this, t); } return t; });
+    acc(TE, 'track', function () { return elementTrack(this); });
   }
 
   // ------------------------------------------------------------ templates

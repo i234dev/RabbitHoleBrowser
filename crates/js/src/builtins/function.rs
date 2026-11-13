@@ -10,6 +10,10 @@ pub fn register(realm: &mut Realm) {
     realm.define_property(fp, "name", Value::str(""), CONFIGURABLE);
     realm.define_method(fp, "call", 1, call);
     realm.define_method(fp, "apply", 2, apply);
+    // Whole applications run inside `f.call(...)` / `f.apply(...)` reached
+    // through other natives: they hold nothing but their arguments.
+    realm.mark_gc_safe(fp, "call");
+    realm.mark_gc_safe(fp, "apply");
     realm.define_method(fp, "bind", 1, bind);
     realm.define_method(fp, "toString", 0, to_string);
     let hi = realm.new_native_function("[Symbol.hasInstance]", 1, has_instance);
