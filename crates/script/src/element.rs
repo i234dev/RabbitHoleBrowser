@@ -980,11 +980,18 @@ fn e_get_bounding_client_rect(realm: &mut Realm, this: Value, _: &[Value]) -> Js
     let r = if n.doc == 0 {
         with_env(|env| {
             env.ensure_layout();
-            env.node_client_rect(n.node).unwrap_or_default()
+            env.node_client_rect(n.node)
         })
+    } else if n.doc & crate::host::FRAME_DOC != 0 {
+        let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
+        with_env(|env| env.frame_node_rect(frame, n.node))
     } else {
-        node_rect(n)
+        None
     };
+    // A boxless element returns the origin, including on a scrolled page.
+    // Applying the viewport offset to a default document rect would instead
+    // expose (-scrollX, -scrollY) for display:none and detached elements.
+    let Some(r) = r else { return Ok(dom_rect(realm, 0.0, 0.0, 0.0, 0.0)); };
     let (sx, sy) = with_env(|env| env.scroll());
     Ok(dom_rect(realm, r.x - sx, r.y - sy, r.w, r.h))
 }

@@ -1930,8 +1930,34 @@ impl Page {
         if node >= self.doc.nodes.len() {
             return None;
         }
+        if let Some(rect) = self.layout_rect_of(node) {
+            return Some(rect);
+        }
+        let mut cur = self.doc.flat_parent(node);
+        while let Some(n) = cur {
+            if let Some(b) = self.layout.box_of(&self.doc, n) {
+                return Some(b.rect);
+            }
+            cur = self.doc.flat_parent(n);
+        }
+        None
+    }
+
+    /// Geometry owned by this node: its box or line fragments, without the
+    /// visual ancestor fallback of [`Page::rect_of`]. CSSOM queries must not
+    /// give an unrendered element its parent's rectangle.
+    pub fn layout_rect_of(&self, node: NodeId) -> Option<Rect> {
+        if node >= self.doc.nodes.len() || !self.doc.is_connected(node) {
+            return None;
+        }
+        if self.styles.get(node).is_some_and(|s| matches!(s.display, rabbithole_style::Display::None | rabbithole_style::Display::Contents)) {
+            return None;
+        }
         self.incr.cached_rect(node, || {
-            if self.layout.box_of(&self.doc, node).is_none() && self.doc.element(node).is_some() {
+            if let Some(b) = self.layout.box_of(&self.doc, node) {
+                return Some(b.rect);
+            }
+            {
                 // Inline elements: the union of their line fragments.
                 let mut rect = self.incr.cached_inline_rect(node, || self.layout.inline_rect_index(&self.doc));
                 // Block-level children split out of an inline element (CSS
@@ -1951,12 +1977,23 @@ impl Page {
                     return Some(r);
                 }
             }
-            let mut cur = Some(node);
-            while let Some(n) = cur {
-                if let Some(b) = self.layout.box_of(&self.doc, n) {
-                    return Some(b.rect);
+            // SVG interiors are painted inside the outer SVG's replaced
+            // box. Preserve that existing approximation, but never revive
+            // a hidden SVG subtree or fall through to an HTML ancestor.
+            if self.doc.element(node).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Svg) {
+                let mut cur = Some(node);
+                while let Some(n) = cur {
+                    if self.styles.get(n).is_some_and(|s| s.display == rabbithole_style::Display::None) {
+                        return None;
+                    }
+                    if !self.doc.element(n).is_some_and(|e| e.ns == rabbithole_dom::Namespace::Svg) {
+                        break;
+                    }
+                    if let Some(b) = self.layout.box_of(&self.doc, n) {
+                        return Some(b.rect);
+                    }
+                    cur = self.doc.flat_parent(n);
                 }
-                cur = self.doc.flat_parent(n);
             }
             None
         })
@@ -1967,7 +2004,7 @@ impl Page {
     /// plus the boxes of block-level children split out of it (CSS 2.1
     /// §9.2.1.1), in tree order. Empty without layout.
     pub fn client_rects_of(&self, node: NodeId) -> Vec<Rect> {
-        if node >= self.doc.nodes.len() {
+        if self.layout_rect_of(node).is_none() {
             return Vec::new();
         }
         if self.layout.box_of(&self.doc, node).is_none()
@@ -1984,17 +2021,17 @@ impl Page {
                 return rects;
             }
         }
-        self.rect_of(node).into_iter().collect()
+        self.layout_rect_of(node).into_iter().collect()
     }
 
-    /// [`Page::rect_of`] as painted: mapped through the CSS transforms of
+    /// [`Page::layout_rect_of`] as painted: mapped through the CSS transforms of
     /// the node and its ancestors (the bounding box of the result).
     pub fn client_rect_of(&self, node: NodeId) -> Option<Rect> {
-        let mut r = self.rect_of(node)?;
+        let mut r = self.layout_rect_of(node)?;
         let mut cur = Some(node);
         while let Some(n) = cur {
             if let Some(s) = self.styles.get(n).filter(|s| !s.transform.is_empty()) {
-                if let Some(b) = self.rect_of(n) {
+                if let Some(b) = self.layout_rect_of(n) {
                     let m = rabbithole_style::transform_matrix(&s.transform, b.w, b.h, s.font_size);
                     let ox = b.x + s.transform_origin.0.resolve_or_zero(b.w);
                     let oy = b.y + s.transform_origin.1.resolve_or_zero(b.h);

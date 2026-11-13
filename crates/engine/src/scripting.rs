@@ -225,7 +225,7 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn node_rect(&mut self, node: NodeId) -> Option<Rect> {
         self.ensure_layout();
-        self.page.rect_of(node)
+        self.page.layout_rect_of(node)
     }
     fn node_client_rects(&mut self, node: NodeId) -> Vec<Rect> {
         self.ensure_layout();
@@ -523,7 +523,7 @@ impl HostEnv for EngineEnv<'_> {
             return None;
         }
         self.engine.flush_layout(child);
-        child.rect_of(node)
+        child.layout_rect_of(node)
     }
     fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
         if let Some(c) = self.page.frames.get(node) {
