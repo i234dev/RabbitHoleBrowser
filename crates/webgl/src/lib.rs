@@ -815,15 +815,10 @@ impl Context {
         offset: usize,
     ) -> Result<()> {
         let bytes = scalar_size(kind)?;
-        if index >= MAX_VERTEX_ATTRIBS
-            || !(1..=4).contains(&size)
-            || stride > 255
-            || stride as usize % bytes != 0
-            || offset % bytes != 0
-        {
+        if index >= MAX_VERTEX_ATTRIBS || !(1..=4).contains(&size) || stride > 255 {
             return Err(Error::InvalidValue);
         }
-        if self.array_buffer == 0 {
+        if stride as usize % bytes != 0 || offset % bytes != 0 || self.array_buffer == 0 {
             return Err(Error::InvalidOperation);
         }
         let a = &mut self.attributes[index as usize];

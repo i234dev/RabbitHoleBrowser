@@ -242,7 +242,11 @@ fn bounds_errors_preserve_framebuffer_and_never_panic() {
     );
     assert_eq!(
         c.vertex_attrib_pointer(0, 2, FLOAT, false, 3, 0),
-        Err(Error::InvalidValue)
+        Err(Error::InvalidOperation)
+    );
+    assert_eq!(
+        c.vertex_attrib_pointer(0, 2, FLOAT, false, 0, 1),
+        Err(Error::InvalidOperation)
     );
     assert_eq!(
         c.vertex_attrib_pointer(0, 2, FLOAT, false, 256, 0),
