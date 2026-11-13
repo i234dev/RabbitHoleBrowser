@@ -179,13 +179,14 @@ impl Realm {
         };
         match &self.obj(id).kind {
             ObjectKind::Function(c) => {
-                let code = c.code.clone();
-                if code.flags.is_class_constructor {
+                let flags = c.code.flags;
+                if flags.is_class_constructor {
+                    let code = c.code.clone();
                     let n = code.name.to_rust_string();
                     // The error comes from the constructor's realm.
                     return self.in_realm(code.realm.get(), |r| r.type_error(&format!("Class constructor {} cannot be invoked without 'new'", n)));
                 }
-                if code.flags.is_generator || code.flags.is_async {
+                if flags.is_generator || flags.is_async {
                     return self.start_generator_like(id, this, args);
                 }
                 if !self.push_plain_call(id, &this, args, 0, true)? {
@@ -547,8 +548,8 @@ impl Realm {
         // in the caller's slots or argument list, then rooted by the frame).
         let cr: &FunctionCode = unsafe { &*code.as_ptr() };
         let cf = cr.call_flags;
-        if let (true, ArgSrc::Stack(src), Some(scope)) = (cf & CALL_SIMPLE != 0, &args, parent_scope) {
-            return self.push_simple_frame(id, cr, scope, *src, argc, this, new_target, ret_slot, is_construct, entry);
+        if let (true, Some(scope)) = (cf & CALL_SIMPLE != 0, parent_scope) {
+            return self.push_simple_frame(id, cr, scope, args, argc, this, new_target, ret_slot, is_construct, entry);
         }
         if self.frames.len() >= self.max_frames {
             return self.range_error("Maximum call stack size exceeded");
@@ -718,7 +719,7 @@ impl Realm {
         id: ObjectId,
         cr: &FunctionCode,
         scope: ObjectId,
-        src: usize,
+        src: ArgSrc,
         argc: usize,
         this: Value,
         new_target: Value,
@@ -743,10 +744,21 @@ impl Realm {
         unsafe {
             let p = self.vstack.as_mut_ptr();
             let regs = p.add(base);
-            let from = p.add(src);
-            for i in 0..nargs {
-                std::ptr::write(regs.add(i), std::ptr::read(from.add(i)));
-                std::ptr::write(from.add(i), Value::Undefined);
+            match src {
+                ArgSrc::Stack(src) => {
+                    let from = p.add(src);
+                    for i in 0..nargs {
+                        std::ptr::write(regs.add(i), std::ptr::read(from.add(i)));
+                        std::ptr::write(from.add(i), Value::Undefined);
+                    }
+                }
+                // A slice outside the value stack (a native's callback
+                // arguments).
+                ArgSrc::Slice(from) => {
+                    for (i, v) in from[..nargs].iter().enumerate() {
+                        std::ptr::write(regs.add(i), v.clone());
+                    }
+                }
             }
             for i in nargs..fsize {
                 std::ptr::write(regs.add(i), Value::Undefined);
