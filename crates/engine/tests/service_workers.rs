@@ -224,6 +224,9 @@ fn intercepted_fetch_preserves_credentials_and_rejects_unsafe_no_cors_before_net
     let worker = "onactivate=e=>e.waitUntil(clients.claim()); onfetch=e=>e.respondWith(fetch(e.request.clone()));";
     let server=Server::new(&[("/app/page.html","text/html",html,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/network","text/plain","ok",&[])]);
     let mut engine=engine();
+    // This minimal Engine fixture disables cookies by default. Install an
+    // isolated in-memory jar so include/omit assertions test actual credentials.
+    engine.loader.fetcher.cookies=Some(Arc::new(Mutex::new(rabbithole_net::cookies::CookieJar::new())));
     let mut page=engine.load(&format!("{}/app/page.html",server.origin),Viewport{width:320.0,height:240.0}).unwrap();
     wait(&engine,&mut page,"controlled===true");
     engine.eval_in_page(&mut page,"document.cookie='sw-secret=present; Path=/'; var done=false; fetch(new Request('network?omit',{credentials:'omit'})).then(()=>fetch('network?include',{credentials:'include'})).then(()=>done=true);");
