@@ -40,7 +40,6 @@ const SCROLL_EVENT_INTERVAL: Duration = Duration::from_millis(16);
 struct ControlEdit {
     node: NodeId,
     buf: TextBuffer,
-    kind: ControlKind,
     max_len: Option<usize>,
     /// Value when editing started (`change` fires on blur if it differs).
     initial: String,
@@ -455,10 +454,12 @@ impl Worker {
             }
             ToContent::Key(k) => self.key(&k),
             ToContent::Text(text) => {
-                if let Some(edit) = self.edit.as_mut() {
-                    let max = edit.max_len;
-                    edit.buf.insert(&text, max);
-                    self.commit_edit();
+                if self.edit.as_ref().map(|e| self.control_is_mutable(e.node)).unwrap_or(false) {
+                    if let Some(edit) = self.edit.as_mut() {
+                        let max = edit.max_len;
+                        edit.buf.insert(&text, max);
+                        self.commit_edit();
+                    }
                 }
             }
             ToContent::Find(query) => {
@@ -1466,12 +1467,11 @@ impl Worker {
 
     fn begin_edit(&mut self, node: NodeId) {
         let Some(page) = self.page.as_mut() else { return };
-        let kind = page.control_kind(node);
         let text = page.control_text(node);
         let max_len = page.max_length(node);
         // Focus (with focus/focusin events) unless the press already did.
         let out = self.engine.focus_element(page, Some(node));
-        self.edit = Some(ControlEdit { node, buf: TextBuffer::new(&text), kind, max_len, initial: text });
+        self.edit = Some(ControlEdit { node, buf: TextBuffer::new(&text), max_len, initial: text });
         self.focus = Some(node);
         self.selection = None;
         self.dirty = true;
@@ -1513,7 +1513,6 @@ impl Worker {
         let editable = focused.filter(|&n| {
             matches!(page.control_kind(n), ControlKind::Text | ControlKind::Password | ControlKind::TextArea)
                 && page.doc.attr(n, "disabled").is_none()
-                && page.doc.attr(n, "readonly").is_none()
         });
         if editing.is_some() {
             // Focus already left the control: commit it (change) without
@@ -1527,7 +1526,7 @@ impl Worker {
         if let Some(n) = editable.filter(|&n| page.state.focused == Some(n)) {
             let text = page.control_text(n);
             let len = text.len();
-            self.edit = Some(ControlEdit { node: n, buf: TextBuffer::new(&text), kind: page.control_kind(n), max_len: page.max_length(n), initial: text });
+            self.edit = Some(ControlEdit { node: n, buf: TextBuffer::new(&text), max_len: page.max_length(n), initial: text });
             if let Some(e) = self.edit.as_mut() {
                 e.buf.set_caret(len, false);
             }
@@ -1549,6 +1548,12 @@ impl Worker {
         }
         self.dirty = true;
         self.dispatch_to(node, "input", input_init(Some(&text)));
+    }
+
+    /// Read-only controls keep their caret and selection, but user input
+    /// must not change their value. Read the live DOM after script handlers.
+    fn control_is_mutable(&self, node: NodeId) -> bool {
+        self.page.as_ref().map(|page| page.doc.attr(node, "readonly").is_none() && page.doc.attr(node, "disabled").is_none()).unwrap_or(false)
     }
 
     fn place_caret_from_click(&mut self, control: NodeId, doc: (f32, f32)) {
@@ -1681,7 +1686,14 @@ impl Worker {
     fn control_key(&mut self, k: &KeyInput) {
         let ctrl = k.mods.ctrl || k.mods.meta;
         let shift = k.mods.shift;
-        let Some((node, kind)) = self.edit.as_ref().map(|e| (e.node, e.kind)) else { return };
+        let Some(node) = self.edit.as_ref().map(|e| e.node) else { return };
+        let Some(page) = self.page.as_ref() else { return };
+        // keydown may change type or readonly, including while this
+        // control already owns an edit buffer.
+        let kind = page.control_kind(node);
+        let mutable = self.control_is_mutable(node);
+        // Masked passwords must not reach the UI clipboard, even via cut.
+        let copyable = kind != ControlKind::Password;
         let mut changed = false;
         let mut clipboard = None;
         {
@@ -1689,8 +1701,10 @@ impl Worker {
             match k.key.as_str() {
                 "Enter" => {
                     if kind == ControlKind::TextArea && !ctrl {
-                        edit.buf.insert("\n", edit.max_len);
-                        changed = true;
+                        if mutable {
+                            edit.buf.insert("\n", edit.max_len);
+                            changed = true;
+                        }
                     } else {
                         self.submit_form(node, None);
                         return;
@@ -1705,32 +1719,38 @@ impl Worker {
                     return;
                 }
                 "Backspace" => {
-                    edit.buf.backspace(ctrl);
-                    changed = true;
+                    if mutable {
+                        edit.buf.backspace(ctrl);
+                        changed = true;
+                    }
                 }
                 "Delete" => {
-                    edit.buf.delete(ctrl);
-                    changed = true;
+                    if mutable {
+                        edit.buf.delete(ctrl);
+                        changed = true;
+                    }
                 }
                 "ArrowLeft" => edit.buf.move_left(shift, ctrl),
                 "ArrowRight" => edit.buf.move_right(shift, ctrl),
                 "Home" => edit.buf.home(shift),
                 "End" => edit.buf.end(shift),
                 " " if !ctrl => {
-                    edit.buf.insert(" ", edit.max_len);
-                    changed = true;
+                    if mutable {
+                        edit.buf.insert(" ", edit.max_len);
+                        changed = true;
+                    }
                 }
                 key if ctrl && key.chars().count() == 1 => match key.to_lowercase().as_str() {
                     "a" => edit.buf.select_all(),
-                    "c" => clipboard = edit.buf.selected_text().map(|s| s.to_string()),
-                    "x" => {
+                    "c" if copyable => clipboard = edit.buf.selected_text().map(|s| s.to_string()),
+                    "x" if mutable && copyable => {
                         if let Some(t) = edit.buf.selected_text().map(|s| s.to_string()) {
                             edit.buf.delete_selection();
                             changed = true;
                             clipboard = Some(t);
                         }
                     }
-                    "v" => {
+                    "v" if mutable => {
                         if let Some(t) = &k.clipboard {
                             edit.buf.insert(t, edit.max_len);
                             changed = true;
@@ -1740,7 +1760,7 @@ impl Worker {
                 },
                 _ => {
                     if let Some(text) = k.text.as_ref().filter(|t| !t.chars().any(|c| c.is_control())) {
-                        if !ctrl {
+                        if !ctrl && mutable {
                             edit.buf.insert(text, edit.max_len);
                             changed = true;
                         }
