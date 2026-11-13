@@ -155,24 +155,29 @@ fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let h = (number(realm, args, 2)? as u32).max(1);
     let alpha = realm.to_boolean(&arg(args, 3));
     let premultiplied = realm.to_boolean(&arg(args, 4));
-    let result = Context::new(w, h)
-        .map_err(|e| e.code())
-        .and_then(|mut ctx| {
-            ctx.set_alpha_channel(alpha);
-            canvas2d::store(|store| {
-                if !store.surfaces.contains_key(&id) || store.webgl.contexts.contains_key(&id) {
-                    return Err(INVALID_OPERATION);
-                }
-                let context = DrawingContext {
-                    ctx,
-                    alpha,
-                    premultiplied,
-                };
-                context.sync(store.surfaces.get_mut(&id).expect("checked canvas"));
-                store.webgl.contexts.insert(id, context);
-                Ok(Reply::Void)
-            })
-        });
+    let version = number(realm, args, 5)? as u32;
+    let result = match version {
+        1 => Context::new(w, h),
+        2 => Context::new_webgl2(w, h),
+        _ => Err(rabbithole_webgl::Error::InvalidValue),
+    }
+    .map_err(|e| e.code())
+    .and_then(|mut ctx| {
+        ctx.set_alpha_channel(alpha);
+        canvas2d::store(|store| {
+            if !store.surfaces.contains_key(&id) || store.webgl.contexts.contains_key(&id) {
+                return Err(INVALID_OPERATION);
+            }
+            let context = DrawingContext {
+                ctx,
+                alpha,
+                premultiplied,
+            };
+            context.sync(store.surfaces.get_mut(&id).expect("checked canvas"));
+            store.webgl.contexts.insert(id, context);
+            Ok(Reply::Void)
+        })
+    });
     Ok(response(realm, result))
 }
 
@@ -250,6 +255,10 @@ enum Command {
     UniformLocation(u32, String),
     Uniform(i32, Vec<f32>),
     Matrix(i32, bool, Vec<f32>),
+    CreateVertexArray,
+    BindVertexArray(u32),
+    DeleteVertexArray(u32),
+    IsVertexArray(u32),
     CreateBuffer,
     BindBuffer(u32, u32),
     BufferData(u32, Vec<u8>),
@@ -338,6 +347,10 @@ impl Command {
             "uniformLocation" => Self::UniformLocation(u!(2), arg_str(realm, args, 3)?),
             "uniform" => Self::Uniform(n!(2) as i32, floats(realm, 3)?),
             "matrix4" => Self::Matrix(n!(2) as i32, b!(3), floats(realm, 4)?),
+            "createVertexArray" => Self::CreateVertexArray,
+            "bindVertexArray" => Self::BindVertexArray(u!(2)),
+            "deleteVertexArray" => Self::DeleteVertexArray(u!(2)),
+            "isVertexArray" => Self::IsVertexArray(u!(2)),
             "createBuffer" => Self::CreateBuffer,
             "bindBuffer" => Self::BindBuffer(u!(2), u!(3)),
             "bufferData" => Self::BufferData(u!(2), byte_source(realm, &arg(args, 3))?),
@@ -489,6 +502,16 @@ impl Command {
                     ctx.uniform_matrix4fv(location, transpose, &values)?;
                     Reply::Void
                 }
+                Self::CreateVertexArray => Reply::Number(ctx.create_vertex_array()? as f64),
+                Self::BindVertexArray(id) => {
+                    ctx.bind_vertex_array(id)?;
+                    Reply::Void
+                }
+                Self::DeleteVertexArray(id) => {
+                    ctx.delete_vertex_array(id)?;
+                    Reply::Void
+                }
+                Self::IsVertexArray(id) => Reply::Bool(ctx.is_vertex_array(id)),
                 Self::CreateBuffer => Reply::Number(ctx.create_buffer() as f64),
                 Self::BindBuffer(target, buffer) => {
                     ctx.bind_buffer(target, buffer)?;
@@ -675,7 +698,7 @@ fn command(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 
 pub(crate) fn install(realm: &mut Realm, target: ObjectId) {
     realm.define_method(target, "webglLimits", 0, limits);
-    realm.define_method(target, "webglNew", 5, create);
+    realm.define_method(target, "webglNew", 6, create);
     realm.define_method(target, "webglResize", 3, resize);
     realm.define_method(target, "webglCall", 2, command);
     realm.define_method(target, "webglLose", 1, lose);

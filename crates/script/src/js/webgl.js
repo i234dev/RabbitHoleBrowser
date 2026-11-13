@@ -80,7 +80,7 @@
   }
   function wrap(s, kind, id, extra = {}) {
     if (!id) { flag(s, GL.OUT_OF_MEMORY); return null; }
-    const C = { Shader: WebGLShader, Program: WebGLProgram, Buffer: WebGLBuffer, Texture: WebGLTexture }[kind];
+    const C = { Shader: WebGLShader, Program: WebGLProgram, Buffer: WebGLBuffer, VertexArrayObject: WebGLVertexArrayObject, Texture: WebGLTexture }[kind];
     const object = Object.create(C.prototype);
     objects.set(object, { context: s, kind, id, deleted: false, ...extra });
     return object;
@@ -144,6 +144,7 @@
   class WebGLProgram extends WebGLObject { constructor() { illegal(); } }
   class WebGLBuffer extends WebGLObject { constructor() { illegal(); } }
   class WebGLTexture extends WebGLObject { constructor() { illegal(); } }
+  class WebGLVertexArrayObject extends WebGLObject { constructor() { illegal(); } }
   class WebGLUniformLocation { constructor() { illegal(); } }
   class WebGLActiveInfo { constructor() { illegal(); } }
   class WebGLShaderPrecisionFormat { constructor() { illegal(); } }
@@ -322,10 +323,12 @@
     getParameter(pname) {
       required('getParameter', 1, arguments); const s = state(this); syncSize(s); if (s.lost) return null;
       switch (pname >>> 0) {
-        case GL.VERSION: return 'WebGL 1.0 (RabbitHole experimental software subset)';
-        case GL.SHADING_LANGUAGE_VERSION: return 'WebGL GLSL ES 1.0 (experimental subset)';
+        case GL.VERSION: return s.version === 2 ? 'WebGL 2.0 (RabbitHole experimental software subset)' : 'WebGL 1.0 (RabbitHole experimental software subset)';
+        case GL.SHADING_LANGUAGE_VERSION: return s.version === 2 ? 'WebGL GLSL ES 3.00 (experimental subset)' : 'WebGL GLSL ES 1.0 (experimental subset)';
         case GL.VENDOR: return 'RabbitHole'; case GL.RENDERER: return 'RabbitHole software rasterizer (experimental)';
         case GL.SHADER_COMPILER: return true;
+        case 0x85B5: if (s.version === 2) return s.currentVAO; flag(s, GL.INVALID_ENUM); return null;
+        case 0x8D6B: if (s.version === 2) return 4294967294; flag(s, GL.INVALID_ENUM); return null;
         case GL.MAX_VERTEX_ATTRIBS: return limits.maxVertexAttribs;
         case GL.MAX_VIEWPORT_DIMS: return new Int32Array([limits.maxDimension, limits.maxDimension]);
         case GL.MAX_RENDERBUFFER_SIZE: case GL.MAX_TEXTURE_SIZE: return limits.maxDimension;
@@ -429,8 +432,35 @@
     Object.defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
     Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
   }
-  for (const C of [WebGLObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
-  hidden(N, 'makeWebGLContext', function (canvas, surface, options) {
+  class WebGL2RenderingContext { constructor() { illegal(); }
+    createVertexArray() { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); const r = call(s, 'createVertexArray'); return r.error ? null : wrap(s, 'VertexArrayObject', r.value, { bound: false, element: null, attribs: freshAttributes() }); }
+    bindVertexArray(object) {
+      required('bindVertexArray', 1, arguments); const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); const v = owned(s, object, 'VertexArrayObject', true); if (!v || call(s, 'bindVertexArray', v.id).error) return;
+      const old = s.currentVAO ? objects.get(s.currentVAO) : s.defaultVAO;
+      old.element = s.bindings[GL.ELEMENT_ARRAY_BUFFER] || null; old.attribs = s.attribs;
+      const next = object ? v : s.defaultVAO, constants = s.attribs.map(a => a.current);
+      s.attribs = next.attribs; for (let i = 0; i < constants.length; i++) s.attribs[i].current = constants[i];
+      s.bindings[GL.ELEMENT_ARRAY_BUFFER] = next.element; s.currentVAO = object; if (object) v.bound = true;
+    }
+    deleteVertexArray(object) {
+      required('deleteVertexArray', 1, arguments); const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); if (object === null) return;
+      const v = owned(s, object, 'VertexArrayObject', false, true); if (!v || v.deleted) return;
+      if (!call(s, 'deleteVertexArray', v.id).error) { if (s.currentVAO === object) this.bindVertexArray(null); v.deleted = true; }
+    }
+    isVertexArray(object) { required('isVertexArray', 1, arguments); const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); const v = objects.get(object); return !!v && v.context === s && v.kind === 'VertexArrayObject' && !v.deleted && !s.lost && !!call(s, 'isVertexArray', v.id).value; }
+  }
+  function freshAttributes() { return Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, current: [0, 0, 0, 1] })); }
+  // These interfaces implement separate WebIDL mixins; WebGL2 is not a WebGL1 subclass.
+  for (const key of Reflect.ownKeys(WebGLRenderingContext.prototype)) if (key !== 'constructor') Object.defineProperty(WebGL2RenderingContext.prototype, key, Object.getOwnPropertyDescriptor(WebGLRenderingContext.prototype, key));
+  // WebGL2 adds source/destination-offset overloads; reject these until implemented.
+  for (const [name, maxArgs] of Object.entries({ bufferData: 3, bufferSubData: 3, readPixels: 7, texImage2D: 9, texSubImage2D: 9, uniform1fv: 2, uniform2fv: 2, uniform3fv: 2, uniform4fv: 2, uniform1iv: 2, uniformMatrix4fv: 3 })) {
+    const base = WebGL2RenderingContext.prototype[name];
+    hidden(WebGL2RenderingContext.prototype, name, function (...args) { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); if (args.length > maxArgs) { flag(s, GL.INVALID_OPERATION); return null; } return base.apply(this, args); });
+  }
+  for (const [name, value] of Object.entries({ ...GL, VERTEX_ARRAY_BINDING: 0x85B5, MAX_ELEMENT_INDEX: 0x8D6B })) { Object.defineProperty(WebGL2RenderingContext, name, { value, enumerable: true }); if (!(name in WebGL2RenderingContext.prototype)) Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, enumerable: true }); }
+  for (const name of ['drawRangeElements', 'drawArraysInstanced', 'drawElementsInstanced', 'vertexAttribDivisor', 'vertexAttribIPointer', 'vertexAttribI4i', 'vertexAttribI4ui', 'vertexAttribI4iv', 'vertexAttribI4uiv', 'texImage3D', 'texSubImage3D', 'copyTexSubImage3D', 'compressedTexImage3D', 'compressedTexSubImage3D', 'texStorage2D', 'texStorage3D', 'drawBuffers', 'readBuffer', 'blitFramebuffer', 'invalidateFramebuffer', 'invalidateSubFramebuffer', 'framebufferTextureLayer', 'renderbufferStorageMultisample', 'copyBufferSubData', 'getBufferSubData', 'bindBufferBase', 'bindBufferRange', 'getIndexedParameter', 'getInternalformatParameter', 'getUniformIndices', 'getActiveUniforms', 'getUniformBlockIndex', 'getActiveUniformBlockParameter', 'getActiveUniformBlockName', 'uniformBlockBinding', 'createQuery', 'deleteQuery', 'isQuery', 'beginQuery', 'endQuery', 'getQuery', 'getQueryParameter', 'createSampler', 'deleteSampler', 'isSampler', 'bindSampler', 'samplerParameteri', 'samplerParameterf', 'getSamplerParameter', 'fenceSync', 'isSync', 'deleteSync', 'clientWaitSync', 'waitSync', 'getSyncParameter', 'createTransformFeedback', 'deleteTransformFeedback', 'isTransformFeedback', 'bindTransformFeedback', 'beginTransformFeedback', 'endTransformFeedback', 'transformFeedbackVaryings', 'getTransformFeedbackVarying', 'pauseTransformFeedback', 'resumeTransformFeedback', 'getFragDataLocation', 'clearBufferiv', 'clearBufferuiv', 'clearBufferfv', 'clearBufferfi', 'uniform1ui', 'uniform2ui', 'uniform3ui', 'uniform4ui', 'uniform1uiv', 'uniform2uiv', 'uniform3uiv', 'uniform4uiv', 'uniformMatrix2x3fv', 'uniformMatrix3x2fv', 'uniformMatrix2x4fv', 'uniformMatrix4x2fv', 'uniformMatrix3x4fv', 'uniformMatrix4x3fv']) hidden(WebGL2RenderingContext.prototype, name, function () { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); flag(s, GL.INVALID_OPERATION); return null; });
+  for (const C of [WebGLObject, WebGL2RenderingContext, WebGLVertexArrayObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
+  hidden(N, 'makeWebGLContext', function (canvas, surface, options, version = 1) {
     if (options !== null && typeof options !== 'object' && typeof options !== 'function') throw new TypeError('WebGL context attributes must be a dictionary');
     const alpha = options.alpha, depth = options.depth, premultipliedAlpha = options.premultipliedAlpha, powerPreference = options.powerPreference;
     const attrs = { alpha: alpha === undefined ? true : !!alpha, depth: depth === undefined ? true : !!depth, stencil: false, antialias: false, premultipliedAlpha: premultipliedAlpha === undefined ? true : !!premultipliedAlpha, preserveDrawingBuffer: !!options.preserveDrawingBuffer, powerPreference: powerPreference === undefined ? 'default' : String(powerPreference), failIfMajorPerformanceCaveat: !!options.failIfMajorPerformanceCaveat, desynchronized: false };
@@ -440,10 +470,11 @@
     const w = surface.width, h = surface.height;
     if (Math.max(w, 1) > limits.maxDimension || Math.max(h, 1) > limits.maxDimension || Math.max(w, 1) * Math.max(h, 1) > limits.maxPixels) return null;
     if (attrs.failIfMajorPerformanceCaveat) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'The software renderer is a major performance caveat' })); return null; }
-    const result = N.webglNew(surface.id, w, h, attrs.alpha, attrs.premultipliedAlpha);
+    const result = N.webglNew(surface.id, w, h, attrs.alpha, attrs.premultipliedAlpha, version);
     if (result.error) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'Software drawing buffer creation failed' })); return null; }
-    const ctx = Object.create(WebGLRenderingContext.prototype);
-    const s = { canvas, surface, attrs, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, blendEnabled: false, blendFactors: [GL.ONE, GL.ZERO, GL.ONE, GL.ZERO], blendEquations: [GL.FUNC_ADD, GL.FUNC_ADD], blendColor: [0, 0, 0, 0], clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, current: [0, 0, 0, 1] })) };
+    const ctx = Object.create(version === 2 ? WebGL2RenderingContext.prototype : WebGLRenderingContext.prototype);
+    const s = { canvas, surface, attrs, version, currentVAO: null, defaultVAO: null, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, blendEnabled: false, blendFactors: [GL.ONE, GL.ZERO, GL.ONE, GL.ZERO], blendEquations: [GL.FUNC_ADD, GL.FUNC_ADD], blendColor: [0, 0, 0, 0], clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, current: [0, 0, 0, 1] })) };
+    s.defaultVAO = { attribs: s.attribs, element: null };
     contexts.set(ctx, s); surface.ctx = ctx; surface.mode = 'webgl';
     N.canvasMarkDirty(surface);
     return ctx;

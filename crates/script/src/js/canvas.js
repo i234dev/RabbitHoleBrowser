@@ -656,13 +656,13 @@
       contexts.set(this, { type, ctx });
       return ctx;
     }
-    if (type === 'webgl') {
+    if (type === 'webgl' || type === 'webgl2') {
       const limits = N.webglLimits(), w = this.width >>> 0, h = this.height >>> 0;
       if (Math.max(w, 1) > limits.maxDimension || Math.max(h, 1) > limits.maxDimension || Math.max(w, 1) * Math.max(h, 1) > limits.maxPixels) {
         this.dispatchEvent(new g.WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'Drawing buffer exceeds the software renderer limits' }));
         return null;
       }
-      const ctx = N.makeWebGLContext(this, surfaceOf(this), attrs === null ? {} : attrs);
+      const ctx = N.makeWebGLContext(this, surfaceOf(this), attrs === null ? {} : attrs, type === 'webgl2' ? 2 : 1);
       if (ctx) contexts.set(this, { type, ctx });
       return ctx;
     }
@@ -702,16 +702,16 @@
   class OffscreenCanvas extends g.EventTarget {
     constructor(w, h) { super(); hidden(this, S, { surface: newSurface(w >>> 0, h >>> 0, this), ctx: null, type: null }); }
     get width() { return this[S].surface.width; }
-    set width(v) { const s = this[S].surface; s.width = v >>> 0; if (this[S].type !== 'webgl') N.canvasResize(s.id, s.width, s.height); if (this[S].type === 'webgl') N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
+    set width(v) { const s = this[S].surface; s.width = v >>> 0; if (!['webgl', 'webgl2'].includes(this[S].type)) N.canvasResize(s.id, s.width, s.height); if (['webgl', 'webgl2'].includes(this[S].type)) N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
     get height() { return this[S].surface.height; }
-    set height(v) { const s = this[S].surface; s.height = v >>> 0; if (this[S].type !== 'webgl') N.canvasResize(s.id, s.width, s.height); if (this[S].type === 'webgl') N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
+    set height(v) { const s = this[S].surface; s.height = v >>> 0; if (!['webgl', 'webgl2'].includes(this[S].type)) N.canvasResize(s.id, s.width, s.height); if (['webgl', 'webgl2'].includes(this[S].type)) N.resizeWebGLSurface(s, s.width, s.height); else if (this[S].ctx && this[S].type === '2d') resetState(this[S].ctx); }
     getContext(type, attrs = {}) {
       type = String(type);
       if (type === 'experimental-webgl') type = 'webgl';
       if (this[S].ctx) return this[S].type === type ? this[S].ctx : null;
       if (type === '2d') { this[S].ctx = makeContext(this, this[S].surface, attrs || {}, OffscreenCanvasRenderingContext2D); this[S].type = type; return this[S].ctx; }
       if (type === 'bitmaprenderer') { const c = Object.create(ImageBitmapRenderingContext.prototype); hidden(c, S, { canvas: this, surface: this[S].surface }); this[S].surface.ctx = c; this[S].surface.mode = type; this[S].ctx = c; this[S].type = type; return c; }
-      if (type === 'webgl') { const c = N.makeWebGLContext(this, this[S].surface, attrs === null ? {} : attrs); if (c) { this[S].ctx = c; this[S].type = type; } return c; }
+      if (type === 'webgl' || type === 'webgl2') { const c = N.makeWebGLContext(this, this[S].surface, attrs === null ? {} : attrs, type === 'webgl2' ? 2 : 1); if (c) { this[S].ctx = c; this[S].type = type; } return c; }
       return null;
     }
     transferToImageBitmap() { const s = this[S].surface; const bm = makeBitmap(s.width, s.height, pixelsOf(s)); N.canvasResize(s.id, s.width, s.height); return bm; }

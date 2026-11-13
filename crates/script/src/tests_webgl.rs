@@ -32,7 +32,7 @@ fn webgl_clear_context_lock_and_aliases() {
         &mut host,
         r#"
       const a = document.getElementById('a'), b = document.getElementById('b');
-      console.log(a.getContext('webgl2') === null);
+      console.log(new OffscreenCanvas(1,1).getContext('webgl2') instanceof WebGL2RenderingContext);
       const gl = a.getContext('webgl', {preserveDrawingBuffer:true});
       console.log(gl instanceof WebGLRenderingContext, gl.canvas === a, gl === a.getContext('experimental-webgl'), a.getContext('2d') === null);
       b.getContext('2d'); console.log(b.getContext('webgl') === null);
@@ -378,14 +378,14 @@ fn webgl_argument_errors_alignment_and_creation_limits_do_not_allocate_huge_buff
 }
 
 #[test]
-fn webgl1_does_not_advertise_webgl2_or_accept_glsl300() {
+fn webgl1_context_lock_and_glsl100_ceiling_remain_independent_of_webgl2() {
     let (mut env, mut host) = setup("<canvas id=a width=4 height=4></canvas>");
     let out = run(
         &mut env,
         &mut host,
         r#"
-      const canvas=document.getElementById('a');console.log(canvas.getContext('webgl2')===null);
-      const gl=canvas.getContext('webgl'),s=gl.createShader(gl.FRAGMENT_SHADER);
+      const canvas=document.getElementById('a'),gl=canvas.getContext('webgl');console.log(canvas.getContext('webgl2')===null);
+      const s=gl.createShader(gl.FRAGMENT_SHADER);
       gl.shaderSource(s,'#version 300 es\nprecision mediump float;out vec4 color;void main(){color=vec4(1.0);}');gl.compileShader(s);
       console.log(gl.getShaderParameter(s,gl.COMPILE_STATUS)===false,gl.getShaderInfoLog(s).length>0,gl.getParameter(gl.VERSION).startsWith('WebGL 1.0'),gl.getError());
     "#,
@@ -429,7 +429,9 @@ fn webgl_enum_arguments_are_converted_once_before_native_commands() {
 #[test]
 fn webgl_linear_texture_filtering_reads_interpolated_pixels() {
     let (mut env, mut host) = setup("<canvas id=a width=3 height=3></canvas>");
-    let source = format!("{SHADERS}\n{TEXTURED_QUAD}\n{}", r#"
+    let source = format!(
+        "{SHADERS}\n{TEXTURED_QUAD}\n{}",
+        r#"
       const gl=document.getElementById('a').getContext('webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});textureQuad(gl);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
@@ -439,8 +441,19 @@ fn webgl_linear_texture_filtering_reads_interpolated_pixels() {
       console.log(gl.getError(),gl.getTexParameter(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER)===gl.LINEAR,gl.getTexParameter(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER)===gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);console.log(gl.getError()===gl.INVALID_OPERATION);
       gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,data);console.log(Array.from(data).join(','));
-    "#);
-    assert_eq!(run(&mut env, &mut host, &source), ["255,0,0,255", "128,128,128,255", "0,0,255,255", "0 true true", "true", "128,128,128,255"]);
+    "#
+    );
+    assert_eq!(
+        run(&mut env, &mut host, &source),
+        [
+            "255,0,0,255",
+            "128,128,128,255",
+            "0,0,255,255",
+            "0 true true",
+            "true",
+            "128,128,128,255"
+        ]
+    );
 }
 
 #[test]
@@ -538,5 +551,139 @@ fn webgl_blending_rgb_only_destination_alpha_and_canvas_premultiplication() {
     "#,
     );
     assert_eq!(out, ["255,0,0,255 0", "0,0,0,0 0", "0,0,0,0 0"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+const WEBGL2_SCENE: &str = r#"
+function scene2(gl){
+ const p=gl.createProgram();
+ for(const [kind,source] of [[gl.VERTEX_SHADER,'#version 300 es\nlayout(location=0) in vec2 position;layout(location=1) in vec4 color;out vec4 v;void main(){gl_Position=vec4(position,0.0,1.0);v=color;}'],[gl.FRAGMENT_SHADER,'#version 300 es\nprecision mediump float;in vec4 v;out vec4 result;void main(){result=v;}']]){
+ const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));gl.attachShader(p,s);}
+ gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));gl.useProgram(p);return p;
+}
+function geometry2(gl){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(0);return b;}
+function indices2(gl,data){const b=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,b);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,data,gl.STATIC_DRAW);return b;}
+function pixel2(gl){const p=new Uint8Array(4);gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);return Array.from(p).join(',');}
+"#;
+#[test]
+fn webgl2_interfaces_queries_and_context_selection_are_independent() {
+    let (mut env, mut host) =
+        setup("<canvas id=a width=4 height=4></canvas><canvas id=b width=4 height=4></canvas>");
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+ const c=document.getElementById('a'),gl=c.getContext('webgl2',{preserveDrawingBuffer:true}),one=document.getElementById('b').getContext('webgl');
+ console.log(gl instanceof WebGL2RenderingContext,gl instanceof WebGLRenderingContext,Object.prototype.toString.call(gl),gl===c.getContext('webgl2'),c.getContext('webgl')===null,c.getContext('2d')===null);
+ console.log(gl.getParameter(gl.VERSION).startsWith('WebGL 2.0'),gl.getParameter(gl.SHADING_LANGUAGE_VERSION).includes('3.00'),gl.getParameter(gl.VERTEX_ARRAY_BINDING)===null,gl.getParameter(gl.MAX_ELEMENT_INDEX));
+ console.log(typeof one.createVertexArray,one.getParameter(0x85B5)===null,one.getError()===one.INVALID_ENUM);
+ console.log(gl.createQuery()===null,gl.getError()===gl.INVALID_OPERATION,gl.drawArraysInstanced(gl.TRIANGLES,0,3,1)===null,gl.getError()===gl.INVALID_OPERATION);
+ gl.getParameter(0x8A2F);console.log(gl.getError()===gl.INVALID_ENUM);
+ const off=new OffscreenCanvas(2,2),other=off.getContext('webgl2');off.width=4;console.log(other instanceof WebGL2RenderingContext,other.drawingBufferWidth,off.getContext('webgl')===null);
+ "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "true false [object WebGL2RenderingContext] true true true",
+            "true true true 4294967294",
+            "undefined true true",
+            "true true true true",
+            "true",
+            "true 4 true"
+        ]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+#[test]
+fn webgl2_vao_switching_captures_element_buffers_and_renders_glsl300_uint32() {
+    let (mut env, mut host) = setup("<canvas id=a width=4 height=4></canvas>");
+    run(&mut env, &mut host, WEBGL2_SCENE);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+ const gl=document.getElementById('a').getContext('webgl2',{preserveDrawingBuffer:true});scene2(gl);
+ const a=gl.createVertexArray();console.log(a instanceof WebGLVertexArrayObject,gl.isVertexArray(a));gl.bindVertexArray(a);const v=geometry2(gl),e=indices2(gl,new Uint32Array([0,1,2]));gl.vertexAttrib4f(1,1,0,0,1);
+ const b=gl.createVertexArray();gl.bindVertexArray(b);console.log(gl.getParameter(gl.ELEMENT_ARRAY_BUFFER_BINDING)===null,gl.getParameter(gl.ARRAY_BUFFER_BINDING)===v,gl.getVertexAttrib(0,gl.VERTEX_ATTRIB_ARRAY_ENABLED));
+ gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(0);indices2(gl,new Uint32Array([0,0,0]));gl.vertexAttrib4f(1,0,1,0,1);
+ gl.bindVertexArray(a);console.log(gl.isVertexArray(a),gl.getParameter(gl.VERTEX_ARRAY_BINDING)===a,gl.getParameter(gl.ELEMENT_ARRAY_BUFFER_BINDING)===e,gl.getVertexAttrib(0,gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING)===v);
+ gl.drawElements(gl.TRIANGLES,3,gl.UNSIGNED_INT,0);console.log(pixel2(gl),gl.getError());
+ gl.clear(gl.COLOR_BUFFER_BIT);gl.bindVertexArray(b);gl.drawElements(gl.TRIANGLES,3,gl.UNSIGNED_INT,0);console.log(pixel2(gl),gl.getError());
+ gl.bindVertexArray(a);gl.deleteVertexArray(a);console.log(gl.getParameter(gl.VERTEX_ARRAY_BINDING)===null,gl.isVertexArray(a));gl.bindVertexArray(a);console.log(gl.getError()===gl.INVALID_OPERATION);
+ "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "true false",
+            "true true false",
+            "true true true true",
+            "0,255,0,255 0",
+            "0,0,0,0 0",
+            "true false",
+            "true"
+        ]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+#[test]
+fn webgl2_deleted_buffer_lifetimes_restart_bounds_and_cross_context_brands() {
+    let (mut env, mut host) =
+        setup("<canvas id=a width=4 height=4></canvas><canvas id=b width=4 height=4></canvas>");
+    run(&mut env, &mut host, WEBGL2_SCENE);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+ const gl=document.getElementById('a').getContext('webgl2',{preserveDrawingBuffer:true}),other=document.getElementById('b').getContext('webgl2');scene2(gl);
+ const a=gl.createVertexArray();gl.bindVertexArray(a);const v=geometry2(gl),e=indices2(gl,new Uint32Array([0,1,2,0xffffffff,0,1,2]));gl.vertexAttrib4f(1,1,0,0,1);
+ gl.bindVertexArray(null);gl.deleteBuffer(v);gl.deleteBuffer(e);gl.bindVertexArray(a);gl.drawElements(gl.TRIANGLE_STRIP,7,gl.UNSIGNED_INT,0);console.log(pixel2(gl),gl.isBuffer(v),gl.getError());
+ gl.clear(gl.COLOR_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,3,gl.UNSIGNED_INT,2);console.log(gl.getError()===gl.INVALID_OPERATION,pixel2(gl));
+ gl.drawElements(gl.TRIANGLES,8,gl.UNSIGNED_INT,0);console.log(gl.getError()===gl.INVALID_OPERATION,pixel2(gl));
+ other.bindVertexArray(a);console.log(other.getError()===other.INVALID_OPERATION,other.getParameter(other.VERTEX_ARRAY_BINDING)===null);
+ let bad=false;try{gl.bindVertexArray({});}catch(e){bad=e instanceof TypeError;}console.log(bad,other.isVertexArray(a));
+ gl.deleteVertexArray(a);console.log(gl.getParameter(gl.VERTEX_ARRAY_BINDING)===null,gl.getError());
+ "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "255,0,0,255 false 0",
+            "true 0,0,0,0",
+            "true 0,0,0,0",
+            "true true",
+            "true false",
+            "true 0"
+        ]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn webgl2_npot_repeat_is_versioned_and_pending_offset_overloads_fail() {
+    let (mut env, mut host) =
+        setup("<canvas id=a width=4 height=4></canvas><canvas id=b width=4 height=4></canvas>");
+    run(&mut env, &mut host, SHADERS);
+    run(&mut env, &mut host, TEXTURED_QUAD);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+ for(const [id,type] of [['a','webgl'],['b','webgl2']]){
+   const gl=document.getElementById(id).getContext(type,{preserveDrawingBuffer:true});textureQuad(gl);
+   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,3,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([0,255,0,255,0,255,0,255,0,255,0,255]));
+   gl.drawArrays(gl.TRIANGLE_STRIP,0,4);const p=new Uint8Array(4);gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);console.log(Array.from(p).join(','),gl.getError());
+   if(type==='webgl2'){
+     gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([1,2]),gl.STATIC_DRAW,1,1);console.log(gl.getError()===gl.INVALID_OPERATION);
+     gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p,0);console.log(gl.getError()===gl.INVALID_OPERATION);
+   }else{gl.drawElements(gl.TRIANGLES,0,gl.UNSIGNED_INT,0);console.log(gl.getError()===gl.INVALID_ENUM);}
+ }
+ "#,
+    );
+    assert_eq!(
+        out,
+        ["0,0,0,255 0", "true", "0,255,0,255 0", "true", "true"]
+    );
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
