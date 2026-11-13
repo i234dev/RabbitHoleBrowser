@@ -2541,6 +2541,11 @@ impl Compiler {
                     self.suspend_tries(ai + 1, left);
                     self.emit(Op::GetReg(*iter));
                     self.emit(Op::GetReg(*next));
+                    // The loop's own throw handler still covers this code:
+                    // it must not close the iterator again if `return()`
+                    // throws (closing undefined there does nothing).
+                    self.emit(Op::Undefined);
+                    self.emit(Op::SetReg(*iter));
                     self.emit(Op::IteratorClose);
                 }
                 ExitCtx::DestructClose { iter, next } => {
@@ -2576,9 +2581,7 @@ impl Compiler {
                     let keep = (*scopes).min(self.fs_ref().scopes.len());
                     let hidden_scopes = self.fs().scopes.split_off(keep);
                     let body = body.clone();
-                    self.fs().no_completion += 1;
-                    let r = self.compile_block(&body);
-                    self.fs().no_completion -= 1;
+                    let r = self.compile_finally_body(&body);
                     self.fs().scopes.extend(hidden_scopes);
                     r?;
                     self.fs().scope_depth = saved_scope_depth;
@@ -2613,6 +2616,11 @@ impl Compiler {
                 self.emit(Op::Pop);
             }
             None => {}
+        }
+        if per_iteration && mat {
+            // The first iteration's copy: closures made by the initializer
+            // keep the initial bindings.
+            self.emit(Op::CopyScope);
         }
         // Rotated loop: the test sits at the bottom, so an iteration runs
         // one conditional jump instead of a test, a branch and a jump.
@@ -2942,6 +2950,11 @@ impl Compiler {
                     self.emit(Op::Pop);
                 }
             }
+            if self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval) {
+                // The catch block's value replaces the try block's.
+                self.emit(Op::Undefined);
+                self.emit(Op::StoreCompletion);
+            }
             self.compile_block(body)?;
             self.pop_block_scope(mat);
             let catch_end = self.here() as u32;
@@ -2972,12 +2985,26 @@ impl Compiler {
         Ok(())
     }
 
-    /// A finalizer body (its statements do not set the completion value).
+    /// A finalizer body. Completing normally it keeps the completion value
+    /// it found; when it breaks / continues out, its own value (or
+    /// undefined) is the completion (UpdateEmpty(F, undefined)).
     fn compile_finally_body(&mut self, f: &[Stmt]) -> CResult<()> {
-        self.fs().no_completion += 1;
-        let r = self.compile_block(f);
-        self.fs().no_completion -= 1;
-        r
+        let tracks = self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval);
+        if !tracks {
+            self.fs().no_completion += 1;
+            let r = self.compile_block(f);
+            self.fs().no_completion -= 1;
+            return r;
+        }
+        let saved = self.hidden_slot("fincv");
+        self.emit(Op::LoadCompletion);
+        self.emit(Op::SetReg(saved));
+        self.emit(Op::Undefined);
+        self.emit(Op::StoreCompletion);
+        self.compile_block(f)?;
+        self.emit(Op::GetReg(saved));
+        self.emit(Op::StoreCompletion);
+        Ok(())
     }
 
     /// The exception path of a finalizer: the exception waits in a
@@ -3407,6 +3434,45 @@ impl Compiler {
                                 self.emit(Op::DeleteElem);
                             }
                             MemberProp::Private(_) => return self.err("Private fields can not be deleted"),
+                        }
+                    }
+                    ExprKind::OptionalChain(inner) if matches!(&inner.kind, ExprKind::Member { object, property, .. } if !matches!(object.kind, ExprKind::Super) && !matches!(property, MemberProp::Private(_))) => {
+                        // `delete a?.b`: true when the chain short-circuits.
+                        let ExprKind::Member { object, property, optional } = &inner.kind else { unreachable!() };
+                        self.chain_stack.push(Vec::new());
+                        self.compile_expr(object)?;
+                        if *optional {
+                            self.emit(Op::Dup);
+                            let j = self.emit(Op::JumpIfNullish(0));
+                            self.chain_exit(j, 1);
+                        }
+                        match property {
+                            MemberProp::Identifier(n) => {
+                                let i = self.const_str(n);
+                                self.emit(Op::DeleteProp(i));
+                            }
+                            MemberProp::Computed(k) => {
+                                self.compile_expr(k)?;
+                                self.emit(Op::DeleteElem);
+                            }
+                            MemberProp::Private(_) => unreachable!(),
+                        }
+                        let exits = self.chain_stack.pop().unwrap();
+                        if !exits.is_empty() {
+                            let done = self.emit(Op::Jump(0));
+                            let mut to_end = Vec::new();
+                            for (j, pops) in exits {
+                                self.patch_jump(j);
+                                for _ in 0..pops {
+                                    self.emit(Op::Pop);
+                                }
+                                self.emit(Op::True);
+                                to_end.push(self.emit(Op::Jump(0)));
+                            }
+                            self.patch_jump(done);
+                            for j in to_end {
+                                self.patch_jump(j);
+                            }
                         }
                     }
                     ExprKind::Identifier(n) => {

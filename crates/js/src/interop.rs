@@ -225,7 +225,15 @@ impl Realm {
                 self.type_error(&format!("Cannot set properties of {} (setting '{}')", what, k))
             }
             _ => {
-                // Primitives: look for a setter on the prototype chain; otherwise ignore.
+                // Primitives: OrdinarySet through the prototype chain with
+                // the primitive as receiver (a setter or a proxy's `set`
+                // trap runs; a data property cannot be created on it).
+                if let V::String(s) = target.v() {
+                    // The wrapper's own index / length properties are read-only.
+                    if key.as_array_index().is_some_and(|i| (i as usize) < s.len()) || matches!(&key, PropertyKey::String(k) if k.eq_str("length")) {
+                        return Ok(false);
+                    }
+                }
                 let proto = match target.v() {
                     V::String(_) => self.intrinsics.string_proto,
                     V::Number(_) => self.intrinsics.number_proto,
@@ -233,20 +241,7 @@ impl Realm {
                     V::Symbol(_) => self.intrinsics.symbol_proto,
                     _ => self.intrinsics.bigint_proto,
                 };
-                let mut cur = Some(proto);
-                while let Some(c) = cur {
-                    if let Some(p) = self.obj(c).props.get(&key).cloned() {
-                        if p.is_accessor() {
-                            if let Some(s) = p.setter_cloned() {
-                                self.call(s, target, &[value])?;
-                                return Ok(true);
-                            }
-                        }
-                        return Ok(false);
-                    }
-                    cur = self.obj(c).proto;
-                }
-                Ok(false)
+                self.set_on_object(proto, key, value, target)
             }
         }
     }
