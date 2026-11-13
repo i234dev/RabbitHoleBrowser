@@ -360,6 +360,9 @@ impl Parser {
         Ty::parse(&n).ok_or_else(|| format!("unsupported type {n}"))
     }
     fn declare(&mut self, name: String, ty: Ty, qual: Qual) -> Result<(), String> {
+        if self.shader.version == 300 && qual != Qual::Local && name == "texture" {
+            return Err("global variable conflicts with built-in texture function".into());
+        }
         if ty == Ty::Sampler2D && (qual != Qual::Uniform || self.vertex) {
             return Err("sampler2D is supported only as a fragment uniform".into());
         }
@@ -445,7 +448,10 @@ impl Parser {
                 e
             }
             Tok::Id(name) => {
-                if name == "texture2D" || name == "texture" {
+                if (name == "texture2D" || name == "texture") && *self.peek() == Tok::P('(') {
+                    if self.shader.symbols.contains_key(&name) {
+                        return Err(format!("{name} is a variable, not a callable function"));
+                    }
                     let expected = if self.shader.version == 100 {
                         "texture2D"
                     } else {

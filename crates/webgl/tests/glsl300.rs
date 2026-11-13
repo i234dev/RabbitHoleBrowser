@@ -195,3 +195,45 @@ fn token_limits_follow_backend_context_capability_and_prefixes_are_reserved() {
     );
     rejects(&mut newer,VERTEX_SHADER,"#version 300 es\nin vec2 webgl_private;void main(){gl_Position=vec4(webgl_private,0.0,1.0);}");
 }
+
+#[test]
+fn legacy_uniform_named_texture_keeps_variable_lookup_in_both_backend_modes() {
+    for version in [100, 300] {
+        let mut c = Context::new_with_glsl_version(4, 4, version).unwrap();
+        let p=program(&mut c,"attribute vec2 position;varying vec2 uv;void main(){gl_Position=vec4(position,0.0,1.0);uv=position*0.5+0.5;}","precision mediump float;uniform sampler2D texture;varying vec2 uv;void main(){gl_FragColor=texture2D(texture,uv);}");
+        attribute(
+            &mut c,
+            p,
+            "position",
+            2,
+            &[-1., -1., 1., -1., -1., 1., 1., 1.],
+        );
+        let t = c.create_texture();
+        c.bind_texture(TEXTURE_2D, t).unwrap();
+        c.tex_image_2d(
+            TEXTURE_2D,
+            0,
+            RGBA,
+            1,
+            1,
+            0,
+            RGBA,
+            UNSIGNED_BYTE,
+            Some(&[50, 100, 150, 200]),
+        )
+        .unwrap();
+        for pname in [TEXTURE_MIN_FILTER, TEXTURE_MAG_FILTER] {
+            c.tex_parameter_i(TEXTURE_2D, pname, NEAREST as i32)
+                .unwrap();
+        }
+        c.draw_arrays(TRIANGLE_STRIP, 0, 4).unwrap();
+        assert_eq!(pixel(&c, 0, 0), [50, 100, 150, 200]);
+    }
+}
+#[test]
+fn local_builtin_shadowing_is_not_mistaken_for_a_function_call() {
+    let mut c = Context::new_with_glsl_version(1, 1, 300).unwrap();
+    shader(&mut c,FRAGMENT_SHADER,"#version 300 es\nprecision mediump float;out vec4 result;void main(){vec4 texture=vec4(1.0);result=texture;}");
+    rejects(&mut c,FRAGMENT_SHADER,"#version 300 es\nprecision mediump float;uniform sampler2D tex;out vec4 result;void main(){vec4 texture=vec4(1.0);result=texture(tex,vec2(0.0));}");
+    rejects(&mut c,FRAGMENT_SHADER,"#version 300 es\nprecision mediump float;uniform sampler2D texture;out vec4 result;void main(){result=vec4(1.0);}");
+}
