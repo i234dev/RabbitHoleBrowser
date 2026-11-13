@@ -260,8 +260,14 @@ fn run_one(batch: &Arc<Batch>, job: BodyJob) {
                 }
             }
         });
-        // A panic in the parser must not leave the batch waiting.
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(&src, batch))).unwrap_or(Ok(()));
+        // A parser failure must neither leave the batch waiting nor turn
+        // an unchecked function body into a successfully checked one.
+        let pos = job.pos;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(&src, batch))).unwrap_or_else(|_| Err(ParseError {
+            message: "Function body validation failed".into(),
+            line: pos.line,
+            column: pos.column,
+        }));
         if let Err(e) = r {
             let mut st = batch.state.lock().unwrap();
             if st.error.as_ref().is_none_or(|f| (e.line, e.column) < (f.line, f.column)) {
@@ -300,12 +306,10 @@ impl Validation {
         loop {
             let mine = {
                 let mut q = p.queue.lock().unwrap();
-                // Usually the only script being checked: its chunks are
-                // at the front.
-                match q.front() {
-                    Some((b, _)) if Arc::ptr_eq(b, &self.batch) => q.pop_front(),
-                    _ => None,
-                }
+                // Concurrent scripts may have interleaved their chunks.
+                // Find ours even when another batch is at the front;
+                // with no worker threads, waiting for it would deadlock.
+                q.iter().position(|(b, _)| Arc::ptr_eq(b, &self.batch)).and_then(|i| q.remove(i))
             };
             if let Some((b, job)) = mine {
                 run(&b, job);

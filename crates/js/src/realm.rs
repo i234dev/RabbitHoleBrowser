@@ -1234,6 +1234,11 @@ impl Realm {
         let program = match crate::parser::parse_program_validating(source, is_module, validation.as_ref()) {
             Ok(p) => p,
             Err(e) => {
+                // Drain checks already queued before the top-level error:
+                // a zero-worker pool otherwise retains abandoned jobs.
+                if let Some(v) = validation {
+                    let _ = v.finish();
+                }
                 let msg = format!("{} ({}:{}:{})", e.message, filename, e.line, e.column);
                 return Err(self.new_error("SyntaxError", &msg));
             }
