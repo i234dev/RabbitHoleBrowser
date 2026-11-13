@@ -76,7 +76,7 @@
         const href = new URL(String(u), g.location.href).href;
         const src = N.loadScriptSync(href);
         if (src === null) throw domError(`Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at '${href}' failed to load.`, 'NetworkError');
-        (0, eval)(src);
+        N.workerEvalScript(src, href);
       }
     },
   };

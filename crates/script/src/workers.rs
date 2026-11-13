@@ -209,6 +209,16 @@ fn load_script_sync(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     }
 }
 
+/// Imported classic worker scripts run as Scripts, not indirect evals:
+/// even a strict script declares its top-level bindings in the worker's
+/// global environment, shared with its other imported scripts.
+fn eval_imported_script(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let source = arg_str(realm, args, 0)?;
+    let url = arg_str(realm, args, 1)?;
+    realm.exec(&source, &url)?;
+    Ok(Value::Undefined)
+}
+
 pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
     realm.define_method(n, "workerStart", 4, worker_start);
     realm.define_method(n, "workerSend", 2, worker_send);
@@ -216,6 +226,7 @@ pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
     realm.define_method(n, "workerPost", 1, worker_post);
     realm.define_method(n, "workerClose", 0, worker_close);
     realm.define_method(n, "loadScriptSync", 1, load_script_sync);
+    realm.define_method(n, "workerEvalScript", 2, eval_imported_script);
     realm.define_method(n, "workerInfo", 0, worker_info);
 }
 
