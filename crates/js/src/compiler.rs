@@ -265,6 +265,9 @@ struct FnState {
     var_scope: usize,
     /// Compiling the parameter initializers.
     in_params: bool,
+    /// Inside finally bodies: their statements' values are not the
+    /// completion value.
+    no_completion: u32,
 }
 
 impl FnState {
@@ -310,6 +313,7 @@ impl FnState {
             annexb: Default::default(),
             var_scope: 0,
             in_params: false,
+            no_completion: 0,
         }
     }
 }
@@ -2091,6 +2095,7 @@ impl Compiler {
         // with undefined unless their body produces a value
         // (UpdateEmpty(result, undefined)).
         if self.completion
+            && self.fs_ref().no_completion == 0
             && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval)
             && matches!(
                 s.kind,
@@ -2103,7 +2108,7 @@ impl Compiler {
         match &s.kind {
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::Expr(e) => {
-                if self.completion && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval) {
+                if self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval) {
                     self.compile_expr(e)?;
                     self.emit(Op::StoreCompletion);
                 } else {
@@ -2339,13 +2344,25 @@ impl Compiler {
 
     /// Emit the exit actions for contexts above `depth` (innermost first).
     fn emit_exits(&mut self, depth: usize) -> CResult<()> {
-        // The code of the exits runs outside the tries being left: their
+        // The code of each exit runs outside the tries nested in it: their
         // handlers must not cover it (an iterator close that throws while
-        // `return` leaves a for-of is not caught by a try in its body).
-        let here = self.here() as u32;
+        // `return` leaves a for-of is not caught by a try in its body; a
+        // finalizer runs outside its own try), while enclosing tries still
+        // apply. Suspended ranges reopen after the last exit.
         let mut left = Vec::new();
+        let r = self.emit_exits_inner(depth, &mut left);
+        let here = self.here() as u32;
+        for t in left {
+            self.fs().tries[t].open_start = Some(here);
+        }
+        r
+    }
+
+    /// Close the handler ranges of the open tries with `exit_depth >= min`.
+    fn suspend_tries(&mut self, min: usize, left: &mut Vec<usize>) {
+        let here = self.here() as u32;
         for (t, tc) in self.fs().tries.iter_mut().enumerate() {
-            if tc.exit_depth >= depth {
+            if tc.exit_depth >= min {
                 if let Some(s) = tc.open_start.take() {
                     if here > s {
                         tc.ranges.push((s, here));
@@ -2354,46 +2371,43 @@ impl Compiler {
                 }
             }
         }
-        let r = self.emit_exits_inner(depth);
-        let here = self.here() as u32;
-        for t in left {
-            self.fs().tries[t].open_start = Some(here);
-        }
-        r
     }
 
-    fn emit_exits_inner(&mut self, depth: usize) -> CResult<()> {
+    fn emit_exits_inner(&mut self, depth: usize, left: &mut Vec<usize>) -> CResult<()> {
         let exits: Vec<ExitCtx> = self.fs_ref().exits[depth..].to_vec();
         for (i, ctx) in exits.iter().enumerate().rev() {
+            let ai = depth + i;
             match ctx {
                 ExitCtx::Scope => {
+                    self.suspend_tries(ai + 1, left);
                     self.emit(Op::PopScope);
                 }
                 ExitCtx::IterClose { iter, next } => {
+                    self.suspend_tries(ai + 1, left);
                     self.emit(Op::GetReg(*iter));
                     self.emit(Op::GetReg(*next));
                     self.emit(Op::IteratorClose);
                 }
                 ExitCtx::DestructClose { iter, next } => {
+                    self.suspend_tries(ai + 1, left);
                     self.emit(Op::IteratorCloseIfNotDoneReg(*iter, *next));
                 }
                 ExitCtx::Finally { body, try_index, scopes } => {
-                    // Inline the finalizer with inner contexts removed and the
-                    // owning try's handler ranges suspended.
-                    let saved_exits = self.fs().exits.split_off(depth + i);
-                    let saved_scope_depth = self.fs_ref().scope_depth;
-                    let n_tries = self.fs_ref().tries.len();
-                    let mut suspended: Vec<usize> = Vec::new();
+                    // Inline the finalizer with inner contexts removed, its
+                    // own try (and those inside it) no longer handling.
                     let here = self.here() as u32;
+                    let n_tries = self.fs_ref().tries.len();
                     for t in *try_index..n_tries {
                         let tc = &mut self.fs().tries[t];
                         if let Some(s) = tc.open_start.take() {
                             if here > s {
                                 tc.ranges.push((s, here));
                             }
-                            suspended.push(t);
+                            left.push(t);
                         }
                     }
+                    let saved_exits = self.fs().exits.split_off(ai);
+                    let saved_scope_depth = self.fs_ref().scope_depth;
                     // Scopes popped by the exits above are reflected in scope_depth for handler bookkeeping.
                     let popped = exits[i + 1..].iter().filter(|e| matches!(e, ExitCtx::Scope)).count() as u32;
                     self.fs().scope_depth = saved_scope_depth - popped;
@@ -2407,14 +2421,12 @@ impl Compiler {
                     let keep = (*scopes).min(self.fs_ref().scopes.len());
                     let hidden_scopes = self.fs().scopes.split_off(keep);
                     let body = body.clone();
+                    self.fs().no_completion += 1;
                     let r = self.compile_block(&body);
+                    self.fs().no_completion -= 1;
                     self.fs().scopes.extend(hidden_scopes);
                     r?;
                     self.fs().scope_depth = saved_scope_depth;
-                    let here = self.here() as u32;
-                    for &t in &suspended {
-                        self.fs().tries[t].open_start = Some(here);
-                    }
                     self.fs().exits.extend(saved_exits);
                 }
             }
@@ -2730,7 +2742,7 @@ impl Compiler {
         let mut end_jumps = Vec::new();
         if let Some(f) = &finalizer_rc {
             self.fs().exits.pop();
-            self.compile_block(f)?;
+            self.compile_finally_body(f)?;
             self.fs().exits.push(ExitCtx::Finally { body: f.clone(), try_index, scopes });
         }
         end_jumps.push(self.emit(Op::Jump(0)));
@@ -2764,7 +2776,7 @@ impl Compiler {
             let finally_ranges = self.take_ranges(try_index, catch_end);
             if let Some(f) = &finalizer_rc {
                 self.fs().exits.pop();
-                self.compile_block(f)?;
+                self.compile_finally_body(f)?;
                 end_jumps.push(self.emit(Op::Jump(0)));
                 // exception path for finally
                 let fin_pc = self.here() as u32;
@@ -2788,13 +2800,21 @@ impl Compiler {
         Ok(())
     }
 
+    /// A finalizer body (its statements do not set the completion value).
+    fn compile_finally_body(&mut self, f: &[Stmt]) -> CResult<()> {
+        self.fs().no_completion += 1;
+        let r = self.compile_block(f);
+        self.fs().no_completion -= 1;
+        r
+    }
+
     /// The exception path of a finalizer: the exception waits in a
     /// register (the finalizer may `break`/`continue`/`return` past the
     /// rethrow with an empty operand stack), then is rethrown.
     fn compile_finally_rethrow(&mut self, f: &[Stmt]) -> CResult<()> {
         let exc = self.hidden_slot("finexc");
         self.emit(Op::SetReg(exc));
-        self.compile_block(f)?;
+        self.compile_finally_body(f)?;
         self.emit(Op::GetReg(exc));
         self.emit(Op::Throw);
         Ok(())

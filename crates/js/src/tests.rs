@@ -1679,6 +1679,8 @@ fn direct_eval_annexb_private_generators() {
     eq("var g = (x = () => y, y = 2) => x(); g()", "2");
     eq("function f(p = eval('var arguments')) {} try { f(); 'no' } catch (e) { e.name }", "SyntaxError");
     eq("var k = { toString() { throw 1; } }; var b = null; try { b[k] ^= 1; 'no' } catch (e) { typeof e === 'object' ? e.name : 'key' }", "TypeError");
+    eq("function f() { try { try { return 1; } finally { throw 9; } } catch (e) { return 'caught ' + e; } } f()", "caught 9");
+    eq("String([eval('1; try { 2; } finally { 3; }'), eval('1; try { } finally { 3; }')])", "2,");
     eq("var it = { [Symbol.iterator]() { return { next() { return { done: false }; }, return() { throw 42; } }; } }; var c = 0, f = 0; function t() { for (var x of it) { try { return 1; } catch (e) { c++; } finally { f++; } } } var r; try { t(); } catch (e) { r = e; } [r, c, f].join()", "42,0,1");
     eq("String([eval('1; do { } while (false)'), eval('2; do { 3; } while (false)'), eval('1; if (true) {}'), eval('1; {}')])", ",3,,1");
     // Lone surrogates in string literals (and eval'd source) survive.
