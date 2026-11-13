@@ -168,7 +168,7 @@ mod sys {
     pub unsafe fn free(_p: *mut u8, _len: usize) {}
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::x64::*;
     use super::*;
@@ -245,4 +245,10 @@ mod tests {
         f(&mut out, inp.as_ptr());
         assert_eq!(out, 3.75);
     }
+}
+
+#[cfg(all(test, not(target_arch = "x86_64")))]
+#[test]
+fn native_backend_is_unavailable() {
+    assert!(!supported());
 }
