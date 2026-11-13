@@ -1219,7 +1219,6 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         size,
                         color,
                         letter_spacing,
-                        decoration,
                         hidden,
                         decoration_info,
                         shadows,
@@ -1239,6 +1238,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             let cy = f.rect.y + f.rect.h / 2.0;
                             self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * cy]));
                         }
+                        // Underlines and overlines go under the text,
+                        // line-throughs over it (CSS Text Decoration 3 §2.1).
+                        if decoration_info.any() {
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, *color, decoration_info, false);
+                        }
                         self.list.push(DisplayItem::Text {
                             x: f.rect.x,
                             y: f.baseline,
@@ -1251,8 +1255,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             small_caps: *small_caps,
                             oblique: *oblique,
                         });
-                        if decoration.any() {
-                            self.paint_decorations(f.rect, f.baseline, *size, *color, decoration_info);
+                        if decoration_info.any() {
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, *color, decoration_info, true);
                         }
                         if self.flipped {
                             self.list.push(DisplayItem::PopTransform);
@@ -1269,29 +1273,65 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
     }
 
-    fn paint_decorations(&mut self, rect: Rect, baseline: f32, size: f32, text_color: Color, info: &DecorationInfo) {
-        let thickness = info.thickness.unwrap_or((size / 16.0).max(1.0));
-        let color = info.color.unwrap_or(text_color);
-        let style = info.style;
-        let mut line = |y: f32| {
-            self.list.push(DisplayItem::Line {
-                x0: rect.x,
-                y0: y,
-                x1: rect.right(),
-                y1: y,
-                width: thickness,
-                color,
-                style,
-            });
-        };
-        if info.lines.underline {
-            line(baseline + thickness * 1.5);
-        }
-        if info.lines.line_through {
-            line(baseline - size * 0.3);
-        }
-        if info.lines.overline {
-            line(rect.y + thickness / 2.0);
+    /// Paint the underlines and overlines (`through` false) or the
+    /// line-throughs (`through` true) of a text fragment.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_decorations(&mut self, rect: Rect, baseline: f32, font: rabbithole_gfx::FontId, size: f32, _text_color: Color, info: &DecorationInfo, through: bool) {
+        let fm = self.ctx.fonts.decoration_metrics(font, size, &info.variations);
+        let asc = baseline - rect.y;
+        let desc = rect.bottom() - baseline;
+        for (i, d) in info.list.iter().enumerate() {
+            let (x0, x1) = info.extents.get(i).copied().flatten().map(|(a, b)| (rect.x + a, rect.x + b)).unwrap_or((rect.x, rect.right()));
+            let (bo, asc, desc) = info.metrics.get(i).copied().unwrap_or((0.0, asc, desc));
+            let baseline = baseline + bo;
+            if x1 <= x0 {
+                continue;
+            }
+            let auto_t = (size / 16.0).max(1.0);
+            let thick = |from: Option<(f32, f32)>| -> f32 {
+                match d.thickness {
+                    Some(t) => t.max(0.0),
+                    None if d.from_font => from.map(|m| m.1).filter(|t| *t > 0.0).unwrap_or(auto_t),
+                    None => auto_t,
+                }
+            };
+            // Decoration lines are snapped to device pixels (whole-pixel
+            // thickness, at least 1px; pixel-aligned ends so the pieces of a
+            // line over adjacent fragments join seamlessly), as in Blink.
+            let (x0, x1) = (x0.round(), x1.round());
+            let mut line = |top: f32, t: f32| {
+                if t <= 0.0 || x1 <= x0 {
+                    return;
+                }
+                let t = t.round().max(1.0);
+                let top = top.round();
+                self.list.push(DisplayItem::Line { x0, y0: top + t / 2.0, x1, y1: top + t / 2.0, width: t, color: d.color, style: d.style });
+            };
+            if through {
+                if d.lines.line_through {
+                    let t = thick(fm.strikeout);
+                    line(baseline - size * 0.3 - t / 2.0, t);
+                }
+                continue;
+            }
+            if d.lines.underline {
+                let t = thick(fm.underline);
+                let pos = d.underline_position;
+                let top = if pos.under {
+                    baseline + desc + d.underline_offset.unwrap_or(0.0)
+                } else if pos.from_font && fm.underline.is_some() {
+                    fm.underline.map(|(p, _)| baseline - p).unwrap_or(baseline) + d.underline_offset.unwrap_or(0.0)
+                } else if let Some(o) = d.underline_offset {
+                    baseline + o
+                } else {
+                    baseline + t
+                };
+                line(top, t);
+            }
+            if d.lines.overline {
+                let t = thick(fm.underline);
+                line(baseline - asc, t);
+            }
         }
     }
 }

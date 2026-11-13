@@ -11,6 +11,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// A font's decoration line metrics in px: (position upwards from the
+/// baseline, thickness).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DecorationMetrics {
+    pub underline: Option<(f32, f32)>,
+    pub strikeout: Option<(f32, f32)>,
+}
+
 /// One shaped glyph in font units.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UnitGlyph {
@@ -88,6 +96,31 @@ impl FontContext {
     /// Does this face have color glyphs (COLR / CBDT / sbix)?
     pub(crate) fn has_color_tables(&self, idx: usize) -> bool {
         self.shaping_data(idx).map(|(_, _, c)| c).unwrap_or(false)
+    }
+
+    /// The font's underline and strikeout metrics at `size`, in px:
+    /// `(underline position, underline thickness, strikeout position,
+    /// strikeout thickness)`, positions measured upwards from the baseline
+    /// (an underline below the baseline has a negative position).
+    pub fn decoration_metrics(&self, font: crate::FontId, size: f32, variations: &[([u8; 4], f32)]) -> DecorationMetrics {
+        let mut m = DecorationMetrics::default();
+        let Some(b) = self.face_bytes(font.0) else { return m };
+        let Ok(mut face) = rustybuzz::ttf_parser::Face::parse(&b, 0) else { return m };
+        for (tag, v) in variations {
+            let _ = face.set_variation(rustybuzz::ttf_parser::Tag::from_bytes(tag), *v);
+        }
+        let upem = face.units_per_em() as f32;
+        if upem <= 0.0 {
+            return m;
+        }
+        let k = size / upem;
+        if let Some(u) = face.underline_metrics() {
+            m.underline = Some((u.position as f32 * k, u.thickness as f32 * k));
+        }
+        if let Some(s) = face.strikeout_metrics() {
+            m.strikeout = Some((s.position as f32 * k, s.thickness as f32 * k));
+        }
+        m
     }
 
     /// The face's SFNT bytes.

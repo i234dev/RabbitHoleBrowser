@@ -376,6 +376,54 @@ impl TextDecoration {
     }
 }
 
+/// `text-underline-offset` (inherited).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum UnderlineOffset {
+    #[default]
+    Auto,
+    Px(f32),
+    /// Percentage of 1em (resolved against the decorating box's font size).
+    Percent(f32),
+}
+
+/// `text-underline-position` (inherited).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UnderlinePosition {
+    pub from_font: bool,
+    pub under: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+/// A text decoration in effect on an element's text (CSS Text Decoration
+/// 3 §2): the element's own `text-decoration-line` and the decorations
+/// propagated from its decorating ancestors, with their color, style,
+/// thickness and underline placement taken from the decorating box.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedDecoration {
+    pub lines: TextDecoration,
+    pub color: Color,
+    pub style: TextDecorationStyle,
+    /// Thickness in px; `None` = `auto` / `from-font`.
+    pub thickness: Option<f32>,
+    pub from_font: bool,
+    /// Underline offset in px; `None` = `auto`.
+    pub underline_offset: Option<f32>,
+    pub underline_position: UnderlinePosition,
+    /// The decorating box's font (its ascent places overlines).
+    pub font_size: f32,
+    pub font_family: Family,
+    pub font_family_list: Vec<String>,
+    pub font_weight: u16,
+    pub font_style: FontStyle,
+    /// The decorating box's baseline shift (`vertical-align` of an inline
+    /// decorating box), in px upwards.
+    pub baseline_shift: f32,
+    /// `text-decoration-inset` (start, end); percentages of the
+    /// decorating box's inline size.
+    pub inset: (Length, Length),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Edges<T> {
     pub top: T,
@@ -1002,6 +1050,18 @@ pub struct ComputedStyle {
     pub text_decoration_color: Option<Color>,
     pub text_decoration_style: TextDecorationStyle,
     pub text_decoration_thickness: Option<f32>,
+    /// `text-decoration-thickness: from-font`.
+    pub text_decoration_thickness_from_font: bool,
+    /// `text-decoration-inset` (start, end; not inherited). Percentages
+    /// are kept as `Length::Percent` of the decorating box's font size.
+    pub text_decoration_inset: (Length, Length),
+    /// `text-underline-offset` (inherited).
+    pub text_underline_offset: UnderlineOffset,
+    /// `text-underline-position` (inherited).
+    pub text_underline_position: UnderlinePosition,
+    /// Decorations painted on this element's text (inherited: computed
+    /// in the cascade from the parent's and the element's own).
+    pub applied_decorations: Vec<AppliedDecoration>,
     pub direction: Direction,
     /// `writing-mode` (inherited).
     pub writing_mode: WritingMode,
@@ -1033,6 +1093,8 @@ pub struct ComputedStyle {
     /// `font_family` fallback.
     pub font_family_list: Vec<String>,
     pub font_variant_small_caps: bool,
+    /// `font-variation-settings` (inherited): axis tag and value.
+    pub font_variation_settings: Vec<([u8; 4], f32)>,
 
     // ---- replaced elements / sizing
     pub object_fit: ObjectFit,
@@ -1178,6 +1240,11 @@ impl ComputedStyle {
             text_decoration_color: None,
             text_decoration_style: TextDecorationStyle::Solid,
             text_decoration_thickness: None,
+            text_decoration_thickness_from_font: false,
+            text_decoration_inset: (Length::ZERO, Length::ZERO),
+            text_underline_offset: UnderlineOffset::Auto,
+            text_underline_position: UnderlinePosition::default(),
+            applied_decorations: Vec::new(),
             direction: Direction::Ltr,
             writing_mode: WritingMode::HorizontalTb,
             unicode_bidi: UnicodeBidi::Normal,
@@ -1194,6 +1261,7 @@ impl ComputedStyle {
             webkit_box: false,
             font_family_list: Vec::new(),
             font_variant_small_caps: false,
+            font_variation_settings: Vec::new(),
             object_fit: ObjectFit::Fill,
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
             aspect_ratio: None,
@@ -1236,10 +1304,11 @@ impl ComputedStyle {
             word_spacing: parent.word_spacing,
             text_align: parent.text_align,
             text_align_webkit_center: parent.text_align_webkit_center,
-            // Not inherited per spec, but decorations propagate to all
-            // descendant inline content, which amounts to the same thing
-            // for a renderer without pseudo-boxes.
-            text_decoration: parent.text_decoration,
+            // `text-decoration-line` is not inherited; the decorations it
+            // draws propagate through `applied_decorations`.
+            applied_decorations: parent.applied_decorations.clone(),
+            text_underline_offset: parent.text_underline_offset,
+            text_underline_position: parent.text_underline_position,
             text_transform: parent.text_transform,
             text_indent: parent.text_indent,
             white_space: parent.white_space,
@@ -1255,6 +1324,7 @@ impl ComputedStyle {
             tab_size: parent.tab_size,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
+            font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
             accent_color: parent.accent_color,
             color_scheme_dark: parent.color_scheme_dark,
@@ -1284,7 +1354,9 @@ impl ComputedStyle {
             && self.word_spacing == o.word_spacing
             && self.text_align == o.text_align
             && self.text_align_webkit_center == o.text_align_webkit_center
-            && self.text_decoration == o.text_decoration
+            && self.applied_decorations == o.applied_decorations
+            && self.text_underline_offset == o.text_underline_offset
+            && self.text_underline_position == o.text_underline_position
             && self.text_transform == o.text_transform
             && self.text_indent == o.text_indent
             && self.white_space == o.white_space
@@ -1300,6 +1372,7 @@ impl ComputedStyle {
             && self.tab_size == o.tab_size
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
+            && self.font_variation_settings == o.font_variation_settings
             && self.image_rendering_pixelated == o.image_rendering_pixelated
             && self.accent_color == o.accent_color
             && self.color_scheme_dark == o.color_scheme_dark

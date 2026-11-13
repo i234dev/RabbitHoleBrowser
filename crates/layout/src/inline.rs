@@ -88,6 +88,92 @@ fn item_elem(items: &[InlineItem], idx: usize) -> Option<NodeId> {
     }
 }
 
+/// `position: relative` offsets of inline elements (CSS 2.1 §9.4.3),
+/// accumulated through nested ones: per item, and per atomic child index.
+/// Empty when no inline element is relatively positioned.
+fn relative_offsets(items: &[InlineItem], children: usize, cbw: f32, cbh: Option<f32>) -> (Vec<(f32, f32)>, Vec<(f32, f32)>) {
+    if !items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.position == rabbithole_style::Position::Relative)) {
+        return (Vec::new(), Vec::new());
+    }
+    let mut out = vec![(0.0, 0.0); items.len()];
+    let mut kids = vec![(0.0, 0.0); children];
+    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+    for (i, it) in items.iter().enumerate() {
+        let cur = *stack.last().unwrap_or(&(0.0, 0.0));
+        match it {
+            InlineItem::Open { style, .. } => {
+                let mut o = cur;
+                if style.position == rabbithole_style::Position::Relative {
+                    let s = &style.inset;
+                    o.0 += s.left.resolve(cbw).or_else(|| s.right.resolve(cbw).map(|v| -v)).unwrap_or(0.0);
+                    o.1 += s.top.resolve_definite(cbh).or_else(|| s.bottom.resolve_definite(cbh).map(|v| -v)).unwrap_or(0.0);
+                }
+                out[i] = o;
+                stack.push(o);
+            }
+            InlineItem::Close => {
+                out[i] = cur;
+                if stack.len() > 1 {
+                    stack.pop();
+                }
+            }
+            InlineItem::Atomic(c) | InlineItem::Float(c) | InlineItem::Absolute(c) => {
+                out[i] = cur;
+                if let Some(k) = kids.get_mut(*c) {
+                    *k = cur;
+                }
+            }
+            _ => out[i] = cur,
+        }
+    }
+    (out, kids)
+}
+
+/// A decoration extent waiting for its decorating box's whole inline
+/// size (see `InlineLayout::decoration_extents`); offsets relative to the
+/// fragment's left edge.
+#[derive(Debug, Clone)]
+struct InsetFixup {
+    line: usize,
+    frag: usize,
+    deco: usize,
+    open: usize,
+    lo: f32,
+    hi: f32,
+    w: f32,
+    inset: (Option<rabbithole_style::Length>, Option<rabbithole_style::Length>),
+}
+
+/// The inline element (Open item) directly enclosing each item, when some
+/// inline element insets its text decorations (`text-decoration-inset`);
+/// empty otherwise.
+fn has_inset(s: &ComputedStyle) -> bool {
+    s.text_decoration.any() && (s.text_decoration_inset.0 != rabbithole_style::Length::ZERO || s.text_decoration_inset.1 != rabbithole_style::Length::ZERO)
+}
+
+/// Pseudo item index standing for the block container's root inline box
+/// (a block decorating box insets its decorations per paragraph).
+const BLOCK_BOX: usize = usize::MAX - 1;
+
+fn open_parents(items: &[InlineItem], container: &ComputedStyle) -> Vec<Option<usize>> {
+    if !has_inset(container) && !items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if has_inset(style))) {
+        return Vec::new();
+    }
+    let mut out = vec![None; items.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        out[i] = stack.last().copied();
+        match it {
+            InlineItem::Open { .. } => stack.push(i),
+            InlineItem::Close => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Split a word after hyphens so `foo-bar` can wrap after the dash.
 fn split_hyphens(w: &str) -> Vec<(String, bool)> {
     if w.len() < 3 || !w.contains('-') {
@@ -248,6 +334,9 @@ impl<'a> Layouter<'a> {
         let clips = cstyle.overflow_x.clips() || cstyle.overflow_y.clips();
         let ellipsis = cstyle.text_overflow == TextOverflow::Ellipsis && clips;
         let max_lines = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
+        let (rel, rel_kids) = relative_offsets(&items, b.children.len(), cb.width, cb.height);
+        let parent_open = open_parents(&items, &cstyle);
+        let inset_seen = std::collections::HashSet::new();
         let mut lines = Vec::new();
         let height = {
             let mut il = InlineLayout {
@@ -271,8 +360,16 @@ impl<'a> Layouter<'a> {
                 final_flush: false,
                 done: false,
                 bidi_items: items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal)),
+                rel,
+                rel_kids,
+                parent_open,
+                inset_seen,
+                inset_fixups: Vec::new(),
+                inset_total: std::collections::HashMap::new(),
             };
-            il.run(&pieces)
+            let h = il.run(&pieces);
+            il.resolve_insets();
+            h
         };
         if inserted_marker {
             pieces.remove(0);
@@ -354,11 +451,109 @@ struct InlineLayout<'l, 'a> {
     done: bool,
     /// Some inline element has a `unicode-bidi` other than `normal`.
     bidi_items: bool,
+    /// Relative offsets per item / atomic child (see [`relative_offsets`]).
+    rel: Vec<(f32, f32)>,
+    rel_kids: Vec<(f32, f32)>,
+    /// See [`open_parents`].
+    parent_open: Vec<Option<usize>>,
+    /// Inline elements with decoration insets already met on a line.
+    inset_seen: std::collections::HashSet<usize>,
+    inset_fixups: Vec<InsetFixup>,
+    /// Inline size of the text of each inset decorating box, all lines.
+    inset_total: std::collections::HashMap<usize, f32>,
 }
 
 impl<'l, 'a> InlineLayout<'l, 'a> {
     fn style(&self, idx: usize) -> &Rc<ComputedStyle> {
         item_style(self.items, self.cstyle, idx)
+    }
+
+    /// Per applied decoration of text item `item` (a fragment at `x`, `w`
+    /// wide), the line extent relative to `x` when its decorating inline
+    /// box insets it (`text-decoration-inset` at the box's start and end).
+    /// The extents are resolved once all lines are laid out (percentages
+    /// refer to the box's whole inline size): this records them.
+    fn decoration_extents(&mut self, item: usize, style: &ComputedStyle, box_ext: &std::collections::HashMap<usize, (f32, f32)>, x: f32, w: f32, frag: usize) -> Vec<Option<(f32, f32)>> {
+        let list = &style.applied_decorations;
+        let mut chain = Vec::new();
+        let mut p = self.parent_open.get(item).copied().flatten();
+        while let Some(o) = p {
+            if self.style(o).text_decoration.any() {
+                chain.push(o);
+            }
+            p = self.parent_open[o];
+        }
+        chain.reverse();
+        if chain.len() > list.len() {
+            return Vec::new();
+        }
+        let first = list.len() - chain.len();
+        for (j, &o) in chain.iter().enumerate() {
+            let d = &list[first + j];
+            let Some(&(lo, hi)) = box_ext.get(&o) else { continue };
+            let starts = !self.inset_seen.contains(&o);
+            let ends = !self.cur.open.iter().any(|e| e.item == o);
+            self.inset_fixups.push(InsetFixup {
+                line: self.lines.len(),
+                frag,
+                deco: first + j,
+                open: o,
+                lo: lo - x,
+                hi: hi - x,
+                w,
+                inset: (if starts { Some(d.inset.0) } else { None }, if ends { Some(d.inset.1) } else { None }),
+            });
+        }
+        // The block container's own decoration (the entry before the
+        // inline elements' ones).
+        if first > 0 && has_inset(self.cstyle) {
+            let d = &list[first - 1];
+            if d.lines == self.cstyle.text_decoration && d.inset == self.cstyle.text_decoration_inset {
+                if let Some(&(lo, hi)) = box_ext.get(&BLOCK_BOX) {
+                    let starts = !self.inset_seen.contains(&BLOCK_BOX);
+                    let ends = self.final_flush;
+                    self.inset_fixups.push(InsetFixup {
+                        line: self.lines.len(),
+                        frag,
+                        deco: first - 1,
+                        open: BLOCK_BOX,
+                        lo: lo - x,
+                        hi: hi - x,
+                        w,
+                        inset: (if starts { Some(d.inset.0) } else { None }, if ends { Some(d.inset.1) } else { None }),
+                    });
+                }
+            }
+        }
+        vec![None; list.len()]
+    }
+
+    /// Resolve the recorded decoration insets (see `decoration_extents`).
+    fn resolve_insets(&mut self) {
+        let fixups = std::mem::take(&mut self.inset_fixups);
+        for fx in fixups {
+            let cw = self.content_w;
+            let edges = if fx.open == BLOCK_BOX {
+                0.0
+            } else {
+                let style = self.style(fx.open).clone();
+                style.padding.left.resolve_or_zero(cw) + style.padding.right.resolve_or_zero(cw) + style.border_width.left + style.border_width.right
+            };
+            let base = self.inset_total.get(&fx.open).copied().unwrap_or(0.0) + edges;
+            let l = fx.lo + fx.inset.0.map(|v| v.resolve_or_zero(base)).unwrap_or(0.0);
+            let r = fx.hi - fx.inset.1.map(|v| v.resolve_or_zero(base)).unwrap_or(0.0);
+            let a = if fx.lo.abs() < 0.01 { l } else { l.max(0.0) };
+            let b = if (fx.w - fx.hi).abs() < 0.01 { r } else { r.min(fx.w) };
+            if let Some(FragmentKind::Text { decoration_info, .. }) = self.lines.get_mut(fx.line).and_then(|ln| ln.fragments.get_mut(fx.frag)).map(|f| &mut f.kind) {
+                if let Some(e) = decoration_info.extents.get_mut(fx.deco) {
+                    *e = Some((a, b));
+                }
+            }
+        }
+    }
+
+    fn rel_of(&self, idx: usize) -> (f32, f32) {
+        self.rel.get(idx).copied().unwrap_or((0.0, 0.0))
     }
 
     fn strut_h(&self) -> f32 {
@@ -1249,9 +1444,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             let cw = self.content_w;
             let pt = style.padding.top.resolve_or_zero(cw) + style.border_width.top;
             let pb = style.padding.bottom.resolve_or_zero(cw) + style.border_width.bottom;
+            let (rx, ry) = self.rel_of(bg.item);
             fragments.push(Fragment {
-                rect: Rect::new(bg.x + shift_x, baseline - tm.asc - pt, bg.w, tm.asc + tm.desc + pt + pb),
-                baseline,
+                rect: Rect::new(bg.x + shift_x + rx, baseline - tm.asc - pt + ry, bg.w, tm.asc + tm.desc + pt + pb),
+                baseline: baseline + ry,
                 node: item_elem(self.items, bg.item),
                 inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                 kind: FragmentKind::InlineBox {
@@ -1261,16 +1457,39 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 },
             });
         }
+        // Extents (on this line) of the inline elements that inset their
+        // decorations.
+        let mut box_ext: std::collections::HashMap<usize, (f32, f32)> = std::collections::HashMap::new();
+        if !self.parent_open.is_empty() {
+            let block = has_inset(self.cstyle);
+            for f in &self.cur.frags {
+                if let PFKind::Text { item, .. } = &f.kind {
+                    if block && *item != MARKER_ITEM {
+                        let e = box_ext.entry(BLOCK_BOX).or_insert((f.x, f.x + f.w));
+                        e.0 = e.0.min(f.x);
+                        e.1 = e.1.max(f.x + f.w);
+                    }
+                    let mut p = self.parent_open.get(*item).copied().flatten();
+                    while let Some(o) = p {
+                        let e = box_ext.entry(o).or_insert((f.x, f.x + f.w));
+                        e.0 = e.0.min(f.x);
+                        e.1 = e.1.max(f.x + f.w);
+                        p = self.parent_open[o];
+                    }
+                }
+            }
+        }
         let frags = std::mem::take(&mut self.cur.frags);
         for (f, fm) in frags.into_iter().zip(fms.into_iter()) {
             match f.kind {
                 PFKind::Text { text, item } => {
                     let tm = fm.tm.expect("text metrics");
                     let style = self.style(item).clone();
-                    let bl = baseline - fm.shift;
+                    let (rx, ry) = if item == MARKER_ITEM { (0.0, 0.0) } else { self.rel_of(item) };
+                    let bl = baseline - fm.shift + ry;
                     let oblique = self.lay.synthetic_oblique(tm.font, &style);
                     fragments.push(Fragment {
-                        rect: Rect::new(f.x + shift_x, bl - tm.asc, f.w, tm.asc + tm.desc),
+                        rect: Rect::new(f.x + shift_x + rx, bl - tm.asc, f.w, tm.asc + tm.desc),
                         baseline: bl,
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
@@ -1280,13 +1499,35 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             size: tm.size,
                             color: style.color,
                             letter_spacing: style.letter_spacing,
-                            decoration: style.text_decoration,
                             hidden: style.visibility == Visibility::Hidden,
                             decoration_info: DecorationInfo {
-                                lines: style.text_decoration,
-                                color: style.text_decoration_color,
-                                style: style.text_decoration_style,
-                                thickness: style.text_decoration_thickness,
+                                list: style.applied_decorations.clone(),
+                                extents: if box_ext.is_empty() || item == MARKER_ITEM { Vec::new() } else { self.decoration_extents(item, &style, &box_ext, f.x, f.w, fragments.len()) },
+                                metrics: style
+                                    .applied_decorations
+                                    .iter()
+                                    .map(|d| {
+                                        let same = d.font_size == style.font_size
+                                            && d.font_family == style.font_family
+                                            && d.font_weight == style.font_weight
+                                            && d.font_style == style.font_style
+                                            && d.font_family_list == style.font_family_list;
+                                        let (a, de) = if same {
+                                            (tm.asc, tm.desc)
+                                        } else {
+                                            let mut s = ComputedStyle::initial();
+                                            s.font_size = d.font_size;
+                                            s.font_family = d.font_family;
+                                            s.font_family_list = d.font_family_list.clone();
+                                            s.font_weight = d.font_weight;
+                                            s.font_style = d.font_style;
+                                            let m = self.lay.text_metrics(&s);
+                                            (m.asc, m.desc)
+                                        };
+                                        (fm.shift - d.baseline_shift, a, de)
+                                    })
+                                    .collect(),
+                                variations: if style.applied_decorations.is_empty() { Vec::new() } else { style.font_variation_settings.clone() },
                             },
                             shadows: style.text_shadow.clone(),
                             small_caps: style.font_variant_small_caps,
@@ -1303,7 +1544,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         _ => baseline - fm.above,
                     };
                     let m = child.margin;
-                    child.translate(f.x + shift_x + m.left - child.rect.x, top + m.top - child.rect.y);
+                    let (rx, ry) = self.rel_kids.get(c).copied().unwrap_or((0.0, 0.0));
+                    child.translate(f.x + shift_x + m.left + rx - child.rect.x, top + m.top + ry - child.rect.y);
                     let node = child.node;
                     let rect = child.margin_rect();
                     fragments.push(Fragment {
@@ -1315,6 +1557,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     });
                 }
             }
+        }
+        for (o, (lo, hi)) in &box_ext {
+            self.inset_seen.insert(*o);
+            *self.inset_total.entry(*o).or_insert(0.0) += hi - lo;
         }
         self.lines.push(LineBox {
             rect: Rect::new(self.cur.left, y, (self.cur.right - self.cur.left).max(0.0), h),

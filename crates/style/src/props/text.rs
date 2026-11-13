@@ -104,6 +104,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             let mut dstyle = None;
             let mut dcolor: Option<Option<rabbithole_gfx::Color>> = None;
             let mut thickness: Option<Option<f32>> = None;
+            let mut from_font = false;
             for c in comps {
                 if let Some(kw) = values::ident(c) {
                     match kw.as_str() {
@@ -120,7 +121,11 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                             any_line = true;
                         }
                         "none" | "blink" => any_line = true,
-                        "auto" | "from-font" => thickness = Some(None),
+                        "auto" => thickness = Some(None),
+                        "from-font" => {
+                            thickness = Some(None);
+                            from_font = true;
+                        }
                         "currentcolor" => dcolor = Some(None),
                         k => {
                             if let Some(s) = decoration_style(k) {
@@ -147,6 +152,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 style.text_decoration_style = dstyle.unwrap_or(TextDecorationStyle::Solid);
                 style.text_decoration_color = dcolor.unwrap_or(None);
                 style.text_decoration_thickness = thickness.unwrap_or(None);
+                style.text_decoration_thickness_from_font = from_font;
             }
         }
         "text-decoration-line" => {
@@ -177,10 +183,60 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         "text-decoration-thickness" => {
             if matches!(values::ident(c0).as_deref(), Some("auto" | "from-font")) {
                 style.text_decoration_thickness = None;
+                style.text_decoration_thickness_from_font = values::is_ident(c0, "from-font");
             } else if let Some(t) = super::px(c0, ctx) {
                 style.text_decoration_thickness = Some(t);
+                style.text_decoration_thickness_from_font = false;
             } else if let [Token::Percentage(p)] = c0 {
                 style.text_decoration_thickness = Some(style.font_size * p / 100.0);
+                style.text_decoration_thickness_from_font = false;
+            } else if let Some(l) = super::len_no_auto(c0, ctx) {
+                style.text_decoration_thickness = Some(l.resolve_or_zero(style.font_size));
+                style.text_decoration_thickness_from_font = false;
+            }
+        }
+        "text-underline-offset" => {
+            if values::is_ident(c0, "auto") {
+                style.text_underline_offset = UnderlineOffset::Auto;
+            } else if let Some(t) = super::px(c0, ctx) {
+                style.text_underline_offset = UnderlineOffset::Px(t);
+            } else if let [Token::Percentage(p)] = c0 {
+                style.text_underline_offset = UnderlineOffset::Percent(*p);
+            } else if let Some(l) = super::len_no_auto(c0, ctx) {
+                // calc() mixing lengths and percentages: resolve against
+                // this element's font size.
+                style.text_underline_offset = UnderlineOffset::Px(l.resolve_or_zero(style.font_size));
+            }
+        }
+        "text-underline-position" => {
+            let mut pos = UnderlinePosition::default();
+            for c in comps {
+                match values::ident(c).as_deref() {
+                    Some("auto") if comps.len() == 1 => {}
+                    Some("from-font") if !pos.under => pos.from_font = true,
+                    Some("under") if !pos.from_font && !pos.under => pos.under = true,
+                    Some("left") if !pos.left && !pos.right => pos.left = true,
+                    Some("right") if !pos.left && !pos.right => pos.right = true,
+                    _ => return true,
+                }
+            }
+            style.text_underline_position = pos;
+        }
+        "text-decoration-inset" => {
+            if values::is_ident(c0, "auto") && comps.len() == 1 {
+                // A UA-chosen trim at each end.
+                let t = Length::Px(style.font_size / 8.0);
+                style.text_decoration_inset = (t, t);
+            } else if comps.len() <= 2 {
+                let Some(a) = super::len_no_auto(c0, ctx) else { return true };
+                let b = match comps.get(1) {
+                    Some(c) => match super::len_no_auto(c, ctx) {
+                        Some(b) => b,
+                        None => return true,
+                    },
+                    None => a,
+                };
+                style.text_decoration_inset = (a, b);
             }
         }
         "writing-mode" | "-webkit-writing-mode" => {
@@ -246,6 +302,24 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 style.font_variant_small_caps = false;
             }
         }
+        "font-variation-settings" => {
+            if values::is_ident(c0, "normal") && comps.len() == 1 {
+                style.font_variation_settings.clear();
+                return true;
+            }
+            let mut out = Vec::new();
+            for part in values::split_commas(comps) {
+                let [s, v] = part.as_slice() else { return true };
+                let [Token::String(tag)] = *s else { return true };
+                if tag.len() != 4 || !tag.is_ascii() {
+                    return true;
+                }
+                let Some(n) = values::number(v) else { return true };
+                let b = tag.as_bytes();
+                out.push(([b[0], b[1], b[2], b[3]], n));
+            }
+            style.font_variation_settings = out;
+        }
         "white-space-collapse" => {
             if let Some(kw) = values::ident(c0) {
                 style.white_space = match kw.as_str() {
@@ -263,9 +337,8 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 };
             }
         }
-        "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings" | "font-variation-settings"
-        | "font-optical-sizing" | "font-synthesis" | "font-smoothing" | "text-size-adjust" | "text-underline-offset"
-        | "text-underline-position" | "text-align-last" | "text-justify" | "text-emphasis"
+        "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
+        | "font-optical-sizing" | "font-synthesis" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-emphasis"
         | "text-emphasis-style" | "text-emphasis-color" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
         | "font-variant-east-asian" | "font-variant-position" | "line-break" | "word-spacing-x" | "ruby-position"

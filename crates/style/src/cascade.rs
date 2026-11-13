@@ -752,6 +752,7 @@ fn apply_declarations(
             d => d,
         };
     }
+    apply_decorations(&mut style, parent);
     // A flex or grid item with a z-index other than `auto` is a stacking
     // context even when it is not positioned (CSS Flexbox §4.3, Grid §9.5):
     // e.g. Material text fields raise the `<input>` above the absolutely
@@ -760,6 +761,50 @@ fn apply_declarations(
         style.creates_stacking_context = true;
     }
     style
+}
+
+/// The decorations on an element's text (CSS Text Decoration 3 §2.1):
+/// those propagated from the parent, unless the element is out of flow or
+/// an atomic inline (they do not propagate into those), plus its own
+/// `text-decoration-line`, drawn with its own color, style and thickness.
+pub fn apply_decorations(style: &mut ComputedStyle, parent: &ComputedStyle) {
+    let blocks = matches!(style.position, Position::Absolute | Position::Fixed)
+        || style.float != Float::None
+        || matches!(style.display, Display::InlineBlock | Display::InlineTable | Display::InlineFlex | Display::InlineGrid);
+    style.applied_decorations = if blocks { Vec::new() } else { parent.applied_decorations.clone() };
+    if style.text_decoration.any() {
+        let fs = style.font_size;
+        let underline_offset = match style.text_underline_offset {
+            UnderlineOffset::Auto => None,
+            UnderlineOffset::Px(v) => Some(v),
+            UnderlineOffset::Percent(p) => Some(fs * p / 100.0),
+        };
+        style.applied_decorations.push(AppliedDecoration {
+            lines: style.text_decoration,
+            color: style.text_decoration_color.unwrap_or(style.color),
+            style: style.text_decoration_style,
+            thickness: style.text_decoration_thickness,
+            from_font: style.text_decoration_thickness_from_font,
+            underline_offset,
+            underline_position: style.text_underline_position,
+            font_size: fs,
+            font_family: style.font_family,
+            font_family_list: style.font_family_list.clone(),
+            font_weight: style.font_weight,
+            font_style: style.font_style,
+            baseline_shift: if style.display == Display::Inline {
+                match style.vertical_align {
+                    VerticalAlign::Sub => -0.25 * fs,
+                    VerticalAlign::Super => 0.35 * fs,
+                    VerticalAlign::Length(v) => v,
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            },
+            inset: style.text_decoration_inset,
+        });
+    }
 }
 
 /// The style `base` with `decls` (e.g. one `@keyframes` frame) applied
@@ -780,6 +825,9 @@ pub fn apply_over(base: &ComputedStyle, parent: &ComputedStyle, decls: &[Declara
             continue;
         }
         apply_property(&d.name, &d.value, &mut style, parent, &ctx);
+    }
+    if decls.iter().any(|d| d.name.starts_with("text-") || d.name == "color") {
+        apply_decorations(&mut style, parent);
     }
     style
 }
@@ -1319,12 +1367,12 @@ fn is_inherited(name: &str) -> bool {
     matches!(
         name,
         "color" | "font" | "font-family" | "font-size" | "font-weight" | "font-style" | "line-height" | "letter-spacing"
-            | "word-spacing" | "text-align" | "text-decoration" | "text-decoration-line" | "text-transform" | "text-indent"
+            | "word-spacing" | "text-align" | "text-underline-offset" | "text-underline-position" | "text-transform" | "text-indent"
             | "white-space" | "list-style" | "list-style-type" | "list-style-position" | "visibility" | "cursor"
             | "border-collapse" | "border-spacing" | "direction" | "tab-size" | "word-break" | "overflow-wrap" | "word-wrap"
             | "text-shadow" | "quotes" | "pointer-events" | "user-select" | "font-variant" | "font-variant-caps"
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
-            | "accent-color" | "color-scheme"
+            | "accent-color" | "color-scheme" | "font-variation-settings"
     )
 }
 
@@ -1414,7 +1462,11 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.text_decoration_color = from.text_decoration_color;
             to.text_decoration_style = from.text_decoration_style;
             to.text_decoration_thickness = from.text_decoration_thickness;
+            to.text_decoration_thickness_from_font = from.text_decoration_thickness_from_font;
         }
+        "text-underline-offset" => to.text_underline_offset = from.text_underline_offset,
+        "text-underline-position" => to.text_underline_position = from.text_underline_position,
+        "text-decoration-inset" => to.text_decoration_inset = from.text_decoration_inset,
         "text-decoration-line" => to.text_decoration = from.text_decoration,
         "text-transform" => to.text_transform = from.text_transform,
         "text-indent" => to.text_indent = from.text_indent,
@@ -1536,7 +1588,10 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "overflow-wrap" | "word-wrap" => to.overflow_wrap = from.overflow_wrap,
         "text-decoration-color" => to.text_decoration_color = from.text_decoration_color,
         "text-decoration-style" => to.text_decoration_style = from.text_decoration_style,
-        "text-decoration-thickness" => to.text_decoration_thickness = from.text_decoration_thickness,
+        "text-decoration-thickness" => {
+            to.text_decoration_thickness = from.text_decoration_thickness;
+            to.text_decoration_thickness_from_font = from.text_decoration_thickness_from_font;
+        }
         "direction" => to.direction = from.direction,
         "writing-mode" | "-webkit-writing-mode" => to.writing_mode = from.writing_mode,
         "unicode-bidi" => to.unicode_bidi = from.unicode_bidi,
@@ -1553,6 +1608,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.line_clamp_prefixed = from.line_clamp_prefixed;
         }
         "font-variant" | "font-variant-caps" => to.font_variant_small_caps = from.font_variant_small_caps,
+        "font-variation-settings" => to.font_variation_settings = from.font_variation_settings.clone(),
         "object-fit" => to.object_fit = from.object_fit,
         "object-position" => to.object_position = from.object_position,
         "aspect-ratio" => to.aspect_ratio = from.aspect_ratio,
