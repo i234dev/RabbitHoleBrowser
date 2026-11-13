@@ -282,6 +282,9 @@ enum Command {
     ClearColor([f32; 4]),
     ClearDepth(f32),
     Clear(u32),
+    AttribDivisor(u32, u32),
+    DrawArraysInstanced(u32, u32, u32, u32),
+    DrawElementsInstanced(u32, u32, u32, usize, u32),
     DrawArrays(u32, u32, u32),
     DrawElements(u32, u32, u32, usize),
     ReadPixels(i32, i32, u32, u32),
@@ -385,6 +388,11 @@ impl Command {
             }
             "clearDepth" => Self::ClearDepth(n!(2) as f32),
             "clear" => Self::Clear(u!(2)),
+            "attribDivisor" => Self::AttribDivisor(u!(2), u!(3)),
+            "drawArraysInstanced" => Self::DrawArraysInstanced(u!(2), u!(3), u!(4), u!(5)),
+            "drawElementsInstanced" => {
+                Self::DrawElementsInstanced(u!(2), u!(3), u!(4), n!(5) as usize, u!(6))
+            }
             "drawArrays" => Self::DrawArrays(u!(2), u!(3), u!(4)),
             "drawElements" => Self::DrawElements(u!(2), u!(3), u!(4), n!(5) as usize),
             "readPixels" => Self::ReadPixels(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
@@ -439,7 +447,11 @@ impl Command {
     fn draws(&self) -> bool {
         matches!(
             self,
-            Self::Clear(_) | Self::DrawArrays(..) | Self::DrawElements(..)
+            Self::Clear(_)
+                | Self::DrawArrays(..)
+                | Self::DrawElements(..)
+                | Self::DrawArraysInstanced(..)
+                | Self::DrawElementsInstanced(..)
         )
     }
 
@@ -599,6 +611,18 @@ impl Command {
                 }
                 Self::Clear(mask) => {
                     ctx.clear(mask)?;
+                    Reply::Void
+                }
+                Self::AttribDivisor(index, divisor) => {
+                    ctx.vertex_attrib_divisor(index, divisor)?;
+                    Reply::Void
+                }
+                Self::DrawArraysInstanced(mode, first, count, instances) => {
+                    ctx.draw_arrays_instanced(mode, first, count, instances)?;
+                    Reply::Void
+                }
+                Self::DrawElementsInstanced(mode, count, kind, offset, instances) => {
+                    ctx.draw_elements_instanced(mode, count, kind, offset, instances)?;
                     Reply::Void
                 }
                 Self::DrawArrays(mode, first, count) => {

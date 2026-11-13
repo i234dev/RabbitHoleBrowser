@@ -577,7 +577,7 @@ fn webgl2_interfaces_queries_and_context_selection_are_independent() {
  console.log(gl instanceof WebGL2RenderingContext,gl instanceof WebGLRenderingContext,Object.prototype.toString.call(gl),gl===c.getContext('webgl2'),c.getContext('webgl')===null,c.getContext('2d')===null);
  console.log(gl.getParameter(gl.VERSION).startsWith('WebGL 2.0'),gl.getParameter(gl.SHADING_LANGUAGE_VERSION).includes('3.00'),gl.getParameter(gl.VERTEX_ARRAY_BINDING)===null,gl.getParameter(gl.MAX_ELEMENT_INDEX));
  console.log(typeof one.createVertexArray,one.getParameter(0x85B5)===null,one.getError()===one.INVALID_ENUM);
- console.log(gl.createQuery()===null,gl.getError()===gl.INVALID_OPERATION,gl.drawArraysInstanced(gl.TRIANGLES,0,3,1)===null,gl.getError()===gl.INVALID_OPERATION);
+ console.log(gl.createQuery()===null,gl.getError()===gl.INVALID_OPERATION,gl.createSampler()===null,gl.getError()===gl.INVALID_OPERATION);
  gl.getParameter(0x8A2F);console.log(gl.getError()===gl.INVALID_ENUM);
  const off=new OffscreenCanvas(2,2),other=off.getContext('webgl2');off.width=4;console.log(other instanceof WebGL2RenderingContext,other.drawingBufferWidth,off.getContext('webgl')===null);
  "#,
@@ -684,6 +684,103 @@ fn webgl2_npot_repeat_is_versioned_and_pending_offset_overloads_fail() {
     assert_eq!(
         out,
         ["0,0,0,255 0", "true", "0,255,0,255 0", "true", "true"]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+const INSTANCING_SCENE: &str = r#"
+function instancingScene(gl){
+ const p=gl.createProgram();
+ for(const [type,src] of [[gl.VERTEX_SHADER,'#version 300 es\nlayout(location=0) in vec2 position;layout(location=1) in vec2 offset;layout(location=2) in vec4 color;out vec4 v;void main(){gl_Position=vec4(position+offset,0.0,1.0);v=color;}'],[gl.FRAGMENT_SHADER,'#version 300 es\nprecision mediump float;in vec4 v;out vec4 result;void main(){result=v;}']]){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));gl.attachShader(p,s);}
+ gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));gl.useProgram(p);
+ function attribute(index,size,data,divisor){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(data),gl.STATIC_DRAW);gl.vertexAttribPointer(index,size,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(index);gl.vertexAttribDivisor(index,divisor);return b;}
+ attribute(0,2,[-.2,-.8,.2,-.8,0,.8],0);attribute(1,2,[-.5,0,.5,0],1);attribute(2,4,[1,0,0,1,0,1,0,1],1);
+ return p;
+}
+function instancingPixel(gl,x){const p=new Uint8Array(4);gl.readPixels(x,4,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);return Array.from(p).join(',');}
+"#;
+#[test]
+fn webgl2_instancing_renders_per_instance_attributes_and_uint32_restart() {
+    let (mut env, mut host) = setup("<canvas id=a width=16 height=8></canvas>");
+    run(&mut env, &mut host, INSTANCING_SCENE);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+ const gl=document.getElementById('a').getContext('webgl2',{preserveDrawingBuffer:true});instancingScene(gl);
+ gl.drawArraysInstanced(gl.TRIANGLES,0,3,2);console.log(instancingPixel(gl,4),instancingPixel(gl,12),gl.getError());
+ const b=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,b);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint32Array([0,1,2,0xffffffff,0,1,2]),gl.STATIC_DRAW);
+ gl.clear(gl.COLOR_BUFFER_BIT);gl.drawElementsInstanced(gl.TRIANGLE_STRIP,7,gl.UNSIGNED_INT,0,2);console.log(instancingPixel(gl,4),instancingPixel(gl,12),gl.getError());
+ gl.clear(gl.COLOR_BUFFER_BIT);gl.drawArrays(gl.TRIANGLES,0,3);console.log(instancingPixel(gl,4),instancingPixel(gl,12),gl.getError());
+ "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "255,0,0,255 0,255,0,255 0",
+            "255,0,0,255 0,255,0,255 0",
+            "255,0,0,255 0,0,0,0 0"
+        ]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+#[test]
+fn webgl2_instance_divisor_is_vao_state_and_converted_once() {
+    let (mut env, mut host) =
+        setup("<canvas id=a width=16 height=8></canvas><canvas id=b></canvas>");
+    run(&mut env, &mut host, INSTANCING_SCENE);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+ const gl=document.getElementById('a').getContext('webgl2',{preserveDrawingBuffer:true});instancingScene(gl);console.log(gl.getVertexAttrib(1,gl.VERTEX_ATTRIB_ARRAY_DIVISOR));
+ let calls=0;gl.vertexAttribDivisor(1,{valueOf(){calls++;return 2;}});console.log(calls,gl.getVertexAttrib(1,gl.VERTEX_ATTRIB_ARRAY_DIVISOR));
+ const vao=gl.createVertexArray();gl.bindVertexArray(vao);console.log(gl.getVertexAttrib(1,gl.VERTEX_ATTRIB_ARRAY_DIVISOR));gl.vertexAttribDivisor(1,7);gl.bindVertexArray(null);console.log(gl.getVertexAttrib(1,gl.VERTEX_ATTRIB_ARRAY_DIVISOR));gl.bindVertexArray(vao);console.log(gl.getVertexAttrib(1,gl.VERTEX_ATTRIB_ARRAY_DIVISOR));
+ const one=document.getElementById('b').getContext('webgl');console.log(typeof one.vertexAttribDivisor,typeof one.drawArraysInstanced,one.getExtension('ANGLE_instanced_arrays')===null);one.getVertexAttrib(1,0x88fe);console.log(one.getError()===one.INVALID_ENUM);
+ let bad=false;try{WebGL2RenderingContext.prototype.vertexAttribDivisor.call(one,1,1);}catch(e){bad=e instanceof TypeError;}console.log(bad);
+ "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "1",
+            "1 2",
+            "0",
+            "2",
+            "7",
+            "undefined undefined true",
+            "true",
+            "true"
+        ]
+    );
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+#[test]
+fn webgl2_instancing_ranges_negative_counts_and_zero_instances_are_atomic() {
+    let (mut env, mut host) = setup("<canvas id=a width=16 height=8></canvas>");
+    run(&mut env, &mut host, INSTANCING_SCENE);
+    let out = run(
+        &mut env,
+        &mut host,
+        r#"
+ const gl=document.getElementById('a').getContext('webgl2',{preserveDrawingBuffer:true});instancingScene(gl);
+ gl.drawArraysInstanced(gl.TRIANGLES,0,3,3);console.log(gl.getError()===gl.INVALID_OPERATION,instancingPixel(gl,4),instancingPixel(gl,12));
+ gl.drawArraysInstanced(gl.TRIANGLES,0,3,0);console.log(gl.getError(),instancingPixel(gl,4));
+ gl.drawArraysInstanced(gl.TRIANGLES,0,3,-1);console.log(gl.getError()===gl.INVALID_VALUE);gl.vertexAttribDivisor(16,1);console.log(gl.getError()===gl.INVALID_VALUE);
+ const b=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,b);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint32Array([0,1,2]),gl.STATIC_DRAW);gl.drawElementsInstanced(gl.TRIANGLES,3,gl.UNSIGNED_INT,2,2);console.log(gl.getError()===gl.INVALID_OPERATION,instancingPixel(gl,4));
+ let errors=0;for(const f of [()=>gl.vertexAttribDivisor(1),()=>gl.drawArraysInstanced(4,0,3),()=>gl.drawElementsInstanced(4,3,gl.UNSIGNED_INT,0)]){try{f();}catch(e){if(e instanceof TypeError)errors++;}}console.log(errors);
+ "#,
+    );
+    assert_eq!(
+        out,
+        [
+            "true 0,0,0,0 0,0,0,0",
+            "0 0,0,0,0",
+            "true",
+            "true",
+            "true 0,0,0,0",
+            "3"
+        ]
     );
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
