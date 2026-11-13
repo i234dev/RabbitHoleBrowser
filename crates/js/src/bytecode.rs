@@ -50,6 +50,9 @@ pub enum Op {
     SetGlobal(u32, u32),
     /// `typeof ident` for unresolved identifiers (no ReferenceError).
     TypeofGlobal(u32),
+    /// GlobalDeclarationInstantiation's checks for the script's
+    /// declarations (`FunctionCode::global_decls`), before any is made.
+    GlobalDeclCheck,
     DeclareGlobalVar(u32),
     DeclareGlobalFunction(u32),
     /// (name, is_const)
@@ -308,6 +311,10 @@ pub enum Op {
     /// Global var `consts[i]` declared by eval code (SyntaxError when a
     /// global lexical declaration has the name).
     DeclareEvalGlobalVar(u32),
+    /// Pop a function object: sloppy eval code's top-level function
+    /// declaration in the global object (CreateGlobalFunctionBinding with
+    /// a deletable binding).
+    DeclareEvalGlobalFunction(u32),
 
 
     // --- register forms, produced by `regs::translate`. Operands are
@@ -539,6 +546,8 @@ pub struct FunctionCode {
     /// later in the list). Parameters an arguments object may map live in
     /// the function scope (`VarLoc::Slot`).
     pub arg_map: Option<Box<[Option<VarLoc>]>>,
+    /// A script's top-level declarations (see `Op::GlobalDeclCheck`).
+    pub global_decls: Option<Box<GlobalDecls>>,
     /// Binding receiving the rest parameter array, if any.
     pub rest_loc: Option<VarLoc>,
     /// Binding holding the `arguments` object, if used.
@@ -586,6 +595,17 @@ pub struct FunctionCode {
     /// Index of the realm the code was compiled for (see
     /// `Realm::current_realm`): its frames run in that realm.
     pub realm: std::cell::Cell<u16>,
+}
+
+/// Names a script declares in the global environment.
+#[derive(Debug, Default)]
+pub struct GlobalDecls {
+    /// `let` / `const` / `class`.
+    pub lex: Vec<JsStr>,
+    /// `var` names that are not also function names.
+    pub vars: Vec<JsStr>,
+    /// Top-level function declarations (last declaration wins).
+    pub funcs: Vec<JsStr>,
 }
 
 /// Per-function state of the baseline compiler (empty without the `jit`
@@ -787,7 +807,7 @@ impl Op {
             SetLocal(..) | InitLocal(..) | SetLocalChecked(..) => (1, 0),
             GetGlobal(..) | TypeofGlobal(_) => (0, 1),
             SetGlobal(..) | DeclareGlobalFunction(_) | InitGlobalLex(_) => (1, 0),
-            DeclareGlobalVar(_) | DeclareGlobalLex(..) => (0, 0),
+            DeclareGlobalVar(_) | DeclareGlobalLex(..) | GlobalDeclCheck => (0, 0),
             PushScope(..) | PopScope | CopyScope => (0, 0),
             GetProp(..) => (1, 1),
             SetProp(..) => (2, 1),
@@ -845,6 +865,7 @@ impl Op {
             CopyPrivate => (2, 1),
             TakePrivate => (1, 1),
             EvalSite(_) | DeclareEvalGlobalVar(_) => (0, 0),
+            DeclareEvalGlobalFunction(_) => (1, 0),
             NewEvalVars | ResumeIsReturn | DeleteGlobal(_) => (0, 1),
             CheckCoercibleUnder => (2, 2),
             YieldStarStep(_) => (4, 3),

@@ -235,6 +235,7 @@ struct FnState {
     /// parameter binding each argument index aliases (see
     /// `FunctionCode::arg_map`).
     arg_map: Option<Vec<Option<Loc>>>,
+    global_decls: Option<Box<crate::bytecode::GlobalDecls>>,
     rest_loc: Option<Loc>,
     arguments_loc: Option<Loc>,
     self_loc: Option<Loc>,
@@ -297,6 +298,7 @@ impl FnState {
             param_count: 0,
             param_locs: Vec::new(),
             arg_map: None,
+            global_decls: None,
             rest_loc: None,
             arguments_loc: None,
             self_loc: None,
@@ -851,6 +853,7 @@ impl Compiler {
             reg_names: Vec::new(),
             param_locs: Vec::new(),
             arg_map: None,
+            global_decls: None,
             rest_loc: None,
             arguments_loc: None,
             self_loc: None,
@@ -1506,12 +1509,31 @@ impl Compiler {
         } else {
             let mut vars = Vec::new();
             Self::collect_var_names(&program.body, &mut vars);
+            let lex = Self::collect_lexical(&program.body, false);
+            self.check_duplicates(&lex, &vars)?;
+            let mut funcs: Vec<JsStr> = Vec::new();
+            for s in program.body.iter() {
+                if let StmtKind::FunctionDecl(f) = &s.kind {
+                    if let Some(n) = &f.name {
+                        let n = JsStr::new(n);
+                        funcs.retain(|x| x != &n);
+                        funcs.push(n);
+                    }
+                }
+            }
+            let mut gvars: Vec<JsStr> = Vec::new();
+            for v in &vars {
+                let v = JsStr::new(v);
+                if !funcs.contains(&v) && !gvars.contains(&v) {
+                    gvars.push(v);
+                }
+            }
+            self.fs().global_decls = Some(Box::new(crate::bytecode::GlobalDecls { lex: lex.iter().map(|(n, _)| JsStr::new(n)).collect(), vars: gvars, funcs }));
+            self.emit(Op::GlobalDeclCheck);
             for v in &vars {
                 let i = self.const_str(v);
                 self.emit(Op::DeclareGlobalVar(i));
             }
-            let lex = Self::collect_lexical(&program.body, false);
-            self.check_duplicates(&lex, &vars)?;
             if !self.fs_ref().flags.is_strict {
                 // Annex B.3.3.2: block functions also bind a global var.
                 let outer: Vec<String> = lex.iter().map(|(n, _)| n.clone()).collect();
@@ -1602,6 +1624,20 @@ impl Compiler {
                 annexb_names.push(n);
             }
             self.eval_scope_entry();
+            let global_env = self.eval_var_env_is_global();
+            if global_env {
+                // EvalDeclarationInstantiation in the global environment:
+                // every check passes before anything is declared.
+                let mut fnames: Vec<JsStr> = Vec::new();
+                for f in &funcs {
+                    let n = JsStr::new(f.name.as_deref().unwrap_or(""));
+                    fnames.retain(|x| x != &n);
+                    fnames.push(n);
+                }
+                let gvars: Vec<JsStr> = vars.iter().map(|v| JsStr::new(v)).filter(|v| !fnames.contains(v)).collect();
+                self.fs().global_decls = Some(Box::new(crate::bytecode::GlobalDecls { lex: Vec::new(), vars: gvars, funcs: fnames }));
+                self.emit(Op::GlobalDeclCheck);
+            }
             let mut declared: Vec<&String> = Vec::new();
             for n in var_like.iter().chain(annexb_names.iter()) {
                 if !declared.contains(&n) {
@@ -1613,7 +1649,12 @@ impl Compiler {
                 let name = f.name.as_deref().unwrap_or("").to_string();
                 let idx = self.compile_function_rc(f, Some(&name))?;
                 self.emit(Op::MakeClosure(idx));
-                self.emit_store_eval_var(&name)?;
+                if global_env {
+                    let i = self.const_str(&name);
+                    self.emit(Op::DeclareEvalGlobalFunction(i));
+                } else {
+                    self.emit_store_eval_var(&name)?;
+                }
             }
         }
         for s in body {
@@ -1652,6 +1693,19 @@ impl Compiler {
             node = n.parent.clone();
         }
         false
+    }
+
+    /// Whether sloppy eval code's variable environment is the global one
+    /// (no function or eval-var object in between).
+    fn eval_var_env_is_global(&self) -> bool {
+        let mut node = self.outer.clone();
+        while let Some(n) = node {
+            if n.is_function || n.is_script {
+                return n.is_script && n.with_name.is_none();
+            }
+            node = n.parent.clone();
+        }
+        true
     }
 
     /// Instantiate `var name` of sloppy eval code in the caller's variable
@@ -2796,8 +2850,11 @@ impl Compiler {
             if let Some(p) = param {
                 let mut names = Vec::new();
                 Self::collect_pattern_names(p, &mut names);
+                // B.3.4: `var` in eval code may redeclare a simple catch
+                // parameter (it is not a lexical binding for that check).
+                let kind = if matches!(p, Pattern::Identifier(_)) { BindKind::Param } else { BindKind::Let };
                 for n in names {
-                    decls.push((n, BindKind::Let));
+                    decls.push((n, kind));
                 }
             }
             let mat = self.push_block_scope(&decls);
@@ -4608,6 +4665,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         reg_names: fs.reg_names,
         param_locs: fs.param_locs.iter().map(|l| l.to_var_loc()).collect(),
         arg_map: fs.arg_map.as_ref().map(|m| m.iter().map(|l| l.map(|l| l.to_var_loc())).collect()),
+        global_decls: fs.global_decls.take(),
         rest_loc: fs.rest_loc.map(|l| l.to_var_loc()),
         arguments_loc: fs.arguments_loc.map(|l| l.to_var_loc()),
         self_loc: fs.self_loc.map(|l| l.to_var_loc()),

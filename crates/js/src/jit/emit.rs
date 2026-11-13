@@ -139,7 +139,7 @@ fn classify_all(op: &Op) -> Class {
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
         Op::DeleteGlobal(..) | Op::CheckCoercibleUnder => exec,
-        Op::CallEval(..) | Op::EvalSite(..) | Op::NewEvalVars | Op::DeclareEvalVar(..) | Op::DeclareEvalGlobalVar(..) => Reject("direct eval"),
+        Op::CallEval(..) | Op::EvalSite(..) | Op::NewEvalVars | Op::DeclareEvalVar(..) | Op::DeclareEvalGlobalVar(..) | Op::DeclareEvalGlobalFunction(..) => Reject("direct eval"),
         Op::ResumeIsReturn | Op::YieldStarStep(..) | Op::YieldStarCheck | Op::YStarIs(..) | Op::YieldRaw | Op::ResumeMode => Reject("suspends"),
         Op::IteratorStepReg(..) | Op::IteratorRestReg(..) | Op::IteratorCloseIfNotDoneReg(..) | Op::IteratorCloseOnThrow(..) => Reject("writes registers out of line"),
         Op::GetPrivate | Op::GetPrivateKeep | Op::SetPrivate | Op::DefinePrivate | Op::CopyPrivate | Op::TakePrivate => exec,
@@ -147,7 +147,7 @@ fn classify_all(op: &Op) -> Class {
         Op::Const(..) | Op::Undefined | Op::Null | Op::True | Op::False | Op::Empty | Op::Pop | Op::Dup | Op::Dup2 | Op::Swap | Op::Rot3 | Op::Rot4 => exec,
         Op::GetReg(..) | Op::GetRegChecked(..) | Op::SetReg(..) | Op::SetRegChecked(..) => exec,
         Op::GetLocal(..) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetLocalChecked(..) | Op::GetImport(..) => exec,
-        Op::GetGlobal(..) | Op::SetGlobal(..) | Op::TypeofGlobal(..) | Op::DeclareGlobalVar(..) | Op::DeclareGlobalFunction(..) => exec,
+        Op::GetGlobal(..) | Op::SetGlobal(..) | Op::TypeofGlobal(..) | Op::GlobalDeclCheck | Op::DeclareGlobalVar(..) | Op::DeclareGlobalFunction(..) => exec,
         Op::DeclareGlobalLex(..) | Op::InitGlobalLex(..) | Op::PushScope(..) | Op::PopScope | Op::CopyScope => exec,
         Op::GetProp(..) | Op::SetProp(..) | Op::GetElem | Op::SetElem | Op::GetElemKeep | Op::GetPropKeep(..) | Op::GetMethod(..) => exec,
         Op::DeleteProp(..) | Op::DeleteElem | Op::DefineProp(..) | Op::DefineElem | Op::DefineMethod(..) | Op::DefineGetter(..) => exec,

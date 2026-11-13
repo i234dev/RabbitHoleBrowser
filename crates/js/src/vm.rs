@@ -964,6 +964,45 @@ impl Realm {
         Ok(true)
     }
 
+    /// GlobalDeclarationInstantiation steps 1-8: a script whose declarations
+    /// clash with the global environment declares nothing.
+    fn global_decl_check(&mut self, d: &crate::bytecode::GlobalDecls) -> JsResult<()> {
+        let g = self.global;
+        for n in &d.lex {
+            let key = PropertyKey::String(n.clone());
+            // HasLexicalDeclaration / HasRestrictedGlobalProperty (var
+            // declarations of scripts are non-configurable properties).
+            let restricted = self.get_own_property_any(g, &key)?.is_some_and(|p| !p.configurable());
+            if self.global_lex.get(n).is_some() || restricted {
+                return Err(self.new_error("SyntaxError", &format!("Identifier '{}' has already been declared", n)));
+            }
+        }
+        for n in d.vars.iter().chain(d.funcs.iter()) {
+            if self.global_lex.get(n).is_some() {
+                return Err(self.new_error("SyntaxError", &format!("Identifier '{}' has already been declared", n)));
+            }
+        }
+        for n in &d.funcs {
+            // CanDeclareGlobalFunction.
+            let key = PropertyKey::String(n.clone());
+            let ok = match self.get_own_property_any(g, &key)? {
+                None => self.is_extensible_any(g)?,
+                Some(p) => p.configurable() || (!p.is_accessor() && p.writable() && p.enumerable()),
+            };
+            if !ok {
+                return Err(self.new_error("TypeError", &format!("Cannot declare global function '{}'", n)));
+            }
+        }
+        for n in &d.vars {
+            // CanDeclareGlobalVar.
+            let key = PropertyKey::String(n.clone());
+            if self.get_own_property_any(g, &key)?.is_none() && !self.is_extensible_any(g)? {
+                return Err(self.new_error("TypeError", &format!("Cannot declare global variable '{}'", n)));
+            }
+        }
+        Ok(())
+    }
+
     /// OrdinaryCallBindThis of a sloppy function in the running realm.
     fn sloppy_this(&mut self, this: Value) -> JsResult<Value> {
         Ok(match this.v() {
@@ -3225,6 +3264,13 @@ impl Realm {
                     };
                     push!(Value::str(t));
                 }
+                Op::GlobalDeclCheck => {
+                    let code = frame!().code;
+                    // SAFETY: the running frame's code outlives this instruction.
+                    if let Some(d) = unsafe { code.as_ref() }.global_decls.as_deref() {
+                        self.global_decl_check(d)?;
+                    }
+                }
                 Op::DeclareGlobalVar(i) => {
                     let key = const_key!(i);
                     let g = self.global;
@@ -4156,6 +4202,19 @@ impl Realm {
                     if let Some(o) = obj.as_object() {
                         if !self.obj(o).props.contains(&key) {
                             self.define_property(o, key, Value::Undefined, WRITABLE | ENUMERABLE | CONFIGURABLE);
+                        }
+                    }
+                }
+                Op::DeclareEvalGlobalFunction(i) => {
+                    let f = pop!();
+                    let key = const_key!(i);
+                    let g = self.global;
+                    match self.get_own_property(g, &key) {
+                        Some(p) if !p.configurable() => {
+                            self.set(Value::Object(g), key, f)?;
+                        }
+                        _ => {
+                            self.define_property(g, key, f, WRITABLE | ENUMERABLE | CONFIGURABLE);
                         }
                     }
                 }
