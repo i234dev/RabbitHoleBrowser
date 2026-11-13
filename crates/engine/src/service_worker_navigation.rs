@@ -1,5 +1,5 @@
-//! Synchronous Engine::load integration only. Loader background threads, frames,
-//! POST navigations and subresource loaders deliberately keep their own paths.
+//! Controlled top-level GET navigation. Realms and reserved clients stay on the
+//! Engine thread; embedders may send only the owned response to a loader thread.
 use crate::{Engine, EngineError, Page, Viewport};
 use rabbithole_dom::{Document, NodeId};
 use rabbithole_gfx::Rect;
@@ -77,4 +77,41 @@ pub(crate) fn load(engine: &mut Engine, url: Url, viewport: Viewport) -> Result<
     // Adopt its reserved client before another worker can call clients.claim().
     engine.ensure_script_host(&mut page);
     Ok(Some(page))
+}
+
+/// A nonblocking navigation operation local to the Engine's owning thread.
+pub struct PendingServiceWorkerNavigation {
+    inner: rabbithole_script::ServiceWorkerNavigationHandle,
+    url: Url,
+    viewport: Viewport,
+    console: Vec<(String,String)>,
+}
+impl PendingServiceWorkerNavigation {
+    pub fn take_console(&mut self) -> Vec<(String,String)> { std::mem::take(&mut self.console) }
+}
+impl Engine {
+    /// Returns None for unsupported methods, inactive scopes or disabled scripting.
+    pub fn begin_service_worker_navigation(&self, request: Request, viewport: Viewport) -> Result<Option<PendingServiceWorkerNavigation>, EngineError> {
+        if self.frame_context.borrow().is_some() || !self.scripting { return Ok(None); }
+        let url = request.url.clone();
+        self.service_workers.begin_navigation(request, self.loader.fetcher.timeout).map(|operation| operation.map(|inner| PendingServiceWorkerNavigation { inner, url, viewport, console: Vec::new() })).map_err(EngineError::Fetch)
+    }
+    /// Pumps existing worker realms once, without waiting for network or timers.
+    pub fn poll_service_worker_navigation(&self, navigation: &mut PendingServiceWorkerNavigation) -> std::task::Poll<Result<rabbithole_script::ServiceWorkerNavigation, EngineError>> {
+        if !self.scripting { return std::task::Poll::Ready(Err(EngineError::Fetch("Scripting was disabled during navigation".into()))); }
+        let mut env = NavigationEnv { engine: self, doc: Document::new(), url: navigation.url.clone(), viewport: navigation.viewport, console: Vec::new() };
+        let result = navigation.inner.poll(&mut env).map(|result| result.map_err(EngineError::Fetch));
+        navigation.console.extend(env.console);
+        result
+    }
+    /// Bind only after the loader's matching generation becomes the real page.
+    pub fn bind_service_worker_navigation_client(&self, page: &mut Page, client: rabbithole_script::ServiceWorkerClient) {
+        page.script.service_worker_client = Some(client);
+        // The committed document owns its real client before deferred external
+        // scripts arrive. Keep this realm when starting those scripts later.
+        if page.script.host.is_none() {
+            let host = { let mut env = crate::scripting::EngineEnv { engine: self, page }; rabbithole_script::ScriptHost::new(&mut env) };
+            page.script.host = Some(host);
+        }
+    }
 }

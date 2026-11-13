@@ -4,7 +4,7 @@
 //! (HTTP byte ranges) or saved to a location the user picks.
 
 use crate::gui::downloads::unique_path;
-use rabbithole_engine::net::{Request, StreamedResponse, Url};
+use rabbithole_engine::net::{Request, Response, StreamedResponse, Url};
 use rabbithole_engine::{Loaded, LoadedPage, Loader, ScriptSource, Viewport};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -62,6 +62,8 @@ pub struct DownloadPrefs {
 pub struct LoadJob {
     pub loader: Loader,
     pub request: Request,
+    /// Already intercepted response; only owned bytes and metadata cross threads.
+    pub response: Option<Response>,
     pub viewport: Viewport,
     pub downloads: DownloadPrefs,
 }
@@ -76,7 +78,18 @@ pub fn spawn(job: LoadJob, deliver: impl Fn(LoadResult) + Send + 'static, downlo
 }
 
 fn run(job: LoadJob, deliver: impl Fn(LoadResult), downloads: impl Fn(DownloadEvent)) {
-    let result = job.loader.load_request(&job.request, job.viewport);
+    let result = match job.response {
+        Some(response) => {
+            let attachment = response.header("content-disposition").is_some_and(|header| header.trim_start().to_ascii_lowercase().starts_with("attachment"));
+            if attachment || !rabbithole_engine::is_displayable(&response.content_type) {
+                let length = response.body.len() as u64;
+                Ok(Loaded::Download(StreamedResponse { url: response.url, status: response.status, content_type: response.content_type, charset: response.charset, headers: response.headers, content_length: Some(length), reader: Box::new(std::io::Cursor::new(response.body)) }))
+            } else if response.status >= 400 && response.body.is_empty() {
+                Err(rabbithole_engine::EngineError::Fetch(format!("HTTP {}", response.status)))
+            } else { Ok(Loaded::Page(job.loader.load_response(response, job.viewport))) }
+        },
+        None => job.loader.load_request(&job.request, job.viewport),
+    };
     let mut deferred: Option<(Url, Vec<ScriptSource>)> = None;
     let (outcome, download) = match result {
         Ok(Loaded::Page(p)) => {

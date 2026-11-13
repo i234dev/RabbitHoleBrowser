@@ -661,10 +661,11 @@ impl Engine {
         }
         page.script.scripts_ran = true;
         let scripts = std::mem::take(&mut page.scripts);
-        let host = {
+        let prepared = if page.script.service_worker_client.is_some() { page.script.host.take() } else { None };
+        let host = prepared.unwrap_or_else(|| {
             let mut env = EngineEnv { engine: self, page };
             ScriptHost::new(&mut env)
-        };
+        });
         page.script.host = Some(host);
         let mut classic = Vec::new();
         let mut deferred = Vec::new();

@@ -741,82 +741,126 @@ impl ServiceWorkerRegistry {
         url.is_http() && s.matching(url).and_then(|id| s.registrations[&id].active).is_some_and(|id| matches!(s.workers[&id].state, "activating" | "activated"))
     }
 
-    /// Synchronous embedding convenience over asynchronous worker/network work.
-    /// Only existing active registrations are considered. No disk persistence.
-    /// The caller must provide a nonblocking fetch_background implementation.
-    pub fn navigate(&self, env: &mut dyn HostEnv, url: Url, timeout: std::time::Duration) -> Result<Option<ServiceWorkerNavigation>, String> {
-        if !self.controls_navigation(&url) { return Ok(None); }
+    /// Start a controlled top-level GET without blocking the owning realm thread.
+    pub fn begin_navigation(&self, request: Request, timeout: std::time::Duration) -> Result<Option<ServiceWorkerNavigationHandle>, String> {
+        if request.method != "GET" || request.body.is_some() || !self.controls_navigation(&request.url) { return Ok(None); }
         let deadline = std::time::Instant::now().checked_add(timeout).ok_or("Invalid navigation timeout")?;
         let client = {
             let mut s = self.0.borrow_mut(); let id = s.id();
-            s.clients.insert(id, Client { execution_ready: false, url: url.clone(), controller: None, events: Vec::new() });
+            s.clients.insert(id, Client { execution_ready: false, url: request.url.clone(), controller: None, events: Vec::new() });
             ServiceWorkerClient(Rc::new(ReservedClient { registry: Rc::downgrade(&self.0), id }))
         };
-        let mut target = url;
-        for _ in 0..=20 {
+        Ok(Some(ServiceWorkerNavigationHandle { registry: self.clone(), client: Some(client), target: request.url.clone(), request, deadline, pending: None, redirects: 0, complete: false }))
+    }
+
+    /// Synchronous embedding convenience using the same incremental runner.
+    pub fn navigate(&self, env: &mut dyn HostEnv, url: Url, timeout: std::time::Duration) -> Result<Option<ServiceWorkerNavigation>, String> {
+        let Some(mut navigation) = self.begin_navigation(Request::get(url), timeout)? else { return Ok(None) };
+        loop {
+            match navigation.poll(env) {
+                std::task::Poll::Ready(result) => return result.map(Some),
+                std::task::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+    }
+
+}
+
+/// Owned response channels and a local reserved-client lease, never JS Values.
+/// Drop cancels delivery; dispatched ExtendableEvents keep their explicit lifetime.
+pub struct ServiceWorkerNavigationHandle {
+    registry: ServiceWorkerRegistry,
+    client: Option<ServiceWorkerClient>,
+    target: Url,
+    request: Request,
+    deadline: std::time::Instant,
+    pending: Option<NavigationPending>,
+    redirects: u8,
+    complete: bool,
+}
+enum NavigationPending {
+    Worker(std::sync::mpsc::Receiver<Result<crate::fetch::FetchReply, String>>, Rc<FetchCancellation>),
+    Network(std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>),
+}
+impl Drop for ServiceWorkerNavigationHandle {
+    fn drop(&mut self) {
+        if let Some(NavigationPending::Worker(_, token)) = &self.pending { token.set(true); }
+    }
+}
+impl ServiceWorkerNavigationHandle {
+    fn finish(&mut self, result: Result<rabbithole_net::Response, String>) -> std::task::Poll<Result<ServiceWorkerNavigation, String>> {
+        self.complete = true;
+        if result.is_err() {
+            if let Some(NavigationPending::Worker(_, token)) = &self.pending { token.set(true); }
+            self.pending = None; self.client = None;
+        }
+        std::task::Poll::Ready(result.map(|response| ServiceWorkerNavigation { response, client: self.client.take().unwrap() }))
+    }
+    /// Poll on the thread that owns the Engine and service-worker realms.
+    pub fn poll(&mut self, env: &mut dyn HostEnv) -> std::task::Poll<Result<ServiceWorkerNavigation, String>> {
+        if self.complete { return std::task::Poll::Ready(Err("Navigation already completed".into())); }
+        if std::time::Instant::now() >= self.deadline {
+            let result = self.finish(Err("Service worker navigation timed out".into()));
+            let now = env.now_ms(); pump_runtimes(&self.registry, env, now);
+            return result;
+        }
+        if self.pending.is_none() {
+            let client = self.client.as_ref().unwrap().0.id;
             let worker = {
-                let mut s = self.0.borrow_mut();
-                let worker = s.matching(&target).and_then(|id| s.registrations[&id].active).filter(|id| matches!(s.workers[id].state, "activating" | "activated"));
-                let reserved = s.clients.get_mut(&client.0.id).unwrap(); reserved.url = target.clone(); reserved.controller = worker;
+                let mut s = self.registry.0.borrow_mut();
+                let worker = s.matching(&self.target).and_then(|id| s.registrations[&id].active).filter(|id| matches!(s.workers[id].state, "activating" | "activated"));
+                let reserved = s.clients.get_mut(&client).unwrap(); reserved.url = self.target.clone(); reserved.controller = worker;
                 worker
             };
-            let mut request = Request::get(target.without_fragment());
+            let mut request = self.request.clone(); request.url = self.target.without_fragment();
             request.dest = rabbithole_net::Destination::Document;
             request.mode = Some(rabbithole_net::RequestMode::Navigate);
             request.credentials = rabbithole_net::CredentialsMode::Include;
             request.redirect = rabbithole_net::RedirectMode::Manual;
             request.follow_redirects = false;
-            let mut response = if let Some(worker) = worker {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let token = Rc::new(FetchCancellation::default());
-                { let mut s = self.0.borrow_mut(); let id = s.id();
-                  s.fetches.insert(id, FetchTask { client: client.0.id, navigation: true, worker, request, sender: Some(tx), cancelled: token.clone(), dispatched: false, abort_notified: false, fallback: false, result: None, network: None, lifetime_done: false }); }
-                let result = self.await_navigation(env, deadline, &rx);
-                if result.is_err() { token.set(true); let now = env.now_ms(); pump_runtimes(self, env, now); }
-                result?.response
+            self.pending = if let Some(worker) = worker {
+                let (tx, rx) = std::sync::mpsc::channel(); let token = Rc::new(FetchCancellation::default());
+                let mut s = self.registry.0.borrow_mut(); let id = s.id();
+                s.fetches.insert(id, FetchTask { client, navigation: true, worker, request, sender: Some(tx), cancelled: token.clone(), dispatched: false, abort_notified: false, fallback: false, result: None, network: None, lifetime_done: false });
+                Some(NavigationPending::Worker(rx, token))
             } else {
-                let rx = env.fetch_background(request).ok_or("Navigation requires asynchronous network support")?;
-                self.await_navigation_network(env, deadline, &rx)?
-            };
-            if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-                if let Some(location) = response.header("location") {
-                    let mut next = target.join(location.trim()).filter(|u| u.is_http()).ok_or("Invalid service worker navigation redirect")?;
-                    if next.fragment.is_none() { next.fragment = target.fragment.clone(); }
-                    target = next; continue;
+                match env.fetch_background(request) {
+                    Some(rx) => Some(NavigationPending::Network(rx)),
+                    None => return self.finish(Err("Navigation requires asynchronous network support".into())),
                 }
-            }
-            if response.status == 0 { return Err("Invalid opaque navigation response".into()); }
-            // A cached fallback's Response.url must never change document origin.
-            response.url = target;
-            return Ok(Some(ServiceWorkerNavigation { response, client }));
+            };
         }
-        Err("Too many service worker navigation redirects".into())
-    }
-    fn await_navigation(&self, env: &mut dyn HostEnv, deadline: std::time::Instant, rx: &std::sync::mpsc::Receiver<Result<crate::fetch::FetchReply, String>>) -> Result<crate::fetch::FetchReply, String> {
-        loop {
-            if std::time::Instant::now() >= deadline { return Err("Service worker navigation timed out".into()); }
-            let now = env.now_ms(); pump_runtimes(self, env, now);
-            if std::time::Instant::now() >= deadline { return Err("Service worker navigation timed out".into()); }
-            match rx.try_recv() {
-                Ok(result) => return result,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err("Service worker navigation disconnected".into()),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
+        let now = env.now_ms(); pump_runtimes(&self.registry, env, now);
+        if std::time::Instant::now() >= self.deadline {
+            let result = self.finish(Err("Service worker navigation timed out".into()));
+            let now = env.now_ms(); pump_runtimes(&self.registry, env, now);
+            return result;
         }
-    }
-    fn await_navigation_network(&self, env: &mut dyn HostEnv, deadline: std::time::Instant, rx: &std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>) -> Result<rabbithole_net::Response, String> {
-        loop {
-            if std::time::Instant::now() >= deadline { return Err("Navigation network timed out".into()); }
-            let now = env.now_ms(); pump_runtimes(self, env, now);
-            if std::time::Instant::now() >= deadline { return Err("Service worker navigation timed out".into()); }
-            match rx.try_recv() {
-                Ok(result) => return result,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err("Navigation network disconnected".into()),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        let result = match self.pending.as_ref().unwrap() {
+            NavigationPending::Worker(rx, _) => rx.try_recv().map(|r| r.map(|r| r.response)),
+            NavigationPending::Network(rx) => rx.try_recv(),
+        };
+        let mut response = match result {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return self.finish(Err(error)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return self.finish(Err("Service worker navigation disconnected".into())),
+            Err(std::sync::mpsc::TryRecvError::Empty) => return std::task::Poll::Pending,
+        };
+        // A consumed response does not abort the event's independent waitUntil.
+        self.pending = None;
+        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            if let Some(location) = response.header("location") {
+                if self.redirects == 20 { return self.finish(Err("Too many service worker navigation redirects".into())); }
+                let Some(mut next) = self.target.join(location.trim()).filter(|u| u.is_http()) else { return self.finish(Err("Invalid service worker navigation redirect".into())) };
+                if next.fragment.is_none() { next.fragment = self.target.fragment.clone(); }
+                if next.origin() != self.target.origin() { self.request.headers.retain(|(name,_)| !name.eq_ignore_ascii_case("authorization")); }
+                self.target = next; self.redirects += 1;
+                return std::task::Poll::Pending;
             }
-            std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        if response.status == 0 { return self.finish(Err("Invalid opaque navigation response".into())); }
+        response.url = self.target.clone();
+        self.finish(Ok(response))
     }
 }
 

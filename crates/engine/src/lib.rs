@@ -14,6 +14,7 @@ pub mod forms;
 pub mod frames;
 mod home;
 mod service_worker_navigation;
+pub use service_worker_navigation::PendingServiceWorkerNavigation;
 pub mod images;
 pub mod incremental;
 pub mod pointer;
@@ -1271,7 +1272,7 @@ impl Engine {
     /// (painting and handling input in between keeps the page responsive
     /// while a long list of scripts runs).
     pub fn start_page_load_scripts(&self, page: &mut Page) {
-        if self.scripting && (!page.scripts.is_empty() || has_inline_handlers(&page.doc)) {
+        if self.scripting && (!page.scripts.is_empty() || has_inline_handlers(&page.doc) || page.script.service_worker_client.is_some()) {
             self.begin_page_scripts(page);
         }
     }

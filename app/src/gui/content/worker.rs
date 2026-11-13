@@ -124,6 +124,9 @@ struct Worker {
     generation: u64,
     /// Load in flight: request URL and whether it adds a history entry.
     pending: Option<(Url, bool)>,
+    /// Local realm operation; it is never sent to a loader/network thread.
+    service_worker_navigation: Option<rabbithole_engine::PendingServiceWorkerNavigation>,
+    navigation_client: Option<(u64, rabbithole_engine::script::ServiceWorkerClient)>,
     /// The committed page waits for its script sources.
     awaiting_scripts: bool,
     /// Load-time scripts are running in slices (since when).
@@ -187,6 +190,8 @@ impl Worker {
             page: None,
             generation: 0,
             pending: None,
+            service_worker_navigation: None,
+            navigation_client: None,
             awaiting_scripts: false,
             running_scripts: None,
             tick_deferred: false,
@@ -277,6 +282,7 @@ impl Worker {
                     return;
                 }
             }
+            self.poll_service_worker_navigation();
             let t1 = Instant::now();
             self.flush_scroll_event();
             let t2 = Instant::now();
@@ -331,10 +337,11 @@ impl Worker {
         if self.running_scripts.is_some() || self.tick_deferred {
             return Some(Duration::ZERO);
         }
-        let mut wait: Option<f64> = None;
+        let mut wait: Option<f64> = self.service_worker_navigation.as_ref().map(|_| 10.0);
         if let Some(due) = self.page.as_ref().and_then(|p| p.next_script_due()) {
             let now = self.engine.start.elapsed().as_secs_f64() * 1000.0;
-            wait = Some((due - now).max(0.0));
+            let left = (due - now).max(0.0);
+            wait = Some(wait.map(|w| w.min(left)).unwrap_or(left));
         }
         if self.load_phase.is_some() && !self.awaiting_scripts {
             // Watch for the end of image loading.
@@ -402,10 +409,14 @@ impl Worker {
             ToContent::Navigate { request, push_history } => self.navigate(request, push_history),
             ToContent::LoadHtml { html, url, push_history } => {
                 self.generation += 1;
+                self.service_worker_navigation = None;
+                self.navigation_client = None;
                 self.pending = None;
                 self.show_html(&html, url, push_history);
             }
             ToContent::Stop => {
+                self.service_worker_navigation = None;
+                self.navigation_client = None;
                 if self.pending.take().is_some() || self.awaiting_scripts || self.load_phase.is_some() {
                     self.generation += 1;
                     self.awaiting_scripts = false;
@@ -507,6 +518,8 @@ impl Worker {
                 let (u, t) = self.page.as_ref().map(|p| (p.url.to_string(), p.text())).unwrap_or_default();
                 let html = pages::text_page(&u, &t);
                 self.generation += 1;
+                self.service_worker_navigation = None;
+                self.navigation_client = None;
                 self.pending = None;
                 self.show_html(&html, crate::gui::about_page("text"), true);
             }
@@ -651,13 +664,40 @@ impl Worker {
             }
         }
         self.generation += 1;
+        self.service_worker_navigation = None;
+        self.navigation_client = None;
         self.pending = Some((request.url.clone(), push_history));
         self.awaiting_scripts = false;
         self.running_scripts = None;
         self.load_phase = None;
+        match self.engine.begin_service_worker_navigation(request.clone(), self.view.viewport) {
+            Ok(Some(navigation)) => { self.service_worker_navigation = Some(navigation); return; }
+            Ok(None) => {},
+            Err(error) => { self.on_load(self.generation, LoadResult::Loaded(Err(error.to_string()))); return; }
+        }
+        self.spawn_navigation_loader(request, None);
+    }
+
+    fn poll_service_worker_navigation(&mut self) {
+        let Some(mut navigation) = self.service_worker_navigation.take() else { return };
+        match self.engine.poll_service_worker_navigation(&mut navigation) {
+            std::task::Poll::Pending => self.service_worker_navigation = Some(navigation),
+            std::task::Poll::Ready(Ok(result)) => {
+                let console = navigation.take_console();
+                if !console.is_empty() { self.send(FromContent::Console(console)); }
+                let request = Request::get(result.response.url.clone());
+                self.navigation_client = Some((self.generation, result.client));
+                self.spawn_navigation_loader(request, Some(result.response));
+            }
+            std::task::Poll::Ready(Err(error)) => self.on_load(self.generation, LoadResult::Loaded(Err(error.to_string()))),
+        }
+    }
+
+    fn spawn_navigation_loader(&mut self, request: Request, response: Option<rabbithole_engine::net::Response>) {
         let job = LoadJob {
             loader: self.engine.loader.clone(),
             request,
+            response,
             viewport: self.view.viewport,
             downloads: self.download_prefs(),
         };
@@ -682,7 +722,10 @@ impl Worker {
             LoadResult::Loaded(Ok(LoadOutcome::Page(loaded))) => {
                 let push = self.pending.take().map(|(_, p)| p).unwrap_or(true);
                 let t = Instant::now();
-                let page = self.engine.build_page_unscripted(*loaded, self.view.viewport);
+                let mut page = self.engine.build_page_unscripted(*loaded, self.view.viewport);
+                if let Some((generation, client)) = self.navigation_client.take() {
+                    if generation == self.generation { self.engine.bind_service_worker_navigation_client(&mut page, client); }
+                }
                 debug_time("build (style + layout)", t);
                 self.awaiting_scripts = true;
                 self.install(page, push);
@@ -690,11 +733,13 @@ impl Worker {
                 self.flush();
             }
             LoadResult::Loaded(Ok(LoadOutcome::Download)) => {
+                self.navigation_client = None;
                 let url = self.pending.take().map(|(u, _)| u.to_string()).unwrap_or_default();
                 self.send(FromContent::Loading(None));
                 self.send(FromContent::Status(format!("Downloading {url}")));
             }
             LoadResult::Loaded(Err(e)) => {
+                self.navigation_client = None;
                 let (url, push) = self.pending.take().unwrap_or_else(|| (crate::gui::about_url(), true));
                 let html = pages::error_page(&url.to_string(), &e);
                 self.show_html(&html, url, push);

@@ -27,7 +27,7 @@ mod shadow;
 mod window;
 mod workers;
 mod service_worker;
-pub use service_worker::{ServiceWorkerRegistry, ServiceWorkerScope, ServiceWorkerClient, ServiceWorkerNavigation};
+pub use service_worker::{ServiceWorkerRegistry, ServiceWorkerScope, ServiceWorkerClient, ServiceWorkerNavigation, ServiceWorkerNavigationHandle};
 
 #[cfg(test)]
 mod tests;

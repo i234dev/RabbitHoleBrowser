@@ -14,6 +14,7 @@ use rabbithole_engine::net::{Request, Url};
 mod consent;
 mod feeds;
 mod focus;
+mod service_workers;
 
 /// Messages received by the fake UI: (when, tab id, message).
 type Received = Receiver<(Instant, u64, FromContent)>;
