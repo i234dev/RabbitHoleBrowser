@@ -8,8 +8,7 @@ Linux under WSL2. The suite reported its 95% confidence interval.
 There were 20 workloads and 58 substeps per iteration, giving 174 measured
 substeps across three iterations. This is a configured three-iteration result.
 No project builds or other project benchmarks ran concurrently; host background
-load was not otherwise controlled. A same-machine Chrome comparison has not
-been measured. The previous undated 0.148 record used a different, loaded
+load was not otherwise controlled. The previous undated 0.148 record used a different, loaded
 three-core VM, so it does not establish a comparable performance change.
 
 ## Results and provenance
