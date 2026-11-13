@@ -134,6 +134,38 @@ fn calls_and_exceptions() {
 }
 
 #[test]
+fn frame_switches_reload_slots_and_constants() {
+    // Distinct callees have distinct constant pools. Deep recursion moves
+    // the value stack, and each caller resumes at several different pcs.
+    check(r#"
+        function left(n) { return "left:" + n; }
+        function right(n) { return "right:" + n; }
+        function recurse(n) {
+            if (n === 0) return 1;
+            var first = left(n), value = recurse(n - 1), last = right(n);
+            if (first !== "left:" + n || last !== "right:" + n) throw "frame";
+            return value + 1;
+        }
+        recurse(2000)
+    "#, "2001");
+    // Native callbacks re-enter the engine; throws/finally resume callers
+    // at non-adjacent instructions rather than the ordinary call return.
+    check(r#"
+        function leaf(n) { if (n === 2) throw "two"; return n * 3; }
+        function outer() {
+            var log = [];
+            for (var i = 0; i < 4; i++) {
+                try { log.push([i].map(leaf)[0]); }
+                catch (e) { log.push(e); }
+                finally { log.push("finally:" + i); }
+            }
+            return log.join(",");
+        }
+        outer()
+    "#, "0,finally:0,3,finally:1,two,finally:2,9,finally:3");
+}
+
+#[test]
 fn errors_identical() {
     // Uncaught errors: message and kind must match.
     same("function f(x) { return x.y.z } f({})");
