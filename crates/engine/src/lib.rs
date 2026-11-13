@@ -1983,7 +1983,15 @@ impl Page {
             // callers, using only that parent's own rendered geometry. This
             // must not restore the ancestor fallback for boxless elements.
             if matches!(&self.doc.node(node).data, rabbithole_dom::NodeData::Text(_)) {
-                return self.doc.flat_parent(node).and_then(|parent| self.layout_rect_of(parent));
+                return self.doc.flat_parent(node).and_then(|parent| {
+                    if self.styles.get(parent).is_some_and(|s| s.display == rabbithole_style::Display::Contents) {
+                        // Contents owns no element box, but its visible text
+                        // can still have real fragments indexed by that ID.
+                        self.incr.cached_inline_rect(parent, || self.layout.inline_rect_index(&self.doc))
+                    } else {
+                        self.layout_rect_of(parent)
+                    }
+                });
             }
             // SVG interiors are painted inside the outer SVG's replaced
             // box. Preserve that existing approximation, but never revive
