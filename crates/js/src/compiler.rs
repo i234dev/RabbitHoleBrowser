@@ -2101,6 +2101,9 @@ impl Compiler {
                 s.kind,
                 StmtKind::If { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::Switch { .. } | StmtKind::Try { .. } | StmtKind::With { .. }
             )
+            // Not the try a `using` declaration is lowered to (its catch
+            // binding is a hidden `%` name): the block's value stands.
+            && !matches!(&s.kind, StmtKind::Try { handler: Some(h), .. } if matches!(&h.0, Some(Pattern::Identifier(n)) if n.starts_with('%')))
         {
             self.emit(Op::Undefined);
             self.emit(Op::StoreCompletion);
