@@ -275,6 +275,10 @@ functionality: `winit` (windows/input), `softbuffer` (presenting pixels),
 
 ## Roadmap
 
+See [the development plan](docs/ROADMAP.md) for the next phases and their
+validation criteria, and [the JIT record](docs/jit-design.md) for implementation
+details and measurements.
+
 - JavaScript speed: make the JIT a net win and turn it on; cheaper calls,
   closures and generators.
 - WPT DOM and CSS pass rates up (CSSOM view, `document.write`, speculative
