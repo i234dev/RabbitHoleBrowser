@@ -16,7 +16,7 @@ dir css/css-grid 862 1763
 dir css/css-images 184 482
 dir css/css-masking 149 384
 dir css/css-nesting 4 17
-dir css/css-overflow 294 719
+dir css/css-overflow 321 719
 dir css/css-position 98 251
 dir css/css-sizing 277 568
 dir css/css-text 839 1550
@@ -4611,12 +4611,8 @@ fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-first-character-0
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-first-line-001.html
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-grapheme-001.html
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-hanging-punctuation-001.html
-fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-003.html
-fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-004.html
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-005.html
-fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-006.html
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-007.html
-fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-008.html
 fail css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-009.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-014.html
 fail css/css-overflow/line-clamp/webkit-line-clamp-027.html
@@ -4776,7 +4772,6 @@ fail css/css-overflow/scrollbar-gutter-fullscreen-004.html
 fail css/css-overflow/scrollbar-gutter-root-both-edges.html
 fail css/css-overflow/scrollbar-gutter-scroll-into-view.html
 fail css/css-overflow/single-axis-overflow-scroll-to-clip.html
-fail css/css-overflow/text-overflow-008.html
 fail css/css-overflow/text-overflow-009.html
 fail css/css-overflow/text-overflow-012.html
 fail css/css-overflow/text-overflow-013.html
@@ -4804,29 +4799,7 @@ fail css/css-overflow/text-overflow-scroll-vertical-lr-001.html
 fail css/css-overflow/text-overflow-scroll-vertical-lr-rtl-001.html
 fail css/css-overflow/text-overflow-scroll-vertical-rl-001.html
 fail css/css-overflow/text-overflow-scroll-vertical-rl-rtl-001.html
-fail css/css-overflow/text-overflow-string-001.html
-fail css/css-overflow/text-overflow-string-002.html
-fail css/css-overflow/text-overflow-string-003.html
-fail css/css-overflow/text-overflow-string-004.html
 fail css/css-overflow/text-overflow-string-005.html
-fail css/css-overflow/text-overflow-string-006.html
-fail css/css-overflow/text-overflow-string-007.html
-fail css/css-overflow/text-overflow-string-008.html
-fail css/css-overflow/text-overflow-string-009.html
-fail css/css-overflow/text-overflow-string-010.html
-fail css/css-overflow/text-overflow-string-011.html
-fail css/css-overflow/text-overflow-string-012.html
-fail css/css-overflow/text-overflow-string-013.html
-fail css/css-overflow/text-overflow-string-014.html
-fail css/css-overflow/text-overflow-string-015.html
-fail css/css-overflow/text-overflow-string-016.html
-fail css/css-overflow/text-overflow-string-017.html
-fail css/css-overflow/text-overflow-string-018.html
-fail css/css-overflow/text-overflow-string-019.html
-fail css/css-overflow/text-overflow-string-020.html
-fail css/css-overflow/text-overflow-string-021.html
-fail css/css-overflow/text-overflow-string-022.html
-fail css/css-overflow/text-overflow-string-023.html
 fail css/css-overflow/text-overflow-string-024.tentative.html
 fail css/css-overflow/text-overflow-string-025.tentative.html
 fail css/css-overflow/text-overflow-string-026.tentative.html

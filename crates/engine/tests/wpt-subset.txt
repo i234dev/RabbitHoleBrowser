@@ -173,3 +173,13 @@ css/css-text/i18n/css3-text-line-break-opclns-001.html
 css/css-position/sticky/position-sticky-hyperlink.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-001.html
 css/css-text/white-space/text-wrap-balance-line-clamp-006.html
+
+# Custom overflow markers, bidi isolation, forced breaks and line clamping.
+css/css-overflow/text-overflow-string-001.html
+css/css-overflow/text-overflow-string-002.html
+css/css-overflow/text-overflow-string-003.html
+css/css-overflow/text-overflow-string-004.html
+css/css-overflow/text-overflow-string-007.html
+css/css-overflow/text-overflow-string-008.html
+css/css-overflow/text-overflow-string-016.html
+css/css-overflow/line-clamp/line-clamp-with-text-overflow-string-003.html
