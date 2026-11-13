@@ -34,6 +34,7 @@ built-ins/Array/prototype/lastIndexOf/15.4.4.15-8-b-i-17.js
 built-ins/Array/prototype/map/15.4.4.19-3-13.js
 built-ins/Array/prototype/map/15.4.4.19-8-b-9.js
 built-ins/Array/prototype/map/not-a-constructor.js
+built-ins/Array/prototype/push/set-length-array-is-frozen.js
 built-ins/Array/prototype/reduce/15.4.4.21-2-17.js
 built-ins/Array/prototype/reduce/15.4.4.21-8-b-iii-1-17.js
 built-ins/Array/prototype/reduce/15.4.4.21-9-c-i-22.js
@@ -47,6 +48,7 @@ built-ins/Array/prototype/some/15.4.4.17-7-c-ii-7.js
 built-ins/Array/prototype/sort/precise-getter-deletes-successor.js
 built-ins/Array/prototype/splice/create-species.js
 built-ins/Array/prototype/toSpliced/start-and-deleteCount-undefineds.js
+built-ins/Array/prototype/unshift/set-length-array-length-is-non-writable.js
 built-ins/ArrayBuffer/isView/arg-is-dataview-subclass-instance.js
 built-ins/ArrayBuffer/prototype/resize/new-length-excessive.js
 built-ins/ArrayBuffer/prototype/transferToFixedLength/descriptor.js
@@ -79,6 +81,7 @@ built-ins/Function/S15.3_A3_T3.js
 built-ins/Function/prototype/apply/S15.3.4.3_A7_T9.js
 built-ins/Function/prototype/bind/BoundFunction_restricted-properties.js
 built-ins/Function/prototype/toString/S15.3.4.2_A10.js
+built-ins/Function/prototype/toString/method-computed-property-name.js
 built-ins/GeneratorFunction/prototype/Symbol.toStringTag.js
 built-ins/Iterator/concat/name.js
 built-ins/Iterator/prototype/chunks/length.js
@@ -152,6 +155,7 @@ built-ins/Promise/resolve-prms-cstm-then-immed.js
 built-ins/Proxy/constructor.js
 built-ins/Proxy/getOwnPropertyDescriptor/trap-is-not-callable.js
 built-ins/Proxy/preventExtensions/call-parameters.js
+built-ins/Proxy/set/call-parameters-prototype-index.js
 built-ins/Reflect/construct/construct.js
 built-ins/Reflect/object-prototype.js
 built-ins/RegExp/S15.10.1_A1_T4.js
@@ -255,11 +259,13 @@ language/expressions/arrow-function/dstr/ary-ptrn-empty.js
 language/expressions/arrow-function/dstr/dflt-obj-ptrn-id-init-fn-name-class.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-in-escaped.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-identifier.js
+language/expressions/assignment/destructuring/keyed-destructuring-property-reference-target-evaluation-order.js
 language/expressions/assignment/dstr/array-elem-iter-rtrn-close-err.js
 language/expressions/assignment/dstr/array-empty-val-num.js
 language/expressions/assignment/dstr/ident-name-prop-name-literal-protected-escaped.js
 language/expressions/assignment/dstr/obj-prop-nested-array-undefined-own.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-switch-escaped.js
+language/expressions/assignment/target-member-computed-reference-undefined.js
 language/expressions/assignmenttargettype/direct-arrowfunction-2.js
 language/expressions/assignmenttargettype/direct-primaryexpression-classexpression.js
 language/expressions/assignmenttargettype/parenthesized-bitwiseandexpression-bitwise-and-equalityexpression-0.js
@@ -275,6 +281,7 @@ language/expressions/async-generator/named-yield-spread-arr-single.js
 language/expressions/async-generator/yield-star-async-return.js
 language/expressions/bitwise-and/S11.10.1_A2.2_T1.js
 language/expressions/bitwise-xor/S11.10.2_A3_T1.5.js
+language/expressions/call/eval-spread.js
 language/expressions/call/spread-obj-override-immutable.js
 language/expressions/class/async-gen-method-static/rest-params-trailing-comma-early-error.js
 language/expressions/class/async-gen-method/dflt-params-ref-later.js
@@ -349,6 +356,7 @@ language/expressions/generators/yield-spread-arr-single.js
 language/expressions/greater-than/S11.8.2_A4.7.js
 language/expressions/instanceof/S11.8.6_A4_T3.js
 language/expressions/less-than-or-equal/S11.8.3_A2.2_T1.js
+language/expressions/less-than/bigint-and-incomparable-string.js
 language/expressions/logical-and/S11.11.1_A2.1_T4.js
 language/expressions/logical-assignment/lgcl-or-assignment-operator-unresolved-rhs-put.js
 language/expressions/multiplication/S11.5.1_A2.1_T3.js
@@ -361,12 +369,14 @@ language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-fn-name-gen
 language/expressions/object/dstr/gen-meth-obj-ptrn-id-init-unresolvable.js
 language/expressions/object/dstr/meth-dflt-ary-init-iter-no-close.js
 language/expressions/object/dstr/meth-dflt-obj-ptrn-prop-obj-value-undef.js
+language/expressions/object/fn-name-accessor-get.js
 language/expressions/object/ident-name-method-def-try-escaped.js
 language/expressions/object/method-definition/async-gen-meth-dflt-params-duplicates.js
 language/expressions/object/method-definition/async-gen-yield-star-sync-next.js
 language/expressions/object/method-definition/gen-yield-as-binding-identifier.js
 language/expressions/object/method-definition/private-name-early-error-get-method-inside-class.js
 language/expressions/optional-chaining/early-errors-tail-position-null-optchain-template-string.js
+language/expressions/optional-chaining/eval-optional-call.js
 language/expressions/postfix-increment/arguments.js
 language/expressions/property-accessors/S11.2.1_A3_T4.js
 language/expressions/strict-equals/S11.9.4_A2.1_T2.js
@@ -446,6 +456,7 @@ language/statements/class/elements/privatefieldadd-typeerror.js
 language/statements/class/elements/regular-definitions-rs-static-privatename-identifier-alt.js
 language/statements/class/elements/same-line-async-method-rs-static-privatename-identifier.js
 language/statements/class/elements/set-access-of-missing-private-setter.js
+language/statements/class/elements/static-field-anonymous-function-name.js
 language/statements/class/elements/syntax/early-errors/delete/field-delete-twice-covered-err-delete-call-expression-privatename.js
 language/statements/class/elements/syntax/early-errors/grammar-privatename-error.js
 language/statements/class/elements/syntax/early-errors/invalid-names/method-outter-call-expression-this.js
@@ -485,6 +496,7 @@ language/statements/for/dstr/const-ary-ptrn-elem-ary-elem-iter.js
 language/statements/for/dstr/const-obj-ptrn-prop-obj.js
 language/statements/for/dstr/let-obj-ptrn-prop-id-get-value-err.js
 language/statements/for/dstr/var-obj-ptrn-id-init-skipped.js
+language/statements/for/scope-body-lex-open.js
 language/statements/function/13.2-18-1.js
 language/statements/function/S13.2_A1_T1.js
 language/statements/function/dstr/ary-ptrn-elem-id-init-fn-name-class.js
@@ -499,11 +511,18 @@ language/statements/let/dstr/obj-ptrn-prop-id.js
 language/statements/switch/cptn-dflt-b-fall-thru-abrupt-empty.js
 language/statements/throw/S12.13_A2_T3.js
 language/statements/try/completion-values-fn-finally-abrupt.js
+language/statements/try/completion-values.js
 language/statements/try/dstr/obj-ptrn-prop-id-init-unresolvable.js
 language/statements/using/syntax/with-initializer-default-statement-list.js
 language/statements/variable/dstr/ary-init-iter-get-err.js
 language/statements/variable/dstr/obj-ptrn-prop-id-init.js
 language/statements/with/S12.10_A1.10_T2.js
 language/statements/with/S12.10_A3.5_T1.js
+language/statements/with/get-mutable-binding-binding-deleted-in-get-unscopables-strict-mode.js
 language/types/number/S8.5_A12.1.js
+language/types/reference/put-value-prop-base-primitive.js
 language/types/undefined/S8.1_A1_T2.js
+staging/sm/Set/intersection.js
+staging/sm/Set/union.js
+staging/sm/expressions/optional-chain.js
+staging/sm/statements/for-of-iterator-close-throw.js
