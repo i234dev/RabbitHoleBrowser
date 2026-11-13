@@ -24,6 +24,11 @@ Each delivery requires relevant regressions, comparison with the previous
 baseline, workspace tests and an updated Windows build. A failing test must
 not disappear merely because the baseline was regenerated.
 
+The start page now gets its full version from Cargo and its current compatibility
+counts from the committed baseline files. Measurement dates and workload scope
+remain attached to the results; historical performance numbers must be replaced
+only after a measured run. See [the measurement records](../tools/metrics/README.md).
+
 ## 2. Make the JavaScript JIT a measured improvement
 
 The baseline x86-64 JIT, loop OSR, runtime helpers and incremental-GC barriers
@@ -71,19 +76,28 @@ Next steps, in order:
 
 The first WebGL1 rendering milestone is implemented: JavaScript shader/program
 and buffer APIs drive our software backend, produce visible canvas pixels and
-support `readPixels`. Depth, uniforms and RGBA8 nearest 2D textures are covered
-by backend pixel tests, API tests and page-renderer tests. See
+support `readPixels`. Depth, uniforms, independent RGB/alpha blending and RGBA8
+nearest/bilinear 2D textures are implemented. Minification and magnification
+filters must match; mipmaps and derivative-based LOD selection remain open.
+The bounded shader evaluator includes 32 typed float/vector math built-ins,
+but still lacks general control flow and user-defined functions. Backend pixel
+tests, API tests and page-renderer fixtures cover these milestones. See
 [the current surface and limits](webgl.md).
 
-Next: expand GLSL and rendering state with pixel regressions, then validate
-real workloads against the supported surface. Framebuffer objects, blending,
-general shader control flow and linear/mipmapped textures remain open.
-WebGL2 still returns `null`. The backend's optional GLSL ES 3.00 parsing mode
-is preparatory work; a WebGL2 milestone also needs coherent context state,
-objects and APIs, including vertex array objects, before it can be exposed.
-Modern Three.js compatibility has not been established.
+An experimental WebGL2 context is now exposed with a distinct JavaScript
+interface, bounded GLSL ES 3.00 source support, vertex array objects and checked
+uint32 element indices with fixed primitive restart. Source language version
+and context version are separate; WebGL1 retains its own semantics. These
+features produce actual page pixels, but do not establish WebGL conformance or
+Three.js compatibility.
 
-### Service Worker lifecycle and memory cache
+Next: framebuffer objects, instancing, broader shader grammar and rendering
+state, mixed/minified texture filtering and mipmaps, each with pixel regressions
+and workload validation. WebGL2 integer attributes/uniforms, 3D textures, UBOs,
+queries, synchronization, transform feedback and MRT remain open. Exposed
+unsupported commands must keep reporting errors until implemented.
+
+### Service Worker lifecycle, memory cache and controlled fetch
 
 Classic Service Worker scripts now execute in isolated worker realms, with
 registration, install/activate lifetimes, rejected-install handling, updates,
@@ -91,13 +105,19 @@ waiting workers, `skipWaiting`, `clients.claim` and controller notifications.
 Origin-scoped Cache API entries hold actual response bytes and shared storage
 within an engine instance. This state survives document changes in that
 instance, but does not survive engine shutdown or share state across independent
-engines. See [the lifecycle and cache scope](service-workers.md).
+engines. Controlled documents' `window.fetch()` now dispatches `FetchEvent`,
+supports asynchronous `respondWith()` responses and network fallback, and can
+receive cached bytes without a network request. Worker-initiated fetches go
+directly to the network, avoiding recursive interception. Client abort reasons
+are preserved; propagation to `event.request.signal` remains open. See
+[the lifecycle, cache and fetch scope](service-workers.md).
 
-Next: implement fetch-event interception and `respondWith`, validate controlled
-navigation and offline behavior, then add disk persistence and restart tests.
+Next: controlled navigation and other resource loaders, worker request-signal
+propagation and offline behavior, then disk persistence and restart tests.
 Module Service Workers, messaging, client enumeration and navigation preload
-also remain open. Lifecycle and cache tests do not establish offline support;
-the separate HTTP cache's disk storage does not persist Service Worker state.
+also remain open. Existing lifecycle, cache and controlled-fetch tests do not
+establish offline navigation; the separate HTTP cache's disk storage does not
+persist Service Worker state.
 
 ## 5. Validate usability and deliver builds
 
@@ -105,6 +125,10 @@ Use the fixed smoke-test list in `scripts/site-smoke.sh` and inspect rendered
 screenshots. Test navigation, links, forms, scrolling, media and session restore
 in the desktop browser. DOM/text counts alone do not verify these interactions.
 Track regressions separately from network errors and external bot challenges.
+
+Google Account screens have reported layout and keyboard-interaction gaps.
+The password caret's UTF-8 crash has a regression fix, but full authenticated
+sign-in still needs interactive validation.
 
 Publish platform builds from the tested revision and record which revision
 each executable contains. Expand macOS/Linux packaging and Windows execution

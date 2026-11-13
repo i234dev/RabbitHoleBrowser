@@ -1,4 +1,4 @@
-# Service workers: first executable milestone
+# Service workers: lifecycle, memory cache and controlled fetch
 
 RabbitHole runs classic service-worker scripts in separate JavaScript worker
 realms. Registration fetches and evaluates the script before resolving; it does
@@ -26,9 +26,45 @@ engine. It is currently memory-only: it does not survive process shutdown, share
 registrations across independent engines, or wake a worker without a live engine
 being ticked. Worker termination/restart and update checks for imported scripts
 are future work. Only classic scripts are supported. Module scripts, messaging,
-client enumeration, navigation preload, and fetch interception are not implemented;
-unsupported exposed operations reject explicitly. Installing a worker therefore
-does not yet provide offline navigation or intercept network requests.
+client enumeration and navigation preload are unfinished; unsupported exposed
+operations reject explicitly.
+
+## Controlled-document fetch interception
+
+`window.fetch()` from a controlled HTTP(S) document dispatches a real
+`FetchEvent` in its active service worker. `respondWith()` must be called once,
+synchronously during dispatch, and stops later listeners from handling that
+event. Its promise can settle asynchronously with a `Response`, including one
+returned by `caches.match()`. Status, status text, headers, response type and body
+bytes cross between realms as owned data; JavaScript objects are not shared.
+
+A request without `respondWith()` follows the existing network path. A rejected
+promise, an invalid/used response, or canceling the event without a response
+produces a fetch error rather than silently falling back to the network. The
+client fetch promise rejects with `TypeError`; `FetchEvent.handled` reports a
+failed service-worker response with `NetworkError`. `fetch(event.request)` inside
+the worker goes to the network without recursively intercepting itself.
+
+`waitUntil()` extends the event lifetime. Pending fetch events can finish in the
+old runtime after an update or unregister, even when that worker has become
+redundant. Client disposal releases its pending deliveries. Aborting a client
+fetch preserves the caller's abort reason and drops its pending delivery, but
+does not physically cancel the inherited HTTP transport. Propagating that abort
+to the worker's `event.request.signal` is still pending.
+
+Request mode, credentials and redirect metadata are preserved when constructing
+or cloning a request. Normal CORS requests retain the network layer's checks.
+The current subset rejects `same-origin` requests to another origin, and
+`no-cors` methods/headers/content types outside the safelist, before dispatching
+or sending them. This is a bounded Fetch implementation; inherited network
+response metadata and header guards still have gaps.
+
+Interception currently covers only controlled documents' JavaScript fetches.
+Navigation, image/style/script loaders, XHR and dedicated/shared-worker fetches
+are outside this milestone. Serving a cached response to `window.fetch()` does
+not yet provide offline navigation or a persistent offline application.
+
+## Cache Storage
 
 Cache Storage shares response bytes and request metadata by origin within the
 Engine, including between documents and service-worker realms. Each match creates
@@ -43,6 +79,9 @@ their byte storage until the Engine is dropped. HTTP cache policy remains
 separate from the explicit Cache API.
 
 Validation uses local HTTP fixtures in `crates/engine/tests/service_workers.rs`
-and focused lifecycle tests in `crates/script/src/tests_service_worker.rs`.
-The lifecycle and registration algorithms follow the primary
+and focused tests in `crates/script/src/tests_service_worker.rs`: lifecycle
+ordering, cached responses without network requests, fallback, worker network
+fetches without recursion, response errors, binary bodies, abort reasons,
+credential modes and rejected unsafe requests. The implementation follows the
+implemented subset of the primary
 [W3C Service Workers specification](https://w3c.github.io/ServiceWorker/).

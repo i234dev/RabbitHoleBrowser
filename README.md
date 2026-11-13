@@ -19,8 +19,8 @@ _Both images were produced by `rabbithole screenshot`: every pixel comes from Ra
 
 ## Status (v0.1.6)
 
-RabbitHole is young but already runs real, heavy sites: Google (search and
-sign-in), YouTube (playback with sound and AV1/VP9 video), Wikipedia, GitHub,
+RabbitHole is young but already runs real, heavy sites: Google search,
+YouTube (playback with sound and AV1/VP9 video), Wikipedia, GitHub,
 Reddit (infinite scroll), BBC, Hacker News, the Svelte playground (WebAssembly
 bundler in a Worker) and Speedometer 3.1 end to end. Everything below is our own
 code unless noted in [Dependencies](#dependencies).
@@ -39,6 +39,11 @@ code unless noted in [Dependencies](#dependencies).
 | Acid3 | 96 / 100 | |
 | Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 | real apps driven with simulated input |
 | Speedometer 3.1 | 0.148 | headless on a loaded 3-core VM; tracked for regressions, not a fair comparison |
+
+The built-in start page shows the complete compiled version and the latest
+dated results from the committed records. Baseline-derived counts refresh at
+build time; historical performance results retain their measurement context.
+See [measurement sources and updates](tools/metrics/README.md).
 
 ## Features
 
@@ -84,15 +89,22 @@ code unless noted in [Dependencies](#dependencies).
   (Mutation/Intersection/Resize), canvas 2D, fetch/XHR with CORS, WebSocket,
   EventSource, Streams, IndexedDB, Web Crypto, Workers, iframes with
   same-origin scripting and `postMessage`, history and Navigation API.
-- Experimental WebGL1: own software shader evaluator, clipping and triangle
-  rasterizer, vertex/index buffers, uniforms, depth testing, RGBA8 nearest
-  2D textures, canvas presentation and `readPixels`. See [supported operations
-  and limits](docs/webgl.md); this is a rendering subset, not full WebGL conformance.
+- Experimental WebGL1 and WebGL2: own software shader evaluator, clipping and
+  triangle rasterizer, vertex/index buffers, uniforms, depth testing, RGB/alpha
+  blending, nearest/bilinear RGBA8 2D textures, canvas presentation and `readPixels`.
+  WebGL2 adds a bounded GLSL ES 3.00 subset, vertex array objects and checked
+  32-bit indices with fixed primitive restart. Shader math includes 32 typed
+  float/vector built-ins; general shader control flow remains unfinished. See
+  [supported operations and limits](docs/webgl.md); these are rendering subsets,
+  not full WebGL conformance.
 - Service Worker lifecycle: classic scripts run in an isolated worker realm,
   with installation/activation, `waitUntil`, updates, `skipWaiting` and
   `clients.claim`. Registrations and origin-scoped Cache API data live in memory
-  within an engine instance. Fetch interception and offline navigation are pending;
-  see [the lifecycle milestone](docs/service-workers.md).
+  within an engine instance. Controlled documents' `window.fetch()` requests
+  dispatch `FetchEvent` and can receive real responses through `respondWith`,
+  including Cache API matches and worker-initiated network fetches. Navigation
+  and other resource loaders are not intercepted yet; see
+  [the lifecycle and fetch scope](docs/service-workers.md).
 
 **Media**
 
@@ -115,16 +127,22 @@ code unless noted in [Dependencies](#dependencies).
 
 ## Limitations (for now)
 
-- WebGL1 is experimental: limited GLSL ES 1.00 and nearest 2D textures;
-  no framebuffer objects, blending, mipmaps or general shader control flow.
-  WebGL2 contexts return `null`; WebGPU is unavailable. This does not establish
-  Three.js compatibility.
-- Service Workers do not yet intercept fetches or provide offline navigation.
-  Registrations and Cache API entries are not persisted to disk; module Service Workers,
-  worker messaging and client enumeration are unfinished.
+- WebGL1/WebGL2 are experimental: bounded GLSL ES 1.00/3.00, without framebuffer
+  objects, instancing, mipmaps, general shader control flow or user-defined
+  functions. Texture minification/magnification filters must both be `NEAREST`
+  or both `LINEAR`; mixed filters are unsupported. WebGPU is unavailable.
+  Three.js compatibility has not been established.
+- Service Workers intercept only controlled documents' `window.fetch()`.
+  Navigation, image/style/script loaders and XHR are not intercepted, and offline
+  navigation is unfinished. Registrations and Cache API entries are not persisted
+  to disk; module Service Workers, worker messaging and client enumeration remain
+  open. Client abort reasons are preserved, but propagation to the worker's
+  `event.request.signal` and physical HTTP cancellation are unfinished.
+- Complex sign-in screens, including Google Account pages, still have layout
+  and interaction gaps; a complete authenticated sign-in has not been validated.
 - No Temporal API; Intl is partial.
-- The JIT is off by default (it is not yet faster than the interpreter on
-  Speedometer) and disabled on Windows until tested there.
+- The JIT is off by default while compatibility and performance acceptance
+  gates remain open, and disabled on Windows until tested there.
 - Speedometer score is far from Chrome's; JavaScript speed is the main gap.
 - H.264/HE-AAC video needs Windows (Media Foundation).
 
