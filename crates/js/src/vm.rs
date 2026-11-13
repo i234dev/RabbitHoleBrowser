@@ -4051,6 +4051,17 @@ impl Realm {
                     let r = std::mem::replace(&mut self.resume_mode, 0) == 2;
                     push!(Value::Bool(r));
                 }
+                Op::CheckCoercibleUnder => {
+                    if self.vstack[sp - 2].is_nullish() {
+                        let k = self.vstack[sp - 1].clone();
+                        let what = if self.vstack[sp - 2].is_null() { "null" } else { "undefined" };
+                        let key = match k.v() {
+                            V::String(s) => format!(" (reading '{}')", s.to_rust_string()),
+                            _ => String::new(),
+                        };
+                        return self.type_error(&format!("Cannot read properties of {what}{key}"));
+                    }
+                }
                 Op::DeleteGlobal(i) => {
                     let key = const_key!(i);
                     let lexical = key.as_str().map(|n| self.global_lex.get(n).is_some()).unwrap_or(false);

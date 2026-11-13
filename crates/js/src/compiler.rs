@@ -2084,6 +2084,19 @@ impl Compiler {
 
     fn compile_stmt(&mut self, s: &Stmt) -> CResult<()> {
         self.set_pos(s.pos);
+        // Completion values (eval / scripts): these statements complete
+        // with undefined unless their body produces a value
+        // (UpdateEmpty(result, undefined)).
+        if self.completion
+            && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval)
+            && matches!(
+                s.kind,
+                StmtKind::If { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::Switch { .. } | StmtKind::Try { .. } | StmtKind::With { .. }
+            )
+        {
+            self.emit(Op::Undefined);
+            self.emit(Op::StoreCompletion);
+        }
         match &s.kind {
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::Expr(e) => {
@@ -3788,6 +3801,7 @@ impl Compiler {
                     }
                     MemberProp::Computed(k) => {
                         self.compile_expr(k)?;
+                        self.emit(Op::CheckCoercibleUnder);
                         self.emit(Op::ToPropertyKey);
                         self.emit(Op::GetElemKeep);
                         self.emit(Op::ToNumeric);
@@ -3960,6 +3974,7 @@ impl Compiler {
                     MemberProp::Private(n) => self.emit_private_name(n)?,
                     MemberProp::Computed(k) => {
                         self.compile_expr(k)?;
+                        self.emit(Op::CheckCoercibleUnder);
                         self.emit(Op::ToPropertyKey);
                     }
                     _ => unreachable!(),

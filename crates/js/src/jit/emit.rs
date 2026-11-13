@@ -138,7 +138,7 @@ fn classify_all(op: &Op) -> Class {
         Op::StoreCompletionR(..) => Helper(h_store_completion as *const () as usize, "h_store_completion"),
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
-        Op::DeleteGlobal(..) => exec,
+        Op::DeleteGlobal(..) | Op::CheckCoercibleUnder => exec,
         Op::CallEval(..) | Op::EvalSite(..) | Op::NewEvalVars | Op::DeclareEvalVar(..) | Op::DeclareEvalGlobalVar(..) => Reject("direct eval"),
         Op::ResumeIsReturn | Op::YieldStarStep(..) | Op::YieldStarCheck | Op::YStarIs(..) | Op::YieldRaw | Op::ResumeMode => Reject("suspends"),
         Op::IteratorStepReg(..) | Op::IteratorRestReg(..) | Op::IteratorCloseIfNotDoneReg(..) | Op::IteratorCloseOnThrow(..) => Reject("writes registers out of line"),

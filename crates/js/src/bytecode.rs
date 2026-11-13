@@ -292,6 +292,9 @@ pub enum Op {
     /// resumed value is then a return value; see `generator_resume_raw`)
     ResumeIsReturn,
 
+    /// obj key -> obj key: TypeError when obj is null/undefined (before the
+    /// key is converted: `null[k] += v` must not call `k.toString`).
+    CheckCoercibleUnder,
     /// -> result of `delete name` for an unbound name (global property).
     DeleteGlobal(u32),
 
@@ -827,6 +830,7 @@ impl Op {
             TakePrivate => (1, 1),
             EvalSite(_) | DeclareEvalGlobalVar(_) => (0, 0),
             NewEvalVars | ResumeIsReturn | DeleteGlobal(_) => (0, 1),
+            CheckCoercibleUnder => (2, 2),
             YieldStarStep(_) => (4, 3),
             YieldStarCheck => (3, 3),
             YStarIs(_) | ResumeMode => (0, 1),
