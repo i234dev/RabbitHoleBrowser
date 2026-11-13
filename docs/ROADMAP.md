@@ -61,11 +61,43 @@ Next steps, in order:
   collections and file APIs, guided by reproducible WPT failures.
 - CSS priorities: overflow, compositing, positioned inline containing blocks,
   masking, selectors/nesting, transforms, images and borders.
-- Implement the remaining realm integration and evaluate Service Workers and
-  WebGL as separate projects with their own designs, tests and milestones.
+- Continue realm integration and the partial Service Worker and WebGL milestones
+  below; neither implementation completes platform compatibility.
 - Intl and Temporal remain deferred.
 - An AArch64 emitter for the JavaScript and WebAssembly JITs is a separate
   backend project, to be validated on real ARM hardware including Apple Silicon.
+
+### Experimental WebGL
+
+The first WebGL1 rendering milestone is implemented: JavaScript shader/program
+and buffer APIs drive our software backend, produce visible canvas pixels and
+support `readPixels`. Depth, uniforms and RGBA8 nearest 2D textures are covered
+by backend pixel tests, API tests and page-renderer tests. See
+[the current surface and limits](webgl.md).
+
+Next: expand GLSL and rendering state with pixel regressions, then validate
+real workloads against the supported surface. Framebuffer objects, blending,
+general shader control flow and linear/mipmapped textures remain open.
+WebGL2 still returns `null`. The backend's optional GLSL ES 3.00 parsing mode
+is preparatory work; a WebGL2 milestone also needs coherent context state,
+objects and APIs, including vertex array objects, before it can be exposed.
+Modern Three.js compatibility has not been established.
+
+### Service Worker lifecycle and memory cache
+
+Classic Service Worker scripts now execute in isolated worker realms, with
+registration, install/activate lifetimes, rejected-install handling, updates,
+waiting workers, `skipWaiting`, `clients.claim` and controller notifications.
+Origin-scoped Cache API entries hold actual response bytes and shared storage
+within an engine instance. This state survives document changes in that
+instance, but does not survive engine shutdown or share state across independent
+engines. See [the lifecycle and cache scope](service-workers.md).
+
+Next: implement fetch-event interception and `respondWith`, validate controlled
+navigation and offline behavior, then add disk persistence and restart tests.
+Module Service Workers, messaging, client enumeration and navigation preload
+also remain open. Lifecycle and cache tests do not establish offline support;
+the separate HTTP cache's disk storage does not persist Service Worker state.
 
 ## 5. Validate usability and deliver builds
 

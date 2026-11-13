@@ -84,6 +84,15 @@ code unless noted in [Dependencies](#dependencies).
   (Mutation/Intersection/Resize), canvas 2D, fetch/XHR with CORS, WebSocket,
   EventSource, Streams, IndexedDB, Web Crypto, Workers, iframes with
   same-origin scripting and `postMessage`, history and Navigation API.
+- Experimental WebGL1: own software shader evaluator, clipping and triangle
+  rasterizer, vertex/index buffers, uniforms, depth testing, RGBA8 nearest
+  2D textures, canvas presentation and `readPixels`. See [supported operations
+  and limits](docs/webgl.md); this is a rendering subset, not full WebGL conformance.
+- Service Worker lifecycle: classic scripts run in an isolated worker realm,
+  with installation/activation, `waitUntil`, updates, `skipWaiting` and
+  `clients.claim`. Registrations and origin-scoped Cache API data live in memory
+  within an engine instance. Fetch interception and offline navigation are pending;
+  see [the lifecycle milestone](docs/service-workers.md).
 
 **Media**
 
@@ -106,7 +115,14 @@ code unless noted in [Dependencies](#dependencies).
 
 ## Limitations (for now)
 
-- No WebGL/WebGPU; no Temporal API; Intl is partial.
+- WebGL1 is experimental: limited GLSL ES 1.00 and nearest 2D textures;
+  no framebuffer objects, blending, mipmaps or general shader control flow.
+  WebGL2 contexts return `null`; WebGPU is unavailable. This does not establish
+  Three.js compatibility.
+- Service Workers do not yet intercept fetches or provide offline navigation.
+  Registrations and Cache API entries are not persisted to disk; module Service Workers,
+  worker messaging and client enumeration are unfinished.
+- No Temporal API; Intl is partial.
 - The JIT is off by default (it is not yet faster than the interpreter on
   Speedometer) and disabled on Windows until tested there.
 - Speedometer score is far from Chrome's; JavaScript speed is the main gap.
@@ -233,6 +249,7 @@ A Cargo workspace; each stage of the pipeline is its own crate:
 | `crates/style`     | UA stylesheet, cascade (with layers), computed values, incremental restyle. |
 | `crates/layout`    | Box tree, block/inline/flex/grid/table layout, display list, incremental relayout. |
 | `crates/gfx`       | Software rasterizer, fonts and shaping, image decoding, canvas 2D backend. |
+| `crates/webgl`     | Experimental own software WebGL shader evaluator, clipping, rasterization and texture sampling. |
 | `crates/svg`       | SVG parsing and rendering. |
 | `crates/net`       | URL, HTTP/2 + HTTP/1.1, cache, cookies, CORS, WebSocket, EventSource. |
 | `crates/js`        | JavaScript engine: parser, compiler, interpreter, GC, builtins, regex, JIT front-end. |
@@ -283,7 +300,10 @@ details and measurements.
   closures and generators.
 - WPT DOM and CSS pass rates up (CSSOM view, `document.write`, speculative
   parsing, text, masking); Intl and Temporal later.
-- WebGL, Temporal, full Intl.
+- Extend experimental WebGL1 with tested shader and rendering capabilities;
+  design a coherent WebGL2 milestone before exposing a WebGL2 context.
+- Service Worker fetch interception, offline navigation and persistent storage;
+  Temporal and full Intl later.
 - macOS and Linux packaging; JIT enabled on Windows after real-hardware testing.
 
 ## License
