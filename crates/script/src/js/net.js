@@ -5,6 +5,7 @@
   'use strict';
   const g = globalThis;
   const N = g.__rhNative;
+  const cloneCodec = g.__rhClone;
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
@@ -319,19 +320,23 @@
     } catch (e) { return Promise.reject(e); }
     if (!signal) return fetchNative.call(this, input, init);
     return new Promise((resolve, reject) => {
-      let nativePromise, done = false;
+      let nativePromise, done = false, serializedReason;
       const abort = () => {
         if (done) return;
         done = true;
         signal.removeEventListener('abort', abort);
-        if (nativePromise) N.cancelFetch(nativePromise);
-        reject(signal.reason);
+        const reason = signal.reason;
+        try {
+          serializedReason = JSON.stringify(reason instanceof g.DOMException ? { kind:'exception', name:reason.name, message:reason.message } : { kind:'clone', value:cloneCodec.serialize(reason) });
+        } catch (_) { serializedReason = '{"kind":"exception","name":"AbortError","message":"Fetch aborted"}'; }
+        if (nativePromise) N.cancelFetch(nativePromise, serializedReason);
+        reject(reason);
       };
       signal.addEventListener('abort', abort, { once: true });
       if (signal.aborted) { abort(); return; }
       try { nativePromise = fetchNative.call(this, input, init, signal); }
       catch (e) { done = true; signal.removeEventListener('abort', abort); reject(e); return; }
-      if (done) { N.cancelFetch(nativePromise); nativePromise.catch(() => {}); return; }
+      if (done) { N.cancelFetch(nativePromise, serializedReason); nativePromise.catch(() => {}); return; }
       nativePromise.then(response => {
         if (done) return;
         done = true; signal.removeEventListener('abort', abort); resolve(response);

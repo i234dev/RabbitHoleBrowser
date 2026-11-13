@@ -1,7 +1,7 @@
 // A real service worker global, installed only in its own Worker realm.
 (function () {
   'use strict';
-  const g = globalThis, N = g.__rhNative, api = g.__rhSW;
+  const g = globalThis, N = g.__rhNative, api = g.__rhSW, cloneCodec = g.__rhClone;
   const info = N.swSnapshot();
   class ServiceWorkerGlobalScope extends g.WorkerGlobalScope {}
   Object.defineProperty(ServiceWorkerGlobalScope.prototype, Symbol.toStringTag, { value: 'ServiceWorkerGlobalScope', configurable: true });
@@ -39,7 +39,7 @@
     s.dispatching = false;
     queueMicrotask(() => finish(e));
   });
-  const fetchState = new WeakMap();
+  const fetchState = new WeakMap(), fetchSignals = new Map();
   class FetchEvent extends ExtendableEvent {
     constructor(type, init = {}) {
       super(type, init);
@@ -74,6 +74,9 @@
   Object.defineProperty(FetchEvent.prototype, Symbol.toStringTag, { value: 'FetchEvent', configurable: true });
   Object.defineProperty(g, 'FetchEvent', { value: FetchEvent, configurable: true, writable: true });
   N.registerProto('__sw_fetch', function (id, request, clientId) {
+    const controller = new g.AbortController();
+    Object.defineProperty(request, 'signal', { value: controller.signal, configurable: true, enumerable: true });
+    fetchSignals.set(id, controller);
     const event = new FetchEvent('fetch', { request, clientId, cancelable: true });
     const state = fetchState.get(event), life = lifetime.get(event);
     life.dispatching = true; life.fetchId = id;
@@ -86,6 +89,19 @@
     }
     queueMicrotask(() => finish(event));
   });
+  N.registerProto('__sw_fetch_abort', function (id, encoded) {
+    const controller = fetchSignals.get(id);
+    fetchSignals.delete(id);
+    if (!controller) return;
+    let reason = new DOMException('Fetch aborted', 'AbortError');
+    try {
+      const record = JSON.parse(encoded);
+      const decoded = record.kind === 'exception' ? new DOMException(record.message, record.name) : cloneCodec.deserialize(record.value);
+      if (decoded !== undefined) reason = decoded;
+    } catch (_) {}
+    controller.abort(reason);
+  });
+  N.registerProto('__sw_fetch_complete', function (id) { fetchSignals.delete(id); });
   Object.defineProperty(g, 'registration', { get() { return api.registration(info.registration); }, configurable: true });
   Object.defineProperty(g, 'serviceWorker', { get() { return api.worker(info.worker); }, configurable: true });
   Object.defineProperty(g, 'skipWaiting', { value: function skipWaiting() { N.swSkipWaiting(); return Promise.resolve(); }, configurable: true, writable: true });

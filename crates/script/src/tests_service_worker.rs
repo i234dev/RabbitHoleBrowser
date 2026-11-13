@@ -362,3 +362,27 @@ fn service_worker_fetch_waits_for_activation_without_falling_through_to_network(
     drive_fetch(&mut env, &mut host, 20);
     assert_eq!(run(&mut env, &mut host, "console.log(response);"), ["after-activation"]);
 }
+
+#[test]
+fn service_worker_abort_signal_reaches_request_clone_and_delayed_forwarding() {
+    let (mut env, mut host) = controlled_worker(r#"
+        onfetch = event => {
+            const requests = [event.request, event.request.clone(), new Request(event.request)];
+            event.request.signal.addEventListener('abort', () => console.log('worker-abort', event.request.signal.aborted, event.request.signal.reason.tag));
+            event.respondWith(new Promise(() => {}));
+            setTimeout(() => {
+                for (const request of requests) fetch(request).then(() => console.log('must not forward'), error => console.log('forward-aborted', error === event.request.signal.reason, error.tag));
+            }, 100);
+        };
+    "#);
+    run(&mut env, &mut host, "var controller = new AbortController(), reason = {tag:'original', nested:[1,2]}, preserved; fetch('no-network', {signal:controller.signal}).catch(error => preserved = error === reason);");
+    drive_fetch(&mut env, &mut host, 2);
+    run(&mut env, &mut host, "controller.abort(reason);");
+    drive_fetch(&mut env, &mut host, 30);
+    assert_eq!(run(&mut env, &mut host, "console.log(preserved);"), ["true"]);
+    let output = logs(&env);
+    assert!(output.iter().any(|s| s.ends_with("worker-abort true original")), "{output:?}");
+    assert_eq!(output.iter().filter(|s| s.ends_with("forward-aborted true original")).count(), 3, "{output:?}");
+    assert!(!output.iter().any(|s| s.contains("must not forward")));
+    assert!(host.next_due().is_none());
+}

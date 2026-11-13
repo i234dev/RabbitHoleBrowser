@@ -250,3 +250,32 @@ fn intercepted_fetch_preserves_credentials_and_rejects_unsafe_no_cors_before_net
     assert_eq!(requests.len(),1,"only the ordinary CORS fetch may reach the cross-origin server: {requests:?}");
     assert!(!requests[0].1.to_ascii_lowercase().contains("x-custom:"));
 }
+
+#[test]
+fn aborted_fetch_propagates_worker_signal_and_never_forwards_delayed_request_to_http() {
+    let html = "<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let worker = r#"onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{
+      const request=e.request.clone();
+      e.waitUntil(caches.open('signals').then(c=>c.put('/event-seen',new Response('yes'))));
+      e.respondWith(new Promise((resolve,reject)=>e.request.signal.addEventListener('abort',()=>reject(e.request.signal.reason))));
+      setTimeout(()=>fetch(request).then(()=>console.log('unexpected-network'),error=>console.log('forward-aborted',error===e.request.signal.reason,error.name,error.message)),100);
+    };"#;
+    let server=Server::new(&[("/app/page.html","text/html",html,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/never","text/plain","must not reach HTTP",&[])]);
+    let mut engine=engine();
+    let mut page=engine.load(&format!("{}/app/page.html",server.origin),Viewport{width:320.0,height:240.0}).unwrap();
+    wait(&engine,&mut page,"controlled===true");
+    engine.eval_in_page(&mut page,"var controller=new AbortController(), reason=new DOMException('client stopped','AbortError'), preserved=false, eventSeen=false;fetch('never',{signal:controller.signal}).catch(e=>preserved=e===reason);function check(){caches.match('/event-seen').then(r=>{if(r)eventSeen=true;else setTimeout(check,5);});}check();");
+    wait(&engine,&mut page,"eventSeen===true");
+    engine.eval_in_page(&mut page,"controller.abort(reason);");
+    wait(&engine,&mut page,"preserved===true");
+    let end=Instant::now()+Duration::from_secs(2);
+    let mut observed=false;
+    while Instant::now()<end {
+        engine.tick(&mut page);
+        for (_,text) in page.take_console() { if text.contains("forward-aborted true AbortError client stopped") {observed=true;} assert!(!text.contains("unexpected-network")); }
+        if observed {break;}
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(observed,"worker clone did not observe deserialized AbortError");
+    assert!(!server.requests.lock().unwrap().iter().any(|(path,_)|path=="/app/never"));
+}

@@ -941,7 +941,7 @@ pub(crate) struct PendingFetch {
     pub rx: FetchReceiver,
     pub sink: FetchSink,
     pub promise: Option<ObjectId>,
-    pub cancellation: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    pub cancellation: Option<std::rc::Rc<crate::service_worker::FetchCancellation>>,
 }
 fn reply_object(realm: &mut Realm, reply: FetchReply) -> Value {
     let r = reply.response;
@@ -953,13 +953,14 @@ fn reply_object(realm: &mut Realm, reply: FetchReply) -> Value {
 /// Called only in the owning realm by the AbortSignal wrapper.
 pub(crate) fn cancel_fetch(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let id = arg(args, 0).as_object();
+    let reason = if arg(args, 1).is_undefined() { None } else { Some(arg_str(realm, args, 1)?) };
     let pending = {
         let st = state(); let mut st = st.borrow_mut();
         let index = st.pending_fetches.iter().position(|p| p.promise.is_some() && p.promise == id);
         index.map(|i| st.pending_fetches.remove(i))
     };
     if let Some(p) = pending {
-        if let Some(cancelled) = p.cancellation { cancelled.set(true); }
+        if let Some(cancelled) = p.cancellation { cancelled.cancel(reason); }
         if let FetchSink::Promise(resolve, reject, _) = p.sink {
             crate::host::unroot_value(realm, &resolve);
             crate::host::unroot_value(realm, &reject);

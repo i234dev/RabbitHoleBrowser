@@ -49,13 +49,27 @@ struct Store {
     cache_names: BTreeMap<String, Vec<(String, u64)>>,
     caches: BTreeMap<u64, CacheRecord>,
 }
+/// Cancellation data shared between host bookkeeping only, never JS Values.
+#[derive(Default)]
+pub(crate) struct FetchCancellation {
+    cancelled: std::cell::Cell<bool>,
+    reason: RefCell<Option<String>>,
+}
+impl FetchCancellation {
+    pub(crate) fn get(&self) -> bool { self.cancelled.get() }
+    pub(crate) fn set(&self, value: bool) { if value { self.cancel(None); } }
+    pub(crate) fn cancel(&self, reason: Option<String>) {
+        if !self.cancelled.replace(true) { *self.reason.borrow_mut() = reason; }
+    }
+}
 struct FetchTask {
     client: u64,
     worker: u64,
     request: Request,
     sender: Option<std::sync::mpsc::Sender<Result<crate::fetch::FetchReply, String>>>,
-    cancelled: Rc<std::cell::Cell<bool>>,
+    cancelled: Rc<FetchCancellation>,
     dispatched: bool,
+    abort_notified: bool,
     fallback: bool,
     result: Option<Result<crate::fetch::FetchReply, String>>,
     network: Option<std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>>,
@@ -122,7 +136,7 @@ impl Notice {
 impl Store {
     fn id(&mut self) -> u64 { self.next += 1; self.next }
     fn prune_fetches(&mut self) {
-        self.fetches.retain(|_, f| !f.cancelled.get());
+        self.fetches.retain(|_, f| !f.cancelled.get() || (f.dispatched && !f.abort_notified));
         let obsolete: Vec<u64> = self.runtimes.keys().filter(|id| self.workers[*id].state == "redundant" && !fetch_work(self, **id)).copied().collect();
         for id in obsolete { self.runtimes.remove(&id); }
     }
@@ -131,7 +145,7 @@ impl Store {
             !r.registered
                 && !self.clients.values().any(|c| c.controller.is_some_and(|id| self.workers[&id].registration == r.id))
                 && !self.workers.values().any(|w| w.registration == r.id && matches!(w.state, "parsed" | "installing" | "activating"))
-                && !self.fetches.values().any(|f| self.workers[&f.worker].registration == r.id && !f.lifetime_done && !f.cancelled.get())
+                && !self.fetches.values().any(|f| self.workers[&f.worker].registration == r.id && !f.lifetime_done && (!f.cancelled.get() || (f.dispatched && !f.abort_notified)))
         }).map(|r| r.id).collect();
         for registration in registrations {
             let r = self.registrations.get_mut(&registration).unwrap();
@@ -176,7 +190,7 @@ pub(crate) fn new_context(env: &mut dyn HostEnv) -> (Context, Option<ServiceWork
     (Context { registry: Rc::downgrade(&registry.0), client: Some(id), worker: None }, Some(registry))
 }
 pub(crate) fn drop_context(context: &Context) {
-    if let (Some(id), Some(store)) = (context.client, context.registry.upgrade()) { let mut s = store.borrow_mut(); s.clients.remove(&id); s.fetches.retain(|_, f| f.client != id); s.prune_fetches(); s.clear_unregistered(); }
+    if let (Some(id), Some(store)) = (context.client, context.registry.upgrade()) { let mut s = store.borrow_mut(); s.clients.remove(&id); for f in s.fetches.values().filter(|f| f.client == id) { f.cancelled.set(true); } s.prune_fetches(); s.clear_unregistered(); }
 }
 pub(crate) fn is_worker(context: &Context) -> bool { context.worker.is_some() }
 impl ServiceWorkerScope {
@@ -298,7 +312,7 @@ fn take_events(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
     Ok(realm.new_array_value(out))
 }
 pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
-    realm.define_method(n, "cancelFetch", 1, crate::fetch::cancel_fetch);
+    realm.define_method(n, "cancelFetch", 2, crate::fetch::cancel_fetch);
     realm.define_method(n, "swFetchResponse", 2, fetch_response);
     realm.define_method(n, "swFetchFailed", 1, fetch_failed);
     realm.define_method(n, "swFetchFallback", 1, fetch_fallback);
@@ -315,7 +329,7 @@ pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
 
 /// Only controlled window clients are intercepted. Worker-initiated fetches
 /// deliberately bypass the registry, including fetch(event.request).
-pub(crate) fn intercept_fetch(request: &Request) -> Option<(std::sync::mpsc::Receiver<Result<crate::fetch::FetchReply, String>>, Rc<std::cell::Cell<bool>>)> {
+pub(crate) fn intercept_fetch(request: &Request) -> Option<(std::sync::mpsc::Receiver<Result<crate::fetch::FetchReply, String>>, Rc<FetchCancellation>)> {
     let c = context();
     if c.worker.is_some() || !request.url.is_http() || state().borrow().worker_info.is_some() { return None; }
     let registry = c.registry.upgrade()?;
@@ -324,8 +338,8 @@ pub(crate) fn intercept_fetch(request: &Request) -> Option<(std::sync::mpsc::Rec
     let worker = s.clients.get(&client)?.controller?;
     if !matches!(s.workers.get(&worker)?.state, "activating" | "activated") { return None; }
     let id = s.id(); let (tx, rx) = std::sync::mpsc::channel();
-    let token = Rc::new(std::cell::Cell::new(false));
-    s.fetches.insert(id, FetchTask { client, worker, request: request.clone(), sender: Some(tx), cancelled: token.clone(), dispatched: false, fallback: false, result: None, network: None, lifetime_done: false });
+    let token = Rc::new(FetchCancellation::default());
+    s.fetches.insert(id, FetchTask { client, worker, request: request.clone(), sender: Some(tx), cancelled: token.clone(), dispatched: false, abort_notified: false, fallback: false, result: None, network: None, lifetime_done: false });
     Some((rx, token))
 }
 fn fetch_identity(realm: &mut Realm, args: &[Value]) -> JsResult<(Rc<RefCell<Store>>, u64)> {
@@ -371,10 +385,27 @@ fn fetch_done(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     if let Ok((store, id)) = fetch_identity(realm, args) { store.borrow_mut().fetches.get_mut(&id).unwrap().lifetime_done = true; }
     Ok(Value::Undefined)
 }
-fn fetch_work(s: &Store, worker: u64) -> bool { s.fetches.values().any(|f| f.worker == worker && !f.cancelled.get()) }
+fn fetch_work(s: &Store, worker: u64) -> bool { s.fetches.values().any(|f| f.worker == worker && (!f.cancelled.get() || (f.dispatched && !f.abort_notified))) }
+fn worker_fetch_hook(runtime: &mut Runtime, env: &mut dyn HostEnv, name: &str, args: &[Value]) {
+    let mut wenv = WorkerEnv { outer: env, doc: &mut runtime.doc, url: runtime.url.clone(), errors: runtime.errors.clone(), service_worker: None };
+    runtime.host.enter(&mut wenv, |realm| {
+        realm.begin_task();
+        let hook = state().borrow().protos.get(name).copied();
+        if let Some(hook) = hook {
+            if let Err(error) = realm.call(Value::Object(hook), Value::Undefined, args) { crate::host::report_error(realm, &error, "service worker fetch notification"); }
+            realm.run_jobs();
+        }
+    });
+}
 fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Runtime, env: &mut dyn HostEnv) {
     if !matches!(runtime.phase, Phase::Active) { return; }
-    registry.0.borrow_mut().fetches.retain(|_, f| !f.cancelled.get());
+    // Signal abort in the worker realm before retiring its request bookkeeping.
+    let aborted: Vec<(u64, String)> = registry.0.borrow().fetches.iter().filter(|(_, f)| f.worker == worker && f.cancelled.get() && f.dispatched && !f.abort_notified).map(|(&id, f)| (id, f.cancelled.reason.borrow().clone().unwrap_or_default())).collect();
+    for (id, reason) in aborted {
+        worker_fetch_hook(runtime, env, "__sw_fetch_abort", &[Value::Number(id as f64), Value::str(&reason)]);
+        if let Some(f) = registry.0.borrow_mut().fetches.get_mut(&id) { f.abort_notified = true; }
+    }
+    registry.0.borrow_mut().fetches.retain(|_, f| !f.cancelled.get() || (f.dispatched && !f.abort_notified));
     let ids: Vec<u64> = registry.0.borrow().fetches.iter().filter(|(_, f)| f.worker == worker && !f.dispatched).map(|(&id, _)| id).collect();
     for id in ids {
         let (req, client) = {
@@ -385,6 +416,9 @@ fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Run
         let mut wenv = WorkerEnv { outer: env, doc: &mut runtime.doc, url: runtime.url.clone(), errors: runtime.errors.clone(), service_worker: None };
         runtime.host.enter(&mut wenv, |realm| {
             realm.begin_task();
+            // This entry originates in Rust rather than a native call scope.
+            // Release temporary request roots after the dispatch checkpoint.
+            let root_mark = realm.native_roots.len();
             let request = crate::fetch::make_request(realm, &req.url.to_string(), &req.method, req.headers, req.body.map(|b| b.data).unwrap_or_default());
             realm.native_root(request.clone());
             let o = request.as_object().unwrap();
@@ -400,6 +434,7 @@ fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Run
                 }
                 realm.run_jobs();
             }
+            realm.native_roots.truncate(root_mark);
         });
     }
     let ids: Vec<u64> = registry.0.borrow().fetches.iter().filter(|(_, f)| f.worker == worker).map(|(&id, _)| id).collect();
@@ -420,6 +455,7 @@ fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Run
         }
         if let Some(result) = task.result.take() { if let Some(sender) = task.sender.take() { if sender.send(result).is_err() { task.cancelled.set(true); } } }
         if !task.cancelled.get() && !(task.sender.is_none() && task.lifetime_done) { registry.0.borrow_mut().fetches.insert(id, task); }
+        else { worker_fetch_hook(runtime, env, "__sw_fetch_complete", &[Value::Number(id as f64)]); }
     }
 }
 
