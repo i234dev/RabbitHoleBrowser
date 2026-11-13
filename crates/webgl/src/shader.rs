@@ -4,6 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ty {
+    // Integer literals can be converted by constructors, not assigned or
+    // used in arithmetic as if they were floating-point values.
+    IntLiteral,
     Float,
     Vec2,
     Vec3,
@@ -23,7 +26,7 @@ impl Ty {
     }
     pub fn n(self) -> usize {
         match self {
-            Self::Float => 1,
+            Self::IntLiteral | Self::Float => 1,
             Self::Vec2 => 2,
             Self::Vec3 => 3,
             Self::Vec4 => 4,
@@ -101,7 +104,7 @@ impl Shader {
 impl Expr {
     fn eval(&self, env: &BTreeMap<String, Value>) -> Value {
         match &self.kind {
-            ExprKind::Number(n) => Value::from(Ty::Float, &[*n]),
+            ExprKind::Number(n) => Value::from(self.ty, &[*n]),
             ExprKind::Name(n) => env[n],
             ExprKind::Neg(e) => {
                 let mut r = e.eval(env);
@@ -121,7 +124,7 @@ impl Expr {
             ExprKind::Construct(args) => {
                 let values: Vec<_> = args.iter().map(|a| a.eval(env)).collect();
                 let mut r = Value::zero(self.ty);
-                if values.len() == 1 && values[0].ty == Ty::Float {
+                if values.len() == 1 && matches!(values[0].ty, Ty::Float | Ty::IntLiteral) {
                     if self.ty == Ty::Mat4 {
                         for i in 0..4 {
                             r.v[i * 5] = values[0].v[0];
@@ -181,7 +184,7 @@ impl Expr {
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
     Id(String),
-    Num(f32),
+    Num(f32, bool),
     P(char),
     End,
 }
@@ -254,7 +257,11 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             if !n.is_finite() {
                 return Err("numeric literal is not finite".into());
             }
-            out.push(Tok::Num(n));
+            let integral = !src[s..i].contains(['.', 'e', 'E']);
+            if integral && (n > 16_777_216. || (i - s > 1 && b[s] == b'0')) {
+                return Err("integer literal is outside the supported decimal range".into());
+            }
+            out.push(Tok::Num(n, integral));
             continue;
         }
         if b";{}(),=+-*/.".contains(&c) {
@@ -366,8 +373,8 @@ impl Parser {
             return Err("shader exceeds expression budget".into());
         }
         let mut left = match self.next() {
-            Tok::Num(n) => Expr {
-                ty: Ty::Float,
+            Tok::Num(n, integral) => Expr {
+                ty: if integral { Ty::IntLiteral } else { Ty::Float },
                 kind: ExprKind::Number(n),
             },
             Tok::P('-') => {
@@ -398,13 +405,17 @@ impl Parser {
                     }
                     self.expect(Tok::P(')'))?;
                     let total: usize = args.iter().map(|e| e.ty.n()).sum();
-                    let scalar = args.len() == 1 && args[0].ty == Ty::Float;
+                    let scalar =
+                        args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::IntLiteral);
                     let trunc = args.len() == 1
                         && args[0].ty != Ty::Mat4
                         && total >= ty.n()
                         && ty != Ty::Mat4;
                     if !scalar && !trunc && total != ty.n() {
                         return Err("constructor component count mismatch".into());
+                    }
+                    if ty == Ty::Float && !scalar {
+                        return Err("float constructors require a scalar argument".into());
                     }
                     if args.iter().any(|a| a.ty == Ty::Mat4) {
                         return Err("matrix conversion constructors are unsupported".into());
@@ -435,7 +446,7 @@ impl Parser {
         };
         loop {
             if self.eat('.') {
-                if matches!(left.ty, Ty::Mat4 | Ty::Float) {
+                if matches!(left.ty, Ty::Mat4 | Ty::Float | Ty::IntLiteral) {
                     return Err("swizzles require a vector".into());
                 }
                 let s = self.id()?;
@@ -476,6 +487,12 @@ impl Parser {
             }
             self.pos += 1;
             let right = self.expr(prec + 1)?;
+            if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
+                return Err(
+                    "integer arithmetic and implicit integer-to-float conversion are unsupported"
+                        .into(),
+                );
+            }
             let ty = if op == '*'
                 && ((left.ty == Ty::Mat4 && right.ty == Ty::Vec4)
                     || (left.ty == Ty::Vec4 && right.ty == Ty::Mat4))

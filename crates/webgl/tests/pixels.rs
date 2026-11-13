@@ -397,3 +397,34 @@ fn strip_and_fan_draw_real_quads() {
         assert!(c.framebuffer_rgba().iter().all(|v| *v == 255));
     }
 }
+
+#[test]
+fn integer_literals_convert_in_constructors_not_float_arithmetic() {
+    let mut c = Context::new(4, 4).unwrap();
+    let p = program(
+        &mut c,
+        "attribute vec2 p; void main(){gl_Position=vec4(p,0,1);}",
+        "precision mediump float;void main(){gl_FragColor=vec4(1);}",
+    );
+    attribute(&mut c, p, "p", 2, &[-1., -1., 1., -1., -1., 1.]);
+    c.draw_arrays(TRIANGLES, 0, 3).unwrap();
+    assert_eq!(pixel(&c, 0, 0), [255; 4]);
+    let f = c.create_shader(FRAGMENT_SHADER).unwrap();
+    for src in [
+        "precision mediump float;void main(){float x=1;gl_FragColor=vec4(x);}",
+        "precision mediump float;void main(){gl_FragColor=vec4(1/2);}",
+        "precision mediump float;void main(){gl_FragColor=vec4(010);}",
+    ] {
+        c.shader_source(f, src).unwrap();
+        c.compile_shader(f).unwrap();
+        assert!(!c.shader_compile_status(f).unwrap(), "accepted {src}");
+    }
+}
+#[test]
+fn draw_work_budget_rejects_before_changing_pixels() {
+    let mut c = Context::new(2048, 2048).unwrap();
+    let p=program(&mut c,"attribute vec2 p;void main(){gl_Position=vec4(p,0.0,1.0);}","precision mediump float;void main(){gl_FragColor=(vec4(1.0)*0.5+vec4(0.1))*0.5+vec4(0.1);}");
+    attribute(&mut c, p, "p", 2, &[-1., -1., 1., -1., -1., 1.]);
+    assert_eq!(c.draw_arrays(TRIANGLES, 0, 3), Err(Error::OutOfMemory));
+    assert!(c.framebuffer_rgba().iter().all(|v| *v == 0));
+}

@@ -42,7 +42,9 @@ qualifiers, `precision ... float;`, comments and optional `#version 100` are
 recognized. Fragment shaders require an explicit float precision declaration.
 Supported expressions are literals, variables, vector swizzles,
 constructors, unary signs and `+ - * /`; matrix/vector and matrix/matrix
-multiplication use GLSL column-major semantics. Matrix uniform updates require
+multiplication use GLSL column-major semantics. Decimal integer literals within
+the exact f32 range may be used in constructors; integer arithmetic and implicit
+integer-to-float assignment are rejected rather than evaluated as float math. Matrix uniform updates require
 `transpose=false`.
 
 Vertex shaders must write `gl_Position`; fragment shaders must write
