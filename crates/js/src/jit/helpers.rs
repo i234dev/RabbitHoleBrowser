@@ -1,8 +1,9 @@
 //! The boundary between native code, the run loop and the runtime.
 //!
-//! Native code calls helpers `extern "sysv64" fn(ctx, pc) -> status` (the
+//! Native code calls helpers `extern "sysv64" fn(ctx, ...) -> status` (the
 //! System V convention on every x86-64 target, so Windows needs no second
-//! calling convention). A helper decodes `code.ops[pc]` itself, syncs the
+//! calling convention). Most helpers decode `code.ops[pc]` themselves; calls
+//! and returns receive static operands from the emitter. Each syncs the
 //! frame's `pc` exactly like the interpreter does before anything that
 //! can throw or call, runs the interpreter's own code for the instruction
 //! and reports what native code does next. Helpers never unwind: a panic
@@ -263,28 +264,25 @@ pub(crate) unsafe extern "sysv64" fn h_tick(ctx: *mut Ctx, fpc: u32) -> usize {
     })
 }
 
-/// `ReturnR`: pop the frame (back to the run loop).
-pub(crate) unsafe extern "sysv64" fn h_return(ctx: *mut Ctx, pc: u32) -> usize {
+/// `ReturnR`: the emitter passes the source slot directly. Frame teardown
+/// remains shared with the interpreter, including constructors and entry frames.
+pub(crate) unsafe extern "sysv64" fn h_return(ctx: *mut Ctx, slot: u32) -> usize {
     guard(ctx, |r, ctx| {
-        let s = match op_at(ctx, pc) {
-            Op::ReturnR(s) => s,
-            _ => unreachable!(),
-        };
-        let v = std::mem::replace(&mut *(*ctx).slots.add(s as usize), Value::Undefined);
-        let c = r.return_r(v);
-        status(r, ctx, c, pc)
+        let v = std::mem::replace(&mut *(*ctx).slots.add(slot as usize), Value::Undefined);
+        match r.return_r(v) {
+            Ctl::Reload => ST_RELOAD,
+            Ctl::Done => ST_DONE,
+            Ctl::Next => unreachable!("return cannot continue in the popped frame"),
+        }
     })
 }
 
-/// `CallR`: calls of natives complete here; JavaScript callees get their
-/// frame pushed and run from the run loop.
-pub(crate) unsafe extern "sysv64" fn h_call(ctx: *mut Ctx, pc: u32) -> usize {
+/// `CallR`: static base/argc/cache operands are packed by the emitter instead
+/// of decoding bytecode on every activation. The call implementation, pc
+/// synchronization, unwind status and frame switch remain shared with the VM.
+pub(crate) unsafe extern "sysv64" fn h_call(ctx: *mut Ctx, pc: u32, args: u64) -> usize {
     guard(ctx, |r, ctx| {
-        let (b, argc, cic) = match op_at(ctx, pc) {
-            Op::CallR(b, argc, cic, _) => (b, argc, cic),
-            _ => unreachable!(),
-        };
-        let c = r.call_r(pc as usize + 1, b, argc, cic);
+        let c = r.call_r(pc as usize + 1, args as u16, (args >> 16) as u16, (args >> 32) as u16);
         status(r, ctx, c, pc)
     })
 }

@@ -292,3 +292,22 @@ var ss = 0; for (var i = 0; i < 2000; i++) ss += get(big, i % 1000).length; out.
 out.join(",")
 "#);
 }
+
+#[test]
+fn calls_with_wide_static_operands_and_return_slots() {
+    // Exercise call operands beyond the low byte, rather than only
+    // the low byte used by small hand-written functions.
+    let names: Vec<_> = (0..300).map(|i| format!("p{i}")).collect();
+    let args = (0..300).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    check(&format!("function leaf({}){{return p299;}} function outer(){{return leaf({args});}} outer()", names.join(",")), "299");
+    let mut source = String::from("function leaf(x){return x;}function many(){let s=0;");
+    for i in 0..300 {
+        source.push_str(&format!("s+=leaf({i});"));
+    }
+    source.push_str("return s;}many()");
+    check(&source, "44850");
+    // Return a counted value held beyond the low-byte range, while frames
+    // are repeatedly pushed/popped and the caller's slots can move.
+    let locals = (0..300).map(|i| format!("let v{i}='v{i}';")).collect::<String>();
+    check(&format!("function f(){{{locals}return v299;}}function g(){{let out='';for(let i=0;i<20;i++)out=f();return out;}}g()"), "v299");
+}

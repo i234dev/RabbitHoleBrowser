@@ -127,7 +127,7 @@ fn classify_all(op: &Op) -> Class {
         Op::IncJumpIfLtRR(..) | Op::IncJumpIfLtRK(..) => Native,
         Op::Nop | Op::Debugger => Native,
         // Dedicated helpers.
-        Op::ReturnR(..) => Helper(h_return as *const () as usize, "h_return"),
+        Op::ReturnR(..) => Native,
         Op::CallR(..) | Op::NewR(..) => Native,
         Op::GetGlobalR(..) | Op::SetGlobalR(..) => Native,
         Op::GetPropR(..) | Op::SetPropR(..) => Native,
@@ -1328,13 +1328,22 @@ impl Gen<'_> {
             Op::GetGlobalR(d, ic) => self.global(pc, ic, Ok(d)),
             Op::SetGlobalR(s, ic) => self.global(pc, ic, Err(s)),
             Op::Nop | Op::Debugger => {}
+            Op::ReturnR(slot) => {
+                self.call_helper(h_return as *const () as usize, "h_return", slot as u32);
+            }
             Op::CallR(..) | Op::NewR(..) => {
-                // The safe-point tick of a call, then the call helper.
+                // The call's safe point precedes both helpers; packing static
+                // operands changes no frame, GC or watchdog bookkeeping.
                 let here = self.a.label();
                 self.tick(pc + 1, here);
                 self.a.bind(here);
-                let (h, name) = if matches!(op, Op::CallR(..)) { (h_call as *const () as usize, "h_call") } else { (h_new as *const () as usize, "h_new") };
-                self.call_helper(h, name, pc as u32);
+                if let Op::CallR(base, argc, ic, _) = op {
+                    let args = base as u64 | ((argc as u64) << 16) | ((ic as u64) << 32);
+                    self.a.mov_imm64(RDX, args);
+                    self.call_helper(h_call as *const () as usize, "h_call", pc as u32);
+                } else {
+                    self.call_helper(h_new as *const () as usize, "h_new", pc as u32);
+                }
             }
             other => match classify(&other) {
                 Class::Helper(h, name) => self.call_helper(h, name, pc as u32),
