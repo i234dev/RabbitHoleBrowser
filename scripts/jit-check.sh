@@ -19,10 +19,16 @@ run() {
   shift
   env "$@" cargo test --release --features jit "${ARGS[@]}" 2>&1 |
     tee "$out/$mode.log" | grep -E "^test .* \.\.\. (ok|FAILED|ignored)$" | sort > "$out/$mode.txt"
+  # Matching results are insufficient if both modes failed the same test
+  # (or failed to compile). Preserve Cargo's status before another command
+  # overwrites PIPESTATUS.
+  return "${PIPESTATUS[0]}"
 }
 ARGS=("$@")
 run off RABBITHOLE_JIT=off
+off_status=$?
 run on RABBITHOLE_JIT=on RABBITHOLE_JIT_THRESHOLD=0
+on_status=$?
 echo "off: $(grep -c ' ok$' "$out/off.txt") passed, $(grep -c 'FAILED$' "$out/off.txt") failed"
 echo "on:  $(grep -c ' ok$' "$out/on.txt") passed, $(grep -c 'FAILED$' "$out/on.txt") failed"
 if diff "$out/off.txt" "$out/on.txt" > "$out/diff.txt"; then
@@ -30,5 +36,9 @@ if diff "$out/off.txt" "$out/on.txt" > "$out/diff.txt"; then
 else
   echo "DIFFERENT results ($out/diff.txt):"
   cat "$out/diff.txt"
+  exit 1
+fi
+if [ "$off_status" -ne 0 ] || [ "$on_status" -ne 0 ]; then
+  echo "test command failed (off: $off_status, on: $on_status); see $out/off.log and $out/on.log"
   exit 1
 fi
