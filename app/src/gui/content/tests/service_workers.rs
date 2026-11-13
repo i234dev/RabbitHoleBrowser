@@ -131,3 +131,33 @@ fn gui_navigation_referrer_privacy_cannot_be_undone_by_clones_or_policy_override
     for(_,headers)in&forwarded{assert!(!headers.contains("private-path")&&!headers.contains("secret-value")&&!headers.contains("hidden"),"discarded referrer escaped to wire: {headers}");}
     assert!(forwarded.iter().any(|(_,headers)|headers.to_ascii_lowercase().contains("sec-fetch-site: same-site")),"referrer stripping must retain origin-only initiator metadata: {forwarded:?}");
 }
+
+#[test]
+fn gui_manual_redirects_apply_response_policy_and_preserve_cross_site_taint(){
+    let worker_a=r#"onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{if(e.request.mode!=='navigate')return;const path=new URL(e.request.url).pathname;
+      if(path.endsWith('/bounce'))e.respondWith(caches.match('target').then(r=>r.text()).then(url=>{const r=Response.redirect(url,302);r.headers.set('referrer-policy','no-referrer');return r;}));
+      else if(path.endsWith('/landing')){console.log('return-view',JSON.stringify([e.request.referrer,e.request.clone().referrer,new Request(e.request).referrer]),e.request.referrerPolicy);e.respondWith(fetch(e.request.clone()));}
+    };"#;
+    let a=Server::new(&[("/app/start",200,"text/html",START,&[("Set-Cookie","strict=one; SameSite=Strict; Path=/")]),("/app/sw.js",200,"text/javascript",worker_a,&[]),("/app/baseline",200,"text/plain","ok",&[]),("/app/landing",200,"text/html","<!doctype html><title>Return protected</title>",&[])]);
+    let worker_b=r#"onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{if(e.request.mode==='navigate'){console.log('hop-view',JSON.stringify([e.request.referrer,e.request.clone().referrer,new Request(e.request).referrer]),e.request.referrerPolicy);e.respondWith(fetch(e.request.clone()));}};"#;
+    let back=format!("{}/app/landing",a.origin);
+    let b=Server::new(&[("/app/start",200,"text/html",START,&[]),("/app/sw.js",200,"text/javascript",worker_b,&[]),("/app/hop",302,"text/html","",&[("Location",&back),("Referrer-Policy","unsafe-url")])]);
+    // Both are loopback; different site hosts make SameSite/Fetch-Site taint observable.
+    let b_origin=b.origin.replace("127.0.0.1","localhost");
+    let(base,rx)=sink();let console=Arc::new(Mutex::new(Vec::new()));let recorded=console.clone();
+    let sink:Sink=Arc::new(move|tab,epoch,message|{if let FromContent::Console(lines)=&message{recorded.lock().unwrap().extend(lines.iter().map(|(_,text)|text.clone()));}base(tab,epoch,message);});
+    let mut settings=config(ViewSize::new(800,600,1.0));settings.loader.fetcher.cookies=Some(Arc::new(Mutex::new(rabbithole_engine::net::CookieJar::new())));
+    let h=ContentHandle::spawn(77,1,settings,sink);h.send(ToContent::SetActive(true));
+    navigate(&h,&format!("{}/app/start",a.origin));committed(&rx,77,"Start");until(&h,&rx,77,"controlled===true");
+    eval(&h,&rx,77,&format!("var configured=false;caches.open('settings').then(c=>c.put('target',new Response('{}'+'/app/hop'))).then(()=>fetch('baseline')).then(()=>configured=true);",b_origin));until(&h,&rx,77,"configured===true");
+    assert!(a.requests.lock().unwrap().iter().any(|(path,headers)|path=="/app/baseline"&&headers.contains("strict=one")),"positive control: same-site baseline sends stored Strict cookie");
+    navigate(&h,&format!("{b_origin}/app/start"));committed(&rx,77,"Start");until(&h,&rx,77,"controlled===true");
+    let source=url(&format!("{}/private?query=secret-value",a.origin));h.send(ToContent::LoadHtml{html:"<!doctype html><title>Before bounce</title>".into(),url:source.clone(),push_history:true});committed(&rx,77,"Before bounce");
+    h.send(ToContent::Navigate{request:Request::get(url(&format!("{}/app/bounce",a.origin))).with_referer(source),push_history:true});committed(&rx,77,"Return protected");
+    let lines=console.lock().unwrap();assert!(lines.iter().any(|text|text.ends_with("hop-view [\"\",\"\",\"\"] no-referrer")),"second-hop getter/clones must reflect response policy: {lines:?}");
+    assert!(lines.iter().any(|text|text.ends_with("return-view [\"\",\"\",\"\"] unsafe-url")),"later weaker policy cannot recover discarded referrer: {lines:?}");drop(lines);
+    let seen=a.requests.lock().unwrap();let landing:Vec<_>=seen.iter().filter(|(path,_)|path=="/app/landing").collect();assert_eq!(landing.len(),1);
+    let headers=landing[0].1.to_ascii_lowercase();assert!(headers.contains("sec-fetch-site: cross-site"),"return hop must retain worst site: {headers}");
+    assert!(!headers.contains("strict=one")&&!headers.contains("referer:")&&!headers.contains("secret-value"),"redirect chain privacy/cookie taint lost: {headers}");
+    let hop=b.requests.lock().unwrap();assert!(hop.iter().filter(|(path,_)|path=="/app/hop").all(|(_,headers)|!headers.to_ascii_lowercase().contains("referer:")),"HTTP redirect hop must not send referrer: {hop:?}");
+}

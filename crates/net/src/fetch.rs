@@ -248,6 +248,13 @@ impl Destination {
     }
 }
 
+/// Monotonic redirect metadata, without retaining historical source URLs.
+#[derive(Debug, Clone)]
+pub struct NavigationRedirectContext {
+    site: &'static str,
+    same_site_chain: bool,
+}
+
 /// A request: method, URL, optional body, extra headers and referer.
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -263,6 +270,8 @@ pub struct Request {
     /// No userinfo, path beyond '/', query or fragment may be stored here.
     /// Legacy callers derive the initiator from `referer` when this is absent.
     pub initiator: Option<Url>,
+    /// Prior manual navigation hops; None preserves legacy fetch behavior.
+    pub navigation_redirect: Option<NavigationRedirectContext>,
     /// Follow redirects (default true). `false` returns 3xx responses as
     /// they are (same as `redirect = Manual`).
     pub follow_redirects: bool,
@@ -288,6 +297,7 @@ impl Request {
             headers: Vec::new(),
             referer: None,
             initiator: None,
+            navigation_redirect: None,
             follow_redirects: true,
             dest: Destination::Document,
             mode: None,
@@ -298,6 +308,18 @@ impl Request {
             priority: None,
         }
     }
+    /// Continue a manually followed GET navigation with the same privacy,
+    /// Fetch Metadata and SameSite state as a normal network redirect chain.
+    pub fn follow_navigation_redirect(&mut self, target: &Url, response: &Response) {
+        let initiator = self.initiator.as_ref().or(self.referer.as_ref());
+        let site = self.navigation_redirect.as_ref().map(|c| c.site).unwrap_or_else(|| fetch_site(initiator, &self.url));
+        let context = CookieContext::new(initiator, &self.url, true, "GET");
+        let same_site_chain = self.navigation_redirect.as_ref().is_none_or(|c| c.same_site_chain) && context.same_site_chain && context.is_same_site(target);
+        self.navigation_redirect = Some(NavigationRedirectContext { site: worse_site(site, fetch_site(initiator, target)), same_site_chain });
+        if let Some(policy) = response.headers.iter().filter(|(name,_)| name.eq_ignore_ascii_case("referrer-policy")).filter_map(|(_,value)| ReferrerPolicy::parse(value)).last() { self.referrer_policy = policy; }
+        self.url = target.clone();
+    }
+
     pub fn get(url: Url) -> Request {
         Request::new("GET", url)
     }
@@ -313,6 +335,7 @@ impl Request {
     pub fn with_referer(mut self, r: Url) -> Request {
         self.referer = Some(r);
         self.initiator = None;
+        self.navigation_redirect = None;
         self
     }
     pub fn with_header(mut self, k: &str, v: &str) -> Request {
@@ -1227,7 +1250,7 @@ impl Fetcher {
         h.push(("Origin".into(), origin.to_string()));
         h.push(("User-Agent".into(), self.user_agent.clone()));
         h.push(("Sec-Fetch-Mode".into(), "cors".into()));
-        h.push(("Sec-Fetch-Site".into(), fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), url).into()));
+        h.push(("Sec-Fetch-Site".into(), worse_site(req.navigation_redirect.as_ref().map(|context| context.site).unwrap_or("none"), fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), url)).into()));
         h.push(("Sec-Fetch-Dest".into(), "empty".into()));
         if let Some(r) = req.referer.as_ref().and_then(|r| cors::referrer_for(r, url, req.referrer_policy)) {
             h.push(("Referer".into(), r));
@@ -1260,9 +1283,11 @@ impl Fetcher {
         let mut url_list = vec![url.clone()];
         let mut tainting = ResponseType::Basic;
         let mut tainted_origin = false;
-        let mut site: &'static str = fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), &url);
+        let mut site = fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), &url);
+        if let Some(context) = &req.navigation_redirect { site = worse_site(context.site, site); }
         let top_level = req.dest == Destination::Document && req.mode.is_none_or(|m| m == RequestMode::Navigate);
         let mut cookie_ctx = CookieContext::new(req.initiator.as_ref().or(req.referer.as_ref()), &url, top_level, &method);
+        if let Some(context) = &req.navigation_redirect { cookie_ctx.same_site_chain &= context.same_site_chain; }
         let author_headers: Vec<(String, String)> = req.headers.iter().filter(|(k, _)| !(req.mode.is_some() && cors::is_forbidden_request_header(k))).cloned().collect();
         for _hop in 0..20 {
             let same_origin = origin_str.as_ref().map(|o| *o == url.origin()).unwrap_or(true);

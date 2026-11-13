@@ -859,6 +859,7 @@ impl ServiceWorkerNavigationHandle {
                 let Some(mut next) = self.target.join(location.trim()).filter(|u| u.is_http()) else { return self.finish(Err("Invalid service worker navigation redirect".into())) };
                 if next.fragment.is_none() { next.fragment = self.target.fragment.clone(); }
                 if next.origin() != self.target.origin() { self.request.headers.retain(|(name,_)| !name.eq_ignore_ascii_case("authorization")); }
+                self.request.follow_navigation_redirect(&next, &response);
                 self.target = next; self.redirects += 1;
                 return std::task::Poll::Pending;
             }
