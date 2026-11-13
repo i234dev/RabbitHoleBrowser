@@ -199,6 +199,10 @@ impl<'a> Layouter<'a> {
                     lead = false;
                 }
                 Piece::Abs(_) => {}
+                Piece::Gap(w) => {
+                    run += w;
+                    line += w;
+                }
                 Piece::Break => {
                     lead = false;
                     min = min.max(run);

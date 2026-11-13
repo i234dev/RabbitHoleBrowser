@@ -43,6 +43,16 @@ pub fn clear_unit_cache() {
     UNIT_CACHE.with(|c| c.borrow_mut().clear());
 }
 
+thread_local! {
+    /// Web font families whose `unicode-range` excludes the space: they
+    /// cannot be the first available font.
+    static UNIT_SKIP: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn set_unit_skip(families: Vec<String>) {
+    UNIT_SKIP.with(|s| *s.borrow_mut() = families);
+}
+
 /// `ch` (advance of "0") and `ex` (x-height) of a style's first available
 /// font, in em.
 pub fn font_units(style: &crate::ComputedStyle) -> (f32, f32, f32) {
@@ -53,7 +63,11 @@ pub fn font_units(style: &crate::ComputedStyle) -> (f32, f32, f32) {
         if let Some(v) = UNIT_CACHE.with(|c| c.borrow().get(&key).copied()) {
             return v;
         }
-        let v = fonts.unit_metrics(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+        let list: Vec<String> = UNIT_SKIP.with(|s| {
+            let s = s.borrow();
+            style.font_family_list.iter().filter(|f| !s.iter().any(|x| x.eq_ignore_ascii_case(f.trim().trim_matches('"').trim_matches('\''))) ).cloned().collect()
+        });
+        let v = fonts.unit_metrics(&list, style.font_family, style.font_weight, style.is_italic());
         UNIT_CACHE.with(|c| c.borrow_mut().insert(key, v));
         v
     })

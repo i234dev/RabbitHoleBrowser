@@ -1119,11 +1119,20 @@ pub struct ComputedStyle {
     pub text_emphasis_right: bool,
     /// `ruby-position: under` (inherited).
     pub ruby_under: bool,
+    /// A multi-column container (`columns` / `column-count` /
+    /// `column-width` not `auto`; columns themselves are not laid out).
+    pub multicol: bool,
     /// `mix-blend-mode` (see `rabbithole_gfx::blend_mode_index`; 0 =
     /// normal).
     pub mix_blend_mode: u8,
     /// `text-wrap-style: balance` (inherited).
     pub text_wrap_balance: bool,
+    /// `text-autospace` adds space between ideographs and other letters
+    /// or digits (inherited; off unless specified).
+    pub text_autospace: bool,
+    /// `wrap-inside: avoid` (not inherited): breaks inside the box are
+    /// avoided (here: `line-break: anywhere` opportunities are not used).
+    pub wrap_inside_avoid: bool,
     /// `font-synthesis` allows a synthesized oblique (inherited).
     pub font_synthesis_style: bool,
     /// `line-break` (inherited): 0 auto/normal, 1 loose, 2 strict,
@@ -1324,7 +1333,10 @@ impl ComputedStyle {
             text_emphasis_right: true,
             ruby_under: false,
             mix_blend_mode: 0,
+            multicol: false,
             text_wrap_balance: false,
+            text_autospace: false,
+            wrap_inside_avoid: false,
             font_synthesis_style: true,
             line_break: 0,
             line_height_tight: false,
@@ -1399,6 +1411,7 @@ impl ComputedStyle {
             text_emphasis_right: parent.text_emphasis_right,
             ruby_under: parent.ruby_under,
             text_wrap_balance: parent.text_wrap_balance,
+            text_autospace: parent.text_autospace,
             font_synthesis_style: parent.font_synthesis_style,
             line_break: parent.line_break,
             line_height_tight: parent.line_height_tight,
@@ -1456,6 +1469,7 @@ impl ComputedStyle {
             && self.text_emphasis_right == o.text_emphasis_right
             && self.ruby_under == o.ruby_under
             && self.text_wrap_balance == o.text_wrap_balance
+            && self.text_autospace == o.text_autospace
             && self.font_synthesis_style == o.font_synthesis_style
             && self.line_break == o.line_break
             && self.line_height_tight == o.line_height_tight

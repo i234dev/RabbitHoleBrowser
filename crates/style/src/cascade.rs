@@ -271,6 +271,20 @@ impl ScopeIndex {
 
 pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> StyledTree {
     crate::values::clear_unit_cache();
+    {
+        // Families none of whose faces cover U+0020.
+        let faces = collect_font_faces(author, env, opts);
+        let mut fams: Vec<String> = faces.iter().map(|f| f.family.to_ascii_lowercase()).collect();
+        fams.sort();
+        fams.dedup();
+        fams.retain(|fam| {
+            faces
+                .iter()
+                .filter(|f| f.family.eq_ignore_ascii_case(fam))
+                .all(|f| f.unicode_range.as_ref().is_some_and(|r| !r.iter().any(|(a, b)| *a <= 0x20 && 0x20 <= *b)))
+        });
+        crate::values::set_unit_skip(fams);
+    }
     let mut engine = crate::restyle::StyleEngine::new(author, env);
     engine.full(doc, author, opts)
 }
@@ -1394,7 +1408,7 @@ fn is_inherited(name: &str) -> bool {
             | "text-shadow" | "quotes" | "pointer-events" | "user-select" | "font-variant" | "font-variant-caps"
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
-            | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style"
+            | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
             | "font-synthesis" | "font-synthesis-style"
     )
 }
@@ -1500,12 +1514,15 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "ruby-position" => to.ruby_under = from.ruby_under,
         "text-wrap-style" => to.text_wrap_balance = from.text_wrap_balance,
+        "text-autospace" => to.text_autospace = from.text_autospace,
+        "wrap-inside" => to.wrap_inside_avoid = from.wrap_inside_avoid,
         "text-wrap" => {
             to.text_wrap_balance = from.text_wrap_balance;
             to.white_space = from.white_space;
         }
         "font-synthesis" | "font-synthesis-style" => to.font_synthesis_style = from.font_synthesis_style,
         "line-break" => to.line_break = from.line_break,
+        "columns" | "column-count" | "column-width" => to.multicol = from.multicol,
         "text-underline-position" => to.text_underline_position = from.text_underline_position,
         "text-decoration-inset" => to.text_decoration_inset = from.text_decoration_inset,
         "text-decoration-line" => to.text_decoration = from.text_decoration,

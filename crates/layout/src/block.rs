@@ -51,6 +51,10 @@ pub(crate) struct Layouter<'a> {
     /// The containing block of the block children being laid out is
     /// right-to-left (over-constrained margins resolve by its direction).
     cb_rtl: bool,
+    /// Line clamping of a block container in progress (`line-clamp`
+    /// counts the lines of its block descendants in the same formatting
+    /// context): lines left, and where the last allowed line ends.
+    pub(crate) clamp: Option<(usize, Option<f32>)>,
 }
 
 pub(crate) fn resolve_edges(e: &Edges<Length>, base: f32) -> Edges<f32> {
@@ -180,6 +184,7 @@ impl<'a> Layouter<'a> {
             abs_cb: HashMap::new(),
             center_blocks: false,
             cb_rtl: false,
+            clamp: None,
         }
     }
 
@@ -372,6 +377,14 @@ impl<'a> Layouter<'a> {
             let forced = self.forced_content_height.take();
             return self.layout_wm_wrapper(b, cb, top, mode, forced);
         }
+        // An independent formatting context does not take part in an
+        // ancestor's line clamping.
+        if b.bfc_root && self.clamp.is_some() {
+            let saved = self.clamp.take();
+            self.layout_block(b, cb, top, bfc, mode);
+            self.clamp = saved;
+            return;
+        }
         let forced_h = self.forced_content_height.take(); // grid/flex hook
         // Where the contents' origin is now (for reuse by translation): the
         // current content box (it moved together with the contents, relative
@@ -505,7 +518,7 @@ impl<'a> Layouter<'a> {
         let float_env = if b.bfc_root { Vec::new() } else { bfc.relative_from(origin, content_y) };
         // Table cells are adjusted after layout (vertical-align), so their
         // contents are not where the cache expects them.
-        let cacheable = b.kind != BoxKind::TableCell;
+        let cacheable = b.kind != BoxKind::TableCell && self.clamp.is_none() && b.style.line_clamp.is_none();
         let had_cache = prev_cache.is_some();
         let reuse = prev_cache.filter(|c| {
             cacheable
@@ -706,7 +719,19 @@ impl<'a> Layouter<'a> {
     fn layout_block_children(&mut self, b: &mut LayoutBox, cb: &Cb, bfc: &mut Bfc, top_collapsible: bool, bottom_collapsible: bool) -> f32 {
         let saved = std::mem::replace(&mut self.center_blocks, b.style.text_align_webkit_center);
         let saved_rtl = std::mem::replace(&mut self.cb_rtl, b.style.direction == rabbithole_style::Direction::Rtl);
-        let h = self.layout_block_children_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+        // A clamping block container: its block descendants' lines count.
+        let clamp_root = b.style.line_clamp.filter(|n| *n > 0 && !b.style.multicol).map(|n| n as usize);
+        let saved_clamp = if let Some(n) = clamp_root { std::mem::replace(&mut self.clamp, Some((n, None))) } else { None };
+        let mut h = self.layout_block_children_inner(b, cb, bfc, top_collapsible, bottom_collapsible);
+        if clamp_root.is_some() {
+            if let Some((_, Some(bottom))) = self.clamp {
+                // The box ends after the last line shown.
+                h = (bottom - b.content_rect.y).max(0.0);
+                b.collapsed_bottom_margin = b.margin.bottom;
+                b.bottom_margins = Margins::of(b.margin.bottom).pair();
+            }
+            self.clamp = saved_clamp;
+        }
         self.center_blocks = saved;
         self.cb_rtl = saved_rtl;
         h

@@ -412,6 +412,18 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             style.text_emphasis_over = o;
             style.text_emphasis_right = side.unwrap_or(true);
         }
+        "wrap-inside" => match values::ident(c0).as_deref() {
+            Some("auto") => style.wrap_inside_avoid = false,
+            Some("avoid") => style.wrap_inside_avoid = true,
+            _ => return true,
+        },
+        "text-autospace" => {
+            let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
+            if kws.len() != comps.len() {
+                return true;
+            }
+            style.text_autospace = !kws.iter().any(|k| k == "no-autospace");
+        }
         "text-wrap-style" => match values::ident(c0).as_deref() {
             Some("balance") => style.text_wrap_balance = true,
             Some("auto" | "stable" | "pretty") => style.text_wrap_balance = false,
@@ -460,7 +472,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
         | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"
-        | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter" | "text-autospace"
+        | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"
         | "-webkit-text-fill-color" | "-webkit-text-stroke" | "-webkit-text-stroke-width" | "-webkit-text-stroke-color"
         | "-webkit-tap-highlight-color" | "-webkit-touch-callout" | "text-decoration-skip-ink" | "text-decoration-skip" => {}
         _ => return false,

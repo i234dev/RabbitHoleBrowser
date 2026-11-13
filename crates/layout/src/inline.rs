@@ -57,6 +57,8 @@ pub(crate) enum Piece {
     Float(usize),
     Abs(usize),
     Break,
+    /// Extra space before the next word (`text-autospace`).
+    Gap(f32),
 }
 
 /// Font metrics of a style, with the half-leading applied.
@@ -191,6 +193,18 @@ pub(crate) fn emphasis_of(style: &ComputedStyle) -> Option<crate::tree::Emphasis
     Some(crate::tree::Emphasis { mark: Rc::from(mark.as_str()), color: style.text_emphasis_color.unwrap_or(style.color), over })
 }
 
+/// `text-autospace` applies between `a` and `b`: an ideograph next to a
+/// letter or digit of another script.
+fn autospace_between(a: char, b: char) -> bool {
+    fn ideo(c: char) -> bool {
+        matches!(c as u32, 0x3041..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x3FFFD)
+    }
+    fn other(c: char) -> bool {
+        c.is_alphanumeric() && (c as u32) < 0x2E80 && !matches!(c as u32, 0x0590..=0x08FF)
+    }
+    (ideo(a) && other(b)) || (other(a) && ideo(b))
+}
+
 /// Split a word after hyphens so `foo-bar` can wrap after the dash.
 fn split_hyphens(w: &str) -> Vec<(String, bool)> {
     if w.len() < 3 || !w.contains('-') {
@@ -265,7 +279,7 @@ impl<'a> Layouter<'a> {
                     let ls = style.letter_spacing;
                     let keep_all = style.word_break == rabbithole_style::WordBreak::KeepAll;
                     let strict = style.line_break == 2;
-                    let anywhere = style.line_break == 3;
+                    let anywhere = style.line_break == 3 && !style.wrap_inside_avoid;
                     for seg in segs.drain(..) {
                         match seg {
                             Seg::Word(w) => {
@@ -279,7 +293,8 @@ impl<'a> Layouter<'a> {
                                         }
                                     }
                                 }
-                                prev_char = w.chars().last();
+                                let prev_before = prev_char;
+                                prev_char = w.chars().rev().find(|c| !matches!(*c as u32, 0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)).or(w.chars().last());
                                 let mut parts: Vec<(String, bool)> = Vec::new();
                                 for (part, continuation) in split_hyphens(&w) {
                                     if wraps && !is_space_word {
@@ -290,7 +305,46 @@ impl<'a> Layouter<'a> {
                                         parts.push((part, continuation));
                                     }
                                 }
+                                // `text-autospace`: 1/8ic between ideographs and
+                                // other letters or digits.
+                                let gap = if style.text_autospace && !is_space_word && !style.writing_mode.is_vertical() {
+                                    style.font_size * rabbithole_style::values::font_units(style).2 / 8.0
+                                } else {
+                                    0.0
+                                };
+                                let mut gapped: Vec<(String, bool, bool)> = Vec::new();
+                                let mut last = prev_before;
                                 for (part, continuation) in parts {
+                                    if gap > 0.0 {
+                                        let mut cur = String::new();
+                                        let mut first = true;
+                                        for c in part.chars() {
+                                            let g = last.is_some_and(|p| autospace_between(p, c));
+                                            if g && !cur.is_empty() {
+                                                gapped.push((std::mem::take(&mut cur), continuation || !first, false));
+                                                first = false;
+                                            }
+                                            if g && cur.is_empty() {
+                                                // Mark the gap before this sub-part.
+                                                gapped.push((String::new(), false, true));
+                                            }
+                                            cur.push(c);
+                                            if !matches!(c as u32, 0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F) {
+                                                last = Some(c);
+                                            }
+                                        }
+                                        if !cur.is_empty() {
+                                            gapped.push((cur, continuation || !first, false));
+                                        }
+                                    } else {
+                                        gapped.push((part, continuation, false));
+                                    }
+                                }
+                                for (part, continuation, is_gap) in gapped {
+                                    if is_gap {
+                                        pieces.push(Piece::Gap(gap));
+                                        continue;
+                                    }
                                     let width = self.measurer.width(font, size, &part) + ls * part.chars().count() as f32;
                                     // A break opportunity before a word comes from the
                                     // preceding whitespace (owned by whatever element
@@ -379,7 +433,20 @@ impl<'a> Layouter<'a> {
         let indent = cstyle.text_indent.resolve_or_zero(cb.width);
         let clips = cstyle.overflow_x.clips() || cstyle.overflow_y.clips();
         let ellipsis = cstyle.text_overflow == TextOverflow::Ellipsis && clips;
-        let max_lines = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
+        let own_clamp = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
+        // Lines left by an ancestor's `line-clamp`.
+        let outer_clamp = if own_clamp.is_none() { self.clamp.map(|c| c.0) } else { None };
+        let max_lines = own_clamp.or(outer_clamp);
+        if outer_clamp == Some(0) {
+            // Clamped away: no lines.
+            b.items = items;
+            b.lines = Vec::new();
+            if inserted_marker {
+                pieces.remove(0);
+            }
+            b.pieces = Some(pieces);
+            return 0.0;
+        }
         let (rel, rel_kids) = relative_offsets(&items, b.children.len(), cb.width, cb.height);
         let parent_open = open_parents(&items, &cstyle);
         let bidi_items = items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal));
@@ -466,6 +533,12 @@ impl<'a> Layouter<'a> {
         }
         b.pieces = Some(pieces);
         b.items = items;
+        if let (Some(n), Some(c)) = (outer_clamp, self.clamp.as_mut()) {
+            c.0 = n.saturating_sub(lines.len());
+            if c.0 == 0 {
+                c.1 = lines.last().map(|l| l.rect.bottom());
+            }
+        }
         b.lines = lines;
         return height;
         }
@@ -708,6 +781,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     self.children[*c].static_pos = (x, y);
                 }
                 Piece::Break => self.finish_line(true),
+                Piece::Gap(w) => {
+                    if self.cur.has_content {
+                        self.cur.x += w;
+                    }
+                }
             }
         }
         if !self.done {
@@ -882,13 +960,14 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             self.cur.break_at = Some(self.cur.frags.len());
         }
         let spaced = self.style(item).word_spacing.abs() > 0.001;
+        let cur_x = self.cur.x;
         let appended = if !break_before {
             match self.cur.frags.last_mut() {
                 Some(PF {
                     kind: PFKind::Text { text: t, item: it },
                     w,
-                    ..
-                }) if *it == item && !(spaced && (t.ends_with(' ') || text.starts_with(' '))) => {
+                    x,
+                }) if *it == item && !(spaced && (t.ends_with(' ') || text.starts_with(' '))) && (*x + *w - cur_x).abs() < 0.01 => {
                     t.push_str(&text);
                     *w += width;
                     true
@@ -1101,7 +1180,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
             };
             let avail = limit - x;
-            let (head, head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, false);
+            let (mut head, mut head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, false);
+            // No space before the ellipsis.
+            if head.ends_with(' ') && !head.trim().is_empty() {
+                let trimmed = head.trim_end().to_string();
+                head_w = self.split_to_fit(&trimmed, item, f32::MAX, false).1;
+                head = trimmed;
+            }
             if head.trim().is_empty() {
                 self.cur.frags.pop();
                 continue;
