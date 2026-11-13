@@ -223,8 +223,9 @@ valores con contador**: eso va a un helper.
 ### 1.9 GC (`heap.rs`, `realm.rs`)
 
 - Mark-and-sweep en una arena `Vec<Option<Object>>`; los ids se reciclan con
-  una lista libre. **No mueve objetos**, no es incremental ni generacional y
-  **no tiene barreras de escritura**.
+  una lista libre. **No mueve objetos** ni es generacional. *(Estado de
+  stage 1; desde S2.8 es incremental, con barrera de escritura en
+  `Heap::get_mut`.)*
 - Raíces (`Realm::gc`): intrínsecos y global, `global_lex`, cada `Frame`
   (`scope`, `this`, `func`, `new_target`, `home_object`, extras y slots
   guardados), **todo `vstack`**, jobs, la tabla de `Root` (handles), `extra_roots`

@@ -763,7 +763,7 @@ const GREY: u8 = 1;
 /// ephemeron pass.
 const BLACK_WEAK: u8 = 2;
 /// Scanned (or allocated during the cycle): nothing left to do.
-const BLACK: u8 = 3;
+pub(crate) const BLACK: u8 = 3;
 
 /// Where the incremental collector is (see [`Heap::start_cycle`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -881,6 +881,10 @@ impl Heap {
     /// Offset of [`Heap::marking`] (one byte), for native code.
     #[cfg(feature = "jit")]
     pub(crate) const MARKING_OFFSET: usize = std::mem::offset_of!(Heap, marking);
+    /// Offset of the mark bytes (a `Vec<u8>`, one per object table slot
+    /// while a cycle runs), for native code.
+    #[cfg(feature = "jit")]
+    pub(crate) const MARKS_OFFSET: usize = std::mem::offset_of!(Heap, marks);
 
     pub fn new() -> Heap {
         Heap {

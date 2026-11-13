@@ -13,6 +13,8 @@ use crate::value::ObjectId;
 pub(crate) struct Layout {
     /// In `Realm`: the object table's buffer pointer and length.
     pub heap_ptr: i32,
+    /// In `Realm`: the collector's mark bytes (buffer pointer).
+    pub marks_ptr: i32,
     pub heap_len: i32,
     /// Size of an object table entry (`Option<Object>`).
     pub obj_size: i32,
@@ -113,6 +115,8 @@ fn probe() -> Result<Layout, u32> {
     let (vp, vl) = vec_words::<Property>(Vec::new(), Property::data(crate::value::Value::Undefined, 0)).ok_or(3u32)?;
     let (hp, hl) = vec_words::<Option<Object>>(Vec::new(), None).ok_or(4u32)?;
     let heap = std::mem::offset_of!(Realm, heap) + Heap::OBJECTS_OFFSET;
+    let (mp, _) = vec_words::<u8>(Vec::new(), 7).ok_or(39u32)?;
+    let marks = std::mem::offset_of!(Realm, heap) + Heap::MARKS_OFFSET;
     let frame = crate::vm::Frame {
         code: std::ptr::NonNull::dangling(),
         pc: 0,
@@ -194,6 +198,7 @@ fn probe() -> Result<Layout, u32> {
     Ok(Layout {
         heap_ptr: i32_of(heap + hp * w).ok_or(15u32)?,
         heap_len: i32_of(heap + hl * w).ok_or(16u32)?,
+        marks_ptr: i32_of(marks + mp * w).ok_or(40u32)?,
         obj_size: i32_of(std::mem::size_of::<Option<Object>>()).ok_or(17u32)?,
         sid: i32_of(props + PropertyMap::SID_OFFSET).ok_or(18u32)?,
         vals_ptr: i32_of(props + PropertyMap::VALUES_OFFSET + vp * w).ok_or(19u32)?,

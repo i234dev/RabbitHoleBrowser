@@ -245,6 +245,10 @@ fn get_or_insert_impl(realm: &mut Realm, this: Value, args: &[Value], kind: Kind
     } else {
         cb
     };
+    if kind == Kind::WeakMap {
+        // The callback may have set the key: its value is overwritten.
+        weak_value_barrier(realm, id, &key);
+    }
     data_mut(realm, id).set(key, value.clone());
     Ok(value)
 }
@@ -678,6 +682,7 @@ fn weak_map_delete(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
 
 /// While the collector marks, the value an entry is about to lose stays
 /// for this cycle (the program may still hold it; see `Heap::shade_value`).
+/// Every path that deletes or overwrites a WeakMap entry calls it.
 fn weak_value_barrier(realm: &mut Realm, id: ObjectId, k: &Value) {
     if realm.heap.marking {
         if let Some(old) = data(realm, id).get(k).cloned() {

@@ -751,8 +751,9 @@ impl Gen<'_> {
         self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_GLOBAL_OBJ as i32);
         self.a.jcc(CC_NE, slow);
         if dst.is_err() {
-            // rax = realm
-            self.barrier_check(RAX, slow);
+            // rax = realm; r8 = the global object's id
+            self.a.load32(R8, Mem::base(RAX, std::mem::offset_of!(crate::realm::Realm, global) as i32));
+            self.barrier_check(RAX, R8, R9, slow);
         }
         self.a.mov_imm64(RAX, crate::shape::proto_epoch_addr() as u64);
         self.a.load32(RAX, Mem::base(RAX, 0));
@@ -813,13 +814,25 @@ impl Gen<'_> {
         }
     }
 
-    /// Take `slow` while the collector marks (`reg` = realm): stores into
-    /// objects then go through the helpers, whose `get_mut` runs the write
-    /// barrier.
-    fn barrier_check(&mut self, reg: u8, slow: Label) {
-        let off = (std::mem::offset_of!(crate::realm::Realm, heap) + crate::heap::Heap::MARKING_OFFSET) as i32;
-        self.a.test_mi8(Mem::base(reg, off), 1);
-        self.a.jcc(CC_NE, slow);
+    /// Write barrier of an inline store into object `idr` (a register
+    /// holding the zero-extended id; `realm` = realm, `tmp` clobbered):
+    /// while the collector marks, an object it has not scanned yet goes to
+    /// the helper, whose `get_mut` scans it first.
+    fn barrier_check(&mut self, realm: u8, idr: u8, tmp: u8, slow: Label) {
+        let marking = (std::mem::offset_of!(crate::realm::Realm, heap) + crate::heap::Heap::MARKING_OFFSET) as i32;
+        let ok = self.a.label();
+        self.a.test_mi8(Mem::base(realm, marking), 1);
+        self.a.jcc(CC_E, ok);
+        match self.lay {
+            Some(l) => {
+                self.a.load64(tmp, Mem::base(realm, l.marks_ptr));
+                self.a.movzx8(tmp, Mem::index(tmp, idr, 1, 0));
+                self.a.alu_ri32(Alu::Cmp, tmp, crate::heap::BLACK as i32);
+                self.a.jcc(CC_NE, slow);
+            }
+            None => self.a.jmp(slow),
+        }
+        self.a.bind(ok);
     }
 
     /// `rax` = address of the object table entry of the object in slot
@@ -934,7 +947,9 @@ impl Gen<'_> {
         };
         self.object_entry(&l, o, slow);
         if dst.is_err() {
-            self.barrier_check(R8, slow);
+            // rdx = the array's id
+            self.a.load32(RDX, slot(o));
+            self.barrier_check(R8, RDX, R9, slow);
         }
         self.is_kind(&l, false);
         self.a.jcc(CC_NE, slow);
@@ -1038,7 +1053,9 @@ impl Gen<'_> {
             return;
         };
         self.object_entry(&l, o, miss);
-        self.barrier_check(R8, miss);
+        // rdx = the receiver's id
+        self.a.load32(RDX, slot(o));
+        self.barrier_check(R8, RDX, R9, miss);
         self.a.mov_imm64(RCX, cell as *const std::cell::Cell<crate::bytecode::PropIc> as u64);
         self.a.movzx8(RDX, Mem::base(RCX, IC_KIND));
         self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_OWN as i32);
@@ -1284,7 +1301,8 @@ impl Gen<'_> {
                     return;
                 };
                 self.scope_data(&l, depth, slow);
-                self.barrier_check(R8, slow);
+                // rdx = the scope's id
+                self.barrier_check(R8, RDX, R9, slow);
                 self.a.alu_mi64(Alu::Cmp, Mem::base(RAX, l.sd_slots_len), s as i32);
                 self.a.jcc(CC_BE, slow);
                 self.a.load64(RDX, Mem::base(RAX, l.sd_slots_ptr));
