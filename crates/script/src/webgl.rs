@@ -1,4 +1,4 @@
-//! Experimental WebGL1 bridge to our own software GL implementation.
+//! Experimental WebGL bridge to our own software GL implementation.
 //!
 //! JavaScript owns WebIDL conversion, object brands and the GL error flags.
 //! The host owns the real contexts and copies their drawing buffers into the
@@ -156,6 +156,7 @@ fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let alpha = realm.to_boolean(&arg(args, 3));
     let premultiplied = realm.to_boolean(&arg(args, 4));
     let version = number(realm, args, 5)? as u32;
+    let depth = realm.to_boolean(&arg(args, 6));
     let result = match version {
         1 => Context::new(w, h),
         2 => Context::new_webgl2(w, h),
@@ -164,6 +165,7 @@ fn create(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     .map_err(|e| e.code())
     .and_then(|mut ctx| {
         ctx.set_alpha_channel(alpha);
+        ctx.set_depth_channel(depth);
         canvas2d::store(|store| {
             if !store.surfaces.contains_key(&id) || store.webgl.contexts.contains_key(&id) {
                 return Err(INVALID_OPERATION);
@@ -290,6 +292,21 @@ enum Command {
     ReadPixels(i32, i32, u32, u32),
     Width,
     Height,
+    ReadWidth,
+    ReadHeight,
+    CreateFramebuffer,
+    BindFramebuffer(u32, u32),
+    DeleteFramebuffer(u32),
+    CheckFramebuffer(u32),
+    FramebufferTexture(u32, u32, u32, u32, i32),
+    FramebufferRenderbuffer(u32, u32, u32, u32),
+    FramebufferAttachment(u32, u32, u32),
+    FramebufferBits(u32),
+    CreateRenderbuffer,
+    BindRenderbuffer(u32, u32),
+    DeleteRenderbuffer(u32),
+    RenderbufferStorage(u32, u32, u32, u32),
+    RenderbufferParameter(u32, u32),
     ActiveAttribs(u32),
     ActiveUniforms(u32),
     GetUniform(u32, i32),
@@ -398,6 +415,23 @@ impl Command {
             "readPixels" => Self::ReadPixels(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
             "width" => Self::Width,
             "height" => Self::Height,
+            "readWidth" => Self::ReadWidth,
+            "readHeight" => Self::ReadHeight,
+            "createFramebuffer" => Self::CreateFramebuffer,
+            "bindFramebuffer" => Self::BindFramebuffer(u!(2), u!(3)),
+            "deleteFramebuffer" => Self::DeleteFramebuffer(u!(2)),
+            "checkFramebuffer" => Self::CheckFramebuffer(u!(2)),
+            "framebufferTexture" => {
+                Self::FramebufferTexture(u!(2), u!(3), u!(4), u!(5), n!(6) as i32)
+            }
+            "framebufferRenderbuffer" => Self::FramebufferRenderbuffer(u!(2), u!(3), u!(4), u!(5)),
+            "framebufferAttachment" => Self::FramebufferAttachment(u!(2), u!(3), u!(4)),
+            "framebufferBits" => Self::FramebufferBits(u!(2)),
+            "createRenderbuffer" => Self::CreateRenderbuffer,
+            "bindRenderbuffer" => Self::BindRenderbuffer(u!(2), u!(3)),
+            "deleteRenderbuffer" => Self::DeleteRenderbuffer(u!(2)),
+            "renderbufferStorage" => Self::RenderbufferStorage(u!(2), u!(3), u!(4), u!(5)),
+            "renderbufferParameter" => Self::RenderbufferParameter(u!(2), u!(3)),
             "activeAttribs" => Self::ActiveAttribs(u!(2)),
             "activeUniforms" => Self::ActiveUniforms(u!(2)),
             "getUniform" => Self::GetUniform(u!(2), n!(3) as i32),
@@ -635,7 +669,7 @@ impl Command {
                 }
                 Self::ReadPixels(x, y, w, h) => {
                     let mut bytes = ctx.read_pixels(x, y, w, h)?;
-                    if !record.alpha {
+                    if !record.alpha && ctx.reads_default_framebuffer() {
                         let (bw, bh) = ctx.dimensions();
                         for (i, pixel) in bytes.chunks_exact_mut(4).enumerate() {
                             let px = x as i64 + (i % w.max(1) as usize) as i64;
@@ -649,6 +683,48 @@ impl Command {
                 }
                 Self::Width => Reply::Number(ctx.dimensions().0 as f64),
                 Self::Height => Reply::Number(ctx.dimensions().1 as f64),
+                Self::ReadWidth => Reply::Number(ctx.read_dimensions()?.0 as f64),
+                Self::ReadHeight => Reply::Number(ctx.read_dimensions()?.1 as f64),
+                Self::CreateFramebuffer => Reply::Number(ctx.create_framebuffer() as f64),
+                Self::BindFramebuffer(target, id) => {
+                    ctx.bind_framebuffer(target, id)?;
+                    Reply::Void
+                }
+                Self::DeleteFramebuffer(id) => {
+                    ctx.delete_framebuffer(id)?;
+                    Reply::Void
+                }
+                Self::CheckFramebuffer(target) => {
+                    Reply::Number(ctx.check_framebuffer_status(target)? as f64)
+                }
+                Self::FramebufferTexture(target, attachment, textarget, id, level) => {
+                    ctx.framebuffer_texture_2d(target, attachment, textarget, id, level)?;
+                    Reply::Void
+                }
+                Self::FramebufferRenderbuffer(target, attachment, rbtarget, id) => {
+                    ctx.framebuffer_renderbuffer(target, attachment, rbtarget, id)?;
+                    Reply::Void
+                }
+                Self::FramebufferAttachment(target, attachment, pname) => Reply::Number(
+                    ctx.framebuffer_attachment_parameter(target, attachment, pname)? as f64,
+                ),
+                Self::FramebufferBits(pname) => Reply::Number(ctx.framebuffer_bits(pname)? as f64),
+                Self::CreateRenderbuffer => Reply::Number(ctx.create_renderbuffer() as f64),
+                Self::BindRenderbuffer(target, id) => {
+                    ctx.bind_renderbuffer(target, id)?;
+                    Reply::Void
+                }
+                Self::DeleteRenderbuffer(id) => {
+                    ctx.delete_renderbuffer(id)?;
+                    Reply::Void
+                }
+                Self::RenderbufferStorage(target, format, width, height) => {
+                    ctx.renderbuffer_storage(target, format, width, height)?;
+                    Reply::Void
+                }
+                Self::RenderbufferParameter(target, pname) => {
+                    Reply::Number(ctx.renderbuffer_parameter(target, pname)? as f64)
+                }
                 Self::ActiveAttribs(p) => Reply::Infos(ctx.active_attributes(p)?),
                 Self::ActiveUniforms(p) => Reply::Infos(ctx.active_uniforms(p)?),
                 Self::GetUniform(p, location) => Reply::Values(ctx.get_uniform(p, location)?),
@@ -710,7 +786,14 @@ fn command(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let result = canvas2d::store(|store| {
         let record = store.webgl.contexts.get_mut(&id).ok_or(INVALID_OPERATION)?;
         let result = command.execute(record);
-        if draws && result.is_ok() {
+        if draws
+            && result.is_ok()
+            && record
+                .ctx
+                .framebuffer_binding(rabbithole_webgl::gl::FRAMEBUFFER)
+                .unwrap_or(0)
+                == 0
+        {
             if let Some(surface) = store.surfaces.get_mut(&id) {
                 record.sync(surface);
             }
@@ -722,7 +805,7 @@ fn command(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
 
 pub(crate) fn install(realm: &mut Realm, target: ObjectId) {
     realm.define_method(target, "webglLimits", 0, limits);
-    realm.define_method(target, "webglNew", 6, create);
+    realm.define_method(target, "webglNew", 7, create);
     realm.define_method(target, "webglResize", 3, resize);
     realm.define_method(target, "webglCall", 2, command);
     realm.define_method(target, "webglLose", 1, lose);

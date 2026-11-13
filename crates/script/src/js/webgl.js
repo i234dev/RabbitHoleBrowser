@@ -1,5 +1,5 @@
-// Experimental WebGL1: real software GL buffers/shaders/rasterization.
-// Unsupported commands set GL errors; WebGL2 and extensions are not advertised.
+// Experimental WebGL software contexts with real buffers, shaders and pixels.
+// Unsupported commands set GL errors; extensions remain unavailable.
 (function () {
   'use strict';
   const g = globalThis, N = g.__rhNative;
@@ -36,6 +36,12 @@
     IMPLEMENTATION_COLOR_READ_TYPE: 0x8B9A, IMPLEMENTATION_COLOR_READ_FORMAT: 0x8B9B,
     VERTEX_ATTRIB_ARRAY_ENABLED: 0x8622, VERTEX_ATTRIB_ARRAY_SIZE: 0x8623, VERTEX_ATTRIB_ARRAY_STRIDE: 0x8624, VERTEX_ATTRIB_ARRAY_TYPE: 0x8625, CURRENT_VERTEX_ATTRIB: 0x8626, VERTEX_ATTRIB_ARRAY_NORMALIZED: 0x886A, VERTEX_ATTRIB_ARRAY_POINTER: 0x8645, VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: 0x889F,
     FRAMEBUFFER: 0x8D40, RENDERBUFFER: 0x8D41, FRAMEBUFFER_BINDING: 0x8CA6, RENDERBUFFER_BINDING: 0x8CA7, FRAMEBUFFER_COMPLETE: 0x8CD5,
+    FRAMEBUFFER_INCOMPLETE_ATTACHMENT: 0x8CD6, FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT: 0x8CD7, FRAMEBUFFER_INCOMPLETE_DIMENSIONS: 0x8CD9, FRAMEBUFFER_UNSUPPORTED: 0x8CDD,
+    COLOR_ATTACHMENT0: 0x8CE0, DEPTH_ATTACHMENT: 0x8D00, STENCIL_ATTACHMENT: 0x8D20, DEPTH_STENCIL_ATTACHMENT: 0x821A,
+    FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE: 0x8CD0, FRAMEBUFFER_ATTACHMENT_OBJECT_NAME: 0x8CD1, FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL: 0x8CD2, FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE: 0x8CD3,
+    TEXTURE: 0x1702, DEPTH_COMPONENT16: 0x81A5, RGBA4: 0x8056,
+    RENDERBUFFER_WIDTH: 0x8D42, RENDERBUFFER_HEIGHT: 0x8D43, RENDERBUFFER_INTERNAL_FORMAT: 0x8D44,
+    RENDERBUFFER_RED_SIZE: 0x8D50, RENDERBUFFER_GREEN_SIZE: 0x8D51, RENDERBUFFER_BLUE_SIZE: 0x8D52, RENDERBUFFER_ALPHA_SIZE: 0x8D53, RENDERBUFFER_DEPTH_SIZE: 0x8D54, RENDERBUFFER_STENCIL_SIZE: 0x8D55,
     TEXTURE_2D: 0x0DE1, TEXTURE_CUBE_MAP: 0x8513, TEXTURE0: 0x84C0, ACTIVE_TEXTURE: 0x84E0, TEXTURE_BINDING_2D: 0x8069,
     TEXTURE_MIN_FILTER: 0x2801, TEXTURE_MAG_FILTER: 0x2800, TEXTURE_WRAP_S: 0x2802, TEXTURE_WRAP_T: 0x2803,
     NEAREST: 0x2600, LINEAR: 0x2601, NEAREST_MIPMAP_LINEAR: 0x2702, NEAREST_MIPMAP_NEAREST: 0x2700, LINEAR_MIPMAP_NEAREST: 0x2701, LINEAR_MIPMAP_LINEAR: 0x2703,
@@ -80,7 +86,7 @@
   }
   function wrap(s, kind, id, extra = {}) {
     if (!id) { flag(s, GL.OUT_OF_MEMORY); return null; }
-    const C = { Shader: WebGLShader, Program: WebGLProgram, Buffer: WebGLBuffer, VertexArrayObject: WebGLVertexArrayObject, Texture: WebGLTexture }[kind];
+    const C = { Shader: WebGLShader, Program: WebGLProgram, Buffer: WebGLBuffer, VertexArrayObject: WebGLVertexArrayObject, Texture: WebGLTexture, Framebuffer: WebGLFramebuffer, Renderbuffer: WebGLRenderbuffer }[kind];
     const object = Object.create(C.prototype);
     objects.set(object, { context: s, kind, id, deleted: false, ...extra });
     return object;
@@ -91,6 +97,17 @@
     const object = s.bindings[target];
     if (!object) { flag(s, GL.INVALID_OPERATION); return null; }
     return objects.get(object);
+  }
+  function framebufferTarget(s, target) {
+    if (target === GL.FRAMEBUFFER || (s.version === 2 && (target === 0x8CA8 || target === 0x8CA9))) return true;
+    flag(s, GL.INVALID_ENUM); return false;
+  }
+  function framebufferObject(s, target) { return target === 0x8CA8 ? s.readFramebuffer : s.drawFramebuffer; }
+  function detachBoundAttachment(s, object, attachment) {
+    for (const fb of [s.drawFramebuffer, s.readFramebuffer]) {
+      const f = fb && objects.get(fb);
+      if (f && f.attachments[attachment] === object) f.attachments[attachment] = null;
+    }
   }
   function dataView(value) {
     if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer)) return new Uint8Array(value);
@@ -137,13 +154,15 @@
     const loc = uniformLocation(s, location);
     if (loc) { data = floats(data); if (data.length > 4) { flag(s, GL.INVALID_OPERATION); return; } call(s, 'uniform', loc.id, data); }
   }
-  function changed(s, result) { if (!result.error) N.canvasMarkDirty(s.surface); }
+  function changed(s, result) { if (!result.error && !s.drawFramebuffer) N.canvasMarkDirty(s.surface); }
 
   class WebGLObject { constructor() { illegal(); } }
   class WebGLShader extends WebGLObject { constructor() { illegal(); } }
   class WebGLProgram extends WebGLObject { constructor() { illegal(); } }
   class WebGLBuffer extends WebGLObject { constructor() { illegal(); } }
   class WebGLTexture extends WebGLObject { constructor() { illegal(); } }
+  class WebGLFramebuffer extends WebGLObject { constructor() { illegal(); } }
+  class WebGLRenderbuffer extends WebGLObject { constructor() { illegal(); } }
   class WebGLVertexArrayObject extends WebGLObject { constructor() { illegal(); } }
   class WebGLUniformLocation { constructor() { illegal(); } }
   class WebGLActiveInfo { constructor() { illegal(); } }
@@ -298,7 +317,7 @@
       if (!Number.isSafeInteger(length) || length > pixels.byteLength) { flag(s, GL.INVALID_OPERATION); return; }
       const r = call(s, 'readPixels', x, y, width, height); if (r.error) return;
       const bytes = new Uint8Array(r.value);
-      const bw = call(s, 'width').value, bh = call(s, 'height').value;
+      const bw = call(s, 'readWidth').value, bh = call(s, 'readHeight').value;
       const first = Math.max(0, -x), last = Math.min(width, bw - x);
       for (let iy = 0; iy < height; iy++) if (y + iy >= 0 && y + iy < bh && last > first) {
         pixels.set(bytes.subarray(iy * row + first * 4, iy * row + last * 4), iy * stride + first * 4);
@@ -307,7 +326,7 @@
     createTexture() { const s = state(this), r = call(s, 'createTexture'); return r.error ? null : wrap(s, 'Texture', r.value, { bound: false }); }
     activeTexture(unit) { required('activeTexture', 1, arguments); const s = state(this); unit >>>= 0; if (!call(s, 'activeTexture', unit).error) s.activeTexture = unit - GL.TEXTURE0; }
     bindTexture(target, object) { required('bindTexture', 2, arguments); const s = state(this), t = owned(s, object, 'Texture', true); target >>>= 0; if (t && !call(s, 'bindTexture', target, t.id).error) { s.textures[s.activeTexture] = object; if (object) t.bound = true; } }
-    deleteTexture(object) { required('deleteTexture', 1, arguments); const s = state(this); if (object === null) return; const t = owned(s, object, 'Texture', false, true); if (t && !t.deleted && !call(s, 'deleteTexture', t.id).error) { t.deleted = true; for (let i = 0; i < s.textures.length; i++) if (s.textures[i] === object) s.textures[i] = null; } }
+    deleteTexture(object) { required('deleteTexture', 1, arguments); const s = state(this); if (object === null) return; const t = owned(s, object, 'Texture', false, true); if (t && !t.deleted && !call(s, 'deleteTexture', t.id).error) { t.deleted = true; for (let i = 0; i < s.textures.length; i++) if (s.textures[i] === object) s.textures[i] = null; detachBoundAttachment(s, object, GL.COLOR_ATTACHMENT0); } }
     isTexture(object) { required('isTexture', 1, arguments); const s = state(this), t = objects.get(object); return !!t && t.context === s && t.kind === 'Texture' && t.bound && !t.deleted && !s.lost; }
     texParameteri(target, pname, value) { required('texParameteri', 3, arguments); call(state(this), 'texParameter', target >>> 0, pname >>> 0, value | 0); }
     texParameterf(target, pname, value) { required('texParameterf', 3, arguments); const s = state(this); value = +(value); if (!Number.isInteger(value)) { flag(s, GL.INVALID_ENUM); return; } call(s, 'texParameter', target >>> 0, pname >>> 0, value); }
@@ -323,7 +342,9 @@
     }
     getParameter(pname) {
       required('getParameter', 1, arguments); const s = state(this); syncSize(s); if (s.lost) return null;
-      switch (pname >>> 0) {
+      pname >>>= 0;
+      if (s.drawFramebuffer && pname >= GL.RED_BITS && pname <= GL.STENCIL_BITS) { const r = call(s, 'framebufferBits', pname); return r.error ? null : r.value; }
+      switch (pname) {
         case GL.VERSION: return s.version === 2 ? 'WebGL 2.0 (RabbitHole experimental software subset)' : 'WebGL 1.0 (RabbitHole experimental software subset)';
         case GL.SHADING_LANGUAGE_VERSION: return s.version === 2 ? 'WebGL GLSL ES 3.00 (experimental subset)' : 'WebGL GLSL ES 1.0 (experimental subset)';
         case GL.VENDOR: return 'RabbitHole'; case GL.RENDERER: return 'RabbitHole software rasterizer (experimental)';
@@ -351,7 +372,9 @@
         case GL.IMPLEMENTATION_COLOR_READ_FORMAT: return GL.RGBA; case GL.IMPLEMENTATION_COLOR_READ_TYPE: return GL.UNSIGNED_BYTE;
         case GL.RED_BITS: case GL.GREEN_BITS: case GL.BLUE_BITS: return 8; case GL.ALPHA_BITS: return s.attrs.alpha ? 8 : 0;
         case GL.DEPTH_BITS: return s.attrs.depth ? 24 : 0; case GL.STENCIL_BITS: case GL.SAMPLES: case GL.SAMPLE_BUFFERS: return 0;
-        case GL.FRAMEBUFFER_BINDING: case GL.RENDERBUFFER_BINDING: return null;
+        case GL.FRAMEBUFFER_BINDING: return s.drawFramebuffer;
+        case 0x8CAA: if (s.version === 2) return s.readFramebuffer; flag(s, GL.INVALID_ENUM); return null;
+        case GL.RENDERBUFFER_BINDING: return s.renderbuffer;
         default: flag(s, GL.INVALID_ENUM); return null;
       }
     }
@@ -359,8 +382,46 @@
       required('getShaderPrecisionFormat', 2, arguments); const s = state(this); if (![GL.VERTEX_SHADER, GL.FRAGMENT_SHADER].includes(shaderType >>> 0) || ![GL.LOW_FLOAT, GL.MEDIUM_FLOAT, GL.HIGH_FLOAT].includes(precisionType >>> 0)) { flag(s, GL.INVALID_ENUM); return null; }
       return Object.assign(Object.create(WebGLShaderPrecisionFormat.prototype), { rangeMin: 127, rangeMax: 127, precision: 23 });
     }
-    bindFramebuffer(target, framebuffer) { required('bindFramebuffer', 2, arguments); const s = state(this); if ((target >>> 0) !== GL.FRAMEBUFFER) { flag(s, GL.INVALID_ENUM); return; } if (framebuffer !== null) flag(s, GL.INVALID_OPERATION); }
-    checkFramebufferStatus(target) { required('checkFramebufferStatus', 1, arguments); const s = state(this); if ((target >>> 0) !== GL.FRAMEBUFFER) { flag(s, GL.INVALID_ENUM); return 0; } return s.lost ? 0 : GL.FRAMEBUFFER_COMPLETE; }
+    createFramebuffer() { const s = state(this), r = call(s, 'createFramebuffer'); return r.error ? null : wrap(s, 'Framebuffer', r.value, { bound: false, attachments: {} }); }
+    bindFramebuffer(target, object) {
+      required('bindFramebuffer', 2, arguments); const s = state(this); target >>>= 0;
+      const f = owned(s, object, 'Framebuffer', true); if (!f || !framebufferTarget(s, target)) return;
+      if (!call(s, 'bindFramebuffer', target, f.id).error) { if (target !== 0x8CA8) s.drawFramebuffer = object; if (target !== 0x8CA9) s.readFramebuffer = object; f.bound = true; }
+    }
+    deleteFramebuffer(object) {
+      required('deleteFramebuffer', 1, arguments); const s = state(this); if (object === null) return;
+      const f = owned(s, object, 'Framebuffer', false, true);
+      if (f && !f.deleted && !call(s, 'deleteFramebuffer', f.id).error) { f.deleted = true; f.attachments = {}; if (s.drawFramebuffer === object) s.drawFramebuffer = null; if (s.readFramebuffer === object) s.readFramebuffer = null; }
+    }
+    isFramebuffer(object) { required('isFramebuffer', 1, arguments); const s = state(this); syncSize(s); const f = objects.get(object); return !!f && f.context === s && f.kind === 'Framebuffer' && f.bound && !f.deleted && !s.lost; }
+    checkFramebufferStatus(target) { required('checkFramebufferStatus', 1, arguments); const s = state(this); target >>>= 0; if (!framebufferTarget(s, target)) return 0; const r = call(s, 'checkFramebuffer', target); return r.error ? 0 : r.value; }
+    framebufferTexture2D(target, attachment, textarget, texture, level) {
+      required('framebufferTexture2D', 5, arguments); const s = state(this); target >>>= 0; attachment >>>= 0; textarget >>>= 0; level |= 0;
+      const t = owned(s, texture, 'Texture', true); if (!t || !framebufferTarget(s, target)) return;
+      if (!call(s, 'framebufferTexture', target, attachment, textarget, t.id, level).error) objects.get(framebufferObject(s, target)).attachments[attachment] = texture;
+    }
+    createRenderbuffer() { const s = state(this), r = call(s, 'createRenderbuffer'); return r.error ? null : wrap(s, 'Renderbuffer', r.value, { bound: false }); }
+    bindRenderbuffer(target, object) {
+      required('bindRenderbuffer', 2, arguments); const s = state(this); target >>>= 0; const r = owned(s, object, 'Renderbuffer', true); if (!r) return;
+      if (!call(s, 'bindRenderbuffer', target, r.id).error) { s.renderbuffer = object; r.bound = true; }
+    }
+    deleteRenderbuffer(object) {
+      required('deleteRenderbuffer', 1, arguments); const s = state(this); if (object === null) return; const r = owned(s, object, 'Renderbuffer', false, true);
+      if (r && !r.deleted && !call(s, 'deleteRenderbuffer', r.id).error) { r.deleted = true; if (s.renderbuffer === object) s.renderbuffer = null; detachBoundAttachment(s, object, GL.DEPTH_ATTACHMENT); }
+    }
+    isRenderbuffer(object) { required('isRenderbuffer', 1, arguments); const s = state(this); syncSize(s); const r = objects.get(object); return !!r && r.context === s && r.kind === 'Renderbuffer' && r.bound && !r.deleted && !s.lost; }
+    renderbufferStorage(target, format, width, height) { required('renderbufferStorage', 4, arguments); const s = state(this); target >>>= 0; format >>>= 0; width |= 0; height |= 0; if (width < 0 || height < 0) { flag(s, GL.INVALID_VALUE); return; } call(s, 'renderbufferStorage', target, format, width, height); }
+    framebufferRenderbuffer(target, attachment, rbtarget, object) {
+      required('framebufferRenderbuffer', 4, arguments); const s = state(this); target >>>= 0; attachment >>>= 0; rbtarget >>>= 0;
+      const r = owned(s, object, 'Renderbuffer', true); if (!r || !framebufferTarget(s, target)) return;
+      if (!call(s, 'framebufferRenderbuffer', target, attachment, rbtarget, r.id).error) objects.get(framebufferObject(s, target)).attachments[attachment] = object;
+    }
+    getRenderbufferParameter(target, pname) { required('getRenderbufferParameter', 2, arguments); const s = state(this), r = call(s, 'renderbufferParameter', target >>> 0, pname >>> 0); return r.error ? null : r.value; }
+    getFramebufferAttachmentParameter(target, attachment, pname) {
+      required('getFramebufferAttachmentParameter', 3, arguments); const s = state(this); target >>>= 0; attachment >>>= 0; pname >>>= 0;
+      if (!framebufferTarget(s, target)) return null; const r = call(s, 'framebufferAttachment', target, attachment, pname); if (r.error) return null;
+      return pname === GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME ? objects.get(framebufferObject(s, target)).attachments[attachment] || null : r.value;
+    }
     flush() { const s = state(this); syncSize(s); if (!s.lost) N.canvasMarkDirty(s.surface); }
     finish() { const s = state(this); syncSize(s); if (!s.lost) N.canvasMarkDirty(s.surface); }
   }
@@ -414,7 +475,7 @@
   function capability(s, cap, enabled) {
     if (cap === GL.SCISSOR_TEST) { if (!call(s, 'enableScissor', enabled).error) s.scissorEnabled = enabled; return; }
     if (cap === GL.BLEND) { if (!call(s, 'enableBlend', enabled).error) s.blendEnabled = enabled; return; }
-    if (cap === GL.DEPTH_TEST) { if (!call(s, 'enableDepth', enabled && s.attrs.depth).error) s.depthEnabled = enabled; return; }
+    if (cap === GL.DEPTH_TEST) { if (!call(s, 'enableDepth', enabled).error) s.depthEnabled = enabled; return; }
     flag(s, [GL.BLEND, GL.CULL_FACE, GL.STENCIL_TEST, GL.DITHER, GL.POLYGON_OFFSET_FILL, GL.SAMPLE_ALPHA_TO_COVERAGE, GL.SAMPLE_COVERAGE].includes(cap) ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
   }
   for (let size = 1; size <= 4; size++) {
@@ -427,8 +488,7 @@
   }
   // These operations are deliberately unavailable until their rendering
   // semantics exist. Libraries get an observable GL error, never fake IDs.
-  for (const name of ['createFramebuffer', 'createRenderbuffer']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); return null; });
-  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'bindRenderbuffer', 'deleteFramebuffer', 'deleteRenderbuffer', 'framebufferTexture2D', 'framebufferRenderbuffer', 'renderbufferStorage', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform2i', 'uniform3i', 'uniform4i', 'uniform2iv', 'uniform3iv', 'uniform4iv', 'uniformMatrix2fv', 'uniformMatrix3fv']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
+  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform2i', 'uniform3i', 'uniform4i', 'uniform2iv', 'uniform3iv', 'uniform4iv', 'uniformMatrix2fv', 'uniformMatrix3fv']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
   for (const [name, value] of Object.entries(GL)) {
     Object.defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
     Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
@@ -472,9 +532,9 @@
     const base = WebGL2RenderingContext.prototype[name];
     hidden(WebGL2RenderingContext.prototype, name, function (...args) { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); if (args.length > maxArgs) { flag(s, GL.INVALID_OPERATION); return null; } return base.apply(this, args); });
   }
-  for (const [name, value] of Object.entries({ ...GL, VERTEX_ARRAY_BINDING: 0x85B5, MAX_ELEMENT_INDEX: 0x8D6B, VERTEX_ATTRIB_ARRAY_DIVISOR: 0x88FE })) { Object.defineProperty(WebGL2RenderingContext, name, { value, enumerable: true }); if (!(name in WebGL2RenderingContext.prototype)) Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, enumerable: true }); }
+  for (const [name, value] of Object.entries({ ...GL, VERTEX_ARRAY_BINDING: 0x85B5, MAX_ELEMENT_INDEX: 0x8D6B, VERTEX_ATTRIB_ARRAY_DIVISOR: 0x88FE, READ_FRAMEBUFFER: 0x8CA8, DRAW_FRAMEBUFFER: 0x8CA9, READ_FRAMEBUFFER_BINDING: 0x8CAA, DRAW_FRAMEBUFFER_BINDING: 0x8CA6 })) { Object.defineProperty(WebGL2RenderingContext, name, { value, enumerable: true }); if (!(name in WebGL2RenderingContext.prototype)) Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, enumerable: true }); }
   for (const name of ['drawRangeElements', 'vertexAttribIPointer', 'vertexAttribI4i', 'vertexAttribI4ui', 'vertexAttribI4iv', 'vertexAttribI4uiv', 'texImage3D', 'texSubImage3D', 'copyTexSubImage3D', 'compressedTexImage3D', 'compressedTexSubImage3D', 'texStorage2D', 'texStorage3D', 'drawBuffers', 'readBuffer', 'blitFramebuffer', 'invalidateFramebuffer', 'invalidateSubFramebuffer', 'framebufferTextureLayer', 'renderbufferStorageMultisample', 'copyBufferSubData', 'getBufferSubData', 'bindBufferBase', 'bindBufferRange', 'getIndexedParameter', 'getInternalformatParameter', 'getUniformIndices', 'getActiveUniforms', 'getUniformBlockIndex', 'getActiveUniformBlockParameter', 'getActiveUniformBlockName', 'uniformBlockBinding', 'createQuery', 'deleteQuery', 'isQuery', 'beginQuery', 'endQuery', 'getQuery', 'getQueryParameter', 'createSampler', 'deleteSampler', 'isSampler', 'bindSampler', 'samplerParameteri', 'samplerParameterf', 'getSamplerParameter', 'fenceSync', 'isSync', 'deleteSync', 'clientWaitSync', 'waitSync', 'getSyncParameter', 'createTransformFeedback', 'deleteTransformFeedback', 'isTransformFeedback', 'bindTransformFeedback', 'beginTransformFeedback', 'endTransformFeedback', 'transformFeedbackVaryings', 'getTransformFeedbackVarying', 'pauseTransformFeedback', 'resumeTransformFeedback', 'getFragDataLocation', 'clearBufferiv', 'clearBufferuiv', 'clearBufferfv', 'clearBufferfi', 'uniform1ui', 'uniform2ui', 'uniform3ui', 'uniform4ui', 'uniform1uiv', 'uniform2uiv', 'uniform3uiv', 'uniform4uiv', 'uniformMatrix2x3fv', 'uniformMatrix3x2fv', 'uniformMatrix2x4fv', 'uniformMatrix4x2fv', 'uniformMatrix3x4fv', 'uniformMatrix4x3fv']) hidden(WebGL2RenderingContext.prototype, name, function () { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); flag(s, GL.INVALID_OPERATION); return null; });
-  for (const C of [WebGLObject, WebGL2RenderingContext, WebGLVertexArrayObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
+  for (const C of [WebGLObject, WebGL2RenderingContext, WebGLVertexArrayObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLFramebuffer, WebGLRenderbuffer, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
   hidden(N, 'makeWebGLContext', function (canvas, surface, options, version = 1) {
     if (options !== null && typeof options !== 'object' && typeof options !== 'function') throw new TypeError('WebGL context attributes must be a dictionary');
     const alpha = options.alpha, depth = options.depth, premultipliedAlpha = options.premultipliedAlpha, powerPreference = options.powerPreference;
@@ -485,10 +545,10 @@
     const w = surface.width, h = surface.height;
     if (Math.max(w, 1) > limits.maxDimension || Math.max(h, 1) > limits.maxDimension || Math.max(w, 1) * Math.max(h, 1) > limits.maxPixels) return null;
     if (attrs.failIfMajorPerformanceCaveat) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'The software renderer is a major performance caveat' })); return null; }
-    const result = N.webglNew(surface.id, w, h, attrs.alpha, attrs.premultipliedAlpha, version);
+    const result = N.webglNew(surface.id, w, h, attrs.alpha, attrs.premultipliedAlpha, version, attrs.depth);
     if (result.error) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'Software drawing buffer creation failed' })); return null; }
     const ctx = Object.create(version === 2 ? WebGL2RenderingContext.prototype : WebGLRenderingContext.prototype);
-    const s = { canvas, surface, attrs, version, currentVAO: null, defaultVAO: null, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, blendEnabled: false, blendFactors: [GL.ONE, GL.ZERO, GL.ONE, GL.ZERO], blendEquations: [GL.FUNC_ADD, GL.FUNC_ADD], blendColor: [0, 0, 0, 0], clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, divisor: 0, current: [0, 0, 0, 1] })) };
+    const s = { canvas, surface, attrs, version, drawFramebuffer: null, readFramebuffer: null, renderbuffer: null, currentVAO: null, defaultVAO: null, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, blendEnabled: false, blendFactors: [GL.ONE, GL.ZERO, GL.ONE, GL.ZERO], blendEquations: [GL.FUNC_ADD, GL.FUNC_ADD], blendColor: [0, 0, 0, 0], clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, divisor: 0, current: [0, 0, 0, 1] })) };
     s.defaultVAO = { attribs: s.attribs, element: null };
     contexts.set(ctx, s); surface.ctx = ctx; surface.mode = 'webgl';
     N.canvasMarkDirty(surface);
