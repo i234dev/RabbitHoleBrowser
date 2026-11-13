@@ -233,10 +233,22 @@ fn this_buffer(realm: &mut Realm, this: &Value, method: &str) -> JsResult<(Objec
     realm.type_error(&format!("Method ArrayBuffer.prototype.{} called on incompatible receiver", method))
 }
 
-/// Allocate a new `ArrayBuffer` of `len` zeroed bytes.
-pub fn allocate_buffer(realm: &mut Realm, len: usize, proto: Option<ObjectId>) -> ObjectId {
+/// Allocate a new `ArrayBuffer` of `len` zeroed bytes (RangeError when the
+/// memory is not available).
+pub fn allocate_buffer(realm: &mut Realm, len: usize, proto: Option<ObjectId>) -> JsResult<ObjectId> {
     let proto = proto.unwrap_or_else(|| realm.intrinsics.others["ArrayBufferPrototype"]);
-    realm.alloc(Object::new(Some(proto), ObjectKind::ArrayBuffer(Rc::new(RefCell::new(vec![0u8; len])))))
+    let Some(bytes) = zeroed_bytes(len) else {
+        return realm.range_error("Array buffer allocation failed");
+    };
+    Ok(realm.alloc(Object::new(Some(proto), ObjectKind::ArrayBuffer(Rc::new(RefCell::new(bytes))))))
+}
+
+/// `len` zero bytes, or `None` when the allocation fails.
+pub fn zeroed_bytes(len: usize) -> Option<Vec<u8>> {
+    let mut v: Vec<u8> = Vec::new();
+    v.try_reserve_exact(len).ok()?;
+    v.resize(len, 0);
+    Some(v)
 }
 
 fn buffer_ctor_impl(realm: &mut Realm, args: &[Value], proto_key: &str, name: &str) -> JsResult<Value> {
@@ -249,7 +261,7 @@ fn buffer_ctor_impl(realm: &mut Realm, args: &[Value], proto_key: &str, name: &s
     }
     let default = realm.intrinsics.others[proto_key];
     let proto = realm.proto_from_new_target(default);
-    Ok(Value::Object(allocate_buffer(realm, len, Some(proto))))
+    Ok(Value::Object(allocate_buffer(realm, len, Some(proto))?))
 }
 
 fn array_buffer_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -568,7 +580,7 @@ pub fn create_typed_array(realm: &mut Realm, kind: TypedArrayKind, length: usize
     if length > 2usize.pow(30) {
         return realm.range_error("Invalid typed array length");
     }
-    let buffer = allocate_buffer(realm, length * kind.element_size(), None);
+    let buffer = allocate_buffer(realm, length * kind.element_size(), None)?;
     let proto = proto.unwrap_or_else(|| realm.intrinsics.others[proto_key(kind)]);
     let data = TypedArrayData { kind, buffer, byte_offset: 0, length };
     Ok(realm.alloc(Object::new(Some(proto), ObjectKind::TypedArray(Box::new(data)))))

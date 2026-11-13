@@ -83,6 +83,9 @@ config directory under `rabbithole/` (override with RABBITHOLE_PROFILE).
 static ALLOC: rabbithole_js::alloc::RhAlloc = rabbithole_js::alloc::RhAlloc;
 
 fn main() -> ExitCode {
+    if let Some(mb) = std::env::var("RH_ALLOC_TRAP_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
+        rabbithole_js::alloc::trap_large_allocations(mb << 20);
+    }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // JavaScript engine switches, read by every realm (set before any
     // thread starts).

@@ -713,3 +713,30 @@ fn overlong_string_concatenation_throws() {
     throws("var a = 'ab'; for (var i = 0; i < 80; i++) a += a; a.length", "Invalid string length");
     throws("var a = 'ab'; for (var i = 0; i < 80; i++) a = a + a; a.length", "Invalid string length");
 }
+
+#[test]
+fn oversized_requests_throw_instead_of_aborting() {
+    // Requests that would reserve gigabytes are RangeErrors, not process
+    // aborts on a failed allocation.
+    throws("'a'.padStart(2 ** 40)", "Invalid string length");
+    throws("'a'.padEnd(2 ** 53 - 1, 'xy')", "Invalid string length");
+    throws("Reflect.apply(Math.max, null, { length: 2 ** 32 - 1 })", "Too many arguments in function call");
+    throws("Math.max.apply(null, { length: 2 ** 32 - 1, 0: 1 })", "Too many arguments in function call");
+    eq("Reflect.apply(Math.max, null, { length: 3, 0: 4, 1: 9, 2: 2 })", "9");
+    eq("new ArrayBuffer(1 << 20).byteLength", "1048576");
+}
+
+#[test]
+fn collection_runs_inside_call_apply_and_reflect() {
+    // Whole programs run inside `Reflect.apply` / `f.apply` reached from
+    // natives; garbage made there is collected (the heap stays small), and
+    // array-like arguments read through getters survive it.
+    let mut realm = Realm::new();
+    realm.gc_threshold = 1000;
+    let src = "function work() { var s = 0; for (var i = 0; i < 200000; i++) { var o = { a: [i] }; s += o.a[0] & 1; } return s + arguments[0].v; }
+               var args = { length: 1, get 0() { return { v: 7 }; } };
+               [Reflect.apply(work, null, args), Function.prototype.apply.call(work, null, args), Reflect.apply(Function.prototype.call, work, [null, { v: 1 }])].join()";
+    let v = realm.eval(src, "t").unwrap_or_else(|e| panic!("{}", realm.error_to_string(&e)));
+    assert_eq!(realm.to_string(v).unwrap().to_rust_string(), "100007,100007,100001");
+    assert!(realm.heap.len() < 150_000, "heap grew to {} slots", realm.heap.len());
+}

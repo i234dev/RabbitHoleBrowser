@@ -7,6 +7,11 @@ use crate::realm::*;
 use crate::value::*;
 use std::rc::Rc;
 
+/// Longest argument list `apply` / `Reflect.apply` build from an
+/// array-like that is not a dense array (longer: RangeError, as in other
+/// engines, instead of reserving gigabytes for `{length: 2 ** 32 - 1}`).
+const MAX_ARGUMENTS: usize = 1 << 22;
+
 pub type JsResult<T> = Result<T, Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1264,15 +1269,28 @@ impl Realm {
         }
         let len = self.get_str(Value::Object(id), "length")?;
         let len = self.to_length(len)?;
+        if len > MAX_ARGUMENTS {
+            return self.range_error("Too many arguments in function call");
+        }
         if self.no_index_properties(id) {
             // `{length: n}`: every element reads as undefined.
             return Ok(vec![Value::Undefined; len]);
         }
-        let mut out = Vec::with_capacity(len);
+        // The list is invisible to the collector while getters run.
+        let mut out = Vec::with_capacity(len.min(1 << 16));
+        self.gc_block += 1;
+        let mut r = Ok(());
         for i in 0..len {
-            out.push(self.get(Value::Object(id), PropertyKey::index(i as u32))?);
+            match self.get(Value::Object(id), PropertyKey::index(i as u32)) {
+                Ok(v) => out.push(v),
+                Err(e) => {
+                    r = Err(e);
+                    break;
+                }
+            }
         }
-        Ok(out)
+        self.gc_block -= 1;
+        r.map(|_| out)
     }
 
     /// No object on the prototype chain of `id` (itself included) can have

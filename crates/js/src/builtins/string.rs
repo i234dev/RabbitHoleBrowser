@@ -345,6 +345,9 @@ fn pad(realm: &mut Realm, this: Value, args: &[Value], at_start: bool) -> JsResu
     if filler.is_empty() {
         return Ok(Value::String(s));
     }
+    if max > crate::value::MAX_STRING_LEN {
+        return realm.range_error("Invalid string length");
+    }
     let fill_len = max - s.len();
     let mut fill: Vec<u16> = Vec::with_capacity(fill_len);
     while fill.len() < fill_len {

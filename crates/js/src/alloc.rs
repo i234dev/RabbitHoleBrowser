@@ -239,6 +239,42 @@ unsafe fn free_to_pool(p: *mut u8, k: usize) {
     });
 }
 
+/// Requests at least this big are reported with a backtrace on stderr
+/// (0 = off; see [`trap_large_allocations`]).
+static TRAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static IN_TRAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Debugging aid: report every allocation of at least `bytes` bytes (with
+/// a backtrace) on stderr; 0 turns it off. `rabbithole` sets it from the
+/// environment variable `RH_ALLOC_TRAP_MB`.
+pub fn trap_large_allocations(bytes: usize) {
+    TRAP_BYTES.store(bytes, Ordering::Relaxed);
+}
+
+#[cold]
+#[inline(never)]
+fn report_large(size: usize) {
+    let _ = IN_TRAP.try_with(|t| {
+        if t.replace(true) {
+            return;
+        }
+        let bt = std::backtrace::Backtrace::force_capture();
+        eprintln!("rabbithole: large allocation of {size} bytes on {:?}\n{bt}", std::thread::current().name());
+        t.set(false);
+    });
+}
+
+#[inline(always)]
+fn check_large(size: usize) {
+    let t = TRAP_BYTES.load(Ordering::Relaxed);
+    if t != 0 && size >= t {
+        report_large(size);
+    }
+}
+
 /// The allocator (see the module docs).
 pub struct RhAlloc;
 
@@ -266,8 +302,25 @@ unsafe impl GlobalAlloc for RhAlloc {
                 }
             }
         }
+        check_large(layout.size());
         account(layout.size() as isize);
         System.alloc(layout)
+    }
+
+    #[inline]
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if layout.size() <= MAX_SMALL && layout.align() <= 16 {
+            let p = self.alloc(layout);
+            if !p.is_null() {
+                std::ptr::write_bytes(p, 0, layout.size());
+            }
+            return p;
+        }
+        // Big zeroed blocks come straight from the system (calloc: fresh
+        // pages are already zero and are not touched until used).
+        check_large(layout.size());
+        account(layout.size() as isize);
+        System.alloc_zeroed(layout)
     }
 
     #[inline]
@@ -308,6 +361,7 @@ unsafe impl GlobalAlloc for RhAlloc {
             return q;
         }
         // A system block stays one (`dealloc` tells them apart by address).
+        check_large(new_size);
         account(new_size as isize - layout.size() as isize);
         System.realloc(p, layout, new_size)
     }
