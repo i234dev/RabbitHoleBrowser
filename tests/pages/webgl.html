@@ -61,7 +61,7 @@
       new Uint8Array([255,80,100,255, 50,210,130,255, 50,110,240,255, 255,220,80,255]));
     tex.uniform1i(tex.getUniformLocation(t, 'image'), 0); tex.drawArrays(tex.TRIANGLE_STRIP, 0, 4);
     if (gl.getError() || tex.getError()) throw new Error('A rendering command failed');
-    status.textContent = 'WebGL1 rendered both examples.\n' + gl.getParameter(gl.RENDERER) + '\nWebGL2 is not advertised by this implementation.';
+    status.textContent = 'WebGL1 rendered both examples.\n' + gl.getParameter(gl.RENDERER) + '\nThis page uses WebGL1; WebGL2 is a separate experimental subset.';
   } catch (error) { status.textContent = 'Rendering error: ' + error.message; }
 })();
 </script>

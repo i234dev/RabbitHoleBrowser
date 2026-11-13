@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Experimental WebGL2: GLSL300, VAO and uint32 indices</title>
+<style>body{margin:0;background:#18202c;color:white;font:16px sans-serif}canvas{display:block}p{margin:12px}</style>
+<canvas id="draw" width="160" height="96"></canvas>
+<p>Experimental WebGL2 subset: two VAOs, GLSL ES 3.00 and 32-bit indices.</p>
+<script>
+const gl=document.getElementById('draw').getContext('webgl2',{preserveDrawingBuffer:true});
+if(!gl)throw new Error('Experimental WebGL2 is unavailable');
+const program=gl.createProgram();
+for(const [kind,source] of [[gl.VERTEX_SHADER,'#version 300 es\nlayout(location=0) in vec2 position;void main(){gl_Position=vec4(position,0.0,1.0);}'],[gl.FRAGMENT_SHADER,'#version 300 es\nprecision mediump float;uniform vec4 color;out vec4 pixel;void main(){pixel=color;}']]){
+ const shader=gl.createShader(kind);gl.shaderSource(shader,source);gl.compileShader(shader);
+ if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(shader));
+ gl.attachShader(program,shader);
+}
+gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(program));gl.useProgram(program);
+function triangle(points){
+ const vao=gl.createVertexArray();gl.bindVertexArray(vao);
+ const v=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,v);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(points),gl.STATIC_DRAW);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(0);
+ const e=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,e);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint32Array([0,1,2]),gl.STATIC_DRAW);return vao;
+}
+const left=triangle([-1,-1,0,-1,-0.5,1]),right=triangle([0,-1,1,-1,0.5,1]),color=gl.getUniformLocation(program,'color');
+gl.bindVertexArray(left);gl.uniform4f(color,1,0,0,1);gl.drawElements(gl.TRIANGLES,3,gl.UNSIGNED_INT,0);
+gl.bindVertexArray(right);gl.uniform4f(color,0,1,0,1);gl.drawElements(gl.TRIANGLES,3,gl.UNSIGNED_INT,0);
+if(gl.getError()!==gl.NO_ERROR)throw new Error('WebGL2 rendering failed');
+</script>
