@@ -1,6 +1,7 @@
 //! Experimental, dependency-free software WebGL rendering. See README.md
 //! for the supported GLSL subset and explicit implementation limits.
 mod blend;
+mod framebuffer;
 pub mod gl;
 mod raster;
 mod shader;
@@ -21,6 +22,7 @@ pub enum Error {
     InvalidEnum,
     InvalidValue,
     InvalidOperation,
+    InvalidFramebufferOperation,
     OutOfMemory,
 }
 impl Error {
@@ -29,6 +31,7 @@ impl Error {
             Self::InvalidEnum => gl::INVALID_ENUM,
             Self::InvalidValue => gl::INVALID_VALUE,
             Self::InvalidOperation => gl::INVALID_OPERATION,
+            Self::InvalidFramebufferOperation => gl::INVALID_FRAMEBUFFER_OPERATION,
             Self::OutOfMemory => gl::OUT_OF_MEMORY,
         }
     }
@@ -142,6 +145,7 @@ pub struct Context {
     clear_depth: f32,
     color_mask: [bool; 4],
     alpha_channel: bool,
+    default_depth_channel: bool,
     blend: blend::BlendState,
     depth_mask: bool,
     depth_test: bool,
@@ -165,6 +169,13 @@ pub struct Context {
     bound_textures: [u32; MAX_TEXTURE_UNITS as usize],
     active_texture_unit: usize,
     texture_bytes: usize,
+    framebuffers: BTreeMap<u32, framebuffer::Framebuffer>,
+    renderbuffers: BTreeMap<u32, framebuffer::Renderbuffer>,
+    draw_framebuffer: u32,
+    read_framebuffer: u32,
+    renderbuffer_binding: u32,
+    renderbuffer_bytes: usize,
+    drawing_to_texture: bool,
 }
 fn filled<T: Clone>(n: usize, v: T) -> Result<Vec<T>> {
     let mut out = Vec::new();
@@ -206,6 +217,7 @@ impl Context {
             clear_depth: 1.,
             color_mask: [true; 4],
             alpha_channel: true,
+            default_depth_channel: true,
             blend: blend::BlendState::default(),
             depth_mask: true,
             depth_test: false,
@@ -229,6 +241,13 @@ impl Context {
             bound_textures: [0; MAX_TEXTURE_UNITS as usize],
             active_texture_unit: 0,
             texture_bytes: 0,
+            framebuffers: BTreeMap::new(),
+            renderbuffers: BTreeMap::new(),
+            draw_framebuffer: 0,
+            read_framebuffer: 0,
+            renderbuffer_binding: 0,
+            renderbuffer_bytes: 0,
+            drawing_to_texture: false,
         })
     }
     /// Backend-only shader language ceiling, not a WebGL version or context.
@@ -318,14 +337,18 @@ impl Context {
         if mask & !(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT) != 0 {
             return Err(Error::InvalidValue);
         }
+        self.with_draw_framebuffer(|ctx| ctx.clear_current(mask))
+    }
+    fn clear_current(&mut self, mask: u32) -> Result<()> {
         let mut col = self.clear_color.map(byte);
+        let depth = self.stored_depth(self.clear_depth);
         if !self.alpha_channel {
             col[3] = 255;
         }
         let r = self.clip_rect(false);
         for y in r[1]..r[3] {
             for x in r[0]..r[2] {
-                let i = ((self.height as i64 - 1 - y) * self.width as i64 + x) as usize;
+                let i = self.pixel_index(x, y);
                 if mask & gl::COLOR_BUFFER_BIT != 0 {
                     for (k, &v) in col.iter().enumerate() {
                         if self.color_mask[k] {
@@ -334,7 +357,7 @@ impl Context {
                     }
                 }
                 if mask & gl::DEPTH_BUFFER_BIT != 0 && self.depth_mask {
-                    self.depth[i] = self.clear_depth;
+                    self.depth[i] = depth;
                 }
             }
         }
@@ -342,14 +365,20 @@ impl Context {
     }
     pub fn read_pixels(&self, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>> {
         let n = dimensions(w, h)?;
+        let (width, height, pixels, bottom_up) = self.read_buffer()?;
         let mut out = filled(n * 4, 0)?;
         for j in 0..h as i64 {
             for i in 0..w as i64 {
                 let (px, py) = (x as i64 + i, y as i64 + j);
-                if px >= 0 && py >= 0 && px < self.width as i64 && py < self.height as i64 {
-                    let src = ((self.height as i64 - 1 - py) * self.width as i64 + px) as usize * 4;
+                if px >= 0 && py >= 0 && px < width as i64 && py < height as i64 {
+                    let row = if bottom_up {
+                        py
+                    } else {
+                        height as i64 - 1 - py
+                    };
+                    let src = (row * width as i64 + px) as usize * 4;
                     let dst = (j * w as i64 + i) as usize * 4;
-                    out[dst..dst + 4].copy_from_slice(&self.rgba[src..src + 4]);
+                    out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
                 }
             }
         }

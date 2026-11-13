@@ -4,9 +4,11 @@ pub const MAX_TEXTURE_UNITS: u32 = 8;
 const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 pub(super) struct Texture {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) pixels: Vec<u8>,
+    pub(super) deleted: bool,
+    pub(super) bound: bool,
     min: u32,
     mag: u32,
     wrap_s: u32,
@@ -18,6 +20,8 @@ impl Default for Texture {
             width: 0,
             height: 0,
             pixels: Vec::new(),
+            deleted: false,
+            bound: false,
             min: gl::NEAREST_MIPMAP_LINEAR,
             mag: gl::LINEAR,
             wrap_s: gl::REPEAT,
@@ -47,10 +51,13 @@ impl Context {
         if target != gl::TEXTURE_2D {
             return Err(Error::InvalidEnum);
         }
-        if id != 0 && !self.textures.contains_key(&id) {
+        if id != 0 && self.textures.get(&id).is_none_or(|t| t.deleted) {
             return Err(Error::InvalidOperation);
         }
         self.bound_textures[self.active_texture_unit] = id;
+        if id != 0 {
+            self.textures.get_mut(&id).unwrap().bound = true;
+        }
         Ok(())
     }
     fn bound_texture(&self, target: u32) -> Result<u32> {
@@ -191,13 +198,18 @@ impl Context {
         if id == 0 {
             return Ok(());
         }
-        let t = self.textures.remove(&id).ok_or(Error::InvalidValue)?;
-        self.texture_bytes -= t.pixels.len();
+        let t = self.textures.get_mut(&id).ok_or(Error::InvalidValue)?;
+        if t.deleted {
+            return Ok(());
+        }
+        t.deleted = true;
         for bound in &mut self.bound_textures {
             if *bound == id {
                 *bound = 0;
             }
         }
+        self.detach_deleted_texture(id);
+        self.collect_framebuffer_resources();
         Ok(())
     }
     pub fn uniform_i32(&mut self, location: i32, values: &[i32]) -> Result<()> {
@@ -224,6 +236,9 @@ impl Context {
                 let Some(&id) = self.bound_textures.get(unit) else {
                     return Err(Error::InvalidOperation);
                 };
+                if self.draw_color_texture() == Some(id) {
+                    return Err(Error::InvalidOperation);
+                }
                 if let Some(t) = self.textures.get(&id) {
                     // The rasterizer does not yet calculate texture-coordinate
                     // derivatives. Equal min/mag filters have unambiguous

@@ -35,7 +35,7 @@ operations must be rejected by the bindings instead of reporting fake success.
 - Raw RGBA `read_pixels` in lower-left GL order; out-of-buffer pixels are zero.
   `framebuffer_rgba` exposes top-left rows for presentation. Color channels are
   raw shader outputs; canvas context attributes determine how the compositor
-  interprets alpha. No blending or implicit premultiplication is performed here.
+  interprets alpha. Blending uses raw RGBA; no implicit canvas premultiplication is performed here.
 
 ## GLSL subset
 
@@ -56,8 +56,7 @@ Vertex shaders must write `gl_Position`; fragment shaders must write
 shared uniform types must agree. Uniforms start at zero after linking.
 
 Not implemented: general GLSL functions or control flow, arrays,
-integer/bool variables, derivatives, discard, swizzle assignments, framebuffer
-objects, stencil, points/lines, culling, multisampling, extensions. Texture sampling has the explicit bounded subset below. Unsupported
+integer/bool variables, derivatives, discard, swizzle assignments, stencil, points/lines, culling, multisampling, extensions. Texture sampling has the explicit bounded subset below. Unsupported
 shader operations are rejected, never synthesized.
 
 ## Limits and verification
@@ -153,8 +152,8 @@ textures can repeat in WebGL2 within the supported texture/filter subset.
 JavaScript has a distinct experimental `WebGL2RenderingContext`; it preserves
 canvas context exclusivity and rejects unimplemented commands and extra offset
 upload/readback overloads. This is not a conformant WebGL2 implementation or a
-Three.js compatibility claim. Integer attributes/uniforms, framebuffer
-objects/MRT, 3D textures, UBOs, queries, samplers, synchronization and transform
+Three.js compatibility claim. Integer attributes/uniforms, multiple color
+attachments/MRT, 3D textures, UBOs, queries, samplers, synchronization and transform
 feedback remain unsupported. Existing software limits still apply.
 
 `tests/vertex_arrays.rs` and the script WebGL tests check actual GLSL300 pixels,
@@ -182,3 +181,29 @@ integer types; it fails shader compilation rather than being simulated as a
 float. This milestone uses actual divisor attributes for per-instance positions,
 colors and other data. See `tests/instancing.rs` for pixel, divisor, VAO, restart,
 range and atomic-budget regressions.
+
+## Framebuffer milestone
+
+Framebuffer objects render into RGBA8 level-zero 2D textures. Clears, draws,
+readback and subsequent texture sampling use real attachment pixels, while
+canvas presentation continues to use only the default drawing buffer. Binding
+an FBO preserves the viewport, masks and other GL state. WebGL2 read and draw
+framebuffer bindings are independent; WebGL1 rejects those separate targets.
+
+Depth renderbuffers support DEPTH_COMPONENT16, with initialized depth one and
+16-bit quantization. Depth-test enable state is independent of whether the
+default canvas requested depth: an attached FBO depth buffer still works when
+that context was created with depth:false. Clears respect masks and scissor.
+
+Missing/unallocated attachments, size mismatches and feedback loops are
+validated before pixels change. Sampling a texture attached to the current
+draw framebuffer is rejected. Deleted attachments are retained by inactive
+FBOs, and deleting an attachment detaches it from current framebuffer bindings.
+
+The current subset requires COLOR_ATTACHMENT0 to hold an RGBA8 2D texture at
+level zero. Optional depth storage must have matching dimensions. Depth-only
+FBOs, color renderbuffers, stencil, multiple attachments/MRT, multisampling and
+blits remain unsupported. Mismatched dimensions are INCOMPLETE_DIMENSIONS in
+WebGL1 and explicitly FRAMEBUFFER_UNSUPPORTED in the WebGL2 subset. Renderbuffers
+have a separate 64 MiB budget and at most 256 live objects of each FBO kind.
+The existing framebuffer dimension and pixel-count limits also apply.

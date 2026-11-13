@@ -80,7 +80,7 @@ fn clip(vertices: [Vertex; 3]) -> Vec<Vertex> {
 }
 impl Context {
     pub(super) fn draw(&mut self, mode: u32, indices: &[u32]) -> Result<()> {
-        self.draw_instances(mode, indices, 1)
+        self.with_draw_framebuffer(|ctx| ctx.draw_instances(mode, indices, 1))
     }
     pub(super) fn draw_instances(
         &mut self,
@@ -291,17 +291,18 @@ impl Context {
                     * 0.5
                     + 0.5)
                     .clamp(0., 1.) as f32;
-                let at = ((self.height as i64 - 1 - y) * self.width as i64 + x) as usize;
+                let at = self.pixel_index(x, y);
+                let stored_depth = self.stored_depth(depth);
                 if self.depth_test {
                     let old = self.depth[at];
                     let pass = match self.depth_func {
                         gl::NEVER => false,
-                        gl::LESS => depth < old,
-                        gl::EQUAL => depth == old,
-                        gl::LEQUAL => depth <= old,
-                        gl::GREATER => depth > old,
-                        gl::NOTEQUAL => depth != old,
-                        gl::GEQUAL => depth >= old,
+                        gl::LESS => stored_depth < old,
+                        gl::EQUAL => stored_depth == old,
+                        gl::LEQUAL => stored_depth <= old,
+                        gl::GREATER => stored_depth > old,
+                        gl::NOTEQUAL => stored_depth != old,
+                        gl::GEQUAL => stored_depth >= old,
                         _ => true,
                     };
                     if !pass {
@@ -352,7 +353,7 @@ impl Context {
                     }
                 }
                 if self.depth_test && self.depth_mask {
-                    self.depth[at] = depth;
+                    self.depth[at] = stored_depth;
                 }
             }
         }
