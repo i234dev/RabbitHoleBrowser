@@ -864,6 +864,11 @@ pub struct Heap {
     grey: Vec<u32>,
     /// Weak collections scanned by the marker (ephemeron pass).
     weak: Vec<u32>,
+    /// Ephemeron values waiting for their (unmarked) key, by key, as of
+    /// the last ephemeron pass: scanning the key shades them, so a chain
+    /// key -> value -> key ... is marked in one pass instead of one link
+    /// per pass.
+    ephemerons: std::collections::HashMap<u32, Vec<u32>, crate::value::FxBuild>,
     /// Sweep position and end (the table length when marking finished).
     sweep_at: usize,
     sweep_end: usize,
@@ -922,6 +927,7 @@ impl Heap {
             phase: GcPhase::Idle,
             grey: Vec::new(),
             weak: Vec::new(),
+            ephemerons: Default::default(),
             sweep_at: 0,
             sweep_end: 0,
             swept: Vec::new(),
@@ -1075,6 +1081,7 @@ impl Heap {
         self.marks.resize(self.objects.len(), WHITE);
         self.grey.clear();
         self.weak.clear();
+        self.ephemerons.clear();
         for &r in roots {
             if self.objects.get(r.0 as usize).is_some_and(|o| o.is_some()) {
                 shade(&mut self.marks, &mut self.grey, r);
@@ -1093,11 +1100,18 @@ impl Heap {
         }
         loop {
             {
-                let Heap { objects, marks, grey, weak, .. } = self;
+                let Heap { objects, marks, grey, weak, ephemerons, .. } = self;
                 while let Some(i) = grey.pop() {
                     let i = i as usize;
                     if marks[i] != GREY {
                         continue;
+                    }
+                    if !ephemerons.is_empty() {
+                        if let Some(vs) = ephemerons.remove(&(i as u32)) {
+                            for v in vs {
+                                shade(marks, grey, ObjectId(v));
+                            }
+                        }
                     }
                     let Some(obj) = objects[i].as_ref() else {
                         marks[i] = BLACK;
@@ -1122,17 +1136,19 @@ impl Heap {
             // WeakMap / WeakSet entries whose key is reachable keep their
             // value (which may make more keys reachable): repeat until
             // nothing new is marked.
-            let Heap { objects, marks, grey, weak, .. } = self;
+            let Heap { objects, marks, grey, weak, ephemerons, .. } = self;
+            ephemerons.clear();
             for &w in weak.iter() {
                 if let Some(Object { kind: ObjectKind::WeakMap(m) | ObjectKind::WeakSet(m), .. }) = &objects[w as usize] {
                     for (k, v) in m.entries.iter().flatten() {
                         if let Some(vid) = v.as_object() {
-                            let key_alive = match k.as_object() {
-                                Some(kid) => marks.get(kid.0 as usize).is_some_and(|&m| m != WHITE),
-                                None => true,
-                            };
-                            if key_alive {
-                                shade(marks, grey, vid);
+                            if marks.get(vid.0 as usize).is_some_and(|&m| m != WHITE) {
+                                continue;
+                            }
+                            match k.as_object().map(|kid| (kid, marks.get(kid.0 as usize).copied())) {
+                                Some((kid, Some(WHITE))) => ephemerons.entry(kid.0).or_default().push(vid.0),
+                                Some((_, None)) => {}
+                                _ => shade(marks, grey, vid),
                             }
                         }
                     }
