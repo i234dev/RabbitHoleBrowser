@@ -22,14 +22,17 @@ fn cpu_ms() -> f64 {
 
 #[cfg(not(target_os = "linux"))]
 fn cpu_ms() -> f64 {
-    0.0
+    thread_local!(static START: Instant = Instant::now());
+    START.with(|s| s.elapsed().as_secs_f64() * 1000.0)
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 extern "C" {
     fn mallopt(param: i32, value: i32) -> i32;
 }
 
 fn main() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     if std::env::var_os("RH_MALLOPT").is_some() {
         unsafe {
             mallopt(-1, 256 << 20); // M_TRIM_THRESHOLD

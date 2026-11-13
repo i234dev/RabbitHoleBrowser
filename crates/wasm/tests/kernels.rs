@@ -128,3 +128,19 @@ fn kernels_match_reference() {
         assert_eq!(call(&store, &inst, "sha256", &[Val::I32(blocks)]), Val::I32(sha_like(blocks as usize, &k)), "{blocks} blocks");
     }
 }
+
+/// Requesting native code on another architecture must preserve execution.
+#[cfg(not(target_arch = "x86_64"))]
+#[test]
+fn unsupported_architecture_uses_interpreter() {
+    use rabbithole_wasm::jit;
+    use rabbithole_wasm::runtime::FuncKind;
+    let (store, inst) = instance();
+    assert!(!jit::enabled());
+    let Some(Extern::Func(f)) = inst.export("fib") else { panic!("fib export") };
+    let FuncKind::Wasm { code, .. } = &f.kind else { panic!("wasm function") };
+    assert!(jit::compiled(code).is_none());
+    assert!(jit::compile(code).is_none());
+    assert!(jit::entry_cells(2).iter().all(|e| e.get().is_null()));
+    assert_eq!(store.call(&mut NoHost, f, &[Val::I32(10)]).unwrap(), vec![Val::I32(55)]);
+}

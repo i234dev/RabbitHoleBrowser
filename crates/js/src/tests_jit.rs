@@ -217,8 +217,11 @@ fn hot_loop_enters_native_code() {
     let mut realm = Realm::new();
     realm.set_jit(true, 1);
     realm.eval(src, "osr.js").unwrap();
-    if crate::jit::LOOP_OSR {
+    if rabbithole_jit::supported() && crate::jit::LOOP_OSR {
         assert!(realm.jit_entries() > 0, "the loop continued in native code");
+    } else if !rabbithole_jit::supported() {
+        assert!(!realm.jit.on, "unsupported architectures stay interpreted");
+        assert_eq!(realm.jit_entries(), 0);
     }
 }
 

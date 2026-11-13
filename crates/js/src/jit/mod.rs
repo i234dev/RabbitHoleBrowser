@@ -36,6 +36,7 @@ pub(crate) use emit::PHASE;
 #[cfg(all(test, not(target_arch = "x86_64")))]
 pub(crate) const PHASE: u8 = 0;
 mod debug;
+#[cfg(target_arch = "x86_64")]
 mod helpers;
 #[cfg(target_arch = "x86_64")]
 mod layout;
@@ -384,5 +385,14 @@ fn build(code: &FunctionCode) -> Result<(rabbithole_jit::ExecMem, Option<String>
     {
         let _ = code;
         Err("no code generator for this architecture".into())
+    }
+}
+
+// Keep the VM hook available when the feature is enabled without a backend.
+#[cfg(not(target_arch = "x86_64"))]
+impl Realm {
+    #[inline(always)]
+    pub(crate) fn jit_reload(&mut self, _code: &FunctionCode, _pc: usize) -> crate::vm::Ctl {
+        crate::vm::Ctl::Next
     }
 }

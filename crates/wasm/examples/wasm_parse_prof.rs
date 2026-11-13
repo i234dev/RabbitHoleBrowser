@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 struct H;
 
+#[cfg(target_os = "linux")]
 fn cpu() -> std::time::Duration {
     #[repr(C)]
     struct Ts {
@@ -24,6 +25,12 @@ fn cpu() -> std::time::Duration {
     // SAFETY: plain libc call (CLOCK_THREAD_CPUTIME_ID = 3).
     unsafe { clock_gettime(3, &mut t) };
     std::time::Duration::new(t.s as u64, t.ns as u32)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cpu() -> std::time::Duration {
+    thread_local!(static START: std::time::Instant = std::time::Instant::now());
+    START.with(|s| s.elapsed())
 }
 
 impl Host for H {
