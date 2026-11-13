@@ -28,3 +28,8 @@ pub const NOTEQUAL: u32 = 0x0205;
 pub const GEQUAL: u32 = 0x0206;
 pub const ALWAYS: u32 = 0x0207;
 pub const RGBA: u32 = 0x1908;
+
+pub const FLOAT_VEC2: u32 = 0x8B50;
+pub const FLOAT_VEC3: u32 = 0x8B51;
+pub const FLOAT_VEC4: u32 = 0x8B52;
+pub const FLOAT_MAT4: u32 = 0x8B5C;
