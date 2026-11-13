@@ -221,13 +221,8 @@ fn species(_realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> 
 /// GetPrototypeFromConstructor(NewTarget, default) — errors propagate.
 fn proto_from_ctor(realm: &mut Realm, default_key: &str) -> JsResult<ObjectId> {
     let default = realm.intrinsics.others[default_key];
-    match realm.new_target().v() {
-        V::Object(nt) => match realm.get(Value::Object(nt), PropertyKey::str("prototype"))?.v() {
-            V::Object(p) => Ok(p),
-            _ => Ok(default),
-        },
-        _ => Ok(default),
-    }
+    let nt = realm.new_target();
+    realm.proto_from_ctor(nt, default)
 }
 
 /// Resolve a relative index (already ToIntegerOrInfinity'd) against `len`.

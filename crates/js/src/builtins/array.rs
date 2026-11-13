@@ -517,7 +517,16 @@ fn array_species_create(realm: &mut Realm, original: ObjectId, len: usize) -> Js
     if species_is_default(realm, original) || !is_array_checked(realm, &Value::Object(original))? {
         return Ok((array_create(realm, len)?, true));
     }
-    let c = realm.get(Value::Object(original), crate::value::names::constructor())?;
+    let mut c = realm.get(Value::Object(original), crate::value::names::constructor())?;
+    // The %Array% of another realm stands for this realm's.
+    if let V::Object(cid) = c.v() {
+        if !realm.realms.is_empty() && realm.is_constructor(&c) {
+            let r = realm.function_realm(cid)?;
+            if r != realm.current_realm && realm.realm_intrinsics(r).array_ctor == cid {
+                c = Value::Undefined;
+            }
+        }
+    }
     let c = match c.v() {
         V::Object(cid) => {
             let s = realm.get(Value::Object(cid), PropertyKey::Symbol(SYM_SPECIES))?;

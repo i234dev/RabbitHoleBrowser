@@ -181,5 +181,21 @@ pub fn create_dynamic_function(realm: &mut Realm, args: &[Value], kind: &str) ->
     }
     let src = format!("({} anonymous({}\n) {{\n{}\n}})", kind, params.join(","), body);
     let code = realm.compile(&src, "Function", false)?;
-    realm.run_script(code)
+    let nt = realm.new_target();
+    let proto = if nt.is_object() {
+        let fallback = match kind {
+            "function" => realm.intrinsics.function_proto,
+            "function*" => realm.intrinsics.others["GeneratorFunctionPrototype"],
+            "async function*" => realm.intrinsics.others["AsyncGeneratorFunctionPrototype"],
+            _ => realm.intrinsics.others["AsyncFunctionPrototype"],
+        };
+        Some(realm.proto_from_ctor(nt, fallback)?)
+    } else {
+        None
+    };
+    let f = realm.run_script(code)?;
+    if let (Some(p), V::Object(id)) = (proto, f.v()) {
+        realm.obj_mut(id).set_proto(Some(p));
+    }
+    Ok(f)
 }

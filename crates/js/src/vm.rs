@@ -182,7 +182,8 @@ impl Realm {
                 let code = c.code.clone();
                 if code.flags.is_class_constructor {
                     let n = code.name.to_rust_string();
-                    return self.type_error(&format!("Class constructor {} cannot be invoked without 'new'", n));
+                    // The error comes from the constructor's realm.
+                    return self.in_realm(code.realm.get(), |r| r.type_error(&format!("Class constructor {} cannot be invoked without 'new'", n)));
                 }
                 if code.flags.is_generator || code.flags.is_async {
                     return self.start_generator_like(id, this, args);
@@ -513,7 +514,7 @@ impl Realm {
             (self.vstack[cb + 1].undef_if_empty(), Value::Undefined)
         } else {
             match self.vstack[cb + 1].v() {
-                V::Undefined | V::Null | V::Empty => (Value::Object(self.global), Value::Undefined),
+                V::Undefined | V::Null | V::Empty => (Value::Object(self.realm_global(c.code.realm.get())), Value::Undefined),
                 V::Object(o) => (Value::Object(o), Value::Undefined),
                 _ => return Ok(false),
             }
@@ -798,7 +799,7 @@ impl Realm {
             (this.undef_if_empty(), Value::Undefined)
         } else {
             match this.v() {
-                V::Undefined | V::Null | V::Empty => (Value::Object(self.global), Value::Undefined),
+                V::Undefined | V::Null | V::Empty => (Value::Object(self.realm_global(c.code.realm.get())), Value::Undefined),
                 V::Object(o) => (Value::Object(o), Value::Undefined),
                 _ => return Ok(false),
             }
@@ -949,7 +950,7 @@ impl Realm {
         let proto = match obj.props.get(&names::prototype()) {
             Some(p) if p.flags & ACCESSOR == 0 => match p.value.v() {
                 V::Object(p) => p,
-                _ => self.intrinsics.object_proto,
+                _ => self.realm_intrinsics(c.code.realm.get()).object_proto,
             },
             _ => return Ok(false),
         };
@@ -963,6 +964,15 @@ impl Realm {
         Ok(true)
     }
 
+    /// OrdinaryCallBindThis of a sloppy function in the running realm.
+    fn sloppy_this(&mut self, this: Value) -> JsResult<Value> {
+        Ok(match this.v() {
+            V::Undefined | V::Null | V::Empty => Value::Object(self.global),
+            V::Object(_) => this,
+            prim => Value::Object(self.to_object(prim.to_value())?),
+        })
+    }
+
     /// Build the frame for calling closure `id`; its slots are reserved on
     /// top of the value stack (push it next, or detach them).
     pub(crate) fn prepare_frame(&mut self, id: ObjectId, this: Value, args: &[Value], new_target: Value, is_construct: bool) -> JsResult<Frame> {
@@ -971,6 +981,11 @@ impl Realm {
             ObjectKind::Function(c) => (c.code.clone(), c.scope, c.this_value.clone(), c.new_target.clone(), c.arguments.clone()),
             _ => unreachable!(),
         };
+        if code.realm.get() != self.current_realm {
+            // `this` wrappers, the global, `arguments` objects: the callee's
+            // realm's.
+            return self.in_realm(code.realm.get(), |r| r.prepare_frame(id, this, args, new_target, is_construct));
+        }
         let flags = code.flags;
         // this binding
         let this = if flags.is_arrow {
@@ -979,20 +994,14 @@ impl Realm {
             if flags.is_derived {
                 Value::Empty
             } else {
-                let proto = match (self.get(new_target.clone(), names::prototype())?).v() {
-                    V::Object(p) => p,
-                    _ => self.intrinsics.object_proto,
-                };
+                let default = self.intrinsics.object_proto;
+                let proto = self.proto_from_ctor(new_target.clone(), default)?;
                 Value::Object(self.alloc(Object::new(Some(proto), ObjectKind::Ordinary)))
             }
         } else if flags.is_strict {
             this
         } else {
-            match this.v() {
-                V::Undefined | V::Null | V::Empty => Value::Object(self.global),
-                V::Object(_) => this,
-                prim => Value::Object(self.to_object(prim.to_value())?),
-            }
+            self.sloppy_this(this)?
         };
         let new_target = if flags.is_arrow { arrow_nt.unwrap_or(Value::Undefined) } else { new_target };
         let nslots = code.scope_slots as usize;
@@ -1099,7 +1108,8 @@ impl Realm {
             // Run FunctionDeclarationInstantiation now (errors in argument
             // binding throw from the call); the body starts suspended at
             // the compiler's initial `Yield`.
-            let fallback = if is_async { self.intrinsics.async_generator_proto } else { self.intrinsics.generator_proto };
+            let fi = self.realm_intrinsics(code.realm.get());
+            let fallback = if is_async { fi.async_generator_proto } else { fi.generator_proto };
             let gen = self.alloc(Object::new(
                 Some(fallback),
                 ObjectKind::Generator(Box::new(GeneratorData { state: GeneratorState::Executing, frame: None, is_async, promise: None, queue: Default::default() })),
@@ -1132,10 +1142,11 @@ impl Realm {
             match (self.get(Value::Object(id), names::prototype())?).v() {
                 V::Object(p) => p,
                 _ => {
+                    let fi = self.realm_intrinsics(code.realm.get());
                     if is_async {
-                        self.intrinsics.async_generator_proto
+                        fi.async_generator_proto
                     } else {
-                        self.intrinsics.generator_proto
+                        fi.generator_proto
                     }
                 }
             }
@@ -1387,6 +1398,7 @@ impl Realm {
             return Err(err);
         }
         let caller_realm = self.current_realm;
+        let outer_entry_realm = std::mem::replace(&mut self.entry_realm, caller_realm);
         let r = loop {
             match self.run_inner() {
                 Ok(exit) => break Ok(exit),
@@ -1397,6 +1409,7 @@ impl Realm {
                 }
             }
         };
+        self.entry_realm = outer_entry_realm;
         if self.current_realm != caller_realm {
             self.switch_realm(caller_realm);
         }
@@ -4462,10 +4475,13 @@ impl Realm {
     fn construct_return_error(&mut self, v: &Value) -> Option<Value> {
         let f = self.frames.last().unwrap();
         let derived = f.code().flags.is_derived;
+        // Thrown in the caller's realm (after the callee's context is gone).
+        let n = self.frames.len();
+        let caller_realm = if f.entry || n < 2 { self.entry_realm } else { self.frames[n - 2].code().realm.get() };
         let e = if derived && !v.is_undefined() {
-            self.new_error("TypeError", "Derived constructors may only return object or undefined")
+            self.in_realm(caller_realm, |r| r.new_error("TypeError", "Derived constructors may only return object or undefined"))
         } else if f.this.is_empty() {
-            self.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")
+            self.in_realm(caller_realm, |r| r.new_error("ReferenceError", "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"))
         } else {
             return None;
         };
@@ -4920,7 +4936,9 @@ impl Realm {
             return;
         }
         let Some(ObjectKind::Function(c)) = self.heap.try_get(id).map(|o| &o.kind) else { return };
-        if c.code.call_flags & (CALL_PLAIN | CALL_ARROW) != CALL_PLAIN {
+        // A callee of another realm binds a sloppy `this` to its own
+        // global: no cached shortcut for it.
+        if c.code.call_flags & (CALL_PLAIN | CALL_ARROW) != CALL_PLAIN || c.code.realm.get() != self.current_realm {
             return;
         }
         cell.set(crate::bytecode::CallIc {

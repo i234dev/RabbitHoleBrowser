@@ -261,6 +261,7 @@ fn regexp_alloc(realm: &mut Realm, pattern: &JsStr, flags: &str, proto: ObjectId
         flags: JsStr::new(flags),
         original_source: pattern.clone(),
         legacy,
+        realm: realm.current_realm,
     };
     let id = realm.alloc(Object::new(Some(proto), ObjectKind::RegExp(Box::new(data))));
     realm.define_property(id, "lastIndex", Value::Number(0.0), WRITABLE);
@@ -378,13 +379,7 @@ fn regexp_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     // RegExpAlloc: the prototype comes from newTarget before the pattern
     // and flags are converted.
     let default_proto = realm.intrinsics.others["RegExpPrototype"];
-    let proto = match new_target.v() {
-        V::Object(nt) => match realm.get(Value::Object(nt), PropertyKey::str("prototype"))?.v() {
-            V::Object(p) => p,
-            _ => default_proto,
-        },
-        _ => default_proto,
-    };
+    let proto = realm.proto_from_ctor(new_target.clone(), default_proto)?;
     let legacy = new_target.as_object() == Some(ctor);
     let p = if p.is_undefined() { JsStr::empty() } else { realm.to_string(p)? };
     let f = if f.is_undefined() { String::new() } else { realm.to_rust_string(f)? };
@@ -394,7 +389,8 @@ fn regexp_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
 /// Annex B `RegExp.prototype.compile(pattern, flags)`.
 fn compile(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_regexp(realm, &this, "compile")?;
-    let legacy = matches!(&realm.obj(id).kind, ObjectKind::RegExp(d) if d.legacy);
+    let cur = realm.current_realm;
+    let legacy = matches!(&realm.obj(id).kind, ObjectKind::RegExp(d) if d.legacy && d.realm == cur);
     if !legacy {
         return realm.type_error("RegExp.prototype.compile called on a RegExp subclass instance");
     }

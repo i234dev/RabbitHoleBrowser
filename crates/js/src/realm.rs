@@ -312,6 +312,8 @@ pub struct Realm {
     /// lexical bindings are the fields above; the others wait in
     /// `realms` (see [`Realm::create_realm`]).
     pub current_realm: u16,
+    /// The realm that entered the innermost run loop (see `Realm::run`).
+    pub(crate) entry_realm: u16,
     /// Realm records by index; the running one's slot is empty. Empty
     /// while there is only the first realm.
     pub(crate) realms: Vec<Option<Box<crate::realms::RealmRecord>>>,
@@ -487,6 +489,7 @@ impl Realm {
             regexp_last: None,
             post_native: None,
             current_realm: 0,
+            entry_realm: 0,
             realms: Vec::new(),
         };
         realm.install_builtins();

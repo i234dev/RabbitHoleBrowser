@@ -547,6 +547,8 @@ pub struct RegExpData {
     pub original_source: JsStr,
     /// [[LegacyFeaturesEnabled]] (Annex B `compile`): created by %RegExp% itself.
     pub legacy: bool,
+    /// [[Realm]]: the realm whose %RegExp% created it.
+    pub realm: u16,
 }
 
 /// The internal shape of an object.

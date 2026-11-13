@@ -88,12 +88,7 @@ pub fn register(realm: &mut Realm) {
 /// `newTarget.prototype` propagate).
 fn proto_from_ctor(realm: &mut Realm, default: ObjectId) -> JsResult<ObjectId> {
     let nt = realm.new_target();
-    if nt.is_object() {
-        if let V::Object(p) = realm.get(nt, PropertyKey::str("prototype"))?.v() {
-            return Ok(p);
-        }
-    }
-    Ok(default)
+    realm.proto_from_ctor(nt, default)
 }
 
 // ------------------------------------------------------- SuppressedError
