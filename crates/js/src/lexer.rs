@@ -10,6 +10,7 @@ use crate::ast::{Name, Pos};
 
 #[path = "prescan.rs"]
 mod prescan;
+pub use prescan::BlockEnd;
 pub use prescan::SkippedBody;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +106,9 @@ pub struct Lexer<'a> {
     /// The escape just scanned was a lone surrogate (`\uD800`): the
     /// caller appends it in source-escaped form (see `value::SOURCE_ESC`).
     lone_surrogate: Option<u16>,
+    /// When set, the pre-parser records the long blocks inside the bodies
+    /// it skips (see [`prescan::BlockEnd`]).
+    pub blocks: Option<Vec<prescan::BlockEnd>>,
 }
 
 // Punctuators ordered longest-first so greedy matching works.
@@ -147,6 +151,7 @@ impl<'a> Lexer<'a> {
             recording: false,
             cache: std::collections::HashMap::default(),
             lone_surrogate: None,
+            blocks: None,
         };
         // Hashbang
         if src.starts_with("#!") {

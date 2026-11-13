@@ -44,6 +44,7 @@ pub mod lexer;
 pub mod modules;
 pub mod panics;
 pub mod parser;
+pub mod validate;
 pub mod realm;
 pub mod realms;
 pub mod regex;

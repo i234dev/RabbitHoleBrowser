@@ -179,13 +179,14 @@ impl Realm {
         };
         match &self.obj(id).kind {
             ObjectKind::Function(c) => {
-                let code = c.code.clone();
-                if code.flags.is_class_constructor {
+                let flags = c.code.flags;
+                if flags.is_class_constructor {
+                    let code = c.code.clone();
                     let n = code.name.to_rust_string();
                     // The error comes from the constructor's realm.
                     return self.in_realm(code.realm.get(), |r| r.type_error(&format!("Class constructor {} cannot be invoked without 'new'", n)));
                 }
-                if code.flags.is_generator || code.flags.is_async {
+                if flags.is_generator || flags.is_async {
                     return self.start_generator_like(id, this, args);
                 }
                 if !self.push_plain_call(id, &this, args, 0, true)? {
@@ -547,8 +548,8 @@ impl Realm {
         // in the caller's slots or argument list, then rooted by the frame).
         let cr: &FunctionCode = unsafe { &*code.as_ptr() };
         let cf = cr.call_flags;
-        if let (true, ArgSrc::Stack(src), Some(scope)) = (cf & CALL_SIMPLE != 0, &args, parent_scope) {
-            return self.push_simple_frame(id, cr, scope, *src, argc, this, new_target, ret_slot, is_construct, entry);
+        if let (true, Some(scope)) = (cf & CALL_SIMPLE != 0, parent_scope) {
+            return self.push_simple_frame(id, cr, scope, args, argc, this, new_target, ret_slot, is_construct, entry);
         }
         if self.frames.len() >= self.max_frames {
             return self.range_error("Maximum call stack size exceeded");
@@ -718,7 +719,7 @@ impl Realm {
         id: ObjectId,
         cr: &FunctionCode,
         scope: ObjectId,
-        src: usize,
+        src: ArgSrc,
         argc: usize,
         this: Value,
         new_target: Value,
@@ -743,10 +744,21 @@ impl Realm {
         unsafe {
             let p = self.vstack.as_mut_ptr();
             let regs = p.add(base);
-            let from = p.add(src);
-            for i in 0..nargs {
-                std::ptr::write(regs.add(i), std::ptr::read(from.add(i)));
-                std::ptr::write(from.add(i), Value::Undefined);
+            match src {
+                ArgSrc::Stack(src) => {
+                    let from = p.add(src);
+                    for i in 0..nargs {
+                        std::ptr::write(regs.add(i), std::ptr::read(from.add(i)));
+                        std::ptr::write(from.add(i), Value::Undefined);
+                    }
+                }
+                // A slice outside the value stack (a native's callback
+                // arguments).
+                ArgSrc::Slice(from) => {
+                    for (i, v) in from[..nargs].iter().enumerate() {
+                        std::ptr::write(regs.add(i), v.clone());
+                    }
+                }
             }
             for i in nargs..fsize {
                 std::ptr::write(regs.add(i), Value::Undefined);
@@ -3386,6 +3398,11 @@ impl Realm {
                     let v = pop!();
                     let key = pop!();
                     let obj = pop!();
+                    if obj.is_nullish() && key.is_object() {
+                        // PutValue: ToObject(base) before ToPropertyKey.
+                        let what = if obj.is_undefined() { "undefined" } else { "null" };
+                        return self.type_error(&format!("Cannot set properties of {what}"));
+                    }
                     let key = self.to_property_key(key)?;
                     let ok = self.set(obj, key.clone(), v.clone())?;
                     if !ok && frame!().code().flags.is_strict {
@@ -3624,6 +3641,21 @@ impl Realm {
                     let args = self.create_list_from_array_like(arr)?;
                     self.do_call(f, this, &args, sp - fb)?;
                 }
+                Op::CallEvalSpread => {
+                    let arr = pop!();
+                    let this = pop!();
+                    let f = pop!();
+                    let args = self.create_list_from_array_like(arr)?;
+                    let site = std::mem::replace(&mut self.eval_site, u32::MAX);
+                    if f.as_object() == Some(self.intrinsics.eval_fn) {
+                        let site = frame!().code().eval_sites.get(site as usize).cloned();
+                        let strict = frame!().code().flags.is_strict;
+                        let v = self.direct_eval(fi, args.first().cloned().unwrap_or(Value::Undefined), strict, site)?;
+                        push!(v);
+                        return Ok(Flow::Next);
+                    }
+                    self.do_call(f, this, &args, sp - fb)?;
+                }
                 Op::New(argc) | Op::NewR(_, argc) => {
                     if let Op::NewR(b, _) = op {
                         sp = fb + b as usize + argc as usize + 1;
@@ -3840,6 +3872,37 @@ impl Realm {
                         _ => false,
                     };
                     push!(Value::Bool(found));
+                }
+                Op::WithGet(i) => {
+                    let obj = pop!();
+                    let key = const_key!(i);
+                    let id = obj.as_object().unwrap();
+                    let v = if self.has_property(id, &key)? {
+                        self.get(obj, key)?
+                    } else if frame!().code().flags.is_strict {
+                        let k = self.key_display(&key);
+                        return Err(self.new_error("ReferenceError", &format!("{} is not defined", k)));
+                    } else {
+                        Value::Undefined
+                    };
+                    push!(v);
+                }
+                Op::WithSet(i) => {
+                    let v = pop!();
+                    let obj = pop!();
+                    let key = const_key!(i);
+                    let id = obj.as_object().unwrap();
+                    let strict = frame!().code().flags.is_strict;
+                    if !self.has_property(id, &key)? && strict {
+                        let k = self.key_display(&key);
+                        return Err(self.new_error("ReferenceError", &format!("{} is not defined", k)));
+                    }
+                    let ok = self.set(obj, key.clone(), v.clone())?;
+                    if !ok && strict {
+                        let k = self.key_display(&key);
+                        return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
+                    }
+                    push!(v);
                 }
                 Op::ToObject => {
                     let v = pop!();
@@ -4375,6 +4438,12 @@ impl Realm {
                     let v = pop!();
                     let key = pop!();
                     let obj = peek!().clone();
+                    // (A static field's anonymous function takes its name.)
+                    if let (V::Object(fid), V::Symbol(sym)) = (v.v(), key.v()) {
+                        if matches!(&self.obj(fid).kind, ObjectKind::Function(c) if c.code.name.is_empty()) {
+                            self.set_function_name(&v, &PropertyKey::Symbol(sym), "");
+                        }
+                    }
                     self.private_define(&obj, &key, Property::data(v, WRITABLE))?;
                 }
                 Op::CopyPrivate => {
@@ -4501,6 +4570,11 @@ impl Realm {
         if let Some(v) = self.get_elem_fast(&obj, &key) {
             return Ok(v);
         }
+        if obj.is_nullish() && key.is_object() {
+            // The base is checked before the key's ToPropertyKey.
+            let what = if obj.is_undefined() { "undefined" } else { "null" };
+            return self.type_error(&format!("Cannot read properties of {what}"));
+        }
         let key = match key.v() {
             // Integer keys: cached index strings, no number formatting.
             V::Number(n) if (n as u32) as f64 == n && n < 4294967295.0 => PropertyKey::index(n as u32),
@@ -4565,8 +4639,9 @@ impl Realm {
         let array_proto = Some(self.intrinsics.array_proto);
         let Some(o) = self.heap.try_get_mut(id) else { return Err(v) };
         let no_props = o.props.is_empty();
-        // Appends need the plain prototype (a typed array prototype decides).
-        let extensible = o.extensible && o.proto == array_proto;
+        // Appends need the plain prototype (a typed array prototype decides)
+        // known to have no indexed properties (see `array_protos_index_free`).
+        let extensible = o.extensible && o.proto == array_proto && self.array_protos_index_free == crate::shape::proto_epoch();
         match &mut o.kind {
             ObjectKind::Array { elements, length } => {
                 let i = i as usize;
@@ -5155,7 +5230,8 @@ impl Realm {
             };
             let name = if prefix.is_empty() { base } else { format!("{} {}", prefix, base) };
             let existing = self.obj(id).props.get(&PropertyKey::str("name")).map(|p| p.value.clone());
-            let keep = matches!(existing.as_ref().map(Value::v), Some(V::String(s)) if !s.is_empty());
+            // (An accessor is always renamed: its static name lacks the prefix.)
+            let keep = prefix.is_empty() && matches!(existing.as_ref().map(Value::v), Some(V::String(s)) if !s.is_empty());
             if !keep {
                 self.define_property(id, "name", Value::str(&name), CONFIGURABLE);
             }
@@ -5556,6 +5632,19 @@ impl Realm {
                 _ => o.is_ge(),
             });
         }
+        // BigInt vs String: StringToBigInt on the string side (undefined ->
+        // the comparison is false), not ToNumber.
+        let fix = match (pa.v(), pb.v()) {
+            (V::BigInt(_), V::String(s)) => Some((false, BigInt::parse(&s.to_rust_string()))),
+            (V::String(s), V::BigInt(_)) => Some((true, BigInt::parse(&s.to_rust_string()))),
+            _ => None,
+        };
+        let (pa, pb) = match fix {
+            None => (pa, pb),
+            Some((_, None)) => return Ok(false),
+            Some((false, Some(b))) => (pa, Value::BigInt(Rc::new(b))),
+            Some((true, Some(a))) => (Value::BigInt(Rc::new(a)), pb),
+        };
         let na = self.to_numeric(pa)?;
         let nb = self.to_numeric(pb)?;
         let ord = match (na.v(), nb.v()) {

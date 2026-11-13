@@ -523,8 +523,9 @@ fn new_set_from(realm: &mut Realm, values: Vec<Value>) -> Value {
 fn set_union(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_coll(realm, &this, Kind::Set, "union")?;
     let other = get_set_record(realm, arg(args, 0))?;
-    let mut values = set_values_vec(realm, id);
+    // (The copy is taken once the keys iterator and its `next` are got.)
     let (it, next) = record_keys(realm, &other)?;
+    let mut values = set_values_vec(realm, id);
     while let Some(v) = realm.iterator_step(&it, &next)? {
         values.push(v);
     }
@@ -536,11 +537,14 @@ fn set_intersection(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<
     let other = get_set_record(realm, arg(args, 0))?;
     let mut out = Vec::new();
     if data(realm, id).size() as f64 <= other.size {
-        for v in set_values_vec(realm, id) {
-            if record_has(realm, &other, &v)? {
-                out.push(v);
+        // The set is walked live: `has` may add (or delete and re-add)
+        // elements, which are visited too.
+        any_live_element(realm, id, |realm, v| {
+            if record_has(realm, &other, v)? {
+                out.push(v.clone());
             }
-        }
+            Ok(false)
+        })?;
     } else {
         let (it, next) = record_keys(realm, &other)?;
         while let Some(v) = realm.iterator_step(&it, &next)? {
@@ -575,9 +579,9 @@ fn set_difference(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Va
 fn set_symmetric_difference(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let id = this_coll(realm, &this, Kind::Set, "symmetricDifference")?;
     let other = get_set_record(realm, arg(args, 0))?;
+    let (it, next) = record_keys(realm, &other)?;
     let result = new_set_from(realm, set_values_vec(realm, id));
     let rid = result.as_object().unwrap();
-    let (it, next) = record_keys(realm, &other)?;
     while let Some(v) = realm.iterator_step(&it, &next)? {
         // Keys are canonicalized (-0 becomes +0).
         let v = match v.v() {

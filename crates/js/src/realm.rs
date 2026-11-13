@@ -231,6 +231,9 @@ pub struct Realm {
     /// `gc_safe` natives running.
     pub native_roots: Vec<Value>,
     /// Cached closure shapes (see `make_closure`).
+    /// Prototype epoch at which `Array.prototype` and `Object.prototype`
+    /// were last seen without indexed properties (0: not known).
+    pub(crate) array_protos_index_free: u32,
     pub(crate) closure_shapes: Option<(Rc<crate::shape::Shape>, Rc<crate::shape::Shape>, Rc<crate::shape::Shape>)>,
     /// `new.target` for the innermost native constructor call.
     pub new_target_stack: Vec<Value>,
@@ -453,6 +456,7 @@ impl Realm {
             native_depth: 0,
             gc_block: 0,
             native_roots: Vec::new(),
+            array_protos_index_free: 0,
             closure_shapes: None,
             new_target_stack: Vec::new(),
             gc_threshold: 200_000,
@@ -1224,12 +1228,17 @@ impl Realm {
     /// Compile source already in source-escaped form (`eval`, `Function`:
     /// see [`crate::value::SOURCE_ESC`]).
     pub(crate) fn compile_escaped(&mut self, source: &str, filename: &str, is_module: bool, completion: bool) -> Result<Rc<FunctionCode>, Value> {
-        // Bodies the lazy parse skips are checked by a complete parse on
-        // another thread meanwhile: their early errors reject the script.
-        let validation = crate::parser::validate_in_background(source, is_module);
-        let program = match crate::parser::parse_program(source, is_module) {
+        // Bodies the lazy parse skips are checked on other threads
+        // meanwhile: their early errors reject the script.
+        let validation = crate::validate::start(source);
+        let program = match crate::parser::parse_program_validating(source, is_module, validation.as_ref()) {
             Ok(p) => p,
             Err(e) => {
+                // Drain checks already queued before the top-level error:
+                // a zero-worker pool otherwise retains abandoned jobs.
+                if let Some(v) = validation {
+                    let _ = v.finish();
+                }
                 let msg = format!("{} ({}:{}:{})", e.message, filename, e.line, e.column);
                 return Err(self.new_error("SyntaxError", &msg));
             }

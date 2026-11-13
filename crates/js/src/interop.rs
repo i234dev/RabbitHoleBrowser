@@ -225,7 +225,15 @@ impl Realm {
                 self.type_error(&format!("Cannot set properties of {} (setting '{}')", what, k))
             }
             _ => {
-                // Primitives: look for a setter on the prototype chain; otherwise ignore.
+                // Primitives: OrdinarySet through the prototype chain with
+                // the primitive as receiver (a setter or a proxy's `set`
+                // trap runs; a data property cannot be created on it).
+                if let V::String(s) = target.v() {
+                    // The wrapper's own index / length properties are read-only.
+                    if key.as_array_index().is_some_and(|i| (i as usize) < s.len()) || matches!(&key, PropertyKey::String(k) if k.eq_str("length")) {
+                        return Ok(false);
+                    }
+                }
                 let proto = match target.v() {
                     V::String(_) => self.intrinsics.string_proto,
                     V::Number(_) => self.intrinsics.number_proto,
@@ -233,20 +241,7 @@ impl Realm {
                     V::Symbol(_) => self.intrinsics.symbol_proto,
                     _ => self.intrinsics.bigint_proto,
                 };
-                let mut cur = Some(proto);
-                while let Some(c) = cur {
-                    if let Some(p) = self.obj(c).props.get(&key).cloned() {
-                        if p.is_accessor() {
-                            if let Some(s) = p.setter_cloned() {
-                                self.call(s, target, &[value])?;
-                                return Ok(true);
-                            }
-                        }
-                        return Ok(false);
-                    }
-                    cur = self.obj(c).proto;
-                }
-                Ok(false)
+                self.set_on_object(proto, key, value, target)
             }
         }
     }
@@ -283,6 +278,18 @@ impl Realm {
         // prototype, e.g. a typed array, decides the [[Set]] otherwise).
         let array_proto = Some(self.intrinsics.array_proto);
         let own_receiver = receiver.as_object() == Some(id);
+        // Appends skip the prototype chain only while it has no indexed
+        // properties (an inherited setter / read-only element decides).
+        let protos_free = if own_receiver && matches!(self.obj(id).kind, ObjectKind::Array { .. }) && key.as_array_index().is_some() {
+            match self.obj(id).proto {
+                p if p == array_proto => self.array_protos_index_free(),
+                Some(p) => self.no_index_properties(p),
+                None => true,
+            }
+        } else {
+            true
+        };
+        let array_proto = if protos_free { array_proto } else { None };
         {
             let obj = self.obj_mut(id);
             match &mut obj.kind {
@@ -290,7 +297,7 @@ impl Realm {
                     if let Some(i) = key.as_array_index() {
                         let i = i as usize;
                         if i < elements.len() {
-                            if !elements[i].is_empty() || !obj.props.contains(&key) {
+                            if !elements[i].is_empty() || (protos_free && !obj.props.contains(&key)) {
                                 if obj.extensible || !elements[i].is_empty() {
                                     elements[i] = value;
                                     return Ok(true);
@@ -1062,6 +1069,11 @@ impl Realm {
                 return self.type_error(&format!("{} is not iterable", d));
             }
         };
+        self.get_iterator_from_method(v, method)
+    }
+
+    /// GetIteratorFromMethod: (iterator, next method).
+    pub fn get_iterator_from_method(&mut self, v: Value, method: Value) -> JsResult<(Value, Value)> {
         let it = self.call(method, v, &[])?;
         if !it.is_object() {
             return self.type_error("Result of the Symbol.iterator method is not an object");
@@ -1121,8 +1133,13 @@ impl Realm {
     /// Step through an iterable, calling `f` with each value and its
     /// index. When `f` fails the iterator is closed (IfAbruptCloseIterator:
     /// errors from `return` are dropped) and `f`'s error is returned.
-    pub fn for_each_iterated(&mut self, iterable: Value, mut f: impl FnMut(&mut Realm, Value, usize) -> JsResult<()>) -> JsResult<()> {
+    pub fn for_each_iterated(&mut self, iterable: Value, f: impl FnMut(&mut Realm, Value, usize) -> JsResult<()>) -> JsResult<()> {
         let (it, next) = self.get_iterator(iterable)?;
+        self.for_each_step(it, next, f)
+    }
+
+    /// [`Self::for_each_iterated`] over an iterator already obtained.
+    pub fn for_each_step(&mut self, it: Value, next: Value, mut f: impl FnMut(&mut Realm, Value, usize) -> JsResult<()>) -> JsResult<()> {
         let mut i = 0;
         while let Some(v) = self.iterator_step(&it, &next)? {
             if let Err(e) = f(self, v, i) {
@@ -1229,6 +1246,36 @@ impl Realm {
     /// No object on the prototype chain of `id` (itself included) can have
     /// an array-index property: ordinary objects (and empty arrays) whose
     /// property keys are all non-index strings or symbols.
+    /// The prototype chain of a plain array (`Array.prototype`, then
+    /// `Object.prototype`) has no indexed properties, so appending elements
+    /// directly cannot skip an inherited setter. Cached per prototype epoch
+    /// (both prototypes are marked as part of cached chains, so a key-set
+    /// change on them advances it).
+    pub(crate) fn array_protos_index_free(&mut self) -> bool {
+        let ap = self.intrinsics.array_proto;
+        if let ObjectKind::Array { elements, .. } = &self.obj(ap).kind {
+            if !elements.is_empty() {
+                self.array_protos_index_free = 0;
+                return false;
+            }
+        }
+        let epoch = crate::shape::proto_epoch();
+        if self.array_protos_index_free == epoch {
+            return true;
+        }
+        if !self.no_index_properties(ap) {
+            self.array_protos_index_free = 0;
+            return false;
+        }
+        let mut cur = Some(ap);
+        while let Some(c) = cur {
+            self.obj(c).props.mark_in_chain();
+            cur = self.obj(c).proto;
+        }
+        self.array_protos_index_free = epoch;
+        true
+    }
+
     pub fn no_index_properties(&self, id: ObjectId) -> bool {
         let mut cur = Some(id);
         let mut depth = 0;

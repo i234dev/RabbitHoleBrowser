@@ -169,6 +169,8 @@ pub struct LazyCode {
     module: Option<u32>,
     filename: Rc<str>,
     source: Rc<str>,
+    /// See [`Compiler::outer_ctx`].
+    outer_ctx: (bool, bool, bool, bool),
 }
 
 impl CScope {
@@ -355,6 +357,10 @@ pub struct Compiler {
     eager_root: *const Function,
     /// Defer compiling nested functions until their first call.
     lazy: bool,
+    /// (in_function, in_method, in_derived_ctor, in_field_init) of the
+    /// innermost non-arrow function enclosing the code being compiled
+    /// from outside it (eval code, a lazily compiled nested function).
+    outer_ctx: (bool, bool, bool, bool),
 }
 
 /// Name of the hidden binding initialised by `export default <expr>` and
@@ -404,6 +410,7 @@ pub fn compile_lazy(code: &FunctionCode) -> CResult<Rc<FunctionCode>> {
         outer: lz.env.clone(),
         eager_root: Rc::as_ptr(&lz.func),
         lazy: true,
+        outer_ctx: lz.outer_ctx,
     };
     // A transparent parent: no bindings of its own, not a scope at run
     // time; names resolve through `outer`.
@@ -448,6 +455,7 @@ pub fn compile_program_with(program: &Program, filename: &str, source: &str, com
         outer: None,
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
+        outer_ctx: Default::default(),
     };
     let code = c.compile_script(program)?;
     c.check_internal()?;
@@ -476,6 +484,7 @@ pub fn compile_eval(program: &Program, site: &EvalSite, source: &str) -> CResult
         outer: site.env.clone(),
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
+        outer_ctx: (site.in_function, site.in_method, site.in_derived_ctor, site.in_field_init),
     };
     // A transparent parent (no bindings, no runtime scope).
     let mut parent = FnState::new("", CodeFlags { is_arrow: true, is_strict: strict, ..Default::default() }, false, filename.clone());
@@ -519,6 +528,7 @@ pub fn compile_module(program: &Program, filename: &str, source: &str, module_id
         outer: None,
         eager_root: std::ptr::null(),
         lazy: lazy_enabled(),
+        outer_ctx: Default::default(),
     };
     let m = c.compile_module_program(program)?;
     c.check_internal()?;
@@ -846,6 +856,7 @@ impl Compiler {
             module: self.module,
             filename: self.fs_ref().filename.clone(),
             source: self.source.clone(),
+            outer_ctx: self.function_ctx(),
         };
         let code = FunctionCode {
             name: JsStr::from_source(&fname),
@@ -980,12 +991,22 @@ impl Compiler {
         ends
     }
 
+    /// [obj] -> [value] for a `with` binding found on `w`'s object
+    /// (GetBindingValue; eval-var objects are plain declarative storage).
+    fn emit_with_get(&mut self, w: &str, i: u32) {
+        if w == EVAL_VARS {
+            self.emit_ic(|ic| Op::GetProp(i, ic));
+        } else {
+            self.emit(Op::WithGet(i));
+        }
+    }
+
     fn emit_get_var(&mut self, name: &str) {
         let chain = self.with_chain(name);
         if !chain.is_empty() {
             let ends = self.emit_with_dispatch(name, &chain, &mut |c, w, i| {
                 c.emit_get_var(w);
-                c.emit_ic(|ic| Op::GetProp(i, ic));
+                c.emit_with_get(w, i);
             });
             self.emit_get_var_static(name);
             for j in ends {
@@ -1028,7 +1049,11 @@ impl Compiler {
             let ends = self.emit_with_dispatch(name, &chain, &mut |c, w, i| {
                 c.emit_get_var(w);
                 c.emit(Op::Swap);
-                c.emit_ic(|ic| Op::SetProp(i, ic));
+                if w == EVAL_VARS {
+                    c.emit_ic(|ic| Op::SetProp(i, ic));
+                } else {
+                    c.emit(Op::WithSet(i));
+                }
                 c.emit(Op::Pop);
             });
             self.emit_set_var_static(name)?;
@@ -2104,21 +2129,26 @@ impl Compiler {
     }
 
     /// What a direct `eval` here needs to compile its code later.
-    fn eval_site(&mut self) -> EvalSite {
-        let env = self.env_snapshot();
-        let strict = self.fs_ref().flags.is_strict;
-        let class_depth = self.fs_ref().class_depth;
-        // The innermost non-arrow function decides super / new.target.
-        let mut ctx = (false, false, false, false);
+    /// The innermost non-arrow function decides super / new.target (see
+    /// [`Compiler::outer_ctx`] for the part outside this compilation).
+    fn function_ctx(&self) -> (bool, bool, bool, bool) {
         for f in self.fns.iter().rev() {
             if f.flags.is_arrow || f.is_eval {
                 continue;
             }
             if !f.is_script && !f.is_module_env {
-                ctx = (true, f.flags.is_method || f.flags.is_class_constructor || f.flags.is_field_init, f.flags.is_class_constructor && f.flags.is_derived, f.flags.is_field_init);
+                return (true, f.flags.is_method || f.flags.is_class_constructor || f.flags.is_field_init, f.flags.is_class_constructor && f.flags.is_derived, f.flags.is_field_init);
             }
             break;
         }
+        self.outer_ctx
+    }
+
+    fn eval_site(&mut self) -> EvalSite {
+        let env = self.env_snapshot();
+        let strict = self.fs_ref().flags.is_strict;
+        let class_depth = self.fs_ref().class_depth;
+        let ctx = self.function_ctx();
         let in_params = self.fs_ref().in_params && !self.fs_ref().flags.is_arrow;
         EvalSite { env, strict, class_depth, in_function: ctx.0, in_method: ctx.1, in_derived_ctor: ctx.2, in_field_init: ctx.3, in_params }
     }
@@ -2381,6 +2411,15 @@ impl Compiler {
         for decl in &d.declarations {
             match &decl.init {
                 Some(init) => {
+                    if let (VarKind::Var, Pattern::Identifier(n)) = (d.kind, &decl.target) {
+                        // Inside `with`: ResolveBinding before the initializer.
+                        if self.in_with() && self.emit_with_ref(n) {
+                            self.compile_expr_named(init, Some(n))?;
+                            self.emit_ref_set_keep(n)?;
+                            self.emit(Op::Pop);
+                            continue;
+                        }
+                    }
                     self.compile_expr_named(init, pattern_name(&decl.target))?;
                     // `var x = e` is an assignment to whatever `x` resolves
                     // to (a `with` object, a var declared by eval...).
@@ -2502,6 +2541,11 @@ impl Compiler {
                     self.suspend_tries(ai + 1, left);
                     self.emit(Op::GetReg(*iter));
                     self.emit(Op::GetReg(*next));
+                    // The loop's own throw handler still covers this code:
+                    // it must not close the iterator again if `return()`
+                    // throws (closing undefined there does nothing).
+                    self.emit(Op::Undefined);
+                    self.emit(Op::SetReg(*iter));
                     self.emit(Op::IteratorClose);
                 }
                 ExitCtx::DestructClose { iter, next } => {
@@ -2537,9 +2581,7 @@ impl Compiler {
                     let keep = (*scopes).min(self.fs_ref().scopes.len());
                     let hidden_scopes = self.fs().scopes.split_off(keep);
                     let body = body.clone();
-                    self.fs().no_completion += 1;
-                    let r = self.compile_block(&body);
-                    self.fs().no_completion -= 1;
+                    let r = self.compile_finally_body(&body);
                     self.fs().scopes.extend(hidden_scopes);
                     r?;
                     self.fs().scope_depth = saved_scope_depth;
@@ -2574,6 +2616,11 @@ impl Compiler {
                 self.emit(Op::Pop);
             }
             None => {}
+        }
+        if per_iteration && mat {
+            // The first iteration's copy: closures made by the initializer
+            // keep the initial bindings.
+            self.emit(Op::CopyScope);
         }
         // Rotated loop: the test sits at the bottom, so an iteration runs
         // one conditional jump instead of a test, a branch and a jump.
@@ -2903,6 +2950,11 @@ impl Compiler {
                     self.emit(Op::Pop);
                 }
             }
+            if self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval) {
+                // The catch block's value replaces the try block's.
+                self.emit(Op::Undefined);
+                self.emit(Op::StoreCompletion);
+            }
             self.compile_block(body)?;
             self.pop_block_scope(mat);
             let catch_end = self.here() as u32;
@@ -2933,12 +2985,26 @@ impl Compiler {
         Ok(())
     }
 
-    /// A finalizer body (its statements do not set the completion value).
+    /// A finalizer body. Completing normally it keeps the completion value
+    /// it found; when it breaks / continues out, its own value (or
+    /// undefined) is the completion (UpdateEmpty(F, undefined)).
     fn compile_finally_body(&mut self, f: &[Stmt]) -> CResult<()> {
-        self.fs().no_completion += 1;
-        let r = self.compile_block(f);
-        self.fs().no_completion -= 1;
-        r
+        let tracks = self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval);
+        if !tracks {
+            self.fs().no_completion += 1;
+            let r = self.compile_block(f);
+            self.fs().no_completion -= 1;
+            return r;
+        }
+        let saved = self.hidden_slot("fincv");
+        self.emit(Op::LoadCompletion);
+        self.emit(Op::SetReg(saved));
+        self.emit(Op::Undefined);
+        self.emit(Op::StoreCompletion);
+        self.compile_block(f)?;
+        self.emit(Op::GetReg(saved));
+        self.emit(Op::StoreCompletion);
+        Ok(())
     }
 
     /// The exception path of a finalizer: the exception waits in a
@@ -3032,13 +3098,50 @@ impl Compiler {
                     return self.compile_object_pattern_dynamic_rest(properties, rest.as_deref().unwrap(), is_decl);
                 }
                 let mut rest_keys: Vec<u32> = Vec::new();
-                if properties.is_empty() {
+                // Targets evaluated ahead of the property read (see below).
+                let reorder = properties.iter().any(|p| Self::member_target(&p.value).is_some()) || (!is_decl && self.in_with());
+                if properties.is_empty() || reorder {
                     // RequireObjectCoercible: `({} = null)` throws.
                     self.emit(Op::Dup);
                     self.emit(Op::ToObject);
                     self.emit(Op::Pop);
                 }
+                let regs = if reorder { Some((self.hidden_slot("dsrc"), self.hidden_slot("dkey"))) } else { None };
                 for p in properties {
+                    if let Some((src, kreg)) = regs {
+                        // [obj] -> key (ToPropertyKey), target reference, then
+                        // the read (KeyedDestructuringAssignmentEvaluation).
+                        let key_const = match &p.key {
+                            PropertyKey::Identifier(n) | PropertyKey::String(n) => Some(self.const_str(n)),
+                            PropertyKey::Number(n) => Some(self.const_str(&crate::value::number_to_string(*n))),
+                            PropertyKey::Computed(e) => {
+                                self.compile_expr(e)?;
+                                self.emit(Op::ToPropertyKey);
+                                self.emit(Op::SetReg(kreg));
+                                None
+                            }
+                            PropertyKey::Private(_) => return self.err("Unexpected private name"),
+                        };
+                        if let Some(i) = key_const {
+                            rest_keys.push(i);
+                        }
+                        self.emit(Op::Dup);
+                        self.emit(Op::SetReg(src));
+                        let r = self.emit_target_ref(&p.value, is_decl)?;
+                        self.emit(Op::GetReg(src));
+                        match key_const {
+                            Some(i) => self.emit_ic(|ic| Op::GetProp(i, ic)),
+                            None => {
+                                self.emit(Op::GetReg(kreg));
+                                self.emit(Op::GetElem)
+                            }
+                        };
+                        match r {
+                            Some(r) => self.emit_target_store(&p.value, r)?,
+                            None => self.compile_pattern_store(&p.value, is_decl)?,
+                        }
+                        continue;
+                    }
                     self.emit(Op::Dup);
                     match &p.key {
                         PropertyKey::Identifier(n) | PropertyKey::String(n) => {
@@ -3088,9 +3191,9 @@ impl Compiler {
                     for el in elements {
                         // A property target is evaluated before the step.
                         if let Some(p) = el {
-                            if self.emit_member_target_ref(p)? {
+                            if let Some(r) = self.emit_target_ref(p, is_decl)? {
                                 self.emit(Op::IteratorStepReg(iter, next));
-                                self.emit_member_target_store(p)?;
+                                self.emit_target_store(p, r)?;
                                 continue;
                             }
                         }
@@ -3103,9 +3206,9 @@ impl Compiler {
                         }
                     }
                     if let Some(r) = rest {
-                        if self.emit_member_target_ref(r)? {
+                        if let Some(rf) = self.emit_target_ref(r, is_decl)? {
                             self.emit(Op::IteratorRestReg(iter, next));
-                            self.emit_member_target_store(r)?;
+                            self.emit_target_store(r, rf)?;
                         } else {
                             self.emit(Op::IteratorRestReg(iter, next));
                             self.compile_pattern_store(r, is_decl)?;
@@ -3281,7 +3384,7 @@ impl Compiler {
                         if !chain.is_empty() {
                             let ends = self.emit_with_dispatch(n, &chain, &mut |c, w, i| {
                                 c.emit_get_var(w);
-                                c.emit_ic(|ic| Op::GetProp(i, ic));
+                                c.emit_with_get(w, i);
                                 c.emit(Op::Typeof);
                             });
                             if let Resolved::Global = self.resolve(n) {
@@ -3331,6 +3434,45 @@ impl Compiler {
                                 self.emit(Op::DeleteElem);
                             }
                             MemberProp::Private(_) => return self.err("Private fields can not be deleted"),
+                        }
+                    }
+                    ExprKind::OptionalChain(inner) if matches!(&inner.kind, ExprKind::Member { object, property, .. } if !matches!(object.kind, ExprKind::Super) && !matches!(property, MemberProp::Private(_))) => {
+                        // `delete a?.b`: true when the chain short-circuits.
+                        let ExprKind::Member { object, property, optional } = &inner.kind else { unreachable!() };
+                        self.chain_stack.push(Vec::new());
+                        self.compile_expr(object)?;
+                        if *optional {
+                            self.emit(Op::Dup);
+                            let j = self.emit(Op::JumpIfNullish(0));
+                            self.chain_exit(j, 1);
+                        }
+                        match property {
+                            MemberProp::Identifier(n) => {
+                                let i = self.const_str(n);
+                                self.emit(Op::DeleteProp(i));
+                            }
+                            MemberProp::Computed(k) => {
+                                self.compile_expr(k)?;
+                                self.emit(Op::DeleteElem);
+                            }
+                            MemberProp::Private(_) => unreachable!(),
+                        }
+                        let exits = self.chain_stack.pop().unwrap();
+                        if !exits.is_empty() {
+                            let done = self.emit(Op::Jump(0));
+                            let mut to_end = Vec::new();
+                            for (j, pops) in exits {
+                                self.patch_jump(j);
+                                for _ in 0..pops {
+                                    self.emit(Op::Pop);
+                                }
+                                self.emit(Op::True);
+                                to_end.push(self.emit(Op::Jump(0)));
+                            }
+                            self.patch_jump(done);
+                            for j in to_end {
+                                self.patch_jump(j);
+                            }
                         }
                     }
                     ExprKind::Identifier(n) => {
@@ -3460,7 +3602,8 @@ impl Compiler {
                         return Ok(());
                     }
                 }
-                let is_eval = matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval");
+                // `eval?.(x)` is an indirect eval.
+                let is_eval = !*optional && matches!(&callee.kind, ExprKind::Identifier(n) if n == "eval");
                 let desc = match callee_description(callee) {
                     Some(d) => self.const_str(&d),
                     None => crate::bytecode::NO_DESC,
@@ -3729,7 +3872,7 @@ impl Compiler {
                         c.emit(Op::Undefined);
                     } else {
                         c.emit(Op::Dup);
-                        c.emit_ic(|ic| Op::GetProp(i, ic));
+                        c.emit(Op::WithGet(i));
                         c.emit(Op::Swap);
                     }
                 });
@@ -3766,7 +3909,16 @@ impl Compiler {
                     }
                 }
             }
-            self.emit(if is_new { Op::NewSpread } else { Op::CallSpread });
+            if is_eval && !is_new {
+                let site = self.eval_site();
+                let fs = self.fs();
+                fs.eval_sites.push(Rc::new(site));
+                let idx = (fs.eval_sites.len() - 1) as u32;
+                self.emit(Op::EvalSite(idx));
+                self.emit(Op::CallEvalSpread);
+            } else {
+                self.emit(if is_new { Op::NewSpread } else { Op::CallSpread });
+            }
         } else {
             for a in args {
                 if let ArrayElement::Expr(x) = a {
@@ -3974,13 +4126,55 @@ impl Compiler {
         self.compile_expr(object)?;
         match property {
             MemberProp::Identifier(_) => {}
-            MemberProp::Computed(k) => {
-                self.compile_expr(k)?;
-                self.emit(Op::ToPropertyKey);
-            }
+            // ToPropertyKey happens at PutValue (SetElem).
+            MemberProp::Computed(k) => self.compile_expr(k)?,
             MemberProp::Private(n) => self.emit_private_name(n)?,
         }
         Ok(true)
+    }
+
+    /// A destructuring target whose reference is evaluated before its value
+    /// is read: a property reference, or (assignment / `var` inside `with`)
+    /// an identifier whose binding object is looked up first. Pushes the
+    /// reference parts; None (nothing emitted) for the other targets.
+    fn emit_target_ref(&mut self, p: &Pattern, is_decl: bool) -> CResult<Option<Option<String>>> {
+        if self.emit_member_target_ref(p)? {
+            return Ok(Some(None));
+        }
+        if is_decl {
+            return Ok(None);
+        }
+        let t = match p {
+            Pattern::Assign { target, .. } => &**target,
+            p => p,
+        };
+        let n = match t {
+            Pattern::Identifier(n) => n,
+            Pattern::Expr(e) => match &e.kind {
+                ExprKind::Identifier(n) => n,
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        if self.emit_with_ref(n) {
+            return Ok(Some(Some(n.to_string())));
+        }
+        Ok(None)
+    }
+
+    /// [ref… value] -> [] for a reference from [`Self::emit_target_ref`].
+    fn emit_target_store(&mut self, p: &Pattern, r: Option<String>) -> CResult<()> {
+        let Some(n) = r else { return self.emit_member_target_store(p) };
+        if let Pattern::Assign { default, .. } = p {
+            self.emit(Op::Dup);
+            let j = self.emit(Op::JumpIfNotUndefined(0));
+            self.emit(Op::Pop);
+            self.compile_expr_named(default, Some(&n))?;
+            self.patch_jump(j);
+        }
+        self.emit_ref_set_keep(&n)?;
+        self.emit(Op::Pop);
+        Ok(())
     }
 
     /// [ref… value] -> []: apply the default, then PutValue.
@@ -4045,7 +4239,7 @@ impl Compiler {
         self.emit(Op::Dup);
         let st = self.emit(Op::JumpIfUndefined(0));
         self.emit(Op::Dup);
-        self.emit_ic(|ic| Op::GetProp(i, ic));
+        self.emit(Op::WithGet(i));
         let end = self.emit(Op::Jump(0));
         self.patch_jump(st);
         self.emit_get_var_static(name);
@@ -4060,17 +4254,8 @@ impl Compiler {
         self.emit(Op::Rot3);
         self.emit(Op::Dup);
         let st = self.emit(Op::JumpIfUndefined(0));
-        if self.fs_ref().flags.is_strict {
-            // Strict code: the binding must still exist on the object.
-            self.emit(Op::Dup);
-            self.emit(Op::WithHas(i));
-            let ok = self.emit(Op::JumpIfTrue(0));
-            let m = self.const_str(&format!("{name} is not defined"));
-            self.emit(Op::ThrowConst(0, m));
-            self.patch_jump(ok);
-        }
         self.emit(Op::Swap);
-        self.emit_ic(|ic| Op::SetProp(i, ic));
+        self.emit(Op::WithSet(i));
         self.emit(Op::Pop);
         let end = self.emit(Op::Jump(0));
         self.patch_jump(st);
@@ -4187,8 +4372,9 @@ impl Compiler {
                                 self.emit(Op::SetPrivate);
                             }
                             MemberProp::Computed(k) => {
+                                // The key's ToPropertyKey waits for PutValue
+                                // (after the value; SetElem converts it).
                                 self.compile_expr(k)?;
-                                self.emit(Op::ToPropertyKey);
                                 self.compile_expr(value)?;
                                 self.emit(Op::SetElem);
                             }

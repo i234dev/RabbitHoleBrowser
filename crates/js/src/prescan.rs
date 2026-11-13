@@ -39,6 +39,22 @@ pub struct SkippedBody {
     pub use_strict: bool,
 }
 
+/// A long block the pre-parser went past while skipping a body (see
+/// `Lexer::blocks`): where it ends, so a later parse of the enclosing
+/// body can skip a function body there without scanning it.
+#[derive(Clone, Debug)]
+pub struct BlockEnd {
+    /// Byte offset of the `{`.
+    pub start: usize,
+    /// Lexer state just past the `}`.
+    pub end: LexerState,
+    /// Position of the `}`.
+    pub close_pos: Pos,
+}
+
+/// Blocks shorter than this are not recorded.
+pub const RECORD_MIN: usize = 1024;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Level {
     /// `(`: whether it is the header of `if`/`while`/`for`/`with` (a `/`
@@ -82,11 +98,24 @@ impl<'a> Lexer<'a> {
     /// matching `}`; on `None` it is unchanged.
     pub fn skip_function_body(&mut self) -> Option<SkippedBody> {
         let save = self.state();
+        let recorded = self.blocks.as_ref().map_or(0, Vec::len);
         let r = self.prescan();
         if r.is_none() {
             self.restore(&save);
+            if let Some(b) = &mut self.blocks {
+                b.truncate(recorded);
+            }
         }
         r
+    }
+
+    /// Skip a function body whose `{` was the last token scanned, known to
+    /// end as `block` says (see [`BlockEnd`]): only its directive prologue
+    /// is looked at. The identifiers it mentions are not collected.
+    pub fn skip_known_body(&mut self, block: &BlockEnd) -> Option<SkippedBody> {
+        let use_strict = self.directive_prologue_strict()?;
+        self.restore(&block.end);
+        Some(SkippedBody { end: block.end.clone(), close_pos: block.close_pos, names: Vec::new(), eval: false, use_strict })
     }
 
     fn prescan(&mut self) -> Option<SkippedBody> {
@@ -95,6 +124,10 @@ impl<'a> Lexer<'a> {
         let mut line = self.line;
         let mut line_start = self.line_start;
         let mut levels: Vec<Level> = vec![Level::Block];
+        // Offsets of the open `{` (blocks and object literals) when
+        // recording long blocks.
+        let record = self.blocks.is_some();
+        let mut opens: Vec<usize> = Vec::new();
         // Pending `?` of conditionals, per level.
         let mut ternary: Vec<u32> = vec![0];
         // A `/` here starts a regular expression.
@@ -355,6 +388,9 @@ impl<'a> Lexer<'a> {
                             brace_block = false;
                         }
                         b'{' => {
+                            if record {
+                                opens.push(i);
+                            }
                             i += 1;
                             levels.push(if brace_block { Level::Block } else { Level::Object });
                             ternary.push(0);
@@ -401,10 +437,20 @@ impl<'a> Lexer<'a> {
                                         self.line_start = line_start;
                                         return Some(SkippedBody { end: self.state(), close_pos, names: list, eval, use_strict });
                                     }
+                                    if record {
+                                        let open = opens.pop()?;
+                                        if i - open >= RECORD_MIN {
+                                            let close_pos = Pos { line, column: (close - line_start) as u32 + 1 };
+                                            self.blocks.as_mut()?.push(BlockEnd { start: open, end: LexerState { pos: i, line, line_start }, close_pos });
+                                        }
+                                    }
                                     regex_ok = true;
                                     brace_block = true;
                                 }
                                 Level::Object => {
+                                    if record {
+                                        opens.pop()?;
+                                    }
                                     regex_ok = false;
                                     brace_block = true;
                                 }

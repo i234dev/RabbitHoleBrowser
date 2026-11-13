@@ -309,8 +309,8 @@ impl Realm {
     /// Parse and compile a module. The record starts `Unlinked`.
     pub fn compile_module(&mut self, source: &str, url: &str) -> JsResult<ModuleId> {
         let source: &str = &crate::value::escape_source(source);
-        let validation = crate::parser::validate_in_background(source, true);
-        let program = match crate::parser::parse_program(source, true) {
+        let validation = crate::validate::start(source);
+        let program = match crate::parser::parse_program_validating(source, true, validation.as_ref()) {
             Ok(p) => p,
             Err(e) => {
                 let msg = format!("{} ({}:{}:{})", e.message, url, e.line, e.column);

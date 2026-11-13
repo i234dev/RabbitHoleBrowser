@@ -91,20 +91,20 @@ pub fn date_from_time(t: f64) -> f64 {
 }
 
 pub fn week_day(t: f64) -> f64 {
-    (day(t) + 4.0).rem_euclid(7.0)
+    (day(t) + 4.0).rem_euclid(7.0) + 0.0
 }
 
 pub fn hour_from_time(t: f64) -> f64 {
-    (t / MS_PER_HOUR).floor().rem_euclid(24.0)
+    (t / MS_PER_HOUR).floor().rem_euclid(24.0) + 0.0
 }
 pub fn min_from_time(t: f64) -> f64 {
-    (t / MS_PER_MINUTE).floor().rem_euclid(60.0)
+    (t / MS_PER_MINUTE).floor().rem_euclid(60.0) + 0.0
 }
 pub fn sec_from_time(t: f64) -> f64 {
-    (t / MS_PER_SECOND).floor().rem_euclid(60.0)
+    (t / MS_PER_SECOND).floor().rem_euclid(60.0) + 0.0
 }
 pub fn ms_from_time(t: f64) -> f64 {
-    t.rem_euclid(MS_PER_SECOND)
+    t.rem_euclid(MS_PER_SECOND) + 0.0
 }
 
 pub fn make_time(hour: f64, min: f64, sec: f64, ms: f64) -> f64 {

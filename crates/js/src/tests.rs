@@ -1947,8 +1947,8 @@ fn lone_surrogates_are_lossless() {
 }
 
 /// A large script whose function body the lazy parse skips: the complete
-/// check (`parser::validate_program`, run off-thread with RH_LAZY_CHECKED)
-/// finds the early error in the body.
+/// check (`parser::validate_program`) and the parallel check of skipped
+/// bodies at load (`validate`) find the early error in the body.
 #[test]
 fn complete_parse_finds_errors_in_skipped_bodies() {
     let filler = "var x = [".to_string() + &"1, ".repeat(9000) + "];\n";
@@ -1958,8 +1958,61 @@ fn complete_parse_finds_errors_in_skipped_bodies() {
     assert!(crate::parser::validate_program(&bad, false).is_err());
     let good = bad.replace("let a; let a;", "let a; let b;");
     assert!(crate::parser::validate_program(&good, false).is_ok());
+    crate::validate::set_enabled(Some(true));
+    let mut realm = Realm::new();
+    assert!(realm.compile(&bad, "t.js", false).is_err(), "rejected at load");
+    assert!(realm.compile(&good, "t.js", false).is_ok());
+    // Errors in nested bodies (long enough to be jobs of their own), the
+    // first one in source order wins.
+    let inner = "x = 1 + 2 + 3 + 4;\n".repeat(200);
+    let nested = format!("{filler}function g() {{ {inner} function h() {{ {inner} let b; var b; }} {inner} }}\nfunction k() {{ {inner} break; }}\n");
+    let err = realm.compile(&nested, "t.js", false).err().map(|e| realm.error_to_string(&e)).unwrap_or_default();
+    assert!(err.contains("SyntaxError") && err.contains("'b'"), "{err}");
+    assert!(realm.compile(&nested.replace("let b; var b;", ""), "t.js", false).err().map(|e| realm.error_to_string(&e)).unwrap_or_default().contains("SyntaxError"));
+    assert!(realm.compile(&nested.replace("let b; var b;", "").replace("break;", ""), "t.js", false).is_ok());
+    // Rejecting a script at its top level must not strand its queued
+    // body checks (also exercised with RH_VALIDATE_THREADS=0).
+    assert!(realm.compile(&format!("{good}\n@"), "t.js", false).is_err());
+    assert!(realm.compile(&good, "t.js", false).is_ok());
+    crate::validate::set_enabled(None);
     // Web-compat call assignment targets throw at run time.
     eq("function f() { return {}; } var r = []; for (var t of [0, 1, 2]) { try { if (t == 0) f() = 1; else if (t == 1) f()++; else for (f() of [1]); } catch (e) { r.push(e.name); } } r.join()", "ReferenceError,ReferenceError,ReferenceError");
     throws("[f() = 1] = []", "SyntaxError");
     throws("'use strict'; f() = 1", "SyntaxError");
+}
+
+#[test]
+fn delete_optional_chain_preserves_references_and_short_circuiting() {
+    eq("var o = {x: 1, y: 2}; [delete o?.x, 'x' in o, delete o?.['y'], 'y' in o].join()", "true,false,true,false");
+    eq("var n = 0, o = null; [delete o?.[n++].x, delete o?.x[n++], n].join()", "true,true,0");
+    eq("var n = 0, o = {x: {y: 1}, f() { n++; return this.x; }}; [delete o?.f().y, 'y' in o.x, n].join()", "true,false,1");
+    eq("var o = {x: 1}; Object.defineProperty(o, 'x', {configurable: false}); delete o?.x", "false");
+    throws("'use strict'; var o = {}; Object.defineProperty(o, 'x', {value: 1}); delete o?.x", "TypeError");
+    throws("var o = null; delete (o?.x).y", "TypeError");
+    eq("var o = {x: 1}; [delete (o?.x), 'x' in o, delete undefined?.x].join()", "true,false,true");
+    eq("var n = 0, o = {get x() { n++; return 1; }}; [delete o?.x, n].join()", "true,0");
+}
+
+#[test]
+fn recovered_completion_and_iteration_semantics() {
+    eq("eval('try { 1; throw 2; } catch (e) {}')", "undefined");
+    eq("eval('while (true) { try { 1; } finally { 2; break; } }')", "2");
+    eq("eval('while (true) { try { 1; break; } finally { 2; } }')", "1");
+    eq("eval('while (true) { try { 1; break; } finally { break; } }')", "undefined");
+    eq("var initial, f; for (let x = (initial = () => x, 0); x < 1; x++) f = () => x; [initial(), f()].join()", "0,0");
+    eq("var n = 0, it = {[Symbol.iterator]() { return {next() {return {value: 1, done: false}}, return() { n++; throw 42; }} }}; try { for (let v of it) break; } catch (e) {} n", "1");
+}
+
+#[test]
+fn set_operations_observe_iterator_and_has_side_effects() {
+    eq("var s = new Set([1]); var other = {size: 0, has() {return false}, keys() {s.add(2); return [][Symbol.iterator]();}}; [...s.union(other)].join()", "1,2");
+    eq("var s = new Set([1]); var other = {size: 0, has() {return false}, keys() {s.add(2); return [][Symbol.iterator]();}}; [...s.symmetricDifference(other)].join()", "1,2");
+    eq("var s = new Set([1]); var other = {size: 10, has(x) { if (x === 1) s.add(2); return true; }, keys() {throw 1}}; [...s.intersection(other)].join()", "1,2");
+}
+
+#[test]
+fn primitive_assignment_observes_proxy_and_string_own_properties() {
+    eq("var seen = []; Object.setPrototypeOf(Number.prototype, new Proxy({}, {set(t, k, v, r) {seen.push([k, v, typeof r].join(':')); return true;}})); (1).x = 2; seen.join()", "x:2:number");
+    eq("var n = 0; Object.defineProperty(String.prototype, '0', {set(v) {n++;}}); 'abc'[0] = 'x'; n", "0");
+    throws("'use strict'; 'abc'[0] = 'x'", "TypeError");
 }

@@ -3,9 +3,10 @@
 //!
 //! Without arguments it uses the framework bundles of the agent test
 //! fixtures. Reports the best of several rounds of `parse_program` and of
-//! `Realm::compile` (parse + early errors + top-level compile; with
-//! `RH_LAZY_CHECKED=1` it waits for the off-thread complete parse of large
-//! scripts) over all files, and of that complete parse alone.
+//! `Realm::compile` (parse + early errors + top-level compile) over all
+//! files, without and with the parallel early-error check of the bodies
+//! the lazy parse skips (`rabbithole_js::validate`), and of a complete
+//! single-threaded parse (no body skipped).
 #[global_allocator]
 static ALLOC: rabbithole_js::alloc::RhAlloc = rabbithole_js::alloc::RhAlloc;
 
@@ -33,6 +34,7 @@ fn main() {
     let mut best_compile = f64::MAX;
     let mut best_early = f64::MAX;
     let mut best_full = f64::MAX;
+    let mut best_checked = f64::MAX;
     let programs: Vec<_> = sources.iter().map(|s| rabbithole_js::parse_program(s, false).expect("parse")).collect();
     for _ in 0..rounds {
         let t = Instant::now();
@@ -50,16 +52,25 @@ fn main() {
             rabbithole_js::parser::validate_program(s, false).expect("full parse");
         }
         best_full = best_full.min(t.elapsed().as_secs_f64() * 1000.0);
-        let mut realm = rabbithole_js::Realm::new();
-        let t = Instant::now();
-        for s in &sources {
-            realm.compile(s, "bench", false).map_err(|_| "compile error").unwrap();
+        for checked in [false, true] {
+            rabbithole_js::validate::set_enabled(Some(checked));
+            let mut realm = rabbithole_js::Realm::new();
+            let t = Instant::now();
+            for s in &sources {
+                realm.compile(s, "bench", false).map_err(|_| "compile error").unwrap();
+            }
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            if checked {
+                best_checked = best_checked.min(ms);
+            } else {
+                best_compile = best_compile.min(ms);
+            }
         }
-        best_compile = best_compile.min(t.elapsed().as_secs_f64() * 1000.0);
     }
     println!("{} files, {} KB", sources.len(), bytes / 1024);
     println!("parse          {:>8.2} ms  ({:.1} MB/s)", best_parse, bytes as f64 / 1e6 / (best_parse / 1000.0));
     println!("parse+compile  {:>8.2} ms  ({:.1} MB/s)", best_compile, bytes as f64 / 1e6 / (best_compile / 1000.0));
+    println!("parse+compile+check {:>8.2} ms  ({:.2}x parse; skipped bodies checked in parallel)", best_checked, best_checked / best_parse);
     println!("early errors   {:>8.2} ms  (of parse)", best_early);
-    println!("full parse     {:>8.2} ms  (no body skipped, early errors; the off-thread check of large scripts)", best_full);
+    println!("full parse     {:>8.2} ms  (no body skipped, early errors, one thread)", best_full);
 }

@@ -142,6 +142,8 @@ pub enum Op {
     SuperCallSpread,
     /// Direct eval: func this args.. with special handling when func is the intrinsic eval
     CallEval(u16, u32),
+    /// Direct eval with spread arguments: func this argsArray -> result
+    CallEvalSpread,
     Return,
     Throw,
     /// Throw a ReferenceError/TypeError with a constant message: (kind, msg const)
@@ -190,6 +192,12 @@ pub enum Op {
     /// `with` lookup: pop an object, push whether the constant name is a
     /// property of it that `Symbol.unscopables` does not hide.
     WithHas(u32),
+    /// `with` GetBindingValue: pop the object, push its property (HasProperty
+    /// first: a missing one is undefined, or a ReferenceError in strict code).
+    WithGet(u32),
+    /// `with` SetMutableBinding: [obj v] -> [v] (HasProperty first: a missing
+    /// one is a ReferenceError in strict code; then Set).
+    WithSet(u32),
     /// Pop a value, push `ToObject(value)` (TypeError for null/undefined).
     ToObject,
     Neg,
@@ -872,6 +880,7 @@ impl Op {
             GetSuperPropKeep(_) => (2, 3),
             GetSuperElemKeep => (3, 4),
             Call(argc, _) | CallEval(argc, _) => (argc as u32 + 2, 1),
+            CallEvalSpread => (3, 1),
             CallSpread => (3, 1),
             New(argc) => (argc as u32 + 1, 1),
             NewSpread => (2, 1),
@@ -886,7 +895,8 @@ impl Op {
             JumpIfStrictEq(_) => (2, 0),
             Add | Sub | Mul | Div | Mod | Exp | BitAnd | BitOr | BitXor | Shl | Shr | UShr | Eq | NotEq | StrictEq | StrictNotEq | Lt | LtEq | Gt | GtEq | In | Instanceof => (2, 1),
             Neg | Plus | Not | BitNot | Typeof | Void | Inc | Dec | ToNumeric | ToString | ToPropertyKey | PrivateIn(..) => (1, 1),
-            WithHas(_) | ToObject => (1, 1),
+            WithHas(_) | WithGet(_) | ToObject => (1, 1),
+            WithSet(_) => (2, 1),
             NewObject => (0, 1),
             NewArray(n) => (n, 1),
             ArrayPush | ArraySpread => (2, 1),

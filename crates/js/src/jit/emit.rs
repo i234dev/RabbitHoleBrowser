@@ -139,7 +139,7 @@ fn classify_all(op: &Op) -> Class {
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
         Op::DeleteGlobal(..) | Op::CheckCoercibleUnder => exec,
-        Op::CallEval(..) | Op::EvalSite(..) | Op::NewEvalVars | Op::DeclareEvalVar(..) | Op::DeclareEvalGlobalVar(..) | Op::DeclareEvalGlobalFunction(..) => Reject("direct eval"),
+        Op::CallEval(..) | Op::CallEvalSpread | Op::EvalSite(..) | Op::NewEvalVars | Op::DeclareEvalVar(..) | Op::DeclareEvalGlobalVar(..) | Op::DeclareEvalGlobalFunction(..) => Reject("direct eval"),
         Op::ResumeIsReturn | Op::YieldStarStep(..) | Op::YieldStarCheck | Op::YStarIs(..) | Op::YieldRaw | Op::ResumeMode => Reject("suspends"),
         Op::IteratorStepReg(..) | Op::IteratorRestReg(..) | Op::IteratorCloseIfNotDoneReg(..) | Op::IteratorCloseOnThrow(..) => Reject("writes registers out of line"),
         Op::GetPrivate | Op::GetPrivateKeep | Op::SetPrivate | Op::DefinePrivate | Op::CopyPrivate | Op::TakePrivate => exec,
@@ -161,7 +161,7 @@ fn classify_all(op: &Op) -> Class {
         Op::JumpIfTrueKeep(..) | Op::JumpIfUndefined(..) | Op::JumpIfNotUndefined(..) | Op::JumpIfStrictEq(..) => exec,
         Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Exp | Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr => exec,
         Op::Eq | Op::NotEq | Op::StrictEq | Op::StrictNotEq | Op::Lt | Op::LtEq | Op::Gt | Op::GtEq | Op::In | Op::Instanceof => exec,
-        Op::WithHas(..) | Op::ToObject | Op::Neg | Op::Plus | Op::Not | Op::BitNot | Op::Typeof | Op::Void | Op::Inc | Op::Dec => exec,
+        Op::WithHas(..) | Op::WithGet(..) | Op::WithSet(..) | Op::ToObject | Op::Neg | Op::Plus | Op::Not | Op::BitNot | Op::Typeof | Op::Void | Op::Inc | Op::Dec => exec,
         Op::ToNumeric | Op::ToString | Op::ToPropertyKey | Op::PrivateIn(..) | Op::NewObject | Op::NewArray(..) | Op::ArrayPush => exec,
         Op::ArrayHole | Op::ArraySpread | Op::NewRegExp(..) | Op::TemplateObject(..) | Op::MakeClosure(..) | Op::MakeClass(..) => exec,
         Op::SetClassFields | Op::NewPrivateName(..) | Op::InitFields | Op::This | Op::ThisChecked | Op::NewTarget | Op::Arguments => exec,
