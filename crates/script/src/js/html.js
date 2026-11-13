@@ -345,26 +345,61 @@
   }
   tag(CustomStateSet, 'CustomStateSet');
   const internalsOf = new WeakMap();
+  // Form-associated custom element operations need `static formAssociated`.
+  const faceOnly = (i, what) => {
+    const el = i[S].el;
+    if (!formAssociated(el)) throw domError(`Failed to execute '${what}' on 'ElementInternals': The target element is not a form-associated custom element.`, 'NotSupportedError');
+    return el;
+  };
+  const formOwnerOf = (el) => {
+    const id = el.getAttribute('form');
+    if (id !== null) { const f = el.isConnected ? el.ownerDocument.getElementById(id) : null; return f && f.localName === 'form' ? f : null; }
+    return el.parentElement ? el.parentElement.closest('form') : null;
+  };
+  const disabledFACE = (el) => {
+    if (el.hasAttribute('disabled')) return true;
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.localName === 'fieldset' && p.hasAttribute('disabled')) {
+        // Inside the fieldset's first legend: not disabled by it.
+        const legend = Array.from(p.children).find((c) => c.localName === 'legend');
+        if (!(legend && legend.contains(el))) return true;
+      }
+    }
+    return false;
+  };
   class ElementInternals {
     constructor() { ILLEGAL(); }
-    get shadowRoot() { const r = this[S].el.shadowRoot; return r; }
-    setFormValue(value, state) { this[S].value = value; this[S].state = state === undefined ? value : state; }
-    get form() { return formAssociated(this[S].el) ? this[S].el.closest('form') : null; }
+    get shadowRoot() { return this[S].el.shadowRoot; }
+    setFormValue(value, state) { faceOnly(this, 'setFormValue'); this[S].value = value; this[S].state = state === undefined ? value : state; }
+    get form() { return formOwnerOf(faceOnly(this, 'form')); }
     setValidity(flags = {}, message, anchor) {
+      faceOnly(this, 'setValidity');
       const v = {};
       for (const k of VALIDITY_FLAGS) v[k] = !!flags[k];
       const any = VALIDITY_FLAGS.some((k) => v[k]);
       if (any && (message === undefined || message === '')) throw new TypeError("Failed to execute 'setValidity' on 'ElementInternals': The second argument should not be empty if one or more flags in the first argument are true.");
       this[S].flags = v;
-      this[S].message = any ? String(message) : '';
+      this[S].message = any ? String(message).replace(/\r\n?/g, '\n') : '';
       this[S].anchor = anchor || null;
     }
-    get willValidate() { return formAssociated(this[S].el) && !this[S].el.hasAttribute('disabled') && !this[S].el.hasAttribute('readonly'); }
-    get validity() { return makeValidity(() => Object.assign({ customError: false }, this[S].flags)); }
-    get validationMessage() { return this[S].message; }
-    checkValidity() { return checkValidityOf(this[S].el, this, false); }
-    reportValidity() { return checkValidityOf(this[S].el, this, true); }
-    get labels() { const id = this[S].el.id; return document.querySelectorAll(id ? `label[for="${CSS.escape(id)}"]` : 'label:not(*)'); }
+    get willValidate() {
+      const el = faceOnly(this, 'willValidate');
+      return !disabledFACE(el) && !el.hasAttribute('readonly') && !el.closest('datalist');
+    }
+    get validity() { faceOnly(this, 'validity'); return makeValidity(() => Object.assign({ customError: false }, this[S].flags)); }
+    get validationMessage() { faceOnly(this, 'validationMessage'); return this[S].message; }
+    checkValidity() { return checkValidityOf(faceOnly(this, 'checkValidity'), this, false); }
+    reportValidity() { return checkValidityOf(faceOnly(this, 'reportValidity'), this, true); }
+    get labels() {
+      const el = faceOnly(this, 'labels');
+      const out = [];
+      for (const l of el.ownerDocument.querySelectorAll('label')) {
+        const f = l.getAttribute('for');
+        const labelable = (c) => /^(button|input|meter|output|progress|select|textarea)$/.test(c.localName) || formAssociated(c);
+        if (f !== null ? (f === el.id && el.isConnected) : Array.from(l.querySelectorAll('*')).find(labelable) === el) out.push(l);
+      }
+      return Object.freeze(out);
+    }
     get states() { return this[S].states; }
   }
   tag(ElementInternals, 'ElementInternals');
