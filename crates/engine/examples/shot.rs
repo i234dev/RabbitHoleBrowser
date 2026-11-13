@@ -3,6 +3,11 @@
 use rabbithole_engine::{Engine, Viewport};
 use rabbithole_gfx::Canvas;
 
+/// The browser's allocator (as in `app/src/main.rs`), so script memory and
+/// the collector's byte-based trigger behave as in the browser.
+#[global_allocator]
+static ALLOC: rabbithole_engine::script::js::alloc::RhAlloc = rabbithole_engine::script::js::alloc::RhAlloc;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let url = args.get(1).map(String::as_str).unwrap_or("about:home");
@@ -192,6 +197,7 @@ fn main() {
     if let Ok(js) = std::env::var("RH_EVAL") {
         eprintln!("eval: {}", engine.eval_in_page(&mut page, &js));
     }
+    rabbithole_engine::script::js::gcstats::report();
     for (level, msg) in page.take_console() {
         eprintln!("[console.{level}] {msg}");
     }

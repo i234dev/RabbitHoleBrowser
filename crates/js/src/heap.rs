@@ -847,6 +847,8 @@ impl Heap {
     /// object id; everything else reachable is found by tracing.
     pub fn collect(&mut self, roots: &[ObjectId]) -> usize {
         self.collections = self.collections.wrapping_add(1).max(1);
+        let stats = crate::gcstats::enabled();
+        let t0 = std::time::Instant::now();
         self.marks.clear();
         self.marks.resize(self.objects.len(), false);
         let mut work: Vec<ObjectId> = Vec::with_capacity(roots.len());
@@ -892,6 +894,7 @@ impl Heap {
                 }
             }
         }
+        let t1 = std::time::Instant::now();
         // Entries whose key is unreachable go with it.
         for &w in &weak {
             let dead: Vec<Value> = match &self.objects[w.0 as usize] {
@@ -904,6 +907,7 @@ impl Heap {
                 }
             }
         }
+        let t2 = std::time::Instant::now();
         let mut freed = 0;
         let debug = std::env::var_os("RH_DEBUG_GC").is_some();
         // Unfinished iterators that die end their iteration.
@@ -935,6 +939,11 @@ impl Heap {
         }
         self.live_count -= freed;
         self.allocated_since_gc = 0;
+        if stats {
+            crate::gcstats::record_phase(1, t1 - t0);
+            crate::gcstats::record_phase(2, t2 - t1);
+            crate::gcstats::record_phase(3, t2.elapsed());
+        }
         freed
     }
 

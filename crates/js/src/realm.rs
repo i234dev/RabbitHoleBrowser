@@ -776,6 +776,7 @@ impl Realm {
 
     /// Run a full garbage collection now.
     pub fn gc(&mut self) -> usize {
+        let t0 = std::time::Instant::now();
         let mut roots: Vec<ObjectId> = Vec::with_capacity(1024);
         let i = &self.intrinsics;
         roots.extend([
@@ -830,7 +831,15 @@ impl Realm {
                 roots.push(o);
             }
         }
-        self.heap.collect(&roots)
+        if crate::gcstats::enabled() {
+            crate::gcstats::record_phase(0, t0.elapsed());
+        }
+        let freed = self.heap.collect(&roots);
+        if crate::gcstats::enabled() {
+            crate::gcstats::record_pause(t0.elapsed(), false);
+            crate::gcstats::record_cycle();
+        }
+        freed
     }
 
     /// Called by the VM at safe points.
@@ -927,7 +936,7 @@ impl Realm {
         self.gc_threshold = (self.heap.live_count.max(50_000)).max(freed / 2);
         let in_use = crate::alloc::thread_bytes_in_use();
         if std::env::var_os("RH_GC_TRACE").is_some() {
-            eprintln!("[gc] objects={} freed={freed} live={} heap_slots={} in_use_before={} in_use_after={in_use}", objects, self.heap.live_count, self.heap.len(), self.gc_bytes_base + self.gc_bytes_budget, );
+            eprintln!("[gc] {:.2}ms objects={} freed={freed} live={} heap_slots={} in_use_before={} in_use_after={in_use}", crate::gcstats::snapshot().pauses_us.last().copied().unwrap_or(0) as f64 / 1000.0, objects, self.heap.live_count, self.heap.len(), self.gc_bytes_base + self.gc_bytes_budget, );
         }
         self.gc_bytes_base = in_use;
         self.gc_bytes_budget = (in_use / 2).max(GC_MIN_BYTES);

@@ -33,6 +33,7 @@ pub mod captures;
 pub mod compiler;
 pub mod descriptor;
 pub mod early;
+pub mod gcstats;
 pub mod heap;
 pub mod ic;
 pub mod interop;

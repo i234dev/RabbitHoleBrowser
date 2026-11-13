@@ -37,6 +37,7 @@ mod tests_realms;
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};
 pub use rabbithole_js::exclude_from_watchdog;
+pub use rabbithole_js as js;
 
 use env::{with_env, EnvGuard};
 use rabbithole_js::V;
