@@ -3386,6 +3386,11 @@ impl Realm {
                     let v = pop!();
                     let key = pop!();
                     let obj = pop!();
+                    if obj.is_nullish() && key.is_object() {
+                        // PutValue: ToObject(base) before ToPropertyKey.
+                        let what = if obj.is_undefined() { "undefined" } else { "null" };
+                        return self.type_error(&format!("Cannot set properties of {what}"));
+                    }
                     let key = self.to_property_key(key)?;
                     let ok = self.set(obj, key.clone(), v.clone())?;
                     if !ok && frame!().code().flags.is_strict {
@@ -3624,6 +3629,21 @@ impl Realm {
                     let args = self.create_list_from_array_like(arr)?;
                     self.do_call(f, this, &args, sp - fb)?;
                 }
+                Op::CallEvalSpread => {
+                    let arr = pop!();
+                    let this = pop!();
+                    let f = pop!();
+                    let args = self.create_list_from_array_like(arr)?;
+                    let site = std::mem::replace(&mut self.eval_site, u32::MAX);
+                    if f.as_object() == Some(self.intrinsics.eval_fn) {
+                        let site = frame!().code().eval_sites.get(site as usize).cloned();
+                        let strict = frame!().code().flags.is_strict;
+                        let v = self.direct_eval(fi, args.first().cloned().unwrap_or(Value::Undefined), strict, site)?;
+                        push!(v);
+                        return Ok(Flow::Next);
+                    }
+                    self.do_call(f, this, &args, sp - fb)?;
+                }
                 Op::New(argc) | Op::NewR(_, argc) => {
                     if let Op::NewR(b, _) = op {
                         sp = fb + b as usize + argc as usize + 1;
@@ -3840,6 +3860,37 @@ impl Realm {
                         _ => false,
                     };
                     push!(Value::Bool(found));
+                }
+                Op::WithGet(i) => {
+                    let obj = pop!();
+                    let key = const_key!(i);
+                    let id = obj.as_object().unwrap();
+                    let v = if self.has_property(id, &key)? {
+                        self.get(obj, key)?
+                    } else if frame!().code().flags.is_strict {
+                        let k = self.key_display(&key);
+                        return Err(self.new_error("ReferenceError", &format!("{} is not defined", k)));
+                    } else {
+                        Value::Undefined
+                    };
+                    push!(v);
+                }
+                Op::WithSet(i) => {
+                    let v = pop!();
+                    let obj = pop!();
+                    let key = const_key!(i);
+                    let id = obj.as_object().unwrap();
+                    let strict = frame!().code().flags.is_strict;
+                    if !self.has_property(id, &key)? && strict {
+                        let k = self.key_display(&key);
+                        return Err(self.new_error("ReferenceError", &format!("{} is not defined", k)));
+                    }
+                    let ok = self.set(obj, key.clone(), v.clone())?;
+                    if !ok && strict {
+                        let k = self.key_display(&key);
+                        return self.type_error(&format!("Cannot assign to read only property '{}' of object", k));
+                    }
+                    push!(v);
                 }
                 Op::ToObject => {
                     let v = pop!();
@@ -4500,6 +4551,11 @@ impl Realm {
     fn get_elem(&mut self, obj: Value, key: Value) -> JsResult<Value> {
         if let Some(v) = self.get_elem_fast(&obj, &key) {
             return Ok(v);
+        }
+        if obj.is_nullish() && key.is_object() {
+            // The base is checked before the key's ToPropertyKey.
+            let what = if obj.is_undefined() { "undefined" } else { "null" };
+            return self.type_error(&format!("Cannot read properties of {what}"));
         }
         let key = match key.v() {
             // Integer keys: cached index strings, no number formatting.
@@ -5556,6 +5612,19 @@ impl Realm {
                 _ => o.is_ge(),
             });
         }
+        // BigInt vs String: StringToBigInt on the string side (undefined ->
+        // the comparison is false), not ToNumber.
+        let fix = match (pa.v(), pb.v()) {
+            (V::BigInt(_), V::String(s)) => Some((false, BigInt::parse(&s.to_rust_string()))),
+            (V::String(s), V::BigInt(_)) => Some((true, BigInt::parse(&s.to_rust_string()))),
+            _ => None,
+        };
+        let (pa, pb) = match fix {
+            None => (pa, pb),
+            Some((_, None)) => return Ok(false),
+            Some((false, Some(b))) => (pa, Value::BigInt(Rc::new(b))),
+            Some((true, Some(a))) => (Value::BigInt(Rc::new(a)), pb),
+        };
         let na = self.to_numeric(pa)?;
         let nb = self.to_numeric(pb)?;
         let ord = match (na.v(), nb.v()) {
