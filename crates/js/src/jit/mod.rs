@@ -37,6 +37,8 @@ pub(crate) use emit::PHASE;
 pub(crate) const PHASE: u8 = 0;
 mod debug;
 mod helpers;
+#[cfg(target_arch = "x86_64")]
+mod layout;
 
 
 /// Process-wide options, read once from the environment.
@@ -51,6 +53,10 @@ pub struct Options {
     pub max: Option<u32>,
     pub stats: bool,
     pub gc_stress: bool,
+    /// Loop-free functions shorter than this run interpreted when called
+    /// from interpreted code (`RABBITHOLE_JIT_ENTRY_MIN`, default
+    /// [`ENTRY_MIN_OPS`]).
+    pub entry_min_ops: usize,
 }
 
 /// Default hotness threshold (calls; a loop adds [`LOOP_WEIGHT`] per
@@ -91,7 +97,34 @@ pub fn options() -> &'static Options {
             max: var("RABBITHOLE_JIT_MAX").and_then(|v| v.parse().ok()),
             stats: var("RABBITHOLE_JIT_STATS").is_some(),
             gc_stress: var("RH_GC_STRESS").is_some(),
+            entry_min_ops: var("RABBITHOLE_JIT_ENTRY_MIN").and_then(|v| v.parse().ok()).unwrap_or(ENTRY_MIN_OPS),
         }
+    })
+}
+
+/// Native code adjusts the reference counts of strings and BigInts inline:
+/// the strong count of an `Rc` is the word 16 bytes before the pointer
+/// `Rc::into_raw` gives (`RcInner` is `repr(C)`: strong, weak, value).
+/// Checked once at run time; when it does not hold, values with a count
+/// take helpers.
+pub(crate) fn rc_inline() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        use crate::value::{JsStr, Value};
+        let probe = |v: Value| -> bool {
+            let p = (v.bits() & 0x0000_FFFF_FFFF_FFFF) as *const usize;
+            // SAFETY: `p` points into a live `Rc` allocation (the counts
+            // precede the value).
+            unsafe {
+                let c0 = std::ptr::read_volatile(p.sub(2));
+                let w = v.clone();
+                let c1 = std::ptr::read_volatile(p.sub(2));
+                drop(w);
+                let c2 = std::ptr::read_volatile(p.sub(2));
+                c1 == c0 + 1 && c2 == c0 && c0 >= 1
+            }
+        };
+        probe(Value::String(JsStr::from("rc probe"))) && probe(Value::BigInt(std::rc::Rc::new(crate::bigint::BigInt::from_i64(7))))
     })
 }
 
@@ -155,6 +188,8 @@ pub(crate) struct Stats {
     pub compile_ns: u128,
     /// Entries into native code.
     pub entries: u64,
+    /// Calls and returns that continued in native code.
+    pub switches: u64,
 }
 
 impl Default for State {
@@ -172,7 +207,7 @@ impl Drop for Stats {
         }
         let pct = |n: u64| if self.samples == 0 { 0.0 } else { 100.0 * n as f64 / self.samples as f64 };
         eprintln!(
-            "[jit] samples {} | in hot functions {:.1}% | in native code {:.1}% | compiled {} ({} ops, {} bytes, {:.2} ms, {:.3} us/op; mapping {:.2} ms in this thread) | rejected {} | entries {}",
+            "[jit] samples {} | in hot functions {:.1}% | in native code {:.1}% | compiled {} ({} ops, {} bytes, {:.2} ms, {:.3} us/op; mapping {:.2} ms in this thread) | rejected {} | entries {} | native calls/returns {}",
             self.samples,
             pct(self.hot_samples),
             pct(self.jit_samples),
@@ -183,7 +218,8 @@ impl Drop for Stats {
             if self.ops_compiled == 0 { 0.0 } else { self.compile_ns as f64 / 1e3 / self.ops_compiled as f64 },
             MAP_NS.with(|m| m.get()) as f64 / 1e6,
             self.rejected,
-            self.entries
+            self.entries,
+            self.switches
         );
     }
 }
@@ -212,7 +248,8 @@ impl Realm {
         self.jit.on
     }
 
-    /// Entries into native code so far (calls, resumes, loop OSR).
+    /// Entries into native code from the run loop so far (calls, resumes,
+    /// loop OSR; calls and returns between native frames are not entries).
     pub fn jit_entries(&self) -> u64 {
         self.jit.entries
     }
@@ -324,7 +361,7 @@ pub(crate) fn compile(code: &FunctionCode, stats: &mut Stats) {
             if let Some(l) = listing {
                 eprintln!("[jit] ---- {} ({} ops, {} bytes at {:p})\n{l}", describe(code), code.ops.len(), mem.len(), mem.ptr());
             }
-            slot.from_interp.set(code.ops.len() >= ENTRY_MIN_OPS || has_loop(code));
+            slot.from_interp.set(code.ops.len() >= o.entry_min_ops || has_loop(code));
             slot.entry.set(mem.ptr() as usize);
             let _ = slot.code.set(JitCode { mem });
             slot.state.set(COMPILED);

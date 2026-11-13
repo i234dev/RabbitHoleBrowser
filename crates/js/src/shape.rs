@@ -36,13 +36,15 @@ fn fresh_values() -> Vec<Property> {
 
 /// Largest number of properties kept in shape mode.
 pub const MAX_SHAPED: usize = 128;
+/// Id of the empty root shape.
+pub const ROOT_SHAPE_ID: u32 = 1;
 /// Shapes up to this size are searched linearly (larger ones use an index).
 const LINEAR_LOOKUP: usize = 8;
 
 thread_local! {
     static NEXT_ID: Cell<u32> = const { Cell::new(2) };
     static ROOT: Rc<Shape> = Rc::new(Shape {
-        id: 1,
+        id: ROOT_SHAPE_ID,
         len: 0,
         keys: Rc::new(RefCell::new(Vec::new())),
         parent: None,
@@ -239,7 +241,7 @@ struct Dict {
 
 #[derive(Debug, Clone)]
 enum Repr {
-    Shaped { shape: Rc<Shape>, values: Vec<Property> },
+    Shaped(Rc<Shape>),
     Dict(Box<Dict>),
 }
 
@@ -247,6 +249,9 @@ enum Repr {
 #[derive(Debug, Clone)]
 pub struct PropertyMap {
     repr: Repr,
+    /// Values of a shape-mode map (empty in dictionary mode). Outside the
+    /// enum so that native code can find them at a fixed offset.
+    values: Vec<Property>,
     /// Copy of the shape / dictionary id (read by every inline cache
     /// check without dereferencing the shape).
     sid: u32,
@@ -283,10 +288,17 @@ impl Default for PropertyMap {
 }
 
 impl PropertyMap {
+    /// Offsets of the shape id and of the shape-mode values (a
+    /// `Vec<Property>`) in the map, for native code.
+    #[cfg(feature = "jit")]
+    pub(crate) const SID_OFFSET: usize = std::mem::offset_of!(PropertyMap, sid);
+    #[cfg(feature = "jit")]
+    pub(crate) const VALUES_OFFSET: usize = std::mem::offset_of!(PropertyMap, values);
+
     pub fn new() -> PropertyMap {
         let shape = Shape::root();
         let sid = shape.id;
-        PropertyMap { repr: Repr::Shaped { shape, values: Vec::new() }, sid, in_chain: Cell::new(false) }
+        PropertyMap { repr: Repr::Shaped(shape), values: Vec::new(), sid, in_chain: Cell::new(false) }
     }
 
     /// A map in shape mode with `values` for the keys of `shape`, in order
@@ -296,7 +308,7 @@ impl PropertyMap {
         let mut values = fresh_values();
         values.extend_from_slice(props);
         let sid = shape.id;
-        PropertyMap { repr: Repr::Shaped { shape, values }, sid, in_chain: Cell::new(false) }
+        PropertyMap { repr: Repr::Shaped(shape), values, sid, in_chain: Cell::new(false) }
     }
 
     /// Shape id (shape mode) or key-set id (dictionary mode). Inline caches
@@ -310,7 +322,7 @@ impl PropertyMap {
     #[inline]
     fn resync(&mut self) {
         let sid = match &self.repr {
-            Repr::Shaped { shape, .. } => shape.id,
+            Repr::Shaped(shape) => shape.id,
             Repr::Dict(d) => d.id,
         };
         if sid != self.sid && self.in_chain.get() {
@@ -338,14 +350,14 @@ impl PropertyMap {
 
     pub fn shape(&self) -> Option<&Rc<Shape>> {
         match &self.repr {
-            Repr::Shaped { shape, .. } => Some(shape),
+            Repr::Shaped(shape) => Some(shape),
             Repr::Dict(_) => None,
         }
     }
 
     pub fn len(&self) -> usize {
         match &self.repr {
-            Repr::Shaped { values, .. } => values.len(),
+            Repr::Shaped(_) => self.values.len(),
             Repr::Dict(d) => d.index.len(),
         }
     }
@@ -358,7 +370,7 @@ impl PropertyMap {
     #[inline]
     pub fn find_slot(&self, key: &PropertyKey) -> Option<u32> {
         match &self.repr {
-            Repr::Shaped { shape, .. } => shape.find(key),
+            Repr::Shaped(shape) => shape.find(key),
             Repr::Dict(d) => d.index.get(key).map(|&i| i as u32),
         }
     }
@@ -367,7 +379,7 @@ impl PropertyMap {
     #[inline(always)]
     pub fn slot(&self, slot: u32) -> Option<&Property> {
         match &self.repr {
-            Repr::Shaped { values, .. } => values.get(slot as usize),
+            Repr::Shaped(_) => self.values.get(slot as usize),
             Repr::Dict(d) => d.entries.get(slot as usize).and_then(|e| e.as_ref()).map(|(_, p)| p),
         }
     }
@@ -375,7 +387,7 @@ impl PropertyMap {
     #[inline]
     pub fn slot_mut(&mut self, slot: u32) -> Option<&mut Property> {
         match &mut self.repr {
-            Repr::Shaped { values, .. } => values.get_mut(slot as usize),
+            Repr::Shaped(_) => self.values.get_mut(slot as usize),
             Repr::Dict(d) => d.entries.get_mut(slot as usize).and_then(|e| e.as_mut()).map(|(_, p)| p),
         }
     }
@@ -390,7 +402,7 @@ impl PropertyMap {
                 Some(Some((PropertyKey::String(k), p))) if k == key => Some(p),
                 _ => None,
             },
-            Repr::Shaped { .. } => None,
+            Repr::Shaped(_) => None,
         }
     }
 
@@ -401,22 +413,22 @@ impl PropertyMap {
                 Some(Some((PropertyKey::String(k), p))) if k == key => Some(p),
                 _ => None,
             },
-            Repr::Shaped { .. } => None,
+            Repr::Shaped(_) => None,
         }
     }
 
     #[inline]
     pub fn get(&self, key: &PropertyKey) -> Option<&Property> {
         match &self.repr {
-            Repr::Shaped { shape, values } => shape.find(key).map(|i| &values[i as usize]),
+            Repr::Shaped(shape) => shape.find(key).map(|i| &self.values[i as usize]),
             Repr::Dict(d) => d.index.get(key).and_then(|&i| d.entries[i].as_ref().map(|(_, p)| p)),
         }
     }
 
     pub fn get_mut(&mut self, key: &PropertyKey) -> Option<&mut Property> {
         match &mut self.repr {
-            Repr::Shaped { shape, values } => match shape.find(key) {
-                Some(i) => Some(&mut values[i as usize]),
+            Repr::Shaped(shape) => match shape.find(key) {
+                Some(i) => Some(&mut self.values[i as usize]),
                 None => None,
             },
             Repr::Dict(d) => match d.index.get(key) {
@@ -436,8 +448,9 @@ impl PropertyMap {
     }
 
     fn insert_inner(&mut self, key: PropertyKey, prop: Property) {
+        let values = &mut self.values;
         match &mut self.repr {
-            Repr::Shaped { shape, values } => {
+            Repr::Shaped(shape) => {
                 if let Some(i) = shape.find(&key) {
                     values[i as usize] = prop;
                     return;
@@ -471,7 +484,8 @@ impl PropertyMap {
     /// adding exactly this key.
     #[inline]
     pub fn push_with_shape(&mut self, next: Rc<Shape>, prop: Property) {
-        if let Repr::Shaped { shape, values } = &mut self.repr {
+        if let Repr::Shaped(shape) = &mut self.repr {
+            let values = &mut self.values;
             if self.in_chain.get() {
                 bump_proto_epoch();
             }
@@ -487,7 +501,8 @@ impl PropertyMap {
     /// Give the storage of a dead object back for reuse (the map is left
     /// empty).
     pub fn recycle(&mut self) {
-        if let Repr::Shaped { values, .. } = &mut self.repr {
+        if let Repr::Shaped(_) = &mut self.repr {
+            let values = &mut self.values;
             let cap = values.capacity();
             if (4..=16).contains(&cap) {
                 let mut v = std::mem::take(values);
@@ -509,7 +524,8 @@ impl PropertyMap {
     }
 
     fn remove_inner(&mut self, key: &PropertyKey) -> Option<Property> {
-        if let Repr::Shaped { shape, values } = &mut self.repr {
+        if let Repr::Shaped(shape) = &mut self.repr {
+            let values = &mut self.values;
             let i = shape.find(key)? as usize;
             // Deleting the last added property returns to the parent layout.
             if i + 1 == values.len() {
@@ -536,14 +552,14 @@ impl PropertyMap {
                 }
                 out
             }
-            Repr::Shaped { .. } => None,
+            Repr::Shaped(_) => None,
         }
     }
 
     fn to_dict(&mut self) {
-        if let Repr::Shaped { shape, values } = &mut self.repr {
+        if let Repr::Shaped(shape) = &mut self.repr {
             let keys = shape.keys();
-            let values = std::mem::take(values);
+            let values = std::mem::take(&mut self.values);
             let mut index = HashMap::with_capacity_and_hasher(keys.len(), FxBuild::default());
             let mut entries = Vec::with_capacity(keys.len());
             for (k, p) in keys.into_iter().zip(values) {
@@ -578,7 +594,8 @@ impl PropertyMap {
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = (&PropertyKey, &Property)> + '_> {
         match &self.repr {
-            Repr::Shaped { shape, values } => {
+            Repr::Shaped(shape) => {
+                let values = &self.values;
                 // The shared key storage is append-only: keys[..len] stay valid
                 // while this shape (and hence this borrow) is alive.
                 let keys = shape.keys.as_ptr();
@@ -598,7 +615,7 @@ impl PropertyMap {
     #[inline]
     pub fn for_each_value(&self, mut f: impl FnMut(&Property)) {
         match &self.repr {
-            Repr::Shaped { values, .. } => values.iter().for_each(f),
+            Repr::Shaped(_) => self.values.iter().for_each(f),
             Repr::Dict(d) => {
                 for (_, p) in d.entries.iter().flatten() {
                     f(p);
@@ -609,7 +626,7 @@ impl PropertyMap {
 
     pub fn values_mut(&mut self) -> Box<dyn Iterator<Item = &mut Property> + '_> {
         match &mut self.repr {
-            Repr::Shaped { values, .. } => Box::new(values.iter_mut()),
+            Repr::Shaped(_) => Box::new(self.values.iter_mut()),
             Repr::Dict(d) => Box::new(d.entries.iter_mut().flatten().map(|(_, p)| p)),
         }
     }

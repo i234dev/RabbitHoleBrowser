@@ -183,6 +183,30 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 style.text_decoration_thickness = Some(style.font_size * p / 100.0);
             }
         }
+        "writing-mode" | "-webkit-writing-mode" => {
+            if let Some(kw) = values::ident(c0) {
+                style.writing_mode = match kw.as_str() {
+                    "horizontal-tb" | "lr" | "lr-tb" | "rl" | "rl-tb" => WritingMode::HorizontalTb,
+                    "vertical-rl" | "sideways-rl" | "tb" | "tb-rl" => WritingMode::VerticalRl,
+                    "vertical-lr" | "tb-lr" => WritingMode::VerticalLr,
+                    "sideways-lr" => WritingMode::SidewaysLr,
+                    _ => return true,
+                };
+            }
+        }
+        "unicode-bidi" => {
+            if let Some(kw) = values::ident(c0) {
+                style.unicode_bidi = match kw.as_str() {
+                    "normal" => UnicodeBidi::Normal,
+                    "embed" => UnicodeBidi::Embed,
+                    "isolate" | "-webkit-isolate" => UnicodeBidi::Isolate,
+                    "bidi-override" => UnicodeBidi::BidiOverride,
+                    "isolate-override" | "-webkit-isolate-override" => UnicodeBidi::IsolateOverride,
+                    "plaintext" | "-webkit-plaintext" => UnicodeBidi::Plaintext,
+                    _ => return true,
+                };
+            }
+        }
         "direction" => {
             if let Some(kw) = values::ident(c0) {
                 style.direction = match kw.as_str() {
@@ -241,8 +265,8 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         }
         "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings" | "font-variation-settings"
         | "font-optical-sizing" | "font-synthesis" | "font-smoothing" | "text-size-adjust" | "text-underline-offset"
-        | "text-underline-position" | "text-align-last" | "text-justify" | "unicode-bidi" | "text-emphasis"
-        | "text-emphasis-style" | "text-emphasis-color" | "writing-mode" | "-webkit-writing-mode" | "text-orientation"
+        | "text-underline-position" | "text-align-last" | "text-justify" | "text-emphasis"
+        | "text-emphasis-style" | "text-emphasis-color" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
         | "font-variant-east-asian" | "font-variant-position" | "line-break" | "word-spacing-x" | "ruby-position"
         | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter" | "text-autospace" | "text-wrap-style"

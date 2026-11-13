@@ -258,6 +258,30 @@ pub struct LayoutBox {
     /// recorded when the document uses counters), so the box can be reused
     /// when it would see the same state.
     pub(crate) counter_io: Option<Rc<crate::build::CounterIo>>,
+    /// Anonymous wrapper of a vertical writing-mode subtree (its only
+    /// child, laid out in logical space; see `wm.rs`).
+    pub(crate) wm_wrapper: bool,
+    /// Logical → physical mapping of a wrapper's contents.
+    pub(crate) wm_transform: Option<Matrix>,
+    /// How a wrapper's contents are turned (see `wm.rs`).
+    pub(crate) wm_kind: WmKind,
+    /// A wrapper's physical background layers (images and gradients of the
+    /// box it wraps, painted unturned).
+    pub(crate) wm_background: Option<Rc<ComputedStyle>>,
+}
+
+/// Orientation of a writing-mode wrapper's contents relative to the space
+/// it sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WmKind {
+    /// 90° clockwise (`vertical-rl` in horizontal).
+    #[default]
+    Cw,
+    /// Reflection about the diagonal (`vertical-lr` in horizontal, and
+    /// horizontal in `vertical-lr`).
+    Reflect,
+    /// 90° counter-clockwise (horizontal in `vertical-rl`).
+    Ccw,
 }
 
 impl LayoutBox {
@@ -302,6 +326,10 @@ impl LayoutBox {
             counter_touch: false,
             built_from: None,
             counter_io: None,
+            wm_wrapper: false,
+            wm_transform: None,
+            wm_kind: WmKind::Cw,
+            wm_background: None,
         }
     }
 
@@ -341,7 +369,7 @@ impl LayoutBox {
 
     /// Does this box establish a stacking context (CSS 2.1 Appendix E)?
     pub fn is_stacking_context(&self) -> bool {
-        self.style.is_stacking_context() || self.fixed
+        self.style.is_stacking_context() || self.fixed || self.wm_transform.is_some()
     }
 
     /// Is the box positioned (any value other than `static`)?
@@ -351,6 +379,11 @@ impl LayoutBox {
 
     /// Transform matrix of this box (document coordinates), if any.
     pub fn transform_matrix(&self) -> Option<Matrix> {
+        if let Some(m) = self.wm_transform {
+            // Quarter turns map the pixel grid onto itself: keep the
+            // contents on whole pixels.
+            return Some([m[0], m[1], m[2], m[3], m[4].round(), m[5].round()]);
+        }
         if self.style.transform.is_empty() {
             return None;
         }
@@ -428,6 +461,12 @@ impl LayoutBox {
         self.rect = self.rect.translate(dx, dy);
         self.content_rect = self.content_rect.translate(dx, dy);
         self.static_pos = (self.static_pos.0 + dx, self.static_pos.1 + dy);
+        if let Some(m) = &mut self.wm_transform {
+            // The contents stay in their logical space.
+            m[4] += dx;
+            m[5] += dy;
+            return;
+        }
         for line in &mut self.lines {
             line.rect = line.rect.translate(dx, dy);
             line.baseline += dy;

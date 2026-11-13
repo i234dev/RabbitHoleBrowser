@@ -382,7 +382,7 @@ impl<'a> Layouter<'a> {
                     }
                 } else {
                     match it.align {
-                        ItemAlign::Stretch | ItemAlign::Auto => {
+                        ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto => {
                             if it.cross_auto {
                                 let inner = (lc - it.edges.pb(cross_axis) - it.margin_sum_axis(cross_axis)).max(0.0);
                                 stretch_to = Some(inner);
@@ -574,7 +574,7 @@ impl<'a> Layouter<'a> {
                     None => match resolve_size(child.style.width, Some(cbw), bb, it.edges.pb_h) {
                         Some(w) => WidthMode::Fixed(w),
                         None => {
-                            if matches!(it.align, ItemAlign::Stretch | ItemAlign::Auto) && !it.edges.auto.left && !it.edges.auto.right {
+                            if matches!(it.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto) && !it.edges.auto.left && !it.edges.auto.right {
                                 WidthMode::Fixed((cbw - it.edges.pb_h - it.edges.margin_sum(Axis::Row)).max(0.0))
                             } else {
                                 WidthMode::ShrinkToFit

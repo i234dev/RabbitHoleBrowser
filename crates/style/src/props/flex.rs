@@ -29,12 +29,13 @@ fn content_distribution(kw: &str, for_align_content: bool) -> Option<ContentDist
 fn item_align(kw: &str, allow_auto: bool) -> Option<ItemAlign> {
     Some(match kw {
         "auto" if allow_auto => ItemAlign::Auto,
-        "stretch" | "normal" => ItemAlign::Stretch,
+        "stretch" => ItemAlign::Stretch,
+        "normal" => ItemAlign::Normal,
         "flex-start" | "start" | "self-start" | "left" => ItemAlign::FlexStart,
         "flex-end" | "end" | "self-end" | "right" => ItemAlign::FlexEnd,
         "center" => ItemAlign::Center,
         "baseline" | "first" | "last" => ItemAlign::Baseline,
-        "legacy" => ItemAlign::Stretch,
+        "legacy" => ItemAlign::Normal,
         _ => return None,
     })
 }

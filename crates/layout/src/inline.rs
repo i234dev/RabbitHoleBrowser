@@ -7,7 +7,7 @@ use crate::tree::{DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox,
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{FontId, Rect};
 use rabbithole_style::{
-    ComputedStyle, Direction, ListStylePosition, OverflowWrap, TextAlign, TextOverflow, VerticalAlign, Visibility, WordBreak,
+    ComputedStyle, Direction, ListStylePosition, OverflowWrap, TextAlign, TextOverflow, UnicodeBidi, VerticalAlign, Visibility, WordBreak,
 };
 use std::rc::Rc;
 
@@ -270,6 +270,7 @@ impl<'a> Layouter<'a> {
                 max_lines,
                 final_flush: false,
                 done: false,
+                bidi_items: items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal)),
             };
             il.run(&pieces)
         };
@@ -351,6 +352,8 @@ struct InlineLayout<'l, 'a> {
     final_flush: bool,
     /// Line clamp reached: remaining content is dropped.
     done: bool,
+    /// Some inline element has a `unicode-bidi` other than `normal`.
+    bidi_items: bool,
 }
 
 impl<'l, 'a> InlineLayout<'l, 'a> {
@@ -822,101 +825,238 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
     }
 
-    /// Mirror the line's fragments for `direction: rtl` (visual order is
-    /// reversed; no bidi reordering of mixed-direction text).
-    /// Bidi reordering of a left-to-right line (UAX #9, simplified to one
-    /// embedding level): runs of right-to-left letters (with the neutrals
-    /// between them, and atomic boxes inside them) are put in reverse
-    /// order by mirroring their positions within the span they occupy.
-    /// The text of each run is shaped right to left by the font code.
-    fn reorder_rtl_runs(&mut self) {
-        let has_rtl = self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { text, .. } if text.chars().any(is_rtl_letter)));
-        if !has_rtl {
+    /// Bidi controls opening (and closing) the inline element `item`'s
+    /// `unicode-bidi` embedding / override / isolate.
+    fn bidi_controls(&self, item: usize) -> (Vec<char>, Vec<char>) {
+        use crate::bidi::*;
+        let s = self.style(item);
+        let rtl = s.direction == Direction::Rtl;
+        let (emb, ovr, iso) = (if rtl { RLE_CH } else { LRE_CH }, if rtl { RLO_CH } else { LRO_CH }, if rtl { RLI_CH } else { LRI_CH });
+        match s.unicode_bidi {
+            UnicodeBidi::Normal => (vec![], vec![]),
+            UnicodeBidi::Embed => (vec![emb], vec![PDF_CH]),
+            UnicodeBidi::BidiOverride => (vec![ovr], vec![PDF_CH]),
+            UnicodeBidi::Isolate => (vec![iso], vec![PDI_CH]),
+            UnicodeBidi::IsolateOverride => (vec![iso, ovr], vec![PDF_CH, PDI_CH]),
+            UnicodeBidi::Plaintext => (vec![FSI_CH], vec![PDI_CH]),
+        }
+    }
+
+    /// Inline elements (item indices, outermost first) enclosing item `idx`
+    /// that have a `unicode-bidi` other than `normal`.
+    fn bidi_chain(&self, idx: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        if idx == MARKER_ITEM || idx >= self.items.len() {
+            return out;
+        }
+        // Walk back over the items: an unmatched Open is an ancestor.
+        let mut depth = 0usize;
+        for j in (0..idx).rev() {
+            match &self.items[j] {
+                InlineItem::Close => depth += 1,
+                InlineItem::Open { style, .. } => {
+                    if depth == 0 {
+                        if style.unicode_bidi != UnicodeBidi::Normal {
+                            out.push(j);
+                        }
+                    } else {
+                        depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.reverse();
+        out
+    }
+
+    /// Reorder the line's fragments with the Unicode Bidirectional
+    /// Algorithm (UAX #9): levels from the paragraph direction, the
+    /// characters and the `unicode-bidi` / `direction` of inline elements;
+    /// then runs of increasing level are reversed (L2) by mirroring their
+    /// positions within the span they occupy.
+    fn bidi_line(&mut self) {
+        use crate::bidi::*;
+        let base_rtl = self.cstyle.direction == Direction::Rtl;
+        let container_bidi = self.cstyle.unicode_bidi;
+        let chains: Vec<Vec<usize>> = self
+            .cur
+            .frags
+            .iter()
+            .map(|f| match &f.kind {
+                _ if !self.bidi_items => Vec::new(),
+                PFKind::Text { item, .. } => self.bidi_chain(*item),
+                PFKind::Box(c) => self.items.iter().position(|it| matches!(it, InlineItem::Atomic(a) if a == c)).map(|i| self.bidi_chain(i)).unwrap_or_default(),
+            })
+            .collect();
+        let explicit = chains.iter().any(|c| !c.is_empty()) || matches!(container_bidi, UnicodeBidi::BidiOverride | UnicodeBidi::IsolateOverride | UnicodeBidi::Plaintext);
+        let rtl_text = self.cur.frags.iter().any(|f| matches!(&f.kind, PFKind::Text { text, .. } if needs_bidi(text)));
+        if !explicit && !rtl_text {
+            if base_rtl {
+                self.mirror_line();
+            }
             return;
         }
-        // Split text fragments into pieces of one direction.
+        // The line's characters with the controls of the inline elements.
+        let mut chars: Vec<char> = Vec::new();
+        // (fragment, char offset within it) of each non-control character.
+        let mut origin: Vec<Option<(usize, usize)>> = Vec::new();
+        let push = |chars: &mut Vec<char>, origin: &mut Vec<Option<(usize, usize)>>, c: char, o: Option<(usize, usize)>| {
+            chars.push(c);
+            origin.push(o);
+        };
+        if matches!(container_bidi, UnicodeBidi::BidiOverride | UnicodeBidi::IsolateOverride) {
+            push(&mut chars, &mut origin, if base_rtl { RLO_CH } else { LRO_CH }, None);
+        }
+        let mut open: Vec<usize> = Vec::new();
+        for (fi, f) in self.cur.frags.iter().enumerate() {
+            let chain = &chains[fi];
+            let common = open.iter().zip(chain.iter()).take_while(|(a, b)| a == b).count();
+            while open.len() > common {
+                let it = open.pop().unwrap();
+                for c in self.bidi_controls(it).1 {
+                    push(&mut chars, &mut origin, c, None);
+                }
+            }
+            for &it in &chain[common..] {
+                for c in self.bidi_controls(it).0 {
+                    push(&mut chars, &mut origin, c, None);
+                }
+                open.push(it);
+            }
+            match &f.kind {
+                PFKind::Text { text, .. } => {
+                    for (k, c) in text.chars().enumerate() {
+                        push(&mut chars, &mut origin, c, Some((fi, k)));
+                    }
+                }
+                PFKind::Box(_) => push(&mut chars, &mut origin, '\u{FFFC}', Some((fi, 0))),
+            }
+        }
+        let base_rtl = if container_bidi == UnicodeBidi::Plaintext { first_strong(&chars).unwrap_or(base_rtl) } else { base_rtl };
+        let base = base_rtl as u8;
+        let mut levels = resolve_levels(&chars, base);
+        reset_line_end(&chars, &mut levels, base);
+        // Per-fragment character levels.
+        let mut frag_levels: Vec<Vec<u8>> = self
+            .cur
+            .frags
+            .iter()
+            .map(|f| match &f.kind {
+                PFKind::Text { text, .. } => vec![base; text.chars().count()],
+                PFKind::Box(_) => vec![base],
+            })
+            .collect();
+        for (i, o) in origin.iter().enumerate() {
+            if let Some((fi, k)) = o {
+                frag_levels[*fi][*k] = levels[i];
+            }
+        }
+        // Split text fragments into units of one level (leading / trailing
+        // neutrals of right-to-left runs apart from the letters, which the
+        // shaper orders on its own).
         let frags = std::mem::take(&mut self.cur.frags);
-        let mut units: Vec<(PF, u8)> = Vec::new(); // 0 neutral, 1 LTR, 2 RTL
-        for f in frags {
+        let mut units: Vec<(PF, u8)> = Vec::new();
+        for (fi, f) in frags.into_iter().enumerate() {
+            let lv = &frag_levels[fi];
             let (text, item) = match &f.kind {
                 PFKind::Text { text, item } => (text.clone(), *item),
                 PFKind::Box(_) => {
-                    units.push((f, 0));
+                    units.push((f, lv[0]));
                     continue;
                 }
             };
-            let classes: Vec<u8> = text.chars().map(char_dir).collect();
-            if !classes.contains(&2) {
-                let c = if classes.contains(&1) { 1 } else { 0 };
-                units.push((f, c));
-                continue;
-            }
-            // Neutrals between RTL letters are RTL, others go with the
-            // left-to-right text.
-            let mut resolved = classes.clone();
-            let mut prev = 0u8;
-            for i in 0..classes.len() {
-                if classes[i] == 0 {
-                    let next = classes[i + 1..].iter().copied().find(|c| *c != 0).unwrap_or(0);
-                    resolved[i] = if prev == 2 && next == 2 { 2 } else { 1 };
-                } else {
-                    prev = classes[i];
+            let cs: Vec<(usize, char)> = text.char_indices().collect();
+            // Cut points: level changes, and the edges of each odd-level
+            // run's right-to-left letters.
+            let mut cuts: Vec<usize> = vec![0];
+            let mut i = 0;
+            while i < cs.len() {
+                let mut j = i;
+                while j < cs.len() && lv[j] == lv[i] {
+                    j += 1;
                 }
+                if lv[i] % 2 == 1 {
+                    let strong = |k: usize| matches!(class(cs[k].1), BidiClass::R | BidiClass::AL);
+                    if let (Some(a), Some(b)) = ((i..j).find(|&k| strong(k)), (i..j).rev().find(|&k| strong(k))) {
+                        cuts.push(a);
+                        cuts.push(b + 1);
+                    }
+                }
+                cuts.push(j);
+                i = j;
             }
+            cuts.sort_unstable();
+            cuts.dedup();
             let style = self.style(item).clone();
             let font = self.lay.font_for(&style);
             let ls = style.letter_spacing;
-            let chars: Vec<(usize, char)> = text.char_indices().collect();
-            let mut start = 0usize;
             let mut x = f.x;
-            let mut i = 0;
-            while i < chars.len() {
-                let dir = resolved[i];
-                let mut j = i;
-                while j < chars.len() && resolved[j] == dir {
-                    j += 1;
+            for w in cuts.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if a >= b {
+                    continue;
                 }
-                let end = if j < chars.len() { chars[j].0 } else { text.len() };
+                let start = cs[a].0;
+                let end = if b < cs.len() { cs[b].0 } else { text.len() };
                 let piece = &text[start..end];
-                let w = if j >= chars.len() && start == 0 {
+                let width = if a == 0 && b >= cs.len() {
                     f.w
-                } else if j >= chars.len() {
+                } else if b >= cs.len() {
                     (f.x + f.w - x).max(0.0)
                 } else {
                     self.lay.measurer.width(font, style.font_size, piece) + ls * piece.chars().count() as f32
                 };
-                units.push((PF { x, w, kind: PFKind::Text { text: piece.to_string(), item } }, dir));
-                x += w;
-                start = end;
+                let level = lv[a];
+                // The run's direction for the shaper: an RLO prefix shapes
+                // it right to left (visual order), an LRO prefix keeps
+                // right-to-left letters in logical order.
+                let has_rtl = piece.chars().any(|c| matches!(class(c), BidiClass::R | BidiClass::AL));
+                let shown: String = if level % 2 == 1 {
+                    format!("{RLO_CH}{piece}")
+                } else if has_rtl {
+                    format!("{LRO_CH}{piece}")
+                } else {
+                    piece.to_string()
+                };
+                units.push((PF { x, w: width, kind: PFKind::Text { text: shown, item } }, level));
+                x += width;
+            }
+        }
+        // L2: reverse runs of level ≥ k, highest k first. A whole-line
+        // reversal (right-to-left paragraphs) mirrors the line box.
+        let max = units.iter().map(|u| u.1).max().unwrap_or(0);
+        let mut k = max;
+        while k >= 1 {
+            if k == 1 && base_rtl {
+                self.cur.frags = units.iter().map(|u| u.0.clone()).collect();
+                self.mirror_line();
+                for (u, f) in units.iter_mut().zip(self.cur.frags.iter()) {
+                    u.0.x = f.x;
+                }
+                break;
+            }
+            let mut idx: Vec<usize> = (0..units.len()).collect();
+            idx.sort_by(|&a, &b| units[a].0.x.total_cmp(&units[b].0.x));
+            let mut i = 0;
+            while i < idx.len() {
+                if units[idx[i]].1 < k {
+                    i += 1;
+                    continue;
+                }
+                let mut j = i;
+                while j < idx.len() && units[idx[j]].1 >= k {
+                    j += 1;
+                }
+                let s = units[idx[i]].0.x;
+                let e = units[idx[j - 1]].0.x + units[idx[j - 1]].0.w;
+                for &u in &idx[i..j] {
+                    let f = &mut units[u].0;
+                    f.x = s + e - (f.x + f.w);
+                }
                 i = j;
             }
-        }
-        // Atomic boxes between RTL runs belong to them.
-        let n = units.len();
-        for i in 0..n {
-            if units[i].1 == 0 {
-                let prev = units[..i].iter().rev().map(|u| u.1).find(|c| *c != 0).unwrap_or(1);
-                let next = units[i + 1..].iter().map(|u| u.1).find(|c| *c != 0).unwrap_or(1);
-                units[i].1 = if prev == 2 && next == 2 { 2 } else { 1 };
-            }
-        }
-        // Mirror every maximal RTL sequence within its span.
-        let mut i = 0;
-        while i < n {
-            if units[i].1 != 2 {
-                i += 1;
-                continue;
-            }
-            let mut j = i;
-            while j < n && units[j].1 == 2 {
-                j += 1;
-            }
-            let s = units[i].0.x;
-            let e = units[j - 1].0.x + units[j - 1].0.w;
-            for u in &mut units[i..j] {
-                u.0.x = s + e - (u.0.x + u.0.w);
-            }
-            i = j;
+            k -= 1;
         }
         self.cur.frags = units.into_iter().map(|u| u.0).collect();
     }
@@ -963,11 +1103,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         if clamp_hit {
             self.done = true;
         }
-        if self.cstyle.direction == Direction::Rtl {
-            self.mirror_line();
-        } else {
-            self.reorder_rtl_runs();
-        }
+        self.bidi_line();
 
         // Vertical metrics.
         struct FM {
@@ -1071,13 +1207,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             // Content was mirrored to the right edge (start); `right` means
             // the end (left) edge.
             match self.cstyle.text_align {
-                TextAlign::Right => -free.max(0.0),
+                TextAlign::End | TextAlign::Left => -free.max(0.0),
                 TextAlign::Center => -(free / 2.0).max(0.0),
                 _ => 0.0,
             }
         } else {
             match self.cstyle.text_align {
-                TextAlign::Right => free.max(0.0),
+                TextAlign::End | TextAlign::Right => free.max(0.0),
                 TextAlign::Center => (free / 2.0).max(0.0),
                 _ => 0.0,
             }
@@ -1204,18 +1340,4 @@ fn needs_bg(style: &ComputedStyle) -> bool {
         || style.outline_width > 0.0
 }
 
-/// A strong right-to-left letter (Hebrew, Arabic, Syriac, Thaana, NKo, ...).
-fn is_rtl_letter(ch: char) -> bool {
-    matches!(ch as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF) && ch.is_alphabetic()
-}
 
-/// Bidi class of a character: 2 right-to-left, 1 left-to-right, 0 neutral.
-fn char_dir(ch: char) -> u8 {
-    if is_rtl_letter(ch) {
-        2
-    } else if ch.is_alphanumeric() {
-        1
-    } else {
-        0
-    }
-}

@@ -11,6 +11,8 @@ use rabbithole_style::{BoxSizing, ComputedStyle, ContentDistribution, GridAutoFl
 use std::collections::HashSet;
 use rabbithole_gfx::Rect;
 
+mod lanes;
+
 /// A track sizing function (§11.1).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Sizing {
@@ -618,6 +620,9 @@ fn span_size(tracks: &[Track], pos: &[f32], start: usize, end: usize) -> (f32, f
 impl<'a> Layouter<'a> {
     /// Lay out the grid items of `b`; returns the content height.
     pub(crate) fn layout_grid(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
+        if b.style.grid_lanes {
+            return self.layout_grid_lanes(b, cb);
+        }
         let style = b.style.clone();
         let cbw = cb.width;
         let content_x = b.content_rect.x;
@@ -645,6 +650,19 @@ impl<'a> Layouter<'a> {
             let (ay, ah) = span_size(&rows.tracks, &row_pos, it.area.row.0 as usize, it.area.row.1 as usize);
             self.layout_grid_item(b, it, ax + content_x, ay + content_y, aw, ah, cbw);
         }
+        // Baseline self-alignment (§10.6): items aligned `baseline` that
+        // start in the same row line up their first baselines.
+        let mut rows_seen: Vec<i32> = items.iter().filter(|it| it.align == ItemAlign::Baseline).map(|it| it.area.row.0).collect();
+        rows_seen.sort_unstable();
+        rows_seen.dedup();
+        for row in rows_seen {
+            let group: Vec<usize> = items.iter().filter(|it| it.align == ItemAlign::Baseline && it.area.row.0 == row).map(|it| it.idx).collect();
+            let bls: Vec<f32> = group.iter().map(|&i| Self::item_baseline(&b.children[i])).collect();
+            let max = bls.iter().cloned().fold(f32::MIN, f32::max);
+            for (k, &i) in group.iter().enumerate() {
+                b.children[i].translate(0.0, max - bls[k]);
+            }
+        }
 
         // Absolutely positioned children of a positioned grid container use
         // the grid area of their line placement as containing block (§9.1);
@@ -667,12 +685,12 @@ impl<'a> Layouter<'a> {
             };
             let n_cols = cols.tracks.len() as i32 + 1;
             let n_rows = rows.tracks.len() as i32 + 1;
-            for c in b.children.iter() {
+            for c in b.children.iter_mut() {
                 if c.flow != Flow::Absolute {
                     continue;
                 }
                 let Some(node) = c.node else { continue };
-                let s = &c.style;
+                let s = c.style.clone();
                 let axis = |start: &rabbithole_style::GridLine, end: &rabbithole_style::GridLine, names: &[Vec<String>], n: i32| -> (Option<i32>, Option<i32>) {
                     let a = match line_spec(start, names, n, false) {
                         LineSpec::Line(l) => Some(l),
@@ -692,6 +710,9 @@ impl<'a> Layouter<'a> {
                 let (c0, c1) = axis(&s.grid_column_start, &s.grid_column_end, &cols.names, n_cols);
                 let (r0, r1) = axis(&s.grid_row_start, &s.grid_row_end, &rows.names, n_rows);
                 if c0.is_none() && c1.is_none() && r0.is_none() && r1.is_none() {
+                    // The static position: as the sole item of an area
+                    // whose edges are the padding edges (§9.4).
+                    c.static_pos = (px0, py0);
                     continue;
                 }
                 let x0 = c0.map(|l| content_x + line_x(&col_pos, &cols.tracks, l)).unwrap_or(px0);
@@ -699,6 +720,8 @@ impl<'a> Layouter<'a> {
                 let y0 = r0.map(|l| content_y + line_x(&row_pos, &rows.tracks, l)).unwrap_or(py0);
                 let y1 = r1.map(|l| content_y + line_x(&row_pos, &rows.tracks, l)).unwrap_or(py1);
                 self.abs_cb.insert(node, Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)));
+                // With auto offsets the item sits at the start of its area.
+                c.static_pos = (x0, y0);
             }
         }
 
@@ -1063,14 +1086,17 @@ impl<'a> Layouter<'a> {
     #[allow(clippy::too_many_arguments)]
     fn row_contributions(&mut self, b: &mut LayoutBox, items: &[GridItem], cols: &[Track], col_pos: &[f32], _col_gap: f32, cbw: f32, cbh: Option<f32>) -> Vec<Contribution> {
         let mut out = Vec::with_capacity(items.len());
+        // (contribution, row, baseline offset) of baseline-aligned items.
+        let mut baselines: Vec<(usize, i32, f32)> = Vec::new();
         for it in items {
             let (_, aw) = span_size(cols, col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
             let child = &mut b.children[it.idx];
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
             let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column);
+            let baseline = it.align == ItemAlign::Baseline;
             let h = match resolve_size(child.style.height, cbh, bb, it.edges.pb_v) {
-                Some(h) => h + extras_v,
-                None => {
+                Some(h) if !baseline => h + extras_v,
+                _ => {
                     let inner_w = self.grid_item_width(child, it, aw, cbw);
                     let cb = Cb {
                         x: 0.0,
@@ -1083,6 +1109,9 @@ impl<'a> Layouter<'a> {
                     child.rect.h + it.edges.margin_sum(Axis::Column)
                 }
             };
+            if baseline {
+                baselines.push((out.len(), it.area.row.0, Self::item_baseline(child)));
+            }
             out.push(Contribution {
                 start: it.area.row.0.max(0) as usize,
                 end: it.area.row.1.max(1) as usize,
@@ -1090,7 +1119,20 @@ impl<'a> Layouter<'a> {
                 max: h,
             });
         }
+        // Baseline-aligned items of a row are shifted to share a baseline:
+        // their contributions include the shift (§11.5 step 2).
+        for &(k, row, bl) in &baselines {
+            let max = baselines.iter().filter(|b| b.1 == row).map(|b| b.2).fold(f32::MIN, f32::max);
+            out[k].min += max - bl;
+            out[k].max += max - bl;
+        }
         out
+    }
+
+    /// Offset of an item's first baseline from its margin-box top (its
+    /// bottom margin edge when it has no line).
+    fn item_baseline(child: &LayoutBox) -> f32 {
+        child.first_baseline().map(|y| y - child.rect.y).unwrap_or(child.rect.h) + child.margin.top
     }
 
     /// Inner width of a grid item inside an area of width `aw` (§10: stretch
@@ -1101,8 +1143,17 @@ impl<'a> Layouter<'a> {
         let _ = cbw;
         match resolve_size(child.style.width, Some(aw), bb, it.edges.pb_h) {
             Some(w) => self.clamp_width(&child.style.clone(), w, aw, it.edges.pb_h),
+            None if matches!(child.style.width, Length::FitContent | Length::MinContent | Length::MaxContent) && child.kind != BoxKind::Image => {
+                let (min, max) = self.intrinsic(child);
+                let w = match child.style.width {
+                    Length::MinContent => min,
+                    Length::MaxContent => max,
+                    _ => crate::block::shrink_to_fit(min, max, avail_inner),
+                };
+                self.clamp_width(&child.style.clone(), w, aw, it.edges.pb_h)
+            }
             None => {
-                let stretch = matches!(it.justify, ItemAlign::Stretch | ItemAlign::Auto) && !it.edges.auto.left && !it.edges.auto.right;
+                let stretch = matches!(it.justify, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto) && !it.edges.auto.left && !it.edges.auto.right;
                 if stretch && child.kind != BoxKind::Image {
                     self.clamp_width(&child.style.clone(), avail_inner, aw, it.edges.pb_h)
                 } else if child.kind == BoxKind::Image {
@@ -1122,7 +1173,7 @@ impl<'a> Layouter<'a> {
         let child = &mut b.children[it.idx];
         let inner_w = self.grid_item_width(child, it, aw, cbw);
         let bb = child.style.box_sizing == BoxSizing::BorderBox;
-        let stretch_h = matches!(it.align, ItemAlign::Stretch | ItemAlign::Auto)
+        let stretch_h = matches!(it.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto)
             && !it.edges.auto.top
             && !it.edges.auto.bottom
             && resolve_size(child.style.height, Some(ah), bb, it.edges.pb_v).is_none()
@@ -1191,6 +1242,9 @@ impl<'a> Layouter<'a> {
 
     /// Intrinsic (min-content, max-content) widths of a grid container.
     pub(crate) fn grid_intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
+        if b.style.grid_lanes {
+            return self.grid_lanes_intrinsic(b);
+        }
         let style = b.style.clone();
         let col_gap = crate::flex::px_or_zero(style.column_gap);
         let (items, mut cols, _rows) = self.place_items(b, &style, None, None, col_gap, 0.0, 0.0, 0.0);

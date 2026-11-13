@@ -474,6 +474,29 @@ impl<'a> Builder<'a> {
                 }
             }
             parts.push(make_inline(run));
+            // The inline's start edge (margin, border, padding) belongs to
+            // its first part and the end edge to its last (the box is
+            // sliced, CSS 2.1 §9.2.1.1 / css-break box-decoration-break).
+            let inline_parts: Vec<usize> = (0..parts.len()).filter(|&i| parts[i].kind == BoxKind::Inline && parts[i].node == b.node).collect();
+            let rtl = style.direction == rabbithole_style::Direction::Rtl;
+            for (k, &i) in inline_parts.iter().enumerate() {
+                let (first, last) = (k == 0, k + 1 == inline_parts.len());
+                if first && last {
+                    continue;
+                }
+                let s = std::rc::Rc::make_mut(&mut parts[i].style);
+                let (cut_left, cut_right) = if rtl { (!last, !first) } else { (!first, !last) };
+                if cut_left {
+                    s.margin.left = rabbithole_style::Length::ZERO;
+                    s.padding.left = rabbithole_style::Length::ZERO;
+                    s.border_width.left = 0.0;
+                }
+                if cut_right {
+                    s.margin.right = rabbithole_style::Length::ZERO;
+                    s.padding.right = rabbithole_style::Length::ZERO;
+                    s.border_width.right = 0.0;
+                }
+            }
             out.extend(parts);
             return;
         }

@@ -219,11 +219,17 @@ fn layer_mask_alpha(items: &[DisplayItem], canvas: &Canvas, fonts: &FontContext,
         return Some(Vec::new());
     }
     let m = rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, -(x0 as f32), -(y0 as f32)], canvas.transform());
+    // Without a canvas transform the offset goes into the painter's own
+    // translation, so boxes snap to pixels exactly as on the page.
+    let plain = rabbithole_gfx::path::is_identity(&canvas.transform());
     let render = |bg: Color| {
         let mut c = Canvas::new(w as u32, h as u32);
         c.clear(bg);
-        c.push_transform(m);
-        let mut s = State { dx: st.dx, dy: st.dy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, views: Vec::new() };
+        let (sdx, sdy) = if plain { (st.dx - x0 as f32, st.dy - y0 as f32) } else { (st.dx, st.dy) };
+        if !plain {
+            c.push_transform(m);
+        }
+        let mut s = State { dx: sdx, dy: sdy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, views: Vec::new() };
         let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
         for it in items {
             paint_item(it, &mut c, fonts, &mut s, all);
@@ -243,6 +249,127 @@ fn layer_mask_alpha(items: &[DisplayItem], canvas: &Canvas, fonts: &FontContext,
             })
             .collect(),
     )
+}
+
+/// Device pixel bounds of a local rect under the canvas transform, within
+/// the canvas.
+fn device_bounds(canvas: &Canvas, r: Rect) -> Option<(i32, i32, usize, usize)> {
+    let d = rabbithole_gfx::path::transform_rect_bounds(&canvas.transform(), r);
+    let x0 = d.x.floor().max(0.0) as i32;
+    let y0 = d.y.floor().max(0.0) as i32;
+    let x1 = (d.x + d.w).ceil().min(canvas.width as f32) as i32;
+    let y1 = (d.y + d.h).ceil().min(canvas.height as f32) as i32;
+    (x1 > x0 && y1 > y0).then(|| (x0, y0, (x1 - x0) as usize, (y1 - y0) as usize))
+}
+
+/// Draw straight RGBA pixels at device position (x0, y0), clipped by the
+/// canvas clips.
+fn draw_device_pixels(canvas: &mut Canvas, rgba: Vec<u8>, x0: i32, y0: i32, w: usize, h: usize) {
+    let img = rabbithole_gfx::Image::new(w as u32, h as u32, rgba);
+    let inv = crate::tree::invert_matrix(canvas.transform());
+    if let Some(inv) = inv {
+        canvas.push_transform(inv);
+    }
+    let smooth = canvas.image_smoothing;
+    canvas.image_smoothing = false;
+    canvas.draw_image(&img, Rect::new(x0 as f32, y0 as f32, w as f32, h as f32), 1.0);
+    canvas.image_smoothing = smooth;
+    if inv.is_some() {
+        canvas.pop_transform();
+    }
+}
+
+fn device_scale(m: &Matrix) -> f32 {
+    (m[0] * m[3] - m[1] * m[2]).abs().sqrt().max(0.01)
+}
+
+/// `filter`: render the group over black and over white offscreen,
+/// recover its RGBA, filter it and composite the result.
+fn paint_filtered(bounds: Rect, filters: &[rabbithole_style::FilterOp], items: &[DisplayItem], canvas: &mut Canvas, fonts: &FontContext, st: &mut State, view: Rect) {
+    let local = bounds.translate(st.dx, st.dy);
+    if !st.ext || local.intersect(&view).is_empty() && rabbithole_gfx::path::transform_rect_bounds(&canvas.transform(), local).intersect(&Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32)).is_empty() {
+        if !st.ext {
+            for it in items {
+                paint_item(it, canvas, fonts, st, view);
+            }
+        }
+        return;
+    }
+    let Some((x0, y0, w, h)) = device_bounds(canvas, local) else { return };
+    let m = rabbithole_style::multiply_matrix([1.0, 0.0, 0.0, 1.0, -(x0 as f32), -(y0 as f32)], canvas.transform());
+    // Without a canvas transform the offset goes into the painter's own
+    // translation, so boxes snap to pixels exactly as on the page.
+    let plain = rabbithole_gfx::path::is_identity(&canvas.transform());
+    let render = |bg: Color| {
+        let mut c = Canvas::new(w as u32, h as u32);
+        c.clear(bg);
+        let (sdx, sdy) = if plain { (st.dx - x0 as f32, st.dy - y0 as f32) } else { (st.dx, st.dy) };
+        if !plain {
+            c.push_transform(m);
+        }
+        let mut s = State { dx: sdx, dy: sdy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, views: Vec::new() };
+        let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
+        for it in items {
+            paint_item(it, &mut c, fonts, &mut s, all);
+        }
+        c.data
+    };
+    let black = render(Color::BLACK);
+    let white = render(Color::WHITE);
+    let mut px = crate::filter::from_black_white(&black, &white, w, h);
+    crate::filter::apply(&mut px, filters, device_scale(&canvas.transform()));
+    draw_device_pixels(canvas, crate::filter::to_rgba(&px), x0, y0, w, h);
+}
+
+/// `backdrop-filter`: filter the canvas pixels under `rect`.
+fn paint_backdrop(rect: Rect, radii: Radii, filters: &[rabbithole_style::FilterOp], canvas: &mut Canvas, st: &mut State, view: Rect) {
+    let local = snap(rect.translate(st.dx, st.dy), canvas);
+    if !st.ext {
+        return;
+    }
+    let _ = view;
+    let Some((x0, y0, w, h)) = device_bounds(canvas, local) else { return };
+    // The filter input is the backdrop within the border box; blurs see
+    // it extended by mirroring at the box edges (no bleeding in from
+    // outside).
+    // Mirroring repeats the box beyond its size: no need for more margin.
+    let e = (crate::filter::spread(filters) * device_scale(&canvas.transform())).ceil().min(w.max(h) as f32) as i32;
+    let (pw, ph) = (w + 2 * e as usize, h + 2 * e as usize);
+    let mirror = |i: i32, n: usize| -> usize {
+        let n = n as i32;
+        let m = if i < 0 { -i - 1 } else if i >= n { 2 * n - i - 1 } else { i };
+        m.clamp(0, n - 1) as usize
+    };
+    let cw = canvas.width as usize;
+    let mut data = Vec::with_capacity(pw * ph);
+    for py in 0..ph {
+        let y = y0 as usize + mirror(py as i32 - e, h);
+        for px in 0..pw {
+            let x = x0 as usize + mirror(px as i32 - e, w);
+            data.push(canvas.data[y * cw + x]);
+        }
+    }
+    let mut px = crate::filter::from_opaque(&data, pw, ph);
+    crate::filter::apply(&mut px, filters, device_scale(&canvas.transform()));
+    // Keep the box's part, composited over the original backdrop (drop
+    // shadows / opacity may leave it partly transparent).
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y + e as usize) * pw + x + e as usize;
+            let c = px.px[i];
+            let o = data[i];
+            let ch = |s: u32| ((o >> s) & 0xff) as f32 / 255.0;
+            let inv = 1.0 - c[3];
+            for (k, s) in [16u32, 8, 0].into_iter().enumerate() {
+                rgba.push(((c[k] + ch(s) * inv).clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            }
+            rgba.push(255);
+        }
+    }
+    canvas.push_clip_rounded(local, radii);
+    draw_device_pixels(canvas, rgba, x0, y0, w, h);
+    canvas.pop_clip();
 }
 
 fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: &mut State, device_view: Rect) {
@@ -320,6 +447,12 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
                     None => canvas.end_layer(*opacity),
                 }
             }
+        }
+        DisplayItem::Filtered { bounds, filters, items } => {
+            paint_filtered(*bounds, filters, items, canvas, fonts, st, view);
+        }
+        DisplayItem::BackdropFilter { rect, radii, filters } => {
+            paint_backdrop(*rect, *radii, filters, canvas, st, view);
         }
         DisplayItem::LayerMask(items) => {
             st.mask = None;

@@ -75,6 +75,11 @@ fn item_bounds(item: &DisplayItem) -> Option<Rect> {
             Rect::new(l - width, t - width, (x0 - x1).abs() + 2.0 * width, (y0 - y1).abs() + 2.0 * width)
         }
         D::PushLayer(r) | D::PushClip(r) | D::PushClipRounded(r, _) => *r,
+        D::Filtered { bounds, .. } => *bounds,
+        D::BackdropFilter { rect, filters, .. } => {
+            let e = crate::filter::spread(filters);
+            Rect::new(rect.x - e, rect.y - e, rect.w + 2.0 * e, rect.h + 2.0 * e)
+        }
         _ => return None,
     })
 }

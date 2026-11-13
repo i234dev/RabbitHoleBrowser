@@ -266,6 +266,24 @@ fn split_slash<'a>(comps: &[&'a [Token]]) -> Vec<Vec<&'a [Token]>> {
     out
 }
 
+/// `normal | [ row | column ] [ fill-reverse || track-reverse ]?`
+fn parse_lanes_direction(comps: &[&[Token]]) -> Option<GridLanesDirection> {
+    let kws: Vec<String> = comps.iter().map(|c| values::ident(c)).collect::<Option<_>>()?;
+    if kws.len() == 1 && kws[0] == "normal" {
+        return Some(GridLanesDirection::default());
+    }
+    let mut d = GridLanesDirection::default();
+    for (i, k) in kws.iter().enumerate() {
+        match k.as_str() {
+            "row" | "column" if i == 0 => d.rows = Some(k == "row"),
+            "fill-reverse" if i > 0 && !d.fill_reverse => d.fill_reverse = true,
+            "track-reverse" if i > 0 && !d.track_reverse => d.track_reverse = true,
+            _ => return None,
+        }
+    }
+    (!kws.is_empty()).then_some(d)
+}
+
 fn join<'a>(comps: &[&'a [Token]]) -> Vec<Token> {
     let mut v = Vec::new();
     for c in comps {
@@ -426,6 +444,56 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 (true, false) => GridAutoFlow::Column,
                 (true, true) => GridAutoFlow::ColumnDense,
             };
+        }
+        "grid-lanes-direction" => {
+            if let Some(d) = parse_lanes_direction(comps) {
+                style.grid_lanes_direction = d;
+            }
+        }
+        "grid-lanes-pack" => match comps {
+            [c] => match values::ident(c).as_deref() {
+                Some("dense") => style.grid_lanes_dense = true,
+                Some("normal") => style.grid_lanes_dense = false,
+                _ => {}
+            },
+            _ => {}
+        },
+        "fit-tolerance" | "flow-tolerance" => {
+            if let [c] = comps {
+                match values::ident(c).as_deref() {
+                    Some("normal") => style.fit_tolerance = None,
+                    Some("infinite") => style.fit_tolerance = Some(Length::Px(f32::INFINITY)),
+                    Some(_) => {}
+                    None => {
+                        if let Some(l) = values::parse_length(c).map(|v| v.resolve(ctx)) {
+                            if !matches!(l, Length::Px(v) | Length::Percent(v) if v < 0.0) {
+                                style.fit_tolerance = Some(l);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "grid-lanes" => {
+            // `grid-lanes: <direction>? <track-list>` (the track list goes
+            // to the template of the grid axis).
+            let mut n = 0;
+            while n < comps.len() && values::ident(comps[n]).is_some_and(|k| matches!(k.as_str(), "normal" | "row" | "column" | "fill-reverse" | "track-reverse")) {
+                n += 1;
+            }
+            let dir = if n == 0 { Some(GridLanesDirection::default()) } else { parse_lanes_direction(&comps[..n]) };
+            let Some(dir) = dir else { return true };
+            let rest = join(&comps[n..]);
+            let list = if rest.iter().all(|t| matches!(t, Token::Whitespace)) { Some(Vec::new()) } else { parse_track_list(&rest, ctx) };
+            let Some(list) = list else { return true };
+            style.grid_lanes_direction = dir;
+            if dir.rows == Some(true) {
+                style.grid_template_rows = list;
+                style.grid_template_columns.clear();
+            } else {
+                style.grid_template_columns = list;
+                style.grid_template_rows.clear();
+            }
         }
         "grid-row" | "grid-column" => {
             let parts = split_slash(comps);

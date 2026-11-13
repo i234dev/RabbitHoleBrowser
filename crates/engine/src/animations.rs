@@ -17,7 +17,7 @@ use std::rc::Rc;
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::Color;
 use rabbithole_script::{EventDetail, EventInit};
-use rabbithole_style::{ComputedStyle, Length, TransformOp, Visibility};
+use rabbithole_style::{ComputedStyle, FilterOp, Length, TransformOp, Visibility};
 
 use crate::scripting::ScriptOutcome;
 use crate::{Engine, Page};
@@ -55,6 +55,8 @@ enum Prop {
     LetterSpacing,
     FontSize,
     BorderRadius,
+    Filter,
+    BackdropFilter,
 }
 
 const ALL: &[Prop] = &[
@@ -88,6 +90,8 @@ const ALL: &[Prop] = &[
     Prop::LetterSpacing,
     Prop::FontSize,
     Prop::BorderRadius,
+    Prop::Filter,
+    Prop::BackdropFilter,
 ];
 
 impl Prop {
@@ -123,6 +127,8 @@ impl Prop {
             Prop::LetterSpacing => "letter-spacing",
             Prop::FontSize => "font-size",
             Prop::BorderRadius => "border-radius",
+            Prop::Filter => "filter",
+            Prop::BackdropFilter => "backdrop-filter",
         }
     }
 
@@ -161,6 +167,7 @@ enum Val {
     L(Length),
     T(Vec<TransformOp>),
     V(Visibility),
+    Fl(Vec<FilterOp>),
 }
 
 fn get(s: &ComputedStyle, p: Prop) -> Val {
@@ -196,6 +203,8 @@ fn get(s: &ComputedStyle, p: Prop) -> Val {
         LetterSpacing => Val::F(s.letter_spacing),
         FontSize => Val::F(s.font_size),
         BorderRadius => Val::F(s.border_radius),
+        Filter => Val::Fl(s.filters.clone()),
+        BackdropFilter => Val::Fl(s.backdrop_filters.clone()),
     }
 }
 
@@ -232,6 +241,19 @@ fn set(s: &mut ComputedStyle, p: Prop, v: &Val) {
         (LetterSpacing, Val::F(f)) => s.letter_spacing = *f,
         (FontSize, Val::F(f)) => s.font_size = f.max(0.0),
         (BorderRadius, Val::F(f)) => s.border_radius = f.max(0.0),
+        (Filter, Val::Fl(f)) => {
+            s.filters = f.clone();
+            if !f.is_empty() {
+                s.creates_stacking_context = true;
+            }
+        }
+        (BackdropFilter, Val::Fl(f)) => {
+            s.backdrop_filters = f.clone();
+            s.backdrop = !f.is_empty();
+            if !f.is_empty() {
+                s.creates_stacking_context = true;
+            }
+        }
         _ => {}
     }
 }
@@ -277,6 +299,42 @@ fn lerp_op(a: &TransformOp, b: &TransformOp, t: f32) -> Option<TransformOp> {
     })
 }
 
+/// The initial (identity) value of a filter function.
+fn filter_identity(op: &FilterOp) -> FilterOp {
+    match op {
+        FilterOp::Blur(_) => FilterOp::Blur(0.0),
+        FilterOp::Brightness(_) => FilterOp::Brightness(1.0),
+        FilterOp::Contrast(_) => FilterOp::Contrast(1.0),
+        FilterOp::Grayscale(_) => FilterOp::Grayscale(0.0),
+        FilterOp::Sepia(_) => FilterOp::Sepia(0.0),
+        FilterOp::Saturate(_) => FilterOp::Saturate(1.0),
+        FilterOp::HueRotate(_) => FilterOp::HueRotate(0.0),
+        FilterOp::Invert(_) => FilterOp::Invert(0.0),
+        FilterOp::Opacity(_) => FilterOp::Opacity(1.0),
+        FilterOp::DropShadow { color, .. } => FilterOp::DropShadow { x: 0.0, y: 0.0, blur: 0.0, color: Color { a: 0, ..*color } },
+    }
+}
+
+fn lerp_filter(a: &FilterOp, b: &FilterOp, t: f32) -> Option<FilterOp> {
+    use FilterOp::*;
+    Some(match (a, b) {
+        (Blur(x), Blur(y)) => Blur(lerp(*x, *y, t)),
+        (Brightness(x), Brightness(y)) => Brightness(lerp(*x, *y, t)),
+        (Contrast(x), Contrast(y)) => Contrast(lerp(*x, *y, t)),
+        (Grayscale(x), Grayscale(y)) => Grayscale(lerp(*x, *y, t)),
+        (Sepia(x), Sepia(y)) => Sepia(lerp(*x, *y, t)),
+        (Saturate(x), Saturate(y)) => Saturate(lerp(*x, *y, t)),
+        (HueRotate(x), HueRotate(y)) => HueRotate(lerp(*x, *y, t)),
+        (Invert(x), Invert(y)) => Invert(lerp(*x, *y, t)),
+        (Opacity(x), Opacity(y)) => Opacity(lerp(*x, *y, t)),
+        (DropShadow { x: ax, y: ay, blur: ab, color: ac }, DropShadow { x: bx, y: by, blur: bb, color: bc }) => {
+            let ch = |p: u8, q: u8| lerp(p as f32, q as f32, t).round().clamp(0.0, 255.0) as u8;
+            DropShadow { x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), blur: lerp(*ab, *bb, t), color: Color { r: ch(ac.r, bc.r), g: ch(ac.g, bc.g), b: ch(ac.b, bc.b), a: ch(ac.a, bc.a) } }
+        }
+        _ => return None,
+    })
+}
+
 fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
     let discrete = || if t < 0.5 { a.clone() } else { b.clone() };
     match (a, b) {
@@ -298,6 +356,24 @@ fn interpolate(a: &Val, b: &Val, t: f32) -> Val {
                 let ops: Option<Vec<TransformOp>> = x.iter().zip(y.iter()).map(|(p, q)| lerp_op(p, q, t)).collect();
                 if let Some(ops) = ops {
                     return Val::T(ops);
+                }
+            }
+            discrete()
+        }
+        (Val::Fl(x), Val::Fl(y)) => {
+            // Filter Effects §8: a missing list is the identity of the other;
+            // lists of the same functions interpolate pairwise.
+            let (x, y): (Vec<FilterOp>, Vec<FilterOp>) = if x.is_empty() {
+                (y.iter().map(filter_identity).collect(), y.clone())
+            } else if y.is_empty() {
+                (x.clone(), x.iter().map(filter_identity).collect())
+            } else {
+                (x.clone(), y.clone())
+            };
+            if x.len() == y.len() {
+                let ops: Option<Vec<FilterOp>> = x.iter().zip(y.iter()).map(|(p, q)| lerp_filter(p, q, t)).collect();
+                if let Some(ops) = ops {
+                    return Val::Fl(ops);
                 }
             }
             discrete()

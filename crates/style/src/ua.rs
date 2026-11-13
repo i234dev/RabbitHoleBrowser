@@ -74,6 +74,10 @@ blink { text-decoration: none; }
 [dir=rtl i] { direction: rtl; }
 [dir=ltr i] { direction: ltr; }
 bdo[dir=rtl i] { direction: rtl; }
+address, blockquote, center, div, figure, figcaption, footer, form, header, hr, legend, listing, main, p, plaintext, pre, search, xmp { unicode-bidi: isolate; }
+bdi, output, [dir] { unicode-bidi: isolate; }
+bdo, bdo[dir] { unicode-bidi: isolate-override; }
+textarea[dir=auto i], pre[dir=auto i] { unicode-bidi: plaintext; }
 
 /* ---- tables ---- */
 table { display: table; box-sizing: border-box; text-indent: 0; border-spacing: 2px; border-collapse: separate; }

@@ -195,6 +195,39 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 };
             }
         }
+        "contain-intrinsic-size" | "contain-intrinsic-width" | "contain-intrinsic-height" | "contain-intrinsic-inline-size" | "contain-intrinsic-block-size" => {
+            // [ auto? [ none | <length> ] ]{1,2}
+            let mut vals: Vec<Option<f32>> = Vec::new();
+            let mut i = 0;
+            while i < comps.len() {
+                if values::is_ident(comps[i], "auto") {
+                    i += 1;
+                }
+                let Some(c) = comps.get(i) else { return true };
+                if values::is_ident(c, "none") {
+                    vals.push(None);
+                } else {
+                    match super::px(c, ctx) {
+                        Some(v) if v >= 0.0 => vals.push(Some(v)),
+                        _ => return true,
+                    }
+                }
+                i += 1;
+            }
+            match (name, vals.as_slice()) {
+                ("contain-intrinsic-size", [v]) => {
+                    style.contain_intrinsic_width = *v;
+                    style.contain_intrinsic_height = *v;
+                }
+                ("contain-intrinsic-size", [w, h]) => {
+                    style.contain_intrinsic_width = *w;
+                    style.contain_intrinsic_height = *h;
+                }
+                ("contain-intrinsic-width" | "contain-intrinsic-inline-size", [v]) => style.contain_intrinsic_width = *v,
+                ("contain-intrinsic-height" | "contain-intrinsic-block-size", [v]) => style.contain_intrinsic_height = *v,
+                _ => {}
+            }
+        }
         "content-visibility" => {
             if let Some(kw) = values::ident(c0) {
                 style.content_visibility_hidden = kw == "hidden";
@@ -417,7 +450,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
         | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color"
         | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"
         | "-ms-touch-action" | "speak" | "orphans" | "widows" | "page" | "size" | "marks" | "quotes-x" | "all-x"
-        | "contain-intrinsic-size" | "container" | "container-type" | "container-name" | "view-transition-name"
+        | "container" | "container-type" | "container-name" | "view-transition-name"
         | "anchor-name" | "position-anchor" | "field-sizing" | "forced-color-adjust" | "interpolate-size" | "math-style"
         | "-webkit-box-sizing" | "-moz-box-sizing" | "-webkit-user-drag" | "-webkit-user-modify" | "-webkit-locale"
         | "-webkit-margin-before" | "-webkit-margin-after" | "-webkit-margin-start" | "-webkit-margin-end"

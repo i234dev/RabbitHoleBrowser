@@ -189,3 +189,71 @@ fn hot_loop_enters_native_code() {
         assert!(realm.jit_entries() > 0, "the loop continued in native code");
     }
 }
+
+#[test]
+fn inline_caches_and_scopes() {
+    // Property caches (own, prototype, deep prototype, getters installed
+    // later, frozen objects, dictionaries, proxies), closure variables,
+    // TDZ, loose equality and typeof, compared over the whole value mix.
+    same(r#"var vals = [undefined, null, 0, -0, 1, NaN, "", "0", "1", "a", true, false, {}, [], [1], Symbol.iterator, 10n, function(){}, {valueOf(){ return 1; }}, {toString(){ return "a"; }}];
+var out = [];
+function eq(a, b) { return a == b; }
+function ne(a, b) { return a != b; }
+function eqn(a) { return a == null; }
+function nen(a) { return a != undefined; }
+function eqs(a) { return a == "a"; }
+function ty(a) { return typeof a; }
+for (var k = 0; k < 3; k++)
+for (var i = 0; i < vals.length; i++) {
+  out.push(eqn(vals[i]), nen(vals[i]), eqs(vals[i]), ty(vals[i]));
+  for (var j = 0; j < vals.length; j++) { try { out.push(eq(vals[i], vals[j]), ne(vals[i], vals[j])); } catch (e) { out.push("E" + e.name); } }
+}
+var o = {x: 1}; var p = Object.create(o); p.y = 2; var q = Object.create(p);
+function g(z) { return z.x + (z.y || 0); }
+for (var i = 0; i < 50; i++) out.push(g(o), g(p), g(q));
+o.x = "s"; out.push(g(q)); Object.defineProperty(o, "x", { get() { return 7; } }); out.push(g(q), g(p), g(o));
+function setx(z, v) { z.x = v; return z.x; }
+var w = {x: 0}; for (var i = 0; i < 20; i++) out.push(setx(w, "v" + i));
+Object.freeze(w); out.push(setx(w, 5)); var dd = {}; for (var i = 0; i < 200; i++) dd["k" + i] = i; out.push(setx(dd, 9));
+function cl() { let a = 1; const f = () => a++; let b; function h() { return b; } b = 3; return [f(), f(), h(), a]; }
+for (var i = 0; i < 5; i++) out.push(cl().join());
+function tdz() { try { return (() => { const r = u; let u = 1; return r; })(); } catch (e) { return e.name; } }
+out.push(tdz(), tdz());
+class A { constructor() { this.v = 1; } m() { return this.v; } }
+class B extends A { constructor() { super(); this.w = 2; } m() { return super.m() + this.w; } }
+for (var i = 0; i < 10; i++) out.push(new B().m(), new A().m());
+var px = new Proxy({}, { get(t, k) { return "P" + String(k); } });
+function gp(z) { return z.x; }
+out.push(gp(px), gp({x: 3}), gp(px), gp(Object.create({x: 4})));
+out.join(",")
+"#);
+    check("function f() { let a = 1; const g = () => { a = a + 'x'; return a }; g(); return g() } f()", "1xx");
+    check("function f(o) { return o.k } var d = {}; for (var i = 0; i < 300; i++) d['p' + i] = i; d.k = 'dict'; String([f({k: 1}), f(d), f(Object.create(d))])", "1,dict,dict");
+}
+
+#[test]
+fn array_elements() {
+    // In-range elements, holes (and getters on the prototype), typed
+    // arrays, strings, frozen arrays, out-of-range / fractional / negative
+    // / huge / NaN indices, appends.
+    same(r#"var out = [];
+function get(a, i) { return a[i]; }
+function set(a, i, v) { a[i] = v; return a[i]; }
+var keys = [0, 1, 2, 3, -1, -0, 1.5, NaN, Infinity, 2 ** 53, "1", "x", 4294967295, 1e300];
+var arrs = [[1, "two", 3n], [, 5, , 7], new Int8Array([1, 2, 3]), "abc", {0: "o", 1: "p"}, Object.freeze([9, 8, 7]), (function () { var x = [1, 2]; x.p = 1; return x; })()];
+for (var r = 0; r < 4; r++)
+  for (var a = 0; a < arrs.length; a++)
+    for (var k = 0; k < keys.length; k++) {
+      try { out.push(String(get(arrs[a], keys[k]))); } catch (e) { out.push("E" + e.name); }
+      try { out.push(String(set(arrs[a], keys[k], r % 2 ? "s" + r : r))); } catch (e) { out.push("E" + e.name); }
+    }
+var proto = [10, 11]; var sub = Object.create(proto);
+out.push(get(sub, 0), get(sub, 1));
+Object.defineProperty(Array.prototype, 5, { get() { return "proto5"; }, configurable: true });
+var holey = [1, , 3, , , ]; out.push(get(holey, 1), get(holey, 5), get([0, 1, 2, 3, 4], 5));
+delete Array.prototype[5];
+var big = []; for (var i = 0; i < 1000; i++) set(big, i, "v" + i); out.push(big.length, get(big, 999));
+var ss = 0; for (var i = 0; i < 2000; i++) ss += get(big, i % 1000).length; out.push(ss);
+out.join(",")
+"#);
+}

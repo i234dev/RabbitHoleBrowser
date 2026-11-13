@@ -13,6 +13,63 @@ fn color(c: &[Token], current: Color) -> Option<Color> {
     }
 }
 
+/// A `<filter-value-list>` (`url()` references are not supported: the
+/// whole value is then ignored).
+fn parse_filters(comps: &[&[Token]], current: Color, ctx: &ApplyCtx) -> Option<Vec<FilterOp>> {
+    let mut out = Vec::new();
+    for c in comps {
+        let f = super::fn_name(c)?;
+        let args = super::fn_args(c);
+        let a0: Option<&[Token]> = args.first().and_then(|a| a.first()).copied();
+        let amount = |default: f32| -> Option<f32> {
+            match a0 {
+                None => Some(default),
+                Some([Token::Number(n)]) if *n >= 0.0 => Some(*n),
+                Some([Token::Percentage(p)]) if *p >= 0.0 => Some(p / 100.0),
+                _ => None,
+            }
+        };
+        let op = match f.as_str() {
+            "blur" => FilterOp::Blur(match a0 {
+                None => 0.0,
+                Some(t) => super::px(t, ctx).filter(|v| *v >= 0.0)?,
+            }),
+            "brightness" => FilterOp::Brightness(amount(1.0)?),
+            "contrast" => FilterOp::Contrast(amount(1.0)?),
+            "grayscale" => FilterOp::Grayscale(amount(1.0)?.min(1.0)),
+            "sepia" => FilterOp::Sepia(amount(1.0)?.min(1.0)),
+            "saturate" => FilterOp::Saturate(amount(1.0)?),
+            "invert" => FilterOp::Invert(amount(1.0)?.min(1.0)),
+            "opacity" => FilterOp::Opacity(amount(1.0)?.min(1.0)),
+            "hue-rotate" => FilterOp::HueRotate(match a0 {
+                None => 0.0,
+                Some(t) => super::angle(t)?,
+            }),
+            "drop-shadow" => {
+                let parts = args.first()?;
+                let mut lens = Vec::new();
+                let mut col = None;
+                for p in parts {
+                    if let Some(v) = super::px(p, ctx) {
+                        lens.push(v);
+                    } else if let Some(cc) = color(p, current) {
+                        col = Some(cc);
+                    } else {
+                        return None;
+                    }
+                }
+                if lens.len() < 2 || lens.len() > 3 {
+                    return None;
+                }
+                FilterOp::DropShadow { x: lens[0], y: lens[1], blur: lens.get(2).copied().unwrap_or(0.0).max(0.0), color: col.unwrap_or(current) }
+            }
+            _ => return None,
+        };
+        out.push(op);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// Largest px radius, for the compatibility `border_radius` field.
 fn max_px_radius(radii: &[(Length, Length); 4], font_size: f32) -> f32 {
     let mut m: f32 = 0.0;
@@ -307,25 +364,34 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             }
         }
         "filter" => {
-            for c in comps {
-                if let Some(f) = super::fn_name(c) {
-                    if f == "opacity" {
-                        let args = super::fn_args(c);
-                        let v = args.first().and_then(|a| a.first()).and_then(|t| match t {
-                            [Token::Number(n)] => Some(*n),
-                            [Token::Percentage(p)] => Some(p / 100.0),
-                            _ => None,
-                        });
-                        if let Some(v) = v {
-                            style.opacity = (style.opacity * v.clamp(0.0, 1.0)).clamp(0.0, 1.0);
-                        }
-                    }
-                    style.creates_stacking_context = true;
-                }
+            if values::is_ident(c0, "none") && comps.len() == 1 {
+                style.filters.clear();
+                return true;
             }
+            let Some(ops) = parse_filters(comps, current, ctx) else { return true };
+            // A lone opacity() is a plain opacity layer.
+            if ops.iter().all(|o| matches!(o, FilterOp::Opacity(_))) {
+                for o in &ops {
+                    if let FilterOp::Opacity(v) = o {
+                        style.opacity = (style.opacity * v).clamp(0.0, 1.0);
+                    }
+                }
+                style.filters.clear();
+            } else {
+                style.filters = ops;
+            }
+            style.creates_stacking_context = true;
         }
         "backdrop-filter" => {
-            style.backdrop = !values::is_ident(c0, "none");
+            if values::is_ident(c0, "none") && comps.len() == 1 {
+                style.backdrop = false;
+                style.backdrop_filters.clear();
+                return true;
+            }
+            let Some(ops) = parse_filters(comps, current, ctx) else { return true };
+            style.backdrop = true;
+            style.backdrop_filters = ops;
+            style.creates_stacking_context = true;
         }
         "isolation" => {
             if values::is_ident(c0, "isolate") {

@@ -500,6 +500,8 @@ fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, c
         }
         .to_string(),
         "text-align" => match s.text_align {
+            rabbithole_style::TextAlign::Start => "start",
+            rabbithole_style::TextAlign::End => "end",
             rabbithole_style::TextAlign::Left => "left",
             rabbithole_style::TextAlign::Right => "right",
             rabbithole_style::TextAlign::Center => "center",

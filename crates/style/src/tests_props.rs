@@ -206,7 +206,12 @@ fn shadows_outline_filter() {
     assert_eq!(s.outline_style, BorderStyle::Dashed);
     assert_eq!(s.outline_color, Some(Color::rgb(0, 0, 255)));
     assert_eq!(s.outline_offset, 3.0);
-    assert!((s.opacity - 0.4).abs() < 1e-5);
+    // opacity() among other filter functions stays in the filter chain.
+    assert!((s.opacity - 0.8).abs() < 1e-5);
+    assert_eq!(s.filters, vec![FilterOp::Opacity(0.5), FilterOp::Blur(2.0)]);
+    // A lone opacity() is folded into opacity.
+    let s = one("opacity: 0.8; filter: opacity(0.5)");
+    assert!((s.opacity - 0.4).abs() < 1e-5 && s.filters.is_empty());
     let s = one("outline: none; box-shadow: none");
     assert_eq!(s.outline_style, BorderStyle::None);
     assert!(s.box_shadow.is_empty());

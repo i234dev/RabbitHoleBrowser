@@ -474,6 +474,32 @@ impl Asm {
         self.b(n);
         self.note(at, || format!("shr {}, {n}", r64(r)));
     }
+    /// `shl r64, imm8`
+    pub fn shl_ri64(&mut self, r: u8, n: u8) {
+        let at = self.pos();
+        self.op_rr(None, true, &[0xc1], 4, r);
+        self.b(n);
+        self.note(at, || format!("shl {}, {n}", r64(r)));
+    }
+    /// `op qword [m], imm`
+    pub fn alu_mi64(&mut self, op: Alu, m: Mem, imm: i32) {
+        let at = self.pos();
+        if (-128..128).contains(&imm) {
+            self.op_mem(None, true, &[0x83], op as u8, m);
+            self.b(imm as i8 as u8);
+        } else {
+            self.op_mem(None, true, &[0x81], op as u8, m);
+            self.d32(imm);
+        }
+        self.note(at, || format!("{} qword {}, {imm:#x}", alu_name(op), mem_str(m)));
+    }
+    /// `imul dst64, src64, imm32`
+    pub fn imul_rri64(&mut self, dst: u8, src: u8, imm: i32) {
+        let at = self.pos();
+        self.op_rr(None, true, &[0x69], dst, src);
+        self.d32(imm);
+        self.note(at, || format!("imul {}, {}, {imm:#x}", r64(dst), r64(src)));
+    }
     /// `not r32`
     pub fn not32(&mut self, r: u8) {
         let at = self.pos();
@@ -654,5 +680,14 @@ mod tests {
         assert_eq!(enc(|a| a.push(R12)), [0x41, 0x54]);
         assert_eq!(enc(|a| a.pop(RBX)), [0x5b]);
         assert_eq!(enc(|a| a.cvttsd2si64(RAX, XMM0)), [0xf2, 0x48, 0x0f, 0x2c, 0xc0]);
+        // add qword [rcx-16], 1 ; sub qword [rdi-16], 1
+        assert_eq!(enc(|a| a.alu_mi64(Alu::Add, Mem::base(RCX, -16), 1)), [0x48, 0x83, 0x41, 0xf0, 0x01]);
+        assert_eq!(enc(|a| a.alu_mi64(Alu::Sub, Mem::base(RDI, -16), 1)), [0x48, 0x83, 0x6f, 0xf0, 0x01]);
+        // shl rcx, 16 ; shr r8, 16
+        assert_eq!(enc(|a| a.shl_ri64(RCX, 16)), [0x48, 0xc1, 0xe1, 0x10]);
+        assert_eq!(enc(|a| a.shr_ri64(R8, 16)), [0x49, 0xc1, 0xe8, 0x10]);
+        // imul rax, rdx, 0x100 ; imul r9, r10, 24
+        assert_eq!(enc(|a| a.imul_rri64(RAX, RDX, 0x100)), [0x48, 0x69, 0xc2, 0x00, 0x01, 0x00, 0x00]);
+        assert_eq!(enc(|a| a.imul_rri64(R9, R10, 24)), [0x4d, 0x69, 0xca, 0x18, 0x00, 0x00, 0x00]);
     }
 }

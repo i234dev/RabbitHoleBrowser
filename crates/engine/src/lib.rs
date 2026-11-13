@@ -1556,7 +1556,7 @@ fn rasterize_inline_svgs(doc: &Document, styles: &StyledTree, fonts: &FontContex
                 "opacity" if s.opacity < 1.0 => Some(format!("{}", s.opacity)),
                 "display" if s.display.is_none() => Some("none".into()),
                 "visibility" if s.visibility == rabbithole_style::Visibility::Hidden => Some("hidden".into()),
-                _ => None,
+                _ => s.svg_props.iter().find(|(n, _)| n == prop).map(|(_, v)| rabbithole_svg::tokens_to_string(v).trim().to_string()),
             }
         };
         let Some(tree) = rabbithole_svg::SvgTree::from_dom(doc, n, &style_of) else { continue };

@@ -30,6 +30,15 @@ const RCMIN: u8 = R14;
 const CONSTS: u8 = R15;
 
 const TAG_BIGINT: u64 = 0xFFFC_0000_0000_0000;
+const TAG_OBJECT: u64 = 0xFFFB_0000_0000_0000;
+/// `PropIc` field offsets (`repr(C)`).
+const IC_KIND: i32 = std::mem::offset_of!(crate::bytecode::PropIc, kind) as i32;
+const IC_SHAPE: i32 = std::mem::offset_of!(crate::bytecode::PropIc, shape) as i32;
+const IC_SLOT: i32 = std::mem::offset_of!(crate::bytecode::PropIc, slot) as i32;
+const IC_HOLDER: i32 = std::mem::offset_of!(crate::bytecode::PropIc, holder) as i32;
+const IC_HOLDER_SHAPE: i32 = std::mem::offset_of!(crate::bytecode::PropIc, holder_shape) as i32;
+const IC_MID: i32 = std::mem::offset_of!(crate::bytecode::PropIc, mid) as i32;
+const IC_MID_SHAPE: i32 = std::mem::offset_of!(crate::bytecode::PropIc, mid_shape) as i32;
 const CANON_NAN: u64 = 0x7FF8_0000_0000_0000;
 const ONE: u64 = 0x3FF0_0000_0000_0000;
 const SIGN: u64 = 0x8000_0000_0000_0000;
@@ -100,7 +109,6 @@ fn classify(op: &Op) -> Class {
 fn classify_all(op: &Op) -> Class {
     use Class::*;
     let exec = Helper(h_exec as *const () as usize, "h_exec");
-    let access = Helper(h_access as *const () as usize, "h_access");
     match op {
         // Native templates.
         Op::Mov(..) | Op::MovRaw(..) | Op::LoadK(..) | Op::MovChecked(..) | Op::CheckInit(..) => Native,
@@ -122,11 +130,12 @@ fn classify_all(op: &Op) -> Class {
         Op::ReturnR(..) => Helper(h_return as *const () as usize, "h_return"),
         Op::CallR(..) | Op::NewR(..) => Native,
         Op::GetGlobalR(..) | Op::SetGlobalR(..) => Native,
-        Op::GetPropR(..) => Helper(h_get_prop as *const () as usize, "h_get_prop"),
-        Op::SetPropR(..) => Helper(h_set_prop as *const () as usize, "h_set_prop"),
-        Op::GetElemR(..) => Helper(h_get_elem as *const () as usize, "h_get_elem"),
-        Op::SetElemR(..) => Helper(h_set_elem as *const () as usize, "h_set_elem"),
-        Op::DefinePropR(..) | Op::GetLocalR(..) | Op::SetLocalR(..) | Op::LoadThis(..) | Op::StoreCompletionR(..) => access,
+        Op::GetPropR(..) | Op::SetPropR(..) => Native,
+        Op::GetElemR(..) | Op::SetElemR(..) => Native,
+        Op::LoadThis(..) => Native,
+        Op::GetLocalR(..) | Op::SetLocalR(..) | Op::GetLocalChecked(..) => Native,
+        Op::DefinePropR(..) => Helper(h_define_prop as *const () as usize, "h_define_prop"),
+        Op::StoreCompletionR(..) => Helper(h_store_completion as *const () as usize, "h_store_completion"),
         // Suspension points and direct eval stay in the interpreter.
         Op::Yield | Op::Await | Op::AsyncYield | Op::IteratorNextWith => Reject("suspends"),
         Op::DeleteGlobal(..) => exec,
@@ -137,7 +146,7 @@ fn classify_all(op: &Op) -> Class {
         // Everything else: the interpreter's out-of-line code.
         Op::Const(..) | Op::Undefined | Op::Null | Op::True | Op::False | Op::Empty | Op::Pop | Op::Dup | Op::Dup2 | Op::Swap | Op::Rot3 | Op::Rot4 => exec,
         Op::GetReg(..) | Op::GetRegChecked(..) | Op::SetReg(..) | Op::SetRegChecked(..) => exec,
-        Op::GetLocal(..) | Op::GetLocalChecked(..) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetLocalChecked(..) | Op::GetImport(..) => exec,
+        Op::GetLocal(..) | Op::SetLocal(..) | Op::InitLocal(..) | Op::SetLocalChecked(..) | Op::GetImport(..) => exec,
         Op::GetGlobal(..) | Op::SetGlobal(..) | Op::TypeofGlobal(..) | Op::DeclareGlobalVar(..) | Op::DeclareGlobalFunction(..) => exec,
         Op::DeclareGlobalLex(..) | Op::InitGlobalLex(..) | Op::PushScope(..) | Op::PopScope | Op::CopyScope => exec,
         Op::GetProp(..) | Op::SetProp(..) | Op::GetElem | Op::SetElem | Op::GetElemKeep | Op::GetPropKeep(..) | Op::GetMethod(..) => exec,
@@ -173,7 +182,10 @@ fn validate(code: &FunctionCode) -> Result<(), String> {
     for (pc, op) in code.ops.iter().enumerate() {
         let (slots, k, t): (Vec<u16>, Option<u32>, Option<u32>) = match *op {
             Op::Mov(d, s) | Op::MovRaw(d, s) | Op::MovChecked(d, s) | Op::IncR(d, s) | Op::DecR(d, s) | Op::ToNumericR(d, s) | Op::NotR(d, s) | Op::UnR(_, d, s) => (vec![d, s], None, None),
-            Op::CheckInit(r) | Op::ReturnR(r) => (vec![r], None, None),
+            Op::CheckInit(r) | Op::ReturnR(r) | Op::LoadThis(r) => (vec![r], None, None),
+            Op::GetPropR(a, b, _) | Op::SetPropR(a, b, _) | Op::DefinePropR(a, b, _) => (vec![a, b], None, None),
+            Op::GetElemR(a, b, c) | Op::SetElemR(a, b, c) => (vec![a, b, c], None, None),
+            Op::GetLocalR(r, _, _) | Op::SetLocalR(r, _, _) | Op::GetGlobalR(r, _) | Op::SetGlobalR(r, _) => (vec![r], None, None),
             Op::LoadK(d, c) => (vec![d], Some(c), None),
             Op::AddRR(d, a, b) | Op::SubRR(d, a, b) | Op::MulRR(d, a, b) | Op::DivRR(d, a, b) | Op::ModRR(d, a, b) | Op::BinRR(_, d, a, b) | Op::CmpRR(_, d, a, b) => (vec![d, a, b], None, None),
             Op::AddRK(d, a, c) | Op::SubRK(d, a, c) | Op::MulRK(d, a, c) | Op::DivRK(d, a, c) | Op::ModRK(d, a, c) | Op::BinRK(_, d, a, c) | Op::CmpRK(_, d, a, c) => (vec![d, a], Some(c as u32), None),
@@ -230,6 +242,9 @@ enum Stub {
     /// Call `helper(ctx, arg)`, then continue at `resume` (or follow the
     /// status).
     Helper { from: Label, helper: usize, name: &'static str, arg: u32, resume: Label },
+    /// Release the reference-counted value whose bits are in `reg`, then
+    /// continue at `resume`.
+    Release { from: Label, reg: u8, resume: Label },
 }
 
 struct Gen<'a> {
@@ -239,6 +254,10 @@ struct Gen<'a> {
     stubs: Vec<Stub>,
     /// Shared: non-zero helper status (exit or internal jump).
     status: Label,
+    /// Reference counts are adjusted inline ([`super::rc_inline`]).
+    rc: bool,
+    /// Object layout for inline property access ([`super::layout`]).
+    lay: Option<super::layout::Layout>,
 }
 
 impl Gen<'_> {
@@ -253,7 +272,7 @@ impl Gen<'_> {
         self.a.mov_imm32(RSI, arg);
         self.a.call_abs(helper, name);
         self.a.load64(SLOTS, Mem::base(CTX, CTX_SLOTS));
-        self.a.test_rr32(RAX, RAX);
+        self.a.test_rr64(RAX, RAX);
         self.a.jcc(CC_NE, self.status);
     }
 
@@ -330,14 +349,49 @@ impl Gen<'_> {
         self.a.bind(ok);
     }
 
-    /// Store `rax` (not reference counted) into slot `d`, unless the slot
-    /// holds a reference-counted value (then `slow`, which redoes the
-    /// whole instruction).
+    /// Store `rax` (an owned value) into slot `d`, releasing the old
+    /// value. Without inline reference counts, a counted old value takes
+    /// `slow` (which redoes the whole instruction) instead. Must end the
+    /// template: the release may call out (caller-saved registers die).
     fn store(&mut self, d: u16, slow: Label) {
         self.a.load64(RDX, slot(d));
-        self.a.cmp_rr64(RDX, RCMIN);
-        self.a.jcc(CC_AE, slow);
-        self.a.store64(slot(d), RAX);
+        if self.rc {
+            self.a.store64(slot(d), RAX);
+            self.release_if_counted(RDX);
+        } else {
+            self.a.cmp_rr64(RDX, RCMIN);
+            self.a.jcc(CC_AE, slow);
+            self.a.store64(slot(d), RAX);
+        }
+    }
+
+    /// Release the value in `reg` (a reference given up) if it is counted,
+    /// out of line.
+    fn release_if_counted(&mut self, reg: u8) {
+        let (from, resume) = (self.a.label(), self.a.label());
+        self.a.cmp_rr64(reg, RCMIN);
+        self.a.jcc(CC_AE, from);
+        self.a.bind(resume);
+        self.stubs.push(Stub::Release { from, reg, resume });
+    }
+
+    /// Take a new reference to the value in `reg` if it is counted
+    /// (`scratch` is clobbered). Only with inline reference counts.
+    fn retain_if_counted(&mut self, reg: u8, scratch: u8) {
+        debug_assert!(self.rc);
+        let skip = self.a.label();
+        self.a.cmp_rr64(reg, RCMIN);
+        self.a.jcc(CC_B, skip);
+        self.retain(reg, scratch);
+        self.a.bind(skip);
+    }
+
+    /// Take a new reference to the counted value in `reg`.
+    fn retain(&mut self, reg: u8, scratch: u8) {
+        self.a.mov_rr64(scratch, reg);
+        self.a.shl_ri64(scratch, 16);
+        self.a.shr_ri64(scratch, 16);
+        self.a.alu_mi64(Alu::Add, Mem::base(scratch, -16), 1);
     }
 
     /// Store the number in `xmm0` into slot `d`.
@@ -492,9 +546,10 @@ impl Gen<'_> {
         let slow = self.exec_slow(pc);
         let done = self.a.label();
         let (yes, no) = (self.a.label(), self.a.label());
-        if kd == 4 || kd == 5 {
-            // Strict (in)equality: numbers inline, anything else through
-            // the runtime's strict_equals (pure).
+        if (4..=7).contains(&kd) {
+            // (In)equality: numbers inline, anything else through the
+            // runtime's strict_equals (pure) or, for loose equality, the
+            // cases that run no JavaScript (h_loose_eq; 2: undecided).
             let generic = self.a.label();
             self.a.load64(RAX, slot(a));
             match b {
@@ -508,7 +563,7 @@ impl Gen<'_> {
             self.a.movq_x_r(XMM0, RAX);
             self.a.movq_x_r(XMM1, RCX);
             self.a.ucomisd(XMM0, XMM1);
-            let (eq, ne) = if kd == 4 { (yes, no) } else { (no, yes) };
+            let (eq, ne) = if kd == 4 || kd == 6 { (yes, no) } else { (no, yes) };
             self.a.jcc(CC_P, ne);
             self.a.jcc(CC_E, eq);
             self.a.jmp(ne);
@@ -516,7 +571,13 @@ impl Gen<'_> {
             self.a.mov_rr64(RDI, CTX);
             self.a.mov_rr64(RSI, RAX);
             self.a.mov_rr64(RDX, RCX);
-            self.a.call_abs(h_strict_eq as *const () as usize, "h_strict_eq");
+            if kd >= 6 {
+                self.a.call_abs(h_loose_eq as *const () as usize, "h_loose_eq");
+                self.a.alu_ri32(Alu::Cmp, RAX, 2);
+                self.a.jcc(CC_E, slow);
+            } else {
+                self.a.call_abs(h_strict_eq as *const () as usize, "h_strict_eq");
+            }
             self.a.test_rr32(RAX, RAX);
             self.a.jcc(CC_NE, eq);
             self.a.jmp(ne);
@@ -607,8 +668,12 @@ impl Gen<'_> {
     fn mov(&mut self, pc: usize, d: u16, s: u16, empty: bool, checked: bool) {
         let slow = self.exec_slow(pc);
         self.a.load64(RAX, slot(s));
-        self.a.cmp_rr64(RAX, RCMIN);
-        self.a.jcc(CC_AE, slow);
+        if self.rc {
+            self.retain_if_counted(RAX, RCX);
+        } else {
+            self.a.cmp_rr64(RAX, RCMIN);
+            self.a.jcc(CC_AE, slow);
+        }
         if empty || checked {
             let ok = self.a.label();
             self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
@@ -701,8 +766,12 @@ impl Gen<'_> {
                 self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
                 self.a.cmp_rr64(RAX, RCX);
                 self.a.jcc(CC_E, slow);
-                self.a.cmp_rr64(RAX, RCMIN);
-                self.a.jcc(CC_AE, slow);
+                if self.rc {
+                    self.retain_if_counted(RAX, RCX);
+                } else {
+                    self.a.cmp_rr64(RAX, RCMIN);
+                    self.a.jcc(CC_AE, slow);
+                }
                 self.store(d, slow);
             }
             Err(s) => {
@@ -711,17 +780,296 @@ impl Gen<'_> {
                 self.a.lea(RAX, Mem::base(TAGMIN, EMPTY));
                 self.a.cmp_rr64(RCX, RAX);
                 self.a.jcc(CC_E, slow);
-                self.a.cmp_rr64(RCX, RCMIN);
-                self.a.jcc(CC_AE, slow);
-                self.a.load64(RAX, slot(s));
-                self.a.cmp_rr64(RAX, RCMIN);
-                self.a.jcc(CC_AE, slow);
-                self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
-                self.a.cmp_rr64(RAX, RCX);
-                self.a.jcc(CC_E, slow);
-                self.a.store64(Mem::base(RDX, 0), RAX);
+                if self.rc {
+                    // rcx = old value, rax = new value (retained)
+                    self.a.load64(RAX, slot(s));
+                    self.a.lea(R8, Mem::base(TAGMIN, EMPTY));
+                    self.a.cmp_rr64(RAX, R8);
+                    self.a.jcc(CC_E, slow);
+                    self.retain_if_counted(RAX, R8);
+                    self.a.store64(Mem::base(RDX, 0), RAX);
+                    self.release_if_counted(RCX);
+                } else {
+                    self.a.cmp_rr64(RCX, RCMIN);
+                    self.a.jcc(CC_AE, slow);
+                    self.a.load64(RAX, slot(s));
+                    self.a.cmp_rr64(RAX, RCMIN);
+                    self.a.jcc(CC_AE, slow);
+                    self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+                    self.a.cmp_rr64(RAX, RCX);
+                    self.a.jcc(CC_E, slow);
+                    self.a.store64(Mem::base(RDX, 0), RAX);
+                }
             }
         }
+    }
+
+    /// `rax` = address of the object table entry of the object in slot
+    /// `o` (`r8` = realm), or `miss` when it is not an object.
+    fn object_entry(&mut self, l: &super::layout::Layout, o: u16, miss: Label) {
+        self.a.load64(RAX, slot(o));
+        self.a.mov_rr64(RDX, RAX);
+        self.a.shr_ri64(RDX, 32);
+        self.a.alu_ri32(Alu::Cmp, RDX, (TAG_OBJECT >> 32) as u32 as i32);
+        self.a.jcc(CC_NE, miss);
+        self.a.alu_rr32(Alu::Or, RAX, RAX); // the id, zero-extended
+        self.a.load64(R8, Mem::base(CTX, CTX_REALM));
+        self.object_at(l, RAX, RAX, miss);
+    }
+
+    /// `dst` = address of the object table entry of object id `id` (a
+    /// zero-extended register; `r8` = realm), or `miss` past the table.
+    fn object_at(&mut self, l: &super::layout::Layout, dst: u8, id: u8, miss: Label) {
+        self.a.alu_rm64(Alu::Cmp, id, Mem::base(R8, l.heap_len));
+        self.a.jcc(CC_AE, miss);
+        self.a.imul_rri64(dst, id, l.obj_size);
+        self.a.alu_rm64(Alu::Add, dst, Mem::base(R8, l.heap_ptr));
+    }
+
+    /// Flags for `jne` = the object table entry at `rax` is not a scope
+    /// (`scope`) / not an array (`r9` clobbered).
+    fn is_kind(&mut self, l: &super::layout::Layout, scope: bool) {
+        match (l.tag_niche, scope) {
+            (false, true) => {
+                self.a.movzx8(R9, Mem::base(RAX, l.scope_tag));
+                self.a.alu_ri32(Alu::Cmp, R9, l.scope_tag_value as i32);
+            }
+            (false, false) => {
+                self.a.movzx8(R9, Mem::base(RAX, l.scope_tag));
+                self.a.alu_ri32(Alu::Cmp, R9, l.array_tag_value as i32);
+            }
+            (true, true) => {
+                self.a.mov_imm64(R9, l.scope_tag_value);
+                self.a.alu_rm64(Alu::Cmp, R9, Mem::base(RAX, l.scope_tag));
+            }
+            (true, false) => {
+                // Arrays: the capacity word has its top bit clear (sets
+                // ZF iff clear; `jne` takes every other variant).
+                self.a.load64(R9, Mem::base(RAX, l.scope_tag));
+                self.a.shr_ri64(R9, 63);
+                self.a.test_rr64(R9, R9);
+            }
+        }
+    }
+
+    /// `rax` = the `ScopeData` `depth` levels up the running frame's scope
+    /// chain, or `slow` if some link is not a scope object (`r8` = realm).
+    fn scope_data(&mut self, l: &super::layout::Layout, depth: u16, slow: Label) {
+        self.a.load64(R8, Mem::base(CTX, CTX_REALM));
+        self.a.load64(RCX, Mem::base(R8, l.frames_len));
+        self.a.imul_rri64(RCX, RCX, l.frame_size);
+        self.a.alu_rm64(Alu::Add, RCX, Mem::base(R8, l.frames_ptr));
+        self.a.load32(RDX, Mem::base(RCX, l.frame_scope - l.frame_size));
+        for i in 0..=depth {
+            self.object_at(l, RAX, RDX, slow);
+            self.is_kind(l, true);
+            self.a.jcc(CC_NE, slow);
+            self.a.load64(RAX, Mem::base(RAX, l.scope_box));
+            if i < depth {
+                self.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.sd_parent_tag), l.proto_some as i32);
+                self.a.jcc(CC_NE, slow);
+                self.a.load32(RDX, Mem::base(RAX, l.sd_parent_id));
+            }
+        }
+    }
+
+    /// Closure variable `s` of the scope `depth` levels up into slot `d`:
+    /// the hole reads as undefined, or (`checked`) takes `slow`.
+    fn get_local(&mut self, d: u16, depth: u16, s: u16, checked: bool, slow: Label) {
+        let Some(l) = self.lay else {
+            self.a.jmp(slow);
+            return;
+        };
+        self.scope_data(&l, depth, slow);
+        self.a.alu_mi64(Alu::Cmp, Mem::base(RAX, l.sd_slots_len), s as i32);
+        self.a.jcc(CC_BE, slow);
+        self.a.load64(RAX, Mem::base(RAX, l.sd_slots_ptr));
+        self.a.load64(RAX, Mem::base(RAX, s as i32 * 8));
+        self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+        self.a.cmp_rr64(RAX, RCX);
+        if checked {
+            self.a.jcc(CC_E, slow);
+        } else {
+            let ok = self.a.label();
+            self.a.jcc(CC_NE, ok);
+            self.a.mov_rr64(RAX, TAGMIN);
+            self.a.bind(ok);
+        }
+        self.retain_if_counted(RAX, RCX);
+        self.store(d, slow);
+    }
+
+    /// `GetElemR` (`Ok(dst)`) / `SetElemR` (`Err(src)`) of an array
+    /// element in range that is not a hole, with an integer index, inline;
+    /// anything else (typed arrays, strings, appends, holes) through the
+    /// helpers.
+    fn elem(&mut self, pc: usize, o: u16, k: u16, dst: Result<u16, u16>) {
+        let next = self.lbl(pc + 1);
+        let (h, name) = match dst {
+            Ok(_) => (h_get_elem as *const () as usize, "h_get_elem"),
+            Err(_) => (h_set_elem as *const () as usize, "h_set_elem"),
+        };
+        let slow = self.slow(h, name, pc, next);
+        let Some(l) = self.lay else {
+            self.a.jmp(slow);
+            return;
+        };
+        self.object_entry(&l, o, slow);
+        self.is_kind(&l, false);
+        self.a.jcc(CC_NE, slow);
+        // r9 = the index: a number with an exact 64-bit integer value
+        // (negative ones fail the unsigned bounds check).
+        self.a.load64(RCX, slot(k));
+        self.a.cmp_rr64(RCX, TAGMIN);
+        self.a.jcc(CC_AE, slow);
+        self.a.movq_x_r(XMM0, RCX);
+        self.a.cvttsd2si64(R9, XMM0);
+        self.a.cvtsi2sd64(XMM1, R9);
+        self.a.ucomisd(XMM0, XMM1);
+        self.a.jcc(CC_NE, slow);
+        self.a.jcc(CC_P, slow);
+        self.a.alu_rm64(Alu::Cmp, R9, Mem::base(RAX, l.array_elems_len));
+        self.a.jcc(CC_AE, slow);
+        self.a.load64(RDX, Mem::base(RAX, l.array_elems_ptr));
+        // rdx = &elements[index]
+        self.a.lea(RDX, Mem::index(RDX, R9, 8, 0));
+        self.a.load64(RAX, Mem::base(RDX, 0));
+        self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+        self.a.cmp_rr64(RAX, RCX);
+        self.a.jcc(CC_E, slow);
+        match dst {
+            Ok(d) => {
+                self.retain_if_counted(RAX, RCX);
+                self.store(d, slow);
+            }
+            Err(v) => {
+                // r8 = the old element; rax = the new one (not the hole)
+                self.a.mov_rr64(R8, RAX);
+                self.a.load64(RAX, slot(v));
+                self.a.cmp_rr64(RAX, RCX);
+                self.a.jcc(CC_E, slow);
+                self.retain_if_counted(RAX, RCX);
+                self.a.store64(Mem::base(RDX, 0), RAX);
+                self.release_if_counted(R8);
+            }
+        }
+    }
+
+    /// `GetPropR` through the site's cache: own data properties and data
+    /// properties of the prototype (`IC_PROTO` one level up,
+    /// `IC_PROTO_DEEP`) inline; anything else through `h_get_prop`.
+    /// Objects referenced from frame slots are alive, so their table
+    /// entries hold objects; a holder is alive while the receiver's
+    /// prototype (or the prototype epoch) still leads to it.
+    fn get_prop(&mut self, pc: usize, d: u16, o: u16, ic: u32) {
+        let next = self.lbl(pc + 1);
+        // Kinds handled elsewhere (primitives, lengths, absent properties):
+        // the helper's cache paths; a failed check of an inline kind: the
+        // full instruction (megamorphic cache, getters, the lookup).
+        let other = self.slow(h_get_prop as *const () as usize, "h_get_prop", pc, next);
+        let (Some(l), Some(cell)) = (self.lay, self.code.ics.get(ic as usize)) else {
+            self.a.jmp(other);
+            return;
+        };
+        let miss = self.slow(h_access as *const () as usize, "h_access", pc, next);
+        let (own, proto, holder, recv) = (self.a.label(), self.a.label(), self.a.label(), self.a.label());
+        self.a.mov_imm64(RCX, cell as *const std::cell::Cell<crate::bytecode::PropIc> as u64);
+        self.a.movzx8(RDX, Mem::base(RCX, IC_KIND));
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_OWN as i32);
+        self.a.jcc(CC_E, recv);
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PROTO as i32);
+        self.a.jcc(CC_E, recv);
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_PROTO_DEEP as i32);
+        self.a.jcc(CC_NE, other);
+        self.a.bind(recv);
+        // r9 = kind; rax = the receiver's entry with the cached shape
+        self.a.mov_rr64(R9, RDX);
+        self.object_entry(&l, o, other);
+        self.a.load32(RDX, Mem::base(RAX, l.sid));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_SHAPE));
+        self.a.jcc(CC_NE, miss);
+        self.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_OWN as i32);
+        self.a.jcc(CC_E, own);
+        // Prototype kinds: never for proxies / namespaces (they have the
+        // root shape and forward elsewhere).
+        self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_SHAPE), crate::shape::ROOT_SHAPE_ID as i32);
+        self.a.jcc(CC_E, miss);
+        self.a.alu_mi32(Alu::Cmp, Mem::base(RAX, l.proto_tag), l.proto_some as i32);
+        self.a.jcc(CC_NE, miss);
+        self.a.load32(RDX, Mem::base(RAX, l.proto_id));
+        self.a.alu_ri32(Alu::Cmp, R9, crate::ic::IC_PROTO as i32);
+        self.a.jcc(CC_E, proto);
+        // IC_PROTO_DEEP: receiver's prototype is `mid`, chain unchanged.
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID));
+        self.a.jcc(CC_NE, miss);
+        self.a.mov_imm64(RDX, crate::shape::proto_epoch_addr() as u64);
+        self.a.load32(RDX, Mem::base(RDX, 0));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_MID_SHAPE));
+        self.a.jcc(CC_NE, miss);
+        self.a.load32(RDX, Mem::base(RCX, IC_HOLDER));
+        self.a.jmp(holder);
+        // IC_PROTO (one level, no `mid`): receiver's prototype is `holder`.
+        self.a.bind(proto);
+        self.a.alu_mi32(Alu::Cmp, Mem::base(RCX, IC_MID), crate::ic::NO_OBJ as i32);
+        self.a.jcc(CC_NE, miss);
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER));
+        self.a.jcc(CC_NE, miss);
+        // rdx = holder id: its entry, with the cached shape.
+        self.a.bind(holder);
+        self.object_at(&l, RAX, RDX, miss);
+        self.a.load32(RDX, Mem::base(RAX, l.sid));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_HOLDER_SHAPE));
+        self.a.jcc(CC_NE, miss);
+        // rax = entry holding the property in `slot` (shape mode only: a
+        // dictionary has no values here).
+        self.a.bind(own);
+        self.a.load32(RDX, Mem::base(RCX, IC_SLOT));
+        self.a.alu_rm64(Alu::Cmp, RDX, Mem::base(RAX, l.vals_len));
+        self.a.jcc(CC_AE, miss);
+        self.a.imul_rri64(RDX, RDX, l.prop_size);
+        self.a.alu_rm64(Alu::Add, RDX, Mem::base(RAX, l.vals_ptr));
+        self.a.test_mi8(Mem::base(RDX, l.prop_flags), crate::heap::ACCESSOR);
+        self.a.jcc(CC_NE, miss);
+        self.a.load64(RAX, Mem::base(RDX, l.prop_value));
+        self.retain_if_counted(RAX, RCX);
+        self.store(d, miss);
+    }
+
+    /// `SetPropR` through the site's cache: writable own data properties
+    /// inline; anything else (additions, setters) through `h_set_prop`.
+    fn set_prop(&mut self, pc: usize, o: u16, v: u16, ic: u32) {
+        let next = self.lbl(pc + 1);
+        let miss = self.slow(h_set_prop as *const () as usize, "h_set_prop", pc, next);
+        let (Some(l), Some(cell)) = (self.lay, self.code.ics.get(ic as usize)) else {
+            self.a.jmp(miss);
+            return;
+        };
+        self.object_entry(&l, o, miss);
+        self.a.mov_imm64(RCX, cell as *const std::cell::Cell<crate::bytecode::PropIc> as u64);
+        self.a.movzx8(RDX, Mem::base(RCX, IC_KIND));
+        self.a.alu_ri32(Alu::Cmp, RDX, crate::ic::IC_OWN as i32);
+        self.a.jcc(CC_NE, miss);
+        self.a.load32(RDX, Mem::base(RAX, l.sid));
+        self.a.alu_rm32(Alu::Cmp, RDX, Mem::base(RCX, IC_SHAPE));
+        self.a.jcc(CC_NE, miss);
+        self.a.load32(RDX, Mem::base(RCX, IC_SLOT));
+        self.a.alu_rm64(Alu::Cmp, RDX, Mem::base(RAX, l.vals_len));
+        self.a.jcc(CC_AE, miss);
+        self.a.imul_rri64(RDX, RDX, l.prop_size);
+        self.a.alu_rm64(Alu::Add, RDX, Mem::base(RAX, l.vals_ptr));
+        self.a.movzx8(RAX, Mem::base(RDX, l.prop_flags));
+        self.a.alu_ri32(Alu::And, RAX, (crate::heap::ACCESSOR | crate::heap::WRITABLE) as i32);
+        self.a.alu_ri32(Alu::Cmp, RAX, crate::heap::WRITABLE as i32);
+        self.a.jcc(CC_NE, miss);
+        // rax = the new value (not the hole), retained; rcx = the old one.
+        self.a.load64(RAX, slot(v));
+        self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+        self.a.cmp_rr64(RAX, RCX);
+        self.a.jcc(CC_E, miss);
+        self.retain_if_counted(RAX, RCX);
+        self.a.load64(RCX, Mem::base(RDX, l.prop_value));
+        self.a.store64(Mem::base(RDX, l.prop_value), RAX);
+        self.release_if_counted(RCX);
     }
 
     fn emit(&mut self, pc: usize, op: Op) {
@@ -732,7 +1080,13 @@ impl Gen<'_> {
             Op::LoadK(d, c) => {
                 let slow = self.exec_slow(pc);
                 if self.code.constants[c as usize].bits() >= TAG_BIGINT {
-                    self.a.jmp(slow);
+                    if self.rc {
+                        self.a.load64(RAX, konst(c));
+                        self.retain(RAX, RCX);
+                        self.store(d, slow);
+                    } else {
+                        self.a.jmp(slow);
+                    }
                 } else {
                     self.a.load64(RAX, konst(c));
                     self.store(d, slow);
@@ -795,6 +1149,7 @@ impl Gen<'_> {
                         self.a.cvtsi2sd32(XMM0, RAX);
                         self.store_xmm0(d, slow);
                     }
+                    3 => self.call_helper(h_unr as *const () as usize, "h_unr", pc as u32),
                     _ => self.a.jmp(slow),
                 }
             }
@@ -891,6 +1246,70 @@ impl Gen<'_> {
                 self.a.jcc(CC_BE, exit);
                 self.jump(pc, t as usize);
             }
+            Op::LoadThis(d) => {
+                let slow = self.slow(h_access as *const () as usize, "h_access", pc, self.lbl(pc + 1));
+                let Some(l) = self.lay else {
+                    self.a.jmp(slow);
+                    return;
+                };
+                // The running frame is the last one.
+                self.a.load64(R8, Mem::base(CTX, CTX_REALM));
+                self.a.load64(RCX, Mem::base(R8, l.frames_len));
+                self.a.imul_rri64(RCX, RCX, l.frame_size);
+                self.a.alu_rm64(Alu::Add, RCX, Mem::base(R8, l.frames_ptr));
+                self.a.load64(RAX, Mem::base(RCX, l.frame_this - l.frame_size));
+                // `this` before `super()` reads as undefined here.
+                let ok = self.a.label();
+                self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+                self.a.cmp_rr64(RAX, RCX);
+                self.a.jcc(CC_NE, ok);
+                self.a.mov_rr64(RAX, TAGMIN);
+                self.a.bind(ok);
+                self.retain_if_counted(RAX, RCX);
+                self.store(d, slow);
+            }
+            Op::GetLocalR(d, depth, s) => {
+                let slow = self.slow(h_get_local as *const () as usize, "h_get_local", pc, self.lbl(pc + 1));
+                self.get_local(d, depth, s, false, slow);
+            }
+            Op::GetLocalChecked(depth, s) => {
+                // A stack instruction: the value goes to the operand stack
+                // slot at the instruction's static depth.
+                let slow = self.exec_slow(pc);
+                let d = self.code.nregs as usize + self.code.depths.get(pc).copied().unwrap_or(u16::MAX) as usize;
+                if d >= self.code.frame_size() {
+                    self.a.jmp(slow);
+                    return;
+                }
+                self.get_local(d as u16, depth, s, true, slow);
+            }
+            Op::SetLocalR(v, depth, s) => {
+                let slow = self.slow(h_set_local as *const () as usize, "h_set_local", pc, self.lbl(pc + 1));
+                let Some(l) = self.lay else {
+                    self.a.jmp(slow);
+                    return;
+                };
+                self.scope_data(&l, depth, slow);
+                self.a.alu_mi64(Alu::Cmp, Mem::base(RAX, l.sd_slots_len), s as i32);
+                self.a.jcc(CC_BE, slow);
+                self.a.load64(RDX, Mem::base(RAX, l.sd_slots_ptr));
+                // rax = the value (the hole stores undefined), retained
+                self.a.load64(RAX, slot(v));
+                let ok = self.a.label();
+                self.a.lea(RCX, Mem::base(TAGMIN, EMPTY));
+                self.a.cmp_rr64(RAX, RCX);
+                self.a.jcc(CC_NE, ok);
+                self.a.mov_rr64(RAX, TAGMIN);
+                self.a.bind(ok);
+                self.retain_if_counted(RAX, RCX);
+                self.a.load64(RCX, Mem::base(RDX, s as i32 * 8));
+                self.a.store64(Mem::base(RDX, s as i32 * 8), RAX);
+                self.release_if_counted(RCX);
+            }
+            Op::GetElemR(d, o, k) => self.elem(pc, o, k, Ok(d)),
+            Op::SetElemR(o, k, v) => self.elem(pc, o, k, Err(v)),
+            Op::GetPropR(d, o, ic) => self.get_prop(pc, d, o, ic),
+            Op::SetPropR(o, v, ic) => self.set_prop(pc, o, v, ic),
             Op::GetGlobalR(d, ic) => self.global(pc, ic, Ok(d)),
             Op::SetGlobalR(s, ic) => self.global(pc, ic, Err(s)),
             Op::Nop | Op::Debugger => {}
@@ -953,7 +1372,7 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     a.alu_rr64(Alu::Add, RAX, RCX);
     a.jmp_r(RAX);
 
-    let mut g = Gen { a, code, labels, stubs: Vec::new(), status };
+    let mut g = Gen { a, code, labels, stubs: Vec::new(), status, rc: super::rc_inline(), lay: if super::rc_inline() { super::layout::get() } else { None } };
     for (pc, op) in code.ops.iter().enumerate() {
         g.a.bind(g.labels[pc]);
         if g.a.listing_enabled() {
@@ -972,34 +1391,41 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
                 g.call_helper(helper, name, arg);
                 g.a.jmp(resume);
             }
+            Stub::Release { from, reg, resume } => {
+                // Last reference: restore the count and let Rust free it.
+                g.a.bind(from);
+                g.a.mov_rr64(RDI, reg);
+                g.a.shl_ri64(RDI, 16);
+                g.a.shr_ri64(RDI, 16);
+                g.a.alu_mi64(Alu::Sub, Mem::base(RDI, -16), 1);
+                g.a.jcc(CC_NE, resume);
+                g.a.alu_mi64(Alu::Add, Mem::base(RDI, -16), 1);
+                g.a.mov_rr64(RDI, reg);
+                g.a.call_abs(h_drop as *const () as usize, "h_drop");
+                g.a.jmp(resume);
+            }
         }
     }
     let mut a = g.a;
-    // Non-zero status: an internal jump continues at ctx.pc; after a call
-    // or return the new last frame continues in its own native code when
-    // it has some (h_switch rewrites ctx); anything else returns to the run
+    // Non-zero status: an address is the new last frame's native code
+    // after a call or return (the helper rewrote ctx; enter at ctx.pc); an
+    // internal jump continues at ctx.pc; anything else returns to the run
     // loop.
     a.comment(|| "status".into());
     a.bind(status);
-    let (jump, reload) = (a.label(), a.label());
+    let (jump, addr) = (a.label(), a.label());
+    a.alu_ri64(Alu::Cmp, RAX, 64);
+    a.jcc(CC_AE, addr);
     a.alu_ri32(Alu::Cmp, RAX, ST_JUMP as i32);
-    a.jcc(CC_E, jump);
-    a.alu_ri32(Alu::Cmp, RAX, ST_RELOAD as i32);
     a.jcc(CC_NE, epilogue);
-    a.mov_rr64(RDI, CTX);
-    a.call_abs(h_switch as *const () as usize, "h_switch");
-    a.test_rr64(RAX, RAX);
-    a.jcc(CC_E, reload);
-    a.load32(RSI, Mem::base(CTX, CTX_PC));
-    a.jmp_r(RAX);
-    a.bind(reload);
-    a.mov_imm32(RAX, ST_RELOAD);
-    a.jmp(epilogue);
     a.bind(jump);
     a.load32(RSI, Mem::base(CTX, CTX_PC));
     a.jmp(dispatch);
+    a.bind(addr);
+    a.load32(RSI, Mem::base(CTX, CTX_PC));
+    a.jmp_r(RAX);
     a.bind(interp);
-    a.mov_imm32(RAX, ST_INTERP);
+    a.mov_imm32(RAX, ST_INTERP as u32);
     a.bind(epilogue);
     a.comment(|| "epilogue".into());
     a.alu_ri64(Alu::Add, RSP, 8);

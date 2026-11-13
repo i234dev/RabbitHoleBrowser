@@ -246,6 +246,34 @@ impl Canvas {
     fn fill_ring(&mut self, rect: Rect, radii: Radii, widths: [f32; 4], colors: [Color; 4]) {
         let m = self.transform();
         if !(is_identity(&m) || is_axis_aligned(&m)) {
+            let visible: Vec<usize> = (0..4).filter(|&i| widths[i] > 0.0 && colors[i].a > 0).collect();
+            let one_color = visible.iter().all(|&i| colors[i] == colors[visible[0]]);
+            if !one_color {
+                // Rotated, sides of different colors: one mitred
+                // trapezoid per side.
+                let inner = rect.inset(widths[0], widths[1], widths[2], widths[3]);
+                let (ox0, oy0, ox1, oy1) = (rect.x, rect.y, rect.right(), rect.bottom());
+                let (ix0, iy0) = (inner.x.min(ox1), inner.y.min(oy1));
+                let (ix1, iy1) = ((ix0 + inner.w.max(0.0)).max(ix0), (iy0 + inner.h.max(0.0)).max(iy0));
+                let quads = [
+                    [(ox0, oy0), (ox1, oy0), (ix1, iy0), (ix0, iy0)],
+                    [(ox1, oy0), (ox1, oy1), (ix1, iy1), (ix1, iy0)],
+                    [(ox1, oy1), (ox0, oy1), (ix0, iy1), (ix1, iy1)],
+                    [(ox0, oy1), (ox0, oy0), (ix0, iy0), (ix0, iy1)],
+                ];
+                for &i in &visible {
+                    let q = quads[i];
+                    let path = [
+                        PathSeg::MoveTo(Point::new(q[0].0, q[0].1)),
+                        PathSeg::LineTo(Point::new(q[1].0, q[1].1)),
+                        PathSeg::LineTo(Point::new(q[2].0, q[2].1)),
+                        PathSeg::LineTo(Point::new(q[3].0, q[3].1)),
+                        PathSeg::Close,
+                    ];
+                    self.fill_path(&path, FillRule::NonZero, &Paint::Solid(colors[i]));
+                }
+                return;
+            }
             // Rotated: even-odd fill of outer + inner path with the first visible color.
             let mut path = rounded_rect_path(rect, radii);
             let inner = rect.inset(widths[0], widths[1], widths[2], widths[3]);

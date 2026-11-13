@@ -97,8 +97,13 @@ impl FontContext {
 
     /// Shape `text` with face `idx` (cached). None when the face cannot be
     /// parsed by the shaper.
-    pub(crate) fn shape_units(&self, idx: usize, text: &str, features: ShapeFeatures) -> Option<Rc<UnitRun>> {
-        let key = (idx, Box::<str>::from(text), features.key());
+    pub(crate) fn shape_units(&self, idx: usize, text: &str, features: ShapeFeatures, rtl: Option<bool>) -> Option<Rc<UnitRun>> {
+        let dir_key = match rtl {
+            None => 0u8,
+            Some(false) => 4,
+            Some(true) => 8,
+        };
+        let key = (idx, Box::<str>::from(text), features.key() | dir_key);
         if let Some(r) = self.shaping.cache.borrow().get(&key) {
             return Some(Rc::clone(r));
         }
@@ -107,6 +112,9 @@ impl FontContext {
         let mut buf = rustybuzz::UnicodeBuffer::new();
         buf.push_str(text);
         buf.guess_segment_properties();
+        if let Some(r) = rtl {
+            buf.set_direction(if r { rustybuzz::Direction::RightToLeft } else { rustybuzz::Direction::LeftToRight });
+        }
         let mut feats = Vec::new();
         if features.no_ligatures {
             for tag in [b"liga", b"clig", b"dlig", b"hlig", b"calt"] {
