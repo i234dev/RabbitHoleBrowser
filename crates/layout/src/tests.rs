@@ -888,3 +888,34 @@ fn text_overflow_string_preserves_spaces_with_white_space_pre() {
     let div = &fx.find(&tree, "div")[0];
     assert!(text_of(div).ends_with("a  b"), "{}", text_of(div));
 }
+
+#[test]
+fn cached_scrolled_contents_keep_their_origin_when_another_box_is_rebuilt() {
+    let mut fx = Fixture::new(
+        "<div id=scroller style='overflow:scroll;width:100px;height:100px'><div id=inside style='display:inline-block;width:300px;height:300px'>content</div></div><div id=other>after</div>",
+        "",
+    );
+    let scroller = fx.doc.element_by_id("scroller").unwrap();
+    let inside = fx.doc.element_by_id("inside").unwrap();
+    let other = fx.doc.element_by_id("other").unwrap();
+    let mut tree = fx.layout();
+    let origin = tree.box_of(&fx.doc, inside).unwrap().rect;
+    let images = HashMap::new();
+    let backgrounds = HashMap::new();
+    for offset in [(20.0, 40.0), (50.0, 80.0), (0.0, 0.0)] {
+        assert!(tree.set_scroll_offset(&fx.doc, scroller, offset));
+        fx.scrolls.insert(scroller, offset);
+        // Invalidating a sibling rebuilds ancestors while retaining this
+        // scroller's boxes and the cache of its content layout.
+        for _ in 0..3 {
+            let damage = crate::LayoutDamage { full: false, dirty: [other].into_iter().collect() };
+            tree = crate::layout_incremental(tree, &fx.ctx(&images, &backgrounds), &damage);
+            let container = tree.box_of(&fx.doc, scroller).unwrap();
+            let rect = tree.box_of(&fx.doc, inside).unwrap().rect;
+            assert!((rect.x - (origin.x - offset.0)).abs() < 0.01, "{offset:?}: {rect:?}");
+            assert!((rect.y - (origin.y - offset.1)).abs() < 0.01, "{offset:?}: {rect:?}");
+            assert_eq!((container.scroll_width, container.scroll_height), (300.0, 300.0));
+            assert_eq!(container.scroll_offset, offset);
+        }
+    }
+}

@@ -387,10 +387,11 @@ impl<'a> Layouter<'a> {
         }
         let forced_h = self.forced_content_height.take(); // grid/flex hook
         // Where the contents' origin is now (for reuse by translation): the
-        // current content box (it moved together with the contents, relative
-        // offsets included) plus the scroll offset applied to the contents.
+        // current content box (relative offsets included) minus the scroll
+        // offset already applied to the contents. Reuse first translates
+        // them back to their unscrolled origin, then applies the new offset.
         let prev_cache = b.layout_cache.take();
-        let prev_origin = (b.content_rect.x + b.scroll_offset.0, b.content_rect.y + b.scroll_offset.1);
+        let prev_origin = (b.content_rect.x - b.scroll_offset.0, b.content_rect.y - b.scroll_offset.1);
         b.rel_applied = (0.0, 0.0);
         b.scroll_offset = (0.0, 0.0);
         if b.formatting == Formatting::Table && b.style.border_collapse {
