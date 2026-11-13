@@ -8,6 +8,11 @@
   const SELF = info(-1, 'self', 0);
   const ids = new WeakMap();
   const proxies = new Map();
+  // Structured cloning creates own data properties; its internal buffers
+  // and destination objects must not invoke inherited setters.
+  const defineData = Object.defineProperty;
+  const put = (o, k, value) => defineData(o, k, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
+  const append = (a, value) => put(a, a.length, value);
   // ECMAScript globals a same-origin frame's WindowProxy exposes (served
   // from this realm, see windowFor).
   const BUILTINS = new Set(['JSON', 'Math', 'Reflect', 'Atomics', 'Intl', 'Object', 'Function', 'Array', 'String', 'Number', 'Boolean',
@@ -50,8 +55,8 @@
         case 'Date': return { t: 'd', id, v: v.getTime() };
         case 'RegExp': return { t: 'r', id, s: v.source, f: v.flags };
         case 'Boolean': case 'Number': case 'String': return { t: 'w', id, k: tag, v: enc(v.valueOf()) };
-        case 'Map': { const e = []; v.forEach((val, key) => e.push([enc(key), enc(val)])); return { t: 'm', id, v: e }; }
-        case 'Set': { const e = []; v.forEach((val) => e.push(enc(val))); return { t: 's', id, v: e }; }
+        case 'Map': { const e = []; v.forEach((val, key) => append(e, [enc(key), enc(val)])); return { t: 'm', id, v: e }; }
+        case 'Set': { const e = []; v.forEach((val) => append(e, enc(val))); return { t: 's', id, v: e }; }
         case 'ArrayBuffer': return { t: 'ab', id, v: Array.from(new Uint8Array(v)) };
         case 'Error': return { t: 'e', id, n: String(v.name), m: String(v.message) };
       }
@@ -62,7 +67,7 @@
       if (typeof Node === 'function' && v instanceof Node) throw cloneError(tag);
       if (typeof Blob === 'function' && v instanceof Blob) throw cloneError(tag);
       const props = [];
-      for (const k of Object.keys(v)) props.push([k, enc(v[k])]);
+      for (const k of Object.keys(v)) append(props, [k, enc(v[k])]);
       return { t: 'o', id, v: props };
     }
     return JSON.stringify(enc(value));
@@ -80,7 +85,7 @@
         case 'ref': return objs.get(x.id);
         case 'a':
           out = new Array(x.l || 0); objs.set(x.id, out);
-          x.v.forEach((e, i) => { out[i] = dec(e); });
+          x.v.forEach((e, i) => { put(out, i, dec(e)); });
           return out;
         case 'd': out = new Date(x.v); break;
         case 'r': out = new RegExp(x.s, x.f); break;
@@ -101,7 +106,7 @@
         }
         case 'o':
           out = {}; objs.set(x.id, out);
-          for (const [k, v] of x.v) out[k] = dec(v);
+          for (const [k, v] of x.v) put(out, k, dec(v));
           return out;
         default: return undefined;
       }

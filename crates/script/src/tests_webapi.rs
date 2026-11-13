@@ -1183,6 +1183,45 @@ fn imported_strict_worker_scripts_share_global_bindings() {
     assert_eq!(out, ["43,41,undefined", "TypeError:import failed:true", "done:43"], "logs: {:?}", env.logs);
 }
 
+#[test]
+fn worker_cloning_creates_own_properties_without_calling_inherited_setters() {
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    env.fetches.insert("https://example.test/dir/clone-worker.js".into(), (200, "text/javascript".into(), r#"
+        const data = {};
+        for (let i = 0; i < 12; i++) data['field' + i] = i;
+        Object.defineProperty(data, '__proto__', { value: 17, enumerable: true });
+        const array = Array.from({ length: 12 }, (_, i) => i);
+        const map = new Map(array.map(i => [i, i]));
+        const set = new Set(array);
+        let hits = 0;
+        Object.defineProperty(Object.prototype, '10', { configurable: true, set() { hits++; } });
+        postMessage({ data, array, map, set });
+        delete Object.prototype['10'];
+        postMessage({ hits });
+    "#.into()));
+    run(&mut env, &mut host, r#"
+        var cloneSetterHits = 0;
+        Object.defineProperty(Object.prototype, '10', { configurable: true, set() { cloneSetterHits++; } });
+        var w = new Worker('clone-worker.js');
+        w.onmessage = function (e) {
+            var d = e.data;
+            if ('hits' in d) {
+                console.log('hits', d.hits, cloneSetterHits);
+                delete Object.prototype['10'];
+            } else {
+                console.log('copy', Object.keys(d.data).length, d.data.__proto__, Object.getPrototypeOf(d.data) === Object.prototype,
+                    d.array[10], d.array.hasOwnProperty('10'), d.map.size, d.set.size);
+            }
+        };
+    "#);
+    for t in [1010.0, 1020.0, 1030.0] {
+        host.run_timers(&mut env, t);
+        host.run_jobs(&mut env);
+    }
+    let out: Vec<_> = env.logs.iter().filter(|(level, _)| level == "log").map(|(_, text)| text.as_str()).collect();
+    assert_eq!(out, ["copy 13 17 true 10 true 12 12", "hits 0 0"], "logs: {:?}", env.logs);
+}
+
 /// Workers run in their own realm: own globals, no DOM, importScripts,
 /// structured-clone messages both ways, transferred MessagePorts, error
 /// events, terminate(), close(), and SharedWorker connections.
