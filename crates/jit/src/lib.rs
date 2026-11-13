@@ -17,6 +17,13 @@ pub mod x64;
 pub struct ExecMem {
     ptr: *mut u8,
     len: usize,
+    mapped_len: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    // Lifecycle accounting also covers unwinding from the patch callback.
+    static LIVE_MAPPED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl std::fmt::Debug for ExecMem {
@@ -31,17 +38,22 @@ impl ExecMem {
     /// read-execute. `None` if the platform refuses or is unsupported.
     pub fn new(code: &[u8], patch: impl FnOnce(*mut u8, &mut [u8])) -> Option<ExecMem> {
         let len = code.len().max(1);
+        let mapped_len = Self::mapped_len_for(code.len())?;
         // SAFETY: a fresh private mapping of `len` bytes, written while
         // read-write and switched to read-execute before any use.
         unsafe {
-            let p = sys::alloc(len)?;
+            let p = sys::alloc(mapped_len)?;
+            // Install the owner before invoking caller code: a panicking
+            // patch must release the still-writable mapping as well.
+            let mem = ExecMem { ptr: p, len, mapped_len };
+            #[cfg(test)]
+            LIVE_MAPPED_BYTES.with(|n| n.set(n.get() + mapped_len));
             std::ptr::copy_nonoverlapping(code.as_ptr(), p, code.len());
             patch(p, std::slice::from_raw_parts_mut(p, code.len()));
-            if !sys::protect(p, len) {
-                sys::free(p, len);
+            if !sys::protect(p, mapped_len) {
                 return None;
             }
-            Some(ExecMem { ptr: p, len })
+            Some(mem)
         }
     }
 
@@ -58,9 +70,19 @@ impl ExecMem {
         self.len == 0
     }
 
-    /// Bytes actually reserved (whole pages).
+    /// Page-rounded mapping bytes (committed pages on Windows). This is
+    /// neither physical RSS nor Windows virtual-address reservation size.
     pub fn mapped_len(&self) -> usize {
-        self.len.div_ceil(PAGE) * PAGE
+        self.mapped_len
+    }
+
+    /// Mapping bytes required for code of this length, before allocating.
+    /// Uses the host's protection/commitment page size, not its address
+    /// allocation granularity. Empty code still receives one page.
+    pub fn mapped_len_for(code_len: usize) -> Option<usize> {
+        static PAGE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        let page = (*PAGE.get_or_init(sys::page_size))?;
+        code_len.max(1).checked_add(page - 1)?.checked_div(page)?.checked_mul(page)
     }
 
     pub fn contains(&self, addr: usize) -> bool {
@@ -68,12 +90,12 @@ impl ExecMem {
     }
 }
 
-const PAGE: usize = 4096;
-
 impl Drop for ExecMem {
     fn drop(&mut self) {
         // SAFETY: allocated by `sys::alloc` with this length.
-        unsafe { sys::free(self.ptr, self.len) }
+        unsafe { sys::free(self.ptr, self.mapped_len) }
+        #[cfg(test)]
+        LIVE_MAPPED_BYTES.with(|n| n.set(n.get() - self.mapped_len));
     }
 }
 
@@ -99,6 +121,7 @@ mod sys {
         fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
         fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
         fn munmap(addr: *mut u8, len: usize) -> i32;
+        fn getpagesize() -> i32;
     }
     const PROT_READ: i32 = 1;
     const PROT_WRITE: i32 = 2;
@@ -108,6 +131,11 @@ mod sys {
     const MAP_ANON: i32 = 0x1000;
     #[cfg(not(target_os = "macos"))]
     const MAP_ANON: i32 = 0x20;
+    pub fn page_size() -> Option<usize> {
+        // SAFETY: getpagesize takes no arguments and returns process-wide
+        // memory-management configuration.
+        usize::try_from(unsafe { getpagesize() }).ok().filter(|n| *n != 0)
+    }
     pub unsafe fn alloc(len: usize) -> Option<*mut u8> {
         let p = mmap(std::ptr::null_mut(), len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if p.is_null() || p as isize == -1 {
@@ -125,8 +153,22 @@ mod sys {
 
 #[cfg(windows)]
 mod sys {
+    #[repr(C)]
+    struct SystemInfo {
+        processor_architecture: u32,
+        page_size: u32,
+        minimum_address: *mut u8,
+        maximum_address: *mut u8,
+        active_processor_mask: usize,
+        processor_count: u32,
+        processor_type: u32,
+        allocation_granularity: u32,
+        processor_level: u16,
+        processor_revision: u16,
+    }
     #[link(name = "kernel32")]
     extern "system" {
+        fn GetSystemInfo(info: *mut SystemInfo);
         fn VirtualAlloc(addr: *mut u8, size: usize, ty: u32, protect: u32) -> *mut u8;
         fn VirtualProtect(addr: *mut u8, size: usize, protect: u32, old: *mut u32) -> i32;
         fn VirtualFree(addr: *mut u8, size: usize, ty: u32) -> i32;
@@ -138,6 +180,16 @@ mod sys {
     const MEM_RELEASE: u32 = 0x8000;
     const PAGE_READWRITE: u32 = 0x04;
     const PAGE_EXECUTE_READ: u32 = 0x20;
+    pub fn page_size() -> Option<usize> {
+        let mut info = std::mem::MaybeUninit::<SystemInfo>::zeroed();
+        // SAFETY: the repr(C) layout matches SYSTEM_INFO and the API
+        // initializes the provided writable structure before returning.
+        let size = unsafe {
+            GetSystemInfo(info.as_mut_ptr());
+            info.assume_init().page_size as usize
+        };
+        (size != 0).then_some(size)
+    }
     pub unsafe fn alloc(len: usize) -> Option<*mut u8> {
         let p = VirtualAlloc(std::ptr::null_mut(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if p.is_null() {
@@ -159,6 +211,9 @@ mod sys {
 
 #[cfg(not(any(unix, windows)))]
 mod sys {
+    pub fn page_size() -> Option<usize> {
+        None
+    }
     pub unsafe fn alloc(_len: usize) -> Option<*mut u8> {
         None
     }
@@ -166,6 +221,41 @@ mod sys {
         false
     }
     pub unsafe fn free(_p: *mut u8, _len: usize) {}
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    #[test]
+    fn mapping_size_uses_host_pages_and_rejects_overflow() {
+        let Some(page) = sys::page_size() else { return };
+        for size in [0, 1, page - 1, page] {
+            assert_eq!(ExecMem::mapped_len_for(size), Some(page));
+        }
+        assert_eq!(ExecMem::mapped_len_for(page + 1), Some(2 * page));
+        assert!(ExecMem::mapped_len_for(usize::MAX).is_none());
+        if supported() {
+            let mem = ExecMem::new(&vec![0; page + 1], |_, _| {}).expect("map");
+            assert_eq!(mem.len(), page + 1);
+            assert_eq!(mem.mapped_len(), 2 * page);
+        }
+    }
+
+    #[test]
+    fn patch_panic_releases_writable_mapping() {
+        if !supported() { return; }
+        let before = LIVE_MAPPED_BYTES.with(|n| n.get());
+        let panic = std::panic::catch_unwind(|| {
+            ExecMem::new(&[0; 32], |_, bytes| {
+                assert!(LIVE_MAPPED_BYTES.with(|n| n.get()) > before);
+                bytes.fill(0xC3);
+                panic!("patch failed");
+            });
+        });
+        assert!(panic.is_err());
+        assert_eq!(LIVE_MAPPED_BYTES.with(|n| n.get()), before);
+    }
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
