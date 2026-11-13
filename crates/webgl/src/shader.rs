@@ -82,6 +82,218 @@ enum ExprKind {
     Neg(Box<Expr>),
     Binary(char, Box<Expr>, Box<Expr>),
     Construct(Vec<Expr>),
+    Builtin(Builtin, Vec<Expr>),
+}
+
+/// Floating-point overloads shared by GLSL ES 1.00 and 3.00, sections 8.1–8.4.
+/// Integer/bool overloads require types this bounded evaluator does not expose.
+#[derive(Clone, Copy, Debug)]
+enum Builtin {
+    Radians,
+    Degrees,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Pow,
+    Exp,
+    Log,
+    Exp2,
+    Log2,
+    Sqrt,
+    InverseSqrt,
+    Abs,
+    Sign,
+    Floor,
+    Ceil,
+    Fract,
+    Mod,
+    Min,
+    Max,
+    Clamp,
+    Mix,
+    Step,
+    SmoothStep,
+    Length,
+    Distance,
+    Dot,
+    Normalize,
+    Cross,
+}
+impl Builtin {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "radians" => Self::Radians,
+            "degrees" => Self::Degrees,
+            "sin" => Self::Sin,
+            "cos" => Self::Cos,
+            "tan" => Self::Tan,
+            "asin" => Self::Asin,
+            "acos" => Self::Acos,
+            "atan" => Self::Atan,
+            "pow" => Self::Pow,
+            "exp" => Self::Exp,
+            "log" => Self::Log,
+            "exp2" => Self::Exp2,
+            "log2" => Self::Log2,
+            "sqrt" => Self::Sqrt,
+            "inversesqrt" => Self::InverseSqrt,
+            "abs" => Self::Abs,
+            "sign" => Self::Sign,
+            "floor" => Self::Floor,
+            "ceil" => Self::Ceil,
+            "fract" => Self::Fract,
+            "mod" => Self::Mod,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "clamp" => Self::Clamp,
+            "mix" => Self::Mix,
+            "step" => Self::Step,
+            "smoothstep" => Self::SmoothStep,
+            "length" => Self::Length,
+            "distance" => Self::Distance,
+            "dot" => Self::Dot,
+            "normalize" => Self::Normalize,
+            "cross" => Self::Cross,
+            _ => return None,
+        })
+    }
+    fn result_type(self, args: &[Expr]) -> Result<Ty, String> {
+        let types: Vec<Ty> = args.iter().map(|e| e.ty).collect();
+        if types
+            .iter()
+            .any(|ty| !matches!(ty, Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4))
+        {
+            return Err(format!(
+                "{self:?} requires floating-point scalar/vector arguments"
+            ));
+        }
+        let result = match (self, types.as_slice()) {
+            (Self::Cross, [Ty::Vec3, Ty::Vec3]) => Some(Ty::Vec3),
+            (Self::Cross, _) => None,
+            (Self::Length, [_]) => Some(Ty::Float),
+            (Self::Length, _) => None,
+            (Self::Dot | Self::Distance, [a, b]) if a == b => Some(Ty::Float),
+            (Self::Dot | Self::Distance, _) => None,
+            (Self::Min | Self::Max | Self::Mod, [a, b]) if a == b || *b == Ty::Float => Some(*a),
+            (Self::Min | Self::Max | Self::Mod, _) => None,
+            (Self::Pow, [a, b]) if a == b => Some(*a),
+            (Self::Pow, _) => None,
+            (Self::Clamp, [x, low, high])
+                if (x == low && x == high) || (*low == Ty::Float && *high == Ty::Float) =>
+            {
+                Some(*x)
+            }
+            (Self::Clamp, _) => None,
+            (Self::Mix, [x, y, a]) if x == y && (x == a || *a == Ty::Float) => Some(*x),
+            (Self::Mix, _) => None,
+            (Self::Step, [edge, x]) if edge == x || *edge == Ty::Float => Some(*x),
+            (Self::Step, _) => None,
+            (Self::SmoothStep, [low, high, x])
+                if (low == x && high == x) || (*low == Ty::Float && *high == Ty::Float) =>
+            {
+                Some(*x)
+            }
+            (Self::SmoothStep, _) => None,
+            (Self::Atan, [a, b]) if a == b => Some(*a),
+            (Self::Atan, [_]) => Some(types[0]),
+            (Self::Atan, _) => None,
+            (_, [a]) => Some(*a),
+            _ => None,
+        };
+        result.ok_or_else(|| format!("no supported {self:?} overload for {types:?}"))
+    }
+    fn eval(self, ty: Ty, args: &[Value]) -> Value {
+        let a = args[0];
+        let mut result = Value::zero(ty);
+        match self {
+            Self::Length | Self::Distance | Self::Dot => {
+                result.v[0] = (0..a.ty.n())
+                    .map(|i| match self {
+                        Self::Dot => a.v[i] * args[1].v[i],
+                        Self::Distance => (a.v[i] - args[1].v[i]).powi(2),
+                        _ => a.v[i] * a.v[i],
+                    })
+                    .sum::<f32>();
+                if !matches!(self, Self::Dot) {
+                    result.v[0] = result.v[0].sqrt();
+                }
+            }
+            Self::Normalize => {
+                let length = a.v[..a.ty.n()].iter().map(|x| x * x).sum::<f32>().sqrt();
+                for i in 0..a.ty.n() {
+                    result.v[i] = a.v[i] / length;
+                }
+            }
+            Self::Cross => {
+                let b = args[1];
+                result.v[..3].copy_from_slice(&[
+                    a.v[1] * b.v[2] - a.v[2] * b.v[1],
+                    a.v[2] * b.v[0] - a.v[0] * b.v[2],
+                    a.v[0] * b.v[1] - a.v[1] * b.v[0],
+                ]);
+            }
+            _ => {
+                for i in 0..ty.n() {
+                    let at =
+                        |arg: usize| args[arg].v[if args[arg].ty == Ty::Float { 0 } else { i }];
+                    let x = at(0);
+                    result.v[i] = match self {
+                        Self::Radians => x.to_radians(),
+                        Self::Degrees => x.to_degrees(),
+                        Self::Sin => x.sin(),
+                        Self::Cos => x.cos(),
+                        Self::Tan => x.tan(),
+                        Self::Asin => x.asin(),
+                        Self::Acos => x.acos(),
+                        Self::Atan if args.len() == 2 => x.atan2(at(1)),
+                        Self::Atan => x.atan(),
+                        Self::Pow => x.powf(at(1)),
+                        Self::Exp => x.exp(),
+                        Self::Log => x.ln(),
+                        Self::Exp2 => x.exp2(),
+                        Self::Log2 => x.log2(),
+                        Self::Sqrt => x.sqrt(),
+                        Self::InverseSqrt => x.sqrt().recip(),
+                        Self::Abs => x.abs(),
+                        Self::Sign => {
+                            if x > 0. {
+                                1.
+                            } else if x < 0. {
+                                -1.
+                            } else {
+                                0.
+                            }
+                        }
+                        Self::Floor => x.floor(),
+                        Self::Ceil => x.ceil(),
+                        Self::Fract => x - x.floor(),
+                        Self::Mod => x - at(1) * (x / at(1)).floor(),
+                        Self::Min => x.min(at(1)),
+                        Self::Max => x.max(at(1)),
+                        // GLSL leaves reversed bounds undefined; avoid host clamp's panic.
+                        Self::Clamp => x.max(at(1)).min(at(2)),
+                        Self::Mix => x * (1. - at(2)) + at(1) * at(2),
+                        Self::Step => {
+                            if at(1) < x {
+                                0.
+                            } else {
+                                1.
+                            }
+                        }
+                        Self::SmoothStep => {
+                            let t = ((at(2) - x) / (at(1) - x)).max(0.).min(1.);
+                            t * t * (3. - 2. * t)
+                        }
+                        _ => unreachable!("geometric function handled above"),
+                    };
+                }
+            }
+        }
+        result
+    }
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Shader {
@@ -123,6 +335,13 @@ impl Expr {
         sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
     ) -> Value {
         match &self.kind {
+            ExprKind::Builtin(function, args) => {
+                let mut values = [Value::zero(Ty::Float); 3];
+                for (i, arg) in args.iter().enumerate() {
+                    values[i] = arg.eval(env, sample);
+                }
+                function.eval(self.ty, &values[..args.len()])
+            }
             ExprKind::Texture(unit, uv) => {
                 let unit = unit.eval(env, sample);
                 let uv = uv.eval(env, sample);
@@ -360,8 +579,13 @@ impl Parser {
         Ty::parse(&n).ok_or_else(|| format!("unsupported type {n}"))
     }
     fn declare(&mut self, name: String, ty: Ty, qual: Qual) -> Result<(), String> {
-        if self.shader.version == 300 && qual != Qual::Local && name == "texture" {
-            return Err("global variable conflicts with built-in texture function".into());
+        if self.shader.version == 300
+            && qual != Qual::Local
+            && (name == "texture" || Builtin::parse(&name).is_some())
+        {
+            return Err(format!(
+                "global variable conflicts with built-in {name} function"
+            ));
         }
         if ty == Ty::Sampler2D && (qual != Qual::Uniform || self.vertex) {
             return Err("sampler2D is supported only as a fragment uniform".into());
@@ -477,6 +701,36 @@ impl Parser {
                     Expr {
                         ty: Ty::Vec4,
                         kind: ExprKind::Texture(Box::new(unit), Box::new(uv)),
+                    }
+                } else if let Some(function) =
+                    Builtin::parse(&name).filter(|_| *self.peek() == Tok::P('('))
+                {
+                    if self.shader.symbols.contains_key(&name) {
+                        return Err(format!("{name} is a variable, not a callable function"));
+                    }
+                    self.expect(Tok::P('('))?;
+                    let mut args = Vec::new();
+                    if !self.eat(')') {
+                        loop {
+                            if args.len() >= 3 {
+                                return Err("too many built-in function arguments".into());
+                            }
+                            args.push(self.expr(0)?);
+                            if self.eat(')') {
+                                break;
+                            }
+                            self.expect(Tok::P(','))?;
+                        }
+                    }
+                    let ty = function.result_type(&args)?;
+                    // Math calls remain within the shader's bounded execution budget.
+                    self.shader.cost += 4 * ty.n();
+                    if self.shader.cost > 512 {
+                        return Err("shader exceeds expression budget".into());
+                    }
+                    Expr {
+                        ty,
+                        kind: ExprKind::Builtin(function, args),
                     }
                 } else if let Some(ty) = Ty::parse(&name) {
                     if ty == Ty::Sampler2D {
