@@ -1236,3 +1236,104 @@ bajo el `heavy.lock`):
   sensible al momento (por bytes y objetos a la vez) para que mover el
   trabajo no mueva colecciones enteras dentro de las ventanas medidas.
 
+### S2.8 GC incremental (pausas cortas)
+
+Motivo: S2.6/S2.7 — una recolección completa caía dentro de las ventanas
+medidas. Medido antes de tocar nada (`RH_GC_STATS=1`: número de pausas,
+total, máximo, p95, histograma y tiempo por fase; mismo equipo, local,
+con el asignador del navegador — `shot` usaba el del sistema, que es
+~20 % más lento en Speedometer y no activa el disparo por bytes):
+
+| | pausa máx. | p95 | GC total |
+|---|---:|---:|---:|
+| Speedometer (TodoMVC-jQuery, Charts-chartjs, NewsSite-Next) | 12–20 ms | 11–12,5 ms | ~420–480 ms |
+| YouTube (portada, 15 s) | 47–69 ms | 37–54 ms | 235–300 ms |
+| portada de un diario grande (15 s) | 29 ms | 24 ms | ~700 ms |
+
+El barrido es más de la mitad del coste (liberar ~45 k objetos por ciclo).
+
+Diseño (`heap.rs`, `realm.rs`):
+
+- **Marcado incremental snapshot-at-the-beginning** (tricolor: blanco,
+  gris, negro, y «negro débil» para WeakMap/WeakSet escaneados cuyas
+  entradas esperan al paso de efímeros). Un ciclo agrisa las raíces de
+  golpe (`gc_roots`, < 0,2 ms) y marca por pasos con presupuesto. Todo lo
+  alcanzable al empezar, más todo lo asignado desde entonces (se asigna
+  negro), sobrevive.
+- **Barrera de escritura en `Heap::get_mut` / `try_get_mut`**: toda
+  modificación de un objeto pasa por ahí (propiedades, elementos,
+  variables de closures/scopes, prototipos, Map/Set, frames de
+  generadores, wrappers DOM...), así que un objeto no escaneado se
+  escanea antes de cambiar. Coste fuera del marcado: una comparación de
+  un byte. Los dos sitios que escriben sin `get_mut` la llaman a mano:
+  el store en línea de globales del IC (`ic_set_global`) y las entradas
+  de WeakMap (sus valores no se trazan al escanear el mapa: `set`,
+  `delete` y `getOrInsertComputed` agrisan el valor que se pierde,
+  `Heap::shade_value`). Las raíces no llevan barrera: forman parte de la
+  instantánea.
+- **JIT**: los stores en línea (`SetPropR` propio, `SetElemR`,
+  `SetLocalR`, `SetGlobalR` de propiedad del global) miran
+  `heap.marking` y, si está activo, el byte de marca del objeto (offset
+  de `marks` sondeado en `jit/layout.rs`); solo un objeto aún no
+  escaneado va al helper (cuyo `get_mut` lo escanea).
+- **Barrido perezoso** por pasos; libera objetos blancos y quita de las
+  WeakMap/WeakSet vivas las entradas de claves muertas. Los huecos
+  liberados se reutilizan solo al terminar el barrido (y entonces sube
+  `collections`, la época de las cachés de llamada), así que un id no
+  cambia de objeto dentro de un ciclo.
+- **Ritmo**: el disparo es el de antes (objetos o bytes desde el último
+  ciclo). Durante un ciclo, un paso de 1 ms (`RH_GC_SLICE_US`) cada 2048
+  objetos o 512 KB asignados; si la asignación adelanta al colector, pasos
+  más largos (hasta 8×) y, al cuádruple del presupuesto, el resto de
+  golpe. Fuera de la ejecución de scripts, `Realm::gc_idle(deadline)`
+  continúa el ciclo o empieza uno a mitad del umbral: lo llaman el bucle
+  del hilo de contenido de la GUI (pasos de ≤ 4 ms, mensajes primero), el
+  `settle` del CLI y `shot` cuando no hay nada pendiente.
+  `RH_GC_INCREMENTAL=0` vuelve a las colecciones completas.
+- **Estrés**: `RH_GC_STRESS=inc` hace 1–48 unidades de trabajo del
+  colector en cada safepoint (tick 1), con ciclos encadenados; el modo
+  completo (`RH_GC_STRESS=1`) ya no depende de la feature `jit`.
+
+Validación: `jit-check` (js, script, frameworks; 354 tests) bajo
+`RH_GC_STRESS=inc` con JIT apagado y a umbral 0: todo pasa e idéntico,
+salvo `tests_webapi::indexeddb_in_memory` a umbral 0 en una de las dos
+tandas — el fallo intermitente con carga de S2.6 (el equipo estaba a
+carga 45; solo, con el mismo estrés, pasa siempre). Sin estrés, igual. `jitdiff` bajo
+`RH_GC_STRESS=inc`: 30 000 programas + el corpus de `perf.rs` con el
+binario anterior al barrier en línea y otros 30 000 con el final, 0
+diferencias. Tests nuevos: barrera a
+nivel de heap y un programa que mueve referencias (objetos, arrays,
+closures, Map/Set, WeakMap, generadores, prototipos) mientras se marca.
+`gc_memory` pasa (también bajo estrés).
+
+Resultados (mismo binario, `RH_GC_INCREMENTAL=0` frente al incremental,
+alternos, bajo `heavy.lock`):
+
+| | antes: máx. / p95 | ahora: máx. / p95 | GC antes → ahora |
+|---|---:|---:|---:|
+| Speedometer (subconjunto) | 12,4–12,6 / 11,1–11,3 ms | 1,5 / 1,0 ms | 418–423 → 426–431 ms |
+| YouTube | 46–55 / 45–48 ms | 3,5–3,6 / 1,0 ms | 236–271 → 169–195 ms en script (+53–80 ms en reposo) |
+| diario grande | 26–32 / 25–30 ms | 1,6–1,8 / 1,0 ms | 381–457 → 291–343 ms |
+
+(JIT apagado y encendido dan las mismas pausas; las cifras de cada fila
+cubren ambos.)
+
+- Speedometer no tiene tiempo ocioso en `shot` (siempre hay un
+  temporizador vencido), así que todo el trabajo sigue dentro de la
+  ventana medida, repartido en pasos de 1 ms. Geomean: paridad dentro
+  del ruido (+0,1 … +1,6 % en dos tandas de 4–5 rondas; pasos de 2 y
+  4 ms no cambian nada).
+- Generación joven: no se hace. El marcado es ~1/3 del coste de la GC y
+  la GC ~4–5 % del tiempo de Speedometer; una nursery ahorraría como
+  mucho ~1,5 % a cambio de barrera permanente (no solo durante el
+  marcado) y conjunto recordado. El barrido (liberar) no se ahorra.
+- JIT por defecto (criterio de S2.7): `perf.rs` sigue sin casos
+  < 0,95× (peor: array_map 0,96, push_objects 0,97; total 1,27×). En
+  Speedometer, con la GC incremental en ambos lados, JIT/VM = +1,5 %
+  (8 rondas), +0,5 % (5) y +0,7 % (6): Charts ya no se lleva la
+  recolección entera (0,996–1,013×), pero TodoMVC y NewsSite siguen
+  1–2 % por encima. **No se cumple «≥ 0 %»: el JIT sigue apagado**; lo
+  que queda es del propio código nativo (llamadas, S2.7), no de la GC.
+  Cambiar `ENTRY_MIN_OPS` no lo arregla (5 rondas: 24 → +1,1 %, 48 →
+  +2,3 %, solo bucles → +1,0 %).
+
