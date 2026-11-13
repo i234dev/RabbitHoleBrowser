@@ -1282,20 +1282,87 @@ fn e_scroll_left_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult
 
 fn e_scroll_into_view(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "scrollIntoView")?;
-    let r = node_rect(n);
-    let align_top = match args.first().map(Value::v) {
-        Some(V::Bool(b)) => b,
+    // ScrollIntoViewOptions: block "start" / inline "nearest" by default;
+    // `false` is block "end".
+    let (mut block, mut inline) = ("start".to_string(), "nearest".to_string());
+    match args.first().map(Value::v) {
+        Some(V::Bool(false)) => block = "end".into(),
         Some(v) if v.is_object() => {
-            let b = dict_str(realm, &v.to_value(), "block")?;
-            !matches!(b.as_deref(), Some("end") | Some("nearest"))
+            let o = v.to_value();
+            for (key, slot) in [("block", &mut block), ("inline", &mut inline)] {
+                if let Some(s) = dict_str(realm, &o, key)? {
+                    if !matches!(s.as_str(), "start" | "center" | "end" | "nearest") {
+                        return Err(realm.throw_type_error(&format!("Failed to execute 'scrollIntoView' on 'Element': The provided value '{s}' is not a valid enum value of type ScrollLogicalPosition.")));
+                    }
+                    *slot = s;
+                }
+            }
         }
-        _ => true,
-    };
+        _ => {}
+    }
+    if n.doc != 0 || !with_doc(0, |doc| doc.is_connected(n.node)) {
+        return Ok(Value::Undefined);
+    }
+    // The new offset along one axis of a scrollport [lo, hi) for a target
+    // [t0, t1) (all in the same coordinates), from the current offset.
+    fn aligned(cur: f32, lo: f32, hi: f32, t0: f32, t1: f32, how: &str, flip: bool) -> f32 {
+        let how = match (how, flip) {
+            ("start", true) => "end",
+            ("end", true) => "start",
+            (h, _) => h,
+        };
+        match how {
+            "start" => cur + (t0 - lo),
+            "end" => cur + (t1 - hi),
+            "center" => cur + ((t0 + t1) / 2.0 - (lo + hi) / 2.0),
+            _ => {
+                // nearest: no change when the target is inside; otherwise
+                // align the edge it overflows on (the start for a target
+                // larger than the scrollport).
+                if (t0 >= lo && t1 <= hi) || (t0 < lo && t1 > hi) {
+                    cur
+                } else if (t0 < lo) == (t1 - t0 <= hi - lo) {
+                    cur + (t0 - lo)
+                } else {
+                    cur + (t1 - hi)
+                }
+            }
+        }
+    }
+    // Scrolling boxes from the innermost out, then the viewport.
+    let mut cur = with_doc(0, |doc| doc.flat_parent(n.node));
+    while let Some(p) = cur {
+        if p == rabbithole_dom::Document::ROOT {
+            break;
+        }
+        let style = with_env(|env| env.computed_style(p));
+        let is_root = with_doc(0, |doc| doc.is_element(p, "html") || doc.is_element(p, "body"));
+        if let Some(s) = style.filter(|s| !is_root && (matches!(s.overflow_x, rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Hidden) || matches!(s.overflow_y, rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto | rabbithole_style::Overflow::Hidden))) {
+            if let Some(((sx, sy), _)) = with_env(|env| env.element_scroll(p)) {
+                let t = node_rect(n);
+                let pr = node_rect(NodeRef::main(p));
+                let (bl, bt) = (s.border_width.left, s.border_width.top);
+                let (cw, ch) = client_size(NodeRef::main(p));
+                let (lo_x, lo_y) = (pr.x + bl, pr.y + bt);
+                let vertical = !matches!(s.writing_mode, rabbithole_style::WritingMode::HorizontalTb);
+                let rtl = s.direction == rabbithole_style::Direction::Rtl;
+                let (bx, by) = if vertical { (&block, &inline) } else { (&inline, &block) };
+                let flip_x = if vertical { s.writing_mode == rabbithole_style::WritingMode::VerticalRl } else { rtl };
+                let flip_y = vertical && (rtl != (s.writing_mode == rabbithole_style::WritingMode::SidewaysLr));
+                let nx = aligned(sx, lo_x, lo_x + cw, t.x, t.x + t.w, bx, flip_x);
+                let ny = aligned(sy, lo_y, lo_y + ch, t.y, t.y + t.h, by, flip_y);
+                with_env(|env| env.set_element_scroll(p, nx.max(0.0), ny.max(0.0)));
+            }
+        }
+        cur = with_doc(0, |doc| doc.flat_parent(p));
+    }
+    let t = node_rect(n);
     with_env(|env| {
         let (vw, vh) = env.viewport();
-        let _ = vw;
-        let y = if align_top { r.y } else { (r.y + r.h - vh).max(0.0) };
-        env.set_scroll(0.0, y.max(0.0));
+        let (sx, sy) = env.scroll();
+        let nx = aligned(sx, sx, sx + vw, t.x, t.x + t.w, &inline, false);
+        let ny = aligned(sy, sy, sy + vh, t.y, t.y + t.h, &block, false);
+        env.set_scroll(nx.max(0.0), ny.max(0.0));
     });
     Ok(Value::Undefined)
 }

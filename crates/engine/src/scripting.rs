@@ -277,7 +277,16 @@ impl HostEnv for EngineEnv<'_> {
         self.page.page_scroll
     }
     fn set_scroll(&mut self, x: f32, y: f32) {
-        self.page.requested_scroll = Some((x.max(0.0), y.max(0.0)));
+        // Instant: scripts see the new position right away (clamped to the
+        // scrollable area); the embedder follows `scroll_to`.
+        self.ensure_layout();
+        let vp = self.page.viewport;
+        let max_x = (self.page.content_width() - vp.width).max(0.0);
+        let max_y = (self.page.content_height() - vp.height).max(0.0);
+        let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
+        let (x, y) = (finite(x).clamp(0.0, max_x), finite(y).clamp(0.0, max_y));
+        self.engine.set_page_scroll(self.page, x, y);
+        self.page.requested_scroll = Some((x, y));
     }
     fn fetch(&mut self, req: Request) -> Result<Response, String> {
         if !req.url.is_http() && req.url.scheme != "data" && req.url.scheme != "file" {

@@ -1437,6 +1437,16 @@ impl Engine {
             return false;
         }
         let p = b.padding_rect();
+        // The scrolling area may extend past what layout recorded (content
+        // overflowing through negative margins, end padding).
+        let area = scrolling_area(b);
+        if area.0 > b.scroll_width || area.1 > b.scroll_height {
+            if let Some(bm) = page.layout.box_of_mut(&page.doc, node) {
+                bm.scroll_width = bm.scroll_width.max(area.0);
+                bm.scroll_height = bm.scroll_height.max(area.1);
+            }
+        }
+        let Some(b) = page.layout.box_of(&page.doc, node) else { return false };
         let max = ((b.scroll_width - p.w).max(0.0), (b.scroll_height - p.h).max(0.0));
         let to = (x.clamp(0.0, max.0), y.clamp(0.0, max.1));
         if to == b.scroll_offset {

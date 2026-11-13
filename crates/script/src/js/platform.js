@@ -706,4 +706,49 @@
   define('CacheStorage', CacheStorage);
   const caches = make(CacheStorage, new Map());
   Object.defineProperty(g, 'caches', { get() { return caches; }, configurable: true, enumerable: true });
+
+  // Scroll methods return a promise settled when the scroll completes
+  // (CSSOM View): scrolling here is instant, so it is already settled.
+  const promiseScroll = (o, name) => {
+    const d = o && Object.getOwnPropertyDescriptor(o, name);
+    if (!d || typeof d.value !== 'function') return;
+    const f = d.value;
+    const w = { [name](...args) { f.apply(this, args); return Promise.resolve(); } }[name];
+    Object.defineProperty(w, 'length', { value: f.length, configurable: true });
+    Object.defineProperty(o, name, Object.assign({}, d, { value: w }));
+  };
+  if (g.Element) for (const n of ['scroll', 'scrollTo', 'scrollBy', 'scrollIntoView']) promiseScroll(g.Element.prototype, n);
+
+  // Element.checkVisibility(options) (CSSOM View): no box (disconnected,
+  // display: none on it or a flat-tree ancestor, under content-visibility:
+  // hidden) → false; optionally opacity 0 / visibility not visible too.
+  if (g.Element && g.getComputedStyle) {
+    const flatParent = (n) => {
+      if (n.assignedSlot) return n.assignedSlot;
+      const p = n.parentNode;
+      if (p && p.nodeType === 11 && p.host) return p.host;
+      return p && p.nodeType === 1 ? p : null;
+    };
+    Object.defineProperty(g.Element.prototype, 'checkVisibility', {
+      value: function checkVisibility(options) {
+        const o = options || {};
+        if (!this.isConnected) return false;
+        const checkOpacity = !!(o.checkOpacity || o.opacityProperty);
+        const checkVis = !!(o.checkVisibilityCSS || o.visibilityProperty);
+        for (let n = this, self = true; n; n = flatParent(n), self = false) {
+          const s = g.getComputedStyle(n);
+          if (s.display === 'none' || (self && s.display === 'contents')) return false;
+          if (!self && s.getPropertyValue('content-visibility') === 'hidden') return false;
+          if (checkOpacity && Number(s.opacity) === 0) return false;
+        }
+        if (checkVis && g.getComputedStyle(this).visibility !== 'visible') return false;
+        return true;
+      },
+      writable: true, configurable: true, enumerable: true,
+    });
+  }
+  for (const n of ['scroll', 'scrollTo', 'scrollBy']) {
+    if (Object.prototype.hasOwnProperty.call(g, n)) promiseScroll(g, n);
+    else if (g.Window) promiseScroll(g.Window.prototype, n);
+  }
 })();
