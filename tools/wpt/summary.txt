@@ -31,9 +31,9 @@ domparsing                                               96      2777      3610 
 encoding                                                 81     18768     23416   80.2%
 encoding/streams                                         24       164       219   74.9%
 hr-time                                                  17        69        94   73.4%
-html/syntax                                             403      8403      8797   95.5%
+html/syntax                                             403      8483      8797   96.4%
 html/webappapis                                          36       222       347   64.0%
 url                                                      77     10585     12345   85.7%
 webidl                                                    3       288       351   82.1%
 webidl/ecmascript-binding                                56       297       471   63.1%
-TOTAL                                                  2843    107913    131464   82.1%
+TOTAL                                                  2843    107993    131464   82.1%
