@@ -353,6 +353,7 @@ fn keyboard_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
         id,
         &dict,
         &[
+            ("view", Value::Null),
             ("key", Value::str("")),
             ("code", Value::str("")),
             ("location", Value::Number(0.0)),
@@ -386,7 +387,17 @@ fn input_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
 fn focus_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let id = event_ctor_generic(realm, "FocusEvent", args)?;
     let dict = arg(args, 1);
-    copy_dict_props(realm, id, &dict, &[("relatedTarget", Value::Null)])?;
+    copy_dict_props(realm, id, &dict, &[("view", Value::Null), ("detail", Value::Number(0.0)), ("relatedTarget", Value::Null)])?;
+    Ok(Value::Object(id))
+}
+
+fn composition_event_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let id = event_ctor_generic(realm, "CompositionEvent", args)?;
+    let dict = arg(args, 1);
+    copy_dict_props(realm, id, &dict, &[("view", Value::Null), ("detail", Value::Number(0.0))])?;
+    let data = dict_value(realm, &dict, "data")?;
+    let data = if data.is_undefined() { Value::str("") } else { Value::str(&realm.to_rust_string(data)?) };
+    realm.define_property(id, "data", data, ACC);
     Ok(Value::Object(id))
 }
 
@@ -1033,6 +1044,52 @@ fn default_action_for(realm: &mut Realm, key: TargetKey, ty: &str) -> DefaultAct
     })
 }
 
+/// The node an event's own `relatedTarget` names, if any.
+fn related_target_of(realm: &mut Realm, eid: ObjectId) -> Option<NodeRef> {
+    let p = rabbithole_js::PropertyKey::str("relatedTarget");
+    let v = realm.obj(eid).props.get(&p).map(|p| p.value.clone())?;
+    node_of(realm, &v)
+}
+
+/// Retarget node `a` against `b` (None: a non-node target): up through
+/// shadow hosts until `a`'s root is not a shadow root or contains `b`.
+fn retarget_ref(a: NodeRef, b: Option<NodeRef>) -> NodeRef {
+    with_doc(a.doc, |doc| {
+        let mut n = a.node;
+        loop {
+            let root = doc.tree_root(n);
+            if !doc.is_shadow_root(root) || b.map(|b| b.doc == a.doc && doc.is_shadow_including_inclusive_ancestor(root, b.node)).unwrap_or(false) {
+                return NodeRef { doc: a.doc, node: n };
+            }
+            match doc.shadow_host(root) {
+                Some(h) => n = h,
+                None => return NodeRef { doc: a.doc, node: n },
+            }
+        }
+    })
+}
+
+/// After a dispatch: the event's target and relatedTarget are those seen
+/// from the outermost tree; if either is still in a shadow tree, both are
+/// cleared (DOM "clearTargets").
+fn clear_targets(realm: &mut Realm, eid: ObjectId, path: &[(TargetKey, Value, Value)], related: Option<NodeRef>) {
+    let last_target = path.last().and_then(|(_, _, t)| node_of(realm, t));
+    let rel = related.map(|r| retarget_ref(r, last_target));
+    let in_shadow = |n: NodeRef| with_doc(n.doc, |doc| doc.is_shadow_root(doc.tree_root(n.node)));
+    let clear = last_target.map(in_shadow).unwrap_or(false) || rel.map(in_shadow).unwrap_or(false);
+    if clear {
+        if let Some(d) = realm.host_data_mut::<EventData>(eid) {
+            d.target = Value::Null;
+        }
+        if related.is_some() {
+            realm.define_property(eid, "relatedTarget", Value::Null, ACC);
+        }
+    } else if let Some(r) = rel {
+        let v = wrap(realm, r);
+        realm.define_property(eid, "relatedTarget", v, ACC);
+    }
+}
+
 /// Dispatch an existing Event object.
 pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, target_override: Option<Value>) -> DispatchResult {
     let composed = realm.host_data::<EventData>(eid).map(|d| d.composed).unwrap_or(false);
@@ -1071,12 +1128,49 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
         (V::Object(a), V::Object(b)) => a == b,
         _ => false,
     };
+    // relatedTarget (MouseEvent, FocusEvent, ...): retargeted against each
+    // current target; a dispatch whose target is its own retargeted
+    // relatedTarget (and not the relatedTarget itself) runs no listeners.
+    let related = related_target_of(realm, eid);
+    let target_node = match key {
+        TargetKey::Node(n) => Some(n),
+        _ => None,
+    };
+    let skip = match (related, target_node) {
+        (Some(r), Some(t)) => retarget_ref(r, Some(t)) == t && t != r,
+        _ => false,
+    };
+    if skip {
+        state().borrow_mut().event_stack.pop();
+        let d = realm.host_data_mut::<EventData>(eid).expect("event data");
+        d.dispatching = false;
+        d.phase = 0;
+        d.current_target = Value::Null;
+        d.propagation_stopped = false;
+        d.immediate_stopped = false;
+        d.path.clear();
+        let prevented = d.default_prevented;
+        clear_targets(realm, eid, &path, related);
+        return DispatchResult { default_prevented: prevented, handled: false, default_action: DefaultAction::None };
+    }
+    let set_related = |realm: &mut Realm, k: &TargetKey| {
+        if let Some(r) = related {
+            let against = match k {
+                TargetKey::Node(n) => Some(*n),
+                TargetKey::Window => Some(NodeRef { doc: r.doc, node: Document::ROOT }),
+                _ => None,
+            };
+            let v = wrap(realm, retarget_ref(r, against));
+            realm.define_property(eid, "relatedTarget", v, ACC);
+        }
+    };
     // Capture phase: window → … → target.
     for (i, entry) in path.iter().enumerate().rev() {
         if stopped(realm, eid) {
             break;
         }
         let (k, v, t) = entry;
+        set_related(realm, k);
         let phase = if at_target(entry) { 2 } else { 1 };
         if i != 0 && phase == 1 {
             set_phase_target(realm, eid, 1, v.clone(), t.clone());
@@ -1092,6 +1186,7 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
             break;
         }
         let (k, v, t) = entry;
+        set_related(realm, k);
         let is_target = i == 0 || at_target(entry);
         if is_target {
             set_phase_target(realm, eid, 2, v.clone(), t.clone());
@@ -1115,6 +1210,9 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
     }
     d.path.clear();
     let default_prevented = d.default_prevented;
+    if related.is_some() || matches!(key, TargetKey::Node(_)) {
+        clear_targets(realm, eid, &path, related);
+    }
     if let Some(pre) = activation {
         let target = match key {
             TargetKey::Node(n) => Some(n),
@@ -1383,7 +1481,7 @@ pub(crate) fn install(realm: &mut Realm) {
     define_class(realm, "KeyboardEvent", Some("UIEvent"), keyboard_event_ctor);
     define_class(realm, "InputEvent", Some("UIEvent"), input_event_ctor);
     define_class(realm, "FocusEvent", Some("UIEvent"), focus_event_ctor);
-    define_class(realm, "CompositionEvent", Some("UIEvent"), input_event_ctor);
+    define_class(realm, "CompositionEvent", Some("UIEvent"), composition_event_ctor);
     define_class(realm, "TouchEvent", Some("UIEvent"), generic_sub_event_ctor);
     define_class(realm, "ErrorEvent", Some("Event"), error_event_ctor);
     define_class(realm, "MessageEvent", Some("Event"), message_event_ctor);
@@ -1567,6 +1665,11 @@ fn post_activation(realm: &mut Realm, pre: PreActivation, canceled: bool, target
         return;
     }
     let connected = with_doc(n.doc, |doc| doc.is_connected(n.node));
+    // A control disabled by a listener does nothing.
+    let disabled = with_doc(n.doc, |doc| doc.element(n.node).map(|e| matches!(e.tag.as_str(), "input" | "button") && e.attr("disabled").is_some()).unwrap_or(false));
+    if disabled && matches!(pre.kind, Activation::Submit | Activation::Reset | Activation::Button) {
+        return;
+    }
     match pre.kind {
         Activation::Checkbox | Activation::Radio => {
             if connected && !(pre.kind == Activation::Radio && pre.was_checked) {

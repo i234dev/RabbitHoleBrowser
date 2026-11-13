@@ -541,8 +541,20 @@ fn d_element_from_point(realm: &mut Realm, this: Value, args: &[Value]) -> JsRes
     if d != 0 {
         return Ok(Value::Null);
     }
-    let x = realm.to_number(arg(args, 0))? as f32;
-    let y = realm.to_number(arg(args, 1))? as f32;
+    if args.len() < 2 {
+        return Err(realm.throw_type_error(&format!("Failed to execute 'elementFromPoint' on 'Document': 2 arguments required, but only {} present.", args.len())));
+    }
+    let x = realm.to_number(arg(args, 0))?;
+    let y = realm.to_number(arg(args, 1))?;
+    if !x.is_finite() || !y.is_finite() {
+        return Err(realm.throw_type_error("Failed to execute 'elementFromPoint' on 'Document': The provided double value is non-finite."));
+    }
+    // Points outside the viewport hit nothing.
+    let (vw, vh) = with_env(|env| env.viewport());
+    if x < 0.0 || y < 0.0 || x > vw as f64 || y > vh as f64 {
+        return Ok(Value::Null);
+    }
+    let (x, y) = (x as f32, y as f32);
     // Shadow content is retargeted to its host for the document.
     let best = hit_test(x, y).map(|n| with_doc(0, |doc| crate::shadow::retarget(doc, n, Document::ROOT)));
     Ok(wrap_opt(realm, 0, best.or_else(|| with_doc(0, |doc| doc.body()))))
@@ -927,6 +939,15 @@ fn impl_empty_array(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Va
     Ok(realm.new_array_value(vec![]))
 }
 
+/// `new Document()`: an empty XML document (DOM §4.5).
 fn doc_ctor(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
-    Ok(new_aux_document(realm, ""))
+    let mut doc = Document::new();
+    doc.is_html = false;
+    doc.content_type = "application/xml".to_string();
+    let v = new_aux_document_from(realm, doc);
+    if let V::Object(o) = v.v() {
+        let p = realm.proto_from_new_target(proto("Document"));
+        realm.obj_mut(o).set_proto(Some(p));
+    }
+    Ok(v)
 }

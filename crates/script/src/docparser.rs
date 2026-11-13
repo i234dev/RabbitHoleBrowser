@@ -380,6 +380,7 @@ pub(crate) fn stream_open(realm: &mut Realm, _this: Value, args: &[Value]) -> Js
         Ok(realm.to_boolean(&v))
     };
     let run_scripts = flag(realm, "runScripts")?;
+    let dsd = flag(realm, "dsd")?;
     let check = flag(realm, "check")?;
     let d = n.doc;
     // The container whose children are written, and the context element.
@@ -452,7 +453,7 @@ pub(crate) fn stream_open(realm: &mut Realm, _this: Value, args: &[Value]) -> Js
         crate::node::record_child_list(NodeRef { doc: d, node: container }, Vec::new(), removed);
     }
     let scripting = d == 0 || d & FRAME_DOC != 0;
-    let mut parser = Parser::new_fragment(context, &ctx_tag, ctx_ns, container, before, form, scripting, false);
+    let mut parser = Parser::new_fragment(context, &ctx_tag, ctx_ns, container, before, form, scripting, dsd);
     parser.set_pause_on_scripts(run_scripts);
     let o = realm.new_object();
     realm.set_host_data(o, Box::new(RefCell::new(StreamParser { parser, doc: d, container, before, run_scripts, closed: false })));

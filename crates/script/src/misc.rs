@@ -111,8 +111,16 @@ fn xml_serializer_ctor(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult
 }
 
 fn xml_serializer_serialize(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let Some(n) = node_of(realm, &arg(args, 0)) else {
-        return Err(realm.throw_type_error("parameter 1 is not of type 'Node'"));
+    let v = arg(args, 0);
+    let Some(n) = node_of(realm, &v) else {
+        // An Attr serializes as the empty string.
+        if v.is_object() {
+            let t = realm.get_str(v, "nodeType")?;
+            if matches!(t.v(), V::Number(x) if x == 2.0) {
+                return Ok(Value::str(""));
+            }
+        }
+        return Err(realm.throw_type_error("Failed to execute 'serializeToString' on 'XMLSerializer': parameter 1 is not of type 'Node'."));
     };
     // XMLSerializer does not require well-formedness.
     Ok(Value::str(&with_doc(n.doc, |doc| doc.serialize_xml(n.node, false)).unwrap_or_default()))

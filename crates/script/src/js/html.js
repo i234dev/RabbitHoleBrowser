@@ -139,11 +139,10 @@
   }
   const E = g.Element, CD = g.CharacterData, SR = g.ShadowRoot, DF = g.DocumentFragment;
   for (const [C, insert] of [[E, true], [SR, true]]) {
-    method(C, 'setHTMLUnsafe', function (html) {
-      if (this instanceof g.HTMLTemplateElement) { this.content.replaceChildren(fragmentFor(this, html)); return; }
-      this.replaceChildren(fragmentFor(this, html));
-    });
-    method(C, 'setHTML', function (html) { this.setHTMLUnsafe(sanitize(String(html))); });
+    // setHTML / setHTMLUnsafe: the children replaced by the markup parsed
+    // with declarative shadow roots allowed.
+    method(C, 'setHTMLUnsafe', function (html, opts) { parseHTMLInto(this, 'html', false, html, opts, true); });
+    method(C, 'setHTML', function (html, opts) { parseHTMLInto(this, 'html', true, html, opts, true); });
     method(C, 'getHTML', function (opts) {
       if (!opts || !opts.serializableShadowRoots) return this.innerHTML;
       return this.innerHTML;
@@ -164,7 +163,7 @@
   // the streaming parser fed all at once. Positional methods on a node
   // without a parent do nothing; a Document, plain DocumentFragment or
   // <html> parent is a HierarchyRequestError.
-  function parseHTMLInto(node, pos, safe, html, opts) {
+  function parseHTMLInto(node, pos, safe, html, opts, dsd) {
     if (opts !== undefined && opts !== null && typeof opts !== 'object') throw new TypeError('The options argument must be an object.');
     const positional = pos === 'before' || pos === 'after' || pos === 'replaceWith';
     if (positional) {
@@ -173,22 +172,24 @@
       if (p.nodeType === 1 && p.namespaceURI === 'http://www.w3.org/1999/xhtml' && (p.localName === 'html' || p.localName === 'template')) {
         throw domError("Failed to execute: the parent is an html or template element.", 'HierarchyRequestError');
       }
-    } else if (isHTMLRoot(node)) {
+    } else if (pos !== 'html' && isHTMLRoot(node)) {
       throw domError("Failed to execute: cannot insert HTML into an html element.", 'HierarchyRequestError');
     }
+    // The safe methods never put markup into a script element.
+    if (safe && isScriptEl(positional ? node.parentNode : node)) return;
     let markup;
     if (safe) {
       markup = String(html);
     } else {
       const iface = positional ? 'Node' : (g.ShadowRoot && node instanceof g.ShadowRoot ? 'ShadowRoot' : 'Element');
-      const r = g.__rhTrustedHTMLSink(html, opts, `${iface} ${pos}HTMLUnsafe`);
+      const r = g.__rhTrustedHTMLSink(html, opts, pos === 'html' ? `${iface} setHTMLUnsafe` : `${iface} ${pos}HTMLUnsafe`);
       markup = r.html;
       opts = r.options;
     }
     const runScripts = !safe && !!(opts && opts.runScripts);
     N.streamOpen(node, pos, { check: true });
     const cfg = streamSanitizerConfig(opts, safe);
-    const h = N.streamOpen(node, pos, { runScripts });
+    const h = N.streamOpen(node, pos, { runScripts, dsd: !!dsd });
     sanitizeCreated(N.streamWrite(h, markup), cfg, safe);
     sanitizeCreated(N.streamClose(h), cfg, safe);
   }
@@ -224,6 +225,7 @@
       }
     }
   }
+  const isScriptEl = (n) => !!n && n.nodeType === 1 && n.localName === 'script' && (n.namespaceURI === 'http://www.w3.org/1999/xhtml' || n.namespaceURI === 'http://www.w3.org/2000/svg');
   const isHTMLRoot = (n) => n.nodeType === 1 && n.namespaceURI === 'http://www.w3.org/1999/xhtml' && n.localName === 'html';
   function makeStream(node, pos, safe, opts) {
     if (opts !== undefined && opts !== null && typeof opts !== 'object') throw new TypeError('The options argument must be an object.');
@@ -239,6 +241,7 @@
     const runScripts = !safe && !!(opts && opts.runScripts);
     N.streamOpen(node, pos, { check: true });
     const cfg = streamSanitizerConfig(opts, safe);
+    if (safe && isScriptEl(positional ? node.parentNode : node)) return new g.WritableStream({ write(chunk) { void `${chunk}`; } });
     const h = N.streamOpen(node, pos, { runScripts });
     return new g.WritableStream({
       write(chunk) {

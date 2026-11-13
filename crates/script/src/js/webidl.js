@@ -89,6 +89,10 @@
       setPrototypeOf() { return false; },
       preventExtensions() { return false; },
     });
-    try { Object.setPrototypeOf(W.prototype, props); } catch (e) { /* immutable */ }
+    try {
+      Object.setPrototypeOf(W.prototype, props);
+      // Worker realms (set up after this) put it back.
+      Object.defineProperty(g, '__rhWindowPropsBase', { value: base, configurable: true });
+    } catch (e) { /* immutable */ }
   }
 })();

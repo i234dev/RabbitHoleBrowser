@@ -194,6 +194,10 @@ impl Ser<'_> {
                 '"' => out.push_str("&quot;"),
                 '<' => out.push_str("&lt;"),
                 '>' => out.push_str("&gt;"),
+                // Kept through attribute-value normalization on reparse.
+                '\t' => out.push_str("&#9;"),
+                '\n' => out.push_str("&#xA;"),
+                '\r' => out.push_str("&#xD;"),
                 c => out.push(c),
             }
         }
@@ -292,11 +296,16 @@ impl Ser<'_> {
                 return self.fail("duplicate attribute");
             }
             seen.push((ans.clone(), al.clone()));
+            // A namespace-less `xmlns` attribute is not a namespace
+            // declaration: the element's namespace decides.
+            if ans.is_none() && al == "xmlns" && !self.wf {
+                continue;
+            }
             let mut candidate: Option<String> = None;
             if let Some(ns) = ans.as_deref() {
                 candidate = map.preferred(Some(ns), ap.as_deref());
                 if ns == XMLNS_NS {
-                    let redefined = ap.is_some() && local_prefixes.get(al).map(|v| v.as_deref() != Some(av.as_str())).unwrap_or(true) && map.has(if av.is_empty() { None } else { Some(av.as_str()) }, al);
+                    let redefined = ap.is_some() && local_prefixes.get(al).map(|v| v.as_deref().unwrap_or("") != av.as_str()).unwrap_or(true) && map.has(if av.is_empty() { None } else { Some(av.as_str()) }, al);
                     if av == XML_NS || (ap.is_none() && ignore_ns_def) || redefined {
                         continue;
                     }

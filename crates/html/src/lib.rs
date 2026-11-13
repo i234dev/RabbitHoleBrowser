@@ -230,6 +230,7 @@ impl Parser {
         tb.fragment = true;
         tb.form = form;
         tb.root_before = before;
+        tb.live_root = true;
         let mut tk = Tokenizer::streaming();
         if context_ns == Namespace::Html {
             match context_tag {
@@ -313,6 +314,7 @@ impl Parser {
         }
         std::mem::swap(doc, &mut self.tb.doc);
         if std::mem::take(&mut self.tb.mode_reset_pending) {
+            self.tb.merge_floor = self.tb.doc.node_count();
             self.tb.reset_insertion_mode();
         }
         let status = self.tb.run_tokens(&mut self.tk);
@@ -464,6 +466,10 @@ struct TreeBuilder {
     /// Reset the insertion mode on the first run (fragment parsers need
     /// the document to look at the context element).
     mode_reset_pending: bool,
+    /// Nodes below this id existed before the parser started.
+    merge_floor: NodeId,
+    /// The fragment root is a live node (streaming): never changed itself.
+    live_root: bool,
 }
 
 impl TreeBuilder {
@@ -493,6 +499,8 @@ impl TreeBuilder {
             dsd_contents: std::collections::HashMap::new(),
             root_before: None,
             mode_reset_pending: false,
+            merge_floor: 0,
+            live_root: false,
         }
     }
 
@@ -605,6 +613,10 @@ impl TreeBuilder {
     }
 
     fn el(&self, n: NodeId) -> (&str, &Namespace) {
+        // A fragment parser's root stands for the `html` element.
+        if self.fragment && self.open.first() == Some(&n) {
+            return ("html", &Namespace::Html);
+        }
         match self.doc.element(n) {
             Some(e) => (e.tag.as_str(), &e.ns),
             None => ("", &Namespace::None),
@@ -824,7 +836,9 @@ impl TreeBuilder {
             Some(b) => self.doc.prev_sibling(b),
             None => self.doc.last_child(place.0),
         };
-        if let Some(p) = prev {
+        // Text nodes the parser did not create (streaming into a live
+        // node) are left alone.
+        if let Some(p) = prev.filter(|&p| p >= self.merge_floor && !self.doc.is_cdata(p)) {
             if let NodeData::Text(t) = &mut self.doc.node_mut(p).data {
                 t.push_str(s);
                 return;
@@ -1566,7 +1580,7 @@ impl TreeBuilder {
                 if self.has_template() {
                     return;
                 }
-                if let Some(&html) = self.open.first() {
+                if let Some(&html) = self.open.first().filter(|_| !self.live_root) {
                     for (k, v) in &t.attrs {
                         if self.doc.attr(html, k).is_none() {
                             self.doc.set_attr(html, k, Some(v));
