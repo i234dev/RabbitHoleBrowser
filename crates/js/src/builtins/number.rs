@@ -42,7 +42,8 @@ pub fn register(realm: &mut Realm) {
     realm.define_method(bip, "valueOf", 0, bigint_value_of);
     realm.define_method(bip, "toLocaleString", 0, bigint_to_string);
     realm.define_property(bip, PropertyKey::Symbol(SYM_TO_STRING_TAG), Value::str("BigInt"), CONFIGURABLE);
-    let bc = realm.new_native_function_full("BigInt", 1, bigint_fn, None, vec![], false);
+    // A constructor (IsConstructor) whose [[Construct]] throws.
+    let bc = realm.new_native_function_full("BigInt", 1, bigint_fn, None, vec![], true);
     realm.define_property(bc, "prototype", Value::Object(bip), 0);
     realm.define_property(bip, "constructor", Value::Object(bc), HIDDEN);
     realm.define_global("BigInt", Value::Object(bc));

@@ -4082,45 +4082,42 @@ impl Compiler {
 
     fn compile_update(&mut self, op: UpdateOp, prefix: bool, target: &Expr) -> CResult<()> {
         let inc = if op == UpdateOp::Increment { Op::Inc } else { Op::Dec };
-        let undo = if op == UpdateOp::Increment { Op::Dec } else { Op::Inc };
+        // Postfix: the old (numeric) value is kept in a register, not
+        // recomputed (x - 1 + 1 is not always x).
+        let old = if prefix { None } else { Some(self.hidden_slot("post")) };
+        let save = |c: &mut Self| {
+            if let Some(t) = old {
+                c.emit(Op::ToNumeric);
+                c.emit(Op::Dup);
+                c.emit(Op::SetReg(t));
+            }
+        };
         match &target.kind {
             ExprKind::Identifier(n) if self.emit_with_ref(n) => {
                 self.emit_ref_get(n);
-                if !prefix {
-                    self.emit(Op::ToNumeric);
-                }
+                save(self);
                 self.emit(inc);
                 self.emit_ref_set_keep(n)?;
-                if !prefix {
-                    self.emit(undo);
-                }
             }
             ExprKind::Identifier(n) => {
                 self.emit_get_var(n);
-                if !prefix {
-                    // The old value (result of the postfix form) is numeric.
-                    self.emit(Op::ToNumeric);
-                }
+                save(self);
                 self.emit(inc);
                 self.emit(Op::Dup);
                 self.emit_set_var(n)?;
-                if !prefix {
-                    self.emit(undo);
-                }
             }
             ExprKind::Call { .. } => {
                 self.emit_call_target_error(target)?;
                 self.emit(Op::Undefined);
+                return Ok(());
             }
             ExprKind::Member { object, property, .. } if matches!(object.kind, ExprKind::Super) => {
                 self.emit_super_ref(property)?;
                 self.emit_super_get_keep(property);
                 self.emit(Op::ToNumeric);
+                save(self);
                 self.emit(inc);
                 self.emit_super_set(property);
-                if !prefix {
-                    self.emit(undo);
-                }
             }
             ExprKind::Member { object, property, .. } => {
                 self.compile_expr(object)?;
@@ -4129,6 +4126,7 @@ impl Compiler {
                         let i = self.const_str(name);
                         self.emit_ic(|ic| Op::GetPropKeep(i, ic));
                         self.emit(Op::ToNumeric);
+                        save(self);
                         self.emit(inc);
                         self.emit_ic(|ic| Op::SetProp(i, ic));
                     }
@@ -4136,6 +4134,7 @@ impl Compiler {
                         self.emit_private_name(name)?;
                         self.emit(Op::GetPrivateKeep);
                         self.emit(Op::ToNumeric);
+                        save(self);
                         self.emit(inc);
                         self.emit(Op::SetPrivate);
                     }
@@ -4145,15 +4144,17 @@ impl Compiler {
                         self.emit(Op::ToPropertyKey);
                         self.emit(Op::GetElemKeep);
                         self.emit(Op::ToNumeric);
+                        save(self);
                         self.emit(inc);
                         self.emit(Op::SetElem);
                     }
                 }
-                if !prefix {
-                    self.emit(undo);
-                }
             }
             _ => return self.err("Invalid left-hand side expression in postfix operation"),
+        }
+        if let Some(t) = old {
+            self.emit(Op::Pop);
+            self.emit(Op::GetReg(t));
         }
         Ok(())
     }

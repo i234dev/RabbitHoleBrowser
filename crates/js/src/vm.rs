@@ -3995,9 +3995,9 @@ impl Realm {
                 Op::NewRegExp(p, f) => {
                     let pattern = constant!(p);
                     let flags = constant!(f);
-                    let p = pattern.as_str().unwrap().to_rust_string();
+                    let p = pattern.as_str().unwrap().clone();
                     let fl = flags.as_str().unwrap().to_rust_string();
-                    let r = crate::builtins::regexp::regexp_create(self, &p, &fl)?;
+                    let r = crate::builtins::regexp::regexp_create_units(self, &p, &fl)?;
                     push!(r);
                 }
                 Op::TemplateObject(idx) => {
@@ -4007,10 +4007,10 @@ impl Realm {
                         None => {
                             let (cooked, raws) = frame!().code().templates[idx as usize].clone();
                             let raw_arr = self.new_array(raws.into_iter().map(Value::String).collect());
-                            self.obj_mut(raw_arr).extensible = false;
+                            crate::builtins::object::freeze(self, Value::Undefined, &[Value::Object(raw_arr)])?;
                             let arr = self.new_array(cooked.into_iter().map(|c| c.map(Value::String).unwrap_or(Value::Undefined)).collect());
                             self.define_property(arr, "raw", Value::Object(raw_arr), 0);
-                            self.obj_mut(arr).extensible = false;
+                            crate::builtins::object::freeze(self, Value::Undefined, &[Value::Object(arr)])?;
                             self.template_cache.insert(key, arr);
                             Value::Object(arr)
                         }

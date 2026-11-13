@@ -432,7 +432,7 @@ fn test_integrity_level(realm: &mut Realm, id: ObjectId, frozen: bool) -> JsResu
     Ok(true)
 }
 
-fn freeze(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+pub(crate) fn freeze(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let v = arg(args, 0);
     if let V::Object(id) = v.v() {
         if let ObjectKind::Proxy { .. } | ObjectKind::MappedArguments(_) | ObjectKind::ModuleNamespace = &realm.obj(id).kind {

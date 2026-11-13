@@ -245,9 +245,13 @@ fn syntax_error(realm: &mut Realm, pattern: &JsStr, flags: &str, e: &crate::rege
 /// callback, e.g. a `new Promise(executor)`, must not pick up that
 /// constructor's prototype.)
 pub fn regexp_create(realm: &mut Realm, pattern: &str, flags: &str) -> JsResult<Value> {
+    regexp_create_units(realm, &JsStr::new(pattern), flags)
+}
+
+/// RegExpCreate with a pattern that may hold lone surrogates.
+pub fn regexp_create_units(realm: &mut Realm, pattern: &JsStr, flags: &str) -> JsResult<Value> {
     let proto = realm.intrinsics.others["RegExpPrototype"];
-    let p = JsStr::new(pattern);
-    regexp_alloc(realm, &p, flags, proto, true)
+    regexp_alloc(realm, pattern, flags, proto, true)
 }
 
 fn regexp_alloc(realm: &mut Realm, pattern: &JsStr, flags: &str, proto: ObjectId, legacy: bool) -> JsResult<Value> {
