@@ -1,5 +1,5 @@
 //! Minimal sampling profiler for the engine (Linux x86-64 only), for
-//! machines without `perf`: `prof <parse|compile|run> <file.js | -e src> [reps]`.
+//! machines without `perf`: `prof <parse|validate|compile|run> <file.js | -e src> [reps]`.
 //!
 //! A SIGPROF interval timer records the interrupted instruction pointer;
 //! raw addresses go to `prof.out` together with the runtime address of a
@@ -101,6 +101,9 @@ fn main() {
         match phase.as_str() {
             "parse" => {
                 let _ = rabbithole_js::parser::parse_program(&src, false);
+            }
+            "validate" => {
+                let _ = rabbithole_js::parser::validate_program(&src, false);
             }
             "compile" => {
                 let mut realm = rabbithole_js::Realm::new();

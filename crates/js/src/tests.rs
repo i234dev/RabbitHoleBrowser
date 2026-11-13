@@ -1947,8 +1947,8 @@ fn lone_surrogates_are_lossless() {
 }
 
 /// A large script whose function body the lazy parse skips: the complete
-/// check (`parser::validate_program`, run off-thread with RH_LAZY_CHECKED)
-/// finds the early error in the body.
+/// check (`parser::validate_program`) and the parallel check of skipped
+/// bodies at load (`validate`) find the early error in the body.
 #[test]
 fn complete_parse_finds_errors_in_skipped_bodies() {
     let filler = "var x = [".to_string() + &"1, ".repeat(9000) + "];\n";
@@ -1958,6 +1958,19 @@ fn complete_parse_finds_errors_in_skipped_bodies() {
     assert!(crate::parser::validate_program(&bad, false).is_err());
     let good = bad.replace("let a; let a;", "let a; let b;");
     assert!(crate::parser::validate_program(&good, false).is_ok());
+    crate::validate::set_enabled(Some(true));
+    let mut realm = Realm::new();
+    assert!(realm.compile(&bad, "t.js", false).is_err(), "rejected at load");
+    assert!(realm.compile(&good, "t.js", false).is_ok());
+    // Errors in nested bodies (long enough to be jobs of their own), the
+    // first one in source order wins.
+    let inner = "x = 1 + 2 + 3 + 4;\n".repeat(200);
+    let nested = format!("{filler}function g() {{ {inner} function h() {{ {inner} let b; var b; }} {inner} }}\nfunction k() {{ {inner} break; }}\n");
+    let err = realm.compile(&nested, "t.js", false).err().map(|e| realm.error_to_string(&e)).unwrap_or_default();
+    assert!(err.contains("SyntaxError") && err.contains("'b'"), "{err}");
+    assert!(realm.compile(&nested.replace("let b; var b;", ""), "t.js", false).err().map(|e| realm.error_to_string(&e)).unwrap_or_default().contains("SyntaxError"));
+    assert!(realm.compile(&nested.replace("let b; var b;", "").replace("break;", ""), "t.js", false).is_ok());
+    crate::validate::set_enabled(None);
     // Web-compat call assignment targets throw at run time.
     eq("function f() { return {}; } var r = []; for (var t of [0, 1, 2]) { try { if (t == 0) f() = 1; else if (t == 1) f()++; else for (f() of [1]); } catch (e) { r.push(e.name); } } r.join()", "ReferenceError,ReferenceError,ReferenceError");
     throws("[f() = 1] = []", "SyntaxError");

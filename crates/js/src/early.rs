@@ -177,7 +177,7 @@ fn is_strict_reserved(n: &str) -> bool {
 }
 
 /// BoundNames of a binding pattern.
-fn bound_names<'b>(p: &'b Pattern, out: &mut Vec<&'b str>) {
+pub(crate) fn bound_names<'b>(p: &'b Pattern, out: &mut Vec<&'b str>) {
     match p {
         Pattern::Identifier(n) => out.push(n.as_str()),
         Pattern::Expr(_) => {}

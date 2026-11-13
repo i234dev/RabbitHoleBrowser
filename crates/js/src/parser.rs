@@ -70,50 +70,34 @@ pub fn validate_program(source: &str, is_module: bool) -> Result<(), ParseError>
     Ok(())
 }
 
-/// Start [`validate_program`] on a thread of its own when parsing
-/// `source` will skip function bodies: the main thread parses lazily and
-/// compiles meanwhile, then [`Validation::finish`] waits for the verdict.
-///
-/// Opt-in (`RH_LAZY_CHECKED=1`): the complete parse costs about 4× the
-/// lazy one (framework bundles: 38 ms against 9.4 ms for 1.27 MB), so
-/// waiting for it makes loading large scripts ~5× slower than lazy
-/// parse + compile; until there is a cheaper complete check (a parser
-/// mode that builds no tree, or bodies validated on several threads),
-/// early errors in skipped bodies are reported when the function is first
-/// compiled unless this is on.
-pub fn validate_in_background(source: &str, is_module: bool) -> Option<Validation> {
-    thread_local!(static ON: bool = std::env::var_os("RH_LAZY_CHECKED").is_some());
-    if !skips_bodies(source.len()) || !ON.with(|o| *o) {
-        return None;
-    }
-    let src: std::sync::Arc<str> = std::sync::Arc::from(source);
-    // The parser recurses with the nesting of the source: a large stack
-    // (reserved, not committed).
-    std::thread::Builder::new()
-        .name("js-validate".into())
-        .stack_size(256 << 20)
-        .spawn(move || validate_program(&src, is_module).err())
-        .ok()
-        .map(Validation)
-}
-
-/// A background [`validate_program`] (see [`validate_in_background`]).
-pub struct Validation(std::thread::JoinHandle<Option<ParseError>>);
-
-impl Validation {
-    /// The early error the complete parse found, if any.
-    pub fn finish(self) -> Option<ParseError> {
-        self.0.join().ok().flatten()
-    }
+/// Parse a script or module like [`parse_program`] while the early errors
+/// of the function bodies the lazy parse skips are checked in parallel
+/// (`validation`, from [`crate::validate::start`]; its
+/// [`crate::validate::Validation::finish`] gives the verdict).
+pub fn parse_program_validating(source: &str, is_module: bool, validation: Option<&crate::validate::Validation>) -> Result<Program, ParseError> {
+    let ctx = crate::early::EarlyContext::default();
+    let program = parse_program_unchecked_with(source, is_module, &ctx, validation.map(|v| v.batch().clone()))?;
+    crate::early::check_program(&program, &ctx)?;
+    Ok(program)
 }
 
 fn parse_program_unchecked(source: &str, is_module: bool, ctx: &crate::early::EarlyContext) -> Result<Program, ParseError> {
+    parse_program_unchecked_with(source, is_module, ctx, None)
+}
+
+fn parse_program_unchecked_with(source: &str, is_module: bool, ctx: &crate::early::EarlyContext, validation: Option<std::sync::Arc<crate::validate::Batch>>) -> Result<Program, ParseError> {
     let mut p = Parser::new(source, is_module)?;
     p.set_early_context(ctx);
+    if validation.is_some() {
+        p.lx.blocks = Some(Vec::new());
+    }
+    p.validation = validation;
     if source.len() < LAZY_MIN_SOURCE {
         p.lazy = false;
     }
-    match p.parse_program() {
+    let r = p.parse_program();
+    p.flush_jobs();
+    match r {
         Ok(program) => Ok(program),
         Err(_) if p.skipped => {
             // The pre-parser skipped function bodies: parse everything to
@@ -150,6 +134,17 @@ const LAZY_MIN_SOURCE: usize = 16 * 1024;
 /// ([`FunctionBody::Lazy`]): its statements and resulting strictness.
 /// Functions nested in it are skipped in turn.
 pub fn parse_lazy_body(f: &Function, lb: &LazyBody) -> Result<(Vec<Stmt>, bool), ParseError> {
+    parse_lazy_body_with(f, lb, None, Vec::new())
+}
+
+/// Check the early errors of a body the pre-parser skipped (one job of
+/// the parallel check of a script): nested bodies are skipped in turn and
+/// submitted to `batch` (see [`crate::validate`]).
+pub(crate) fn validate_lazy_body(f: &Function, lb: &LazyBody, batch: &std::sync::Arc<crate::validate::Batch>, blocks: Vec<crate::lexer::BlockEnd>) -> Result<(), ParseError> {
+    parse_lazy_body_with(f, lb, Some(batch.clone()), blocks).map(|_| ())
+}
+
+fn parse_lazy_body_with(f: &Function, lb: &LazyBody, validation: Option<std::sync::Arc<crate::validate::Batch>>, known_blocks: Vec<crate::lexer::BlockEnd>) -> Result<(Vec<Stmt>, bool), ParseError> {
     let mut lx = Lexer::new(&lb.source, lb.is_module);
     lx.restore(&crate::lexer::LexerState::at(lb.start, lb.line, lb.line_start));
     let tok = lx.next_token()?;
@@ -176,10 +171,19 @@ pub fn parse_lazy_body(f: &Function, lb: &LazyBody) -> Result<(Vec<Stmt>, bool),
         lazy: lazy_parse_enabled(),
         skipped: false,
         lazy_src: Some(lb.source.clone()),
+        no_skip_until: 0,
+        in_job: validation.is_some(),
+        known_blocks,
+        skip_blocks: None,
+        validation,
+        jobs: Vec::new(),
+        jobs_len: 0,
         parenthesized: Default::default(),
         rest_comma: Default::default(),
     };
-    let r = p.parse_function_body_block()?;
+    let r = p.parse_function_body_block();
+    p.flush_jobs();
+    let r = r?;
     if p.prev_end != lb.end {
         return Err(ParseError { message: "Invalid or unexpected token (lazily parsed function body)".into(), line: lb.line, column: (lb.start - lb.line_start) as u32 + 1 });
     }
@@ -250,6 +254,25 @@ pub struct Parser<'a> {
     skipped: bool,
     /// The source, shared by the skipped bodies (made on first use).
     lazy_src: Option<std::rc::Rc<str>>,
+    /// Parsing a job of the parallel early-error check: its nested bodies
+    /// become jobs whether or not they run at once.
+    in_job: bool,
+    /// In a job: the long blocks of its body, by start (see
+    /// [`crate::lexer::BlockEnd`]): the function bodies among them are
+    /// skipped without a pre-scan.
+    known_blocks: Vec<crate::lexer::BlockEnd>,
+    /// The long blocks inside the body skipped last, with its start: they
+    /// go with its job.
+    skip_blocks: Option<(usize, Vec<crate::lexer::BlockEnd>)>,
+    /// End of the last body found too short to skip: the bodies nested in
+    /// it are shorter still, no need to pre-scan them.
+    no_skip_until: usize,
+    /// Skipped bodies are handed to the parallel early-error check of
+    /// this script (see [`crate::validate`]).
+    validation: Option<std::sync::Arc<crate::validate::Batch>>,
+    /// Skipped bodies not submitted yet (and their total length).
+    jobs: Vec<crate::validate::BodyJob>,
+    jobs_len: usize,
     /// Positions of object / array literals and assignments written in
     /// parentheses: not valid destructuring targets (`({a}) = b`).
     parenthesized: std::collections::HashSet<(u32, u32), crate::value::FxBuild>,
@@ -404,6 +427,13 @@ impl<'a> Parser<'a> {
             lazy: lazy_parse_enabled(),
             skipped: false,
             lazy_src: None,
+                no_skip_until: 0,
+            in_job: false,
+            known_blocks: Vec::new(),
+            skip_blocks: None,
+            validation: None,
+            jobs: Vec::new(),
+            jobs_len: 0,
             parenthesized: Default::default(),
             rest_comma: Default::default(),
         })
@@ -1987,21 +2017,20 @@ impl<'a> Parser<'a> {
                 Ok((FunctionBody::Expr(Box::new(e)), p.ctx.strict))
             }
         })?;
-        Ok(Expr {
+        let f = Function {
+            name: None,
+            params,
+            body,
+            is_arrow: true,
+            is_async,
+            is_generator: false,
+            strict,
             pos,
-            kind: ExprKind::Arrow(std::rc::Rc::new(Function {
-                name: None,
-                params,
-                body,
-                is_arrow: true,
-                is_async,
-                is_generator: false,
-                strict,
-                pos,
-                span: (0, 0),
-                self_binding: false,
-            })),
-        })
+            span: (0, 0),
+            self_binding: false,
+        };
+        self.submit_skipped(&f);
+        Ok(Expr { pos, kind: ExprKind::Arrow(std::rc::Rc::new(f)) })
     }
 
     fn parse_conditional(&mut self) -> PResult<Expr> {
@@ -2828,7 +2857,7 @@ impl<'a> Parser<'a> {
             }
             let simple = params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest);
             let (body, strict) = p.parse_function_body(simple, false)?;
-            Ok(Function {
+            let f = Function {
                 name: None,
                 params,
                 body,
@@ -2839,14 +2868,17 @@ impl<'a> Parser<'a> {
                 pos,
                 span: (0, 0),
                 self_binding: false,
-            })
+            };
+            p.submit_skipped(&f);
+            Ok(f)
         })
     }
 
     /// `{ body }` of a function: skipped by the pre-parser when lazy
     /// parsing applies (see [`FunctionBody::Lazy`]), else parsed.
     fn parse_function_body(&mut self, simple_params: bool, eager: bool) -> PResult<(FunctionBody, bool)> {
-        if self.lazy && !eager && self.is_punct("{") {
+        let eager = eager && !self.in_job;
+        if self.lazy && !eager && self.tok.start >= self.no_skip_until && self.is_punct("{") {
             if let Some(r) = self.skip_function_body(simple_params)? {
                 return Ok(r);
             }
@@ -2855,15 +2887,72 @@ impl<'a> Parser<'a> {
         Ok((FunctionBody::Block(stmts), strict))
     }
 
+    /// Hand the body of `f` to the parallel early-error check if the
+    /// pre-parser skipped it.
+    fn submit_skipped(&mut self, f: &Function) {
+        if let (Some(_), FunctionBody::Lazy(lb)) = (&self.validation, &f.body) {
+            let blocks = match self.skip_blocks.take() {
+                Some((start, b)) if start == lb.start => b,
+                _ => Vec::new(),
+            };
+            let job = crate::validate::BodyJob::new(f, lb, blocks);
+            self.jobs_len += job.len();
+            self.jobs.push(job);
+            if self.jobs_len >= crate::validate::CHUNK {
+                self.flush_jobs();
+            }
+        }
+    }
+
+    fn flush_jobs(&mut self) {
+        if let Some(batch) = &self.validation {
+            if !self.jobs.is_empty() {
+                crate::validate::submit(batch, std::mem::take(&mut self.jobs));
+            }
+        }
+        self.jobs_len = 0;
+    }
+
     fn skip_function_body(&mut self, simple_params: bool) -> PResult<Option<(FunctionBody, bool)>> {
         let open_start = self.tok.start;
         let open_pos = self.tok.pos;
         let after_open = self.lx.state();
-        let Some(sk) = self.lx.skip_function_body() else { return Ok(None) };
+        let known = match self.known_blocks.binary_search_by_key(&open_start, |b| b.start) {
+            Ok(i) => Some(i),
+            Err(_) => None,
+        };
+        let sk = match known {
+            Some(i) => {
+                let b = self.known_blocks[i].clone();
+                self.lx.skip_known_body(&b)
+            }
+            None => self.lx.skip_function_body(),
+        };
+        let Some(sk) = sk else { return Ok(None) };
         if sk.end.pos() - open_start < LAZY_MIN_BODY || (sk.use_strict && !simple_params) {
             // Small (or an early error to report): parse it now.
+            if sk.end.pos() - open_start < LAZY_MIN_BODY {
+                self.no_skip_until = sk.end.pos();
+            }
             self.lx.restore(&after_open);
+            if let Some(b) = &mut self.lx.blocks {
+                b.clear();
+            }
             return Ok(None);
+        }
+        if self.validation.is_some() {
+            // The long blocks inside go with the body's job.
+            let mut blocks = match known {
+                Some(_) => {
+                    let end = sk.end.pos();
+                    let a = self.known_blocks.partition_point(|b| b.start <= open_start);
+                    let n = self.known_blocks[a..].partition_point(|b| b.start < end);
+                    self.known_blocks[a..a + n].to_vec()
+                }
+                None => self.lx.blocks.as_mut().map(std::mem::take).unwrap_or_default(),
+            };
+            blocks.sort_unstable_by_key(|b| b.start);
+            self.skip_blocks = Some((open_start, blocks));
         }
         let source = match &self.lazy_src {
             Some(s) => s.clone(),
@@ -2965,7 +3054,7 @@ impl<'a> Parser<'a> {
             let params = p.parse_formal_params_until_paren()?;
             let simple = params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest);
             let (body, strict) = p.parse_function_body(simple, eager)?;
-            Ok(Function {
+            let f = Function {
                 name,
                 params,
                 body,
@@ -2976,7 +3065,9 @@ impl<'a> Parser<'a> {
                 pos,
                 span: (start, p.prev_end as u32),
                 self_binding: is_expression && name_is_some,
-            })
+            };
+            p.submit_skipped(&f);
+            Ok(f)
         })
     }
 
