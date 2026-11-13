@@ -833,7 +833,10 @@ impl Context {
         if id == 0 {
             return Ok(());
         }
-        self.buffers.get_mut(&id).ok_or(Error::InvalidValue)?.deleted = true;
+        self.buffers
+            .get_mut(&id)
+            .ok_or(Error::InvalidValue)?
+            .deleted = true;
         if self.array_buffer == id {
             self.array_buffer = 0;
         }
@@ -882,7 +885,10 @@ impl Context {
         Ok(())
     }
     pub fn vertex_attrib(&mut self, index: u32, value: [f32; 4]) -> Result<()> {
-        *self.attribute_constants.get_mut(index as usize).ok_or(Error::InvalidValue)? = value;
+        *self
+            .attribute_constants
+            .get_mut(index as usize)
+            .ok_or(Error::InvalidValue)? = value;
         Ok(())
     }
     pub fn draw_arrays(&mut self, mode: u32, first: u32, count: u32) -> Result<()> {
@@ -921,23 +927,49 @@ impl Context {
                 .map(|v| u16::from_le_bytes([v[0], v[1]]) as u32)
                 .collect()
         } else {
-            src.chunks_exact(4).map(|v| u32::from_le_bytes(v.try_into().unwrap())).collect()
+            src.chunks_exact(4)
+                .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
+                .collect()
         };
         if self.context_version == 2 {
-            let restart = match size { 1 => u8::MAX as u32, 2 => u16::MAX as u32, _ => u32::MAX };
+            let restart = match size {
+                1 => u8::MAX as u32,
+                2 => u16::MAX as u32,
+                _ => u32::MAX,
+            };
             let mut triangles = Vec::new();
             for segment in indices.split(|index| *index == restart) {
                 match mode {
                     gl::TRIANGLES => triangles.extend(segment.chunks_exact(3).flatten().copied()),
-                    gl::TRIANGLE_FAN => { for i in 2..segment.len() { triangles.extend([segment[0], segment[i-1], segment[i]]); } },
-                    gl::TRIANGLE_STRIP => { for i in 2..segment.len() { triangles.extend(if i % 2 == 0 { [segment[i-2],segment[i-1],segment[i]] } else { [segment[i-1],segment[i-2],segment[i]] }); } },
+                    gl::TRIANGLE_FAN => {
+                        for i in 2..segment.len() {
+                            triangles.extend([segment[0], segment[i - 1], segment[i]]);
+                        }
+                    }
+                    gl::TRIANGLE_STRIP => {
+                        for i in 2..segment.len() {
+                            triangles.extend(if i % 2 == 0 {
+                                [segment[i - 2], segment[i - 1], segment[i]]
+                            } else {
+                                [segment[i - 1], segment[i - 2], segment[i]]
+                            });
+                        }
+                    }
                     _ => unreachable!(),
                 }
             }
             // Check incomplete primitive references too, before any fragment writes.
-            self.validate_arrays(indices.iter().copied().filter(|index| *index != restart).max())?;
+            self.validate_arrays(
+                indices
+                    .iter()
+                    .copied()
+                    .filter(|index| *index != restart)
+                    .max(),
+            )?;
             self.draw(gl::TRIANGLES, &triangles)
-        } else { self.draw(mode, &indices) }
+        } else {
+            self.draw(mode, &indices)
+        }
     }
     fn validate_arrays(&self, max: Option<u32>) -> Result<()> {
         for a in &self.attributes {

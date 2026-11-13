@@ -110,7 +110,8 @@ constructor `Context::new_with_glsl_version(width, height, max_version)` accepts
 version. Mode 300 also accepts version-100/default sources using version-100
 rules, as described by [Khronos GLSL ES 3.00 support](https://registry.khronos.org/webgl/specs/2.0/#GLSL_ES_3.00_support).
 A program may not link vertex and fragment stages with different versions.
-Nothing here enables JavaScript `getContext('webgl2')` or claims WebGL2 support.
+Selecting this backend language mode alone does not change the JavaScript
+context version; the separate experimental WebGL2 milestone is described below.
 
 The [GLSL ES 3.00](https://registry.khronos.org/OpenGL/specs/es/3.0/GLSL_ES_Specification_3.00.pdf)
 subset requires `#version 300 es`. Vertex `in` maps to attributes and vertex
