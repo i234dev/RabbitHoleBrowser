@@ -70,6 +70,9 @@ pub struct ScriptState {
     /// window fired `load`: the iframe element in the parent fires `load`
     /// on the parent's next tick.
     pub frame_load_pending: bool,
+    /// The initial about:blank load, before initial insertion or a task
+    /// delivers it. Kept separate from a script-created parser's load.
+    pub frame_initial_load_pending: bool,
 }
 
 /// Origin-scoped `localStorage`, shared by all pages of an engine and
@@ -569,11 +572,10 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn document_load_started(&mut self) {
         self.page.script.frame_load_pending = false;
+        self.page.script.frame_initial_load_pending = false;
     }
-    fn frame_initial_load_fired(&mut self, node: NodeId) {
-        if let Some(child) = self.page.frames.children.iter_mut().find(|c| c.node == node).and_then(|c| c.page.as_mut()) {
-            child.script.frame_load_pending = false;
-        }
+    fn take_initial_frame_load(&mut self, node: NodeId) -> bool {
+        self.page.frames.children.iter_mut().find(|c| c.node == node).and_then(|c| c.page.as_mut()).map(|p| std::mem::take(&mut p.script.frame_initial_load_pending)).unwrap_or(false)
     }
     fn focus_node(&mut self, node: Option<NodeId>) {
         self.page.state.focused = node;

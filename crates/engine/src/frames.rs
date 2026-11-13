@@ -422,7 +422,7 @@ impl Page {
 
     /// Any frame load still in progress (this page or below)?
     pub fn frames_loading(&self) -> bool {
-        self.frames.children.iter().any(|c| c.pending.is_some() || c.page.as_ref().map(|p| p.script.frame_load_pending || p.frames_loading()).unwrap_or(false))
+        self.frames.children.iter().any(|c| c.pending.is_some() || c.page.as_ref().map(|p| p.script.frame_load_pending || p.script.frame_initial_load_pending || p.frames_loading()).unwrap_or(false))
     }
 
     pub(crate) fn frames_next_due(&self) -> Option<f64> {
@@ -430,7 +430,7 @@ impl Page {
         // Poll background loads every 25 ms (engine clock).
         let poll = self.image_state.clock.map(|origin| (std::time::Instant::now() + std::time::Duration::from_millis(25)).saturating_duration_since(origin).as_secs_f64() * 1000.0).unwrap_or(0.0);
         for c in &self.frames.children {
-            let d = if c.pending.is_some() { Some(poll) } else { c.page.as_ref().and_then(|p| if p.script.frame_load_pending { Some(0.0) } else { p.next_script_due() }) };
+            let d = if c.pending.is_some() { Some(poll) } else { c.page.as_ref().and_then(|p| if p.script.frame_load_pending || p.script.frame_initial_load_pending { Some(0.0) } else { p.next_script_due() }) };
             if let Some(d) = d {
                 due = Some(due.map(|x: f64| x.min(d)).unwrap_or(d));
             }
@@ -504,6 +504,7 @@ impl Engine {
                     c.stale = true;
                     if let Some(p) = c.page.as_mut() {
                         p.script.frame_load_pending = false;
+                        p.script.frame_initial_load_pending = false;
                     }
                     changed = true;
                 }
@@ -644,7 +645,7 @@ impl Engine {
         // Keep the initial document available synchronously and queue its
         // load. The no-src insertion steps can deliver it synchronously;
         // document.open() replaces it with the new parser's load instead.
-        child.script.frame_load_pending = frame_source(page, node) == FrameSource::Blank;
+        child.script.frame_initial_load_pending = frame_source(page, node) == FrameSource::Blank;
         {
             let mut reg = self.frames.borrow_mut();
             let e = reg.entries.entry(id).or_default();
@@ -803,7 +804,10 @@ impl Engine {
             }
             // The frame's document finished loading again (document.open /
             // close): the iframe fires `load` in this document.
-            let reloaded = page.frames.children.get_mut(i).and_then(|c| c.page.as_mut()).map(|p| std::mem::take(&mut p.script.frame_load_pending)).unwrap_or(false);
+            let reloaded = page.frames.children.get_mut(i).and_then(|c| c.page.as_mut()).map(|p| {
+                let initial = std::mem::take(&mut p.script.frame_initial_load_pending);
+                std::mem::take(&mut p.script.frame_load_pending) || initial
+            }).unwrap_or(false);
             if reloaded && page.script.host.is_some() {
                 let node = page.frames.children[i].node;
                 page.frames.children[i].dirty = true;

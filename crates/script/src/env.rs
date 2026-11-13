@@ -212,8 +212,9 @@ pub trait HostEnv {
     fn document_load_complete(&mut self) {}
     /// A script-created parser replaces the document's pending load.
     fn document_load_started(&mut self) {}
-    /// Initial insertion delivered a blank iframe's synchronous load.
-    fn frame_initial_load_fired(&mut self, _node: NodeId) {}
+    /// Take a blank iframe's initial load for synchronous delivery. False
+    /// if it was already delivered (e.g. a state-preserving move).
+    fn take_initial_frame_load(&mut self, _node: NodeId) -> bool { false }
 }
 
 type EnvPtr = *mut (dyn HostEnv + 'static);

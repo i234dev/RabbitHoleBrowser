@@ -64,6 +64,9 @@ fn initial_blank_frames_fire_load_once_without_replacing_the_document() {
     assert_eq!(eval(&e, &mut page, "document.querySelector('iframe').contentDocument.body.textContent"), "no src");
     settle(&e, &mut page);
     assert_eq!(eval(&e, &mut page, "loads.length"), "3");
+    eval(&e, &mut page, "document.body.moveBefore(document.querySelector('iframe'), null)");
+    settle(&e, &mut page);
+    assert_eq!(eval(&e, &mut page, "loads.length"), "3");
 }
 
 #[test]
