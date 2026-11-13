@@ -13,13 +13,13 @@ dir css/css-display 109 223
 dir css/css-flexbox 629 1027
 dir css/css-fonts 191 387
 dir css/css-grid 862 1763
-dir css/css-images 182 482
+dir css/css-images 184 482
 dir css/css-masking 149 384
 dir css/css-nesting 4 17
 dir css/css-overflow 294 719
-dir css/css-position 89 251
+dir css/css-position 98 251
 dir css/css-sizing 277 568
-dir css/css-text 823 1550
+dir css/css-text 839 1550
 dir css/css-text-decor 256 339
 dir css/css-transforms 356 794
 dir css/css-ui 876 962
@@ -4050,10 +4050,8 @@ fail css/css-images/object-fit-fill-svg-005p.html
 fail css/css-images/object-fit-fill-svg-006e.html
 fail css/css-images/object-fit-fill-svg-006p.html
 fail css/css-images/object-fit-fill-svg-with-natural-size-and-viewbox.html
-fail css/css-images/object-fit-none-png-001c.html
 fail css/css-images/object-fit-none-png-001e.html
 fail css/css-images/object-fit-none-png-001p.html
-fail css/css-images/object-fit-none-png-002c.html
 fail css/css-images/object-fit-none-png-002e.html
 fail css/css-images/object-fit-none-png-002p.html
 fail css/css-images/object-fit-none-svg-001e.html
@@ -4948,9 +4946,6 @@ fail css/css-position/static-position/vrl-ltr-ltr.html
 fail css/css-position/static-position/vrl-ltr-rtl.tentative.html
 fail css/css-position/static-position/vrl-rtl-ltr.tentative.html
 fail css/css-position/static-position/vrl-rtl-rtl.html
-fail css/css-position/sticky/position-sticky-bottom-002.html
-fail css/css-position/sticky/position-sticky-bottom-003.html
-fail css/css-position/sticky/position-sticky-bottom-007.html
 fail css/css-position/sticky/position-sticky-change-top.html
 fail css/css-position/sticky/position-sticky-child-multicolumn.html
 fail css/css-position/sticky/position-sticky-contained-by-display-table.html
@@ -4972,8 +4967,6 @@ fail css/css-position/sticky/position-sticky-left-003.html
 fail css/css-position/sticky/position-sticky-margins-002.html
 fail css/css-position/sticky/position-sticky-margins-003.html
 fail css/css-position/sticky/position-sticky-nested-inline.html
-fail css/css-position/sticky/position-sticky-nested-table.html
-fail css/css-position/sticky/position-sticky-nested-thead-th.html
 fail css/css-position/sticky/position-sticky-on-minimum-scale.html
 fail css/css-position/sticky/position-sticky-padding-002.html
 fail css/css-position/sticky/position-sticky-rendering.html
@@ -4981,7 +4974,6 @@ fail css/css-position/sticky/position-sticky-right-002.html
 fail css/css-position/sticky/position-sticky-right-003.html
 fail css/css-position/sticky/position-sticky-rtl.html
 fail css/css-position/sticky/position-sticky-scroll-reposition.html
-fail css/css-position/sticky/position-sticky-table-parts.html
 fail css/css-position/sticky/position-sticky-table-pixel-rounding.html
 fail css/css-position/sticky/position-sticky-table-td-bottom.html
 fail css/css-position/sticky/position-sticky-table-td-left.html
@@ -4995,9 +4987,6 @@ fail css/css-position/sticky/position-sticky-table-th-top.html
 fail css/css-position/sticky/position-sticky-table-thead-top.html
 fail css/css-position/sticky/position-sticky-table-tr-bottom.html
 fail css/css-position/sticky/position-sticky-table-tr-top.html
-fail css/css-position/sticky/position-sticky-top-002.html
-fail css/css-position/sticky/position-sticky-top-003.html
-fail css/css-position/sticky/position-sticky-top-and-bottom-003.html
 fail css/css-position/sticky/position-sticky-writing-modes.html
 fail css/css-sizing/abspos-stretch-replaced-percentage-child.html
 fail css/css-sizing/aspect-ratio/abspos-003.html
@@ -5607,17 +5596,6 @@ fail css/css-text/line-break/line-break-strict-017b.xht
 fail css/css-text/line-break/line-break-strict-018.xht
 fail css/css-text/line-break/line-break-strict-hyphens-001.html
 fail css/css-text/line-break/line-break-strict-hyphens-002.html
-fail css/css-text/line-breaking/line-breaking-001.html
-fail css/css-text/line-breaking/line-breaking-002.html
-fail css/css-text/line-breaking/line-breaking-003.html
-fail css/css-text/line-breaking/line-breaking-004.html
-fail css/css-text/line-breaking/line-breaking-005.html
-fail css/css-text/line-breaking/line-breaking-006.html
-fail css/css-text/line-breaking/line-breaking-007.html
-fail css/css-text/line-breaking/line-breaking-008.html
-fail css/css-text/line-breaking/line-breaking-009.html
-fail css/css-text/line-breaking/line-breaking-010.html
-fail css/css-text/line-breaking/line-breaking-011.html
 fail css/css-text/line-breaking/line-breaking-014.html
 fail css/css-text/line-breaking/line-breaking-018.html
 fail css/css-text/line-breaking/line-breaking-019.html
@@ -5867,8 +5845,6 @@ fail css/css-text/white-space/break-spaces-before-first-ideographic-char-006.htm
 fail css/css-text/white-space/break-spaces-before-first-ideographic-char-015.html
 fail css/css-text/white-space/break-spaces-tab-001.html
 fail css/css-text/white-space/break-spaces-tab-002.html
-fail css/css-text/white-space/break-spaces-tab-005.html
-fail css/css-text/white-space/break-spaces-tab-006.html
 fail css/css-text/white-space/break-spaces-with-ideographic-space-001.html
 fail css/css-text/white-space/break-spaces-with-ideographic-space-005.html
 fail css/css-text/white-space/break-spaces-with-ideographic-space-008.html
@@ -6006,9 +5982,7 @@ fail css/css-text/white-space/white-space-trim-white-space.html
 fail css/css-text/white-space/white-space-trim-wrap.html
 fail css/css-text/white-space/white-space-wrap-after-nowrap-001.html
 fail css/css-text/white-space/white-space-zero-fontsize-002.html
-fail css/css-text/word-break/auto-phrase/word-break-auto-phrase-intrinsic-001.html
 fail css/css-text/word-break/auto-phrase/word-break-auto-phrase-overflow-001.html
-fail css/css-text/word-break/auto-phrase/word-break-auto-phrase-wbr-nobr-001.html
 fail css/css-text/word-break/auto-phrase/word-break-auto-phrase-wbr-nobr-002.html
 fail css/css-text/word-break/break-boundary-2-chars-001.html
 fail css/css-text/word-break/word-break-break-all-005.html
@@ -6042,7 +6016,6 @@ fail css/css-text/word-break/word-break-min-content-004.html
 fail css/css-text/word-break/word-break-min-content-005.html
 fail css/css-text/word-break/word-break-min-content-006.html
 fail css/css-text/word-break/word-break-min-content-007.html
-fail css/css-text/word-break/word-break-normal-001.html
 fail css/css-text/word-break/word-break-normal-002.html
 fail css/css-text/word-break/word-break-normal-003.html
 fail css/css-text/word-break/word-break-normal-bo-000.html

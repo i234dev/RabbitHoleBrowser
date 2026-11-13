@@ -1409,7 +1409,7 @@ fn is_inherited(name: &str) -> bool {
             | "caption-side" | "empty-cells" | "list-style-image" | "text-align-last" | "hyphens" | "font-family-x"
             | "accent-color" | "color-scheme" | "font-variation-settings" | "text-emphasis" | "text-emphasis-style"
             | "text-emphasis-color" | "text-emphasis-position" | "ruby-position" | "line-break" | "text-wrap-style" | "text-autospace"
-            | "font-synthesis" | "font-synthesis-style"
+            | "font-synthesis"
     )
 }
 
@@ -1520,7 +1520,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.text_wrap_balance = from.text_wrap_balance;
             to.white_space = from.white_space;
         }
-        "font-synthesis" | "font-synthesis-style" => to.font_synthesis_style = from.font_synthesis_style,
+        "font-synthesis" => to.font_synthesis_style = from.font_synthesis_style,
         "line-break" => to.line_break = from.line_break,
         "columns" | "column-count" | "column-width" => to.multicol = from.multicol,
         "text-underline-position" => to.text_underline_position = from.text_underline_position,

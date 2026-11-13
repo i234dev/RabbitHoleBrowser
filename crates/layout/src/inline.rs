@@ -851,7 +851,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
 
     fn place_word(&mut self, text: Rc<str>, width: f32, item: usize, break_before: bool) {
         let wraps = self.style(item).white_space.wraps();
-        let policy = break_policy(self.style(item));
+        let mut policy = break_policy(self.style(item));
+        // `auto-phrase` falls back to ordinary breaking only inside
+        // ideographic text too long for a line.
+        if self.style(item).word_break == rabbithole_style::WordBreak::AutoPhrase && !text.chars().any(|c| c as u32 >= 0x2E80) {
+            policy = BreakPolicy::Never;
+        }
         let mut text: String = text.to_string();
         let mut width = width;
         let mut break_before = break_before;
