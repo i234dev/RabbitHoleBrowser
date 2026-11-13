@@ -299,7 +299,7 @@ impl Context {
                 let out = e
                     .fragment
                     .run_with_sampler(env, &|unit, uv| self.sample_texture(unit, uv));
-                let color = out["gl_FragColor"];
+                let color = out[&e.fragment.output];
                 for k in 0..4 {
                     if self.color_mask[k] {
                         self.rgba[at * 4 + k] = byte(color.v[k]);

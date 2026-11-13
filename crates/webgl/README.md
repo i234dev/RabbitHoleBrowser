@@ -97,3 +97,34 @@ vertex texture sampling or texture extensions are claimed.
 `tests/textures.rs` verifies texel values/orientation, sub-updates, texture units,
 reflection, wrapping, NPOT behavior, resource bounds, explicit unsupported-state
 errors and malformed sampler shaders.
+
+## Explicit GLSL ES 3.00 backend mode
+
+`Context::new` continues to permit only GLSL ES 1.00. The separate backend
+constructor `Context::new_with_glsl_version(width, height, max_version)` accepts
+100 or 300 as a **maximum source-language version**, not as a WebGL context
+version. Mode 300 also accepts version-100/default sources using version-100
+rules, as described by [Khronos GLSL ES 3.00 support](https://registry.khronos.org/webgl/specs/2.0/#GLSL_ES_3.00_support).
+A program may not link vertex and fragment stages with different versions.
+Nothing here enables JavaScript `getContext('webgl2')` or claims WebGL2 support.
+
+The [GLSL ES 3.00](https://registry.khronos.org/OpenGL/specs/es/3.0/GLSL_ES_Specification_3.00.pdf)
+subset requires `#version 300 es`. Vertex `in` maps to attributes and vertex
+`out` to varyings; fragment `in` consumes varyings and exactly one declared
+`out vec4` supplies the existing RGBA drawing buffer. Fragment `texture()` uses
+the actual sampler2D implementation; legacy `attribute`, `varying`,
+`texture2D()` and `gl_FragColor` are rejected in version-300 sources.
+
+Literal `layout(location=N)` is supported for vertex inputs at 0..15 and the
+single fragment output at location 0. Explicit source locations override
+`bind_attrib_location`; aliasing active inputs fails linking. Other layouts,
+multiple fragment outputs/MRT, non-vec4 outputs and newer language versions fail
+explicitly. The existing arithmetic, texture, no-control-flow and resource
+limits remain in effect. Precision declarations for float, int and sampler2D
+are recognized; integer variables/arithmetic remain unsupported.
+
+Token limits are 256 characters in the default backend mode and 1024 in mode
+300, including version-100 sources there. Reserved `webgl_`/`_webgl_` identifiers
+are rejected. `tests/glsl300.rs` verifies colored/textured triangles, named
+outputs, location precedence/alias errors, mixed-version links, source-version
+restrictions, token limits, and legacy-100 rendering under the optional mode.

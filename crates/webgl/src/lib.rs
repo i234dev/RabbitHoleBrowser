@@ -141,6 +141,7 @@ pub struct Context {
     depth_mask: bool,
     depth_test: bool,
     depth_func: u32,
+    max_glsl_version: u32,
     next_id: u32,
     next_location: i32,
     shaders: BTreeMap<u32, ShaderObject>,
@@ -198,6 +199,7 @@ impl Context {
             depth_mask: true,
             depth_test: false,
             depth_func: gl::LESS,
+            max_glsl_version: 100,
             next_id: 1,
             next_location: 0,
             shaders: BTreeMap::new(),
@@ -213,6 +215,17 @@ impl Context {
             active_texture_unit: 0,
             texture_bytes: 0,
         })
+    }
+    /// Backend-only shader language ceiling, not a WebGL version or context.
+    /// 300 admits both GLSL ES 1.00 and 3.00 sources; new() admits only 1.00.
+    /// A program's stages must still use the same source version.
+    pub fn new_with_glsl_version(width: u32, height: u32, max_version: u32) -> Result<Self> {
+        if !matches!(max_version, 100 | 300) {
+            return Err(Error::InvalidValue);
+        }
+        let mut context = Self::new(width, height)?;
+        context.max_glsl_version = max_version;
+        Ok(context)
     }
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -388,7 +401,11 @@ impl Context {
     }
     pub fn compile_shader(&mut self, id: u32) -> Result<()> {
         let s = self.shaders.get_mut(&id).ok_or(Error::InvalidValue)?;
-        match shader::compile(&s.source, s.kind == gl::VERTEX_SHADER) {
+        match shader::compile(
+            &s.source,
+            s.kind == gl::VERTEX_SHADER,
+            self.max_glsl_version,
+        ) {
             Ok(c) => {
                 s.compiled = Some(c);
                 s.log.clear();
@@ -502,11 +519,15 @@ impl Context {
         }
         let vertex = vertex.ok_or("missing vertex shader")?;
         let fragment = fragment.ok_or("missing fragment shader")?;
+        if vertex.version != fragment.version {
+            return Err("vertex and fragment shader GLSL ES versions differ".into());
+        }
         let mut attributes = BTreeMap::new();
         let mut used = Vec::new();
         for (name, s) in &vertex.symbols {
             if s.qual == Qual::Attribute && vertex.reads.contains(name) {
-                if let Some(&location) = p.bindings.get(name) {
+                if let Some(&location) = vertex.locations.get(name).or_else(|| p.bindings.get(name))
+                {
                     if used.contains(&location) {
                         return Err("aliased attribute locations are unsupported".into());
                     }

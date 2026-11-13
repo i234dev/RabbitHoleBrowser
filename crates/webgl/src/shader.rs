@@ -1,4 +1,4 @@
-//! A deliberately bounded, typed GLSL ES 1.00 subset. Unsupported grammar
+//! A deliberately bounded, versioned GLSL ES 1.00 / 3.00 subset. Unsupported grammar
 //! produces a compile error; it is never replaced with a canned shader.
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -85,6 +85,9 @@ enum ExprKind {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Shader {
+    pub version: u32,
+    pub output: String,
+    pub locations: BTreeMap<String, u32>,
     pub symbols: BTreeMap<String, Symbol>,
     pub reads: BTreeSet<String>,
     pub writes: BTreeSet<String>,
@@ -209,13 +212,15 @@ enum Tok {
     P(char),
     End,
 }
-fn lex(src: &str) -> Result<Vec<Tok>, String> {
+fn lex(src: &str, token_limit: usize) -> Result<(Vec<Tok>, u32), String> {
     if src.len() > 65536 {
         return Err("shader source exceeds 64 KiB".into());
     }
     let b = src.as_bytes();
     let mut i = 0;
     let mut out = Vec::new();
+    let mut version = 100;
+    let mut version_seen = false;
     while i < b.len() {
         let c = b[i];
         if c.is_ascii_whitespace() {
@@ -244,11 +249,21 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
             }
-            if src[s..i].split_whitespace().collect::<Vec<_>>() != ["#version", "100"]
-                || !out.is_empty()
-            {
-                return Err("only #version 100 is supported".into());
+            if version_seen || !out.is_empty() {
+                return Err("#version must appear once before source tokens".into());
             }
+            let words = src[s..i]
+                .split("//")
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            version = match words.as_slice() {
+                ["#version", "100"] => 100,
+                ["#version", "300", "es"] => 300,
+                _ => return Err("supported versions are #version 100 and #version 300 es".into()),
+            };
+            version_seen = true;
             continue;
         }
         if c.is_ascii_alphabetic() || c == b'_' {
@@ -256,6 +271,9 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             i += 1;
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
                 i += 1;
+            }
+            if i - s > token_limit {
+                return Err(format!("identifier exceeds {token_limit} characters"));
             }
             out.push(Tok::Id(src[s..i].into()));
             continue;
@@ -293,7 +311,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
         return Err(format!("unsupported token at byte {i}"));
     }
     out.push(Tok::End);
-    Ok(out)
+    Ok((out, version))
 }
 struct Parser {
     tokens: Vec<Tok>,
@@ -346,10 +364,13 @@ impl Parser {
             return Err("sampler2D is supported only as a fragment uniform".into());
         }
         if name.starts_with("gl_")
+            || name.starts_with("webgl_")
+            || name.starts_with("_webgl_")
             || Ty::parse(&name).is_some()
             || matches!(
                 name.as_str(),
                 "void"
+                    | "layout"
                     | "main"
                     | "attribute"
                     | "uniform"
@@ -424,7 +445,18 @@ impl Parser {
                 e
             }
             Tok::Id(name) => {
-                if name == "texture2D" {
+                if name == "texture2D" || name == "texture" {
+                    let expected = if self.shader.version == 100 {
+                        "texture2D"
+                    } else {
+                        "texture"
+                    };
+                    if name != expected {
+                        return Err(format!(
+                            "{name} is unavailable in GLSL ES {}",
+                            self.shader.version
+                        ));
+                    }
                     if self.vertex {
                         return Err("vertex texture sampling is unsupported".into());
                     }
@@ -577,12 +609,28 @@ impl Parser {
         Ok(left)
     }
 }
-pub(crate) fn compile(source: &str, vertex: bool) -> Result<Shader, String> {
+pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Shader, String> {
+    let token_limit = if max_version >= 300 { 1024 } else { 256 };
+    let (tokens, version) = lex(source, token_limit)?;
+    if version > max_version {
+        return Err(format!(
+            "this context permits GLSL ES {max_version}, not {version}"
+        ));
+    }
     let mut p = Parser {
-        tokens: lex(source)?,
+        tokens,
         pos: 0,
         vertex,
         shader: Shader {
+            version,
+            output: if vertex {
+                "gl_Position".into()
+            } else if version == 100 {
+                "gl_FragColor".into()
+            } else {
+                String::new()
+            },
+            locations: BTreeMap::new(),
             symbols: BTreeMap::new(),
             reads: BTreeSet::new(),
             writes: BTreeSet::new(),
@@ -591,18 +639,15 @@ pub(crate) fn compile(source: &str, vertex: bool) -> Result<Shader, String> {
         },
         depth: 0,
     };
-    let output = if vertex {
-        "gl_Position"
-    } else {
-        "gl_FragColor"
-    };
-    p.shader.symbols.insert(
-        output.into(),
-        Symbol {
-            ty: Ty::Vec4,
-            qual: Qual::Output,
-        },
-    );
+    if vertex || version == 100 {
+        p.shader.symbols.insert(
+            p.shader.output.clone(),
+            Symbol {
+                ty: Ty::Vec4,
+                qual: Qual::Output,
+            },
+        );
+    }
     if !vertex {
         p.shader.symbols.insert(
             "gl_FragCoord".into(),
@@ -614,42 +659,97 @@ pub(crate) fn compile(source: &str, vertex: bool) -> Result<Shader, String> {
     }
     let mut precision_float = false;
     loop {
-        let n = p.id()?;
+        let mut n = p.id()?;
+        let mut location = None;
+        if n == "layout" {
+            if version != 300 {
+                return Err("layout qualifiers require GLSL ES 3.00".into());
+            }
+            p.expect(Tok::P('('))?;
+            p.expect(Tok::Id("location".into()))?;
+            p.expect(Tok::P('='))?;
+            let value = match p.next() {
+                Tok::Num(n, true) if n >= 0. && n < crate::MAX_VERTEX_ATTRIBS as f32 => n as u32,
+                _ => return Err("location must be a supported decimal integer literal".into()),
+            };
+            location = Some(value);
+            p.expect(Tok::P(')'))?;
+            n = p.id()?;
+        }
         if n == "precision" {
+            if location.is_some() {
+                return Err("layout cannot qualify a precision declaration".into());
+            }
             let q = p.id()?;
             if !matches!(q.as_str(), "lowp" | "mediump" | "highp") {
                 return Err("invalid precision".into());
             }
-            if p.ty()? != Ty::Float {
-                return Err("only float precision declarations are supported".into());
+            let ty = p.id()?;
+            match ty.as_str() {
+                "float" => precision_float = true,
+                "int" | "sampler2D" => {}
+                _ => return Err("unsupported precision declaration type".into()),
             }
-            precision_float = true;
             p.expect(Tok::P(';'))?;
             continue;
         }
         if n == "void" {
+            if location.is_some() {
+                return Err("layout cannot qualify main".into());
+            }
             p.expect(Tok::Id("main".into()))?;
             p.expect(Tok::P('('))?;
             p.expect(Tok::P(')'))?;
             p.expect(Tok::P('{'))?;
             break;
         }
-        let qual = match n.as_str() {
-            "attribute" if p.vertex => Qual::Attribute,
-            "uniform" => Qual::Uniform,
-            "varying" => Qual::Varying,
-            _ => return Err(format!("unsupported global declaration {n}")),
+        let qual = match (n.as_str(), version, vertex) {
+            ("uniform", _, _) => Qual::Uniform,
+            ("attribute", 100, true) => Qual::Attribute,
+            ("varying", 100, _) => Qual::Varying,
+            ("in", 300, true) => Qual::Attribute,
+            ("in", 300, false) => Qual::Varying,
+            ("out", 300, true) => Qual::Varying,
+            ("out", 300, false) => Qual::Output,
+            _ => return Err(format!("unsupported declaration {n} for GLSL ES {version}")),
         };
+        if location.is_some()
+            && !((vertex && qual == Qual::Attribute) || (!vertex && qual == Qual::Output))
+        {
+            return Err(
+                "locations are supported only on vertex inputs and fragment outputs".into(),
+            );
+        }
+        if !vertex && location.is_some_and(|v| v != 0) {
+            return Err(
+                "multiple render targets are unsupported; output location must be zero".into(),
+            );
+        }
         let ty = p.ty()?;
         if ty == Ty::Mat4 && qual != Qual::Uniform {
             return Err("mat4 is supported only for uniforms and locals".into());
         }
+        if qual == Qual::Output && ty != Ty::Vec4 {
+            return Err("only a vec4 fragment output is supported".into());
+        }
         let name = p.id()?;
-        p.declare(name, ty, qual)?;
+        p.declare(name.clone(), ty, qual)?;
+        if qual == Qual::Output {
+            if !p.shader.output.is_empty() {
+                return Err("multiple fragment outputs are unsupported".into());
+            }
+            p.shader.output = name.clone();
+        }
+        if let Some(location) = location {
+            p.shader.locations.insert(name, location);
+        }
         p.expect(Tok::P(';'))?;
     }
     if !vertex && !precision_float {
         return Err("fragment shaders require a float precision declaration".into());
+    }
+    if p.shader.output.is_empty() {
+        return Err("GLSL ES 3.00 fragment shaders require one vec4 output".into());
     }
     while !p.eat('}') {
         if p.shader.statements.len() >= 128 {
@@ -688,8 +788,8 @@ pub(crate) fn compile(source: &str, vertex: bool) -> Result<Shader, String> {
         p.shader.statements.push((name, expr));
     }
     p.expect(Tok::End)?;
-    if !p.shader.writes.contains(output) {
-        return Err(format!("shader must write {output}"));
+    if !p.shader.writes.contains(&p.shader.output) {
+        return Err(format!("shader must write {}", p.shader.output));
     }
     Ok(p.shader)
 }
