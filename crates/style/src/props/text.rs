@@ -112,8 +112,8 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                     "ellipsis" => TextOverflow::Ellipsis,
                     _ => return true,
                 };
-            } else if let [Token::String(_)] = c0 {
-                style.text_overflow = TextOverflow::Ellipsis;
+            } else if let [Token::String(s)] = c0 {
+                style.text_overflow = TextOverflow::String(s.to_string());
             }
         }
         "word-break" => {

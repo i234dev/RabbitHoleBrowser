@@ -565,3 +565,28 @@ fn shadow_dom_changes_restyle_incrementally() {
     check(&engine, &mut page, "document class");
     assert_eq!(page.incr.stats.style_full, full_before, "shadow DOM changes must not restyle the whole document");
 }
+
+#[test]
+fn line_clamp_removal_restores_descendant_lines() {
+    let (engine, mut page) = load(r#"<style>.clamp { line-clamp: 1; font: 16px/32px serif }</style><div class="clamp" id="container"><div>Line 1</div><div>Line 2</div><div>Line 3</div></div>"#);
+    let container = id(&page, "container");
+    let clamped = page.rect_of(container).unwrap().h;
+    for clamp in ["none", "2", "none", "1", "none"] {
+        page.doc.set_attr(container, "style", Some(&format!("line-clamp: {clamp}")));
+        check(&engine, &mut page, "changing line-clamp must restore discarded lines");
+        let height = page.rect_of(container).unwrap().h;
+        if clamp == "none" { assert!(height >= clamped + 63.0, "{height} versus {clamped}"); }
+    }
+}
+
+#[test]
+fn line_clamp_removal_from_script_after_measuring_layout() {
+    let mut engine = Engine::new_bundled_fonts_only();
+    engine.loader.load_images = false;
+    let html = r#"<style>.clamp { line-clamp: 1; font: 16px/32px serif }</style><div class="clamp" id="container"><div>Line 1</div><div>Line 2</div><div>Line 3</div></div><script>document.body.offsetHeight; document.getElementById("container").style.lineClamp = "none";</script>"#;
+    let mut page = engine.load_html(html, Url::parse("https://example.test/").unwrap(), Viewport { width: 800.0, height: 600.0 });
+    let container = id(&page, "container");
+    engine.restyle(&mut page);
+    assert_eq!(page.doc.attr(container, "style"), Some("line-clamp: none;"));
+    assert!(page.rect_of(container).unwrap().h >= 95.0);
+}

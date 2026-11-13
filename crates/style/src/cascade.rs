@@ -1641,7 +1641,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.outline_color = from.outline_color;
             to.outline_offset = from.outline_offset;
         }
-        "text-overflow" => to.text_overflow = from.text_overflow,
+        "text-overflow" => to.text_overflow = from.text_overflow.clone(),
         "word-break" => to.word_break = from.word_break,
         "overflow-wrap" | "word-wrap" => to.overflow_wrap = from.overflow_wrap,
         "text-decoration-color" => to.text_decoration_color = from.text_decoration_color,

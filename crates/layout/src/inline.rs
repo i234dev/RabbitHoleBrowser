@@ -440,7 +440,7 @@ impl<'a> Layouter<'a> {
         let strut = self.text_metrics(&cstyle);
         let indent = cstyle.text_indent.resolve_or_zero(cb.width);
         let clips = cstyle.overflow_x.clips() || cstyle.overflow_y.clips();
-        let ellipsis = cstyle.text_overflow == TextOverflow::Ellipsis && clips;
+        let ellipsis = cstyle.text_overflow != TextOverflow::Clip && clips;
         let own_clamp = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
         // Lines left by an ancestor's `line-clamp`.
         let outer_clamp = if own_clamp.is_none() { self.clamp.map(|c| c.0) } else { None };
@@ -1173,14 +1173,36 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         }
     }
 
-    /// Truncate the current line so that it ends with "…" within the line
-    /// box (`text-overflow: ellipsis` / line clamping).
-    fn ellipsize(&mut self) {
+    /// Truncate the current line to make room for its overflow marker
+    /// (`text-overflow` / line clamping).
+    fn ellipsize(&mut self, clamp: bool) {
         let cstyle = self.cstyle.clone();
         let font = self.lay.font_for(&cstyle);
         let size = cstyle.font_size;
-        let ell = "\u{2026}";
-        let ell_w = self.lay.measurer.width(font, size, ell);
+        // A block ellipsis is independent of the inline overflow marker.
+        let marker = if !clamp {
+            match &cstyle.text_overflow {
+                // Forced line breaks in the anonymous inline marker are
+                // transformed to spaces; it never creates another line.
+                TextOverflow::String(s) => {
+                    let mut out = String::new();
+                    let mut space = false;
+                    for c in s.chars() {
+                        if matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c' | '\u{85}' | '\u{2028}' | '\u{2029}') {
+                            if !space || !cstyle.white_space.collapses() { out.push(' '); }
+                            space = true;
+                        } else {
+                            out.push(c);
+                            space = false;
+                        }
+                    }
+                    out
+                }
+                _ => "\u{2026}".to_string(),
+            }
+        } else { "\u{2026}".to_string() };
+        let ell = marker.as_str();
+        let ell_w = self.lay.measurer.width(font, size, ell) + cstyle.letter_spacing * ell.chars().count() as f32;
         let limit = self.cur.right - ell_w;
         // Drop / trim fragments from the end until the text fits.
         while let Some(last) = self.cur.frags.last() {
@@ -1195,7 +1217,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
             };
             let avail = limit - x;
-            let (mut head, mut head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, false);
+            // CSS Overflow keeps the first character on the line, clipping
+            // the marker itself if there is not enough room for both.
+            let keep_first = !clamp && self.cur.frags.len() == 1;
+            let (mut head, mut head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, keep_first);
             // No space before the ellipsis.
             if head.ends_with(' ') && !head.trim().is_empty() {
                 let trimmed = head.trim_end().to_string();
@@ -1333,10 +1358,19 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 open.push(it);
             }
             match &f.kind {
-                PFKind::Text { text, .. } => {
+                PFKind::Text { text, item } => {
+                    // Overflow markers form an independent bidi paragraph,
+                    // taking their base direction from the containing line.
+                    // In plaintext, the content before the marker determines it.
+                    let marker = *item == MARKER_ITEM;
+                    if marker {
+                        let rtl = if container_bidi == UnicodeBidi::Plaintext { first_strong(&chars).unwrap_or(base_rtl) } else { base_rtl };
+                        push(&mut chars, &mut origin, if rtl { RLI_CH } else { LRI_CH }, None);
+                    }
                     for (k, c) in text.chars().enumerate() {
                         push(&mut chars, &mut origin, c, Some((fi, k)));
                     }
+                    if marker { push(&mut chars, &mut origin, PDI_CH, None); }
                 }
                 PFKind::Box(_) => push(&mut chars, &mut origin, '\u{FFFC}', Some((fi, 0))),
             }
@@ -1506,7 +1540,7 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let clamp_hit = matches!(self.max_lines, Some(n) if self.lines.len() + 1 >= n) && more_follows;
         let overflows = self.cur.x > self.cur.right + 0.5;
         if (self.ellipsis && overflows) || clamp_hit {
-            self.ellipsize();
+            self.ellipsize(clamp_hit);
         }
         if clamp_hit {
             self.done = true;

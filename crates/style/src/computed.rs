@@ -761,10 +761,11 @@ pub enum TransformOp {
 
 // --------------------------------------------------------------- text / misc
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextOverflow {
     Clip,
     Ellipsis,
+    String(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

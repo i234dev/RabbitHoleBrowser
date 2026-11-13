@@ -848,3 +848,43 @@ fn text_input_is_content_box_with_centered_text() {
     // Buttons stay border-box.
     assert!((inputs[2].rect.h - 40.0).abs() < 0.01, "button {}", inputs[2].rect.h);
 }
+
+#[test]
+fn text_overflow_custom_string_and_empty_marker() {
+    for marker in ["[more]", "", "123"] {
+        let html = format!("<div style='width:120px;white-space:nowrap;overflow:hidden;text-overflow:\"{marker}\"'>This is a fairly long sentence that cannot fit</div>");
+        let fx = Fixture::new(&html, "");
+        let tree = fx.layout();
+        let div = &fx.find(&tree, "div")[0];
+        let text = text_of(div);
+        assert!(text.ends_with(marker), "{marker}: {text}");
+        assert!(!text.contains('…'), "{text}");
+        for frag in &div.lines[0].fragments {
+            assert!(frag.rect.right() <= div.content_rect.right() + 0.6, "{:?}", frag.rect);
+        }
+    }
+}
+
+#[test]
+fn text_overflow_string_keeps_first_character_when_marker_is_too_wide() {
+    let fx = Fixture::new("<div style='font:20px monospace;width:30px;white-space:nowrap;overflow:hidden;text-overflow:\"123456789\"'>abcdef</div>", "");
+    let tree = fx.layout();
+    let div = &fx.find(&tree, "div")[0];
+    assert_eq!(text_of(div), "a123456789");
+}
+
+#[test]
+fn text_overflow_string_collapses_forced_breaks() {
+    let fx = Fixture::new("<div style='width:150px;white-space:nowrap;overflow:hidden;text-overflow:\"Hi\\a\\2028\\2029Hi\"'>This is a fairly long sentence that cannot fit</div>", "");
+    let tree = fx.layout();
+    let div = &fx.find(&tree, "div")[0];
+    assert!(text_of(div).ends_with("Hi Hi"), "{}", text_of(div));
+}
+
+#[test]
+fn text_overflow_string_preserves_spaces_with_white_space_pre() {
+    let fx = Fixture::new("<div style='width:150px;white-space:pre;overflow:hidden;text-overflow:\"a  b\"'>This is a fairly long sentence that cannot fit</div>", "");
+    let tree = fx.layout();
+    let div = &fx.find(&tree, "div")[0];
+    assert!(text_of(div).ends_with("a  b"), "{}", text_of(div));
+}
