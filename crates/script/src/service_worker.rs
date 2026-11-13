@@ -812,6 +812,11 @@ impl ServiceWorkerNavigationHandle {
                 let reserved = s.clients.get_mut(&client).unwrap(); reserved.url = self.target.clone(); reserved.controller = worker;
                 worker
             };
+            // Main fetch applies referrer policy before exposing the Request
+            // to a worker. Discarded path/query cannot reappear after cloning,
+            // changing policy or redirecting back to the initiating origin.
+            self.request.initiator = self.request.initiator.as_ref().or(self.request.referer.as_ref()).and_then(|url| Url::parse_absolute(&format!("{}/", url.origin())));
+            self.request.referer = self.request.referer.as_ref().and_then(|url| rabbithole_net::cors::referrer_for(url, &self.target, self.request.referrer_policy)).and_then(|url| Url::parse_absolute(&url));
             let mut request = self.request.clone(); request.url = self.target.without_fragment();
             request.dest = rabbithole_net::Destination::Document;
             request.mode = Some(rabbithole_net::RequestMode::Navigate);

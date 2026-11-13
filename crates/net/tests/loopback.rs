@@ -807,3 +807,31 @@ fn live_websocket_echo() {
     ws.send_text("rabbithole").unwrap();
     assert_eq!(ws.next_event(t), Some(WsEvent::Message(WsMessage::Text("rabbithole".into()))));
 }
+
+#[test]
+fn origin_only_initiator_preserves_cors_and_samesite_without_a_referrer() {
+    // This source is inert metadata; only the loopback destination is contacted.
+    let source = Url::parse_absolute("http://source.example.test/").unwrap();
+    let origin = source.origin();
+    let allow = origin.clone();
+    let server = serve(Arc::new(move |req: &Req| match req.path.as_str() {
+        "/set" => (200, hv(&[("set-cookie", "strict=one; SameSite=Strict; Path=/")]), b"set".to_vec()),
+        "/allowed" => (200, hv(&[("access-control-allow-origin", &allow), ("access-control-allow-credentials", "true")]), b"allowed".to_vec()),
+        _ => (200, vec![], b"closed".to_vec()),
+    }));
+    let f = fetcher();
+    f.request(&Request::get(server.url("/set"))).unwrap();
+    let mut request = Request::get(server.url("/allowed")).with_dest(Destination::Empty).with_mode(RequestMode::Cors, CredentialsMode::Include);
+    request.initiator = Some(source);
+    request.referrer_policy = ReferrerPolicy::NoReferrer;
+    assert_eq!(f.fetch_api(&request).unwrap().kind, ResponseType::Cors);
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.header("origin"), Some(origin.as_str()));
+    assert_eq!(sent.header("sec-fetch-site"), Some("cross-site"));
+    assert_eq!(sent.header("referer"), None);
+    assert_eq!(sent.header("cookie"), None, "NoReferrer must not turn cross-site into a browser-initiated same-site request");
+    request.url = server.url("/closed");
+    assert!(matches!(f.fetch_api(&request), Err(FetchError::Cors(_))), "missing referrer must not bypass CORS when an initiator exists");
+    f.request(&Request::get(server.url("/baseline"))).unwrap();
+    assert_eq!(server.requests().pop().unwrap().header("cookie"), Some("strict=one"), "positive control: Strict cookie was stored and same-site requests still send it");
+}

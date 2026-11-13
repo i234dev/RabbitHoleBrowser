@@ -106,3 +106,28 @@ fn gui_navigation_keeps_reserved_client_and_realm_while_external_scripts_arrive(
     assert_eq!(eval(&h,&rx,75,"beforeExternal==='preserved'&&sameReserved"),"true","starting deferred scripts must reuse the committed realm/client");
     assert_eq!(server.requests.lock().unwrap().iter().filter(|(path,_)|path=="/app/slow.js").count(),1);
 }
+
+#[test]
+fn gui_navigation_referrer_privacy_cannot_be_undone_by_clones_or_policy_override(){
+    let worker=r#"onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{if(e.request.mode!=='navigate')return;
+      const original=e.request,cloned=original.clone(),copied=new Request(original),unsafe=new Request(original,{referrerPolicy:'unsafe-url'});
+      const changed=original.clone();Object.defineProperty(changed,'referrerPolicy',{value:'unsafe-url',configurable:true});
+      const refs=[original.referrer,cloned.referrer,copied.referrer,unsafe.referrer,changed.referrer];
+      const policyChanged=unsafe.referrerPolicy==='unsafe-url'&&changed.referrerPolicy==='unsafe-url';
+      e.respondWith(Promise.all([original,cloned,copied,unsafe,changed].map(r=>fetch(r))).then(()=>new Response('<!doctype html><title>Referrer SW</title><script>var refs='+JSON.stringify(refs)+',policyChanged='+JSON.stringify(policyChanged)+';</script>',{headers:{'content-type':'text/html'}})));
+    };"#;
+    let source=Server::new(&[]);
+    let destination=Server::new(&[("/app/start",200,"text/html",START,&[]),("/app/sw.js",200,"text/javascript",worker,&[]),("/app/referrer",200,"text/html","<!doctype html><title>Wire only</title>",&[])]);
+    let(sink,rx)=sink();let h=spawn(76,&sink);navigate(&h,&format!("{}/app/start",destination.origin));committed(&rx,76,"Start");until(&h,&rx,76,"controlled===true");
+    for (policy,expected) in [(rabbithole_engine::net::cors::ReferrerPolicy::StrictOriginWhenCrossOrigin,format!("{}/",source.origin)),(rabbithole_engine::net::cors::ReferrerPolicy::NoReferrer,String::new())] {
+      let source_url=url(&format!("{}/private-path?query=secret-value#hidden",source.origin));
+      h.send(ToContent::LoadHtml{html:"<!doctype html><title>Source origin</title>".into(),url:source_url.clone(),push_history:true});committed(&rx,76,"Source origin");
+      let request=Request::get(url(&format!("{}/app/referrer",destination.origin))).with_referer(source_url).with_referrer_policy(policy);
+      h.send(ToContent::Navigate{request,push_history:true});committed(&rx,76,"Referrer SW");until(&h,&rx,76,"typeof refs==='object'");
+      assert_eq!(eval(&h,&rx,76,"policyChanged&&refs.every(r=>!r.includes('private-path')&&!r.includes('secret-value')&&!r.includes('hidden'))"),"true");
+      assert_eq!(eval(&h,&rx,76,"refs.slice(0,3).every(r=>r===refs[0])"),"true");assert_eq!(eval(&h,&rx,76,"refs[0]"),expected);
+    }
+    let seen=destination.requests.lock().unwrap();let forwarded:Vec<_>=seen.iter().filter(|(path,_)|path=="/app/referrer").collect();assert_eq!(forwarded.len(),10,"5 forwards for each policy, no recursion");
+    for(_,headers)in&forwarded{assert!(!headers.contains("private-path")&&!headers.contains("secret-value")&&!headers.contains("hidden"),"discarded referrer escaped to wire: {headers}");}
+    assert!(forwarded.iter().any(|(_,headers)|headers.to_ascii_lowercase().contains("sec-fetch-site: same-site")),"referrer stripping must retain origin-only initiator metadata: {forwarded:?}");
+}

@@ -255,10 +255,14 @@ pub struct Request {
     pub url: Url,
     pub body: Option<Body>,
     pub headers: Vec<(String, String)>,
-    /// The document that initiated the request (its URL is the source of
-    /// the `Referer` header, filtered by `referrer_policy`, and of the
-    /// request origin).
+    /// Referrer source, filtered by `referrer_policy` for the wire. Legacy
+    /// callers also derive the initiator from this when `initiator` is absent.
+    /// Before service-worker dispatch this contains only the allowed referrer.
     pub referer: Option<Url>,
+    /// Optional origin-only initiator after referrer privacy has been applied.
+    /// No userinfo, path beyond '/', query or fragment may be stored here.
+    /// Legacy callers derive the initiator from `referer` when this is absent.
+    pub initiator: Option<Url>,
     /// Follow redirects (default true). `false` returns 3xx responses as
     /// they are (same as `redirect = Manual`).
     pub follow_redirects: bool,
@@ -283,6 +287,7 @@ impl Request {
             body: None,
             headers: Vec::new(),
             referer: None,
+            initiator: None,
             follow_redirects: true,
             dest: Destination::Document,
             mode: None,
@@ -307,6 +312,7 @@ impl Request {
     }
     pub fn with_referer(mut self, r: Url) -> Request {
         self.referer = Some(r);
+        self.initiator = None;
         self
     }
     pub fn with_header(mut self, k: &str, v: &str) -> Request {
@@ -1221,7 +1227,7 @@ impl Fetcher {
         h.push(("Origin".into(), origin.to_string()));
         h.push(("User-Agent".into(), self.user_agent.clone()));
         h.push(("Sec-Fetch-Mode".into(), "cors".into()));
-        h.push(("Sec-Fetch-Site".into(), fetch_site(req.referer.as_ref(), url).into()));
+        h.push(("Sec-Fetch-Site".into(), fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), url).into()));
         h.push(("Sec-Fetch-Dest".into(), "empty".into()));
         if let Some(r) = req.referer.as_ref().and_then(|r| cors::referrer_for(r, url, req.referrer_policy)) {
             h.push(("Referer".into(), r));
@@ -1243,7 +1249,7 @@ impl Fetcher {
         }
         let api = req.mode.is_some_and(|m| m != RequestMode::Navigate) && !cors_disabled();
         let mode = req.mode.unwrap_or(RequestMode::Navigate);
-        let client_origin: Option<Url> = req.referer.clone().filter(|r| r.is_http());
+        let client_origin: Option<Url> = req.initiator.as_ref().or(req.referer.as_ref()).cloned().filter(|r| r.is_http());
         let origin_str = client_origin.as_ref().map(|o| o.origin());
         let priority = req.effective_priority();
         let incremental = matches!(req.dest, Destination::Image | Destination::Document);
@@ -1254,9 +1260,9 @@ impl Fetcher {
         let mut url_list = vec![url.clone()];
         let mut tainting = ResponseType::Basic;
         let mut tainted_origin = false;
-        let mut site: &'static str = fetch_site(req.referer.as_ref(), &url);
+        let mut site: &'static str = fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), &url);
         let top_level = req.dest == Destination::Document && req.mode.is_none_or(|m| m == RequestMode::Navigate);
-        let mut cookie_ctx = CookieContext::new(req.referer.as_ref(), &url, top_level, &method);
+        let mut cookie_ctx = CookieContext::new(req.initiator.as_ref().or(req.referer.as_ref()), &url, top_level, &method);
         let author_headers: Vec<(String, String)> = req.headers.iter().filter(|(k, _)| !(req.mode.is_some() && cors::is_forbidden_request_header(k))).cloned().collect();
         for _hop in 0..20 {
             let same_origin = origin_str.as_ref().map(|o| *o == url.origin()).unwrap_or(true);
@@ -1356,7 +1362,7 @@ impl Fetcher {
                         if api && tainting == ResponseType::Cors && next.origin() != url.origin() && !same_origin {
                             tainted_origin = true;
                         }
-                        site = worse_site(site, fetch_site(req.referer.as_ref(), &next));
+                        site = worse_site(site, fetch_site(req.initiator.as_ref().or(req.referer.as_ref()), &next));
                         cookie_ctx.same_site_chain = cookie_ctx.same_site_chain && cookie_ctx.is_same_site(&next);
                         cookie_ctx.safe_method = matches!(method.as_str(), "GET" | "HEAD");
                         url = next;

@@ -843,6 +843,7 @@ pub(crate) fn make_navigation_request(realm: &mut Realm, source: &Request) -> Va
     for (name, value) in [("mode", "navigate"), ("credentials", credentials_name(source.credentials)), ("redirect", redirect_name(source.redirect)), ("destination", "document")] { realm.define_property(id, name, Value::str(value), ACC); }
     let referer = source.referer.as_ref().map(ToString::to_string).unwrap_or_default();
     realm.define_property(id, "referrer", Value::str(&referer), ACC);
+    realm.define_property(id, "referrerPolicy", Value::str(source.referrer_policy.as_str()), ACC);
     request
 }
 /// Snapshot a navigation override dictionary exactly once, including inherited
@@ -933,6 +934,17 @@ fn request_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Val
             realm.define_property(id, name, value, ACC);
         }
     }
+    let mut policy = if init.is_object() { realm.get_str(init.clone(), "referrerPolicy")? } else { Value::Undefined };
+    if policy.is_undefined() && navigation.is_some() && !overridden {
+        policy = Value::str(navigation.as_ref().unwrap().referrer_policy.as_str());
+    } else if policy.is_undefined() && navigation.is_none() && input.as_object().is_some_and(|o| realm.obj(o).class_name() == Some("Request")) {
+        policy = realm.get_str(input.clone(), "referrerPolicy")?;
+    }
+    if !policy.is_undefined() {
+        let text = realm.to_rust_string(policy.clone())?;
+        if !text.is_empty() && rabbithole_net::cors::ReferrerPolicy::parse(&text).filter(|policy| policy.as_str() == text).is_none() { return Err(realm.throw_type_error("Invalid Request referrer policy")); }
+        realm.define_property(id, "referrerPolicy", Value::str(&text), ACC);
+    }
     Ok(request)
 }
 
@@ -947,7 +959,7 @@ fn request_clone(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value>
     let request = make_request(realm, &url, &method, headers, body);
     realm.native_root(request.clone());
     if let Some(o) = request.as_object() {
-        for name in ["mode", "credentials", "redirect", "signal"] {
+        for name in ["mode", "credentials", "redirect", "signal", "referrerPolicy"] {
             let value = realm.get_str(this.clone(), name)?;
             if !value.is_undefined() { realm.define_property(o, name, value, ACC); }
         }
@@ -1165,6 +1177,12 @@ fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
         }
         if let Some((v, _)) = option(realm, "credentials")? { req.credentials = rabbithole_net::CredentialsMode::parse(&v).ok_or_else(|| realm.throw_type_error("Invalid fetch credentials"))?; }
         if let Some((v, _)) = option(realm, "redirect")? { req.redirect = rabbithole_net::RedirectMode::parse(&v).ok_or_else(|| realm.throw_type_error("Invalid fetch redirect"))?; }
+        let mut policy = if init.is_object() { realm.get_str(init.clone(), "referrerPolicy")? } else { Value::Undefined };
+        if policy.is_undefined() && input.as_object().is_some_and(|o| realm.obj(o).class_name() == Some("Request")) { policy = realm.get_str(input.clone(), "referrerPolicy")?; }
+        if !policy.is_undefined() {
+            let text = realm.to_rust_string(policy)?;
+            if !text.is_empty() { req.referrer_policy = rabbithole_net::cors::ReferrerPolicy::parse(&text).filter(|policy| policy.as_str() == text).ok_or_else(|| realm.throw_type_error("Invalid fetch referrer policy"))?; }
+        }
         if let Some((_, content_type)) = headers.iter().find(|(name, _)| name == "content-type") {
             if !req.headers.iter().any(|(name, _)| name == "content-type") { req.headers.push(("content-type".into(), content_type.clone())); }
         }
