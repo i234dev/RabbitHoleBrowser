@@ -121,7 +121,24 @@ fn chain(doc: &Document, n: NodeId) -> Vec<NodeId> {
 }
 
 fn is_disabled_control(doc: &Document, n: NodeId) -> bool {
-    matches!(doc.tag(n), Some("button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset")) && doc.attr(n, "disabled").is_some()
+    if matches!(doc.tag(n), Some("button" | "input" | "select" | "textarea" | "option" | "optgroup" | "fieldset")) && doc.attr(n, "disabled").is_some() {
+        return true;
+    }
+    if !matches!(doc.tag(n), Some("button" | "input" | "select" | "textarea")) {
+        return false;
+    }
+    let mut ancestor = doc.parent(n);
+    while let Some(a) = ancestor {
+        if doc.is_element(a, "fieldset") && doc.attr(a, "disabled").is_some() {
+            let legend = doc.child_elements(a).find(|&c| doc.is_element(c, "legend"));
+            let in_first_legend = legend.is_some_and(|legend| doc.ancestor_or_self(n, |c| c == legend).is_some());
+            if !in_first_legend {
+                return true;
+            }
+        }
+        ancestor = doc.parent(a);
+    }
+    false
 }
 
 /// Can the element receive focus from a click?
@@ -134,7 +151,46 @@ pub fn is_focusable(doc: &Document, n: NodeId) -> bool {
         "a" | "area" if el.attr("href").is_some() => true,
         "button" | "select" | "textarea" | "iframe" | "summary" => true,
         "input" => !el.attr("type").map(|t| t.eq_ignore_ascii_case("hidden")).unwrap_or(false),
-        _ => el.attr("tabindex").and_then(|t| t.trim().parse::<i32>().ok()).is_some() || el.attr("contenteditable").map(|v| v != "false").unwrap_or(false),
+        _ => el.attr("tabindex").and_then(|t| t.trim().parse::<i32>().ok()).is_some() || el.attr("contenteditable").map(|v| !v.eq_ignore_ascii_case("false")).unwrap_or(false),
+    }
+}
+
+impl Page {
+    /// Local sequential-focus candidates, with positive tabindex values first.
+    /// Hidden and inert subtrees do not enter the keyboard navigation order.
+    pub fn sequential_focus_order(&self) -> Vec<NodeId> {
+        use rabbithole_style::{Display, Visibility};
+        let doc = &self.doc;
+        let mut candidates: Vec<(i32, NodeId)> = doc.descendants(Document::ROOT).filter_map(|n| {
+            if !is_focusable(doc, n) || self.styles.get(n)?.visibility != Visibility::Visible {
+                return None;
+            }
+            let index = doc.attr(n, "tabindex").and_then(|t| t.trim().parse::<i32>().ok()).unwrap_or(0);
+            if index < 0 || self.styles.get(n)?.display == Display::Contents {
+                return None;
+            }
+            let mut ancestor = Some(n);
+            while let Some(a) = ancestor {
+                if doc.attr(a, "inert").is_some() {
+                    return None;
+                }
+                if self.styles.get(a).is_some_and(|s| s.display == Display::None || (a != n && s.content_visibility_hidden)) {
+                    return None;
+                }
+                if a != n && doc.is_element(a, "details") && doc.attr(a, "open").is_none() {
+                    let summary = doc.child_elements(a).find(|&c| doc.is_element(c, "summary"));
+                    if !summary.is_some_and(|summary| doc.ancestor_or_self(n, |c| c == summary).is_some()) {
+                        return None;
+                    }
+                }
+                ancestor = doc.flat_parent(a);
+            }
+            Some((index, n))
+        }).collect();
+        // Stable sorting preserves tree order for equal indexes and for the
+        // default (zero) group. Positive indexes precede that group.
+        candidates.sort_by_key(|&(index, _)| if index > 0 { (0, index) } else { (1, 0) });
+        candidates.into_iter().map(|(_, n)| n).collect()
     }
 }
 
