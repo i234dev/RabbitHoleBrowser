@@ -1444,23 +1444,33 @@ impl Realm {
             }
             return Err(err);
         }
+        if self.realms.is_empty() {
+            // A single realm (the caller's is realm 0; one created while
+            // this runs may be left running by an exception).
+            let r = self.run_loops();
+            if self.current_realm != 0 {
+                self.switch_realm(0);
+            }
+            return r;
+        }
         let caller_realm = self.current_realm;
         let outer_entry_realm = std::mem::replace(&mut self.entry_realm, caller_realm);
-        let r = loop {
-            match self.run_inner() {
-                Ok(exit) => break Ok(exit),
-                Err(e) => {
-                    if let Err(e) = self.unwind(e) {
-                        break Err(e);
-                    }
-                }
-            }
-        };
+        let r = self.run_loops();
         self.entry_realm = outer_entry_realm;
         if self.current_realm != caller_realm {
             self.switch_realm(caller_realm);
         }
         r
+    }
+
+    #[inline(always)]
+    fn run_loops(&mut self) -> JsResult<Exit> {
+        loop {
+            match self.run_inner() {
+                Ok(exit) => return Ok(exit),
+                Err(e) => self.unwind(e)?,
+            }
+        }
     }
 
     #[inline]
