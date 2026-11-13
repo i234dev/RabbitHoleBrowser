@@ -15,7 +15,7 @@ It can be used three ways:
 
 ![Wikipedia rendered by RabbitHole](docs/wikipedia.png)
 
-_Both images were produced by `rabbithole screenshot`: every pixel comes from RabbitHole's own rasterizer._
+_Both images were produced by RabbitHole's renderer: every pixel comes from its own rasterizer._
 
 ## Status (v0.1.6)
 
