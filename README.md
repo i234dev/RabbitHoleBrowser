@@ -29,9 +29,9 @@ code unless noted in [Dependencies](#dependencies).
 
 | Suite | Result | Notes |
 |---|---|---|
-| **test262** (ECMAScript) | **80.2 %** (36,682 / 45,761 run) | first full run before fixes; language 84.4 %, built-ins 79.9 %; Temporal, ShadowRealm and other proposals skipped |
+| **test262** (ECMAScript) | **97.4 %** (44,633 / 45,848 run) | 98.5 % excluding Intl; committed baseline in `crates/js/tests/test262_baseline.txt`; Temporal and other unfinished proposals skipped |
 | **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **75.5 %** (98,867 / 130,962 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **52.3 %** (10,269 / 19,627) | committed baseline in `crates/engine/tests/wpt-css-baseline.txt`; CSS2 76.6 %, color 79.4 %, flexbox 59.3 % |
+| **WPT CSS reftests** (pixel comparison) | **57.5 %** (11,282 / 19,627) | committed baseline in `crates/engine/tests/wpt-css-baseline.txt`; CSS2 78.3 %, color 79.4 %, css-ui 91.1 %, flexbox 61.2 % |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
 | html5lib tree construction | 1,848 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
@@ -277,8 +277,8 @@ functionality: `winit` (windows/input), `softbuffer` (presenting pixels),
 
 - JavaScript speed: make the JIT a net win and turn it on; cheaper calls,
   closures and generators.
-- test262 to 90 %+ (Intl later), WPT DOM and CSS pass rates up (grid,
-  writing modes, CSSOM view, `document.write`, speculative parsing).
+- WPT DOM and CSS pass rates up (CSSOM view, `document.write`, speculative
+  parsing, text, masking); Intl and Temporal later.
 - WebGL, Temporal, full Intl.
 - macOS and Linux packaging; JIT enabled on Windows after real-hardware testing.
 
