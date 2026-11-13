@@ -353,10 +353,12 @@ fn resolve_job(s: &mut Store, job: &Job, registration: u64) {
 }
 fn notify(host: &mut ScriptHost, env: &mut dyn HostEnv) {
     host.enter(env, |realm| {
-        let hook = state().borrow().protos.get("__sw_notify").copied();
-        if let Some(f) = hook {
-            if let Err(e) = realm.call(Value::Object(f), Value::Undefined, &[]) { crate::host::report_error(realm, &e, "service worker notification"); }
-            realm.run_jobs();
+        for name in ["__sw_notify", "__sw_notify_events"] {
+            let hook = state().borrow().protos.get(name).copied();
+            if let Some(f) = hook {
+                if let Err(e) = realm.call(Value::Object(f), Value::Undefined, &[]) { crate::host::report_error(realm, &e, "service worker notification"); }
+                realm.run_jobs();
+            }
         }
     });
 }

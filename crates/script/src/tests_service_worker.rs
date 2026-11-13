@@ -183,10 +183,12 @@ fn service_worker_updatefound_follows_register_reactions_before_installing_is_cl
     env.fetches.insert("https://example.test/dir/sw.js".into(), (200, "text/javascript".into(), "oninstall = e => e.waitUntil(Promise.resolve());".into()));
     run(&mut env, &mut host, r#"
         var registration, worker, found = 0, order = [], observed = [];
-        navigator.serviceWorker.register('sw.js').then(r => {
+        navigator.serviceWorker.register('sw.js').then(async r => {
             registration = r;
             worker = r.installing;
             order.push('registered');
+            await Promise.resolve();
+            await Promise.resolve();
             r.onupdatefound = () => {
                 found++;
                 order.push('updatefound');

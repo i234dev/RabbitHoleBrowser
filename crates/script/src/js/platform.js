@@ -626,7 +626,7 @@
   if (!console.dirxml) hidden(console, 'dirxml', function dirxml(...args) { console.log(...args); });
 
   // ---------------------------------------------------- Service workers
-  const swWorkers = new Map(), swRegistrations = new Map(), swPending = new Map();
+  const swWorkers = new Map(), swRegistrations = new Map(), swPending = new Map(), swEventTasks = [];
   const swSnapshot = () => N.swSnapshot();
   const swRegData = (id) => swSnapshot().registrations.find(r => r.id === id);
   const swWorkerData = (id) => swSnapshot().workers.find(w => w.id === id);
@@ -729,15 +729,18 @@
         if (p) { swPending.delete(e.id); e.kind === 'resolve' ? p.resolve(swRegistration(e.value)) : p.reject(swError(e.name, e.message)); }
       } else if (e.kind === 'updatefound') {
         const r = swRegistrations.get(e.id);
-        // Let register() reactions attach listeners before updatefound. The
-        // host drains this microtask before dispatching install or advancing
-        // the lifecycle, so installing still identifies the new worker.
-        if (r) queueMicrotask(() => r.dispatchEvent(new Event('updatefound')));
+        // The host drains the complete register() microtask checkpoint before
+        // these tasks, and dispatches them before starting install.
+        if (r) swEventTasks.push(() => r.dispatchEvent(new Event('updatefound')));
       } else if (e.kind === 'state') {
         const w = swWorkers.get(e.id); if (w) w.dispatchEvent(new Event('statechange'));
       } else if (e.kind === 'controller') swContainer.dispatchEvent(new Event('controllerchange'));
     }
     swReady();
+  });
+  N.registerProto('__sw_notify_events', function () {
+    const tasks = swEventTasks.splice(0);
+    for (const task of tasks) task();
   });
   setNav('serviceWorker', swContainer);
   hidden(g, '__rhSW', { registration: swRegistration, worker: swWorker });
