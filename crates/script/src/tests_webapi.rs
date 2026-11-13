@@ -12,12 +12,16 @@ const MIN_COVERAGE: f64 = 0.99;
 #[test]
 fn webapi_coverage() {
     let (mut env, mut host) = setup("<!doctype html><html><head><title>t</title></head><body><div id=a></div></body></html>");
-    let inv = include_str!("../../../tools/webapi/inventory.tsv");
+    let inv = include_str!("../../../tools/webapi/inventory.tsv").replace("\r\n", "\n");
+    let crlf = inv.replace('\n', "\r\n");
     let check = include_str!("../../../tools/webapi/check.js");
-    host.realm().define_global("__RH_INV", rabbithole_js::Value::str(inv));
+    host.realm().define_global("__RH_INV", rabbithole_js::Value::str(&inv));
+    host.realm().define_global("__RH_INV_CRLF", rabbithole_js::Value::str(&crlf));
     let src = format!(
         "{check}\n(function () {{
           const r = JSON.parse(__rhWebApiCoverage(__RH_INV, true));
+          const windows = JSON.parse(__rhWebApiCoverage(__RH_INV_CRLF, true));
+          if (JSON.stringify(r) !== JSON.stringify(windows)) throw new Error('Web API inventory depends on line endings');
           const lines = [];
           for (const [k, s] of Object.entries(r.specs))
             lines.push(k.padEnd(22) + s.tier.padEnd(9) + String(s.present).padStart(5) + '/' + String(s.total).padEnd(5) + (100 * s.present / s.total).toFixed(1) + '%');
@@ -36,6 +40,40 @@ fn webapi_coverage() {
     }
     let ratio: f64 = out[2].parse().unwrap();
     assert!(ratio >= MIN_COVERAGE, "Web API coverage regressed: {ratio} < {MIN_COVERAGE}");
+}
+
+#[test]
+fn webapi_coverage_accepts_lf_and_crlf_records() {
+    let (mut env, mut host) = setup("<!doctype html><html><body></body></html>");
+    let inventory = concat!(
+        "# spec\ttier\tinterface\tkind\tmember\n",
+        "fixture\tcore\tCoverageChild\tinterface\tCoverageChild\n",
+        "fixture\tcore\tCoverageChild\tinherits\tCoverageParent\n",
+        "fixture\tcore\tCoverageChild\tproto\tpresent\n",
+        "fixture\tcore\tCoverageChild\tstatic\tpresent\n",
+        "fixture\tcore\tCoverageChild\tconst\tVALUE\n",
+        "fixture\tcore\tWindow\tglobal\tcoverageGlobal\n",
+        "fixture\tcore\tCoverageChild\tproto\tmissing\n",
+    );
+    host.realm().define_global("__RH_LF", rabbithole_js::Value::str(inventory));
+    host.realm().define_global("__RH_CRLF", rabbithole_js::Value::str(&inventory.replace('\n', "\r\n")));
+    let check = include_str!("../../../tools/webapi/check.js");
+    let out = run(&mut env, &mut host, &format!("{check}\n{}", r#"
+        globalThis.CoverageParent = function CoverageParent() {};
+        globalThis.CoverageChild = function CoverageChild() {};
+        Object.setPrototypeOf(CoverageChild.prototype, CoverageParent.prototype);
+        CoverageChild.prototype.present = function () {};
+        CoverageChild.present = function () {};
+        CoverageChild.VALUE = 1;
+        globalThis.coverageGlobal = true;
+        const lf = JSON.parse(__rhWebApiCoverage(__RH_LF, true));
+        const crlf = JSON.parse(__rhWebApiCoverage(__RH_CRLF, true));
+        console.log(lf.total, lf.present, crlf.total, crlf.present);
+        console.log(JSON.stringify(lf) === JSON.stringify(crlf));
+        console.log(crlf.specs.fixture.missing.join(','));
+    "#));
+    assert_eq!(out, ["7 6 7 6", "true", "CoverageChild#missing"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
 
 /// Evaluate `src` (which must set `window.result`) and return `result`.

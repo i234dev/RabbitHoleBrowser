@@ -53,7 +53,7 @@ function __rhWebApiCoverage(tsv, listMissing) {
     return false;
   }
   const out = { total: 0, present: 0, specs: {} };
-  for (const line of String(tsv).split('\n')) {
+  for (const line of String(tsv).split(/\r?\n/)) {
     if (!line || line[0] === '#') continue;
     const [spec, tier, iface, kind, member] = line.split('\t');
     const s = out.specs[spec] || (out.specs[spec] = { tier, total: 0, present: 0, missing: [] });
