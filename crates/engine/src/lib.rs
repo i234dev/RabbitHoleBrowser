@@ -1979,19 +1979,28 @@ impl Page {
             }
             // Text fragments carry their containing element's ID for hit
             // testing, so the inline index may not contain the Text node.
-            // Preserve its existing parent-geometry approximation for Range
-            // callers, using only that parent's own rendered geometry. This
-            // must not restore the ancestor fallback for boxless elements.
+            // Preserve the existing ancestor-geometry approximation for Range
+            // callers, taking the first real fragment/box while checking the
+            // full ancestor path for suppressed content. Only Text nodes get
+            // this approximation; boxless elements never inherit a rectangle.
             if matches!(&self.doc.node(node).data, rabbithole_dom::NodeData::Text(_)) {
-                return self.doc.flat_parent(node).and_then(|parent| {
-                    if self.styles.get(parent).is_some_and(|s| s.display == rabbithole_style::Display::Contents) {
-                        // Contents owns no element box, but its visible text
-                        // can still have real fragments indexed by that ID.
-                        self.incr.cached_inline_rect(parent, || self.layout.inline_rect_index(&self.doc))
-                    } else {
-                        self.layout_rect_of(parent)
+                let mut cur = self.doc.flat_parent(node);
+                let mut rect = None;
+                while let Some(parent) = cur {
+                    if self.styles.get(parent).is_some_and(|s| s.display == rabbithole_style::Display::None || s.content_visibility_hidden) {
+                        return None;
                     }
-                });
+                    if rect.is_none() && self.styles.get(parent).is_some_and(|s| s.display == rabbithole_style::Display::Contents) {
+                        // Contents owns no element box, but its visible text
+                        // may retain fragments indexed by that ID. Otherwise
+                        // continue to the nearest ancestor that owns geometry.
+                        rect = self.incr.cached_inline_rect(parent, || self.layout.inline_rect_index(&self.doc));
+                    } else if rect.is_none() {
+                        rect = self.layout_rect_of(parent);
+                    }
+                    cur = self.doc.flat_parent(parent);
+                }
+                return rect;
             }
             // SVG interiors are painted inside the outer SVG's replaced
             // box. Preserve that existing approximation, but never revive

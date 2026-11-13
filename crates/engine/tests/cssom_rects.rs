@@ -95,7 +95,7 @@ fn svg_fallback_stays_within_a_rendered_svg_subtree() {
 
 #[test]
 fn text_nodes_keep_rendered_parent_geometry_without_reviving_hidden_elements() {
-    let (engine, mut page) = load("<div id=container style='width:380px'><span id=inline>short text</span><span id=contents style='display:contents'>visible text</span><span id=hidden style='display:none'>hidden text</span></div>");
+    let (engine, mut page) = load("<div id=container style='width:380px'><span id=inline>short text</span><span id=contents style='display:contents'>visible text</span><span id=hidden style='display:none'>hidden text</span><div id=skipped style='content-visibility:hidden'><span id=skippedContents style='display:contents'>omitted text</span></div></div>");
     let inline = page.doc.element_by_id("inline").unwrap();
     let text = page.doc.descendants(inline).find(|&n| matches!(&page.doc.node(n).data, NodeData::Text(_))).unwrap();
     let rect = page.layout_rect_of(text).unwrap();
@@ -109,9 +109,14 @@ fn text_nodes_keep_rendered_parent_geometry_without_reviving_hidden_elements() {
     let contents = page.doc.element_by_id("contents").unwrap();
     let contents_text = page.doc.descendants(contents).find(|&n| matches!(&page.doc.node(n).data, NodeData::Text(_))).unwrap();
     let text_rect = page.layout_rect_of(contents_text).unwrap();
-    assert!(text_rect.w > 0. && text_rect.w < 380. && text_rect.h > 0., "{text_rect:?}");
+    // The flattened layout may retain only the container's owner ID. Keep
+    // the previous bounded ancestor approximation, not character accuracy.
+    assert!(text_rect.w > 0. && text_rect.w <= 380. && text_rect.h > 0., "{text_rect:?}");
     assert!(page.layout_rect_of(contents).is_none());
     assert!(page.client_rects_of(contents).is_empty());
+    let skipped = page.doc.element_by_id("skippedContents").unwrap();
+    let skipped_text = page.doc.descendants(skipped).find(|&n| matches!(&page.doc.node(n).data, NodeData::Text(_))).unwrap();
+    assert!(page.layout_rect_of(skipped_text).is_none());
     assert_eq!(eval(&engine, &mut page, "document.getElementById('inline').remove(); 'removed'"), "removed");
     assert!(page.layout_rect_of(text).is_none());
     assert_eq!(eval(&engine, &mut page, "document.getElementById('contents').style.display='none'; document.getElementById('contents').getClientRects().length"), "0");
