@@ -1977,6 +1977,14 @@ impl Page {
                     return Some(r);
                 }
             }
+            // Text fragments carry their containing element's ID for hit
+            // testing, so the inline index may not contain the Text node.
+            // Preserve its existing parent-geometry approximation for Range
+            // callers, using only that parent's own rendered geometry. This
+            // must not restore the ancestor fallback for boxless elements.
+            if matches!(&self.doc.node(node).data, rabbithole_dom::NodeData::Text(_)) {
+                return self.doc.flat_parent(node).and_then(|parent| self.layout_rect_of(parent));
+            }
             // SVG interiors are painted inside the outer SVG's replaced
             // box. Preserve that existing approximation, but never revive
             // a hidden SVG subtree or fall through to an HTML ancestor.

@@ -94,12 +94,18 @@ fn svg_fallback_stays_within_a_rendered_svg_subtree() {
 }
 
 #[test]
-fn text_nodes_keep_the_geometry_of_their_own_fragments() {
-    let (_engine, page) = load("<div id=container style='width:380px'><span id=inline>short text</span></div>");
+fn text_nodes_keep_rendered_parent_geometry_without_reviving_hidden_elements() {
+    let (engine, mut page) = load("<div id=container style='width:380px'><span id=inline>short text</span><span id=hidden style='display:none'>hidden text</span></div>");
     let inline = page.doc.element_by_id("inline").unwrap();
     let text = page.doc.descendants(inline).find(|&n| matches!(&page.doc.node(n).data, NodeData::Text(_))).unwrap();
     let rect = page.layout_rect_of(text).unwrap();
     assert!(rect.w > 0. && rect.w < 380., "{rect:?}");
     assert!(rect.h > 0.);
     assert_eq!(page.layout_rect_of(inline), Some(rect));
+    let hidden = page.doc.element_by_id("hidden").unwrap();
+    let hidden_text = page.doc.descendants(hidden).find(|&n| matches!(&page.doc.node(n).data, NodeData::Text(_))).unwrap();
+    assert!(page.layout_rect_of(hidden_text).is_none());
+    assert!(page.layout_rect_of(hidden).is_none());
+    assert_eq!(eval(&engine, &mut page, "document.getElementById('inline').remove(); 'removed'"), "removed");
+    assert!(page.layout_rect_of(text).is_none());
 }
