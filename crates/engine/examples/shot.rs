@@ -104,6 +104,7 @@ fn main() {
     let progress = std::env::var("RH_PROGRESS").ok();
     let done = std::env::var("RH_DONE").ok();
     let mut next_report = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (mut idle_waits, mut idle_time) = (0u32, std::time::Duration::ZERO);
     while std::time::Instant::now() < deadline {
         if std::time::Instant::now() >= next_report {
             next_report = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -126,6 +127,8 @@ fn main() {
                     // Idle until the next task: collector work first.
                     let wait = std::time::Duration::from_micros(((due - now) * 1000.0) as u64).min(std::time::Duration::from_millis(50));
                     let until = std::time::Instant::now() + wait;
+                    idle_waits += 1;
+                    idle_time += wait;
                     engine.idle_gc(&mut page, until);
                     std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
                 }
@@ -200,6 +203,9 @@ fn main() {
     }
     if let Ok(js) = std::env::var("RH_EVAL") {
         eprintln!("eval: {}", engine.eval_in_page(&mut page, &js));
+    }
+    if rabbithole_engine::script::js::gcstats::enabled() {
+        eprintln!("[idle] {idle_waits} waits, {:.1} ms", idle_time.as_secs_f64() * 1000.0);
     }
     rabbithole_engine::script::js::gcstats::report();
     for (level, msg) in page.take_console() {

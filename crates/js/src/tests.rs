@@ -1838,3 +1838,90 @@ fn weak_collections_drop_entries_with_their_keys() {
     let r = realm.eval("wm.get(wm.get(keep).inner) + ':' + ws.has(keep) + ':' + wm.has({})", "weak2.js").unwrap();
     assert_eq!(realm.to_string(r).unwrap().to_rust_string(), "chained:true:false");
 }
+
+/// Programs that move references around while the incremental collector
+/// marks (a few units of work at every safe point): objects taken out of
+/// unscanned objects and stored into scanned ones, closure variables,
+/// array elements, Map/Set and WeakMap entries, generator frames and
+/// prototypes must all survive; results match a run without collection.
+#[test]
+fn incremental_gc_keeps_references_moved_while_marking() {
+    let src = r#"
+        var out = [];
+        function Node(v, next) { this.v = v; this.next = next; }
+        var wm = new WeakMap();
+        var map = new Map(), set = new Set();
+        function* gen(list) { var held = list; while (held) { yield held.v; held = held.next; } }
+        for (var round = 0; round < 60; round++) {
+            var a = { x: { y: { z: round } } }, b = {};
+            var list = null;
+            for (var i = 0; i < 40; i++) list = new Node(i + round, list);
+            // Move a subtree out of `a` into `b`, then cut it from `a`.
+            b.moved = a.x; delete a.x;
+            // Array elements: take, overwrite, re-store elsewhere.
+            var arr = [ {k: 1}, {k: 2}, {k: 3} ];
+            var taken = arr[1]; arr[1] = null; arr.length = 1; b.taken = taken;
+            // Closure variables.
+            var mk = (function () { var held = { s: 'c' + round }; return { get: function () { return held; }, set: function (v) { var old = held; held = v; return old; } }; })();
+            var old = mk.set({ s: 'n' + round }); b.old = old;
+            // Map / Set: delete after reading.
+            var mv = { m: round }; map.set('k', mv); var got = map.get('k'); map.delete('k'); b.got = got;
+            var sv = { q: round }; set.add(sv); set.forEach(function (x) { b.sv = x; }); set.clear();
+            // WeakMap: value read, entry deleted, value kept by the program.
+            var key = {}; wm.set(key, { w: round }); var wv = wm.get(key); wm.delete(key); b.wv = wv;
+            // Generator holding the list in its frame.
+            var g = gen(list), s = 0, n; while (!(n = g.next()).done) s += n.value;
+            // Prototype swap.
+            var proto = { p: round }; var child = Object.create({}); Object.setPrototypeOf(child, proto); proto = null; b.child = child;
+            // Some garbage to keep cycles going.
+            for (var j = 0; j < 200; j++) { var t = { j: j, arr: [j, j + 1] }; }
+            out.push([b.moved.y.z, b.taken.k, b.old.s, mk.get().s, b.got.m, b.sv.q, b.wv.w, s, b.child.p].join(','));
+        }
+        out.join(';')
+    "#;
+    let mut plain = Realm::new();
+    plain.gc_enabled = false;
+    let v = plain.eval(src, "inc.js").unwrap();
+    let expected = plain.to_string(v).unwrap().to_rust_string();
+    let mut realm = Realm::new();
+    realm.gcx.stress = crate::realm::GC_STRESS_INCREMENTAL;
+    let v = realm.eval(src, "inc.js").unwrap();
+    assert_eq!(realm.to_string(v).unwrap().to_rust_string(), expected);
+    assert!(realm.heap.collections > 3, "only {} collections", realm.heap.collections);
+}
+
+/// The write barrier at the heap level: a reference moved from an object
+/// the marker has not scanned to one it already scanned survives.
+#[test]
+fn write_barrier_keeps_reference_moved_to_scanned_object() {
+    use crate::heap::{GcBudget, Object, ObjectKind};
+    let mut realm = Realm::new();
+    let c = realm.new_object();
+    let a = realm.new_array(vec![Value::Object(c)]);
+    let b = realm.new_array(vec![]);
+    let heap = &mut realm.heap;
+    heap.finish_cycle();
+    heap.start_cycle(&[a, b]);
+    // One object scanned (the last root pushed: `b`).
+    heap.mark_step(&mut GcBudget::units(1));
+    // b (scanned) takes c; a (not scanned) loses it.
+    if let ObjectKind::Array { elements, length } = &mut heap.get_mut(b).kind {
+        elements.push(Value::Object(c));
+        *length = 1;
+    }
+    if let ObjectKind::Array { elements, length } = &mut heap.get_mut(a).kind {
+        elements.clear();
+        *length = 0;
+    }
+    heap.finish_cycle();
+    assert!(heap.try_get(c).is_some(), "the moved object was freed");
+    // Allocated during a cycle: survives it.
+    heap.start_cycle(&[a]);
+    let fresh = heap.alloc(Object::new(None, ObjectKind::Ordinary));
+    heap.finish_cycle();
+    assert!(heap.try_get(fresh).is_some());
+    // And goes with the next one when unreachable.
+    heap.start_cycle(&[a]);
+    heap.finish_cycle();
+    assert!(heap.try_get(fresh).is_none());
+}
