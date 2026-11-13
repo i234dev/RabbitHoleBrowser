@@ -1219,6 +1219,14 @@ mod tests {
         accepts("({ __proto__: a, __proto__: b } = {})");
         accepts("(a) = 1; [(a)] = []; ({ a: (b) } = {});");
         accepts("function f() { return () => new.target; }");
+        rejects("class C { #x; m() { #x in #x in this; } }");
+        rejects("class C { #x; m() { const { #x: x } = this; } }");
+        rejects("class C { static { (class await {}); } }");
+        accepts("class C { static { (function await(await) {}); (() => { var await; }); } }");
+        rejects("class C { static { (await => 0); } }");
+        rejects("\\u0061sync () => {}");
+        rejects("v\\u0061r x = 1;");
+        accepts("var \\u0061sync = 1; ({ \\u0076ar: 1 }).var;");
     }
 
     #[test]
@@ -1230,5 +1238,10 @@ mod tests {
         assert!(m("function f() {} function f() {}").is_err());
         assert!(m("var x; export { x as y }; export { x };").is_ok());
         assert!(m("import { a } from 'm'; export { a };").is_ok());
+        assert!(m("import { eval } from 'm';").is_err());
+        assert!(m("export { 'a' as b };").is_err());
+        assert!(m("export { 'a' as b } from 'm';").is_ok());
+        assert!(m("import a from 'm' with { type: 'json', 'type': 'json' };").is_err());
+        assert!(m("import a from 'm' with { type: 'json' };").is_ok());
     }
 }

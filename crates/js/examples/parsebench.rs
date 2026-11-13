@@ -29,7 +29,14 @@ fn main() {
     let rounds = 15;
     let mut best_parse = f64::MAX;
     let mut best_compile = f64::MAX;
+    let mut best_early = f64::MAX;
+    let programs: Vec<_> = sources.iter().map(|s| rabbithole_js::parse_program(s, false).expect("parse")).collect();
     for _ in 0..rounds {
+        let t = Instant::now();
+        for p in &programs {
+            rabbithole_js::early::check_program(p, &Default::default()).expect("early errors");
+        }
+        best_early = best_early.min(t.elapsed().as_secs_f64() * 1000.0);
         let t = Instant::now();
         for s in &sources {
             rabbithole_js::parse_program(s, false).expect("parse");
@@ -45,4 +52,5 @@ fn main() {
     println!("{} files, {} KB", sources.len(), bytes / 1024);
     println!("parse          {:>8.2} ms  ({:.1} MB/s)", best_parse, bytes as f64 / 1e6 / (best_parse / 1000.0));
     println!("parse+compile  {:>8.2} ms  ({:.1} MB/s)", best_compile, bytes as f64 / 1e6 / (best_compile / 1000.0));
+    println!("early errors   {:>8.2} ms  (of parse)", best_early);
 }
