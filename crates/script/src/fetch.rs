@@ -1172,6 +1172,33 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     if !(parts.is_undefined() || parts.is_object()) {
         return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value cannot be converted to a sequence."));
     }
+    // Web IDL converts arguments from left to right: coerce the sequence's
+    // string parts before reading any member of the options dictionary.
+    // Keep binary parts as references until processing the constructor's
+    // body (an options getter may still mutate an ArrayBuffer).
+    let mut converted = Vec::new();
+    if parts.is_object() {
+        let sequence = realm.iterate_to_vec(parts)?;
+        for p in &sequence {
+            realm.native_root(p.clone());
+        }
+        for p in sequence {
+            let binary = match p.v() {
+                V::Object(o) => realm.host_data::<BodyData>(o).is_some()
+                    || realm.host_data::<ParamsData>(o).is_some()
+                    || realm.host_data::<FormDataData>(o).is_some()
+                    || matches!(&realm.obj(o).kind, rabbithole_js::ObjectKind::ArrayBuffer(_) | rabbithole_js::ObjectKind::TypedArray(_)),
+                _ => false,
+            };
+            let p = if binary || matches!(p.v(), V::String(_) | V::Null | V::Undefined) {
+                p
+            } else {
+                Value::str(&realm.to_rust_string(p)?)
+            };
+            realm.native_root(p.clone());
+            converted.push(p);
+        }
+    }
     if !(opts.is_undefined() || opts.is_null() || opts.is_object()) {
         return Err(realm.throw_type_error("Failed to construct 'Blob': The provided value is not of type 'BlobPropertyBag'."));
     }
@@ -1183,19 +1210,17 @@ fn blob_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value>
     };
     let ty = dict_str(realm, &opts, "type")?.unwrap_or_default();
     let mut bytes = Vec::new();
-    if parts.is_object() {
-        for p in realm.iterate_to_vec(parts)? {
-            if native {
-                if let V::String(s) = p.v() {
-                    // Line endings to the platform's (LF).
-                    let s = s.to_rust_string().replace("\r\n", "\n").replace('\r', "\n");
-                    bytes.extend(s.into_bytes());
-                    continue;
-                }
+    for p in converted {
+        if native {
+            if let V::String(s) = p.v() {
+                // Line endings to the platform's (LF).
+                let s = s.to_rust_string().replace("\r\n", "\n").replace('\r', "\n");
+                bytes.extend(s.into_bytes());
+                continue;
             }
-            let (b, _) = body_bytes_from_value(realm, &p)?;
-            bytes.extend(b);
         }
+        let (b, _) = body_bytes_from_value(realm, &p)?;
+        bytes.extend(b);
     }
     // The type: lower-cased, or empty when not printable ASCII.
     let ty = if ty.chars().all(|c| ('\u{20}'..='\u{7e}').contains(&c)) { ty.to_ascii_lowercase() } else { String::new() };

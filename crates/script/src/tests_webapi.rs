@@ -1222,6 +1222,26 @@ fn worker_cloning_creates_own_properties_without_calling_inherited_setters() {
     assert_eq!(out, ["copy 13 17 true 10 true 12 12", "hits 0 0"], "logs: {:?}", env.logs);
 }
 
+#[test]
+fn blob_parts_are_converted_before_property_bag_members() {
+    let (mut env, mut host) = setup("<html><body></body></html>");
+    let out = run(&mut env, &mut host, r#"
+        const marker = {};
+        let readOptions = false;
+        try {
+            new Blob([{ toString() { throw marker; } }], { get type() { readOptions = true; } });
+        } catch (e) { console.log('error', e === marker, readOptions); }
+        const order = [], bytes = new Uint8Array([65]);
+        const blob = new Blob([{ toString() { order.push('part'); return 'a\r\nb'; } }, bytes], {
+            get endings() { order.push('endings'); return 'native'; },
+            get type() { order.push('type'); bytes[0] = 66; return 'TEXT/PLAIN'; }
+        });
+        console.log(order.join(','), blob.type);
+        blob.text().then(text => console.log(JSON.stringify(text)));
+    "#);
+    assert_eq!(out, ["error true false", "part,endings,type text/plain", "\"a\\nbB\""]);
+}
+
 /// Workers run in their own realm: own globals, no DOM, importScripts,
 /// structured-clone messages both ways, transferred MessagePorts, error
 /// events, terminate(), close(), and SharedWorker connections.
