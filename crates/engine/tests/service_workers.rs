@@ -491,3 +491,19 @@ fn navigation_forwarding_and_clones_use_live_headers_without_forging_metadata() 
       assert!(!headers.contains("forged-cookie"),"forbidden author header escaped guard: {headers}");
     }
 }
+
+#[test]
+fn controlled_html_without_scripts_is_execution_ready_for_later_clients_claim() {
+    let start="<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let old="onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{if(e.request.mode==='navigate')e.respondWith(new Response('<!doctype html><title>Plain controlled HTML</title>',{headers:{'content-type':'text/html'}}));};";
+    let new="skipWaiting();onactivate=e=>e.waitUntil(clients.claim());";
+    let observer="<!doctype html><script>var updated=false;navigator.serviceWorker.register('/app/new.js',{scope:'/app/'}).then(r=>{function check(){if(r.active&&r.active.state==='activated'&&r.active.scriptURL.endsWith('/app/new.js'))updated=true;else setTimeout(check,5);}check();});</script>";
+    let server=Server::new(&[("/app/start.html","text/html",start,&[]),("/app/sw.js","text/javascript",old,&[]),("/app/new.js","text/javascript",new,&[]),("/observer.html","text/html",observer,&[])]);
+    let mut engine=engine();let vp=Viewport{width:320.0,height:240.0};
+    let mut start=engine.load(&format!("{}/app/start.html",server.origin),vp).unwrap();wait(&engine,&mut start,"controlled===true");drop(start);
+    let mut plain=engine.load(&format!("{}/app/plain",server.origin),vp).unwrap();assert_eq!(plain.title,"Plain controlled HTML");
+    let mut observer=engine.load(&format!("{}/observer.html",server.origin),vp).unwrap();wait(&engine,&mut observer,"updated===true");
+    // Creating a realm only here would adopt the stale reserved controller and
+    // miss the claim performed while this script-free document was already live.
+    assert_eq!(engine.eval_in_page(&mut plain,"navigator.serviceWorker.controller.scriptURL.endsWith('/app/new.js')"),"true");
+}

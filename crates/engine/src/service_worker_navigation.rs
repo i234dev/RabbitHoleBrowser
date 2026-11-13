@@ -73,5 +73,8 @@ pub(crate) fn load(engine: &mut Engine, url: Url, viewport: Viewport) -> Result<
     page.script.service_worker_client = Some(navigation.client);
     page.script.console.extend(console);
     engine.finish_page_load(&mut page);
+    // A controlled Window is execution-ready even when its HTML has no script.
+    // Adopt its reserved client before another worker can call clients.claim().
+    engine.ensure_script_host(&mut page);
     Ok(Some(page))
 }
