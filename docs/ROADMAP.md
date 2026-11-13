@@ -6,18 +6,21 @@ TLS, font shaping and media codecs currently use the dependencies listed in
 the README. Compatibility percentages measure specific test corpora; they
 do not establish that every real site works.
 
-## 1. Complete and validate recovered work
+## 1. Recovered work validated
 
 - DOM: streaming HTML parsing, `document.write`, DOM parsing/serialization,
-  scrolling and form-associated custom elements. Compare WPT against the
-  committed corpus and investigate each regression before updating baselines.
-- JavaScript: recover the conformance fixes and unfinished optional-chain
-  deletion; preserve the callback improvements and early-error validation.
-  Run test262 against its baseline, without expanding the deferred Intl work.
-- CSS: fix dynamic removal of line clamping and implement custom text-overflow
-  markers, then continue the remaining overflow and compositing cases.
+  scrolling and form-associated custom elements were recovered. WPT comparison
+  against the original corpus exposed iframe, worker, messaging and Blob
+  regressions; these were fixed before refreshing the baseline.
+- JavaScript: the conformance fixes, optional-chain deletion, callback
+  improvements and checked lazy parser were recovered. test262 gained 80
+  passes without regressions; checked lazy parsing remains opt-in.
+- CSS: custom text-overflow markers and dynamic line-clamp regression coverage
+  were added. Combined validation also fixed repeated scroll translations
+  when reusing cached layout. Continue with the remaining overflow and
+  compositing cases.
 
-Completion requires relevant regressions, comparison with the previous
+Each delivery requires relevant regressions, comparison with the previous
 baseline, workspace tests and an updated Windows build. A failing test must
 not disappear merely because the baseline was regenerated.
 
@@ -61,6 +64,8 @@ Next steps, in order:
 - Implement the remaining realm integration and evaluate Service Workers and
   WebGL as separate projects with their own designs, tests and milestones.
 - Intl and Temporal remain deferred.
+- An AArch64 emitter for the JavaScript and WebAssembly JITs is a separate
+  backend project, to be validated on real ARM hardware including Apple Silicon.
 
 ## 5. Validate usability and deliver builds
 

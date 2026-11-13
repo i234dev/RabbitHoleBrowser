@@ -16,7 +16,7 @@ dir css/css-grid 862 1763
 dir css/css-images 184 482
 dir css/css-masking 149 384
 dir css/css-nesting 4 17
-dir css/css-overflow 321 719
+dir css/css-overflow 332 719
 dir css/css-position 98 251
 dir css/css-sizing 277 568
 dir css/css-text 839 1550
@@ -4410,18 +4410,14 @@ fail css/css-nesting/nest-containing-forgiving.html
 fail css/css-nesting/nesting-basic.html
 fail css/css-nesting/nesting-type-selector.html
 fail css/css-nesting/supports-rule.html
-fail css/css-overflow/add-scroller-then-scroll-content-into-view.html
 fail css/css-overflow/before-after-pseudo-element-scrolling.html
 fail css/css-overflow/clip-002.html
 fail css/css-overflow/clip-003.html
 fail css/css-overflow/clip-004.html
 fail css/css-overflow/clip-005.html
 fail css/css-overflow/clip-008.html
-fail css/css-overflow/clipped-scroller-add-content.html
 fail css/css-overflow/column-style-change-triggers-relayout.html
-fail css/css-overflow/content-change-then-scroll-into-view.html
 fail css/css-overflow/display-flex-svg-overflow-default.html
-fail css/css-overflow/document-element-overflow-hidden-scroll.html
 fail css/css-overflow/line-clamp/block-ellipsis-001.html
 fail css/css-overflow/line-clamp/block-ellipsis-003.html
 fail css/css-overflow/line-clamp/block-ellipsis-004.html
@@ -4565,8 +4561,6 @@ fail css/css-overflow/line-clamp/line-clamp-form-select-001.tentative.html
 fail css/css-overflow/line-clamp/line-clamp-form-textarea-001.tentative.html
 fail css/css-overflow/line-clamp/line-clamp-intrinsic-size-003.html
 fail css/css-overflow/line-clamp/line-clamp-intrinsic-size-004.html
-fail css/css-overflow/line-clamp/line-clamp-invalidation-001.html
-fail css/css-overflow/line-clamp/line-clamp-invalidation-002.html
 fail css/css-overflow/line-clamp/line-clamp-text-overflow-001.html
 fail css/css-overflow/line-clamp/line-clamp-with-abspos-004.html
 fail css/css-overflow/line-clamp/line-clamp-with-abspos-008.html
@@ -4634,10 +4628,8 @@ fail css/css-overflow/overflow-clip-margin-001.html
 fail css/css-overflow/overflow-clip-margin-003.html
 fail css/css-overflow/overflow-clip-margin-004.html
 fail css/css-overflow/overflow-clip-margin-006.html
-fail css/css-overflow/overflow-clip-margin-007.html
 fail css/css-overflow/overflow-clip-margin-010.html
 fail css/css-overflow/overflow-clip-margin-011.html
-fail css/css-overflow/overflow-clip-margin-012.html
 fail css/css-overflow/overflow-clip-margin-013.html
 fail css/css-overflow/overflow-clip-margin-014.html
 fail css/css-overflow/overflow-clip-margin-015.html
@@ -4659,14 +4651,12 @@ fail css/css-overflow/overflow-clip-transform-001.html
 fail css/css-overflow/overflow-clip-x-visible-y-svg.html
 fail css/css-overflow/overflow-clip-y-visible-x-svg.html
 fail css/css-overflow/overflow-clipped-transparent-border-clip.html
-fail css/css-overflow/overflow-hidden-resize-with-stacking-context-child.html
 fail css/css-overflow/overflow-img-border-radius.html
 fail css/css-overflow/overflow-img-display-table.html
 fail css/css-overflow/overflow-img-object-position.html
 fail css/css-overflow/overflow-img-scroll-non-replaced.html
 fail css/css-overflow/overflow-img-svg.html
 fail css/css-overflow/overflow-img.html
-fail css/css-overflow/overflow-recalc-001.html
 fail css/css-overflow/overflow-video.html
 fail css/css-overflow/paint-containment-svg.html
 fail css/css-overflow/rounded-overflow-clip-visible.html
@@ -4784,7 +4774,6 @@ fail css/css-overflow/text-overflow-026.html
 fail css/css-overflow/text-overflow-027.html
 fail css/css-overflow/text-overflow-028.html
 fail css/css-overflow/text-overflow-029.html
-fail css/css-overflow/text-overflow-change-color.html
 fail css/css-overflow/text-overflow-ellipsis-bidi-grapheme-001.html
 fail css/css-overflow/text-overflow-ellipsis-editable-div-with-caret.html
 fail css/css-overflow/text-overflow-ellipsis-first-line.html

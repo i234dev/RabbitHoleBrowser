@@ -36,7 +36,23 @@ También se ha medido la rama de la "ronda 4 de la VM" (`worktree-agent-ac8f2d59
 asignador por clases de tamaño, latch de bucle fusionado), porque el JIT se
 construirá sobre la representación que exista cuando se empiece.
 
-## Resumen
+## Validación de la recuperación
+
+- 947 pruebas del workspace en ambos modos, JIT apagado y forzado a umbral 0,
+  con resultados idénticos y sin fallos.
+- Los últimos arreglos de APIs se comprobaron además con las 80 pruebas de
+  `script` en ambos modos y bajo GC incremental forzada. El arreglo de layout
+  pasó 125 pruebas de layout, 14 incrementales y el subset CSS de 181 casos.
+- `jitdiff`: 40 000 programas aleatorios repartidos en cuatro semillas y
+  16 programas del corpus de rendimiento; intérprete y umbrales 0/2 producen
+  resultados idénticos. El millón de programas del plan original sigue pendiente.
+- `jit-check.sh` rechaza cualquier fallo de Cargo, aunque ambos modos fallen
+  igual, y crea la carpeta de resultados cuando se configura explícitamente.
+- Las comparaciones de rendimiento deben fijar afinidad en máquinas con
+  núcleos de distinta velocidad: medir CPU del hilo no elimina esa variación.
+  No se ha activado el JIT por defecto ni se ha añadido un backend ARM64.
+
+## Resumen histórico del estudio
 
 1. **Hoy no es la mejor inversión. Recomendación: "todavía no"** para el JIT,
    pero sí hacer ya la fase 1 de infraestructura de medida (contadores) como

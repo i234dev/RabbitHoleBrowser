@@ -30,10 +30,10 @@ code unless noted in [Dependencies](#dependencies).
 | Suite | Result | Notes |
 |---|---|---|
 | **test262** (ECMAScript) | **98.7 %** (45,243 / 45,848 run) | 99.8 % excluding Intl; committed baseline in `crates/js/tests/test262_baseline.txt`; Temporal and other unfinished proposals skipped |
-| **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **75.5 %** (98,867 / 130,962 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
-| **WPT CSS reftests** (pixel comparison) | **60.9 %** (11,945 / 19,627) | committed baseline in `crates/engine/tests/wpt-css-baseline.txt`; CSS2 79.6 %, color 79.4 %, css-ui 91.1 %, css-text-decor 75.5 %, flexbox 61.2 % |
+| **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
+| **WPT CSS reftests** (pixel comparison) | **61.1 %** (11,983 / 19,627) | committed baseline in `crates/engine/tests/wpt-css-baseline.txt`; CSS2 79.6 %, color 79.4 %, css-ui 91.1 %, css-text-decor 75.5 %, flexbox 61.2 % |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
-| html5lib tree construction | 1,848 / 1,945 | |
+| html5lib tree construction | 1,935 / 1,945 | |
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
 | Acid2 | **0 pixels** different from the reference | |
 | Acid3 | 96 / 100 | |
