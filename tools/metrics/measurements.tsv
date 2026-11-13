@@ -1,0 +1,16 @@
+# Built-in status-page measurements. Seven tab-separated columns:
+# id, label, recorded result (or pass/total date stamp for computed baselines), measured date, scope, source, result type.
+# test262/css/wpt/dom counts always come from their baseline files. If counts
+# change without updating this record, the page shows the new counts with an
+# unrecorded date rather than attributing them to an older run.
+test262	JavaScript / test262	45243/45848	2026-11-13	Executed ECMAScript cases	crates/js/tests/test262_baseline.txt	computed
+css	CSS / WPT pixel tests	11983/19627	2026-11-13	Reference-image comparisons across the committed CSS corpus	crates/engine/tests/wpt-css-baseline.txt	computed
+dom	DOM / WPT dom/*	55772/65775	2026-11-13	DOM directory and its subdirectories; other web APIs are counted below	tools/wpt/summary.txt	computed
+wpt	Web platform / WPT	107993/131464	2026-11-13	DOM, HTML, URL, Encoding, IndexedDB and other tested APIs	tools/wpt/summary.txt	computed
+html	HTML / html5lib	1,935 / 1,945	2026-11-13	Tree-construction tests	README conformance record	recorded
+wasm	WebAssembly spec	66,747 / 66,757 (99.99%)	Date not recorded	Latest recorded spec-suite result; not rerun for every browser build	README conformance record	recorded
+url	WHATWG URL	899 / 899; 278 / 278 setters	Date not recorded	Latest recorded URL parsing and setter tests	README conformance record	recorded
+frameworks	Framework applications	66 / 66	Date not recorded	Latest recorded application fixtures with simulated input	README conformance record	recorded
+acid2	Acid2	0 different pixels	Date not recorded	Latest recorded comparison with the reference image	README conformance record	recorded
+acid3	Acid3	96 / 100	Date not recorded	Latest recorded run	README conformance record	recorded
+speedometer	Speedometer 3.1	0.148	Date not recorded	Historical measurement: headless on a loaded 3-core VM; not a current-machine speed estimate	README benchmark record	recorded

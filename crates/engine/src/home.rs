@@ -1,13 +1,14 @@
 //! The built-in `about:home` page.
 
-pub const HOME_HTML: &str = r#"<!DOCTYPE html>
+pub const HOME_HTML: &str = concat!(
+    r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <title>RabbitHole</title>
 <style>
   body { margin: 0; background: #faf7f2; color: #2b2b2b; font-family: sans-serif; }
-  .hero { background: #1f1b2e; color: #f4efe6; padding: 48px 32px 40px 32px; border-bottom: 6px solid #e0a84a; }
+  .hero { background: #1f1b2e; color: #f4efe6; padding: 28px 32px; border-bottom: 6px solid #e0a84a; }
   .hero h1 { font-size: 44px; margin: 0 0 8px 0; letter-spacing: 1px; }
   .hero p { margin: 0; font-size: 18px; color: #d7cfc1; }
   .hero .tag { display: inline-block; background: #e0a84a; color: #1f1b2e; font-weight: bold; padding: 3px 10px; border-radius: 12px; font-size: 13px; margin-top: 16px; }
@@ -24,15 +25,37 @@ pub const HOME_HTML: &str = r#"<!DOCTYPE html>
   table { border-collapse: collapse; margin: 12px 0; }
   td, th { border: 1px solid #d8d0c4; padding: 6px 12px; text-align: left; }
   th { background: #efe9df; }
+  .measurements { width: 100%; font-size: 14px; }
+  .measurements th, .measurements td { padding: 9px 10px; vertical-align: top; }
+  .measurements tbody th { width: 19%; background: #f5f0e8; }
+  .measurements .result { font-weight: bold; width: 23%; }
+  .measurements .source { display: block; color: #7b746a; font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
+  .measurement-note { color: #5a5650; font-size: 14px; line-height: 1.5; }
+  @media (max-width: 640px) {
+    .hero { padding: 24px 16px; }
+    main { padding: 16px; }
+    .measurements { font-size: 12px; }
+    .measurements th, .measurements td { padding: 6px; }
+    .cards { display: block; }
+    .card { width: auto; }
+  }
 </style>
 </head>
 <body>
 <div class="hero">
   <h1>RabbitHole</h1>
   <p>A web browser written from scratch. No Chromium, no WebKit, no Gecko, no webview.</p>
-  <span class="tag">v0.1 &middot; own HTML parser &middot; own CSS engine &middot; own layout &middot; own rasterizer</span>
+  <span class="tag" id="build-version">v"#,
+    env!("CARGO_PKG_VERSION"),
+    r#" &middot; own HTML, CSS, JavaScript and rendering engines</span>
 </div>
 <main>
+  <h2>Compatibility and performance</h2>
+  <p class="measurement-note">The latest recorded results included in this build. Percentages apply to the listed test corpora; they do not guarantee that every site works. Dates identify measurements, not the browser build date.</p>
+"#,
+    include_str!(concat!(env!("OUT_DIR"), "/home-metrics.html")),
+    r#"
+  <p class="measurement-note">JavaScript JIT remains off by default. Experimental WebGL and Service Worker features have focused tests; they are not full conformance scores.</p>
   <h2>Try a few pages</h2>
   <ul class="links">
     <li><a href="https://example.com/">example.com</a> &ndash; the classic</li>
@@ -61,8 +84,9 @@ pub const HOME_HTML: &str = r#"<!DOCTYPE html>
   </table>
 
   <p>There is also a command line: <code>rabbithole text &lt;url&gt;</code>, <code>rabbithole screenshot &lt;url&gt;</code>, and an MCP server with <code>rabbithole mcp</code>.</p>
-  <p class="footer">RabbitHole is free software (MIT). Everything you see was fetched over pure-Rust TLS and painted pixel by pixel.</p>
+  <p class="footer">RabbitHole is free software (MIT). This page is rendered by RabbitHole's own browser engines.</p>
 </main>
 </body>
 </html>
-"#;
+"#
+);
