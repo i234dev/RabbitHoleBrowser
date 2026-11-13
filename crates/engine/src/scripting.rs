@@ -567,6 +567,14 @@ impl HostEnv for EngineEnv<'_> {
             self.page.script.frame_load_pending = true;
         }
     }
+    fn document_load_started(&mut self) {
+        self.page.script.frame_load_pending = false;
+    }
+    fn frame_initial_load_fired(&mut self, node: NodeId) {
+        if let Some(child) = self.page.frames.children.iter_mut().find(|c| c.node == node).and_then(|c| c.page.as_mut()) {
+            child.script.frame_load_pending = false;
+        }
+    }
     fn focus_node(&mut self, node: Option<NodeId>) {
         self.page.state.focused = node;
         self.page.state.focus_visible = node.map(|n| self.page.focus_should_be_visible(n)).unwrap_or(false);

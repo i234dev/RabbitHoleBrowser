@@ -422,7 +422,7 @@ impl Page {
 
     /// Any frame load still in progress (this page or below)?
     pub fn frames_loading(&self) -> bool {
-        self.frames.children.iter().any(|c| c.pending.is_some() || c.page.as_ref().map(|p| p.frames_loading()).unwrap_or(false))
+        self.frames.children.iter().any(|c| c.pending.is_some() || c.page.as_ref().map(|p| p.script.frame_load_pending || p.frames_loading()).unwrap_or(false))
     }
 
     pub(crate) fn frames_next_due(&self) -> Option<f64> {
@@ -430,7 +430,7 @@ impl Page {
         // Poll background loads every 25 ms (engine clock).
         let poll = self.image_state.clock.map(|origin| (std::time::Instant::now() + std::time::Duration::from_millis(25)).saturating_duration_since(origin).as_secs_f64() * 1000.0).unwrap_or(0.0);
         for c in &self.frames.children {
-            let d = if c.pending.is_some() { Some(poll) } else { c.page.as_ref().and_then(|p| p.next_script_due()) };
+            let d = if c.pending.is_some() { Some(poll) } else { c.page.as_ref().and_then(|p| if p.script.frame_load_pending { Some(0.0) } else { p.next_script_due() }) };
             if let Some(d) = d {
                 due = Some(due.map(|x: f64| x.min(d)).unwrap_or(d));
             }
@@ -502,6 +502,9 @@ impl Engine {
                     c.source = source;
                     c.pending = None;
                     c.stale = true;
+                    if let Some(p) = c.page.as_mut() {
+                        p.script.frame_load_pending = false;
+                    }
                     changed = true;
                 }
                 None => {
@@ -636,8 +639,12 @@ impl Engine {
         let loaded = self.loader.load_html("<!doctype html><html><head></head><body></body></html>", Url::parse("about:blank").expect("about:blank"), vp);
         let name = page.doc.attr(node, "name").map(|s| s.to_string());
         self.frame_context.replace(Some(FrameContext { id, depth: page.frame_depth + 1, name, origin: Some(origin_of(page)) }));
-        let child = self.build_page_unscripted(loaded, vp);
+        let mut child = self.build_page_unscripted(loaded, vp);
         self.frame_context.replace(None);
+        // Keep the initial document available synchronously and queue its
+        // load. The no-src insertion steps can deliver it synchronously;
+        // document.open() replaces it with the new parser's load instead.
+        child.script.frame_load_pending = frame_source(page, node) == FrameSource::Blank;
         {
             let mut reg = self.frames.borrow_mut();
             let e = reg.entries.entry(id).or_default();

@@ -44,6 +44,48 @@ fn escape_attr(s: &str) -> String {
     s.replace('&', "&amp;").replace('"', "&quot;")
 }
 
+#[test]
+fn initial_blank_frames_fire_load_once_without_replacing_the_document() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<script>
+        var loads = [];
+        for (var source of ['', 'about:blank']) {
+            var f = document.createElement('iframe');
+            if (source) f.src = source;
+            f.onload = function () { loads.push(this.contentDocument.body.textContent); };
+            document.body.appendChild(f);
+            f.contentDocument.body.textContent = source || 'no src';
+        }
+        loads.push('sync');
+    </script>"#);
+    // No src: initial insertion fires synchronously. Explicit about:blank
+    // navigates asynchronously, while keeping the same initial document.
+    assert_eq!(eval(&e, &mut page, "loads.join('|')"), "|sync|about:blank");
+    assert_eq!(eval(&e, &mut page, "document.querySelector('iframe').contentDocument.body.textContent"), "no src");
+    settle(&e, &mut page);
+    assert_eq!(eval(&e, &mut page, "loads.length"), "3");
+}
+
+#[test]
+fn document_open_replaces_the_initial_frame_load_with_its_own() {
+    let mut e = engine();
+    let mut page = load(&mut e, r#"<script>
+        var loads = [], f = document.createElement('iframe');
+        f.src = 'about:blank';
+        f.onload = function () { loads.push(this.contentDocument.body.textContent); };
+        document.body.appendChild(f);
+        var d = f.contentDocument;
+        d.open();
+        d.write('<body><p>written</p>');
+    </script>"#);
+    assert_eq!(eval(&e, &mut page, "loads.length"), "0");
+    eval(&e, &mut page, "d.close()");
+    settle(&e, &mut page);
+    assert_eq!(eval(&e, &mut page, "loads.join('|')"), "written");
+    settle(&e, &mut page);
+    assert_eq!(eval(&e, &mut page, "loads.length"), "1");
+}
+
 fn child(page: &mut Page, i: usize) -> &mut Page {
     page.frames.children[i].page.as_mut().expect("frame loaded")
 }

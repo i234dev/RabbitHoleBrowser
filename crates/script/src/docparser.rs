@@ -121,6 +121,7 @@ pub(crate) fn open(realm: &mut Realm, d: u32) -> JsResult<()> {
     state().borrow_mut().doc_parsers.insert(d, ap);
     if d == 0 {
         state().borrow_mut().ready_state = "loading";
+        with_env(|env| env.document_load_started());
         mark_dirty();
     }
     Ok(())

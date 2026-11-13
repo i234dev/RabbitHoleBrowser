@@ -484,6 +484,7 @@ fn after_insert_connected(realm: &mut Realm, inserted: &[NodeRef]) -> JsResult<(
     // attributes", initial insertion).
     for f in frames {
         if with_env(|env| env.ensure_frame(f)).is_some() && is_connected(NodeRef::main(f)) {
+            with_env(|env| env.frame_initial_load_fired(f));
             crate::events::dispatch(realm, TargetKey::Node(NodeRef::main(f)), "load", crate::EventInit { bubbles: false, cancelable: false, detail: None }, true);
         }
     }
