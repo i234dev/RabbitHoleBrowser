@@ -91,11 +91,21 @@ and context version are separate; WebGL1 retains its own semantics. These
 features produce actual page pixels, but do not establish WebGL conformance or
 Three.js compatibility.
 
-Next: framebuffer objects, instancing, broader shader grammar and rendering
-state, mixed/minified texture filtering and mipmaps, each with pixel regressions
-and workload validation. WebGL2 integer attributes/uniforms, 3D textures, UBOs,
-queries, synchronization, transform feedback and MRT remain open. Exposed
-unsupported commands must keep reporting errors until implemented.
+The integrated milestones now implement WebGL2 instancing through VAO-captured
+divisor attributes, and WebGL1/2 render-to-texture framebuffers with one RGBA8
+color texture and optional DEPTH_COMPONENT16 storage. WebGL2 read/draw bindings
+are independent; feedback loops and invalid attachments are checked before
+pixels change. Joint regressions render distinct instances into an FBO, sample
+the result onto the page and verify that the default canvas remains unchanged.
+This remains a partial experimental implementation, not full WebGL2 conformance.
+
+Next: broader shader grammar and rendering state, real integer shader types
+(including `gl_InstanceID`), integer attributes/uniforms, mixed/minified texture
+filtering and mipmaps, each with pixel regressions and workload validation.
+Depth-only FBOs, color renderbuffers, multiple color attachments/MRT, stencil,
+blits and multisampling remain open, alongside 3D textures, UBOs, queries,
+synchronization and transform feedback. Exposed unsupported commands must keep
+reporting errors until implemented.
 
 ### Service Worker lifecycle, memory cache and controlled fetch
 

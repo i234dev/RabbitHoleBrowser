@@ -27,6 +27,9 @@ language version alone does not turn a WebGL1 context into WebGL2.
 - RGBA8 2D texture uploads and sub-updates, eight texture units and nearest or
   bilinear sampling with clamp/repeat/mirrored-repeat. DOM and typed-array uploads
   handle supported unpack flags and row alignment.
+- RGBA8 render-to-texture framebuffers with optional 16-bit depth storage,
+  checked attachments and feedback-loop rejection.
+- WebGL2 instanced draws with real divisor attributes captured by VAOs.
 - Visible canvas presentation, readback orientation and packing,
   resize behavior, context attributes and loss on oversized drawing buffers.
 
@@ -68,10 +71,56 @@ fixed primitive restart applies to byte, short and uint indices in WebGL2 and
 does not change WebGL1 index semantics. Non-power-of-two textures can repeat in
 WebGL2 within the supported filtering subset.
 
-This milestone does not include instancing, framebuffer objects/MRT, integer
-attributes or general integer uniforms, 3D textures, UBOs, queries, sampler
-objects, synchronization or transform feedback. Extra offset upload/readback
+Integer attributes and general integer uniforms, 3D textures, UBOs, queries,
+sampler objects, synchronization and transform feedback remain unsupported. Extra offset upload/readback
 overloads are also unsupported. Exposed unsupported operations report errors.
+
+## Instancing through attributes
+
+WebGL2 implements `vertexAttribDivisor`, `drawArraysInstanced` and
+`drawElementsInstanced`. A nonzero divisor selects attribute data at
+`floor(instance/divisor)`; a zero divisor advances per vertex. Instance data can
+change actual positions, colors and other supported shader inputs. Divisors
+belong to the VAO; generic constant attributes remain global. Ordinary draws
+use instance zero for divisor attributes. Indexed instancing supports the same
+checked index types and fixed primitive restart as other WebGL2 indexed draws.
+
+All instance ranges, total work and prepared geometry budgets are validated
+before any framebuffer pixel or depth changes. Current limits are 1024 instances,
+262,144 evaluated vertex references, 32 Mi weighted work units and 64 MiB of
+prepared triangle data per draw. WebGL1 does not expose instancing or its
+extension. `gl_InstanceID` still fails shader compilation: integer shader types
+have not been implemented, and the ID is not simulated as a float.
+
+## Framebuffers and render-to-texture
+
+WebGL1 and WebGL2 can render to a level-zero RGBA8 2D texture attached at
+`COLOR_ATTACHMENT0`. Clear, drawing, `readPixels` and subsequent texture sampling
+use actual attachment pixels. WebGL2 supports independent `READ_FRAMEBUFFER`
+and `DRAW_FRAMEBUFFER` bindings; WebGL1 rejects these separate targets.
+
+Binding an FBO preserves the viewport and other GL state. Offscreen rendering
+leaves the default drawing buffer intact, and canvas presentation always uses
+that default buffer. A complete instanced batch selects its target once;
+target size, alpha and effective depth state are restored on success or error.
+FBO textures retain their alpha channel even if the default canvas has
+`alpha:false`.
+
+An optional matching `DEPTH_COMPONENT16` renderbuffer supplies initialized,
+16-bit-quantized depth storage. It works independently of the default canvas's
+`depth` attribute, so an FBO depth attachment can be used with `depth:false`.
+Depth-test enable state remains the requested GL state; its effect depends on
+the selected target's depth storage. Clear obeys scissor and write masks.
+
+Missing or unallocated attachments, size mismatches and texture feedback loops
+are checked before drawing changes pixels. Sampling a texture attached to the
+current draw FBO is rejected. Deleted attachments remain alive while referenced
+by inactive FBOs; deletion detaches them from current framebuffer bindings.
+
+This subset requires one color texture attachment and optional matching depth.
+Depth-only FBOs, color renderbuffers, stencil, multiple color attachments/MRT,
+blits and multisampling remain unsupported. Unsupported commands report errors;
+this milestone does not establish complete WebGL2 conformance.
 
 ## Texture filtering
 
@@ -85,17 +134,18 @@ textures also need clamp-to-edge wrapping for completeness.
 
 ## Current limits
 
-No framebuffer objects, stencil, culling, points/lines, multisampling,
-cube maps, mipmaps or compressed textures. User-defined GLSL
+Stencil, culling, points/lines, multiple color attachments/MRT, blits,
+multisampling, cube maps, mipmaps and compressed textures remain unsupported. User-defined GLSL
 functions, control flow, arrays, integer/bool variables, derivatives and
 discard are unavailable. Context creation does not imply that arbitrary
 WebGL applications can run.
 
 Drawing-buffer dimensions are at most 4096 per axis and 4,194,304 pixels in
 total. The backend caps vertex attributes at 16, texture units at eight,
-buffer storage at 64 MiB and texture storage at a separate 64 MiB, with
-additional shader and draw-work budgets. See the
-[backend implementation record](../crates/webgl/README.md) for precise limits.
+buffer storage at 64 MiB and texture storage at a separate 64 MiB.
+Renderbuffers have another 64 MiB budget, and framebuffer/renderbuffer object
+counts are capped at 256 each. Additional shader and draw-work budgets apply.
+See the [backend implementation record](../crates/webgl/README.md) for precise limits.
 Its opt-in GLSL ES 3.00 language ceiling remains separate from selecting an
 actual WebGL2 context.
 
@@ -105,10 +155,14 @@ actual WebGL2 context.
 and a nearest-sampled RGBA texture. The
 [compositing demo](../tests/pages/webgl-compositing.html) combines bilinear
 filtering and alpha blending, and the [WebGL2 demo](../tests/pages/webgl2.html)
-uses GLSL 3.00, VAOs and uint32 indices. Backend tests assert pixel values
-for clipping, interpolation, depth, blending, textures, math built-ins and invalid
-operations. Script
-tests cover API conversion, resource ownership, readback, context exclusivity,
+uses GLSL 3.00, VAOs and uint32 indices. The
+[framebuffer demo](../tests/pages/webgl-framebuffer.html) samples a rendered
+texture while preserving a second canvas. The
+[joint pipeline demo](../tests/pages/webgl-pipeline.html) renders two indexed
+instances into a texture, then presents it alongside the unchanged default
+canvas snapshot. Backend tests assert pixel values for clipping, interpolation,
+depth, blending, textures, math built-ins, instancing and invalid operations.
+Script tests cover API conversion, resource ownership, readback, context exclusivity,
 resize and canvas integration; engine tests verify actual page pixels.
 These focused checks complement the existing conformance baselines and do
 not constitute a WebGL conformance score.

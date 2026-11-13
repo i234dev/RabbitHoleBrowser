@@ -26,8 +26,8 @@ operations must be rejected by the bindings instead of reporting fake success.
   signed/unsigned bytes and shorts, including normalized conversions; disabled
   arrays use constant attribute values with `(0, 0, 0, 1)` defaults.
 - Draw arrays/elements for triangles, triangle strips and triangle fans. Index
-  formats are unsigned byte/short; all array/index ranges are checked before
-  drawing. Homogeneous clipping covers all six clip planes, varying interpolation
+  formats are unsigned byte/short and, in WebGL2, unsigned int. Ranges are
+  checked before drawing. Homogeneous clipping covers all six clip planes, varying interpolation
   is perspective-correct, depth is interpolated in window space, and a consistent
   half-open edge rule prevents shared-edge holes or double coverage.
 - Shader objects, compile status/logs, program linking, active attribute locations,
@@ -55,9 +55,13 @@ Vertex shaders must write `gl_Position`; fragment shaders must write
 `gl_FragColor` and can read `gl_FragCoord`. Active cross-stage varying types and
 shared uniform types must agree. Uniforms start at zero after linking.
 
-Not implemented: general GLSL functions or control flow, arrays,
-integer/bool variables, derivatives, discard, swizzle assignments, stencil, points/lines, culling, multisampling, extensions. Texture sampling has the explicit bounded subset below. Unsupported
-shader operations are rejected, never synthesized.
+The evaluator also supports 32 typed float/vector math built-ins, with checked
+argument counts, types and expression costs. See
+[the supported functions](../../docs/webgl.md#shader-language-subset).
+User-defined functions, control flow, arrays, integer/bool variables, derivatives,
+discard, swizzle assignments, stencil, points/lines, culling, multisampling and
+extensions remain unsupported. Texture sampling has the explicit bounded subset
+below. Unsupported shader operations fail compilation with diagnostics.
 
 ## Limits and verification
 
@@ -71,8 +75,7 @@ bounded; they are not a claim of WebGL conformance.
 `cargo test -p rabbithole-webgl` checks pixel values for colored and indexed
 triangles, perspective interpolation, clipping, depth, normalized attributes,
 scissor/masks, blend factors/equations and alpha-channel behavior, resize/readback
-orientation, shader/link errors and invalid buffer
-ranges/resource lifetimes. Browser bindings have additional integration tests.
+orientation, shader/link errors and invalid buffer ranges/resource lifetimes. Browser bindings have additional integration tests.
 
 ## Texture milestone
 
@@ -84,18 +87,19 @@ the bindings handle DOM conversion and pixel-unpack flags before calling here.
 Textures have a separate 64 MiB total storage budget and the framebuffer size
 limits apply to each image.
 
-Nearest-neighbor sampling supports clamp-to-edge, repeat and mirrored-repeat;
+Nearest and bilinear sampling support clamp-to-edge, repeat and mirrored-repeat;
 non-power-of-two images require clamp-to-edge in both dimensions under WebGL 1
-completeness rules. Missing/uninitialized or NPOT-repeat textures sample opaque
-black, as required for incomplete textures; allocated zero-filled images sample
-their actual transparent zero pixels.
+completeness rules. Missing/uninitialized textures, and NPOT-repeat textures in
+WebGL1, sample opaque black for incomplete textures; allocated zero-filled images
+sample their actual transparent zero pixels.
 
-**Set both MIN_FILTER and MAG_FILTER to NEAREST.** Object defaults retain GL's
-real mipmapped-min/linear-mag defaults, but linear and mipmapped filtering are
-not implemented: setting those filters reports an error; drawing a defined image
-with unsupported default filters reports INVALID_OPERATION without changing
-pixels. No derivative-based LOD, mipmap generation, cube maps, compressed data,
-vertex texture sampling or texture extensions are claimed.
+**Set both MIN_FILTER and MAG_FILTER to NEAREST, or both to LINEAR.** Bilinear
+filtering uses texel-center coordinates and the selected wrap mode. Defaults
+retain GL's mipmapped-min/linear-mag values, but mipmaps and mixed min/mag filters
+are unsupported. A defined image with those unsupported filters reports
+INVALID_OPERATION before pixels change. Derivative-based LOD, mipmap generation,
+cube maps, compressed data, vertex texture sampling and texture extensions remain
+unsupported. `tests/linear.rs` checks interpolated pixels and rejected states.
 
 `tests/textures.rs` verifies texel values/orientation, sub-updates, texture units,
 reflection, wrapping, NPOT behavior, resource bounds, explicit unsupported-state
@@ -180,7 +184,9 @@ expose instancing.
 integer types; it fails shader compilation rather than being simulated as a
 float. This milestone uses actual divisor attributes for per-instance positions,
 colors and other data. See `tests/instancing.rs` for pixel, divisor, VAO, restart,
-range and atomic-budget regressions.
+range and atomic-budget regressions. The whole batch selects its framebuffer
+once, validates every instance, then executes in order; target restoration also
+applies to rejected batches.
 
 ## Framebuffer milestone
 
@@ -207,3 +213,18 @@ blits remain unsupported. Mismatched dimensions are INCOMPLETE_DIMENSIONS in
 WebGL1 and explicitly FRAMEBUFFER_UNSUPPORTED in the WebGL2 subset. Renderbuffers
 have a separate 64 MiB budget and at most 256 live objects of each FBO kind.
 The existing framebuffer dimension and pixel-count limits also apply.
+
+
+## Combined validation
+
+`tests/instancing.rs` includes a joint FBO regression covering two differently
+colored instances, an unchanged default buffer, independent read/draw bindings,
+alpha:false/depth:false default attributes, attached depth16 and restoration
+after a rejected batch. Script tests exercise the same composition through the
+JavaScript API. Engine fixtures check both native canvas pixels and actual page
+pixels, including sampling the resulting texture into the visible canvas. See
+[the joint pipeline demo](../../tests/pages/webgl-pipeline.html).
+
+These checks cover the implemented subset. Multiple color attachments/MRT,
+stencil, blits and multisampling remain open; there is no full WebGL2 conformance
+or Three.js compatibility claim.

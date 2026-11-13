@@ -127,11 +127,12 @@ See [measurement sources and updates](tools/metrics/README.md).
 
 ## Limitations (for now)
 
-- WebGL1/WebGL2 are experimental: bounded GLSL ES 1.00/3.00, without framebuffer
-  objects, instancing, mipmaps, general shader control flow or user-defined
-  functions. Texture minification/magnification filters must both be `NEAREST`
-  or both `LINEAR`; mixed filters are unsupported. WebGPU is unavailable.
-  Three.js compatibility has not been established.
+- WebGL1/WebGL2 remain experimental: RGBA8 render-to-texture and WebGL2
+  divisor-based instancing work, but MRT, stencil, blits, multisampling, mipmaps,
+  general shader control flow and user-defined functions remain unsupported.
+  Texture minification/magnification filters must both be `NEAREST` or both
+  `LINEAR`; mixed filters are unsupported. WebGPU is unavailable. Full WebGL2
+  conformance and Three.js compatibility have not been established.
 - Service Workers intercept only controlled documents' `window.fetch()`.
   Navigation, image/style/script loaders and XHR are not intercepted, and offline
   navigation is unfinished. Registrations and Cache API entries are not persisted
@@ -318,8 +319,8 @@ details and measurements.
   closures and generators.
 - WPT DOM and CSS pass rates up (CSSOM view, `document.write`, speculative
   parsing, text, masking); Intl and Temporal later.
-- Extend experimental WebGL1 with tested shader and rendering capabilities;
-  design a coherent WebGL2 milestone before exposing a WebGL2 context.
+- Advance the experimental WebGL1/WebGL2 subsets with pixel regressions,
+  validated resource/state handling and real-workload compatibility gates.
 - Service Worker fetch interception, offline navigation and persistent storage;
   Temporal and full Intl later.
 - macOS and Linux packaging; JIT enabled on Windows after real-hardware testing.
