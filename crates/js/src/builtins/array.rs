@@ -117,17 +117,25 @@ fn from(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         return realm.type_error("Array.from: mapper is not a function");
     }
     let plain = this.as_object() == Some(realm.intrinsics.array_ctor) || !realm.is_constructor(&this);
-    let uses_iterator = realm.get_method(source.clone(), PropertyKey::Symbol(SYM_ITERATOR))?.is_some();
-    if uses_iterator {
+    if let Some(method) = realm.get_method(source.clone(), PropertyKey::Symbol(SYM_ITERATOR))? {
         if plain {
             // A fresh array: defining its elements is unobservable, so
             // collect first (mapping as we go, closing on errors).
             if !mapping {
-                let items = realm.iterate_to_vec(source)?;
+                let fast = source.as_object().is_some_and(|o| matches!(realm.obj(o).kind, ObjectKind::Array { .. }) && realm.obj(o).proto == Some(realm.intrinsics.array_proto) && !realm.obj(o).props.contains(&PropertyKey::Symbol(SYM_ITERATOR)) && realm.array_iterator_pristine());
+                if fast {
+                    // (A plain array: its iterator is looked up again only
+                    // when the fast path does not apply, unobservably.)
+                    let items = realm.iterate_to_vec(source)?;
+                    return Ok(realm.new_array_value(items));
+                }
+                let (it, next) = realm.get_iterator_from_method(source, method)?;
+                let items = realm.collect_iterator(&it, &next)?;
                 return Ok(realm.new_array_value(items));
             }
             let mut out = Vec::new();
-            realm.for_each_iterated(source, |realm, v, i| {
+            let (it, next) = realm.get_iterator_from_method(source, method)?;
+            realm.for_each_step(it, next, |realm, v, i| {
                 out.push(realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])?);
                 Ok(())
             })?;
@@ -136,7 +144,8 @@ fn from(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
         let a = realm.construct(this, &[], Value::Undefined)?;
         let Some(aid) = a.as_object() else { return realm.type_error("Array.from: constructor did not return an object") };
         let mut count = 0usize;
-        realm.for_each_iterated(source, |realm, v, i| {
+        let (it, next) = realm.get_iterator_from_method(source, method)?;
+        realm.for_each_step(it, next, |realm, v, i| {
             let v = if mapping { realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])? } else { v };
             create_data_property_or_throw(realm, aid, i as f64, v)?;
             count = i + 1;
@@ -152,8 +161,12 @@ fn from(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
             return realm.range_error("Invalid array length");
         }
         if !mapping {
-            let items = realm.create_list_from_array_like(Value::Object(obj))?;
-            return Ok(realm.new_array_value(items));
+            if let ObjectKind::Array { elements, length } = &realm.obj(obj).kind {
+                if *length as usize == elements.len() && len == elements.len() && !elements.iter().any(|e| e.is_empty()) {
+                    let items = elements.clone();
+                    return Ok(realm.new_array_value(items));
+                }
+            }
         }
         let mut out = Vec::with_capacity(len.min(1 << 20));
         // `Array.from({length: n}, fn)`: no element to read while the
@@ -166,7 +179,7 @@ fn from(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
                 nprops = realm.obj(obj).props.len();
             }
             let v = if holes { Value::Undefined } else { realm.get(Value::Object(obj), index_key(i as f64))? };
-            out.push(realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])?);
+            out.push(if mapping { realm.call(map_fn.clone(), this_arg.clone(), &[v, Value::Number(i as f64)])? } else { v });
         }
         return Ok(realm.new_array_value(out));
     } else {
@@ -753,7 +766,6 @@ fn filter(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
             }
         }
     }
-    set_len(realm, out, n)?;
     Ok(Value::Object(out))
 }
 
@@ -880,10 +892,12 @@ fn includes(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 
 /// Strict-equality search of the present elements of a plain array from
 /// `start`; `None` when a hole or a non-array needs the generic loop.
-fn dense_index_of(realm: &Realm, id: ObjectId, start: usize, target: &Value) -> Option<Option<usize>> {
+fn dense_index_of(realm: &Realm, id: ObjectId, start: usize, len: usize, target: &Value) -> Option<Option<usize>> {
     let o = realm.obj(id);
     match &o.kind {
-        ObjectKind::Array { elements, length } if *length as usize == elements.len() && o.props.is_empty() => {
+        // (Not when the array shrank while the arguments were converted:
+        // the remaining indices below the old length are still probed.)
+        ObjectKind::Array { elements, length } if *length as usize == elements.len() && elements.len() == len && o.props.is_empty() => {
             for (i, v) in elements.iter().enumerate().skip(start) {
                 if v.is_empty() {
                     return None;
@@ -905,7 +919,7 @@ fn index_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     }
     let target = arg(args, 0);
     let start = realm.relative_index(arg(args, 1), len, 0)?;
-    if let Some(r) = dense_index_of(realm, id, start, &target) {
+    if let Some(r) = dense_index_of(realm, id, start, len, &target) {
         return Ok(Value::Number(r.map_or(-1.0, |i| i as f64)));
     }
     if let Some(keys) = sparse_keys(realm, id, start, len) {
@@ -1080,6 +1094,16 @@ fn map(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
 /// An array whose `length` is writable and whose elements all live in
 /// `elements` (`length == elements.len()`) and that may grow or shrink.
 #[inline]
+/// No prototype of `id` has indexed properties (new elements can be
+/// appended without consulting inherited setters).
+fn protos_index_free(realm: &mut Realm, id: ObjectId) -> bool {
+    match realm.obj(id).proto {
+        Some(p) if p == realm.intrinsics.array_proto => realm.array_protos_index_free(),
+        Some(p) => realm.no_index_properties(p),
+        None => true,
+    }
+}
+
 fn growable(o: &Object) -> bool {
     o.extensible && matches!(&o.kind, ObjectKind::Array { elements, length } if *length as usize == elements.len()) && !o.props.contains(&crate::value::names::length())
 }
@@ -1108,8 +1132,9 @@ fn pop(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
 
 fn push(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
+    let plain_proto = protos_index_free(realm, id);
     let obj = realm.obj_mut(id);
-    if growable(obj) {
+    if plain_proto && growable(obj) {
         if let ObjectKind::Array { elements, length } = &mut obj.kind {
             if elements.len() + args.len() < u32::MAX as usize {
                 elements.extend_from_slice(args);
@@ -1198,7 +1223,8 @@ fn shift(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
 fn unshift(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let (id, len) = this_arr(realm, &this)?;
     let n = args.len();
-    if simple_dense(realm, id) && len + n < u32::MAX as usize {
+    let plain_proto = n == 0 || protos_index_free(realm, id);
+    if plain_proto && simple_dense(realm, id) && len + n < u32::MAX as usize {
         if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
             elements.splice(0..0, args.iter().cloned());
             *length = elements.len() as u32;
@@ -1420,7 +1446,8 @@ fn splice(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     }
     let (removed_arr, fresh) = array_species_create(realm, id, delete_count)?;
     // Plain arrays: move the elements directly (unobservable).
-    if fresh && simple_dense(realm, id) && realm.length_of(Value::Object(id))? == len && len + item_count < u32::MAX as usize {
+    // Growing writes new indices: no inherited indexed property may see them.
+    if fresh && simple_dense(realm, id) && realm.length_of(Value::Object(id))? == len && len + item_count < u32::MAX as usize && (item_count <= delete_count || protos_index_free(realm, id)) {
         let removed: Vec<Value> = if let ObjectKind::Array { elements, length } = &mut realm.obj_mut(id).kind {
             let r: Vec<Value> = elements.splice(start..start + delete_count, items.iter().cloned()).collect();
             *length = elements.len() as u32;

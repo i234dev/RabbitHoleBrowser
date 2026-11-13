@@ -4621,8 +4621,9 @@ impl Realm {
         let array_proto = Some(self.intrinsics.array_proto);
         let Some(o) = self.heap.try_get_mut(id) else { return Err(v) };
         let no_props = o.props.is_empty();
-        // Appends need the plain prototype (a typed array prototype decides).
-        let extensible = o.extensible && o.proto == array_proto;
+        // Appends need the plain prototype (a typed array prototype decides)
+        // known to have no indexed properties (see `array_protos_index_free`).
+        let extensible = o.extensible && o.proto == array_proto && self.array_protos_index_free == crate::shape::proto_epoch();
         match &mut o.kind {
             ObjectKind::Array { elements, length } => {
                 let i = i as usize;

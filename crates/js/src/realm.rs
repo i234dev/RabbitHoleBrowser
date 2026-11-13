@@ -231,6 +231,9 @@ pub struct Realm {
     /// `gc_safe` natives running.
     pub native_roots: Vec<Value>,
     /// Cached closure shapes (see `make_closure`).
+    /// Prototype epoch at which `Array.prototype` and `Object.prototype`
+    /// were last seen without indexed properties (0: not known).
+    pub(crate) array_protos_index_free: u32,
     pub(crate) closure_shapes: Option<(Rc<crate::shape::Shape>, Rc<crate::shape::Shape>, Rc<crate::shape::Shape>)>,
     /// `new.target` for the innermost native constructor call.
     pub new_target_stack: Vec<Value>,
@@ -453,6 +456,7 @@ impl Realm {
             native_depth: 0,
             gc_block: 0,
             native_roots: Vec::new(),
+            array_protos_index_free: 0,
             closure_shapes: None,
             new_target_stack: Vec::new(),
             gc_threshold: 200_000,
