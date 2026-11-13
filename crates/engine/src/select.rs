@@ -52,11 +52,21 @@ fn collect_runs(b: &LayoutBox, out: &mut Vec<TextRun>) {
 /// X offset (from the run's left edge) of the character boundary at
 /// byte index `idx`.
 fn x_at(fonts: &FontContext, run: &TextRun, idx: usize) -> f32 {
-    let prefix = &run.text[..idx.min(run.text.len())];
+    let prefix = &run.text[..boundary_before(&run.text, idx)];
     if prefix.is_empty() {
         return 0.0;
     }
     fonts.measure(run.font, run.size, prefix) + run.letter_spacing * prefix.chars().count() as f32
+}
+
+/// Caret offsets can outlive an edit or refer to a different display string.
+/// Clamp them to an actual UTF-8 boundary before slicing rendered text.
+fn boundary_before(text: &str, idx: usize) -> usize {
+    let mut idx = idx.min(text.len());
+    while !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }
 
 /// Byte index of the character boundary nearest to x (run-relative).
@@ -243,11 +253,20 @@ impl Page {
         out
     }
 
-    /// Caret x position inside a text control for a byte offset (relative
-    /// to the control's border box), using the control's first text run.
+    /// Caret x position for a byte offset in the control's value (relative
+    /// to its border box), using the control's first text run.
     pub fn caret_x(&self, fonts: &FontContext, control: NodeId, byte_idx: usize) -> Option<f32> {
         let run = self.text_runs().into_iter().find(|r| r.node == Some(control))?;
         let bx = self.rect_of(control)?.x;
-        Some(run.rect.x - bx + x_at(fonts, &run, byte_idx))
+        let display_idx = if crate::forms::control_kind(&self.doc, control) == crate::forms::ControlKind::Password {
+            // Layout masks each source character with a bullet. Source byte
+            // offsets (e.g. 1 for ASCII) cannot index that three-byte glyph.
+            let value = self.doc.control_value(control).unwrap_or("");
+            let count = value[..boundary_before(value, byte_idx)].chars().count();
+            run.text.char_indices().nth(count).map_or(run.text.len(), |(idx, _)| idx)
+        } else {
+            byte_idx
+        };
+        Some(run.rect.x - bx + x_at(fonts, &run, display_idx))
     }
 }
