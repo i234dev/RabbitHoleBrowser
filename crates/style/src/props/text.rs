@@ -122,6 +122,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                     "normal" => WordBreak::Normal,
                     "break-all" => WordBreak::BreakAll,
                     "keep-all" => WordBreak::KeepAll,
+                    "auto-phrase" => WordBreak::AutoPhrase,
                     "break-word" => WordBreak::BreakWord,
                     _ => return true,
                 };

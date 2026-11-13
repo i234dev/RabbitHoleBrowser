@@ -773,6 +773,8 @@ pub enum WordBreak {
     BreakAll,
     KeepAll,
     BreakWord,
+    /// `auto-phrase`: like `keep-all`, with breaks between phrases.
+    AutoPhrase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

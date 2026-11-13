@@ -27,7 +27,7 @@ enum BreakPolicy {
 fn break_policy(style: &ComputedStyle) -> BreakPolicy {
     match style.word_break {
         WordBreak::BreakAll => BreakPolicy::Anywhere,
-        WordBreak::BreakWord => BreakPolicy::IfNeeded,
+        WordBreak::BreakWord | WordBreak::AutoPhrase => BreakPolicy::IfNeeded,
         _ => match style.overflow_wrap {
             OverflowWrap::Normal => BreakPolicy::Never,
             _ => BreakPolicy::IfNeeded,
@@ -277,7 +277,11 @@ impl<'a> Layouter<'a> {
                     segs.clear();
                     segment_tabs(&t, ws, &mut col, &mut segs, style.tab_size.max(1.0) as usize);
                     let ls = style.letter_spacing;
-                    let keep_all = style.word_break == rabbithole_style::WordBreak::KeepAll;
+                    let keep_all = match style.word_break {
+                        rabbithole_style::WordBreak::KeepAll => 1u8,
+                        rabbithole_style::WordBreak::AutoPhrase => 2,
+                        _ => 0,
+                    };
                     let strict = style.line_break == 2;
                     let anywhere = style.line_break == 3 && !style.wrap_inside_avoid;
                     for seg in segs.drain(..) {
@@ -367,6 +371,10 @@ impl<'a> Layouter<'a> {
                                 prev_break_opp = wraps;
                                 prev_char = Some(' ');
                             }
+                            Seg::Opportunity => {
+                                prev_break_opp = wraps;
+                                prev_char = None;
+                            }
                             Seg::Break => {
                                 pieces.push(Piece::Break);
                                 prev_break_opp = true;
@@ -453,7 +461,7 @@ impl<'a> Layouter<'a> {
         // `text-wrap: balance` (CSS Text 4 §6.1.2): the narrowest wrap
         // width that keeps the line count, found by bisection over trial
         // layouts (paragraphs of at most 6 lines without floats).
-        let balance = cstyle.text_wrap_balance && cstyle.white_space.wraps() && max_lines.is_none() && !items.iter().any(|it| matches!(it, InlineItem::Float(_)));
+        let balance = cstyle.text_wrap_balance && cstyle.white_space.wraps() && !items.iter().any(|it| matches!(it, InlineItem::Float(_)));
         let mut wrap_limit: Option<f32> = None;
         let mut passes = if balance { 14 } else { 0 };
         let (mut lo, mut hi, mut want) = (0.0f32, cb.width, 0usize);
@@ -461,6 +469,7 @@ impl<'a> Layouter<'a> {
         loop {
         let mut lines = Vec::new();
         let max_used;
+        let clamped;
         let height = {
             let mut il = InlineLayout {
                 lay: self,
@@ -495,13 +504,14 @@ impl<'a> Layouter<'a> {
             let h = il.run(&pieces);
             il.resolve_insets();
             max_used = il.max_used;
+            clamped = il.done;
             h
         };
         if passes > 0 {
             let n = lines.len();
             if first_pass {
                 first_pass = false;
-                if (2..=6).contains(&n) {
+                if (2..=6).contains(&n) && !clamped {
                     want = n;
                     hi = max_used.min(cb.width);
                     lo = 0.0;
@@ -510,7 +520,7 @@ impl<'a> Layouter<'a> {
                 }
             } else {
                 passes -= 1;
-                let fits = n <= want && max_used <= wrap_limit.unwrap_or(f32::MAX) + 0.01;
+                let fits = !clamped && n <= want && max_used <= wrap_limit.unwrap_or(f32::MAX) + 0.01;
                 if fits {
                     hi = wrap_limit.unwrap_or(hi);
                 } else {

@@ -143,6 +143,9 @@ pub struct StickyPatch {
     /// Painted bounds of the sticky subtree (document coordinates, before
     /// the sticky displacement).
     pub bounds: Rect,
+    /// The scrollport of an inner scroll container (the box does not
+    /// follow the page scroll); `None` = the viewport.
+    pub port: Option<Rect>,
 }
 
 impl StickyPatch {
@@ -158,6 +161,9 @@ impl DisplayList {
     pub fn update_page_scroll(&mut self, page_scroll: (f32, f32), viewport: (f32, f32)) {
         let port = Rect::new(page_scroll.0, page_scroll.1, viewport.0, viewport.1);
         for p in &self.sticky {
+            if p.port.is_some() {
+                continue;
+            }
             let (dx, dy) = p.offset(port);
             self.items[p.item] = DisplayItem::PushTransform([1.0, 0.0, 0.0, 1.0, dx, dy]);
             self.hits.scopes[p.scope as usize].scope = HitScope::Transform(Some([1.0, 0.0, 0.0, 1.0, -dx, -dy]));
@@ -307,6 +313,8 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         root,
         skip_root_bg: root_bg_painted,
         sticky_scrollport: Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height),
+        nested_port: false,
+        flow_cb: Rect::default(),
         hits: HitList::default(),
         scope: None,
         hoisted: top_layer.iter().map(|(_, b)| *b as *const LayoutBox as usize).collect(),
@@ -329,6 +337,12 @@ struct Painter<'l, 't, 'a> {
     root: &'t LayoutBox,
     skip_root_bg: bool,
     sticky_scrollport: Rect,
+    /// The sticky scrollport is an inner scroll container's.
+    nested_port: bool,
+    /// While collecting deferred boxes: the containing block content rect
+    /// of in-flow boxes inside an anonymous block (its parent's: anonymous
+    /// blocks form no containing block).
+    flow_cb: Rect,
     /// Hit regions recorded while painting.
     hits: HitList,
     /// Current hit scope (clip / transform / fixed layer).
@@ -437,6 +451,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                     cb,
                     inset: root.style.inset,
                     bounds: root.subtree_bounds(),
+                    port: self.nested_port.then_some(self.sticky_scrollport),
                 });
             }
         }
@@ -598,7 +613,15 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.push(DisplayItem::PushClip(*r));
             self.push_scope(HitScope::Clip(*r));
         }
+        // A sticky box inside a scroll container sticks to its scrollport
+        // (the innermost overflow clip).
+        let saved_port = (self.sticky_scrollport, self.nested_port);
+        if let Some(r) = d.clips.last() {
+            self.sticky_scrollport = *r;
+            self.nested_port = true;
+        }
         self.paint_stacking_context(d.b, d.cb);
+        (self.sticky_scrollport, self.nested_port) = saved_port;
         for _ in &d.clips {
             self.list.push(DisplayItem::PopClip);
         }
@@ -649,6 +672,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// that are themselves deferred.
     fn collect_deferred(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
+        let flow_cb = if b.kind == BoxKind::AnonymousBlock { self.flow_cb } else { b.content_rect };
+        let saved_flow_cb = std::mem::replace(&mut self.flow_cb, flow_cb);
         for c in &b.children {
             if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
                 continue;
@@ -661,7 +686,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             let deferred = c.is_positioned() || c.is_stacking_context() || c.flow == Flow::Absolute;
             if deferred {
                 *order += 1;
-                let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { b.content_rect };
+                let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { flow_cb };
                 let clips = if c.flow == Flow::Absolute { abs_clips.to_vec() } else { flow_clips.to_vec() };
                 out.push(Deferred {
                     z: if c.is_stacking_context() || c.is_positioned() { c.style.z_index.unwrap_or(0) } else { 0 },
@@ -687,7 +712,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 self.collect_deferred(c, cb_for_children, out, order, flow_clips, abs_clips);
             }
+            self.flow_cb = flow_cb;
         }
+        self.flow_cb = saved_flow_cb;
     }
 
     /// A positioned box with `z-index: auto`: painted like a stacking

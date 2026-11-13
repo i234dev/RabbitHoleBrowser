@@ -314,6 +314,13 @@ impl<'a> Builder<'a> {
             }
             return;
         }
+        if tag == "wbr" {
+            // A line break opportunity (HTML §4.5.29).
+            let mut t = LayoutBox::new(BoxKind::Text, None, style.clone());
+            t.text = Some(Rc::from("\u{200B}"));
+            out.push(t);
+            return;
+        }
         if tag == "br" {
             out.push(LayoutBox::new(BoxKind::LineBreak, Some(node), style));
             return;
@@ -326,6 +333,10 @@ impl<'a> Builder<'a> {
             BoxKind::Block
         } else {
             match style.display {
+                // A sticky inline box moves as a whole: laid out as an
+                // atomic inline so the sticky offset can shift it (it no
+                // longer breaks across lines).
+                Display::Inline if style.position == Position::Sticky && !REPLACED.contains(&tag) => BoxKind::InlineBlock,
                 Display::Inline => BoxKind::Inline,
                 Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::InlineTable => BoxKind::InlineBlock,
                 Display::TableCell => BoxKind::TableCell,
