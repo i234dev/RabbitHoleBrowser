@@ -1,5 +1,7 @@
 # Delivery conventions
 
+- All commits must use `i234dev` as both author and committer, with empty email
+  addresses. Do not add co-author, contributor or assistant attribution trailers.
 - Every new delivery published to `main` increments the workspace patch version.
   Patch numbers are integers: `0.1.9` is followed by `0.1.10`.
 - Fetch the previous published revision, then use
