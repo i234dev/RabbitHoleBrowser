@@ -393,6 +393,7 @@ fn eval(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
         Ok(c) => c,
         Err(e) => return Err(realm.new_error("SyntaxError", &e.message)),
     };
+    realm.adopt_code(&code);
     realm.run_script(code)
 }
 

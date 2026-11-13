@@ -322,6 +322,10 @@ unsafe fn switch_frame(ctx: *mut Ctx) -> usize {
     let (pc, base) = (f.pc, f.base as usize);
     // SAFETY: the frame's code outlives the frame (see `Frame::code`).
     let code: &FunctionCode = &*f.code.as_ptr();
+    if code.realm.get() != r.current_realm {
+        // A frame of another realm: the run loop switches realms.
+        return 0;
+    }
     let s = &code.jit.s;
     let mut e = s.entry.get();
     if e == 0 {

@@ -323,6 +323,7 @@ impl Realm {
                 return Err(self.new_error("SyntaxError", &msg));
             }
         };
+        self.adopt_code(&code);
         let mut rec = ModuleRecord::new(url);
         rec.code = Some(code);
         rec.slots = slots;

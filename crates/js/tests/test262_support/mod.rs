@@ -280,7 +280,12 @@ fn native_detach(realm: &mut Realm, _this: Value, args: &[Value]) -> Result<Valu
 }
 
 fn native_create_realm(realm: &mut Realm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
-    Err(realm.throw_type_error("$262.createRealm is not supported"))
+    let id = realm.create_realm();
+    realm.in_realm(id, |r| {
+        install_host(r);
+        let g = r.global();
+        r.get(Value::Object(g), PropertyKey::str("$262"))
+    })
 }
 
 fn native_htmldda(_realm: &mut Realm, _this: Value, _args: &[Value]) -> Result<Value, Value> {

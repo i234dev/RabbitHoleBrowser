@@ -44,6 +44,7 @@ pub mod modules;
 pub mod panics;
 pub mod parser;
 pub mod realm;
+pub mod realms;
 pub mod regex;
 pub mod stack;
 pub mod regs;

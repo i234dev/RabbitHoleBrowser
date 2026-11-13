@@ -307,6 +307,14 @@ pub struct Realm {
     /// with [`request_post_native`] (custom element reactions of DOM
     /// methods: `[CEReactions]`).
     pub post_native: Option<fn(&mut Realm)>,
+    /// The running realm (ECMAScript Realm Record) among those sharing
+    /// this agent and heap: its intrinsics, global object and global
+    /// lexical bindings are the fields above; the others wait in
+    /// `realms` (see [`Realm::create_realm`]).
+    pub current_realm: u16,
+    /// Realm records by index; the running one's slot is empty. Empty
+    /// while there is only the first realm.
+    pub(crate) realms: Vec<Option<Box<crate::realms::RealmRecord>>>,
 }
 
 thread_local! {
@@ -422,47 +430,7 @@ impl Realm {
         crate::alloc::enable_for_this_thread();
         crate::panics::install_hook();
         let mut heap = Heap::new();
-        let object_proto = heap.alloc(Object::new(None, ObjectKind::Ordinary));
-        let function_proto = heap.alloc(Object::new(
-            Some(object_proto),
-            ObjectKind::Native(Box::new(NativeFunction { func: |_, _, _| Ok(Value::Undefined), name: JsStr::empty(), data: None, captures: vec![], is_constructor: false, intrinsic: 0, gc_safe: false })),
-        ));
-        let mk = |heap: &mut Heap, proto: ObjectId| heap.alloc(Object::new(Some(proto), ObjectKind::Ordinary));
-        let array_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::Array { elements: vec![], length: 0 }));
-        let string_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::String(JsStr::empty())));
-        let number_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::Number(0.0)));
-        let boolean_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::Boolean(false)));
-        let symbol_proto = mk(&mut heap, object_proto);
-        let bigint_proto = mk(&mut heap, object_proto);
-        let error_proto = mk(&mut heap, object_proto);
-        let iterator_proto = mk(&mut heap, object_proto);
-        let array_iterator_proto = mk(&mut heap, iterator_proto);
-        let generator_proto = mk(&mut heap, iterator_proto);
-        let async_generator_proto = mk(&mut heap, object_proto);
-        let promise_proto = mk(&mut heap, object_proto);
-        let global = mk(&mut heap, object_proto);
-        let intrinsics = Intrinsics {
-            object_proto,
-            function_proto,
-            array_proto,
-            string_proto,
-            number_proto,
-            boolean_proto,
-            symbol_proto,
-            bigint_proto,
-            error_proto,
-            iterator_proto,
-            array_iterator_proto,
-            generator_proto,
-            async_generator_proto,
-            promise_proto,
-            promise_ctor: object_proto,
-            object_ctor: object_proto,
-            array_ctor: object_proto,
-            function_ctor: object_proto,
-            eval_fn: object_proto,
-            others: HashMap::default(),
-        };
+        let (intrinsics, global) = Self::bootstrap_intrinsics(&mut heap, 0);
         let mut symbols = Vec::new();
         for (name, _) in WELL_KNOWN_SYMBOLS.iter() {
             symbols.push(SymbolInfo { description: Some(JsStr::new(&format!("Symbol.{}", name))), is_private: false, registered: false });
@@ -518,18 +486,72 @@ impl Realm {
             regexp_pristine: None,
             regexp_last: None,
             post_native: None,
+            current_realm: 0,
+            realms: Vec::new(),
         };
-        crate::builtins::register_builtins(&mut realm);
-        realm.mark_intrinsics();
-        let (ap, gp) = (realm.intrinsics.array_proto, realm.intrinsics.generator_proto);
-        for name in ["forEach", "map", "filter", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "reduce", "reduceRight"] {
-            realm.mark_gc_safe(ap, name);
-        }
-        for name in ["next", "return", "throw"] {
-            realm.mark_gc_safe(gp, name);
-        }
+        realm.install_builtins();
         realm.gc_bytes_base = crate::alloc::thread_bytes_in_use();
         realm
+    }
+
+    /// The first objects of a realm (the prototypes the others need) and
+    /// its global object; the rest is filled in by `register_builtins`.
+    pub(crate) fn bootstrap_intrinsics(heap: &mut Heap, realm: u16) -> (Intrinsics, ObjectId) {
+        let object_proto = heap.alloc(Object::new(None, ObjectKind::Ordinary));
+        let function_proto = heap.alloc(Object::new(
+            Some(object_proto),
+            ObjectKind::Native(Box::new(NativeFunction { func: |_, _, _| Ok(Value::Undefined), name: JsStr::empty(), data: None, captures: vec![], is_constructor: false, intrinsic: 0, gc_safe: false, realm })),
+        ));
+        let mk = |heap: &mut Heap, proto: ObjectId| heap.alloc(Object::new(Some(proto), ObjectKind::Ordinary));
+        let array_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::Array { elements: vec![], length: 0 }));
+        let string_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::String(JsStr::empty())));
+        let number_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::Number(0.0)));
+        let boolean_proto = heap.alloc(Object::new(Some(object_proto), ObjectKind::Boolean(false)));
+        let symbol_proto = mk(heap, object_proto);
+        let bigint_proto = mk(heap, object_proto);
+        let error_proto = mk(heap, object_proto);
+        let iterator_proto = mk(heap, object_proto);
+        let array_iterator_proto = mk(heap, iterator_proto);
+        let generator_proto = mk(heap, iterator_proto);
+        let async_generator_proto = mk(heap, object_proto);
+        let promise_proto = mk(heap, object_proto);
+        let global = mk(heap, object_proto);
+        let intrinsics = Intrinsics {
+            object_proto,
+            function_proto,
+            array_proto,
+            string_proto,
+            number_proto,
+            boolean_proto,
+            symbol_proto,
+            bigint_proto,
+            error_proto,
+            iterator_proto,
+            array_iterator_proto,
+            generator_proto,
+            async_generator_proto,
+            promise_proto,
+            promise_ctor: object_proto,
+            object_ctor: object_proto,
+            array_ctor: object_proto,
+            function_ctor: object_proto,
+            eval_fn: object_proto,
+            others: HashMap::default(),
+        };
+        (intrinsics, global)
+    }
+
+    /// Fill the running realm's intrinsics and global object.
+    pub(crate) fn install_builtins(&mut self) {
+        crate::builtins::register_builtins(self);
+        self.mark_intrinsics();
+        let (ap, gp) = (self.intrinsics.array_proto, self.intrinsics.generator_proto);
+        for name in ["forEach", "map", "filter", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "reduce", "reduceRight"] {
+            self.mark_gc_safe(ap, name);
+        }
+        for name in ["next", "return", "throw"] {
+            self.mark_gc_safe(gp, name);
+        }
     }
 
     /// Tag the built-ins the interpreter inlines (see `vm::INTRINSIC_*`).
@@ -601,7 +623,7 @@ impl Realm {
     /// (kept alive by the GC).
     pub fn new_native_function_full(&mut self, name: &str, arity: u32, func: NativeFn, data: Option<Rc<dyn Any>>, captures: Vec<Value>, is_constructor: bool) -> ObjectId {
         let proto = self.intrinsics.function_proto;
-        let id = self.alloc(Object::new(Some(proto), ObjectKind::Native(Box::new(NativeFunction { func, name: JsStr::new(name), data, captures, is_constructor, intrinsic: 0, gc_safe: false }))));
+        let id = self.alloc(Object::new(Some(proto), ObjectKind::Native(Box::new(NativeFunction { func, name: JsStr::new(name), data, captures, is_constructor, intrinsic: 0, gc_safe: false, realm: self.current_realm }))));
         let o = self.heap.get_mut(id);
         o.props.insert(names::length(), Property::data(Value::Number(arity as f64), CONFIGURABLE));
         o.props.insert(names::name(), Property::data(Value::str(name), CONFIGURABLE));
@@ -850,6 +872,7 @@ impl Realm {
             i.promise_proto, i.promise_ctor, i.object_ctor, i.array_ctor, i.function_ctor, i.eval_fn, self.global,
         ]);
         roots.extend(i.others.values().copied());
+        self.trace_realms(&mut roots);
         for (v, _) in self.global_lex.values() {
             if let V::Object(o) = v.v() {
                 roots.push(o);
@@ -1199,7 +1222,10 @@ impl Realm {
             }
         };
         match crate::compiler::compile_program_with(&program, filename, source, completion) {
-            Ok(c) => Ok(c),
+            Ok(c) => {
+                self.adopt_code(&c);
+                Ok(c)
+            }
             Err(e) => Err(self.new_error("SyntaxError", &e.message)),
         }
     }
@@ -1306,12 +1332,8 @@ impl Realm {
     /// Prototype for an object created by a native constructor, honouring
     /// subclassing via `new.target.prototype`; falls back to `default`.
     pub fn proto_from_new_target(&mut self, default: ObjectId) -> ObjectId {
-        if let V::Object(nt) = self.new_target().v() {
-            if let Ok(V::Object(p)) = self.get(Value::Object(nt), names::prototype()).as_ref().map(Value::v) {
-                return p;
-            }
-        }
-        default
+        let nt = self.new_target();
+        self.proto_from_ctor(nt, default).unwrap_or(default)
     }
 
     // ------------------------------------------------------------ promises

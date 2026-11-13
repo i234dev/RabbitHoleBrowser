@@ -234,7 +234,14 @@ impl Realm {
             return self.range_error("Maximum call stack size exceeded");
         }
         self.native_depth += 1;
-        let gc_safe = matches!(self.heap.try_get(id).map(|o| &o.kind), Some(ObjectKind::Native(n)) if n.gc_safe);
+        let (gc_safe, frealm) = match self.heap.try_get(id).map(|o| &o.kind) {
+            Some(ObjectKind::Native(n)) => (n.gc_safe, n.realm),
+            _ => (false, self.current_realm),
+        };
+        let caller_realm = self.current_realm;
+        if frealm != caller_realm {
+            self.switch_realm(frealm);
+        }
         let roots = self.native_roots.len();
         if gc_safe {
             self.native_roots.push(this.clone());
@@ -269,6 +276,9 @@ impl Realm {
             self.gc_block -= 1;
         }
         self.native_depth -= 1;
+        if self.current_realm != caller_realm {
+            self.switch_realm(caller_realm);
+        }
         r
     }
 
@@ -814,6 +824,9 @@ impl Realm {
                     Ok(c) => c,
                     Err(e) => return Err(self.new_error("SyntaxError", &e.message)),
                 };
+                if code.realm.get() != 0 {
+                    c.set_realm(code.realm.get());
+                }
                 let _ = code.compiled.set(c.clone());
                 c
             }
@@ -1373,12 +1386,21 @@ impl Realm {
             }
             return Err(err);
         }
-        loop {
+        let caller_realm = self.current_realm;
+        let r = loop {
             match self.run_inner() {
-                Ok(exit) => return Ok(exit),
-                Err(e) => self.unwind(e)?,
+                Ok(exit) => break Ok(exit),
+                Err(e) => {
+                    if let Err(e) = self.unwind(e) {
+                        break Err(e);
+                    }
+                }
             }
+        };
+        if self.current_realm != caller_realm {
+            self.switch_realm(caller_realm);
         }
+        r
     }
 
     #[inline]
@@ -1534,6 +1556,9 @@ impl Realm {
                 debug_assert!(self.vstack.len() >= f.base as usize + f.code().frame_size());
                 (f.code.as_ref(), f.pc, self.vstack.as_mut_ptr().add(f.base as usize))
             };
+            if code.realm.get() != self.current_realm {
+                self.switch_realm(code.realm.get());
+            }
             #[cfg(feature = "jit")]
             if JIT {
                 match self.jit_reload(code, pc) {
@@ -4596,6 +4621,7 @@ impl Realm {
             Ok(c) => c,
             Err(e) => return Err(self.new_error("SyntaxError", &e.message)),
         };
+        self.adopt_code(&code);
         let f = self.make_closure(fi, code);
         self.call(Value::Object(f), Value::Undefined, &[])
     }

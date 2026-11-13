@@ -864,6 +864,7 @@ impl Compiler {
             eval_sites: Vec::new(),
             compiled: std::cell::OnceCell::new(),
             jit: Default::default(),
+            realm: Default::default(),
         };
         let parent = self.fs();
         parent.functions.push(Rc::new(code));
@@ -4594,6 +4595,7 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         source_span: fs.span,
         filename: fs.filename,
         module,
+        realm: Default::default(),
     };
     code.call_flags = code.compute_call_flags();
     code

@@ -578,6 +578,9 @@ pub struct FunctionCode {
     pub jit: JitSlot,
     /// Direct `eval` call sites (see `Op::EvalSite`).
     pub eval_sites: Vec<Rc<crate::compiler::EvalSite>>,
+    /// Index of the realm the code was compiled for (see
+    /// `Realm::current_realm`): its frames run in that realm.
+    pub realm: std::cell::Cell<u16>,
 }
 
 /// Per-function state of the baseline compiler (empty without the `jit`
@@ -616,6 +619,14 @@ pub const CALL_ARROW: u8 = 32;
 pub const CALL_SIMPLE: u8 = 64;
 
 impl FunctionCode {
+    /// Assign the code and every function nested in it to `realm`.
+    pub fn set_realm(&self, realm: u16) {
+        self.realm.set(realm);
+        for f in &self.functions {
+            f.set_realm(realm);
+        }
+    }
+
     /// Compute [`FunctionCode::call_flags`] from the compiled code.
     pub fn compute_call_flags(&self) -> u8 {
         if self.lazy.is_some() {

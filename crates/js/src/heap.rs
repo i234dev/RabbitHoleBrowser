@@ -96,6 +96,9 @@ pub struct NativeFunction {
     /// hold values the collector cannot see, so collection waits until
     /// they return.
     pub gc_safe: bool,
+    /// Index of the realm the function belongs to (its [[Realm]]): calls
+    /// run with that realm's intrinsics and global object.
+    pub realm: u16,
 }
 
 impl std::fmt::Debug for NativeFunction {
