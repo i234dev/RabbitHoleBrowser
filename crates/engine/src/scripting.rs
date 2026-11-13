@@ -46,6 +46,7 @@ impl Default for DialogPolicy {
 /// Script-related state kept on a page.
 #[derive(Default)]
 pub struct ScriptState {
+    pub(crate) service_worker_client: Option<rabbithole_script::ServiceWorkerClient>,
     pub host: Option<ScriptHost>,
     /// DOM changed by scripts since the last style/layout.
     pub dom_dirty: bool,
@@ -184,6 +185,7 @@ pub struct EngineEnv<'a> {
 }
 
 impl HostEnv for EngineEnv<'_> {
+    fn service_worker_client(&self) -> Option<rabbithole_script::ServiceWorkerClient> { self.page.script.service_worker_client.clone() }
     fn service_worker_registry(&self) -> Option<rabbithole_script::ServiceWorkerRegistry> {
         Some(self.engine.service_workers.clone())
     }

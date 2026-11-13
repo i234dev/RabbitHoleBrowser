@@ -13,6 +13,7 @@ pub mod diff;
 pub mod forms;
 pub mod frames;
 mod home;
+mod service_worker_navigation;
 pub mod images;
 pub mod incremental;
 pub mod pointer;
@@ -1154,6 +1155,9 @@ impl Engine {
 
     /// Synchronous convenience: load + build.
     pub fn load(&mut self, url: &str, viewport: Viewport) -> Result<Page, EngineError> {
+        if let Some(target) = Url::parse(url).filter(|u| u.is_http()) {
+            if let Some(page) = service_worker_navigation::load(self, target, viewport)? { return Ok(page); }
+        }
         let loaded = self.loader.load(url, viewport)?;
         Ok(self.build_page(loaded, viewport))
     }

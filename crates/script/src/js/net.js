@@ -302,7 +302,8 @@
   if (g.Response && !g.Response.redirect) {
     g.Response.redirect = function redirect(url, status = 302) {
       if (![301, 302, 303, 307, 308].includes(status)) throw new RangeError("Failed to execute 'redirect' on 'Response': Invalid status code");
-      const u = new URL(url, document.baseURI).href;
+      const base = typeof document !== 'undefined' ? document.baseURI : g.location.href;
+      const u = new URL(url, base).href;
       return new g.Response(null, { status, headers: { Location: u } });
     };
   }

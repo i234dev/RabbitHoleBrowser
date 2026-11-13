@@ -556,6 +556,8 @@ fn headers_values(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
 pub(crate) struct BodyData {
     pub bytes: Vec<u8>,
     pub used: bool,
+    /// Privileged source navigation metadata; never derived from JS properties.
+    pub navigation: Option<Request>,
 }
 
 pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(Vec<u8>, Option<String>)> {
@@ -603,7 +605,7 @@ pub(crate) fn body_bytes_from_value(realm: &mut Realm, v: &Value) -> JsResult<(V
 pub(crate) fn make_response(realm: &mut Realm, url: &str, status: u16, status_text: &str, headers: Vec<(String, String)>, body: Vec<u8>, ty: &str) -> Value {
     let p = proto("Response");
     let o = realm.new_object_with_proto(Some(p));
-    realm.set_host_data(o, Box::new(BodyData { bytes: body, used: false }));
+    realm.set_host_data(o, Box::new(BodyData { bytes: body, used: false, navigation: None }));
     realm.set_class_name(o, "Response");
     realm.native_root(Value::Object(o));
     let h = make_headers(realm, headers);
@@ -802,7 +804,7 @@ fn response_json_static(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRe
 pub(crate) fn make_request(realm: &mut Realm, url: &str, method: &str, headers: Vec<(String, String)>, body: Vec<u8>) -> Value {
     let p = proto("Request");
     let o = realm.new_object_with_proto(Some(p));
-    realm.set_host_data(o, Box::new(BodyData { bytes: body, used: false }));
+    realm.set_host_data(o, Box::new(BodyData { bytes: body, used: false, navigation: None }));
     realm.set_class_name(o, "Request");
     let h = make_headers(realm, headers);
     realm.define_property(o, "url", Value::str(url), ACC);
@@ -819,6 +821,44 @@ pub(crate) fn make_request(realm: &mut Realm, url: &str, method: &str, headers: 
     Value::Object(o)
 }
 
+fn navigation_of(realm: &mut Realm, input: &Value) -> JsResult<Option<Request>> {
+    let source = input.as_object().and_then(|id| realm.host_data::<BodyData>(id)).and_then(|body| body.navigation.clone());
+    let Some(mut source) = source else { return Ok(None) };
+    // The native slot protects navigation authority, not the mutable header
+    // list. Copy its current Headers before cloning or forwarding the request.
+    let headers = realm.get_str(input.clone(), "headers")?;
+    realm.native_root(headers.clone());
+    source.headers = headers_from_init(realm, &headers)?;
+    Ok(Some(source))
+}
+fn credentials_name(value: rabbithole_net::CredentialsMode) -> &'static str { match value { rabbithole_net::CredentialsMode::Omit => "omit", rabbithole_net::CredentialsMode::Include => "include", _ => "same-origin" } }
+fn redirect_name(value: rabbithole_net::RedirectMode) -> &'static str { match value { rabbithole_net::RedirectMode::Manual => "manual", rabbithole_net::RedirectMode::Error => "error", _ => "follow" } }
+/// Only host-created FetchEvents can create this slot. Clone preserves it;
+/// public RequestInit.mode='navigate' can never acquire it.
+pub(crate) fn make_navigation_request(realm: &mut Realm, source: &Request) -> Value {
+    let request = make_request(realm, &source.url.to_string(), &source.method, source.headers.clone(), source.body.as_ref().map(|b| b.data.clone()).unwrap_or_default());
+    realm.native_root(request.clone());
+    let id = request.as_object().unwrap();
+    realm.host_data_mut::<BodyData>(id).unwrap().navigation = Some(source.clone());
+    for (name, value) in [("mode", "navigate"), ("credentials", credentials_name(source.credentials)), ("redirect", redirect_name(source.redirect)), ("destination", "document")] { realm.define_property(id, name, Value::str(value), ACC); }
+    let referer = source.referer.as_ref().map(ToString::to_string).unwrap_or_default();
+    realm.define_property(id, "referrer", Value::str(&referer), ACC);
+    request
+}
+/// Snapshot a navigation override dictionary exactly once, including inherited
+/// and non-enumerable members. An empty init preserves the privileged source;
+/// any supplied member resets mode/origin/referrer to the worker client.
+fn navigation_init(realm: &mut Realm, source: &Option<Request>, init: Value) -> JsResult<(Value, bool)> {
+    if source.is_none() || init.is_nullish() { return Ok((init, false)); }
+    if init.as_object().is_none() { return Err(realm.throw_type_error("Request init must be a dictionary")); }
+    let snapshot = realm.new_object_with_proto(None); realm.native_root(Value::Object(snapshot));
+    let mut overridden = false;
+    for name in ["body", "cache", "credentials", "duplex", "headers", "integrity", "keepalive", "method", "mode", "priority", "redirect", "referrer", "referrerPolicy", "signal", "window"] {
+        let value = realm.get_str(init.clone(), name)?;
+        if !value.is_undefined() { realm.native_root(value.clone()); realm.define_property(snapshot, name, value, ALL); overridden = true; }
+    }
+    Ok((Value::Object(snapshot), overridden))
+}
 /// Resolve (url, method, headers, body) from fetch/Request arguments.
 fn request_parts(realm: &mut Realm, input: &Value, init: &Value) -> JsResult<(String, String, Vec<(String, String)>, Vec<u8>)> {
     let (mut url, mut method, mut headers, mut body) = match input.v() {
@@ -862,35 +902,47 @@ fn request_parts(realm: &mut Realm, input: &Value, init: &Value) -> JsResult<(St
 }
 
 fn request_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let (url, method, headers, body) = request_parts(realm, &arg(args, 0), &arg(args, 1))?;
-    let req = make_request(realm, &url, &method, headers, body);
-    realm.native_root(req.clone());
-    // `signal` follows init.signal, else the input Request's signal.
-    let mut signal = Value::Undefined;
-    if let init @ V::Object(_) = (arg(args, 1)).v() {
-        signal = realm.get_str(init.to_value(), "signal")?;
-    }
-    if signal.is_nullish() {
-        if let input @ V::Object(_) = (arg(args, 0)).v() {
-            if realm.get_str(input.to_value(), "method").map(|m| !m.is_undefined()).unwrap_or(false) {
-                signal = realm.get_str(input.to_value(), "signal")?;
-            }
+    let input = arg(args, 0);
+    let navigation = navigation_of(realm, &input)?;
+    let (init, overridden) = navigation_init(realm, &navigation, arg(args, 1))?;
+    let parts_input = navigation.as_ref().map(|request| make_navigation_request(realm, request)).unwrap_or_else(|| input.clone());
+    realm.native_root(parts_input.clone());
+    let (url, method, headers, body) = request_parts(realm, &parts_input, &init)?;
+    let request = if let Some(source) = navigation.as_ref().filter(|_| !overridden) { make_navigation_request(realm, source) } else { make_request(realm, &url, &method, headers, body) };
+    realm.native_root(request.clone());
+    let id = request.as_object().unwrap();
+    let mut signal = if init.as_object().is_some() { realm.get_str(init.clone(), "signal")? } else { Value::Undefined };
+    if signal.is_nullish() && input.as_object().is_some_and(|o| realm.obj(o).class_name() == Some("Request")) { signal = realm.get_str(input.clone(), "signal")?; }
+    if signal.as_object().is_some() { realm.define_property(id, "signal", signal, ACC); }
+    for name in ["mode", "credentials", "redirect"] {
+        let mut value = if init.as_object().is_some() { realm.get_str(init.clone(), name)? } else { Value::Undefined };
+        let explicit = !value.is_undefined();
+        if value.is_undefined() {
+            if let Some(source) = &navigation {
+                value = Value::str(match name { "mode" => if overridden { "same-origin" } else { "navigate" }, "credentials" => credentials_name(source.credentials), _ => redirect_name(source.redirect) });
+            } else if input.as_object().is_some_and(|o| realm.obj(o).class_name() == Some("Request")) { value = realm.get_str(input.clone(), name)?; }
+        }
+        if !value.is_undefined() {
+            let text = realm.to_rust_string(value.clone())?;
+            let valid = match name {
+                "mode" => rabbithole_net::RequestMode::parse(&text).is_some() && (text != "navigate" || (!explicit && navigation.is_some() && !overridden)),
+                "credentials" => rabbithole_net::CredentialsMode::parse(&text).is_some(),
+                _ => rabbithole_net::RedirectMode::parse(&text).is_some(),
+            };
+            if !valid { return Err(realm.throw_type_error("Invalid Request policy")); }
+            realm.define_property(id, name, value, ACC);
         }
     }
-    if let (V::Object(o), V::Object(_)) = (req.v(), signal.v()) {
-        realm.define_property(o, "signal", signal, ACC);
-    }
-    if let Some(o) = req.as_object() {
-        for name in ["mode", "credentials", "redirect"] {
-            let mut value = if let Some(init) = arg(args, 1).as_object() { realm.get_str(Value::Object(init), name)? } else { Value::Undefined };
-            if value.is_undefined() && arg(args, 0).as_object().is_some_and(|id| realm.obj(id).class_name() == Some("Request")) { value = realm.get_str(arg(args, 0), name)?; }
-            if !value.is_undefined() { realm.define_property(o, name, value, ACC); }
-        }
-    }
-    Ok(req)
+    Ok(request)
 }
 
 fn request_clone(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    if let Some(source) = navigation_of(realm, &this)? {
+        let request = make_navigation_request(realm, &source);
+        let signal = realm.get_str(this, "signal")?;
+        if !signal.is_undefined() { realm.define_property(request.as_object().unwrap(), "signal", signal, ACC); }
+        return Ok(request);
+    }
     let (url, method, headers, body) = request_parts(realm, &this, &Value::Undefined)?;
     let request = make_request(realm, &url, &method, headers, body);
     realm.native_root(request.clone());
@@ -1075,9 +1127,21 @@ pub(crate) fn do_fetch(url: &str, method: &str, headers: &[(String, String)], bo
 }
 
 fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let (url, method, headers, body) = match request_parts(realm, &arg(args, 0), &arg(args, 1)) {
+    let input = arg(args, 0);
+    let navigation = match navigation_of(realm, &input) {
+        Ok(source) => source,
+        Err(error) => { realm.native_root(error.clone()); let (promise, _, reject) = realm.new_promise(); realm.call(Value::Object(reject), Value::Undefined, &[error])?; return Ok(Value::Object(promise)); }
+    };
+    let (init, overridden) = match navigation_init(realm, &navigation, arg(args, 1)) {
+        Ok(init) => init,
+        Err(error) => { realm.native_root(error.clone()); let (promise, _, reject) = realm.new_promise(); realm.call(Value::Object(reject), Value::Undefined, &[error])?; return Ok(Value::Object(promise)); }
+    };
+    let parts_input = navigation.as_ref().map(|request| make_navigation_request(realm, request)).unwrap_or_else(|| input.clone());
+    realm.native_root(parts_input.clone());
+    let (url, method, headers, body) = match request_parts(realm, &parts_input, &init) {
         Ok(p) => p,
         Err(e) => {
+            realm.native_root(e.clone());
             let (p, _, reject) = realm.new_promise();
             realm.call(Value::Object(reject), Value::Undefined, &[e])?;
             return Ok(Value::Object(p));
@@ -1086,18 +1150,21 @@ fn fetch_fn(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
     let (p, resolve, reject) = realm.new_promise();
     for id in [p, resolve, reject] { realm.native_root(Value::Object(id)); }
     let request = (|| -> JsResult<Request> {
-        let mut req = build_request(&url, &method, &headers, &body).map_err(|e| realm.throw_type_error(&e))?;
-        let input = arg(args, 0); let init = arg(args, 1);
-        let option = |realm: &mut Realm, name: &str| -> JsResult<Option<String>> {
+        let mut req = if let Some(source) = navigation.as_ref().filter(|_| !overridden) { source.clone() } else { build_request(&url, &method, &headers, &body).map_err(|e| realm.throw_type_error(&e))? };
+        let option = |realm: &mut Realm, name: &str| -> JsResult<Option<(String, bool)>> {
             let mut v = if init.as_object().is_some() { realm.get_str(init.clone(), name)? } else { Value::Undefined };
-            if v.is_undefined() && input.as_object().is_some_and(|o| realm.obj(o).class_name() == Some("Request")) { v = realm.get_str(input.clone(), name)?; }
-            if v.is_undefined() { Ok(None) } else { Ok(Some(realm.to_rust_string(v)?)) }
+            let explicit = !v.is_undefined();
+            if v.is_undefined() {
+                if let Some(source) = &navigation { v = Value::str(match name { "mode" => if overridden { "same-origin" } else { "navigate" }, "credentials" => credentials_name(source.credentials), _ => redirect_name(source.redirect) }); }
+                else if input.as_object().is_some_and(|o| realm.obj(o).class_name() == Some("Request")) { v = realm.get_str(input.clone(), name)?; }
+            }
+            if v.is_undefined() { Ok(None) } else { Ok(Some((realm.to_rust_string(v)?, explicit))) }
         };
-        if let Some(v) = option(realm, "mode")? {
-            req.mode = Some(rabbithole_net::RequestMode::parse(&v).filter(|m| *m != rabbithole_net::RequestMode::Navigate).ok_or_else(|| realm.throw_type_error("Invalid fetch mode"))?);
+        if let Some((value, explicit)) = option(realm, "mode")? {
+            req.mode = Some(rabbithole_net::RequestMode::parse(&value).filter(|mode| *mode != rabbithole_net::RequestMode::Navigate || (!explicit && navigation.is_some() && !overridden)).ok_or_else(|| realm.throw_type_error("Invalid fetch mode"))?);
         }
-        if let Some(v) = option(realm, "credentials")? { req.credentials = rabbithole_net::CredentialsMode::parse(&v).ok_or_else(|| realm.throw_type_error("Invalid fetch credentials"))?; }
-        if let Some(v) = option(realm, "redirect")? { req.redirect = rabbithole_net::RedirectMode::parse(&v).ok_or_else(|| realm.throw_type_error("Invalid fetch redirect"))?; }
+        if let Some((v, _)) = option(realm, "credentials")? { req.credentials = rabbithole_net::CredentialsMode::parse(&v).ok_or_else(|| realm.throw_type_error("Invalid fetch credentials"))?; }
+        if let Some((v, _)) = option(realm, "redirect")? { req.redirect = rabbithole_net::RedirectMode::parse(&v).ok_or_else(|| realm.throw_type_error("Invalid fetch redirect"))?; }
         if let Some((_, content_type)) = headers.iter().find(|(name, _)| name == "content-type") {
             if !req.headers.iter().any(|(name, _)| name == "content-type") { req.headers.push(("content-type".into(), content_type.clone())); }
         }
@@ -1271,7 +1338,7 @@ pub(crate) fn make_blob(realm: &mut Realm, bytes: Vec<u8>, ty: &str) -> Value {
     let p = proto("Blob");
     let o = realm.new_object_with_proto(Some(p));
     let len = bytes.len();
-    realm.set_host_data(o, Box::new(BodyData { bytes, used: false }));
+    realm.set_host_data(o, Box::new(BodyData { bytes, used: false, navigation: None }));
     realm.set_class_name(o, "Blob");
     realm.define_property(o, "size", Value::Number(len as f64), ACC);
     realm.define_property(o, "type", Value::str(ty), ACC);

@@ -23,6 +23,29 @@ impl std::fmt::Debug for ServiceWorkerRegistry {
     }
 }
 
+/// A reserved navigation client. The last lease removes an uncommitted client;
+/// once a Window realm adopts it, normal ScriptHost teardown owns its lifetime.
+#[derive(Clone)]
+pub struct ServiceWorkerClient(Rc<ReservedClient>);
+struct ReservedClient { registry: Weak<RefCell<Store>>, id: u64 }
+impl std::fmt::Debug for ServiceWorkerClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_tuple("ServiceWorkerClient").field(&self.0.id).finish() }
+}
+impl Drop for ReservedClient {
+    fn drop(&mut self) {
+        let Some(registry) = self.registry.upgrade() else { return };
+        let discard = registry.borrow().clients.get(&self.id).is_some_and(|c| !c.execution_ready);
+        if discard {
+            let mut s = registry.borrow_mut();
+            s.clients.remove(&self.id);
+            for task in s.fetches.values().filter(|task| task.client == self.id) { task.cancelled.set(true); }
+            s.prune_fetches(); s.clear_unregistered();
+        }
+    }
+}
+/// A buffered top-level GET navigation response and the client reserved for it.
+pub struct ServiceWorkerNavigation { pub response: rabbithole_net::Response, pub client: ServiceWorkerClient }
+
 /// Internal worker environment identity; embedders normally only supply a registry.
 #[derive(Clone)]
 pub struct ServiceWorkerScope {
@@ -64,6 +87,7 @@ impl FetchCancellation {
 }
 struct FetchTask {
     client: u64,
+    navigation: bool,
     worker: u64,
     request: Request,
     sender: Option<std::sync::mpsc::Sender<Result<crate::fetch::FetchReply, String>>>,
@@ -80,6 +104,7 @@ struct CacheRecord {
     entries: Vec<(String, String)>,
 }
 struct Client {
+    execution_ready: bool,
     url: Url,
     controller: Option<u64>,
     events: Vec<Notice>,
@@ -180,11 +205,20 @@ pub(crate) fn new_context(env: &mut dyn HostEnv) -> (Context, Option<ServiceWork
     }
     let registry = env.service_worker_registry().unwrap_or_default();
     let url = env.document_url();
+    if let Some(client) = env.service_worker_client() {
+        if client.0.registry.upgrade().is_some_and(|s| Rc::ptr_eq(&s, &registry.0)) {
+            let adopted = {
+                let mut s = registry.0.borrow_mut();
+                s.clients.get_mut(&client.0.id).filter(|c| !c.execution_ready && c.url.without_fragment() == url.without_fragment()).map(|c| { c.execution_ready = true; c.url = url.clone(); c.events.clear(); client.0.id })
+            };
+            if let Some(id) = adopted { return (Context { registry: Rc::downgrade(&registry.0), client: Some(id), worker: None }, Some(registry)); }
+        }
+    }
     let id = {
         let mut s = registry.0.borrow_mut();
         let controller = s.matching(&url).and_then(|id| s.registrations[&id].active).filter(|id| s.workers[id].state == "activated");
         let id = s.id();
-        s.clients.insert(id, Client { url, controller, events: Vec::new() });
+        s.clients.insert(id, Client { execution_ready: true, url, controller, events: Vec::new() });
         id
     };
     (Context { registry: Rc::downgrade(&registry.0), client: Some(id), worker: None }, Some(registry))
@@ -272,7 +306,7 @@ fn claim(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
 }
 fn claim_clients(s: &mut Store, id: u64) {
     let reg = s.workers[&id].registration;
-    let clients: Vec<u64> = s.clients.iter().filter(|(_, c)| s.matching(&c.url) == Some(reg) && c.controller != Some(id)).map(|(&id, _)| id).collect();
+    let clients: Vec<u64> = s.clients.iter().filter(|(_, c)| c.execution_ready && s.matching(&c.url) == Some(reg) && c.controller != Some(id)).map(|(&id, _)| id).collect();
     for client in clients {
         let c = s.clients.get_mut(&client).unwrap();
         c.controller = Some(id); c.events.push(Notice::simple("controller", id, 0));
@@ -339,7 +373,7 @@ pub(crate) fn intercept_fetch(request: &Request) -> Option<(std::sync::mpsc::Rec
     if !matches!(s.workers.get(&worker)?.state, "activating" | "activated") { return None; }
     let id = s.id(); let (tx, rx) = std::sync::mpsc::channel();
     let token = Rc::new(FetchCancellation::default());
-    s.fetches.insert(id, FetchTask { client, worker, request: request.clone(), sender: Some(tx), cancelled: token.clone(), dispatched: false, abort_notified: false, fallback: false, result: None, network: None, lifetime_done: false });
+    s.fetches.insert(id, FetchTask { client, navigation: false, worker, request: request.clone(), sender: Some(tx), cancelled: token.clone(), dispatched: false, abort_notified: false, fallback: false, result: None, network: None, lifetime_done: false });
     Some((rx, token))
 }
 fn fetch_identity(realm: &mut Realm, args: &[Value]) -> JsResult<(Rc<RefCell<Store>>, u64)> {
@@ -369,7 +403,8 @@ fn fetch_response(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value
     let redirected = realm.get_str(value.clone(), "redirected")?; let redirected = realm.to_boolean(&redirected);
     let body = crate::fetch::take_body(realm, &Value::Object(o))?;
     let content_type = headers.iter().find(|(k, _)| k == "content-type").map(|(_,v)| v.clone()).unwrap_or_default();
-    let reply = crate::fetch::FetchReply { response: rabbithole_net::Response { url, status: status as u16, content_type, charset: None, headers, body }, status_text, response_type: if ty == "default" { "basic".into() } else { ty }, redirected };
+    let (content_type, charset) = rabbithole_net::parse_content_type(&content_type);
+    let reply = crate::fetch::FetchReply { response: rabbithole_net::Response { url, status: status as u16, content_type, charset, headers, body }, status_text, response_type: if ty == "default" { "basic".into() } else { ty }, redirected };
     if let Some(f) = store.borrow_mut().fetches.get_mut(&id) { f.result = Some(Ok(reply)); }
     Ok(Value::Undefined)
 }
@@ -412,10 +447,10 @@ fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Run
     registry.0.borrow_mut().fetches.retain(|_, f| retain_fetch(f));
     let ids: Vec<u64> = registry.0.borrow().fetches.iter().filter(|(_, f)| f.worker == worker && !f.dispatched).map(|(&id, _)| id).collect();
     for id in ids {
-        let (req, client) = {
+        let (req, client, navigation) = {
             let mut s = registry.0.borrow_mut();
             let f = s.fetches.get_mut(&id).unwrap(); f.dispatched = true;
-            (f.request.clone(), f.client)
+            (f.request.clone(), f.client, f.navigation)
         };
         let mut wenv = WorkerEnv { outer: env, doc: &mut runtime.doc, url: runtime.url.clone(), errors: runtime.errors.clone(), service_worker: None };
         runtime.host.enter(&mut wenv, |realm| {
@@ -423,16 +458,17 @@ fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Run
             // This entry originates in Rust rather than a native call scope.
             // Release temporary request roots after the dispatch checkpoint.
             let root_mark = realm.native_roots.len();
-            let request = crate::fetch::make_request(realm, &req.url.to_string(), &req.method, req.headers, req.body.map(|b| b.data).unwrap_or_default());
+            let request = if navigation { crate::fetch::make_navigation_request(realm, &req) } else { crate::fetch::make_request(realm, &req.url.to_string(), &req.method, req.headers.clone(), req.body.clone().map(|b| b.data).unwrap_or_default()) };
             realm.native_root(request.clone());
             let o = request.as_object().unwrap();
-            let mode = match req.mode { Some(rabbithole_net::RequestMode::NoCors) => "no-cors", Some(rabbithole_net::RequestMode::SameOrigin) => "same-origin", _ => "cors" };
+            let mode = match req.mode { Some(rabbithole_net::RequestMode::Navigate) => "navigate", Some(rabbithole_net::RequestMode::NoCors) => "no-cors", Some(rabbithole_net::RequestMode::SameOrigin) => "same-origin", _ => "cors" };
             let credentials = match req.credentials { rabbithole_net::CredentialsMode::Omit => "omit", rabbithole_net::CredentialsMode::Include => "include", _ => "same-origin" };
             let redirect = match req.redirect { rabbithole_net::RedirectMode::Manual => "manual", rabbithole_net::RedirectMode::Error => "error", _ => "follow" };
             for (name, value) in [("mode", mode), ("credentials", credentials), ("redirect", redirect)] { realm.define_property(o, name, Value::str(value), ALL); }
+            let client_id = client.to_string();
             let hook = state().borrow().protos.get("__sw_fetch").copied();
             if let Some(hook) = hook {
-                if let Err(e) = realm.call(Value::Object(hook), Value::Undefined, &[Value::Number(id as f64), request, Value::str(&client.to_string())]) {
+                if let Err(e) = realm.call(Value::Object(hook), Value::Undefined, &[Value::Number(id as f64), request, Value::str(if navigation { "" } else { &client_id }), Value::str(if navigation { &client_id } else { "" })]) {
                     crate::host::report_error(realm, &e, "service worker fetch event");
                     if let Some(f) = registry.0.borrow_mut().fetches.get_mut(&id) { f.result = Some(Err("Service worker fetch dispatch failed".into())); f.lifetime_done = true; }
                 }
@@ -680,6 +716,110 @@ fn advance(registry: &ServiceWorkerRegistry, env: &mut dyn HostEnv, id: u64, run
     true
 }
 
+fn pump_runtimes(registry: &ServiceWorkerRegistry, env: &mut dyn HostEnv, now: f64) -> bool {
+    let mut ran = false;
+    registry.0.borrow_mut().prune_fetches();
+        let ids: Vec<u64> = registry.0.borrow().runtimes.keys().copied().collect();
+        for id in ids {
+            let runtime = registry.0.borrow_mut().runtimes.remove(&id);
+            let Some(mut runtime) = runtime else { continue };
+            if registry.0.borrow().workers[&id].state == "redundant" && !fetch_work(&registry.0.borrow(), id) { continue; }
+
+            ran |= !matches!(runtime.phase, Phase::Active);
+            let keep = advance(registry, env, id, &mut runtime, now);
+            pump_fetches(registry, id, &mut runtime, env);
+            if keep && (registry.0.borrow().workers[&id].state != "redundant" || fetch_work(&registry.0.borrow(), id)) { registry.0.borrow_mut().runtimes.insert(id, runtime); }
+        }
+        registry.0.borrow_mut().clear_unregistered();
+        ran
+}
+impl ServiceWorkerRegistry {
+    /// The scope check is side-effect free. Installing/waiting workers do not
+    /// become navigation controllers until normal lifecycle activation occurs.
+    pub fn controls_navigation(&self, url: &Url) -> bool {
+        let s = self.0.borrow();
+        url.is_http() && s.matching(url).and_then(|id| s.registrations[&id].active).is_some_and(|id| matches!(s.workers[&id].state, "activating" | "activated"))
+    }
+
+    /// Synchronous embedding convenience over asynchronous worker/network work.
+    /// Only existing active registrations are considered. No disk persistence.
+    /// The caller must provide a nonblocking fetch_background implementation.
+    pub fn navigate(&self, env: &mut dyn HostEnv, url: Url, timeout: std::time::Duration) -> Result<Option<ServiceWorkerNavigation>, String> {
+        if !self.controls_navigation(&url) { return Ok(None); }
+        let deadline = std::time::Instant::now().checked_add(timeout).ok_or("Invalid navigation timeout")?;
+        let client = {
+            let mut s = self.0.borrow_mut(); let id = s.id();
+            s.clients.insert(id, Client { execution_ready: false, url: url.clone(), controller: None, events: Vec::new() });
+            ServiceWorkerClient(Rc::new(ReservedClient { registry: Rc::downgrade(&self.0), id }))
+        };
+        let mut target = url;
+        for _ in 0..=20 {
+            let worker = {
+                let mut s = self.0.borrow_mut();
+                let worker = s.matching(&target).and_then(|id| s.registrations[&id].active).filter(|id| matches!(s.workers[id].state, "activating" | "activated"));
+                let reserved = s.clients.get_mut(&client.0.id).unwrap(); reserved.url = target.clone(); reserved.controller = worker;
+                worker
+            };
+            let mut request = Request::get(target.without_fragment());
+            request.dest = rabbithole_net::Destination::Document;
+            request.mode = Some(rabbithole_net::RequestMode::Navigate);
+            request.credentials = rabbithole_net::CredentialsMode::Include;
+            request.redirect = rabbithole_net::RedirectMode::Manual;
+            request.follow_redirects = false;
+            let mut response = if let Some(worker) = worker {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let token = Rc::new(FetchCancellation::default());
+                { let mut s = self.0.borrow_mut(); let id = s.id();
+                  s.fetches.insert(id, FetchTask { client: client.0.id, navigation: true, worker, request, sender: Some(tx), cancelled: token.clone(), dispatched: false, abort_notified: false, fallback: false, result: None, network: None, lifetime_done: false }); }
+                let result = self.await_navigation(env, deadline, &rx);
+                if result.is_err() { token.set(true); let now = env.now_ms(); pump_runtimes(self, env, now); }
+                result?.response
+            } else {
+                let rx = env.fetch_background(request).ok_or("Navigation requires asynchronous network support")?;
+                self.await_navigation_network(env, deadline, &rx)?
+            };
+            if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+                if let Some(location) = response.header("location") {
+                    let mut next = target.join(location.trim()).filter(|u| u.is_http()).ok_or("Invalid service worker navigation redirect")?;
+                    if next.fragment.is_none() { next.fragment = target.fragment.clone(); }
+                    target = next; continue;
+                }
+            }
+            if response.status == 0 { return Err("Invalid opaque navigation response".into()); }
+            // A cached fallback's Response.url must never change document origin.
+            response.url = target;
+            return Ok(Some(ServiceWorkerNavigation { response, client }));
+        }
+        Err("Too many service worker navigation redirects".into())
+    }
+    fn await_navigation(&self, env: &mut dyn HostEnv, deadline: std::time::Instant, rx: &std::sync::mpsc::Receiver<Result<crate::fetch::FetchReply, String>>) -> Result<crate::fetch::FetchReply, String> {
+        loop {
+            if std::time::Instant::now() >= deadline { return Err("Service worker navigation timed out".into()); }
+            let now = env.now_ms(); pump_runtimes(self, env, now);
+            if std::time::Instant::now() >= deadline { return Err("Service worker navigation timed out".into()); }
+            match rx.try_recv() {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err("Service worker navigation disconnected".into()),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    fn await_navigation_network(&self, env: &mut dyn HostEnv, deadline: std::time::Instant, rx: &std::sync::mpsc::Receiver<Result<rabbithole_net::Response, String>>) -> Result<rabbithole_net::Response, String> {
+        loop {
+            if std::time::Instant::now() >= deadline { return Err("Navigation network timed out".into()); }
+            let now = env.now_ms(); pump_runtimes(self, env, now);
+            if std::time::Instant::now() >= deadline { return Err("Service worker navigation timed out".into()); }
+            match rx.try_recv() {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err("Navigation network disconnected".into()),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
 impl ScriptHost {
     pub(crate) fn pump_service_workers(&mut self, env: &mut dyn HostEnv, now: f64) -> bool {
         if self.service_workers_due().is_none_or(|due| due > now) { return false; }
@@ -691,17 +831,7 @@ impl ScriptHost {
         // Publish register() while installing, before firing install: callers
         // can observe the actual state changes, rather than a synthetic result.
         notify(self, env);
-        let ids: Vec<u64> = registry.0.borrow().runtimes.keys().copied().collect();
-        for id in ids {
-            let runtime = registry.0.borrow_mut().runtimes.remove(&id);
-            let Some(mut runtime) = runtime else { continue };
-            if registry.0.borrow().workers[&id].state == "redundant" && !fetch_work(&registry.0.borrow(), id) { continue; }
-            ran |= !matches!(runtime.phase, Phase::Active);
-            let keep = advance(&registry, env, id, &mut runtime, now);
-            pump_fetches(&registry, id, &mut runtime, env);
-            if keep && (registry.0.borrow().workers[&id].state != "redundant" || fetch_work(&registry.0.borrow(), id)) { registry.0.borrow_mut().runtimes.insert(id, runtime); }
-        }
-        registry.0.borrow_mut().clear_unregistered();
+        ran |= pump_runtimes(&registry, env, now);
         notify(self, env);
         ran
     }

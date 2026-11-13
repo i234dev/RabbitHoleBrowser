@@ -47,11 +47,11 @@
       let resolve, reject;
       const handled = new Promise((a, b) => { resolve = a; reject = b; });
       handled.catch(() => {});
-      fetchState.set(this, { request: init.request, clientId: init.clientId || '', handled, resolve, reject, entered: false });
+      fetchState.set(this, { request: init.request, clientId: init.clientId || '', resultingClientId: init.resultingClientId || '', handled, resolve, reject, entered: false });
     }
     get request() { return fetchState.get(this).request; }
     get clientId() { return fetchState.get(this).clientId; }
-    get resultingClientId() { return ''; }
+    get resultingClientId() { return fetchState.get(this).resultingClientId; }
     get replacesClientId() { return ''; }
     get preloadResponse() { return Promise.resolve(undefined); }
     get handled() { return fetchState.get(this).handled; }
@@ -73,11 +73,11 @@
   }
   Object.defineProperty(FetchEvent.prototype, Symbol.toStringTag, { value: 'FetchEvent', configurable: true });
   Object.defineProperty(g, 'FetchEvent', { value: FetchEvent, configurable: true, writable: true });
-  N.registerProto('__sw_fetch', function (id, request, clientId) {
+  N.registerProto('__sw_fetch', function (id, request, clientId, resultingClientId) {
     const controller = new g.AbortController();
     Object.defineProperty(request, 'signal', { value: controller.signal, configurable: true, enumerable: true });
     fetchSignals.set(id, controller);
-    const event = new FetchEvent('fetch', { request, clientId, cancelable: true });
+    const event = new FetchEvent('fetch', { request, clientId, resultingClientId, cancelable: true });
     const state = fetchState.get(event), life = lifetime.get(event);
     life.dispatching = true; life.fetchId = id;
     dispatch.call(g, event);

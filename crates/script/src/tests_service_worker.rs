@@ -408,3 +408,17 @@ fn aborted_fetch_wait_until_survives_skip_waiting_and_unregister() {
     drive_fetch(&mut env,&mut host,25);
     assert_eq!(run(&mut env,&mut host,"caches.match('after-abort').then(response=>response ? response.text() : 'missing').then(console.log);"),["completed old event"]);
 }
+
+#[test]
+fn navigation_mode_cannot_be_acquired_through_public_request_properties_or_init() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/forbidden".into(), (200, "text/plain".into(), "unexpected network".into()));
+    let output = run(&mut env, &mut host, r#"
+        try { new Request('forbidden', {mode:'navigate'}); } catch(error) { console.log('constructor', error.name); }
+        const forged=new Request('forbidden');
+        Object.defineProperty(forged,'mode',{value:'navigate',configurable:true});
+        fetch(forged).then(()=>console.log('unexpected success'),error=>console.log('forged',error.name));
+        fetch('forbidden',{mode:'navigate'}).then(()=>console.log('unexpected success'),error=>console.log('init',error.name));
+    "#);
+    assert_eq!(output, ["constructor TypeError", "init TypeError", "forged TypeError"]);
+}

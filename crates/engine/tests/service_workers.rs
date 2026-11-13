@@ -14,7 +14,11 @@ struct Server {
 }
 impl Server {
     fn new(routes: &[(&str, &str, &str, &[(&str, &str)])]) -> Self {
-        let routes: BTreeMap<String, (String, String, Vec<(String, String)>)> = routes.iter().map(|(path, mime, body, headers)| ((*path).into(), ((*mime).into(), (*body).into(), headers.iter().map(|(k,v)| ((*k).into(),(*v).into())).collect()))).collect();
+        let routes: Vec<_> = routes.iter().map(|(path,mime,body,headers)| (*path,200,*mime,*body,*headers)).collect();
+        Self::with_status(&routes)
+    }
+    fn with_status(routes: &[(&str,u16,&str,&str,&[(&str,&str)])]) -> Self {
+        let routes: BTreeMap<String, (u16,String,String,Vec<(String,String)>)> = routes.iter().map(|(path,status,mime,body,headers)| ((*path).into(), (*status,(*mime).into(),(*body).into(),headers.iter().map(|(k,v)| ((*k).into(),(*v).into())).collect()))).collect();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -41,7 +45,7 @@ impl Server {
                 }
                 seen.lock().unwrap().push((path.clone(), headers));
                 let (status, mime, body, extra) = match routes.get(path.split('?').next().unwrap()) {
-                    Some((mime, body, extra)) => (200, mime.as_str(), body.as_str(), extra.as_slice()),
+                    Some((status,mime,body,extra)) => (*status,mime.as_str(),body.as_str(),extra.as_slice()),
                     None => (404, "text/plain", "not found", &[][..]),
                 };
                 let _ = write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
@@ -300,4 +304,190 @@ fn aborted_old_worker_wait_until_survives_replacement_unregister_and_client_drop
     let mut observer=engine.load(&format!("{}/observer.html",server.origin),vp).unwrap();
     wait(&engine,&mut observer,"completed==='completed old event'");
     assert!(!server.requests.lock().unwrap().iter().any(|(path,_)|path=="/app/old-event"));
+}
+
+#[test]
+fn engine_get_navigation_serves_precached_utf8_html_offline_with_real_client_identity() {
+    let start="<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let offline="<!doctype html><title>Offline café 🐇</title><main id=offline>Cache without server</main><script>var cachedScriptRan=true,actualClientId;fetch('client-id').then(r=>r.text()).then(id=>actualClientId=id);</script>";
+    let worker=r#"oninstall=e=>e.waitUntil(fetch('offline.html').then(r=>r.arrayBuffer()).then(bytes=>caches.open('pages').then(c=>c.put('offline.html',new Response(bytes,{status:203,headers:{'content-type':'text/html; charset=UTF-8'}})))));
+      onactivate=e=>e.waitUntil(clients.claim());
+      onfetch=e=>{
+        if(e.request.mode==='navigate'){
+          console.log('navigation-client',e.resultingClientId);
+          console.log('navigation-policy',e.request.mode,e.request.destination,e.clientId==='',e.resultingClientId!=='');
+          e.respondWith(caches.match(e.request));
+        }else if(new URL(e.request.url).pathname.endsWith('/client-id'))e.respondWith(new Response(e.clientId));
+      };"#;
+    let server=Server::new(&[("/app/start.html","text/html",start,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/offline.html","text/html",offline,&[("Cache-Control","no-store")])]);
+    let origin=server.origin.clone(); let mut engine=engine(); let vp=Viewport{width:320.0,height:240.0};
+    let mut page=engine.load(&format!("{origin}/app/start.html"),vp).unwrap();
+    wait(&engine,&mut page,"controlled===true");
+    assert_eq!(server.requests.lock().unwrap().iter().filter(|(path,_)|path=="/app/offline.html").count(),1);
+    drop(page); drop(server);
+    engine.loader.fetcher.timeout=Duration::from_millis(500);
+    let target=format!("{origin}/app/offline.html#anchor");
+    let mut page=engine.load(&target,vp).expect("pre-cached navigation must work with stopped HTTP server");
+    assert_eq!(page.status,203);
+    assert_eq!(page.title,"Offline café 🐇");
+    assert_eq!(page.url.to_string(),target);
+    assert_eq!(engine.eval_in_page(&mut page,"cachedScriptRan && document.querySelector('#offline').textContent==='Cache without server'"),"true");
+    wait(&engine,&mut page,"typeof actualClientId==='string'");
+    let client=engine.eval_in_page(&mut page,"actualClientId").trim_matches('\'').to_string();
+    let console=page.take_console();
+    assert!(console.iter().any(|(_,text)|text.ends_with(&format!("navigation-client {client}"))),"{console:?}");
+    assert!(console.iter().any(|(_,text)|text.ends_with("navigation-policy navigate document true true")),"{console:?}");
+    let mut separate=Engine::new_bundled_fonts_only(); separate.loader.fetcher.timeout=Duration::from_millis(100);
+    assert!(separate.load(&target,vp).is_err(),"a new Engine must not inherit another Engine's registry or explicit Cache Storage");
+}
+
+#[test]
+fn navigation_passthrough_preserves_private_source_and_constructor_override_resets_origin() {
+    let start="<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let worker=r#"onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{
+      if(e.request.mode!=='navigate')return;
+      const cloned=e.request.clone(), copied=new Request(cloned,{});
+      console.log('source-policies',cloned.mode,copied.mode,copied.redirect);
+      let rejected=0;
+      try{new Request('/app/pass',{mode:'navigate'});}catch(error){if(error instanceof TypeError)rejected++;}
+      try{new Request(e.request,{mode:'navigate'});}catch(error){if(error instanceof TypeError)rejected++;}
+      console.log('constructor-rejected',rejected);
+      const overridden=new Request(e.request,{headers:{'x-override':'yes'},credentials:'omit',redirect:'follow'});
+      console.log('override-policies',overridden.mode,overridden.credentials);
+      const forged=overridden.clone();Object.defineProperty(forged,'mode',{value:'navigate',configurable:true});
+      e.waitUntil(fetch(forged).then(()=>console.log('unexpected forged success'),error=>console.log('forged-rejected',error.name)));
+      e.waitUntil(fetch(overridden).then(r=>r.text()));
+      e.respondWith(fetch(copied.clone()));
+    };"#;
+    let server=Server::new(&[("/app/start.html","text/html",start,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/pass","text/html","<!doctype html><title>Network pass</title><main>real network body</main>",&[])]);
+    let mut engine=engine();let vp=Viewport{width:320.0,height:240.0};
+    let mut page=engine.load(&format!("{}/app/start.html",server.origin),vp).unwrap();wait(&engine,&mut page,"controlled===true");drop(page);
+    let mut page=engine.load(&format!("{}/app/pass",server.origin),vp).unwrap();
+    assert_eq!(page.title,"Network pass");
+    let end=Instant::now()+Duration::from_secs(2);
+    while Instant::now()<end && server.requests.lock().unwrap().iter().filter(|(path,_)|path=="/app/pass").count()<2 {engine.tick(&mut page);std::thread::sleep(Duration::from_millis(2));}
+    let console=page.take_console();
+    for expected in ["source-policies navigate navigate manual","constructor-rejected 2","override-policies same-origin omit","forged-rejected TypeError"] {assert!(console.iter().any(|(_,text)|text.ends_with(expected)),"missing {expected}: {console:?}");}
+    let requests=server.requests.lock().unwrap();let pass:Vec<_>=requests.iter().filter(|(path,_)|path=="/app/pass").collect();
+    assert_eq!(pass.len(),2,"original passthrough plus explicit override only: {requests:?}");
+    let native=pass.iter().find(|(_,headers)|!headers.contains("x-override: yes")).unwrap().1.to_ascii_lowercase();
+    let changed=pass.iter().find(|(_,headers)|headers.contains("x-override: yes")).unwrap().1.to_ascii_lowercase();
+    assert!(native.contains("sec-fetch-mode: navigate")&&native.contains("sec-fetch-dest: document"),"{native}");
+    assert!(!native.contains("referer:"),"typed navigation has no source client referrer: {native}");
+    assert!(changed.contains("sec-fetch-mode: same-origin")&&changed.contains("sec-fetch-dest: empty"),"{changed}");
+    assert!(changed.contains(&format!("referer: {}/app/sw.js",server.origin)),"override must use worker client origin/referrer: {changed}");
+}
+
+#[test]
+fn navigation_fallback_rejections_redirects_timeout_and_disabled_scripts_are_bounded() {
+    let start="<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let worker=r#"onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{
+      const path=new URL(e.request.url).pathname;
+      if(e.request.mode!=='navigate'){
+        if(path.endsWith('/timed-out'))e.respondWith(caches.match('/timed-out'));
+        return;
+      }
+      if(path.endsWith('/reject'))e.respondWith(Promise.reject(new Error('navigation rejected')));
+      else if(path.endsWith('/false'))e.respondWith(false);
+      else if(path.endsWith('/hang')){
+        e.request.signal.addEventListener('abort',()=>caches.open('flags').then(c=>c.put('/timed-out',new Response('aborted'))));
+        e.respondWith(new Promise(()=>{}));
+      }else if(path.endsWith('/redirect'))e.respondWith(Response.redirect('/app/done',302));
+      else if(path.endsWith('/loop'))e.respondWith(Response.redirect('/app/loop',302));
+      else if(path.endsWith('/done'))e.respondWith(new Response('<!doctype html><title>Redirect done</title><main>synthetic</main>',{status:201,headers:{'content-type':'text/html; charset=UTF-8'}}));
+    };"#;
+    let server=Server::new(&[("/app/start.html","text/html",start,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/fallback","text/html","<!doctype html><title>Network fallback</title>",&[]),("/outside/page","text/html","<!doctype html><title>Outside scope</title>",&[]),("/app/disabled","text/html","<!doctype html><title>Scripts disabled</title>",&[]),("/app/reject","text/plain","must not fetch",&[]),("/app/false","text/plain","must not fetch",&[]),("/app/hang","text/plain","must not fetch",&[])]);
+    let origin=server.origin.clone();let mut engine=engine();let vp=Viewport{width:320.0,height:240.0};
+    let mut page=engine.load(&format!("{origin}/app/start.html"),vp).unwrap();wait(&engine,&mut page,"controlled===true");drop(page);
+    assert_eq!(engine.load(&format!("{origin}/outside/page"),vp).unwrap().title,"Outside scope");
+    assert_eq!(engine.load(&format!("{origin}/app/fallback"),vp).unwrap().title,"Network fallback");
+    engine.scripting=false;
+    assert_eq!(engine.load(&format!("{origin}/app/disabled"),vp).unwrap().title,"Scripts disabled");engine.scripting=true;
+    for path in ["reject","false"] {assert!(engine.load(&format!("{origin}/app/{path}"),vp).is_err());}
+    let redirected=engine.load(&format!("{origin}/app/redirect"),vp).unwrap();
+    assert_eq!(redirected.status,201);assert_eq!(redirected.title,"Redirect done");assert_eq!(redirected.url.to_string(),format!("{origin}/app/done"));drop(redirected);
+    assert!(engine.load(&format!("{origin}/app/loop"),vp).err().unwrap().to_string().contains("Too many"));
+    engine.loader.fetcher.timeout=Duration::from_millis(50);let started=Instant::now();
+    let error=engine.load(&format!("{origin}/app/hang"),vp).err().unwrap();assert!(error.to_string().contains("timed out"),"{error}");assert!(started.elapsed()<Duration::from_secs(1));
+    engine.loader.fetcher.timeout=Duration::from_secs(2);
+    let mut page=engine.load(&format!("{origin}/app/done"),vp).unwrap();
+    engine.eval_in_page(&mut page,"var abortObserved;fetch('timed-out').then(r=>r.text()).then(text=>abortObserved=text);");wait(&engine,&mut page,"abortObserved==='aborted'");
+    let requests=server.requests.lock().unwrap();
+    assert!(!requests.iter().any(|(path,_)|["/app/reject","/app/false","/app/hang","/app/redirect","/app/done","/app/loop"].contains(&path.as_str())),"rejected/cached/redirected requests must not fall through: {requests:?}");
+}
+
+#[test]
+fn installing_worker_is_not_forced_active_by_navigation() {
+    let start="<!doctype html><script>var registered=false;navigator.serviceWorker.register('sw.js').then(()=>registered=true);</script>";
+    let worker="oninstall=e=>e.waitUntil(new Promise(()=>{}));onfetch=e=>e.respondWith(new Response('must not intercept an installing worker'));";
+    let server=Server::new(&[("/app/start.html","text/html",start,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/network","text/html","<!doctype html><title>Network while installing</title>",&[])]);
+    let mut engine=engine();let vp=Viewport{width:320.0,height:240.0};
+    let mut first=engine.load(&format!("{}/app/start.html",server.origin),vp).unwrap();wait(&engine,&mut first,"registered===true");
+    let second=engine.load(&format!("{}/app/network",server.origin),vp).unwrap();
+    assert_eq!(second.title,"Network while installing");
+    assert_eq!(server.requests.lock().unwrap().iter().filter(|(path,_)|path=="/app/network").count(),1);
+}
+
+#[test]
+fn service_worker_navigation_cross_origin_redirect_reselects_controller_and_rejects_other_schemes() {
+    let destination=Server::new(&[("/landing","text/html","<!doctype html><title>Other origin</title><script>var uncontrolled=navigator.serviceWorker.controller===null;</script>",&[])]);
+    let start="<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let worker=format!("onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{{if(e.request.mode==='navigate')e.respondWith(Response.redirect(new URL(e.request.url).pathname.endsWith('/bad')?'data:text/html,blocked':'{}/landing',302));}};",destination.origin);
+    let source=Server::new(&[("/app/start.html","text/html",start,&[]),("/app/sw.js","text/javascript",&worker,&[])]);
+    let mut engine=engine();let vp=Viewport{width:320.0,height:240.0};
+    let mut page=engine.load(&format!("{}/app/start.html",source.origin),vp).unwrap();wait(&engine,&mut page,"controlled===true");drop(page);
+    let mut page=engine.load(&format!("{}/app/cross",source.origin),vp).unwrap();
+    assert_eq!(page.url.to_string(),format!("{}/landing",destination.origin));assert_eq!(page.title,"Other origin");
+    assert_eq!(engine.eval_in_page(&mut page,"uncontrolled"),"true");
+    assert!(engine.load(&format!("{}/app/bad",source.origin),vp).is_err());
+    assert_eq!(destination.requests.lock().unwrap().iter().filter(|(path,_)|path=="/landing").count(),1);
+}
+
+#[test]
+fn navigation_network_redirect_is_followed_with_scope_reselection() {
+    let start="<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let worker="onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{if(e.request.mode==='navigate'&&new URL(e.request.url).pathname.endsWith('/forward'))e.respondWith(fetch(e.request));};";
+    let server=Server::with_status(&[
+      ("/app/start.html",200,"text/html",start,&[]),
+      ("/app/sw.js",200,"text/javascript",worker,&[]),
+      ("/app/forward",302,"text/html","",&[("Location","/outside/final")]),
+      ("/app/fallback",302,"text/html","",&[("Location","/outside/final")]),
+      ("/outside/final",200,"text/html","<!doctype html><title>HTTP redirect</title><script>var uncontrolled=navigator.serviceWorker.controller===null;</script>",&[]),
+    ]);
+    let mut engine=engine();let vp=Viewport{width:320.0,height:240.0};
+    let mut page=engine.load(&format!("{}/app/start.html",server.origin),vp).unwrap();wait(&engine,&mut page,"controlled===true");drop(page);
+    for path in ["forward","fallback"] {
+      let mut page=engine.load(&format!("{}/app/{path}#kept",server.origin),vp).unwrap();
+      assert_eq!(page.title,"HTTP redirect");assert_eq!(page.url.to_string(),format!("{}/outside/final#kept",server.origin));
+      assert_eq!(engine.eval_in_page(&mut page,"uncontrolled"),"true");
+    }
+    let seen=server.requests.lock().unwrap();
+    for path in ["/app/forward","/app/fallback"] {assert_eq!(seen.iter().filter(|(p,_)|p==path).count(),1,"{seen:?}");}
+}
+
+#[test]
+fn navigation_forwarding_and_clones_use_live_headers_without_forging_metadata() {
+    let start="<!doctype html><script>var controlled=false;navigator.serviceWorker.register('sw.js');navigator.serviceWorker.ready.then(r=>controlled=navigator.serviceWorker.controller===r.active);</script>";
+    let worker=r#"onactivate=e=>e.waitUntil(clients.claim());onfetch=e=>{
+      if(e.request.mode!=='navigate')return;
+      const path=new URL(e.request.url).pathname, live=e.request.headers;
+      live.set('X-Live',path);live.set('Cookie','forged-cookie=must-not-send');
+      Object.defineProperty(e.request,'mode',{value:'cors',configurable:true});
+      Object.defineProperty(e.request,'headers',{get(){const h=new Headers(live);for(let i=0;i<50;i++)new Array(20).fill({i});return h;},configurable:true});
+      const forwarded=path.endsWith('/clone')?e.request.clone():path.endsWith('/copy')?new Request(e.request,{}):e.request;
+      e.respondWith(fetch(forwarded));
+    };"#;
+    let html="<!doctype html><title>Live headers</title>";
+    let server=Server::new(&[("/app/start.html","text/html",start,&[]),("/app/sw.js","text/javascript",worker,&[]),("/app/direct","text/html",html,&[]),("/app/clone","text/html",html,&[]),("/app/copy","text/html",html,&[])]);
+    let mut engine=engine();let vp=Viewport{width:320.0,height:240.0};
+    let mut page=engine.load(&format!("{}/app/start.html",server.origin),vp).unwrap();wait(&engine,&mut page,"controlled===true");drop(page);
+    for kind in ["direct","clone","copy"] {assert_eq!(engine.load(&format!("{}/app/{kind}",server.origin),vp).unwrap().title,"Live headers");}
+    let seen=server.requests.lock().unwrap();
+    for kind in ["direct","clone","copy"] {
+      let path=format!("/app/{kind}");let hits:Vec<_>=seen.iter().filter(|(p,_)|p==&path).collect();assert_eq!(hits.len(),1,"{seen:?}");
+      let headers=hits[0].1.to_ascii_lowercase();
+      assert!(headers.contains(&format!("x-live: {path}")),"live Headers lost: {headers}");
+      assert!(headers.contains("sec-fetch-mode: navigate")&&headers.contains("sec-fetch-dest: document"),"metadata authority lost: {headers}");
+      assert!(!headers.contains("forged-cookie"),"forbidden author header escaped guard: {headers}");
+    }
 }
