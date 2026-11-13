@@ -50,6 +50,41 @@ fn decoration_style(kw: &str) -> Option<TextDecorationStyle> {
     })
 }
 
+fn emphasis_keyword(k: &str) -> bool {
+    matches!(k, "none" | "filled" | "open" | "dot" | "circle" | "double-circle" | "triangle" | "sesame")
+}
+
+/// `text-emphasis-style`: none | [filled | open] || [dot | circle |
+/// double-circle | triangle | sesame] | <string>.
+fn emphasis_style(comps: &[&[Token]]) -> Option<EmphasisStyle> {
+    if let [[Token::String(s)]] = comps {
+        return Some(EmphasisStyle::Custom(s.to_string()));
+    }
+    let (mut open, mut shape): (Option<bool>, Option<u8>) = (None, None);
+    for c in comps {
+        match values::ident(c).as_deref() {
+            Some("none") if comps.len() == 1 => return Some(EmphasisStyle::None),
+            Some("filled") if open.is_none() => open = Some(false),
+            Some("open") if open.is_none() => open = Some(true),
+            Some(k) if shape.is_none() => {
+                shape = Some(match k {
+                    "dot" => 1,
+                    "circle" => 2,
+                    "double-circle" => 3,
+                    "triangle" => 4,
+                    "sesame" => 5,
+                    _ => return None,
+                })
+            }
+            _ => return None,
+        }
+    }
+    if open.is_none() && shape.is_none() {
+        return None;
+    }
+    Some(EmphasisStyle::Shape { open: open.unwrap_or(false), shape: shape.unwrap_or(0) })
+}
+
 pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut ComputedStyle, parent: &ComputedStyle, ctx: &ApplyCtx) -> bool {
     let name = match name {
         "word-wrap" => "overflow-wrap",
@@ -61,6 +96,11 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         "-webkit-text-size-adjust" | "-ms-text-size-adjust" | "-moz-text-size-adjust" => "text-size-adjust",
         "-webkit-hyphens" | "-ms-hyphens" => "hyphens",
         "-webkit-font-feature-settings" => "font-feature-settings",
+        "-webkit-text-emphasis" => "text-emphasis",
+        "-webkit-text-emphasis-style" => "text-emphasis-style",
+        "-webkit-text-emphasis-color" => "text-emphasis-color",
+        "-webkit-text-emphasis-position" => "text-emphasis-position",
+        "-webkit-ruby-position" => "ruby-position",
         n => n,
     };
     let c0 = comps[0];
@@ -82,6 +122,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                     "normal" => WordBreak::Normal,
                     "break-all" => WordBreak::BreakAll,
                     "keep-all" => WordBreak::KeepAll,
+                    "auto-phrase" => WordBreak::AutoPhrase,
                     "break-word" => WordBreak::BreakWord,
                     _ => return true,
                 };
@@ -104,6 +145,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             let mut dstyle = None;
             let mut dcolor: Option<Option<rabbithole_gfx::Color>> = None;
             let mut thickness: Option<Option<f32>> = None;
+            let mut from_font = false;
             for c in comps {
                 if let Some(kw) = values::ident(c) {
                     match kw.as_str() {
@@ -120,7 +162,11 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                             any_line = true;
                         }
                         "none" | "blink" => any_line = true,
-                        "auto" | "from-font" => thickness = Some(None),
+                        "auto" => thickness = Some(None),
+                        "from-font" => {
+                            thickness = Some(None);
+                            from_font = true;
+                        }
                         "currentcolor" => dcolor = Some(None),
                         k => {
                             if let Some(s) = decoration_style(k) {
@@ -147,6 +193,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 style.text_decoration_style = dstyle.unwrap_or(TextDecorationStyle::Solid);
                 style.text_decoration_color = dcolor.unwrap_or(None);
                 style.text_decoration_thickness = thickness.unwrap_or(None);
+                style.text_decoration_thickness_from_font = from_font;
             }
         }
         "text-decoration-line" => {
@@ -177,10 +224,60 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         "text-decoration-thickness" => {
             if matches!(values::ident(c0).as_deref(), Some("auto" | "from-font")) {
                 style.text_decoration_thickness = None;
+                style.text_decoration_thickness_from_font = values::is_ident(c0, "from-font");
             } else if let Some(t) = super::px(c0, ctx) {
                 style.text_decoration_thickness = Some(t);
+                style.text_decoration_thickness_from_font = false;
             } else if let [Token::Percentage(p)] = c0 {
                 style.text_decoration_thickness = Some(style.font_size * p / 100.0);
+                style.text_decoration_thickness_from_font = false;
+            } else if let Some(l) = super::len_no_auto(c0, ctx) {
+                style.text_decoration_thickness = Some(l.resolve_or_zero(style.font_size));
+                style.text_decoration_thickness_from_font = false;
+            }
+        }
+        "text-underline-offset" => {
+            if values::is_ident(c0, "auto") {
+                style.text_underline_offset = UnderlineOffset::Auto;
+            } else if let Some(t) = super::px(c0, ctx) {
+                style.text_underline_offset = UnderlineOffset::Px(t);
+            } else if let [Token::Percentage(p)] = c0 {
+                style.text_underline_offset = UnderlineOffset::Percent(*p);
+            } else if let Some(l) = super::len_no_auto(c0, ctx) {
+                // calc() mixing lengths and percentages: resolve against
+                // this element's font size.
+                style.text_underline_offset = UnderlineOffset::Px(l.resolve_or_zero(style.font_size));
+            }
+        }
+        "text-underline-position" => {
+            let mut pos = UnderlinePosition::default();
+            for c in comps {
+                match values::ident(c).as_deref() {
+                    Some("auto") if comps.len() == 1 => {}
+                    Some("from-font") if !pos.under => pos.from_font = true,
+                    Some("under") if !pos.from_font && !pos.under => pos.under = true,
+                    Some("left") if !pos.left && !pos.right => pos.left = true,
+                    Some("right") if !pos.left && !pos.right => pos.right = true,
+                    _ => return true,
+                }
+            }
+            style.text_underline_position = pos;
+        }
+        "text-decoration-inset" => {
+            if values::is_ident(c0, "auto") && comps.len() == 1 {
+                // A UA-chosen trim at each end.
+                let t = Length::Px(style.font_size / 8.0);
+                style.text_decoration_inset = (t, t);
+            } else if comps.len() <= 2 {
+                let Some(a) = super::len_no_auto(c0, ctx) else { return true };
+                let b = match comps.get(1) {
+                    Some(c) => match super::len_no_auto(c, ctx) {
+                        Some(b) => b,
+                        None => return true,
+                    },
+                    None => a,
+                };
+                style.text_decoration_inset = (a, b);
             }
         }
         "writing-mode" | "-webkit-writing-mode" => {
@@ -246,6 +343,115 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 style.font_variant_small_caps = false;
             }
         }
+        "font-variation-settings" => {
+            if values::is_ident(c0, "normal") && comps.len() == 1 {
+                style.font_variation_settings.clear();
+                return true;
+            }
+            let mut out = Vec::new();
+            for part in values::split_commas(comps) {
+                let [s, v] = part.as_slice() else { return true };
+                let [Token::String(tag)] = *s else { return true };
+                if tag.len() != 4 || !tag.is_ascii() {
+                    return true;
+                }
+                let Some(n) = values::number(v) else { return true };
+                let b = tag.as_bytes();
+                out.push(([b[0], b[1], b[2], b[3]], n));
+            }
+            style.font_variation_settings = out;
+        }
+        "text-emphasis-style" => match emphasis_style(comps) {
+            Some(s) => style.text_emphasis_style = s,
+            None => return true,
+        },
+        "text-emphasis-color" => {
+            if values::is_ident(c0, "currentcolor") {
+                style.text_emphasis_color = None;
+            } else if let Some(ColorValue::Color(col)) = values::parse_color_component(c0) {
+                style.text_emphasis_color = Some(col);
+            }
+        }
+        "text-emphasis" => {
+            // style || color
+            let mut color: Option<Option<rabbithole_gfx::Color>> = None;
+            let mut rest: Vec<&[Token]> = Vec::new();
+            for c in comps {
+                if values::is_ident(c, "currentcolor") {
+                    color = Some(None);
+                } else if let (None, Some(ColorValue::Color(col))) = (values::ident(c).filter(|k| emphasis_keyword(k)), values::parse_color_component(c)) {
+                    color = Some(Some(col));
+                } else {
+                    rest.push(c);
+                }
+            }
+            let st = if rest.is_empty() { Some(EmphasisStyle::None) } else { emphasis_style(&rest) };
+            match st {
+                Some(s) => {
+                    style.text_emphasis_style = s;
+                    style.text_emphasis_color = color.unwrap_or(None);
+                }
+                None => return true,
+            }
+        }
+        "text-emphasis-position" => {
+            let (mut over, mut side) = (None, None);
+            for c in comps {
+                match values::ident(c).as_deref() {
+                    Some("over") if over.is_none() => over = Some(true),
+                    Some("under") if over.is_none() => over = Some(false),
+                    Some("right") if side.is_none() => side = Some(true),
+                    Some("left") if side.is_none() => side = Some(false),
+                    Some("auto") if comps.len() == 1 => {
+                        over = Some(true);
+                        side = Some(true);
+                    }
+                    _ => return true,
+                }
+            }
+            let Some(o) = over else { return true };
+            style.text_emphasis_over = o;
+            style.text_emphasis_right = side.unwrap_or(true);
+        }
+        "wrap-inside" => match values::ident(c0).as_deref() {
+            Some("auto") => style.wrap_inside_avoid = false,
+            Some("avoid") => style.wrap_inside_avoid = true,
+            _ => return true,
+        },
+        "text-autospace" => {
+            let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
+            if kws.len() != comps.len() {
+                return true;
+            }
+            style.text_autospace = !kws.iter().any(|k| k == "no-autospace");
+        }
+        "text-wrap-style" => match values::ident(c0).as_deref() {
+            Some("balance") => style.text_wrap_balance = true,
+            Some("auto" | "stable" | "pretty") => style.text_wrap_balance = false,
+            _ => return true,
+        },
+        "font-synthesis" => {
+            let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
+            style.font_synthesis_style = if name == "font-synthesis" {
+                kws.iter().any(|k| k == "style")
+            } else {
+                kws.iter().any(|k| k == "auto" || k == "oblique-only")
+            };
+        }
+        "line-break" | "-webkit-line-break" => {
+            style.line_break = match values::ident(c0).as_deref() {
+                Some("auto" | "normal") => 0,
+                Some("loose") => 1,
+                Some("strict") => 2,
+                Some("anywhere") => 3,
+                _ => return true,
+            }
+        }
+        "ruby-position" => match values::ident(c0).as_deref() {
+            Some("over") | Some("alternate") | Some("inter-character") => style.ruby_under = false,
+            Some("under") => style.ruby_under = true,
+            _ => return true,
+        },
         "white-space-collapse" => {
             if let Some(kw) = values::ident(c0) {
                 style.white_space = match kw.as_str() {
@@ -263,13 +469,11 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                 };
             }
         }
-        "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings" | "font-variation-settings"
-        | "font-optical-sizing" | "font-synthesis" | "font-smoothing" | "text-size-adjust" | "text-underline-offset"
-        | "text-underline-position" | "text-align-last" | "text-justify" | "text-emphasis"
-        | "text-emphasis-style" | "text-emphasis-color" | "text-orientation"
+        "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
+        | "font-optical-sizing" | "font-smoothing" | "font-synthesis-style" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
-        | "font-variant-east-asian" | "font-variant-position" | "line-break" | "word-spacing-x" | "ruby-position"
-        | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter" | "text-autospace" | "text-wrap-style"
+        | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"
+        | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"
         | "-webkit-text-fill-color" | "-webkit-text-stroke" | "-webkit-text-stroke-width" | "-webkit-text-stroke-color"
         | "-webkit-tap-highlight-color" | "-webkit-touch-callout" | "text-decoration-skip-ink" | "text-decoration-skip" => {}
         _ => return false,

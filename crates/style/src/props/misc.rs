@@ -442,10 +442,13 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
                 }
             }
         }
+        "columns" | "column-count" | "column-width" => {
+            style.multicol = !comps.iter().all(|c| values::is_ident(c, "auto"));
+        }
         "list-style-image" | "overscroll-behavior" | "overscroll-behavior-x"
         | "overscroll-behavior-y" | "scroll-behavior" | "scroll-snap-type" | "scroll-snap-align" | "scroll-padding"
         | "scroll-padding-top" | "scroll-margin-bottom" | "scroll-margin-left" | "scroll-margin-right" | "scrollbar-width"
-        | "scrollbar-color" | "scrollbar-gutter" | "columns" | "column-count" | "column-width" | "column-gap-x" | "column-rule"
+        | "scrollbar-color" | "scrollbar-gutter" | "column-gap-x" | "column-rule"
         | "column-span" | "column-fill" | "break-inside" | "break-before" | "break-after" | "page-break-inside"
         | "page-break-before" | "page-break-after" | "box-decoration-break" | "caret-color"
         | "image-orientation" | "print-color-adjust" | "-webkit-print-color-adjust" | "touch-action"

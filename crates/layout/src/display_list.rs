@@ -94,6 +94,9 @@ pub enum DisplayItem {
     /// Mask of the layer closed by the next `PopLayer` (`mask-image`):
     /// the alpha of these items scales the layer's contribution.
     LayerMask(Vec<DisplayItem>),
+    /// Blend mode (`mix-blend-mode`) of the layer closed by the next
+    /// `PopLayer`.
+    LayerBlend(u8),
     /// `filter`: `items` (the element's painting) rendered offscreen
     /// within `bounds` and filtered before being composited.
     Filtered {
@@ -140,6 +143,9 @@ pub struct StickyPatch {
     /// Painted bounds of the sticky subtree (document coordinates, before
     /// the sticky displacement).
     pub bounds: Rect,
+    /// The scrollport of an inner scroll container (the box does not
+    /// follow the page scroll); `None` = the viewport.
+    pub port: Option<Rect>,
 }
 
 impl StickyPatch {
@@ -155,6 +161,9 @@ impl DisplayList {
     pub fn update_page_scroll(&mut self, page_scroll: (f32, f32), viewport: (f32, f32)) {
         let port = Rect::new(page_scroll.0, page_scroll.1, viewport.0, viewport.1);
         for p in &self.sticky {
+            if p.port.is_some() {
+                continue;
+            }
             let (dx, dy) = p.offset(port);
             self.items[p.item] = DisplayItem::PushTransform([1.0, 0.0, 0.0, 1.0, dx, dy]);
             self.hits.scopes[p.scope as usize].scope = HitScope::Transform(Some([1.0, 0.0, 0.0, 1.0, -dx, -dy]));
@@ -271,6 +280,16 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
     } else {
         root_bg_painted = true;
     }
+    // The root's opacity also fades the canvas background over the white
+    // page backdrop (CSS Compositing 1 §4.1: the root group blends with
+    // it).
+    let root_opacity = root.style.opacity.clamp(0.0, 1.0);
+    if root_opacity < 1.0 && !bg.is_transparent() {
+        let a = bg.a as f32 / 255.0 * root_opacity;
+        let mix = |c: u8| (255.0 * (1.0 - a) + c as f32 * a + 0.5) as u8;
+        bg = Color::rgb(mix(bg.r), mix(bg.g), mix(bg.b));
+        root_bg_painted = true;
+    }
     if !bg.is_transparent() {
         list.push(DisplayItem::Rect {
             rect: bounds,
@@ -294,6 +313,8 @@ pub fn build(tree: &LayoutTree, ctx: &LayoutContext) -> DisplayList {
         root,
         skip_root_bg: root_bg_painted,
         sticky_scrollport: Rect::new(ctx.page_scroll.0, ctx.page_scroll.1, ctx.viewport_width, ctx.viewport_height),
+        nested_port: false,
+        flow_cb: Rect::default(),
         hits: HitList::default(),
         scope: None,
         hoisted: top_layer.iter().map(|(_, b)| *b as *const LayoutBox as usize).collect(),
@@ -316,6 +337,12 @@ struct Painter<'l, 't, 'a> {
     root: &'t LayoutBox,
     skip_root_bg: bool,
     sticky_scrollport: Rect,
+    /// The sticky scrollport is an inner scroll container's.
+    nested_port: bool,
+    /// While collecting deferred boxes: the containing block content rect
+    /// of in-flow boxes inside an anonymous block (its parent's: anonymous
+    /// blocks form no containing block).
+    flow_cb: Rect,
     /// Hit regions recorded while painting.
     hits: HitList,
     /// Current hit scope (clip / transform / fixed layer).
@@ -424,6 +451,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                     cb,
                     inset: root.style.inset,
                     bounds: root.subtree_bounds(),
+                    port: self.nested_port.then_some(self.sticky_scrollport),
                 });
             }
         }
@@ -450,7 +478,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             };
         }
         let opacity = root.style.opacity.clamp(0.0, 1.0);
-        let layer = opacity < 1.0;
+        let layer = opacity < 1.0 || root.style.mix_blend_mode != 0;
         if layer && opacity <= 0.0 {
             // Invisible but still hit-testable (transparent overlays,
             // styled file inputs, ...): record hits, drop the paint.
@@ -485,6 +513,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
         if let Some(items) = mask {
             self.list.push(DisplayItem::LayerMask(items));
+        }
+        if root.style.mix_blend_mode != 0 {
+            self.list.push(DisplayItem::LayerBlend(root.style.mix_blend_mode));
         }
         if layer {
             self.list.push(DisplayItem::PopLayer(opacity));
@@ -582,7 +613,15 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             self.list.push(DisplayItem::PushClip(*r));
             self.push_scope(HitScope::Clip(*r));
         }
+        // A sticky box inside a scroll container sticks to its scrollport
+        // (the innermost overflow clip).
+        let saved_port = (self.sticky_scrollport, self.nested_port);
+        if let Some(r) = d.clips.last() {
+            self.sticky_scrollport = *r;
+            self.nested_port = true;
+        }
         self.paint_stacking_context(d.b, d.cb);
+        (self.sticky_scrollport, self.nested_port) = saved_port;
         for _ in &d.clips {
             self.list.push(DisplayItem::PopClip);
         }
@@ -633,6 +672,8 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
     /// that are themselves deferred.
     fn collect_deferred(&mut self, b: &'t LayoutBox, cb: Rect, out: &mut Vec<Deferred<'t>>, order: &mut usize, flow_clips: &[Rect], abs_clips: &[Rect]) {
         let cb_for_children = if b.is_positioned() { b.padding_rect() } else { cb };
+        let flow_cb = if b.kind == BoxKind::AnonymousBlock { self.flow_cb } else { b.content_rect };
+        let saved_flow_cb = std::mem::replace(&mut self.flow_cb, flow_cb);
         for c in &b.children {
             if self.hoisted.contains(&(c as *const LayoutBox as usize)) {
                 continue;
@@ -645,7 +686,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             let deferred = c.is_positioned() || c.is_stacking_context() || c.flow == Flow::Absolute;
             if deferred {
                 *order += 1;
-                let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { b.content_rect };
+                let cb_rect = if c.flow == Flow::Absolute { cb_for_children } else { flow_cb };
                 let clips = if c.flow == Flow::Absolute { abs_clips.to_vec() } else { flow_clips.to_vec() };
                 out.push(Deferred {
                     z: if c.is_stacking_context() || c.is_positioned() { c.style.z_index.unwrap_or(0) } else { 0 },
@@ -671,7 +712,9 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
             } else {
                 self.collect_deferred(c, cb_for_children, out, order, flow_clips, abs_clips);
             }
+            self.flow_cb = flow_cb;
         }
+        self.flow_cb = saved_flow_cb;
     }
 
     /// A positioned box with `z-index: auto`: painted like a stacking
@@ -1219,12 +1262,12 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                         size,
                         color,
                         letter_spacing,
-                        decoration,
                         hidden,
                         decoration_info,
                         shadows,
                         small_caps,
                         oblique,
+                        emphasis,
                     } => {
                         if *hidden {
                             continue;
@@ -1239,6 +1282,11 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             let cy = f.rect.y + f.rect.h / 2.0;
                             self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * cy]));
                         }
+                        // Underlines and overlines go under the text,
+                        // line-throughs over it (CSS Text Decoration 3 §2.1).
+                        if decoration_info.any() {
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, *color, decoration_info, false);
+                        }
                         self.list.push(DisplayItem::Text {
                             x: f.rect.x,
                             y: f.baseline,
@@ -1251,11 +1299,14 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                             small_caps: *small_caps,
                             oblique: *oblique,
                         });
-                        if decoration.any() {
-                            self.paint_decorations(f.rect, f.baseline, *size, *color, decoration_info);
+                        if decoration_info.any() {
+                            self.paint_decorations(f.rect, f.baseline, *font, *size, *color, decoration_info, true);
                         }
                         if self.flipped {
                             self.list.push(DisplayItem::PopTransform);
+                        }
+                        if let Some(e) = emphasis {
+                            self.paint_emphasis(f.rect, *font, *size, text, *letter_spacing, e);
                         }
                     }
                     FragmentKind::Box(i) => {
@@ -1269,29 +1320,120 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         }
     }
 
-    fn paint_decorations(&mut self, rect: Rect, baseline: f32, size: f32, text_color: Color, info: &DecorationInfo) {
-        let thickness = info.thickness.unwrap_or((size / 16.0).max(1.0));
-        let color = info.color.unwrap_or(text_color);
-        let style = info.style;
-        let mut line = |y: f32| {
-            self.list.push(DisplayItem::Line {
-                x0: rect.x,
-                y0: y,
-                x1: rect.right(),
-                y1: y,
-                width: thickness,
-                color,
-                style,
+    /// Paint emphasis marks centered over (or under) each character of a
+    /// text fragment, at half the font size, touching the glyph box.
+    fn paint_emphasis(&mut self, rect: Rect, font: rabbithole_gfx::FontId, size: f32, text: &str, letter_spacing: f32, e: &crate::tree::Emphasis) {
+        let fonts = self.ctx.fonts;
+        let msize = size / 2.0;
+        let mm = fonts.metrics(font, msize);
+        let mw = fonts.measure(font, msize, &e.mark);
+        let y = if e.over { rect.y - mm.descent } else { rect.bottom() + mm.ascent };
+        let glyphs = fonts.shape(font, size, text, letter_spacing);
+        let mut i = 0;
+        while i < glyphs.len() {
+            let g = glyphs[i];
+            let mut adv = g.advance;
+            let mut j = i + 1;
+            while j < glyphs.len() && glyphs[j].byte_index == g.byte_index {
+                adv += glyphs[j].advance;
+                j += 1;
+            }
+            i = j;
+            let Some(ch) = text.get(g.byte_index..).and_then(|t| t.chars().next()) else { continue };
+            if emphasis_skips(ch) {
+                continue;
+            }
+            let x = rect.x + g.x + (adv - letter_spacing - mw) / 2.0;
+            if self.flipped {
+                let cy = y - mm.ascent + (mm.ascent + mm.descent) / 2.0;
+                self.list.push(DisplayItem::PushTransform([1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * cy]));
+            }
+            self.list.push(DisplayItem::Text {
+                x,
+                y,
+                font,
+                size: msize,
+                color: e.color,
+                text: e.mark.to_string(),
+                letter_spacing: 0.0,
+                shadows: Vec::new(),
+                small_caps: false,
+                oblique: false,
             });
-        };
-        if info.lines.underline {
-            line(baseline + thickness * 1.5);
-        }
-        if info.lines.line_through {
-            line(baseline - size * 0.3);
-        }
-        if info.lines.overline {
-            line(rect.y + thickness / 2.0);
+            if self.flipped {
+                self.list.push(DisplayItem::PopTransform);
+            }
         }
     }
+
+    /// Paint the underlines and overlines (`through` false) or the
+    /// line-throughs (`through` true) of a text fragment.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_decorations(&mut self, rect: Rect, baseline: f32, font: rabbithole_gfx::FontId, size: f32, _text_color: Color, info: &DecorationInfo, through: bool) {
+        let fm = self.ctx.fonts.decoration_metrics(font, size, &info.variations);
+        let asc = baseline - rect.y;
+        let desc = rect.bottom() - baseline;
+        for (i, d) in info.list.iter().enumerate() {
+            let (x0, x1) = info.extents.get(i).copied().flatten().map(|(a, b)| (rect.x + a, rect.x + b)).unwrap_or((rect.x, rect.right()));
+            let (bo, asc, desc) = info.metrics.get(i).copied().unwrap_or((0.0, asc, desc));
+            let baseline = baseline + bo;
+            if x1 <= x0 {
+                continue;
+            }
+            let auto_t = (size / 16.0).max(1.0);
+            let thick = |from: Option<(f32, f32)>| -> f32 {
+                match d.thickness {
+                    Some(t) => t.max(0.0),
+                    None if d.from_font => from.map(|m| m.1).filter(|t| *t > 0.0).unwrap_or(auto_t),
+                    None => auto_t,
+                }
+            };
+            // Decoration lines are snapped to device pixels (whole-pixel
+            // thickness, at least 1px; pixel-aligned ends so the pieces of a
+            // line over adjacent fragments join seamlessly), as in Blink.
+            let (x0, x1) = (x0.round(), x1.round());
+            let mut line = |top: f32, t: f32| {
+                if t <= 0.0 || x1 <= x0 {
+                    return;
+                }
+                let t = t.round().max(1.0);
+                let top = top.round();
+                self.list.push(DisplayItem::Line { x0, y0: top + t / 2.0, x1, y1: top + t / 2.0, width: t, color: d.color, style: d.style });
+            };
+            if through {
+                if d.lines.line_through {
+                    let t = thick(fm.strikeout);
+                    line(baseline - size * 0.3 - t / 2.0, t);
+                }
+                continue;
+            }
+            if d.lines.underline {
+                let t = thick(fm.underline);
+                let pos = d.underline_position;
+                let top = if pos.under {
+                    baseline + desc + d.underline_offset.unwrap_or(0.0)
+                } else if pos.from_font && fm.underline.is_some() {
+                    fm.underline.map(|(p, _)| baseline - p).unwrap_or(baseline) + d.underline_offset.unwrap_or(0.0)
+                } else if let Some(o) = d.underline_offset {
+                    baseline + o
+                } else {
+                    baseline + t
+                };
+                line(top, t);
+            }
+            if d.lines.overline {
+                let t = thick(fm.underline);
+                line(baseline - asc, t);
+            }
+        }
+    }
+}
+
+/// Characters that get no emphasis mark: separators, controls and
+/// punctuation, other (format, unassigned...) characters (CSS Text
+/// Decoration 3 §3.1: Unicode categories Z*, P* and C*).
+fn emphasis_skips(c: char) -> bool {
+    use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
+    c.is_whitespace()
+        || matches!(c.general_category_group(), GeneralCategoryGroup::Punctuation | GeneralCategoryGroup::Separator | GeneralCategoryGroup::Other)
 }

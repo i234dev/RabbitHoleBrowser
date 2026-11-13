@@ -2,7 +2,7 @@
 
 use crate::block::{Cb, Layouter};
 use crate::float::Bfc;
-use crate::text::{segment_tabs, transform, Collapser, Seg};
+use crate::text::{cjk_break_between, segment_tabs, split_cjk, transform, Collapser, Seg};
 use crate::tree::{DecorationInfo, Fragment, FragmentKind, InlineItem, LayoutBox, LineBox};
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{FontId, Rect};
@@ -27,7 +27,7 @@ enum BreakPolicy {
 fn break_policy(style: &ComputedStyle) -> BreakPolicy {
     match style.word_break {
         WordBreak::BreakAll => BreakPolicy::Anywhere,
-        WordBreak::BreakWord => BreakPolicy::IfNeeded,
+        WordBreak::BreakWord | WordBreak::AutoPhrase => BreakPolicy::IfNeeded,
         _ => match style.overflow_wrap {
             OverflowWrap::Normal => BreakPolicy::Never,
             _ => BreakPolicy::IfNeeded,
@@ -57,6 +57,8 @@ pub(crate) enum Piece {
     Float(usize),
     Abs(usize),
     Break,
+    /// Extra space before the next word (`text-autospace`).
+    Gap(f32),
 }
 
 /// Font metrics of a style, with the half-leading applied.
@@ -86,6 +88,121 @@ fn item_elem(items: &[InlineItem], idx: usize) -> Option<NodeId> {
         Some(InlineItem::Open { node, .. }) => *node,
         _ => None,
     }
+}
+
+/// `position: relative` offsets of inline elements (CSS 2.1 §9.4.3),
+/// accumulated through nested ones: per item, and per atomic child index.
+/// Empty when no inline element is relatively positioned.
+fn relative_offsets(items: &[InlineItem], children: usize, cbw: f32, cbh: Option<f32>) -> (Vec<(f32, f32)>, Vec<(f32, f32)>) {
+    if !items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.position == rabbithole_style::Position::Relative)) {
+        return (Vec::new(), Vec::new());
+    }
+    let mut out = vec![(0.0, 0.0); items.len()];
+    let mut kids = vec![(0.0, 0.0); children];
+    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+    for (i, it) in items.iter().enumerate() {
+        let cur = *stack.last().unwrap_or(&(0.0, 0.0));
+        match it {
+            InlineItem::Open { style, .. } => {
+                let mut o = cur;
+                if style.position == rabbithole_style::Position::Relative {
+                    let s = &style.inset;
+                    o.0 += s.left.resolve(cbw).or_else(|| s.right.resolve(cbw).map(|v| -v)).unwrap_or(0.0);
+                    o.1 += s.top.resolve_definite(cbh).or_else(|| s.bottom.resolve_definite(cbh).map(|v| -v)).unwrap_or(0.0);
+                }
+                out[i] = o;
+                stack.push(o);
+            }
+            InlineItem::Close => {
+                out[i] = cur;
+                if stack.len() > 1 {
+                    stack.pop();
+                }
+            }
+            InlineItem::Atomic(c) | InlineItem::Float(c) | InlineItem::Absolute(c) => {
+                out[i] = cur;
+                if let Some(k) = kids.get_mut(*c) {
+                    *k = cur;
+                }
+            }
+            _ => out[i] = cur,
+        }
+    }
+    (out, kids)
+}
+
+/// A decoration extent waiting for its decorating box's whole inline
+/// size (see `InlineLayout::decoration_extents`); offsets relative to the
+/// fragment's left edge.
+#[derive(Debug, Clone)]
+struct InsetFixup {
+    line: usize,
+    frag: usize,
+    deco: usize,
+    open: usize,
+    lo: f32,
+    hi: f32,
+    w: f32,
+    inset: (Option<rabbithole_style::Length>, Option<rabbithole_style::Length>),
+}
+
+/// The inline element (Open item) directly enclosing each item, when some
+/// inline element insets its text decorations (`text-decoration-inset`);
+/// empty otherwise.
+fn has_inset(s: &ComputedStyle) -> bool {
+    s.text_decoration.any() && (s.text_decoration_inset.0 != rabbithole_style::Length::ZERO || s.text_decoration_inset.1 != rabbithole_style::Length::ZERO)
+}
+
+/// Pseudo item index standing for the block container's root inline box
+/// (a block decorating box insets its decorations per paragraph).
+const BLOCK_BOX: usize = usize::MAX - 1;
+
+fn open_parents(items: &[InlineItem], container: &ComputedStyle) -> Vec<Option<usize>> {
+    if !has_inset(container) && !items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if has_inset(style))) {
+        return Vec::new();
+    }
+    let mut out = vec![None; items.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        out[i] = stack.last().copied();
+        match it {
+            InlineItem::Open { .. } => stack.push(i),
+            InlineItem::Close => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The emphasis marks of text in `style`, with the side resolved in the
+/// line's logical space (vertical lines are laid out turned: the right
+/// side is the logical top in `vertical-rl`, the bottom in `vertical-lr`
+/// and `sideways-lr`).
+pub(crate) fn emphasis_of(style: &ComputedStyle) -> Option<crate::tree::Emphasis> {
+    let vertical = style.writing_mode.is_vertical();
+    let mark = style.text_emphasis_style.mark(vertical)?;
+    let over = if !vertical {
+        style.text_emphasis_over
+    } else if style.writing_mode == rabbithole_style::WritingMode::VerticalRl {
+        style.text_emphasis_right
+    } else {
+        !style.text_emphasis_right
+    };
+    Some(crate::tree::Emphasis { mark: Rc::from(mark.as_str()), color: style.text_emphasis_color.unwrap_or(style.color), over })
+}
+
+/// `text-autospace` applies between `a` and `b`: an ideograph next to a
+/// letter or digit of another script.
+fn autospace_between(a: char, b: char) -> bool {
+    fn ideo(c: char) -> bool {
+        matches!(c as u32, 0x3041..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x3FFFD)
+    }
+    fn other(c: char) -> bool {
+        c.is_alphanumeric() && (c as u32) < 0x2E80 && !matches!(c as u32, 0x0590..=0x08FF)
+    }
+    (ideo(a) && other(b)) || (other(a) && ideo(b))
 }
 
 /// Split a word after hyphens so `foo-bar` can wrap after the dash.
@@ -118,7 +235,7 @@ impl<'a> Layouter<'a> {
         let font = self.font_for(style);
         let size = style.font_size;
         let m = self.ctx.fonts.metrics(font, size);
-        let lh = style.line_height_px();
+        let lh = if style.line_height_tight { m.ascent + m.descent } else { style.line_height_px() };
         let half = (lh - (m.ascent + m.descent)) / 2.0;
         TextMetrics {
             asc: m.ascent,
@@ -145,6 +262,9 @@ impl<'a> Layouter<'a> {
         let mut stack: Vec<usize> = Vec::new();
         let mut pieces = Vec::new();
         let mut prev_break_opp = true;
+        // Last character of the previous word (breaks between ideographs
+        // need no space).
+        let mut prev_char: Option<char> = None;
         let mut segs = Vec::new();
         for (i, item) in items.iter().enumerate() {
             match item {
@@ -157,11 +277,78 @@ impl<'a> Layouter<'a> {
                     segs.clear();
                     segment_tabs(&t, ws, &mut col, &mut segs, style.tab_size.max(1.0) as usize);
                     let ls = style.letter_spacing;
+                    let keep_all = match style.word_break {
+                        rabbithole_style::WordBreak::KeepAll => 1u8,
+                        rabbithole_style::WordBreak::AutoPhrase => 2,
+                        _ => 0,
+                    };
+                    let strict = style.line_break == 2;
+                    let anywhere = style.line_break == 3 && !style.wrap_inside_avoid;
                     for seg in segs.drain(..) {
                         match seg {
                             Seg::Word(w) => {
                                 let is_space_word = w.chars().all(|c| c == ' ');
+                                // A break between the previous word and this
+                                // one (ideographs break without spaces).
+                                if wraps && !prev_break_opp {
+                                    if let (Some(p), Some(c)) = (prev_char, w.chars().next()) {
+                                        if p != ' ' && c != ' ' && (anywhere || cjk_break_between(p, c, keep_all, strict)) {
+                                            prev_break_opp = true;
+                                        }
+                                    }
+                                }
+                                let prev_before = prev_char;
+                                prev_char = w.chars().rev().find(|c| !matches!(*c as u32, 0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)).or(w.chars().last());
+                                let mut parts: Vec<(String, bool)> = Vec::new();
                                 for (part, continuation) in split_hyphens(&w) {
+                                    if wraps && !is_space_word {
+                                        for (k, p) in split_cjk(&part, keep_all, strict, anywhere).into_iter().enumerate() {
+                                            parts.push((p, continuation || k > 0));
+                                        }
+                                    } else {
+                                        parts.push((part, continuation));
+                                    }
+                                }
+                                // `text-autospace`: 1/8ic between ideographs and
+                                // other letters or digits.
+                                let gap = if style.text_autospace && !is_space_word && !style.writing_mode.is_vertical() {
+                                    style.font_size * rabbithole_style::values::font_units(style).2 / 8.0
+                                } else {
+                                    0.0
+                                };
+                                let mut gapped: Vec<(String, bool, bool)> = Vec::new();
+                                let mut last = prev_before;
+                                for (part, continuation) in parts {
+                                    if gap > 0.0 {
+                                        let mut cur = String::new();
+                                        let mut first = true;
+                                        for c in part.chars() {
+                                            let g = last.is_some_and(|p| autospace_between(p, c));
+                                            if g && !cur.is_empty() {
+                                                gapped.push((std::mem::take(&mut cur), continuation || !first, false));
+                                                first = false;
+                                            }
+                                            if g && cur.is_empty() {
+                                                // Mark the gap before this sub-part.
+                                                gapped.push((String::new(), false, true));
+                                            }
+                                            cur.push(c);
+                                            if !matches!(c as u32, 0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F) {
+                                                last = Some(c);
+                                            }
+                                        }
+                                        if !cur.is_empty() {
+                                            gapped.push((cur, continuation || !first, false));
+                                        }
+                                    } else {
+                                        gapped.push((part, continuation, false));
+                                    }
+                                }
+                                for (part, continuation, is_gap) in gapped {
+                                    if is_gap {
+                                        pieces.push(Piece::Gap(gap));
+                                        continue;
+                                    }
                                     let width = self.measurer.width(font, size, &part) + ls * part.chars().count() as f32;
                                     // A break opportunity before a word comes from the
                                     // preceding whitespace (owned by whatever element
@@ -182,10 +369,16 @@ impl<'a> Layouter<'a> {
                                 let width = self.measurer.space_width(font, size) + style.word_spacing;
                                 pieces.push(Piece::Space { width, item: i });
                                 prev_break_opp = wraps;
+                                prev_char = Some(' ');
+                            }
+                            Seg::Opportunity => {
+                                prev_break_opp = wraps;
+                                prev_char = None;
                             }
                             Seg::Break => {
                                 pieces.push(Piece::Break);
                                 prev_break_opp = true;
+                                prev_char = None;
                             }
                         }
                     }
@@ -200,6 +393,7 @@ impl<'a> Layouter<'a> {
                     }
                 }
                 InlineItem::Atomic(c) => {
+                    prev_char = None;
                     pieces.push(Piece::Atomic(*c));
                     prev_break_opp = container_wraps;
                     // An atomic box interrupts the whitespace sequence, so a
@@ -247,8 +441,35 @@ impl<'a> Layouter<'a> {
         let indent = cstyle.text_indent.resolve_or_zero(cb.width);
         let clips = cstyle.overflow_x.clips() || cstyle.overflow_y.clips();
         let ellipsis = cstyle.text_overflow == TextOverflow::Ellipsis && clips;
-        let max_lines = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
+        let own_clamp = cstyle.line_clamp.filter(|n| *n > 0).map(|n| n as usize);
+        // Lines left by an ancestor's `line-clamp`.
+        let outer_clamp = if own_clamp.is_none() { self.clamp.map(|c| c.0) } else { None };
+        let max_lines = own_clamp.or(outer_clamp);
+        if outer_clamp == Some(0) {
+            // Clamped away: no lines.
+            b.items = items;
+            b.lines = Vec::new();
+            if inserted_marker {
+                pieces.remove(0);
+            }
+            b.pieces = Some(pieces);
+            return 0.0;
+        }
+        let (rel, rel_kids) = relative_offsets(&items, b.children.len(), cb.width, cb.height);
+        let parent_open = open_parents(&items, &cstyle);
+        let bidi_items = items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal));
+        // `text-wrap: balance` (CSS Text 4 §6.1.2): the narrowest wrap
+        // width that keeps the line count, found by bisection over trial
+        // layouts (paragraphs of at most 6 lines without floats).
+        let balance = cstyle.text_wrap_balance && cstyle.white_space.wraps() && !items.iter().any(|it| matches!(it, InlineItem::Float(_)));
+        let mut wrap_limit: Option<f32> = None;
+        let mut passes = if balance { 14 } else { 0 };
+        let (mut lo, mut hi, mut want) = (0.0f32, cb.width, 0usize);
+        let mut first_pass = true;
+        loop {
         let mut lines = Vec::new();
+        let max_used;
+        let clamped;
         let height = {
             let mut il = InlineLayout {
                 lay: self,
@@ -270,17 +491,67 @@ impl<'a> Layouter<'a> {
                 max_lines,
                 final_flush: false,
                 done: false,
-                bidi_items: items.iter().any(|it| matches!(it, InlineItem::Open { style, .. } if style.unicode_bidi != UnicodeBidi::Normal)),
+                bidi_items,
+                rel: rel.clone(),
+                rel_kids: rel_kids.clone(),
+                parent_open: parent_open.clone(),
+                inset_seen: std::collections::HashSet::new(),
+                inset_fixups: Vec::new(),
+                inset_total: std::collections::HashMap::new(),
+                wrap_limit,
+                max_used: 0.0,
             };
-            il.run(&pieces)
+            let h = il.run(&pieces);
+            il.resolve_insets();
+            max_used = il.max_used;
+            clamped = il.done;
+            h
         };
+        if passes > 0 {
+            let n = lines.len();
+            if first_pass {
+                first_pass = false;
+                if (2..=6).contains(&n) && !clamped {
+                    want = n;
+                    hi = max_used.min(cb.width);
+                    lo = 0.0;
+                } else {
+                    passes = 0;
+                }
+            } else {
+                passes -= 1;
+                let fits = !clamped && n <= want && max_used <= wrap_limit.unwrap_or(f32::MAX) + 0.01;
+                if fits {
+                    hi = wrap_limit.unwrap_or(hi);
+                } else {
+                    lo = wrap_limit.unwrap_or(lo);
+                }
+            }
+            if passes > 1 && hi - lo > 0.5 {
+                wrap_limit = Some((lo + hi) / 2.0);
+                continue;
+            }
+            if passes > 0 && wrap_limit != Some(hi) {
+                // The final layout at the narrowest width that fits.
+                wrap_limit = Some(hi);
+                passes = 0;
+                continue;
+            }
+        }
         if inserted_marker {
             pieces.remove(0);
         }
         b.pieces = Some(pieces);
         b.items = items;
+        if let (Some(n), Some(c)) = (outer_clamp, self.clamp.as_mut()) {
+            c.0 = n.saturating_sub(lines.len());
+            if c.0 == 0 {
+                c.1 = lines.last().map(|l| l.rect.bottom());
+            }
+        }
         b.lines = lines;
-        height
+        return height;
+        }
     }
 }
 
@@ -326,6 +597,9 @@ struct Line {
     open: Vec<OpenInline>,
     /// Index of the first fragment of the current unbreakable run.
     break_at: Option<usize>,
+    /// The line's end for alignment (`right` may be narrower when lines
+    /// are balanced).
+    align_right: f32,
 }
 
 struct InlineLayout<'l, 'a> {
@@ -354,11 +628,114 @@ struct InlineLayout<'l, 'a> {
     done: bool,
     /// Some inline element has a `unicode-bidi` other than `normal`.
     bidi_items: bool,
+    /// Relative offsets per item / atomic child (see [`relative_offsets`]).
+    rel: Vec<(f32, f32)>,
+    rel_kids: Vec<(f32, f32)>,
+    /// Lines wrap at this width (`text-wrap: balance`) but align in the
+    /// full one.
+    wrap_limit: Option<f32>,
+    /// Widest line content (trailing hanging spaces excluded).
+    max_used: f32,
+    /// See [`open_parents`].
+    parent_open: Vec<Option<usize>>,
+    /// Inline elements with decoration insets already met on a line.
+    inset_seen: std::collections::HashSet<usize>,
+    inset_fixups: Vec<InsetFixup>,
+    /// Inline size of the text of each inset decorating box, all lines.
+    inset_total: std::collections::HashMap<usize, f32>,
 }
 
 impl<'l, 'a> InlineLayout<'l, 'a> {
     fn style(&self, idx: usize) -> &Rc<ComputedStyle> {
         item_style(self.items, self.cstyle, idx)
+    }
+
+    /// Per applied decoration of text item `item` (a fragment at `x`, `w`
+    /// wide), the line extent relative to `x` when its decorating inline
+    /// box insets it (`text-decoration-inset` at the box's start and end).
+    /// The extents are resolved once all lines are laid out (percentages
+    /// refer to the box's whole inline size): this records them.
+    fn decoration_extents(&mut self, item: usize, style: &ComputedStyle, box_ext: &std::collections::HashMap<usize, (f32, f32)>, x: f32, w: f32, frag: usize) -> Vec<Option<(f32, f32)>> {
+        let list = &style.applied_decorations;
+        let mut chain = Vec::new();
+        let mut p = self.parent_open.get(item).copied().flatten();
+        while let Some(o) = p {
+            if self.style(o).text_decoration.any() {
+                chain.push(o);
+            }
+            p = self.parent_open[o];
+        }
+        chain.reverse();
+        if chain.len() > list.len() {
+            return Vec::new();
+        }
+        let first = list.len() - chain.len();
+        for (j, &o) in chain.iter().enumerate() {
+            let d = &list[first + j];
+            let Some(&(lo, hi)) = box_ext.get(&o) else { continue };
+            let starts = !self.inset_seen.contains(&o);
+            let ends = !self.cur.open.iter().any(|e| e.item == o);
+            self.inset_fixups.push(InsetFixup {
+                line: self.lines.len(),
+                frag,
+                deco: first + j,
+                open: o,
+                lo: lo - x,
+                hi: hi - x,
+                w,
+                inset: (if starts { Some(d.inset.0) } else { None }, if ends { Some(d.inset.1) } else { None }),
+            });
+        }
+        // The block container's own decoration (the entry before the
+        // inline elements' ones).
+        if first > 0 && has_inset(self.cstyle) {
+            let d = &list[first - 1];
+            if d.lines == self.cstyle.text_decoration && d.inset == self.cstyle.text_decoration_inset {
+                if let Some(&(lo, hi)) = box_ext.get(&BLOCK_BOX) {
+                    let starts = !self.inset_seen.contains(&BLOCK_BOX);
+                    let ends = self.final_flush;
+                    self.inset_fixups.push(InsetFixup {
+                        line: self.lines.len(),
+                        frag,
+                        deco: first - 1,
+                        open: BLOCK_BOX,
+                        lo: lo - x,
+                        hi: hi - x,
+                        w,
+                        inset: (if starts { Some(d.inset.0) } else { None }, if ends { Some(d.inset.1) } else { None }),
+                    });
+                }
+            }
+        }
+        vec![None; list.len()]
+    }
+
+    /// Resolve the recorded decoration insets (see `decoration_extents`).
+    fn resolve_insets(&mut self) {
+        let fixups = std::mem::take(&mut self.inset_fixups);
+        for fx in fixups {
+            let cw = self.content_w;
+            let edges = if fx.open == BLOCK_BOX {
+                0.0
+            } else {
+                let style = self.style(fx.open).clone();
+                style.padding.left.resolve_or_zero(cw) + style.padding.right.resolve_or_zero(cw) + style.border_width.left + style.border_width.right
+            };
+            let base = self.inset_total.get(&fx.open).copied().unwrap_or(0.0) + edges;
+            let l = fx.lo + fx.inset.0.map(|v| v.resolve_or_zero(base)).unwrap_or(0.0);
+            let r = fx.hi - fx.inset.1.map(|v| v.resolve_or_zero(base)).unwrap_or(0.0);
+            let a = if fx.lo.abs() < 0.01 { l } else { l.max(0.0) };
+            let b = if (fx.w - fx.hi).abs() < 0.01 { r } else { r.min(fx.w) };
+            if let Some(FragmentKind::Text { decoration_info, .. }) = self.lines.get_mut(fx.line).and_then(|ln| ln.fragments.get_mut(fx.frag)).map(|f| &mut f.kind) {
+                if let Some(e) = decoration_info.extents.get_mut(fx.deco) {
+                    *e = Some((a, b));
+                }
+            }
+        }
+    }
+
+    fn rel_of(&self, idx: usize) -> (f32, f32) {
+        self.rel.get(idx).copied().unwrap_or((0.0, 0.0))
     }
 
     fn strut_h(&self) -> f32 {
@@ -369,7 +746,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
         self.cur.y = y;
         self.cur.left = l;
-        self.cur.right = r;
+        self.cur.align_right = r;
+        self.cur.right = match self.wrap_limit {
+            Some(w) => r.min(l + w + if self.first_line { self.indent.max(0.0) } else { 0.0 }),
+            None => r,
+        };
         self.cur.x = l + if self.first_line { self.indent } else { 0.0 };
         self.cur.frags.clear();
         self.cur.bg.clear();
@@ -410,6 +791,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                     self.children[*c].static_pos = (x, y);
                 }
                 Piece::Break => self.finish_line(true),
+                Piece::Gap(w) => {
+                    if self.cur.has_content {
+                        self.cur.x += w;
+                    }
+                }
             }
         }
         if !self.done {
@@ -465,7 +851,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
 
     fn place_word(&mut self, text: Rc<str>, width: f32, item: usize, break_before: bool) {
         let wraps = self.style(item).white_space.wraps();
-        let policy = break_policy(self.style(item));
+        let mut policy = break_policy(self.style(item));
+        // `auto-phrase` falls back to ordinary breaking only inside
+        // ideographic text too long for a line.
+        if self.style(item).word_break == rabbithole_style::WordBreak::AutoPhrase && !text.chars().any(|c| c as u32 >= 0x2E80) {
+            policy = BreakPolicy::Never;
+        }
         let mut text: String = text.to_string();
         let mut width = width;
         let mut break_before = break_before;
@@ -584,13 +975,14 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             self.cur.break_at = Some(self.cur.frags.len());
         }
         let spaced = self.style(item).word_spacing.abs() > 0.001;
+        let cur_x = self.cur.x;
         let appended = if !break_before {
             match self.cur.frags.last_mut() {
                 Some(PF {
                     kind: PFKind::Text { text: t, item: it },
                     w,
-                    ..
-                }) if *it == item && !(spaced && (t.ends_with(' ') || text.starts_with(' '))) => {
+                    x,
+                }) if *it == item && !(spaced && (t.ends_with(' ') || text.starts_with(' '))) && (*x + *w - cur_x).abs() < 0.01 => {
                     t.push_str(&text);
                     *w += width;
                     true
@@ -669,7 +1061,11 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let (l, r) = self.bfc.available(y, self.strut_h().max(1.0), self.content_x, self.content_w);
         let shift = l - self.cur.left;
         self.cur.left = l;
-        self.cur.right = r;
+        self.cur.right = match self.wrap_limit {
+            Some(w) => r.min(l + w),
+            None => r,
+        };
+        self.cur.align_right = r;
         self.cur.x += shift;
         for o in &mut self.cur.open {
             o.start_x += shift;
@@ -760,7 +1156,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             ..
         }) = self.cur.frags.last_mut()
         {
-            if text.ends_with(' ') && text.len() > 1 {
+            // Preserved spaces stay (they hang or overflow instead; right-
+            // to-left lines still drop one, their hanging is not modelled).
+            let preserved = matches!(
+                item_style(self.items, self.cstyle, *item).white_space,
+                rabbithole_style::WhiteSpace::PreWrap | rabbithole_style::WhiteSpace::BreakSpaces
+            ) && self.cstyle.direction != Direction::Rtl;
+            if text.ends_with(' ') && text.len() > 1 && !preserved {
                 text.pop();
                 let style = item_style(self.items, self.cstyle, *item).clone();
                 let font = self.lay.font_for(&style);
@@ -793,7 +1195,13 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
             };
             let avail = limit - x;
-            let (head, head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, false);
+            let (mut head, mut head_w, _tail) = self.split_to_fit(text.trim_end(), item, avail, false);
+            // No space before the ellipsis.
+            if head.ends_with(' ') && !head.trim().is_empty() {
+                let trimmed = head.trim_end().to_string();
+                head_w = self.split_to_fit(&trimmed, item, f32::MAX, false).1;
+                head = trimmed;
+            }
             if head.trim().is_empty() {
                 self.cur.frags.pop();
                 continue;
@@ -1128,9 +1536,20 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         VerticalAlign::Length(v) => v,
                         _ => 0.0,
                     };
+                    let (mut above, mut below) = (tm.above + shift, tm.below - shift);
+                    // Emphasis marks need room beside the glyphs.
+                    if let Some(e) = emphasis_of(&style) {
+                        let m = self.lay.ctx.fonts.metrics(tm.font, tm.size / 2.0);
+                        let mh = m.ascent + m.descent;
+                        if e.over {
+                            above = above.max(tm.asc + shift + mh);
+                        } else {
+                            below = below.max(tm.desc - shift + mh);
+                        }
+                    }
                     FM {
-                        above: tm.above + shift,
-                        below: tm.below - shift,
+                        above,
+                        below,
                         mode: 0,
                         shift,
                         tm: Some(tm),
@@ -1199,9 +1618,27 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         let y = self.cur.y;
         let baseline = y + a;
 
-        // Horizontal alignment.
-        let used = self.cur.x - self.cur.left;
-        let free = (self.cur.right - self.cur.left) - used;
+        // Horizontal alignment. Preserved spaces at the end of a `pre-wrap`
+        // line hang: what overflows the line does not count.
+        let mut hang = 0.0;
+        let trailing = match self.cur.frags.last() {
+            Some(PF { kind: PFKind::Text { text, item }, w, .. }) if text.ends_with(' ') => Some((*item, text.chars().rev().take_while(|c| *c == ' ').count(), *w)),
+            _ => None,
+        };
+        if let Some((item, n, w)) = trailing {
+            let st = self.style(item).clone();
+            if st.white_space == rabbithole_style::WhiteSpace::PreWrap {
+                let font = self.lay.font_for(&st);
+                let sw = self.lay.measurer.space_width(font, st.font_size) + st.letter_spacing;
+                let spaces = (sw * n as f32).min(w);
+                // At a soft wrap they hang unconditionally; before a forced
+                // break (or the end of the paragraph) only what overflows.
+                hang = if forced || self.final_flush { (self.cur.x - self.cur.right).clamp(0.0, spaces) } else { spaces };
+            }
+        }
+        let used = self.cur.x - self.cur.left - hang;
+        self.max_used = self.max_used.max(used);
+        let free = (self.cur.align_right - self.cur.left) - used;
         let rtl = self.cstyle.direction == Direction::Rtl;
         let shift_x = if rtl {
             // Content was mirrored to the right edge (start); `right` means
@@ -1249,9 +1686,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             let cw = self.content_w;
             let pt = style.padding.top.resolve_or_zero(cw) + style.border_width.top;
             let pb = style.padding.bottom.resolve_or_zero(cw) + style.border_width.bottom;
+            let (rx, ry) = self.rel_of(bg.item);
             fragments.push(Fragment {
-                rect: Rect::new(bg.x + shift_x, baseline - tm.asc - pt, bg.w, tm.asc + tm.desc + pt + pb),
-                baseline,
+                rect: Rect::new(bg.x + shift_x + rx, baseline - tm.asc - pt + ry, bg.w, tm.asc + tm.desc + pt + pb),
+                baseline: baseline + ry,
                 node: item_elem(self.items, bg.item),
                 inert: style.pointer_events == rabbithole_style::PointerEvents::None,
                 kind: FragmentKind::InlineBox {
@@ -1261,16 +1699,39 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 },
             });
         }
+        // Extents (on this line) of the inline elements that inset their
+        // decorations.
+        let mut box_ext: std::collections::HashMap<usize, (f32, f32)> = std::collections::HashMap::new();
+        if !self.parent_open.is_empty() {
+            let block = has_inset(self.cstyle);
+            for f in &self.cur.frags {
+                if let PFKind::Text { item, .. } = &f.kind {
+                    if block && *item != MARKER_ITEM {
+                        let e = box_ext.entry(BLOCK_BOX).or_insert((f.x, f.x + f.w));
+                        e.0 = e.0.min(f.x);
+                        e.1 = e.1.max(f.x + f.w);
+                    }
+                    let mut p = self.parent_open.get(*item).copied().flatten();
+                    while let Some(o) = p {
+                        let e = box_ext.entry(o).or_insert((f.x, f.x + f.w));
+                        e.0 = e.0.min(f.x);
+                        e.1 = e.1.max(f.x + f.w);
+                        p = self.parent_open[o];
+                    }
+                }
+            }
+        }
         let frags = std::mem::take(&mut self.cur.frags);
         for (f, fm) in frags.into_iter().zip(fms.into_iter()) {
             match f.kind {
                 PFKind::Text { text, item } => {
                     let tm = fm.tm.expect("text metrics");
                     let style = self.style(item).clone();
-                    let bl = baseline - fm.shift;
+                    let (rx, ry) = if item == MARKER_ITEM { (0.0, 0.0) } else { self.rel_of(item) };
+                    let bl = baseline - fm.shift + ry;
                     let oblique = self.lay.synthetic_oblique(tm.font, &style);
                     fragments.push(Fragment {
-                        rect: Rect::new(f.x + shift_x, bl - tm.asc, f.w, tm.asc + tm.desc),
+                        rect: Rect::new(f.x + shift_x + rx, bl - tm.asc, f.w, tm.asc + tm.desc),
                         baseline: bl,
                         node: if item == MARKER_ITEM { None } else { item_elem(self.items, item) },
                         inert: style.pointer_events == rabbithole_style::PointerEvents::None,
@@ -1280,17 +1741,40 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                             size: tm.size,
                             color: style.color,
                             letter_spacing: style.letter_spacing,
-                            decoration: style.text_decoration,
                             hidden: style.visibility == Visibility::Hidden,
                             decoration_info: DecorationInfo {
-                                lines: style.text_decoration,
-                                color: style.text_decoration_color,
-                                style: style.text_decoration_style,
-                                thickness: style.text_decoration_thickness,
+                                list: style.applied_decorations.clone(),
+                                extents: if box_ext.is_empty() || item == MARKER_ITEM { Vec::new() } else { self.decoration_extents(item, &style, &box_ext, f.x, f.w, fragments.len()) },
+                                metrics: style
+                                    .applied_decorations
+                                    .iter()
+                                    .map(|d| {
+                                        let same = d.font_size == style.font_size
+                                            && d.font_family == style.font_family
+                                            && d.font_weight == style.font_weight
+                                            && d.font_style == style.font_style
+                                            && d.font_family_list == style.font_family_list;
+                                        let (a, de) = if same {
+                                            (tm.asc, tm.desc)
+                                        } else {
+                                            let mut s = ComputedStyle::initial();
+                                            s.font_size = d.font_size;
+                                            s.font_family = d.font_family;
+                                            s.font_family_list = d.font_family_list.clone();
+                                            s.font_weight = d.font_weight;
+                                            s.font_style = d.font_style;
+                                            let m = self.lay.text_metrics(&s);
+                                            (m.asc, m.desc)
+                                        };
+                                        (fm.shift - d.baseline_shift, a, de)
+                                    })
+                                    .collect(),
+                                variations: if style.applied_decorations.is_empty() { Vec::new() } else { style.font_variation_settings.clone() },
                             },
                             shadows: style.text_shadow.clone(),
                             small_caps: style.font_variant_small_caps,
                             oblique,
+                            emphasis: if item == MARKER_ITEM { None } else { emphasis_of(&style) },
                         },
                     });
                 }
@@ -1303,7 +1787,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                         _ => baseline - fm.above,
                     };
                     let m = child.margin;
-                    child.translate(f.x + shift_x + m.left - child.rect.x, top + m.top - child.rect.y);
+                    let (rx, ry) = self.rel_kids.get(c).copied().unwrap_or((0.0, 0.0));
+                    child.translate(f.x + shift_x + m.left + rx - child.rect.x, top + m.top + ry - child.rect.y);
                     let node = child.node;
                     let rect = child.margin_rect();
                     fragments.push(Fragment {
@@ -1316,8 +1801,12 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 }
             }
         }
+        for (o, (lo, hi)) in &box_ext {
+            self.inset_seen.insert(*o);
+            *self.inset_total.entry(*o).or_insert(0.0) += hi - lo;
+        }
         self.lines.push(LineBox {
-            rect: Rect::new(self.cur.left, y, (self.cur.right - self.cur.left).max(0.0), h),
+            rect: Rect::new(self.cur.left, y, (self.cur.align_right - self.cur.left).max(0.0), h),
             baseline,
             fragments,
         });

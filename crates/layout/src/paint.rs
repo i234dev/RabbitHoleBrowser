@@ -140,6 +140,8 @@ struct State {
     layers: Vec<bool>,
     /// Alpha mask for the layer about to be closed (`mask-image`).
     mask: Option<Vec<u8>>,
+    /// Blend mode of the layer about to be closed.
+    blend: u8,
     /// Saved translation while inside the fixed layer.
     fixed_saved: Option<(f32, f32)>,
     /// Canvas offset of `position: fixed` content (the viewport origin).
@@ -183,6 +185,7 @@ fn paint_view(list: &DisplayList, canvas: &mut Canvas, fonts: &FontContext, scro
         clips: Vec::new(),
         layers: Vec::new(),
         mask: None,
+        blend: 0,
         fixed_saved: None,
         fixed_origin,
         ext: gfx_ext_available(),
@@ -229,7 +232,7 @@ fn layer_mask_alpha(items: &[DisplayItem], canvas: &Canvas, fonts: &FontContext,
         if !plain {
             c.push_transform(m);
         }
-        let mut s = State { dx: sdx, dy: sdy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, views: Vec::new() };
+        let mut s = State { dx: sdx, dy: sdy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, blend: 0, views: Vec::new() };
         let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
         for it in items {
             paint_item(it, &mut c, fonts, &mut s, all);
@@ -307,7 +310,7 @@ fn paint_filtered(bounds: Rect, filters: &[rabbithole_style::FilterOp], items: &
         if !plain {
             c.push_transform(m);
         }
-        let mut s = State { dx: sdx, dy: sdy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, views: Vec::new() };
+        let mut s = State { dx: sdx, dy: sdy, frames: Vec::new(), clips: Vec::new(), layers: Vec::new(), fixed_saved: None, fixed_origin: st.fixed_origin, ext: st.ext, mask: None, blend: 0, views: Vec::new() };
         let all = Rect::new(-1.0e7, -1.0e7, 2.0e7, 2.0e7);
         for it in items {
             paint_item(it, &mut c, fonts, &mut s, all);
@@ -442,9 +445,11 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
         }
         DisplayItem::PopLayer(opacity) => {
             if let Some(true) = st.layers.pop() {
-                match st.mask.take() {
-                    Some(alpha) => canvas.end_layer_masked(*opacity, &alpha),
-                    None => canvas.end_layer(*opacity),
+                let blend = std::mem::take(&mut st.blend);
+                match (st.mask.take(), blend) {
+                    (alpha, b) if b != 0 => canvas.end_layer_blend(*opacity, b, alpha.as_deref()),
+                    (Some(alpha), _) => canvas.end_layer_masked(*opacity, &alpha),
+                    (None, _) => canvas.end_layer(*opacity),
                 }
             }
         }
@@ -453,6 +458,11 @@ fn paint_item(item: &DisplayItem, canvas: &mut Canvas, fonts: &FontContext, st: 
         }
         DisplayItem::BackdropFilter { rect, radii, filters } => {
             paint_backdrop(*rect, *radii, filters, canvas, st, view);
+        }
+        DisplayItem::LayerBlend(mode) => {
+            if st.layers.last() == Some(&true) {
+                st.blend = *mode;
+            }
         }
         DisplayItem::LayerMask(items) => {
             st.mask = None;

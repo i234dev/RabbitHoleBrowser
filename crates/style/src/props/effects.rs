@@ -412,8 +412,13 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, ctx: &Ap
             if name == "will-change" && kws.iter().any(|k| matches!(k.as_str(), "transform" | "opacity")) {
                 style.creates_stacking_context = true;
             }
-            if name == "mix-blend-mode" && !kws.iter().any(|k| k == "normal") {
-                style.creates_stacking_context = true;
+            if name == "mix-blend-mode" {
+                if let [k] = kws.as_slice() {
+                    if let Some(m) = rabbithole_gfx::blend_mode_index(k) {
+                        style.mix_blend_mode = m;
+                        style.creates_stacking_context = m != 0;
+                    }
+                }
             }
         }
         "clip-path" | "clip" | "perspective" | "perspective-origin"

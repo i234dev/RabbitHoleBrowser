@@ -6,7 +6,7 @@ use rabbithole_css::PseudoElement;
 use rabbithole_dom::NodeId;
 use rabbithole_gfx::{Color, FontId, Image, Matrix, Rect};
 use rabbithole_style::{
-    transform_matrix, ComputedStyle, Edges, PointerEvents, Position, Shadow, TextDecoration, TextDecorationStyle,
+    transform_matrix, AppliedDecoration, ComputedStyle, Edges, PointerEvents, Position, Shadow,
 };
 use std::rc::Rc;
 
@@ -88,15 +88,38 @@ pub enum InlineItem {
     Break,
 }
 
-/// Text decoration details carried by a text fragment.
+/// Emphasis marks over (or under) each typographic character of a text
+/// fragment (CSS Text Decoration 3 §3).
 #[derive(Debug, Clone, PartialEq)]
+pub struct Emphasis {
+    pub mark: Rc<str>,
+    pub color: Color,
+    /// On the logical top side (else the bottom).
+    pub over: bool,
+}
+
+/// The text decorations drawn over a text fragment.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecorationInfo {
-    pub lines: TextDecoration,
-    /// `None` = the text color.
-    pub color: Option<Color>,
-    pub style: TextDecorationStyle,
-    /// `None` = automatic (font-size / 16).
-    pub thickness: Option<f32>,
+    /// The decorations in effect (outermost decorating box first).
+    pub list: Vec<AppliedDecoration>,
+    /// Per decoration, the horizontal extent `(x0, x1)` of its line
+    /// relative to the fragment's left edge, when it differs from the
+    /// fragment's (insets at the decorating box's ends).
+    pub extents: Vec<Option<(f32, f32)>>,
+    /// Per decoration, the decorating box's baseline relative to the
+    /// fragment's (a shifted descendant keeps its ancestor's line) and
+    /// the ascent and descent of its font.
+    pub metrics: Vec<(f32, f32, f32)>,
+    /// `font-variation-settings` of the text (variable fonts vary their
+    /// decoration metrics).
+    pub variations: Vec<([u8; 4], f32)>,
+}
+
+impl DecorationInfo {
+    pub fn any(&self) -> bool {
+        !self.list.is_empty()
+    }
 }
 
 /// A painted piece of a line.
@@ -108,10 +131,9 @@ pub enum FragmentKind {
         size: f32,
         color: Color,
         letter_spacing: f32,
-        decoration: TextDecoration,
         /// Hide text but keep its space (`visibility: hidden`).
         hidden: bool,
-        /// Decoration color/style/thickness.
+        /// Text decorations.
         decoration_info: DecorationInfo,
         /// `text-shadow` list.
         shadows: Vec<Shadow>,
@@ -119,6 +141,8 @@ pub enum FragmentKind {
         small_caps: bool,
         /// Synthetic oblique (italic requested, upright face chosen).
         oblique: bool,
+        /// `text-emphasis` marks.
+        emphasis: Option<Emphasis>,
     },
     /// Background / border segment of an inline element.
     InlineBox {
@@ -268,6 +292,8 @@ pub struct LayoutBox {
     /// A wrapper's physical background layers (images and gradients of the
     /// box it wraps, painted unturned).
     pub(crate) wm_background: Option<Rc<ComputedStyle>>,
+    /// Ruby layout role: 1 = a base/annotation pair box, 2 = its base.
+    pub(crate) ruby: u8,
 }
 
 /// Orientation of a writing-mode wrapper's contents relative to the space
@@ -327,6 +353,7 @@ impl LayoutBox {
             built_from: None,
             counter_io: None,
             wm_wrapper: false,
+            ruby: 0,
             wm_transform: None,
             wm_kind: WmKind::Cw,
             wm_background: None,

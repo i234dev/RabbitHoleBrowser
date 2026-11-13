@@ -376,6 +376,106 @@ impl TextDecoration {
     }
 }
 
+/// `text-emphasis-style` (inherited).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum EmphasisStyle {
+    #[default]
+    None,
+    /// A shape: 0 = the writing mode's default (circle horizontally,
+    /// sesame vertically), 1 dot, 2 circle, 3 double-circle, 4 triangle,
+    /// 5 sesame.
+    Shape { open: bool, shape: u8 },
+    /// A `<string>` mark (its first grapheme cluster).
+    Custom(String),
+}
+
+impl EmphasisStyle {
+    /// The mark drawn, for a horizontal (`vertical` false) or vertical line.
+    pub fn mark(&self, vertical: bool) -> Option<String> {
+        match self {
+            EmphasisStyle::None => None,
+            EmphasisStyle::Custom(s) => {
+                let mut it = s.chars();
+                let first = it.next()?;
+                let mut m = first.to_string();
+                // Keep combining marks / variation selectors with the base.
+                for c in it {
+                    if matches!(c as u32, 0x300..=0x36F | 0xFE00..=0xFE0F | 0x200D | 0x3099 | 0x309A) {
+                        m.push(c);
+                    } else {
+                        break;
+                    }
+                }
+                Some(m)
+            }
+            EmphasisStyle::Shape { open, shape } => {
+                let shape = if *shape == 0 { if vertical { 5 } else { 2 } } else { *shape };
+                let c = match (shape, open) {
+                    (1, false) => '\u{2022}',
+                    (1, true) => '\u{25E6}',
+                    (2, false) => '\u{25CF}',
+                    (2, true) => '\u{25CB}',
+                    (3, false) => '\u{25C9}',
+                    (3, true) => '\u{25CE}',
+                    (4, false) => '\u{25B2}',
+                    (4, true) => '\u{25B3}',
+                    (5, false) => '\u{FE45}',
+                    _ => '\u{FE46}',
+                };
+                Some(c.to_string())
+            }
+        }
+    }
+}
+
+/// `text-underline-offset` (inherited).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum UnderlineOffset {
+    #[default]
+    Auto,
+    Px(f32),
+    /// Percentage of 1em (resolved against the decorating box's font size).
+    Percent(f32),
+}
+
+/// `text-underline-position` (inherited).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UnderlinePosition {
+    pub from_font: bool,
+    pub under: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+/// A text decoration in effect on an element's text (CSS Text Decoration
+/// 3 §2): the element's own `text-decoration-line` and the decorations
+/// propagated from its decorating ancestors, with their color, style,
+/// thickness and underline placement taken from the decorating box.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedDecoration {
+    pub lines: TextDecoration,
+    pub color: Color,
+    pub style: TextDecorationStyle,
+    /// Thickness in px; `None` = `auto` / `from-font`.
+    pub thickness: Option<f32>,
+    pub from_font: bool,
+    /// Underline offset in px; `None` = `auto`.
+    pub underline_offset: Option<f32>,
+    pub underline_position: UnderlinePosition,
+    /// The decorating box's font (its ascent places overlines).
+    pub font_size: f32,
+    pub font_family: Family,
+    pub font_family_list: Vec<String>,
+    pub font_weight: u16,
+    pub font_style: FontStyle,
+    /// The decorating box's baseline shift (`vertical-align` of an inline
+    /// decorating box), in px upwards.
+    pub baseline_shift: f32,
+    /// `text-decoration-inset` (start, end); percentages of the
+    /// decorating box's inline size.
+    pub inset: (Length, Length),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Edges<T> {
     pub top: T,
@@ -673,6 +773,8 @@ pub enum WordBreak {
     BreakAll,
     KeepAll,
     BreakWord,
+    /// `auto-phrase`: like `keep-all`, with breaks between phrases.
+    AutoPhrase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1002,6 +1104,50 @@ pub struct ComputedStyle {
     pub text_decoration_color: Option<Color>,
     pub text_decoration_style: TextDecorationStyle,
     pub text_decoration_thickness: Option<f32>,
+    /// `text-decoration-thickness: from-font`.
+    pub text_decoration_thickness_from_font: bool,
+    /// `text-decoration-inset` (start, end; not inherited). Percentages
+    /// are kept as `Length::Percent` of the decorating box's font size.
+    pub text_decoration_inset: (Length, Length),
+    /// `text-underline-offset` (inherited).
+    pub text_underline_offset: UnderlineOffset,
+    /// `text-emphasis-style` (inherited).
+    pub text_emphasis_style: EmphasisStyle,
+    /// `text-emphasis-color` (inherited; `None` = currentcolor).
+    pub text_emphasis_color: Option<Color>,
+    /// `text-emphasis-position` (inherited): `over` (else under) and
+    /// `right` (else left).
+    pub text_emphasis_over: bool,
+    pub text_emphasis_right: bool,
+    /// `ruby-position: under` (inherited).
+    pub ruby_under: bool,
+    /// A multi-column container (`columns` / `column-count` /
+    /// `column-width` not `auto`; columns themselves are not laid out).
+    pub multicol: bool,
+    /// `mix-blend-mode` (see `rabbithole_gfx::blend_mode_index`; 0 =
+    /// normal).
+    pub mix_blend_mode: u8,
+    /// `text-wrap-style: balance` (inherited).
+    pub text_wrap_balance: bool,
+    /// `text-autospace` adds space between ideographs and other letters
+    /// or digits (inherited; off unless specified).
+    pub text_autospace: bool,
+    /// `wrap-inside: avoid` (not inherited): breaks inside the box are
+    /// avoided (here: `line-break: anywhere` opportunities are not used).
+    pub wrap_inside_avoid: bool,
+    /// `font-synthesis` allows a synthesized oblique (inherited).
+    pub font_synthesis_style: bool,
+    /// `line-break` (inherited): 0 auto/normal, 1 loose, 2 strict,
+    /// 3 anywhere.
+    pub line_break: u8,
+    /// Layout-internal: lines are as tall as the font's ascent + descent
+    /// (ruby bases and annotations).
+    pub line_height_tight: bool,
+    /// `text-underline-position` (inherited).
+    pub text_underline_position: UnderlinePosition,
+    /// Decorations painted on this element's text (inherited: computed
+    /// in the cascade from the parent's and the element's own).
+    pub applied_decorations: Vec<AppliedDecoration>,
     pub direction: Direction,
     /// `writing-mode` (inherited).
     pub writing_mode: WritingMode,
@@ -1033,6 +1179,8 @@ pub struct ComputedStyle {
     /// `font_family` fallback.
     pub font_family_list: Vec<String>,
     pub font_variant_small_caps: bool,
+    /// `font-variation-settings` (inherited): axis tag and value.
+    pub font_variation_settings: Vec<([u8; 4], f32)>,
 
     // ---- replaced elements / sizing
     pub object_fit: ObjectFit,
@@ -1178,6 +1326,24 @@ impl ComputedStyle {
             text_decoration_color: None,
             text_decoration_style: TextDecorationStyle::Solid,
             text_decoration_thickness: None,
+            text_decoration_thickness_from_font: false,
+            text_decoration_inset: (Length::ZERO, Length::ZERO),
+            text_underline_offset: UnderlineOffset::Auto,
+            text_emphasis_style: EmphasisStyle::None,
+            text_emphasis_color: None,
+            text_emphasis_over: true,
+            text_emphasis_right: true,
+            ruby_under: false,
+            mix_blend_mode: 0,
+            multicol: false,
+            text_wrap_balance: false,
+            text_autospace: false,
+            wrap_inside_avoid: false,
+            font_synthesis_style: true,
+            line_break: 0,
+            line_height_tight: false,
+            text_underline_position: UnderlinePosition::default(),
+            applied_decorations: Vec::new(),
             direction: Direction::Ltr,
             writing_mode: WritingMode::HorizontalTb,
             unicode_bidi: UnicodeBidi::Normal,
@@ -1194,6 +1360,7 @@ impl ComputedStyle {
             webkit_box: false,
             font_family_list: Vec::new(),
             font_variant_small_caps: false,
+            font_variation_settings: Vec::new(),
             object_fit: ObjectFit::Fill,
             object_position: (Length::Percent(50.0), Length::Percent(50.0)),
             aspect_ratio: None,
@@ -1236,10 +1403,21 @@ impl ComputedStyle {
             word_spacing: parent.word_spacing,
             text_align: parent.text_align,
             text_align_webkit_center: parent.text_align_webkit_center,
-            // Not inherited per spec, but decorations propagate to all
-            // descendant inline content, which amounts to the same thing
-            // for a renderer without pseudo-boxes.
-            text_decoration: parent.text_decoration,
+            // `text-decoration-line` is not inherited; the decorations it
+            // draws propagate through `applied_decorations`.
+            applied_decorations: parent.applied_decorations.clone(),
+            text_underline_offset: parent.text_underline_offset,
+            text_emphasis_style: parent.text_emphasis_style.clone(),
+            text_emphasis_color: parent.text_emphasis_color,
+            text_emphasis_over: parent.text_emphasis_over,
+            text_emphasis_right: parent.text_emphasis_right,
+            ruby_under: parent.ruby_under,
+            text_wrap_balance: parent.text_wrap_balance,
+            text_autospace: parent.text_autospace,
+            font_synthesis_style: parent.font_synthesis_style,
+            line_break: parent.line_break,
+            line_height_tight: parent.line_height_tight,
+            text_underline_position: parent.text_underline_position,
             text_transform: parent.text_transform,
             text_indent: parent.text_indent,
             white_space: parent.white_space,
@@ -1255,6 +1433,7 @@ impl ComputedStyle {
             tab_size: parent.tab_size,
             font_family_list: parent.font_family_list.clone(),
             font_variant_small_caps: parent.font_variant_small_caps,
+            font_variation_settings: parent.font_variation_settings.clone(),
             image_rendering_pixelated: parent.image_rendering_pixelated,
             accent_color: parent.accent_color,
             color_scheme_dark: parent.color_scheme_dark,
@@ -1284,7 +1463,19 @@ impl ComputedStyle {
             && self.word_spacing == o.word_spacing
             && self.text_align == o.text_align
             && self.text_align_webkit_center == o.text_align_webkit_center
-            && self.text_decoration == o.text_decoration
+            && self.applied_decorations == o.applied_decorations
+            && self.text_underline_offset == o.text_underline_offset
+            && self.text_emphasis_style == o.text_emphasis_style
+            && self.text_emphasis_color == o.text_emphasis_color
+            && self.text_emphasis_over == o.text_emphasis_over
+            && self.text_emphasis_right == o.text_emphasis_right
+            && self.ruby_under == o.ruby_under
+            && self.text_wrap_balance == o.text_wrap_balance
+            && self.text_autospace == o.text_autospace
+            && self.font_synthesis_style == o.font_synthesis_style
+            && self.line_break == o.line_break
+            && self.line_height_tight == o.line_height_tight
+            && self.text_underline_position == o.text_underline_position
             && self.text_transform == o.text_transform
             && self.text_indent == o.text_indent
             && self.white_space == o.white_space
@@ -1300,6 +1491,7 @@ impl ComputedStyle {
             && self.tab_size == o.tab_size
             && self.font_family_list == o.font_family_list
             && self.font_variant_small_caps == o.font_variant_small_caps
+            && self.font_variation_settings == o.font_variation_settings
             && self.image_rendering_pixelated == o.image_rendering_pixelated
             && self.accent_color == o.accent_color
             && self.color_scheme_dark == o.color_scheme_dark

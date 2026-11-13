@@ -15,12 +15,12 @@ pub mod raster;
 pub mod stroke;
 mod shaping;
 pub mod color_glyph;
-pub use shaping::ShapeFeatures;
+pub use shaping::{DecorationMetrics, ShapeFeatures};
 
 #[cfg(test)]
 mod tests_v02;
 
 pub use canvas::{Canvas, Color, ColorStop, FillRule, LineCap, LineJoin, Matrix, Paint, PathSeg, Point, Radii, Rect, StrokeStyle, IDENTITY};
-pub use canvas_ext::{ellipse_path, parse_svg_path, rounded_rect_path};
+pub use canvas_ext::{blend_mode_index, blend_pixel, ellipse_path, parse_svg_path, rounded_rect_path};
 pub use font::{FaceInfo, Family, FontContext, FontId, GlyphBitmap, LineMetrics, ShapedGlyph};
 pub use image::Image;

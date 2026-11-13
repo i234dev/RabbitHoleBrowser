@@ -11,6 +11,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// A font's decoration line metrics in px: (position upwards from the
+/// baseline, thickness).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DecorationMetrics {
+    pub underline: Option<(f32, f32)>,
+    pub strikeout: Option<(f32, f32)>,
+}
+
 /// One shaped glyph in font units.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UnitGlyph {
@@ -88,6 +96,70 @@ impl FontContext {
     /// Does this face have color glyphs (COLR / CBDT / sbix)?
     pub(crate) fn has_color_tables(&self, idx: usize) -> bool {
         self.shaping_data(idx).map(|(_, _, c)| c).unwrap_or(false)
+    }
+
+    /// The font's underline and strikeout metrics at `size`, in px:
+    /// `(underline position, underline thickness, strikeout position,
+    /// strikeout thickness)`, positions measured upwards from the baseline
+    /// (an underline below the baseline has a negative position).
+    pub fn decoration_metrics(&self, font: crate::FontId, size: f32, variations: &[([u8; 4], f32)]) -> DecorationMetrics {
+        let mut m = DecorationMetrics::default();
+        let Some(b) = self.face_bytes(font.0) else { return m };
+        let Ok(mut face) = rustybuzz::ttf_parser::Face::parse(&b, 0) else { return m };
+        for (tag, v) in variations {
+            let _ = face.set_variation(rustybuzz::ttf_parser::Tag::from_bytes(tag), *v);
+        }
+        let upem = face.units_per_em() as f32;
+        if upem <= 0.0 {
+            return m;
+        }
+        let k = size / upem;
+        if let Some(u) = face.underline_metrics() {
+            m.underline = Some((u.position as f32 * k, u.thickness as f32 * k));
+        }
+        if let Some(s) = face.strikeout_metrics() {
+            m.strikeout = Some((s.position as f32 * k, s.thickness as f32 * k));
+        }
+        m
+    }
+
+    /// `ch` (advance of "0") and `ex` (x-height) of the font chosen for a
+    /// family list, in em (CSS Values 4 §6.1.1; 0.5em when unknown).
+    /// Also `ic` (advance of U+6C34), 1em when the font lacks it.
+    pub fn unit_metrics(&self, families: &[String], generic: crate::Family, weight: u16, italic: bool) -> (f32, f32, f32) {
+        // The first available font: one that has a space glyph.
+        let mut font = self.select(generic, weight, italic);
+        for i in 0..families.len() {
+            let f = self.select_family(&families[i..], generic, weight, italic);
+            let has_space = self
+                .face_bytes(f.0)
+                .and_then(|b| rustybuzz::ttf_parser::Face::parse(&b, 0).ok().map(|face| face.glyph_index(' ').is_some()))
+                .unwrap_or(true);
+            if has_space {
+                font = f;
+                break;
+            }
+        }
+        let Some(b) = self.face_bytes(font.0) else { return (0.5, 0.5, 1.0) };
+        let Ok(face) = rustybuzz::ttf_parser::Face::parse(&b, 0) else { return (0.5, 0.5, 1.0) };
+        let upem = face.units_per_em() as f32;
+        if upem <= 0.0 {
+            return (0.5, 0.5, 1.0);
+        }
+        let adv = |c: char| face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).map(|a| a as f32 / upem).filter(|a| *a > 0.0);
+        let ch = adv('0').unwrap_or(0.5);
+        let ic = adv('\u{6C34}').unwrap_or(1.0);
+        let ex = face
+            .x_height()
+            .map(|v| v as f32)
+            .filter(|v| *v > 0.0)
+            .or_else(|| {
+                let g = face.glyph_index('x')?;
+                face.glyph_bounding_box(g).map(|r| r.y_max as f32)
+            })
+            .map(|xh| xh / upem)
+            .unwrap_or(0.5);
+        (ch, ex, ic)
     }
 
     /// The face's SFNT bytes.
