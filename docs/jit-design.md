@@ -1,4 +1,34 @@
-# JIT para el motor JS de RabbitHole: análisis y diseño (Stage 1)
+# JIT para el motor JS de RabbitHole: diseño e implementación
+
+## Estado de las fases
+
+Hay dos numeraciones: **Stage 1** es el estudio histórico y **Stage 2** es
+la implementación, subdividida en las fases siguientes. Estar en Stage 2
+no significa estar en la fase 2. El resumen del estudio original que sigue
+más abajo conserva sus medidas y recomendaciones de entonces.
+
+| Fase | Implementación presente | Cierre pendiente |
+|---|---|---|
+| 1. Infraestructura | Memoria W^X, ensamblador propio, flags, trazas, estadísticas y validación diferencial | Mantener paridad y comprobar el coste con JIT apagado en cada cambio |
+| 2. Código numérico lineal | Constantes, registros, aritmética, comparaciones y retornos | El objetivo original de coste de compilación no está alcanzado |
+| 3. Control de flujo | Saltos, latches fusionados, ticks y watchdog | Mantener las pruebas de interrupción y GC-stress |
+| 4. Valores dinámicos | Helpers y caminos nativos por tipo; cachés de propiedades/globales | No consta el millón de programas diferenciales exigido por el plan original |
+| 5. Llamadas y excepciones | Llamadas JS/nativas, retornos, constructores, excepciones y cambio de frame sin recursión nativa | Reducir el coste de llamadas y probar ejecución real en Windows |
+| 6. Tiering | Umbrales, exclusiones, fallos cacheados, límite de código por hilo y liberación con la función | Objetivos de carga de páginas, tamaño/coste de compilación y arena de código |
+| 7. OSR | Entrada en código nativo durante un bucle interpretado (`LOOP_OSR`) | Mantener paridad al entrar en mitad de la función |
+| 8. Rendimiento | Accesos, variables de closure y contadores de referencias en código nativo | Llamadas/retornos y reanudación; demostrar mejora global repetible |
+| Extensión S2.8 | GC incremental con barreras para intérprete y JIT | Mantener validación de referencias y pausas bajo cargas reales |
+
+`emit::PHASE = 5` solo controla las **familias de instrucciones** admitidas
+por el emisor. Las fases 6–8 y la GC se implementan en otras políticas y
+caminos del motor; ese número no describe el avance global.
+
+La funcionalidad de una fase y sus criterios de cierre son cosas distintas.
+El JIT sigue apagado por defecto: quedan objetivos medidos sin cumplir.
+Los siguientes pasos son cerrar la validación de lo recuperado, reducir el
+coste de llamadas/reanudación y después la asignación de memoria ejecutable.
+Activarlo requiere paridad funcional y una mejora global demostrada; no
+basta con mejorar un bucle numérico aislado.
 
 Estado: **Stage 1 (análisis y diseño) en las secciones 0–10; Stage 2 implementado, ver "Stage 2: implementación" al final**. Rama base del análisis: `main` @ `3896a9e`.
 También se ha medido la rama de la "ronda 4 de la VM" (`worktree-agent-ac8f2d59ac314de8f` @ `0d121b8`:
