@@ -57,3 +57,24 @@ workspaces and metadata only:
 ```sh
 python3 -B -m unittest discover -s scripts/tests -p 'test_release_version.py' -v
 ```
+
+## CI build and test profiles
+
+CI builds the workspace and runs its browser smoke test with the production
+`release` profile. Tests use the experimental `ci` profile, which inherits
+`release` and overrides only `lto = false` and `codegen-units = 16`. This removes
+cross-crate ThinLTO from the test executables while retaining release settings
+such as optimization level and assertion behavior. Cargo may still perform
+local LTO between a crate's codegen units.
+
+`cargo test --workspace --profile ci` keeps Cargo's default target selection:
+library/binary unit tests, integration tests, example build/link checks and
+library documentation tests. Existing ignored tests remain ignored. The
+production release build and smoke test continue to validate the delivered
+browser's profile. Example linking is not replaced by `cargo check`.
+
+The expected CI time saving has not been measured. Compare complete GitHub
+runs before claiming an improvement; a changed profile also creates a separate
+artifact cache on its first run. See the Cargo references for
+[target selection](https://doc.rust-lang.org/cargo/commands/cargo-test.html#target-selection)
+and [profile settings](https://doc.rust-lang.org/cargo/reference/profiles.html).

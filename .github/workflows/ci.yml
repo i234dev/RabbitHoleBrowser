@@ -21,7 +21,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - run: cargo build --workspace --release
-      - run: cargo test --workspace --release
+      # Default target selection retains example linking and library doctests.
+      - run: cargo test --workspace --profile ci
       - name: Headless smoke test
         run: cargo run --release -p rabbithole -- screenshot about:home -o home.png --width 1000 --height 700
       - uses: actions/upload-artifact@v4
