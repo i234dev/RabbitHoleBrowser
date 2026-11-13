@@ -170,3 +170,6 @@ css/css-text-decor/text-decoration-propagation-04.html
 css/css-values/ic-unit-001.html
 css/css-text/line-break/line-break-anywhere-002.html
 css/css-text/i18n/css3-text-line-break-opclns-001.html
+css/css-position/sticky/position-sticky-hyperlink.html
+css/css-text/word-break/auto-phrase/word-break-auto-phrase-001.html
+css/css-text/white-space/text-wrap-balance-line-clamp-006.html

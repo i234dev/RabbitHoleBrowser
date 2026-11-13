@@ -122,6 +122,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
                     "normal" => WordBreak::Normal,
                     "break-all" => WordBreak::BreakAll,
                     "keep-all" => WordBreak::KeepAll,
+                    "auto-phrase" => WordBreak::AutoPhrase,
                     "break-word" => WordBreak::BreakWord,
                     _ => return true,
                 };
@@ -429,7 +430,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             Some("auto" | "stable" | "pretty") => style.text_wrap_balance = false,
             _ => return true,
         },
-        "font-synthesis" | "font-synthesis-style" => {
+        "font-synthesis" => {
             let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
             style.font_synthesis_style = if name == "font-synthesis" {
                 kws.iter().any(|k| k == "style")
@@ -469,7 +470,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             }
         }
         "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
-        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
+        | "font-optical-sizing" | "font-smoothing" | "font-synthesis-style" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
         | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"
         | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"

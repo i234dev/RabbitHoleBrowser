@@ -15,6 +15,8 @@ pub(crate) enum Seg {
     Space,
     /// A forced line break (`\n` in pre / pre-wrap / pre-line).
     Break,
+    /// A break opportunity without width (U+200B, `<wbr>`).
+    Opportunity,
 }
 
 /// Tracks collapsible-space state across adjacent text items.
@@ -80,6 +82,7 @@ pub(crate) fn segment_tabs(text: &str, ws: WhiteSpace, st: &mut Collapser, out: 
             '\u{200b}' => {
                 // Zero-width space: break opportunity without width.
                 flush(&mut word, out);
+                out.push(Seg::Opportunity);
                 if !preserve_spaces {
                     st.prev_space = true;
                 }
@@ -174,7 +177,18 @@ fn lb_class(c: char) -> Lb {
 /// spaces and hyphens are handled by the caller. `keep_all`: CJK text is
 /// unbreakable like words (`word-break: keep-all`); `strict`: small kana
 /// do not start a line (`line-break: strict`).
-pub(crate) fn cjk_break_between(a: char, b: char, keep_all: bool, strict: bool) -> bool {
+/// `keep_all` 2 = `word-break: auto-phrase`: `keep-all` plus a break where
+/// a phrase starts (here: kanji or katakana after hiragana, the end of a
+/// particle or inflection).
+pub(crate) fn cjk_break_between(a: char, b: char, keep_all: u8, strict: bool) -> bool {
+    if keep_all == 2 {
+        let hira = |c: char| matches!(c as u32, 0x3041..=0x309F);
+        let starts_phrase = |c: char| matches!(c as u32, 0x30A1..=0x30FA | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF);
+        if hira(a) && starts_phrase(b) {
+            return true;
+        }
+    }
+    let keep_all = keep_all != 0;
     let (mut ca, mut cb) = (lb_class(a), lb_class(b));
     if ca == Lb::Cj {
         ca = if strict { Lb::Ns } else { Lb::Id };
@@ -205,7 +219,7 @@ pub(crate) fn cjk_break_between(a: char, b: char, keep_all: bool, strict: bool) 
 
 /// Split `w` (no spaces) at the line break opportunities of ideographic
 /// text; returns the parts (one part when there is none).
-pub(crate) fn split_cjk(w: &str, keep_all: bool, strict: bool, anywhere: bool) -> Vec<String> {
+pub(crate) fn split_cjk(w: &str, keep_all: u8, strict: bool, anywhere: bool) -> Vec<String> {
     if !anywhere && w.chars().all(|c| (c as u32) < 0x2E80 && (c as u32) != 0x3000) {
         return vec![w.to_string()];
     }
@@ -312,14 +326,14 @@ mod tests {
     fn ideographic_breaks() {
         // Between ideographs, not before closing punctuation or small kana
         // under `line-break: strict`, not after opening punctuation.
-        assert_eq!(split_cjk("日本語", false, false, false), vec!["日", "本", "語"]);
-        assert_eq!(split_cjk("本。「語」", false, false, false), vec!["本。", "「語」"]);
-        assert_eq!(split_cjk("きゃ", false, true, false), vec!["きゃ"]);
-        assert_eq!(split_cjk("きゃ", false, false, false), vec!["き", "ゃ"]);
-        assert_eq!(split_cjk("日本語", true, false, false), vec!["日本語"]);
-        assert_eq!(split_cjk("word", false, false, false), vec!["word"]);
-        assert_eq!(split_cjk("ab", false, false, true), vec!["a", "b"]);
-        assert!(cjk_break_between('a', '日', false, false));
-        assert!(!cjk_break_between('a', 'b', false, false));
+        assert_eq!(split_cjk("日本語", 0, false, false), vec!["日", "本", "語"]);
+        assert_eq!(split_cjk("本。「語」", 0, false, false), vec!["本。", "「語」"]);
+        assert_eq!(split_cjk("きゃ", 0, true, false), vec!["きゃ"]);
+        assert_eq!(split_cjk("きゃ", 0, false, false), vec!["き", "ゃ"]);
+        assert_eq!(split_cjk("日本語", 1, false, false), vec!["日本語"]);
+        assert_eq!(split_cjk("word", 0, false, false), vec!["word"]);
+        assert_eq!(split_cjk("ab", 0, false, true), vec!["a", "b"]);
+        assert!(cjk_break_between('a', '日', 0, false));
+        assert!(!cjk_break_between('a', 'b', 0, false));
     }
 }
