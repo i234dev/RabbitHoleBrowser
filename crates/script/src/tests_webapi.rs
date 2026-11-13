@@ -350,10 +350,20 @@ fn logs_of(html: &str, src: &str) -> Vec<String> {
     let (mut env, mut host) = setup(html);
     let mut out = run(&mut env, &mut host, src);
     for t in [1100.0, 1200.0, 1300.0] {
-        let before = env.logs.len();
-        host.run_timers(&mut env, t);
-        host.run_jobs(&mut env);
-        out.extend(env.logs[before..].iter().filter(|(l, _)| l == "log").map(|(_, m)| m.clone()));
+        // A timer checkpoint deliberately yields after TICK_SLICE. Under GC
+        // stress or CPU contention, three calls need not finish even a short
+        // finite task chain (such as an IndexedDB cursor). Drain work due at
+        // this mock time without changing the production scheduling budget.
+        for slice in 0..128 {
+            let before = env.logs.len();
+            host.run_timers(&mut env, t);
+            host.run_jobs(&mut env);
+            out.extend(env.logs[before..].iter().filter(|(l, _)| l == "log").map(|(_, m)| m.clone()));
+            if host.next_due().is_none_or(|due| due > t) {
+                break;
+            }
+            assert!(slice < 127, "Web API test did not drain its due tasks");
+        }
     }
     assert!(env.errors().is_empty(), "errors: {:?}", env.errors());
     out
