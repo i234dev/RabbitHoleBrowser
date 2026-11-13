@@ -262,7 +262,7 @@ fn webgl_textured_quad_reads_real_rgba_and_unpack_transformations() {
       const data=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,data);console.log(Array.from(data).join(','),gl.getError());
       gl.readPixels(0,3,1,1,gl.RGBA,gl.UNSIGNED_BYTE,data);console.log(Array.from(data).join(','));
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,source);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,data);console.log(Array.from(data).join(','));
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);console.log(gl.getError()===gl.INVALID_ENUM,gl.getTexParameter(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER)===gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST_MIPMAP_LINEAR);console.log(gl.getError()===gl.INVALID_ENUM,gl.getTexParameter(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER)===gl.NEAREST);
       gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(3));console.log(gl.getError()===gl.INVALID_OPERATION);
       gl.deleteTexture(t);console.log(gl.isTexture(t),gl.getParameter(gl.TEXTURE_BINDING_2D)===null);
     "#
@@ -424,4 +424,21 @@ fn webgl_enum_arguments_are_converted_once_before_native_commands() {
     "#,
     );
     assert_eq!(out, ["1 true", "1 4 0", "true", "1 0"]);
+}
+
+#[test]
+fn webgl_linear_texture_filtering_reads_interpolated_pixels() {
+    let (mut env, mut host) = setup("<canvas id=a width=3 height=3></canvas>");
+    let source = format!("{SHADERS}\n{TEXTURED_QUAD}\n{}", r#"
+      const gl=document.getElementById('a').getContext('webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});textureQuad(gl);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,0,0,255,0,255,0,255,0,0,255,255,255,255,255,255]));
+      gl.drawArrays(gl.TRIANGLE_STRIP,0,4);const data=new Uint8Array(4);
+      for(const xy of [[0,0],[1,1],[0,2]]){gl.readPixels(xy[0],xy[1],1,1,gl.RGBA,gl.UNSIGNED_BYTE,data);console.log(Array.from(data).join(','));}
+      console.log(gl.getError(),gl.getTexParameter(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER)===gl.LINEAR,gl.getTexParameter(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER)===gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);console.log(gl.getError()===gl.INVALID_OPERATION);
+      gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,data);console.log(Array.from(data).join(','));
+    "#);
+    assert_eq!(run(&mut env, &mut host, &source), ["255,0,0,255", "128,128,128,255", "0,0,255,255", "0 true true", "true", "128,128,128,255"]);
 }
