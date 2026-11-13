@@ -1,5 +1,6 @@
 //! Experimental, dependency-free software WebGL rendering. See README.md
 //! for the supported GLSL subset and explicit implementation limits.
+mod blend;
 pub mod gl;
 mod raster;
 mod shader;
@@ -138,6 +139,8 @@ pub struct Context {
     clear_color: [f32; 4],
     clear_depth: f32,
     color_mask: [bool; 4],
+    alpha_channel: bool,
+    blend: blend::BlendState,
     depth_mask: bool,
     depth_test: bool,
     depth_func: u32,
@@ -196,6 +199,8 @@ impl Context {
             clear_color: [0.; 4],
             clear_depth: 1.,
             color_mask: [true; 4],
+            alpha_channel: true,
+            blend: blend::BlendState::default(),
             depth_mask: true,
             depth_test: false,
             depth_func: gl::LESS,
@@ -239,6 +244,11 @@ impl Context {
         let rgba = filled(n * 4, 0)?;
         let depth = filled(n, 1.)?;
         self.rgba = rgba;
+        if !self.alpha_channel {
+            for pixel in self.rgba.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+        }
         self.depth = depth;
         self.width = width;
         self.height = height;
@@ -298,7 +308,10 @@ impl Context {
         if mask & !(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT) != 0 {
             return Err(Error::InvalidValue);
         }
-        let col = self.clear_color.map(byte);
+        let mut col = self.clear_color.map(byte);
+        if !self.alpha_channel {
+            col[3] = 255;
+        }
         let r = self.clip_rect(false);
         for y in r[1]..r[3] {
             for x in r[0]..r[2] {

@@ -299,10 +299,17 @@ impl Context {
                 let out = e
                     .fragment
                     .run_with_sampler(env, &|unit, uv| self.sample_texture(unit, uv));
-                let color = out[&e.fragment.output];
+                // Blend normalized source and destination before applying write masks.
+                // Buffer bytes stay raw RGBA; canvas premultiplication is separate.
+                let source = std::array::from_fn(|k| clamp(out[&e.fragment.output].v[k]));
+                let destination = std::array::from_fn(|k| self.rgba[at * 4 + k] as f32 / 255.);
+                let mut color = self.blend.apply(source, destination);
+                if !self.alpha_channel {
+                    color[3] = 1.;
+                }
                 for k in 0..4 {
                     if self.color_mask[k] {
-                        self.rgba[at * 4 + k] = byte(color.v[k]);
+                        self.rgba[at * 4 + k] = byte(color[k]);
                     }
                 }
                 if self.depth_test && self.depth_mask {

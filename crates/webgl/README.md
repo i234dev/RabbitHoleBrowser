@@ -17,6 +17,10 @@ operations must be rejected by the bindings instead of reporting fake success.
   viewport and scissor, as required by WebGL's viewport rules.
 - Clear color/depth, viewport, scissor, color/depth write masks and all eight depth
   comparisons. Clear obeys the scissor and write masks, independently of viewport.
+- Core WebGL1 blending: independent RGB/alpha factors and add/subtract/reverse
+  equations, constant blend color, source-alpha saturation and atomic invalid-state
+  rejection. Blending uses raw normalized RGBA before color write masks; clear
+  bypasses blending. RGB-only canvas buffers use destination alpha one.
 - Vertex/index buffers with zero-initialized storage, sub-data updates, checked
   captured attribute pointers, and actual deletion. Attributes accept float,
   signed/unsigned bytes and shorts, including normalized conversions; disabled
@@ -53,7 +57,7 @@ shared uniform types must agree. Uniforms start at zero after linking.
 
 Not implemented: general GLSL functions or control flow, arrays,
 integer/bool variables, derivatives, discard, swizzle assignments, framebuffer
-objects, stencil, blending, points/lines, culling, multisampling, extensions or
+objects, stencil, points/lines, culling, multisampling, extensions or
 WebGL 2. Texture sampling has the explicit bounded subset below. Unsupported
 shader operations are rejected, never synthesized.
 
@@ -68,7 +72,8 @@ bounded; they are not a claim of WebGL conformance.
 
 `cargo test -p rabbithole-webgl` checks pixel values for colored and indexed
 triangles, perspective interpolation, clipping, depth, normalized attributes,
-scissor/masks, resize/readback orientation, shader/link errors and invalid buffer
+scissor/masks, blend factors/equations and alpha-channel behavior, resize/readback
+orientation, shader/link errors and invalid buffer
 ranges/resource lifetimes. Browser bindings have additional integration tests.
 
 ## Texture milestone
