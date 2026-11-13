@@ -3507,28 +3507,68 @@ impl Realm {
                         _ => {}
                     }
                 }
+                Op::SetHome(n) => {
+                    let f = self.vstack[sp - 1].clone();
+                    let home = self.vstack[sp - 1 - n as usize].as_object();
+                    if let (V::Object(fid), Some(h)) = (f.v(), home) {
+                        if let ObjectKind::Function(c) = &mut self.obj_mut(fid).kind {
+                            c.home_object = Some(h);
+                        }
+                    }
+                }
+                Op::SuperBase => {
+                    let v = self.super_base(fi)?;
+                    push!(v);
+                }
                 Op::GetSuperProp(i) => {
-                    let key = const_key!(i);
-                    let v = self.super_get(fi, key)?;
+                    let base = pop!();
+                    let this = pop!();
+                    let base = self.super_base_object(&base, Some(&const_key!(i)))?;
+                    let v = self.super_get(base, const_key!(i), this)?;
+                    push!(v);
+                }
+                Op::GetSuperPropKeep(i) => {
+                    let base = self.vstack[sp - 1].clone();
+                    let this = self.vstack[sp - 2].clone();
+                    let base = self.super_base_object(&base, Some(&const_key!(i)))?;
+                    let v = self.super_get(base, const_key!(i), this)?;
                     push!(v);
                 }
                 Op::GetSuperElem => {
+                    let base = pop!();
                     let key = pop!();
+                    let this = pop!();
+                    let base = self.super_base_object(&base, None)?;
                     let key = self.to_property_key(key)?;
-                    let v = self.super_get(fi, key)?;
+                    let v = self.super_get(base, key, this)?;
+                    push!(v);
+                }
+                Op::GetSuperElemKeep => {
+                    let base = self.vstack[sp - 1].clone();
+                    let key = self.vstack[sp - 2].clone();
+                    let this = self.vstack[sp - 3].clone();
+                    let base = self.super_base_object(&base, None)?;
+                    let key = self.to_property_key(key)?;
+                    self.vstack[sp - 2] = key.to_value();
+                    let v = self.super_get(base, key, this)?;
                     push!(v);
                 }
                 Op::SetSuperProp(i) => {
                     let v = pop!();
-                    let key = const_key!(i);
-                    self.super_set(fi, key, v.clone())?;
+                    let base = pop!();
+                    let this = pop!();
+                    let base = self.super_base_object(&base, Some(&const_key!(i)))?;
+                    self.super_set(fi, base, const_key!(i), v.clone(), this)?;
                     push!(v);
                 }
                 Op::SetSuperElem => {
                     let v = pop!();
+                    let base = pop!();
                     let key = pop!();
+                    let this = pop!();
+                    let base = self.super_base_object(&base, None)?;
                     let key = self.to_property_key(key)?;
-                    self.super_set(fi, key, v.clone())?;
+                    self.super_set(fi, base, key, v.clone(), this)?;
                     push!(v);
                 }
                 Op::Call(argc, desc) | Op::CallEval(argc, desc) | Op::CallR(_, argc, _, desc) => {
@@ -4772,17 +4812,29 @@ impl Realm {
         Ok(())
     }
 
-    fn super_get(&mut self, fi: usize, key: PropertyKey) -> JsResult<Value> {
-        let (home, this) = {
-            let f = &self.frames[fi];
-            (self.frame_home_object(f), f.this.clone())
-        };
-        let home = match home {
-            Some(h) => h,
-            None => return self.type_error("'super' keyword unexpected here"),
-        };
-        let proto = self.get_prototype_of(home)?;
-        let Some(p) = proto else { return Ok(Value::Undefined) };
+    /// GetSuperBase: the prototype of the running function's home object
+    /// (null when it has none).
+    fn super_base(&mut self, fi: usize) -> JsResult<Value> {
+        let home = self.frame_home_object(&self.frames[fi]);
+        let Some(home) = home else { return self.type_error("'super' keyword unexpected here") };
+        Ok(match self.get_prototype_of(home)? {
+            Some(p) => Value::Object(p),
+            None => Value::Null,
+        })
+    }
+
+    /// ToObject of a super reference's base (a null prototype throws).
+    fn super_base_object(&mut self, base: &Value, key: Option<&PropertyKey>) -> JsResult<ObjectId> {
+        match base.v() {
+            V::Object(o) => Ok(o),
+            _ => {
+                let k = key.map(|k| self.key_display(k)).unwrap_or_default();
+                self.type_error(&format!("Cannot read properties of null (reading 'super.{k}')"))
+            }
+        }
+    }
+
+    fn super_get(&mut self, p: ObjectId, key: PropertyKey, this: Value) -> JsResult<Value> {
         // `super.m` in class hierarchies: the lookup starts at the home
         // object's prototype, cached like an ordinary read from it.
         if let PropertyKey::String(k) = &key {
@@ -4807,17 +4859,11 @@ impl Realm {
         self.get_from_object(p, &key, this)
     }
 
-    fn super_set(&mut self, fi: usize, key: PropertyKey, v: Value) -> JsResult<()> {
-        let (home, this) = {
-            let f = &self.frames[fi];
-            (self.frame_home_object(f), f.this.clone())
-        };
-        let home = match home {
-            Some(h) => h,
-            None => return self.type_error("'super' keyword unexpected here"),
-        };
-        if let Some(p) = self.get_prototype_of(home)? {
-            self.set_on_object(p, key, v, this)?;
+    fn super_set(&mut self, fi: usize, base: ObjectId, key: PropertyKey, v: Value, this: Value) -> JsResult<()> {
+        let ok = self.set_on_object(base, key.clone(), v, this)?;
+        if !ok && self.frames[fi].code().flags.is_strict {
+            let k = self.key_display(&key);
+            return self.type_error(&format!("Cannot assign to property '{k}' through super"));
         }
         Ok(())
     }

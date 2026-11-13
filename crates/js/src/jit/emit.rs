@@ -153,6 +153,7 @@ fn classify_all(op: &Op) -> Class {
         Op::DeleteProp(..) | Op::DeleteElem | Op::DefineProp(..) | Op::DefineElem | Op::DefineMethod(..) | Op::DefineGetter(..) => exec,
         Op::DefineSetter(..) | Op::CopyDataProps | Op::CopyDataPropsExcluding | Op::SetProtoLiteral => exec,
         Op::GetSuperProp(..) | Op::SetSuperProp(..) | Op::GetSuperElem | Op::SetSuperElem => exec,
+        Op::SuperBase | Op::SetHome(..) | Op::GetSuperPropKeep(..) | Op::GetSuperElemKeep => exec,
         Op::Call(..) | Op::CallSpread | Op::New(..) | Op::NewSpread | Op::SuperCall(..) | Op::SuperCallSpread => exec,
         Op::Return | Op::Throw | Op::ThrowConst(..) => exec,
         Op::JumpIfFalse(..) | Op::JumpIfTrue(..) | Op::JumpIfNullish(..) | Op::JumpIfNotNullishKeep(..) | Op::JumpIfFalseKeep(..) => exec,

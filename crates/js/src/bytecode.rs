@@ -94,10 +94,24 @@ pub enum Op {
     CopyDataPropsExcluding,
     /// Define `__proto__: value` in a literal: obj value -> obj
     SetProtoLiteral,
+    /// Super references: `this` (checked), then for `super[k]` the key
+    /// value, then `SuperBase` pushes the home object's prototype.
+    SuperBase,
+    /// this base -> value
     GetSuperProp(u32),
+    /// this base value -> value
     SetSuperProp(u32),
+    /// this key base -> value
     GetSuperElem,
+    /// this key base value -> value
     SetSuperElem,
+    /// home ... fn -> home ... fn: the function's [[HomeObject]] is the
+    /// value `n` slots below it (static class elements).
+    SetHome(u8),
+    /// this base -> this base value
+    GetSuperPropKeep(u32),
+    /// this key base -> this propertykey base value
+    GetSuperElemKeep,
 
     // --- calls
     /// func this args.. -> result; second operand: constant describing the
@@ -822,9 +836,13 @@ impl Op {
             CopyDataProps => (2, 1),
             CopyDataPropsExcluding => (3, 1),
             SetProtoLiteral => (2, 1),
-            GetSuperProp(_) => (0, 1),
-            SetSuperProp(_) | GetSuperElem => (1, 1),
-            SetSuperElem => (2, 1),
+            SuperBase => (0, 1),
+            SetHome(n) => (n as u32 + 1, n as u32 + 1),
+            GetSuperProp(_) => (2, 1),
+            SetSuperProp(_) | GetSuperElem => (3, 1),
+            SetSuperElem => (4, 1),
+            GetSuperPropKeep(_) => (2, 3),
+            GetSuperElemKeep => (3, 4),
             Call(argc, _) | CallEval(argc, _) => (argc as u32 + 2, 1),
             CallSpread => (3, 1),
             New(argc) => (argc as u32 + 1, 1),

@@ -2210,7 +2210,13 @@ impl<'a> Parser<'a> {
         let callee = if self.is_ident("new") {
             self.parse_new()?
         } else if self.is_ident("super") {
-            return Err(self.error("'super' keyword unexpected here"));
+            // `new super.C()` / `new super[k]()` (never `new super()`).
+            let spos = self.tok.pos;
+            self.advance()?;
+            if !(self.is_punct(".") || self.is_punct("[")) || !self.ctx.super_prop_ok {
+                return Err(self.error_at(spos, "'super' keyword unexpected here"));
+            }
+            self.parse_call_tail(Expr { pos: spos, kind: ExprKind::Super }, false)?
         } else if self.is_ident("import") {
             return Err(self.error("Cannot use new with import"));
         } else {

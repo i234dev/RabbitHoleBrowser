@@ -2937,6 +2937,14 @@ impl Compiler {
                 }
             }
             Pattern::Expr(e) => match &e.kind {
+                ExprKind::Member { object, property, optional: false } if matches!(object.kind, ExprKind::Super) => {
+                    // value -> value this [key] base -> this [key] base value
+                    self.emit_super_ref(property)?;
+                    self.emit(if matches!(property, MemberProp::Computed(_)) { Op::Rot4 } else { Op::Rot3 });
+                    self.emit_super_set(property);
+                    self.emit(Op::Pop);
+                    Ok(())
+                }
                 ExprKind::Member { object, property, optional: false } => {
                     self.compile_expr(object)?;
                     match property {
@@ -3256,6 +3264,19 @@ impl Compiler {
                     self.emit(Op::Typeof);
                 }
                 UnaryOp::Delete => match &operand.kind {
+                    ExprKind::Member { object, property, .. } if matches!(object.kind, ExprKind::Super) => {
+                        // The reference is evaluated, then deleting it throws.
+                        self.emit_super_ref(property)?;
+                        let m = self.const_str("Unsupported reference to 'super'");
+                        self.emit(Op::ThrowConst(0, m));
+                        // (unreachable; keeps the stack depth of a delete)
+                        self.emit(Op::Pop);
+                        self.emit(Op::Pop);
+                        if matches!(property, MemberProp::Computed(_)) {
+                            self.emit(Op::Pop);
+                        }
+                        self.emit(Op::True);
+                    }
                     ExprKind::Member { object, property, .. } => {
                         self.compile_expr(object)?;
                         match property {
@@ -3419,18 +3440,8 @@ impl Compiler {
             }
             ExprKind::Member { object, property, optional } => {
                 if let ExprKind::Super = object.kind {
-                    match property {
-                        MemberProp::Identifier(n) => {
-                            let i = self.const_str(n);
-                            self.emit(Op::GetSuperProp(i));
-                        }
-                        MemberProp::Computed(k) => {
-                            self.compile_expr(k)?;
-                            self.emit(Op::ToPropertyKey);
-                            self.emit(Op::GetSuperElem);
-                        }
-                        MemberProp::Private(_) => return self.err("Unexpected private field"),
-                    }
+                    self.emit_super_ref(property)?;
+                    self.emit_super_get(property);
                     return Ok(());
                 }
                 if !*optional && matches!(&object.kind, ExprKind::Identifier(n) if n == "arguments") && self.args_direct_ok() {
@@ -3605,20 +3616,9 @@ impl Compiler {
             ExprKind::Member { object, property, optional } => {
                 if let ExprKind::Super = object.kind {
                     // super.method(...) : this = current this
-                    match property {
-                        MemberProp::Identifier(n) => {
-                            let i = self.const_str(n);
-                            self.emit(Op::GetSuperProp(i));
-                        }
-                        MemberProp::Computed(k) => {
-                            self.compile_expr(k)?;
-                            self.emit(Op::ToPropertyKey);
-                            self.emit(Op::GetSuperElem);
-                        }
-                        MemberProp::Private(_) => return self.err("Unexpected private field"),
-                    }
-                    let derived = self.fs_ref().flags.is_derived;
-                    self.emit(if derived { Op::ThisChecked } else { Op::This });
+                    self.emit_super_ref(property)?;
+                    self.emit_super_get(property);
+                    self.emit_this();
                     return Ok(());
                 }
                 self.set_pos(callee.pos);
@@ -3773,6 +3773,64 @@ impl Compiler {
         Ok(())
     }
 
+    /// `this` as the `this` expression evaluates it.
+    fn emit_this(&mut self) {
+        let derived = self.fs_ref().flags.is_derived;
+        self.emit(if derived { Op::ThisChecked } else { Op::This });
+    }
+
+    /// A super reference: `this` (its binding checked first), the key
+    /// value of `super[k]`, then GetSuperBase: -> this [key] base.
+    fn emit_super_ref(&mut self, property: &MemberProp) -> CResult<()> {
+        self.emit_this();
+        match property {
+            MemberProp::Identifier(_) => {}
+            MemberProp::Computed(k) => self.compile_expr(k)?,
+            MemberProp::Private(_) => return self.err("Unexpected private field"),
+        }
+        self.emit(Op::SuperBase);
+        Ok(())
+    }
+
+    /// this [key] base -> value
+    fn emit_super_get(&mut self, property: &MemberProp) {
+        match property {
+            MemberProp::Identifier(n) => {
+                let i = self.const_str(n);
+                self.emit(Op::GetSuperProp(i));
+            }
+            _ => {
+                self.emit(Op::GetSuperElem);
+            }
+        }
+    }
+
+    /// this [key] base -> this [key] base value
+    fn emit_super_get_keep(&mut self, property: &MemberProp) {
+        match property {
+            MemberProp::Identifier(n) => {
+                let i = self.const_str(n);
+                self.emit(Op::GetSuperPropKeep(i));
+            }
+            _ => {
+                self.emit(Op::GetSuperElemKeep);
+            }
+        }
+    }
+
+    /// this [key] base value -> value
+    fn emit_super_set(&mut self, property: &MemberProp) {
+        match property {
+            MemberProp::Identifier(n) => {
+                let i = self.const_str(n);
+                self.emit(Op::SetSuperProp(i));
+            }
+            _ => {
+                self.emit(Op::SetSuperElem);
+            }
+        }
+    }
+
     /// The member expression an assignment-pattern element targets
     /// (`[a.b = 1] = …`), if any.
     fn member_target(p: &Pattern) -> Option<(&Expr, &MemberProp, Option<&Expr>)> {
@@ -3782,7 +3840,7 @@ impl Compiler {
         };
         match t {
             Pattern::Expr(e) => match &e.kind {
-                ExprKind::Member { object, property, optional: false } if !matches!(object.kind, ExprKind::Super) => Some((object, property, default)),
+                ExprKind::Member { object, property, optional: false } => Some((object, property, default)),
                 _ => None,
             },
             _ => None,
@@ -3793,6 +3851,10 @@ impl Compiler {
     /// (DestructuringAssignmentEvaluation order). False when `p` is not one.
     fn emit_member_target_ref(&mut self, p: &Pattern) -> CResult<bool> {
         let Some((object, property, _)) = Self::member_target(p) else { return Ok(false) };
+        if let ExprKind::Super = object.kind {
+            self.emit_super_ref(property)?;
+            return Ok(true);
+        }
         self.compile_expr(object)?;
         match property {
             MemberProp::Identifier(_) => {}
@@ -3807,13 +3869,18 @@ impl Compiler {
 
     /// [ref… value] -> []: apply the default, then PutValue.
     fn emit_member_target_store(&mut self, p: &Pattern) -> CResult<()> {
-        let Some((_, property, default)) = Self::member_target(p) else { return Ok(()) };
+        let Some((object, property, default)) = Self::member_target(p) else { return Ok(()) };
         if let Some(d) = default {
             self.emit(Op::Dup);
             let j = self.emit(Op::JumpIfNotUndefined(0));
             self.emit(Op::Pop);
             self.compile_expr(d)?;
             self.patch_jump(j);
+        }
+        if let ExprKind::Super = object.kind {
+            self.emit_super_set(property);
+            self.emit(Op::Pop);
+            return Ok(());
         }
         match property {
             MemberProp::Identifier(name) => {
@@ -3925,6 +3992,16 @@ impl Compiler {
                     self.emit(undo);
                 }
             }
+            ExprKind::Member { object, property, .. } if matches!(object.kind, ExprKind::Super) => {
+                self.emit_super_ref(property)?;
+                self.emit_super_get_keep(property);
+                self.emit(Op::ToNumeric);
+                self.emit(inc);
+                self.emit_super_set(property);
+                if !prefix {
+                    self.emit(undo);
+                }
+            }
             ExprKind::Member { object, property, .. } => {
                 self.compile_expr(object)?;
                 match property {
@@ -3988,20 +4065,9 @@ impl Compiler {
                         }
                         return Ok(());
                     } else {
-                        match property {
-                            MemberProp::Identifier(name) => {
-                                self.compile_expr(value)?;
-                                let i = self.const_str(name);
-                                self.emit(Op::SetSuperProp(i));
-                            }
-                            MemberProp::Computed(k) => {
-                                self.compile_expr(k)?;
-                                self.emit(Op::ToPropertyKey);
-                                self.compile_expr(value)?;
-                                self.emit(Op::SetSuperElem);
-                            }
-                            MemberProp::Private(_) => return self.err("Unexpected private field"),
-                        }
+                        self.emit_super_ref(property)?;
+                        self.compile_expr(value)?;
+                        self.emit_super_set(property);
                         return Ok(());
                     }
                 }
@@ -4078,11 +4144,39 @@ impl Compiler {
             ExprKind::Member { object, property, .. } => (object, property),
             _ => return self.err("Invalid left-hand side in assignment"),
         };
+        let logical = matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish);
         if let ExprKind::Super = object.kind {
-            return self.err("Compound assignment to super properties is not supported");
+            // this [key] base
+            self.emit_super_ref(property)?;
+            let depth = if matches!(property, MemberProp::Computed(_)) { 3 } else { 2 };
+            self.emit_super_get_keep(property);
+            if logical {
+                let j = match op {
+                    AssignOp::And => self.emit(Op::JumpIfFalseKeep(0)),
+                    AssignOp::Or => self.emit(Op::JumpIfTrueKeep(0)),
+                    _ => self.emit(Op::JumpIfNotNullishKeep(0)),
+                };
+                if op != AssignOp::Nullish {
+                    self.emit(Op::Pop);
+                }
+                self.compile_expr(value)?;
+                self.emit_super_set(property);
+                let end = self.emit(Op::Jump(0));
+                self.patch_jump(j);
+                // this [key] base value -> value
+                for _ in 0..depth {
+                    self.emit(Op::Swap);
+                    self.emit(Op::Pop);
+                }
+                self.patch_jump(end);
+            } else {
+                self.compile_expr(value)?;
+                self.emit(binop_for_assign(op));
+                self.emit_super_set(property);
+            }
+            return Ok(());
         }
         self.compile_expr(object)?;
-        let logical = matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish);
         match property {
             MemberProp::Identifier(name) => {
                 let i = self.const_str(name);
@@ -4422,6 +4516,7 @@ impl Compiler {
                     self.emit(Op::Dup); // proto ctor ctor
                     let idx = self.compile_method(&f, Some(""), true)?;
                     self.emit(Op::MakeClosure(idx)); // proto ctor ctor fn
+                    self.emit(Op::SetHome(1));
                     self.emit(Op::Swap); // proto ctor fn ctor
                     self.emit(Op::Call(0, crate::bytecode::NO_DESC)); // proto ctor result
                     self.emit(Op::Pop);
@@ -4518,6 +4613,7 @@ impl Compiler {
         };
         let idx = self.compile_method(&f, key_name.as_deref(), true)?;
         self.emit(Op::MakeClosure(idx)); // proto ctor ctor key fn
+        self.emit(Op::SetHome(2));
         self.emit(Op::Rot3); // proto ctor key fn ctor  -- wait: Rot3 a b c -> b c a : (ctor key fn) -> (key fn ctor)
         self.emit(Op::Call(0, crate::bytecode::NO_DESC)); // proto ctor key value
         self.emit(if matches!(key, PropertyKey::Private(_)) { Op::DefinePrivate } else { Op::DefineElem }); // proto ctor
