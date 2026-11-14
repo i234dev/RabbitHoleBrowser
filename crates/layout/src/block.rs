@@ -55,6 +55,8 @@ pub(crate) struct Layouter<'a> {
     /// counts the lines of its block descendants in the same formatting
     /// context): lines left, and where the last allowed line ends.
     pub(crate) clamp: Option<(usize, Option<f32>)>,
+    /// Bounds only the new recursive subgrid contribution/transport work.
+    pub(crate) grid_work: crate::grid::subgrid::WorkBudget,
 }
 
 pub(crate) fn resolve_edges(e: &Edges<Length>, base: f32) -> Edges<f32> {
@@ -185,6 +187,7 @@ impl<'a> Layouter<'a> {
             center_blocks: false,
             cb_rtl: false,
             clamp: None,
+            grid_work: Default::default(),
         }
     }
 

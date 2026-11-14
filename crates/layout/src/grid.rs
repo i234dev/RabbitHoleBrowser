@@ -725,6 +725,7 @@ impl<'a> Layouter<'a> {
                 self.layout_grid_item(child,it,ax+content_x,ay+content_y,aw,ah,cbw);
                 continue;
             }
+            self.grid_work.charge(1);
             let columns=column_request.then(||subgrid::section(&cols,&col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,true));
             let rows=row_request.then(||subgrid::section(&rows,&row_pos,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,true));
             self.with_subgrid(child,columns,rows,cbw,|this,child| {
@@ -1162,6 +1163,7 @@ impl<'a> Layouter<'a> {
                 let rows=if row_request {row_source} else {None};
                 let mut nested=self.with_subgrid(child,Some(columns),rows,cbw,|this,child|this.subgrid_axis_contributions(child,false,None,phase));
                 for c in &mut nested {c.start+=it.area.col.0 as usize;c.end+=it.area.col.0 as usize;}
+                self.grid_work.charge(nested.len());
                 out.extend(nested);
             } else if row_request&&row_source.is_some() {
                 let contribution=self.with_subgrid(child,None,row_source,cbw,|this,child|this.column_contribution(child,it,cbw));
@@ -1200,6 +1202,7 @@ impl<'a> Layouter<'a> {
             if !subgrid::requests(&b.children[it.idx]).1 {
                 continue;
             }
+            self.grid_work.charge(1);
             let (_,aw)=span_size(&cols.tracks,col_pos,it.area.col.0 as usize,it.area.col.1 as usize);
             let child=&mut b.children[it.idx];
             let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names));
@@ -1210,6 +1213,7 @@ impl<'a> Layouter<'a> {
                 this.subgrid_axis_contributions(child,true,Some(inner_w),phase)
             });
             for c in &mut nested {c.start+=it.area.row.0 as usize;c.end+=it.area.row.0 as usize;}
+            self.grid_work.charge(nested.len());
             out.extend(nested);
         }
         out
