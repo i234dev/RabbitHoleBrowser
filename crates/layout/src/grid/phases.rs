@@ -1,0 +1,418 @@
+//! Caller-owned history for one per-axis Grid sizing operation.
+//!
+//! This checkpoint does not select a new used size. Estimates, intrinsic
+//! constraints and completed axis results remain different types. Results
+//! cannot be looked up by placement shape or reused with another input id.
+use std::rc::Rc;
+
+use super::{Contribution, GridItem, GridSpace, TrackList};
+use super::subgrid::{self, AxisInheritance, WorkBudget};
+use crate::tree::WmKind;
+use rabbithole_style::ContentDistribution;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GridAxis { Columns, Rows }
+impl GridAxis {
+    fn index(self)->usize {match self {Self::Columns=>0,Self::Rows=>1}}
+    fn opposite(self)->Self {match self {Self::Columns=>Self::Rows,Self::Rows=>Self::Columns}}
+}
+
+/// These are the passes of Grid2 §12.1, not the steps within track sizing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MeasurePoint { Columns, Rows, AdjustColumns, AdjustRows }
+impl MeasurePoint {
+    fn rank(self)->u8 {match self {Self::Columns=>0,Self::Rows=>1,Self::AdjustColumns=>2,Self::AdjustRows=>3}}
+    pub(super) fn axis(self)->GridAxis {match self {Self::Columns|Self::AdjustColumns=>GridAxis::Columns,_=>GridAxis::Rows}}
+    pub(super) fn is_adjustment(self)->bool {matches!(self,Self::AdjustColumns|Self::AdjustRows)}
+}
+
+/// Operation identity isolates intrinsic-min, intrinsic-max and final layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OperationKind { IntrinsicMin, IntrinsicMax, Layout }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum AvailableSpace {
+    Definite(f32),
+    MinContent,
+    MaxContent,
+    Indefinite,
+}
+impl AvailableSpace {
+    pub(super) fn constraint(self)->Option<GridSpace> {
+        match self {
+            Self::Definite(size)=>Some(GridSpace::Definite(size)),
+            Self::MinContent=>Some(GridSpace::MinContent),
+            Self::MaxContent=>Some(GridSpace::MaxContent),
+            Self::Indefinite=>None,
+        }
+    }
+    fn validate(self) {
+        if let Self::Definite(size)=self {assert!(size.is_finite()&&size>=0.,"Invalid definite Grid measurement space");}
+    }
+}
+
+/// An estimate of the perpendicular span is not an intrinsic constraint.
+/// Unknown tracks retain line metadata, but expose no numeric used geometry.
+#[derive(Clone, Debug)]
+pub(super) struct PerpendicularEstimate {
+    line_names:Vec<Vec<String>>,
+    definite:Option<AxisInheritance>,
+}
+impl PerpendicularEstimate {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_tracks(list:&TrackList,start:usize,end:usize,gap:f32,names:bool,available:Option<f32>,align:ContentDistribution,budget:&mut WorkBudget)->Self {
+        budget.tracks(list);
+        budget.tracks(list);
+        let end=end.min(list.tracks.len());let start=start.min(end);
+        let line_names=if names {list.names[start..=end].to_vec()} else {vec![Vec::new();end-start+1]};
+        let source=(start<end).then(||subgrid::fixed_section_aligned(list,start,end,gap,names,available,align)).flatten();
+        let definite=source.filter(|source|matches!(source,AxisInheritance::Tracks(axis) if axis.definite));
+        Self{line_names,definite}
+    }
+    pub(super) fn is_infinite(&self)->bool {self.definite.is_none()}
+    pub(super) fn line_names(&self)->&[Vec<String>] {&self.line_names}
+    pub(super) fn definite_geometry(&self)->Option<&AxisInheritance> {self.definite.as_ref()}
+}
+
+/// Geometry is supplied afresh at every entry, including when track counts
+/// and placement did not change. The root measurement point is never swapped;
+/// an orthogonal wrapper swaps only its interpretation in the local axes.
+#[derive(Clone, Debug)]
+pub(super) struct MeasureInputs {
+    pub(super) spaces:[AvailableSpace;2],
+    pub(super) gaps:[f32;2],
+    pub(super) columns:Option<AxisInheritance>,
+    pub(super) rows:Option<AxisInheritance>,
+    swapped:bool,
+}
+impl MeasureInputs {
+    pub(super) fn new(spaces:[AvailableSpace;2],gaps:[f32;2],columns:Option<AxisInheritance>,rows:Option<AxisInheritance>)->Self {
+        for space in spaces {space.validate();}
+        Self{spaces,gaps,columns,rows,swapped:false}
+    }
+    pub(super) fn local_axis(&self,point:MeasurePoint)->GridAxis {
+        if self.swapped {point.axis().opposite()} else {point.axis()}
+    }
+    pub(super) fn through_wrapper(&self,kind:WmKind,budget:&mut WorkBudget)->Self {
+        budget.charge(subgrid::source_work(&self.columns).saturating_add(subgrid::source_work(&self.rows)).saturating_mul(2));
+        let (columns,rows)=subgrid::through_wrapper(self.columns.clone(),self.rows.clone(),kind);
+        Self{spaces:[self.spaces[1],self.spaces[0]],gaps:[self.gaps[1],self.gaps[0]],columns,rows,swapped:!self.swapped}
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct MeasurementId { operation:Rc<()>, sequence:u64 }
+impl PartialEq for MeasurementId {
+    fn eq(&self,other:&Self)->bool {Rc::ptr_eq(&self.operation,&other.operation)&&self.sequence==other.sequence}
+}
+impl Eq for MeasurementId {}
+
+/// Identity follows the concrete projected item slot, including a lanes
+/// item's hypothetical area. Geometry changes still require a fresh entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SlotKey {
+    item:usize,
+    columns:(i32,i32),
+    rows:(i32,i32),
+    names:(bool,bool),
+    automatic:bool,
+}
+impl SlotKey {
+    pub(super) fn of(item:&GridItem)->Self {
+        Self{item:item.idx,columns:item.area.col,rows:item.area.row,names:(item.column_names,item.row_names),automatic:item.parent_lanes_auto}
+    }
+}
+
+/// A true min-content probe is separate from Contribution.min, which may be
+/// the smaller minimum contribution after an explicit minimum/overflow rule.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct MinContentProbe { path:Vec<usize>, value:f32 }
+impl MinContentProbe {
+    pub(super) fn new(path:&[usize],value:f32,budget:&mut WorkBudget)->Self {
+        assert!(value.is_finite(),"Invalid Grid min-content probe");
+        budget.charge(path.len().saturating_add(1));
+        Self{path:path.to_vec(),value}
+    }
+}
+
+/// Construction performs complete track sizing or accepts an already-used
+/// inherited axis. A partly initialized/maximized list cannot be recorded as
+/// an axis result merely because it has numeric base sizes.
+pub(super) struct CompletedAxis {
+    tracks:TrackList,
+    space:Option<GridSpace>,
+}
+impl CompletedAxis {
+    pub(super) fn standalone(mut tracks:TrackList,contributions:&[Contribution],space:GridSpace,gap:f32,stretch:bool,budget:&mut WorkBudget)->Self {
+        assert!(tracks.inherited.is_none(),"Standalone completion of an inherited Grid axis");
+        budget.charge(tracks.tracks.len().saturating_add(contributions.len()).saturating_mul(3));
+        super::size_tracks_with_space(&mut tracks.tracks,contributions,space,gap,stretch);
+        Self{tracks,space:Some(space)}
+    }
+    pub(super) fn inherited(tracks:TrackList,budget:&mut WorkBudget)->Self {
+        assert!(tracks.inherited.as_ref().is_some_and(|axis|axis.definite),"Grid placement estimate is not a used inherited axis");
+        budget.charge(tracks.tracks.len());
+        Self{tracks,space:None}
+    }
+    pub(super) fn tracks(&self)->&TrackList {&self.tracks}
+    pub(super) fn into_tracks(self)->TrackList {self.tracks}
+}
+
+#[derive(Clone, Debug)]
+struct Entry { id:MeasurementId, point:MeasurePoint, inputs:MeasureInputs }
+
+/// Only a completed axis is recorded. Partial bases are never a result.
+pub(super) struct AxisRecord {
+    entry:Entry,
+    pub(super) tracks:TrackList,
+    pub(super) contributions:Vec<Contribution>,
+    pub(super) completed_space:Option<GridSpace>,
+    min_content:Vec<MinContentProbe>,
+}
+
+impl AxisRecord {
+    pub(super) fn producer(&self)->MeasurePoint {self.entry.point}
+    pub(super) fn inputs(&self)->&MeasureInputs {&self.entry.inputs}
+}
+
+pub(super) struct GridOperation {
+    kind:OperationKind,
+    token:Rc<()>,
+    next:u64,
+    active:Option<Entry>,
+    axes:[Option<AxisRecord>;2],
+    children:Vec<(SlotKey,GridOperation)>,
+}
+impl GridOperation {
+    pub(super) fn new(kind:OperationKind,budget:&mut WorkBudget)->Self {
+        budget.charge(1);
+        Self{kind,token:Rc::new(()),next:0,active:None,axes:[None,None],children:Vec::new()}
+    }
+    pub(super) fn child(&mut self,key:SlotKey,budget:&mut WorkBudget)->&mut Self {
+        budget.charge(self.children.len().saturating_add(1));
+        if let Some(index)=self.children.iter().position(|(old,_)|*old==key) {return &mut self.children[index].1;}
+        budget.charge(1);
+        let child=Self::new(self.kind,budget);
+        self.children.push((key,child));
+        &mut self.children.last_mut().unwrap().1
+    }
+    pub(super) fn begin(&mut self,point:MeasurePoint,inputs:MeasureInputs,budget:&mut WorkBudget)->MeasurementId {
+        if let Some(old)=&self.active {
+            assert!(point.rank()>=old.point.rank(),"Grid measurement pass moved backwards");
+            assert!(!point.is_adjustment()||point!=old.point,"Grid adjustment repeated");
+        }
+        budget.charge(1);
+        let sequence=self.next.checked_add(1).expect("Grid measurement id exhausted");
+        let id=MeasurementId{operation:self.token.clone(),sequence};
+        self.next=sequence;
+        self.active=Some(Entry{id:id.clone(),point,inputs});
+        id
+    }
+    /// Every call records freshly measured inputs. Comparison uses only true
+    /// min-content probes; a max-only change must not request an adjustment.
+    pub(super) fn record(&mut self,id:&MeasurementId,completed:&CompletedAxis,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
+        let entry=self.active.as_ref().filter(|entry|entry.id==*id).expect("Stale Grid measurement result");
+        let axis=entry.inputs.local_axis(entry.point).index();
+        let tracks=&completed.tracks;
+        budget.tracks(tracks);
+        budget.charge(contributions.len().saturating_mul(3));
+        for probe in probes {budget.charge(probe.path.len().saturating_add(1));}
+        let changed=self.axes[axis].as_ref().is_some_and(|before|before.min_content!=probes);
+        let record=AxisRecord{entry:entry.clone(),tracks:tracks.clone(),contributions:contributions.to_vec(),completed_space:completed.space,min_content:probes.to_vec()};
+        self.axes[axis]=Some(record);
+        changed
+    }
+    pub(super) fn result(&self,id:&MeasurementId)->Option<&AxisRecord> {
+        let entry=self.active.as_ref().filter(|entry|entry.id==*id)?;
+        self.axes[entry.inputs.local_axis(entry.point).index()].as_ref().filter(|record|record.entry.id==*id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::{Sizing, Track};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn list(sizes:&[(Sizing,Sizing)])->TrackList {
+        TrackList {
+            tracks:sizes.iter().map(|&(min,max)|Track::new(min,max)).collect(),
+            names:(0..=sizes.len()).map(|i|vec![format!("line-{i}")]).collect(),
+            inherited:None,
+        }
+    }
+
+    fn source(sizes:&[f32],gap:f32)->AxisInheritance {
+        let mut list=list(&sizes.iter().map(|&size|(Sizing::Fixed(size),Sizing::Fixed(size))).collect::<Vec<_>>());
+        let mut position=0.;
+        let positions:Vec<_>=sizes.iter().enumerate().map(|(i,&size)| {
+            list.tracks[i].base=size;
+            let start=position;position+=size+gap;start
+        }).collect();
+        subgrid::section(&list,&positions,0,sizes.len(),gap,true)
+    }
+
+    fn inputs()->MeasureInputs {
+        MeasureInputs::new([AvailableSpace::MaxContent,AvailableSpace::Indefinite],[2.,3.],None,None)
+    }
+
+    fn completed(contributions:&[Contribution],budget:&mut WorkBudget)->CompletedAxis {
+        CompletedAxis::standalone(list(&[(Sizing::Auto,Sizing::Auto)]),contributions,GridSpace::MaxContent,0.,false,budget)
+    }
+
+    fn contribution(min:f32,max:f32)->Contribution {Contribution{start:0,end:1,min,max}}
+
+    fn key(column:i32)->SlotKey {
+        SlotKey{item:7,columns:(column,column+1),rows:(0,1),names:(true,true),automatic:true}
+    }
+
+    fn tracks(source:&Option<AxisInheritance>)->&subgrid::SharedTracks {
+        let Some(AxisInheritance::Tracks(axis))=source else {panic!("Missing tracks")};axis
+    }
+
+    #[test]
+    fn availability_keeps_infinite_zero_and_intrinsic_constraints_distinct() {
+        assert_eq!(AvailableSpace::Indefinite.constraint(),None);
+        assert_eq!(AvailableSpace::Definite(0.).constraint(),Some(GridSpace::Definite(0.)));
+        assert_eq!(AvailableSpace::MinContent.constraint(),Some(GridSpace::MinContent));
+        assert_eq!(AvailableSpace::MaxContent.constraint(),Some(GridSpace::MaxContent));
+        assert!(catch_unwind(||MeasureInputs::new([AvailableSpace::Definite(f32::NAN),AvailableSpace::Indefinite],[0.,0.],None,None)).is_err());
+    }
+
+    #[test]
+    fn initial_estimate_retains_names_and_never_exposes_placement_zero_as_used_size() {
+        let mut budget=WorkBudget::default();
+        let list=list(&[(Sizing::Fixed(10.),Sizing::Auto)]);
+        let estimate=PerpendicularEstimate::from_tracks(&list,0,1,0.,true,None,ContentDistribution::FlexStart,&mut budget);
+        assert!(estimate.is_infinite());assert!(estimate.definite_geometry().is_none());
+        assert_eq!(estimate.line_names(),list.names.as_slice());
+        let empty=PerpendicularEstimate::from_tracks(&list,1,1,0.,true,None,ContentDistribution::FlexStart,&mut budget);
+        assert!(empty.is_infinite());assert_eq!(empty.line_names(),&list.names[1..=1]);
+        let zero=list_of_zero();
+        let estimate=PerpendicularEstimate::from_tracks(&zero,0,1,0.,true,None,ContentDistribution::FlexStart,&mut budget);
+        assert!(!estimate.is_infinite());
+        let Some(AxisInheritance::Tracks(axis))=estimate.definite_geometry() else {panic!("Missing definite zero")};
+        assert_eq!(axis.extent(),0.);
+    }
+
+    fn list_of_zero()->TrackList {list(&[(Sizing::Fixed(0.),Sizing::Fixed(0.))])}
+
+    #[test]
+    fn definite_perpendicular_estimate_floors_maxima_and_preserves_distribution() {
+        let mut budget=WorkBudget::default();
+        let list=list(&[(Sizing::Fixed(70.),Sizing::Fixed(50.)),(Sizing::Fixed(50.),Sizing::Fixed(50.))]);
+        let estimate=PerpendicularEstimate::from_tracks(&list,0,2,0.,true,Some(300.),ContentDistribution::SpaceBetween,&mut budget);
+        let Some(AxisInheritance::Tracks(axis))=estimate.definite_geometry() else {panic!("Missing fixed estimate")};
+        assert_eq!(axis.sizes,[70.,50.]);assert_eq!(axis.starts,[0.,250.]);
+    }
+
+    #[test]
+    fn wrappers_map_axes_sources_spaces_and_gaps_without_restarting_parent_point() {
+        let mut budget=WorkBudget::default();
+        let outer=MeasureInputs::new([AvailableSpace::MaxContent,AvailableSpace::Definite(90.)],[5.,7.],Some(source(&[20.,40.],5.)),Some(source(&[10.,30.],7.)));
+        for kind in [WmKind::Cw,WmKind::Ccw,WmKind::Reflect] {
+            let inner=outer.through_wrapper(kind,&mut budget);
+            assert_eq!(inner.local_axis(MeasurePoint::Columns),GridAxis::Rows);
+            assert_eq!(inner.local_axis(MeasurePoint::AdjustRows),GridAxis::Columns);
+            assert_eq!(inner.spaces,[AvailableSpace::Definite(90.),AvailableSpace::MaxContent]);
+            assert_eq!(inner.gaps,[7.,5.]);
+            let columns=tracks(&inner.columns);let rows=tracks(&inner.rows);
+            assert_eq!(columns.sizes,if kind==WmKind::Ccw {vec![30.,10.]} else {vec![10.,30.]});
+            assert_eq!(rows.sizes,if kind==WmKind::Cw {vec![40.,20.]} else {vec![20.,40.]});
+            assert_eq!(columns.names,if kind==WmKind::Ccw {vec![vec!["line-2".to_owned()],vec!["line-1".to_owned()],vec!["line-0".to_owned()]]} else {vec![vec!["line-0".to_owned()],vec!["line-1".to_owned()],vec!["line-2".to_owned()]]});
+        }
+        let restored=outer.through_wrapper(WmKind::Cw,&mut budget).through_wrapper(WmKind::Ccw,&mut budget);
+        assert_eq!(restored.local_axis(MeasurePoint::Columns),GridAxis::Columns);
+        assert_eq!(restored.spaces,outer.spaces);assert_eq!(restored.gaps,outer.gaps);
+        assert_eq!(tracks(&restored.columns).sizes,tracks(&outer.columns).sizes);
+        assert_eq!(tracks(&restored.rows).starts,tracks(&outer.rows).starts);
+    }
+
+    #[test]
+    fn completed_axes_keep_actual_maximization_separate_from_intrinsic_minimum() {
+        let mut budget=WorkBudget::default();let contributions=[contribution(10.,48.)];
+        let min=CompletedAxis::standalone(list(&[(Sizing::Auto,Sizing::Auto)]),&contributions,GridSpace::MinContent,0.,false,&mut budget);
+        let max=completed(&contributions,&mut budget);
+        assert_eq!(min.tracks().tracks[0].base,10.);
+        assert_eq!(max.tracks().tracks[0].base,48.);
+        let placement=subgrid::sizing_section_aligned(&list(&[(Sizing::Auto,Sizing::Auto)]),0,1,0.,true,None,ContentDistribution::FlexStart);
+        let AxisInheritance::Tracks(axis)=placement else {panic!("Missing placement")};
+        let estimated=TrackList{tracks:vec![Track::new(Sizing::Fixed(0.),Sizing::Fixed(0.))],names:axis.names.clone(),inherited:Some(axis)};
+        assert!(catch_unwind(AssertUnwindSafe(||CompletedAxis::inherited(estimated,&mut budget))).is_err());
+    }
+
+    #[test]
+    fn equal_shape_with_new_opposite_geometry_requires_a_fresh_result() {
+        let mut budget=WorkBudget::default();let contributions=[contribution(10.,40.)];
+        let done=completed(&contributions,&mut budget);
+        let probes=[MinContentProbe::new(&[7],10.,&mut budget)];
+        let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let first=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        operation.record(&first,&done,&contributions,&probes,&mut budget);
+        let mut changed=inputs();changed.gaps[1]=25.;changed.rows=Some(source(&[50.,50.],25.));
+        let second=operation.begin(MeasurePoint::Columns,changed,&mut budget);
+        assert_ne!(first,second);assert!(operation.result(&first).is_none());assert!(operation.result(&second).is_none());
+        operation.record(&second,&done,&contributions,&probes,&mut budget);
+        let record=operation.result(&second).unwrap();
+        assert_eq!(record.producer(),MeasurePoint::Columns);
+        assert_eq!(record.inputs().gaps,[2.,25.]);assert_eq!(tracks(&record.inputs().rows).starts,[0.,75.]);
+    }
+
+    #[test]
+    fn only_true_min_content_changes_trigger_adjustment_with_both_fresh_contributions() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let first=[contribution(0.,40.)];let same_min=[MinContentProbe::new(&[7],10.,&mut budget)];
+        let done=completed(&first,&mut budget);
+        let id=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        assert!(!operation.record(&id,&done,&first,&same_min,&mut budget));
+        let max_only=[contribution(0.,80.)];let done=completed(&max_only,&mut budget);
+        let id=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        assert!(!operation.record(&id,&done,&max_only,&same_min,&mut budget));
+        // A minimum contribution can stay zero because of min-width:0 even
+        // when the real min-content size changes after the opposite pass.
+        let changed_min=[MinContentProbe::new(&[7],25.,&mut budget)];
+        let fresh=[contribution(0.,90.)];let done=completed(&fresh,&mut budget);
+        let id=operation.begin(MeasurePoint::AdjustColumns,inputs(),&mut budget);
+        assert!(operation.record(&id,&done,&fresh,&changed_min,&mut budget));
+        let record=operation.result(&id).unwrap();assert_eq!(record.contributions,fresh);
+        assert_eq!(record.completed_space,Some(GridSpace::MaxContent));assert_eq!(record.tracks.tracks[0].base,90.);
+    }
+
+    #[test]
+    fn operation_and_hypothetical_slot_ids_cannot_alias() {
+        let mut budget=WorkBudget::default();
+        let mut parent=GridOperation::new(OperationKind::IntrinsicMin,&mut budget);
+        let first=parent.child(key(0),&mut budget).begin(MeasurePoint::Columns,inputs(),&mut budget);
+        let second=parent.child(key(1),&mut budget).begin(MeasurePoint::Columns,inputs(),&mut budget);
+        assert_ne!(first,second);
+        assert!(parent.child(key(0),&mut budget).result(&second).is_none());
+        let mut max=GridOperation::new(OperationKind::IntrinsicMax,&mut budget);
+        let third=max.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        assert_ne!(first,third);assert!(max.result(&first).is_none());
+    }
+
+    #[test]
+    fn retained_copies_are_precharged_and_failure_does_not_install_a_partial_result() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let contributions=[contribution(10.,40.)];let done=completed(&contributions,&mut budget);
+        let probes=[MinContentProbe::new(&[7],10.,&mut budget)];
+        let id=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        let mut short=WorkBudget::limited_for_test(1);
+        assert!(catch_unwind(AssertUnwindSafe(||operation.record(&id,&done,&contributions,&probes,&mut short))).is_err());
+        assert!(operation.result(&id).is_none());
+        operation.record(&id,&done,&contributions,&probes,&mut budget);
+        assert_eq!(operation.result(&id).unwrap().tracks.tracks[0].base,40.);
+    }
+
+    #[test]
+    fn backward_passes_and_second_adjustments_fail_before_replacing_active_results() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let contributions=[contribution(10.,40.)];let done=completed(&contributions,&mut budget);
+        let id=operation.begin(MeasurePoint::AdjustColumns,inputs(),&mut budget);
+        operation.record(&id,&done,&contributions,&[],&mut budget);
+        assert!(catch_unwind(AssertUnwindSafe(||operation.begin(MeasurePoint::Rows,inputs(),&mut budget))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(||operation.begin(MeasurePoint::AdjustColumns,inputs(),&mut budget))).is_err());
+        assert!(operation.result(&id).is_some());
+        operation.begin(MeasurePoint::AdjustRows,inputs(),&mut budget);
+    }
+}

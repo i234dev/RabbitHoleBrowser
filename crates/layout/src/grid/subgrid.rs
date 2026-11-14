@@ -25,6 +25,9 @@ impl Drop for DepthGuard {
     fn drop(&mut self) {self.0.set(self.0.get().saturating_sub(1));}
 }
 impl WorkBudget {
+    #[cfg(test)]
+    pub(super) fn limited_for_test(remaining:usize)->Self {Self{remaining,depth:None}}
+
     pub(super) fn charge(&mut self,work:usize) {
         let Some(remaining)=self.remaining.checked_sub(work) else {panic!("Subgrid layout work budget exceeded");};
         self.remaining=remaining;
@@ -58,7 +61,7 @@ impl WorkBudget {
     }
 }
 
-fn source_work(source:&Option<AxisInheritance>)->usize {
+pub(super) fn source_work(source:&Option<AxisInheritance>)->usize {
     match source {
         Some(AxisInheritance::Tracks(axis))=>axis.sizes.len().saturating_mul(8).saturating_add(axis.names.iter().flatten().map(|name|name.len()).fold(0,usize::saturating_add)),
         _=>1,
@@ -114,7 +117,7 @@ fn reverse(source: Option<AxisInheritance>) -> Option<AxisInheritance> {
 }
 
 /// Express parent-space sources in an orthogonal wrapper's inner space.
-fn through_wrapper(columns: Option<AxisInheritance>, rows: Option<AxisInheritance>, kind: WmKind) -> (Option<AxisInheritance>,Option<AxisInheritance>) {
+pub(super) fn through_wrapper(columns: Option<AxisInheritance>, rows: Option<AxisInheritance>, kind: WmKind) -> (Option<AxisInheritance>,Option<AxisInheritance>) {
     let inner_columns=if kind==WmKind::Ccw {reverse(rows)} else {rows};
     let inner_rows=if kind==WmKind::Cw {reverse(columns)} else {columns};
     (inner_columns,inner_rows)
