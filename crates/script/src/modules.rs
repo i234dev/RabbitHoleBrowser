@@ -258,10 +258,10 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
     if let Some(id) = state().borrow().modules.cache.get(&key) {
         return Ok(*id);
     }
-    // Fetching and compiling a dependency is not script execution: the
-    // time it takes (network, size of the graph) moves the running
-    // script's deadline instead of eating its budget.
-    let started = std::time::Instant::now();
+    // The host accounts for synchronous fetch time (EngineEnv::fetch uses
+    // exclude_from_watchdog). Compilation is accounted separately below;
+    // restarting the deadline here would reset the source task's CPU clock,
+    // pending host credit and regexp expiration during a cross-realm loan.
     // blob: URLs (URL.createObjectURL) are served from the page's store.
     let resp = if url.scheme == "blob" {
         crate::fetch::blob_url_response(&key).ok_or_else(|| format!("no blob for {key}"))
@@ -281,17 +281,19 @@ fn load_module(realm: &mut Realm, referrer: &str, specifier: &str) -> Result<Mod
         }
     };
     let id = match kind {
-        ModuleKind::JavaScript => match realm.compile_module(&text, &key) {
-            Ok(id) => {
-                if let Some(d) = realm.deadline {
-                    realm.set_deadline(Some(d + started.elapsed()));
-                }
-                id
+        ModuleKind::JavaScript => {
+            let started = std::time::Instant::now();
+            let compiled = realm.compile_module(&text, &key);
+            if realm.deadline.is_some() {
+                rabbithole_js::exclude_from_watchdog(started.elapsed());
             }
-            Err(e) => {
-                let msg = realm.error_to_string(&e);
-                host::log("error", &format!("Failed to compile module \"{specifier}\" ({key}): {msg}"));
-                return Err(e);
+            match compiled {
+                Ok(id) => id,
+                Err(e) => {
+                    let msg = realm.error_to_string(&e);
+                    host::log("error", &format!("Failed to compile module \"{specifier}\" ({key}): {msg}"));
+                    return Err(e);
+                }
             }
         },
         ModuleKind::Json => {
@@ -351,6 +353,111 @@ pub(crate) fn run_module_script(realm: &mut Realm, source: &str, url: &str) -> R
             let msg = realm.error_to_string(&e);
             host::log("error", &format!("Uncaught {msg} ({url})"));
             Err(msg)
+        }
+    }
+}
+
+#[cfg(test)]
+mod watchdog_credit_tests {
+    use super::*;
+    use crate::tests::MockEnv;
+    use crate::{FrameCall, FrameReply, ScriptHost};
+    use std::time::{Duration, Instant};
+
+    // An explicit test double for host credit; no sleep/network is involved.
+    // Production EngineEnv::fetch independently credits its measured request
+    // duration in engine/src/scripting.rs. The large credit is numerical and
+    // makes its loss/duplication distinct from compilation time.
+    const HOST_CREDIT: Duration = Duration::from_secs(60);
+    const EMPTY_ARGS: &str = r#"{"t":"a","id":0,"v":[],"l":0}"#;
+
+    fn fixture(success: bool) -> (MockEnv, ScriptHost) {
+        let mut env = MockEnv::new("");
+        let body = if success {
+            "export const result=7;".to_owned()
+        } else {
+            // Parse enough input to make compilation credit observable even
+            // on a coarse host clock, then fail with a real syntax error.
+            let prefix: String = (0..128).map(|i| format!("const fixture{i}={i};\n")).collect();
+            prefix + "export const = ;"
+        };
+        env.fetches.insert("https://example.test/dir/fixture.js".into(), (200, "text/javascript".into(), body));
+        env.fetch_watchdog_credit = HOST_CREDIT;
+        let host = ScriptHost::new(&mut env);
+        (env, host)
+    }
+
+    fn consume_and_check_credit(realm: &mut Realm, original_deadline: Instant, total_elapsed: Duration) {
+        // Expire relative to the ORIGINAL clock origin, not current wall
+        // time, so descheduling cannot suppress the consumer checkpoint.
+        let expired = original_deadline - Duration::from_secs(31);
+        realm.deadline = Some(expired);
+        assert!(realm.check_watchdog().is_ok());
+        let credit = realm.deadline.unwrap().duration_since(expired);
+        assert!(credit > HOST_CREDIT, "compilation credit missing: {credit:?}");
+        assert!(credit <= HOST_CREDIT + total_elapsed, "host fetch credited twice: {credit:?} > {:?}", HOST_CREDIT + total_elapsed);
+        realm.set_deadline(None);
+    }
+
+    fn load_once(success: bool) {
+        let (mut env, mut host) = fixture(success);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        host.realm().set_deadline(Some(deadline));
+        let before = host.realm().watchdog_state();
+        let started = Instant::now();
+        let result = host.enter(&mut env, |realm| {
+            load_module(realm, "https://example.test/dir/page.html", "./fixture.js")
+                .map(|_| ())
+                .map_err(|error| realm.error_to_string(&error))
+        });
+        let total_elapsed = started.elapsed();
+        assert_eq!(result.is_ok(), success, "{result:?}");
+        // Neither CPU origin/deadline nor termination is reset by successful
+        // compilation or the syntax-error path. Credit stays TLS pending.
+        assert_eq!(host.realm().watchdog_state(), before);
+        consume_and_check_credit(host.realm(), deadline, total_elapsed);
+    }
+
+    #[test]
+    fn javascript_dependency_success_keeps_host_credit_and_the_task_clock() {
+        load_once(true);
+    }
+
+    #[test]
+    fn javascript_dependency_syntax_error_credits_compilation_without_reset() {
+        load_once(false);
+    }
+
+    fn compile_dependency(realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
+        load_module(realm, "https://example.test/dir/page.html", "./fixture.js")?;
+        Ok(Value::Number(7.0))
+    }
+
+    #[test]
+    fn borrowed_global_call_crossing_the_module_loader_returns_credit_and_restores_its_target() {
+        for success in [true, false] {
+            let (mut env, mut host) = fixture(success);
+            let function = host.realm().new_native_function("compileFixture", 0, compile_dependency);
+            host.realm().define_global("compileFixture", Value::Object(function));
+            let idle = host.realm().watchdog_state();
+            let idle_budget = host.realm().task_budget;
+            let mut source = Realm::new();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            source.set_deadline(Some(deadline));
+            let before = source.watchdog_state();
+            let mut task = before;
+            let started = Instant::now();
+            // A real global-call bridge invokes a test native that enters the
+            // real dependency loader synchronously. No fake module results.
+            let result = host.frame_call_with_watchdog(&mut env, FrameCall::CallGlobal { name: "compileFixture".into(), args: EMPTY_ARGS.into() }, &mut task);
+            let total_elapsed = started.elapsed();
+            assert_eq!(matches!(result, FrameReply::Value(ref value) if value == "7"), success, "{result:?}");
+            if !success { assert!(matches!(result, FrameReply::Error(_)), "{result:?}"); }
+            assert_eq!(task, before);
+            assert_eq!(host.realm().watchdog_state(), idle);
+            assert_eq!(host.realm().task_budget, idle_budget);
+            source.replace_watchdog_state(task);
+            consume_and_check_credit(&mut source, deadline, total_elapsed);
         }
     }
 }

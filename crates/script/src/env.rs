@@ -67,6 +67,9 @@ pub trait HostEnv {
     fn scroll(&self) -> (f32, f32);
     fn set_scroll(&mut self, x: f32, y: f32);
     /// Synchronous resource fetch (same cookie jar / caches as the page).
+    /// The host excludes measured synchronous fetch work with
+    /// `exclude_from_watchdog`; the module loader accounts separately for
+    /// JavaScript compilation and must not compensate fetch time twice.
     fn fetch(&mut self, req: Request) -> Result<Response, String>;
     /// Start a fetch on a background thread; the result arrives on the
     /// returned channel. `None` (the default) means "not supported": the

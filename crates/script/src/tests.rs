@@ -27,6 +27,8 @@ pub(crate) struct MockEnv {
     /// Simulate a host failure after returning an effective watchdog loan.
     pub(crate) frame_watchdog_outcome: Option<rabbithole_js::WatchdogState>,
     pub(crate) frame_watchdog_panic: bool,
+    /// Test-only host credit, modeling EngineEnv::fetch without real I/O.
+    pub(crate) fetch_watchdog_credit: std::time::Duration,
     /// Real network client for WebSocket / EventSource tests.
     pub(crate) net: Option<rabbithole_net::Fetcher>,
 }
@@ -52,6 +54,7 @@ impl MockEnv {
             net: None,
             frame_watchdog_outcome: None,
             frame_watchdog_panic: false,
+            fetch_watchdog_credit: std::time::Duration::ZERO,
         }
     }
 
@@ -108,6 +111,9 @@ impl HostEnv for MockEnv {
         self.scroll = (x, y);
     }
     fn fetch(&mut self, req: Request) -> Result<Response, String> {
+        if !self.fetch_watchdog_credit.is_zero() {
+            rabbithole_js::exclude_from_watchdog(self.fetch_watchdog_credit);
+        }
         let key = req.url.to_string();
         match self.fetches.get(&key) {
             Some((status, ct, body)) => Ok(Response {

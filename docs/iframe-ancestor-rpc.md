@@ -3,7 +3,7 @@
 This candidate extends the existing Engine cross-realm bridge for global
 property reads and function calls from an iframe to a reachable, inactive
 ancestor or sibling. It is based on source 34780e675d84a769bfb427e07af34d9ba053a0ae.
-The source changes and twenty-one tests (fourteen Engine, five JS, two Script) have not been
+The source changes and twenty-four tests (fourteen Engine, five JS, five Script) have not been
 compiled or executed yet.
 
 The reverse route accepts only HTTP(S) documents whose effective origin equals
@@ -30,10 +30,22 @@ state; they do not change VM/JIT loops, ABI or watchdog polling rules. Custom
 hosts implementing only the old HostEnv method retain their legacy behavior
 through the default forwarding method.
 
-The pre-existing module dependency loader still explicitly restarts a deadline
-when compensating compilation. That transitive path requires its own follow-up
-before this candidate can claim that the loan survives synchronous module
-loading; it is not covered by the twenty-one tests in this chain.
+The module follow-up removes the old dependency-compilation deadline restart.
+Production EngineEnv::fetch in crates/engine/src/scripting.rs already credits
+its measured synchronous request duration with exclude_from_watchdog. The JS
+module branch starts its separate timer immediately before compile_module and
+credits that interval on success or syntax error when a deadline is enabled.
+It does not credit JSON/CSS processing: JSON.parse can execute page code.
+Disabled deadlines remain disabled. No network timing or module fetch policy
+is changed.
+
+Three module tests use an explicit MockEnv host-credit fixture without I/O or
+sleep. They verify unchanged task state, pending credit consumed exactly once,
+compilation credit bounded by the measured loader interval, syntax failure,
+and a real borrowed global call entering the dependency loader synchronously
+through a test native. Both successful and failed compilation restore the
+idle target and return the source state. These are deterministic local binding
+fixtures, not real-network performance measurements.
 
 Executing frame pages are detached from their owners, including sibling
 calls. Restoration and subsequent input/tick/message effects resolve stable
