@@ -430,7 +430,16 @@ impl Engine {
         };
         let ids = TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()));
         for id in ids {
-            self.with_frame(page, id, &mut drain);
+            let drained = self.with_frame(page, id, &mut drain).unwrap_or(false);
+            if !drained && self.frames.borrow().exists(id) {
+                // A reverse call can itself touch a sibling below its owner.
+                // That context is not below the original calling child.
+                // Preserve its work until the root owns the whole tree again.
+                REVERSE_TOUCHED.with(|t| {
+                    let mut t = t.borrow_mut();
+                    if !t.contains(&id) { t.push(id); }
+                });
+            }
         }
         if !ancestors().is_empty() || page.script.host.is_none() { return; }
         let ids = REVERSE_TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()));
@@ -1449,6 +1458,18 @@ mod ancestor_call_tests {
         finish(&engine, &mut page, 0);
         engine.finish_page_load(&mut page);
         assert_eq!(eval(&engine, &mut page, "observed"), "1");
+    }
+
+    #[test]
+    fn ancestor_calling_a_sibling_keeps_that_siblings_jobs_until_the_owner_returns() {
+        let (mut engine, mut page) = fixture();
+        eval(&engine, &mut page, "function throughSibling(){return frames[1].queue()}");
+        replace_child(&mut engine, &mut page, 1, "https://frame.test/sibling", "<script>var flag=0;function queue(){Promise.resolve().then(()=>flag=1);return 7}</script>");
+        finish(&engine, &mut page, 1);
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "<script>var answer=parent.throughSibling()</script>");
+        finish(&engine, &mut page, 0);
+        assert_eq!(eval(&engine, &mut page, "frames[0].answer"), "7");
+        assert_eq!(eval(&engine, &mut page, "frames[1].flag"), "1");
     }
 
     #[test]
