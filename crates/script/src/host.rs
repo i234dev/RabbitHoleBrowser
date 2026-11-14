@@ -89,8 +89,6 @@ pub struct ObserverReg {
 
 #[allow(dead_code)]
 pub struct HostState {
-    /// Replaced only when document.open replaces this document.
-    pub document_token: Rc<()>,
     pub wrappers: HashMap<NodeRef, ObjectId>,
     /// `childNodes` lists by parent, with the document epoch they were
     /// filled at (one NodeList per node, refreshed in place when the

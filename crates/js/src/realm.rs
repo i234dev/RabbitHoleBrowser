@@ -374,6 +374,9 @@ impl WallDeadlineGuard {
         Self { previous, _thread: std::marker::PhantomData }
     }
 }
+impl WallDeadlineGuard {
+    pub fn expired(&self) -> bool { wall_deadline().is_some_and(|deadline| std::time::Instant::now() >= deadline) }
+}
 impl Drop for WallDeadlineGuard {
     fn drop(&mut self) { WALL_DEADLINE.with(|slot| slot.set(self.previous)); }
 }

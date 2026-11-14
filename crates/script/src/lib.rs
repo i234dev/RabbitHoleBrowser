@@ -297,7 +297,6 @@ impl ScriptHost {
             realm.new_private_symbol(rabbithole_js::JsStr::new("URLSearchParams.url")),
         );
         let state = Rc::new(RefCell::new(HostState {
-            document_token: Rc::new(()),
             wrappers: HashMap::default(),
             child_lists: HashMap::default(),
             protos: HashMap::default(),

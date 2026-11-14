@@ -801,6 +801,10 @@ impl Engine {
     /// Run due timers, rAF callbacks and microtasks. Call from the UI loop;
     /// `Page::next_script_due` says when the next call is needed.
     pub fn tick(&self, page: &mut Page) -> ScriptOutcome {
+        self.tick_tasks(page, None).1
+    }
+
+    fn tick_tasks(&self, page: &mut Page, console_deadline: Option<std::time::Instant>) -> (Result<(), String>, ScriptOutcome) {
         // Images first: install finished background loads, fire their
         // events and advance animations.
         let mut images_changed = self.poll_images(page);
@@ -820,11 +824,19 @@ impl Engine {
         }
         let anim_out = self.dispatch_animation_events(page);
         let link_out = self.fire_link_events(page);
-        let mut out = self.tick_scripts(page);
+        let (result, mut out) = if let Some(deadline) = console_deadline {
+            let now = self.start.elapsed().as_secs_f64() * 1000.0;
+            let result = if page.script.host.is_some() {
+                self.with_console_host(page, |host, env| host.pump_console_tasks(env, now, deadline))
+            } else { Ok(()) };
+            (result, self.settle(page, false))
+        } else { (Ok(()), self.tick_scripts(page)) };
         out.merge(link_out);
         out.merge(anim_out);
-        let frames_out = self.tick_frames(page);
-        out.merge(frames_out);
+        if console_deadline.is_none_or(|deadline| std::time::Instant::now() < deadline) {
+            let frames_out = self.tick_frames(page);
+            out.merge(frames_out);
+        }
         out.relayout |= images_changed || img_out.relayout;
         if out.navigation.is_none() {
             out.navigation = img_out.navigation;
@@ -834,7 +846,7 @@ impl Engine {
         if out.scroll_to.is_none() {
             out.scroll_to = img_out.scroll_to;
         }
-        out
+        (result, out)
     }
 
     /// Idle time until `deadline` (nothing due before it): garbage
@@ -1016,24 +1028,36 @@ impl Engine {
 
     /// Start a rooted observation belonging to this page's live document.
     pub fn start_console_evaluation(&self, page: &mut Page, source: &str, deadline: std::time::Instant) -> (Result<rabbithole_script::ConsoleEvaluation, String>, ScriptOutcome) {
-        let _wall = rabbithole_script::ConsoleDeadline::new(deadline);
-        let result = self.with_console_host(page, |host, env| host.start_console_evaluation(env, source, deadline));
-        (result, self.settle(page, false))
+        let wall = rabbithole_script::ConsoleDeadline::new(deadline);
+        let mut result = self.with_console_host(page, |host, env| host.start_console_evaluation(env, source, deadline));
+        let outcome = self.settle(page, false);
+        if let Ok(evaluation) = &result {
+            if !page.script.host.as_ref().is_some_and(|host| host.console_evaluation_is_current(evaluation, &page.doc)) {
+                result = Err("Console evaluation document was replaced".into());
+            }
+        }
+        if wall.expired() { result = Err("Console evaluation deadline expired".into()); }
+        (result, outcome)
     }
 
     pub fn poll_console_evaluation(&self, page: &mut Page, evaluation: &rabbithole_script::ConsoleEvaluation, deadline: std::time::Instant) -> (Result<rabbithole_script::ConsolePoll, String>, ScriptOutcome) {
-        let _wall = rabbithole_script::ConsoleDeadline::new(deadline);
-        let result = self.with_console_host(page, |host, env| host.poll_console_evaluation(env, evaluation, deadline));
-        (result, self.settle(page, false))
+        let wall = rabbithole_script::ConsoleDeadline::new(deadline);
+        let mut result = self.with_console_host(page, |host, env| host.poll_console_evaluation(env, evaluation, deadline));
+        let outcome = self.settle(page, false);
+        if !page.script.host.as_ref().is_some_and(|host| host.console_evaluation_is_current(evaluation, &page.doc)) {
+            result = Err("Console evaluation document was replaced".into());
+        }
+        if wall.expired() { result = Err("Console evaluation deadline expired".into()); }
+        (result, outcome)
     }
 
     /// Advance ready jobs, timers and network responses, with no quiet-period wait.
     pub fn pump_console_tasks(&self, page: &mut Page, deadline: std::time::Instant) -> (Result<(), String>, ScriptOutcome) {
-        let _wall = rabbithole_script::ConsoleDeadline::new(deadline);
-        if page.script.host.is_none() { return (Ok(()), ScriptOutcome::default()); }
-        let now = self.start.elapsed().as_secs_f64() * 1000.0;
-        let result = self.with_console_host(page, |host, env| host.pump_console_tasks(env, now, deadline));
-        (result, self.settle(page, false))
+        let wall = rabbithole_script::ConsoleDeadline::new(deadline);
+        if wall.expired() { return (Err("Console evaluation deadline expired".into()), ScriptOutcome::default()); }
+        let (mut result, outcome) = self.tick_tasks(page, Some(deadline));
+        if wall.expired() { result = Err("Console evaluation deadline expired".into()); }
+        (result, outcome)
     }
 
     /// Evaluate JavaScript in the page (devtools console / CLI).

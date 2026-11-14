@@ -1219,7 +1219,7 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<Strin
                 // poll, and the handle drops before finish_action replaces it.
                 if outcome.navigation.is_some() { break "Evaluation cancelled: script requested navigation".to_string(); }
                 if Instant::now() >= deadline {
-                    break format!("Promise still pending after {} ms", timeout.as_millis());
+                    break if pending { format!("Promise still pending after {} ms", timeout.as_millis()) } else { format!("Evaluation timed out after {} ms", timeout.as_millis()) };
                 }
                 let (polled, out) = agent.engine.poll_console_evaluation(&mut agent.tabs[ti].frames[0].page, &evaluation, deadline);
                 merge_outcome(&mut outcome, out);

@@ -3,7 +3,7 @@ use rabbithole_agent::{call, Agent, Config};
 use serde_json::json;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Condvar};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -12,6 +12,7 @@ struct Server {
     address: std::net::SocketAddr,
     stop: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<(String, String, String)>>>,
+    release: Arc<(Mutex<bool>, Condvar)>,
     thread: Option<JoinHandle<()>>,
 }
 impl Server {
@@ -20,6 +21,8 @@ impl Server {
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let held = release.clone();
         let stopped = stop.clone();
         let observed = requests.clone();
         let thread = std::thread::spawn(move || {
@@ -44,15 +47,27 @@ impl Server {
                 let method = words.next().unwrap_or("").to_string();
                 let path = words.next().unwrap_or("/").to_string();
                 observed.lock().unwrap().push((method, path.clone(), String::from_utf8_lossy(&body).into_owned()));
+                if path == "/held" {
+                    let (lock, changed) = &*held;
+                    drop(changed.wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(30), |released| !*released).unwrap());
+                }
+                if path == "/pixel.svg" {
+                    let image = "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'><rect width='1' height='1' fill='green'/></svg>";
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", image.len(), image);
+                    continue;
+                }
                 if path == "/slow" { std::thread::sleep(Duration::from_millis(100)); }
-                let html = if path == "/next" || path == "/submit" { "<!doctype html><title>Arrived</title><p>Destination</p>" } else {
+                let html = if path == "/child-open" {
+                    "<!doctype html><p>Child</p><script>setTimeout(()=>{parent.document.open();parent.document.write('<p>Parent replacement</p>');parent.document.close()},10)</script>"
+                } else if path == "/next" || path == "/submit" { "<!doctype html><title>Arrived</title><p>Destination</p>" } else {
                     "<!doctype html><title>Async fixture</title><p id='result'>Original</p><form id='form' method='post' action='/submit'><input name='message' value='causal'></form><script>globalThis.fixtureReady=true;</script>"
                 };
                 let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", html.len(), html);
             }
         });
-        Self { address, stop, requests, thread: Some(thread) }
+        Self { address, stop, requests, release, thread: Some(thread) }
     }
+    fn release(&self) { let (lock, changed) = &*self.release; *lock.lock().unwrap() = true; changed.notify_all(); }
     fn url(&self, path: &str) -> String { format!("http://{}{path}", self.address) }
     fn agent(&self) -> Agent {
         let mut agent = Agent::new(Config { settle_cap: Duration::from_millis(500), ..Config::default() });
@@ -63,6 +78,7 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        self.release();
         let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
         if let Some(thread) = self.thread.take() { thread.join().unwrap(); }
     }
@@ -130,4 +146,43 @@ fn debug_cancels_replaced_document_and_bounds_runaway_microtasks() {
     assert!(result.contains("Promise still pending after 200 ms"), "{result}");
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(eval(&mut agent, "haltDebugLoop=true; 23", 500).contains("\n23\n"));
+}
+
+
+#[test]
+fn debug_async_http_timeout_does_not_wait_for_a_held_response_or_cancel_it() {
+    let server = Server::new();
+    let mut agent = server.agent();
+    let started = Instant::now();
+    let result = eval(&mut agent, "globalThis.heldResponse=fetch('/held').then(r=>r.status); heldResponse", 200);
+    assert!(result.contains("Promise still pending after 200 ms"), "{result}");
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}: {result}", started.elapsed());
+    assert!(server.requests.lock().unwrap().iter().any(|(_, path, _)| path == "/held"));
+    server.release();
+    assert!(eval(&mut agent, "heldResponse", 500).contains("\n200\n"));
+}
+
+#[test]
+fn debug_pumps_iframe_and_image_ready_events_and_cancels_foreign_open() {
+    let server = Server::new();
+    let mut agent = Agent::new(Config { images: true, settle_cap: Duration::from_millis(500), ..Config::default() });
+    call(&mut agent, "open", &json!({"url":server.url("/")})).unwrap();
+    let result = eval(&mut agent, "new Promise((r,j)=>{const f=document.createElement('iframe');f.onload=()=>r(7);f.onerror=()=>j(new Error('frame failed'));f.src='/next';document.body.appendChild(f)})", 1000);
+    assert!(result.contains("\n7\n"), "{result}");
+    let result = eval(&mut agent, "new Promise((r,j)=>{const image=new Image();image.onload=()=>r(image.naturalWidth);image.onerror=()=>j(new Error('image failed'));image.src='/pixel.svg';document.body.appendChild(image)})", 1000);
+    assert!(result.contains("\n1\n"), "{result}");
+    let result = eval(&mut agent, "new Promise(r=>{const f=document.createElement('iframe');f.src='/child-open';document.body.appendChild(f)})", 1000);
+    assert!(result.contains("document was replaced"), "{result}");
+}
+
+#[test]
+fn debug_follow_propagates_navigation_failure_after_observation_closes() {
+    let server = Server::new();
+    let mut agent = server.agent();
+    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = unused.local_addr().unwrap();
+    drop(unused);
+    let source = format!("location.href='http://{address}/unavailable'; 1");
+    let result = call(&mut agent, "debug", &json!({"eval":source,"timeout":500,"follow":true}));
+    assert!(result.is_err(), "follow navigation failure was discarded");
 }

@@ -203,8 +203,27 @@ impl<T> std::ops::DerefMut for Tracked<T> {
     }
 }
 
+/// Identity of one live document incarnation. A rendering/DOM clone owns a
+/// fresh identity, so snapshots cannot keep the original incarnation alive.
+struct DocumentIdentity(std::sync::Arc<()>);
+impl DocumentIdentity {
+    fn new() -> Self { Self(std::sync::Arc::new(())) }
+}
+impl Clone for DocumentIdentity {
+    fn clone(&self) -> Self { Self::new() }
+}
+
+#[derive(Clone, Debug)]
+pub struct DocumentWeak(std::sync::Weak<()>);
+impl DocumentWeak {
+    pub fn is_for(&self, document: &Document) -> bool {
+        self.0.ptr_eq(&std::sync::Arc::downgrade(&document.identity.0))
+    }
+}
+
 #[derive(Clone)]
 pub struct Document {
+    identity: DocumentIdentity,
     pub nodes: Vec<Node>,
     /// Incremented on every mutation made through the `Document` API.
     epoch: u64,
@@ -313,6 +332,7 @@ impl Document {
 
     pub fn new() -> Self {
         Document {
+            identity: DocumentIdentity::new(),
             nodes: vec![Node {
                 parent: None,
                 first_child: None,
@@ -355,6 +375,12 @@ impl Document {
 
     /// Mutation counter: changes whenever the tree, an attribute or text
     /// changes through this API.
+    pub fn weak_identity(&self) -> DocumentWeak { DocumentWeak(std::sync::Arc::downgrade(&self.identity.0)) }
+
+    /// document.open replaces an incarnation while retaining the arena/Realm.
+    /// Ordinary DOM mutations preserve this identity.
+    pub fn replace_identity(&mut self) { self.identity = DocumentIdentity::new(); }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -1532,5 +1558,25 @@ mod tests {
         d.detach(text);
         assert_eq!(d.flat_children(s_default), vec![fallback]);
         assert_eq!(d.connected_shadow_roots(), vec![root]);
+    }
+}
+
+#[cfg(test)]
+mod document_identity_tests {
+    use super::*;
+    #[test]
+    fn document_clones_and_open_do_not_keep_the_old_identity_alive() {
+        let mut document = Document::new();
+        let identity = document.weak_identity();
+        assert!(identity.is_for(&document));
+        let snapshot = document.clone();
+        assert!(!identity.is_for(&snapshot));
+        document.create_element("p", Vec::new());
+        assert!(identity.is_for(&document));
+        document.replace_identity();
+        assert!(!identity.is_for(&document));
+        assert_eq!(identity.0.strong_count(), 0);
+        fn assert_send<T: Send>() {}
+        assert_send::<Document>();
     }
 }

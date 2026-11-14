@@ -9,7 +9,7 @@ use std::time::Instant;
 pub struct ConsoleEvaluation {
     root: Root,
     owner: Weak<RefCell<HostState>>,
-    document: Weak<()>,
+    document: rabbithole_dom::DocumentWeak,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -20,9 +20,10 @@ pub enum ConsolePoll {
 }
 
 impl ScriptHost {
-    fn console_owner(&self, evaluation: &ConsoleEvaluation) -> bool {
+    /// Pure ownership check: safe after settling callbacks, without running JS.
+    pub fn console_evaluation_is_current(&self, evaluation: &ConsoleEvaluation, document: &rabbithole_dom::Document) -> bool {
         evaluation.owner.upgrade().is_some_and(|owner| Rc::ptr_eq(&owner, &self.state))
-            && evaluation.document.upgrade().is_some_and(|document| Rc::ptr_eq(&document, &self.state.borrow().document_token))
+            && evaluation.document.is_for(document)
     }
 
     // The wall cap is thread-local and inherited by callbacks/child realms.
@@ -52,7 +53,7 @@ impl ScriptHost {
 
     pub fn start_console_evaluation(&mut self, env: &mut dyn HostEnv, source: &str, deadline: Instant) -> Result<ConsoleEvaluation, String> {
         let owner = Rc::downgrade(&self.state);
-        let document = Rc::downgrade(&self.state.borrow().document_token);
+        let document = env.doc().weak_identity();
         let root = self.console_deadline(deadline, |host| host.enter(env, |realm| {
             let value = realm.eval_console(source).map_err(|error| realm.error_to_string(&error))?;
             let root = realm.root(value);
@@ -62,12 +63,12 @@ impl ScriptHost {
             Ok(root)
         }))?;
         let evaluation = ConsoleEvaluation { root, owner, document };
-        if !self.console_owner(&evaluation) { return Err("Console evaluation document was replaced".into()); }
+        if !self.console_evaluation_is_current(&evaluation, env.doc()) { return Err("Console evaluation document was replaced".into()); }
         Ok(evaluation)
     }
 
     pub fn poll_console_evaluation(&mut self, env: &mut dyn HostEnv, evaluation: &ConsoleEvaluation, deadline: Instant) -> Result<ConsolePoll, String> {
-        if !self.console_owner(evaluation) { return Err("Console evaluation document was replaced".into()); }
+        if !self.console_evaluation_is_current(evaluation, env.doc()) { return Err("Console evaluation document was replaced".into()); }
         let result = self.console_deadline(deadline, |host| host.enter(env, |realm| {
             let value = evaluation.root.value();
             let settled = value.as_object().and_then(|id| match &realm.obj(id).kind {
@@ -81,7 +82,7 @@ impl ScriptHost {
                 None => ConsolePoll::Resolved(rabbithole_js::builtins::global::inspect(realm, &value, 0)),
             })
         }));
-        if !self.console_owner(evaluation) { return Err("Console evaluation document was replaced".into()); }
+        if !self.console_evaluation_is_current(evaluation, env.doc()) { return Err("Console evaluation document was replaced".into()); }
         result
     }
 
@@ -156,6 +157,10 @@ mod tests {
         assert!(host.poll_console_evaluation(&mut env, &old, deadline()).unwrap_err().contains("document was replaced"));
         drop(old);
         drop(handle);
+        let snapshot_handle = host.start_console_evaluation(&mut env, "new Promise(()=>{})", deadline()).unwrap();
+        env.doc = env.doc.clone();
+        assert!(host.poll_console_evaluation(&mut env, &snapshot_handle, deadline()).unwrap_err().contains("document was replaced"));
+        drop(snapshot_handle);
         assert_eq!(evaluate(&mut host, &mut env, "5"), ConsolePoll::Resolved("5".into()));
     }
 

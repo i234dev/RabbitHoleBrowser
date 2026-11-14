@@ -124,11 +124,7 @@ pub(crate) fn open(realm: &mut Realm, d: u32) -> JsResult<()> {
     if let Some(ap) = state().borrow_mut().doc_parsers.remove(&d) {
         ap.borrow_mut().parser.abort();
     }
-    if d == 0 {
-        let st = state();
-        let mut st = st.borrow_mut();
-        st.document_token = Rc::new(());
-    }
+    with_doc(d, |doc| doc.replace_identity());
     let root = NodeRef { doc: d, node: Document::ROOT };
     let removed = crate::node::children_of(root);
     with_doc(d, |doc| doc.clear_children(Document::ROOT));
