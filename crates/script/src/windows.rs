@@ -104,6 +104,9 @@ pub(crate) fn install(realm: &mut Realm) {
         Ok(_) => return,
         Err(error) => { let message = realm.error_to_string(&error); crate::host::log("error", &format!("WindowProxy setup failed: {message}")); return; }
     }
+    // Headless hosts and iframe realms retain their existing global name,
+    // focus and opener semantics; this transport owns top-level GUI contexts.
+    if with_env(|env| env.window_context()).is_none() { return; }
     let global = realm.global();
     let attributes = CONFIGURABLE | ENUMERABLE;
     realm.define_accessor(global, "closed", Some(own_closed), None, attributes);
@@ -154,7 +157,10 @@ pub(crate) fn open(realm: &mut Realm, args: &[Value]) -> JsResult<Value> {
         }
         return crate::frames::window_for(realm, Some(target));
     }
-    let Some(context) = with_env(|env| env.window_context()) else { return Ok(Value::Null) };
+    let Some(context) = with_env(|env| env.window_context()) else {
+        if let Some(url) = url { with_env(|env| env.open_window(url)); }
+        return Ok(Value::Null);
+    };
     let noreferrer = feature(&features, "noreferrer");
     let noopener = noreferrer || feature(&features, "noopener");
     let request = with_env(|env| WindowOpenRequest {
