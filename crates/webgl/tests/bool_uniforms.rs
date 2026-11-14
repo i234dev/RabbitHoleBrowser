@@ -121,7 +121,7 @@ fn invalid_bool_setters_preserve_values_and_pixels() {
         c.uniform_i32(loc,&[-50]).unwrap();
         assert_eq!(draw(&mut c,0),[255,0,0,255]);
         assert_eq!(c.uniform_i32(loc,&[0,0]),Err(Error::InvalidOperation));
-        assert_eq!(c.uniform_i32(loc,&[]),Err(Error::InvalidOperation));
+        assert_eq!(c.uniform_i32(loc,&[]),Err(Error::InvalidValue));
         assert_eq!(c.uniform_f32(loc,&[0.,0.]),Err(Error::InvalidOperation));
         assert_eq!(c.uniform_f32(loc,&[]),Err(Error::InvalidOperation));
         assert_eq!(c.uniform_matrix4fv(loc,false,&[0.;16]),Err(Error::InvalidOperation));

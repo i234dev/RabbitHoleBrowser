@@ -117,7 +117,7 @@ fn malformed_uniform_family_commands_are_atomic_and_null_locations_are_ignored()
         let gain=c.get_uniform_location(p,"gain").unwrap().unwrap();
         c.uniform_f32_components(gain,1,&[0.5]).unwrap();
         for width in [0,5,u32::MAX] {assert_eq!(c.uniform_f32_components(gain,width,&[0.]),Err(Error::InvalidValue));}
-        assert_eq!(c.uniform_f32_components(gain,1,&[]),Err(Error::InvalidOperation));
+        assert_eq!(c.uniform_f32_components(gain,1,&[]),Err(Error::InvalidValue));
         assert_eq!(c.uniform_f32_components(gain,1,&[0.,0.]),Err(Error::InvalidOperation));
         c.uniform_f32_components(-1,0,&[]).unwrap();
         assert_eq!(c.get_uniform(p,gain).unwrap(),[0.5]);

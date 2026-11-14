@@ -1,0 +1,116 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGL uniform conversion and atomic updates</title>
+<style>body{margin:16px;background:#202634;color:white;font:16px sans-serif}canvas{width:128px;height:128px;image-rendering:pixelated}</style>
+<h1>WebGL uniform validation</h1>
+<p>Both canvases remain red after rejected uniform updates.</p>
+<canvas id="uniform1" width="1" height="1"></canvas>
+<canvas id="uniform2" width="1" height="1"></canvas>
+<script>
+(function(){
+  function check(value, message){if(!value)throw new Error(message||'Uniform validation regression');}
+  function throwsType(action){let threw=false;try{action();}catch(e){threw=e instanceof TypeError;}check(threw,'Expected TypeError');}
+  function shader(gl, kind, source){const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);check(gl.getShaderParameter(s,gl.COMPILE_STATUS),gl.getShaderInfoLog(s));return s;}
+  for(const version of [1,2]) {
+    const gl=document.getElementById('uniform'+version).getContext(version===2?'webgl2':'webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+    check(!!gl,'Missing context');
+    const prefix=version===2?'#version 300 es\n':'';
+    const vertex=shader(gl,gl.VERTEX_SHADER,prefix+(version===2?'in':'attribute')+' vec2 position;void main(){gl_Position=vec4(position,0.0,1.0);}');
+    const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+    for(const [name,type,width,initial,body,expected] of [
+      ['uniform1fv','float',1,[0.25],'OUTPUT=vec4(value);','64,64,64,64'],
+      ['uniform2fv','vec2',2,[0.25,0.5],'OUTPUT=vec4(value,0.0,1.0);','64,128,0,255'],
+      ['uniform3fv','vec3',3,[0.25,0.5,0.75],'OUTPUT=vec4(value,1.0);','64,128,191,255'],
+      ['uniform4fv','vec4',4,[0.25,0.5,0.75,1],'OUTPUT=value;','64,128,191,255'],
+      ['uniformMatrix2fv','mat2',4,[0.25,0.5,0,0],'OUTPUT=vec4(value*vec2(1.0,0.0),0.0,1.0);','64,128,0,255'],
+      ['uniformMatrix3fv','mat3',9,[0.25,0.5,0.75,0,0,0,0,0,0],'OUTPUT=vec4(value*vec3(1.0,0.0,0.0),1.0);','64,128,191,255'],
+      ['uniformMatrix4fv','mat4',16,[0.25,0.5,0.75,1,0,0,0,0,0,0,0,0,0,0,0,0],'OUTPUT=value*vec4(1.0,0.0,0.0,0.0);','64,128,191,255'],
+      ['uniform1iv','bool',1,[1],'if(value){OUTPUT=vec4(1.0,0.0,0.0,1.0);}else{OUTPUT=vec4(0.0,1.0,0.0,1.0);}','255,0,0,255']
+    ]) {
+      const matrix=name.indexOf('Matrix')!==-1, integer=name==='uniform1iv';
+      const p=gl.createProgram();gl.attachShader(p,vertex);
+      gl.attachShader(p,shader(gl,gl.FRAGMENT_SHADER,prefix+'precision mediump float;'+(version===2?'out vec4 pixel;':'')+'uniform '+type+' value;void main(){'+body.replace(/OUTPUT/g,version===2?'pixel':'gl_FragColor')+'}'));
+      gl.linkProgram(p);check(gl.getProgramParameter(p,gl.LINK_STATUS),gl.getProgramInfoLog(p));gl.useProgram(p);
+      const a=gl.getAttribLocation(p,'position');gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(a);
+      let location=gl.getUniformLocation(p,'value');check(location!==null,'Inactive fixture uniform');
+      function set(loc,data,transpose){if(matrix)gl[name](loc,!!transpose,data);else gl[name](loc,data);}
+      function snapshot(){const value=gl.getUniform(p,location);return ArrayBuffer.isView(value)?Array.from(value).join(','):String(value);}
+      function pixel(){gl.drawArrays(gl.TRIANGLES,0,3);const data=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,data);return Array.from(data).join(',');}
+      set(location,initial);const before=snapshot();check(pixel()===expected,name+' initial pixels');check(gl.getError()===gl.NO_ERROR);
+      function unchanged(){check(snapshot()===before,name+' modified uniform');check(pixel()===expected,name+' modified pixels');check(gl.getError()===gl.NO_ERROR);}
+      function rejected(data,error,transpose){set(location,data,transpose);check(gl.getError()===error,name+' wrong GL error');unchanged();}
+      // CTS distinguishes empty/short/non-multiple lengths from a complete
+      // multi-element update to a non-array uniform. Both typed and IDL paths.
+      for(const typed of [false,true]) {
+        const ArrayType=integer?Int32Array:Float32Array;
+        const data=(length)=>typed?new ArrayType(length):Array.from({length},()=>0);
+        rejected(data(0),gl.INVALID_VALUE);
+        if(width>1){rejected(data(width-1),gl.INVALID_VALUE);rejected(data(width+1),gl.INVALID_VALUE);}
+        rejected(data(width*2),gl.INVALID_OPERATION);
+      }
+      if(matrix)rejected(initial,gl.INVALID_VALUE,true);
+      if(matrix){gl.uniform4fv(location,[0,0,0,0]);check(gl.getError()===gl.INVALID_OPERATION);unchanged();}
+      else if(!integer){gl.uniform1iv(location,[0]);check(gl.getError()===gl.INVALID_OPERATION);unchanged();}
+      const hiddenLength=new (integer?Int32Array:Float32Array)(initial);
+      Object.defineProperty(hiddenLength,'length',{get(){throw new Error('Read page length getter');}});
+      Object.defineProperty(hiddenLength,Symbol.iterator,{get(){throw new Error('Iterated typed array argument');}});
+      set(location,hiddenLength);check(gl.getError()===gl.NO_ERROR);unchanged();
+      const oversized=new (integer?Int32Array:Float32Array)(width*2);
+      Object.defineProperty(oversized,'length',{value:width});rejected(oversized,gl.INVALID_OPERATION);
+      // These lengths lie past the old seventeen-element conversion cutoff.
+      if(width===3)rejected(Array.from({length:18},()=>0),gl.INVALID_OPERATION);
+      if(name==='uniform4fv')rejected(Array.from({length:20},()=>0),gl.INVALID_OPERATION);
+      for(const loc of [null,undefined]) {
+        set(loc,[],true);check(gl.getError()===gl.NO_ERROR,'Null validated GL length/transpose');
+        for(const data of [[Symbol()],[1n],null,'not a sequence']) {throwsType(()=>set(loc,data));check(gl.getError()===gl.NO_ERROR,'IDL exception set GL error');}
+      }
+      let conversionCalls=0,returnCalls=0,iteratorReads=0,nextReads=0;
+      const failure={};
+      const late={get [Symbol.iterator](){++iteratorReads;return function(){return {get next(){++nextReads;return function(){++conversionCalls;if(conversionCalls===23)throw failure;return {done:false,value:0};};},return(){++returnCalls;return {done:true};}};};}};
+      let caught=false;try{set(location,late);}catch(e){caught=e===failure;}
+      check(caught&&conversionCalls===23&&iteratorReads===1&&nextReads===1&&returnCalls===0,'Truncated or repeated sequence conversion');check(gl.getError()===gl.NO_ERROR);unchanged();
+      let closed=false;
+      const badElement={ [Symbol.iterator](){return {next(){return {done:false,value:Symbol()};},return(){closed=true;return {done:true};}};} };
+      throwsType(()=>set(null,badElement));check(!closed&&gl.getError()===gl.NO_ERROR,'Web IDL conversion closed the iterator');
+      const done={ [Symbol.iterator](){return {next(){return {done:true,get value(){throw new Error('Read a finished iterator value');}};}};} };
+      set(null,done);check(gl.getError()===gl.NO_ERROR);
+      let accessed=false;
+      const untouched={get [Symbol.iterator](){accessed=true;return initial[Symbol.iterator];}};
+      throwsType(()=>set({},untouched));check(!accessed&&gl.getError()===gl.NO_ERROR,'Data converted before location brand');
+      function callableSequence(){}callableSequence[Symbol.iterator]=function(){return initial[Symbol.iterator]();};
+      set(location,callableSequence);check(gl.getError()===gl.NO_ERROR);unchanged();
+      let reads=0;const once={get [Symbol.iterator](){check(++reads===1,'Iterator read twice');return function(){return initial[Symbol.iterator]();};}};
+      set(location,once);check(reads===1&&gl.getError()===gl.NO_ERROR);unchanged();
+      // Web IDL conversion precedes current-program/generation/context checks.
+      gl.useProgram(null);throwsType(()=>set(location,[Symbol()]));check(gl.getError()===gl.NO_ERROR,'GL state checked before conversion');set(location,initial);check(gl.getError()===gl.INVALID_OPERATION);gl.useProgram(p);unchanged();
+      const stale=location;gl.linkProgram(p);check(gl.getProgramParameter(p,gl.LINK_STATUS));gl.useProgram(p);location=gl.getUniformLocation(p,'value');set(location,initial);
+      throwsType(()=>set(stale,[Symbol()]));check(gl.getError()===gl.NO_ERROR);set(stale,initial);check(gl.getError()===gl.INVALID_OPERATION);unchanged();
+      if(version===1&&integer)globalThis.firstUniformValidationLocation=location;
+      if(version===2){throwsType(()=>set(globalThis.firstUniformValidationLocation,[Symbol()]));check(gl.getError()===gl.NO_ERROR);set(globalThis.firstUniformValidationLocation,initial);check(gl.getError()===gl.INVALID_OPERATION);unchanged();}
+      if(integer) {
+        // ivec types remain unsupported; nullable and IDL behavior still applies.
+        for(const [method,components] of [['uniform2iv',2],['uniform3iv',3],['uniform4iv',4]]) {
+          gl[method](null,[]);gl[method](undefined,[]);check(gl.getError()===gl.NO_ERROR);
+          throwsType(()=>gl[method](null,[Symbol()]));check(gl.getError()===gl.NO_ERROR);
+          gl[method](location,new Int32Array(components));check(gl.getError()===gl.INVALID_OPERATION);unchanged();
+          if(version===2){gl[method](location,new Int32Array(components),0);check(gl.getError()===gl.INVALID_OPERATION);}
+        }
+        gl.uniform1iv(location,[4294967296]);check(gl.getUniform(p,location)===false,'ToInt32 wrap');gl.uniform1iv(location,[-0.9]);check(gl.getUniform(p,location)===false,'ToInt32 truncation');gl.uniform1iv(location,[1.9]);check(gl.getUniform(p,location)===true);unchanged();
+      }
+      // Existing scalar wrappers use the same location/type validation without
+      // introducing sequence iteration into scalar argument conversion.
+      if(name==='uniform4fv') {
+        let converted=0;const number={valueOf(){++converted;return 0;}};
+        throwsType(()=>gl.uniform4f({},number,number,number,number));check(converted===0&&gl.getError()===gl.NO_ERROR);
+        const order=[];gl.uniform4f(null,{valueOf(){order.push(1);return 0;}},{valueOf(){order.push(2);return 0;}},{valueOf(){order.push(3);return 0;}},{valueOf(){order.push(4);return 0;}});check(order.join(',')==='1,2,3,4'&&gl.getError()===gl.NO_ERROR);
+        throwsType(()=>gl.uniform1i(null,1n));check(gl.getError()===gl.NO_ERROR);
+        const iterate=Array.prototype[Symbol.iterator];
+        try{Array.prototype[Symbol.iterator]=function(){throw new Error('Scalar read Array iterator');};gl.uniform4f(location,0.25,0.5,0.75,1);}finally{Array.prototype[Symbol.iterator]=iterate;}
+        unchanged();
+      }
+      check(gl.getError()===gl.NO_ERROR);
+    }
+    console.log(version,'uniform validation ok');
+  }
+})();
+</script>
