@@ -106,6 +106,22 @@ pub(super) fn requests(b: &LayoutBox) -> (bool,bool) {
     (requested(&b.style.grid_template_columns),requested(&b.style.grid_template_rows))
 }
 
+/// Fixed line-name groups establish the automatic span without materializing
+/// repeats. Auto-fill then fills the resulting used span; it cannot enlarge
+/// the span from which its own repetition count is determined.
+pub(super) fn automatic_span(b:&LayoutBox,rows:bool)->Option<usize> {
+    if b.wm_wrapper {return b.children.first().and_then(|inner|automatic_span(inner,!rows));}
+    if b.formatting!=Formatting::Grid {return None;}
+    let list=if rows {&b.style.grid_template_rows} else {&b.style.grid_template_columns};
+    let Some(TrackListItem::Subgrid{line_names})=list.first() else {return None;};
+    let lines=line_names.iter().map(|part|match part {
+        SubgridLineNames::Names(_)=>1,
+        SubgridLineNames::Repeat{count:Some(count),names}=>names.len().saturating_mul(*count as usize),
+        SubgridLineNames::Repeat{count:None,..}=>0,
+    }).fold(0,usize::saturating_add);
+    Some(lines.saturating_sub(1).max(1))
+}
+
 pub(super) fn shared(b: &LayoutBox, rows: bool) -> Option<Arc<SharedTracks>> {
     match if rows {&b.grid_rows} else {&b.grid_columns} {
         Some(AxisInheritance::Tracks(tracks))=>Some(tracks.clone()),
@@ -603,5 +619,14 @@ mod tests {
         let mut budget=WorkBudget::default();
         let out=automatic_contributions(&mut budget,vec![Contribution{start:1,end:2,min:40.,max:40.}],2);
         assert_eq!(out,[Contribution{start:0,end:1,min:40.,max:40.},Contribution{start:1,end:2,min:40.,max:40.}]);
+    }
+
+    #[test]
+    fn automatic_spans_count_compact_line_groups_without_expanding_repeats() {
+        let mut b=child();let mut style=(*b.style).clone();
+        style.grid_template_columns=vec![TrackListItem::Subgrid{line_names:vec![SubgridLineNames::Names(vec!["a".into()]),SubgridLineNames::Repeat{count:Some(2),names:vec![vec!["b".into()]]}]}];
+        b.style=Rc::new(style);assert_eq!(automatic_span(&b,false),Some(2));
+        let mut style=(*b.style).clone();style.grid_template_columns=vec![TrackListItem::Subgrid{line_names:vec![SubgridLineNames::Repeat{count:Some(1_000_000),names:vec![vec![]]}]}];
+        b.style=Rc::new(style);assert_eq!(automatic_span(&b,false),Some(999_999));
     }
 }
