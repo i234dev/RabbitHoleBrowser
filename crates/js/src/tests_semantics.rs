@@ -207,3 +207,20 @@ fn var_arguments_respects_explicit_parameter_and_body_bindings() {
     assert_eq!(evaluate("(function(){var arguments;function arguments(){return 'function';}return arguments();})()"), "function");
     assert_eq!(evaluate("(function(){const original=arguments;return [((arguments)=>{var arguments;return arguments;})('arrow'),arguments===original].join(':');})(1)"), "arrow:true");
 }
+
+#[test]
+fn string_literal_expression_continues_across_line_terminators() {
+    for whitespace in ["\t", "\u{b}", "\u{c}", " ", "\u{a0}", "\n", "\r", "\u{2028}", "\u{2029}", "\t\u{b}\u{c} \u{a0}\n\r\u{2028}\u{2029}"] {
+        assert_eq!(evaluate(&format!("'MAX_VALUE'{whitespace}in{whitespace}Number")), "true", "whitespace={whitespace:?}");
+    }
+}
+
+#[test]
+fn use_strict_is_a_directive_only_when_it_is_the_whole_statement() {
+    assert_eq!(evaluate("(function(){'use strict'\n+1;return this===globalThis;})()"), "true");
+    assert_eq!(evaluate("(function(){'use strict'\n[0];return this===globalThis;})()"), "true");
+    assert_eq!(evaluate("(function(a,a){'use strict'\n+1;return a;})(1,2)"), "2");
+    assert_eq!(evaluate("(function(){'use strict'\n;return this===undefined;})()"), "true");
+    assert!(crate::parser::parse_program("'\\1';'use strict';", false).is_err());
+    assert!(crate::parser::parse_program("'\\1'\n+1;'use strict';", false).is_ok());
+}

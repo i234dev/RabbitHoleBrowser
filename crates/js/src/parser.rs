@@ -700,34 +700,27 @@ impl<'a> Parser<'a> {
         let mut strict = false;
         // A directive with an octal escape, before or after "use strict".
         let mut octal: Option<Pos> = None;
-        while let TokenKind::Str(s) = &self.tok.kind {
+        while matches!(&self.tok.kind, TokenKind::Str(_)) {
             let raw = &self.lx.source()[self.tok.start..self.tok.end];
             let is_use_strict = raw == "\"use strict\"" || raw == "'use strict'";
             if octal.is_none() && has_legacy_octal_escape(raw.as_bytes()) {
                 octal = Some(self.tok.pos);
             }
-            let s = s.clone();
-            // Only a directive if the statement is exactly the string literal.
-            let snap = self.snapshot();
             let pos = self.tok.pos;
-            self.advance()?;
-            let is_directive = self.is_punct(";") || self.is_punct("}") || self.tok.kind == TokenKind::Eof || self.tok.newline_before;
+            // A line terminator does not insert a semicolon when the next
+            // token continues the expression (`"use strict"\n+1`). Only a
+            // complete string-literal ExpressionStatement is a directive.
+            let expression = self.parse_expression()?;
+            self.consume_semicolon()?;
+            let is_directive = matches!(&expression.kind, ExprKind::String(_));
+            body.push(Stmt { pos, kind: StmtKind::Expr(expression) });
             if !is_directive {
-                self.restore(snap);
                 break;
             }
-            self.consume_semicolon()?;
             if is_use_strict {
                 strict = true;
                 self.ctx.strict = true;
             }
-            body.push(Stmt {
-                pos,
-                kind: StmtKind::Expr(Expr {
-                    pos,
-                    kind: ExprKind::String(s),
-                }),
-            });
         }
         if let (true, Some(pos)) = (strict || self.ctx.strict, octal) {
             return Err(self.error_at(pos, "Octal escape sequences are not allowed in strict mode"));
