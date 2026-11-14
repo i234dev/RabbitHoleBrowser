@@ -19,6 +19,8 @@ impl Server {
         let script_gate=Arc::new(AtomicBool::new(false));let release_script=script_gate.clone();
         let task=std::thread::spawn(move || while !halt.load(Ordering::Relaxed) {
             let (mut stream,_)=match listener.accept(){Ok(s)=>s,Err(_)=>{std::thread::sleep(Duration::from_millis(1));continue;}};
+            // Accepted Winsock sockets inherit the listener's nonblocking mode.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut reader=std::io::BufReader::new(stream.try_clone().unwrap());let mut first=String::new();
             if std::io::BufRead::read_line(&mut reader,&mut first).is_err(){continue;}

@@ -32,6 +32,9 @@ impl Server {
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => { std::thread::sleep(Duration::from_millis(1)); continue; }
                     Err(_) => break,
                 };
+                // Winsock accept inherits the nonblocking listener mode.
+                // Read the complete HTTP request before replying on every platform.
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut first = String::new();
