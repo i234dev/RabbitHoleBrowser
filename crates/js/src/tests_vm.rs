@@ -221,6 +221,25 @@ fn calls_and_frames() {
 }
 
 #[test]
+fn native_callback_receiver_and_fallbacks() {
+    // Native callbacks enter through Realm::call. Strict receivers keep
+    // primitives; sloppy receivers still use the boxing fallback.
+    eq("function strict(v, i) { 'use strict'; return typeof this + ':' + this + ':' + (v + i); } [3, 4].map(strict, 7).join('|')", "number:7:3|number:7:5");
+    eq("function sloppy(v) { return typeof this + ':' + this.valueOf() + ':' + v; } [3].map(sloppy, 7).join()", "object:7:3");
+    eq("function global(v) { return this === globalThis; } [1].map(global).join()", "true");
+    // Arrows use lexical this and new.target, including arrows that need
+    // the arguments-object fallback.
+    eq("function C() { this.n = 5; this.out = [1, 2].map(v => this.n + v + (new.target === C ? 10 : 0)); } new C().out.join()", "16,17");
+    eq("function outer(x) { return [1, 2].map(v => arguments[0] + v).join(); } outer(4)", "5,6");
+    // Other callable kinds and non-plain closures retain their paths.
+    eq("function rest(...a) { return a.length; } var bound = function(v) { return this.n + v; }.bind({n: 10}); var proxy = new Proxy(v => v + 1, {apply(t, th, a) { return t(a[0]) + 1; }}); [[1].map(rest)[0], [2].map(bound)[0], [3].map(proxy)[0]].join()", "3,12,5");
+    eq("var caught; try { [1].map(function() { throw 'sentinel'; }); } catch (e) { caught = e; } caught + ':' + [2].map(v => v + 3)[0]", "sentinel:5");
+    // The first callback invocation may still need lazy compilation.
+    let src = format!("{} function callback(v) {{ 'use strict'; {PAD} return this + v; }} [1, 2].map(callback, 7).join()", "/* padding */".repeat(1500));
+    eq(&src, "8,9");
+}
+
+#[test]
 fn superinstructions_and_fast_paths() {
     // Constant operands with non-number left sides.
     eq("var s = 'a'; s = s + 1; s += 2; s", "a12");
