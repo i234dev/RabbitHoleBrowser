@@ -319,6 +319,7 @@ impl<'a> Layouter<'a> {
             align: it.align,
             column_names: !rows&&it.fixed.is_some(),
             row_names: rows&&it.fixed.is_some(),
+            parent_lanes_auto: it.fixed.is_none(),
         }
     }
 
@@ -420,6 +421,7 @@ impl<'a> Layouter<'a> {
                     if subgrid::shared(child,true).is_some() {this.subgrid_axis_contributions(child,true,Some(w),phase)}
                     else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h}]}
                 });
+                if it.fixed.is_none() {nested=subgrid::automatic_contributions(&mut self.grid_work,nested,it.span);}
                 for c in &mut nested {c.start+=s;c.end+=s;}
                 self.grid_work.charge(nested.len());
                 contribs.extend(nested);

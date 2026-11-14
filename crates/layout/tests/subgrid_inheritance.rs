@@ -97,3 +97,21 @@ fn inherited_row_lanes_measure_automatic_inline_items_without_zero_width() {
         "section{display:grid-lanes;grid-template-rows:100px;font:10px/1 monospace}#min{width:min-content}#max{width:max-content}.s{display:grid-lanes;grid-template-rows:subgrid;grid-row:1}#word{display:block;width:min-content;font:10px/1 monospace}");
     let min=by_id(&d,&t,"min");let max=by_id(&d,&t,"max");let word=by_id(&d,&t,"word");close(min.content_rect.w,max.content_rect.w);assert!(min.content_rect.w>word.content_rect.w+1.);
 }
+
+#[test]
+fn automatic_column_lanes_subgrid_items_contribute_to_every_parent_track() {
+    for (placement,expected) in [("span 2",120.),("2/span 2",40.)] {
+        let(d,t)=render("<section id=p><div id=s><i></i></div></section>",
+            &format!("section{{display:grid-lanes;width:max-content;grid-template-columns:auto auto auto}}#s{{display:grid;grid-column:{placement};grid-template-columns:subgrid}}i{{grid-column:1;width:40px;height:10px}}"));
+        close(by_id(&d,&t,"p").content_rect.w,expected);
+    }
+}
+
+#[test]
+fn automatic_row_lanes_subgrid_items_contribute_to_every_parent_track() {
+    for (placement,expected) in [("span 2",60.),("2/span 2",20.)] {
+        let(d,t)=render("<section id=p><div id=s><i></i></div></section>",
+            &format!("section{{display:grid-lanes;width:100px;grid-template-rows:auto auto auto}}#s{{display:grid;grid-row:{placement};grid-template-rows:subgrid;width:10px}}i{{grid-row:1;width:10px;height:20px}}"));
+        close(by_id(&d,&t,"p").content_rect.h,expected);
+    }
+}
