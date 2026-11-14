@@ -971,14 +971,8 @@ impl Engine {
             // targets it holds) must be checked again.
             host.invalidate_rendering();
         }
-        // Skip the dispatch entirely when no listener for this type exists
-        // anywhere (the event could bubble to any ancestor or the window).
-        // Clicks always go through so inline `onclick` attributes and
-        // default-action bookkeeping (`element.click()`) work.
-        if !host.any_listener_for(event_type) && !host.has_listeners(target, event_type) && !matches!(event_type, "click" | "submit") {
-            page.script.host = Some(host);
-            return ScriptOutcome::default();
-        }
+        // Script dispatch checks the complete path, including inline and IDL
+        // handlers. Registered-listener counts alone cannot skip this event.
         let result: DispatchResult = {
             let mut env = EngineEnv { engine: self, page };
             host.realm().begin_task();
