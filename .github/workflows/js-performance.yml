@@ -1,0 +1,61 @@
+name: JS performance build pair (diagnostic)
+
+on:
+  push:
+    branches: ["performance/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: js-performance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      BASELINE_SHA: d81b54f33740a5672faece1c9c04990c850d4672
+      CANDIDATE_SHA: ${{ github.sha }}
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      # Keep production release optimization/LTO/codegen settings. These
+      # identical profiling overrides retain symbols and frame pointers.
+      CARGO_PROFILE_RELEASE_STRIP: "false"
+      RUSTFLAGS: -C force-frame-pointers=yes
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare immutable source snapshots and diagnostic directory
+        run: |
+          mkdir -p js-performance-artifacts sources targets
+          printf '%s\n' 'Diagnostic build pair only. CI does not measure browser performance.' > js-performance-artifacts/README.txt
+          git worktree add --detach sources/baseline "$BASELINE_SHA"
+          git worktree add --detach sources/candidate "$CANDIDATE_SHA"
+      # Match the production CI toolchain; the artifact records its exact
+      # rustc/cargo versions, target host and release settings for both builds.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: js-performance-pair-v1
+          workspaces: |
+            sources/baseline -> ../../targets/baseline
+            sources/candidate -> ../../targets/candidate
+      - name: Check JS and build the baseline and candidate sequentially
+        run: python3 scripts/js-performance-ci.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: js-performance-diagnostic-${{ env.BASELINE_SHA }}-vs-${{ github.sha }}
+          path: js-performance-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
