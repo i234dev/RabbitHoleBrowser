@@ -5,6 +5,7 @@
 pub mod avif;
 pub mod canvas;
 pub mod canvas_ext;
+pub mod clip_group;
 pub mod diff;
 pub mod font;
 pub mod font_ext;

@@ -226,6 +226,12 @@ impl RoundedBox {
         self.radii.iter().all(|c| c.0 <= 0.0 || c.1 <= 0.0)
     }
 
+    /// Analytic containment in local coordinates. Nonfinite input never hits.
+    /// Callers supplying raw public fields must first validate the geometry.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x.is_finite() && y.is_finite() && self.inside(x, y)
+    }
+
     #[inline]
     fn inside(&self, px: f32, py: f32) -> bool {
         let r = &self.r;
