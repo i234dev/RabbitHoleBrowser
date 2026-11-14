@@ -354,9 +354,9 @@ impl Engine {
         self.call_in_frame_with_watchdog(page, id, call, None)
     }
 
-    pub(crate) fn call_in_frame_with_watchdog(&self, page: &mut Page, id: u64, call: rabbithole_script::FrameCall, mut watchdog: Option<&mut rabbithole_js::WatchdogState>) -> Option<rabbithole_script::FrameReply> {
+    pub(crate) fn call_in_frame_with_watchdog(&self, page: &mut Page, id: u64, call: rabbithole_script::FrameCall, mut watchdog: Option<&mut rabbithole_script::js::WatchdogState>) -> Option<rabbithole_script::FrameReply> {
         let origin = page_origin(page);
-        let source_http = matches!(page.url.scheme(), "http" | "https") && origin != "null" && page.url.origin() == origin;
+        let source_http = matches!(page.url.scheme.as_str(), "http" | "https") && origin != "null" && page.url.origin() == origin;
         let reverse_allowed = source_http && matches!(&call, rabbithole_script::FrameCall::GetGlobal { .. } | rabbithole_script::FrameCall::CallGlobal { .. });
         let mut call = Some(call);
         let mut invoke = |target: &mut Page| {
@@ -397,7 +397,7 @@ impl Engine {
             })?;
             let owner = unsafe { &mut *owner };
             let mut reverse = |target: &mut Page| {
-                if !matches!(target.url.scheme(), "http" | "https") || target.url.origin() != origin || target.script.host.is_none() { return None; }
+                if !matches!(target.url.scheme.as_str(), "http" | "https") || target.url.origin() != origin || target.script.host.is_none() { return None; }
                 invoke(target)
             };
             if owner.frame_id == id { reverse(owner) } else { self.with_frame(owner, id, &mut reverse).flatten() }
@@ -1436,8 +1436,8 @@ mod ancestor_call_tests {
         engine.frames.borrow_mut().entries.get_mut(&id).unwrap().url = url.into();
     }
 
-    fn task_state(budget: Duration) -> rabbithole_js::WatchdogState {
-        let mut realm = rabbithole_js::Realm::new();
+    fn task_state(budget: Duration) -> rabbithole_script::js::WatchdogState {
+        let mut realm = rabbithole_script::js::Realm::new();
         realm.set_deadline(Some(Instant::now() + budget));
         realm.watchdog_state()
     }
@@ -1657,7 +1657,7 @@ mod ancestor_call_tests {
             let old_budget = page.script.host.as_mut().unwrap().realm().task_budget;
             let mut task = task_state(Duration::from_millis(20));
             let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_watchdog(source, id, call, Some(&mut task))).flatten();
-            let mut caller_probe = rabbithole_js::Realm::new();
+            let mut caller_probe = rabbithole_script::js::Realm::new();
             caller_probe.replace_watchdog_state(task);
             assert!(caller_probe.timed_out());
             assert!(matches!(result, Some(FrameReply::Error(ref message)) if message.contains("timed out")), "{result:?}");

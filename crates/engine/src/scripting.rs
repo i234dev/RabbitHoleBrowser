@@ -583,7 +583,7 @@ impl HostEnv for EngineEnv<'_> {
     fn frame_call(&mut self, id: u64, call: rabbithole_script::FrameCall) -> Option<rabbithole_script::FrameReply> {
         self.engine.call_in_frame(self.page, id, call)
     }
-    fn frame_call_with_watchdog(&mut self, id: u64, call: rabbithole_script::FrameCall, watchdog: &mut rabbithole_js::WatchdogState) -> Option<rabbithole_script::FrameReply> {
+    fn frame_call_with_watchdog(&mut self, id: u64, call: rabbithole_script::FrameCall, watchdog: &mut rabbithole_script::js::WatchdogState) -> Option<rabbithole_script::FrameReply> {
         self.engine.call_in_frame_with_watchdog(self.page, id, call, Some(watchdog))
     }
     fn frame_checkpoint(&mut self) {
