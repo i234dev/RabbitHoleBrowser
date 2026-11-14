@@ -15,6 +15,7 @@ mod consent;
 mod editing;
 mod feeds;
 mod focus;
+mod popups;
 mod service_workers;
 
 /// Messages received by the fake UI: (when, tab id, message).
@@ -32,6 +33,7 @@ fn sink() -> (Sink, Received) {
 fn config(view: ViewSize) -> ContentConfig {
     let dir = std::env::temp_dir().join(format!("rh-content-test-{}", std::process::id()));
     ContentConfig {
+        window_context: None,
         loader: rabbithole_engine::Loader::new(),
         settings: ContentSettings { download_dir: dir, ..ContentSettings::new(true, true, false) },
         local_storage: Arc::new(Mutex::new(rabbithole_engine::LocalStorage::default())),

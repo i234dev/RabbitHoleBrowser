@@ -51,6 +51,7 @@ fn threaded_run(url: Url, duration: Duration) -> Result<(), String> {
     });
     let view = ViewSize::new(W, H - 120, 1.0);
     let config = ContentConfig {
+        window_context: None,
         loader: rabbithole_engine::Loader::new(),
         settings: ContentSettings::new(true, true, true),
         local_storage: Arc::new(Mutex::new(LocalStorage::default())),

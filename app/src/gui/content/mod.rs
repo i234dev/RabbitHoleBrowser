@@ -33,6 +33,7 @@ use rabbithole_engine::dom::NodeId;
 use rabbithole_engine::gfx::{Image, Rect};
 use rabbithole_engine::net::{Request, Url};
 use rabbithole_engine::{LocalStorage, Loader, Modifiers, Viewport};
+use super::browsing_context::{BlankOrigin, WindowBinding};
 
 use crate::gui::loader::{DownloadEvent, LoadResult};
 
@@ -127,6 +128,9 @@ pub struct KeyInput {
 pub enum ToContent {
     /// Load a URL (already checked by the UI: no internal schemes).
     Navigate { request: Request, push_history: bool },
+    /// A real top-level proxy command; only its owning context may consume it.
+    ContextNavigate { id: u64, ticket: u64, request: Request, replace: bool, blank: Option<BlankOrigin>, javascript_origin: Option<String> },
+    ContextMessage { id: u64, ticket: u64, message: rabbithole_engine::script::WindowMessage },
     /// Show generated HTML (internal pages) as if loaded from `url`.
     LoadHtml { html: String, url: Url, push_history: bool },
     /// Cancel the load in progress.
@@ -213,6 +217,9 @@ pub enum FromContent {
     /// (internal pages, new tabs) and answers with `ToContent::Navigate`.
     Navigate { request: Request, push_history: bool },
     OpenTab(Url),
+    OpenContext(u64),
+    FocusContext(u64),
+    CloseContext(u64),
     Dialog(String),
     /// The page scrolled itself (scripts, find, focus, keys).
     ScrollTo { x: f32, y: f32 },
@@ -247,6 +254,7 @@ pub type Sink = Arc<dyn Fn(u64, u64, FromContent) + Send + Sync>;
 /// Everything a content thread needs to start.
 #[derive(Clone)]
 pub struct ContentConfig {
+    pub window_context: Option<WindowBinding>,
     /// Template loader (shares caches and cookies with the UI's).
     pub loader: Loader,
     pub settings: ContentSettings,
@@ -284,12 +292,16 @@ pub struct ContentHandle {
     tx: Sender<Inbox>,
     /// When the thread started its current task (`now_ms`), 0 when idle.
     busy: Arc<AtomicU64>,
+    window_context: Option<WindowBinding>,
 }
 
 impl ContentHandle {
     /// Start a content thread for a tab.
     pub fn spawn(tab_id: u64, epoch: u64, config: ContentConfig, sink: Sink) -> ContentHandle {
         let (tx, rx) = channel();
+        let window_context = config.window_context.clone();
+        if let Some(binding) = &window_context { binding.registry.attach(binding.id, tab_id, epoch, tx.clone()); }
+        let failed_sink = sink.clone();
         let busy = Arc::new(AtomicU64::new(0));
         let worker_tx = tx.clone();
         let worker_busy = busy.clone();
@@ -303,9 +315,13 @@ impl ContentHandle {
             .spawn(move || worker::run(tab_id, epoch, config, sink, rx, worker_tx, worker_busy));
         if let Err(e) = spawned {
             eprintln!("rabbithole: could not spawn content thread: {e}");
+            if let Some(binding) = &window_context { binding.registry.renderer_gone(binding.id, tab_id, epoch); }
+            failed_sink(tab_id, epoch, FromContent::Crashed(format!("Could not start content thread: {e}")));
         }
-        ContentHandle { tab_id, epoch, tx, busy }
+        ContentHandle { tab_id, epoch, tx, busy, window_context }
     }
+
+    pub fn context_id(&self) -> Option<u64> { self.window_context.as_ref().map(|binding| binding.id) }
 
     pub fn send(&self, msg: ToContent) {
         let _ = self.tx.send(Inbox::Ui(msg));
@@ -330,6 +346,7 @@ impl Drop for ContentHandle {
     fn drop(&mut self) {
         // The thread exits when it next looks at its inbox (a busy one
         // finishes its current task first; its messages are then ignored).
+        if let Some(binding) = &self.window_context { binding.registry.detach(binding.id, self.tab_id, self.epoch); }
         let _ = self.tx.send(Inbox::Ui(ToContent::Shutdown));
     }
 }

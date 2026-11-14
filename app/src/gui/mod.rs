@@ -10,6 +10,7 @@ pub mod bench;
 pub mod chrome;
 pub mod console;
 pub mod content;
+pub mod browsing_context;
 pub mod downloads;
 pub mod input;
 mod interact;
@@ -163,6 +164,7 @@ fn proxy_sink(proxy: EventLoopProxy<UserEvent>) -> Sink {
 pub struct App {
     /// UI fonts and the template loader (shared caches and cookies).
     pub(crate) engine: Engine,
+    pub(crate) browsing_contexts: Arc<browsing_context::BrowsingContexts>,
     pub(crate) profile: Profile,
     pub(crate) options: GuiOptions,
     pub(crate) cookies: Arc<Mutex<CookieJar>>,
@@ -267,8 +269,10 @@ impl App {
         if main_window {
             let _ = std::fs::write(profile.running_marker(), std::process::id().to_string());
         }
+        let browsing_contexts = browsing_context::BrowsingContexts::new(sink.clone());
         let mut app = App {
             engine,
+            browsing_contexts,
             profile,
             options,
             cookies,
@@ -563,9 +567,18 @@ impl App {
 
     /// Start a content thread for a tab.
     fn spawn_content(&mut self, tab_id: u64, view: ViewSize) -> ContentHandle {
+        self.spawn_context_content(tab_id, view, None).expect("normal context reservation")
+    }
+
+    fn spawn_context_content(&mut self, tab_id: u64, view: ViewSize, reserved: Option<u64>) -> Option<ContentHandle> {
         let epoch = self.next_epoch;
         self.next_epoch += 1;
+        let binding = match reserved {
+            Some(id) => self.browsing_contexts.popup_binding(id, tab_id, epoch)?,
+            None => self.browsing_contexts.reserve_tab(tab_id, epoch),
+        };
         let config = ContentConfig {
+            window_context: Some(binding),
             loader: self.engine.loader.clone(),
             settings: self.content_settings(),
             local_storage: self.engine.local_storage.clone(),
@@ -574,7 +587,7 @@ impl App {
             system_fonts: true,
             console_to_stderr: self.engine.console_to_stderr,
         };
-        ContentHandle::spawn(tab_id, epoch, config, self.sink.clone())
+        Some(ContentHandle::spawn(tab_id, epoch, config, self.sink.clone()))
     }
 
     /// Replace a tab's content thread (it stopped responding): the old
@@ -606,20 +619,41 @@ impl App {
 
     /// Create a tab at `insert_at` with a content thread (not navigated).
     fn insert_tab(&mut self, insert_at: usize) -> usize {
+        self.insert_context_tab(insert_at, None).expect("normal tab reservation")
+    }
+
+    fn insert_context_tab(&mut self, insert_at: usize, context: Option<u64>) -> Option<usize> {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let mut tab = Tab::new(id);
         let insert_at = insert_at.min(self.tabs.len());
         // Background tabs load for the active tab's view size.
         let view = self.view_for(self.active.min(self.tabs.len().saturating_sub(1)));
-        tab.content = Some(self.spawn_content(id, view));
+        tab.content = Some(self.spawn_context_content(id, view, context)?);
         tab.view = Some(view);
         self.tabs.insert(insert_at, tab);
         if insert_at <= self.active && self.tabs.len() > 1 {
             self.active += 1;
         }
         self.session_dirty = true;
-        insert_at
+        Some(insert_at)
+    }
+
+    fn open_context_tab(&mut self, context: u64) {
+        self.browsing_contexts.creation_consumed(context);
+        if self.browsing_contexts.info(context).is_none_or(|info| info.closed) { return; }
+        let at = self.browsing_contexts.creator_tab(context).and_then(|id| self.tab_index(id)).map(|index| index + 1).unwrap_or(self.active + 1).max(self.first_unpinned());
+        if let Some(index) = self.insert_context_tab(at, Some(context)) {
+            self.activate_tab(index);
+            self.ui_focus = UiFocus::Page;
+            if let Some(window) = &self.window { window.focus_window(); }
+        }
+    }
+
+    fn context_tab(&self, context: u64) -> Option<usize> {
+        let (tab, epoch) = self.browsing_contexts.owner(context)?;
+        let index = self.tab_index(tab)?;
+        self.tabs[index].content.as_ref().filter(|handle| handle.epoch == epoch && handle.context_id() == Some(context)).map(|_| index)
     }
 
     /// Open a new tab (optionally in the background) and navigate it.
@@ -1405,7 +1439,18 @@ impl App {
 
     // ------------------------------------------------------ content events
 
-    fn on_content(&mut self, tab_id: u64, epoch: u64, msg: FromContent) {
+    fn on_content(&mut self, event_loop: &ActiveEventLoop, tab_id: u64, epoch: u64, msg: FromContent) {
+        // Reserved contexts may outlive their opener or its renderer epoch.
+        if let FromContent::OpenContext(id) = msg { self.open_context_tab(id); return; }
+        if let FromContent::FocusContext(id) = msg {
+            self.browsing_contexts.focus_consumed(id);
+            if let Some(index) = self.context_tab(id) { self.activate_tab(index); if let Some(window) = &self.window { window.focus_window(); } }
+            return;
+        }
+        if let FromContent::CloseContext(id) = msg {
+            if let Some(index) = self.context_tab(id) { self.close_tab(index, event_loop); }
+            return;
+        }
         // Downloads outlive the tab that started them.
         if let FromContent::Download(d) = msg {
             self.on_download(d);
@@ -1459,6 +1504,7 @@ impl App {
                 self.request_redraw();
             }
             FromContent::UrlChanged { url, push_history } => {
+                if let Some(id) = self.tabs[idx].content.as_ref().and_then(ContentHandle::context_id) { self.browsing_contexts.same_document_url(id, url.clone()); }
                 let tab = &mut self.tabs[idx];
                 tab.current_url = Some(url.clone());
                 if push_history {
@@ -1587,6 +1633,7 @@ impl App {
                 }
             }
             FromContent::Download(_) => {}
+            FromContent::OpenContext(_) | FromContent::FocusContext(_) | FromContent::CloseContext(_) => {}
             FromContent::Consent(ev) => self.on_consent(idx, ev),
             FromContent::Crashed(reason) => self.restart_content(idx, &format!("Tab crashed: {reason}")),
         }
@@ -2102,10 +2149,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.request_redraw();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let t = Instant::now();
         match event {
-            UserEvent::Content { tab_id, epoch, msg } => self.on_content(tab_id, epoch, msg),
+            UserEvent::Content { tab_id, epoch, msg } => self.on_content(event_loop, tab_id, epoch, msg),
         }
         self.stats.record("content message", t.elapsed());
     }
