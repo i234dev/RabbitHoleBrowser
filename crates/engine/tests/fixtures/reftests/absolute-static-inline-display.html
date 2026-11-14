@@ -1,0 +1,13 @@
+<!doctype html>
+<title>Hypothetical block and inline absolute static positions</title>
+<link rel="match" href="absolute-static-inline-display-ref.html">
+<style>
+body { margin: 0; }
+#outer { position: relative; width: 200px; padding-top: 10px; font-size: 0; line-height: 0; }
+i { display: inline-block; width: 60px; height: 20px; vertical-align: top; }
+#container { position: relative; left: 10px; padding: 10px 0; }
+#block, #inline { position: absolute; top: 0; width: 20px; height: 20px; }
+#block { background: green; }
+#inline { background: blue; }
+</style>
+<div id="outer"><i></i><span id="container"><div id="block"></div><span id="inline"></span></span></div>

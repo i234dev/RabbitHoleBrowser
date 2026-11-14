@@ -787,7 +787,15 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 Piece::Atomic(c) => self.place_atomic(*c),
                 Piece::Float(c) => self.place_float(*c),
                 Piece::Abs(c) => {
-                    let (x, y) = (self.cur.x, self.cur.y);
+                    // A hypothetical block starts at its block container's
+                    // edge, even when the absolute occurs after inline text.
+                    let block = !self.children[*c].style.display_before_blockification.is_inline_level();
+                    let x = if block {
+                        self.content_x + if self.cstyle.direction == Direction::Rtl { self.content_w } else { 0.0 }
+                    } else {
+                        self.cur.x
+                    };
+                    let y = self.cur.y;
                     let (rx, ry) = self.rel_kids.get(*c).copied().unwrap_or((0.0, 0.0));
                     self.children[*c].static_pos = (x + rx, y + ry);
                 }

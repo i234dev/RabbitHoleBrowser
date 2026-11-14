@@ -758,7 +758,9 @@ impl<'a> Layouter<'a> {
             match b.children[i].flow {
                 Flow::Absolute => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
-                    b.children[i].static_pos = (content_x, cursor + off);
+                    let block = !b.children[i].style.display_before_blockification.is_inline_level();
+                    let x = content_x + if block && b.style.direction == rabbithole_style::Direction::Rtl { cb.width } else { 0.0 };
+                    b.children[i].static_pos = (x, cursor + off);
                 }
                 Flow::FloatLeft | Flow::FloatRight => {
                     let off = if at_top { 0.0 } else { pending.resolve() };
@@ -1119,7 +1121,10 @@ impl<'a> Layouter<'a> {
                         .and_then(|a| inline_cbs.get(&a).copied())
                         .or_else(|| self.abs_cb.get(&n).copied())
                 });
-                self.layout_absolute(&mut b.children[i], area.unwrap_or(cb));
+                let static_right = matches!(b.formatting, Formatting::Block | Formatting::Inline)
+                    && b.style.direction == rabbithole_style::Direction::Rtl
+                    && !b.children[i].style.display_before_blockification.is_inline_level();
+                self.layout_absolute(&mut b.children[i], area.unwrap_or(cb), static_right);
                 found = true;
             } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below {
                 // Kept boxes remember having none (their subtree is
@@ -1132,7 +1137,7 @@ impl<'a> Layouter<'a> {
         found
     }
 
-    fn layout_absolute(&mut self, c: &mut LayoutBox, cb: Rect) {
+    fn layout_absolute(&mut self, c: &mut LayoutBox, cb: Rect, static_right: bool) {
         let cb = if c.style.position == Position::Fixed {
             Rect::new(0.0, 0.0, self.ctx.viewport_width, self.ctx.viewport_height)
         } else {
@@ -1236,7 +1241,7 @@ impl<'a> Layouter<'a> {
         } else if let Some(r) = r {
             cb.right() - r - mr - c.rect.w
         } else {
-            c.static_pos.0 + ml
+            if static_right { c.static_pos.0 - mr - c.rect.w } else { c.static_pos.0 + ml }
         };
         let y = if let (Some(t), Some(bt), true) = (t, btm, sized_h) {
             let free = cb.h - t - bt - c.rect.h;

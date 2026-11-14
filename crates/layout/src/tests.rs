@@ -1124,3 +1124,30 @@ fn rtl_inline_containing_block_preserves_fragments_open_at_line_end() {
     let absolute = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
     assert_eq!(absolute, Rect::new(120.0, 0.0, 20.0, 40.0));
 }
+
+#[test]
+fn absolute_static_inline_positions_preserve_the_hypothetical_display() {
+    let fx = Fixture::new(
+        "<div id=outer><i></i><span id=container><div id=block></div><span id=inline></span><div id=inline-div></div></span></div>",
+        "body{margin:0} #outer{position:relative;width:200px;padding-top:10px;font-size:0;line-height:0} \
+         i{display:inline-block;width:60px;height:20px;vertical-align:top} #container{position:relative;left:10px;padding:10px 0} \
+         #block,#inline,#inline-div{position:absolute;top:0;width:20px;height:20px} #inline-div{display:inline}",
+    );
+    let t = fx.layout();
+    for (id, x) in [("block", 10.0), ("inline", 70.0), ("inline-div", 70.0)] {
+        let rect = t.box_of(&fx.doc, fx.doc.element_by_id(id).unwrap()).unwrap().rect;
+        assert_eq!(rect, Rect::new(x, 0.0, 20.0, 20.0), "{id}");
+    }
+}
+
+#[test]
+fn absolute_static_blocks_use_the_right_edge_of_a_rtl_parent() {
+    let fx = Fixture::new(
+        "<div id=outer><span id=parent><span id=absolute></span></span></div>",
+        "body{margin:0} #outer{position:relative;width:200px} #parent{display:block;direction:rtl;width:0;margin-left:100px} \
+         #absolute{display:block;position:absolute;top:0;width:30px;height:20px;margin-right:5px}",
+    );
+    let t = fx.layout();
+    let rect = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+    assert_eq!(rect, Rect::new(65.0, 0.0, 30.0, 20.0));
+}

@@ -128,6 +128,7 @@ fn wrap(mut r: LayoutBox, cache: &mut Cache, is_root: bool, outer: WritingMode) 
     let mut ws = ComputedStyle::inherit_from(&phys);
     ws.writing_mode = WritingMode::HorizontalTb;
     ws.display = if phys.display.is_inline_level() { Display::InlineBlock } else { Display::Block };
+    ws.display_before_blockification = phys.display_before_blockification;
     ws.position = phys.position;
     ws.inset = phys.inset;
     ws.z_index = phys.z_index;
