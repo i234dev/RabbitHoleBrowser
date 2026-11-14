@@ -1,0 +1,1 @@
+throw new Error('ANDROID_JS_NEGATIVE_CONTROL');

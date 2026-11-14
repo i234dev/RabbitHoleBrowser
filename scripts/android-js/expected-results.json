@@ -1,0 +1,25 @@
+{
+  "smoke": {
+    "exit": 0,
+    "stdout": "expected.stdout"
+  },
+  "smoke-inc-gc": {
+    "exit": 0,
+    "stdout": "expected.stdout",
+    "environment": {
+      "RH_GC_STRESS": "inc",
+      "RH_GC_STATS": "1",
+      "RH_GC_INCREMENTAL": "1"
+    }
+  },
+  "negative-uncaught": {
+    "exit": 1,
+    "stderr_contains": "ANDROID_JS_NEGATIVE_CONTROL"
+  },
+  "negative-rejection": {
+    "exit": 1,
+    "stderr_contains": "ANDROID_JS_REJECTION_CONTROL"
+  },
+  "jit": "feature disabled at build time",
+  "performance_comparison": "none"
+}

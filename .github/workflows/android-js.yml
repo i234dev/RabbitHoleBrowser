@@ -1,0 +1,44 @@
+name: Android JS core diagnostic
+
+on:
+  push:
+    branches: ["android/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-js-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cross-compile:
+    if: startsWith(github.ref, 'refs/heads/android/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "2"
+      ANDROID_JS_OUTPUT: ${{ runner.temp }}/android-js-artifacts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Rust and the Android NDK come from the runner image. The script may
+      # add only rust-std for Android to that existing Rust toolchain.
+      - name: Cross-compile and package without executing ARM
+        run: python3 scripts/android-js/build-diagnostic.py
+      - name: Upload binary, source, oracles and provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-js-aarch64-api21-${{ github.sha }}
+          path: |
+            ${{ env.ANDROID_JS_OUTPUT }}/android-js-aarch64-api21.tar.gz
+            ${{ env.ANDROID_JS_OUTPUT }}/archive.sha256
+            ${{ env.ANDROID_JS_OUTPUT }}/commands.log
+            ${{ env.ANDROID_JS_OUTPUT }}/error.txt
+            ${{ env.ANDROID_JS_OUTPUT }}/bundle/metadata/
+            ${{ env.ANDROID_JS_OUTPUT }}/bundle/manifest.json
+          if-no-files-found: error
+          retention-days: 14
