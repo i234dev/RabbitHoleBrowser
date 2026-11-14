@@ -271,6 +271,7 @@ impl Tokenizer {
 
     /// Add input at the end of the stream (network data).
     pub fn append(&mut self, text: &str) {
+        self.compact();
         let at = self.input.len();
         self.insert_chars(at, text);
     }
@@ -279,6 +280,9 @@ impl Tokenizer {
     /// the end of the stream when it is undefined); the insertion point
     /// stays after it.
     pub fn insert(&mut self, text: &str) {
+        // Compaction rebases every live and saved insertion point. Take
+        // this offset afterwards, in the same window as insert_chars.
+        self.compact();
         let at = self.insertion_point.unwrap_or(self.input.len());
         let n = self.insert_chars(at, text);
         if let Some(ip) = self.insertion_point.as_mut() {
@@ -287,7 +291,6 @@ impl Tokenizer {
     }
 
     fn insert_chars(&mut self, at: usize, text: &str) -> usize {
-        self.compact();
         let at = at.min(self.input.len());
         let mut chars = Vec::with_capacity(text.len());
         let trailing_cr = preprocess(text, &mut chars);
