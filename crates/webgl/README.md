@@ -97,7 +97,8 @@ a 1024-unit limit and pays the full transitive callee cost at every call site,
 including arguments, bodies and bindings. Both sides of conditionals are charged,
 so skipped branches and shared bodies cannot hide exponential execution. These
 units estimate evaluation work; they are not an AST-node or measured CPU count.
-The independent per-draw raster limit remains 32 million weighted units, checked
+The independent per-draw raster limit remains 33,554,432 weighted units (32 ×
+1024²), checked
 before pixels change. Larger programs may therefore compile while draws to
 larger targets still return OUT_OF_MEMORY. Existing source, token, variable,
 statement and nesting limits remain in force. Unused helpers do not activate
