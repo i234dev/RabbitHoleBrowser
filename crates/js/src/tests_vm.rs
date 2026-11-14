@@ -4,6 +4,36 @@
 
 use crate::realm::Realm;
 
+#[test]
+fn thenable_rejection_survives_collection_inside_the_callback() {
+    fn collect_now(realm: &mut Realm, _: crate::Value, _: &[crate::Value]) -> Result<crate::Value, crate::Value> {
+        realm.gc();
+        Ok(crate::Value::Undefined)
+    }
+    let mut realm = Realm::new();
+    let collect = realm.new_native_function("collectNow", 0, collect_now);
+    realm.define_global("collectNow", crate::Value::Object(collect));
+    for (source, expected) in [
+        (
+            "var outcome='pending'; Promise.resolve({then(){collectNow();throw 'expected'}}).then(()=>outcome='wrong',e=>outcome=e)",
+            "expected",
+        ),
+        (
+            "outcome='pending'; Promise.resolve({then(resolve){resolve('resolved');collectNow();throw 'ignored'}}).then(v=>outcome=v,e=>outcome='wrong')",
+            "resolved",
+        ),
+        (
+            "outcome='pending'; Promise.resolve({then(){[0].map(()=>collectNow());throw {message:'nested'}}}).catch(e=>outcome=e.message)",
+            "nested",
+        ),
+    ] {
+        realm.eval(source, "thenable.js").unwrap();
+        realm.run_jobs();
+        let result = realm.eval("outcome", "result.js").unwrap();
+        assert_eq!(realm.to_string(result).unwrap().to_rust_string(), expected);
+    }
+}
+
 fn run(src: &str) -> Result<String, String> {
     let mut realm = Realm::new();
     realm.set_console_sink(Box::new(|_, _| {}));

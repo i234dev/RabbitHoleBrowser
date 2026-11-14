@@ -281,6 +281,10 @@ impl Realm {
 
     pub(crate) fn run_resolve_thenable(&mut self, promise: ObjectId, thenable: Value, then: Value) -> JsResult<()> {
         let (res, rej) = create_resolving_functions(self, promise);
+        // The callback may ignore both arguments and collect them while it
+        // runs. We still need reject if it throws, even after resolve was
+        // called: its shared AlreadyResolved record must remain alive too.
+        let _reject_root = self.root_object(rej);
         if let Err(e) = self.call(then, thenable, &[Value::Object(res), Value::Object(rej)]) {
             self.call(Value::Object(rej), Value::Undefined, &[e])?;
         }
