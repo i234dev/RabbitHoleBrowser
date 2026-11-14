@@ -26,6 +26,10 @@ thread_local! {
     static LIVE_MAPPED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+// The deliberate RWX detector fixture must not race the whole-process check.
+#[cfg(all(test, windows))]
+static RWX_FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl std::fmt::Debug for ExecMem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ExecMem({:p}, {} bytes)", self.ptr, self.len)
@@ -105,14 +109,18 @@ pub const fn supported() -> bool {
     cfg!(all(target_arch = "x86_64", any(unix, windows)))
 }
 
-/// Linux: does the process have any writable and executable mapping?
-/// (Tests use it to check W^X.) Elsewhere: `None`.
+/// Linux/Windows: does the process have any writable and executable mapping?
+/// An instantaneous observation, not a lock on protection changes by other
+/// threads. Query failure or unsupported platforms return `None`.
 pub fn has_rwx_mapping() -> Option<bool> {
-    if !cfg!(target_os = "linux") {
-        return None;
+    #[cfg(windows)]
+    { sys::has_rwx_mapping() }
+    #[cfg(not(windows))]
+    {
+        if !cfg!(target_os = "linux") { return None; }
+        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+        Some(maps.lines().any(|l| l.split_whitespace().nth(1).map(|p| p.starts_with("rwx")).unwrap_or(false)))
     }
-    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
-    Some(maps.lines().any(|l| l.split_whitespace().nth(1).map(|p| p.starts_with("rwx")).unwrap_or(false)))
 }
 
 #[cfg(unix)]
@@ -166,12 +174,27 @@ mod sys {
         processor_level: u16,
         processor_revision: u16,
     }
+    // Native SDK layout: PartitionId is present on 64-bit Windows, not x86.
+    // https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-memory_basic_information
+    #[repr(C)]
+    struct MemoryBasicInformation {
+        base_address: *mut u8,
+        allocation_base: *mut u8,
+        allocation_protect: u32,
+        #[cfg(target_pointer_width = "64")]
+        partition_id: u16,
+        region_size: usize,
+        state: u32,
+        protect: u32,
+        kind: u32,
+    }
     #[link(name = "kernel32")]
     extern "system" {
         fn GetSystemInfo(info: *mut SystemInfo);
         fn VirtualAlloc(addr: *mut u8, size: usize, ty: u32, protect: u32) -> *mut u8;
         fn VirtualProtect(addr: *mut u8, size: usize, protect: u32, old: *mut u32) -> i32;
         fn VirtualFree(addr: *mut u8, size: usize, ty: u32) -> i32;
+        fn VirtualQuery(addr: *const u8, info: *mut MemoryBasicInformation, size: usize) -> usize;
         fn FlushInstructionCache(process: isize, addr: *const u8, size: usize) -> i32;
         fn GetCurrentProcess() -> isize;
     }
@@ -180,6 +203,58 @@ mod sys {
     const MEM_RELEASE: u32 = 0x8000;
     const PAGE_READWRITE: u32 = 0x04;
     const PAGE_EXECUTE_READ: u32 = 0x20;
+    const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+    const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
+    #[cfg(test)]
+    thread_local! {
+        static FAIL_NEXT_FLUSH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    fn query(addr: usize) -> Option<MemoryBasicInformation> {
+        query_with(addr, |p, info, size| unsafe { VirtualQuery(p, info, size) })
+    }
+    fn query_with(addr: usize, call: impl FnOnce(*const u8, *mut MemoryBasicInformation, usize) -> usize) -> Option<MemoryBasicInformation> {
+        let mut info = std::mem::MaybeUninit::<MemoryBasicInformation>::zeroed();
+        let size = std::mem::size_of::<MemoryBasicInformation>();
+        // VirtualQuery inspects this address; Rust never dereferences it.
+        let written = call(addr as *const u8, info.as_mut_ptr(), size);
+        if written != size { return None; }
+        Some(unsafe { info.assume_init() })
+    }
+    fn scan_regions(
+        mut cursor: usize, end: usize,
+        mut query_region: impl FnMut(usize) -> Option<MemoryBasicInformation>,
+        mut matches: impl FnMut(&MemoryBasicInformation) -> bool,
+    ) -> Option<bool> {
+        if cursor >= end { return None; }
+        while cursor < end {
+            let info = query_region(cursor)?;
+            let base = info.base_address as usize;
+            let next = base.checked_add(info.region_size)?;
+            if base > cursor || next <= cursor { return None; }
+            if matches(&info) { return Some(true); }
+            cursor = next;
+        }
+        Some(false)
+    }
+    pub fn has_rwx_mapping() -> Option<bool> {
+        let mut info = std::mem::MaybeUninit::<SystemInfo>::zeroed();
+        unsafe { GetSystemInfo(info.as_mut_ptr()); }
+        let info = unsafe { info.assume_init() };
+        let end = (info.maximum_address as usize).checked_add(1)?;
+        scan_regions(info.minimum_address as usize, end, query, |region| {
+            // Protect is undefined for free/reserved regions. AllocationProtect
+            // describes the initial state, not the permissions in force now.
+            region.state == MEM_COMMIT && matches!(region.protect & 0xff,
+                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)
+        })
+    }
+    #[cfg(test)]
+    fn range_is(p: *const u8, len: usize, protection: u32) -> Option<bool> {
+        let end = (p as usize).checked_add(len)?;
+        scan_regions(p as usize, end, query, |info| {
+            info.state != MEM_COMMIT || info.protect != protection
+        }).map(|mismatch| !mismatch)
+    }
     pub fn page_size() -> Option<usize> {
         let mut info = std::mem::MaybeUninit::<SystemInfo>::zeroed();
         // SAFETY: the repr(C) layout matches SYSTEM_INFO and the API
@@ -200,13 +275,112 @@ mod sys {
     }
     pub unsafe fn protect(p: *mut u8, len: usize) -> bool {
         let mut old = 0;
-        let ok = VirtualProtect(p, len, PAGE_EXECUTE_READ, &mut old) != 0;
-        FlushInstructionCache(GetCurrentProcess(), p, len);
-        ok
+        if VirtualProtect(p, len, PAGE_EXECUTE_READ, &mut old) == 0 {
+            return false;
+        }
+        // Cache coherency is part of sealing generated code. A failed flush
+        // rejects the block; ExecMem's existing owner releases its RX mapping.
+        #[cfg(test)]
+        if FAIL_NEXT_FLUSH.with(|fail| fail.replace(false)) { return false; }
+        FlushInstructionCache(GetCurrentProcess(), p, len) != 0
     }
     pub unsafe fn free(p: *mut u8, _len: usize) {
         VirtualFree(p, 0, MEM_RELEASE);
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::{ExecMem, LIVE_MAPPED_BYTES};
+
+        #[test]
+        fn native_memory_information_layout_matches_sdk() {
+            #[cfg(target_pointer_width = "64")]
+            {
+                assert_eq!(std::mem::size_of::<MemoryBasicInformation>(), 48);
+                assert_eq!(std::mem::offset_of!(MemoryBasicInformation, region_size), 24);
+            }
+            #[cfg(target_pointer_width = "32")]
+            {
+                assert_eq!(std::mem::size_of::<MemoryBasicInformation>(), 28);
+                assert_eq!(std::mem::offset_of!(MemoryBasicInformation, region_size), 12);
+            }
+        }
+
+        #[test]
+        fn virtual_query_observes_rw_then_rx_over_all_code_pages() {
+            let page = page_size().unwrap();
+            let mem = ExecMem::new(&vec![0xC3; page + 1], |p, bytes| {
+                assert_eq!(bytes.len(), page + 1);
+                assert_eq!(range_is(p, page * 2, PAGE_READWRITE), Some(true));
+                assert_eq!(range_is(p, page * 2, PAGE_EXECUTE_READ), Some(false));
+            }).expect("seal actual mapping and flush instruction cache");
+            assert_eq!(range_is(mem.ptr(), mem.mapped_len(), PAGE_EXECUTE_READ), Some(true));
+            assert_eq!(range_is(mem.ptr(), mem.mapped_len(), PAGE_READWRITE), Some(false));
+            eprintln!("windows-wx mapped_bytes={} patch=RW sealed=RX verified_with=VirtualQuery", mem.mapped_len());
+        }
+
+        #[test]
+        fn virtual_query_detects_a_writable_executable_fixture() {
+            let _fixture = crate::RWX_FIXTURE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let page = page_size().unwrap();
+            let mem = ExecMem::new(&[0xC3], |p, _| {
+                let mut old = 0;
+                // A deliberately RWX test fixture, never executed. The owner
+                // still seals RX before returning and frees it on failure.
+                assert_ne!(unsafe { VirtualProtect(p, page, PAGE_EXECUTE_READWRITE, &mut old) }, 0);
+                assert_eq!(range_is(p, page, PAGE_EXECUTE_READWRITE), Some(true));
+                assert_eq!(super::has_rwx_mapping(), Some(true));
+            }).expect("fixture restored to RX");
+            assert_eq!(range_is(mem.ptr(), mem.mapped_len(), PAGE_EXECUTE_READ), Some(true));
+        }
+
+        #[test]
+        fn failed_flush_rejects_mapping_and_releases_its_owner() {
+            struct ResetFlush(bool);
+            impl Drop for ResetFlush {
+                fn drop(&mut self) { FAIL_NEXT_FLUSH.with(|flag| flag.set(self.0)); }
+            }
+            let reset = ResetFlush(FAIL_NEXT_FLUSH.with(|flag| flag.replace(true)));
+            assert!(!reset.0, "this thread has no pending injection");
+            let before = LIVE_MAPPED_BYTES.with(|n| n.get());
+            let patched = std::cell::Cell::new(false);
+            let mem = ExecMem::new(&[0xC3], |p, _| {
+                patched.set(true);
+                assert_eq!(range_is(p, page_size().unwrap(), PAGE_READWRITE), Some(true));
+                assert!(LIVE_MAPPED_BYTES.with(|n| n.get()) > before);
+            });
+            assert!(patched.get());
+            assert!(mem.is_none(), "injected flush failure must not publish executable code");
+            assert_eq!(LIVE_MAPPED_BYTES.with(|n| n.get()), before);
+            assert!(!FAIL_NEXT_FLUSH.with(|flag| flag.get()), "injection was consumed");
+            let next = ExecMem::new(&[0xC3], |_, _| {}).expect("next real flush is unaffected");
+            drop(next);
+            assert_eq!(LIVE_MAPPED_BYTES.with(|n| n.get()), before);
+            drop(reset);
+            eprintln!("windows-wx flush_failure=injected executable_owner=None mapped_bytes_restored={before}");
+        }
+
+        #[test]
+        fn query_errors_and_nonprogress_never_report_safe_memory() {
+            fn region(base: usize, size: usize) -> MemoryBasicInformation {
+                let mut info: MemoryBasicInformation = unsafe { std::mem::zeroed() };
+                info.base_address = base as *mut u8;
+                info.region_size = size;
+                info
+            }
+            assert!(query(usize::MAX).is_none(), "Windows rejects an address beyond its user range");
+            assert!(query_with(1, |_, _, _| 0).is_none());
+            assert!(query_with(1, |_, _, size| size - 1).is_none(), "partial information is not trusted");
+            assert_eq!(scan_regions(1, 10, |_| None, |_| false), None);
+            assert_eq!(scan_regions(1, 10, |_| Some(region(1, 0)), |_| false), None);
+            assert_eq!(scan_regions(1, 10, |_| Some(region(2, 8)), |_| false), None);
+            assert_eq!(scan_regions(1, 10, |_| Some(region(0, 1)), |_| false), None);
+            assert_eq!(scan_regions(1, 10, |_| Some(region(1, usize::MAX)), |_| false), None);
+            assert_eq!(scan_regions(1, 10, |_| Some(region(0, 10)), |_| false), Some(false));
+        }
+    }
+
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -265,6 +439,8 @@ mod tests {
 
     #[test]
     fn stub_runs_and_no_rwx() {
+        #[cfg(windows)]
+        let _fixture = RWX_FIXTURE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         if !supported() {
             return;
         }

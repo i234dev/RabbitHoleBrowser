@@ -1549,3 +1549,27 @@ el selector del entorno antes del override del test. Un contador acumulado
 anterior no acredita ejecución durante la fase medida; el control apagado
 exige que no aumente. Las profundidades vivas son observaciones dinámicas y
 deben seguir a cero en ese control.
+
+
+### Windows: permisos y coherencia de caché (candidato)
+
+El backend consulta ahora los permisos actuales con `VirtualQuery` en Windows;
+una consulta fallida devuelve `None`, nunca una afirmación de ausencia de RWX.
+Las pruebas consultan el rango completo de las páginas propias: RW durante
+el parcheo, RX tras sellar. Un fixture RWX temporal verifica el detector sin
+ejecutar esa memoria. La consulta de todo el proceso es una observación
+instantánea y otros hilos pueden cambiar sus propios permisos después.
+
+Un resultado cero de `FlushInstructionCache` rechaza el bloque igual que un
+fallo de `VirtualProtect`: el propietario RAII libera la asignación y
+`ExecMem::new` no devuelve código instalable. Una inyección de fallo limitada
+al hilo de test comprueba ese rechazo y la liberación; no se presenta como
+un fallo real del sistema operativo. Los caminos positivos usan las APIs
+reales. La fuente sigue pendiente de compilación y CI.
+
+Contrato primario: [FlushInstructionCache](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-flushinstructioncache),
+[VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect),
+[VirtualQuery](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualquery) y
+[MEMORY_BASIC_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information).
+El selector Windows, el ABI y las tablas de unwind permanecen fuera de este
+cambio.
