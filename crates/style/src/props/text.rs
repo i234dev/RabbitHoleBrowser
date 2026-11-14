@@ -432,12 +432,16 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
         },
         "font-synthesis" => {
             let kws: Vec<String> = comps.iter().filter_map(|c| values::ident(c)).collect();
-            style.font_synthesis_style = if name == "font-synthesis" {
-                kws.iter().any(|k| k == "style")
-            } else {
-                kws.iter().any(|k| k == "auto" || k == "oblique-only")
-            };
+            style.font_synthesis_style = kws.iter().any(|k| k == "style");
         }
+        "font-synthesis-style" => match comps {
+            [c] => match values::ident(c).as_deref() {
+                Some("auto") => style.font_synthesis_style = true,
+                Some("none") => style.font_synthesis_style = false,
+                _ => return true,
+            },
+            _ => return true,
+        },
         "line-break" | "-webkit-line-break" => {
             style.line_break = match values::ident(c0).as_deref() {
                 Some("auto" | "normal") => 0,
@@ -470,7 +474,7 @@ pub fn apply(name: &str, comps: &[&[Token]], value: &[Token], style: &mut Comput
             }
         }
         "hyphens" | "text-rendering" | "font-stretch" | "font-kerning" | "font-feature-settings"
-        | "font-optical-sizing" | "font-smoothing" | "font-synthesis-style" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
+        | "font-optical-sizing" | "font-smoothing" | "text-size-adjust" | "text-align-last" | "text-justify" | "text-orientation"
         | "text-combine-upright" | "font-language-override" | "font-variant-numeric" | "font-variant-ligatures"
         | "font-variant-east-asian" | "font-variant-position" | "word-spacing-x"
         | "ruby-align" | "text-spacing" | "hanging-punctuation" | "initial-letter"

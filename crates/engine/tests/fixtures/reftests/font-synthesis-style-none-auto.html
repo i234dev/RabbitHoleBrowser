@@ -1,0 +1,23 @@
+<!doctype html>
+<title>The synthesis style longhand controls synthetic slant</title>
+<link rel="help" href="https://www.w3.org/TR/css-fonts-4/#font-synthesis-style">
+<link rel="match" href="font-synthesis-style-none-auto-ref.html">
+<link rel="mismatch" href="font-synthesis-style-none-auto-upright-ref.html">
+<style>
+body { margin: 0; }
+/* The bundled serif family has no italic face. Both references use the same family. */
+main { font: 40px/60px serif; }
+div { height: 60px; }
+#none { font-style: italic; font-synthesis-style: none; }
+#auto { font-style: italic; font-synthesis: none; font-synthesis-style: auto; }
+section { font-style: italic; font-synthesis-style: none; }
+#initial { font-synthesis-style: initial; }
+</style>
+<main>
+  <div id="none">Filler text</div>
+  <div id="auto">Filler text</div>
+  <section>
+    <div>Filler text</div>
+    <div id="initial">Filler text</div>
+  </section>
+</main>
