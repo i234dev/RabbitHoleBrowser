@@ -739,6 +739,7 @@ impl<'a> Layouter<'a> {
         for it in items.iter_mut() {
             let (ax, aw) = span_size(&cols.tracks, &col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
             let (ay, ah) = span_size(&rows.tracks, &row_pos, it.area.row.0 as usize, it.area.row.1 as usize);
+            if subgrid::requests(&b.children[it.idx])!=(false,false) {*it=subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw);}
             let child=&mut b.children[it.idx];
             let (column_request,row_request)=subgrid::requests(child);
             if !column_request&&!row_request {
@@ -748,7 +749,7 @@ impl<'a> Layouter<'a> {
             self.grid_work.charge(1);
             let columns=column_request.then(||subgrid::section(&cols,&col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,true));
             let rows=row_request.then(||subgrid::section(&rows,&row_pos,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,true));
-            self.with_subgrid(child,columns,rows,cbw,|this,child| {
+            self.with_subgrid(child,columns,rows,aw,|this,child| {
                 let (justify,align,auto)=(it.justify,it.align,it.edges.auto);
                 subgrid::stretch_item(child,it);
                 this.layout_grid_item(child,it,ax+content_x,ay+content_y,aw,ah,cbw);
@@ -1175,21 +1176,24 @@ impl<'a> Layouter<'a> {
                 out.push(self.column_contribution(child,it,cbw));
                 continue;
             }
+            self.grid_work.charge(1);
+            let reference=subgrid::placement_reference(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap);
+            let item=subgrid::rebase_item(it,&child.style,cbw,reference);let it=&item;
             let row_source=rows.map_or(Some(subgrid::AxisInheritance::Stacking),|rows| {
                 if phase==MeasurePhase::Initial {subgrid::fixed_section(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names)}
                 else {let (positions,_)=subgrid::positions(rows,row_gap,None,ContentDistribution::FlexStart);Some(subgrid::section(rows,&positions,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names))}
             });
             if column_request {
                 let columns=subgrid::sizing_section(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names);
-                let columns=subgrid::item_layer_source(columns,it,&child.style,false,cbw);
+                let columns=subgrid::item_layer_source(columns,it,&child.style,false,reference);
                 let rows=if row_request {row_source} else {None};
-                let mut nested=self.with_subgrid(child,Some(columns),rows,cbw,|this,child|this.subgrid_axis_contributions(child,false,None,phase));
+                let mut nested=self.with_subgrid(child,Some(columns),rows,reference,|this,child|this.subgrid_axis_contributions(child,false,None,phase));
                 if it.parent_lanes_auto {nested=subgrid::automatic_contributions(&mut self.grid_work,nested,(it.area.col.1-it.area.col.0)as usize);}
                 for c in &mut nested {c.start+=it.area.col.0 as usize;c.end+=it.area.col.0 as usize;}
                 self.grid_work.charge(nested.len());
                 out.extend(nested);
             } else if row_request&&row_source.is_some() {
-                let contribution=self.with_subgrid(child,None,row_source,cbw,|this,child|this.column_contribution(child,it,cbw));
+                let contribution=self.with_subgrid(child,None,row_source,reference,|this,child|this.column_contribution(child,it,reference));
                 out.push(contribution);
             } else {
                 out.extend(self.column_contributions(b,std::slice::from_ref(it),cbw));
@@ -1227,11 +1231,12 @@ impl<'a> Layouter<'a> {
             }
             self.grid_work.charge(1);
             let (_,aw)=span_size(&cols.tracks,col_pos,it.area.col.0 as usize,it.area.col.1 as usize);
+            let item=subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw);let it=&item;
             let child=&mut b.children[it.idx];
             let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names));
             let rows=subgrid::sizing_section(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names);
-            let rows=subgrid::item_layer_source(rows,it,&child.style,true,cbw);
-            let mut nested=self.with_subgrid(child,columns,Some(rows),cbw,|this,child| {
+            let rows=subgrid::item_layer_source(rows,it,&child.style,true,aw);
+            let mut nested=self.with_subgrid(child,columns,Some(rows),aw,|this,child| {
                 let mut item=*it;subgrid::stretch_item(child,&mut item);
                 let inner_w=this.grid_item_width(child,&item,aw,cbw);
                 this.subgrid_axis_contributions(child,true,Some(inner_w),phase)
@@ -1251,6 +1256,7 @@ impl<'a> Layouter<'a> {
         let mut baselines: Vec<(usize, i32, f32)> = Vec::new();
         for it in items {
             let (_, aw) = span_size(&cols.tracks, col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
+            let item=if subgrid::requests(&b.children[it.idx])!=(false,false) {subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw)} else {*it};let it=&item;
             let child = &mut b.children[it.idx];
             let bb = child.style.box_sizing == BoxSizing::BorderBox;
             let extras_v = it.edges.pb_v + it.edges.margin_sum(Axis::Column);
@@ -1259,7 +1265,7 @@ impl<'a> Layouter<'a> {
                 Some(h) if !baseline => h + extras_v,
                 _ => {
                     let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,true));
-                    self.with_subgrid(child,columns,None,cbw,|this,child| {
+                    self.with_subgrid(child,columns,None,aw,|this,child| {
                         let inner_w = this.grid_item_width(child, it, aw, cbw);
                         let cb = Cb { x:0., width:aw, height:None };
                         let mut bfc = Bfc::new();

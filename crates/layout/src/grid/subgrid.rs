@@ -51,6 +51,8 @@ pub(crate) struct SharedTracks {
     pub(super) names: Vec<Vec<String>>,
     pub(super) collapsed: Vec<bool>,
     pub(super) gap: f32,
+    /// Placement-only geometry must not resolve cyclic percentage edges.
+    definite: bool,
     /// Accumulated ancestor edge layers at internal track boundaries. A
     /// nested subgrid must retain its parent's own gap adjustments as well.
     edge_before: Vec<f32>,
@@ -161,6 +163,7 @@ pub(super) fn section(list:&TrackList, positions:&[f32], start:usize, end:usize,
         names:if names {list.names[start..=end].to_vec()} else {vec![vec![];end-start+1]},
         collapsed:list.tracks[start..end].iter().map(|t|t.collapsed).collect(),
         gap,
+        definite:list.inherited.as_ref().is_none_or(|parent|parent.definite),
         edge_before:(start..end).map(|i|if i==start {0.} else {before(i)}).collect(),
         edge_after:(start..end).map(|i|if i+1==end {0.} else {after(i)}).collect(),
         inset_start:if start<end {before(start)} else {0.},
@@ -240,7 +243,40 @@ pub(super) fn sizing_section(list:&TrackList,start:usize,end:usize,gap:f32,names
     }).collect();
     let probe=TrackList{tracks,names:list.names.clone(),inherited:list.inherited.clone()};
     let (positions,_)=positions(&probe,gap,None,ContentDistribution::FlexStart);
-    section(&probe,&positions,start,end,gap,names)
+    let mut source=section(&probe,&positions,start,end,gap,names);
+    if let AxisInheritance::Tracks(axis)=&mut source {
+        let definite=list.inherited.as_ref().map_or_else(||list.tracks[start..end].iter().all(|t|matches!((t.min,t.max),(Sizing::Fixed(a),Sizing::Fixed(b)) if a==b)),|parent|parent.definite);
+        Arc::make_mut(axis).definite=definite;
+    }
+    source
+}
+
+pub(super) fn scope_reference(columns:&Option<AxisInheritance>,fallback:f32)->f32 {
+    match columns {Some(AxisInheritance::Tracks(axis))=>if axis.definite {axis.extent()} else {0.},_=>fallback}
+}
+
+/// An intrinsic axis is indefinite for percentage contributions. A placement
+/// span consisting entirely of fixed tracks already supplies a definite area.
+pub(super) fn placement_reference(list:&TrackList,start:usize,end:usize,gap:f32)->f32 {
+    if let Some(axis)=&list.inherited {
+        return if axis.definite {axis.starts[end-1]+axis.sizes[end-1]-axis.starts[start]} else {0.};
+    }
+    let tracks=&list.tracks[start..end];
+    if !tracks.iter().all(|t|matches!((t.min,t.max),(Sizing::Fixed(a),Sizing::Fixed(b)) if a==b)) {return 0.;}
+    let count=tracks.iter().filter(|t|!t.collapsed).count();
+    tracks.iter().map(|t|if t.collapsed {0.} else if let Sizing::Fixed(size)=t.min {size} else {0.}).sum::<f32>()+gap*count.saturating_sub(1)as f32
+}
+
+/// Preserve the inherited/hypothetical margin layer while resolving the
+/// child's own percentage edges against its grid area's inline size.
+pub(super) fn rebase_item(item:&GridItem,style:&ComputedStyle,old_reference:f32,new_reference:f32)->GridItem {
+    let old=ItemEdges::new(style,old_reference);let mut result=*item;
+    result.edges=ItemEdges::new(style,new_reference);
+    result.edges.margin.left+=item.edges.margin.left-old.margin.left;
+    result.edges.margin.right+=item.edges.margin.right-old.margin.right;
+    result.edges.margin.top+=item.edges.margin.top-old.margin.top;
+    result.edges.margin.bottom+=item.edges.margin.bottom-old.margin.bottom;
+    result
 }
 
 pub(super) fn clamp_placement(pair:Result<(i32,i32),i32>,count:usize)->Result<(i32,i32),i32> {
@@ -388,6 +424,9 @@ fn install(b:&mut LayoutBox,columns:Option<AxisInheritance>,rows:Option<AxisInhe
     saved.push(Saved{style:b.style.clone(),columns:b.grid_columns.clone(),rows:b.grid_rows.clone()});
     b.grid_columns=columns.clone();b.grid_rows=rows.clone();
     let mut style=(*b.style).clone();
+    let resolve=|value:Length|if value.is_auto() {Length::Auto} else {Length::Px(value.resolve_or_zero(reference))};
+    style.margin=rabbithole_style::Edges{left:resolve(style.margin.left),right:resolve(style.margin.right),top:resolve(style.margin.top),bottom:resolve(style.margin.bottom)};
+    style.padding=rabbithole_style::Edges{left:Length::Px(style.padding.left.resolve_or_zero(reference)),right:Length::Px(style.padding.right.resolve_or_zero(reference)),top:Length::Px(style.padding.top.resolve_or_zero(reference)),bottom:Length::Px(style.padding.bottom.resolve_or_zero(reference))};
     if matches!(columns.as_ref(),Some(AxisInheritance::Tracks(_))) {style.width=Length::Auto;style.min_width=Length::ZERO;style.max_width=Length::Auto;}
     if matches!(rows.as_ref(),Some(AxisInheritance::Tracks(_))) {style.height=Length::Auto;style.min_height=Length::ZERO;style.max_height=Length::Auto;}
     b.style=Rc::new(style);
@@ -424,6 +463,7 @@ impl<'a> Layouter<'a> {
     pub(super) fn with_subgrid<R>(&mut self,b:&mut LayoutBox,columns:Option<AxisInheritance>,rows:Option<AxisInheritance>,reference:f32,body:impl FnOnce(&mut Self,&mut LayoutBox)->R)->R {
         let (column_request,row_request)=requests(b);
         if (!column_request||columns.is_none())&&(!row_request||rows.is_none()) {return body(self,b);}
+        let reference=scope_reference(&columns,reference);
         self.grid_work.charge(source_work(&columns).saturating_add(source_work(&rows)).saturating_add(b.children.len()));
         let scope=Scope::new(b,columns,rows,reference);
         body(self,&mut *scope.node)
@@ -668,5 +708,32 @@ mod tests {
         let source=sizing_section(&list,1,2,50.,true);
         let AxisInheritance::Tracks(axis)=item_layer_source(source,&hypothetical,&ComputedStyle::initial(),false,0.) else {panic!("missing source")};
         assert_eq!((axis.inset_start,axis.inset_end),(10.,10.));
+    }
+
+    #[test]
+    fn placement_only_tracks_do_not_resolve_percentage_edges() {
+        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(10.),Sizing::Auto)],names:vec![vec![],vec![]],inherited:None};
+        let source=Some(sizing_section(&list,0,1,0.,true));assert_eq!(scope_reference(&source,300.),0.);
+        let list=parent();let source=Some(sizing_section(&list,0,1,50.,true));assert_eq!(scope_reference(&source,300.),100.);
+    }
+
+    #[test]
+    fn percentage_edges_are_resolved_once_in_the_area_space_and_restored() {
+        let parent=parent();let mut b=child();let mut style=(*b.style).clone();
+        style.margin=rabbithole_style::Edges::all(Length::ZERO);style.border_width=rabbithole_style::Edges::all(0.);style.padding=rabbithole_style::Edges::all(Length::Percent(10.));b.style=Rc::new(style);
+        let original=b.style.clone();
+        {
+            let scope=Scope::new(&mut b,Some(section(&parent,&[0.,150.],0,1,50.,true)),None,100.);
+            assert_eq!(scope.node.style.padding.left,Length::Px(10.));
+            assert_eq!(shared(scope.node,false).unwrap().inset_start,10.);
+        }
+        assert!(Rc::ptr_eq(&original,&b.style));assert_eq!(b.style.padding.left,Length::Percent(10.));
+    }
+
+    #[test]
+    fn rebasing_percentage_edges_preserves_the_inherited_margin_layer() {
+        let mut style=ComputedStyle::initial();style.margin.left=Length::Percent(10.);style.padding.left=Length::Percent(10.);
+        let mut item=item(0,1);item.edges=ItemEdges::new(&style,300.);item.edges.margin.left+=7.;
+        let item=rebase_item(&item,&style,300.,100.);assert_eq!(item.edges.margin.left,17.);assert_eq!(item.edges.pb_h,10.);
     }
 }

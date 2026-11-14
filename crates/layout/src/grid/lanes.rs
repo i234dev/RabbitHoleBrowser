@@ -459,9 +459,10 @@ impl<'a> Layouter<'a> {
                 let (ax, aw) = span_size(&tracks, &col_pos, s, s + it.span);
                 let child = &mut b.children[it.idx];
                 let (columns,rows)=subgrid::requests(child);
+                if columns||rows {gi=subgrid::rebase_item(&gi,&child.style,cbw,aw);}
                 let columns=columns.then(||subgrid::section(&tl,&col_pos,s,s+it.span,col_gap,it.fixed.is_some()));
                 let rows=rows.then_some(subgrid::AxisInheritance::Stacking);
-                placed[i]=self.with_subgrid(child,columns,rows,cbw,|this,child| {
+                placed[i]=self.with_subgrid(child,columns,rows,aw,|this,child| {
                     subgrid::stretch_item(child,&mut gi);
                     let inner_w = this.grid_item_width(child, &gi, aw, cbw);
                     let lcb = Cb { x: 0.0, width: aw, height: cb.height };
@@ -482,12 +483,14 @@ impl<'a> Layouter<'a> {
             for (i, it) in items.iter().enumerate() {
                 let (x, mut outer) = placed[i];
                 let free = limits[i] - pl.pos[i] - outer;
+                let s=pl.start[i];let (_,aw)=span_size(&tl.tracks,&col_pos,s,s+it.span);
+                let mut item=Self::lane_grid_item(it,s,false);subgrid::item_edges(b,&mut item,col_gap,row_gap);
                 let child=&mut b.children[it.idx];
                 let (columns,rows)=subgrid::requests(child);
-                let s=pl.start[i];
+                let mut lane=*it;if columns||rows {lane.edges=subgrid::rebase_item(&item,&child.style,cbw,aw).edges;}
                 let columns=columns.then(||subgrid::section(&tl,&col_pos,s,s+it.span,col_gap,it.fixed.is_some()));
                 let rows=rows.then_some(subgrid::AxisInheritance::Stacking);
-                let off=self.with_subgrid(child,columns,rows,cbw,|this,child|this.lane_stack_align(child,it,it.align,free,cbw,true,cb.height));
+                let off=self.with_subgrid(child,columns,rows,aw,|this,child|this.lane_stack_align(child,&lane,it.align,free,aw,true,cb.height));
                 if it.align == ItemAlign::Stretch && free > 0.01 {
                     outer = b.children[it.idx].rect.h + b.children[it.idx].margin.top + b.children[it.idx].margin.bottom;
                 }
