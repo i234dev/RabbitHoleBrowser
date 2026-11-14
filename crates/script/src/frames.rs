@@ -115,9 +115,17 @@ pub(crate) fn checkpoint_allowed() -> bool { FOREIGN_DEPTH.with(|d| d.get() == 0
 
 pub(crate) fn call_frame(realm: &mut Realm, id: u64, call: crate::FrameCall) -> Option<crate::FrameReply> {
     let _guard = ForeignCallGuard::enter();
-    let mut watchdog = realm.watchdog_state();
-    let r = with_env(|env| env.frame_call_with_watchdog(id, call, &mut watchdog));
-    realm.replace_watchdog_state(watchdog);
+    struct CallerWatchdog<'a> {
+        realm: &'a mut Realm,
+        state: rabbithole_js::WatchdogState,
+    }
+    impl Drop for CallerWatchdog<'_> {
+        fn drop(&mut self) { self.realm.replace_watchdog_state(self.state); }
+    }
+    let state = realm.watchdog_state();
+    let mut loan = CallerWatchdog { realm, state };
+    let r = with_env(|env| env.frame_call_with_watchdog(id, call, &mut loan.state));
+    drop(loan);
     if r.is_some() {
         FOREIGN_CALLS.with(|f| f.set(true));
     }
