@@ -13,7 +13,7 @@ fn webgl_signed_64_sizes_convert_before_memory_budget_validation() {
           console.log(gl.getError()===gl.NO_ERROR,gl.getBufferParameter(gl.ARRAY_BUFFER,gl.BUFFER_SIZE)===size);
         }
         gl.bufferData(gl.ARRAY_BUFFER,8,gl.STATIC_DRAW);
-        for (const input of [-1,-1.9,2**63,-(2**63),-(2**64)-4096]) {
+        for (const input of [-1,-1.9,-1024,2**63,-(2**63),-(2**64)-4096]) {
           gl.bufferData(gl.ARRAY_BUFFER,input,gl.STATIC_DRAW);
           console.log(gl.getError()===gl.INVALID_VALUE,gl.getBufferParameter(gl.ARRAY_BUFFER,gl.BUFFER_SIZE)===8);
         }
@@ -23,7 +23,7 @@ fn webgl_signed_64_sizes_convert_before_memory_budget_validation() {
         }
       }
     "#);
-    assert_eq!(out, vec!["true true"; 42]);
+    assert_eq!(out, vec!["true true"; 44]);
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
 

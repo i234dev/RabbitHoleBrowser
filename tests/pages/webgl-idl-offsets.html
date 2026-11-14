@@ -42,20 +42,33 @@ for (const [id, version] of [['gl1', 1], ['gl2', 2]]) {
 
   const halfGreen = new Uint8Array([0,128,0,255,0,128,0,255,0,128,0,255]);
   gl.bufferSubData(gl.ARRAY_BUFFER, 1.9, halfGreen.subarray(1)); error(gl.NO_ERROR, 'fractional update');
+  // At byte0 the first index is invalid; only truncating2.9 to byte2 draws.
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([99,0,1,2]), gl.STATIC_DRAW);
+  gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);
   draw(2.9); check(pixel() === '0,128,0,255', 'fraction truncates to byte offset');
+  if (version === 2) {
+    gl.clear(gl.COLOR_BUFFER_BIT);gl.drawElementsInstanced(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, 2.9, 1);
+    error(gl.NO_ERROR, 'fractional instanced draw');check(pixel() === '0,128,0,255', 'instanced draw used byte2');
+  }
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0,1,2,0,1,2]), gl.STATIC_DRAW);
+  // A prefixed byte makes the attribute's offset affect the actual color.
+  const prefixed = new Uint8Array(13);prefixed[0]=255;prefixed.set(halfGreen,1);
+  gl.bufferData(gl.ARRAY_BUFFER,prefixed,gl.STATIC_DRAW);
   gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, 1.9); error(gl.NO_ERROR, 'fractional pointer');
   check(gl.getVertexAttribOffset(color, gl.VERTEX_ATTRIB_ARRAY_POINTER) === 1, 'pointer truncates');
+  gl.clear(gl.COLOR_BUFFER_BIT);draw(0);check(pixel() === '0,128,0,255', 'fractional pointer reached vertex fetch');
+  gl.bufferData(gl.ARRAY_BUFFER,halfGreen,gl.STATIC_DRAW);
   gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, 0);
   gl.bindBuffer(gl.ARRAY_BUFFER, positions); gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 3.9);
   error(gl.INVALID_OPERATION, 'alignment after truncation');
   check(gl.getVertexAttribOffset(position, gl.VERTEX_ATTRIB_ARRAY_POINTER) === 0, 'bad pointer unchanged');
   gl.bindBuffer(gl.ARRAY_BUFFER, colors);
 
-  for (const invalid of [-1, -1.9, 2 ** 63, -(2 ** 63), 2 ** 32, 2 ** 53, 2 ** 63 - 1024, -(2 ** 63) - 2048, 2 ** 64 + 4096]) {
+  for (const invalid of [-1, -1.9, -1024, 2 ** 63, -(2 ** 63), 2 ** 32, 2 ** 53, 2 ** 63 - 1024, -(2 ** 63) - 2048, 2 ** 64 + 4096]) {
     gl.bufferSubData(gl.ARRAY_BUFFER, invalid, red); error(gl.INVALID_VALUE, 'invalid update');
     draw(0); check(pixel() === '0,128,0,255', 'rejected update preserved colors');
   }
-  for (const [invalid, expected] of [[-1.9, gl.INVALID_VALUE], [2 ** 63, gl.INVALID_VALUE], [1.9, gl.INVALID_OPERATION], [2 ** 32, gl.INVALID_OPERATION], [2 ** 53, gl.INVALID_OPERATION], [2 ** 63 - 1024, gl.INVALID_OPERATION]]) {
+  for (const [invalid, expected] of [[-1.9, gl.INVALID_VALUE], [-1024, gl.INVALID_VALUE], [2 ** 63, gl.INVALID_VALUE], [1.9, gl.INVALID_OPERATION], [2 ** 32, gl.INVALID_OPERATION], [2 ** 53, gl.INVALID_OPERATION], [2 ** 63 - 1024, gl.INVALID_OPERATION]]) {
     gl.drawElements(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, invalid); error(expected, 'invalid element range/alignment');
     check(pixel() === '0,128,0,255', 'rejected draw preserved pixels');
     if (version === 2) {
@@ -76,6 +89,13 @@ for (const [id, version] of [['gl1', 1], ['gl2', 2]]) {
   conversions = 0; gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, numeric); error(gl.NO_ERROR, 'object pointer'); check(conversions === 1, 'one pointer conversion');
   conversions = 0; draw(numeric); check(conversions === 1, 'one draw conversion');
   if (version === 2) { conversions = 0; gl.drawElementsInstanced(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, numeric, 1); error(gl.NO_ERROR, 'object instanced offset'); check(conversions === 1, 'one instanced conversion'); }
+  for (const invalid of [1n,Object(1n),{valueOf(){return 1n;}},{[Symbol.toPrimitive](){return 1n;}},Symbol('offset'),Object(Symbol('offset')),{valueOf(){return Symbol('offset');}},{[Symbol.toPrimitive](){return Symbol('offset');}}]) {
+    const calls=[()=>gl.bufferSubData(gl.ARRAY_BUFFER,invalid,red),()=>gl.vertexAttribPointer(color,4,gl.UNSIGNED_BYTE,true,0,invalid),()=>gl.drawElements(gl.TRIANGLES,3,gl.UNSIGNED_SHORT,invalid)];
+    if(version===2)calls.push(()=>gl.drawElementsInstanced(gl.TRIANGLES,3,gl.UNSIGNED_SHORT,invalid,1));
+    for(const call of calls){let caught=false;try{call();}catch(exception){caught=exception instanceof TypeError;}check(caught,'ToNumber rejected BigInt/Symbol');error(gl.NO_ERROR,'conversion TypeError has no GL error');}
+    check(gl.getVertexAttribOffset(color,gl.VERTEX_ATTRIB_ARRAY_POINTER)===0,'conversion TypeError preserved pointer');
+    draw(0);check(pixel()==='0,255,0,255','conversion TypeError preserved colors');
+  }
   const sentinel = new Error('offset conversion'); let caught = false;
   try { gl.bufferSubData(gl.ARRAY_BUFFER, {valueOf(){throw sentinel;}}, red); } catch (exception) { caught = exception === sentinel; }
   check(caught, 'conversion exception propagated'); error(gl.NO_ERROR, 'conversion exception has no GL error');
