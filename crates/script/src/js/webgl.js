@@ -142,13 +142,26 @@
     for (const n of value) { values.push(+(n) | 0); if (values.length > 16) break; }
     return new Int32Array(values);
   }
+  function matrixValues(value) {
+    if (value instanceof Float32Array) return { data: value, length: value.length };
+    if (value === null || typeof value !== 'object' || typeof value[Symbol.iterator] !== 'function') throw new TypeError('Expected a Float32Array or a sequence of numbers');
+    const head = [];
+    let length = 0;
+    // Convert the entire WebIDL sequence even for a null location, retaining
+    // only one largest supported matrix. Conversion exceptions precede GL errors.
+    for (const n of value) { const converted = +(n); if (length < 16) head.push(converted); ++length; }
+    return { data: new Float32Array(head), length };
+  }
   function matrix(s, location, transpose, data) {
+    if (location !== null && !locations.has(location)) throw new TypeError('Expected WebGLUniformLocation');
+    const values = matrixValues(data);
     const loc = uniformLocation(s, location);
     if (!loc) return;
-    data = floats(data);
     if (transpose) { flag(s, GL.INVALID_VALUE); return; }
-    if (data.length !== 16) { flag(s, GL.INVALID_OPERATION); return; }
-    call(s, 'matrix4', loc.id, false, data);
+    const elements = 16;
+    if (values.length < elements || values.length % elements !== 0) { flag(s, GL.INVALID_VALUE); return; }
+    if (values.length !== elements) { flag(s, GL.INVALID_OPERATION); return; }
+    call(s, 'matrix4', loc.id, false, values.data);
   }
   function uniform(s, location, data, components) {
     const loc = uniformLocation(s, location);

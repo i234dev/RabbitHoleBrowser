@@ -803,13 +803,16 @@ impl Context {
         transpose: bool,
         values: &[f32],
     ) -> Result<()> {
-        if transpose {
-            return Err(Error::InvalidValue);
-        }
         if location < 0 {
             return Ok(());
         }
+        if transpose {
+            return Err(Error::InvalidValue);
+        }
         let u = self.uniform_mut(location)?;
+        if values.len() < 16 || values.len() % 16 != 0 {
+            return Err(Error::InvalidValue);
+        }
         if u.ty != Ty::Mat4 || values.len() != 16 {
             return Err(Error::InvalidOperation);
         }

@@ -43,6 +43,8 @@ mod tests_realms;
 mod tests_service_worker;
 #[cfg(test)]
 mod tests_webgl;
+#[cfg(test)]
+mod tests_webgl_matrix_validation;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};
