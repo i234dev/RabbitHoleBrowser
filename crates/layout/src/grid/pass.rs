@@ -346,4 +346,52 @@ mod tests {
             assert!(panic_text(error.as_ref()).contains("cannot re-size a completed axis"));
         });
     }
+
+    fn check_own_condition_change(before_inputs:MeasureInputs,after_inputs:MeasureInputs,before_target:Target,after_target:Target,contributions:[Contribution;2],before_sizes:&[f32],after_sizes:&[f32]) {
+        with_layouter(|layouter| {
+            let mut operation=GridOperation::new(OperationKind::Layout,&mut layouter.grid_work);
+            let before=layouter.grid_axis_pass(&mut operation,MeasurePoint::Columns,before_inputs,before_target,automatic(1),ContentDistribution::FlexStart,|this,_,_,_|sample(this,&contributions,&[10.,10.]));
+            assert_eq!(used_sizes(&before),before_sizes);
+            let after=layouter.grid_axis_pass(&mut operation,MeasurePoint::AdjustColumns,after_inputs,after_target,automatic(1),ContentDistribution::FlexStart,|this,_,_,_|sample(this,&contributions,&[10.,10.]));
+            assert!(!after.min_content_changed,"own-condition changes are not min-content changes");
+            assert_eq!(used_sizes(&after),after_sizes);
+            assert_eq!(operation.result(&after.id).unwrap().completion_origin().unwrap().point,MeasurePoint::AdjustColumns);
+        });
+    }
+    fn equal_contributions(max:f32)->[Contribution;2] {
+        [Contribution{start:0,end:1,min:10.,max},Contribution{start:1,end:2,min:10.,max}]
+    }
+
+    #[test]
+    fn adjustment_recompletes_when_own_definite_space_changes_with_equal_minima() {
+        check_own_condition_change(
+            inputs([AvailableSpace::Definite(100.),AvailableSpace::Indefinite]),inputs([AvailableSpace::Definite(200.),AvailableSpace::Indefinite]),
+            Target::standalone(automatic(2),GridSpace::Definite(100.),false),Target::standalone(automatic(2),GridSpace::Definite(200.),false),
+            equal_contributions(100.),&[50.,50.],&[100.,100.]);
+    }
+
+    #[test]
+    fn adjustment_recompletes_when_own_gap_changes_with_equal_minima() {
+        let before=inputs([AvailableSpace::Definite(100.),AvailableSpace::Indefinite]);
+        let mut after=before.clone();after.gaps[0]=20.;
+        check_own_condition_change(before,after,
+            Target::standalone(automatic(2),GridSpace::Definite(100.),false),Target::standalone(automatic(2),GridSpace::Definite(100.),false),
+            equal_contributions(100.),&[50.,50.],&[40.,40.]);
+    }
+
+    #[test]
+    fn adjustment_recompletes_when_own_template_changes_with_equal_minima() {
+        let input=inputs([AvailableSpace::Definite(100.),AvailableSpace::Indefinite]);
+        check_own_condition_change(input.clone(),input,
+            Target::standalone(automatic(2),GridSpace::Definite(100.),false),Target::standalone(list(&[(Sizing::Fixed(70.),Sizing::Fixed(70.)),(Sizing::Fixed(30.),Sizing::Fixed(30.))]),GridSpace::Definite(100.),false),
+            equal_contributions(100.),&[50.,50.],&[70.,30.]);
+    }
+
+    #[test]
+    fn adjustment_recompletes_when_own_stretch_changes_with_equal_minima() {
+        let input=inputs([AvailableSpace::Definite(100.),AvailableSpace::Indefinite]);
+        check_own_condition_change(input.clone(),input,
+            Target::standalone(automatic(2),GridSpace::Definite(100.),false),Target::standalone(automatic(2),GridSpace::Definite(100.),true),
+            equal_contributions(20.),&[20.,20.],&[50.,50.]);
+    }
 }
