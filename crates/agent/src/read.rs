@@ -153,11 +153,125 @@ struct Md<'a> {
     geo: &'a GeoMap,
     refs: &'a mut RefMap,
     frame: usize,
+    links: bool,
+    cites: bool,
     out: String,
 }
 
 fn esc_md(s: &str) -> String {
     s.replace(['⟦', '⟧'], "|")
+}
+
+// Normalize prose only: code spans are opaque to whitespace/punctuation cleanup.
+fn clean_inline(input: &str) -> String {
+    let mut out = String::new();
+    let mut pending = false;
+    let mut pos = 0;
+    while pos < input.len() {
+        let rest = &input[pos..];
+        if rest.starts_with('`') {
+            let count = rest.bytes().take_while(|&b| b == b'`').count();
+            let delimiter = "`".repeat(count);
+            if let Some(end) = rest[count..].find(&delimiter) {
+                if pending && !out.is_empty() { out.push(' '); }
+                let length = count + end + count;
+                out.push_str(&rest[..length]);
+                pos += length;
+                pending = false;
+                continue;
+            }
+            // Consume an unmatched run together (a long literal run must not
+            // rescan its remaining suffix once per backtick).
+            if pending && !out.is_empty() { out.push(' '); }
+            out.push_str(&delimiter);
+            pos += count;
+            pending = false;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        pos += ch.len_utf8();
+        if ch.is_whitespace() { pending = !out.is_empty(); }
+        else {
+            if pending && !matches!(ch, ',' | '.' | ';' | ':' | ')') { out.push(' '); }
+            out.push(ch);
+            pending = false;
+        }
+    }
+    out
+}
+
+fn tick_run(input: &str) -> usize {
+    input.split(|ch| ch != '`').map(str::len).max().unwrap_or(0)
+}
+
+fn inline_code(input: &str) -> String {
+    let input = esc_md(input);
+    let delimiter = "`".repeat(tick_run(&input) + 1);
+    let padding = if input.starts_with('`') || input.ends_with('`') { " " } else { "" };
+    format!("{delimiter}{padding}{input}{padding}{delimiter}")
+}
+
+// Keep structural indentation, fences and every byte of preformatted lines.
+fn clean_blocks(input: &str) -> String {
+    let mut lines = Vec::new();
+    let mut fence = None;
+    let mut code_span = None;
+    let mut span_lines = Vec::new();
+    let mut span_indent = 0;
+    let mut blank = false;
+    for line in input.lines() {
+        let mut marker = line.trim_start();
+        while let Some(rest) = marker.strip_prefix('>') { marker = rest.trim_start(); }
+        let ticks = marker.bytes().take_while(|&b| b == b'`').count();
+        let boundary = ticks >= 3 && marker.len() == ticks;
+        if let Some(length) = fence {
+            lines.push(line.to_string());
+            if boundary && ticks == length { fence = None; }
+            continue;
+        }
+        // Inline code may cross a source line. Keep such lines opaque too;
+        // collapsing per-line whitespace would change code before its closer.
+        let was_span = code_span.is_some();
+        if !boundary || was_span {
+            let mut scan = line;
+            while let Some(at) = scan.find('`') {
+                scan = &scan[at..];
+                let run = scan.bytes().take_while(|&b| b == b'`').count();
+                if code_span == Some(run) { code_span = None; }
+                else if code_span.is_none() { code_span = Some(run); }
+                scan = &scan[run..];
+            }
+        }
+        if was_span || code_span.is_some() {
+            if !was_span { span_indent = line.len() - line.trim_start_matches(' ').len(); }
+            span_lines.push(line.to_string());
+            if code_span.is_none() {
+                let joined = span_lines.join("\n");
+                lines.push(format!("{}{}", &joined[..span_indent], clean_inline(&joined[span_indent..])));
+                span_lines.clear();
+            }
+            blank = false;
+        } else if boundary {
+            fence = Some(ticks);
+            blank = false;
+            lines.push(line.to_string());
+        } else if line.trim().is_empty() {
+            if !blank { lines.push(String::new()); }
+            blank = true;
+        } else {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            lines.push(format!("{}{}", &line[..indent], clean_inline(&line[indent..])));
+            blank = false;
+        }
+    }
+    if !span_lines.is_empty() {
+        // An unmatched literal backtick is prose, not a code delimiter.
+        for line in span_lines {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            lines.push(format!("{}{}", &line[..indent], clean_inline(&line[indent..])));
+        }
+    }
+    lines.join("\n").trim().to_string()
 }
 
 impl Md<'_> {
@@ -178,7 +292,7 @@ impl Md<'_> {
     fn inline(&mut self, n: NodeId) -> String {
         let mut s = String::new();
         self.inline_into(n, &mut s);
-        s.split_whitespace().collect::<Vec<_>>().join(" ")
+        clean_inline(&s)
     }
 
     fn inline_into(&mut self, n: NodeId, s: &mut String) {
@@ -198,8 +312,11 @@ impl Md<'_> {
                     if text.is_empty() {
                         continue;
                     }
-                    let r = self.refs.assign(self.frame, c, "link", &text);
-                    s.push_str(&format!(" [{text}](@e{r}) "));
+                    if self.omit_citation(c) { continue; }
+                    if self.links {
+                        let r = self.refs.assign(self.frame, c, "link", &text);
+                        s.push_str(&format!(" [{text}](@e{r}) "));
+                    } else { s.push_str(&text); }
                 }
                 "strong" | "b" => {
                     let t = self.inline(c);
@@ -215,7 +332,7 @@ impl Md<'_> {
                 }
                 "code" | "kbd" | "samp" => {
                     let t = doc.text_content(c);
-                    s.push_str(&format!(" `{}` ", esc_md(t.trim())));
+                    s.push_str(&format!(" {} ", inline_code(&t)));
                 }
                 "br" => s.push('\n'),
                 "img" => {
@@ -234,6 +351,19 @@ impl Md<'_> {
                 }
             }
         }
+    }
+
+    fn omit_citation(&self, n: NodeId) -> bool {
+        if self.cites { return false; }
+        let doc = &self.page.doc;
+        let mut parent = doc.parent(n);
+        let mut in_sup = false;
+        while let Some(node) = parent {
+            if doc.is_element(node, "sup") { in_sup = true; break; }
+            parent = doc.parent(node);
+        }
+        in_sup && doc.attr(n, "href").and_then(|href| self.page.resolve(href)).is_some_and(|url|
+            url.fragment.is_some() && url.without_fragment() == self.page.url.without_fragment())
     }
 
     fn has_block_child(&self, n: NodeId) -> bool {
@@ -305,11 +435,11 @@ impl Md<'_> {
                                     head.push_str(&esc_md(t));
                                 } else if doc.element(cc).is_some() && visible(self.page, self.geo, cc) {
                                     head.push(' ');
-                                    head.push_str(&self.inline(cc));
+                                    self.inline_one(cc, &mut head);
                                     head.push(' ');
                                 }
                             }
-                            let head = head.split_whitespace().collect::<Vec<_>>().join(" ");
+                            let head = clean_inline(&head);
                             self.out.push_str(&format!("{indent}{marker} {head}\n"));
                             for cc in doc.child_elements(li).collect::<Vec<_>>() {
                                 if matches!(doc.tag(cc), Some("ul" | "ol")) {
@@ -331,9 +461,12 @@ impl Md<'_> {
                 "pre" => {
                     self.block_sep();
                     let t = doc.text_content(c);
-                    self.out.push_str("```\n");
-                    self.out.push_str(&esc_md(t.trim_end()).replace("```", "'''"));
-                    self.out.push_str("\n```");
+                    let delimiter = "`".repeat((tick_run(&t) + 1).max(3));
+                    self.out.push_str(&delimiter);
+                    self.out.push('\n');
+                    self.out.push_str(&esc_md(&t));
+                    if !t.ends_with('\n') { self.out.push('\n'); }
+                    self.out.push_str(&delimiter);
                     self.block_sep();
                 }
                 "blockquote" => {
@@ -444,8 +577,11 @@ impl Md<'_> {
             "a" if el.attr("href").is_some() => {
                 let text = self.inline(n);
                 if !text.is_empty() {
-                    let r = self.refs.assign(self.frame, n, "link", &text);
-                    s.push_str(&format!("[{text}](@e{r})"));
+                    if self.omit_citation(n) { return; }
+                    if self.links {
+                        let r = self.refs.assign(self.frame, n, "link", &text);
+                        s.push_str(&format!("[{text}](@e{r})"));
+                    } else { s.push_str(&text); }
                 }
             }
             "strong" | "b" => {
@@ -460,7 +596,7 @@ impl Md<'_> {
                     s.push_str(&format!("*{t}*"));
                 }
             }
-            "code" => s.push_str(&format!("`{}`", esc_md(doc.text_content(n).trim()))),
+            "code" => s.push_str(&inline_code(&doc.text_content(n))),
             "br" => s.push('\n'),
             _ => s.push_str(&self.inline(n)),
         }
@@ -492,34 +628,49 @@ fn metadata(page: &Page) -> Vec<String> {
 
 /// One element's content as Markdown.
 pub fn read_subtree(page: &Page, refs: &mut RefMap, frame: usize, root: NodeId) -> String {
+    read_subtree_with_options(page, refs, frame, root, true, false)
+}
+
+pub fn read_subtree_with_options(page: &Page, refs: &mut RefMap, frame: usize, root: NodeId, links: bool, cites: bool) -> String {
     let geo = GeoMap::build(page);
-    let mut md = Md { page, geo: &geo, refs, frame, out: String::new() };
+    let mut md = Md { page, geo: &geo, refs, frame, links, cites, out: String::new() };
     md.block(root, 0);
-    md.out.trim().to_string()
+    clean_blocks(&md.out)
 }
 
 /// Main content as Markdown.
 pub fn read(page: &Page, refs: &mut RefMap, frame: usize) -> String {
+    read_with_options(page, refs, frame, true, false)
+}
+
+pub fn read_with_options(page: &Page, refs: &mut RefMap, frame: usize, links: bool, cites: bool) -> String {
     let geo = GeoMap::build(page);
     let doc = &page.doc;
     let root = main_content(page).or_else(|| doc.body()).unwrap_or(Document::ROOT);
-    let mut md = Md { page, geo: &geo, refs, frame, out: String::new() };
+    let mut md = Md { page, geo: &geo, refs, frame, links, cites, out: String::new() };
     md.block(root, 0);
-    let mut body = md.out.trim().to_string();
-    // Collapse runs of blank lines.
-    while body.contains("\n\n\n") {
-        body = body.replace("\n\n\n", "\n\n");
-    }
-    let body = body.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
+    let body = clean_blocks(&md.out);
     let mut out = String::new();
     let title = page.title.trim();
     if !body.starts_with("# ") && !title.is_empty() {
-        out.push_str(&format!("# {}\n\n", esc_md(title)));
+        out.push_str(&format!("# {}\n\n", clean_inline(&esc_md(title))));
     }
     let meta = metadata(page);
     if !meta.is_empty() {
-        out.push_str(&format!("_{}_\n\n", esc_md(&meta.join(" · "))));
+        out.push_str(&format!("_{}_\n\n", clean_inline(&esc_md(&meta.join(" · ")))));
     }
     out.push_str(&body);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_blocks,clean_inline,inline_code};
+    #[test]
+    fn prose_cleanup_preserves_markdown_links_and_code_contents(){
+        assert_eq!(clean_inline("  A\u{a0}\u{a0} [link](@e12) , **bold** ; `x  , y` . ( tail )  "),"A [link](@e12), **bold**; `x  , y`. ( tail)");
+        assert_eq!(clean_inline(&inline_code("`a  b`")),"`` `a  b` ``");
+        assert_eq!(clean_blocks("- one  , two\n  - nested   item\n\n\nend"),"- one, two\n  - nested item\n\nend");
+        assert_eq!(clean_blocks("before `a  \n\n b  ` , after ."),"before `a  \n\n b  `, after.");
+    }
 }

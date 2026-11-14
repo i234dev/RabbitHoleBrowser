@@ -118,30 +118,44 @@ pub fn render(page: &Page, root: &Ax, refs: &mut RefMap, overlays: &[Overlay]) -
         out.push(s);
     }
 
-    // Landmarks (top level and one level down).
+    // Main/search remain discoverable even when deeply wrapped. Navigation
+    // landmarks share one slot while retaining the first actionable ref.
     let mut marks: Vec<&Ax> = Vec::new();
     root.visit(&mut |a, depth| {
-        if depth <= 3 && a.kind == Kind::Landmark && a.role != "form" {
+        if a.kind == Kind::Landmark && a.role != "form" && (depth <= 3 || matches!(a.role.as_str(), "main" | "search" | "navigation")) {
             marks.push(a);
         }
     });
+    let nav_count = marks.iter().filter(|a| a.role == "navigation").count();
+    let mut nav_seen = false;
+    marks.retain(|a| {
+        if a.role != "navigation" { return true; }
+        let keep = !nav_seen;
+        nav_seen = true;
+        keep
+    });
     if !marks.is_empty() {
+        let mut chosen: Vec<usize> = marks.iter().enumerate().filter(|(_, m)| matches!(m.role.as_str(), "main" | "search")).map(|(i, _)| i).take(MAX_LANDMARKS).collect();
+        for i in 0..marks.len() {
+            if chosen.len() >= MAX_LANDMARKS { break; }
+            if !chosen.contains(&i) { chosen.push(i); }
+        }
+        chosen.sort_unstable();
         let mut items: Vec<String> = Vec::new();
-        for m in marks.iter().take(MAX_LANDMARKS) {
-            let mut s = format!("[{}", landmark_label(&m.role));
-            if !m.name.is_empty() {
-                s.push_str(&format!(" \"{}\"", esc(&clip_text(&m.name, 30))));
+        for &i in &chosen {
+            let m = marks[i];
+            let mut label = landmark_label(&m.role).to_string();
+            if m.role == "navigation" && nav_count > 1 { label.push_str(&format!(" ×{nav_count}")); }
+            let mut item = format!("[{label}");
+            if !m.name.is_empty() && !(m.role == "navigation" && nav_count > 1) {
+                item.push_str(&format!(" \"{}\"", esc(&clip_text(&m.name, 30))));
             }
-            s.push(']');
-            if let Some(r) = m.reference {
-                s.push_str(&format!(" @e{r}"));
-            }
-            items.push(s);
+            item.push(']');
+            if let Some(r) = m.reference { item.push_str(&format!(" @e{r}")); }
+            items.push(item);
         }
         let mut line = format!("landmarks: {}", items.join("  "));
-        if marks.len() > MAX_LANDMARKS {
-            line.push_str(&format!("  +{} more", marks.len() - MAX_LANDMARKS));
-        }
+        if marks.len() > chosen.len() { line.push_str(&format!("  +{} more", marks.len() - chosen.len())); }
         out.push(line);
     }
 
@@ -155,7 +169,15 @@ pub fn render(page: &Page, root: &Ax, refs: &mut RefMap, overlays: &[Overlay]) -
     if !heads.is_empty() {
         out.push("outline:".into());
         let min = heads.iter().map(|h| h.level).min().unwrap_or(1);
-        for h in heads.iter().take(MAX_HEADINGS) {
+        let second = heads.iter().map(|h| h.level).filter(|&level| level > min).min().unwrap_or(min);
+        let mut chosen: Vec<usize> = heads.iter().enumerate().filter(|(_, h)| h.level <= second).map(|(i, _)| i).take(MAX_HEADINGS).collect();
+        for i in 0..heads.len() {
+            if chosen.len() >= MAX_HEADINGS { break; }
+            if !chosen.contains(&i) { chosen.push(i); }
+        }
+        chosen.sort_unstable();
+        for i in chosen {
+            let h = heads[i];
             // A heading that is one link points at the link.
             let r = match h.children.as_slice() {
                 [c] if c.role == "link" && c.reference.is_some() => c.reference.unwrap(),
@@ -172,16 +194,17 @@ pub fn render(page: &Page, root: &Ax, refs: &mut RefMap, overlays: &[Overlay]) -
     // Forms, with their fields.
     let forms = crate::forms::forms(page);
     let mut shown = 0;
+    let mut eligible = 0;
+    let mut preferences = 0;
     let mut form_lines = Vec::new();
     for f in &forms {
         let fields = crate::forms::fields(page, *f);
-        if fields.is_empty() {
+        if !fields.iter().any(|field| field.kind == rabbithole_engine::ControlKind::Submit || (field.role == "textbox" && !matches!(field.ty.as_str(), "color" | "range"))) {
+            preferences += 1;
             continue;
         }
-        if shown == MAX_FORMS {
-            shown += 1;
-            continue;
-        }
+        eligible += 1;
+        if shown >= MAX_FORMS { continue; }
         shown += 1;
         let desc = crate::forms::describe(page, 0, *f, refs);
         let head = desc.first().cloned().unwrap_or_default();
@@ -204,12 +227,13 @@ pub fn render(page: &Page, root: &Ax, refs: &mut RefMap, overlays: &[Overlay]) -
             }
         }
     });
-    if !form_lines.is_empty() || !loose.is_empty() {
+    if !form_lines.is_empty() || !loose.is_empty() || preferences > 0 {
         out.push("forms:".into());
         out.extend(form_lines);
-        if shown > MAX_FORMS {
-            out.push(format!("  … +{} more forms (fill lists them all)", shown - MAX_FORMS));
+        if eligible > shown {
+            out.push(format!("  … +{} more forms (fill lists them all)", eligible - shown));
         }
+        if preferences > 0 { out.push(format!("  … +{preferences} formularios sin campos de texto")); }
         if !loose.is_empty() {
             let more = loose.len().saturating_sub(3);
             loose.truncate(3);

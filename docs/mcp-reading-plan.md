@@ -55,7 +55,8 @@ remeasured. The expected benefit comes primarily from avoiding `open` → `find`
 
 ## Medium priority
 
-4. **Lighter `read`.** Add `links`, keeping **`true` by default** for existing
+4. **Lighter `read`.** Candidate code and fixtures prepared; combined runtime
+   validation and output-size measurements remain pending. Add `links`, keeping **`true` by default** for existing
    navigation workflows. `links=false` emits plain anchor text, without refs.
    Omit citation links inside `<sup>` that target a fragment on the same page,
    unless `cites=true`; preserve other superscripts and external links. Collapse
@@ -63,7 +64,8 @@ remeasured. The expected benefit comes primarily from avoiding `open` → `find`
    before `, . ; : )`, preserving meaningful preformatted content. The long
    paragraph fixture with `links=false` must be below 800 characters and contain
    no `@e`; default output must contain neither citation marks nor `" ,"`.
-5. **Article summaries.** Allocate outline slots to the two highest heading
+5. **Article summaries.** Candidate code and fixtures prepared; combined runtime
+   validation remains pending. Allocate outline slots to the two highest heading
    levels first, preserving document order within that selection; use remaining
    slots for deeper headings. Show forms with a text field or submit button;
    count omitted preference/radio-only forms, e.g.
