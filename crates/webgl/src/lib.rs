@@ -631,7 +631,7 @@ impl Context {
                     if f.qual == Qual::Uniform && f.ty != s.ty {
                         return Err(format!("uniform type mismatch for {name}"));
                     }
-                    if f.qual == Qual::Uniform && vertex.version == 300
+                    if f.qual == Qual::Uniform
                         && vertex.symbol_precisions.get(name) != fragment.symbol_precisions.get(name)
                     {
                         return Err(format!("uniform precision mismatch for {name}"));

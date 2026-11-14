@@ -80,11 +80,14 @@ fn validation_is_historical_per_program_and_rejects_excess_active_samplers() {
 }
 
 #[test]
-fn uniform_precision_is_captured_at_declaration_and_matched_across_300_stages() {
+fn uniform_precision_is_captured_at_declaration_and_matched_across_both_versions() {
+    for version in [100, 300] {
     for (fragment_precision, expected) in [("highp", true), ("mediump", false)] {
-        let mut context = Context::new_webgl2(1, 1).unwrap();
-        let vertex = compile(&mut context, VERTEX_SHADER, "#version 300 es\nprecision highp float;uniform float gain;precision mediump float;void main(){gl_Position=vec4(gain,0.0,0.0,1.0);}");
-        let source = format!("#version 300 es\nprecision {fragment_precision} float;uniform float gain;precision lowp float;out vec4 color;void main(){{color=vec4(gain);}}");
+        let mut context = if version == 300 { Context::new_webgl2(1, 1).unwrap() } else { Context::new(1, 1).unwrap() };
+        let prefix = if version == 300 { "#version 300 es\n" } else { "" };
+        let vertex = compile(&mut context, VERTEX_SHADER, &format!("{prefix}precision highp float;uniform float gain;precision mediump float;void main(){{gl_Position=vec4(gain,0.0,0.0,1.0);}}"));
+        let (declaration, output) = if version == 300 { ("out vec4 color;", "color") } else { ("", "gl_FragColor") };
+        let source = format!("{prefix}precision {fragment_precision} float;uniform float gain;precision lowp float;{declaration}void main(){{{output}=vec4(gain);}}");
         let fragment = compile(&mut context, FRAGMENT_SHADER, &source);
         for shader in [vertex, fragment] { assert!(context.shader_compile_status(shader).unwrap(), "{}", context.shader_info_log(shader).unwrap()); }
         let program = context.create_program();
@@ -92,5 +95,6 @@ fn uniform_precision_is_captured_at_declaration_and_matched_across_300_stages() 
         context.link_program(program).unwrap();
         assert_eq!(context.program_link_status(program).unwrap(), expected, "{}", context.program_info_log(program).unwrap());
         if !expected { assert!(context.program_info_log(program).unwrap().contains("uniform precision mismatch")); }
+    }
     }
 }
