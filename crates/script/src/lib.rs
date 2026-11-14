@@ -25,6 +25,8 @@ mod sockets;
 mod observers;
 mod shadow;
 mod window;
+mod windows;
+pub use windows::{WindowContext, WindowHost, WindowInfo, WindowMessage, WindowOpenRequest};
 mod workers;
 mod service_worker;
 pub use service_worker::{ServiceWorkerRegistry, ServiceWorkerScope, ServiceWorkerClient, ServiceWorkerNavigation, ServiceWorkerNavigationHandle, CacheStorageLimits, CacheStorageUsage};
@@ -352,6 +354,7 @@ impl ScriptHost {
             document::install(realm);
             window::install(realm);
             frames::install(realm);
+            windows::install(realm);
             cssom::install(realm);
             fetch::install(realm);
             misc::install(realm);
@@ -565,6 +568,16 @@ impl ScriptHost {
             if let Err(e) = frames::deliver(realm, data, origin, source) {
                 let msg = realm.error_to_string(&e);
                 host::log("error", &format!("Uncaught {msg} (message event)"));
+            }
+        });
+    }
+
+    /// A top-level context posted an owned structured clone to this one.
+    pub fn deliver_window_message(&mut self, env: &mut dyn HostEnv, message: &WindowMessage) {
+        self.enter(env, |realm| {
+            if let Err(error) = windows::deliver(realm, message) {
+                let text = realm.error_to_string(&error);
+                host::log("error", &format!("Uncaught {text} (window message event)"));
             }
         });
     }
