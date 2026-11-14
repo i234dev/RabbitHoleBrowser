@@ -17,8 +17,8 @@ fn evaluate(source: &str) -> String {
 }
 
 #[test]
-fn annexb_block_functions_do_not_replace_implicit_arguments() {
-    for parameters in ["", "x", "...rest", "x=1", "{x}={}"] {
+fn annexb_block_functions_can_replace_implicit_arguments() {
+    for parameters in ["", "x"] {
         let source = format!(r#"
           (function({parameters}) {{
             const original=arguments;
@@ -27,21 +27,21 @@ fn annexb_block_functions_do_not_replace_implicit_arguments() {
             return [Object.prototype.toString.call(arguments),arguments===original,inside].join(':');
           }})()
         "#);
-        assert_eq!(evaluate(&source), "[object Arguments]:true:block", "params={parameters}");
+        assert_eq!(evaluate(&source), "[object Function]:false:block", "params={parameters}");
     }
 }
 
 #[test]
-fn annexb_arguments_binding_respects_parameter_expressions_and_body_functions() {
+fn annexb_arguments_copies_respect_body_functions_and_formal_parameters() {
     for (parameters, actual, expected) in [
         ("", "", "block"),
         ("...rest", "", "block"),
         ("{x}", "{}", "block"),
         ("[x]", "[]", "block"),
-        ("x=1", "", "top"),
-        ("{x=1}", "{}", "top"),
-        ("[x=1]", "[]", "top"),
-        ("{['x']:x}", "{}", "top"),
+        ("x=1", "", "block"),
+        ("{x=1}", "{}", "block"),
+        ("[x=1]", "[]", "block"),
+        ("{['x']:x}", "{}", "block"),
     ] {
         let source = format!(r#"
           (function({parameters}) {{
@@ -53,6 +53,9 @@ fn annexb_arguments_binding_respects_parameter_expressions_and_body_functions() 
         assert_eq!(evaluate(&source), expected, "params={parameters}");
     }
     assert_eq!(evaluate("(function(arguments){ { function arguments(){return 'block';} } return arguments; })('parameter')"), "parameter");
+    assert_eq!(evaluate("(function({arguments}){ { function arguments(){return 'block';} } return arguments; })({arguments:'pattern'})"), "pattern");
+    assert_eq!(evaluate("(function(arguments='default'){ { function arguments(){return 'block';} } return arguments; })()"), "default");
+    assert_eq!(evaluate("(function(){let arguments='lexical'; {function arguments(){return 'block';}} return arguments;})()"), "lexical");
 }
 
 #[test]

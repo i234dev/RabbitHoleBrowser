@@ -2014,12 +2014,9 @@ impl Compiler {
             for p in &f.params {
                 Self::collect_pattern_names(&p.pattern, &mut outer);
             }
-            // Annex B excludes parameter bindings, including an implicit
-            // arguments object. A body declaration only suppresses that
-            // object when the formal parameters contain no expressions.
-            if !f.is_arrow && (has_parameter_expressions || !lex.iter().any(|(n, _)| n == "arguments")) {
-                outer.push("arguments".to_string());
-            }
+            // Eligibility consults formal parameter names, not the separate
+            // parameterBindings list containing the implicit arguments object.
+            // A block function can therefore replace that implicit binding.
             for (n, ptr) in Self::collect_annexb(body_stmts, outer) {
                 if n != "arguments" {
                     if separate_vars {
