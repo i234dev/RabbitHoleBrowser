@@ -224,6 +224,10 @@ impl GridOperation {
     fn record_inner(&mut self,id:&MeasurementId,complete:Option<&CompletedAxis>,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
         let entry=self.active.as_ref().filter(|entry|entry.id==*id).expect("Stale Grid measurement result");
         let axis=entry.inputs.local_axis(entry.point).index();
+        // Sources currently share Arc-backed payloads, but retaining a new
+        // record still consumes the operation's input-retention allowance.
+        // Charge before Entry::clone, including projections with no items.
+        budget.charge(subgrid::source_work(&entry.inputs.columns).saturating_add(subgrid::source_work(&entry.inputs.rows)));
         if let Some(complete)=complete {budget.tracks(&complete.tracks);}
         budget.charge(contributions.len().saturating_mul(3));
         for probe in probes {budget.charge(probe.path.len().saturating_add(1));}
@@ -441,5 +445,17 @@ mod tests {
         assert!(operation.result(&next).is_none());
         operation.record(&next,&completed,&contributions,&probes,&mut budget);
         assert!(operation.result(&next).unwrap().completion().is_some());
+    }
+
+    #[test]
+    fn even_an_empty_projection_precharges_its_retained_input_sources() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let input=MeasureInputs::new([AvailableSpace::Definite(1000.),AvailableSpace::Indefinite],[0.,0.],Some(source(&[10.;64],0.)),None);
+        let id=operation.begin(MeasurePoint::Columns,input,&mut budget);
+        let mut exhausted=WorkBudget::limited_for_test(0);
+        assert!(catch_unwind(AssertUnwindSafe(||operation.record_projection(&id,&[],&[],&mut exhausted))).is_err());
+        assert!(operation.result(&id).is_none());
+        operation.record_projection(&id,&[],&[],&mut budget);
+        assert_eq!(tracks(&operation.result(&id).unwrap().inputs().columns).sizes.len(),64);
     }
 }
