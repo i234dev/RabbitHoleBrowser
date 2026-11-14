@@ -802,6 +802,8 @@ struct Parser {
     functions: BTreeMap<String, Arc<Function>>,
     locals: BTreeMap<String, Symbol>,
     scopes: Vec<BTreeMap<String, Binding>>,
+    readonly: BTreeSet<String>,
+    constants: BTreeSet<String>,
     function_globals: Option<BTreeSet<String>>,
     function_name: Option<String>,
     function_depth: usize,
@@ -963,7 +965,19 @@ impl Parser {
             Ok(name)
         }
     }
+    fn constant_expression(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Number(_) | ExprKind::Boolean(_) => true,
+            ExprKind::Name(key) => self.constants.contains(key),
+            ExprKind::Swizzle(value, _) | ExprKind::Neg(value) | ExprKind::Not(value) => self.constant_expression(value),
+            ExprKind::Compare(_, a, b) | ExprKind::Logical(_, a, b) | ExprKind::Binary(_, a, b) => self.constant_expression(a) && self.constant_expression(b),
+            ExprKind::Conditional(condition, yes, no) => self.constant_expression(condition) && self.constant_expression(yes) && self.constant_expression(no),
+            ExprKind::Construct(args) | ExprKind::Builtin(_, args) => args.iter().all(|arg| self.constant_expression(arg)),
+            ExprKind::Call(_, _) | ExprKind::Global(_) | ExprKind::Texture(_, _) => false,
+        }
+    }
     fn assignment(&mut self) -> Result<(String, Expr), String> {
+        let constant = self.eat_id("const");
         let first = self.id()?;
         let (name, declaration) = if Ty::parse(&first).is_some()
             || matches!(first.as_str(), "lowp" | "mediump" | "highp")
@@ -975,6 +989,7 @@ impl Parser {
         } else {
             (first, None)
         };
+        if constant && declaration.is_none() { return Err("const must qualify a local declaration".into()); }
         let sym = if let Some(ty) = declaration {
             Symbol {
                 ty,
@@ -989,12 +1004,16 @@ impl Parser {
         {
             return Err(format!("helpers cannot write global {name}"));
         }
+        if declaration.is_none() && self.local(&name).is_some_and(|binding| self.readonly.contains(&binding.key)) {
+            return Err(format!("{name} is read-only"));
+        }
         if matches!(sym.qual, Qual::Attribute | Qual::Uniform | Qual::Input)
             || (sym.qual == Qual::Varying && !self.vertex)
         {
             return Err(format!("{name} is read-only"));
         }
         if declaration.is_some() && self.eat(';') {
+            if constant { return Err("const locals require an initializer".into()); }
             // Uninitialized local values are undefined in ESSL. This bounded
             // evaluator initializes them to zero, with real lexical scope;
             // later assignments still have to type-check and execute.
@@ -1022,6 +1041,7 @@ impl Parser {
         if expr.ty != sym.ty {
             return Err(format!("assignment type mismatch for {name}"));
         }
+        if constant && !self.constant_expression(&expr) { return Err("const local initializer must be a constant expression".into()); }
         self.expect(Tok::P(';'))?;
         let target = if let Some(ty) = declaration {
             // GLSL ES 1.00 section 4.2 and 3.00 section 4.2.2: the new
@@ -1029,6 +1049,7 @@ impl Parser {
             // an outer variable or helper of the same name remains visible.
             self.declare(name, ty, Qual::Local)?
         } else { self.local(&name).map_or(name.clone(),|binding|binding.key.clone()) };
+        if constant { self.readonly.insert(target.clone()); self.constants.insert(target.clone()); }
         if self.function_name.is_none() && self.shader.symbols.contains_key(&target) { self.shader.writes.insert(target.clone()); }
         Ok((target, expr))
     }
@@ -1047,6 +1068,8 @@ impl Parser {
         self.shader.symbols.remove(&name);
         self.locals = BTreeMap::new();
         self.scopes = vec![BTreeMap::new()];
+        self.readonly.clear();
+        self.constants.clear();
         self.result_type = Some(result_type);
         self.statement_count = 0;
         self.function_globals = Some(BTreeSet::new());
@@ -1062,9 +1085,9 @@ impl Parser {
                 if parameters.len() >= MAX_PARAMETERS {
                     return Err("too many function parameters".into());
                 }
-                if matches!(self.peek(), Tok::Id(q) if matches!(q.as_str(), "out" | "inout" | "const"))
-                {
-                    return Err("only ordinary or in function parameters are supported".into());
+                let constant = self.eat_id("const");
+                if matches!(self.peek(), Tok::Id(q) if matches!(q.as_str(), "out" | "inout")) {
+                    return Err("only ordinary, in or const in function parameters are supported".into());
                 }
                 self.eat_id("in");
                 let ty = self.ty()?;
@@ -1073,6 +1096,7 @@ impl Parser {
                 }
                 let parameter = self.id()?;
                 let key = self.declare(parameter, ty, Qual::Local)?;
+                if constant { self.readonly.insert(key.clone()); }
                 parameters.push((key, ty));
                 if self.eat(')') {
                     break;
@@ -1090,6 +1114,8 @@ impl Parser {
         }
         let locals = std::mem::take(&mut self.locals);
         self.scopes.clear();
+        self.readonly.clear();
+        self.constants.clear();
         let globals = self.function_globals.take().unwrap();
         let cost = self.shader.cost + parameters.len() + locals.len() + globals.len() + 1;
         if cost > 512 {
@@ -1540,6 +1566,8 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         functions: BTreeMap::new(),
         locals: BTreeMap::new(),
         scopes: Vec::new(),
+        readonly: BTreeSet::new(),
+        constants: BTreeSet::new(),
         result_type: None,
         statement_depth: 0,
         statement_count: 0,
@@ -1689,6 +1717,31 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
 mod control_flow_evaluation {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn const_input_parameters_and_local_constants_are_read_only_and_lexically_scoped() {
+        for version in [100,300] {
+            let (prefix,output)=if version==300 {("#version 300 es\nprecision highp float;out vec4 pixel;","pixel")}else{("precision highp float;","gl_FragColor")};
+            let helpers="vec3 transform(const in vec3 color){const float factor=2.0;const vec3 scale=vec3(factor);vec3 result=mix(color*0.5,color*scale,vec3(lessThanEqual(color,vec3(0.5))));{vec3 color=vec3(0.0);color+=vec3(1.0);}return result;}";
+            let source=format!("{prefix}{helpers}void main(){{const float a=0.25;float mutable=a;mutable+=0.0;{output}=vec4(transform(vec3(mutable,0.75,0.5)),1.0);}}");
+            let shader=compile(&source,false,version).unwrap();
+            let result=shader.run_with_sampler(BTreeMap::new(),&|_,_|panic!("no sampler"));
+            assert_eq!(result[output].v[..4],[0.5,0.375,1.0,1.0]);
+            for (helper,body) in [
+                ("float f(const in float x){x=0.0;return x;}", ""),
+                ("float f(const float x){x+=0.0;return x;}", ""),
+                ("float f(const in float x){const float y=x;return y;}", ""),
+                ("float f(float x){return x;}", "const float x=f(0.5);"),
+                ("", "const float x;"), ("", "const float x=gain;"),
+                ("", "const float x=0.5;x=0.25;"), ("", "const vec3 x=vec3(0.0);x+=vec3(1.0);"),
+                ("", "float x=0.0;const x=0.5;"),
+                ("", "float x=0.0;const float y=x;"),
+            ] {
+                let source=format!("{prefix}uniform float gain;{helper}void main(){{{body}{output}=vec4(1.0);}}");
+                assert!(compile(&source,false,version).is_err(),"{helper} {body}");
+            }
+        }
+    }
 
     #[test]
     fn boolean_vectors_relations_swizzles_and_explicit_constructors_keep_types_and_values() {

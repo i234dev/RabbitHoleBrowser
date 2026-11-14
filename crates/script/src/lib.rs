@@ -62,6 +62,8 @@ mod tests_webgl_matrices;
 mod tests_webgl_precision;
 #[cfg(test)]
 mod tests_webgl_facing;
+#[cfg(test)]
+mod tests_webgl_color_types;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};

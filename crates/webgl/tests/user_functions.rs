@@ -321,7 +321,7 @@ fn helper_types_arity_and_return_contract_are_checked_before_execution() {
             "float f(float x){return x;x=x+1.0;}",
             "float f(out float x){return x;}",
             "float f(inout float x){return x;}",
-            "float f(const in float x){return x;}",
+            "float f(const in float x){x=0.0;return x;}",
             "float f(sampler2D image){return 1.0;}",
             "float f(mat4 transform){return 1.0;}",
             "float f(float x,float x){return x;}",

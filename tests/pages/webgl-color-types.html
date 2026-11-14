@@ -1,0 +1,28 @@
+<!doctype html><title>Typed vector masks and constant input parameters</title>
+<style>body{margin:0}canvas{display:block}</style>
+<canvas id="gl1" width="4" height="4"></canvas><canvas id="gl2" width="4" height="4"></canvas>
+<script>
+for(const version of [1,2]){
+  const gl=document.getElementById('gl'+version).getContext(version===2?'webgl2':'webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+  function check(v,m){if(!v)throw new Error(version+': '+m);}
+  function shader(kind,source){const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);check(gl.getShaderParameter(s,gl.COMPILE_STATUS),gl.getShaderInfoLog(s));return s;}
+  const prefix=version===2?'#version 300 es\n':'';
+  const p=gl.createProgram();
+  gl.attachShader(p,shader(gl.VERTEX_SHADER,prefix+(version===2?'in':'attribute')+' vec2 position;void main(){gl_Position=vec4(position,0.0,1.0);}'));
+  gl.attachShader(p,shader(gl.FRAGMENT_SHADER,prefix+'precision highp float;'+(version===2?'out vec4 pixel;':'')+`
+vec3 transform(const in vec3 color){
+  const float factor=2.0;
+  const vec3 scale=vec3(factor);
+  bvec3 selected=lessThanEqual(color,vec3(0.5));
+  return mix(color*0.5,color*scale,vec3(selected));
+}
+void main(){`+(version===2?'pixel':'gl_FragColor')+`=vec4(transform(vec3(0.25,0.75,0.5)),1.0);}`));
+  gl.linkProgram(p);check(gl.getProgramParameter(p,gl.LINK_STATUS),gl.getProgramInfoLog(p));gl.useProgram(p);
+  const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+  const a=gl.getAttribLocation(p,'position');gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(a);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  const pixel=new Uint8Array(4);gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+  check(Array.from(pixel).join(',')==='128,96,255,255','typed mask and constant helper pixels');check(gl.getError()===gl.NO_ERROR,'unexpected GL error');
+  console.log(version+' color types ok');
+}
+</script>
