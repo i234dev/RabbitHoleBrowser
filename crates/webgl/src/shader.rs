@@ -1477,8 +1477,8 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             );
         }
         let ty = p.ty()?;
-        if ty == Ty::Bool {
-            return Err("bool interfaces are unsupported; use bool only in locals or helpers".into());
+        if ty == Ty::Bool && qual != Qual::Uniform {
+            return Err("bool interfaces other than uniforms are unsupported".into());
         }
         if ty == Ty::Mat4 && qual != Qual::Uniform {
             return Err("mat4 is supported only for uniforms and locals".into());

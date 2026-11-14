@@ -160,7 +160,7 @@ fn dangling_else_binds_to_nearest_if_and_optional_else_keeps_prior_output() {
 }
 
 #[test]
-fn bool_types_do_not_become_float_math_numeric_conditions_or_interfaces() {
+fn bool_types_reject_float_math_numeric_conditions_and_nonuniform_interfaces() {
     for version in [100,300] {
         let out=output(version);
         for body in [
@@ -174,7 +174,7 @@ fn bool_types_do_not_become_float_math_numeric_conditions_or_interfaces() {
         ] {
             reject(version,"",&format!("{body}{out}=vec4(1.0);"));
         }
-        for extra in ["uniform bool flag;",if version==300{"in bool flag;"}else{"varying bool flag;"}] {
+        for extra in [if version==300{"in bool flag;"}else{"varying bool flag;"}] {
             assert!(reject(version,extra,&format!("{out}=vec4(1.0);")).contains("bool interfaces"));
         }
         let mut c=context(version,1);

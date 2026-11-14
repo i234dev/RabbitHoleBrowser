@@ -68,10 +68,18 @@ transitive body against its expression budget. There are at most 16 helpers and
 Scalar bool operations include `!`, short-circuiting `&&`/`||`, `^^`, scalar float
 comparisons and equality/inequality on matching bool, float, vector or matrix
 types. Both sides and all branches are checked and reflected at compile time.
-Boolean interfaces, boolean vectors, numeric/bool conversions, loops, switch,
+Boolean interfaces other than scalar uniforms, boolean vectors, GLSL numeric/bool
+conversions, loops, switch,
 ternary expressions, arrays, integer arithmetic, unsupported built-in overloads
 and derivatives fail compilation. The subset allows 16 nested statement levels
 and 128 statements per body; skipped branches still add to the compile budget.
+
+Scalar `uniform bool` works in vertex and fragment shaders and starts false after
+linking. `uniform1i`/`uniform1iv` and `uniform1f`/`uniform1fv` set false for zero
+and true for nonzero inputs, following [OpenGL ES 2.0 section 2.10.4](https://registry.khronos.org/OpenGL/specs/es/2.0/es_full_spec_2.0.pdf).
+`getActiveUniform` reports `BOOL`; JavaScript `getUniform` returns a boolean.
+Wrong-size/type setters preserve the value, and relinking restores false and
+invalidates earlier locations. Boolean vectors and arrays remain unsupported.
 
 ## WebGL2 context milestone
 

@@ -23,7 +23,7 @@
     STREAM_DRAW: 0x88E0, STATIC_DRAW: 0x88E4, DYNAMIC_DRAW: 0x88E8, BUFFER_SIZE: 0x8764, BUFFER_USAGE: 0x8765,
     VERTEX_SHADER: 0x8B31, FRAGMENT_SHADER: 0x8B30, SHADER_TYPE: 0x8B4F, DELETE_STATUS: 0x8B80, COMPILE_STATUS: 0x8B81, LINK_STATUS: 0x8B82, VALIDATE_STATUS: 0x8B83,
     ATTACHED_SHADERS: 0x8B85, ACTIVE_UNIFORMS: 0x8B86, ACTIVE_ATTRIBUTES: 0x8B89, CURRENT_PROGRAM: 0x8B8D,
-    FLOAT_VEC2: 0x8B50, FLOAT_VEC3: 0x8B51, FLOAT_VEC4: 0x8B52, FLOAT_MAT4: 0x8B5C,
+    FLOAT_VEC2: 0x8B50, FLOAT_VEC3: 0x8B51, FLOAT_VEC4: 0x8B52, FLOAT_MAT4: 0x8B5C, BOOL: 0x8B56,
     HIGH_FLOAT: 0x8DF2, MEDIUM_FLOAT: 0x8DF1, LOW_FLOAT: 0x8DF0, HIGH_INT: 0x8DF5, MEDIUM_INT: 0x8DF4, LOW_INT: 0x8DF3, SHADER_COMPILER: 0x8DFA,
     RGBA: 0x1908, RGB: 0x1907, ALPHA: 0x1906, LUMINANCE: 0x1909, LUMINANCE_ALPHA: 0x190A,
     SCISSOR_TEST: 0x0C11, DEPTH_TEST: 0x0B71, BLEND: 0x0BE2, CULL_FACE: 0x0B44, STENCIL_TEST: 0x0B90, DITHER: 0x0BD0, POLYGON_OFFSET_FILL: 0x8037, SAMPLE_ALPHA_TO_COVERAGE: 0x809E, SAMPLE_COVERAGE: 0x80A0,
@@ -226,6 +226,7 @@
       const loc = locations.get(location); if (!loc) throw new TypeError('Expected WebGLUniformLocation');
       if (loc.context !== s || loc.program !== program || loc.generation !== p.generation) { flag(s, GL.INVALID_OPERATION); return null; }
       const r = call(s, 'getUniform', p.id, loc.id); if (r.error) return null;
+      if (typeof r.value === 'boolean') return r.value;
       const values = new Float32Array(r.value); return values.length === 1 ? values[0] : values;
     }
     uniform1i(location, value) { required('uniform1i', 2, arguments); const s = state(this), loc = uniformLocation(s, location); if (loc) call(s, 'uniformI', loc.id, new Int32Array([value | 0])); }

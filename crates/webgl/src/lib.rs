@@ -118,7 +118,7 @@ fn active_info(name: &str, ty: Ty) -> ActiveInfo {
         name: name.into(),
         size: 1,
         kind: match ty {
-            Ty::Bool => 0x8B56, // GL_BOOL; boolean interfaces are rejected by the parser.
+            Ty::Bool => gl::BOOL,
             Ty::IntLiteral => unreachable!("literal types are not interface variables"),
             Ty::Sampler2D => gl::SAMPLER_2D,
             Ty::Float => gl::FLOAT,
@@ -744,17 +744,24 @@ impl Context {
             .collect())
     }
     pub fn get_uniform(&self, id: u32, location: i32) -> Result<Vec<f32>> {
+        let u = self.uniform(id, location)?;
+        Ok(u.value.v[..u.ty.n()].to_vec())
+    }
+    pub fn get_uniform_kind(&self, id: u32, location: i32) -> Result<u32> {
+        let u = self.uniform(id, location)?;
+        Ok(active_info(&u.name, u.ty).kind)
+    }
+    fn uniform(&self, id: u32, location: i32) -> Result<&Uniform> {
         let e = self
             .programs
             .get(&id)
             .and_then(|p| p.executable.as_ref())
             .ok_or(Error::InvalidOperation)?;
-        let u = e
+        e
             .uniforms
             .iter()
             .find(|u| u.location == location)
-            .ok_or(Error::InvalidOperation)?;
-        Ok(u.value.v[..u.ty.n()].to_vec())
+            .ok_or(Error::InvalidOperation)
     }
     pub fn uniform_f32(&mut self, location: i32, values: &[f32]) -> Result<()> {
         if location < 0 {
@@ -764,7 +771,9 @@ impl Context {
         if matches!(u.ty, Ty::Mat4 | Ty::Sampler2D) || u.ty.n() != values.len() {
             return Err(Error::InvalidOperation);
         }
-        u.value = Value::from(u.ty, values);
+        u.value = if u.ty == Ty::Bool {
+            Value::from(Ty::Bool, &[u8::from(values[0] != 0.) as f32])
+        } else { Value::from(u.ty, values) };
         Ok(())
     }
     pub fn uniform_matrix4fv(

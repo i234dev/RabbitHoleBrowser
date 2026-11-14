@@ -53,7 +53,8 @@ integer-to-float assignment are rejected rather than evaluated as float math. Ma
 
 Vertex shaders must write `gl_Position`; fragment shaders must write
 `gl_FragColor` and can read `gl_FragCoord`. Active cross-stage varying types and
-shared uniform types must agree. Uniforms start at zero after linking.
+shared uniform types must agree. Uniforms start at zero after linking; scalar
+boolean uniforms start at false.
 
 The evaluator also supports 32 typed float/vector math built-ins, with checked
 argument counts, types and expression costs. See
@@ -83,8 +84,13 @@ Scalar `bool` supports `true`/`false`, bool-only `!`, `&&`, `||`, `^^`, and
 `bool(bool)`. `&&` and `||` skip the right operand when its value is unnecessary;
 `^^` evaluates both. Relational comparisons require two scalar floats; `==` and
 `!=` require matching bool, float, vector or matrix types and produce one bool.
-Numeric/bool conversions, boolean vectors and boolean interface variables are
-rejected. Both branches and logical operands are typed and reflected statically,
+Numeric/bool GLSL conversions, boolean vectors and boolean interfaces other
+than uniforms are rejected. Scalar `uniform bool` is supported in both shader
+stages. Integer and floating-point scalar uniform setters normalize zero to false
+and every other value to true, including negative integers; sampler setters keep
+their texture-unit range checks. Reflection reports `BOOL` and JavaScript
+`getUniform` returns a boolean. Relinking resets the value to false and invalidates
+old locations. Setters with incompatible dimensions or types fail atomically. Both branches and logical operands are typed and reflected statically,
 including constant dead paths. Blocks have lexical scopes; a new local enters
 scope after its initializer, and leaving a block restores the enclosing binding.
 At most 16 nested statement levels and 128 statements per body are supported.

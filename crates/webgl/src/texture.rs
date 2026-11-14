@@ -219,14 +219,18 @@ impl Context {
         if values.len() != 1 {
             return Err(Error::InvalidOperation);
         }
-        if !(0..MAX_TEXTURE_UNITS as i32).contains(&values[0]) {
-            return Err(Error::InvalidValue);
-        }
         let u = self.uniform_mut(location)?;
-        if u.ty != Ty::Sampler2D {
-            return Err(Error::InvalidOperation);
-        }
-        u.value = Value::from(u.ty, &[values[0] as f32]);
+        let value = match u.ty {
+            Ty::Bool => u8::from(values[0] != 0) as f32,
+            Ty::Sampler2D => {
+                if !(0..MAX_TEXTURE_UNITS as i32).contains(&values[0]) {
+                    return Err(Error::InvalidValue);
+                }
+                values[0] as f32
+            }
+            _ => return Err(Error::InvalidOperation),
+        };
+        u.value = Value::from(u.ty, &[value]);
         Ok(())
     }
     pub(super) fn validate_samplers(&self, e: &Executable) -> Result<()> {

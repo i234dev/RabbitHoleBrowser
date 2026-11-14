@@ -736,7 +736,12 @@ impl Command {
                 }
                 Self::ActiveAttribs(p) => Reply::Infos(ctx.active_attributes(p)?),
                 Self::ActiveUniforms(p) => Reply::Infos(ctx.active_uniforms(p)?),
-                Self::GetUniform(p, location) => Reply::Values(ctx.get_uniform(p, location)?),
+                Self::GetUniform(p, location) => {
+                    let values = ctx.get_uniform(p, location)?;
+                    if ctx.get_uniform_kind(p, location)? == rabbithole_webgl::gl::BOOL {
+                        Reply::Bool(values[0] != 0.)
+                    } else { Reply::Values(values) }
+                }
                 Self::UniformI(location, values) => {
                     ctx.uniform_i32(location, &values)?;
                     Reply::Void

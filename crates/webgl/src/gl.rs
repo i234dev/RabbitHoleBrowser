@@ -34,6 +34,7 @@ pub const FLOAT_VEC2: u32 = 0x8B50;
 pub const FLOAT_VEC3: u32 = 0x8B51;
 pub const FLOAT_VEC4: u32 = 0x8B52;
 pub const FLOAT_MAT4: u32 = 0x8B5C;
+pub const BOOL: u32 = 0x8B56;
 pub const TEXTURE_2D: u32 = 0x0DE1;
 pub const TEXTURE0: u32 = 0x84C0;
 pub const TEXTURE_MIN_FILTER: u32 = 0x2801;
