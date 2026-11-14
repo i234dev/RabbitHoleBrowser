@@ -568,10 +568,10 @@ impl ScriptHost {
             }
             let previous = realm.deadline;
             let budget = realm.task_budget;
-            let deadline = match (previous, caller_deadline) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            // An inactive target can retain an expired deadline from its last
+            // completed checkpoint. That is not a still-running task budget.
+            // Use the source's existing task deadline without restarting it.
+            let deadline = caller_deadline.or(previous);
             realm.task_budget = None;
             realm.set_deadline(deadline);
             let guard = DeadlineGuard { realm, previous, budget, caller: caller_deadline };

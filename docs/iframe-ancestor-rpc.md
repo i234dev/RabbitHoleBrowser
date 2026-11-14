@@ -3,7 +3,7 @@
 This candidate extends the existing Engine cross-realm bridge for global
 property reads and function calls from an iframe to a reachable, inactive
 ancestor or sibling. It is based on source 34780e675d84a769bfb427e07af34d9ba053a0ae.
-The source changes and eight tests have not been compiled or executed yet.
+The source changes and nine tests have not been compiled or executed yet.
 
 The reverse route accepts only HTTP(S) documents whose effective origin equals
 their URL's non-opaque tuple origin, and whose tuple origins agree. This is a
@@ -13,7 +13,8 @@ schemes. Existing descendant permissions and frame limits are not broadened.
 
 A source realm passes its existing absolute deadline through GetGlobal and
 CallGlobal, including property getters. The target temporarily disables task
-budget restart, uses the earlier of its existing and caller deadlines, then
+budget restart, uses the caller's unchanged deadline (an idle target's previous deadline may
+already have expired), then
 restores its idle deadline, budget and the caller's regexp deadline by RAII.
 No VM or JIT behavior is changed. Hosts implementing only the old HostEnv API
 retain their existing behavior through the default forwarding method.

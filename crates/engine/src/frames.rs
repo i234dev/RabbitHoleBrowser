@@ -1518,6 +1518,20 @@ mod ancestor_call_tests {
     }
 
     #[test]
+    fn expired_idle_target_deadline_does_not_override_the_live_caller_budget() {
+        let (mut engine, mut page) = fixture();
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "");
+        finish(&engine, &mut page, 0);
+        let id = page.frame_id;
+        let expired = Instant::now() - Duration::from_secs(1);
+        page.script.host.as_mut().unwrap().realm().set_deadline(Some(expired));
+        let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_deadline(source, id, FrameCall::GetGlobal { name: "marker".into() }, Some(Instant::now()+Duration::from_secs(1)))).flatten();
+        assert!(matches!(result, Some(FrameReply::Value(ref value)) if value == "\"root\""), "{result:?}");
+        assert_eq!(page.script.host.as_mut().unwrap().realm().deadline, Some(expired));
+        page.script.host.as_mut().unwrap().realm().set_deadline(None);
+    }
+
+    #[test]
     fn ancestor_getter_and_call_share_absolute_deadline_and_recover() {
         for getter in [true, false] {
             let (mut engine, mut page) = fixture();
