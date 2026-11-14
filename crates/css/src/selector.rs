@@ -828,6 +828,20 @@ impl MatchState {
 /// Matching state for one immutable document/state pass. The selector
 /// lifetime prevents pointer-key reuse after a temporary AST is dropped.
 /// Drop this context before mutating the DOM or changing dynamic state.
+/// Temporary selector storage cannot be dropped and reused during a pass:
+/// ```compile_fail
+/// use rabbithole_css::selector::{Compound, Selector, SelectorMatcher};
+/// use rabbithole_css::MatchState;
+/// let doc = rabbithole_dom::Document::new();
+/// let state = MatchState::default();
+/// let matcher = SelectorMatcher::new(&doc, &state);
+/// {
+///     let temporary = Selector { compounds: vec![Compound::default()], combinators: vec![], pseudo_element: None };
+///     matcher.matches(&temporary, 0);
+/// }
+/// let next = Selector { compounds: vec![Compound::default()], combinators: vec![], pseudo_element: None };
+/// matcher.matches(&next, 0);
+/// ```
 pub struct SelectorMatcher<'d, 's> {
     doc: &'d Document,
     state: &'d MatchState,
