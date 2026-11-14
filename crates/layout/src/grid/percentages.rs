@@ -71,6 +71,23 @@ pub(super) fn freeze_edges(style:&mut ComputedStyle,edge_basis:AvailableSpace) {
     }
 }
 
+/// A wrapper's finite execution space can be smaller than the real area
+/// that supplied a percentage basis. Resolve the item's own dimensional
+/// percentages once in each local axis before ordinary layout sees that
+/// proxy. Values remain CSS box sizes; box-sizing is applied by sizing.
+pub(super) fn freeze_sizes(style:&mut ComputedStyle,bases:[AvailableSpace;2]) {
+    if let Some(reference)=bases[0].definite() {
+        for value in [&mut style.width,&mut style.min_width,&mut style.max_width] {
+            if value.has_percent() {*value=Length::Px(value.resolve_or_zero(reference).max(0.));}
+        }
+    }
+    if let Some(reference)=bases[1].definite() {
+        for value in [&mut style.height,&mut style.min_height,&mut style.max_height] {
+            if value.has_percent() {*value=Length::Px(value.resolve_or_zero(reference).max(0.));}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +101,21 @@ mod tests {
         style.margin=Edges::all(Length::Calc(-5.,20.));
         style.column_gap=Length::Calc(2.,10.);style.row_gap=Length::Calc(4.,10.);
         style
+    }
+
+    #[test]
+    fn defined_dimensional_percentages_freeze_before_a_smaller_execution_proxy() {
+        let mut style=sample_style();
+        freeze_sizes(&mut style,[AvailableSpace::Definite(100.),AvailableSpace::Definite(80.)]);
+        assert_eq!(style.width,Length::Px(61.));assert_eq!(style.min_width,Length::Px(27.));assert_eq!(style.max_width,Length::Px(90.));
+        assert_eq!(style.height,Length::Px(20.));assert_eq!(style.min_height,Length::Px(33.));assert_eq!(style.max_height,Length::Px(60.));
+        // Edge percentages have their own original-inline base and are not
+        // resolved by this dimensional operation.
+        assert_eq!(style.padding.left,Length::Calc(3.,10.));
+        let mut cyclic=sample_style();freeze_sizes(&mut cyclic,[AvailableSpace::Indefinite;2]);
+        assert_eq!(cyclic.width,Length::Calc(11.,50.));assert_eq!(cyclic.height,Length::Percent(25.));
+        freeze_sizes(&mut cyclic,[AvailableSpace::Definite(0.),AvailableSpace::Definite(0.)]);
+        assert_eq!(cyclic.width,Length::Px(11.));assert_eq!(cyclic.height,Length::Px(0.));
     }
 
     #[test]
