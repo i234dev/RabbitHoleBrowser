@@ -7,7 +7,7 @@ provenance commits. The published 0.1.9 and frozen 0.1.10 source are unchanged.
 The implementation transports immutable parent track sizes, positions, collapsed
 state, names and gaps to a requested subgrid axis. Orthogonal wrappers map and
 reverse those axes. Scoped installation restores computed styles and invalidates
-caches. Shared axes ignore preferred/min/max sizes and self alignment, cannot
+caches, including when a measurement unwinds. Shared axes ignore preferred/min/max sizes and self alignment, cannot
 append implicit tracks, and retain ancestor edge/gap layers through nesting.
 
 Descendants contribute to the corresponding parent tracks. A grid performs an
@@ -20,7 +20,7 @@ min/max maxima. Row-lanes measurement receives definite inherited geometry
 before computing inline contributions; explicit intrinsic preferred sizes remain
 in force in an independent axis. Stretch relayout keeps inherited geometry.
 
-Written, not executed: twelve geometry/compaction unit tests, nine layout tests,
+Written, not executed: thirteen geometry/compaction/unwind unit tests, nine layout tests,
 two new visual reftest pairs and the seven prior GridSpace tests. The original
 four deferred intrinsic constraint fixtures are preserved byte-for-byte. Style
 metadata/gap tests are in the dependency commits.
