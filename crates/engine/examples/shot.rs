@@ -241,7 +241,7 @@ fn main() {
                 stack_items.push(it.clone());
                 continue;
             }
-            rabbithole_engine::layout::paint(&single, &mut c2, &engine.fonts, 0.0, 0.0);
+            rabbithole_engine::layout::paint(&single, &mut c2, &page.fonts, 0.0, 0.0);
             let e = kinds.entry(name).or_insert((0, std::time::Duration::ZERO));
             e.0 += 1;
             e.1 += t.elapsed();
@@ -257,17 +257,17 @@ fn main() {
         }
         let mut c3 = Canvas::new(w, h);
         let t = std::time::Instant::now();
-        rabbithole_engine::layout::paint(&flat, &mut c3, &engine.fonts, 0.0, 0.0);
+        rabbithole_engine::layout::paint(&flat, &mut c3, &page.fonts, 0.0, 0.0);
         eprintln!("[profile] full paint with no-rounded-clips {:?}", t.elapsed());
         let mut c4 = Canvas::new(w, h);
         let t = std::time::Instant::now();
-        rabbithole_engine::layout::paint(&page.display_list, &mut c4, &engine.fonts, 0.0, 0.0);
+        rabbithole_engine::layout::paint(&page.display_list, &mut c4, &page.fonts, 0.0, 0.0);
         eprintln!("[profile] full paint {:?}", t.elapsed());
         let mut nolayer = page.display_list.clone();
         nolayer.items.retain(|it| !matches!(it, D::PushLayer(_) | D::PopLayer(_)));
         let mut c5 = Canvas::new(w, h);
         let t = std::time::Instant::now();
-        rabbithole_engine::layout::paint(&nolayer, &mut c5, &engine.fonts, 0.0, 0.0);
+        rabbithole_engine::layout::paint(&nolayer, &mut c5, &page.fonts, 0.0, 0.0);
         eprintln!("[profile] full paint without layers {:?}", t.elapsed());
     }
     // Scroll like a browser navigating to the URL's fragment (or RH_SCROLL).

@@ -15,6 +15,7 @@ mod consent;
 mod editing;
 mod feeds;
 mod focus;
+mod font_scopes;
 mod popups;
 mod service_workers;
 
@@ -418,7 +419,7 @@ fn reference_paint(html: &str, f: &Frame) -> Vec<u32> {
     engine.flush_display_list(&mut page);
     let mut c = rabbithole_engine::gfx::Canvas::new(f.canvas.width, f.canvas.height);
     c.clear(rabbithole_engine::gfx::Color::WHITE);
-    rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut c, &engine.fonts, f.origin.0, f.origin.1, (f.scroll.0 - f.origin.0, f.scroll.1 - f.origin.1));
+    rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut c, &page.fonts, f.origin.0, f.origin.1, (f.scroll.0 - f.origin.0, f.scroll.1 - f.origin.1));
     c.data
 }
 

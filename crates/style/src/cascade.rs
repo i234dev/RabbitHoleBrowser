@@ -315,22 +315,21 @@ impl ScopeIndex {
     }
 }
 
+/// Select a document's font-unit view for a complete or incremental pass.
+/// Recomputes unicode-range eligibility from that document's current sheets.
+pub fn font_unit_scope(
+    fonts: Option<Rc<rabbithole_gfx::FontContext>>,
+    author: &[Stylesheet],
+    env: &MediaEnv,
+    opts: &StyleOptions,
+) -> crate::values::FontUnitScope {
+    let faces = collect_font_faces(author, env, opts);
+    crate::values::scope_unit_fonts(fonts, crate::values::font_unit_skip(&faces))
+}
+
 pub fn style_tree_with(doc: &Document, author: &[Stylesheet], env: &MediaEnv, opts: &StyleOptions) -> StyledTree {
-    crate::values::clear_unit_cache();
-    {
-        // Families none of whose faces cover U+0020.
-        let faces = collect_font_faces(author, env, opts);
-        let mut fams: Vec<String> = faces.iter().map(|f| f.family.to_ascii_lowercase()).collect();
-        fams.sort();
-        fams.dedup();
-        fams.retain(|fam| {
-            faces
-                .iter()
-                .filter(|f| f.family.eq_ignore_ascii_case(fam))
-                .all(|f| f.unicode_range.as_ref().is_some_and(|r| !r.iter().any(|(a, b)| *a <= 0x20 && 0x20 <= *b)))
-        });
-        crate::values::set_unit_skip(fams);
-    }
+    let faces = collect_font_faces(author, env, opts);
+    let _font_units = crate::values::scope_unit_skip(crate::values::font_unit_skip(&faces));
     let mut engine = crate::restyle::StyleEngine::new(author, env);
     engine.full(doc, author, opts)
 }

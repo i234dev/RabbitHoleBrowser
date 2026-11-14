@@ -22,10 +22,10 @@ fn password_caret_after_typing_uses_mask_character_boundaries() {
         engine.restyle(&mut page);
         let run = page.text_runs().into_iter().find(|r| r.node == Some(secret)).unwrap();
         assert_eq!(&*run.text, "•".repeat(value.chars().count()));
-        let start = page.caret_x(&engine.fonts, secret, 0).unwrap();
+        let start = page.caret_x(&page.fonts, secret, 0).unwrap();
         for (count, (offset, _)) in value.char_indices().chain(std::iter::once((value.len(), ' '))).enumerate() {
-            let x = page.caret_x(&engine.fonts, secret, offset).unwrap();
-            let expected = engine.fonts.measure(run.font, run.size, &"•".repeat(count))
+            let x = page.caret_x(&page.fonts, secret, offset).unwrap();
+            let expected = page.fonts.measure(run.font, run.size, &"•".repeat(count))
                 + run.letter_spacing * count as f32;
             assert!((x - start - expected).abs() < 0.01, "value={value:?}, offset={offset}, x={x}");
         }
@@ -35,7 +35,7 @@ fn password_caret_after_typing_uses_mask_character_boundaries() {
     }
     page.set_control_text(secret, "");
     engine.restyle(&mut page);
-    assert!(page.caret_x(&engine.fonts, secret, 0).unwrap().is_finite());
+    assert!(page.caret_x(&page.fonts, secret, 0).unwrap().is_finite());
 }
 
 #[test]
@@ -44,20 +44,20 @@ fn caret_clamps_stale_and_interior_unicode_offsets() {
     let plain = page.doc.element_by_id("plain").unwrap();
     page.set_control_text(plain, "•");
     engine.restyle(&mut page);
-    let start = page.caret_x(&engine.fonts, plain, 0).unwrap();
-    assert_eq!(page.caret_x(&engine.fonts, plain, 1), Some(start));
-    assert_eq!(page.caret_x(&engine.fonts, plain, 2), Some(start));
-    let end = page.caret_x(&engine.fonts, plain, "•".len()).unwrap();
+    let start = page.caret_x(&page.fonts, plain, 0).unwrap();
+    assert_eq!(page.caret_x(&page.fonts, plain, 1), Some(start));
+    assert_eq!(page.caret_x(&page.fonts, plain, 2), Some(start));
+    let end = page.caret_x(&page.fonts, plain, "•".len()).unwrap();
     assert!(end > start);
-    assert_eq!(page.caret_x(&engine.fonts, plain, usize::MAX), Some(end));
+    assert_eq!(page.caret_x(&page.fonts, plain, usize::MAX), Some(end));
     let secret = page.doc.element_by_id("secret").unwrap();
     page.set_control_text(secret, "é😀");
     engine.restyle(&mut page);
-    let start = page.caret_x(&engine.fonts, secret, 0).unwrap();
-    let after_first = page.caret_x(&engine.fonts, secret, 2).unwrap();
-    assert_eq!(page.caret_x(&engine.fonts, secret, 1), Some(start));
+    let start = page.caret_x(&page.fonts, secret, 0).unwrap();
+    let after_first = page.caret_x(&page.fonts, secret, 2).unwrap();
+    assert_eq!(page.caret_x(&page.fonts, secret, 1), Some(start));
     for offset in 3..6 {
-        assert_eq!(page.caret_x(&engine.fonts, secret, offset), Some(after_first));
+        assert_eq!(page.caret_x(&page.fonts, secret, offset), Some(after_first));
     }
-    assert!(page.caret_x(&engine.fonts, secret, usize::MAX).unwrap() > after_first);
+    assert!(page.caret_x(&page.fonts, secret, usize::MAX).unwrap() > after_first);
 }

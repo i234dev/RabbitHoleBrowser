@@ -747,6 +747,9 @@ fn screenshot(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let ti = agent.tab_index()?;
     agent.ensure_loaded(ti)?;
     agent.ensure_fonts();
+    // System faces can arrive after this page was built. Refresh its own
+    // font view and geometry before computing the capture region or marks.
+    agent.engine.flush_display_list(&mut agent.tabs[ti].frames[0].page);
     let scale = n(a, "scale").unwrap_or(1.0).clamp(0.25, 3.0) as f32;
     let marks = b(a, "marks").unwrap_or(true);
     // Images were skipped while loading: fetch them now (bounded wait).

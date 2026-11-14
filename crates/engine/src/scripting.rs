@@ -357,7 +357,7 @@ impl HostEnv for EngineEnv<'_> {
         self.page.script.dom_dirty = true;
     }
     fn font_context(&mut self) -> Option<std::rc::Rc<rabbithole_gfx::FontContext>> {
-        Some(self.engine.fonts.clone())
+        Some(self.page.fonts.clone())
     }
     fn navigate(&mut self, url: Url, replace: bool) {
         self.page.script.pending_navigation = Some(PendingNavigation {

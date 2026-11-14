@@ -33,3 +33,26 @@ costs. The SFNT quota is not a decoder scratch or glyph-cache budget. Arbitraril
 many distinct navigations can exhaust the store's registration quota; subsequent
 new fonts then use the normal unsuccessful-registration fallback. Reusing an
 existing binding still succeeds.
+
+## Page integration
+
+Each `Page` owns its document view. `Engine.fonts` remains the clean host view
+for browser chrome and explicit host registrations such as Ahem. Layout,
+inline SVG text, complete and damaged painting, frame rasterization and Canvas
+text use the page view. Content GUI caret/selection/find, PDF pagination and
+screenshot diagnostics pass that same view when reshaping display-list text.
+Standalone callers painting a page's display list must also pass `page.fonts`.
+
+Incremental style/layout observes the document and host selection revisions.
+A newly available local or host face invalidates the page's style and layout on
+its next flush. Screenshot setup flushes after loading system fonts, before it
+calculates capture geometry. Loading another page never changes the aliases of
+a retained page or frame.
+
+Font-relative CSS units use a scoped thread-local guard. It saves and restores
+fonts, the metric cache and unicode-range exclusions, including nested passes
+and unwinding. Cache keys use constant-time selection revisions rather than
+enumerating the font catalog. Resource discovery without a Page enters an empty
+font scope; full/incremental passes, unrendered style queries, verification and
+animation keyframes enter their document's scope. An unchanged style flush
+returns before collecting font descriptors or entering a new scope.

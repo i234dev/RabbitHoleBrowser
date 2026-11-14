@@ -677,7 +677,7 @@ impl Worker {
         let Some(page) = self.page.as_mut() else { return };
         self.engine.flush_display_list(page);
         let t = Instant::now();
-        let pages = crate::gui::pdf::paginate(&page.display_list, &self.engine.fonts, page.viewport.width, page.content_height(), page.background, 2.0);
+        let pages = crate::gui::pdf::paginate(&page.display_list, &page.fonts, page.viewport.width, page.content_height(), page.background, 2.0);
         let title = if page.title.trim().is_empty() { page.url.to_string() } else { page.title.trim().to_string() };
         let pdf = crate::gui::pdf::write_pdf(&pages, crate::gui::pdf::A4, &title);
         debug_time("print to PDF", t);
@@ -1154,7 +1154,7 @@ impl Worker {
                             cv.pop_clip();
                             cv.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
                             let css = Rect::new(r.x / s, r.y / s, r.w / s, r.h / s);
-                            rabbithole_engine::layout::paint_region(&page.display_list, &mut cv, &self.engine.fonts, origin.0, origin.1, css);
+                            rabbithole_engine::layout::paint_region(&page.display_list, &mut cv, &page.fonts, origin.0, origin.1, css);
                             cv.pop_transform();
                         }
                         self.paint_stats.partial += 1;
@@ -1183,7 +1183,7 @@ impl Worker {
                 // Fixed content (interleaved in stacking order) is painted
                 // where the viewport is inside the overscanned canvas.
                 cv.push_transform([s, 0.0, 0.0, s, 0.0, 0.0]);
-                rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut cv, &self.engine.fonts, origin.0, origin.1, (sx - origin.0, sy - origin.1));
+                rabbithole_engine::layout::paint_with_fixed_origin(&page.display_list, &mut cv, &page.fonts, origin.0, origin.1, (sx - origin.0, sy - origin.1));
                 cv.pop_transform();
                 self.paint_stats.full += 1;
                 cv
@@ -1244,7 +1244,7 @@ impl Worker {
         }
         if let Some(edit) = &self.edit {
             if let Some(screen) = page.rect_of(edit.node).map(map) {
-                let rel = page.caret_x(&self.engine.fonts, edit.node, edit.buf.caret).unwrap_or(4.0);
+                let rel = page.caret_x(&page.fonts, edit.node, edit.buf.caret).unwrap_or(4.0);
                 let cx = screen.x + rel * s;
                 let pad = (3.0 * s).min(screen.h / 4.0);
                 canvas.stroke_rect(screen, [1.5; 4], [ACCENT; 4], [0; 4], 2.0);
@@ -1345,7 +1345,7 @@ impl Worker {
                 }
                 if p.dragged {
                     if let (Some(anchor), Some(page)) = (p.anchor, self.page.as_ref()) {
-                        let sel = page.select_between(&self.engine.fonts, anchor, doc);
+                        let sel = page.select_between(&page.fonts, anchor, doc);
                         self.selection = if sel.rects.is_empty() { None } else { Some(sel) };
                         self.dirty = true;
                         // Scripts still see the moves of a selecting drag
@@ -1447,7 +1447,7 @@ impl Worker {
             self.dirty = true;
         }
         if double {
-            let sel = self.page.as_ref().map(|p| p.select_word_at(&self.engine.fonts, doc.0, doc.1));
+            let sel = self.page.as_ref().map(|p| p.select_word_at(&p.fonts, doc.0, doc.1));
             self.selection = sel.filter(|s| !s.rects.is_empty());
             self.dirty = true;
         }
@@ -1702,7 +1702,7 @@ impl Worker {
         let mut best = text.len();
         let mut best_d = f32::MAX;
         for (i, _) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
-            if let Some(cx) = page.caret_x(&self.engine.fonts, control, i) {
+            if let Some(cx) = page.caret_x(&page.fonts, control, i) {
                 let d = (cx - rel_x).abs();
                 if d < best_d {
                     best_d = d;
@@ -1922,7 +1922,7 @@ impl Worker {
                 }
             }
             key if ctrl && key.eq_ignore_ascii_case("a") => {
-                let sel = self.page.as_ref().map(|p| p.select_between(&self.engine.fonts, (0.0, 0.0), (p.content_width(), p.content_height())));
+                let sel = self.page.as_ref().map(|p| p.select_between(&p.fonts, (0.0, 0.0), (p.content_width(), p.content_height())));
                 self.selection = sel.filter(|s| !s.rects.is_empty());
                 self.dirty = true;
             }
@@ -1934,7 +1934,7 @@ impl Worker {
 
     fn refresh_find(&mut self, scroll: bool) {
         let matches = match self.page.as_ref() {
-            Some(p) if !self.find.query.is_empty() => p.find_text(&self.engine.fonts, &self.find.query),
+            Some(p) if !self.find.query.is_empty() => p.find_text(&p.fonts, &self.find.query),
             _ => Vec::new(),
         };
         self.find.current = self.find.current.min(matches.len().saturating_sub(1));

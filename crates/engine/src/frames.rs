@@ -755,7 +755,7 @@ impl Engine {
         }
         let (sx, sy) = child.page_scroll;
         canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
-        rabbithole_layout::paint(&child.display_list, &mut canvas, &self.fonts, sx, sy);
+        rabbithole_layout::paint(&child.display_list, &mut canvas, &child.fonts, sx, sy);
         canvas.pop_transform();
         Image::new(pw, ph, canvas.to_rgba8())
     }

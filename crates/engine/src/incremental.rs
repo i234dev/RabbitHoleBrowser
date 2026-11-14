@@ -47,6 +47,8 @@ pub struct IncrementalStats {
 #[derive(Default)]
 pub struct IncrementalState {
     style: Option<StyleEngine>,
+    /// Revision of this document view and the shared host catalog.
+    fonts_seen: Option<(u64, u64)>,
     /// (DOM epoch, visited history size, base URL) the `:visited` link set
     /// was computed for.
     pub(crate) visited_key: Option<(u64, usize, String)>,
@@ -233,6 +235,8 @@ impl Engine {
             resolve_url: &|base, raw| resolve_url(base, raw),
             document_base: &base_str,
         };
+        let env = media_env(page.viewport, self.scripting);
+        let _font_units = rabbithole_style::cascade::font_unit_scope(Some(page.fonts.clone()), &page.sheets, &env, &opts);
         se.style_chain_from(&page.doc, &opts, node, Some(&page.styles))
     }
 
@@ -241,6 +245,13 @@ impl Engine {
     /// dirty (see [`Engine::flush_layout`]).
     pub fn flush_style(&self, page: &mut Page) {
         page.incr.unrendered.get_mut().clear();
+        let fonts_now = page.fonts.selection_generation();
+        if page.incr.fonts_seen != Some(fonts_now) {
+            page.incr.fonts_seen = Some(fonts_now);
+            page.incr.style = None;
+            page.incr.layout_full = true;
+            page.incr.layout_dirty = true;
+        }
         let log = if page.doc.is_tracking_mutations() {
             page.doc.take_mutations()
         } else {
@@ -283,8 +294,15 @@ impl Engine {
             resolve_url: &|base, raw| resolve_url(base, raw),
             document_base: &base_str,
         };
+        let fresh = !matches!(&page.incr.style, Some(se) if se.env_matches(&env));
+        if !fresh {
+            let se = page.incr.style.as_ref().expect("style engine");
+            if log.is_empty() && !se_state_differs(se, &state) && !se.has_pending(&page.doc) {
+                return;
+            }
+        }
+        let _font_units = rabbithole_style::cascade::font_unit_scope(Some(page.fonts.clone()), &page.sheets, &env, &opts);
         let incr = &mut page.incr;
-        let fresh = !matches!(&incr.style, Some(se) if se.env_matches(&env));
         let mut anim_changes: Vec<crate::animations::Change> = Vec::new();
         let mut anim_full = fresh;
         // Elements this flush started rendering (incremental restyles).
@@ -298,10 +316,6 @@ impl Engine {
             incr.layout_full = true;
         } else {
             let se = incr.style.as_mut().expect("style engine");
-            let had_changes = !log.is_empty() || se_state_differs(se, &state) || se.has_pending(&page.doc);
-            if !had_changes {
-                return;
-            }
             let out = se.update(&page.doc, &mut page.styles, &log, &opts, &page.sheets);
             if debug_enabled() {
                 eprintln!("[incr] style: full={} recomputed={} changed={} mutations={}", out.full, out.recomputed, out.changes.len(), log.entries.len());
@@ -351,12 +365,12 @@ impl Engine {
         incr.dl_dirty = true;
         page.background = canvas_background(&page.doc, &page.styles);
         if fresh || log.overflow || anim_full {
-            rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images, None);
+            rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, None);
         } else {
             // Only newly rendered elements can be SVGs without an image.
             let roots: Vec<NodeId> = std::mem::take(&mut newly_styled).into_iter().filter(|&n| page.doc.is_element(n, "svg")).collect();
             if !roots.is_empty() {
-                rasterize_inline_svgs(&page.doc, &page.styles, &self.fonts, &mut page.images, Some(&roots));
+                rasterize_inline_svgs(&page.doc, &page.styles, &page.fonts, &mut page.images, Some(&roots));
             }
         }
         if anim_full {
@@ -378,7 +392,7 @@ impl Engine {
     /// display list is left stale (see [`Engine::flush_display_list`]).
     pub fn flush_layout(&self, page: &mut Page) {
         self.flush_style(page);
-        let Page { doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, .. } = page;
+        let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, .. } = page;
         // Inputs changed outside the style system: images, background
         // images, scroll offsets, viewport.
         let mut images_now = HashMap::with_capacity(images.len());
@@ -431,7 +445,7 @@ impl Engine {
         let ctx = LayoutContext {
             doc,
             styles,
-            fonts: &self.fonts,
+            fonts,
             images,
             background_images,
             viewport_width: viewport.width,
@@ -631,7 +645,7 @@ impl Engine {
                 canvas.fill_rect(r, page.background);
             }
             canvas.pop_clip();
-            rabbithole_layout::paint_region(&page.display_list, canvas, &self.fonts, scroll.0, scroll.1, r);
+            rabbithole_layout::paint_region(&page.display_list, canvas, &page.fonts, scroll.0, scroll.1, r);
         }
     }
 }
@@ -834,12 +848,13 @@ impl Engine {
             resolve_url: &|base, raw| resolve_url(base, raw),
             document_base: &base_str,
         };
+        let _font_units = rabbithole_style::cascade::font_unit_scope(Some(page.fonts.clone()), &page.sheets, &env, &opts);
         let full_styles = StyleEngine::new(&page.sheets, &env).full(&page.doc, &page.sheets, &opts);
         check_styles(&page.doc, &page.styles, &full_styles)?;
         let ctx = LayoutContext {
             doc: &page.doc,
             styles: &page.styles,
-            fonts: &self.fonts,
+            fonts: &page.fonts,
             images: &page.images,
             background_images: &page.background_images,
             viewport_width: page.viewport.width,

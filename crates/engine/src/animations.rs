@@ -720,6 +720,7 @@ impl Engine {
     }
 
     fn sync_animations(&self, page: &mut Page, node: NodeId, before: Option<&ComputedStyle>, after: &ComputedStyle, now: f64) {
+        let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
         let old_names: Vec<&str> = before.map(|b| b.animations.iter().map(|a| a.name.as_str()).collect()).unwrap_or_default();
         // Cancel animations whose name went away.
         let names: Vec<String> = after.animations.iter().map(|a| a.name.clone()).collect();

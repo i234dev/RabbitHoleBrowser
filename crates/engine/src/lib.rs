@@ -347,7 +347,12 @@ impl Loader {
             document_base: &base_str,
         };
         let t = std::time::Instant::now();
-        let styles = rabbithole_style::style_tree_with(&doc, &sheets, &env, &opts);
+        let styles = {
+            // Resource discovery has no document font view yet, and may run
+            // on the same thread as a retained page's synchronous load.
+            let _font_units = rabbithole_style::values::scope_unit_fonts(None, Vec::new());
+            rabbithole_style::style_tree_with(&doc, &sheets, &env, &opts)
+        };
         if debug {
             eprintln!("[load] discovery cascade {:?}", t.elapsed());
         }
@@ -1024,7 +1029,6 @@ pub struct Engine {
     pub dialog_policy: scripting::DialogPolicy,
     /// Real top-level context transport, configured by the browser embedder.
     pub window_context: Option<rabbithole_script::WindowContext>,
-    registered_fonts: std::cell::RefCell<HashSet<String>>,
     /// Frame tree of all pages (what scripts see of other frames) and
     /// queued cross-frame messages.
     pub frames: std::cell::RefCell<frames::FrameRegistry>,
@@ -1043,6 +1047,8 @@ pub struct Link {
 
 /// A loaded, styled and laid out document.
 pub struct Page {
+    /// Document-local web-font aliases/fallback over the Engine's shared store.
+    pub fonts: Rc<FontContext>,
     pub url: Url,
     /// Base for relative URLs (`<base href>` or the document URL).
     pub base_url: Url,
@@ -1106,7 +1112,6 @@ impl Engine {
         let fonts = FontContext::new();
         fonts.load_system_fonts();
         let fonts = Rc::new(fonts);
-        rabbithole_style::values::set_unit_fonts(Some(fonts.clone()));
         Engine {
             service_workers: Default::default(),
             fonts,
@@ -1118,7 +1123,6 @@ impl Engine {
             device_pixel_ratio: 1.0,
             dialog_policy: scripting::DialogPolicy::default(),
             window_context: None,
-            registered_fonts: Default::default(),
             frames: Default::default(),
             frame_context: Default::default(),
             visited: Default::default(),
@@ -1128,7 +1132,6 @@ impl Engine {
     /// Engine without system font discovery (faster startup for tests/CLI).
     pub fn new_bundled_fonts_only() -> Engine {
         let fonts = Rc::new(FontContext::new());
-        rabbithole_style::values::set_unit_fonts(Some(fonts.clone()));
         Engine {
             service_workers: Default::default(),
             fonts,
@@ -1140,7 +1143,6 @@ impl Engine {
             device_pixel_ratio: 1.0,
             dialog_policy: scripting::DialogPolicy::default(),
             window_context: None,
-            registered_fonts: Default::default(),
             frames: Default::default(),
             frame_context: Default::default(),
             visited: Default::default(),
@@ -1224,15 +1226,18 @@ impl Engine {
 
     pub fn build_page_unscripted(&self, loaded: LoadedPage, viewport: Viewport) -> Page {
         self.visited.borrow_mut().insert(loaded.url.without_fragment().to_string());
+        let fonts = Rc::new(self.fonts.document_scope());
+        let mut registered = HashSet::new();
         for f in &loaded.fonts {
-            let key = format!("{}|{}|{}", f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic);
-            if self.registered_fonts.borrow_mut().insert(key) {
-                self.fonts.add_font_data(&f.face.family, f.face.weight.0, f.face.italic, &f.data);
+            let key = (f.face.family.to_ascii_lowercase(), f.face.weight.0, f.face.italic);
+            if registered.insert(key) {
+                fonts.add_font_data(&f.face.family, f.face.weight.0, f.face.italic, &f.data);
             }
         }
         let has_dynamic_rules = loaded.sheets.iter().any(sheet_has_dynamic_rules);
         let frame = self.frame_context.borrow_mut().take();
         let mut page = Page {
+            fonts,
             url: loaded.url,
             base_url: loaded.base_url,
             doc: loaded.doc,
@@ -1379,11 +1384,11 @@ impl Engine {
     /// Rebuild only the display list (after scrolling: sticky/fixed boxes
     /// and inner scroll offsets).
     pub fn rebuild_display_list(&self, page: &mut Page) {
-        let Page { doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, incr, .. } = page;
+        let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, incr, .. } = page;
         let ctx = LayoutContext {
             doc,
             styles,
-            fonts: &self.fonts,
+            fonts,
             images,
             background_images,
             viewport_width: viewport.width,
@@ -1534,10 +1539,10 @@ impl Engine {
         }
         if (scale - 1.0).abs() > 1e-3 {
             canvas.push_transform([scale, 0.0, 0.0, scale, 0.0, 0.0]);
-            rabbithole_layout::paint(&page.display_list, canvas, &self.fonts, scroll_x, scroll_y);
+            rabbithole_layout::paint(&page.display_list, canvas, &page.fonts, scroll_x, scroll_y);
             canvas.pop_transform();
         } else {
-            rabbithole_layout::paint(&page.display_list, canvas, &self.fonts, scroll_x, scroll_y);
+            rabbithole_layout::paint(&page.display_list, canvas, &page.fonts, scroll_x, scroll_y);
         }
     }
 }

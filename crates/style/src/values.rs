@@ -28,7 +28,7 @@ pub struct LengthContext {
 
 thread_local! {
     static UNIT_FONTS: std::cell::RefCell<Option<std::rc::Rc<rabbithole_gfx::FontContext>>> = const { std::cell::RefCell::new(None) };
-    static UNIT_CACHE: std::cell::RefCell<std::collections::HashMap<(String, u8, u16, bool, usize), (f32, f32, f32)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    static UNIT_CACHE: std::cell::RefCell<std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), (f32, f32, f32)>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// Fonts used to resolve the font-relative units `ch` and `ex` on this
@@ -49,8 +49,48 @@ thread_local! {
     static UNIT_SKIP: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-pub(crate) fn set_unit_skip(families: Vec<String>) {
-    UNIT_SKIP.with(|s| *s.borrow_mut() = families);
+type UnitCache = std::collections::HashMap<(String, u8, u16, bool, (u64, u64)), (f32, f32, f32)>;
+
+/// Restores all font-unit state, including nested document/style passes.
+/// A cache belongs to a view, not merely to its number of registered faces.
+#[must_use]
+pub struct FontUnitScope {
+    fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>,
+    cache: UnitCache,
+    skip: Vec<String>,
+}
+
+pub fn scope_unit_fonts(fonts: Option<std::rc::Rc<rabbithole_gfx::FontContext>>, skip: Vec<String>) -> FontUnitScope {
+    FontUnitScope {
+        fonts: UNIT_FONTS.with(|f| std::mem::replace(&mut *f.borrow_mut(), fonts)),
+        cache: UNIT_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut())),
+        skip: UNIT_SKIP.with(|s| std::mem::replace(&mut *s.borrow_mut(), skip)),
+    }
+}
+
+pub(crate) fn scope_unit_skip(skip: Vec<String>) -> FontUnitScope {
+    let fonts = UNIT_FONTS.with(|f| f.borrow().clone());
+    scope_unit_fonts(fonts, skip)
+}
+
+impl Drop for FontUnitScope {
+    fn drop(&mut self) {
+        UNIT_FONTS.with(|f| *f.borrow_mut() = self.fonts.take());
+        UNIT_CACHE.with(|c| *c.borrow_mut() = std::mem::take(&mut self.cache));
+        UNIT_SKIP.with(|s| *s.borrow_mut() = std::mem::take(&mut self.skip));
+    }
+}
+
+/// Preserve the existing unicode-range rule: a family whose every face
+/// excludes U+0020 cannot provide the first available font's unit metrics.
+pub fn font_unit_skip(faces: &[crate::FontFace]) -> Vec<String> {
+    let mut families: Vec<_> = faces.iter().map(|f| f.family.to_ascii_lowercase()).collect();
+    families.sort();
+    families.dedup();
+    families.retain(|family| faces.iter().filter(|f| f.family.eq_ignore_ascii_case(family)).all(|f| {
+        f.unicode_range.as_ref().is_some_and(|r| !r.iter().any(|(a, b)| *a <= 0x20 && 0x20 <= *b))
+    }));
+    families
 }
 
 /// `ch` (advance of "0") and `ex` (x-height) of a style's first available
@@ -59,7 +99,7 @@ pub fn font_units(style: &crate::ComputedStyle) -> (f32, f32, f32) {
     UNIT_FONTS.with(|f| {
         let f = f.borrow();
         let Some(fonts) = f.as_ref() else { return (0.5, 0.5, 1.0) };
-        let key = (style.font_family_list.join(","), style.font_family as u8, style.font_weight, style.is_italic(), fonts.face_count());
+        let key = (style.font_family_list.join(","), style.font_family as u8, style.font_weight, style.is_italic(), fonts.selection_generation());
         if let Some(v) = UNIT_CACHE.with(|c| c.borrow().get(&key).copied()) {
             return v;
         }
@@ -989,5 +1029,58 @@ mod tests {
         // Invalid: clamp() needs three arguments.
         let t = Tokenizer::tokenize("clamp(10%, 20px)");
         assert!(parse_length(components(&t)[0]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod font_scope_tests {
+    use super::*;
+    use std::rc::Rc;
+    use rabbithole_gfx::{Family, FontContext};
+
+    #[test]
+    fn nested_scopes_restore_fonts_cache_and_unicode_range_skip() {
+        let host = FontContext::new();
+        let a = Rc::new(host.document_scope());
+        let b = Rc::new(host.document_scope());
+        a.add_font_data("Unit alias", 400, false, include_bytes!("../../../assets/fonts/DejaVuSansMono.ttf")).unwrap();
+        b.add_font_data("Unit alias", 400, false, include_bytes!("../../../assets/fonts/DejaVuSerif.ttf")).unwrap();
+        assert_eq!(a.face_count(), b.face_count());
+        let mut style = crate::ComputedStyle::initial();
+        style.font_family_list = vec!["Unit alias".into()];
+        let expected_a = a.unit_metrics(&style.font_family_list, Family::Sans, 400, false);
+        let expected_b = b.unit_metrics(&style.font_family_list, Family::Sans, 400, false);
+        assert_ne!(expected_a, expected_b);
+        let _outer = scope_unit_fonts(Some(a.clone()), vec![]);
+        assert_eq!(font_units(&style), expected_a);
+        let saved_cache = UNIT_CACHE.with(|c| c.borrow().clone());
+        {
+            let _inner = scope_unit_fonts(Some(b), vec![]);
+            assert_eq!(font_units(&style), expected_b);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _skipped = scope_unit_fonts(Some(a.clone()), vec!["unit alias".into()]);
+                assert_eq!(font_units(&style), a.unit_metrics(&[], Family::Sans, 400, false));
+                panic!("exercise scope restoration");
+            }));
+            assert!(result.is_err());
+            assert_eq!(font_units(&style), expected_b);
+            UNIT_SKIP.with(|s| assert!(s.borrow().is_empty()));
+        }
+        assert_eq!(UNIT_CACHE.with(|c| c.borrow().clone()), saved_cache);
+        assert_eq!(font_units(&style), expected_a);
+    }
+
+    #[test]
+    fn host_generation_invalidates_units_without_enumerating_faces() {
+        let host = Rc::new(FontContext::new());
+        let page = Rc::new(host.document_scope());
+        let mut style = crate::ComputedStyle::initial();
+        style.font_family_list = vec!["Late font".into()];
+        let _scope = scope_unit_fonts(Some(page.clone()), vec![]);
+        let before = font_units(&style);
+        host.add_font_data("Late font", 400, false, include_bytes!("../../../assets/fonts/DejaVuSansMono.ttf")).unwrap();
+        let after = font_units(&style);
+        assert_ne!(before, after);
+        assert_eq!(after, page.unit_metrics(&style.font_family_list, Family::Sans, 400, false));
     }
 }
