@@ -328,6 +328,9 @@ impl<'a> Layouter<'a> {
         if tl.inherited.is_some() {return;}
         let mut virt = Vec::new();
         for it in items {
+            if subgrid::requests(&b.children[it.idx])!=(false,false) {
+                self.grid_work.charge(if it.fixed.is_some() {1} else {tl.tracks.len().saturating_sub(it.span.min(tl.tracks.len())).saturating_add(1)});
+            }
             for s in Self::lane_positions(it, &tl.tracks) {
                 let mut item=Self::lane_grid_item(it,s,false);
                 subgrid::item_edges(b,&mut item,gap,0.);
@@ -404,6 +407,7 @@ impl<'a> Layouter<'a> {
                 for s in Self::lane_positions(it,&tl.tracks) {contribs.push(Contribution{start:s,end:s+it.span.min(tl.tracks.len()),min:h,max:h});}
                 continue;
             }
+            self.grid_work.charge(if it.fixed.is_some() {1} else {tl.tracks.len().saturating_sub(it.span.min(tl.tracks.len())).saturating_add(1)});
             for s in Self::lane_positions(it, &tl.tracks) {
                 let mut item=Self::lane_grid_item(it,s,true);
                 subgrid::item_edges(b,&mut item,0.,gap);
@@ -417,6 +421,7 @@ impl<'a> Layouter<'a> {
                     else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h}]}
                 });
                 for c in &mut nested {c.start+=s;c.end+=s;}
+                self.grid_work.charge(nested.len());
                 contribs.extend(nested);
             }
         }
@@ -578,7 +583,9 @@ impl<'a> Layouter<'a> {
         let mut out=Vec::new();
         if !rows {
             let mut virtual_items=Vec::new();
-            for it in &items {for start in Self::lane_positions(it,&tl.tracks) {
+            for it in &items {
+                self.grid_work.charge(if it.fixed.is_some() {1} else {tl.tracks.len().saturating_sub(it.span.min(tl.tracks.len())).saturating_add(1)});
+                for start in Self::lane_positions(it,&tl.tracks) {
                 let mut item=Self::lane_grid_item(it,start,false);
                 subgrid::item_edges(b,&mut item,col_gap,row_gap);
                 virtual_items.push(item);

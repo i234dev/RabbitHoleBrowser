@@ -2,12 +2,47 @@
 //! must not maximize inherited tracks or invent implicit ones.
 use std::rc::Rc;
 use std::sync::Arc;
+use std::cell::Cell;
 
 use super::{expand_tracks, size_tracks_with_space, Contribution, GridItem, GridSpace, MeasurePhase, Sizing, Track, TrackList};
 use crate::block::Layouter;
 use crate::flex::ItemEdges;
 use crate::tree::{Formatting, LayoutBox, WmKind};
 use rabbithole_style::{ComputedStyle, ContentDistribution, ItemAlign, Length, SubgridLineNames, TrackListItem};
+
+/// A per-layout cap on newly introduced recursive subgrid work. Exhaustion is
+/// explicit: the engine's tab panic boundary reports the failed layout. It
+/// never returns a truncated contribution set as valid geometry.
+pub(crate) struct WorkBudget {
+    remaining:usize,
+    depth:Option<Rc<Cell<usize>>>,
+}
+impl Default for WorkBudget {
+    fn default()->Self {Self{remaining:1_000_000,depth:None}}
+}
+pub(super) struct DepthGuard(Rc<Cell<usize>>);
+impl Drop for DepthGuard {
+    fn drop(&mut self) {self.0.set(self.0.get().saturating_sub(1));}
+}
+impl WorkBudget {
+    pub(super) fn charge(&mut self,work:usize) {
+        let Some(remaining)=self.remaining.checked_sub(work) else {panic!("Subgrid layout work budget exceeded");};
+        self.remaining=remaining;
+    }
+    fn enter(&mut self,work:usize)->DepthGuard {
+        if self.depth.as_ref().is_some_and(|depth|depth.get()>=128) {panic!("Subgrid layout recursion budget exceeded");}
+        self.charge(work);
+        let depth=self.depth.get_or_insert_with(||Rc::new(Cell::new(0)));
+        depth.set(depth.get()+1);DepthGuard(depth.clone())
+    }
+}
+
+fn source_work(source:&Option<AxisInheritance>)->usize {
+    match source {
+        Some(AxisInheritance::Tracks(axis))=>axis.sizes.len().saturating_mul(8).saturating_add(axis.names.iter().flatten().map(|name|name.len()).fold(0,usize::saturating_add)),
+        _=>1,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct SharedTracks {
@@ -331,6 +366,7 @@ impl<'a> Layouter<'a> {
     pub(super) fn with_subgrid<R>(&mut self,b:&mut LayoutBox,columns:Option<AxisInheritance>,rows:Option<AxisInheritance>,reference:f32,body:impl FnOnce(&mut Self,&mut LayoutBox)->R)->R {
         let (column_request,row_request)=requests(b);
         if (!column_request||columns.is_none())&&(!row_request||rows.is_none()) {return body(self,b);}
+        self.grid_work.charge(source_work(&columns).saturating_add(source_work(&rows)).saturating_add(b.children.len()));
         let scope=Scope::new(b,columns,rows,reference);
         body(self,&mut *scope.node)
     }
@@ -339,6 +375,7 @@ impl<'a> Layouter<'a> {
     /// The caller has supplied only placement geometry for that axis. Its
     /// descendants, rather than the subgrid's preferred size, size the parent.
     pub(super) fn subgrid_axis_contributions(&mut self,b:&mut LayoutBox,rows:bool,inline_size:Option<f32>,phase:MeasurePhase)->Vec<Contribution> {
+        let _depth=self.grid_work.enter(b.children.len().saturating_add(1));
         if b.wm_wrapper {
             let reverse=if rows {b.wm_kind==WmKind::Ccw} else {b.wm_kind==WmKind::Cw};
             let count=shared(b,rows).map_or(0,|axis|axis.sizes.len());
@@ -523,5 +560,27 @@ mod tests {
             panic!("simulated measurement failure");
         }));
         assert!(result.is_err());assert!(Rc::ptr_eq(&original,&b.style));assert!(b.grid_columns.is_none());
+    }
+
+    #[test]
+    fn work_budget_is_cumulative_and_failed_charges_do_not_wrap() {
+        let mut budget=WorkBudget{remaining:3,depth:None};
+        budget.charge(2);
+        for work in [2,usize::MAX] {
+            let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||budget.charge(work)));
+            assert!(result.is_err());assert_eq!(budget.remaining,1);
+        }
+        budget.charge(1);assert_eq!(budget.remaining,0);
+    }
+
+    #[test]
+    fn recursion_budget_is_restored_by_guards_and_separate_layouts_are_fresh() {
+        let mut budget=WorkBudget::default();
+        let guards:Vec<_>=(0..128).map(|_|budget.enter(1)).collect();
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||budget.enter(1)));
+        assert!(result.is_err());assert_eq!(budget.depth.as_ref().unwrap().get(),128);
+        drop(guards);assert_eq!(budget.depth.as_ref().unwrap().get(),0);
+        drop(budget.enter(1));assert_eq!(budget.depth.as_ref().unwrap().get(),0);
+        let fresh=WorkBudget::default();assert_eq!(fresh.remaining,1_000_000);assert!(fresh.depth.is_none());
     }
 }
