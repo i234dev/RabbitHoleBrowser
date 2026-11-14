@@ -13,8 +13,8 @@ use rabbithole_style::ContentDistribution;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GridAxis { Columns, Rows }
 impl GridAxis {
-    fn index(self)->usize {match self {Self::Columns=>0,Self::Rows=>1}}
-    fn opposite(self)->Self {match self {Self::Columns=>Self::Rows,Self::Rows=>Self::Columns}}
+    pub(super) fn index(self)->usize {match self {Self::Columns=>0,Self::Rows=>1}}
+    pub(super) fn opposite(self)->Self {match self {Self::Columns=>Self::Rows,Self::Rows=>Self::Columns}}
 }
 
 /// These are the passes of Grid2 §12.1, not the steps within track sizing.
@@ -24,6 +24,7 @@ impl MeasurePoint {
     fn rank(self)->u8 {match self {Self::Columns=>0,Self::Rows=>1,Self::AdjustColumns=>2,Self::AdjustRows=>3}}
     pub(super) fn axis(self)->GridAxis {match self {Self::Columns|Self::AdjustColumns=>GridAxis::Columns,_=>GridAxis::Rows}}
     pub(super) fn is_adjustment(self)->bool {matches!(self,Self::AdjustColumns|Self::AdjustRows)}
+    pub(super) fn legacy_phase(self)->super::MeasurePhase {if self.is_adjustment() {super::MeasurePhase::Adjusted} else {super::MeasurePhase::Initial}}
 }
 
 /// Operation identity isolates intrinsic-min, intrinsic-max and final layout.
@@ -49,6 +50,7 @@ impl AvailableSpace {
     fn validate(self) {
         if let Self::Definite(size)=self {assert!(size.is_finite()&&size>=0.,"Invalid definite Grid measurement space");}
     }
+    pub(super) fn definite(self)->Option<f32> {if let Self::Definite(value)=self {Some(value)} else {None}}
 }
 
 /// An estimate of the perpendicular span is not an intrinsic constraint.
@@ -81,14 +83,18 @@ impl PerpendicularEstimate {
 pub(super) struct MeasureInputs {
     pub(super) spaces:[AvailableSpace;2],
     pub(super) gaps:[f32;2],
+    /// Original containing-block inline base for margins/padding. It is
+    /// separate from local available spaces and is not swapped by a wrapper.
+    pub(super) edge_basis:AvailableSpace,
     pub(super) columns:Option<AxisInheritance>,
     pub(super) rows:Option<AxisInheritance>,
     swapped:bool,
 }
 impl MeasureInputs {
-    pub(super) fn new(spaces:[AvailableSpace;2],gaps:[f32;2],columns:Option<AxisInheritance>,rows:Option<AxisInheritance>)->Self {
+    pub(super) fn new(spaces:[AvailableSpace;2],gaps:[f32;2],edge_basis:AvailableSpace,columns:Option<AxisInheritance>,rows:Option<AxisInheritance>)->Self {
         for space in spaces {space.validate();}
-        Self{spaces,gaps,columns,rows,swapped:false}
+        edge_basis.validate();
+        Self{spaces,gaps,edge_basis,columns,rows,swapped:false}
     }
     pub(super) fn local_axis(&self,point:MeasurePoint)->GridAxis {
         if self.swapped {point.axis().opposite()} else {point.axis()}
@@ -96,7 +102,13 @@ impl MeasureInputs {
     pub(super) fn through_wrapper(&self,kind:WmKind,budget:&mut WorkBudget)->Self {
         budget.charge(subgrid::source_work(&self.columns).saturating_add(subgrid::source_work(&self.rows)).saturating_mul(2));
         let (columns,rows)=subgrid::through_wrapper(self.columns.clone(),self.rows.clone(),kind);
-        Self{spaces:[self.spaces[1],self.spaces[0]],gaps:[self.gaps[1],self.gaps[0]],columns,rows,swapped:!self.swapped}
+        Self{spaces:[self.spaces[1],self.spaces[0]],gaps:[self.gaps[1],self.gaps[0]],edge_basis:self.edge_basis,columns,rows,swapped:!self.swapped}
+    }
+    /// A descendant in the same writing mode keeps the parent-point mapping;
+    /// its local spaces and scope sources are supplied again, not inferred
+    /// from the previous slot's track count or geometry.
+    pub(super) fn descendant(&self,spaces:[AvailableSpace;2],gaps:[f32;2],edge_basis:AvailableSpace,columns:Option<AxisInheritance>,rows:Option<AxisInheritance>)->Self {
+        let mut inputs=Self::new(spaces,gaps,edge_basis,columns,rows);inputs.swapped=self.swapped;inputs
     }
 }
 
@@ -192,10 +204,13 @@ impl GridOperation {
         Self{kind,token:Rc::new(()),next:0,active:None,axes:[None,None],children:Vec::new()}
     }
     pub(super) fn child(&mut self,key:SlotKey,budget:&mut WorkBudget)->&mut Self {
+        self.child_of_kind(key,self.kind,budget)
+    }
+    pub(super) fn child_of_kind(&mut self,key:SlotKey,kind:OperationKind,budget:&mut WorkBudget)->&mut Self {
         budget.charge(self.children.len().saturating_add(1));
-        if let Some(index)=self.children.iter().position(|(old,_)|*old==key) {return &mut self.children[index].1;}
+        if let Some(index)=self.children.iter().position(|(old,child)|*old==key&&child.kind==kind) {return &mut self.children[index].1;}
         budget.charge(1);
-        let child=Self::new(self.kind,budget);
+        let child=Self::new(kind,budget);
         self.children.push((key,child));
         &mut self.children.last_mut().unwrap().1
     }
@@ -240,6 +255,14 @@ impl GridOperation {
         let entry=self.active.as_ref().filter(|entry|entry.id==*id)?;
         self.axes[entry.inputs.local_axis(entry.point).index()].as_ref().filter(|record|record.entry.id==*id)
     }
+    /// History is an earlier approximation with its original producer and
+    /// inputs. Only the opposite-axis phase may consume its completion;
+    /// it is never presented as a fresh result of the active measurement.
+    pub(super) fn opposite_history(&self,id:&MeasurementId)->Option<&AxisRecord> {
+        let entry=self.active.as_ref().filter(|entry|entry.id==*id)?;
+        let opposite=entry.inputs.local_axis(entry.point).opposite().index();
+        self.axes[opposite].as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -267,7 +290,7 @@ mod tests {
     }
 
     fn inputs()->MeasureInputs {
-        MeasureInputs::new([AvailableSpace::MaxContent,AvailableSpace::Indefinite],[2.,3.],None,None)
+        MeasureInputs::new([AvailableSpace::MaxContent,AvailableSpace::Indefinite],[2.,3.],AvailableSpace::Indefinite,None,None)
     }
 
     fn completed(contributions:&[Contribution],budget:&mut WorkBudget)->CompletedAxis {
@@ -290,7 +313,7 @@ mod tests {
         assert_eq!(AvailableSpace::Definite(0.).constraint(),Some(GridSpace::Definite(0.)));
         assert_eq!(AvailableSpace::MinContent.constraint(),Some(GridSpace::MinContent));
         assert_eq!(AvailableSpace::MaxContent.constraint(),Some(GridSpace::MaxContent));
-        assert!(catch_unwind(||MeasureInputs::new([AvailableSpace::Definite(f32::NAN),AvailableSpace::Indefinite],[0.,0.],None,None)).is_err());
+        assert!(catch_unwind(||MeasureInputs::new([AvailableSpace::Definite(f32::NAN),AvailableSpace::Indefinite],[0.,0.],AvailableSpace::Indefinite,None,None)).is_err());
     }
 
     #[test]
@@ -323,13 +346,14 @@ mod tests {
     #[test]
     fn wrappers_map_axes_sources_spaces_and_gaps_without_restarting_parent_point() {
         let mut budget=WorkBudget::default();
-        let outer=MeasureInputs::new([AvailableSpace::MaxContent,AvailableSpace::Definite(90.)],[5.,7.],Some(source(&[20.,40.],5.)),Some(source(&[10.,30.],7.)));
+        let outer=MeasureInputs::new([AvailableSpace::MaxContent,AvailableSpace::Definite(90.)],[5.,7.],AvailableSpace::Definite(300.),Some(source(&[20.,40.],5.)),Some(source(&[10.,30.],7.)));
         for kind in [WmKind::Cw,WmKind::Ccw,WmKind::Reflect] {
             let inner=outer.through_wrapper(kind,&mut budget);
             assert_eq!(inner.local_axis(MeasurePoint::Columns),GridAxis::Rows);
             assert_eq!(inner.local_axis(MeasurePoint::AdjustRows),GridAxis::Columns);
             assert_eq!(inner.spaces,[AvailableSpace::Definite(90.),AvailableSpace::MaxContent]);
             assert_eq!(inner.gaps,[7.,5.]);
+            assert_eq!(inner.edge_basis,AvailableSpace::Definite(300.));
             let columns=tracks(&inner.columns);let rows=tracks(&inner.rows);
             assert_eq!(columns.sizes,if kind==WmKind::Ccw {vec![30.,10.]} else {vec![10.,30.]});
             assert_eq!(rows.sizes,if kind==WmKind::Cw {vec![40.,20.]} else {vec![20.,40.]});
@@ -450,12 +474,46 @@ mod tests {
     #[test]
     fn even_an_empty_projection_precharges_its_retained_input_sources() {
         let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
-        let input=MeasureInputs::new([AvailableSpace::Definite(1000.),AvailableSpace::Indefinite],[0.,0.],Some(source(&[10.;64],0.)),None);
+        let input=MeasureInputs::new([AvailableSpace::Definite(1000.),AvailableSpace::Indefinite],[0.,0.],AvailableSpace::Definite(1000.),Some(source(&[10.;64],0.)),None);
         let id=operation.begin(MeasurePoint::Columns,input,&mut budget);
         let mut exhausted=WorkBudget::limited_for_test(0);
         assert!(catch_unwind(AssertUnwindSafe(||operation.record_projection(&id,&[],&[],&mut exhausted))).is_err());
         assert!(operation.result(&id).is_none());
         operation.record_projection(&id,&[],&[],&mut budget);
         assert_eq!(tracks(&operation.result(&id).unwrap().inputs().columns).sizes.len(),64);
+    }
+
+    #[test]
+    fn intrinsic_min_and_max_children_have_distinct_histories_for_the_same_item_slot() {
+        let mut budget=WorkBudget::default();let mut parent=GridOperation::new(OperationKind::Layout,&mut budget);
+        let min=parent.child_of_kind(key(0),OperationKind::IntrinsicMin,&mut budget).begin(MeasurePoint::Columns,inputs(),&mut budget);
+        let max=parent.child_of_kind(key(0),OperationKind::IntrinsicMax,&mut budget).begin(MeasurePoint::Columns,inputs(),&mut budget);
+        assert_ne!(min,max);
+        assert!(parent.child_of_kind(key(0),OperationKind::IntrinsicMax,&mut budget).result(&min).is_none());
+    }
+
+    #[test]
+    fn opposite_history_exposes_its_old_producer_without_claiming_fresh_geometry() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let contributions=[contribution(10.,40.)];let done=completed(&contributions,&mut budget);
+        let id=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        operation.record(&id,&done,&contributions,&[],&mut budget);
+        let mut fresh=inputs();fresh.gaps[1]=25.;fresh.rows=Some(source(&[50.,50.],25.));
+        let rows=operation.begin(MeasurePoint::Rows,fresh,&mut budget);
+        assert!(operation.result(&id).is_none());assert!(operation.result(&rows).is_none());
+        let previous=operation.opposite_history(&rows).unwrap();
+        assert_eq!(previous.producer(),MeasurePoint::Columns);assert_eq!(previous.inputs().gaps,[2.,3.]);
+        assert_eq!(previous.completion().unwrap().tracks().tracks[0].base,40.);
+    }
+
+    #[test]
+    fn same_mode_descendant_keeps_its_orthogonal_parent_point_mapping() {
+        let mut budget=WorkBudget::default();
+        let parent=inputs().through_wrapper(WmKind::Cw,&mut budget);
+        let child=parent.descendant([AvailableSpace::Definite(75.),AvailableSpace::Indefinite],[4.,8.],AvailableSpace::Definite(180.),None,None);
+        assert_eq!(child.local_axis(MeasurePoint::Columns),GridAxis::Rows);
+        assert_eq!(child.spaces,[AvailableSpace::Definite(75.),AvailableSpace::Indefinite]);
+        assert_eq!(child.edge_basis,AvailableSpace::Definite(180.));
+        assert_eq!(MeasurePoint::AdjustRows.legacy_phase(),super::super::MeasurePhase::Adjusted);
     }
 }

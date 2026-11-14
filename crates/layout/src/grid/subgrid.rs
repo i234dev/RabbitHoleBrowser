@@ -51,7 +51,7 @@ impl WorkBudget {
     /// Each scoped measure visits the entire subtree to count it, invalidate
     /// before layout, and invalidate after restoration. Charge before growing
     /// the pending stack or installing any temporary style.
-    fn subtree(&mut self,node:&LayoutBox) {
+    pub(super) fn subtree(&mut self,node:&LayoutBox) {
         self.charge(3);
         let mut pending=vec![node];
         while let Some(node)=pending.pop() {
@@ -438,7 +438,7 @@ pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,gap:f32,items:&mut
 struct Saved {
     style:Rc<ComputedStyle>,columns:Option<AxisInheritance>,rows:Option<AxisInheritance>,
 }
-fn invalidate(b:&mut LayoutBox) {
+pub(super) fn invalidate(b:&mut LayoutBox) {
     b.intrinsic_cache=None;b.layout_cache=None;b.reused_layout=false;
     for child in &mut b.children {invalidate(child);}
 }
