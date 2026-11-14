@@ -20,12 +20,15 @@ pub const CONSOLE_CAPACITY: usize = 500;
 #[derive(Debug, Default, Clone)]
 pub struct ConsoleLog {
     lines: VecDeque<(String, String)>,
+    /// ID of the oldest retained message. IDs are never reused by clear.
+    first_id: u64,
 }
 
 impl ConsoleLog {
     pub fn push(&mut self, level: impl Into<String>, text: impl Into<String>) {
         if self.lines.len() >= CONSOLE_CAPACITY {
             self.lines.pop_front();
+            self.first_id += 1;
         }
         self.lines.push_back((level.into(), text.into()));
     }
@@ -40,6 +43,16 @@ impl ConsoleLog {
         self.lines.iter()
     }
 
+    pub fn entries(&self) -> impl DoubleEndedIterator<Item = (u64, &(String, String))> + ExactSizeIterator {
+        let first_id = self.first_id;
+        self.lines.iter().enumerate().map(move |(i, line)| (first_id + i as u64, line))
+    }
+
+    pub fn get(&self, id: u64) -> Option<&(String, String)> {
+        let index = usize::try_from(id.checked_sub(self.first_id)?).ok()?;
+        self.lines.get(index)
+    }
+
     pub fn len(&self) -> usize {
         self.lines.len()
     }
@@ -50,6 +63,7 @@ impl ConsoleLog {
     }
 
     pub fn clear(&mut self) {
+        self.first_id += self.lines.len() as u64;
         self.lines.clear();
     }
 
@@ -220,9 +234,19 @@ mod tests {
         }
         assert_eq!(c.len(), CONSOLE_CAPACITY);
         assert_eq!(c.lines().next().unwrap().1, "m10");
+        assert_eq!(c.entries().next().unwrap().0, 10);
+        assert!(c.get(9).is_none());
+        assert_eq!(c.get(10).unwrap().1, "m10");
+        let last_id = c.entries().next_back().unwrap().0;
         assert_eq!(c.error_count(), CONSOLE_CAPACITY / 2);
         c.clear();
         assert!(c.is_empty());
+        assert!(c.get(last_id).is_none());
+        c.clear();
+        c.push("error", "café 🐇\r\n  at página.js\n\n");
+        let (new_id, entry) = c.entries().next().unwrap();
+        assert_eq!(new_id, last_id + 1);
+        assert_eq!(entry.1, "café 🐇\r\n  at página.js\n\n");
     }
 
     #[test]

@@ -4,16 +4,97 @@
 //! (requests with status, type, size and time).
 
 use rabbithole_engine::gfx::Rect;
+use std::collections::BTreeSet;
+use std::ops::Range;
 use winit::event::KeyEvent;
 use winit::keyboard::{Key, NamedKey};
 
-use super::chrome::{baseline_in, draw_centered, draw_field, ellipsize, pal, FieldView, UI_FONT};
+use super::chrome::{baseline_in, draw_centered, draw_field, ellipsize, pal, Chrome, FieldView, UI_FONT};
 use super::content::ToContent;
 use super::pages::human_size;
 use super::{App, Panel, UiFocus};
 
 /// Row height of the devtools lists (logical px).
 const ROW_H: f32 = 18.0;
+
+fn console_log_area(chrome: &Chrome) -> Rect {
+    let body = chrome.devtools_body();
+    Rect::new(body.x, body.y + 2.0 * chrome.s, body.w, (chrome.console_input().y - body.y - 6.0 * chrome.s).max(0.0))
+}
+
+/// Borrow the stored text; only the visible rows need owned display labels.
+struct ConsoleRow<'a> {
+    id: u64,
+    level: &'a str,
+    text: &'a str,
+    header: bool,
+    expandable: bool,
+    expanded: bool,
+    more: usize,
+}
+
+fn console_rows<'a>(log: &'a crate::scripting::ConsoleLog, expanded: &BTreeSet<u64>, width: f32, measure: impl Fn(&str) -> f32) -> Vec<ConsoleRow<'a>> {
+    let mut rows = Vec::new();
+    for (id, (level, text)) in log.entries() {
+        // split preserves empty messages and trailing blank lines. CRLF is
+        // displayed as a line break; clipboard text remains byte-for-byte raw.
+        let more = text.split('\n').count().saturating_sub(1);
+        let first = text.split('\n').next().unwrap_or("");
+        let first = first.strip_suffix('\r').unwrap_or(first);
+        let expandable = more > 0 || measure(first) > width;
+        let is_expanded = expandable && expanded.contains(&id);
+        if !is_expanded {
+            rows.push(ConsoleRow { id, level, text: first, header: true, expandable, expanded: false, more });
+            continue;
+        }
+        let mut header = true;
+        for line in text.split('\n') {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            for part in wrap_console_line(line, width, &measure) {
+                rows.push(ConsoleRow { id, level, text: part, header, expandable, expanded: true, more: 0 });
+                header = false;
+            }
+        }
+    }
+    rows
+}
+
+/// Wrap on UTF-8 character boundaries using the same font measurements as
+/// painting. The slices retain every character, including indentation.
+fn wrap_console_line<'a>(line: &'a str, width: f32, measure: &impl Fn(&str) -> f32) -> Vec<&'a str> {
+    if line.is_empty() || measure(line) <= width {
+        return vec![line];
+    }
+    let boundaries: Vec<usize> = line.char_indices().map(|(i, _)| i).chain(std::iter::once(line.len())).collect();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < boundaries.len() - 1 {
+        // Bracket the next row locally. Searching the entire remaining text
+        // for every row would repeatedly shape huge prefixes of long logs.
+        let (mut lo, mut hi) = (start, start + 1);
+        while hi < boundaries.len() - 1 && measure(&line[boundaries[start]..boundaries[hi]]) <= width {
+            lo = hi;
+            hi = (start + (hi - start).saturating_mul(2)).min(boundaries.len() - 1);
+        }
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if measure(&line[boundaries[start]..boundaries[mid]]) <= width {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        let end = lo.max(start + 1);
+        parts.push(&line[boundaries[start]..boundaries[end]]);
+        start = end;
+    }
+    parts
+}
+
+fn console_window(total: usize, visible: usize, scroll: usize) -> Range<usize> {
+    let end = total - scroll.min(total.saturating_sub(visible));
+    end.saturating_sub(visible)..end
+}
 
 /// Short resource type for the Network view.
 pub fn resource_type(ev: &rabbithole_engine::net::NetEvent) -> &'static str {
@@ -36,6 +117,34 @@ pub fn resource_type(ev: &rabbithole_engine::net::NetEvent) -> &'static str {
 }
 
 impl App {
+    fn console_visible_rows(&self) -> usize {
+        (console_log_area(&self.chrome()).h / (ROW_H * self.ui_scale())).floor().max(0.0) as usize
+    }
+
+    fn console_rows(&self) -> Vec<ConsoleRow<'_>> {
+        let chrome = self.chrome();
+        let width = (console_log_area(&chrome).w - 30.0 * chrome.s).max(0.0);
+        self.tab().map(|tab| console_rows(&tab.console, &tab.console_expanded, width, |text| self.engine.fonts.measure(self.mono_font, 12.0 * chrome.s, text))).unwrap_or_default()
+    }
+
+    fn set_console_expanded(&mut self, id: u64, expanded: bool) {
+        let visible = self.console_visible_rows();
+        let total = self.console_rows().len();
+        let start = console_window(total, visible, self.tab().map(|t| t.console_scroll).unwrap_or(0)).start;
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        if expanded {
+            tab.console_expanded.insert(id);
+        } else {
+            tab.console_expanded.remove(&id);
+        }
+        // Keep the clicked header in place rather than jumping to the bottom
+        // of a newly expanded stack trace.
+        let total = self.console_rows().len();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.console_scroll = total.saturating_sub(visible).saturating_sub(start);
+        }
+    }
+
     fn devtools_rows(&self) -> usize {
         let body = self.chrome().devtools_body();
         let reserve = if self.panel == Panel::Console { 34.0 } else { 0.0 };
@@ -92,24 +201,33 @@ impl App {
         let fonts = self.engine.fonts.clone();
         let size = 12.0 * s;
         let line_h = ROW_H * s;
-        let body = chrome.devtools_body();
         let input = chrome.console_input();
-        let log_area = Rect::new(body.x, body.y + 2.0 * s, body.w, (input.y - body.y - 6.0 * s).max(0.0));
+        let log_area = console_log_area(&chrome);
         let rows = (log_area.h / line_h).floor().max(0.0) as usize;
-        let lines: Vec<(String, String)> = self
-            .tab()
-            .map(|t| {
-                let skip_from_end = t.console_scroll.min(t.console.len());
-                t.console.lines().rev().skip(skip_from_end).take(rows).cloned().collect::<Vec<_>>().into_iter().rev().collect()
-            })
-            .unwrap_or_default();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.prune_console_state();
+        }
+        let (total, scroll, lines) = {
+            let layout = self.console_rows();
+            let scroll = self.tab().map(|t| t.console_scroll).unwrap_or(0).min(layout.len().saturating_sub(rows));
+            let lines: Vec<_> = layout[console_window(layout.len(), rows, scroll)].iter().map(|row| {
+                let summary = if row.more > 0 && !row.expanded { format!("{}  (+{} lines)", row.text, row.more) } else { row.text.to_string() };
+                let label = if row.expanded { summary } else { ellipsize(&fonts, self.mono_font, size, &summary, log_area.w - 30.0 * s) };
+                (row.id, row.level.to_string(), label, row.header, row.expandable, row.expanded)
+            }).collect();
+            (layout.len(), scroll, lines)
+        };
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.console_scroll = scroll;
+        }
+        let selected = self.tab().and_then(|t| t.console_selected);
         self.canvas.push_clip(log_area);
         let mut y = log_area.y;
-        if lines.is_empty() {
+        if total == 0 {
             let baseline = baseline_in(&fonts, self.ui_font, size, Rect::new(log_area.x, y, log_area.w, line_h));
             self.canvas.draw_text(&fonts, self.ui_font, size, "No console messages. Type JavaScript below and press Enter (Ctrl+L clears).", log_area.x + 8.0 * s, baseline, p.text_muted);
         }
-        for (level, text) in &lines {
+        for (id, level, label, header, expandable, expanded) in &lines {
             let row = Rect::new(log_area.x, y, log_area.w, line_h);
             let (bg, fg) = match level.as_str() {
                 "error" => (Some(p.error_bg), p.error_fg),
@@ -118,20 +236,21 @@ impl App {
                 "result" => (None, p.result_fg),
                 _ => (None, p.text),
             };
-            if let Some(bg) = bg {
+            if selected == Some(*id) {
+                self.canvas.fill_rect(row, p.selection);
+            } else if let Some(bg) = bg {
                 self.canvas.fill_rect(row, bg);
             }
-            let one_line: String = text.lines().next().unwrap_or("").to_string();
-            let more = text.lines().count().saturating_sub(1);
-            let shown = if more > 0 { format!("{one_line}  (+{more} lines)") } else { one_line };
-            let label = ellipsize(&fonts, self.mono_font, size, &shown, log_area.w - 16.0 * s);
             let baseline = baseline_in(&fonts, self.mono_font, size, row);
-            self.canvas.draw_text(&fonts, self.mono_font, size, &label, log_area.x + 8.0 * s, baseline, fg);
+            if *header && *expandable {
+                self.canvas.draw_text(&fonts, self.mono_font, size, if *expanded { "▾" } else { "▸" }, log_area.x + 6.0 * s, baseline, fg);
+            }
+            self.canvas.draw_text(&fonts, self.mono_font, size, label, log_area.x + 22.0 * s, baseline, fg);
             y += line_h;
         }
         self.canvas.pop_clip();
         // Input line.
-        let focused = self.ui_focus == UiFocus::Console;
+        let focused = self.ui_focus == UiFocus::Console && selected.is_none();
         let (text, caret, sel) = self.tab().map(|t| (t.console_input.text.clone(), t.console_input.caret, t.console_input.selection())).unwrap_or_default();
         let view = FieldView::new(input, &text, caret, if focused { sel } else { None }, focused, "Evaluate JavaScript in this page…");
         draw_field(&mut self.canvas, &fonts, self.ui_font, s, &view);
@@ -308,6 +427,35 @@ impl App {
         match self.panel {
             Panel::Console => {
                 self.ui_focus = UiFocus::Console;
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.prune_console_state();
+                }
+                if chrome.console_input().contains(x, y) {
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        // Restore the input's existing caret and text selection.
+                        tab.console_selected = None;
+                    }
+                } else {
+                    let area = console_log_area(&chrome);
+                    let hit = if area.contains(x, y) {
+                        let layout = self.console_rows();
+                        let visible = self.console_visible_rows();
+                        let scroll = self.tab().map(|t| t.console_scroll).unwrap_or(0);
+                        let window = console_window(layout.len(), visible, scroll);
+                        let i = ((y - area.y) / line_h).floor() as usize;
+                        layout[window].get(i).map(|row| (row.id, row.header && row.expandable, row.expanded))
+                    } else {
+                        None
+                    };
+                    if let Some((id, toggle, expanded)) = hit {
+                        if let Some(tab) = self.tabs.get_mut(self.active) {
+                            tab.console_selected = Some(id);
+                        }
+                        if toggle {
+                            self.set_console_expanded(id, !expanded);
+                        }
+                    }
+                }
             }
             Panel::Elements => {
                 let (tree, _) = self.elements_split();
@@ -357,12 +505,13 @@ impl App {
         let rows = self.devtools_rows();
         let step = if dy < 0.0 { -3i64 } else { 3 };
         let panel = self.panel;
+        let console_max = if panel == Panel::Console { self.console_rows().len().saturating_sub(self.console_visible_rows()) } else { 0 };
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         match panel {
             Panel::Console => {
-                let max = tab.console.len().saturating_sub(1);
+                tab.prune_console_state();
                 if dy < 0.0 {
-                    tab.console_scroll = (tab.console_scroll + 3).min(max);
+                    tab.console_scroll = tab.console_scroll.saturating_add(3).min(console_max);
                 } else {
                     tab.console_scroll = tab.console_scroll.saturating_sub(3);
                 }
@@ -399,10 +548,37 @@ impl App {
         true
     }
 
-    /// Keys while the console input has focus.
+    /// Keys while either the console log or its input has focus.
     pub(crate) fn handle_console_key(&mut self, event: &KeyEvent, ctrl: bool, shift: bool) {
+        self.console_key(&event.logical_key, event.text.as_deref(), ctrl, shift);
+    }
+
+    pub(crate) fn console_key(&mut self, key: &Key, text: Option<&str>, ctrl: bool, shift: bool) {
+        let console_max = self.console_rows().len().saturating_sub(self.console_visible_rows());
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        match &event.logical_key {
+        tab.prune_console_state();
+        if let Some(id) = tab.console_selected {
+            let expanded = tab.console_expanded.contains(&id);
+            let expansion = match key {
+                Key::Named(NamedKey::Enter | NamedKey::Space) if !ctrl => Some(!expanded),
+                Key::Named(NamedKey::ArrowRight) => Some(true),
+                Key::Named(NamedKey::ArrowLeft) => Some(false),
+                _ => None,
+            };
+            if let Some(expand) = expansion {
+                self.set_console_expanded(id, expand);
+                self.request_redraw();
+                return;
+            }
+            // Copy and scrolling act on the log. Editing keys and typing
+            // return to the input, preserving its own selection.
+            let log_key = matches!(key, Key::Named(NamedKey::Escape | NamedKey::PageUp | NamedKey::PageDown))
+                || (ctrl && matches!(key, Key::Character(c) if matches!(c.to_lowercase().as_str(), "c" | "l")));
+            if !log_key {
+                tab.console_selected = None;
+            }
+        }
+        match key {
             Key::Named(NamedKey::Enter) => {
                 self.console_eval();
                 return;
@@ -424,17 +600,14 @@ impl App {
                     tab.console_input.set_text(&p);
                 }
             }
-            Key::Named(NamedKey::PageUp) => tab.console_scroll = (tab.console_scroll + 10).min(tab.console.len().saturating_sub(1)),
+            Key::Named(NamedKey::PageUp) => tab.console_scroll = tab.console_scroll.saturating_add(10).min(console_max),
             Key::Named(NamedKey::PageDown) => tab.console_scroll = tab.console_scroll.saturating_sub(10),
             Key::Named(NamedKey::Space) => tab.console_input.insert(" ", None),
             Key::Character(c) if ctrl => match c.to_lowercase().as_str() {
                 "a" => tab.console_input.select_all(),
-                "l" => {
-                    tab.console.clear();
-                    tab.console_scroll = 0;
-                }
+                "l" => tab.clear_console(),
                 "c" => {
-                    if let Some(t) = tab.console_input.selected_text().map(|s| s.to_string()) {
+                    if let Some(t) = tab.console_copy_text().map(str::to_string) {
                         self.clipboard_set(&t);
                     }
                 }
@@ -448,7 +621,7 @@ impl App {
                 _ => {}
             },
             _ => {
-                if let Some(text) = event.text.as_ref() {
+                if let Some(text) = text {
                     if !ctrl {
                         tab.console_input.insert(text, None);
                     }
@@ -456,5 +629,158 @@ impl App {
             }
         }
         self.request_redraw();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::snapshots::{headless_app, lock, save_png};
+    use super::super::tab::Tab;
+    use crate::scripting::ConsoleLog;
+
+    fn console_app(tag: &str) -> App {
+        let mut app = headless_app(tag);
+        app.tabs.push(Tab::new(1));
+        app.devtools_open = true;
+        app.panel = Panel::Console;
+        app.settings.show_bookmarks_bar = false;
+        app
+    }
+
+    fn click_log_row(app: &mut App, row: usize) {
+        let area = console_log_area(&app.chrome());
+        app.devtools_click(area.x + 40.0, area.y + (row as f32 + 0.5) * ROW_H);
+    }
+
+    #[test]
+    fn console_multiline_clicks_render_copy_and_restore_input() {
+        let _guard = lock();
+        let mut app = console_app("console-multiline");
+        let original = "TypeError: café 🐇\n    at cargar (página.js:12:3)\r\n\n終わり\n";
+        app.tabs[0].console.push("error", original);
+        app.tabs[0].console_input.set_text("expresión 🐇");
+        app.tabs[0].console_input.select_all();
+        app.paint(1200, 800);
+        save_png(&app.canvas, "devtools-console-collapsed.png");
+        assert_eq!(app.console_rows().len(), 1);
+        let id = app.tabs[0].console.entries().next().unwrap().0;
+        click_log_row(&mut app, 0);
+        assert_eq!(app.tabs[0].console_selected, Some(id));
+        assert!(app.tabs[0].console_expanded.contains(&id));
+        assert_eq!(app.tabs[0].console_copy_text(), Some(original));
+        let layout = app.console_rows();
+        assert_eq!(layout.iter().map(|r| r.text).collect::<Vec<_>>(), vec!["TypeError: café 🐇", "    at cargar (página.js:12:3)", "", "終わり", ""]);
+        drop(layout);
+        app.paint(1200, 800);
+        save_png(&app.canvas, "devtools-console-expanded.png");
+        // Verify that the stack's second row contains painted glyphs, beyond
+        // the selection background that all rows of the message share.
+        let area = console_log_area(&app.chrome());
+        let mut glyphs = 0;
+        for y in (area.y + ROW_H) as usize..(area.y + ROW_H * 2.0) as usize {
+            for x in 22..500 {
+                if app.canvas.data[y * app.canvas.width as usize + x] != pal().selection.to_u32() {
+                    glyphs += 1;
+                }
+            }
+        }
+        assert!(glyphs > 0, "expanded stack row was not painted");
+        click_log_row(&mut app, 1);
+        assert_eq!(app.tabs[0].console_selected, Some(id));
+        assert!(app.tabs[0].console_expanded.contains(&id), "selecting a continuation must not collapse it");
+        click_log_row(&mut app, 0);
+        assert_eq!(app.console_rows().len(), 1);
+        assert_eq!(app.tabs[0].console_copy_text(), Some(original), "collapsed copy must still include the full stack");
+
+        let input = app.chrome().console_input();
+        app.devtools_click(input.x + 20.0, input.y + input.h / 2.0);
+        assert_eq!(app.tabs[0].console_selected, None);
+        assert_eq!(app.tabs[0].console_copy_text(), Some("expresión 🐇"));
+        click_log_row(&mut app, 0);
+        app.console_key(&Key::Character("ñ".into()), Some("ñ"), false, false);
+        assert_eq!(app.tabs[0].console_selected, None);
+        assert_eq!(app.tabs[0].console_input.text, "ñ");
+        app.tabs[0].console_input.select_all();
+        click_log_row(&mut app, 0);
+        app.handle_text_input("東京");
+        assert_eq!(app.tabs[0].console_selected, None);
+        assert_eq!(app.tabs[0].console_input.text, "東京");
+    }
+
+    #[test]
+    fn console_scroll_and_clicks_follow_expanded_visual_rows() {
+        let _guard = lock();
+        let mut app = console_app("console-scroll");
+        let visible = app.console_visible_rows();
+        let stack = (0..visible + 12).map(|i| format!("    at frame_{i} (script.js:{i}:1)")).collect::<Vec<_>>().join("\n");
+        app.tabs[0].console.push("error", stack.as_str());
+        let stack_id = app.tabs[0].console.entries().next().unwrap().0;
+        click_log_row(&mut app, 0);
+        assert_eq!(app.console_rows().len(), visible + 12);
+        assert_eq!(app.tabs[0].console_scroll, 12, "expanding keeps the header visible");
+        app.scroll_devtools(1.0);
+        assert_eq!(app.tabs[0].console_scroll, 9);
+        click_log_row(&mut app, 0);
+        assert_eq!(app.tabs[0].console_selected, Some(stack_id));
+        assert!(app.tabs[0].console_expanded.contains(&stack_id));
+        app.tabs[0].console.push("log", "newest 🐇");
+        let newest_id = app.tabs[0].console.entries().next_back().unwrap().0;
+        app.console_key(&Key::Named(NamedKey::PageDown), None, false, false);
+        assert_eq!(app.tabs[0].console_scroll, 0);
+        click_log_row(&mut app, visible - 1);
+        assert_eq!(app.tabs[0].console_selected, Some(newest_id));
+        assert_eq!(app.tabs[0].console_copy_text(), Some("newest 🐇"));
+        app.console_key(&Key::Named(NamedKey::PageUp), None, false, false);
+        assert_eq!(app.tabs[0].console_scroll, 10);
+        click_log_row(&mut app, 0);
+        assert_eq!(app.tabs[0].console_selected, Some(stack_id));
+        for _ in 0..20 {
+            app.scroll_devtools(-1.0);
+        }
+        assert_eq!(app.tabs[0].console_scroll, 13);
+        click_log_row(&mut app, 0);
+        assert!(!app.tabs[0].console_expanded.contains(&stack_id));
+        assert_eq!(app.tabs[0].console_scroll, 0);
+        assert_eq!(app.console_rows().len(), 2);
+        click_log_row(&mut app, 1);
+        assert_eq!(app.tabs[0].console_selected, Some(newest_id));
+        app.console_key(&Key::Character("l".into()), None, true, false);
+        assert!(app.tabs[0].console.is_empty());
+        assert_eq!(app.tabs[0].console_selected, None);
+        assert!(app.tabs[0].console_expanded.is_empty());
+        assert_eq!(app.tabs[0].console_scroll, 0);
+    }
+
+    #[test]
+    fn console_expansion_is_per_tab_and_wraps_unicode_without_loss() {
+        let _guard = lock();
+        let mut app = console_app("console-tabs");
+        app.tabs.push(Tab::new(2));
+        for tab in &mut app.tabs {
+            tab.console.push("error", "same\nstack");
+        }
+        click_log_row(&mut app, 0);
+        assert_eq!(app.console_rows().len(), 2);
+        app.active = 1;
+        assert_eq!(app.console_rows().len(), 1);
+        assert!(app.tabs[1].console_expanded.is_empty());
+        assert_eq!(app.tabs[1].console_selected, None);
+        app.active = 0;
+        assert_eq!(app.console_rows().len(), 2);
+
+        let mut log = ConsoleLog::default();
+        let text = "é🐇東京  αβγ";
+        log.push("log", text);
+        let id = log.entries().next().unwrap().0;
+        let expanded = BTreeSet::from([id]);
+        let rows = console_rows(&log, &expanded, 3.0, |t| t.chars().count() as f32);
+        assert!(rows.len() > 1);
+        assert_eq!(rows.iter().map(|r| r.text).collect::<String>(), text);
+        assert!(rows.iter().all(|r| r.text.chars().count() <= 3));
+        assert_eq!(log.get(id).unwrap().1, text);
+        assert_eq!(console_window(20, 6, usize::MAX), 0..6);
+        assert_eq!(console_window(2, 6, 0), 0..2);
+        assert_eq!(console_window(2, 0, 0), 2..2);
     }
 }
