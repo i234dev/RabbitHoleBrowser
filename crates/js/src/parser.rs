@@ -2158,8 +2158,9 @@ impl<'a> Parser<'a> {
         self.parse_unary_impl(true)
     }
 
-    /// `exp_allowed` is false for the operand of a unary operator, where a
-    /// following `**` is a syntax error (`-2 ** 2`).
+    /// Operands of unary and prefix-update operators leave a following
+    /// `**` to their caller. Unary operators reject it; an update expression
+    /// can be the base of exponentiation (`++x ** 2`).
     fn parse_unary_impl(&mut self, exp_allowed: bool) -> PResult<Expr> {
         let pos = self.tok.pos;
         let op = match &self.tok.kind {
@@ -2202,25 +2203,23 @@ impl<'a> Parser<'a> {
                 kind: ExprKind::Await(Box::new(operand)),
             });
         }
-        if self.is_punct("++") || self.is_punct("--") {
+        let expr = if self.is_punct("++") || self.is_punct("--") {
             let op = if self.is_punct("++") { UpdateOp::Increment } else { UpdateOp::Decrement };
             self.advance()?;
-            let target = self.parse_unary()?;
+            let target = self.parse_unary_impl(false)?;
             self.check_simple_target(&target)?;
-            return Ok(Expr {
+            Expr {
                 pos,
                 kind: ExprKind::Update {
                     op,
                     prefix: true,
                     target: Box::new(target),
                 },
-            });
-        }
-        let expr = self.parse_postfix()?;
-        if self.is_punct("**") {
-            if !exp_allowed {
-                return Err(self.error("Unary operator used immediately before exponentiation expression. Parenthesis must be used to disambiguate operator precedence"));
             }
+        } else {
+            self.parse_postfix()?
+        };
+        if exp_allowed && self.is_punct("**") {
             self.advance()?;
             let right = self.parse_unary()?;
             return Ok(Expr {

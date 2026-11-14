@@ -49,3 +49,27 @@ fn annexb_arguments_binding_respects_parameter_expressions_and_body_functions() 
     }
     assert_eq!(evaluate("(function(arguments){ { function arguments(){return 'block';} } return arguments; })('parameter')"), "parameter");
 }
+
+#[test]
+fn exponentiation_accepts_update_expressions_with_right_associativity() {
+    for (expression, initial, expected) in [
+        ("--base ** 2", 4, "9:3"),
+        ("++base ** 2", 4, "25:5"),
+        ("base++ ** 2", 4, "16:5"),
+        ("base-- ** 2", 4, "16:3"),
+        ("--base ** --base ** 2", 4, "81:2"),
+        ("++base ** ++base ** 2", 2, "43046721:4"),
+        ("base++ ** base++ ** 2", 4, "1125899906842624:6"),
+    ] {
+        let source = format!("var base={initial}; [({expression}),base].join(':')");
+        assert_eq!(evaluate(&source), expected, "expression={expression}");
+    }
+}
+
+#[test]
+fn exponentiation_rejects_unparenthesized_unary_bases() {
+    for expression in ["-base ** 2", "+base ** 2", "!base ** 2", "typeof base ** 2", "-++base ** 2", "void base++ ** 2"] {
+        assert!(crate::parser::parse_program(expression, false).is_err(), "accepted {expression}");
+    }
+    assert_eq!(evaluate("var base=4; [(-base) ** 2, base ** -2, ++base ** -2].join(':')"), "16:0.0625:0.04");
+}
