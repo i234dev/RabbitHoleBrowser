@@ -1590,5 +1590,34 @@ fn caller_watchdog_outcome_is_adopted_on_rust_host_unwind_without_js_frames() {
     });
     assert_eq!(host.realm().watchdog_state(), outcome);
     assert!(host.realm().timed_out());
+    assert!(host.realm().native_roots.is_empty());
+    assert_eq!(host.realm().gc_block, 0);
+    // Recovery starts a genuinely new task; the failed task's catch did not
+    // silently grant it a fresh budget or clear its termination.
+    host.realm().set_task_budget(Some(std::time::Duration::from_secs(1)));
+    assert!(host.realm().begin_task());
+    assert!(!host.realm().timed_out());
+    assert_eq!(host.eval_for_console(&mut env, "40+2"), "42");
+    host.realm().set_deadline(None);
+}
+
+#[test]
+fn rust_host_failure_preserves_an_explicitly_disabled_task_budget() {
+    let (mut env, mut host) = setup("");
+    host.realm().set_task_budget(None);
+    host.realm().set_deadline(None);
+    let outcome = host.realm().watchdog_state();
+    env.frame_watchdog_outcome = Some(outcome);
+    env.frame_watchdog_panic = true;
+    // Pure Rust again: this never unwinds through a generated JS frame.
+    host.enter(&mut env, |realm| {
+        crate::frames::call_frame(realm, 123, FrameCall::GetGlobal { name: "fixture".into() });
+    });
+    assert_eq!(host.realm().watchdog_state(), outcome);
+    assert_eq!(host.realm().task_budget, None);
+    assert_eq!(host.realm().deadline, None);
+    assert!(!host.realm().timed_out());
+    assert!(!host.realm().begin_task());
+    assert_eq!(host.eval_for_console(&mut env, "40+2"), "42");
     host.realm().set_deadline(None);
 }

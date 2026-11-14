@@ -423,7 +423,12 @@ impl ScriptHost {
         match rabbithole_js::panics::catch(|| f(realm)) {
             Ok(r) => r,
             Err((msg, loc)) => {
+                // Restore the VM/native stack, not an older task watchdog.
+                // A nested realm may already have consumed host credit or
+                // terminated this task before a host panic escaped its call.
+                let watchdog = self.realm.watchdog_state();
                 self.realm.unwind_to(&mark);
+                self.realm.replace_watchdog_state(watchdog);
                 let at = if loc.is_empty() { String::new() } else { format!(" at {loc}") };
                 host::log("error", &format!("internal error: {msg}{at} (Rust panic caught; the page keeps running)"));
                 R::after_panic(&msg)
