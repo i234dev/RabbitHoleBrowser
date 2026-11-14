@@ -5145,6 +5145,14 @@ fn finish(mut fs: FnState, module: Option<u32>) -> FunctionCode {
         realm: Default::default(),
     };
     code.call_flags = code.compute_call_flags();
+    // Tiny arithmetic / identity callbacks need no generic operand-stack
+    // padding. Keep every declared register (including unused parameters)
+    // and compact only code whose instructions name all their slots.
+    if code.call_flags & crate::bytecode::CALL_SIMPLE != 0 && code.handlers.is_empty() {
+        if let Some(depth) = crate::regs::leaf_frame_depth(&code.ops, code.nregs) {
+            code.max_depth = depth;
+        }
+    }
     code
 }
 
