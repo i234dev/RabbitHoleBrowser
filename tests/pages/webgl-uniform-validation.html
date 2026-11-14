@@ -104,9 +104,30 @@
         throwsType(()=>gl.uniform4f({},number,number,number,number));check(converted===0&&gl.getError()===gl.NO_ERROR);
         const order=[];gl.uniform4f(null,{valueOf(){order.push(1);return 0;}},{valueOf(){order.push(2);return 0;}},{valueOf(){order.push(3);return 0;}},{valueOf(){order.push(4);return 0;}});check(order.join(',')==='1,2,3,4'&&gl.getError()===gl.NO_ERROR);
         throwsType(()=>gl.uniform1i(null,1n));check(gl.getError()===gl.NO_ERROR);
-        const iterate=Array.prototype[Symbol.iterator];
-        try{Array.prototype[Symbol.iterator]=function(){throw new Error('Scalar read Array iterator');};gl.uniform4f(location,0.25,0.5,0.75,1);}finally{Array.prototype[Symbol.iterator]=iterate;}
-        unchanged();
+        const iterate=Array.prototype[Symbol.iterator],sentinel={};let iteratorCalls=0;
+        try {
+          Array.prototype[Symbol.iterator]=function(){++iteratorCalls;throw sentinel;};
+          // This explicit control must observe the throwing iterator. Otherwise
+          // a broken Array-spread fast path could make the API check pass falsely.
+          let observed=false;try{(function(){})(...[0]);}catch(e){observed=e===sentinel;}
+          check(observed&&iteratorCalls===1,'Array spread control did not observe iterator');
+          iteratorCalls=0;gl.uniform4f(location,0.75,0.25,0.5,1);
+        } finally {Array.prototype[Symbol.iterator]=iterate;}
+        check(iteratorCalls===0,'Native uniform invocation read Array iterator');
+        check(gl.getError()===gl.NO_ERROR&&snapshot()==='0.75,0.25,0.5,1'&&pixel()==='191,64,128,255','Scalar update did not reach native pixels');
+        set(location,initial);unchanged();
+        const prototype=Object.getPrototypeOf(Float32Array.prototype),descriptor=Object.getOwnPropertyDescriptor(prototype,'length');
+        for(const throwing of [false,true]) {
+          let lengthReads=0;
+          const color=throwing?[1,0.25,0.5,1]:[0.5,0.75,0.25,1];
+          try {
+            Object.defineProperty(prototype,'length',{configurable:true,get(){++lengthReads;if(throwing)throw sentinel;return 0;}});
+            gl.uniform4fv(location,color);
+          } finally {Object.defineProperty(prototype,'length',descriptor);}
+          check(lengthReads===0,'Uniform conversion read public typed-array length');
+          check(gl.getError()===gl.NO_ERROR&&snapshot()===color.join(',')&&pixel()===(throwing?'255,64,128,255':'128,191,64,255'),'Sequence copy did not reach native pixels');
+          set(location,initial);unchanged();
+        }
       }
       check(gl.getError()===gl.NO_ERROR);
     }
