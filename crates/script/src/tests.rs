@@ -519,6 +519,19 @@ fn storage_cookie_location_and_navigation() {
 }
 
 #[test]
+fn window_open_self_targets_navigate_the_existing_context() {
+    let (mut env, mut host) = setup("<title>Existing context</title>");
+    let out = run(&mut env, &mut host, r#"
+      console.log(window.open('/callback','_self')===window);
+      console.log(window.open('','_top','noopener')===window);
+      console.log(window.open('','_PARENT')===window);
+    "#);
+    assert_eq!(out, ["true", "true", "true"]);
+    assert_eq!(env.navigations, vec![("https://example.test/callback".to_string(), false)]);
+    assert!(env.opened.is_empty(), "self/parent/top must not create another context");
+}
+
+#[test]
 fn forms_controls_reflect() {
     let (mut env, mut host) = setup(r#"<form id="f"><input id="t" name="t" value="a"><input id="c" type="checkbox" name="c"><input type="radio" name="r" value="1" id="r1" checked><input type="radio" name="r" value="2" id="r2"><select id="sel"><option>one</option><option value="2" selected>two</option></select><textarea id="ta">hello</textarea></form>"#);
     let out = run(
