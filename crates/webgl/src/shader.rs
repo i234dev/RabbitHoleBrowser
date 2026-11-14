@@ -1837,8 +1837,18 @@ mod typed_value_contract {
     }
     fn branch_expr(shader: &mut Shader) -> &mut Expr {
         let Statement::If(_, yes, _) = &mut shader.statements[0] else { panic!("fixture if"); };
-        let Statement::Assign(_, expr) = &mut yes[0] else { panic!("fixture assignment"); };
-        expr
+        assert_eq!(yes.len(), 1, "fixture branch");
+        assignment_expr(&mut yes[0])
+    }
+    fn assignment_expr(statement: &mut Statement) -> &mut Expr {
+        match statement {
+            Statement::Assign(_, expr) => expr,
+            Statement::Block(body) => {
+                assert_eq!(body.len(), 1, "fixture block");
+                assignment_expr(&mut body[0])
+            }
+            _ => panic!("fixture assignment"),
+        }
     }
     fn inner_function(shader: &mut Shader) -> &mut Function {
         let ExprKind::Call(outer, _) = &mut branch_expr(shader).kind else { panic!("fixture outer call"); };
