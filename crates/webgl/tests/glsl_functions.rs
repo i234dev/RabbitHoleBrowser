@@ -325,7 +325,10 @@ fn undefined_math_domains_do_not_panic_and_math_work_remains_bounded() {
         let (_, fs) = sources(version, "", "vec4(x)");
         let fs = fs.replace(
             "void main(){",
-            &format!("void main(){{float x=0.5;{}", "x=sin(x);".repeat(110)),
+            // Each assignment charges one statement, three expression heads
+            // and two scalar built-ins: 12 weighted units. 110*12 exceeds
+            // main's1024 limit before reaching the128-statement limit.
+            &format!("void main(){{float x=0.5;{}", "x=sin(cos(x));".repeat(110)),
         );
         let s = c.create_shader(FRAGMENT_SHADER).unwrap();
         c.shader_source(s, &fs).unwrap();
