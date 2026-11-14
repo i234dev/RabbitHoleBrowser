@@ -107,7 +107,7 @@ blits and multisampling remain open, alongside 3D textures, UBOs, queries,
 synchronization and transform feedback. Exposed unsupported commands must keep
 reporting errors until implemented.
 
-### Service Worker lifecycle, memory cache and controlled fetch
+### Service Worker lifecycle, memory cache and controlled navigation
 
 Classic Service Worker scripts now execute in isolated worker realms, with
 registration, install/activate lifetimes, rejected-install handling, updates,
@@ -118,16 +118,23 @@ instance, but does not survive engine shutdown or share state across independent
 engines. Controlled documents' `window.fetch()` now dispatches `FetchEvent`,
 supports asynchronous `respondWith()` responses and network fallback, and can
 receive cached bytes without a network request. Worker-initiated fetches go
-directly to the network, avoiding recursive interception. Client abort reasons
-are preserved; propagation to `event.request.signal` remains open. See
-[the lifecycle, cache and fetch scope](service-workers.md).
+directly to the network, avoiding recursive interception. Initially controlled
+top-level GET HTTP(S) navigation now also works in `Engine::load()` and the
+asynchronous GUI, including cached HTML with a stopped server in the same Engine.
+The committed page adopts the reserved client and retains its realm while
+external scripts arrive. Headers, referrer filtering, redirect response policies
+and cumulative cookie/Fetch Metadata state have local HTTP regression coverage.
+Stop and superseding navigation propagate abort to `event.request.signal` and
+discard stale delivery without replacing the old page before commit. See
+[the lifecycle, cache and navigation scope](service-workers.md).
 
-Next: controlled navigation and other resource loaders, worker request-signal
-propagation and offline behavior, then disk persistence and restart tests.
-Module Service Workers, messaging, client enumeration and navigation preload
-also remain open. Existing lifecycle, cache and controlled-fetch tests do not
-establish offline navigation; the separate HTTP cache's disk storage does not
-persist Service Worker state.
+Next: interception for POST, frames and other resource loaders, then disk
+persistence and restart tests. Initially uncontrolled navigation still uses the
+existing loader, including redirects into a registered scope. Registrations and
+Cache Storage remain memory-only within one Engine and are not shared across
+independent tabs; the separate HTTP cache's disk storage does not persist Service
+Worker state. Module Service Workers, messaging, client enumeration, navigation
+preload and physical cancellation of existing HTTP transport also remain open.
 
 ## 5. Validate usability and deliver builds
 

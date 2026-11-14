@@ -102,9 +102,10 @@ See [measurement sources and updates](tools/metrics/README.md).
   `clients.claim`. Registrations and origin-scoped Cache API data live in memory
   within an engine instance. Controlled documents' `window.fetch()` requests
   dispatch `FetchEvent` and can receive real responses through `respondWith`,
-  including Cache API matches and worker-initiated network fetches. Navigation
-  and other resource loaders are not intercepted yet; see
-  [the lifecycle and fetch scope](docs/service-workers.md).
+  including Cache API matches and worker-initiated network fetches. Initially
+  controlled top-level GET HTTP(S) navigation also works through `Engine::load`
+  and the asynchronous GUI loader, including cached HTML after the server stops
+  within that same engine. See [the supported scope](docs/service-workers.md).
 
 **Media**
 
@@ -133,12 +134,14 @@ See [measurement sources and updates](tools/metrics/README.md).
   Texture minification/magnification filters must both be `NEAREST` or both
   `LINEAR`; mixed filters are unsupported. WebGPU is unavailable. Full WebGL2
   conformance and Three.js compatibility have not been established.
-- Service Workers intercept only controlled documents' `window.fetch()`.
-  Navigation, image/style/script loaders and XHR are not intercepted, and offline
-  navigation is unfinished. Registrations and Cache API entries are not persisted
-  to disk; module Service Workers, worker messaging and client enumeration remain
-  open. Client abort reasons are preserved, but propagation to the worker's
-  `event.request.signal` and physical HTTP cancellation are unfinished.
+- Service Worker navigation covers initially controlled top-level GET HTTP(S)
+  loads in the same Engine, alongside controlled documents' `window.fetch()`.
+  Initially uncontrolled navigation uses the existing loader, including redirects
+  into a registered scope. POST, frames, image/style/script loaders and XHR are
+  outside this interception scope. Registrations and Cache API entries remain in
+  memory per Engine, without disk persistence or sharing across tabs. Module
+  Service Workers, messaging and client enumeration remain open. Aborts propagate
+  to `event.request.signal`; existing HTTP transport is not physically canceled.
 - Complex sign-in screens, including Google Account pages, still have layout
   and interaction gaps; a complete authenticated sign-in has not been validated.
 - No Temporal API; Intl is partial.
@@ -322,7 +325,8 @@ details and measurements.
   parsing, text, masking); Intl and Temporal later.
 - Advance the experimental WebGL1/WebGL2 subsets with pixel regressions,
   validated resource/state handling and real-workload compatibility gates.
-- Service Worker fetch interception, offline navigation and persistent storage;
+- Extend Service Worker interception beyond initially controlled GET navigation
+  and JavaScript fetches; add persistent storage and restart coverage.
   Temporal and full Intl later.
 - macOS and Linux packaging; JIT enabled on Windows after real-hardware testing.
 
