@@ -38,6 +38,8 @@ pub enum Pseudo {
     AnyLink,
     NthChild(i32, i32),
     NthLastChild(i32, i32),
+    NthChildOf(i32, i32, Vec<Selector>),
+    NthLastChildOf(i32, i32, Vec<Selector>),
     NthOfType(i32, i32),
     Not(Vec<Selector>),
     Is(Vec<Selector>),
@@ -170,6 +172,7 @@ impl Selector {
                 let valid = match p {
                     Pseudo::Nesting(list) => list.iter().all(|s| s.fits_nesting_budget(budget)),
                     Pseudo::Is(list) | Pseudo::Where(list) | Pseudo::Not(list)
+                    | Pseudo::NthChildOf(_, _, list) | Pseudo::NthLastChildOf(_, _, list)
                     | Pseudo::Host(list) | Pseudo::HostContext(list) | Pseudo::Slotted(list) => list.iter().all(|s| s.fits_nesting_budget(budget)),
                     Pseudo::Has(list) => list.iter().all(|(_, s)| s.fits_nesting_budget(budget)),
                     _ => true,
@@ -223,6 +226,12 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
                     s.0 += m.0;
                     s.1 += m.1;
                     s.2 += m.2;
+                }
+            }
+            Pseudo::NthChildOf(_, _, list) | Pseudo::NthLastChildOf(_, _, list) => {
+                s.1 += 1;
+                if let Some(m) = list.iter().map(Selector::specificity).max() {
+                    s.0 += m.0; s.1 += m.1; s.2 += m.2;
                 }
             }
             Pseudo::Nesting(list) => {
@@ -605,6 +614,24 @@ impl<'a> SelectorParser<'a> {
                         }
                     }
                     "nth-child" | "nth-last-child" | "nth-of-type" | "nth-last-of-type" => {
+                        let mut depth = 0usize;
+                        let mut of = None;
+                        for (i, token) in inner.iter().enumerate() {
+                            match token {
+                                Token::Function(_) | Token::OpenParen | Token::OpenBracket => depth += 1,
+                                Token::CloseParen | Token::CloseBracket => depth = depth.saturating_sub(1),
+                                Token::Ident(n) if depth == 0 && n.eq_ignore_ascii_case("of") => { of = Some(i); break; }
+                                _ => {}
+                            }
+                        }
+                        if let Some(i) = of {
+                            if lname != "nth-child" && lname != "nth-last-child" { return None; }
+                            let (a, b) = parse_nth(&inner[..i])?;
+                            let mut sub = self.subparser(&inner[i + 1..]);
+                            let list = sub.parse_list()?;
+                            if list.iter().any(|s| s.pseudo_element.is_some() || s.compounds.iter().any(|c| c.pseudos.iter().any(|p| matches!(p, Pseudo::Never | Pseudo::Slotted(_))))) { return None; }
+                            return Some(PseudoParse::Class(if lname == "nth-child" { Pseudo::NthChildOf(a, b, list) } else { Pseudo::NthLastChildOf(a, b, list) }));
+                        }
                         let (a, b) = parse_nth(inner)?;
                         match lname.as_str() {
                             "nth-child" => Pseudo::NthChild(a, b),
@@ -711,12 +738,15 @@ impl<'a> SelectorParser<'a> {
 
 /// Parse `an+b` micro-syntax from tokens.
 fn parse_nth(toks: &[Token]) -> Option<(i32, i32)> {
+    let significant: Vec<_> = toks.iter().filter(|t| **t != Token::Whitespace).collect();
+    if matches!(significant.first(), Some(Token::Number(_))) && significant.len() != 1 { return None; }
+    let integer = |n: f32| n.is_finite() && n.fract() == 0.0 && (n as f64) >= i32::MIN as f64 && (n as f64) <= i32::MAX as f64;
     let mut s = String::new();
     for t in toks {
         match t {
             Token::Ident(i) => s.push_str(i),
-            Token::Number(n) => s.push_str(&format!("{}", *n as i32)),
-            Token::Dimension(n, u) => s.push_str(&format!("{}{}", *n as i32, u)),
+            Token::Number(n) if integer(*n) => s.push_str(&format!("{}", *n as i32)),
+            Token::Dimension(n, u) if integer(*n) => s.push_str(&format!("{}{}", *n as i32, u)),
             Token::Delim(c) => s.push(*c),
             Token::Whitespace => {}
             _ => return None,
@@ -747,7 +777,8 @@ fn nth_matches(a: i32, b: i32, index: i32) -> bool {
     if a == 0 {
         return index == b;
     }
-    let diff = index - b;
+    let diff = i64::from(index) - i64::from(b);
+    let a = i64::from(a);
     diff % a == 0 && diff / a >= 0
 }
 
@@ -991,7 +1022,7 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
     let has_parent = || doc.parent(node).map(|p| doc.element(p).is_some()).unwrap_or(false);
     for p in &c.pseudos {
         let ok = match p {
-            Pseudo::FirstChild | Pseudo::LastChild | Pseudo::OnlyChild | Pseudo::FirstOfType | Pseudo::LastOfType | Pseudo::OnlyOfType | Pseudo::NthChild(..) | Pseudo::NthLastChild(..) | Pseudo::NthOfType(..) | Pseudo::NthLastOfType(..)
+            Pseudo::FirstChild | Pseudo::LastChild | Pseudo::OnlyChild | Pseudo::FirstOfType | Pseudo::LastOfType | Pseudo::OnlyOfType | Pseudo::NthChild(..) | Pseudo::NthLastChild(..) | Pseudo::NthChildOf(..) | Pseudo::NthLastChildOf(..) | Pseudo::NthOfType(..) | Pseudo::NthLastOfType(..)
                 if !has_parent() =>
             {
                 false
@@ -1013,6 +1044,19 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
             Pseudo::Link => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some() && !state.visited.contains(&node),
             Pseudo::NthChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, false)),
             Pseudo::NthLastChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, true)),
+            Pseudo::NthChildOf(a, b, list) | Pseudo::NthLastChildOf(a, b, list) => {
+                let accepts = |n| list.iter().any(|s| matches_with(s, doc, n, state));
+                if !accepts(node) { false } else {
+                    let backwards = matches!(p, Pseudo::NthLastChildOf(..));
+                    let mut index = 1;
+                    let mut sibling = if backwards { next_element_sibling(doc, node) } else { prev_element_sibling(doc, node) };
+                    while let Some(n) = sibling {
+                        if accepts(n) { index += 1; }
+                        sibling = if backwards { next_element_sibling(doc, n) } else { prev_element_sibling(doc, n) };
+                    }
+                    nth_matches(*a, *b, index)
+                }
+            }
             Pseudo::NthOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, false)),
             Pseudo::Not(list) => !list.iter().any(|s| matches_with(s, doc, node, state)),
             Pseudo::Is(list) | Pseudo::Where(list) => list.iter().any(|s| matches_with(s, doc, node, state)),
@@ -1384,6 +1428,37 @@ mod tests {
         assert_eq!(sels.len(), 2);
         assert_eq!(sels[0].specificity(), Specificity(1, 3, 3));
         assert_eq!(sels[1].specificity(), Specificity(0, 1, 0));
+    }
+
+    #[test]
+    fn nth_of_filters_siblings_lists_complex_selectors_and_specificity() {
+        let doc = rabbithole_html::parse("<ul class=parent><li class=target id=a></li><li id=gap></li><li class=target id=b></li><li class=target id=c><em></em></li></ul>");
+        let a = doc.element_by_id("a").unwrap();
+        let b = doc.element_by_id("b").unwrap();
+        let c = doc.element_by_id("c").unwrap();
+        let gap = doc.element_by_id("gap").unwrap();
+        let second = parse(":nth-child(2 of .parent > .target, #absent)");
+        assert_eq!(second[0].specificity(), Specificity(1, 1, 0));
+        assert!(!matches(&second[0], &doc, a));
+        assert!(matches(&second[0], &doc, b));
+        assert!(!matches(&second[0], &doc, gap));
+        assert!(matches(&parse(":nth-last-child(1 of.target)")[0], &doc, c));
+        assert!(matches(&parse(":nth-child(2n+1 of :nth-child(n of .target))")[0], &doc, c));
+        assert!(matches(&parse(":nth-child(1 of :has(> em))")[0], &doc, c));
+        assert!(!matches(&parse(":nth-child(2 of .target)")[0], &doc, c));
+    }
+
+    #[test]
+    fn nth_of_is_strict_and_formula_arithmetic_does_not_overflow() {
+        for source in [":nth-child(1 of)", ":nth-child(1 of .a,)", ":nth-child(1 of > .a)",
+            ":nth-child(1 of ::before)", ":nth-child(1 of .a, :unknown)",
+            ":nth-of-type(1 of div)", ":nth-last-of-type(n of div)",
+            ":nth-child(1 n)", ":nth-child(1.5 of div)"] {
+            let tokens = crate::tokenizer::Tokenizer::tokenize(source);
+            assert!(SelectorParser::new(&tokens).parse_list().is_none(), "{source}");
+        }
+        assert!(nth_matches(1, i32::MIN, 1));
+        assert!(!nth_matches(i32::MIN, i32::MAX, 1));
     }
 
     #[test]

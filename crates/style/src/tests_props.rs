@@ -593,3 +593,30 @@ fn nesting_incremental_parent_class_and_dynamic_state() {
     engine.update(&doc, &mut tree, &log, &opts, &sheets);
     assert_eq!(tree.get(child).unwrap().color, Color::rgb(255, 0, 0));
 }
+
+#[test]
+fn nth_of_membership_changes_restyle_forward_and_reverse_siblings() {
+    use crate::restyle::StyleEngine;
+    let mut doc = rabbithole_html::parse("<section class=group><i class=item id=a></i><i id=b></i><i class=item id=c></i></section>");
+    let sheets = vec![parse_stylesheet("i {color:red; background:white} i:nth-child(2 of .group > .item) {color:green} i:nth-last-child(2 of .item) {background:blue}")];
+    let a = doc.element_by_id("a").unwrap(); let b = doc.element_by_id("b").unwrap(); let c = doc.element_by_id("c").unwrap();
+    let state = MatchState::default();
+    let opts = StyleOptions { state: &state, resolve_url: &|_, s| Some(s.to_string()), document_base: "" };
+    let mut engine = StyleEngine::new(&sheets, &env());
+    let mut tree = engine.full(&doc, &sheets, &opts);
+    assert_eq!(tree.get(c).unwrap().color, Color::rgb(0, 128, 0));
+    assert_eq!(tree.get(a).unwrap().background_color, Color::rgb(0, 0, 255));
+    doc.track_mutations(true);
+    doc.set_attr(b, "class", Some("item"));
+    let log = doc.take_mutations(); engine.update(&doc, &mut tree, &log, &opts, &sheets);
+    assert_eq!(tree.get(b).unwrap().color, Color::rgb(0, 128, 0));
+    assert_eq!(tree.get(c).unwrap().color, Color::rgb(255, 0, 0));
+    assert_eq!(tree.get(a).unwrap().background_color, Color::rgb(255, 255, 255));
+    assert_eq!(tree.get(b).unwrap().background_color, Color::rgb(0, 0, 255));
+    doc.set_attr(a, "class", None);
+    let log = doc.take_mutations(); engine.update(&doc, &mut tree, &log, &opts, &sheets);
+    assert_eq!(tree.get(c).unwrap().color, Color::rgb(0, 128, 0));
+    doc.set_attr(doc.find_element("section").unwrap(), "class", None);
+    let log = doc.take_mutations(); engine.update(&doc, &mut tree, &log, &opts, &sheets);
+    assert_eq!(tree.get(c).unwrap().color, Color::rgb(255, 0, 0));
+}

@@ -299,6 +299,12 @@ impl InvalidationMap {
                     self.first |= rel;
                     self.last |= rel;
                 }
+                Pseudo::NthChildOf(_, _, list) | Pseudo::NthLastChildOf(_, _, list) => {
+                    if matches!(p, Pseudo::NthChildOf(..)) { self.nth_fwd |= rel; } else { self.nth_back |= rel; }
+                    // A filter change can alter sibling membership, including
+                    // complex selectors depending on ancestors or :has().
+                    for s in list { self.add_selector(s, R_GLOBAL, false); }
+                }
                 Pseudo::NthChild(..) | Pseudo::NthOfType(..) | Pseudo::FirstOfType => self.nth_fwd |= rel,
                 Pseudo::NthLastChild(..) | Pseudo::NthLastOfType(..) | Pseudo::LastOfType => self.nth_back |= rel,
                 Pseudo::OnlyOfType => {
