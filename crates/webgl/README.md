@@ -43,11 +43,21 @@ The bounded [token preprocessor](../../docs/glsl-preprocessor.md) supports objec
 macros and conditional source selection before the existing grammar and type checks.
 Its resource limits and explicitly deferred directives are described separately.
 
-One `void main()` with whole-variable assignments, initialized local declarations,
+One `void main()` with whole-variable assignments (including `+=`, `-=`, `*=`, `/=`), local declarations,
 blocks, bounded `if`/`else` selection and `return;`. Global `attribute` (vertex only), `varying`, and `uniform`
 declarations; scalar `float`, `vec2/3/4`, and uniform/local `mat2/3/4` types. Precision
 qualifiers, `precision ... float;`, comments and optional `#version 100` are
 recognized. Fragment shaders require an explicit float precision declaration.
+Local declarations without initializers have undefined initial values; this evaluator
+chooses zero. Assignment expressions and swizzle assignment targets remain unsupported.
+
+Default precision declarations are validated against ESSL100/300 core type names,
+including sampler types that do not instantiate a uniform or sampling operation.
+A valid unused `precision highp samplerCube;` declaration does not imply Cube
+texture support: an actual unsupported sampler uniform still fails compilation.
+Default precision is captured when each interface is declared; shared uniforms
+must have matching precision as well as type across shader stages.
+
 Supported expressions are literals, variables, vector swizzles,
 constructors, unary signs and `+ - * /`; matrix/vector and matrix/matrix
 multiplication use GLSL column-major semantics. Decimal integer literals within
@@ -56,7 +66,11 @@ integer-to-float assignment are rejected rather than evaluated as float math. Ma
 `transpose=false`.
 
 Vertex shaders must write `gl_Position`; fragment shaders must write
-`gl_FragColor` and can read `gl_FragCoord`. Active cross-stage varying types and
+`gl_FragColor` and can read `gl_FragCoord` and the read-only scalar bool
+`gl_FrontFacing`. The latter uses the original projected winding, including
+clipping and strip parity, before triangle coverage normalization. `frontFace`
+accepts CW/CCW (default CCW); culling remains unsupported.
+Active cross-stage varying types and
 shared uniform types must agree. Uniforms start at zero after linking; scalar
 boolean uniforms start at false.
 
@@ -64,7 +78,8 @@ The evaluator also supports 32 typed float/vector math built-ins, with checked
 argument counts, types and expression costs. See
 [the supported functions](../../docs/webgl.md#shader-language-subset).
 User helpers may return scalar `bool`, `float` or `vec2/3/4`, take up to eight
-named parameters of those types by value (ordinary or `in` parameters), and use
+named parameters of those types by value (ordinary, `in` or read-only `const in`
+parameters), and use
 initialized locals, nested blocks, `if`/`else` and typed early returns. Every
 helper path must return a value; every main path must write its stage output
 before returning or falling through. Precision qualifiers and zero-argument helpers
@@ -80,16 +95,26 @@ At most 16 helpers and 16 nested function calls are supported. Function bodies
 share immutable ASTs; the 512-unit expression budget includes every nested call
 site, argument, body and local binding so shared bodies do not hide exponential
 execution. Unused helpers do not activate their referenced uniforms. Recursion,
-forward calls, prototypes, overloading/redefinition, `out`/`inout`/`const`
+forward calls, prototypes, overloading/redefinition, `out`/`inout`
 parameters and statements after an unconditional return are rejected with
 diagnostics; they are not silently ignored.
 
 Scalar `bool` supports `true`/`false`, bool-only `!`, `&&`, `||`, `^^`, and
-`bool(bool)`. `&&` and `||` skip the right operand when its value is unnecessary;
+explicit scalar numeric/bool conversions. `&&` and `||` skip the right operand when its value is unnecessary;
 `^^` evaluates both. Relational comparisons require two scalar floats; `==` and
 `!=` require matching bool, float, vector or matrix types and produce one bool.
-Numeric/bool GLSL conversions, boolean vectors and boolean interfaces other
-than uniforms are rejected. Scalar `uniform bool` is supported in both shader
+`bvec2/3/4` expressions, locals and helper inputs/results support constructors,
+swizzles, `lessThan`, `lessThanEqual`, `greaterThan`, `greaterThanEqual`, `equal`,
+`notEqual`, `any`, `all` and `not` with checked argument types and widths. Explicit
+vector constructors convert numeric/bool components; boolean arithmetic and
+boolean vector interfaces remain rejected. Scalar constructors currently require
+a scalar argument; boolean components in matrix constructors remain unsupported.
+`condition ? yes : no` requires a scalar bool and matching supported alternatives.
+Both alternatives are typed, reflected and charged against the execution budget,
+while only the selected alternative runs. Local `const` initializers must be
+constant expressions and their bindings cannot be reassigned. Read-only formal
+parameters are not treated as compile-time constants. Global constants remain
+unsupported. Scalar `uniform bool` is supported in both shader
 stages. Integer and floating-point scalar uniform setters normalize zero to false
 and every other value to true, including negative integers; sampler setters keep
 their texture-unit range checks. Reflection reports `BOOL` and JavaScript
@@ -102,7 +127,7 @@ scope after its initializer, and leaving a block restores the enclosing binding.
 At most 16 nested statement levels and 128 statements per body are supported.
 All branches add to the expression/call-site cost, even when runtime skips them.
 
-Loops, switch, ternary expressions, arrays, integer variables, derivatives,
+Loops, switch, arrays, integer variables, derivatives,
 discard, swizzle assignments, stencil, points/lines, culling, multisampling and
 extensions remain unsupported. Texture sampling has the explicit bounded subset
 below. Unsupported shader operations fail compilation with diagnostics.
@@ -308,3 +333,14 @@ pixels, including sampling the resulting texture into the visible canvas. See
 These checks cover the implemented subset. Multiple color attachments/MRT,
 stencil and multisampling remain open; there is no full WebGL2 conformance
 or Three.js compatibility claim.
+
+## Program validation status
+
+`VALIDATE_STATUS` is a native boolean, initially false, recording the last
+explicit `validateProgram` attempt. Linking does not implicitly validate or
+replace that historical result. Validation checks that a linked executable exists
+and checks active sampler counts and unit ranges for the supported 2D sampler
+subset; it updates the program log without binding the program. Unsupported
+sampler targets remain shader errors, so cross-target aliasing cannot be
+expressed in this subset. Texture/FBO feedback and completeness remain separate
+draw-time checks. This limited implementation is not a WebGL conformance claim.

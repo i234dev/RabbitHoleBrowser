@@ -36,7 +36,7 @@ language version alone does not turn a WebGL1 context into WebGL2.
 ## Shader language subset
 
 WebGL1 accepts a GLSL ES 1.00 subset: whole-variable assignments,
-initialized local declarations, float/vector/matrix expressions, scalar bool
+local declarations and typed compound assignments, float/vector/matrix expressions, scalar bool
 expressions, bounded `if`/`else` with lexical blocks, early returns and fragment
 `texture2D`. Fragment shaders need an explicit float precision declaration.
 Unsupported constructs fail compilation with a diagnostic. Unsupported API
@@ -54,7 +54,7 @@ overloads, with checked argument counts, types and expression budgets:
 
 User helpers support scalar `bool`, `float` and `vec2/3/4` results and up to eight named
 parameters of those types, copied by value with ordinary or `in` syntax. Helpers
-may execute initialized local declarations, local/parameter assignments, blocks,
+may execute local declarations and typed compound assignments, local/parameter assignments, blocks,
 selection and typed early returns. Every helper path must return; every main
 exit path must write its stage output. Definitions precede callers and `main`; nested calls to earlier
 helpers work in both language versions. Uniforms, attributes and fragment inputs
@@ -64,13 +64,13 @@ Helpers cannot write globals or read mutable outputs.
 The evaluator shares helper bodies and charges every call site, argument and
 transitive body against its expression budget. There are at most 16 helpers and
 16 nested calls. Recursion, forward calls, prototypes, overloading, `out`/`inout`/
-`const` parameters and statements after an unconditional return are rejected. See [the backend limits](../crates/webgl/README.md#glsl-subset).
+statements after an unconditional return are rejected. `const in` parameters
+are read-only; local `const` declarations require constant-expression initializers. See [the backend limits](../crates/webgl/README.md#glsl-subset).
 Scalar bool operations include `!`, short-circuiting `&&`/`||`, `^^`, scalar float
 comparisons and equality/inequality on matching bool, float, vector or matrix
 types. Both sides and all branches are checked and reflected at compile time.
-Boolean interfaces other than scalar uniforms, boolean vectors, GLSL numeric/bool
-conversions, loops, switch,
-ternary expressions, arrays, integer arithmetic, unsupported built-in overloads
+Boolean interfaces other than scalar uniforms, loops, switch,
+arrays, integer arithmetic, unsupported built-in overloads
 and derivatives fail compilation. The subset allows 16 nested statement levels
 and 128 statements per body; skipped branches still add to the compile budget.
 
@@ -79,7 +79,7 @@ linking. `uniform1i`/`uniform1iv` and `uniform1f`/`uniform1fv` set false for zer
 and true for nonzero inputs, following [OpenGL ES 2.0 section 2.10.4](https://registry.khronos.org/OpenGL/specs/es/2.0/es_full_spec_2.0.pdf).
 `getActiveUniform` reports `BOOL`; JavaScript `getUniform` returns a boolean.
 Wrong-size/type setters preserve the value, and relinking restores false and
-invalidates earlier locations. Boolean vectors and arrays remain unsupported.
+invalidates earlier locations. Boolean vector uniforms and arrays remain unsupported.
 
 ## Square matrices in WebGL1 and WebGL2
 
@@ -183,7 +183,7 @@ textures also need clamp-to-edge wrapping for completeness.
 
 Stencil, culling, points/lines, multiple color attachments/MRT, blits,
 multisampling, cube maps, mipmaps and compressed textures remain unsupported. GLSL loops,
-switch, ternary expressions, arrays, integer variables, derivatives and discard are unavailable. Context creation does not imply that arbitrary
+switch, arrays, integer variables, derivatives and discard are unavailable. Context creation does not imply that arbitrary
 WebGL applications can run.
 
 Drawing-buffer dimensions are at most 4096 per axis and 4,194,304 pixels in
@@ -212,3 +212,21 @@ Script tests cover API conversion, resource ownership, readback, context exclusi
 resize and canvas integration; engine tests verify actual page pixels.
 These focused checks complement the existing conformance baselines and do
 not constitute a WebGL conformance score.
+
+### Typed selections and vector masks
+
+Scalar-bool ternary selection evaluates one matching float/vector/matrix/bool
+alternative while checking types, reflection and execution cost of both.
+`bvec2/3/4` locals, helper values, vector comparisons, `any`/`all`/`not`, swizzles
+and explicit numeric/bool constructors produce real typed masks. Boolean vector
+interfaces, boolean arithmetic, scalar constructors from vectors/matrices and
+boolean-to-matrix construction remain explicit errors.
+
+Core ESSL precision declarations accept the valid sampler names for their source
+version even when that sampler target cannot be used by this backend. Interface
+precision is fixed at declaration and shared uniforms must match across stages.
+`gl_FrontFacing` reads the projected winding before rasterizer normalization;
+`frontFace(CW/CCW)` and its state query are implemented. Culling remains deferred.
+`validateProgram` and `VALIDATE_STATUS` retain a real per-program validation
+result, initially false, and an information log; they do not unconditionally
+accept a shader or bind a program. See the [bounded backend contract](../crates/webgl/README.md#program-validation-status).
