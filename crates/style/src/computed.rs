@@ -1053,6 +1053,10 @@ pub struct ComputedStyle {
     pub order: i32,
     pub row_gap: Length,
     pub column_gap: Length,
+    /// Keep normal distinct from an explicit zero for subgridded axes.
+    /// The ordinary grid/flex used value remains zero in either case.
+    pub row_gap_normal: bool,
+    pub column_gap_normal: bool,
 
     // ---- grid
     pub grid_template_columns: Vec<TrackListItem>,
@@ -1302,6 +1306,8 @@ impl ComputedStyle {
             order: 0,
             row_gap: Length::ZERO,
             column_gap: Length::ZERO,
+            row_gap_normal: true,
+            column_gap_normal: true,
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
             grid_auto_columns: Vec::new(),
