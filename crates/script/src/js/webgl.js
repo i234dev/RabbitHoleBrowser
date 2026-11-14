@@ -259,11 +259,13 @@
     getAttachedShaders(program) { const s = state(this), p = owned(s, program, 'Program', false, true); return p ? Array.from(p.shaders) : null; }
     bindAttribLocation(program, location, name) { required('bindAttribLocation', 3, arguments); const s = state(this), p = owned(s, program, 'Program'); if (p) call(s, 'bindAttrib', p.id, location >>> 0, String(name)); }
     linkProgram(program) { required('linkProgram', 1, arguments); const s = state(this), p = owned(s, program, 'Program'); if (p && !call(s, 'linkProgram', p.id).error) p.generation++; }
+    validateProgram(program) { required('validateProgram', 1, arguments); const s = state(this), p = owned(s, program, 'Program', false, true); if (p) call(s, 'validateProgram', p.id); }
     getProgramParameter(program, pname) {
       required('getProgramParameter', 2, arguments); const s = state(this), p = owned(s, program, 'Program', false, true); if (!p) return null;
       if (p.deleted && !call(s, 'isProgram', p.id).value) { flag(s, GL.INVALID_VALUE); return null; }
       switch (pname >>> 0) {
         case GL.LINK_STATUS: return call(s, 'programStatus', p.id).value;
+        case GL.VALIDATE_STATUS: return call(s, 'programValidationStatus', p.id).value;
         case GL.DELETE_STATUS: return p.deleted;
         case GL.ATTACHED_SHADERS: return p.shaders.size;
         case GL.ACTIVE_ATTRIBUTES: { const r = call(s, 'activeAttribs', p.id); return r.error ? null : r.value.length; }
@@ -564,7 +566,7 @@
   }
   // These operations are deliberately unavailable until their rendering
   // semantics exist. Libraries get an observable GL error, never fake IDs.
-  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform2i', 'uniform3i', 'uniform4i']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
+  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'uniform2i', 'uniform3i', 'uniform4i']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
   for (const [name, value] of Object.entries(GL)) {
     Object.defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
     Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });

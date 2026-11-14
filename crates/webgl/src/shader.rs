@@ -8,6 +8,34 @@ const MAX_PARAMETERS: usize = 8;
 const MAX_CALL_DEPTH: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Precision { Low, Medium, High }
+impl Precision {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name { "lowp" => Self::Low, "mediump" => Self::Medium, "highp" => Self::High, _ => return None })
+    }
+}
+
+// A default precision declaration does not instantiate a value of its type.
+// Validate core type names by ESSL version, including sampler types whose
+// uniforms/sampling remain explicitly unsupported by this compiler.
+fn precision_type(name: &str, version: u32) -> bool {
+    matches!(name, "float" | "int" | "sampler2D" | "samplerCube")
+        || (version == 300 && matches!(name,
+            "sampler3D" | "sampler2DArray" | "sampler2DShadow" | "samplerCubeShadow" | "sampler2DArrayShadow"
+            | "isampler2D" | "isampler3D" | "isamplerCube" | "isampler2DArray"
+            | "usampler2D" | "usampler3D" | "usamplerCube" | "usampler2DArray"))
+}
+
+fn initial_precisions(vertex: bool) -> BTreeMap<String, Precision> {
+    let mut defaults = BTreeMap::from([
+        ("int".into(), if vertex { Precision::High } else { Precision::Medium }),
+        ("sampler2D".into(), Precision::Low), ("samplerCube".into(), Precision::Low),
+    ]);
+    if vertex { defaults.insert("float".into(), Precision::High); }
+    defaults
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ty {
     // Integer literals can be converted by constructors, not assigned or
     // used in arithmetic as if they were floating-point values.
@@ -424,6 +452,8 @@ pub(crate) struct Shader {
     pub output: String,
     pub locations: BTreeMap<String, u32>,
     pub symbols: BTreeMap<String, Symbol>,
+    pub precision_defaults: BTreeMap<String, Precision>,
+    pub symbol_precisions: BTreeMap<String, Precision>,
     pub reads: BTreeSet<String>,
     pub writes: BTreeSet<String>,
     function_globals: BTreeSet<String>,
@@ -795,14 +825,20 @@ impl Parser {
         Ok(())
     }
     fn ty(&mut self) -> Result<Ty, String> {
+        self.qualified_type().map(|(ty, _)| ty)
+    }
+    fn qualified_type(&mut self) -> Result<(Ty, Option<Precision>), String> {
         let mut n = self.id()?;
-        let precision = matches!(n.as_str(), "lowp" | "mediump" | "highp");
-        if precision {
+        let precision = Precision::parse(&n);
+        if precision.is_some() {
             n = self.id()?;
         }
         let ty = Ty::parse(&n).ok_or_else(|| format!("unsupported type {n}"))?;
-        if precision && ty == Ty::Bool { return Err("bool cannot have a precision qualifier".into()); }
-        Ok(ty)
+        if precision.is_some() && ty == Ty::Bool { return Err("bool cannot have a precision qualifier".into()); }
+        let key = match ty { Ty::Sampler2D => Some("sampler2D"), Ty::Bool => None, _ => Some("float") };
+        let precision = precision.or_else(|| key.and_then(|key| self.shader.precision_defaults.get(key).copied()));
+        if key.is_some() && precision.is_none() { return Err(format!("no default precision for {n}")); }
+        Ok((ty, precision))
     }
     fn declare(&mut self, name: String, ty: Ty, qual: Qual) -> Result<String, String> {
         if self.shader.version == 300
@@ -1403,6 +1439,8 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             },
             locations: BTreeMap::new(),
             symbols: BTreeMap::new(),
+            precision_defaults: initial_precisions(vertex),
+            symbol_precisions: BTreeMap::new(),
             reads: BTreeSet::new(),
             writes: BTreeSet::new(),
             function_globals: BTreeSet::new(),
@@ -1438,7 +1476,6 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             },
         );
     }
-    let mut precision_float = false;
     loop {
         let mut n = p.id()?;
         let mut location = None;
@@ -1461,17 +1498,11 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             if location.is_some() {
                 return Err("layout cannot qualify a precision declaration".into());
             }
-            let q = p.id()?;
-            if !matches!(q.as_str(), "lowp" | "mediump" | "highp") {
-                return Err("invalid precision".into());
-            }
+            let q = Precision::parse(&p.id()?).ok_or("invalid precision")?;
             let ty = p.id()?;
-            match ty.as_str() {
-                "float" => precision_float = true,
-                "int" | "sampler2D" => {}
-                _ => return Err("unsupported precision declaration type".into()),
-            }
+            if !precision_type(&ty, version) { return Err(format!("unsupported precision declaration type {ty} for GLSL ES {version}")); }
             p.expect(Tok::P(';'))?;
+            p.shader.precision_defaults.insert(ty, q);
             continue;
         }
         if matches!(
@@ -1523,7 +1554,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
                 "multiple render targets are unsupported; output location must be zero".into(),
             );
         }
-        let ty = p.ty()?;
+        let (ty, precision) = p.qualified_type()?;
         if ty == Ty::Bool && qual != Qual::Uniform {
             return Err("bool interfaces other than uniforms are unsupported".into());
         }
@@ -1535,6 +1566,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         }
         let name = p.id()?;
         p.declare(name.clone(), ty, qual)?;
+        if let Some(precision) = precision { p.shader.symbol_precisions.insert(name.clone(), precision); }
         if qual == Qual::Output {
             if !p.shader.output.is_empty() {
                 return Err("multiple fragment outputs are unsupported".into());
@@ -1546,7 +1578,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         }
         p.expect(Tok::P(';'))?;
     }
-    if !vertex && !precision_float {
+    if !vertex && !p.shader.precision_defaults.contains_key("float") {
         return Err("fragment shaders require a float precision declaration".into());
     }
     if p.shader.output.is_empty() {

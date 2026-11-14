@@ -247,6 +247,8 @@ enum Command {
     CreateProgram,
     AttachShader(u32, u32),
     LinkProgram(u32),
+    ValidateProgram(u32),
+    ProgramValidationStatus(u32),
     ProgramStatus(u32),
     ProgramLog(u32),
     IsProgram(u32),
@@ -361,6 +363,8 @@ impl Command {
             "createProgram" => Self::CreateProgram,
             "attachShader" => Self::AttachShader(u!(2), u!(3)),
             "linkProgram" => Self::LinkProgram(u!(2)),
+            "validateProgram" => Self::ValidateProgram(u!(2)),
+            "programValidationStatus" => Self::ProgramValidationStatus(u!(2)),
             "programStatus" => Self::ProgramStatus(u!(2)),
             "programLog" => Self::ProgramLog(u!(2)),
             "isProgram" => Self::IsProgram(u!(2)),
@@ -533,6 +537,11 @@ impl Command {
                     Reply::Void
                 }
                 Self::ProgramStatus(p) => Reply::Bool(ctx.program_link_status(p)?),
+                Self::ValidateProgram(p) => {
+                    ctx.validate_program(p)?;
+                    Reply::Void
+                }
+                Self::ProgramValidationStatus(p) => Reply::Bool(ctx.program_validation_status(p)?),
                 Self::ProgramLog(p) => Reply::Text(ctx.program_info_log(p)?.to_string()),
                 Self::IsProgram(p) => Reply::Bool(ctx.program_link_status(p).is_ok()),
                 Self::UseProgram(p) => {

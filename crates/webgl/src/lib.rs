@@ -59,6 +59,7 @@ struct Program {
     log: String,
     deleted: bool,
     bindings: BTreeMap<String, u32>,
+    validated: bool,
 }
 #[derive(Clone, Debug)]
 struct Uniform {
@@ -630,6 +631,11 @@ impl Context {
                     if f.qual == Qual::Uniform && f.ty != s.ty {
                         return Err(format!("uniform type mismatch for {name}"));
                     }
+                    if f.qual == Qual::Uniform && vertex.version == 300
+                        && vertex.symbol_precisions.get(name) != fragment.symbol_precisions.get(name)
+                    {
+                        return Err(format!("uniform precision mismatch for {name}"));
+                    }
                 }
             }
         }
@@ -677,6 +683,40 @@ impl Context {
     }
     pub fn program_info_log(&self, id: u32) -> Result<&str> {
         Ok(&self.programs.get(&id).ok_or(Error::InvalidValue)?.log)
+    }
+    /// Validate the currently linked executable without binding it. With this
+    /// compiler's single supported sampler target there can be no cross-target
+    /// unit alias, but the active sampler count and unit range are real checks.
+    /// Framebuffer completeness/feedback and texture completeness are draw-time
+    /// checks, not reasons to report every linked program as invalid here.
+    pub fn validate_program(&mut self, id: u32) -> Result<()> {
+        let p = self.programs.get_mut(&id).ok_or(Error::InvalidValue)?;
+        let problem = match p.executable.as_ref() {
+            None => Some("program has no successfully linked executable"),
+            Some(executable) => {
+                let mut count = 0;
+                let mut invalid_unit = false;
+                for uniform in &executable.uniforms {
+                    if uniform.ty == Ty::Sampler2D {
+                        count += 1;
+                        let unit = uniform.value.v[0];
+                        invalid_unit |= !unit.is_finite() || unit.fract() != 0.0
+                            || unit < 0.0 || unit >= MAX_TEXTURE_UNITS as f32;
+                    }
+                }
+                if count > MAX_TEXTURE_UNITS as usize { Some("active sampler count exceeds the supported texture unit limit") }
+                else if invalid_unit { Some("sampler refers to an unsupported texture unit") }
+                else { None }
+            }
+        };
+        p.validated = problem.is_none();
+        p.log = problem.unwrap_or("").into();
+        Ok(())
+    }
+    /// Initially false; only an explicit validation attempt changes this
+    /// historical result. Linking does not perform validation implicitly.
+    pub fn program_validation_status(&self, id: u32) -> Result<bool> {
+        Ok(self.programs.get(&id).ok_or(Error::InvalidValue)?.validated)
     }
     pub fn use_program(&mut self, id: u32) -> Result<()> {
         if id != 0
