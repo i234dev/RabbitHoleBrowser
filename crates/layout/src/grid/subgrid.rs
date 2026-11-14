@@ -3,11 +3,11 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::{expand_tracks, GridItem, Sizing, Track, TrackList};
+use super::{expand_tracks, size_tracks_with_space, Contribution, GridItem, GridSpace, MeasurePhase, Sizing, Track, TrackList};
 use crate::block::Layouter;
 use crate::flex::ItemEdges;
 use crate::tree::{Formatting, LayoutBox, WmKind};
-use rabbithole_style::{ComputedStyle, ContentDistribution, Length, SubgridLineNames, TrackListItem};
+use rabbithole_style::{ComputedStyle, ContentDistribution, ItemAlign, Length, SubgridLineNames, TrackListItem};
 
 #[derive(Clone, Debug)]
 pub(crate) struct SharedTracks {
@@ -16,6 +16,10 @@ pub(crate) struct SharedTracks {
     pub(super) names: Vec<Vec<String>>,
     pub(super) collapsed: Vec<bool>,
     pub(super) gap: f32,
+    /// Accumulated ancestor edge layers at internal track boundaries. A
+    /// nested subgrid must retain its parent's own gap adjustments as well.
+    edge_before: Vec<f32>,
+    edge_after: Vec<f32>,
     pub(super) inset_start: f32,
     pub(super) inset_end: f32,
 }
@@ -37,6 +41,8 @@ impl SharedTracks {
         let mut result=self.clone();
         result.starts=self.starts.iter().zip(&self.sizes).rev().map(|(p,s)| extent-p-s).collect();
         result.sizes.reverse();result.collapsed.reverse();result.names.reverse();
+        result.edge_before=self.edge_after.iter().rev().copied().collect();
+        result.edge_after=self.edge_before.iter().rev().copied().collect();
         std::mem::swap(&mut result.inset_start,&mut result.inset_end);
         result
     }
@@ -96,12 +102,18 @@ pub(super) fn section(list:&TrackList, positions:&[f32], start:usize, end:usize,
     let start=start.min(list.tracks.len().saturating_sub(1));
     let end=end.max(start+1).min(list.tracks.len());
     let origin=positions.get(start).copied().unwrap_or(0.);
+    let before=|i:usize|list.inherited.as_ref().map_or(0.,|parent|if i==0 {parent.inset_start} else {parent.edge_before[i]+(gap-parent.gap)*0.5});
+    let after=|i:usize|list.inherited.as_ref().map_or(0.,|parent|if i+1==parent.sizes.len() {parent.inset_end} else {parent.edge_after[i]+(gap-parent.gap)*0.5});
     let tracks=SharedTracks {
         sizes:list.tracks[start..end].iter().map(|t|t.base).collect(),
         starts:positions[start..end].iter().map(|p|p-origin).collect(),
         names:if names {list.names[start..=end].to_vec()} else {vec![vec![];end-start+1]},
         collapsed:list.tracks[start..end].iter().map(|t|t.collapsed).collect(),
-        gap,inset_start:0.,inset_end:0.,
+        gap,
+        edge_before:(start..end).map(|i|if i==start {0.} else {before(i)}).collect(),
+        edge_after:(start..end).map(|i|if i+1==end {0.} else {after(i)}).collect(),
+        inset_start:if start<end {before(start)} else {0.},
+        inset_end:if start<end {after(end-1)} else {0.},
     };
     AxisInheritance::Tracks(Arc::new(tracks))
 }
@@ -144,18 +156,40 @@ pub(super) fn tracks(b:&LayoutBox,rows:bool,avail:Option<f32>,gap:f32)->TrackLis
     TrackList{tracks,names,inherited:Some(inherited)}
 }
 
-/// Fixed tracks can be supplied before measuring the perpendicular axis.
-/// Intrinsic/flexible tracks must wait for their own contribution pass.
+/// Grid2 §12.1's initial opposite-axis estimate uses definite maximum track
+/// sizes, floored by definite minimums. Other tracks remain indefinite.
 pub(super) fn fixed_section(list:&TrackList,start:usize,end:usize,gap:f32,names:bool)->Option<AxisInheritance> {
     if list.inherited.is_some() {
         let (positions,_)=positions(list,gap,None,ContentDistribution::FlexStart);
         return Some(section(list,&positions,start,end,gap,names));
     }
-    if !list.tracks.iter().all(|t|matches!((t.min,t.max),(Sizing::Fixed(a),Sizing::Fixed(b)) if a==b)) {return None;}
-    let tracks=list.tracks.iter().cloned().map(|mut t|{if let Sizing::Fixed(size)=t.min {t.base=if t.collapsed {0.} else {size};t.limit=Some(t.base);}t}).collect();
+    let end=end.min(list.tracks.len());let start=start.min(end);
+    if start==end||!list.tracks[start..end].iter().all(|t|matches!(t.max,Sizing::Fixed(_))) {return None;}
+    let tracks=list.tracks.iter().cloned().map(|mut t| {
+        t.base=match (t.min,t.max) {
+            (Sizing::Fixed(min),Sizing::Fixed(max))=>min.max(max),
+            (_,Sizing::Fixed(max))=>max,
+            _=>0.,
+        };
+        if t.collapsed {t.base=0.;}t.limit=Some(t.base);t
+    }).collect();
     let fixed=TrackList{tracks,names:list.names.clone(),inherited:None};
     let (positions,_)=positions(&fixed,gap,None,ContentDistribution::FlexStart);
     Some(section(&fixed,&positions,start,end,gap,names))
+}
+
+/// During contribution collection the span and line names are definite, but
+/// intrinsic track sizes are not. Keep that placement geometry separate from
+/// used geometry; grandchildren contribute directly without sizing this axis.
+pub(super) fn sizing_section(list:&TrackList,start:usize,end:usize,gap:f32,names:bool)->AxisInheritance {
+    let tracks=list.tracks.iter().cloned().map(|mut t| {
+        t.base=match t.min {Sizing::Fixed(v)=>v,_=>0.};
+        if t.collapsed {t.base=0.;}
+        t
+    }).collect();
+    let probe=TrackList{tracks,names:list.names.clone(),inherited:list.inherited.clone()};
+    let (positions,_)=positions(&probe,gap,None,ContentDistribution::FlexStart);
+    section(&probe,&positions,start,end,gap,names)
 }
 
 pub(super) fn clamp_placement(pair:Result<(i32,i32),i32>,count:usize)->Result<(i32,i32),i32> {
@@ -182,11 +216,62 @@ pub(super) fn item_edges(b:&LayoutBox,it:&mut GridItem,column_gap:f32,row_gap:f3
     for (rows,gap) in [(false,column_gap),(true,row_gap)] {
         let Some(tracks)=shared(b,rows) else {continue;};
         let (start,end)=if rows {it.area.row} else {it.area.col};
-        let before=if start==0 {tracks.inset_start} else {(gap-tracks.gap)*0.5};
-        let after=if end as usize==tracks.sizes.len() {tracks.inset_end} else {(gap-tracks.gap)*0.5};
+        let before=if start==0 {tracks.inset_start} else {tracks.edge_before[start as usize]+(gap-tracks.gap)*0.5};
+        let after=if end as usize==tracks.sizes.len() {tracks.inset_end} else {tracks.edge_after[end as usize-1]+(gap-tracks.gap)*0.5};
         if rows {it.edges.margin.top+=before;it.edges.margin.bottom+=after;}
         else {it.edges.margin.left+=before;it.edges.margin.right+=after;}
     }
+}
+
+/// Shared-axis sizing and alignment are ignored, including automatic margins.
+/// The subgrid's margin box must fill exactly the inherited grid area.
+pub(super) fn stretch_item(b:&LayoutBox,it:&mut GridItem) {
+    if shared(b,false).is_some() {
+        it.justify=ItemAlign::Stretch;it.edges.auto.left=false;it.edges.auto.right=false;
+    }
+    if shared(b,true).is_some() {
+        it.align=ItemAlign::Stretch;it.edges.auto.top=false;it.edges.auto.bottom=false;
+    }
+}
+
+/// Items with identical spans affect track sizing only through the maximum
+/// of each intrinsic contribution. Compact in place before walking another
+/// subgrid level; hypothetical edge items must not duplicate exponentially.
+pub(super) fn compact_contributions(items:&mut Vec<Contribution>) {
+    items.sort_unstable_by_key(|c|(c.start,c.end));
+    let mut write=0;
+    for read in 0..items.len() {
+        let item=items[read];
+        if write>0&&items[write-1].start==item.start&&items[write-1].end==item.end {
+            items[write-1].min=items[write-1].min.max(item.min);
+            items[write-1].max=items[write-1].max.max(item.max);
+        } else {items[write]=item;write+=1;}
+    }
+    items.truncate(write);
+}
+
+/// Grid2 §9 accounts for an edge with empty adjacent tracks using a
+/// hypothetical item spanning those tracks. An entirely empty subgrid
+/// contributes nothing. Real items touching the edge already carry its layer.
+pub(super) fn empty_edge_contributions(b:&LayoutBox,rows:bool,gap:f32,items:&mut Vec<Contribution>) {
+    compact_contributions(items);
+    let Some(axis)=shared(b,rows) else {return;};
+    let Some(first)=items.iter().map(|c|c.start).min() else {return;};
+    let last=items.iter().map(|c|c.end).max().unwrap();
+    let count=items.len();
+    let internal=(gap-axis.gap)*0.5;
+    for i in 0..count {
+        let item=items[i];
+        if first>0&&item.start==first {
+            let delta=axis.inset_start-axis.edge_before[item.start]-internal;
+            items.push(Contribution{start:0,end:item.end,min:item.min+delta,max:item.max+delta});
+        }
+        if last<axis.sizes.len()&&item.end==last {
+            let delta=axis.inset_end-axis.edge_after[item.end-1]-internal;
+            items.push(Contribution{start:item.start,end:axis.sizes.len(),min:item.min+delta,max:item.max+delta});
+        }
+    }
+    compact_contributions(items);
 }
 
 struct Saved {
@@ -231,6 +316,41 @@ impl<'a> Layouter<'a> {
         let result=body(self,b);
         restore(b,&mut saved.into_iter());invalidate(b);result
     }
+
+    /// Contributions in the requested axis, in this box's local grid lines.
+    /// The caller has supplied only placement geometry for that axis. Its
+    /// descendants, rather than the subgrid's preferred size, size the parent.
+    pub(super) fn subgrid_axis_contributions(&mut self,b:&mut LayoutBox,rows:bool,inline_size:Option<f32>,phase:MeasurePhase)->Vec<Contribution> {
+        if b.wm_wrapper {
+            let reverse=if rows {b.wm_kind==WmKind::Ccw} else {b.wm_kind==WmKind::Cw};
+            let count=shared(b,rows).map_or(0,|axis|axis.sizes.len());
+            let Some(inner)=b.children.first_mut() else {return Vec::new();};
+            let inner_inline=shared(inner,false).map(|axis|(axis.extent()-axis.inset_start-axis.inset_end).max(0.));
+            let mut result=self.subgrid_axis_contributions(inner,!rows,inner_inline,phase);
+            if reverse {for c in &mut result {let start=c.start;c.start=count.saturating_sub(c.end);c.end=count.saturating_sub(start);}}
+            return result;
+        }
+        if b.style.grid_lanes||inherits_stacking(b) {
+            return self.lane_axis_contributions(b,rows,inline_size,phase);
+        }
+        let style=b.style.clone();
+        let col_gap=gap(b,false,inline_size.unwrap_or(0.));
+        let row_gap=gap(b,true,0.);
+        let (items,mut cols,row_tracks)=self.place_items(b,&style,inline_size,None,col_gap,row_gap,0.,0.);
+        let mut result=if !rows {
+            self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),phase)
+        } else {
+            if cols.inherited.is_none() {
+                let contributions=self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),phase);
+                let space=inline_size.map(GridSpace::Definite).unwrap_or(GridSpace::MaxContent);
+                size_tracks_with_space(&mut cols.tracks,&contributions,space,col_gap,false);
+            }
+            let (positions,_)=positions(&cols,col_gap,inline_size,style.justify_content);
+            self.projected_rows(b,&items,&row_tracks,&cols,&positions,col_gap,row_gap,inline_size.unwrap_or(0.),None,phase)
+        };
+        empty_edge_contributions(b,rows,if rows {row_gap} else {col_gap},&mut result);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -251,7 +371,7 @@ mod tests {
         let mut b=LayoutBox::new(BoxKind::Block,None,Rc::new(style));b.formatting=Formatting::Grid;b
     }
     fn item(start:i32,end:i32)->GridItem {
-        GridItem{idx:0,area:super::super::Area{col:(start,end),row:(0,1)},edges:ItemEdges::new(&ComputedStyle::default(),0.),justify:ItemAlign::Stretch,align:ItemAlign::Stretch}
+        GridItem{idx:0,area:super::super::Area{col:(start,end),row:(0,1)},edges:ItemEdges::new(&ComputedStyle::default(),0.),justify:ItemAlign::Stretch,align:ItemAlign::Stretch,column_names:true,row_names:true}
     }
 
     #[test]
@@ -317,5 +437,61 @@ mod tests {
         assert_eq!(clamp_placement(Ok((1,30)),2),Ok((1,2)));
         assert_eq!(clamp_placement(Ok((40,50)),2),Ok((1,2)));
         assert_eq!(clamp_placement(Err(12),2),Err(2));
+    }
+
+    #[test]
+    fn nested_sections_carry_the_ancestor_edge_layer_once() {
+        let parent=parent();let mut outer=child();let mut saved=Vec::new();
+        install(&mut outer,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
+        let inherited=tracks(&outer,false,None,50.);
+        let (positions,_)=positions(&inherited,50.,None,ContentDistribution::Center);
+        let nested=section(&inherited,&positions,0,2,50.,true);
+        let mut inner=child();let mut saved=Vec::new();install(&mut inner,Some(nested),None,300.,&mut saved);
+        let axis=shared(&inner,false).unwrap();assert_eq!(axis.inset_start,20.);assert_eq!(axis.inset_end,20.);
+        let mut first=item(0,1);item_edges(&inner,&mut first,50.,0.);assert_eq!(first.edges.margin.left,20.);
+    }
+
+    #[test]
+    fn initial_cross_axis_estimate_uses_the_definite_maximum() {
+        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(10.),Sizing::Fixed(100.)),Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![],vec![]],inherited:None};
+        let Some(AxisInheritance::Tracks(axis))=fixed_section(&list,0,1,0.,true) else {panic!("missing definite maximum")};
+        assert_eq!(axis.sizes,[100.]);
+        assert!(fixed_section(&list,0,2,0.,true).is_none());
+    }
+
+    #[test]
+    fn nested_normal_gap_keeps_ancestor_internal_adjustments() {
+        let parent=parent();let mut outer=child();let mut style=(*outer.style).clone();
+        style.column_gap=Length::Px(20.);style.column_gap_normal=false;outer.style=Rc::new(style);
+        let mut saved=Vec::new();install(&mut outer,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
+        let list=tracks(&outer,false,None,20.);let (positions,_)=positions(&list,20.,None,ContentDistribution::Center);
+        let mut inner=child();let mut saved=Vec::new();install(&mut inner,Some(section(&list,&positions,0,2,20.,true)),None,300.,&mut saved);
+        assert_eq!(gap(&inner,false,300.),20.);
+        let mut first=item(0,1);let mut last=item(1,2);item_edges(&inner,&mut first,20.,0.);item_edges(&inner,&mut last,20.,0.);
+        assert_eq!(first.edges.margin.right,-15.);assert_eq!(last.edges.margin.left,-15.);
+        let mut first=item(0,1);item_edges(&inner,&mut first,35.,0.);assert_eq!(first.edges.margin.right,-7.5);
+    }
+
+    #[test]
+    fn empty_subgrids_do_not_synthesize_padding_contributions() {
+        let parent=parent();let mut b=child();let mut saved=Vec::new();
+        install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
+        let mut items=vec![];empty_edge_contributions(&b,false,50.,&mut items);assert!(items.is_empty());
+    }
+
+    #[test]
+    fn hypothetical_edge_items_cover_empty_tracks_without_moving_the_real_item() {
+        let parent=parent();let mut b=child();let mut saved=Vec::new();
+        install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
+        let real=Contribution{start:1,end:2,min:30.,max:50.};let mut items=vec![real];
+        empty_edge_contributions(&b,false,50.,&mut items);
+        assert_eq!(items,[Contribution{start:0,end:2,min:40.,max:60.},real]);
+    }
+
+    #[test]
+    fn virtual_items_with_the_same_span_keep_both_independent_maxima() {
+        let mut items=vec![Contribution{start:1,end:3,min:10.,max:100.},Contribution{start:0,end:1,min:5.,max:5.},Contribution{start:1,end:3,min:20.,max:50.}];
+        compact_contributions(&mut items);
+        assert_eq!(items,[Contribution{start:0,end:1,min:5.,max:5.},Contribution{start:1,end:3,min:20.,max:100.}]);
     }
 }

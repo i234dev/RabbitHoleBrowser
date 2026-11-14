@@ -12,6 +12,7 @@
 use super::*;
 
 /// An in-flow item of a grid lanes container.
+#[derive(Clone, Copy)]
 struct LaneItem {
     idx: usize,
     /// Number of tracks spanned.
@@ -316,6 +317,8 @@ impl<'a> Layouter<'a> {
             edges: it.edges,
             justify: it.justify,
             align: it.align,
+            column_names: !rows&&it.fixed.is_some(),
+            row_names: rows&&it.fixed.is_some(),
         }
     }
 
@@ -326,10 +329,12 @@ impl<'a> Layouter<'a> {
         let mut virt = Vec::new();
         for it in items {
             for s in Self::lane_positions(it, &tl.tracks) {
-                virt.push(Self::lane_grid_item(it, s, false));
+                let mut item=Self::lane_grid_item(it,s,false);
+                subgrid::item_edges(b,&mut item,gap,0.);
+                virt.push(item);
             }
         }
-        let contribs = self.column_contributions(b, &virt, cbw);
+        let contribs = self.projected_columns(b,&virt,tl,None,gap,0.,cbw,MeasurePhase::Initial);
         size_tracks_with_space(&mut tl.tracks, &contribs, space, gap, stretch);
     }
 
@@ -345,7 +350,12 @@ impl<'a> Layouter<'a> {
             None => {
                 let (min, max) = self.intrinsic(child);
                 let room = avail.map(|a| (a - it.edges.pb_h - it.edges.margin_sum(Axis::Row)).max(0.0)).unwrap_or(f32::INFINITY);
-                self.clamp_width(&style, crate::block::shrink_to_fit(min, max, room), cbw, it.edges.pb_h)
+                let width=match style.width {
+                    Length::MinContent=>min,
+                    Length::MaxContent=>max,
+                    _=>crate::block::shrink_to_fit(min,max,room),
+                };
+                self.clamp_width(&style,width,cbw,it.edges.pb_h)
             }
         }
     }
@@ -364,17 +374,53 @@ impl<'a> Layouter<'a> {
         child.rect.h + mv
     }
 
+    /// Supply a definite shared row span before asking a subgrid for its
+    /// inline contribution. Unresolved row tracks wait for the row pass.
+    #[allow(clippy::too_many_arguments)]
+    fn row_lane_widths(&mut self,b:&mut LayoutBox,tl:&TrackList,items:&[LaneItem],row_gap:f32,cbw:f32,available:Option<f32>,phase:MeasurePhase)->Vec<f32> {
+        items.iter().map(|it| {
+            let child=&mut b.children[it.idx];
+            let (columns,rows)=subgrid::requests(child);
+            let start=it.fixed.unwrap_or(0);
+            let rows=if !rows {None} else if phase==MeasurePhase::Initial {subgrid::fixed_section(tl,start,start+it.span,row_gap,it.fixed.is_some())}
+                else {let (positions,_)=subgrid::positions(tl,row_gap,None,ContentDistribution::FlexStart);Some(subgrid::section(tl,&positions,start,start+it.span,row_gap,it.fixed.is_some()))};
+            self.with_subgrid(child,columns.then_some(subgrid::AxisInheritance::Stacking),rows,cbw,|this,child|this.lane_item_width(child,it,cbw,available))
+        }).collect()
+    }
+
     /// Row-lane track sizing; the items are `widths[i]` wide.
     fn size_row_lanes(&mut self, b: &mut LayoutBox, tl: &mut TrackList, items: &[LaneItem], widths: &[f32], avail: Option<f32>, gap: f32, cbw: f32, stretch: bool) {
         if tl.inherited.is_some() {return;}
+        let contribs=self.lane_row_contributions(b,tl,items,widths,gap,cbw,MeasurePhase::Initial);
+        size_tracks(&mut tl.tracks, &contribs, avail, gap, stretch);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lane_row_contributions(&mut self,b:&mut LayoutBox,tl:&TrackList,items:&[LaneItem],widths:&[f32],gap:f32,cbw:f32,phase:MeasurePhase)->Vec<Contribution> {
         let mut contribs = Vec::new();
         for (it, &w) in items.iter().zip(widths) {
-            let h = self.lane_item_height(&mut b.children[it.idx], it, w, cbw);
+            if tl.inherited.is_none()&&subgrid::requests(&b.children[it.idx])==(false,false) {
+                let h=self.lane_item_height(&mut b.children[it.idx],it,w,cbw);
+                for s in Self::lane_positions(it,&tl.tracks) {contribs.push(Contribution{start:s,end:s+it.span.min(tl.tracks.len()),min:h,max:h});}
+                continue;
+            }
             for s in Self::lane_positions(it, &tl.tracks) {
-                contribs.push(Contribution { start: s, end: s + it.span.min(tl.tracks.len()), min: h, max: h });
+                let mut item=Self::lane_grid_item(it,s,true);
+                subgrid::item_edges(b,&mut item,0.,gap);
+                let mut lane=*it;lane.edges=item.edges;
+                let child=&mut b.children[it.idx];
+                let (columns,rows)=subgrid::requests(child);
+                let columns=columns.then_some(subgrid::AxisInheritance::Stacking);
+                let rows=rows.then(||subgrid::sizing_section(tl,s,s+it.span,gap,it.fixed.is_some()));
+                let mut nested=self.with_subgrid(child,columns,rows,cbw,|this,child| {
+                    if subgrid::shared(child,true).is_some() {this.subgrid_axis_contributions(child,true,Some(w),phase)}
+                    else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h}]}
+                });
+                for c in &mut nested {c.start+=s;c.end+=s;}
+                contribs.extend(nested);
             }
         }
-        size_tracks(&mut tl.tracks, &contribs, avail, gap, stretch);
+        contribs
     }
 
     /// Lay out a grid lanes container's items; returns the content height.
@@ -406,7 +452,7 @@ impl<'a> Layouter<'a> {
                 let columns=columns.then(||subgrid::section(&tl,&col_pos,s,s+it.span,col_gap,it.fixed.is_some()));
                 let rows=rows.then_some(subgrid::AxisInheritance::Stacking);
                 placed[i]=self.with_subgrid(child,columns,rows,cbw,|this,child| {
-                    if subgrid::shared(child,false).is_some() {gi.justify=ItemAlign::Stretch;}
+                    subgrid::stretch_item(child,&mut gi);
                     let inner_w = this.grid_item_width(child, &gi, aw, cbw);
                     let lcb = Cb { x: 0.0, width: aw, height: cb.height };
                     let mut bfc = Bfc::new();
@@ -426,7 +472,12 @@ impl<'a> Layouter<'a> {
             for (i, it) in items.iter().enumerate() {
                 let (x, mut outer) = placed[i];
                 let free = limits[i] - pl.pos[i] - outer;
-                let off = self.lane_stack_align(&mut b.children[it.idx], it, it.align, free, cbw, true, cb.height);
+                let child=&mut b.children[it.idx];
+                let (columns,rows)=subgrid::requests(child);
+                let s=pl.start[i];
+                let columns=columns.then(||subgrid::section(&tl,&col_pos,s,s+it.span,col_gap,it.fixed.is_some()));
+                let rows=rows.then_some(subgrid::AxisInheritance::Stacking);
+                let off=self.with_subgrid(child,columns,rows,cbw,|this,child|this.lane_stack_align(child,it,it.align,free,cbw,true,cb.height));
                 if it.align == ItemAlign::Stretch && free > 0.01 {
                     outer = b.children[it.idx].rect.h + b.children[it.idx].margin.top + b.children[it.idx].margin.bottom;
                 }
@@ -444,15 +495,17 @@ impl<'a> Layouter<'a> {
         // Row lanes: tracks are rows; items stack in the inline axis.
         let avail = cb.height;
         let (mut tl, items) = self.lanes_setup(b, &style, true, avail, row_gap, cbw, (cx, cy));
-        let widths: Vec<f32> = items.iter().map(|it| {
-            let child=&mut b.children[it.idx];
-            let (columns,rows)=subgrid::requests(child);
-            let start=it.fixed.unwrap_or(0);
-            let rows=if rows {subgrid::fixed_section(&tl,start,start+it.span,row_gap,it.fixed.is_some())} else {None};
-            self.with_subgrid(child,columns.then_some(subgrid::AxisInheritance::Stacking),rows,cbw,|this,child|this.lane_item_width(child,it,cbw,Some(cbw)))
-        }).collect();
+        let mut widths=self.row_lane_widths(b,&tl,&items,row_gap,cbw,Some(cbw),MeasurePhase::Initial);
         let stretch = matches!(style.align_content, ContentDistribution::Stretch | ContentDistribution::FlexStart);
         self.size_row_lanes(b, &mut tl, &items, &widths, avail, row_gap, cbw, stretch);
+        if items.iter().any(|it|subgrid::requests(&b.children[it.idx]).1) {
+            let adjusted=self.row_lane_widths(b,&tl,&items,row_gap,cbw,Some(cbw),MeasurePhase::Adjusted);
+            if adjusted!=widths {
+                let contributions=self.lane_row_contributions(b,&tl,&items,&adjusted,row_gap,cbw,MeasurePhase::Adjusted);
+                if tl.inherited.is_none() {size_tracks(&mut tl.tracks,&contributions,avail,row_gap,stretch);}
+                widths=adjusted;
+            }
+        }
         let (row_pos, rows_extent) = subgrid::positions(&tl, row_gap, avail, style.align_content);
         let tol = tolerance(&style, avail);
         let tracks = tl.tracks.clone();
@@ -467,7 +520,7 @@ impl<'a> Layouter<'a> {
             let columns=columns.then_some(subgrid::AxisInheritance::Stacking);
             let rows=rows.then(||subgrid::section(&tl,&row_pos,s,s+it.span,row_gap,it.fixed.is_some()));
             placed[i]=self.with_subgrid(child,columns,rows,cbw,|this,child| {
-                if subgrid::shared(child,true).is_some() {gi.align=ItemAlign::Stretch;}
+                subgrid::stretch_item(child,&mut gi);
                 let mut margin = gi.edges.margin;
                 let stretch = matches!(gi.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto)
                     && !gi.edges.auto.top && !gi.edges.auto.bottom
@@ -492,7 +545,12 @@ impl<'a> Layouter<'a> {
             let (y, mut outer) = placed[i];
             let free = limits[i] - pl.pos[i] - outer;
             let ah = b.children[it.idx].rect.h;
-            let off = self.lane_stack_align(&mut b.children[it.idx], it, it.justify, free, cbw, false, Some(ah));
+            let child=&mut b.children[it.idx];
+            let (columns,rows)=subgrid::requests(child);
+            let s=pl.start[i];
+            let columns=columns.then_some(subgrid::AxisInheritance::Stacking);
+            let rows=rows.then(||subgrid::section(&tl,&row_pos,s,s+it.span,row_gap,it.fixed.is_some()));
+            let off=self.with_subgrid(child,columns,rows,cbw,|this,child|this.lane_stack_align(child,it,it.justify,free,cbw,false,Some(ah)));
             if it.justify == ItemAlign::Stretch && free > 0.01 {
                 outer = b.children[it.idx].rect.w + b.children[it.idx].margin.left + b.children[it.idx].margin.right;
             }
@@ -508,12 +566,43 @@ impl<'a> Layouter<'a> {
     }
 
     /// Intrinsic (min-content, max-content) widths of a grid lanes container.
+    /// Project a subgrid's items through the parent's shared grid axis. Every
+    /// possible automatic lane placement contributes, not just its final one.
+    pub(super) fn lane_axis_contributions(&mut self,b:&mut LayoutBox,rows:bool,inline_size:Option<f32>,phase:MeasurePhase)->Vec<Contribution> {
+        debug_assert_eq!(row_lanes(b),rows);
+        let style=b.style.clone();
+        let col_gap=subgrid::gap(b,false,inline_size.unwrap_or(0.));
+        let row_gap=subgrid::gap(b,true,0.);
+        let gap=if rows {row_gap} else {col_gap};
+        let (tl,items)=self.lanes_setup(b,&style,rows,if rows {None} else {inline_size},gap,inline_size.unwrap_or(0.),(0.,0.));
+        let mut out=Vec::new();
+        if !rows {
+            let mut virtual_items=Vec::new();
+            for it in &items {for start in Self::lane_positions(it,&tl.tracks) {
+                let mut item=Self::lane_grid_item(it,start,false);
+                subgrid::item_edges(b,&mut item,col_gap,row_gap);
+                virtual_items.push(item);
+            }}
+            out=self.projected_columns(b,&virtual_items,&tl,None,col_gap,row_gap,inline_size.unwrap_or(0.),phase);
+        } else {
+            let widths=self.row_lane_widths(b,&tl,&items,row_gap,inline_size.unwrap_or(0.),inline_size,phase);
+            out=self.lane_row_contributions(b,&tl,&items,&widths,row_gap,inline_size.unwrap_or(0.),phase);
+        }
+        subgrid::empty_edge_contributions(b,rows,gap,&mut out);
+        out
+    }
+
+    /// Intrinsic (min-content, max-content) widths of a grid lanes container.
     pub(crate) fn grid_lanes_intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
         let style = b.style.clone();
+        if let Some(axis)=subgrid::shared(b,false) {
+            let width=(axis.extent()-axis.inset_start-axis.inset_end).max(0.);
+            return (width,width);
+        }
         let col_gap = subgrid::gap(b,false,0.);
         if !row_lanes(b) {
             let (tl, items) = self.lanes_setup(b, &style, false, None, col_gap, 0.0, (0.0, 0.0));
-            let mut min_t = TrackList { tracks: tl.tracks.clone(), names: Vec::new(), inherited: tl.inherited.clone() };
+            let mut min_t = TrackList { tracks: tl.tracks.clone(), names: tl.names.clone(), inherited: tl.inherited.clone() };
             self.size_column_lanes(b, &mut min_t, &items, GridSpace::MinContent, col_gap, 0.0, false);
             let mut max_t = tl;
             self.size_column_lanes(b, &mut max_t, &items, GridSpace::MaxContent, col_gap, 0.0, false);
@@ -523,14 +612,20 @@ impl<'a> Layouter<'a> {
         }
         // Row lanes: the stacking range with min-/max-content item widths.
         let row_gap = subgrid::gap(b,true,0.);
-        let fixed_h = match style.height {
+        let fixed_h = subgrid::shared(b,true).map(|axis|(axis.extent()-axis.inset_start-axis.inset_end).max(0.)).or_else(||match style.height {
             Length::Px(h) => Some(h),
             _ => None,
-        };
+        });
         let mut out = [0.0f32; 2];
         for (k, avail_w) in [Some(0.0), None].into_iter().enumerate() {
             let (mut tl, items) = self.lanes_setup(b, &style, true, fixed_h, row_gap, 0.0, (0.0, 0.0));
-            let widths: Vec<f32> = items.iter().map(|it| self.lane_item_width(&mut b.children[it.idx], it, 0.0, avail_w)).collect();
+            // A row-lanes subgrid has no standalone track axis to size here:
+            // measure layout in its inherited geometry. The stacking-axis
+            // available space is indefinite; do not turn it into a fabricated
+            // zero-width containing block. Explicit min/max-content item
+            // sizes still select their own contribution in lane_item_width.
+            let available=if tl.inherited.is_some() {None} else {avail_w};
+            let widths=self.row_lane_widths(b,&tl,&items,row_gap,0.,available,MeasurePhase::Initial);
             self.size_row_lanes(b, &mut tl, &items, &widths, fixed_h, row_gap, 0.0, false);
             let tol = tolerance(&style, fixed_h);
             let pl = place(&items, &tl.tracks, tol, col_gap, style.grid_lanes_direction.track_reverse, false, |i, _| widths[i] + items[i].edges.pb_h + items[i].edges.margin_sum(Axis::Row));
