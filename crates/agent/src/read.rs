@@ -308,6 +308,9 @@ impl Md<'_> {
             if !visible(self.page, self.geo, c) || matches!(el.tag.as_str(), "script" | "style" | "noscript" | "template" | "button" | "svg") {
                 continue;
             }
+            if el.tag == "a" && el.attr("href").is_some() && self.omit_citation(c) { continue; }
+            let structural = !self.links && self.block_element(c);
+            if structural { s.push(' '); }
             match el.tag.as_str() {
                 "a" if el.attr("href").is_some() => {
                     if self.omit_citation(c) { continue; }
@@ -346,6 +349,7 @@ impl Md<'_> {
                     if self.links { s.push(' '); }
                 }
             }
+            if structural { s.push(' '); }
         }
     }
 
@@ -376,7 +380,7 @@ impl Md<'_> {
         matches!(
             self.page.doc.tag(n),
             Some("p" | "div" | "section" | "article" | "ul" | "ol" | "table" | "pre" | "blockquote" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "figure" | "header" | "dl" | "hr" | "main" | "aside" | "nav" | "footer" | "form" | "details")
-        )
+        ) || self.page.styles.get(n).is_some_and(|style| style.display.is_block_level())
     }
 
     fn has_block_child(&self, n: NodeId) -> bool {
@@ -583,6 +587,9 @@ impl Md<'_> {
         // only emit `n`.
         let _ = parent;
         let Some(el) = doc.element(n) else { return };
+        if el.tag == "a" && el.attr("href").is_some() && self.omit_citation(n) { return; }
+        let structural = !self.links && self.block_element(n);
+        if structural { s.push(' '); }
         match el.tag.as_str() {
             "a" if el.attr("href").is_some() => {
                 if self.omit_citation(n) { return; }
@@ -600,6 +607,7 @@ impl Md<'_> {
             "br" => s.push('\n'),
             _ => if self.links { s.push_str(&self.inline(n)); } else { self.inline_into(n, s); },
         }
+        if structural { s.push(' '); }
     }
 }
 
