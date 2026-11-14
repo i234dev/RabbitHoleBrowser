@@ -41,7 +41,7 @@ operations must be rejected by the bindings instead of reporting fake success.
 
 One `void main()` with whole-variable assignments, initialized local declarations,
 blocks, bounded `if`/`else` selection and `return;`. Global `attribute` (vertex only), `varying`, and `uniform`
-declarations; scalar `float`, `vec2/3/4`, and uniform/local `mat4` types. Precision
+declarations; scalar `float`, `vec2/3/4`, and uniform/local `mat2/3/4` types. Precision
 qualifiers, `precision ... float;`, comments and optional `#version 100` are
 recognized. Fragment shaders require an explicit float precision declaration.
 Supported expressions are literals, variables, vector swizzles,

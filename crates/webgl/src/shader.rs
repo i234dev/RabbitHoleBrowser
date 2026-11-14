@@ -18,6 +18,8 @@ pub(crate) enum Ty {
     Vec2,
     Vec3,
     Vec4,
+    Mat2,
+    Mat3,
     Mat4,
 }
 impl Ty {
@@ -29,6 +31,8 @@ impl Ty {
             "vec2" => Self::Vec2,
             "vec3" => Self::Vec3,
             "vec4" => Self::Vec4,
+            "mat2" => Self::Mat2,
+            "mat3" => Self::Mat3,
             "mat4" => Self::Mat4,
             _ => return None,
         })
@@ -39,7 +43,17 @@ impl Ty {
             Self::Vec2 => 2,
             Self::Vec3 => 3,
             Self::Vec4 => 4,
+            Self::Mat2 => 4,
+            Self::Mat3 => 9,
             Self::Mat4 => 16,
+        }
+    }
+    pub fn matrix_dim(self) -> Option<usize> {
+        match self {
+            Self::Mat2 => Some(2),
+            Self::Mat3 => Some(3),
+            Self::Mat4 => Some(4),
+            _ => None,
         }
     }
     fn vector(n: usize) -> Self {
@@ -513,12 +527,22 @@ impl Expr {
                 let values: Vec<_> = args.iter().map(|a| a.eval(env, globals, sample)).collect();
                 let mut r = Value::zero(self.ty);
                 if values.len() == 1 && matches!(values[0].ty, Ty::Float | Ty::IntLiteral) {
-                    if self.ty == Ty::Mat4 {
-                        for i in 0..4 {
-                            r.v[i * 5] = values[0].v[0];
+                    if let Some(n) = self.ty.matrix_dim() {
+                        for i in 0..n {
+                            r.v[i * (n + 1)] = values[0].v[0];
                         }
                     } else {
                         r.v[..self.ty.n()].fill(values[0].v[0]);
+                    }
+                } else if let (Some(dst), Some(src)) = (self.ty.matrix_dim(), values[0].ty.matrix_dim()) {
+                    // Matrix constructors preserve the common upper-left block;
+                    // components outside it come from the identity matrix.
+                    for col in 0..dst {
+                        for row in 0..dst {
+                            r.v[col * dst + row] = if col < src && row < src {
+                                values[0].v[col * src + row]
+                            } else { u8::from(col == row) as f32 };
+                        }
                     }
                 } else {
                     let mut i = 0;
@@ -536,19 +560,23 @@ impl Expr {
             ExprKind::Binary(op, a, b) => {
                 let (a, b) = (a.eval(env, globals, sample), b.eval(env, globals, sample));
                 let mut r = Value::zero(self.ty);
-                if *op == '*' && a.ty == Ty::Mat4 && b.ty == Ty::Vec4 {
-                    for row in 0..4 {
-                        r.v[row] = (0..4).map(|col| a.v[col * 4 + row] * b.v[col]).sum();
+                let (ad, bd) = (a.ty.matrix_dim(), b.ty.matrix_dim());
+                if *op == '*' && ad.is_some() && bd.is_none() && b.ty != Ty::Float {
+                    let n = ad.unwrap();
+                    for row in 0..n {
+                        r.v[row] = (0..n).map(|col| a.v[col * n + row] * b.v[col]).sum();
                     }
-                } else if *op == '*' && a.ty == Ty::Vec4 && b.ty == Ty::Mat4 {
-                    for col in 0..4 {
-                        r.v[col] = (0..4).map(|row| a.v[row] * b.v[col * 4 + row]).sum();
+                } else if *op == '*' && bd.is_some() && ad.is_none() && a.ty != Ty::Float {
+                    let n = bd.unwrap();
+                    for col in 0..n {
+                        r.v[col] = (0..n).map(|row| a.v[row] * b.v[col * n + row]).sum();
                     }
-                } else if *op == '*' && a.ty == Ty::Mat4 && b.ty == Ty::Mat4 {
-                    for col in 0..4 {
-                        for row in 0..4 {
-                            r.v[col * 4 + row] =
-                                (0..4).map(|k| a.v[k * 4 + row] * b.v[col * 4 + k]).sum();
+                } else if *op == '*' && ad.is_some() && bd.is_some() {
+                    let n = ad.unwrap();
+                    for col in 0..n {
+                        for row in 0..n {
+                            r.v[col * n + row] =
+                                (0..n).map(|k| a.v[k * n + row] * b.v[col * n + k]).sum();
                         }
                     }
                 } else {
@@ -1153,11 +1181,15 @@ impl Parser {
                     let total: usize = args.iter().map(|e| e.ty.n()).sum();
                     let scalar =
                         args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::IntLiteral);
+                    let conversion = ty.matrix_dim().is_some()
+                        && args.len() == 1 && args[0].ty.matrix_dim().is_some();
                     let trunc = args.len() == 1
-                        && args[0].ty != Ty::Mat4
+                        && args[0].ty.matrix_dim().is_none()
                         && total >= ty.n()
-                        && ty != Ty::Mat4;
-                    if !scalar && !trunc && total != ty.n() {
+                        && ty.matrix_dim().is_none();
+                    let matrix_components = ty.matrix_dim().is_some() && total >= ty.n()
+                        && total - args.last().unwrap().ty.n() < ty.n();
+                    if !scalar && !conversion && !trunc && !matrix_components && total != ty.n() {
                         return Err("constructor component count mismatch".into());
                     }
                     if ty == Ty::Float && !scalar {
@@ -1166,8 +1198,14 @@ impl Parser {
                     if args.iter().any(|a| a.ty == Ty::Sampler2D) {
                         return Err("samplers cannot be converted".into());
                     }
-                    if args.iter().any(|a| a.ty == Ty::Mat4) {
-                        return Err("matrix conversion constructors are unsupported".into());
+                    if !conversion && args.iter().any(|a| a.ty.matrix_dim().is_some()) {
+                        return Err("a matrix constructor requires one matrix argument or scalar/vector components; matrix-to-vector conversion is unsupported".into());
+                    }
+                    if ty.matrix_dim().is_some() {
+                        self.shader.cost += ty.n();
+                        if self.shader.cost > 512 {
+                            return Err("shader exceeds expression budget".into());
+                        }
                     }
                     Expr {
                         ty,
@@ -1247,10 +1285,7 @@ impl Parser {
         };
         loop {
             if self.eat('.') {
-                if matches!(
-                    left.ty,
-                    Ty::Mat4 | Ty::Float | Ty::IntLiteral | Ty::Sampler2D | Ty::Bool
-                ) {
+                if !matches!(left.ty, Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
                     return Err("swizzles require a vector".into());
                 }
                 let s = self.id()?;
@@ -1320,11 +1355,22 @@ impl Parser {
                 if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
                     return Err("integer arithmetic and implicit integer-to-float conversion are unsupported".into());
                 }
-                ty = if op == "*" && ((left.ty==Ty::Mat4 && right.ty==Ty::Vec4) || (left.ty==Ty::Vec4 && right.ty==Ty::Mat4)) {Ty::Vec4}
+                let (ad, bd) = (left.ty.matrix_dim(), right.ty.matrix_dim());
+                ty = if op == "*" && ad.is_some_and(|n| right.ty == Ty::vector(n)) {right.ty}
+                    else if op == "*" && bd.is_some_and(|n| left.ty == Ty::vector(n)) {left.ty}
                     else if left.ty==right.ty {left.ty}
                     else if left.ty==Ty::Float {right.ty}
                     else if right.ty==Ty::Float {left.ty}
                     else {return Err("binary operand types do not match".into());};
+                if let Some(n) = ad.or(bd) {
+                    // Matrix products do cubic work; matrix/vector products
+                    // and component operations do quadratic work. Every call
+                    // site, including helper bodies, retains this charge.
+                    self.shader.cost += if op == "*" && ad.is_some() && bd.is_some() { n*n*n } else { n*n };
+                    if self.shader.cost > 512 {
+                        return Err("shader exceeds expression budget".into());
+                    }
+                }
                 kind=ExprKind::Binary(op.as_bytes()[0] as char,Box::new(left),Box::new(right));
             }
             left=Expr {ty,kind};
@@ -1480,8 +1526,8 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         if ty == Ty::Bool && qual != Qual::Uniform {
             return Err("bool interfaces other than uniforms are unsupported".into());
         }
-        if ty == Ty::Mat4 && qual != Qual::Uniform {
-            return Err("mat4 is supported only for uniforms and locals".into());
+        if ty.matrix_dim().is_some() && qual != Qual::Uniform {
+            return Err("matrices are supported only for uniforms and locals".into());
         }
         if qual == Qual::Output && ty != Ty::Vec4 {
             return Err("only a vec4 fragment output is supported".into());

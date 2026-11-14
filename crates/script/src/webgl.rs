@@ -256,7 +256,7 @@ enum Command {
     BindAttrib(u32, u32, String),
     UniformLocation(u32, String),
     Uniform(i32, u32, Vec<f32>),
-    Matrix(i32, bool, Vec<f32>),
+    Matrix(i32, u32, bool, Vec<f32>),
     CreateVertexArray,
     BindVertexArray(u32),
     DeleteVertexArray(u32),
@@ -370,7 +370,9 @@ impl Command {
             "bindAttrib" => Self::BindAttrib(u!(2), u!(3), arg_str(realm, args, 4)?),
             "uniformLocation" => Self::UniformLocation(u!(2), arg_str(realm, args, 3)?),
             "uniform" => Self::Uniform(n!(2) as i32, u!(3), floats(realm, 4)?),
-            "matrix4" => Self::Matrix(n!(2) as i32, b!(3), floats(realm, 4)?),
+            "matrix2" => Self::Matrix(n!(2) as i32, 2, b!(3), floats(realm, 4)?),
+            "matrix3" => Self::Matrix(n!(2) as i32, 3, b!(3), floats(realm, 4)?),
+            "matrix4" => Self::Matrix(n!(2) as i32, 4, b!(3), floats(realm, 4)?),
             "createVertexArray" => Self::CreateVertexArray,
             "bindVertexArray" => Self::BindVertexArray(u!(2)),
             "deleteVertexArray" => Self::DeleteVertexArray(u!(2)),
@@ -555,8 +557,13 @@ impl Command {
                     ctx.uniform_f32_components(location, components, &values)?;
                     Reply::Void
                 }
-                Self::Matrix(location, transpose, values) => {
-                    ctx.uniform_matrix4fv(location, transpose, &values)?;
+                Self::Matrix(location, dimension, transpose, values) => {
+                    match dimension {
+                        2 => ctx.uniform_matrix2fv(location, transpose, &values)?,
+                        3 => ctx.uniform_matrix3fv(location, transpose, &values)?,
+                        4 => ctx.uniform_matrix4fv(location, transpose, &values)?,
+                        _ => return Err(rabbithole_webgl::Error::InvalidValue),
+                    }
                     Reply::Void
                 }
                 Self::CreateVertexArray => Reply::Number(ctx.create_vertex_array()? as f64),

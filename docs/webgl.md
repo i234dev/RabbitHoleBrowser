@@ -81,6 +81,27 @@ and true for nonzero inputs, following [OpenGL ES 2.0 section 2.10.4](https://re
 Wrong-size/type setters preserve the value, and relinking restores false and
 invalidates earlier locations. Boolean vectors and arrays remain unsupported.
 
+## Square matrices in WebGL1 and WebGL2
+
+Square `mat2`, `mat3` and `mat4` uniforms and locals use column-major storage.
+Constructors accept a diagonal scalar, scalar/vector components, or another
+square matrix (copying its common block and filling the rest from identity).
+The final vector argument may supply unused trailing components. Multiplication
+supports matching matrix/vector, vector/matrix and matrix/matrix operands;
+component arithmetic and matching matrix equality also work. These rules follow
+[GLSL ES 1.00 sections 5.4.2 and 5.9](https://www.khronos.org/files/opengles_shading_language.pdf).
+
+`uniformMatrix2fv`, `uniformMatrix3fv` and `uniformMatrix4fv` upload one matrix,
+reject transposition and preserve uniforms after errors. Reflection reports
+`FLOAT_MAT2/3/4`; `getUniform` returns a `Float32Array`. Null locations ignore GL
+validation after WebIDL argument conversion. See
+[WebGL uniforms](https://registry.khronos.org/webgl/specs/latest/1.0/#5.14.10).
+Matrix operations consume the existing expression and draw-work budgets.
+Matrix helper parameters/results, matrix interfaces other than uniforms,
+matrix-to-scalar/vector constructors, indexing, matrix built-ins, nonsquare
+matrices and GLSL 3.00 `matNxN` aliases,
+arrays and WebGL2 offset overloads remain unsupported and report errors.
+
 ## WebGL2 context milestone
 
 WebGL2 additionally accepts the bounded GLSL ES 3.00 mode with `#version 300 es`:

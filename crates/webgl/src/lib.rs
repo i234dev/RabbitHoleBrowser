@@ -125,6 +125,8 @@ fn active_info(name: &str, ty: Ty) -> ActiveInfo {
             Ty::Vec2 => gl::FLOAT_VEC2,
             Ty::Vec3 => gl::FLOAT_VEC3,
             Ty::Vec4 => gl::FLOAT_VEC4,
+            Ty::Mat2 => gl::FLOAT_MAT2,
+            Ty::Mat3 => gl::FLOAT_MAT3,
             Ty::Mat4 => gl::FLOAT_MAT4,
         },
     }
@@ -772,7 +774,7 @@ impl Context {
             return Ok(());
         }
         let u = self.uniform_mut(location)?;
-        if matches!(u.ty, Ty::Mat4 | Ty::Sampler2D) || u.ty.n() != values.len() {
+        if u.ty.matrix_dim().is_some() || u.ty == Ty::Sampler2D || u.ty.n() != values.len() {
             return Err(Error::InvalidOperation);
         }
         u.value = if u.ty == Ty::Bool {
@@ -797,9 +799,19 @@ impl Context {
         }
         self.uniform_f32(location, values)
     }
-    pub fn uniform_matrix4fv(
+    pub fn uniform_matrix2fv(&mut self, location: i32, transpose: bool, values: &[f32]) -> Result<()> {
+        self.uniform_matrix_fv(location, Ty::Mat2, transpose, values)
+    }
+    pub fn uniform_matrix3fv(&mut self, location: i32, transpose: bool, values: &[f32]) -> Result<()> {
+        self.uniform_matrix_fv(location, Ty::Mat3, transpose, values)
+    }
+    pub fn uniform_matrix4fv(&mut self, location: i32, transpose: bool, values: &[f32]) -> Result<()> {
+        self.uniform_matrix_fv(location, Ty::Mat4, transpose, values)
+    }
+    fn uniform_matrix_fv(
         &mut self,
         location: i32,
+        ty: Ty,
         transpose: bool,
         values: &[f32],
     ) -> Result<()> {
@@ -810,10 +822,10 @@ impl Context {
             return Err(Error::InvalidValue);
         }
         let u = self.uniform_mut(location)?;
-        if values.len() < 16 || values.len() % 16 != 0 {
+        if values.len() < ty.n() || values.len() % ty.n() != 0 {
             return Err(Error::InvalidValue);
         }
-        if u.ty != Ty::Mat4 || values.len() != 16 {
+        if u.ty != ty || values.len() != ty.n() {
             return Err(Error::InvalidOperation);
         }
         u.value = Value::from(u.ty, values);

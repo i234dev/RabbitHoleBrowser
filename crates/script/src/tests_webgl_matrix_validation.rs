@@ -23,6 +23,16 @@ fn webgl_matrix4_validation_converts_webidl_inputs_before_null_noop_and_gl_error
         }
         gl.uniformMatrix4fv(color,false,good);check(gl.getError()===gl.INVALID_OPERATION);check(Array.from(gl.getUniform(p,color)).join(',')==='1,0,0,1');
         gl.uniformMatrix4fv(null,true,[]);check(gl.getError()===gl.NO_ERROR);
+        gl.uniformMatrix4fv(undefined,true,[]);check(gl.getError()===gl.NO_ERROR);
+        function callableSequence(){}callableSequence[Symbol.iterator]=function(){return good[Symbol.iterator]();};
+        gl.uniformMatrix4fv(matrix,false,callableSequence);check(gl.getError()===gl.NO_ERROR);check(Array.from(gl.getUniform(p,matrix)).join(',')===good.join(','));
+        let iteratorReads=0;const once={get [Symbol.iterator](){++iteratorReads;return good[Symbol.iterator].bind(good);}};
+        gl.uniformMatrix4fv(null,false,once);check(iteratorReads===1&&gl.getError()===gl.NO_ERROR);
+        const iterate=function(){return good[Symbol.iterator]();};Object.defineProperty(iterate,'call',{get(){throw new Error('Iterator.call must not be read');}});
+        const seq={ [Symbol.iterator]:iterate },oldApply=Reflect.apply;
+        Reflect.apply=function(){throw new Error('Public Reflect.apply must not be read');};
+        try{gl.uniformMatrix4fv(matrix,false,seq);gl.uniformMatrix4fv(null,false,seq);}finally{Reflect.apply=oldApply;}
+        check(gl.getError()===gl.NO_ERROR&&Array.from(gl.getUniform(p,matrix)).join(',')===good.join(','));
         for(const location of [null,matrix]) {
           for(const data of [undefined,null,1,[Symbol()],Array(20).fill(0).concat([Symbol()])]) {
             let threw=false;try{gl.uniformMatrix4fv(location,true,data);}catch(e){threw=e instanceof TypeError;}check(threw);check(gl.getError()===gl.NO_ERROR);

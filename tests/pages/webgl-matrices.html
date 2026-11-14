@@ -1,0 +1,75 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGL matrix transforms</title>
+<style>body{margin:16px;background:#202634;color:white;font:16px sans-serif}canvas{width:256px;height:128px;image-rendering:pixelated}</style>
+<h1>WebGL matrix transforms</h1>
+<p>Both canvases show the same translated shape and updated color.</p>
+<canvas id="matrix1" width="8" height="4"></canvas>
+<canvas id="matrix2" width="8" height="4"></canvas>
+<script>
+(function(){
+  function check(condition,message){if(!condition)throw new Error(message||'Matrix regression');}
+  function shader(gl,kind,source){const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);check(gl.getShaderParameter(s,gl.COMPILE_STATUS),gl.getShaderInfoLog(s));return s;}
+  for(const version of [1,2]) {
+    const gl=document.getElementById('matrix'+version).getContext(version===2?'webgl2':'webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+    check(!!gl,'Missing WebGL context');
+    const prefix=version===2?'#version 300 es\n':'';
+    const vertex=prefix+(version===2?'in':'attribute')+' vec2 position;uniform mat2 shape;uniform mat3 transform;void main(){vec3 p=transform*vec3(shape*position,1.0);gl_Position=vec4(p.xy,0.0,p.z);}';
+    const fragment=prefix+'precision mediump float;'+(version===2?'out vec4 pixel;':'')+'uniform mat2 tint;uniform vec4 base;void main(){'+(version===2?'pixel':'gl_FragColor')+'=vec4(tint*vec2(0.25,0.5),0.0,1.0)+base;}';
+    const p=gl.createProgram();gl.attachShader(p,shader(gl,gl.VERTEX_SHADER,vertex));gl.attachShader(p,shader(gl,gl.FRAGMENT_SHADER,fragment));gl.linkProgram(p);check(gl.getProgramParameter(p,gl.LINK_STATUS),gl.getProgramInfoLog(p));gl.useProgram(p);
+    const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+    const position=gl.getAttribLocation(p,'position');gl.vertexAttribPointer(position,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(position);
+    const shape=gl.getUniformLocation(p,'shape'),transform=gl.getUniformLocation(p,'transform'),tint=gl.getUniformLocation(p,'tint'),base=gl.getUniformLocation(p,'base');
+    const kinds={};for(let i=0;i<gl.getProgramParameter(p,gl.ACTIVE_UNIFORMS);++i){const info=gl.getActiveUniform(p,i);check(info.size===1);kinds[info.name]=info.type;}
+    check(kinds.shape===gl.FLOAT_MAT2&&kinds.tint===gl.FLOAT_MAT2&&kinds.transform===gl.FLOAT_MAT3,'Matrix reflection');
+    check(gl.getUniform(p,shape) instanceof Float32Array&&gl.getUniform(p,shape).length===4,'mat2 readback type');
+    check(gl.getUniform(p,transform) instanceof Float32Array&&Array.from(gl.getUniform(p,transform)).join(',')==='0,0,0,0,0,0,0,0,0','mat3 zero defaults');
+    const shapeValue=[0.5,0,0.25,1],tintValue=[1,0.5,0.25,1];
+    gl.uniformMatrix2fv(shape,false,new Float32Array(shapeValue));gl.uniformMatrix2fv(tint,false,tintValue);
+    gl.uniformMatrix3fv(transform,false,[1,0,0,0,1,0,-0.5,0,1]);
+    function pixel(x){const v=new Uint8Array(4);gl.readPixels(x,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,v);return Array.from(v).join(',');}
+    function draw(){gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);}
+    draw();check(pixel(1)==='96,159,0,255'&&pixel(6)==='0,0,255,255','Initial non-symmetric matrices');
+    gl.uniform4f(base,0.125,0.25,0.375,0);draw();const ordinaryPixel=pixel(1);
+    gl.uniformMatrix2fv(base,false,[0,0,0,0]);check(gl.getError()===gl.INVALID_OPERATION,'vec4 confused with mat2');
+    check(Array.from(gl.getUniform(p,base)).join(',')==='0.125,0.25,0.375,0','Matrix setter modified vec4');
+    draw();check(pixel(1)===ordinaryPixel,'Matrix setter modified vec4 pixels');gl.uniform4f(base,0,0,0,0);draw();
+    const beforeTransform=Array.from(gl.getUniform(p,transform)).join(',');
+    for(const [name,location,transpose,data,error] of [
+      ['uniformMatrix2fv',shape,false,[],gl.INVALID_VALUE],
+      ['uniformMatrix2fv',shape,false,[0,0,0],gl.INVALID_VALUE],
+      ['uniformMatrix2fv',shape,true,[0,0,0,0],gl.INVALID_VALUE],
+      ['uniformMatrix2fv',shape,false,new Float32Array(8),gl.INVALID_OPERATION],
+      ['uniformMatrix3fv',shape,false,new Float32Array(9),gl.INVALID_OPERATION],
+      ['uniformMatrix2fv',transform,false,new Float32Array(4),gl.INVALID_OPERATION],
+      ['uniformMatrix3fv',transform,false,new Float32Array(8),gl.INVALID_VALUE],
+      ['uniformMatrix3fv',transform,true,new Float32Array(9),gl.INVALID_VALUE],
+      ['uniformMatrix3fv',transform,false,new Float32Array(18),gl.INVALID_OPERATION]
+    ]) {
+      gl[name](location,transpose,data);check(gl.getError()===error,'Matrix error code');
+      check(Array.from(gl.getUniform(p,shape)).join(',')===shapeValue.join(',')&&Array.from(gl.getUniform(p,transform)).join(',')===beforeTransform,'Atomic matrix update');
+      draw();check(pixel(1)==='96,159,0,255'&&pixel(6)==='0,0,255,255','Error changed geometry');
+    }
+    gl.uniform4fv(shape,[0,0,0,0]);check(gl.getError()===gl.INVALID_OPERATION,'mat2 confused with vec4');
+    for(const name of ['uniformMatrix2fv','uniformMatrix3fv']) {
+      gl[name](null,true,[]);check(gl.getError()===gl.NO_ERROR);
+      let threw=false;try{gl[name](null,false,[Symbol()]);}catch(e){threw=e instanceof TypeError;}check(threw&&gl.getError()===gl.NO_ERROR,'Null skipped conversion');
+      if(version===2){gl[name](name==='uniformMatrix2fv'?shape:transform,false,new Float32Array(16),0);check(gl.getError()===gl.INVALID_OPERATION,'Unsupported offset overload accepted');}
+    }
+    // Matrix3 changes actual coverage; Matrix2 changes actual color.
+    gl.uniformMatrix3fv(transform,false,new Float32Array([1,0,0,0,1,0,0.5,0,1]));
+    gl.uniformMatrix2fv(tint,false,[0,1,1,0]);draw();
+    check(pixel(1)==='0,0,255,255'&&pixel(6)==='128,64,0,255','Updated matrix pixels');
+    check(Array.from(gl.getUniform(p,tint)).join(',')==='0,1,1,0','Updated matrix readback');
+    // Locations belong to the program generation and to this context.
+    const old=shape;gl.linkProgram(p);check(gl.getProgramParameter(p,gl.LINK_STATUS));
+    gl.uniformMatrix2fv(old,false,shapeValue);check(gl.getError()===gl.INVALID_OPERATION,'Stale matrix location');
+    const currentShape=gl.getUniformLocation(p,'shape'),currentTransform=gl.getUniformLocation(p,'transform'),currentTint=gl.getUniformLocation(p,'tint');
+    check(Array.from(gl.getUniform(p,currentShape)).join(',')==='0,0,0,0','Matrix relink default');
+    gl.uniformMatrix2fv(currentShape,false,shapeValue);gl.uniformMatrix3fv(currentTransform,false,[1,0,0,0,1,0,0.5,0,1]);gl.uniformMatrix2fv(currentTint,false,[0,1,1,0]);draw();
+    if(version===1){globalThis.firstMatrixLocation=currentShape;globalThis.firstMatrixReadback=gl.getUniform(p,currentShape);}
+    else {gl.uniformMatrix2fv(globalThis.firstMatrixLocation,false,shapeValue);check(gl.getError()===gl.INVALID_OPERATION,'Foreign matrix location');check(Array.from(gl.getUniform(p,currentShape)).join(',')===shapeValue.join(','));}
+    check(gl.getError()===gl.NO_ERROR);console.log(version,'matrices ok');
+  }
+})();
+</script>

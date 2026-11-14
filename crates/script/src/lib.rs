@@ -45,6 +45,8 @@ mod tests_service_worker;
 mod tests_webgl;
 #[cfg(test)]
 mod tests_webgl_matrix_validation;
+#[cfg(test)]
+mod tests_webgl_matrices;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};
