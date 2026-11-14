@@ -1229,7 +1229,7 @@ impl Parser {
             },
             Tok::P('-') => {
                 let e = self.expr(8)?;
-                if (e.ty == Ty::Sampler2D || e.ty.is_bool()) {
+                if e.ty == Ty::Sampler2D || e.ty.is_bool() {
                     return Err("unary minus requires a numeric value".into());
                 }
                 Expr {
@@ -1239,7 +1239,7 @@ impl Parser {
             }
             Tok::P('+') => {
                 let e = self.expr(8)?;
-                if (e.ty == Ty::Sampler2D || e.ty.is_bool()) {
+                if e.ty == Ty::Sampler2D || e.ty.is_bool() {
                     return Err("unary plus requires a numeric value".into());
                 }
                 e
