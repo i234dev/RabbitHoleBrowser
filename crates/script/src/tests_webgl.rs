@@ -3,6 +3,8 @@ use crate::tests::{run, setup};
 
 #[path = "tests_webgl_offsets.rs"]
 mod offsets;
+#[path = "tests_webgl_preprocessor.rs"]
+mod preprocessing;
 
 
 #[test]
