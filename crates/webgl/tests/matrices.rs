@@ -219,7 +219,9 @@ fn invalid_matrix_grammar_dimensions_interfaces_and_helpers_are_rejected() {
 fn matrix_product_work_is_charged_at_each_transitive_helper_call() {
     let mut c = context(300,1);
     let extra = "vec4 costly(vec4 x){mat4 a=mat4(1.0);mat4 b=a*a;mat4 c=b*b;mat4 d=c*c;return d*x;}";
-    let body = "pixel=costly(vec4(1.0))+costly(vec4(1.0))+costly(vec4(1.0));";
+    // The shared helper costs 246 (<512). Five call sites alone cost 1230,
+    // exceeding main's 1024 limit in one otherwise valid statement.
+    let body = "pixel=costly(vec4(1.0))+costly(vec4(1.0))+costly(vec4(1.0))+costly(vec4(1.0))+costly(vec4(1.0));";
     let source = fragment(300,extra,body);
     let s = c.create_shader(FRAGMENT_SHADER).unwrap();
     c.shader_source(s,&source).unwrap();c.compile_shader(s).unwrap();

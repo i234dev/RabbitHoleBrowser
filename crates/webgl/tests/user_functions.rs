@@ -421,12 +421,15 @@ fn function_graph_and_call_site_costs_are_bounded_without_ast_expansion() {
             &format!("{}=vec4(1.0);", output(version))
         )
         .contains("budget"));
+        // Two identity calls per assignment charge both call sites: each
+        // callee costs 5, plus three expression heads and one statement gives
+        // 14 units. 100 assignments exceed 1024 while staying below 128 statements.
         assert!(reject(
             version,
             "float f(float x){return x;}",
             &format!(
                 "float x=0.5;{}{}=vec4(x);",
-                "x=f(x);".repeat(100),
+                "x=f(f(x));".repeat(100),
                 output(version)
             )
         )
