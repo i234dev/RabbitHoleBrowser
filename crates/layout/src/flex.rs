@@ -508,7 +508,29 @@ impl<'a> Layouter<'a> {
     /// (min-content, max-content) sizes of an item along the main axis.
     fn flex_content_sizes(&mut self, b: &mut LayoutBox, idx: usize, axis: Axis, cbw: f32, cbh: Option<f32>) -> (f32, f32) {
         let child = &mut b.children[idx];
-        match axis {
+        // Content suggestions and content flex bases measure the item's
+        // contents, not its own preferred/min/max main size (Flex §4.5, §9.2).
+        // The normal intrinsic cache includes those constraints, so isolate
+        // the temporary measurement and restore it for ordinary block sizing.
+        // Replaced, ratio and orthogonal-wrapper sizing retain their existing
+        // measurement paths; a wrapper's logical child owns those properties.
+        let (size, min, max) = match axis {
+            Axis::Row => (child.style.width, child.style.min_width, child.style.max_width),
+            Axis::Column => (child.style.height, child.style.min_height, child.style.max_height),
+        };
+        let unconstrain = child.kind != BoxKind::Image && !child.wm_wrapper && child.style.aspect_ratio.is_none()
+            && (size != Length::Auto || (min != Length::Auto && min != Length::Px(0.0)) || max != Length::Auto);
+        let original = if unconstrain {
+            let original = (child.style.clone(), child.intrinsic_cache.take());
+            let mut style = (*child.style).clone();
+            match axis {
+                Axis::Row => { style.width = Length::Auto; style.min_width = Length::Px(0.0); style.max_width = Length::Auto; }
+                Axis::Column => { style.height = Length::Auto; style.min_height = Length::Px(0.0); style.max_height = Length::Auto; }
+            }
+            child.style = std::rc::Rc::new(style);
+            Some(original)
+        } else { None };
+        let sizes = match axis {
             Axis::Row => {
                 if child.kind == BoxKind::Image {
                     let pb = child.style.padding.left.resolve_or_zero(cbw) + child.style.padding.right.resolve_or_zero(cbw) + child.style.border_width.left + child.style.border_width.right;
@@ -536,7 +558,12 @@ impl<'a> Layouter<'a> {
                 let h = child.content_rect.h;
                 (h, h)
             }
+        };
+        if let Some((style, cache)) = original {
+            child.style = style;
+            child.intrinsic_cache = cache;
         }
+        sizes
     }
 
     /// Lay out an item with its used main size; `forced_cross` stretches

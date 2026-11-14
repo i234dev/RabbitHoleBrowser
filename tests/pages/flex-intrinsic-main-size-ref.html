@@ -1,0 +1,10 @@
+<!doctype html><title>Flex unconstrained content reference</title>
+<style>
+body{margin:0}section{width:300px;height:20px;margin-bottom:4px;background:blue}
+.green{width:100px;height:20px;background:green}.minimum{width:400px}.minimum .green{width:220px}
+.empty{width:100px;background:green}
+</style>
+<section><div class=green></div></section>
+<section class=minimum><div class=green></div></section>
+<section class=empty></section>
+<section><div class=green></div></section>
