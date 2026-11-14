@@ -50,6 +50,12 @@ fn keywords(comps: &[&[Token]]) -> Vec<String> {
 }
 
 fn flex_basis(c: &[Token], ctx: &ApplyCtx) -> Option<Length> {
+    // The flex-basis grammar excludes negative literal lengths/percentages.
+    // Inspect the tokens, not the resolved Length: math functions may produce
+    // a negative result that is instead clamped when determining the used size.
+    if matches!(c, [Token::Dimension(n, _)] | [Token::Percentage(n)] | [Token::Number(n)] if *n < 0.0) {
+        return None;
+    }
     if let Some(kw) = values::ident(c) {
         return match kw.as_str() {
             "auto" | "content" => Some(Length::Auto),

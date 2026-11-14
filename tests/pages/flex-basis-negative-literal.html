@@ -1,0 +1,16 @@
+<!doctype html><title>Invalid flex-basis literals preserve valid sizes</title>
+<link rel="match" href="flex-basis-negative-literal-ref.html">
+<style>
+body{margin:0}section{display:flex;width:100px;height:20px;margin-bottom:4px;background:blue}
+section>div{background:green;width:30px;height:30px;flex-basis:-50px}
+.prior>div{flex-basis:20px;flex-basis:-50px}
+.column{flex-direction:column;width:20px;height:100px}
+.math>div{flex-basis:20px;flex-basis:calc(-50px)}
+.variable>div{--basis:-50px;flex-basis:20px;flex-basis:calc(var(--basis))}
+</style>
+<section><div></div></section>
+<section class=prior><div></div></section>
+<section class=column><div></div></section>
+<section class="column prior"><div></div></section>
+<section class=math><div></div></section>
+<section class=variable><div></div></section>

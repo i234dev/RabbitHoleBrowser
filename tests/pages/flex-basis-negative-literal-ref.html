@@ -1,0 +1,13 @@
+<!doctype html><title>Invalid flex-basis literals reference</title>
+<style>
+body{margin:0}section{width:100px;height:20px;margin-bottom:4px;background:blue}
+section>div{background:green;width:30px;height:30px}
+.prior>div{width:20px}.column{width:20px;height:100px}.column>div{height:30px}
+.column.prior>div{width:30px;height:20px}.math>div,.variable>div{width:0}
+</style>
+<section><div></div></section>
+<section class=prior><div></div></section>
+<section class=column><div></div></section>
+<section class="column prior"><div></div></section>
+<section class=math><div></div></section>
+<section class=variable><div></div></section>
