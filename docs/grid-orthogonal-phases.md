@@ -1,7 +1,8 @@
 # Orthogonal Grid phases: interface checkpoint
 
-This successor is **SIN VALIDAR**. The new `grid::phases` module is compiled
-and tested, but no layout caller uses it yet. It does not fix the real
+This successor is **SIN VALIDAR**. The new `grid::phases` module is included
+in compilation and unit controls, but has not been built or executed and no
+layout caller uses it yet. It does not fix the real
 `column-subgrid-orthogonal-writing-mode-002` regression and is not a release
 candidate. The existing sizing traversal and all WPT expectations are unchanged.
 
@@ -37,6 +38,10 @@ It rejects placement-only inherited geometry. Recording also retains the
 producer point, exact inputs and the completion constraint, so a numeric base
 cannot silently be promoted to a completed result.
 
+An unresolved inherited axis can instead record a projection of hoisted
+descendants. That projection contains contributions and probes, but no
+completed track geometry. It cannot be consumed as a numeric used axis.
+
 Every entry gets a new measurement identity and supplies fresh spaces, gaps
 and opposite-axis sources. An old result cannot be retrieved under a newer
 identity even if track count and placement are unchanged. Ordinary scoped
@@ -70,12 +75,13 @@ complete bound for all preexisting Grid/template work.
 
 ## Written controls and remaining gates
 
-Ten new unit controls cover tagged availability, definite-zero/infinite
+Eleven new unit controls cover tagged availability, definite-zero/infinite
 estimates and names, maximum/minimum flooring and distributed positions,
 clockwise/counter-clockwise/reflected transport, complete maximization versus
 intrinsic minimum, fresh geometry with unchanged placement, min-only versus
 max-only adjustment triggers, operation/virtual-slot isolation, precharged
-recording failure and bounded pass ordering. The split's two existing controls
+recording failure, bounded pass ordering and projection without completed
+geometry. The split's two existing controls
 are retained; their missing test imports are corrected in this checkpoint.
 No Rust build or test execution has been performed for this checkpoint.
 
