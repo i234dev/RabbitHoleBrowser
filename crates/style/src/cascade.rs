@@ -134,7 +134,10 @@ impl RuleIndex {
                         match key {
                             SubjectKey::Id(id) => self.by_id.entry(id).or_default().push(idx),
                             SubjectKey::Class(class) => self.by_class.entry(class).or_default().push(idx),
-                            SubjectKey::Tag(tag) => self.by_tag.entry(tag.to_ascii_lowercase()).or_default().push(idx),
+                            SubjectKey::Tag(mut tag) => {
+                                tag.make_ascii_lowercase();
+                                self.by_tag.entry(tag).or_default().push(idx);
+                            }
                             SubjectKey::Attr(attr) => self.by_attr.entry(attr).or_default().push(idx),
                         }
                     }
