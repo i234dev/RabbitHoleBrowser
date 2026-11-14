@@ -210,13 +210,17 @@ fn parallel_requests_respect_per_host_limit() {
     }));
     let f = fetcher();
     let urls: Vec<Url> = (0..30).map(|i| srv.url(&format!("/r{i}"))).collect();
-    let t = std::time::Instant::now();
     let res = f.fetch_many_for(&urls, 8, Destination::Image, None);
-    assert!(res.iter().all(|r| r.is_ok()));
+    assert_eq!(res.len(), urls.len());
+    for response in &res {
+        assert_eq!(response.as_ref().unwrap().body, b"x");
+    }
+    assert_eq!(srv.requests().len(), urls.len());
+    assert_eq!(active.load(Ordering::SeqCst), 0);
     assert!(peak.load(Ordering::SeqCst) <= 6, "peak {}", peak.load(Ordering::SeqCst));
     assert!(peak.load(Ordering::SeqCst) >= 4, "peak {}", peak.load(Ordering::SeqCst));
-    // 30 requests * 30 ms / 6 connections ~ 150 ms (not 900 ms).
-    assert!(t.elapsed() < Duration::from_millis(700), "{:?}", t.elapsed());
+    // Peak concurrency and complete responses verify parallel progress without
+    // imposing a wall-clock throughput threshold on shared CI runners.
     // Priority: when queued behind the limit, CSS goes before images.
     let order = Arc::new(Mutex::new(Vec::new()));
     let o2 = order.clone();
