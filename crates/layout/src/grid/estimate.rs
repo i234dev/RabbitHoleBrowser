@@ -213,6 +213,10 @@ mod tests {
     }
 
     fn find_mut(node:&mut LayoutBox,id:usize)->Option<&mut LayoutBox> {
+        fn owns(node:&LayoutBox,id:usize)->bool {
+            node.node==Some(id)||(node.wm_wrapper&&node.children.first().is_some_and(|inner|owns(inner,id)))
+        }
+        if node.wm_wrapper&&owns(node,id) {return Some(node);}
         if node.node==Some(id)&&node.kind!=BoxKind::Text {return Some(node);}
         node.children.iter_mut().find_map(|child|find_mut(child,id))
     }
@@ -239,6 +243,9 @@ mod tests {
         let expected=(reference.content_rect.w,reference.rect.h);
         let mut root=crate::wm::prepare(crate::build::Builder::new(&ctx,None).build_root(),doc.body());
         let node=find_mut(&mut root,doc.element_by_id("probe").unwrap()).unwrap();
+        if styles.get(id).is_some_and(|style|style.writing_mode.is_vertical()) {
+            assert!(node.wm_wrapper,"measure the anonymous wrapper, not its logical inner");
+        }
         let original=node.style.clone();
         let item=super::super::GridItem{idx:0,area:super::super::Area{row:(0,1),col:(0,1)},edges:ItemEdges::new(&node.style,800.),justify,align:ItemAlign::FlexStart,column_names:true,row_names:true,parent_lanes_auto:false};
         let mut layouter=Layouter::new(&ctx);
@@ -439,5 +446,15 @@ mod tests {
             assert!(Rc::ptr_eq(&current.style,style));assert!(current.intrinsic_cache.is_none());
             if i<3 {current=current.children.first().unwrap();}
         }
+    }
+
+    #[test]
+    fn measurement_selection_keeps_an_anonymous_wrapper_instead_of_its_identified_inner() {
+        let style=Rc::new(ComputedStyle::initial());
+        let inner=LayoutBox::new(BoxKind::Block,Some(7),style.clone());
+        let mut wrapper=LayoutBox::new(BoxKind::Block,None,style.clone());wrapper.wm_wrapper=true;wrapper.children.push(inner);
+        let mut root=LayoutBox::new(BoxKind::Block,None,style);root.children.push(wrapper);
+        let selected=find_mut(&mut root,7).unwrap();
+        assert!(selected.wm_wrapper);assert!(selected.node.is_none());assert_eq!(selected.children[0].node,Some(7));
     }
 }
