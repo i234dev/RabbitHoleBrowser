@@ -832,6 +832,27 @@ fn read_dispatch_preserves_link_defaults_and_passes_plain_text_and_citation_opti
 }
 
 #[test]
+fn read_after_debug_append_sees_new_prose_without_an_extra_navigation() {
+    let original = "The original visible article already contains enough prose for the existing main-content selector. ".repeat(8);
+    let page: &'static str = Box::leak(format!("<title>Live reader</title><main id=story><p>{original}</p></main>").into_boxed_str());
+    let srv = serve(Box::new(move |_| html(page)));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let before = ok(&mut a, "read", json!({"links":false}));
+    assert!(before.contains("original visible article") && !before.contains("APPENDED_LIVE_READER"), "{before}");
+    let requests = srv.requests().len();
+    ok(&mut a, "debug", json!({"eval":"var p=document.createElement('p');p.id='appended-reader';p.textContent='APPENDED_LIVE_READER This visible paragraph was appended by the ordinary debug tool and must appear in read immediately.';document.getElementById('story').appendChild(p);'appended'"}));
+    // Separate the existing eval/settle freshness contract from main-content
+    // selection: this control does not manufacture stale styles or flush them.
+    let page = a.tabs[a.active.unwrap()].page().unwrap();
+    let node = page.doc.descendants(rabbithole_engine::dom::Document::ROOT).find(|&n| page.doc.attr(n, "id") == Some("appended-reader")).unwrap();
+    assert!(page.styles.get(node).is_some(), "debug already settles the appended element");
+    let after = ok(&mut a, "read", json!({"links":false}));
+    assert!(after.contains("APPENDED_LIVE_READER This visible paragraph"), "read must extract the new prose, not just expose a DOM node: {after}");
+    assert_eq!(srv.requests().len(), requests, "read/debug must not navigate");
+}
+
+#[test]
 fn article_reading_contract_is_compact_through_tool_dispatch_and_keeps_offsets_and_fences() {
     const ARTICLE: &str = include_str!("fixtures/reading-article.html");
     fn body(output: &str) -> &str {
