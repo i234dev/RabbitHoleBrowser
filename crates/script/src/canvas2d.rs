@@ -776,7 +776,7 @@ pub(crate) fn resolve_font(fc: &FontContext, font: &str) -> Option<(f32, rabbith
     for family in &parsed.families {
         let selected = match family {
             FontFamilyName::Named(name) => fc.select_exact_family(name, parsed.weight, parsed.italic),
-            FontFamilyName::Generic(name) => Some(fc.select_family(std::slice::from_ref(name), rabbithole_gfx::Family::Sans, parsed.weight, parsed.italic)),
+            FontFamilyName::Generic(name) => Some(fc.select_generic_family(name, parsed.weight, parsed.italic)),
         };
         if let Some(font) = selected { return Some((parsed.size, font)); }
     }

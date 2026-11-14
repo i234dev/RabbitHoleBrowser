@@ -201,6 +201,18 @@ impl FontContext {
         self.select(generic, weight, italic)
     }
 
+    /// Resolve a generic through host fonts, without treating a document's
+    /// named aliases as platform generic candidates. Unknown generic names
+    /// use Sans; the rounded generic currently shares the Sans fallback.
+    pub fn select_generic_family(&self, family: &str, weight: u16, italic: bool) -> FontId {
+        let family = family.to_ascii_lowercase();
+        let family = if family == "ui-rounded" { "sans-serif".to_string() } else { family };
+        if generic_candidates(&family).is_none() {
+            return self.select(Family::Sans, weight, italic);
+        }
+        self.host_scope().select_family(&[family], Family::Sans, weight, italic)
+    }
+
     /// Select a literal family name without interpreting generic keywords.
     /// A quoted CSS family such as `"serif"` uses this path.
     pub fn select_exact_family(&self, family_lower: &str, weight: u16, italic: bool) -> Option<FontId> {

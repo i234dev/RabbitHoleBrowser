@@ -66,6 +66,9 @@ font shorthand through the owning document's view. Family entries retain their
 order. A quoted name such as `"serif"` is a literal registered name; unquoted
 `serif` selects the generic family. Missing named entries fall through to the
 next family, while a generic entry selects the host's generic immediately.
+Generic lookup does not inspect private aliases such as downloaded Arial or
+Consolas when mapping platform candidates. `ui-rounded` currently uses the
+host's Sans fallback; quoted `"ui-rounded"` still selects a literal name.
 The font setter keeps its previous value when shorthand resolution fails.
 
 The shared shorthand resolver takes an explicit parent and length context.

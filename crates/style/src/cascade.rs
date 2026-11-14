@@ -2043,7 +2043,11 @@ pub fn resolve_font_shorthand(value: &[Token], parent: &ComputedStyle, context: 
         return None;
     }
     if let Some(line) = parsed.line_height.as_deref() {
-        if matches!(line, [Token::Number(value)] | [Token::Dimension(value, _)] | [Token::Percentage(value)] if !value.is_finite() || *value < 0.0)
+        if matches!(line, [Token::Number(value)] if !value.is_finite() || *value < 0.0)
+            || values::parse_length(line).is_some_and(|length| match length.resolve(context) {
+                Length::Px(value) | Length::Percent(value) => !value.is_finite() || value < 0.0,
+                _ => true,
+            })
             || line_height_of(line, computed.font_size, context).is_none()
         {
             return None;
