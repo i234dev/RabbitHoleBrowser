@@ -25,10 +25,10 @@ Design goals, in order:
 
 | Tool         | What it does |
 |--------------|--------------|
-| `open`       | Load a URL (or `back` / `forward` / `reload`); default: short [page summary](#the-page-summary). `find` (string or string array) returns the header, covering-layer warnings and matching passages instead; `summary=true` adds the overview. Without `find`, `snapshot=true` (alias `full=true`, or any `max_tokens`) returns the full snapshot. Other options: `new_tab`, `context` (isolated cookies/storage), `bot`, `robots`, `allowlist`, `javascript`, `dialog`. |
+| `open`       | Load a URL (or `back` / `forward` / `reload`); default: short [page summary](#the-page-summary). `find` (string or string array) returns the header, covering-layer warnings and matching passages; `window` and `limit` adjust that search, and `summary=true` adds the overview. Without `find`, `snapshot=true` (alias `full=true`, or any `max_tokens`) returns the full snapshot. Other options: `new_tab`, `context` (isolated-session name), `bot`, `robots`, `allowlist`, `javascript`, `dialog`. |
 | `snapshot`   | The semantic tree of the page. `ref` expands one element (a truncated list, a collapsed landmark); `max_tokens` (default 2500); `hidden=true` also lists hidden content, marked; `urls=true` shows link targets. |
 | `read`       | Main content as Markdown, without nav/footer/related; without `ref`, starts at the article beginning. Optional `ref` reads that subtree. `max_tokens` defaults to 4000; `offset` counts characters. `links=true` keeps link refs; `links=false` uses plain text. `cites=false` omits same-page superscript citation links; `cites=true` includes them. Use `find` for a particular fact. |
-| `find`       | Search `text` (string or string array, any term), `role` + `name`, or CSS `selector`. Returns element refs in document order. Text search includes surrounding `context` (default 240 characters; 0 keeps the legacy first 120), matching terms and absent terms. `limit` counts elements (default 20). |
+| `find`       | Search `text` (string or string array, any term), `role` + `name`, or CSS `selector`. Returns element refs in document order. `window` (default 240 characters; `context` is an alias) selects passages around the first occurrence of each term, capped at three windows per element. Zero keeps the legacy first 120. `limit` counts elements (default 20). |
 | `click`      | Click by ref (real hit-tested pointer sequence). `hover=true` only hovers. `force=true` dispatches even if covered/invisible. `ref="cookies"` rejects a cookie banner. |
 | `type`       | Type `text` into a field with per-key events (`clear=true` replaces), and/or press a `key` (`Enter`, `Tab`, `Escape`, `ArrowDown`, `Backspace`, …). `submit=true` presses Enter afterwards (implicit submission). |
 | `fill`       | Forms as a unit. No arguments: list the forms. `ref=@fN`: list its fields. `values={label|name|id|@eN: value}` fills (text, `true`/`false` for checkboxes, option label/value for selects and radios). `submit=true` runs constraint validation and submits. A single field: `ref=@eN value=…`. |
@@ -41,6 +41,11 @@ Design goals, in order:
 Every action (`open`, `click`, `type`, `fill`, `scroll`) accepts `dialog`:
 the answer to `alert`/`confirm`/`prompt` raised during that call — `accept`,
 `dismiss` (the default) or the text to answer a prompt with.
+
+The tool-budget test checks the compact `tools/list` result object,
+`{"tools":[…]}`, at at most 6,900 Unicode scalar values, with each tool description
+under 200 UTF-8 bytes. This is a catalogue-size gate, separate from model tokens,
+page output and the surrounding JSON-RPC envelope.
 
 ### CLI
 
@@ -71,6 +76,13 @@ Options shared with `rabbithole mcp`: `--bot`, `--no-robots`,
 
 ## Lighter read output
 
+Without `ref`, main-content selection uses the live, filtered DOM. It scores
+prose, including containers made of inline children, and excludes navigation,
+footers, forms, controls and hidden content. A small `main` or `article` shell
+does not hide substantial prose elsewhere: when no suitable container holds
+enough of the text, the reader uses the filtered body. `read ref=@eN` keeps the
+requested subtree rather than running that selection again.
+
 The published reading contract keeps `links` set to
 `true`, retaining `[text](@eN)` and stable navigation refs. `links=false` emits
 plain anchor text without assigning link refs. `cites` defaults to `false`:
@@ -84,8 +96,8 @@ before `, . ; : )` is removed. Code spans and fenced preformatted content retain
 meaningful spaces and blank lines; code containing backticks uses a longer
 Markdown delimiter. List indentation, link ref syntax and page-content fences
 remain intact. The existing `max_tokens=4000`, character `offset`, and `ref`
-subtree behaviour are unchanged. These output-size improvements have not yet
-been benchmarked against the historical RH-AGENT-001 runs.
+subtree behaviour are unchanged. Benchmark results are tracked separately with
+their measured source revision and conditions.
 
 ## The page summary
 
@@ -119,6 +131,11 @@ Summary only: open … find= or find text= locates facts with context; read with
 * `outline`: up to 12 headings, prioritising the two highest heading levels
   present before deeper headings. Selected headings remain in document order,
   indented by level, each with a ref (the link's ref when it is a link).
+* With at most two headings and at least 200 characters of selected main
+  content, `text: N chars in main (read shows it)` signals that prose is available.
+  `N` counts Unicode scalar values after normalising whitespace and nonempty
+  text-node boundaries to one space. It does not count Markdown, refs or an
+  added page title, and does not insert the article into the summary.
 * `forms`: up to 3 forms that contain a text field or submit control, with up to
   6 fields each (label, type, ref, submit button), plus text inputs outside forms.
   Other forms are counted as `… +N formularios sin campos de texto`; `fill` still
@@ -133,14 +150,19 @@ The refs are the same ones `snapshot`, `find` and the actions use.
 Search during navigation to locate a fact in one call:
 
 ```json
-{"url":"https://example.test/article","find":["Guido","1989","CWI"]}
+{"url":"https://example.test/article","find":["Guido","1989","CWI"],"window":240,"limit":5}
 ```
 
 `open` with `find` preserves the page header, navigation notices and covering-layer
 warnings, then returns search results. It omits landmarks, outline, forms and
-counts unless `summary=true`. Search uses the default 240-character window and
+counts unless `summary=true`. The header, warnings and passages share one
+untrusted-content fence. Search uses the default 240-character window and
 20-element limit. `find` takes precedence over snapshot options; ordinary
 `open` and `snapshot` output keep their existing behaviour.
+
+On `open`, `context` is exclusively an isolated-session name, not a search
+budget. Numeric values and names containing only ASCII digits are rejected
+before navigation or context creation; use `window` for the passage size.
 
 On a loaded page, `find {"text":["Guido","1989","CWI"],"limit":10}` searches
 all eligible elements once, returning an element when any term matches. Results
@@ -154,33 +176,42 @@ Inline links contribute their complete labels to searchable prose: a paragraph
 this plain text with the normal tree's visibility rules and node refs; it does
 not parse snapshot link markers or change snapshot rendering. Other separate
 semantic runs keep their boundaries. Hits in different runs of one element
-share a result, whose snippet comes from its first matching run.
+share a result and can contribute separate fragments to its snippet.
 Linked prose uses its real common containing element, including across inline
 spans, so the result ref can read the complete passage.
 
 ```text
-@e17 text "…Guido began Python in December 1989 at CWI…" (below viewport) [text: "Guido", "1989", "CWI"] (+2 más en este elemento)
-Sin coincidencias: "diciembre de 1989"
+@e17 text "…Guido began Python in December 1989 at CWI…" (below viewport) [text: "Guido", "1989", "CWI"] (+2 more in this element)
+No matches for: "diciembre de 1989"
 ```
 
 The core result grammar stays `@eN role "snippet" (position)`, with an optional
-position; text matches append `[text: "term", …]` in request order. Repeated
-occurrences, including occurrences of different requested terms, append
-`(+N más en este elemento)`. Terms are case-insensitive literals; duplicate terms
+position; text matches append `[text: "term", …]` in request order. Occurrences
+not wholly visible in the returned fragments append `(+N more in this element)`.
+This includes a term whose window did not fit; its presence is still reported.
+Terms are case-insensitive literals; duplicate terms
 that lowercase identically are combined. There is no regex option. Empty searches
 and arrays containing nonstrings are errors.
 
-`context` is an integer from 0 through 4096. A positive value caps the total
-original Unicode characters in the snippet, including `…` at clipped ends;
-the window centres on the earliest match. Small budgets can clip the match
-itself. A name that fits is returned whole. Lowercase expansions such as `İ`
-map back to original character positions. `context=0` preserves the old initial
-120-character clipping. Quotes, backslashes and control characters keep the
-existing display escaping rules.
+`window` is an integer from 0 through 4096. On `find`, `context` remains an
+alias; `window` wins when both are present. A positive window centres on the
+first occurrence of each requested term. Overlapping or touching windows are
+merged, and separate fragments are joined with `…` in source order. The snippet
+for **each element**, including these ellipses, is capped at `3 × window` original
+Unicode characters before display escaping. Terms are admitted in request order
+when the cap prevents adding another fragment. Small windows can clip a match.
+Lowercase expansions such as `İ` map back to original character positions.
+`window=0` is the explicit exception: it preserves the old first-120-character
+clipping. Quotes, backslashes and control characters retain their escaping rules.
+
+Text search without an explicit `role` can omit redundant links whose normalised
+label exactly equals a requested term when matching prose is also available.
+It reports `(N redundant links omitted; use role=link to include)`. An explicit
+role search retains its usual matching elements; a distinct link label is kept.
 
 `limit` truncates returned elements, not the scan: a term found later is never
 listed as absent just because its element was omitted. The final
-`Sin coincidencias:` line reports terms absent from the entire eligible selection.
+`No matches for:` line reports terms absent from the entire eligible selection.
 Search results and this line remain inside the untrusted-content fences; refs
 remain usable with `read`, `snapshot` and actions.
 
