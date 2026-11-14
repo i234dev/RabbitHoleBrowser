@@ -36,6 +36,9 @@ and the [WebGL preprocessing rules](https://registry.khronos.org/webgl/specs/lat
   continuation requirement. Comment contents and quoted preprocessing tokens are not
   expanded. Non-GLSL characters in eliminated branches can disappear before the GLSL
   character/grammar check; active string or character expressions remain unsupported.
+  ESSL 100 retains block-comment newlines for directive boundaries. ESSL 300 replaces
+  the complete block comment earlier, while the physical line map remains available
+  for `__LINE__` and diagnostics.
 - `#error` produces a compile diagnostic. Unknown pragmas are ignored as GLSL requires.
   `optimize(on/off)` and `debug(on/off)` are recognized implementation-dependent hints,
   checked outside function definitions; they do not expose a new optimizer or debugger.

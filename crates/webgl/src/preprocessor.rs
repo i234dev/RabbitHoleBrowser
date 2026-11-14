@@ -97,7 +97,7 @@ fn splice(source: Mapped) -> Mapped {
     Mapped { text: String::from_utf8(text).expect("splicing ASCII preserves UTF-8"), lines }
 }
 
-fn comments(source: Mapped) -> Result<Mapped, String> {
+fn comments(source: Mapped, version: u32) -> Result<Mapped, String> {
     let bytes = source.text.as_bytes();
     let (mut text, mut lines, mut i) = (Vec::new(), Vec::new(), 0);
     while i < bytes.len() {
@@ -116,7 +116,12 @@ fn comments(source: Mapped) -> Result<Mapped, String> {
             while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
         } else if bytes.get(i..i + 2) == Some(b"/*") {
             let line = source.lines[i]; text.push(b' '); lines.push(line); i += 2;
-            while i + 1 < bytes.len() && &bytes[i..i + 2] != b"*/" { i += 1; }
+            while i + 1 < bytes.len() && &bytes[i..i + 2] != b"*/" {
+                // ESSL 100 retains comment newlines for directive boundaries;
+                // ESSL 300 replaces the complete block in its earlier phase.
+                if version == 100 && bytes[i] == b'\n' { text.push(b'\n'); lines.push(source.lines[i]); }
+                i += 1;
+            }
             if i + 1 >= bytes.len() { return Err(error(line, "unterminated comment")); }
             i += 2;
         } else { text.push(bytes[i]); lines.push(source.lines[i]); i += 1; }
@@ -169,7 +174,7 @@ pub(crate) fn preprocess(source: &str, token_limit: usize) -> Result<String, Str
     let first_line = normalized.text.split('\n').next().unwrap_or("");
     let strict_300 = header_300(first_line) && normalized.text.contains('\n');
     let version = if strict_300 { 300 } else { 100 };
-    let lines = tokenize(&comments(splice(normalized))?, token_limit)?;
+    let lines = tokenize(&comments(splice(normalized), version)?, token_limit)?;
     let mut processor = Processor { version, token_limit, macros: BTreeMap::new(), names: BTreeMap::new(), work: 0, created_bytes: 0, braces: 0 };
     let (mut output, mut pending, mut stack, mut seen_any, mut version_seen) = (String::new(), Vec::new(), Vec::<Conditional>::new(), false, false);
     for line in lines {
@@ -563,8 +568,17 @@ mod tests {
         assert_eq!(words("#define VA\\\nL 0.25\nVAL __LINE__"), ["0.25", "3"]);
         assert_eq!(words("#version 300 es\n#define VA\\\nL 0.25\nVAL __LINE__ __VERSION__"), ["#version", "300", "es", "0.25", "4", "300"]);
         assert_eq!(words("// ignored\\\n#define BAD 1\n#ifdef BAD\n#error continued comment expanded\n#endif\n__LINE__"), ["6"]);
-        assert_eq!(words("#define X /* comment\ncontinuation */ 0.5\nX __LINE__"), ["0.5", "3"]);
         assert_eq!(words("0.5\\\\\n\n"), ["0.5", "\\"]);
+    }
+
+    #[test]
+    fn block_comment_newlines_have_versioned_directive_boundaries() {
+        assert_eq!(words("value; /* comment\n*/ #define COLOR 0.5\nCOLOR"), ["value", ";", "0.5"]);
+        rejects("#version 300 es\nvalue; /* comment\n*/ #define COLOR 0.5\nCOLOR", "# must start a directive");
+        // In 100, X is empty and0.5 is source after the directive's newline.
+        // In 300, the complete comment is replaced before parsing the directive.
+        assert_eq!(words("#define X /* comment\ncontinuation */ 0.5\nX X __LINE__"), ["0.5", "3"]);
+        assert_eq!(words("#version 300 es\n#define X /* comment\ncontinuation */ 0.5\nX X __LINE__"), ["#version", "300", "es", "0.5", "0.5", "4"]);
     }
 
     #[test]

@@ -101,3 +101,16 @@ fn preprocessing_failures_are_compile_errors_and_keep_the_linked_executable() {
         }
     }
 }
+
+#[test]
+fn a_block_comment_newline_starts_a_directive_in_essl100_but_not_300() {
+    let source100 = "precision mediump float; /* comment\n*/ #define COLOR vec4(1.0)\nvoid main(){gl_FragColor=COLOR;}";
+    let mut old = context(100); scene(&mut old, &vertex(100), source100);
+    assert_eq!(pixel(&mut old), [255, 255, 255, 255]);
+
+    let source300 = "#version 300 es\nprecision mediump float;out vec4 color; /* comment\n*/ #define COLOR vec4(1.0)\nvoid main(){color=COLOR;}";
+    let mut new = context(300); let fragment = new.create_shader(FRAGMENT_SHADER).unwrap();
+    new.shader_source(fragment, source300).unwrap(); new.compile_shader(fragment).unwrap();
+    assert!(!new.shader_compile_status(fragment).unwrap());
+    assert!(new.shader_info_log(fragment).unwrap().contains("# must start a directive"));
+}
