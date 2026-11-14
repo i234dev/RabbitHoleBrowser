@@ -478,13 +478,13 @@ mod tests {
         TrackList{tracks,names:vec![vec!["first".into()],vec!["middle".into()],vec!["last".into()]],inherited:None}
     }
     fn child()->LayoutBox {
-        let mut style=ComputedStyle::default();
+        let mut style=ComputedStyle::initial();
         style.grid_template_columns=vec![TrackListItem::Subgrid{line_names:vec![]}];
         style.margin=Edges::all(Length::Px(2.));style.padding=Edges::all(Length::Px(5.));style.border_width=Edges::all(3.);
         let mut b=LayoutBox::new(BoxKind::Block,None,Rc::new(style));b.formatting=Formatting::Grid;b
     }
     fn item(start:i32,end:i32)->GridItem {
-        GridItem{idx:0,area:super::super::Area{col:(start,end),row:(0,1)},edges:ItemEdges::new(&ComputedStyle::default(),0.),justify:ItemAlign::Stretch,align:ItemAlign::Stretch,column_names:true,row_names:true,parent_lanes_auto:false}
+        GridItem{idx:0,area:super::super::Area{col:(start,end),row:(0,1)},edges:ItemEdges::new(&ComputedStyle::initial(),0.),justify:ItemAlign::Stretch,align:ItemAlign::Stretch,column_names:true,row_names:true,parent_lanes_auto:false}
     }
 
     #[test]
@@ -666,7 +666,7 @@ mod tests {
         let list=tracks(&b,false,None,50.);let mut hypothetical=item(1,2);
         hypothetical.edges.margin.left=10.;hypothetical.edges.margin.right=10.;
         let source=sizing_section(&list,1,2,50.,true);
-        let AxisInheritance::Tracks(axis)=item_layer_source(source,&hypothetical,&ComputedStyle::default(),false,0.) else {panic!("missing source")};
+        let AxisInheritance::Tracks(axis)=item_layer_source(source,&hypothetical,&ComputedStyle::initial(),false,0.) else {panic!("missing source")};
         assert_eq!((axis.inset_start,axis.inset_end),(10.,10.));
     }
 }
