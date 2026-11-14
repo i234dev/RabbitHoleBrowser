@@ -28,20 +28,24 @@ jobs:
       - id: build
         run: cargo build --workspace --release --locked
       # Default target selection retains example linking and library doctests.
-      - name: Test interpreter with incremental GC stress
+      - id: tests_off
+        name: Test interpreter with incremental GC stress
         shell: bash
         env:
           RABBITHOLE_JIT: "off"
           RH_GC_STRESS: inc
-        run: cargo test --workspace --profile ci --features jit --locked 2>&1 | tee tests-off.log
-      - name: Test baseline JIT with incremental GC stress
+        run: cargo test --workspace --profile ci --features jit --locked --no-fail-fast 2>&1 | tee tests-off.log
+      - id: tests_on
+        name: Test baseline JIT with incremental GC stress
+        if: always() && steps.build.outcome == 'success'
         shell: bash
         env:
           RABBITHOLE_JIT: "on"
           RABBITHOLE_JIT_THRESHOLD: "0"
           RH_GC_STRESS: inc
-        run: cargo test --workspace --profile ci --features jit --locked 2>&1 | tee tests-on.log
+        run: cargo test --workspace --profile ci --features jit --locked --no-fail-fast 2>&1 | tee tests-on.log
       - name: Compare executed test results
+        if: always() && steps.build.outcome == 'success'
         run: python scripts/compare-test-runs.py tests-off.log tests-on.log
       - name: Headless smoke test
         run: cargo run --release --locked -p rabbithole -- screenshot about:home -o home.png --width 1000 --height 700
