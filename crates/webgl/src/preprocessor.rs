@@ -251,7 +251,8 @@ impl Processor {
     fn charge(&mut self, line: usize, bytes: usize) -> Result<(), String> {
         self.work = self.work.saturating_add(1);
         self.created_bytes = self.created_bytes.saturating_add(bytes);
-        if self.work > MAX_WORK || self.created_bytes > MAX_CREATED_BYTES { return Err(error(line, "macro expansion work budget exceeded")); }
+        if self.work > MAX_WORK { return Err(error(line, "macro expansion work budget exceeded")); }
+        if self.created_bytes > MAX_CREATED_BYTES { return Err(error(line, "macro token materialization byte budget exceeded")); }
         Ok(())
     }
     fn builtin(&self, name: &str, line: usize) -> Option<usize> {
@@ -587,6 +588,7 @@ mod tests {
         assert_eq!(words(source), ["selected", "second", "third"]);
         assert_eq!(words("#if 0 && (1/0)\nwrong\n#else\nselected\n#endif"), ["selected"]);
         assert_eq!(words("#if 1 || (1/0)\nselected\n#endif"), ["selected"]);
+        assert!(preprocess("#if 1 || (1 +)\n#endif", 1024).is_err(), "short circuit cannot hide invalid expression syntax");
         assert_eq!(words("#if 0\n#if undefined / invalid\n#error ignored\n#endif\n#else\nselected\n#endif"), ["selected"]);
         for condition in ["MISSING", "0 || MISSING", "1 && MISSING"] { rejects(&format!("#if {condition}\n#endif"), "undefined"); }
         rejects("#define D defined\n#if D(X)\n#endif", "macro-generated defined");
@@ -634,5 +636,22 @@ mod tests {
         let parameters = (0..33).map(|i| format!("x{i}")).collect::<Vec<_>>().join(","); rejects(&format!("#define F({parameters}) 0.5\n"), "parameter budget");
         let long = "a".repeat(250); rejects(&format!("#define A {long}\n{}", "A ".repeat(300)), "budget");
         rejects(&" ".repeat(MAX_BYTES + 1), "64 KiB");
+    }
+
+    #[test]
+    fn expansion_work_and_materialization_are_accumulated_across_directives() {
+        let mut work = "#define M0 1\n".to_string();
+        for index in 1..=10 { work.push_str(&format!("#define M{index} M{}+M{}\n", index - 1, index - 1)); }
+        work.push_str(&"#if M10\n#endif\n".repeat(17));
+        // Each condition fits by itself and produces no shader output; only
+        // the cumulative expansion work crosses the shared limit.
+        rejects(&work, "macro expansion work budget exceeded");
+
+        let long = "a".repeat(250);
+        let bytes = format!("#define L {long}\n{}", "#if 0 && L\n#endif\n".repeat(2100));
+        assert!(bytes.len() < MAX_BYTES);
+        // Source tokens/work stay below their limits; repeated long-token
+        // materialization crosses 1 MiB. The unknown identifier is unevaluated.
+        rejects(&bytes, "materialization byte budget exceeded");
     }
 }
