@@ -137,3 +137,12 @@ fn for_using_disposes_once_and_preserves_iteration_closures_on_continue_and_brea
         assert_eq!(evaluate(&source), "1,2:1,2", "{loop_kind} ({declaration})");
     }
 }
+
+#[test]
+fn duplicate_parameter_last_missing_argument_overwrites_earlier_value() {
+    for (actual, expected) in [("1,2", "undefined"), ("1,2,3,4", "4"), ("1,2,3,undefined", "undefined"), ("", "undefined")] {
+        assert_eq!(evaluate(&format!("(function(x,a,b,x){{return x;}})({actual})")), expected);
+        assert_eq!(evaluate(&format!("(function(x,a,b,x){{return ()=>x;}})({actual})()")), expected);
+    }
+    assert_eq!(evaluate("(function(x,a,b,x){x=5;return [x,arguments[0],arguments.length].join(':');})(1,2)"), "5:1:2");
+}

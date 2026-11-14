@@ -596,10 +596,9 @@ impl Realm {
                     slots = vec![Value::Undefined; nslots];
                 }
                 for (i, &loc) in cr.param_locs.iter().enumerate() {
-                    if i >= argc {
-                        break;
-                    }
-                    let v = arg(i);
+                    // Repeated formal names share a location. A missing
+                    // later argument must overwrite its earlier value too.
+                    let v = if i < argc { arg(i) } else { Value::Undefined };
                     match loc {
                         VarLoc::Reg(r) => *regs.add(r as usize) = v,
                         VarLoc::Slot(s) => slots[s as usize] = v,
