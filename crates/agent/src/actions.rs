@@ -47,6 +47,7 @@ fn check_fill_control(page: &Page, control: NodeId) -> Result<(), String> {
 /// by click. Navigation from focus/input stops this sequence immediately.
 pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &str) -> Result<FillOutcome, String> {
     check_fill_control(page, control)?;
+    let document = page.doc.weak_identity();
     let mut result = FillOutcome::default();
     let kind = page.control_kind(control);
     match kind {
@@ -84,6 +85,10 @@ pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &s
             if result.outcome.navigation.is_some() {
                 return Ok(result);
             }
+            if !document.is_for(&page.doc) {
+                result.error = Some("the document was replaced while receiving focus; take a new snapshot".into());
+                return Ok(result);
+            }
             if let Err(error) = check_fill_control(page, control) {
                 result.error = Some(error);
                 return Ok(result);
@@ -99,6 +104,10 @@ pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &s
     result.value_applied = true;
     engine.restyle(page);
     merge(&mut result.outcome, engine.dispatch_event(page, control, "input", input_init(Some(value))));
+    if !document.is_for(&page.doc) {
+        result.error = Some("the document was replaced by the input event; take a new snapshot".into());
+        return Ok(result);
+    }
     if result.outcome.navigation.is_some() || !page.doc.is_connected(control) {
         return Ok(result);
     }

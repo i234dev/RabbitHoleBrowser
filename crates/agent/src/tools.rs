@@ -879,6 +879,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let mut outcome = ScriptOutcome::default();
     let mut frame = 0;
     let mut field_navigation = false;
+    let mut field_document_replaced = false;
     for (index, operation) in operations.iter().enumerate() {
         let (field_frame, fields, field_index) = match fill_fields(agent, ti, &operation.target) {
             Ok(fields) => fields,
@@ -888,6 +889,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
             }
         };
         frame = field_frame;
+        let document = agent.tabs[ti].frames[frame].page.doc.weak_identity();
         let result = crate::forms::set_field_with_outcome(&agent.engine, &mut agent.tabs[ti].frames[frame].page, &fields, field_index, &operation.value);
         match result {
             Ok((description, result)) => {
@@ -915,6 +917,23 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
             }
             crate::actions::merge(&mut outcome, ScriptOutcome { navigation: settled.navigation, new_windows: settled.new_windows, dialogs: settled.dialogs, relayout: settled.changed, ..ScriptOutcome::default() });
         }
+        if !document.is_for(&agent.tabs[ti].frames[frame].page.doc) {
+            // document.open may reattach the same control/form NodeIds. Their
+            // old refs still belong to the replaced document incarnation.
+            agent.tabs[ti].refs.drop_frame(frame);
+            if outcome.navigation.is_none() {
+                field_document_replaced = true;
+                notes.push("The document was replaced while filling; take a new snapshot before continuing.".into());
+                let pending: Vec<String> = operations[index + 1..].iter().map(|operation| format!("\"{}\"", esc(&operation.key))).collect();
+                if !pending.is_empty() {
+                    notes.push(format!("Not attempted after document replacement: {}.", pending.join(", ")));
+                }
+                if submit {
+                    notes.push("submit=true was not attempted after document replacement.".into());
+                }
+                break;
+            }
+        }
         if outcome.navigation.is_some() {
             field_navigation = true;
             let pending: Vec<String> = operations[index + 1..].iter().map(|operation| format!("\"{}\"", esc(&operation.key))).collect();
@@ -934,7 +953,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     }
     let mut request = None;
     let mut submit_error = false;
-    if submit && !field_navigation {
+    if submit && !field_navigation && !field_document_replaced {
         let resolved = agent.resolve(ti, form.as_ref().unwrap());
         match resolved {
             Err(error) => {
@@ -981,7 +1000,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         text.push('\n');
         text.push_str(&notes.join("\n"));
     }
-    if submit_error || (!errors.is_empty() && done.is_empty() && !submit && !field_navigation) {
+    if submit_error || (!errors.is_empty() && done.is_empty() && (!submit || field_document_replaced) && !field_navigation) {
         return Err(text);
     }
     Ok(Out::text(text))
