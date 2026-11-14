@@ -138,6 +138,7 @@ impl MinContentProbe {
 /// Construction performs complete track sizing or accepts an already-used
 /// inherited axis. A partly initialized/maximized list cannot be recorded as
 /// an axis result merely because it has numeric base sizes.
+#[derive(Clone)]
 pub(super) struct CompletedAxis {
     tracks:TrackList,
     space:Option<GridSpace>,
@@ -161,18 +162,20 @@ impl CompletedAxis {
 #[derive(Clone, Debug)]
 struct Entry { id:MeasurementId, point:MeasurePoint, inputs:MeasureInputs }
 
-/// Only a completed axis is recorded. Partial bases are never a result.
+/// A shared axis can project descendants before its parent resolves its used
+/// sizes. That result contains no track sizes. Only an explicit completion
+/// provides geometry, together with the point and inputs that produced it.
 pub(super) struct AxisRecord {
     entry:Entry,
-    pub(super) tracks:TrackList,
+    complete:Option<CompletedAxis>,
     pub(super) contributions:Vec<Contribution>,
-    pub(super) completed_space:Option<GridSpace>,
     min_content:Vec<MinContentProbe>,
 }
 
 impl AxisRecord {
     pub(super) fn producer(&self)->MeasurePoint {self.entry.point}
     pub(super) fn inputs(&self)->&MeasureInputs {&self.entry.inputs}
+    pub(super) fn completion(&self)->Option<&CompletedAxis> {self.complete.as_ref()}
 }
 
 pub(super) struct GridOperation {
@@ -211,14 +214,21 @@ impl GridOperation {
     /// Every call records freshly measured inputs. Comparison uses only true
     /// min-content probes; a max-only change must not request an adjustment.
     pub(super) fn record(&mut self,id:&MeasurementId,completed:&CompletedAxis,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
+        self.record_inner(id,Some(completed),contributions,probes,budget)
+    }
+    /// Hoisted descendants of an unresolved inherited axis are measured, not
+    /// completed. In particular this cannot turn placement bases into sizes.
+    pub(super) fn record_projection(&mut self,id:&MeasurementId,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
+        self.record_inner(id,None,contributions,probes,budget)
+    }
+    fn record_inner(&mut self,id:&MeasurementId,complete:Option<&CompletedAxis>,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
         let entry=self.active.as_ref().filter(|entry|entry.id==*id).expect("Stale Grid measurement result");
         let axis=entry.inputs.local_axis(entry.point).index();
-        let tracks=&completed.tracks;
-        budget.tracks(tracks);
+        if let Some(complete)=complete {budget.tracks(&complete.tracks);}
         budget.charge(contributions.len().saturating_mul(3));
         for probe in probes {budget.charge(probe.path.len().saturating_add(1));}
         let changed=self.axes[axis].as_ref().is_some_and(|before|before.min_content!=probes);
-        let record=AxisRecord{entry:entry.clone(),tracks:tracks.clone(),contributions:contributions.to_vec(),completed_space:completed.space,min_content:probes.to_vec()};
+        let record=AxisRecord{entry:entry.clone(),complete:complete.cloned(),contributions:contributions.to_vec(),min_content:probes.to_vec()};
         self.axes[axis]=Some(record);
         changed
     }
@@ -375,7 +385,8 @@ mod tests {
         let id=operation.begin(MeasurePoint::AdjustColumns,inputs(),&mut budget);
         assert!(operation.record(&id,&done,&fresh,&changed_min,&mut budget));
         let record=operation.result(&id).unwrap();assert_eq!(record.contributions,fresh);
-        assert_eq!(record.completed_space,Some(GridSpace::MaxContent));assert_eq!(record.tracks.tracks[0].base,90.);
+        let complete=record.completion().unwrap();
+        assert_eq!(complete.space,Some(GridSpace::MaxContent));assert_eq!(complete.tracks().tracks[0].base,90.);
     }
 
     #[test]
@@ -401,7 +412,7 @@ mod tests {
         assert!(catch_unwind(AssertUnwindSafe(||operation.record(&id,&done,&contributions,&probes,&mut short))).is_err());
         assert!(operation.result(&id).is_none());
         operation.record(&id,&done,&contributions,&probes,&mut budget);
-        assert_eq!(operation.result(&id).unwrap().tracks.tracks[0].base,40.);
+        assert_eq!(operation.result(&id).unwrap().completion().unwrap().tracks().tracks[0].base,40.);
     }
 
     #[test]
@@ -414,5 +425,21 @@ mod tests {
         assert!(catch_unwind(AssertUnwindSafe(||operation.begin(MeasurePoint::AdjustColumns,inputs(),&mut budget))).is_err());
         assert!(operation.result(&id).is_some());
         operation.begin(MeasurePoint::AdjustRows,inputs(),&mut budget);
+    }
+
+    #[test]
+    fn shared_axis_projection_cannot_be_used_as_completed_geometry() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let contributions=[contribution(10.,40.)];
+        let probes=[MinContentProbe::new(&[7],10.,&mut budget)];
+        let id=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        operation.record_projection(&id,&contributions,&probes,&mut budget);
+        let record=operation.result(&id).unwrap();
+        assert!(record.completion().is_none());assert_eq!(record.contributions,contributions);
+        let completed=completed(&contributions,&mut budget);
+        let next=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        assert!(operation.result(&next).is_none());
+        operation.record(&next,&completed,&contributions,&probes,&mut budget);
+        assert!(operation.result(&next).unwrap().completion().is_some());
     }
 }
