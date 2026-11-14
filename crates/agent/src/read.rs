@@ -59,52 +59,137 @@ fn visible(page: &Page, geo: &GeoMap, n: NodeId) -> bool {
     }
 }
 
-fn text_len(doc: &Document, n: NodeId) -> usize {
-    doc.text_content(n).split_whitespace().map(|w| w.len() + 1).sum()
+// Keep main-content selection and the body fallback on the same exclusions.
+// Explicit read(ref) still starts at the requested node, as before.
+fn omitted_block(doc: &Document, n: NodeId) -> bool {
+    matches!(doc.tag(n), Some("script" | "style" | "noscript" | "template" | "nav" | "aside" | "footer" | "form" | "button" | "select" | "input" | "textarea" | "iframe" | "dialog" | "svg" | "menu"))
+        || is_junk(doc, n)
+        || matches!(doc.attr(n, "role"), Some("navigation" | "complementary" | "contentinfo" | "dialog" | "alertdialog"))
 }
 
-fn link_len(doc: &Document, n: NodeId) -> usize {
-    doc.descendants(n).filter(|&d| doc.is_element(d, "a")).map(|a| text_len(doc, a)).sum()
+#[derive(Clone, Copy, Default)]
+struct TextStats {
+    // Unicode scalar values, with whitespace and text-node boundaries normalized
+    // to one space. Neither hidden text nor control values enter this count.
+    chars: usize,
+    links: usize,
+    commas: usize,
+}
+
+impl TextStats {
+    fn append(&mut self, other: Self) {
+        if self.chars > 0 && other.chars > 0 { self.chars += 1; }
+        self.chars += other.chars;
+        self.links += other.links;
+        self.commas += other.commas;
+    }
+}
+
+struct Content {
+    root: NodeId,
+    order: Vec<NodeId>,
+    stats: HashMap<NodeId, TextStats>,
+}
+
+impl Content {
+    fn of(page: &Page) -> Self {
+        let doc = &page.doc;
+        let geo = GeoMap::build(page);
+        let root = doc.body().unwrap_or(Document::ROOT);
+        let mut content = Self { root, order: Vec::new(), stats: HashMap::new() };
+        let mut stack = vec![(root, false)];
+        while let Some((n, visited)) = stack.pop() {
+            if let Some(text) = doc.text(n) {
+                let mut stats = TextStats::default();
+                for word in text.split_whitespace() {
+                    if stats.chars > 0 { stats.chars += 1; }
+                    stats.chars += word.chars().count();
+                    stats.commas += word.matches(',').count();
+                }
+                content.stats.insert(n, stats);
+                continue;
+            }
+            if n != root && (omitted_block(doc, n) || !visible(page, &geo, n)) { continue; }
+            if !visited {
+                if doc.element(n).is_some() { content.order.push(n); }
+                stack.push((n, true));
+                stack.extend(doc.flat_children(n).into_iter().rev().map(|c| (c, false)));
+            } else {
+                let mut stats = TextStats::default();
+                for c in doc.flat_children(n) {
+                    stats.append(content.get(c));
+                }
+                if doc.is_element(n, "a") { stats.links = stats.chars; }
+                content.stats.insert(n, stats);
+            }
+        }
+        content
+    }
+
+    fn get(&self, n: NodeId) -> TextStats { self.stats.get(&n).copied().unwrap_or_default() }
+
+    fn substantial(&self, n: NodeId) -> bool {
+        // A small shell labelled main must not hide the prose elsewhere. With
+        // several substantial regions the filtered body is the safe fallback.
+        self.get(n).chars.saturating_mul(2) >= self.get(self.root).chars
+    }
 }
 
 /// The element holding the main content.
 pub fn main_content(page: &Page) -> Option<NodeId> {
+    let content = Content::of(page);
+    select_main(page, &content)
+}
+
+/// Visible, normalized prose in the same live subtree used by read without ref.
+pub(crate) fn main_text_chars(page: &Page) -> usize {
+    let content = Content::of(page);
+    let root = select_main(page, &content).unwrap_or(content.root);
+    content.get(root).chars
+}
+
+fn select_main(page: &Page, content: &Content) -> Option<NodeId> {
     let doc = &page.doc;
-    let all: Vec<NodeId> = doc.descendants(Document::ROOT).filter(|&n| doc.element(n).is_some() && crate::ax::displayed(page, n)).collect();
+    let all = &content.order;
     // Explicit markers first.
     let explicit: Vec<NodeId> = all.iter().copied().filter(|&n| doc.is_element(n, "main") || doc.attr(n, "role") == Some("main")).collect();
-    if let Some(&m) = explicit.iter().max_by_key(|&&n| text_len(doc, n)) {
-        if text_len(doc, m) > 200 {
+    if let Some(&m) = explicit.iter().max_by_key(|&&n| content.get(n).chars) {
+        if content.get(m).chars > 200 && content.substantial(m) {
             // A single big <article> inside main is even better.
-            let arts: Vec<NodeId> = doc.descendants(m).filter(|&d| doc.is_element(d, "article")).collect();
-            if arts.len() == 1 && text_len(doc, arts[0]) * 2 > text_len(doc, m) {
+            let arts: Vec<NodeId> = doc.descendants(m).filter(|&d| doc.is_element(d, "article") && content.get(d).chars > 0).collect();
+            if arts.len() == 1 && content.get(arts[0]).chars * 2 > content.get(m).chars && content.substantial(arts[0]) {
                 return Some(arts[0]);
             }
             return Some(m);
         }
     }
     let arts: Vec<NodeId> = all.iter().copied().filter(|&n| doc.is_element(n, "article")).collect();
-    if arts.len() == 1 && text_len(doc, arts[0]) > 500 {
+    if arts.len() == 1 && content.get(arts[0]).chars > 500 && content.substantial(arts[0]) {
         return Some(arts[0]);
     }
     // Readability scoring.
     let mut scores: HashMap<NodeId, f32> = HashMap::new();
-    for &n in &all {
+    for &n in all {
         let tag = doc.tag(n).unwrap_or("");
-        if !matches!(tag, "p" | "pre" | "td" | "blockquote" | "li" | "dd") && !(tag == "div" && doc.child_elements(n).next().is_none()) {
+        // A div made of spans/links is prose too (including JS-created cards).
+        // Divs containing paragraphs already receive their children's scores.
+        let inline_div = tag == "div" && !doc.flat_children(n).into_iter().any(|c| {
+            content.get(c).chars > 0 && page.styles.get(c).map(|s| s.display.is_block_level()).unwrap_or(false)
+        });
+        if !matches!(tag, "p" | "pre" | "td" | "blockquote" | "li" | "dd") && !inline_div {
             continue;
         }
-        let text = doc.text_content(n);
-        let len = text.split_whitespace().map(|w| w.len() + 1).sum::<usize>();
+        let stats = content.get(n);
+        let len = stats.chars;
         if len < 25 {
             continue;
         }
-        let score = 1.0 + text.matches(',').count() as f32 + (len as f32 / 100.0).min(3.0);
+        let score = 1.0 + stats.commas as f32 + (len as f32 / 100.0).min(3.0);
         let mut cur = doc.parent(n);
         let mut div = 1.0;
         for _ in 0..3 {
             let Some(p) = cur else { break };
-            if doc.element(p).is_none() {
+            if doc.element(p).is_none() || !content.stats.contains_key(&p) {
                 break;
             }
             let base = scores.entry(p).or_insert_with(|| {
@@ -124,22 +209,25 @@ pub fn main_content(page: &Page) -> Option<NodeId> {
         }
     }
     let mut best: Option<(NodeId, f32)> = None;
-    for (&n, &s) in &scores {
-        let tl = text_len(doc, n).max(1);
-        let ld = link_len(doc, n) as f32 / tl as f32;
+    // DOM order also makes ties deterministic, unlike HashMap iteration.
+    for &n in all {
+        let Some(&s) = scores.get(&n) else { continue };
+        if !content.substantial(n) { continue; }
+        let stats = content.get(n);
+        let ld = stats.links as f32 / stats.chars.max(1) as f32;
         let fs = s * (1.0 - ld);
         if best.map(|(_, b)| fs > b).unwrap_or(true) {
             best = Some((n, fs));
         }
     }
-    let (mut n, s) = best?;
+    let Some((mut n, s)) = best else { return Some(content.root) };
     // Climb while the parent holds clearly more of the same content.
     while let Some(p) = doc.parent(n) {
-        if doc.element(p).is_none() || doc.is_element(p, "body") {
+        if doc.element(p).is_none() || doc.is_element(p, "body") || !content.stats.contains_key(&p) {
             break;
         }
         let ps = scores.get(&p).copied().unwrap_or(0.0);
-        if ps >= s * 0.8 && text_len(doc, p) < text_len(doc, n) * 2 {
+        if ps >= s * 0.8 && content.get(p).chars < content.get(n).chars * 2 {
             n = p;
         } else {
             break;
@@ -401,10 +489,7 @@ impl Md<'_> {
             }
             let Some(el) = doc.element(c) else { continue };
             let tag = el.tag.clone();
-            if matches!(tag.as_str(), "script" | "style" | "noscript" | "template" | "nav" | "aside" | "footer" | "form" | "button" | "select" | "input" | "textarea" | "iframe" | "dialog" | "svg" | "menu") {
-                continue;
-            }
-            if !visible(self.page, self.geo, c) || is_junk(doc, c) || matches!(el.attr("role"), Some("navigation" | "complementary" | "contentinfo" | "dialog" | "alertdialog")) {
+            if omitted_block(doc, c) || !visible(self.page, self.geo, c) {
                 continue;
             }
             match tag.as_str() {

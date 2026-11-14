@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Collected sayings</title></head><body>
+<nav><a href="/">Navigation only</a><a href="/next">Next page</a></nav>
+<div class="container" id="sayings">
+<script>
+document.write('<div class="quote"><span>Written saying 1: A patient reader discovers meaningful words, even when the page builds its content with JavaScript.</span> <a href="/author/1">Writer 1</a></div>');
+</script>
+</div>
+<button id="more">Add another saying</button>
+<script>
+function addSaying(number) {
+  var card = document.createElement('div');
+  card.className = 'quote';
+  var text = document.createElement('span');
+  text.textContent = 'Loaded saying ' + number + ': El pingüino 🐇 reads every sentence, with patience and curiosity, rather than confusing the footer for the story.';
+  card.appendChild(text);
+  var link = document.createElement('a');
+  link.href = '/author/' + number;
+  link.textContent = ' Writer ' + number;
+  card.appendChild(link);
+  document.getElementById('sayings').appendChild(card);
+}
+window.addEventListener('load', function () {
+  for (var i = 2; i <= 10; i++) addSaying(i);
+});
+document.getElementById('more').addEventListener('click', function () { addSaying(11); });
+</script>
+<footer><p>Footer-only information: <a href="/about">About this collection</a> and <a href="/legal">legal details</a>.</p></footer>
+</body></html>

@@ -191,6 +191,15 @@ pub fn render(page: &Page, root: &Ax, refs: &mut RefMap, overlays: &[Overlay]) -
         }
     }
 
+    // A sparse outline can otherwise look like an empty page even when script
+    // produced substantial prose. Keep articles with a useful outline compact.
+    if heads.len() <= 2 {
+        let chars = crate::read::main_text_chars(page);
+        if chars >= 200 {
+            out.push(format!("text: {chars} chars in main (read shows it)"));
+        }
+    }
+
     // Forms, with their fields.
     let forms = crate::forms::forms(page);
     let mut shown = 0;
