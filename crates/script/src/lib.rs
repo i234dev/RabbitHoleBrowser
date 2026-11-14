@@ -36,6 +36,8 @@ mod tests;
 #[cfg(test)]
 mod tests_webapi;
 #[cfg(test)]
+mod tests_url_lifetime;
+#[cfg(test)]
 mod tests_canvas_fonts;
 #[cfg(test)]
 mod tests_media;
