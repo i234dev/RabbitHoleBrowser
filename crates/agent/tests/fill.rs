@@ -150,6 +150,8 @@ fn fill_input_navigation_stops_change_pending_fields_and_explicit_submit() {
     let mut a = agent();
     let snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
     let stale = ref_of(&snapshot, "textbox \"Tail\"");
+    // Full snapshots publish element refs; list forms before using @f1.
+    assert!(ok(&mut a, "fill", json!({})).contains("@f1 form"));
     let output = ok(&mut a, "fill", json!({"ref":"@f1","values":{"a":"go","z":"must-not-write"},"submit":true}));
     assert!(output.contains("→ navigated to") && output.contains("tail=untouched") && output.contains("Input arrived"), "{output}");
     assert!(output.contains("Not attempted after navigation: \"z\"") && output.contains("submit=true was not attempted"), "{output}");
