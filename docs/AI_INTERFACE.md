@@ -69,6 +69,24 @@ Options shared with `rabbithole mcp`: `--bot`, `--no-robots`,
 `--profile DIR`, `--allow d1,d2` (domain allowlist), `--live`, `--timeout MS`,
 `--width`/`--height`, `--no-js`, `--images`, `--system-fonts`.
 
+## Lighter read output
+
+Candidate reading contract (pending combined validation): `links` defaults to
+`true`, retaining `[text](@eN)` and stable navigation refs. `links=false` emits
+plain anchor text without assigning link refs. `cites` defaults to `false`:
+anchors inside a `<sup>` that resolve to a fragment of this same document are
+omitted. `cites=true` restores those marks; it does not override `links=false`.
+Other superscripts, external links and links to another document are retained.
+The document base URL participates in resolving citation targets.
+
+Prose whitespace, including nonbreaking spaces, is collapsed, and whitespace
+before `, . ; : )` is removed. Code spans and fenced preformatted content retain
+meaningful spaces and blank lines; code containing backticks uses a longer
+Markdown delimiter. List indentation, link ref syntax and page-content fences
+remain intact. The existing `max_tokens=4000`, character `offset`, and `ref`
+subtree behaviour are unchanged. These output-size improvements have not yet
+been benchmarked against the historical RH-AGENT-001 runs.
+
 ## The page summary
 
 `open`, and every action that navigates (a clicked link, a submitted form),
@@ -95,11 +113,16 @@ Summary only: snapshot (or open … snapshot=true) shows the full tree, read the
 ```
 
 * Overlays and dialogs come first (`⚠`), with their buttons.
-* `landmarks`: up to 10, with refs (use `snapshot ref=@eN` to expand one).
-* `outline`: the first 12 headings, indented by level, each with a ref (the
-  link's ref when the heading is a link).
-* `forms`: up to 3 forms with up to 6 fields each (label, type, ref, submit
-  button), plus text inputs outside any form; `fill` lists them all.
+* `landmarks`: up to 10 groups with refs; `main` and `search` have priority.
+  Repeated navigation landmarks share one `nav ×N` entry retaining the first ref
+  (use `snapshot ref=@eN` to expand that navigation).
+* `outline`: up to 12 headings, prioritising the two highest heading levels
+  present before deeper headings. Selected headings remain in document order,
+  indented by level, each with a ref (the link's ref when it is a link).
+* `forms`: up to 3 forms that contain a text field or submit control, with up to
+  6 fields each (label, type, ref, submit button), plus text inputs outside forms.
+  Other forms are counted as `… +N formularios sin campos de texto`; `fill` still
+  lists all forms and fields.
 * Counts of links, buttons and inputs in `main` and in the whole page.
 
 The refs are the same ones `snapshot`, `find` and the actions use.
