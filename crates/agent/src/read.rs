@@ -41,7 +41,7 @@ fn is_junk(doc: &Document, n: NodeId) -> bool {
     !s.trim().is_empty() && NEGATIVE.iter().any(|k| s.contains(k)) && !POSITIVE.iter().any(|k| s.contains(k))
 }
 
-fn visible(page: &Page, geo: &GeoMap, n: NodeId) -> bool {
+fn style_visible(page: &Page, n: NodeId) -> bool {
     let doc = &page.doc;
     if doc.attr(n, "aria-hidden") == Some("true") {
         return false;
@@ -53,10 +53,26 @@ fn visible(page: &Page, geo: &GeoMap, n: NodeId) -> bool {
     if st.visibility == Visibility::Hidden || st.opacity < 0.05 {
         return false;
     }
+    true
+}
+
+fn visible(page: &Page, geo: &GeoMap, n: NodeId) -> bool {
+    if !style_visible(page, n) { return false; }
     match geo.get(n) {
         Some(g) => !((g.raw.w < 1.5 && g.raw.h < 1.5) || g.rect.right() <= 0.0 || g.rect.bottom() <= 0.0),
         None => true,
     }
+}
+
+fn body_visible(page: &Page) -> bool {
+    let mut current = page.doc.body();
+    while let Some(n) = current {
+        if page.doc.element(n).is_some() && !style_visible(page, n) { return false; }
+        current = page.doc.parent(n);
+    }
+    // Use style/ARIA here: a body with only positioned children need not have
+    // a nonempty own rectangle even when its descendants are visible.
+    true
 }
 
 // Keep main-content selection and the body fallback on the same exclusions.
@@ -97,6 +113,7 @@ impl Content {
         let geo = GeoMap::build(page);
         let root = doc.body().unwrap_or(Document::ROOT);
         let mut content = Self { root, order: Vec::new(), stats: HashMap::new() };
+        if !body_visible(page) { return content; }
         let mut stack = vec![(root, false)];
         while let Some((n, visited)) = stack.pop() {
             if let Some(text) = doc.text(n) {
@@ -738,6 +755,7 @@ pub fn read(page: &Page, refs: &mut RefMap, frame: usize) -> String {
 }
 
 pub fn read_with_options(page: &Page, refs: &mut RefMap, frame: usize, links: bool, cites: bool) -> String {
+    if !body_visible(page) { return String::new(); }
     let geo = GeoMap::build(page);
     let doc = &page.doc;
     let root = main_content(page).or_else(|| doc.body()).unwrap_or(Document::ROOT);

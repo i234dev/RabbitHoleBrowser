@@ -135,3 +135,25 @@ fn summary_sparse_outline_counts_unicode_prose_without_markup_or_hidden_text() {
     let short = overview(&load_page("<!doctype html><main><p>A short introduction.</p></main>"));
     assert!(!short.contains("chars in main"), "{short}");
 }
+
+#[test]
+fn read_and_summary_omit_an_invisible_body_without_changing_explicit_ref_scope() {
+    let direct = "Direct body prose 🐇 ".repeat(20);
+    for attributes in ["style='display:none'", "aria-hidden='true'"] {
+        let page = load_page(&format!("<!doctype html><body {attributes}>{direct}<div>Nested body prose.</div></body>"));
+        let summary = overview(&page);
+        assert!(!summary.contains("chars in main"), "{attributes}: {summary}");
+        let read = read::read_with_options(&page, &mut RefMap::default(), 0, false, false);
+        assert!(read.is_empty(), "{attributes}: {read}");
+        // Explicit ref remains the requested subtree, rather than selecting a
+        // different main or changing the established root-node conversion.
+        let scoped = read::read_subtree_with_options(&page, &mut RefMap::default(), 0, page.doc.body().unwrap(), false, false);
+        assert!(scoped.contains("Direct body prose 🐇"), "{attributes}: {scoped}");
+    }
+    let page = load_page(&format!("<!doctype html><body>{direct}</body>"));
+    assert!(overview(&page).contains("chars in main (read shows it)"));
+    assert!(read::read_with_options(&page, &mut RefMap::default(), 0, false, false).contains("Direct body prose 🐇"));
+    let positioned = load_page(&format!("<!doctype html><body style='margin:0;height:0'><div style='position:absolute;top:20px;left:20px;width:400px'>{direct}</div></body>"));
+    assert!(overview(&positioned).contains("chars in main (read shows it)"));
+    assert!(read::read_with_options(&positioned, &mut RefMap::default(), 0, false, false).contains("Direct body prose 🐇"));
+}
