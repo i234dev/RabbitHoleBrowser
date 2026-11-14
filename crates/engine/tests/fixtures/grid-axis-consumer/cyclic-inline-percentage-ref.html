@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body { margin:0; background:white; font-size:0; line-height:0; }
+.case { height:80px; }
+.block { width:80px; height:60px; background:green; }
+.percent { width:40px; height:30px; background:silver; }
+.payload { width:80px; height:10px; background:black; }
+.vertical { width:10px; height:30px; writing-mode:vertical-rl; background:yellow; }
+.tile { display:inline-block; width:10px; height:20px; background:blue; }
+.block-row { width:80px; height:40px; background:green; }
+.row { height:20px; }
+.percent-height { width:80px; height:10px; }
+.tall-payload { height:20px; }
+.vertical-short { height:20px; }
+</style>
+<div class="case"><div class="block"><div class="percent"><div class="payload"></div></div><div class="vertical"><span class="tile"></span></div></div></div>
+<div class="case"><div class="block"><div class="percent"><div class="payload"></div></div><div class="vertical"><span class="tile"></span></div></div></div>
+<div class="case"><div class="block-row"><div class="row"><div class="percent-height"><div class="payload tall-payload"></div></div></div><div class="vertical vertical-short"><span class="tile"></span></div></div></div>

@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Intrinsic Grid contributions keep their own cyclic percentage base indefinite</title>
+<link rel="match" href="cyclic-inline-percentage-ref.html">
+<style>
+html,body { margin:0; background:white; font-size:0; line-height:0; }
+.case { height:80px; }
+.grid { display:grid; width:min-content; height:60px; grid-template-columns:auto; grid-template-rows:30px 30px; justify-content:center; justify-items:start; background:green; }
+.max { width:max-content; }
+.percent { width:50%; background:silver; }
+.payload { width:80px; height:10px; background:black; }
+.vertical { writing-mode:vertical-rl; background:yellow; }
+.tile { display:inline-block; width:10px; height:20px; background:blue; }
+.grid-row { display:grid; width:80px; grid-template-columns:80px; grid-template-rows:auto auto; justify-items:start; background:green; }
+.percent-height { height:50%; }
+.tall-payload { height:20px; }
+</style>
+<div class="case"><div class="grid"><div class="percent"><div class="payload"></div></div><div class="vertical"><span class="tile"></span></div></div></div>
+<div class="case"><div class="grid max"><div class="percent"><div class="payload"></div></div><div class="vertical"><span class="tile"></span></div></div></div>
+<div class="case"><div class="grid-row"><div class="percent-height"><div class="payload tall-payload"></div></div><div class="vertical"><span class="tile"></span></div></div></div>
