@@ -320,12 +320,11 @@ impl<'a> Layouter<'a> {
                 virt.push(Self::lane_grid_item(it, s, false));
             }
         }
-        let contribs = self.column_contributions(b, &virt, cbw);
+        let mut contribs = self.column_contributions(b, &virt, cbw);
         if min_only {
-            size_tracks_with_constraint(&mut tl.tracks, &contribs, avail, gap, stretch, SizingConstraint::MinContent);
-        } else {
-            size_tracks(&mut tl.tracks, &contribs, avail, gap, stretch);
+            contribs.iter_mut().for_each(|c| c.max = c.min);
         }
+        size_tracks(&mut tl.tracks, &contribs, avail, gap, stretch);
     }
 
     /// Inner (content-box) width of an item in the stacking axis of row

@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Grid lanes stretch only an automatic preferred block size</title>
+<link rel="match" href="grid-lanes-stretch-intrinsic-height-ref.html">
+<style>
+.rows { display: grid-lanes; width: 100px; height: 100px; grid-template-rows: 100px; background: green; margin-bottom: 10px; }
+.rows .item { width: 100px; background: red; }
+#intrinsic .item { height: max-content; }
+#auto .item { height: auto; background: blue; }
+</style>
+<div class="rows" id="intrinsic"><div class="item"></div></div>
+<div class="rows" id="auto"><div class="item"></div></div>
