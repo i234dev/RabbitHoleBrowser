@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -106,19 +107,40 @@ pub(crate) struct FaceSlot {
     pub failed: Cell<bool>,
 }
 
+/// Retained web-font resources per shared store, independent of live document
+/// count. This does not bound decoder scratch, parsed fonts or glyph caches.
+#[derive(Debug, Clone, Copy)]
+pub struct FontLimits {
+    pub max_web_bindings: usize,
+    pub max_sfnt_bytes: usize,
+}
+
+impl Default for FontLimits {
+    fn default() -> Self {
+        Self { max_web_bindings: 4096, max_sfnt_bytes: 128 * 1024 * 1024 }
+    }
+}
+
 pub struct FontContext {
-    pub(crate) faces: RefCell<Vec<FaceSlot>>,
+    pub(crate) faces: Rc<RefCell<Vec<FaceSlot>>>,
     /// Lower-cased family name → face indices.
-    pub(crate) by_family: RefCell<HashMap<String, Vec<usize>>>,
+    pub(crate) by_family: Rc<RefCell<HashMap<String, Vec<usize>>>>,
+    base_families: Rc<RefCell<HashMap<String, Vec<usize>>>>,
+    base_generation: Rc<Cell<u64>>,
+    pub(crate) byte_faces: Rc<RefCell<HashMap<u64, Vec<usize>>>>,
+    pub(crate) limits: FontLimits,
+    pub(crate) web_bindings: Rc<Cell<usize>>,
+    pub(crate) web_sfnt_bytes: Rc<Cell<usize>>,
+    seen_base_generation: Cell<u64>,
     /// (face, glyph, size×4, subpixel quarter) → bitmap
-    cache: RefCell<HashMap<(usize, u16, u32, u8), Rc<GlyphBitmap>>>,
+    cache: Rc<RefCell<HashMap<(usize, u16, u32, u8), Rc<GlyphBitmap>>>>,
     /// (primary face, char) → face that has the char (None = nowhere)
     fallback_cache: RefCell<HashMap<(usize, char), Option<usize>>>,
-    pub(crate) system_loaded: Cell<bool>,
+    pub(crate) system_loaded: Rc<Cell<bool>>,
     /// OpenType shaping state (face data, shaped-run cache).
-    pub(crate) shaping: crate::shaping::ShapingState,
+    pub(crate) shaping: Rc<crate::shaping::ShapingState>,
     /// (face, glyph, size×4) → color rendering (None: not a color glyph).
-    pub(crate) color_cache: RefCell<HashMap<(usize, u16, u32), Option<Rc<crate::color_glyph::ColorGlyph>>>>,
+    pub(crate) color_cache: Rc<RefCell<HashMap<(usize, u16, u32), Option<Rc<crate::color_glyph::ColorGlyph>>>>>,
 }
 
 impl Default for FontContext {
@@ -220,6 +242,12 @@ impl FontContext {
     /// Load the bundled fonts (no system font scan; see
     /// [`FontContext::load_system_fonts`] / [`FontContext::with_system_fonts`]).
     pub fn new() -> FontContext {
+        Self::with_limits(FontLimits::default())
+    }
+
+    /// Bundled fonts with explicit limits for subsequent web-font registration.
+    /// System font paths and bundled data do not consume these quotas.
+    pub fn with_limits(limits: FontLimits) -> FontContext {
         let sources: [(&str, &str, u16, bool, Family, &[u8]); BUNDLED_COUNT] = [
             ("DejaVu Sans", "DejaVu Sans", 400, false, Family::Sans, include_bytes!("../../../assets/fonts/DejaVuSans.ttf")),
             ("DejaVu Sans Bold", "DejaVu Sans", 700, false, Family::Sans, include_bytes!("../../../assets/fonts/DejaVuSans-Bold.ttf")),
@@ -229,14 +257,22 @@ impl FontContext {
             ("DejaVu Serif", "DejaVu Serif", 400, false, Family::Serif, include_bytes!("../../../assets/fonts/DejaVuSerif.ttf")),
             ("DejaVu Serif Bold", "DejaVu Serif", 700, false, Family::Serif, include_bytes!("../../../assets/fonts/DejaVuSerif-Bold.ttf")),
         ];
+        let base_families = Rc::new(RefCell::new(HashMap::new()));
         let ctx = FontContext {
-            faces: RefCell::new(Vec::with_capacity(BUNDLED_COUNT)),
-            by_family: RefCell::new(HashMap::new()),
-            cache: RefCell::new(HashMap::new()),
+            faces: Rc::new(RefCell::new(Vec::with_capacity(BUNDLED_COUNT))),
+            by_family: base_families.clone(),
+            base_families,
+            base_generation: Rc::new(Cell::new(0)),
+            byte_faces: Rc::new(RefCell::new(HashMap::new())),
+            limits,
+            web_bindings: Rc::new(Cell::new(0)),
+            web_sfnt_bytes: Rc::new(Cell::new(0)),
+            seen_base_generation: Cell::new(0),
+            cache: Rc::new(RefCell::new(HashMap::new())),
             fallback_cache: RefCell::new(HashMap::new()),
-            system_loaded: Cell::new(false),
+            system_loaded: Rc::new(Cell::new(false)),
             shaping: Default::default(),
-            color_cache: RefCell::new(HashMap::new()),
+            color_cache: Rc::new(RefCell::new(HashMap::new())),
         };
         for (name, family, weight, italic, generic, bytes) in sources {
             let font = fontdue::Font::from_bytes(bytes, fontdue_settings()).expect("bundled font is valid");
@@ -262,14 +298,86 @@ impl FontContext {
         ctx
     }
 
-    /// Add a face to the registry; returns its id.
+    /// A fresh document view. Host/bundled registrations remain visible, but
+    /// aliases belonging to this view (or its parent document) do not transfer.
+    /// Font IDs and caches stay valid while any view retains the shared store.
+    pub fn document_scope(&self) -> Self {
+        Self {
+            faces: self.faces.clone(),
+            by_family: Rc::new(RefCell::new(HashMap::new())),
+            base_families: self.base_families.clone(),
+            base_generation: self.base_generation.clone(),
+            byte_faces: self.byte_faces.clone(),
+            limits: self.limits,
+            web_bindings: self.web_bindings.clone(),
+            web_sfnt_bytes: self.web_sfnt_bytes.clone(),
+            seen_base_generation: Cell::new(self.base_generation.get()),
+            cache: self.cache.clone(),
+            fallback_cache: RefCell::new(HashMap::new()),
+            system_loaded: self.system_loaded.clone(),
+            shaping: self.shaping.clone(),
+            color_cache: self.color_cache.clone(),
+        }
+    }
+
+    pub(crate) fn host_scope(&self) -> Self {
+        let mut host = self.document_scope();
+        host.by_family = host.base_families.clone();
+        host
+    }
+
+    pub(crate) fn bytes_key(bytes: &[u8]) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub(crate) fn family_faces(&self, family: &str) -> Option<Vec<usize>> {
+        self.by_family
+            .borrow()
+            .get(family)
+            .cloned()
+            .or_else(|| self.base_families.borrow().get(family).cloned())
+    }
+
+    /// Eligible faces only: historical documents must never enter fallback.
+    pub(crate) fn visible_faces(&self) -> Vec<usize> {
+        let mut ids: Vec<_> = self.base_families.borrow().values().flatten().copied().collect();
+        ids.extend(self.by_family.borrow().values().flatten().copied());
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    pub(crate) fn bind_face(&self, idx: usize) {
+        let key = self.faces.borrow()[idx].family_lower.clone();
+        let mut families = self.by_family.borrow_mut();
+        let ids = families.entry(key).or_default();
+        if !ids.contains(&idx) {
+            ids.push(idx);
+            self.fallback_cache.borrow_mut().clear();
+            if Rc::ptr_eq(&self.by_family, &self.base_families) {
+                self.base_generation.set(self.base_generation.get().wrapping_add(1));
+            }
+        }
+    }
+
+    /// Add a face to the store and bind it only in this view.
     pub(crate) fn register(&self, slot: FaceSlot) -> FontId {
-        let key = slot.family_lower.clone();
-        let mut faces = self.faces.borrow_mut();
-        let idx = faces.len();
-        faces.push(slot);
-        self.by_family.borrow_mut().entry(key).or_default().push(idx);
-        self.fallback_cache.borrow_mut().clear();
+        let bytes_key = match &slot.source {
+            FaceSource::Bytes(bytes) => Some(Self::bytes_key(bytes)),
+            FaceSource::Path(..) => None,
+        };
+        let idx = {
+            let mut faces = self.faces.borrow_mut();
+            let idx = faces.len();
+            faces.push(slot);
+            idx
+        };
+        if let Some(key) = bytes_key {
+            self.byte_faces.borrow_mut().entry(key).or_default().push(idx);
+        }
+        self.bind_face(idx);
         FontId(idx)
     }
 
@@ -388,6 +496,10 @@ impl FontContext {
     /// then any registered face. Results are cached per (face, char).
     pub fn fallback_for_char(&self, ch: char, prefer: FontId) -> Option<FontId> {
         let primary = self.resolve_index(prefer.0);
+        let generation = self.base_generation.get();
+        if self.seen_base_generation.replace(generation) != generation {
+            self.fallback_cache.borrow_mut().clear();
+        }
         if let Some(r) = self.fallback_cache.borrow().get(&(primary, ch)) {
             return r.map(FontId);
         }
@@ -407,7 +519,7 @@ impl FontContext {
             (s.family_lower.clone(), s.generic, s.italic, s.weight)
         };
         // 1. Same family, other styles.
-        let same_family: Vec<usize> = self.by_family.borrow().get(&family_lower).cloned().unwrap_or_default();
+        let same_family: Vec<usize> = self.family_faces(&family_lower).unwrap_or_default();
         for idx in same_family {
             if idx != primary && has(idx) {
                 return Some(idx);
@@ -417,7 +529,7 @@ impl FontContext {
         // font over the monochrome symbols of the bundled faces.
         if matches!(ch as u32, 0x1F000..=0x1FAFF) {
             for fam in crate::font_ext::script_fallback_families(ch) {
-                if let Some(ids) = self.by_family.borrow().get(&fam.to_ascii_lowercase()).cloned() {
+                if let Some(ids) = self.family_faces(&fam.to_ascii_lowercase()) {
                     if let Some(idx) = self.best_of(&ids, prim_weight, prim_italic) {
                         if has(idx) {
                             return Some(idx);
@@ -440,7 +552,7 @@ impl FontContext {
         }
         // 3. Script-specific system fonts.
         for fam in crate::font_ext::script_fallback_families(ch) {
-            if let Some(ids) = self.by_family.borrow().get(&fam.to_ascii_lowercase()).cloned() {
+            if let Some(ids) = self.family_faces(&fam.to_ascii_lowercase()) {
                 if let Some(idx) = self.best_of(&ids, prim_weight, prim_italic) {
                     if has(idx) {
                         return Some(idx);
@@ -450,9 +562,8 @@ impl FontContext {
         }
         // 4. Any registered face (bounded scan: loading hundreds of system
         //    fonts for one glyph is not worth it).
-        let n = self.faces.borrow().len();
         let mut scanned = 0;
-        for idx in BUNDLED_COUNT..n {
+        for idx in self.visible_faces().into_iter().filter(|&idx| idx >= BUNDLED_COUNT) {
             if scanned >= 48 {
                 break;
             }
@@ -661,9 +772,9 @@ impl FontContext {
         faces.get(font.0).or(faces.first()).map(|s| s.name.clone()).unwrap_or_default()
     }
 
-    /// Number of registered faces.
+    /// Number of faces eligible in this view. IDs are shared, not contiguous.
     pub fn face_count(&self) -> usize {
-        self.faces.borrow().len()
+        self.visible_faces().len()
     }
 
     /// Whether `font` has a real glyph for `ch` (no fallback considered).

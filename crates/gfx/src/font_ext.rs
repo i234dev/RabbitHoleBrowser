@@ -69,23 +69,62 @@ impl FontContext {
     /// descriptors). Returns None when the data cannot be decoded.
     pub fn add_font_data(&self, family: &str, weight: u16, italic: bool, data: &[u8]) -> Option<FontId> {
         let sfnt = decode_font_container(data)?;
-        let font = fontdue::Font::from_bytes(sfnt.as_slice(), crate::font::fontdue_settings()).ok()?;
         let family = family.trim().trim_matches('"').trim_matches('\'').to_string();
         if family.is_empty() {
             return None;
         }
+        let family_lower = family.to_ascii_lowercase();
+        let weight = weight.clamp(1, 1000);
+        let (existing_binding, existing_data) = {
+            let faces = self.faces.borrow();
+            let mut binding = None;
+            let mut data = None;
+            let candidates = self.byte_faces.borrow();
+            for &idx in candidates.get(&Self::bytes_key(&sfnt)).into_iter().flatten() {
+                let slot = &faces[idx];
+                let FaceSource::Bytes(bytes) = &slot.source else { continue };
+                if bytes.as_slice() != sfnt.as_slice() {
+                    continue;
+                }
+                data = Some((bytes.clone(), slot.font.borrow().clone()));
+                if slot.generic.is_none() && slot.family_lower == family_lower && slot.weight == weight && slot.italic == italic {
+                    binding = Some(idx);
+                    break;
+                }
+            }
+            (binding, data)
+        };
+        if let Some(idx) = existing_binding {
+            self.bind_face(idx);
+            return Some(FontId(idx));
+        }
+        // Interning hits above remain usable even at capacity. Nothing is
+        // published or charged until decoding and parsing have both succeeded.
+        let additional_bytes = if existing_data.is_some() { 0 } else { sfnt.len() };
+        let retained_bytes = self.web_sfnt_bytes.get().checked_add(additional_bytes)?;
+        if self.web_bindings.get() >= self.limits.max_web_bindings || retained_bytes > self.limits.max_sfnt_bytes {
+            return None;
+        }
+        let (bytes, font) = if let Some((bytes, Some(font))) = existing_data {
+            (bytes, font)
+        } else {
+            let font = fontdue::Font::from_bytes(sfnt.as_slice(), crate::font::fontdue_settings()).ok()?;
+            (Rc::new(sfnt), Rc::new(font))
+        };
         let name = format!("{family} {weight}{}", if italic { " Italic" } else { "" });
         let id = self.register(FaceSlot {
             name,
-            family_lower: family.to_ascii_lowercase(),
+            family_lower,
             family,
-            weight: weight.clamp(1, 1000),
+            weight,
             italic,
             generic: None,
-            source: FaceSource::Bytes(Rc::new(sfnt)),
-            font: RefCell::new(Some(Rc::new(font))),
+            source: FaceSource::Bytes(bytes),
+            font: RefCell::new(Some(font)),
             failed: Cell::new(false),
         });
+        self.web_bindings.set(self.web_bindings.get() + 1);
+        self.web_sfnt_bytes.set(retained_bytes);
         Some(id)
     }
 
@@ -97,13 +136,16 @@ impl FontContext {
             return 0;
         }
         self.system_loaded.set(true);
+        // A system scan belongs to the host catalog even when requested
+        // through a document view. Other views share the loaded flag.
+        let host = self.host_scope();
         let found = sysfonts::scan_system_fonts();
         let n = found.len();
         for f in found {
-            if self.has_exact_face(&f.family, f.weight, f.italic) {
+            if host.has_exact_face(&f.family, f.weight, f.italic) {
                 continue;
             }
-            self.register(FaceSlot {
+            host.register(FaceSlot {
                 name: f.full_name.clone(),
                 family_lower: f.family.to_ascii_lowercase(),
                 family: f.family,
@@ -121,9 +163,7 @@ impl FontContext {
     fn has_exact_face(&self, family: &str, weight: u16, italic: bool) -> bool {
         let key = family.to_ascii_lowercase();
         let faces = self.faces.borrow();
-        self.by_family
-            .borrow()
-            .get(&key)
+        self.family_faces(&key)
             .map(|ids| ids.iter().any(|&i| faces[i].weight == weight && faces[i].italic == italic && i >= BUNDLED_COUNT))
             .unwrap_or(false)
     }
@@ -158,7 +198,7 @@ impl FontContext {
     }
 
     fn select_exact_family(&self, family_lower: &str, weight: u16, italic: bool) -> Option<FontId> {
-        let ids = self.by_family.borrow().get(&family_lower.to_ascii_lowercase()).cloned()?;
+        let ids = self.family_faces(&family_lower.to_ascii_lowercase())?;
         let idx = self.best_of(&ids, weight, italic)?;
         // Make sure the face actually loads.
         self.try_face(idx)?;
@@ -185,17 +225,19 @@ impl FontContext {
 
     /// Registered faces (bundled + web + system).
     pub fn faces(&self) -> Vec<FaceInfo> {
-        self.faces
-            .borrow()
-            .iter()
-            .enumerate()
-            .map(|(i, s)| FaceInfo { family: s.family.clone(), weight: s.weight, italic: s.italic, id: FontId(i) })
+        let faces = self.faces.borrow();
+        self.visible_faces()
+            .into_iter()
+            .map(|i| {
+                let s = &faces[i];
+                FaceInfo { family: s.family.clone(), weight: s.weight, italic: s.italic, id: FontId(i) }
+            })
             .collect()
     }
 
     /// Does any registered face provide `family`?
     pub fn has_family(&self, family: &str) -> bool {
-        self.by_family.borrow().contains_key(&family.trim().to_ascii_lowercase())
+        self.family_faces(&family.trim().to_ascii_lowercase()).is_some()
     }
 
     /// Family name of a face.

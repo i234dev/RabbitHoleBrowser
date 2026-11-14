@@ -19,8 +19,10 @@ pub use shaping::{DecorationMetrics, ShapeFeatures};
 
 #[cfg(test)]
 mod tests_v02;
+#[cfg(test)]
+mod tests_font_scopes;
 
 pub use canvas::{Canvas, Color, ColorStop, FillRule, LineCap, LineJoin, Matrix, Paint, PathSeg, Point, Radii, Rect, StrokeStyle, IDENTITY};
 pub use canvas_ext::{blend_mode_index, blend_pixel, ellipse_path, parse_svg_path, rounded_rect_path};
-pub use font::{FaceInfo, Family, FontContext, FontId, GlyphBitmap, LineMetrics, ShapedGlyph};
+pub use font::{FaceInfo, Family, FontContext, FontId, FontLimits, GlyphBitmap, LineMetrics, ShapedGlyph};
 pub use image::Image;
