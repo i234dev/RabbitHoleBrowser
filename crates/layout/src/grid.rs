@@ -424,6 +424,14 @@ fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f3
 }
 
 fn size_tracks_with_space(tracks: &mut [Track], contribs: &[Contribution], space: GridSpace, gap: f32, stretch: bool) {
+    resolve_intrinsic_tracks(tracks, contribs, gap);
+    complete_track_sizing(tracks, contribs, space, gap, stretch);
+}
+
+/// Grid2 §12.4-12.5: retain both the resolved bases and growth limits before
+/// maximizing. A staged subgrid measure must not confuse these bases with a
+/// final min-content constraint or discard the limits needed by a later pass.
+fn resolve_intrinsic_tracks(tracks: &mut [Track], contribs: &[Contribution], gap: f32) {
     // §11.4 initialize.
     for t in tracks.iter_mut() {
         t.base = match t.min {
@@ -536,6 +544,12 @@ fn size_tracks_with_space(tracks: &mut [Track], contribs: &[Contribution], space
             }
         }
     }
+}
+
+/// Complete §12.6-12.8 from the already resolved bases and growth limits.
+/// Ordinary sizing runs this immediately; separating the stages does not
+/// change its available-space or intrinsic-constraint semantics.
+fn complete_track_sizing(tracks: &mut [Track], contribs: &[Contribution], space: GridSpace, gap: f32, stretch: bool) {
     let n_gaps = tracks.iter().filter(|t| !t.collapsed).count().saturating_sub(1) as f32;
     // §11.6 maximize tracks.
     if let GridSpace::Definite(a) = space {
