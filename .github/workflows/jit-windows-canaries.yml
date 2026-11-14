@@ -2,7 +2,7 @@ name: Windows native JIT canaries
 
 on:
   push:
-    branches: ["validation/jit-windows-active-frame-20261114", "validation/jit-windows-canary-baseline-20261114"]
+    branches: ["validation/jit-windows-active-frame-20261114", "validation/jit-windows-canary-baseline-20261114", "validation/jit-windows-wx-flush-20261114"]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +19,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Windows executable mapping and cache flush evidence
+        if: startsWith(github.ref, 'refs/heads/validation/jit-windows-wx-flush-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'source_revision=%s runner_os=%s runner_arch=%s\n' "$GITHUB_SHA" "$RUNNER_OS" "$RUNNER_ARCH"
+            rustc -Vv
+            printf 'command=cargo test -p rabbithole-jit --profile ci --locked -- --nocapture --test-threads=1\n'
+            cargo test -p rabbithole-jit --profile ci --locked -- --nocapture --test-threads=1
+          } 2>&1 | tee windows-wx.log
       - name: Native entry, watchdog, callback and live-frame GC evidence
         shell: bash
         run: |
@@ -40,5 +51,7 @@ jobs:
         if: always()
         with:
           name: native-canaries-windows-${{ github.sha }}
-          path: native-canaries.log
+          path: |
+            native-canaries.log
+            windows-wx.log
           if-no-files-found: error
