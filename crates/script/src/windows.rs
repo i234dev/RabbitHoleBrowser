@@ -80,7 +80,9 @@ impl std::fmt::Debug for WindowContext {
 }
 
 fn api_call(realm: &mut Realm, method: &str, args: &[Value]) -> JsResult<Value> {
-    let Some(api) = state().borrow().protos.get("__windows_api").copied() else { return Ok(Value::Null) };
+    let Some(api) = state().borrow().protos.get("__windows_api").copied() else {
+        return Err(crate::misc::dom_exception(realm, "NotSupportedError", "Window context bindings are unavailable."));
+    };
     let function = realm.get_str(Value::Object(api), method)?;
     realm.call(function, Value::Object(api), args)
 }
@@ -90,6 +92,9 @@ fn window_for(realm: &mut Realm, id: u64) -> JsResult<Value> {
 }
 
 pub(crate) fn install(realm: &mut Realm) {
+    // Frames and headless hosts keep their existing frame transport and
+    // do not parse a second proxy factory they cannot use.
+    if with_env(|env| env.window_context()).is_none() { return; }
     let native = realm.new_native_function("windowContext", 4, native_info);
     let native = Value::Object(native);
     root_value(realm, &native);
@@ -104,9 +109,6 @@ pub(crate) fn install(realm: &mut Realm) {
         Ok(_) => return,
         Err(error) => { let message = realm.error_to_string(&error); crate::host::log("error", &format!("WindowProxy setup failed: {message}")); return; }
     }
-    // Headless hosts and iframe realms retain their existing global name,
-    // focus and opener semantics; this transport owns top-level GUI contexts.
-    if with_env(|env| env.window_context()).is_none() { return; }
     let global = realm.global();
     let attributes = CONFIGURABLE | ENUMERABLE;
     realm.define_accessor(global, "closed", Some(own_closed), None, attributes);
@@ -185,7 +187,10 @@ pub(crate) fn open(realm: &mut Realm, args: &[Value]) -> JsResult<Value> {
         source_base_url: env.base_url(), url, name, noopener, noreferrer,
     });
     match context.host.open(request) {
-        Some(id) if !noopener => window_for(realm, id),
+        Some(id) if !noopener => match window_for(realm, id) {
+            Ok(proxy) => Ok(proxy),
+            Err(error) => { context.host.close(context.id, id); Err(error) }
+        },
         _ => Ok(Value::Null),
     }
 }
