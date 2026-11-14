@@ -6,7 +6,7 @@ use crate::computed::*;
 use crate::props::{self, ApplyCtx};
 use crate::values::{self, ColorValue, LengthContext};
 use crate::{FontFace, FontSource, MediaEnv, StyleOptions, StyledTree, Stylesheet};
-use rabbithole_css::selector::{Compound, Selector, Specificity};
+use rabbithole_css::selector::{Compound, Pseudo, Selector, Specificity};
 use rabbithole_css::selector::{is_host_selector, is_slotted_selector, matches_slotted};
 use rabbithole_css::{matches_with, parse_declaration_list, parse_stylesheet, Declaration, PseudoElement, StyleRule, Token};
 use rabbithole_dom::{Document, NodeId};
@@ -64,6 +64,46 @@ pub(crate) struct RuleIndex {
     slotted: Vec<usize>,
 }
 
+/// Every matching subject must have at least one of these keys. A missing
+/// cover means the universal bucket is required; never intersect alternatives
+/// in :is()/nesting lists or borrow features from their ancestor compounds.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SubjectKey { Id(String), Class(String), Tag(String), Attr(String) }
+
+fn subject_cover(c: &Compound, depth: usize) -> Option<Vec<SubjectKey>> {
+    if let Some(id) = &c.id { return Some(vec![SubjectKey::Id(id.clone())]); }
+    if let Some(class) = c.classes.first() { return Some(vec![SubjectKey::Class(class.clone())]); }
+    if let Some(tag) = c.tag.as_ref().filter(|t| *t != "*") { return Some(vec![SubjectKey::Tag(tag.clone())]); }
+    if let Some(attr) = c.attrs.first() { return Some(vec![SubjectKey::Attr(attr.name.clone())]); }
+    if depth >= 32 { return None; }
+    for pseudo in &c.pseudos {
+        let list: &[Selector] = match pseudo {
+            Pseudo::Nesting(list) => list,
+            Pseudo::Is(list) | Pseudo::Where(list) => list,
+            _ => continue,
+        };
+        let mut keys = Vec::new();
+        let mut covered = true;
+        for selector in list {
+            if selector.pseudo_element.is_some() {
+                if matches!(pseudo, Pseudo::Nesting(_)) { continue; }
+                // Keep the current matching semantics for legacy :is/where
+                // parser edge cases; this optimization must not change them.
+                covered = false; break;
+            }
+            let Some(last) = selector.compounds.last() else { covered = false; break; };
+            let Some(mut branch) = subject_cover(last, depth + 1) else { covered = false; break; };
+            keys.append(&mut branch);
+            if keys.len() > 256 { covered = false; break; }
+        }
+        if covered {
+            keys.sort_unstable(); keys.dedup();
+            return Some(keys);
+        }
+    }
+    None
+}
+
 impl RuleIndex {
     fn add_sheet(&mut self, rules: &[&StyleRule], is_ua: bool, base: Option<Rc<str>>, layers: &HashMap<std::sync::Arc<str>, u32>, sheet: usize) {
         for rule in rules {
@@ -89,17 +129,16 @@ impl RuleIndex {
                     continue;
                 }
                 let last: &Compound = sel.compounds.last().expect("non-empty selector");
-                if let Some(id) = &last.id {
-                    self.by_id.entry(id.clone()).or_default().push(idx);
-                } else if let Some(cls) = last.classes.first() {
-                    self.by_class.entry(cls.clone()).or_default().push(idx);
-                } else if let Some(tag) = last.tag.as_ref().filter(|t| *t != "*") {
-                    self.by_tag.entry(tag.clone()).or_default().push(idx);
-                } else if let Some(a) = last.attrs.first() {
-                    self.by_attr.entry(a.name.clone()).or_default().push(idx);
-                } else {
-                    self.universal.push(idx);
-                }
+                if let Some(keys) = subject_cover(last, 0) {
+                    for key in keys {
+                        match key {
+                            SubjectKey::Id(id) => self.by_id.entry(id).or_default().push(idx),
+                            SubjectKey::Class(class) => self.by_class.entry(class).or_default().push(idx),
+                            SubjectKey::Tag(tag) => self.by_tag.entry(tag).or_default().push(idx),
+                            SubjectKey::Attr(attr) => self.by_attr.entry(attr).or_default().push(idx),
+                        }
+                    }
+                } else { self.universal.push(idx); }
             }
         }
     }
@@ -2984,5 +3023,37 @@ mod tests {
         assert_eq!(p.border_color.top, Color::rgb(0, 128, 0));
         let u = style_of(&doc, &t, "u");
         assert!(u.text_decoration.underline && u.text_decoration.line_through);
+    }
+}
+
+#[cfg(test)]
+mod subject_cover_tests {
+    use super::*;
+    #[test]
+    fn nesting_subject_union_is_indexed_once_and_universal_alternative_survives() {
+        let doc = rabbithole_html::parse("<div class='a b' id=target></div><span data-hit></span><em></em>");
+        let sheets = vec![parse_stylesheet(".a, .b, #target, [data-hit] { & {color:green} } *, .missing { & {background:blue} }")];
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let index = ScopeIndex::build(&sheets, &env);
+        let mut candidates = Vec::new();
+        for tag in ["div", "span", "em"] {
+            let node = doc.find_element(tag).unwrap();
+            index.doc.candidates(&doc, node, &mut candidates);
+            let author: Vec<_> = candidates.iter().filter(|&&i| !index.doc.rules[i].is_ua).collect();
+            assert_eq!(author.len(), if tag == "em" { 1 } else { 2 }, "{tag}");
+            assert!(author.iter().all(|&&i| matches_with(&index.doc.rules[i].selector, &doc, node, &Default::default())));
+        }
+    }
+
+    #[test]
+    fn many_nesting_rules_do_not_enter_every_elements_candidate_set() {
+        let css: String = (0..1000).map(|i| format!(".scope{i} {{ & {{color:green}} }}")).collect();
+        let sheets = vec![parse_stylesheet(&css)];
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let index = ScopeIndex::build(&sheets, &env);
+        let doc = rabbithole_html::parse("<div class=scope517></div>");
+        let node = doc.find_element("div").unwrap();
+        let mut candidates = Vec::new(); index.doc.candidates(&doc, node, &mut candidates);
+        assert_eq!(candidates.iter().filter(|&&i| !index.doc.rules[i].is_ua).count(), 1);
     }
 }
