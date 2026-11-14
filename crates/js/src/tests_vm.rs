@@ -253,9 +253,10 @@ fn leaf_frames_keep_parameters_and_operand_values() {
         ("(function(a, b) { return a + b; })", vec![Value::str("a counted string "), Value::str("and another")], "a counted string and another", 3),
     ] {
         let f = realm.eval(src, "leaf-frame.js").unwrap();
-        let result = realm.call(f.clone(), Value::Undefined, &args).unwrap();
+        let f = realm.root(f);
+        let result = realm.call(f.value(), Value::Undefined, &args).unwrap();
         assert_eq!(realm.to_string(result).unwrap().to_rust_string(), expected);
-        let ObjectKind::Function(c) = &realm.obj(f.as_object().unwrap()).kind else { panic!("expected closure") };
+        let ObjectKind::Function(c) = &realm.obj(f.value().as_object().unwrap()).kind else { panic!("expected closure") };
         assert!(c.code.call_flags & crate::bytecode::CALL_SIMPLE != 0);
         assert_eq!(c.code.frame_size(), slots, "{src}");
     }
@@ -265,6 +266,22 @@ fn leaf_frames_keep_parameters_and_operand_values() {
     // while a compact leaf's other operands still need to survive.
     eq("function sum(a, b, c) { return a + b + c; } var o = { valueOf() { [1, 2].map(x => x * 2); return 3; } }; var total = 0; for (var i = 0; i < 1500; i++) total += sum(o, 4, 5); total", "18000");
     eq("function add(a, b) { return a + b; } var caught; try { add(1n, 2); } catch (e) { caught = e instanceof TypeError; } caught + ':' + add('counted ', 'return value')", "true:counted return value");
+    eq("function neg(x) { return -x; } function inc(x) { return ++x; } var seen = []; var o = { valueOf() { seen.push([1].map(() => 2)[0]); return 7; } }; var a = neg(o), b = inc(o), caught; try { neg(Symbol()); } catch (e) { caught = e instanceof TypeError; } [a, b, seen.join(':'), caught].join()", "-7,8,2:2,true");
+
+    // Calls, jumps and exception handlers keep their conservative stack
+    // capacity even when all parameters happen to use registers.
+    for (src, expected) in [
+        ("(function(x) { return Math.abs(x); })", "4"),
+        ("(function(x) { if (x) return x; return 0; })", "-4"),
+        ("(function(x) { try { return x + 1; } catch (e) { return 0; } })", "-3"),
+    ] {
+        let f = realm.eval(src, "conservative-frame.js").unwrap();
+        let f = realm.root(f);
+        let result = realm.call(f.value(), Value::Undefined, &[Value::Number(-4.0)]).unwrap();
+        assert_eq!(realm.to_string(result).unwrap().to_rust_string(), expected);
+        let ObjectKind::Function(c) = &realm.obj(f.value().as_object().unwrap()).kind else { panic!("expected closure") };
+        assert!(c.code.max_depth >= 4, "generic frame lost its conservative capacity: {src}");
+    }
 }
 
 #[test]
