@@ -1384,6 +1384,7 @@ impl Engine {
     /// Rebuild only the display list (after scrolling: sticky/fixed boxes
     /// and inner scroll offsets).
     pub fn rebuild_display_list(&self, page: &mut Page) {
+        let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
         let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, display_list, incr, .. } = page;
         let ctx = LayoutContext {
             doc,

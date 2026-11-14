@@ -554,7 +554,7 @@ impl Engine {
             let c = &mut page.frames.children[i];
             // Scripts of this document changed the frame's document.
             if let Some(p) = c.page.as_mut() {
-                if p.script.dom_dirty {
+                if p.script.dom_dirty || p.incr.fonts_changed(&p.fonts) {
                     p.script.dom_dirty = false;
                     self.restyle(p);
                     c.dirty = true;

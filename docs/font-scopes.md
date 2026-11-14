@@ -45,8 +45,9 @@ Standalone callers painting a page's display list must also pass `page.fonts`.
 
 Incremental style/layout observes the document and host selection revisions.
 A newly available local or host face invalidates the page's style and layout on
-its next flush. Screenshot setup flushes after loading system fonts, before it
-calculates capture geometry. Loading another page never changes the aliases of
+its next flush. Frame synchronization also notices a child's changed font view
+and regenerates its cached raster. Screenshot setup restyles after loading
+system fonts, before it calculates capture geometry. Loading another page never changes the aliases of
 a retained page or frame.
 
 Font-relative CSS units use a scoped thread-local guard. It saves and restores
@@ -54,5 +55,6 @@ fonts, the metric cache and unicode-range exclusions, including nested passes
 and unwinding. Cache keys use constant-time selection revisions rather than
 enumerating the font catalog. Resource discovery without a Page enters an empty
 font scope; full/incremental passes, unrendered style queries, verification and
-animation keyframes enter their document's scope. An unchanged style flush
+animation keyframes enter their document's scope. Layout retains a guard too,
+including text-autospace measurements that occur after styling. An unchanged style flush
 returns before collecting font descriptors or entering a new scope.

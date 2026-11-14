@@ -88,6 +88,10 @@ pub struct IncrementalState {
 }
 
 impl IncrementalState {
+    pub(crate) fn fonts_changed(&self, fonts: &rabbithole_gfx::FontContext) -> bool {
+        self.fonts_seen != Some(fonts.selection_generation())
+    }
+
     /// Is a layout or display list flush pending?
     pub fn dirty(&self) -> bool {
         self.layout_dirty || self.dl_dirty || self.layout_full
@@ -235,8 +239,7 @@ impl Engine {
             resolve_url: &|base, raw| resolve_url(base, raw),
             document_base: &base_str,
         };
-        let env = media_env(page.viewport, self.scripting);
-        let _font_units = rabbithole_style::cascade::font_unit_scope(Some(page.fonts.clone()), &page.sheets, &env, &opts);
+        let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
         se.style_chain_from(&page.doc, &opts, node, Some(&page.styles))
     }
 
@@ -392,6 +395,7 @@ impl Engine {
     /// display list is left stale (see [`Engine::flush_display_list`]).
     pub fn flush_layout(&self, page: &mut Page) {
         self.flush_style(page);
+        let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
         let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, .. } = page;
         // Inputs changed outside the style system: images, background
         // images, scroll offsets, viewport.
