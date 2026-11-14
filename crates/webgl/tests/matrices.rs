@@ -172,7 +172,7 @@ fn matrix3_translation_updates_geometry_and_matrix2_color_is_column_major() {
         c.uniform_matrix2fv(tint,false,&[1.,0.5,0.25,1.]).unwrap();
         for (translation,left,right) in [(-0.5,[96,159,0,255],[0,0,255,255]),(0.5,[0,0,255,255],[96,159,0,255])] {
             c.uniform_matrix3fv(transform,false,&[1.,0.,0.,0.,1.,0.,translation,0.,1.]).unwrap();
-            c.clear_color(0.,0.,1.,1.);
+            c.clear_color([0.,0.,1.,1.]);
             c.clear(COLOR_BUFFER_BIT).unwrap();
             c.draw_arrays(TRIANGLE_STRIP,0,4).unwrap();
             assert_eq!(c.read_pixels(1,0,1,1).unwrap(),left);
