@@ -92,9 +92,16 @@ write globals or read mutable outputs. These calls follow the supported portion
 of [GLSL ES function definitions and input parameters](https://registry.khronos.org/OpenGL/specs/es/2.0/GLSL_ES_Specification_1.00.pdf), section 6.1.
 
 At most 16 helpers and 16 nested function calls are supported. Function bodies
-share immutable ASTs; the 512-unit expression budget includes every nested call
-site, argument, body and local binding so shared bodies do not hide exponential
-execution. Unused helpers do not activate their referenced uniforms. Recursion,
+share immutable ASTs. Each helper has a 512-unit weighted-work limit; main has
+a 1024-unit limit and pays the full transitive callee cost at every call site,
+including arguments, bodies and bindings. Both sides of conditionals are charged,
+so skipped branches and shared bodies cannot hide exponential execution. These
+units estimate evaluation work; they are not an AST-node or measured CPU count.
+The independent per-draw raster limit remains 32 million weighted units, checked
+before pixels change. Larger programs may therefore compile while draws to
+larger targets still return OUT_OF_MEMORY. Existing source, token, variable,
+statement and nesting limits remain in force. Unused helpers do not activate
+their referenced uniforms. Recursion,
 forward calls, prototypes, overloading/redefinition, `out`/`inout`
 parameters and statements after an unconditional return are rejected with
 diagnostics; they are not silently ignored.

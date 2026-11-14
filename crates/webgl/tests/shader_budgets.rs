@@ -1,4 +1,4 @@
-use rabbithole_webgl::{gl::*, Context};
+use rabbithole_webgl::{gl::*, Context, Error};
 
 fn context(version:u32)->Context {
     if version==300 {Context::new_webgl2(1,1).unwrap()}else{Context::new(1,1).unwrap()}
@@ -33,6 +33,12 @@ fn a_shared_twelve_light_material_produces_the_analytic_pixel_in_both_versions()
         // Every normalized light faces +z: ambient + twelve tint terms gives
         // linear (.17,.34,.56), independent of parser cost bookkeeping.
         assert_eq!(c.read_pixels(0,0,1,1).unwrap(),[43,87,143,255]);
+        // A larger compilable main does not increase the raster work budget.
+        // Reject before any color/depth write when a larger target exceeds it.
+        c.resize(256,256).unwrap();c.viewport(0,0,256,256).unwrap();
+        c.clear_color([0.0,0.0,1.0,1.0]);c.clear(COLOR_BUFFER_BIT).unwrap();
+        assert_eq!(c.draw_arrays(TRIANGLES,0,3),Err(Error::OutOfMemory));
+        assert!(c.framebuffer_rgba().chunks_exact(4).all(|pixel|pixel==[0,0,255,255]));
     }
 }
 

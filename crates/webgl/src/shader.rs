@@ -6,6 +6,13 @@ use std::sync::Arc;
 const MAX_FUNCTIONS: usize = 16;
 const MAX_PARAMETERS: usize = 8;
 const MAX_CALL_DEPTH: usize = 16;
+// These are weighted evaluation-work limits, not syntax-node counts. Main may
+// compose several small helpers; every call still pays the full callee cost.
+const MAX_MAIN_WORK: usize = 1024;
+const MAX_FUNCTION_WORK: usize = 512;
+fn add_work(cost: usize, units: usize) -> Result<usize, String> {
+    cost.checked_add(units).ok_or_else(|| "shader expression budget overflow".into())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Precision { Low, Medium, High }
@@ -814,6 +821,12 @@ struct Parser {
 #[derive(Clone)]
 struct Binding { key: String, symbol: Symbol }
 impl Parser {
+    fn charge(&mut self, units: usize) -> Result<(), String> {
+        self.shader.cost = add_work(self.shader.cost, units)?;
+        let limit = if self.function_name.is_some() { MAX_FUNCTION_WORK } else { MAX_MAIN_WORK };
+        if self.shader.cost > limit { return Err("shader exceeds expression budget".into()); }
+        Ok(())
+    }
     fn peek(&self) -> &Tok {
         &self.tokens[self.pos]
     }
@@ -1021,8 +1034,7 @@ impl Parser {
             let kind = if sym.ty == Ty::Bool { ExprKind::Boolean(false) } else {
                 ExprKind::Construct(vec![Expr { ty: Ty::Float, kind: ExprKind::Number(0.0) }])
             };
-            self.shader.cost += sym.ty.n();
-            if self.shader.cost > 512 { return Err("shader exceeds expression budget".into()); }
+            self.charge(sym.ty.n())?;
             return Ok((target, Expr { ty: sym.ty, kind }));
         }
         let compound = if let Tok::Compound(op) = self.peek() {
@@ -1032,8 +1044,7 @@ impl Parser {
         let mut expr = self.expr(0)?;
         if let Some(op) = compound {
             self.read_name(&name)?;
-            self.shader.cost += 1;
-            if self.shader.cost > 512 { return Err("shader exceeds expression budget".into()); }
+            self.charge(1)?;
             let key = self.local(&name).map_or(name.clone(), |binding| binding.key.clone());
             let prior = Expr { ty: sym.ty, kind: ExprKind::Name(key) };
             expr = self.arithmetic(op, prior, expr)?;
@@ -1117,10 +1128,9 @@ impl Parser {
         self.readonly.clear();
         self.constants.clear();
         let globals = self.function_globals.take().unwrap();
-        let cost = self.shader.cost + parameters.len() + locals.len() + globals.len() + 1;
-        if cost > 512 {
-            return Err("function exceeds expression budget".into());
-        }
+        let overhead = parameters.len().checked_add(locals.len()).and_then(|n| n.checked_add(globals.len())).and_then(|n| n.checked_add(1)).ok_or("function expression budget overflow")?;
+        self.charge(overhead).map_err(|_| "function exceeds expression budget")?;
+        let cost = self.shader.cost;
         let call_depth = self.function_depth;
         self.function_name = None;
         self.result_type = None;
@@ -1159,10 +1169,9 @@ impl Parser {
     fn statement(&mut self) -> Result<Statement,String> {
         self.statement_depth += 1;
         self.statement_count += 1;
-        self.shader.cost += 1;
         if self.statement_depth > 16 { return Err("statement nesting exceeds 16".into()); }
         if self.statement_count > 128 { return Err("too many shader statements".into()); }
-        if self.shader.cost > 512 { return Err("shader exceeds expression budget".into()); }
+        self.charge(1)?;
         let statement = if self.eat('{') {
             self.scopes.push(BTreeMap::new());
             let body = self.statements()?;
@@ -1208,8 +1217,7 @@ impl Parser {
             else if right.ty == Ty::Float {left.ty}
             else {return Err("binary operand types do not match".into());};
         if let Some(n) = ad.or(bd) {
-            self.shader.cost += if op == '*' && ad.is_some() && bd.is_some() { n*n*n } else { n*n };
-            if self.shader.cost > 512 { return Err("shader exceeds expression budget".into()); }
+            self.charge(if op == '*' && ad.is_some() && bd.is_some() { n*n*n } else { n*n })?;
         }
         Ok(Expr { ty, kind: ExprKind::Binary(op, Box::new(left), Box::new(right)) })
     }
@@ -1218,10 +1226,7 @@ impl Parser {
         if self.depth > 64 {
             return Err("expression nesting exceeds 64".into());
         }
-        self.shader.cost += 1;
-        if self.shader.cost > 512 {
-            return Err("shader exceeds expression budget".into());
-        }
+        self.charge(1)?;
         let mut left = match self.next() {
             Tok::Num(n, integral) => Expr {
                 ty: if integral { Ty::IntLiteral } else { Ty::Float },
@@ -1309,10 +1314,7 @@ impl Parser {
                     }
                     let ty = function.result_type(&args)?;
                     // Math calls remain within the shader's bounded execution budget.
-                    self.shader.cost += 4 * ty.n();
-                    if self.shader.cost > 512 {
-                        return Err("shader exceeds expression budget".into());
-                    }
+                    self.charge(4 * ty.n())?;
                     Expr {
                         ty,
                         kind: ExprKind::Builtin(function, args),
@@ -1360,10 +1362,7 @@ impl Parser {
                         return Err("a matrix constructor requires one matrix argument or scalar/vector components; matrix-to-vector conversion is unsupported".into());
                     }
                     if ty.matrix_dim().is_some() {
-                        self.shader.cost += ty.n();
-                        if self.shader.cost > 512 {
-                            return Err("shader exceeds expression budget".into());
-                        }
+                        self.charge(ty.n())?;
                     }
                     Expr {
                         ty,
@@ -1407,10 +1406,7 @@ impl Parser {
                         return Err("user function call nesting exceeds limit".into());
                     }
                     self.function_depth = self.function_depth.max(call_depth);
-                    self.shader.cost += function.cost;
-                    if self.shader.cost > 512 {
-                        return Err("shader exceeds expression budget".into());
-                    }
+                    self.charge(function.cost)?;
                     if self.function_name.is_none() {
                         self.shader
                             .function_globals
@@ -1717,6 +1713,23 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
 mod control_flow_evaluation {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn main_work_composes_helpers_without_raising_each_helper_limit_or_overflowing() {
+        assert_eq!(MAX_MAIN_WORK,1024);
+        assert_eq!(MAX_FUNCTION_WORK,512);
+        assert!(add_work(usize::MAX,1).unwrap_err().contains("overflow"));
+        assert_eq!(add_work(usize::MAX-1,1).unwrap(),usize::MAX);
+        for version in [100,300] {
+            let (prefix,output)=if version==300 {("#version 300 es\nprecision highp float;out vec4 pixel;","pixel")}else{("precision highp float;","gl_FragColor")};
+            let work="color=sin(color);".repeat(40);
+            let source=format!("{prefix}void main(){{vec3 color=vec3(0.0);{work}{output}=vec4(color,1.0);}}");
+            let shader=compile(&source,false,version).unwrap();
+            assert!(shader.cost>MAX_FUNCTION_WORK && shader.cost<=MAX_MAIN_WORK);
+            let source=format!("{prefix}vec3 heavy(vec3 color){{{work}return color;}}void main(){{{output}=vec4(1.0);}}");
+            assert!(compile(&source,false,version).unwrap_err().contains("budget"),"even an unused helper keeps its own512 limit");
+        }
+    }
 
     #[test]
     fn boolean_vector_helper_parameters_results_and_nested_calls_preserve_width() {
