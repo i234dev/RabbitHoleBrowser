@@ -196,6 +196,28 @@ struct FrameEntry {
     name: Option<String>,
 }
 
+/// One executing document/realm owns the strong token. Page is not Clone;
+/// moving/detaching it preserves this identity, rebuilding a Page renews it.
+/// DOM and rendering snapshots never contain this token. Queues hold only Weak.
+/// document.open keeps the existing realm, so it keeps the same task owner.
+pub(crate) struct FrameDocumentToken(std::rc::Rc<()>);
+impl FrameDocumentToken {
+    pub(crate) fn new() -> Self { Self(std::rc::Rc::new(())) }
+    fn job(&self, id: u64) -> FrameJob { FrameJob { id, document: std::rc::Rc::downgrade(&self.0) } }
+}
+
+struct FrameJob {
+    id: u64,
+    document: std::rc::Weak<()>,
+}
+impl FrameJob {
+    fn live(&self) -> bool { self.document.strong_count() != 0 }
+    fn matches(&self, page: &Page) -> bool {
+        self.id == page.frame_id && self.document.ptr_eq(&std::rc::Rc::downgrade(&page.frame_document_token.0))
+    }
+    fn same_document(&self, other: &Self) -> bool { self.id == other.id && self.document.ptr_eq(&other.document) }
+}
+
 /// The frame tree of every page of an engine (what scripts can see of
 /// other frames), plus queued cross-frame messages and navigations.
 #[derive(Default)]
@@ -204,12 +226,25 @@ pub struct FrameRegistry {
     pub(crate) outbox: Vec<FrameMessage>,
     pub(crate) navigations: Vec<(u64, Url)>,
     // Cross-realm jobs belong to this Engine, never a thread-global queue.
-    touched: Vec<u64>,
-    reverse_touched: Vec<u64>,
+    touched: Vec<FrameJob>,
+    reverse_touched: Vec<FrameJob>,
     pub(crate) jobs_pending: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl FrameRegistry {
+    fn remember(&mut self, job: FrameJob, reverse: bool) {
+        if !job.live() { return; }
+        let queue = if reverse { &mut self.reverse_touched } else { &mut self.touched };
+        if !queue.iter().any(|queued| queued.same_document(&job)) { queue.push(job); }
+        self.jobs_pending.set(!self.reverse_touched.is_empty());
+    }
+
+    fn prune_dead_jobs(&mut self) {
+        self.touched.retain(FrameJob::live);
+        self.reverse_touched.retain(FrameJob::live);
+        self.jobs_pending.set(!self.reverse_touched.is_empty());
+    }
+
     pub fn parent(&self, id: u64) -> Option<u64> {
         self.entries.get(&id).and_then(|e| e.parent)
     }
@@ -237,8 +272,8 @@ impl FrameRegistry {
             }
         }
         self.outbox.retain(|m| m.to != id);
-        self.touched.retain(|target| *target != id);
-        self.reverse_touched.retain(|target| *target != id);
+        self.touched.retain(|target| target.id != id);
+        self.reverse_touched.retain(|target| target.id != id);
         self.jobs_pending.set(!self.reverse_touched.is_empty());
     }
 }
@@ -359,6 +394,7 @@ impl Engine {
         let source_http = matches!(page.url.scheme.as_str(), "http" | "https") && origin != "null" && page.url.origin() == origin;
         let reverse_allowed = source_http && matches!(&call, rabbithole_script::FrameCall::GetGlobal { .. } | rabbithole_script::FrameCall::CallGlobal { .. });
         let mut call = Some(call);
+        let mut document = None;
         let mut invoke = |target: &mut Page| {
             if page_origin(target) != origin { return None; }
             if target.script.host.is_none() && !target.script.scripts_ran && self.scripting {
@@ -375,6 +411,7 @@ impl Engine {
             };
             target.script.host = Some(host);
             target.script.dom_dirty = true;
+            document = Some(target.frame_document_token.job(target.frame_id));
             Some(reply)
         };
         let descendant = find_frame_page(page, id);
@@ -403,51 +440,54 @@ impl Engine {
             if owner.frame_id == id { reverse(owner) } else { self.with_frame(owner, id, &mut reverse).flatten() }
         };
         if r.is_some() {
-            let mut registry = self.frames.borrow_mut();
-            let touched = if descendant { &mut registry.touched } else { &mut registry.reverse_touched };
-            if !touched.contains(&id) { touched.push(id); }
-            registry.jobs_pending.set(!registry.reverse_touched.is_empty());
+            self.frames.borrow_mut().remember(document?, !descendant);
         }
         r
+    }
+
+    fn drain_frame_jobs(&self, target: &mut Page, job: &FrameJob) -> Option<bool> {
+        // A browsing-context ID survives navigation, its old realm does not.
+        // Never run an old checkpoint in the replacement document's host.
+        if !job.matches(target) { return Some(false); }
+        let Some(mut host) = target.script.host.take() else { return None };
+        {
+            let mut env = EngineEnv { engine: self, page: target };
+            host.run_jobs(&mut env);
+        }
+        let pending = host.has_frame_jobs();
+        target.script.host = Some(host);
+        target.script.dom_dirty = true;
+        Some(pending)
     }
 
     /// Preserve descendant checkpoints between classic scripts. Reverse
     /// targets wait until the outer owner and suspended source hosts return.
     pub(crate) fn frame_microtasks(&self, page: &mut Page) {
         if !rabbithole_script::ScriptHost::frame_checkpoint_allowed() { return; }
-        let mut drain = |target: &mut Page| {
-            let Some(mut host) = target.script.host.take() else { return None };
-            {
-                let mut env = EngineEnv { engine: self, page: target };
-                host.run_jobs(&mut env);
-            }
-            let pending = host.has_frame_jobs();
-            target.script.host = Some(host);
-            target.script.dom_dirty = true;
-            Some(pending)
-        };
-        let ids = std::mem::take(&mut self.frames.borrow_mut().touched);
-        for id in ids {
-            let pending = self.with_frame(page, id, &mut drain).flatten();
-            let live = self.frames.borrow().exists(id);
+        // This must precede the no-host gate: a replacement document without
+        // scripts must also be able to retire jobs of its destroyed predecessor.
+        self.frames.borrow_mut().prune_dead_jobs();
+        let jobs = std::mem::take(&mut self.frames.borrow_mut().touched);
+        for job in jobs {
+            if !job.live() { continue; }
+            let pending = self.with_frame(page, job.id, &mut |target| self.drain_frame_jobs(target, &job)).flatten();
+            let live = self.frames.borrow().exists(job.id);
             if pending != Some(false) && live {
-                // A reverse call can itself touch a sibling below its owner.
-                // That context is not below the original calling child.
-                // Preserve its work until the root owns the whole tree again.
-                let mut registry = self.frames.borrow_mut();
-                if !registry.reverse_touched.contains(&id) { registry.reverse_touched.push(id); }
-                registry.jobs_pending.set(true);
+                self.frames.borrow_mut().remember(job, true);
             }
         }
         if !ancestors().is_empty() || page.script.host.is_none() { return; }
-        let ids = std::mem::take(&mut self.frames.borrow_mut().reverse_touched);
-        for id in ids {
-            let pending = if page.frame_id == id { drain(page) } else { self.with_frame(page, id, &mut drain).flatten() };
-            let live = self.frames.borrow().exists(id);
+        let jobs = std::mem::take(&mut self.frames.borrow_mut().reverse_touched);
+        for job in jobs {
+            if !job.live() { continue; }
+            let pending = if page.frame_id == job.id {
+                self.drain_frame_jobs(page, &job)
+            } else {
+                self.with_frame(page, job.id, &mut |target| self.drain_frame_jobs(target, &job)).flatten()
+            };
+            let live = self.frames.borrow().exists(job.id);
             if pending != Some(false) && live {
-                let mut registry = self.frames.borrow_mut();
-                if !registry.reverse_touched.contains(&id) { registry.reverse_touched.push(id); }
-                registry.jobs_pending.set(true);
+                self.frames.borrow_mut().remember(job, true);
             }
         }
         let registry = self.frames.borrow();
@@ -1643,6 +1683,76 @@ mod ancestor_call_tests {
         assert_eq!(task, original_task);
         assert_eq!(page.script.host.as_mut().unwrap().realm().watchdog_state(), idle);
         assert_eq!(eval(&engine, &mut page, "marker"), "root");
+    }
+
+    fn pending_root_jobs() -> (Engine, Page) {
+        let (mut engine, mut page) = fixture();
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "<script>addEventListener('keydown',()=>parent.value())</script>");
+        finish(&engine, &mut page, 0);
+        let node = page.frames.children[0].node;
+        engine.focus_element(&mut page, Some(node));
+        engine.frame_key_event(&mut page, "x", "KeyX", true, crate::Modifiers::default()).unwrap();
+        assert!(page.frame_jobs_pending.get());
+        assert!(!engine.frames.borrow().reverse_touched.is_empty());
+        (engine, page)
+    }
+
+    #[test]
+    fn destroying_the_owner_document_retires_jobs_even_with_a_dom_snapshot() {
+        let (mut engine, page) = pending_root_jobs();
+        let snapshot = page.doc.clone();
+        let old_document = page.frame_document_token.job(page.frame_id).document;
+        drop(page);
+        assert_eq!(old_document.strong_count(), 0);
+        // A raw DOM snapshot has no realm/task ownership. The replacement has
+        // no ScriptHost, so dead-job pruning must precede the no-host gate.
+        assert!(snapshot.descendants(Document::ROOT).count() > 0);
+        let mut replacement = engine.load_html("<p>replacement without scripts</p>", Url::parse("https://frame.test/replacement").unwrap(), Viewport { width: 800.0, height: 600.0 });
+        assert!(replacement.script.host.is_none());
+        engine.tick(&mut replacement);
+        assert!(engine.frames.borrow().reverse_touched.is_empty());
+        assert!(!replacement.frame_jobs_pending.get());
+        assert_eq!(replacement.next_script_due(), None);
+        drop(snapshot);
+    }
+
+    #[test]
+    fn replacement_with_the_same_frame_id_never_inherits_an_old_documents_checkpoint() {
+        let (mut engine, old_page) = pending_root_jobs();
+        let id = old_page.frame_id;
+        let old_document = old_page.frame_document_token.job(id);
+        // Keep the old Page allocated deliberately: identity must reject it
+        // even before its last owner drops, not merely check Weak liveness.
+        engine.frame_context.replace(Some(FrameContext { id, depth: 0, name: None, origin: None }));
+        let mut replacement = engine.load_html("<script>var trace=['replacement']</script>", Url::parse("https://frame.test/replacement").unwrap(), old_page.viewport);
+        engine.frame_context.replace(None);
+        assert_eq!(replacement.frame_id, id);
+        assert!(!old_document.matches(&replacement));
+        assert!(old_page.script.host.as_ref().unwrap().has_frame_jobs());
+        assert_eq!(eval(&engine, &mut replacement, "trace.join(',')"), "replacement");
+        assert!(old_page.script.host.as_ref().unwrap().has_frame_jobs());
+        assert!(engine.frames.borrow().reverse_touched.is_empty());
+        assert!(!replacement.frame_jobs_pending.get());
+    }
+
+    #[test]
+    fn cancelling_an_uncommitted_page_preserves_the_current_documents_pending_jobs() {
+        let (engine, mut current) = pending_root_jobs();
+        let original = current.frame_document_token.job(current.frame_id);
+        let loaded = engine.loader.load_html("<p>uncommitted</p>", Url::parse("https://frame.test/provisional").unwrap(), current.viewport);
+        let provisional = engine.build_page_unscripted(loaded, current.viewport);
+        let cancelled = provisional.frame_document_token.job(provisional.frame_id).document;
+        assert!(!original.matches(&provisional));
+        // Discarding a prepared page models cancellation before commit; it
+        // must not revoke or replace the currently displayed realm's token.
+        drop(provisional);
+        assert_eq!(cancelled.strong_count(), 0);
+        assert!(original.matches(&current));
+        assert!(current.frame_jobs_pending.get());
+        engine.tick(&mut current);
+        assert_eq!(eval(&engine, &mut current, "trace.join(',')"), "sync,promise");
+        assert!(engine.frames.borrow().reverse_touched.is_empty());
+        assert!(!current.frame_jobs_pending.get());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 This candidate extends the existing Engine cross-realm bridge for global
 property reads and function calls from an iframe to a reachable, inactive
 ancestor or sibling. It is based on source 34780e675d84a769bfb427e07af34d9ba053a0ae.
-The source changes and twenty-four tests (fourteen Engine, five JS, five Script) have not been
+The source changes and twenty-seven tests (seventeen Engine, five JS, five Script) have not been
 compiled or executed yet.
 
 The reverse route accepts only HTTP(S) documents whose effective origin equals
@@ -63,6 +63,17 @@ belong to each Engine's FrameRegistry, and a per-Engine wakeup flag shared by
 its Pages covers input callbacks returning without settle. Another Engine
 cannot steal the work or consume that flag. Bounded checkpoints retain the
 ID/wakeup while Promise, mutation or custom-element/slot work remains.
+
+Each queued checkpoint additionally carries a Weak document/realm token.
+Exactly one non-Clone Page owns the strong token: moves and temporary
+frame detachment preserve it; every Page construction gets a fresh token,
+including replacement with the same FrameId. DOM/render snapshots do not
+contain it. document.open retains the existing realm and token. Queues cannot
+keep a discarded Page alive. Dead jobs are pruned before the no-ScriptHost
+gate, and a live but superseded token never runs against the new document's
+host. Preparing and cancelling a provisional Page leaves the current Page's
+jobs intact. These ownership controls exercise Engine Pages directly; they
+do not claim a new GUI navigation/cancellation integration test.
 
 Separate realm queues remain: this candidate does not implement a single
 global FIFO microtask queue across all realms, and does not claim complete

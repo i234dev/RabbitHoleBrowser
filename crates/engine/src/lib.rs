@@ -1099,6 +1099,7 @@ pub struct Page {
     pub frames: frames::Frames,
     /// Engine-owned cross-realm checkpoints can outlive an input callback.
     pub(crate) frame_jobs_pending: std::rc::Rc<std::cell::Cell<bool>>,
+    pub(crate) frame_document_token: frames::FrameDocumentToken,
     /// Running CSS transitions and animations.
     pub anim: animations::AnimationState,
 }
@@ -1270,6 +1271,7 @@ impl Engine {
             frame_origin: frame.and_then(|f| f.origin),
             frames: frames::Frames::default(),
             frame_jobs_pending: self.frames.borrow().jobs_pending.clone(),
+            frame_document_token: frames::FrameDocumentToken::new(),
             anim: animations::AnimationState::default(),
         };
         if page.frame_depth == 0 {
