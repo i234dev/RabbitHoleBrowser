@@ -1475,3 +1475,23 @@ cubren ambos.)
   Cambiar `ENTRY_MIN_OPS` no lo arregla (5 rondas: 24 → +1,1 %, 48 →
   +2,3 %, solo bucles → +1,0 %).
 
+
+
+## Experimento de arena de código descartado (2026-11-14)
+
+Se validó un prototipo aislado con regiones reservadas, páginas independientes
+por función y guardias permanentes. El código anterior permanecía ejecutable
+mientras se preparaban páginas nuevas; los fallos de limpieza retenían su cargo
+de memoria y excluían el slot de la reutilización. No se incorporó al motor.
+
+En ocho pares alternos, con el mismo binario y afinidad CPU 0, compilar a través
+del motor 1.003 funciones y 15.059 instrucciones consumió un **7,04 % más de CPU**
+con arena. Los ocho pares empeoraron, entre un 5,05 % y un 9,83 %; el coste de
+mapping mediano aumentó un 18,23 %. Ambos modos generaron los mismos 2.192.340
+bytes lógicos y el testigo de asignación confirmó el uso de la arena.
+
+El asignador aislado con reutilización ahorró entre un 7,0 % y un 9,8 % de CPU,
+pero esa mejora no se trasladó a la compilación JavaScript. Se descartó esta
+variante tras validar sus pruebas de memoria, JavaScript, GC y 2.000 programas
+diferenciales. Los objetivos de coste de compilación y asignación siguen
+abiertos; el JIT continúa apagado por defecto.
