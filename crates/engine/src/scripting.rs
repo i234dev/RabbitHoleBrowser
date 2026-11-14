@@ -974,7 +974,7 @@ impl Engine {
         if !self.scripting || page.frame_depth != 0 { return ScriptOutcome::default(); }
         let Some(context) = &self.window_context else { return ScriptOutcome::default() };
         let Some(target) = context.host.info(context.id).filter(|info| !info.closed) else { return ScriptOutcome::default() };
-        if message.target_origin_key.as_ref().map(|key| key != &target.origin_key).unwrap_or(false) { return ScriptOutcome::default(); }
+        if message.target_origin_key.as_ref().map(|key| key.is_empty() || key != &target.origin_key).unwrap_or(false) { return ScriptOutcome::default(); }
         self.ensure_script_host(page);
         let Some(mut host) = page.script.host.take() else { return ScriptOutcome::default() };
         {
