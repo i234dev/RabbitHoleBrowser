@@ -200,6 +200,8 @@ fn expand_tracks(list: &[TrackListItem], avail: Option<f32>, gap: f32) -> TrackL
         .sum();
     for item in list {
         match item {
+            // An axis without an inherited span uses the standalone fallback.
+            TrackListItem::Subgrid { .. } => {},
             TrackListItem::Track { names: pre, size } => push_track(&mut tracks, &mut names, pre, size, false),
             TrackListItem::Names(n) => names.last_mut().unwrap().extend(n.iter().cloned()),
             TrackListItem::Repeat { count, auto_fit, tracks: inner } => {
@@ -230,7 +232,7 @@ fn expand_tracks(list: &[TrackListItem], avail: Option<f32>, gap: f32) -> TrackL
                         match t {
                             TrackListItem::Track { names: pre, size } => push_track(&mut tracks, &mut names, pre, size, auto && *auto_fit),
                             TrackListItem::Names(n) => names.last_mut().unwrap().extend(n.iter().cloned()),
-                            TrackListItem::Repeat { .. } => {}
+                            TrackListItem::Repeat { .. } | TrackListItem::Subgrid { .. } => {}
                         }
                     }
                 }

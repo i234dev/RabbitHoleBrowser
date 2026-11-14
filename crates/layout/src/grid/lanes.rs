@@ -27,7 +27,12 @@ struct LaneItem {
 fn row_lanes(style: &ComputedStyle) -> bool {
     match style.grid_lanes_direction.rows {
         Some(r) => r,
-        None => style.grid_template_columns.is_empty() && !style.grid_template_rows.is_empty(),
+        None => {
+            // A computed subgrid request is not an independent explicit axis.
+            // Once inherited, its actual tracks establish the used direction.
+            let standalone = |list: &[TrackListItem]| !list.is_empty() && !matches!(list.first(), Some(TrackListItem::Subgrid { .. }));
+            !standalone(&style.grid_template_columns) && standalone(&style.grid_template_rows)
+        }
     }
 }
 

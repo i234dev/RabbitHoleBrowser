@@ -581,8 +581,16 @@ impl TrackCalc {
     }
 }
 
+/// Line names on a subgridded axis. Repetitions stay compact until the
+/// inherited span is known; large repeat counts must not allocate tracks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubgridLineNames {
+    Names(Vec<String>),
+    Repeat { count: Option<u32>, names: Vec<Vec<String>> },
+}
+
 /// A track list entry: a sized track, optionally preceded by line names,
-/// or a `repeat()`.
+/// a `repeat()`, or the request to inherit one axis from the parent grid.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrackListItem {
     Track {
@@ -597,6 +605,7 @@ pub enum TrackListItem {
     },
     /// Trailing line names after the last track.
     Names(Vec<String>),
+    Subgrid { line_names: Vec<SubgridLineNames> },
 }
 
 /// `grid-row-start` etc.
