@@ -641,6 +641,7 @@ enum Tok {
     Num(f32, bool),
     P(char),
     Op(String),
+    Compound(char),
     End,
 }
 fn lex(src: &str, token_limit: usize) -> Result<(Vec<Tok>, u32), String> {
@@ -733,6 +734,9 @@ fn lex(src: &str, token_limit: usize) -> Result<(Vec<Tok>, u32), String> {
             }
             out.push(Tok::Num(n, integral));
             continue;
+        }
+        if b"+-*/".contains(&c) && b.get(i+1) == Some(&b'=') {
+            out.push(Tok::Compound(c as char)); i += 2; continue;
         }
         if let Some(op) = ["<=", ">=", "==", "!=", "&&", "||", "^^"].iter().find(|op| b.get(i..i+2) == Some(op.as_bytes())) {
             out.push(Tok::Op((*op).into())); i+=2; continue;
@@ -948,8 +952,31 @@ impl Parser {
         {
             return Err(format!("{name} is read-only"));
         }
-        self.expect(Tok::P('='))?;
-        let expr = self.expr(0)?;
+        if declaration.is_some() && self.eat(';') {
+            // Uninitialized local values are undefined in ESSL. This bounded
+            // evaluator initializes them to zero, with real lexical scope;
+            // later assignments still have to type-check and execute.
+            let target = self.declare(name, sym.ty, Qual::Local)?;
+            let kind = if sym.ty == Ty::Bool { ExprKind::Boolean(false) } else {
+                ExprKind::Construct(vec![Expr { ty: Ty::Float, kind: ExprKind::Number(0.0) }])
+            };
+            self.shader.cost += sym.ty.n();
+            if self.shader.cost > 512 { return Err("shader exceeds expression budget".into()); }
+            return Ok((target, Expr { ty: sym.ty, kind }));
+        }
+        let compound = if let Tok::Compound(op) = self.peek() {
+            if declaration.is_some() { return Err("a declaration requires =, not compound assignment".into()); }
+            let op = *op; self.pos += 1; Some(op)
+        } else { self.expect(Tok::P('='))?; None };
+        let mut expr = self.expr(0)?;
+        if let Some(op) = compound {
+            self.read_name(&name)?;
+            self.shader.cost += 1;
+            if self.shader.cost > 512 { return Err("shader exceeds expression budget".into()); }
+            let key = self.local(&name).map_or(name.clone(), |binding| binding.key.clone());
+            let prior = Expr { ty: sym.ty, kind: ExprKind::Name(key) };
+            expr = self.arithmetic(op, prior, expr)?;
+        }
         if expr.ty != sym.ty {
             return Err(format!("assignment type mismatch for {name}"));
         }
@@ -1097,6 +1124,26 @@ impl Parser {
         };
         self.statement_depth -= 1;
         Ok(statement)
+    }
+    fn arithmetic(&mut self, op: char, left: Expr, right: Expr) -> Result<Expr, String> {
+        if matches!(left.ty, Ty::Sampler2D | Ty::Bool) || matches!(right.ty, Ty::Sampler2D | Ty::Bool) {
+            return Err("arithmetic requires numeric operands".into());
+        }
+        if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
+            return Err("integer arithmetic and implicit integer-to-float conversion are unsupported".into());
+        }
+        let (ad, bd) = (left.ty.matrix_dim(), right.ty.matrix_dim());
+        let ty = if op == '*' && ad.is_some_and(|n| right.ty == Ty::vector(n)) {right.ty}
+            else if op == '*' && bd.is_some_and(|n| left.ty == Ty::vector(n)) {left.ty}
+            else if left.ty == right.ty {left.ty}
+            else if left.ty == Ty::Float {right.ty}
+            else if right.ty == Ty::Float {left.ty}
+            else {return Err("binary operand types do not match".into());};
+        if let Some(n) = ad.or(bd) {
+            self.shader.cost += if op == '*' && ad.is_some() && bd.is_some() { n*n*n } else { n*n };
+            if self.shader.cost > 512 { return Err("shader exceeds expression budget".into()); }
+        }
+        Ok(Expr { ty, kind: ExprKind::Binary(op, Box::new(left), Box::new(right)) })
     }
     fn expr(&mut self, min_prec: u8) -> Result<Expr, String> {
         self.depth += 1;
@@ -1393,29 +1440,9 @@ impl Parser {
                 ty=Ty::Bool;
                 kind=ExprKind::Compare(op,Box::new(left),Box::new(right));
             } else {
-                if matches!(left.ty,Ty::Sampler2D|Ty::Bool) || matches!(right.ty,Ty::Sampler2D|Ty::Bool) {
-                    return Err("arithmetic requires numeric operands".into());
-                }
-                if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
-                    return Err("integer arithmetic and implicit integer-to-float conversion are unsupported".into());
-                }
-                let (ad, bd) = (left.ty.matrix_dim(), right.ty.matrix_dim());
-                ty = if op == "*" && ad.is_some_and(|n| right.ty == Ty::vector(n)) {right.ty}
-                    else if op == "*" && bd.is_some_and(|n| left.ty == Ty::vector(n)) {left.ty}
-                    else if left.ty==right.ty {left.ty}
-                    else if left.ty==Ty::Float {right.ty}
-                    else if right.ty==Ty::Float {left.ty}
-                    else {return Err("binary operand types do not match".into());};
-                if let Some(n) = ad.or(bd) {
-                    // Matrix products do cubic work; matrix/vector products
-                    // and component operations do quadratic work. Every call
-                    // site, including helper bodies, retains this charge.
-                    self.shader.cost += if op == "*" && ad.is_some() && bd.is_some() { n*n*n } else { n*n };
-                    if self.shader.cost > 512 {
-                        return Err("shader exceeds expression budget".into());
-                    }
-                }
-                kind=ExprKind::Binary(op.as_bytes()[0] as char,Box::new(left),Box::new(right));
+                let arithmetic = self.arithmetic(op.as_bytes()[0] as char, left, right)?;
+                ty = arithmetic.ty;
+                kind = arithmetic.kind;
             }
             left=Expr {ty,kind};
         }
@@ -1621,6 +1648,20 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
 mod control_flow_evaluation {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn compound_rhs_samples_once_and_matrix_operations_share_binary_rules() {
+        for version in [100,300] {
+            let (prefix,sample,output)=if version==300 {("#version 300 es\nprecision highp float;out vec4 pixel;","texture","pixel")}else{("precision highp float;","texture2D","gl_FragColor")};
+            let source=format!("{prefix}uniform sampler2D image;vec4 touched(){{return {sample}(image,vec2(0.5));}}void main(){{vec4 color;color=vec4(0.25);color+=touched();{output}=color;}}");
+            let shader=compile(&source,false,version).unwrap();let calls=Cell::new(0);
+            let result=shader.run_with_sampler(BTreeMap::new(),&|_,_|{calls.set(calls.get()+1);[0.5;4]});
+            assert_eq!(calls.get(),1);assert_eq!(result[output].v[..4],[0.75;4]);
+            let source=format!("{prefix}void main(){{mat2 m=mat2(0.5);m*=2.0;m/=4.0;m+=mat2(0.25);m-=mat2(0.25);vec2 v=vec2(1.0);v*=m;{output}=vec4(v,0.75,1.0);}}");
+            let result=compile(&source,false,version).unwrap().run_with_sampler(BTreeMap::new(),&|_,_|panic!("no texture operation"));
+            assert_eq!(result[output].v[..4],[0.25,0.25,0.75,1.0]);
+        }
+    }
 
     #[test]
     fn ternary_types_both_alternatives_but_evaluates_only_the_selected_one() {
