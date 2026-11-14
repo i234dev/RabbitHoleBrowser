@@ -320,6 +320,9 @@ pub struct Realm {
     /// Realm records by index; the running one's slot is empty. Empty
     /// while there is only the first realm.
     pub(crate) realms: Vec<Option<Box<crate::realms::RealmRecord>>>,
+    /// Actual deadline aborts, retained across task/deadline resets. Unlike
+    /// `terminating`, this does not also describe memory-limit failures.
+    pub(crate) watchdog_aborts: u64,
 }
 
 thread_local! {
@@ -495,6 +498,7 @@ impl Realm {
             current_realm: 0,
             entry_realm: 0,
             realms: Vec::new(),
+            watchdog_aborts: 0,
         };
         realm.install_builtins();
         realm.gc_bytes_base = crate::alloc::thread_bytes_in_use();
@@ -1192,6 +1196,13 @@ impl Realm {
     /// Did the last run hit the deadline?
     pub fn timed_out(&self) -> bool {
         self.terminating
+    }
+
+    /// Number of tasks stopped by the execution watchdog. Observing an
+    /// already-aborted task does not increment it; starting a new task
+    /// does not erase earlier aborts.
+    pub fn watchdog_abort_count(&self) -> u64 {
+        self.watchdog_aborts
     }
 
     // --------------------------------------------------------- evaluation

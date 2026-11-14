@@ -79,6 +79,27 @@ pub fn parse_report(url: &str, json: &str, ms: u64) -> Option<TestResult> {
     })
 }
 
+/// A script can stop while registering synchronous tests and leave an OK
+/// report for only the prefix it reached. Preserve that prefix, but mark
+/// execution incomplete using the engine's timeout state, never log text.
+fn report_after_watchdog_abort(json: &str, watchdog_aborts: u64) -> String {
+    if watchdog_aborts == 0 {
+        return json.to_string();
+    }
+    let Ok(mut report) = serde_json::from_str::<Value>(json) else { return json.to_string() };
+    if report["status"].as_u64() != Some(0) && report["status"].as_str() != Some("OK") {
+        return json.to_string();
+    }
+    report["status"] = Value::from(2);
+    let reason = format!("Execution watchdog aborted {watchdog_aborts} page task(s); registered subtests may be incomplete.");
+    let message = match report["message"].as_str() {
+        Some(message) if !message.is_empty() => format!("{reason} {message}"),
+        _ => reason,
+    };
+    report["message"] = Value::from(message);
+    report.to_string()
+}
+
 const MARKER: &str = "@@WPT@@";
 const TD_MARKER: &str = "@@TD@@";
 
@@ -227,7 +248,7 @@ pub fn run_child(url: &str, timeout: Duration, verbose: bool) -> i32 {
     let mut grace_end = None;
     loop {
         if let Some(j) = check(&mut page, &mut driver_requests) {
-            println!("{j}");
+            println!("{}", report_after_watchdog_abort(&j, page.script.watchdog_abort_count()));
             return 0;
         }
         for r in std::mem::take(&mut driver_requests) {

@@ -892,6 +892,12 @@ impl ScriptHost {
     pub fn realm(&mut self) -> &mut Realm {
         &mut self.realm
     }
+
+    /// Watchdog aborts in this host, including scripts, jobs and handlers.
+    /// The count survives per-task deadline resets.
+    pub fn watchdog_abort_count(&self) -> u64 {
+        self.realm.watchdog_abort_count()
+    }
 }
 
 impl Default for DispatchResult {

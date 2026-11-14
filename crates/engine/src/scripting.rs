@@ -76,6 +76,15 @@ pub struct ScriptState {
     pub frame_initial_load_pending: bool,
 }
 
+impl ScriptState {
+    /// Actual watchdog aborts in this page's main script realm, including
+    /// microtasks and event handlers. Unlike per-task timeout state, the
+    /// counter survives later scripts, readiness events and checkpoints.
+    pub fn watchdog_abort_count(&self) -> u64 {
+        self.host.as_ref().map_or(0, ScriptHost::watchdog_abort_count)
+    }
+}
+
 /// Origin-scoped `localStorage`, shared by all pages of an engine and
 /// optionally persisted to a file.
 #[derive(Default)]

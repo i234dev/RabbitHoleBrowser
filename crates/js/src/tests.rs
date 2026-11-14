@@ -1386,6 +1386,35 @@ fn watchdog_interrupts_infinite_loops() {
     assert_eq!(realm.to_rust_string(v).unwrap(), "2");
 }
 
+#[test]
+fn watchdog_abort_count_survives_task_resets_and_counts_each_abort_once() {
+    let mut realm = crate::Realm::new();
+    let expired = || Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+    assert_eq!(realm.watchdog_abort_count(), 0);
+    realm.set_deadline(expired());
+    assert!(realm.check_watchdog().is_err());
+    assert_eq!(realm.watchdog_abort_count(), 1);
+    assert!(realm.check_watchdog().is_err());
+    assert_eq!(realm.watchdog_abort_count(), 1);
+    realm.set_deadline(None);
+    assert!(!realm.timed_out());
+    realm.set_task_budget(Some(std::time::Duration::from_secs(1)));
+    assert!(realm.begin_task());
+    assert!(realm.check_watchdog().is_ok());
+    assert_eq!(realm.watchdog_abort_count(), 1);
+    realm.set_deadline(expired());
+    assert!(realm.check_watchdog().is_err());
+    assert_eq!(realm.watchdog_abort_count(), 2);
+    realm.set_deadline(None);
+}
+
+#[test]
+fn memory_limit_termination_is_not_counted_as_watchdog_abort() {
+    let mut realm = crate::Realm::new();
+    let _ = realm.out_of_memory();
+    assert_eq!(realm.watchdog_abort_count(), 0);
+}
+
 fn host_work(_realm: &mut crate::Realm, _this: crate::Value, args: &[crate::Value]) -> crate::JsResult<crate::Value> {
     // Host work done for a script (like a forced layout): excluded.
     let ms = args.first().and_then(|v| v.as_number()).unwrap_or(0.0);

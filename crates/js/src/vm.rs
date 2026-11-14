@@ -1571,6 +1571,9 @@ impl Realm {
                 if !self.terminating && self.apply_watchdog_credit() && self.watch_now() < self.deadline.unwrap_or(d) {
                     return Ok(());
                 }
+                if !self.terminating {
+                    self.watchdog_aborts = self.watchdog_aborts.saturating_add(1);
+                }
                 self.terminating = true;
                 return Err(self.new_error("RangeError", "Script execution timed out"));
             }
