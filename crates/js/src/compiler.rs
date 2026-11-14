@@ -1229,6 +1229,22 @@ impl Compiler {
         }
     }
 
+    /// Static Semantics: ContainsExpression for formal binding patterns.
+    /// Rest/destructuring alone do not introduce a parameter expression.
+    fn pattern_contains_expression(p: &Pattern) -> bool {
+        match p {
+            Pattern::Identifier(_) => false,
+            Pattern::Expr(_) | Pattern::Assign { .. } => true,
+            Pattern::Object { properties, rest } => {
+                properties.iter().any(|p| matches!(p.key, PropertyKey::Computed(_)) || Self::pattern_contains_expression(&p.value))
+                    || rest.as_deref().is_some_and(Self::pattern_contains_expression)
+            }
+            Pattern::Array { elements, rest } => {
+                elements.iter().flatten().any(Self::pattern_contains_expression) || rest.as_deref().is_some_and(Self::pattern_contains_expression)
+            }
+        }
+    }
+
     fn collect_var_names_stmt(s: &Stmt, out: &mut Vec<String>) {
         match &s.kind {
             StmtKind::VarDecl(d) if d.kind == VarKind::Var => {
@@ -1982,6 +1998,13 @@ impl Compiler {
             let mut outer: Vec<String> = lex.iter().filter(|(_, k)| *k != BindKind::Function).map(|(n, _)| n.clone()).collect();
             for p in &f.params {
                 Self::collect_pattern_names(&p.pattern, &mut outer);
+            }
+            // Annex B excludes parameter bindings, including an implicit
+            // arguments object. A body declaration only suppresses that
+            // object when the formal parameters contain no expressions.
+            let has_parameter_expressions = f.params.iter().any(|p| Self::pattern_contains_expression(&p.pattern));
+            if !f.is_arrow && (has_parameter_expressions || !lex.iter().any(|(n, _)| n == "arguments")) {
+                outer.push("arguments".to_string());
             }
             for (n, ptr) in Self::collect_annexb(body_stmts, outer) {
                 if n != "arguments" {

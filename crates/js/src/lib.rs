@@ -58,6 +58,8 @@ pub mod vm;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_semantics;
+#[cfg(test)]
 mod tests_vm;
 #[cfg(test)]
 mod tests_panic;
