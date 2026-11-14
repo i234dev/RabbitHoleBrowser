@@ -49,7 +49,7 @@ fn keywords(comps: &[&[Token]]) -> Vec<String> {
         .collect()
 }
 
-fn flex_basis(c: &[Token], ctx: &ApplyCtx) -> Option<Length> {
+fn flex_basis(c: &[Token], ctx: &ApplyCtx) -> Option<(Length, bool)> {
     // The flex-basis grammar excludes negative literal lengths/percentages.
     // Inspect the tokens, not the resolved Length: math functions may produce
     // a negative result that is instead clamped when determining the used size.
@@ -58,14 +58,15 @@ fn flex_basis(c: &[Token], ctx: &ApplyCtx) -> Option<Length> {
     }
     if let Some(kw) = values::ident(c) {
         return match kw.as_str() {
-            "auto" | "content" => Some(Length::Auto),
-            "max-content" => Some(Length::MaxContent),
-            "min-content" => Some(Length::MinContent),
-            "fit-content" => Some(Length::FitContent),
+            "auto" => Some((Length::Auto, false)),
+            "content" => Some((Length::Auto, true)),
+            "max-content" => Some((Length::MaxContent, false)),
+            "min-content" => Some((Length::MinContent, false)),
+            "fit-content" => Some((Length::FitContent, false)),
             _ => None,
         };
     }
-    super::len_no_auto(c, ctx)
+    super::len_no_auto(c, ctx).map(|length| (length, false))
 }
 
 fn gap_value(c: &[Token], ctx: &ApplyCtx) -> Option<Length> {
@@ -103,12 +104,14 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
                             style.flex_grow = 0.0;
                             style.flex_shrink = 0.0;
                             style.flex_basis = Length::Auto;
+                            style.flex_basis_content = false;
                             return true;
                         }
                         "auto" => {
                             style.flex_grow = 1.0;
                             style.flex_shrink = 1.0;
                             style.flex_basis = Length::Auto;
+                            style.flex_basis_content = false;
                             return true;
                         }
                         _ => {}
@@ -125,7 +128,7 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
                     } else if shrink.is_none() {
                         shrink = Some(n);
                     } else if basis.is_none() && n == 0.0 {
-                        basis = Some(Length::ZERO);
+                        basis = Some((Length::ZERO, false));
                     } else {
                         return true;
                     }
@@ -143,7 +146,9 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             }
             style.flex_grow = grow.unwrap_or(1.0);
             style.flex_shrink = shrink.unwrap_or(1.0);
-            style.flex_basis = basis.unwrap_or(if grow.is_some() { Length::Percent(0.0) } else { Length::Auto });
+            let (length, content) = basis.unwrap_or((if grow.is_some() { Length::Percent(0.0) } else { Length::Auto }, false));
+            style.flex_basis = length;
+            style.flex_basis_content = content;
         }
         "flex-grow" | "-webkit-box-flex" => {
             if let Some(n) = values::number(c0) {
@@ -156,8 +161,9 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             }
         }
         "flex-basis" => {
-            if let Some(b) = flex_basis(c0, ctx) {
-                style.flex_basis = b;
+            if let Some((length, content)) = flex_basis(c0, ctx) {
+                style.flex_basis = length;
+                style.flex_basis_content = content;
             }
         }
         "flex-wrap" => {

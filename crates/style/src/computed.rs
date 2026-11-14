@@ -1045,6 +1045,9 @@ pub struct ComputedStyle {
     pub flex_grow: f32,
     pub flex_shrink: f32,
     pub flex_basis: Length,
+    /// `content` uses the contents even when the preferred main size is set.
+    /// Its numeric storage is `Auto`; keep it distinct from the `auto` keyword.
+    pub flex_basis_content: bool,
     pub flex_wrap: FlexWrap,
     pub justify_content: ContentDistribution,
     pub align_items: ItemAlign,
@@ -1298,6 +1301,7 @@ impl ComputedStyle {
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
+            flex_basis_content: false,
             flex_wrap: FlexWrap::NoWrap,
             justify_content: ContentDistribution::FlexStart,
             align_items: ItemAlign::Normal,
