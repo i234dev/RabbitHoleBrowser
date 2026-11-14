@@ -53,6 +53,17 @@ pub fn parse_program_in(source: &str, is_module: bool, ctx: &crate::early::Early
     Ok(program)
 }
 
+/// Console top-level await keeps script grammar/strictness and rejects
+/// module-only forms. Parse all bodies before executing any fallback code.
+pub(crate) fn parse_console_await(source: &str) -> Result<Program, ParseError> {
+    let mut parser = Parser::new(source, false)?;
+    parser.ctx.in_async = true;
+    parser.lazy = false;
+    let program = parser.parse_program()?;
+    crate::early::check_program(&program, &crate::early::EarlyContext::default())?;
+    Ok(program)
+}
+
 /// Whether parsing `len` bytes of source skips function bodies (whose
 /// early errors [`validate_program`] then finds).
 pub fn skips_bodies(len: usize) -> bool {

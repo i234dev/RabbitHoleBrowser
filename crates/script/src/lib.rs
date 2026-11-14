@@ -28,6 +28,9 @@ mod window;
 mod windows;
 pub use windows::{WindowContext, WindowHost, WindowInfo, WindowMessage, WindowOpenRequest};
 mod workers;
+mod console;
+pub use console::{ConsoleEvaluation, ConsolePoll};
+pub use rabbithole_js::realm::WallDeadlineGuard as ConsoleDeadline;
 mod service_worker;
 pub use service_worker::{ServiceWorkerRegistry, ServiceWorkerScope, ServiceWorkerClient, ServiceWorkerNavigation, ServiceWorkerNavigationHandle, CacheStorageLimits, CacheStorageUsage};
 
@@ -294,6 +297,7 @@ impl ScriptHost {
             realm.new_private_symbol(rabbithole_js::JsStr::new("URLSearchParams.url")),
         );
         let state = Rc::new(RefCell::new(HostState {
+            document_token: Rc::new(()),
             wrappers: HashMap::default(),
             child_lists: HashMap::default(),
             protos: HashMap::default(),
@@ -680,6 +684,7 @@ impl ScriptHost {
     pub fn run_timers(&mut self, env: &mut dyn HostEnv, now_ms: f64) -> bool {
         let own = self.enter(env, |realm| {
             let slice_end = std::time::Instant::now() + TICK_SLICE;
+            let slice_end = realm.wall_deadline().map(|deadline| deadline.min(slice_end)).unwrap_or(slice_end);
             state().borrow_mut().last_tick = now_ms;
             realm.begin_task();
             let mut ran = node::run_ready_script_fetches(realm);

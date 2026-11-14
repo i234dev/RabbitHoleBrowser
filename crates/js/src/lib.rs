@@ -26,6 +26,7 @@
 
 pub mod alloc;
 mod arguments;
+mod console;
 pub mod ast;
 pub mod bigint;
 pub mod builtins;

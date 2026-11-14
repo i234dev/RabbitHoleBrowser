@@ -325,6 +325,18 @@ pub struct Realm {
     pub(crate) watchdog_aborts: u64,
 }
 
+/// Opaque saved state for a bounded, idle host entry. Abort accounting is
+/// deliberately monotonic and is not rolled back on restoration.
+pub struct WatchdogState {
+    deadline: Option<std::time::Instant>,
+    origin: Option<(std::time::Instant, std::time::Duration)>,
+    budget: Option<std::time::Duration>,
+    terminating: bool,
+    credit: std::time::Duration,
+    regex: (Option<std::time::Instant>, bool),
+    wall: Option<std::time::Instant>,
+}
+
 thread_local! {
     /// Time spent in host work that must not count against the running
     /// task's watchdog budget (see [`exclude_from_watchdog`]).
@@ -338,6 +350,36 @@ thread_local! {
 pub fn exclude_from_watchdog(spent: std::time::Duration) {
     WATCHDOG_CREDIT.with(|c| c.set(c.get() + spent));
     crate::regex::shift_deadline(spent);
+}
+
+thread_local! {
+    // A bounded host operation spans tasks and child realms on this thread.
+    // Task restarts and excluded host-work credits cannot extend this cap.
+    static WALL_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Thread-bound absolute deadline scope, including nested realms and host
+/// callbacks. It borrows no Realm, so embedders can cover layout/lifecycle too.
+pub struct WallDeadlineGuard {
+    previous: Option<std::time::Instant>,
+    _thread: std::marker::PhantomData<Rc<()>>,
+}
+impl WallDeadlineGuard {
+    pub fn new(deadline: std::time::Instant) -> Self {
+        let previous = WALL_DEADLINE.with(|slot| {
+            let previous = slot.get();
+            slot.set(Some(previous.map(|old| old.min(deadline)).unwrap_or(deadline)));
+            previous
+        });
+        Self { previous, _thread: std::marker::PhantomData }
+    }
+}
+impl Drop for WallDeadlineGuard {
+    fn drop(&mut self) { WALL_DEADLINE.with(|slot| slot.set(self.previous)); }
+}
+
+pub(crate) fn wall_deadline() -> Option<std::time::Instant> {
+    WALL_DEADLINE.with(|deadline| deadline.get())
 }
 
 thread_local! {
@@ -1138,6 +1180,40 @@ impl Realm {
         WATCHDOG_CREDIT.with(|c| c.set(std::time::Duration::ZERO));
     }
 
+    /// Thread-local host wall cap, inherited by reentrant/child realms.
+    pub fn wall_deadline(&self) -> Option<std::time::Instant> { wall_deadline() }
+
+    /// Replace a scoped host cap. Embedders restore the returned previous cap.
+    pub fn replace_wall_deadline(&mut self, deadline: Option<std::time::Instant>) -> Option<std::time::Instant> {
+        WALL_DEADLINE.with(|slot| slot.replace(deadline))
+    }
+
+    /// Save all watchdog clocks/flags before a host-owned bounded entry.
+    pub fn save_watchdog(&self) -> WatchdogState {
+        WatchdogState { deadline: self.deadline, origin: self.watch_origin, budget: self.task_budget,
+            terminating: self.terminating, credit: WATCHDOG_CREDIT.with(|c| c.get()),
+            regex: crate::regex::watchdog_state(), wall: wall_deadline() }
+    }
+
+    pub fn restore_watchdog(&mut self, state: WatchdogState) {
+        self.deadline = state.deadline;
+        self.watch_origin = state.origin;
+        self.task_budget = state.budget;
+        self.terminating = state.terminating;
+        WATCHDOG_CREDIT.with(|c| c.set(state.credit));
+        crate::regex::restore_watchdog_state(state.regex);
+        WALL_DEADLINE.with(|c| c.set(state.wall));
+    }
+
+    /// Remaining CPU allowance, including any already earned host-work credit.
+    pub fn remaining_watchdog_budget(&self) -> Option<std::time::Duration> {
+        self.deadline.map(|deadline| {
+            if self.terminating { return std::time::Duration::ZERO; }
+            let credit = WATCHDOG_CREDIT.with(|c| c.get());
+            deadline.saturating_duration_since(self.watch_now()).saturating_add(credit)
+        })
+    }
+
     /// Set the per-task watchdog budget used by [`Realm::begin_task`].
     pub fn set_task_budget(&mut self, budget: Option<std::time::Duration>) {
         self.task_budget = budget;
@@ -1277,6 +1353,11 @@ impl Realm {
     /// to the console and do not stop the drain.
     pub fn run_jobs(&mut self) {
         while let Some(job) = self.jobs.pop_front() {
+            if self.wall_deadline().is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                self.jobs.push_front(job);
+                let _ = self.check_watchdog();
+                break;
+            }
             // Keep the running job's values alive: it is no longer in the
             // queue, and the code it runs may trigger a collection.
             let mut job_roots = Vec::new();

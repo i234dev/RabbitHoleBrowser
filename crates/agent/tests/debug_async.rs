@@ -1,0 +1,133 @@
+//! Source-bound MCP async evaluation over a private loopback origin.
+use rabbithole_agent::{call, Agent, Config};
+use serde_json::json;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+struct Server {
+    address: std::net::SocketAddr,
+    stop: Arc<AtomicBool>,
+    requests: Arc<Mutex<Vec<(String, String, String)>>>,
+    thread: Option<JoinHandle<()>>,
+}
+impl Server {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stopped = stop.clone();
+        let observed = requests.clone();
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stopped.load(Ordering::Acquire) { break; }
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut reader = BufReader::new(&mut stream);
+                let mut first = String::new();
+                if reader.read_line(&mut first).is_err() { continue; }
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" { break; }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") { length = value.trim().parse::<usize>().unwrap_or(0).min(4096); }
+                    }
+                }
+                let mut body = vec![0; length];
+                if reader.read_exact(&mut body).is_err() { continue; }
+                let mut words = first.split_whitespace();
+                let method = words.next().unwrap_or("").to_string();
+                let path = words.next().unwrap_or("/").to_string();
+                observed.lock().unwrap().push((method, path.clone(), String::from_utf8_lossy(&body).into_owned()));
+                if path == "/slow" { std::thread::sleep(Duration::from_millis(100)); }
+                let html = if path == "/next" || path == "/submit" { "<!doctype html><title>Arrived</title><p>Destination</p>" } else {
+                    "<!doctype html><title>Async fixture</title><p id='result'>Original</p><form id='form' method='post' action='/submit'><input name='message' value='causal'></form><script>globalThis.fixtureReady=true;</script>"
+                };
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", html.len(), html);
+            }
+        });
+        Self { address, stop, requests, thread: Some(thread) }
+    }
+    fn url(&self, path: &str) -> String { format!("http://{}{path}", self.address) }
+    fn agent(&self) -> Agent {
+        let mut agent = Agent::new(Config { settle_cap: Duration::from_millis(500), ..Config::default() });
+        call(&mut agent, "open", &json!({"url":self.url("/")})).unwrap();
+        agent
+    }
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
+        if let Some(thread) = self.thread.take() { thread.join().unwrap(); }
+    }
+}
+fn eval(agent: &mut Agent, source: &str, timeout: u64) -> String {
+    call(agent, "debug", &json!({"eval":source,"timeout":timeout})).unwrap().text
+}
+
+#[test]
+fn debug_waits_for_loopback_fetch_timers_rejection_and_top_level_await() {
+    let server = Server::new();
+    let mut agent = server.agent();
+    assert!(eval(&mut agent, "fetch(location.href).then(r=>r.status)", 500).contains("\n200\n"));
+    assert!(eval(&mut agent, "await new Promise(r=>setTimeout(()=>r(7),50))", 500).contains("\n7\n"));
+    assert!(eval(&mut agent, "await(Promise.resolve(42))", 500).contains("\n42\n"));
+    assert!(eval(&mut agent, "await 0; 9; const after=1", 500).contains("\n9\n"));
+    assert!(eval(&mut agent, "Promise.reject(new Error('rejected-marker'))", 500).contains("Uncaught (in promise) Error: rejected-marker"));
+    assert!(eval(&mut agent, "await ({get then(){throw new Error('getter-marker')}})", 500).contains("getter-marker"));
+    for source in ["'await'; /* await */ var normalDebugBinding=17; normalDebugBinding", "async function nestedDebug(){await 1}; normalDebugBinding"] {
+        assert!(eval(&mut agent, source, 500).contains("\n17\n"));
+    }
+    let started = Instant::now();
+    let pending = eval(&mut agent, "new Promise(()=>{})", 200);
+    assert!(pending.contains("Promise still pending after 200 ms"), "{pending}");
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}: {pending}", started.elapsed());
+}
+
+#[test]
+fn debug_old_fetch_advances_on_later_tools_after_observation_timeout() {
+    let server = Server::new();
+    let mut agent = server.agent();
+    assert!(eval(&mut agent, "globalThis.oldFetch=fetch('/slow').then(r=>{document.getElementById('result').textContent='Old fetch completed';return r.status}); oldFetch", 20).contains("Promise still pending after 20 ms"));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let text = loop {
+        let text = call(&mut agent, "read", &json!({})).unwrap().text;
+        if text.contains("Old fetch completed") { break text; }
+        assert!(Instant::now() < deadline, "old fetch never delivered: {text}");
+        std::thread::yield_now();
+    };
+    assert!(!text.contains("Original"));
+    assert!(eval(&mut agent, "oldFetch", 500).contains("\n200\n"));
+}
+
+#[test]
+fn debug_follow_is_explicit_and_preserves_form_post_navigation() {
+    let server = Server::new();
+    let mut agent = server.agent();
+    let result = eval(&mut agent, "Promise.resolve().then(()=>location.href='/next')", 500);
+    assert!(result.contains("not followed"), "{result}");
+    assert_eq!(agent.tabs[agent.active.unwrap()].frames[0].page.url.to_string(), server.url("/"));
+    let result = call(&mut agent, "debug", &json!({"eval":"new Promise(r=>setTimeout(()=>{document.getElementById('form').submit();r(1)},10))","timeout":500,"follow":true})).unwrap().text;
+    assert!(result.contains("navigated to") && result.contains("/submit"), "{result}");
+    assert_eq!(agent.tabs[agent.active.unwrap()].frames[0].page.url.to_string(), server.url("/submit"));
+    assert!(server.requests.lock().unwrap().iter().any(|(method,path,body)|method=="POST" && path=="/submit" && body=="message=causal"));
+}
+
+#[test]
+fn debug_cancels_replaced_document_and_bounds_runaway_microtasks() {
+    let server = Server::new();
+    let mut agent = server.agent();
+    let result = eval(&mut agent, "new Promise(r=>setTimeout(()=>{document.open();document.write('<p>Replacement</p>');document.close();r(8)},10))", 500);
+    assert!(result.contains("document was replaced"), "{result}");
+    let started = Instant::now();
+    let result = eval(&mut agent, "globalThis.haltDebugLoop=false; Promise.resolve().then(function recur(){if(!haltDebugLoop) Promise.resolve().then(recur)}); new Promise(()=>{})", 200);
+    assert!(result.contains("Promise still pending after 200 ms"), "{result}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(eval(&mut agent, "haltDebugLoop=true; 23", 500).contains("\n23\n"));
+}

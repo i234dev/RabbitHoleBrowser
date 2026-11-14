@@ -270,6 +270,8 @@ struct FnState {
     eval_sites: Vec<Rc<EvalSite>>,
     /// The function compiled from direct eval code.
     is_eval: bool,
+    /// Console async body tracks statement completion without eval scoping.
+    console_completion: bool,
     /// Annex B.3.3 block function declarations (by node address) that
     /// also assign a var of the function / script / eval var scope.
     annexb: std::collections::HashSet<usize>,
@@ -326,6 +328,7 @@ impl FnState {
             class_depth: 0,
             eval_sites: Vec::new(),
             is_eval: false,
+            console_completion: false,
             annexb: Default::default(),
             var_scope: 0,
             in_params: false,
@@ -460,6 +463,28 @@ pub fn compile_program_with(program: &Program, filename: &str, source: &str, com
     let code = c.compile_script(program)?;
     c.check_internal()?;
     Ok(code)
+}
+
+/// Compile an async console scope while retaining the script completion
+/// rules (including blocks/branches and declarations after an expression).
+pub(crate) fn compile_console_await(program: &Program, source: &str) -> CResult<Rc<FunctionCode>> {
+    let mut c = Compiler { completion: true, fns: Vec::new(), filename: Rc::from("console"),
+        source: Rc::from(source), pending_tweak: None, chain_stack: Vec::new(), loose_chain_exits: Vec::new(),
+        module: None, captures: crate::captures::analyze_program(&program.body), internal_error: None,
+        outer: None, eager_root: std::ptr::null(), lazy: lazy_enabled(), outer_ctx: Default::default() };
+    let mut outer = FnState::new("", CodeFlags { is_script: true, ..Default::default() }, true, c.filename.clone());
+    outer.scopes[0].materialized = false;
+    c.fns.push(outer);
+    let function = Function { name: None, params: Vec::new(), body: FunctionBody::Block(program.body.clone()),
+        is_arrow: true, is_async: true, is_generator: false, strict: program.strict,
+        pos: program.body.first().map(|s| s.pos).unwrap_or_default(), span: (0, 0), self_binding: false };
+    let index = c.compile_function_completion(&function, None, true)?;
+    c.emit(Op::MakeClosure(index));
+    c.emit(Op::Undefined);
+    c.emit(Op::Call(0, crate::bytecode::NO_DESC));
+    c.emit(Op::Return);
+    c.check_internal()?;
+    Ok(Rc::new(finish(c.fns.pop().unwrap(), None)))
 }
 
 /// Compile direct `eval` code for the call site `site`: an arrow function
@@ -1860,11 +1885,15 @@ impl Compiler {
     // ------------------------------------------------------------ functions
 
     fn compile_function(&mut self, f: &Function, name: Option<&str>) -> CResult<u32> {
+        self.compile_function_completion(f, name, false)
+    }
+
+    fn compile_function_completion(&mut self, f: &Function, name: Option<&str>, completion: bool) -> CResult<u32> {
         if let FunctionBody::Lazy(lb) = &f.body {
             // Skipped by the pre-parser: parse the body now.
             let (stmts, strict) = crate::parser::parse_lazy_body(f, lb).map_err(|e| CompileError { message: e.message, pos: Pos { line: e.line, column: e.column } })?;
             let full = Function { body: FunctionBody::Block(stmts), strict: f.strict || strict, ..f.clone() };
-            return self.compile_function(&full, name);
+            return self.compile_function_completion(&full, name, completion);
         }
         let name = f.name.as_deref().or(name).unwrap_or("");
         let mut flags = CodeFlags {
@@ -1881,6 +1910,7 @@ impl Compiler {
         }
         let filename = self.fs_ref().filename.clone();
         let mut fs = FnState::new(name, flags, false, filename);
+        fs.console_completion = completion;
         fs.source = Some(self.source.clone());
         fs.span = (f.span.1 > f.span.0).then_some(f.span);
         fs.class_depth = self.fs_ref().class_depth;
@@ -2114,7 +2144,7 @@ impl Compiler {
                 for s in b {
                     self.compile_stmt(s)?;
                 }
-                self.emit(Op::Undefined);
+                self.emit(if completion { Op::LoadCompletion } else { Op::Undefined });
                 self.emit(Op::Return);
             }
             FunctionBody::Expr(e) => {
@@ -2273,7 +2303,7 @@ impl Compiler {
         // (UpdateEmpty(result, undefined)).
         if self.completion
             && self.fs_ref().no_completion == 0
-            && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval)
+            && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval || self.fs_ref().console_completion)
             && matches!(
                 s.kind,
                 StmtKind::If { .. } | StmtKind::For { .. } | StmtKind::ForIn { .. } | StmtKind::ForOf { .. } | StmtKind::While { .. } | StmtKind::DoWhile { .. } | StmtKind::Switch { .. } | StmtKind::Try { .. } | StmtKind::With { .. }
@@ -2288,7 +2318,7 @@ impl Compiler {
         match &s.kind {
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::Expr(e) => {
-                if self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval) {
+                if self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval || self.fs_ref().console_completion) {
                     self.compile_expr(e)?;
                     self.emit(Op::StoreCompletion);
                 } else {
@@ -2984,7 +3014,7 @@ impl Compiler {
                     self.emit(Op::Pop);
                 }
             }
-            if self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval) {
+            if self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval || self.fs_ref().console_completion) {
                 // The catch block's value replaces the try block's.
                 self.emit(Op::Undefined);
                 self.emit(Op::StoreCompletion);
@@ -3023,7 +3053,7 @@ impl Compiler {
     /// it found; when it breaks / continues out, its own value (or
     /// undefined) is the completion (UpdateEmpty(F, undefined)).
     fn compile_finally_body(&mut self, f: &[Stmt]) -> CResult<()> {
-        let tracks = self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval);
+        let tracks = self.completion && self.fs_ref().no_completion == 0 && ((self.fns.len() == 1 && self.fs_ref().is_script) || self.fs_ref().is_eval || self.fs_ref().console_completion);
         if !tracks {
             self.fs().no_completion += 1;
             let r = self.compile_block(f);

@@ -203,7 +203,8 @@ fn perform_then(realm: &mut Realm, promise: ObjectId, on_fulfilled: Option<Value
     attach_reactions(realm, promise, fr, rr);
 }
 
-fn attach_reactions(realm: &mut Realm, promise: ObjectId, fr: PromiseReaction, rr: PromiseReaction) {
+/// A host observer handles rejection without retaining empty JS reactions.
+pub fn observe(realm: &mut Realm, promise: ObjectId) {
     // HostPromiseRejectionTracker "handle": a handler attached to an
     // already-rejected, unhandled promise takes it off the unhandled list.
     let late = match &realm.obj(promise).kind {
@@ -219,6 +220,11 @@ fn attach_reactions(realm: &mut Realm, promise: ObjectId, fr: PromiseReaction, r
             realm.unhandled_rejections.remove(pos);
         }
     }
+    if let ObjectKind::Promise(pd) = &mut realm.obj_mut(promise).kind { pd.handled = true; }
+}
+
+fn attach_reactions(realm: &mut Realm, promise: ObjectId, fr: PromiseReaction, rr: PromiseReaction) {
+    observe(realm, promise);
     let (state, value) = match &mut realm.obj_mut(promise).kind {
         ObjectKind::Promise(pd) => {
             pd.handled = true;

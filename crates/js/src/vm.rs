@@ -1566,6 +1566,11 @@ impl Realm {
         if self.heap.live_count > self.heap_limit {
             return Err(self.out_of_memory());
         }
+        if self.wall_deadline().is_some_and(|d| std::time::Instant::now() >= d) {
+            if !self.terminating { self.watchdog_aborts = self.watchdog_aborts.saturating_add(1); }
+            self.terminating = true;
+            return Err(self.new_error("RangeError", "Script execution timed out"));
+        }
         if let Some(d) = self.deadline {
             if self.terminating || self.watch_now() >= d {
                 if !self.terminating && self.apply_watchdog_credit() && self.watch_now() < self.deadline.unwrap_or(d) {

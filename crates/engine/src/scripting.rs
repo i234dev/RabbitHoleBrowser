@@ -48,6 +48,7 @@ impl Default for DialogPolicy {
 pub struct ScriptState {
     pub(crate) service_worker_client: Option<rabbithole_script::ServiceWorkerClient>,
     pub host: Option<ScriptHost>,
+    console_busy: bool,
     /// DOM changed by scripts since the last style/layout.
     pub dom_dirty: bool,
     pub pending_navigation: Option<PendingNavigation>,
@@ -994,6 +995,45 @@ impl Engine {
         }
         page.script.host = Some(host);
         self.settle(page, false)
+    }
+
+    fn with_console_host<T>(&self, page: &mut Page, f: impl FnOnce(&mut ScriptHost, &mut dyn rabbithole_script::HostEnv) -> Result<T, String>) -> Result<T, String> {
+        if page.script.console_busy { return Err("Console evaluation cannot reenter this page".into()); }
+        self.ensure_script_host(page);
+        let Some(mut host) = page.script.host.take() else { return Err("Console script realm is unavailable or running".into()) };
+        page.script.console_busy = true;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut env = EngineEnv { engine: self, page };
+            f(&mut host, &mut env)
+        }));
+        page.script.host = Some(host);
+        page.script.console_busy = false;
+        match result {
+            Ok(result) => result,
+            Err(_) => Err("Internal error while evaluating console JavaScript".into()),
+        }
+    }
+
+    /// Start a rooted observation belonging to this page's live document.
+    pub fn start_console_evaluation(&self, page: &mut Page, source: &str, deadline: std::time::Instant) -> (Result<rabbithole_script::ConsoleEvaluation, String>, ScriptOutcome) {
+        let _wall = rabbithole_script::ConsoleDeadline::new(deadline);
+        let result = self.with_console_host(page, |host, env| host.start_console_evaluation(env, source, deadline));
+        (result, self.settle(page, false))
+    }
+
+    pub fn poll_console_evaluation(&self, page: &mut Page, evaluation: &rabbithole_script::ConsoleEvaluation, deadline: std::time::Instant) -> (Result<rabbithole_script::ConsolePoll, String>, ScriptOutcome) {
+        let _wall = rabbithole_script::ConsoleDeadline::new(deadline);
+        let result = self.with_console_host(page, |host, env| host.poll_console_evaluation(env, evaluation, deadline));
+        (result, self.settle(page, false))
+    }
+
+    /// Advance ready jobs, timers and network responses, with no quiet-period wait.
+    pub fn pump_console_tasks(&self, page: &mut Page, deadline: std::time::Instant) -> (Result<(), String>, ScriptOutcome) {
+        let _wall = rabbithole_script::ConsoleDeadline::new(deadline);
+        if page.script.host.is_none() { return (Ok(()), ScriptOutcome::default()); }
+        let now = self.start.elapsed().as_secs_f64() * 1000.0;
+        let result = self.with_console_host(page, |host, env| host.pump_console_tasks(env, now, deadline));
+        (result, self.settle(page, false))
     }
 
     /// Evaluate JavaScript in the page (devtools console / CLI).

@@ -269,7 +269,7 @@ impl Agent {
     }
 
     /// Point the engine at a tab's context, network log and dialog policy.
-    fn prepare(&mut self, ti: usize) {
+    pub(crate) fn prepare(&mut self, ti: usize) {
         let ci = self.tabs[ti].ctx;
         self.activate_ctx(ci);
         self.engine.loader.fetcher.log = Some(self.tabs[ti].netlog.clone());

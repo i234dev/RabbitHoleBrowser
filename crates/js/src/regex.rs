@@ -47,6 +47,14 @@ pub fn set_deadline(d: Option<std::time::Instant>) {
     EXPIRED.with(|c| c.set(false));
 }
 
+pub(crate) fn watchdog_state() -> (Option<std::time::Instant>, bool) {
+    (DEADLINE.with(|c| c.get()), EXPIRED.with(|c| c.get()))
+}
+pub(crate) fn restore_watchdog_state(state: (Option<std::time::Instant>, bool)) {
+    DEADLINE.with(|c| c.set(state.0));
+    EXPIRED.with(|c| c.set(state.1));
+}
+
 /// Move the matcher deadline later (host time excluded from the watchdog).
 pub(crate) fn shift_deadline(by: std::time::Duration) {
     if !EXPIRED.with(|c| c.get()) {
@@ -56,6 +64,10 @@ pub(crate) fn shift_deadline(by: std::time::Duration) {
 
 /// Check the deadline (cheap; call every few thousand steps).
 fn deadline_passed() -> bool {
+    if crate::realm::wall_deadline().is_some_and(|d| std::time::Instant::now() >= d) {
+        EXPIRED.with(|c| c.set(true));
+        return true;
+    }
     if EXPIRED.with(|c| c.get()) {
         return true;
     }

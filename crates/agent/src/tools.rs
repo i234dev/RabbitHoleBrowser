@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rabbithole_engine::css::selector::SelectorParser;
 use rabbithole_engine::css::{matches, Tokenizer};
@@ -98,9 +98,9 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "action": { "type": "string" }, "id": { "type": "integer" }, "url": { "type": "string" }, "path": { "type": "string" }, "context": { "type": "string" }
             } } }),
-        json!({ "name": "debug", "description": "eval JavaScript, console/JS errors, action log export (log=script|json), live=true to watch the tab in a browser.",
+        json!({ "name": "debug", "description": "Evaluate JS/await; console, log=script|json, live view, stats. follow=true follows script navigation.",
             "inputSchema": { "type": "object", "properties": {
-                "eval": { "type": "string" }, "console": { "type": "boolean" }, "clear": { "type": "boolean" }, "log": { "type": "string" }, "live": { "type": "boolean" }, "stats": { "type": "boolean" }
+                "eval": { "type": "string" }, "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds; default auto-wait cap" }, "follow": { "type": "boolean", "default": false }, "console": { "type": "boolean" }, "clear": { "type": "boolean" }, "log": { "type": "string" }, "live": { "type": "boolean" }, "stats": { "type": "boolean" }
             } } }),
     ]
 }
@@ -178,7 +178,8 @@ pub fn call(agent: &mut Agent, name: &str, args: &Value) -> Result<Out, String> 
     if let (Some(p), Some(ti)) = (dialog_policy(&args), agent.active) {
         agent.tabs[ti].dialog_policy = p;
     }
-    let mutating = matches!(name, "open" | "click" | "type" | "fill" | "scroll" | "tabs");
+    advance_background(agent);
+    let mutating = matches!(name, "open" | "click" | "type" | "fill" | "scroll" | "tabs") || (name == "debug" && b(&args, "follow").unwrap_or(false) && args.get("eval").is_some());
     let r = dispatch(agent, name, &args);
     if let (Some(p), Some(ti)) = (saved_policy, agent.active) {
         if ti < agent.tabs.len() {
@@ -1166,6 +1167,101 @@ fn tabs(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     }
 }
 
+fn merge_outcome(into: &mut ScriptOutcome, mut other: ScriptOutcome) {
+    into.relayout |= other.relayout;
+    into.default_prevented |= other.default_prevented;
+    if into.navigation.is_none() { into.navigation = other.navigation.take(); }
+    into.new_windows.append(&mut other.new_windows);
+    into.dialogs.append(&mut other.dialogs);
+    into.scroll_to = other.scroll_to.or(into.scroll_to);
+}
+
+// A tool call is an opportunity to deliver ready responses from an earlier
+// evaluation. Keep effects queued for the next action; never silently navigate.
+fn advance_background(agent: &mut Agent) {
+    let Some(ti) = agent.active.filter(|ti| *ti < agent.tabs.len()) else { return };
+    agent.prepare(ti);
+    let deadline = Instant::now() + Duration::from_millis(10);
+    let mut events = Vec::new();
+    for frame in &mut agent.tabs[ti].frames {
+        if Instant::now() >= deadline { break; }
+        if frame.page.script.pending_navigation.is_some() { continue; }
+        let (_, mut out) = agent.engine.pump_console_tasks(&mut frame.page, deadline);
+        if let Some(nav) = &out.navigation {
+            events.push(format!("Background script requested navigation to {}; follow with debug follow=true.", nav.request.url));
+        }
+        frame.page.script.pending_navigation = out.navigation.take();
+        frame.page.script.new_windows.append(&mut out.new_windows);
+        frame.page.script.dialogs.append(&mut out.dialogs);
+    }
+    agent.tabs[ti].events.extend(events);
+}
+
+fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<String, String> {
+    use rabbithole_engine::script::ConsolePoll;
+    let ti = agent.tab_index()?;
+    agent.ensure_loaded(ti)?;
+    agent.prepare(ti);
+    let timeout = match args.get("timeout") {
+        Some(value) => Duration::from_millis(value.as_u64().filter(|v| *v > 0).ok_or("timeout needs a positive integer in milliseconds")?),
+        None => agent.cfg.settle_cap.max(Duration::from_millis(1)),
+    };
+    let deadline = Instant::now().checked_add(timeout).ok_or("timeout is too large")?;
+    let follow = b(args, "follow").unwrap_or(false);
+    let before = follow.then(|| agent.before_state(ti));
+    let (started, mut outcome) = agent.engine.start_console_evaluation(&mut agent.tabs[ti].frames[0].page, source, deadline);
+    let result = match started {
+        Err(error) => format!("Error: {error}"),
+        Ok(evaluation) => {
+            let mut pending = false;
+            let result = loop {
+                // Navigation terminates this document's observation before a
+                // poll, and the handle drops before finish_action replaces it.
+                if outcome.navigation.is_some() { break "Evaluation cancelled: script requested navigation".to_string(); }
+                if Instant::now() >= deadline {
+                    break format!("Promise still pending after {} ms", timeout.as_millis());
+                }
+                let (polled, out) = agent.engine.poll_console_evaluation(&mut agent.tabs[ti].frames[0].page, &evaluation, deadline);
+                merge_outcome(&mut outcome, out);
+                if outcome.navigation.is_some() { continue; }
+                match polled {
+                    Ok(ConsolePoll::Resolved(value)) => break value,
+                    Ok(ConsolePoll::Rejected(error)) => break format!("Uncaught (in promise) {error}"),
+                    Err(_error) if Instant::now() >= deadline && pending => break format!("Promise still pending after {} ms", timeout.as_millis()),
+                    Err(error) => break format!("Error: {error}"),
+                    Ok(ConsolePoll::Pending) => pending = true,
+                }
+                let (pumped, out) = agent.engine.pump_console_tasks(&mut agent.tabs[ti].frames[0].page, deadline);
+                merge_outcome(&mut outcome, out);
+                if outcome.navigation.is_some() { continue; }
+                if let Err(error) = pumped {
+                    if Instant::now() >= deadline { continue; }
+                    break format!("Error: {error}");
+                }
+                let now = Instant::now();
+                if now < deadline {
+                    let page = &agent.tabs[ti].frames[0].page;
+                    let now_ms = agent.engine.start.elapsed().as_secs_f64() * 1000.0;
+                    let delay = page.next_script_due().map(|due| Duration::from_secs_f64(((due - now_ms).max(0.0) / 1000.0).min(0.01))).unwrap_or(Duration::from_millis(10));
+                    // Poll after a checkpoint before waiting, so a resolved
+                    // microtask does not need a timer to become observable.
+                    if !delay.is_zero() { std::thread::sleep(delay.min(deadline - now)); }
+                }
+            };
+            drop(evaluation);
+            result
+        }
+    };
+    let mut text = format!("eval result:\n{}", fence(&clip_text(&result, 20_000)));
+    if let Some(before) = before {
+        text.push('\n');
+        text.push_str(&agent.finish_action(ti, 0, before, outcome, None, "debug", None)?);
+    } else if outcome.navigation.is_some() || !outcome.dialogs.is_empty() || !outcome.new_windows.is_empty() {
+        text.push_str("\n(the script requested navigation, a dialog or a new window; it was not followed; use follow=true)");
+    }
+    Ok(text)
+}
+
 fn debug(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let mut parts = Vec::new();
     if b(a, "live").unwrap_or(false) {
@@ -1176,15 +1272,7 @@ fn debug(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         parts.push(format!("Live view: {} (updates after every action)", agent.live.as_ref().map(|l| l.url.clone()).unwrap_or_default()));
     }
     if let Some(js) = a.get("eval").and_then(Value::as_str) {
-        let ti = agent.tab_index()?;
-        let tab = &mut agent.tabs[ti];
-        let page = &mut tab.frames[0].page;
-        let (result, out) = agent.engine.eval_with_outcome(page, js);
-        let mut text = format!("eval result:\n{}", fence(&clip_text(&result, 20_000)));
-        if out.navigation.is_some() || !out.dialogs.is_empty() {
-            text.push_str("\n(the script requested a navigation or dialog; it was not followed)");
-        }
-        parts.push(text);
+        parts.push(debug_evaluate(agent, a, js)?);
     }
     if b(a, "console").unwrap_or(false) || b(a, "clear").unwrap_or(false) {
         let ti = agent.tab_index()?;
