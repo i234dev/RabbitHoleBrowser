@@ -600,7 +600,7 @@ impl App {
             // Only actual input editing returns to the field. In particular,
             // Control/Shift/Alt/Meta events arrive before shortcut characters
             // and must preserve the selected message for Ctrl+C.
-            let edits_input = matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Home | NamedKey::End | NamedKey::ArrowUp))
+            let edits_input = matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Home | NamedKey::End | NamedKey::ArrowUp | NamedKey::Enter | NamedKey::Space))
                 || (ctrl && matches!(key, Key::Character(c) if matches!(c.to_lowercase().as_str(), "a" | "v")))
                 || (!ctrl && text.is_some_and(|text| !text.is_empty()));
             if edits_input {
@@ -735,6 +735,48 @@ mod tests {
         app.console_key(&Key::Character("c".into()), None, true, false);
         assert_eq!(copied(&app).last().unwrap(), "input e\u{301} 🐇");
         assert_eq!(app.tabs[0].console_input, before_input);
+    }
+
+    #[test]
+    fn console_enter_and_space_expand_without_ctrl_and_edit_the_input_with_ctrl() {
+        let _guard = lock();
+        let mut app = console_app("console-control-enter-space");
+        app.tabs[0].console.push("error", "TypeError\n  trace 🐇");
+        app.tabs[0].console_input.set_text("1 + 1");
+        click_log_row(&mut app, 0);
+        let id = app.tabs[0].console_selected.unwrap();
+        let input = app.tabs[0].console_input.clone();
+        assert!(app.tabs[0].console_expanded.contains(&id));
+        app.console_key(&Key::Named(NamedKey::Enter), None, false, false);
+        assert!(!app.tabs[0].console_expanded.contains(&id));
+        assert_eq!(app.tabs[0].console_selected, Some(id));
+        assert_eq!(app.tabs[0].console_input, input);
+        assert_eq!(app.tabs[0].console.len(), 1);
+        app.console_key(&Key::Named(NamedKey::Space), None, false, false);
+        assert!(app.tabs[0].console_expanded.contains(&id));
+        assert_eq!(app.tabs[0].console_selected, Some(id));
+        assert_eq!(app.tabs[0].console_input, input);
+        assert_eq!(app.tabs[0].console.len(), 1);
+
+        app.console_key(&Key::Named(NamedKey::Enter), None, true, false);
+        assert_eq!(app.tabs[0].console_selected, None);
+        assert!(app.tabs[0].console_input.text.is_empty());
+        assert_eq!(app.tabs[0].console.len(), 2);
+        assert_eq!(app.tabs[0].console.lines().next_back().unwrap(), &("input".to_string(), "> 1 + 1".to_string()));
+
+        app.tabs[0].clear_console();
+        app.tabs[0].console.push("error", "TypeError\n  trace 🐇");
+        app.tabs[0].console_input.set_text("leftRIGHT");
+        app.tabs[0].console_input.set_caret(4, false);
+        app.tabs[0].console_input.end(true);
+        click_log_row(&mut app, 0);
+        app.console_key(&Key::Named(NamedKey::Space), None, true, false);
+        assert_eq!(app.tabs[0].console_selected, None);
+        assert_eq!(app.tabs[0].console_input.text, "left ");
+        assert_eq!(app.tabs[0].console_input.caret, 5);
+        assert_eq!(app.tabs[0].console_input.anchor, None);
+        assert_eq!(app.tabs[0].console.len(), 1);
+        assert!(app.ui_focus == UiFocus::Console);
     }
 
     #[test]
