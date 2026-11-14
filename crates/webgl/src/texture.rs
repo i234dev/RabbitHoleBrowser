@@ -216,6 +216,9 @@ impl Context {
         if location < 0 {
             return Ok(());
         }
+        if values.is_empty() {
+            return Err(Error::InvalidValue);
+        }
         if values.len() != 1 {
             return Err(Error::InvalidOperation);
         }

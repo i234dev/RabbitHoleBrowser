@@ -4,6 +4,8 @@
   'use strict';
   const g = globalThis, N = g.__rhNative;
   const invoke = Reflect.apply;
+  const UniformFloats = Float32Array, UniformInts = Int32Array;
+  const uniformLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(UniformFloats.prototype), 'length').get;
   // IDL conversion must not invoke page replacements of these builtins.
   const truncateOffset = Math.trunc, finiteOffset = Number.isFinite;
   const hidden = (o, k, value) => Object.defineProperty(o, k, { value, configurable: true, writable: true });
@@ -145,30 +147,40 @@
     for (const n of value) { values.push(+(n)); if (values.length > 16) break; }
     return new Float32Array(values);
   }
-  function ints(value) {
-    if (value instanceof Int32Array) return value;
-    if (value === null || typeof value !== 'object' || typeof value[Symbol.iterator] !== 'function') throw new TypeError('Expected an Int32Array or a sequence of integers');
-    const values = [];
-    for (const n of value) { values.push(+(n) | 0); if (values.length > 16) break; }
-    return new Int32Array(values);
+  function uniformArgument(value) {
+    if (value === undefined || value === null) return null;
+    if (!locations.has(value)) throw new TypeError('Expected WebGLUniformLocation');
+    return value;
   }
-  function matrixValues(value) {
-    if (value instanceof Float32Array) return { data: value, length: value.length };
-    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) throw new TypeError('Expected a Float32Array or a sequence of numbers');
+  function uniformValues(value, integer = false) {
+    const ArrayType = integer ? UniformInts : UniformFloats;
+    if (value instanceof ArrayType) return { data: value, length: invoke(uniformLength, value, []) };
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) throw new TypeError('Expected a typed array or a sequence of numbers');
     const iterate = value[Symbol.iterator];
-    if (typeof iterate !== 'function') throw new TypeError('Expected a Float32Array or a sequence of numbers');
-    const head = [];
+    if (typeof iterate !== 'function') throw new TypeError('Expected a typed array or a sequence of numbers');
+    const iterator = invoke(iterate, value, []);
+    if (iterator === null || (typeof iterator !== 'object' && typeof iterator !== 'function')) throw new TypeError('Expected an iterator');
+    const next = iterator.next;
+    const head = new ArrayType(16);
     let length = 0;
-    // Convert the entire WebIDL sequence even for a null location, retaining
-    // only one largest supported matrix. Conversion exceptions precede GL errors.
-    const iterable = { [Symbol.iterator]() { return invoke(iterate, value, []); } };
-    for (const n of iterable) { const converted = +(n); if (length < 16) head.push(converted); ++length; }
-    return { data: new Float32Array(head), length };
+    // Web IDL consumes the whole sequence before validating GL state, including
+    // null locations. Retain at most one largest supported matrix, but count all
+    // elements. Sequence conversion does not IteratorClose on an element error.
+    while (true) {
+      const item = invoke(next, iterator, []);
+      if (item === null || (typeof item !== 'object' && typeof item !== 'function')) throw new TypeError('Expected an iterator result');
+      if (item.done) break;
+      const number = +item.value, converted = integer ? number | 0 : number;
+      if (length < 16) head[length] = converted;
+      ++length;
+    }
+    const data = new ArrayType(length < 16 ? length : 16);
+    for (let i = 0; i < data.length; ++i) data[i] = head[i];
+    return { data, length };
   }
   function matrix(s, location, transpose, data, dimension) {
-    if (location === undefined) location = null;
-    if (location !== null && !locations.has(location)) throw new TypeError('Expected WebGLUniformLocation');
-    const values = matrixValues(data);
+    location = uniformArgument(location);
+    const values = uniformValues(data);
     const loc = uniformLocation(s, location);
     if (!loc) return;
     if (transpose) { flag(s, GL.INVALID_VALUE); return; }
@@ -177,13 +189,28 @@
     if (values.length !== elements) { flag(s, GL.INVALID_OPERATION); return; }
     call(s, 'matrix' + dimension, loc.id, false, values.data);
   }
-  function uniform(s, location, data, components) {
+  function uniform(s, location, data, components, integer = false) {
+    location = uniformArgument(location);
+    const values = uniformValues(data, integer);
+    setUniform(s, location, values, components, integer);
+  }
+  function uniformScalars(s, location, data, components, integer = false) {
+    location = uniformArgument(location);
+    const converted = new (integer ? UniformInts : UniformFloats)(components);
+    for (let i = 0; i < components; ++i) {
+      const number = +data[i];
+      converted[i] = integer ? number | 0 : number;
+    }
+    setUniform(s, location, { data: converted, length: components }, components, integer);
+  }
+  function setUniform(s, location, values, components, integer) {
     const loc = uniformLocation(s, location);
     if (!loc) return;
-    data = floats(data);
-    if (data.length < components || data.length % components !== 0) { flag(s, GL.INVALID_VALUE); return; }
-    if (data.length > 4) { flag(s, GL.INVALID_OPERATION); return; }
-    call(s, 'uniform', loc.id, components, data);
+    if (values.length < components || values.length % components !== 0) { flag(s, GL.INVALID_VALUE); return; }
+    // Uniform arrays and integer vectors are not supported by the shader subset.
+    if (values.length !== components || (integer && components !== 1)) { flag(s, GL.INVALID_OPERATION); return; }
+    if (integer) call(s, 'uniformI', loc.id, values.data);
+    else call(s, 'uniform', loc.id, components, values.data);
   }
   function changed(s, result) { if (!result.error && !s.drawFramebuffer) N.canvasMarkDirty(s.surface); }
 
@@ -260,12 +287,15 @@
       if (typeof r.value === 'boolean') return r.value;
       const values = new Float32Array(r.value); return values.length === 1 ? values[0] : values;
     }
-    uniform1i(location, value) { required('uniform1i', 2, arguments); const s = state(this), loc = uniformLocation(s, location); if (loc) call(s, 'uniformI', loc.id, new Int32Array([value | 0])); }
-    uniform1iv(location, values) { required('uniform1iv', 2, arguments); const s = state(this), loc = uniformLocation(s, location); if (!loc) return; values = ints(values); if (values.length !== 1) { flag(s, GL.INVALID_OPERATION); return; } call(s, 'uniformI', loc.id, values); }
-    uniform1f(location, x) { required('uniform1f', 2, arguments); uniform(state(this), location, [+(x)], 1); }
-    uniform2f(location, x, y) { required('uniform2f', 3, arguments); uniform(state(this), location, [+(x), +(y)], 2); }
-    uniform3f(location, x, y, z) { required('uniform3f', 4, arguments); uniform(state(this), location, [+(x), +(y), +(z)], 3); }
-    uniform4f(location, x, y, z, w) { required('uniform4f', 5, arguments); uniform(state(this), location, [+(x), +(y), +(z), +(w)], 4); }
+    uniform1i(location, value) { required('uniform1i', 2, arguments); uniformScalars(state(this), location, [value], 1, true); }
+    uniform1iv(location, values) { required('uniform1iv', 2, arguments); uniform(state(this), location, values, 1, true); }
+    uniform2iv(location, values) { required('uniform2iv', 2, arguments); uniform(state(this), location, values, 2, true); }
+    uniform3iv(location, values) { required('uniform3iv', 2, arguments); uniform(state(this), location, values, 3, true); }
+    uniform4iv(location, values) { required('uniform4iv', 2, arguments); uniform(state(this), location, values, 4, true); }
+    uniform1f(location, x) { required('uniform1f', 2, arguments); uniformScalars(state(this), location, [x], 1); }
+    uniform2f(location, x, y) { required('uniform2f', 3, arguments); uniformScalars(state(this), location, [x, y], 2); }
+    uniform3f(location, x, y, z) { required('uniform3f', 4, arguments); uniformScalars(state(this), location, [x, y, z], 3); }
+    uniform4f(location, x, y, z, w) { required('uniform4f', 5, arguments); uniformScalars(state(this), location, [x, y, z, w], 4); }
     uniform1fv(location, value) { required('uniform1fv', 2, arguments); uniform(state(this), location, value, 1); }
     uniform2fv(location, value) { required('uniform2fv', 2, arguments); uniform(state(this), location, value, 2); }
     uniform3fv(location, value) { required('uniform3fv', 2, arguments); uniform(state(this), location, value, 3); }
@@ -530,7 +560,7 @@
   }
   // These operations are deliberately unavailable until their rendering
   // semantics exist. Libraries get an observable GL error, never fake IDs.
-  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform2i', 'uniform3i', 'uniform4i', 'uniform2iv', 'uniform3iv', 'uniform4iv']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
+  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'validateProgram', 'uniform2i', 'uniform3i', 'uniform4i']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
   for (const [name, value] of Object.entries(GL)) {
     Object.defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
     Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
@@ -587,7 +617,7 @@
   // These interfaces implement separate WebIDL mixins; WebGL2 is not a WebGL1 subclass.
   for (const key of Reflect.ownKeys(WebGLRenderingContext.prototype)) if (key !== 'constructor') Object.defineProperty(WebGL2RenderingContext.prototype, key, Object.getOwnPropertyDescriptor(WebGLRenderingContext.prototype, key));
   // WebGL2 adds source/destination-offset overloads; reject these until implemented.
-  for (const [name, maxArgs] of Object.entries({ bufferData: 3, bufferSubData: 3, readPixels: 7, texImage2D: 9, texSubImage2D: 9, uniform1fv: 2, uniform2fv: 2, uniform3fv: 2, uniform4fv: 2, uniform1iv: 2, uniformMatrix2fv: 3, uniformMatrix3fv: 3, uniformMatrix4fv: 3 })) {
+  for (const [name, maxArgs] of Object.entries({ bufferData: 3, bufferSubData: 3, readPixels: 7, texImage2D: 9, texSubImage2D: 9, uniform1fv: 2, uniform2fv: 2, uniform3fv: 2, uniform4fv: 2, uniform1iv: 2, uniform2iv: 2, uniform3iv: 2, uniform4iv: 2, uniformMatrix2fv: 3, uniformMatrix3fv: 3, uniformMatrix4fv: 3 })) {
     const base = WebGL2RenderingContext.prototype[name];
     hidden(WebGL2RenderingContext.prototype, name, function (...args) { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); if (args.length > maxArgs) { flag(s, GL.INVALID_OPERATION); return null; } return base.apply(this, args); });
   }

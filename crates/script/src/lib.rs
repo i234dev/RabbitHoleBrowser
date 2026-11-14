@@ -46,6 +46,8 @@ mod tests_service_worker;
 #[cfg(test)]
 mod tests_webgl;
 #[cfg(test)]
+mod tests_webgl_uniform_validation;
+#[cfg(test)]
 mod tests_webgl_matrix_validation;
 #[cfg(test)]
 mod tests_webgl_matrices;
