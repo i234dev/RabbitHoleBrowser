@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Reference using max-content and explicit line breaks</title>
+<style>
+  body { margin: 10px; font: 20px/1 monospace; color: transparent; }
+  div { width: max-content; height: 20px; margin-bottom: 6px; overflow: hidden; background: green; }
+  .edges { margin-left: 5px; padding-left: 2px; border-left: 1px solid transparent;
+           margin-right: 7px; padding-right: 4px; border-right: 3px solid transparent; }
+  .negative { margin-right: -12px; }
+</style>
+<div>XXXXX<br>XXXXX</div>
+<div>XXXXX<br>XXXXX</div>
+<div>XXXXX<br><span>XXXXX</span></div>
+<div style="white-space:pre-line">XXXXX<br>XXXXX</div>
+<div>X<br><span class=edges>XXXXX</span></div>
+<div><span class=edges>XXXXX</span><br>X</div>
+<div style="white-space:nowrap">XXXXX XXXXX</div>
+<div>XXXXX&nbsp;XXXXX</div>
+<div style="white-space:pre">XXXXX  X</div>
+<div style="white-space:pre-wrap">X<br>XXXXX</div>
+<div>X<br>XXXXX-<br>XXXXX</div>
+<div><span class="edges negative">XXXXX</span><br>X</div>

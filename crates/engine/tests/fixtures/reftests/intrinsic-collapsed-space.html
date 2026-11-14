@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Collapsed spaces do not lead min-content lines</title>
+<link rel="match" href="intrinsic-collapsed-space-ref.html">
+<style>
+  body { margin: 10px; font: 20px/1 monospace; color: transparent; }
+  div { width: min-content; height: 20px; margin-bottom: 6px; overflow: hidden; background: green; }
+  .edges { margin-left: 5px; padding-left: 2px; border-left: 1px solid transparent;
+           margin-right: 7px; padding-right: 4px; border-right: 3px solid transparent; }
+  .negative { margin-right: -12px; }
+</style>
+<div>XXXXX XXXXX</div>
+<div>XXXXX     XXXXX</div>
+<div>XXXXX <span>XXXXX</span></div>
+<div style="white-space:pre-line">XXXXX XXXXX</div>
+<div>X <span class=edges>XXXXX</span></div>
+<div><span class=edges>XXXXX </span>X</div>
+<div style="white-space:nowrap">XXXXX XXXXX</div>
+<div>XXXXX&nbsp;XXXXX</div>
+<div style="white-space:pre">XXXXX  X</div>
+<div style="white-space:pre-wrap">X  XXXXX</div>
+<div>X XXXXX-XXXXX</div>
+<div><span class="edges negative">XXXXX </span>X</div>

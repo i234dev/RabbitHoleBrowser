@@ -129,6 +129,13 @@ impl<'a> Layouter<'a> {
         let mut line: f32 = 0.0;
         let mut run: f32 = 0.0;
         let mut pending_space: f32 = 0.0;
+        // A collapsible space still contributes to max-content, but not to
+        // either min-content line when its soft break is taken. Keep the
+        // previous run pending through inline edges: an opening belongs to
+        // the next run, while a closing edge of an already-open inline still
+        // belongs to the previous one.
+        let mut pending_break: Option<(f32, usize)> = None;
+        let mut inline_depth = 0usize;
         // text-indent widens the first line (percentages resolve against
         // a zero base here, as in browsers).
         let indent = cstyle.text_indent.resolve_or_zero(0.0);
@@ -151,19 +158,28 @@ impl<'a> Layouter<'a> {
                     width, item, break_before, ..
                 } => {
                     let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
-                    if *break_before && wraps && !lead {
+                    let broke_at_space = if let Some((before, _)) = pending_break.take() {
+                        min = min.max(before);
+                        true
+                    } else {
+                        false
+                    };
+                    if *break_before && wraps && !lead && !broke_at_space {
                         min = min.max(run);
                         run = 0.0;
                     }
                     lead = false;
                     line += pending_space + width;
-                    run += pending_space + width;
+                    run += if broke_at_space { *width } else { pending_space + width };
                     pending_space = 0.0;
                 }
                 Piece::Space { width, item } => {
                     let wraps = item_style(&b.items, &cstyle, *item).white_space.wraps();
                     if wraps && !lead {
-                        min = min.max(run);
+                        if let Some((before, _)) = pending_break.take() {
+                            min = min.max(before);
+                        }
+                        pending_break = Some((run, inline_depth));
                         run = 0.0;
                     }
                     if line > 0.0 && !lead {
@@ -178,9 +194,24 @@ impl<'a> Layouter<'a> {
                         px(s.margin.right) + s.border_width.right + px(s.padding.right)
                     };
                     line += e;
-                    run += e;
+                    if matches!(p, Piece::Open(_)) {
+                        inline_depth += 1;
+                        run += e;
+                    } else {
+                        match pending_break.as_mut() {
+                            Some((before, depth)) if inline_depth <= *depth => {
+                                *before += e;
+                                *depth = depth.saturating_sub(1);
+                            }
+                            _ => run += e,
+                        }
+                        inline_depth = inline_depth.saturating_sub(1);
+                    }
                 }
                 Piece::Atomic(c) | Piece::Float(c) => {
+                    if let Some((before, _)) = pending_break.take() {
+                        min = min.max(before);
+                    }
                     let ex = extras_px(&b.children[*c].style);
                     let (cmin, cmax) = self.intrinsic(&mut b.children[*c]);
                     if container_wraps {
@@ -205,6 +236,9 @@ impl<'a> Layouter<'a> {
                 }
                 Piece::Break => {
                     lead = false;
+                    if let Some((before, _)) = pending_break.take() {
+                        min = min.max(before);
+                    }
                     min = min.max(run);
                     run = 0.0;
                     max = max.max(line);
@@ -212,6 +246,9 @@ impl<'a> Layouter<'a> {
                     pending_space = 0.0;
                 }
             }
+        }
+        if let Some((before, _)) = pending_break {
+            min = min.max(before);
         }
         min = min.max(run);
         max = max.max(line);
