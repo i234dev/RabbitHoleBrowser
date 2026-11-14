@@ -797,6 +797,9 @@ impl Context {
         if self.uniform_mut(location)?.ty.n() != components as usize {
             return Err(Error::InvalidOperation);
         }
+        if values.len() < components as usize || values.len() % components as usize != 0 {
+            return Err(Error::InvalidValue);
+        }
         self.uniform_f32(location, values)
     }
     pub fn uniform_matrix2fv(&mut self, location: i32, transpose: bool, values: &[f32]) -> Result<()> {
