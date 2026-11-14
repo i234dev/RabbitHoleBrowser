@@ -178,6 +178,11 @@ fn url_search_params(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
     }
     let pairs = parse_query(u.query.as_deref().unwrap_or(""));
     let p = make_params(realm, pairs, Some(o));
+    // Host payloads are opaque to the collector. Store the relationship
+    // in a private property as well, so the SameObject query list stays
+    // alive with this URL, including when the public object is frozen.
+    let slot = state().borrow().url_links.0;
+    realm.define_property(o, slot, Value::Object(p), 0);
     if let Some(d) = realm.host_data_mut::<UrlData>(o) {
         d.params = Some(p);
     }
@@ -215,6 +220,13 @@ fn make_params(realm: &mut Realm, pairs: Vec<(String, String)>, owner: Option<Ob
     let o = realm.new_object_with_proto(Some(p));
     realm.set_host_data(o, Box::new(ParamsData { pairs, owner }));
     realm.set_class_name(o, "URLSearchParams");
+    if let Some(owner) = owner {
+        // A separately retained query list must still update its URL.
+        // This is an ordinary traced edge, not a permanent realm root;
+        // an unreachable URL/list cycle can therefore be collected.
+        let slot = state().borrow().url_links.1;
+        realm.define_property(o, slot, Value::Object(owner), 0);
+    }
     o
 }
 
