@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tomllib
 
-BASELINE_SHA = "d81b54f33740a5672faece1c9c04990c850d4672"
+BASELINE_SHA = "673a2e9fb5f45a16d197a458e06c9ab669cd7606"
 BUILD_SETTINGS = {
     "RUSTUP_TOOLCHAIN": "stable",
     "CARGO_BUILD_JOBS": "2",

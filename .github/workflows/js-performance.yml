@@ -17,7 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
-      BASELINE_SHA: d81b54f33740a5672faece1c9c04990c850d4672
+      # Isolate these optimizations from the functional changes in 0.1.9.
+      BASELINE_SHA: 673a2e9fb5f45a16d197a458e06c9ab669cd7606
       CANDIDATE_SHA: ${{ github.sha }}
       RUSTUP_TOOLCHAIN: stable
       CARGO_BUILD_JOBS: "2"
