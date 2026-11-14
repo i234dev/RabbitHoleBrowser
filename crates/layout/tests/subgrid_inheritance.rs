@@ -115,3 +115,17 @@ fn automatic_row_lanes_subgrid_items_contribute_to_every_parent_track() {
         close(by_id(&d,&t,"p").content_rect.h,expected);
     }
 }
+
+#[test]
+fn automatic_subgrid_spans_use_local_line_groups_and_fixed_repeats() {
+    for template in ["subgrid [a] [b] [c]","subgrid repeat(3,[line])"] {
+        for (placement,expected) in [("auto",100.),("1",100.),("auto/3",100.),("1/1",100.),("1/span 1",30.),("1/2",30.)] {
+            let(d,t)=render("<section><div id=s><i></i></div></section>",
+                &format!("section{{display:grid;width:100px;grid-template-columns:30px 70px}}#s{{display:grid;grid-column:{placement};grid-template-columns:{template}}}i{{height:10px}}"));
+            close(by_id(&d,&t,"s").content_rect.w,expected);
+        }
+        let(d,t)=render("<section><div id=s><i id=x></i></div></section>",
+            &format!("section{{display:grid;width:50px;grid-template-columns:50px;grid-template-rows:30px 70px}}#s{{display:grid;grid-template-rows:{template}}}i{{grid-row:2}}"));
+        close(by_id(&d,&t,"s").content_rect.h,100.);close(by_id(&d,&t,"x").content_rect.h,70.);
+    }
+}

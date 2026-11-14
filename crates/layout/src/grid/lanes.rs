@@ -223,7 +223,7 @@ impl<'a> Layouter<'a> {
         for &(_, idx) in &order {
             let s = &b.children[idx].style;
             let (gs, ge) = if rows { (&s.grid_row_start, &s.grid_row_end) } else { (&s.grid_column_start, &s.grid_column_end) };
-            let mut p = resolve_pair(line_spec(gs, &tl.names, n_lines, false), line_spec(ge, &tl.names, n_lines, true));
+            let mut p = self.item_pair(&b.children[idx],rows,line_spec(gs,&tl.names,n_lines,false),line_spec(ge,&tl.names,n_lines,true));
             if tl.inherited.is_some() {p=subgrid::clamp_placement(p,tl.tracks.len());}
             placements.push((idx, p));
         }
