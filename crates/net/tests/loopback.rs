@@ -98,6 +98,9 @@ fn serve(handler: Handler) -> Server {
     std::thread::spawn(move || {
         for s in l.incoming() {
             let Ok(s) = s else { continue };
+            // Keep repeated small fixture responses independent of the
+            // platform's Nagle/delayed-ACK interaction, as the client does.
+            s.set_nodelay(true).unwrap();
             conns2.fetch_add(1, Ordering::SeqCst);
             let (h, log) = (handler.clone(), log2.clone());
             std::thread::spawn(move || {
