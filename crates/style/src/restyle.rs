@@ -581,8 +581,25 @@ pub struct StyleEngine {
     decls: DeclCache,
     /// Dynamic state the current styles were computed with.
     state: MatchState,
+    /// Ancestors used by the last pass. Current DOM cannot reconstruct an
+    /// old :hover/:active/:focus-within chain after removal or reparenting.
+    state_chains: [Vec<NodeId>; 3],
     /// Styles exist for the document (a full pass ran).
     ready: bool,
+}
+
+fn state_chain(doc: &Document, node: Option<NodeId>) -> Vec<NodeId> {
+    let mut chain = Vec::new();
+    let mut current = node.filter(|&node| node < doc.nodes.len());
+    while let Some(node) = current {
+        chain.push(node);
+        current = doc.parent(node);
+    }
+    chain
+}
+
+fn state_chains(doc: &Document, state: &MatchState) -> [Vec<NodeId>; 3] {
+    [state_chain(doc, state.hovered), state_chain(doc, state.active), state_chain(doc, state.focused)]
 }
 
 fn env_eq(a: &MediaEnv, b: &MediaEnv) -> bool {
@@ -619,6 +636,7 @@ impl StyleEngine {
             need: Vec::new(),
             decls: DeclCache::default(),
             state: MatchState::default(),
+            state_chains: Default::default(),
             ready: false,
         }
     }
@@ -653,6 +671,7 @@ impl StyleEngine {
         self.inherit_dep = vec![false; n];
         self.need = vec![0; n];
         self.state = opts.state.clone();
+        self.state_chains = state_chains(doc, opts.state);
         self.ready = true;
         self.defined_seen = doc.defined_custom.clone();
         self.walk(doc, &mut tree, opts, true, &mut Vec::new());
@@ -737,8 +756,10 @@ impl StyleEngine {
         self.need.clear();
         self.need.resize(n, 0);
         let mut flat_changed = Vec::new();
-        let global = self.invalidate(doc, tree, log, opts.state, &mut flat_changed);
+        let new_chains = state_chains(doc, opts.state);
+        let global = self.invalidate(doc, tree, log, opts.state, &new_chains, &mut flat_changed);
         self.state = opts.state.clone();
+        self.state_chains = new_chains;
         if global {
             *tree = self.full(doc, author, opts);
             return RestyleOutcome { full: true, ..Default::default() };
@@ -751,7 +772,7 @@ impl StyleEngine {
     /// Turn mutations and state changes into restyle marks; returns true
     /// when everything must be recomputed. Elements whose flat-tree
     /// children changed through shadow DOM are added to `flat_changed`.
-    fn invalidate(&mut self, doc: &Document, tree: &mut StyledTree, log: &MutationLog, new_state: &MatchState, flat_changed: &mut Vec<NodeId>) -> bool {
+    fn invalidate(&mut self, doc: &Document, tree: &mut StyledTree, log: &MutationLog, new_state: &MatchState, new_chains: &[Vec<NodeId>; 3], flat_changed: &mut Vec<NodeId>) -> bool {
         let inval = &self.inval;
         let has_global = inval.has_outer & !R_SELF != 0;
         let shadow = !doc.shadow_roots.is_empty() || !self.shadow_seen.is_empty();
@@ -907,24 +928,16 @@ impl StyleEngine {
         // Dynamic state: elements whose :hover/:active/:focus match flips
         // are the ancestor chains' symmetric difference.
         let old_state = &self.state;
-        for (old, new, deps) in [
-            (old_state.hovered, new_state.hovered, &inval.hover),
-            (old_state.active, new_state.active, &inval.active),
-            (old_state.focused, new_state.focused, &inval.focus),
+        for (a, b, deps) in [
+            (&self.state_chains[0], &new_chains[0], &inval.hover),
+            (&self.state_chains[1], &new_chains[1], &inval.active),
+            (&self.state_chains[2], &new_chains[2], &inval.focus),
         ] {
-            if old == new || deps.is_empty() {
+            // Equal state IDs do not imply equal ancestry: mutations may
+            // have detached or moved the same hovered/active/focused node.
+            if deps.is_empty() || a == b {
                 continue;
             }
-            let chain = |n: Option<NodeId>| -> Vec<NodeId> {
-                let mut v = Vec::new();
-                let mut cur = n.filter(|&n| n < doc.nodes.len());
-                while let Some(c) = cur {
-                    v.push(c);
-                    cur = doc.parent(c);
-                }
-                v
-            };
-            let (a, b) = (chain(old), chain(new));
             let sa: HashSet<NodeId> = a.iter().copied().collect();
             let sb: HashSet<NodeId> = b.iter().copied().collect();
             for &e in a.iter().filter(|e| !sb.contains(e)).chain(b.iter().filter(|e| !sa.contains(e))) {

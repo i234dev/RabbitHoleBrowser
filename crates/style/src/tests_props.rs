@@ -620,3 +620,61 @@ fn nth_of_membership_changes_restyle_forward_and_reverse_siblings() {
     let log = doc.take_mutations(); engine.update(&doc, &mut tree, &log, &opts, &sheets);
     assert_eq!(tree.get(c).unwrap().color, Color::rgb(255, 0, 0));
 }
+
+#[test]
+fn incremental_hover_removal_and_reinsertion_keep_old_ancestor_styles_current() {
+    let mut doc=rabbithole_html::parse("<section id=left><div id=branch><button id=target>x</button></div><span class=marker>left</span></section><aside id=after></aside><section id=right><span class=marker>right</span></section>");
+    let sheets=vec![parse_stylesheet("section{background:green}.marker,aside{color:green}section:hover{background:red}section:hover .marker{color:red}#left:hover+aside{color:red}")];
+    let left=doc.element_by_id("left").unwrap();let right=doc.element_by_id("right").unwrap();
+    let branch=doc.element_by_id("branch").unwrap();let target=doc.element_by_id("target").unwrap();
+    let after=doc.element_by_id("after").unwrap();
+    let state=MatchState{hovered:Some(target),..Default::default()};
+    let opts=StyleOptions{state:&state,resolve_url:&|_,s|Some(s.to_string()),document_base:""};
+    let mut engine=crate::StyleEngine::new(&sheets,&env());
+    let mut tree=engine.full(&doc,&sheets,&opts);
+    assert_eq!(tree.get(left).unwrap().background_color,Color::rgb(255,0,0));
+    assert_eq!(tree.get(after).unwrap().color,Color::rgb(255,0,0));
+    doc.track_mutations(true);
+    doc.detach(branch);
+    let log=doc.take_mutations();
+    engine.update(&doc,&mut tree,&log,&opts,&sheets);
+    assert_eq!(tree.get(left).unwrap().background_color,Color::rgb(0,128,0));
+    assert_eq!(tree.get(after).unwrap().color,Color::rgb(0,128,0));
+    let full=style_tree_with(&doc,&sheets,&env(),&opts);
+    for node in doc.descendants(Document::ROOT).filter(|&node|doc.element(node).is_some()) {
+        assert_eq!(tree.get(node),full.get(node),"after remove node={node}");
+    }
+    doc.append_child(right,branch);
+    let log=doc.take_mutations();
+    engine.update(&doc,&mut tree,&log,&opts,&sheets);
+    assert_eq!(tree.get(left).unwrap().background_color,Color::rgb(0,128,0));
+    assert_eq!(tree.get(right).unwrap().background_color,Color::rgb(255,0,0));
+    let full=style_tree_with(&doc,&sheets,&env(),&opts);
+    for node in doc.descendants(Document::ROOT).filter(|&node|doc.element(node).is_some()) {
+        assert_eq!(tree.get(node),full.get(node),"after reinsert node={node}");
+    }
+}
+
+#[test]
+fn incremental_active_and_focus_within_reparent_without_changing_state_ids() {
+    for focus in [false,true] {
+        let mut doc=rabbithole_html::parse("<section id=left><input id=target></section><section id=right></section>");
+        let sheets=vec![parse_stylesheet("section{background:green}section:active,section:focus-within{background:red}")];
+        let left=doc.element_by_id("left").unwrap();let right=doc.element_by_id("right").unwrap();let target=doc.element_by_id("target").unwrap();
+        let state=if focus {MatchState{focused:Some(target),..Default::default()}} else {MatchState{active:Some(target),..Default::default()}};
+        let opts=StyleOptions{state:&state,resolve_url:&|_,s|Some(s.to_string()),document_base:""};
+        let mut engine=crate::StyleEngine::new(&sheets,&env());
+        let mut tree=engine.full(&doc,&sheets,&opts);
+        assert_eq!(tree.get(left).unwrap().background_color,Color::rgb(255,0,0));
+        doc.track_mutations(true);
+        doc.append_child(right,target);
+        let log=doc.take_mutations();
+        engine.update(&doc,&mut tree,&log,&opts,&sheets);
+        assert_eq!(tree.get(left).unwrap().background_color,Color::rgb(0,128,0),"focus={focus}");
+        assert_eq!(tree.get(right).unwrap().background_color,Color::rgb(255,0,0),"focus={focus}");
+        let full=style_tree_with(&doc,&sheets,&env(),&opts);
+        for node in doc.descendants(Document::ROOT).filter(|&node|doc.element(node).is_some()) {
+            assert_eq!(tree.get(node),full.get(node),"focus={focus} node={node}");
+        }
+    }
+}
