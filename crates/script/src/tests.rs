@@ -1329,6 +1329,112 @@ fn normalize_respects_text_receiver_empty_nodes_and_cdata_boundaries() {
 }
 
 #[test]
+fn character_data_substring_preserves_utf16_and_converts_unsigned_offsets() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const xml = new DOMParser().parseFromString('<root/>', 'text/xml');
+        const nodes = [document.createTextNode('A😀é'), document.createComment('A😀é'),
+            xml.createProcessingInstruction('pi', 'A😀é'), xml.createCDATASection('A😀é')];
+        for (const n of nodes) {
+            console.log('units', n.nodeType, n.substringData(1, 1).length,
+                n.substringData(1, 1).charCodeAt(0), n.substringData(2, 1).charCodeAt(0));
+            console.log('unsigned', n.substringData(4294967297, 4294967298),
+                n.substringData(3, -1), n.substringData(Infinity, -1), n.substringData(0, 4294967296).length);
+            const errors = [];
+            for (const offset of [-1, 5, 4294967295]) {
+                try { n.substringData(offset, 1); } catch (e) { errors.push(e.name); }
+            }
+            console.log('bounds', errors.join(','), n.data);
+        }
+        let order = '';
+        try {
+            nodes[0].substringData({valueOf() {order += 'o'; return -1;}}, {valueOf() {order += 'c'; return 1;}});
+        } catch (e) { console.log('conversion', order, e.name); }
+    "#);
+    let mut expected = Vec::new();
+    for kind in [3, 8, 7, 4] {
+        expected.push(format!("units {kind} 1 55357 56832"));
+        expected.push("unsigned 😀 é A😀é 0".to_string());
+        expected.push("bounds IndexSizeError,IndexSizeError,IndexSizeError A😀é".to_string());
+    }
+    expected.push("conversion oc IndexSizeError".to_string());
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn character_data_requires_arguments_before_conversion_or_mutation() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const xml = new DOMParser().parseFromString('<root/>', 'text/xml');
+        const nodes = [document.createTextNode('é•'), document.createComment('é•'),
+            xml.createProcessingInstruction('pi', 'é•'), xml.createCDATASection('é•')];
+        for (const n of nodes) {
+            const r = document.createRange(); r.selectNodeContents(n);
+            const observer = new MutationObserver(() => {});
+            observer.observe(n, {characterData: true});
+            let converted = false;
+            const offset = {valueOf() {converted = true; return 0;}};
+            const calls = [() => n.appendData(), () => n.insertData(offset), () => n.deleteData(offset),
+                () => n.replaceData(offset, 1), () => n.substringData(), () => n.substringData(offset)];
+            const errors = calls.map(f => {try {f(); return 'missing';} catch (e) {return e.name;}});
+            console.log(n.nodeType, errors.join(','), converted, n.data, r.startOffset, r.endOffset, observer.takeRecords().length);
+        }
+        const t = document.createTextNode('x');
+        try { t.splitText(); } catch (e) { console.log('split', e.name, t.data); }
+    "#);
+    let mut expected = Vec::new();
+    for kind in [3, 8, 7, 4] {
+        expected.push(format!("{kind} TypeError,TypeError,TypeError,TypeError,TypeError,TypeError false é• 0 2 0"));
+    }
+    expected.push("split TypeError x".to_string());
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn character_data_null_conversion_and_native_editing_ignore_method_overrides() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const xml = new DOMParser().parseFromString('<root/>', 'text/xml');
+        const nodes = [document.createTextNode('x'), document.createComment('x'),
+            xml.createProcessingInstruction('pi', 'x'), xml.createCDATASection('x')];
+        for (const n of nodes) {
+            n.data = null;
+            const dataNull = n.length;
+            n.data = undefined;
+            const dataUndefined = n.data;
+            n.nodeValue = null;
+            const nodeNull = n.length;
+            n.nodeValue = undefined;
+            console.log('nulls', n.nodeType, dataNull, dataUndefined, nodeNull, n.length);
+            n.appendData(null);
+            n.insertData(0, undefined);
+            console.log('methods', n.data);
+            n.data = 'ab';
+            n.replaceData = () => { throw new Error('overridden replaceData'); };
+            n.insertData(1, null); n.deleteData(1, 4);
+            console.log('native', n.data);
+        }
+        const p = document.createElement('p');
+        const cd = CharacterData.prototype;
+        const calls = [() => Object.getOwnPropertyDescriptor(cd, 'data').get.call(p),
+            () => Object.getOwnPropertyDescriptor(cd, 'data').set.call(p, 'x'),
+            () => Object.getOwnPropertyDescriptor(cd, 'length').get.call(p),
+            () => cd.appendData.call(p, 'x'), () => cd.insertData.call(p, 0, 'x'),
+            () => cd.deleteData.call(p, 0, 1), () => cd.replaceData.call(p, 0, 1, 'x'),
+            () => cd.substringData.call(p, 0, 1), () => Text.prototype.splitText.call(document.createComment('x'), 0)];
+        console.log('brands', calls.map(f => {try {f(); return false;} catch (e) {return e instanceof TypeError;}}).join(','));
+    "#);
+    let mut expected = Vec::new();
+    for kind in [3, 8, 7, 4] {
+        expected.push(format!("nulls {kind} 0 undefined 0 0"));
+        expected.push("methods undefinednull".to_string());
+        expected.push("native ab".to_string());
+    }
+    expected.push("brands true,true,true,true,true,true,true,true,true".to_string());
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn node_iterator_survives_removal_by_its_filter() {
     let (mut env, mut host) = setup("<body></body>");
     let out = run(&mut env, &mut host, r#"

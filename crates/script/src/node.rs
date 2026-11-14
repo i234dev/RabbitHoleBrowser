@@ -918,7 +918,10 @@ fn n_node_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
 
 fn n_node_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "nodeValue")?;
-    let v = arg_str(realm, args, 0)?;
+    let v = match args.first().map(Value::v) {
+        None | Some(V::Null) | Some(V::Undefined) => String::new(),
+        Some(v) => realm.to_rust_string(v.to_value())?,
+    };
     set_character_data(n, &v);
     Ok(Value::Undefined)
 }
@@ -1478,8 +1481,23 @@ fn n_get_elements_by_class_name(realm: &mut Realm, this: Value, args: &[Value]) 
 
 // CharacterData
 
+fn this_character_data(realm: &mut Realm, this: &Value, method: &str) -> JsResult<NodeRef> {
+    let n = this_node(realm, this, method)?;
+    if !with_doc(n.doc, |doc| doc.char_data(n.node).is_some()) {
+        return Err(realm.throw_type_error("Illegal invocation"));
+    }
+    Ok(n)
+}
+
+fn character_data_arguments(realm: &mut Realm, args: &[Value], required: usize, method: &str) -> JsResult<()> {
+    if args.len() < required {
+        return Err(realm.throw_type_error(&format!("Failed to execute '{method}' on 'CharacterData': {required} arguments required, but only {} present.", args.len())));
+    }
+    Ok(())
+}
+
 fn cd_data_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let n = this_node(realm, &this, "data")?;
+    let n = this_character_data(realm, &this, "data")?;
     Ok(with_doc(n.doc, |doc| match &doc.node(n.node).data {
         NodeData::Text(t) | NodeData::Comment(t) => Value::str(t),
         _ => Value::str(""),
@@ -1487,19 +1505,22 @@ fn cd_data_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 }
 
 fn cd_data_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let n = this_node(realm, &this, "data")?;
-    let v = arg_str(realm, args, 0)?;
+    let n = this_character_data(realm, &this, "data")?;
+    // CharacterData.data has [LegacyNullToEmptyString], unlike method
+    // DOMString arguments, where null is converted to the string "null".
+    let v = if matches!(arg(args, 0).v(), V::Null) { String::new() } else { arg_str(realm, args, 0)? };
     set_character_data(n, &v);
     Ok(Value::Undefined)
 }
 
 fn cd_length(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let n = this_node(realm, &this, "length")?;
+    let n = this_character_data(realm, &this, "length")?;
     Ok(Value::Number(with_doc(n.doc, |doc| doc.char_data(n.node).map(|t| t.encode_utf16().count()).unwrap_or(0)) as f64))
 }
 
 fn cd_append_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let n = this_node(realm, &this, "appendData")?;
+    let n = this_character_data(realm, &this, "appendData")?;
+    character_data_arguments(realm, args, 1, "appendData")?;
     let v = arg_str(realm, args, 0)?;
     let len = with_doc(n.doc, |doc| doc.char_data(n.node).map(|t| t.encode_utf16().count()).unwrap_or(0));
     replace_character_data(n, len, 0, &v);
@@ -1519,9 +1540,10 @@ pub(crate) fn replace_character_data(n: NodeRef, offset: usize, count: usize, da
 
 /// `CharacterData.replaceData(offset, count, data)`.
 fn cd_replace_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let n = this_node(realm, &this, "replaceData")?;
-    let off = realm.to_number(arg(args, 0))? as i64 as u32 as usize;
-    let count = realm.to_number(arg(args, 1))? as i64 as u32 as usize;
+    let n = this_character_data(realm, &this, "replaceData")?;
+    character_data_arguments(realm, args, 3, "replaceData")?;
+    let off = realm.to_uint32(arg(args, 0))? as usize;
+    let count = realm.to_uint32(arg(args, 1))? as usize;
     let data = arg_str(realm, args, 2)?;
     let len = with_doc(n.doc, |doc| doc.char_data(n.node).map(|t| t.encode_utf16().count()).unwrap_or(0));
     if off > len {
@@ -1531,20 +1553,43 @@ fn cd_replace_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
     Ok(Value::Undefined)
 }
 
+fn cd_insert_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    this_character_data(realm, &this, "insertData")?;
+    character_data_arguments(realm, args, 2, "insertData")?;
+    cd_replace_data(realm, this, &[arg(args, 0), Value::Number(0.0), arg(args, 1)])
+}
+
+fn cd_delete_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    this_character_data(realm, &this, "deleteData")?;
+    character_data_arguments(realm, args, 2, "deleteData")?;
+    cd_replace_data(realm, this, &[arg(args, 0), arg(args, 1), Value::str("")])
+}
+
 fn cd_substring_data(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let n = this_node(realm, &this, "substringData")?;
-    let off = realm.to_number(arg(args, 0))?.max(0.0) as usize;
-    let count = realm.to_number(arg(args, 1))?.max(0.0) as usize;
+    let n = this_character_data(realm, &this, "substringData")?;
+    character_data_arguments(realm, args, 2, "substringData")?;
+    let off = realm.to_uint32(arg(args, 0))? as usize;
+    let count = realm.to_uint32(arg(args, 1))? as usize;
     let cur = with_doc(n.doc, |doc| doc.char_data(n.node).unwrap_or("").to_string());
     let units: Vec<u16> = cur.encode_utf16().collect();
-    let end = (off + count).min(units.len());
-    let s = String::from_utf16_lossy(&units[off.min(units.len())..end]);
-    Ok(Value::str(&s))
+    if off > units.len() {
+        return Err(crate::misc::dom_exception(realm, "IndexSizeError", &format!("The offset {off} is greater than the node's length ({}).", units.len())));
+    }
+    let end = off + count.min(units.len() - off);
+    // A DOMString slice may end between a surrogate pair. Keep its code
+    // units in the JS string instead of replacing unpaired units with U+FFFD.
+    Ok(Value::String(rabbithole_js::JsStr::from_units(units[off..end].to_vec())))
 }
 
 fn text_split(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "splitText")?;
-    let off = realm.to_number(arg(args, 0))? as i64 as u32 as usize;
+    if !with_doc(n.doc, |doc| doc.is_text(n.node)) {
+        return Err(realm.throw_type_error("Illegal invocation"));
+    }
+    if args.is_empty() {
+        return Err(realm.throw_type_error("Failed to execute 'splitText' on 'Text': 1 argument required, but only 0 present."));
+    }
+    let off = realm.to_uint32(arg(args, 0))? as usize;
     let (old, len, parent) = with_doc(n.doc, |doc| {
         let t = doc.char_data(n.node).unwrap_or("").to_string();
         let len = t.encode_utf16().count();
@@ -1746,6 +1791,8 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(cd, "data", Some(cd_data_get), Some(cd_data_set), rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_accessor(cd, "length", Some(cd_length), None, rabbithole_js::CONFIGURABLE | rabbithole_js::ENUMERABLE);
     realm.define_method(cd, "appendData", 1, cd_append_data);
+    realm.define_method(cd, "insertData", 2, cd_insert_data);
+    realm.define_method(cd, "deleteData", 2, cd_delete_data);
     realm.define_method(cd, "replaceData", 3, cd_replace_data);
     realm.define_method(cd, "substringData", 2, cd_substring_data);
     let text = define_class(realm, "Text", Some("CharacterData"), text_ctor);
