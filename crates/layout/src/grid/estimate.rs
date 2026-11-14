@@ -19,7 +19,25 @@ pub(super) struct Scope<'b> {
     saved:Vec<Rc<ComputedStyle>>,
 }
 impl<'b> Scope<'b> {
-    pub(super) fn new(node:&'b mut LayoutBox,mut spaces:[AvailableSpace;2],edge_basis:AvailableSpace,mut contribution:GridAxis,kind:OperationKind,budget:&mut WorkBudget)->Self {
+    pub(super) fn new(node:&'b mut LayoutBox,mut bases:[AvailableSpace;2],edge_basis:AvailableSpace,mut contribution:GridAxis,kind:OperationKind,budget:&mut WorkBudget)->Self {
+        Self::map(node,budget,|style,box_kind,wrapper| {
+            percentages::normalize(style,bases,edge_basis,contribution,kind,box_kind==BoxKind::Image);
+            percentages::freeze_edges(style,edge_basis);
+            if wrapper {bases.swap(0,1);contribution=contribution.opposite();}
+        })
+    }
+    fn inline_content(node:&'b mut LayoutBox,budget:&mut WorkBudget)->Self {
+        let mut axis=GridAxis::Columns;
+        Self::map(node,budget,|style,_,wrapper| {
+            if axis==GridAxis::Columns {
+                style.width=Length::Auto;style.min_width=Length::ZERO;style.max_width=Length::Auto;
+            } else {
+                style.height=Length::Auto;style.min_height=Length::ZERO;style.max_height=Length::Auto;
+            }
+            if wrapper {axis=axis.opposite();}
+        })
+    }
+    fn map(node:&'b mut LayoutBox,budget:&mut WorkBudget,mut prepare:impl FnMut(&mut ComputedStyle,BoxKind,bool))->Self {
         let mut current=&*node;
         loop {
             budget.charge(1);
@@ -32,12 +50,11 @@ impl<'b> Scope<'b> {
         loop {
             scope.saved.push(current.style.clone());
             let mut style=(*current.style).clone();
-            percentages::normalize(&mut style,spaces,edge_basis,contribution,kind,current.kind==BoxKind::Image);
-            percentages::freeze_edges(&mut style,edge_basis);
+            prepare(&mut style,current.kind,current.wm_wrapper);
             current.style=Rc::new(style);
             if !current.wm_wrapper {break;}
             let Some(inner)=current.children.first_mut() else {break;};
-            current=inner;spaces.swap(0,1);contribution=contribution.opposite();
+            current=inner;
         }
         subgrid::invalidate(scope.node);
         scope
@@ -74,6 +91,28 @@ pub(super) struct RowItemEstimate {
 }
 
 impl<'a> Layouter<'a> {
+    /// The content oracle excludes this box's preferred/min/max inline
+    /// sizes, including the corresponding logical block properties behind
+    /// an orthogonal wrapper. Bounds such as min-width:max-content must not
+    /// see intrinsic(node)'s early (width,width) numeric preferred shortcut.
+    fn estimated_inline_content(&mut self,child:&mut LayoutBox,bases:[AvailableSpace;2])->(f32,f32) {
+        let scope=Scope::inline_content(child,&mut self.grid_work);
+        if !scope.node.wm_wrapper {return self.intrinsic(scope.node);}
+        // The generic wrapper intrinsic helper uses the viewport height.
+        // Here a real perpendicular CB size, if present, takes precedence.
+        // An actually indefinite block input keeps the existing WM fallback.
+        let outer=&scope.node.style;
+        let margins=outer.margin.top.resolve_or_zero(0.)+outer.margin.bottom.resolve_or_zero(0.);
+        let inline=bases[1].definite().map(|height|(height-margins).max(0.)).unwrap_or_else(||self.ctx.viewport_height.max(1.));
+        let block=bases[0].definite().map(|width|(width-outer.margin.left.resolve_or_zero(0.)-outer.margin.right.resolve_or_zero(0.)).max(0.));
+        let Some(inner)=scope.node.children.first_mut() else {return (0.,0.);};
+        let mode=if inner.style.width.is_auto() {WidthMode::ShrinkToFit} else {WidthMode::Fill};
+        let cb=Cb{x:0.,width:inline,height:block};let mut bfc=Bfc::new();
+        self.forced_content_height=None;
+        self.layout_block(inner,&cb,0.,&mut bfc,mode);
+        (inner.rect.h,inner.rect.h)
+    }
+
     /// Measure an ordinary item in the row pass without completing an
     /// unresolved perpendicular Grid axis. The per-axis traversal must
     /// intercept subgrid descendants before reaching this ordinary path.
@@ -90,12 +129,25 @@ impl<'a> Layouter<'a> {
         edges.margin.right+=item.edges.margin.right-original.margin.right;
         edges.margin.top+=item.edges.margin.top-original.margin.top;
         edges.margin.bottom+=item.edges.margin.bottom-original.margin.bottom;
-        let content=self.intrinsic(scope.node);
-        let stretch=style.width.is_auto()&&matches!(item.justify,ItemAlign::Stretch|ItemAlign::Normal|ItemAlign::Auto)&&!edges.auto.left&&!edges.auto.right;
-        let inline=realize(&style,spaces[0],spaces[0],content,edges.pb_h,edges.margin_sum(Axis::Row),stretch);
+        let content=self.estimated_inline_content(scope.node,spaces);
+        let natural=scope.node.kind==BoxKind::Image||style.aspect_ratio.is_some_and(|ratio|ratio>0.);
+        let stretch=style.width.is_auto()&&!edges.auto.left&&!edges.auto.right&&(item.justify==ItemAlign::Stretch||(!natural&&matches!(item.justify,ItemAlign::Normal|ItemAlign::Auto)));
+        let preferred=if style.width.is_auto()&&!stretch&&scope.node.kind!=BoxKind::Image {
+            style.aspect_ratio.filter(|ratio|*ratio>0.).zip(style.height.resolve_definite(spaces[1].definite())).map(|(ratio,height)|Length::Px(height*ratio)).unwrap_or(style.width)
+        } else {style.width};
+        let inline=realize_preferred(&style,preferred,spaces[0],spaces[0],content,edges.pb_h,edges.margin_sum(Axis::Row),stretch);
         // Only execution uses a finite proxy; own cyclic preferred/min/max
         // lengths and percentage edges were normalized in the scope above.
         let proxy=inline.percentage_basis().unwrap_or_else(||(inline.content()+edges.pb_h+edges.margin_sum(Axis::Row)).max(0.));
+        if scope.node.kind==BoxKind::Image {
+            // Replaced layout ignores WidthMode::Fixed. Give it the exact
+            // scoped preferred width, including explicit stretch, so the
+            // reported estimate and executed content width stay coherent.
+            self.grid_work.charge(1);
+            let mut execution=(*style).clone();
+            execution.width=Length::Px(inline.content()+if style.box_sizing==BoxSizing::BorderBox {edges.pb_h} else {0.});
+            scope.node.style=Rc::new(execution);
+        }
         let cb=Cb{x:0.,width:proxy,height:spaces[1].definite()};
         let mut bfc=Bfc::new();self.forced_content_height=None;
         self.layout_block(scope.node,&cb,0.,&mut bfc,WidthMode::Fixed(inline.content()));
@@ -110,6 +162,10 @@ impl<'a> Layouter<'a> {
 /// Neither input is inferred from the subsequently realized content width.
 /// The result sizes an item for measurement; it is not a CompletedAxis.
 pub(super) fn realize(style:&ComputedStyle,available:AvailableSpace,percentage_basis:AvailableSpace,content:(f32,f32),padding_border:f32,margins:f32,stretch:bool)->FiniteInline {
+    realize_preferred(style,style.width,available,percentage_basis,content,padding_border,margins,stretch)
+}
+#[allow(clippy::too_many_arguments)]
+fn realize_preferred(style:&ComputedStyle,preferred:Length,available:AvailableSpace,percentage_basis:AvailableSpace,content:(f32,f32),padding_border:f32,margins:f32,stretch:bool)->FiniteInline {
     assert!(content.0.is_finite()&&content.1.is_finite()&&content.1>=content.0,"Invalid intrinsic Grid item size");
     let reference=percentage_basis.definite();
     let inner=|value:f32|if style.box_sizing==BoxSizing::BorderBox {(value-padding_border).max(0.)} else {value.max(0.)};
@@ -118,8 +174,8 @@ pub(super) fn realize(style:&ComputedStyle,available:AvailableSpace,percentage_b
         AvailableSpace::MinContent=>min,
         _=>room.map_or(max,|room|crate::block::shrink_to_fit(min,max,room)),
     };
-    let size=if let Some(size)=style.width.resolve_definite(reference) {inner(size)} else {
-        match style.width {
+    let size=if let Some(size)=preferred.resolve_definite(reference) {inner(size)} else {
+        match preferred {
             Length::MinContent=>content.0,
             Length::MaxContent=>content.1,
             Length::FitContent=>fit(content.0,content.1),
@@ -148,7 +204,8 @@ mod tests {
     use super::*;
     use std::panic::{catch_unwind,AssertUnwindSafe};
     use std::collections::HashMap;
-    use rabbithole_gfx::FontContext;
+    use std::sync::Arc;
+    use rabbithole_gfx::{FontContext,Image};
     use rabbithole_css::{parse_stylesheet,MediaEnv};
 
     fn realize_same_basis(style:&ComputedStyle,available:AvailableSpace,content:(f32,f32),padding_border:f32,margins:f32,stretch:bool)->FiniteInline {
@@ -167,21 +224,27 @@ mod tests {
     /// The expected rectangle comes from ordinary Block layout of a separate
     /// reference with an explicit used size; no Grid/Flex oracle is reused.
     fn measured_item(css:&str,inline:AvailableSpace,edge_basis:AvailableSpace)->(RowItemEstimate,(f32,f32)) {
-        let doc=rabbithole_html::parse("<div id=probe>XXXX XX</div><div id=reference>XXXX XX</div>");
+        measured_case("<div id=probe>XXXX XX</div><div id=reference>XXXX XX</div>",css,[inline,AvailableSpace::Indefinite],edge_basis,ItemAlign::Stretch)
+    }
+    fn measured_case(html:&str,css:&str,bases:[AvailableSpace;2],edge_basis:AvailableSpace,justify:ItemAlign)->(RowItemEstimate,(f32,f32)) {
+        let doc=rabbithole_html::parse(html);
         let sheets=[parse_stylesheet(&format!("*{{font:10px/1 monospace}}div{{display:block;min-width:0}}{css}"))];
         let styles=rabbithole_style::style_tree(&doc,&sheets,&MediaEnv{width:800.,height:600.,screen:true,scripting:true});
-        let fonts=FontContext::new();let images=HashMap::new();let backgrounds=HashMap::new();let scrolls=HashMap::new();
+        let fonts=FontContext::new();let mut images=HashMap::new();let backgrounds=HashMap::new();let scrolls=HashMap::new();
+        let id=doc.element_by_id("probe").unwrap();
+        if doc.tag(id)==Some("img") {images.insert(id,Arc::new(Image::new(40,20,vec![0;40*20*4])));}
         let ctx=crate::LayoutContext{doc:&doc,styles:&styles,fonts:&fonts,images:&images,background_images:&backgrounds,scroll_offsets:&scrolls,viewport_width:800.,viewport_height:600.,page_scroll:(0.,0.)};
         let reference=crate::layout(&ctx);
         let reference=find(&reference.root,doc.element_by_id("reference").unwrap()).unwrap();
         let expected=(reference.content_rect.w,reference.rect.h);
-        let mut root=crate::build::Builder::new(&ctx,None).build_root();
+        let mut root=crate::wm::prepare(crate::build::Builder::new(&ctx,None).build_root(),doc.body());
         let node=find_mut(&mut root,doc.element_by_id("probe").unwrap()).unwrap();
         let original=node.style.clone();
-        let item=super::super::GridItem{idx:0,area:super::super::Area{row:(0,1),col:(0,1)},edges:ItemEdges::new(&node.style,800.),justify:ItemAlign::Stretch,align:ItemAlign::FlexStart,column_names:true,row_names:true,parent_lanes_auto:false};
+        let item=super::super::GridItem{idx:0,area:super::super::Area{row:(0,1),col:(0,1)},edges:ItemEdges::new(&node.style,800.),justify,align:ItemAlign::FlexStart,column_names:true,row_names:true,parent_lanes_auto:false};
         let mut layouter=Layouter::new(&ctx);
-        let measured=layouter.estimate_row_item(node,&item,[inline,AvailableSpace::Indefinite],edge_basis,OperationKind::Layout,800.);
+        let measured=layouter.estimate_row_item(node,&item,bases,edge_basis,OperationKind::Layout,800.);
         assert!(Rc::ptr_eq(&node.style,&original));assert!(node.intrinsic_cache.is_none());
+        assert!((measured.inline.content()-node.content_rect.w).abs()<0.02,"reported {} != executed {}",measured.inline.content(),node.content_rect.w);
         (measured,expected)
     }
 
@@ -297,5 +360,84 @@ mod tests {
         assert_eq!(super::realize(&style,AvailableSpace::MinContent,AvailableSpace::Definite(100.),(30.,80.),0.,0.,false).content(),30.);
         style.width=Length::FitContent;
         assert_eq!(super::realize(&style,AvailableSpace::MinContent,AvailableSpace::Definite(100.),(30.,80.),0.,0.,false).content(),30.);
+    }
+
+    #[test]
+    fn numeric_preferred_width_does_not_replace_the_content_oracle_for_intrinsic_bounds() {
+        let html="<div id=probe><span></span><span></span></div><div id=reference></div>";
+        for (preferred,bound,expected_width,expected_height) in [(10.,"min-width:max-content",80.,10.),(100.,"max-width:min-content",40.,20.)] {
+            let css=format!("#probe,#probe *{{font:0/0 monospace}}#probe{{width:{preferred}px;{bound}}}#probe span{{display:inline-block;width:40px;height:10px;vertical-align:top}}#reference{{width:{expected_width}px;height:{expected_height}px}}");
+            let (measured,expected)=measured_case(html,&css,[AvailableSpace::Definite(160.),AvailableSpace::Indefinite],AvailableSpace::Definite(160.),ItemAlign::FlexStart);
+            assert!((measured.inline.content()-expected.0).abs()<0.02);
+            assert!((measured.outer_block-expected.1).abs()<0.02);
+        }
+    }
+
+    #[test]
+    fn percentage_normalization_uses_the_containing_basis_before_an_intrinsic_constraint_is_applied() {
+        let mut style=ComputedStyle::initial();style.width=Length::Percent(50.);
+        let original=Rc::new(style);let mut node=LayoutBox::new(BoxKind::Block,None,original.clone());
+        let mut budget=WorkBudget::default();
+        {
+            let scope=Scope::new(&mut node,[AvailableSpace::Definite(100.),AvailableSpace::Indefinite],AvailableSpace::Definite(100.),GridAxis::Columns,OperationKind::IntrinsicMin,&mut budget);
+            assert_eq!(scope.node.style.width,Length::Percent(50.));
+            let measured=super::realize(&scope.node.style,AvailableSpace::MinContent,AvailableSpace::Definite(100.),(30.,80.),0.,0.,false);
+            assert_eq!(measured.content(),50.);assert_eq!(measured.available(),AvailableSpace::MinContent);
+        }
+        assert!(Rc::ptr_eq(&node.style,&original));
+    }
+
+    #[test]
+    fn ordinary_wrapper_content_uses_a_defined_perpendicular_space_instead_of_viewport_height() {
+        let html="<div id=probe><span></span><span></span><span></span><span></span><span></span></div><div id=reference></div>";
+        for mode in ["vertical-rl","vertical-lr","sideways-lr"] {
+            for (block,width) in [(30.,50.),(60.,20.)] {
+                let css=format!("#probe,#probe *{{font:0/0 monospace}}#probe{{writing-mode:{mode};min-height:0}}#probe span{{display:inline-block;width:10px;height:20px;vertical-align:top}}#reference{{width:{width}px;height:{block}px}}");
+                let (measured,expected)=measured_case(html,&css,[AvailableSpace::Indefinite,AvailableSpace::Definite(block)],AvailableSpace::Indefinite,ItemAlign::Normal);
+                assert!((measured.inline.content()-expected.0).abs()<0.02,"{mode}/{block}: {} != {}",measured.inline.content(),expected.0);
+                assert!((measured.outer_block-expected.1).abs()<0.02);
+            }
+        }
+    }
+
+    #[test]
+    fn images_and_ratio_boxes_preserve_normal_and_explicit_stretch_as_distinct_rules() {
+        for (tag,extra,normal,stretch) in [("img","",(40.,20.),(100.,50.)),("div","height:20px;aspect-ratio:2",(40.,20.),(100.,20.))] {
+            for (justify,(width,height)) in [(ItemAlign::Normal,normal),(ItemAlign::Stretch,stretch)] {
+                let html=if tag=="img" {"<img id=probe><div id=reference></div>"} else {"<div id=probe></div><div id=reference></div>"};
+                let css=format!("#probe{{{extra}}}#reference{{width:{width}px;height:{height}px}}");
+                let (measured,expected)=measured_case(html,&css,[AvailableSpace::Definite(100.),AvailableSpace::Indefinite],AvailableSpace::Definite(100.),justify);
+                assert!((measured.inline.content()-expected.0).abs()<0.02,"{tag}/{justify:?}: {} != {}",measured.inline.content(),expected.0);
+                assert!((measured.outer_block-expected.1).abs()<0.02,"{tag}/{justify:?}: {} != {}",measured.outer_block,expected.1);
+            }
+        }
+    }
+
+    #[test]
+    fn percentage_scope_restores_every_asymmetric_wrapper_style_on_unwind() {
+        let originals:Vec<_>=(0..4).map(|i| {
+            let mut style=ComputedStyle::initial();style.width=Length::Percent(50.+i as f32);style.height=Length::Percent(25.+i as f32);style.padding.left=Length::Percent(10.+i as f32);Rc::new(style)
+        }).collect();
+        let mut node=LayoutBox::new(BoxKind::Block,None,originals[3].clone());
+        for (i,kind) in [(2,crate::tree::WmKind::Reflect),(1,crate::tree::WmKind::Ccw),(0,crate::tree::WmKind::Cw)] {
+            let mut wrapper=LayoutBox::new(BoxKind::Block,None,originals[i].clone());wrapper.wm_wrapper=true;wrapper.wm_kind=kind;wrapper.children.push(node);node=wrapper;
+        }
+        let mut budget=WorkBudget::default();
+        let result=catch_unwind(AssertUnwindSafe(|| {
+            let scope=Scope::new(&mut node,[AvailableSpace::Indefinite,AvailableSpace::Definite(80.)],AvailableSpace::Definite(300.),GridAxis::Rows,OperationKind::Layout,&mut budget);
+            let mut current=&mut *scope.node;
+            for i in 0..4 {
+                assert_eq!(current.style.padding.left,Length::Px(30.+3.*i as f32));
+                if i%2==0 {assert_eq!(current.style.width,Length::Auto);} else {assert_eq!(current.style.height,Length::Auto);}
+                current.intrinsic_cache=Some((100.,100.));
+                if i<3 {current=current.children.first_mut().unwrap();}
+            }
+            panic!("intentional wrapper estimate abort");
+        }));
+        assert!(result.is_err());let mut current=&node;
+        for (i,style) in originals.iter().enumerate() {
+            assert!(Rc::ptr_eq(&current.style,style));assert!(current.intrinsic_cache.is_none());
+            if i<3 {current=current.children.first().unwrap();}
+        }
     }
 }

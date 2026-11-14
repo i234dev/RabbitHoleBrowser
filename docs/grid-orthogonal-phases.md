@@ -162,3 +162,35 @@ item measured under MinContent in a fixed 100px track still resolves its
 `width:50%` to 50px, whereas an automatic item selects its min-content size.
 Realizing a finite width cannot create or erase that definite base. This is
 covered by a further control before the general column collector is wired.
+
+## Ordinary-item consumer review follow-up
+
+The reviewed preparatory helpers remain disconnected from layout. Before
+wiring, independent review found four required boundaries. This successor
+addresses them in the helper and adds causal controls; it has not yet been
+compiled or executed:
+
+- Percentage normalization receives the original containing-block bases,
+  independently of an intrinsic contribution constraint. A control runs the
+  actual Scope before MinContent realization and preserves 50% of a fixed
+  100px track.
+- A second scoped content oracle temporarily clears preferred/min/max inline
+  sizes only while obtaining raw content, including the corresponding axis
+  behind wrappers. Numeric width cannot replace the max-content/min-content
+  oracle needed by an intrinsic bound. Tests measure two 40px atoms against
+  separate explicit 80px/40px Block references.
+- Ordinary wrapper content uses a real perpendicular containing-block size
+  instead of the unconditional viewport-height intrinsic helper. Only an
+  actually indefinite perpendicular input retains the existing WM viewport
+  fallback. Tests use three orientations and available heights 30px/60px,
+  with five physical 10x20px atoms and separate Block references.
+- Normal alignment uses natural-size/ratio behavior; explicit stretch remains
+  distinct. Replaced execution gets the exact scoped preferred width because
+  ordinary Image layout ignores WidthMode::Fixed. Tests verify both reported
+  and executed inline sizes against independent natural-image/ratio references.
+
+An asymmetric Cw/Ccw/Reflect chain also checks every scoped style Rc and cache
+on unwind, with distinct padding percentages and the original edge reference.
+These checks preserve the pending per-axis/subgrid requirements and do not
+claim complete aspect-ratio, replaced-element or writing-mode conformance.
+The legacy final Grid item sizing and global WM helpers are unchanged.
