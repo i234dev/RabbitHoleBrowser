@@ -375,6 +375,114 @@ fn arrays() {
 }
 
 #[test]
+fn array_map_species_preserves_sparse_result_length() {
+    // map defines only visited indices after ArraySpeciesCreate; it does not
+    // restore the input length on a custom species result (ECMA-262 23.1.3.21).
+    eq(
+        r#"
+        var source = new Array(3), target = [], constructorArgs, calls = 0;
+        source.constructor = {};
+        source.constructor[Symbol.species] = function(len) {
+            constructorArgs = [arguments.length, len];
+            return target;
+        };
+        var result = source.map(function() { calls++; });
+        [constructorArgs.join(':'), result === target, result.length,
+         Object.keys(result).length, calls].join(':')
+        "#,
+        "1:3:true:0:0:0",
+    );
+    eq(
+        r#"
+        var source = [7], target = [], calls = 0;
+        source.length = 3;
+        source.constructor = {};
+        source.constructor[Symbol.species] = function() { return target; };
+        var result = source.map(function(v) { calls++; return v * 2; });
+        [result === target, result.length, result[0], 1 in result,
+         2 in result, calls].join(':')
+        "#,
+        "true:1:14:false:false:1",
+    );
+    eq(
+        r#"
+        var source = new Array(3), target = [], calls = 0;
+        Object.defineProperty(target, 'length', {writable:false});
+        source.constructor = {};
+        source.constructor[Symbol.species] = function() { return target; };
+        var result = source.map(function() { calls++; });
+        var desc = Object.getOwnPropertyDescriptor(result, 'length');
+        [result === target, result.length, desc.value, desc.writable,
+         Object.keys(result).length, calls].join(':')
+        "#,
+        "true:0:0:false:0:0",
+    );
+}
+
+#[test]
+fn array_map_species_length_controls() {
+    eq(
+        "var calls = 0; var r = new Array(3).map(function() { calls++; }); [r.length, Object.keys(r).length, calls].join(':')",
+        "3:0:0",
+    );
+    eq(
+        r#"
+        var source = [1, 2, 3], target = [];
+        source.constructor = {};
+        source.constructor[Symbol.species] = function() { return target; };
+        var result = source.map(function(v) { return v * 2; });
+        [result === target, result.length, result.join(',')].join(':')
+        "#,
+        "true:3:2,4,6",
+    );
+    eq(
+        r#"
+        var source = [7], target = [], caught = false, calls = 0;
+        Object.defineProperty(target, 'length', {writable:false});
+        source.constructor = {};
+        source.constructor[Symbol.species] = function() { return target; };
+        try { source.map(function(v) { calls++; return v; }); }
+        catch (e) { caught = e instanceof TypeError; }
+        [caught, target.length, Object.keys(target).length, calls].join(':')
+        "#,
+        "true:0:0:1",
+    );
+    eq(
+        r#"
+        var source = [7], target = {};
+        source.length = 3;
+        Object.defineProperty(target, 'length', {
+            get: function() { return 17; },
+            set: function() { throw new Error('map must not set length'); }
+        });
+        source.constructor = {};
+        source.constructor[Symbol.species] = function() { return target; };
+        var result = source.map(function(v) { return v * 2; });
+        [result === target, result.length, result[0], Object.keys(result).join(',')].join(':')
+        "#,
+        "true:17:14:0",
+    );
+    eq(
+        r#"
+        var source = [7], target = [], log = [];
+        source.length = 3;
+        var proxy = new Proxy(target, {
+            defineProperty: function(t, key, desc) {
+                log.push('define:' + key);
+                return Reflect.defineProperty(t, key, desc);
+            },
+            set: function() { throw new Error('map must not set properties'); }
+        });
+        source.constructor = {};
+        source.constructor[Symbol.species] = function() { return proxy; };
+        var result = source.map(function(v) { return v * 2; });
+        [result === proxy, target.length, target[0], log.join(',')].join(':')
+        "#,
+        "true:1:14:define:0",
+    );
+}
+
+#[test]
 fn generators() {
     eq("function* g() { yield 1; yield 2; return 3; } var it = g(); JSON.stringify([it.next(), it.next(), it.next(), it.next()])", "[{\"value\":1,\"done\":false},{\"value\":2,\"done\":false},{\"value\":3,\"done\":true},{\"done\":true}]");
     eq("function* fib() { let [a, b] = [0, 1]; for (;;) { yield a; [a, b] = [b, a + b]; } } var out = []; for (const v of fib()) { if (v > 50) break; out.push(v); } out.join()", "0,1,1,2,3,5,8,13,21,34");

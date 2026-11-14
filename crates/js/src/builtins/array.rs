@@ -1083,11 +1083,6 @@ fn map(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
             push_result(realm, out, i, r)?;
         }
     }
-    if let ObjectKind::Array { length, .. } = &mut realm.obj_mut(out).kind {
-        if (*length as usize) < len {
-            *length = len as u32;
-        }
-    }
     Ok(Value::Object(out))
 }
 
