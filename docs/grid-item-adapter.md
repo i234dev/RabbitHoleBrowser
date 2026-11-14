@@ -31,3 +31,20 @@ minimum contribution and min-content contribution remain separate result
 data: the existing track solver still conflates its single `Contribution.min`
 input for some sizing functions. The first adapter keeps that legacy minimum
 contract and supplies true min-content separately for adjustment probes.
+
+`item_measure::measure_ordinary_item` returns a contribution, an independent
+min-content value and an optional row baseline. Columns are freshly measured
+under both MinContent and MaxContent inline constraints, preserving the
+opposite geometry and independent percentage bases. Rows execute at the
+caller's current perpendicular inline space. The traversal applies baseline
+group shifts and creates probes with its actual item/virtual-slot paths;
+the adapter does not invent an operation, complete tracks or reuse a previous
+item result. Its eligibility helper checks the same replaced/ratio/subgrid
+boundary as the intended first caller.
+
+Seven adapter controls cover distinct minimum/min-content values, intrinsic
+bounds independent of numeric preferred widths, repeated geometry changes on
+the same ordinary item and each wrapper orientation, defined percentage bases,
+unsupported items and failure before any style/result installation. The module
+hook belongs to the traversal owner and is deliberately absent from this
+adapter-only checkpoint. These tests are not yet compiled or run.
