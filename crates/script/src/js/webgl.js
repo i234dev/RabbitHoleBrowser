@@ -4,6 +4,8 @@
   'use strict';
   const g = globalThis, N = g.__rhNative;
   const invoke = Reflect.apply;
+  // IDL conversion must not invoke page replacements of these builtins.
+  const truncateOffset = Math.trunc, finiteOffset = Number.isFinite;
   const hidden = (o, k, value) => Object.defineProperty(o, k, { value, configurable: true, writable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
   const illegal = () => { throw new TypeError('Illegal constructor'); };
@@ -120,8 +122,8 @@
     // GLintptr/GLsizeiptr are ordinary signed Web IDL long long values:
     // non-finite values become zero, fractions truncate, then wrap at 64 bits.
     // Keep a signed remainder so adding 2^64 cannot round a small negative to zero.
-    if (!Number.isFinite(value) || value === 0) return 0;
-    value = Math.trunc(value) % 0x10000000000000000;
+    if (!finiteOffset(value) || value === 0) return 0;
+    value = truncateOffset(value) % 0x10000000000000000;
     if (value >= 0x8000000000000000) value -= 0x10000000000000000;
     else if (value < -0x8000000000000000) value += 0x10000000000000000;
     if (value < 0) { flag(s, GL.INVALID_VALUE); return null; }
