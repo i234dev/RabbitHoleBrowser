@@ -236,6 +236,7 @@ box.addEventListener('scroll', function () {
 new IntersectionObserver(function (entries) {
   entries.forEach(function (e) {
     log.push('io ' + e.isIntersecting + ' ' + Math.round(e.rootBounds.top) + ' ' + Math.round(e.rootBounds.height));
+    console.log(log[log.length - 1]);
     if (e.isIntersecting && !loading) {
       loading = true;
       fetch('/page?n=' + (++page)).then(function (r) { return r.text(); }).then(function (t) { sentinel.insertAdjacentHTML('beforebegin', t); loading = false; log.push('loaded ' + page); });
@@ -379,8 +380,19 @@ fn infinite_scroll_inside_a_scroll_container() {
     let (sink, rx) = sink();
     let h = spawn(1, &sink);
     navigate(&h, &format!("{base}/nested"));
-    wait_for(&rx, 1, Duration::from_secs(10), is_frame).expect("frame");
-    assert!(eval(&h, &rx, "log.join('|')").starts_with("io false 50 500"), "{}", eval(&h, &rx, "log.join('|')"));
+    // Painting can precede the asynchronous observer callback. Wait for both
+    // messages in either order before asserting its initial geometry.
+    let (mut painted, mut notified) = (false, false);
+    wait_for(&rx, 1, Duration::from_secs(10), |message| {
+        match message {
+            FromContent::Frame(_) => painted = true,
+            FromContent::Console(lines) => notified |= lines.iter().any(|(_, line)| line.starts_with("io ")),
+            _ => {}
+        }
+        painted && notified
+    }).expect("first frame and initial IntersectionObserver notification");
+    let log = eval(&h, &rx, "log.join('|')");
+    assert!(log.starts_with("io false 50 500"), "{log}");
     // Wheel over the container (the UI forwards it to the page).
     for _ in 0..12 {
         h.send(ToContent::Wheel { x: 200.0, y: 200.0, dx: 0.0, dy: 100.0, mods: Modifiers::default(), scrolled: false });
