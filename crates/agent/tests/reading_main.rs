@@ -157,3 +157,19 @@ fn read_and_summary_omit_an_invisible_body_without_changing_explicit_ref_scope()
     assert!(overview(&positioned).contains("chars in main (read shows it)"));
     assert!(read::read_with_options(&positioned, &mut RefMap::default(), 0, false, false).contains("Direct body prose 🐇"));
 }
+
+#[test]
+fn read_and_summary_preserve_visible_descendants_of_a_visibility_hidden_root() {
+    let prose = "é🐇".repeat(110);
+    let hidden = "Hidden direct text. ".repeat(100);
+    let page = load_page(&format!("<!doctype html><body style='visibility:hidden'>{hidden}<div style='visibility:visible'>{prose}</div></body>"));
+    let summary = overview(&page);
+    assert!(summary.contains("text: 220 chars in main (read shows it)"), "{summary}");
+    let text = read::read_with_options(&page, &mut RefMap::default(), 0, false, false);
+    assert!(text.contains(&prose) && !text.contains("Hidden direct text"), "{text}");
+
+    let page = load_page(&format!("<!doctype html><html style='visibility:hidden'><body style='visibility:visible'>{prose}</body></html>"));
+    let summary = overview(&page);
+    assert!(summary.contains("text: 220 chars in main (read shows it)"), "{summary}");
+    assert!(read::read_with_options(&page, &mut RefMap::default(), 0, false, false).contains(&prose));
+}

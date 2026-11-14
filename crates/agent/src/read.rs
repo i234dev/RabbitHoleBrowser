@@ -41,7 +41,7 @@ fn is_junk(doc: &Document, n: NodeId) -> bool {
     !s.trim().is_empty() && NEGATIVE.iter().any(|k| s.contains(k)) && !POSITIVE.iter().any(|k| s.contains(k))
 }
 
-fn style_visible(page: &Page, n: NodeId) -> bool {
+fn subtree_visible(page: &Page, n: NodeId) -> bool {
     let doc = &page.doc;
     if doc.attr(n, "aria-hidden") == Some("true") {
         return false;
@@ -50,10 +50,14 @@ fn style_visible(page: &Page, n: NodeId) -> bool {
     if st.display == rabbithole_engine::style::Display::None {
         return false;
     }
-    if st.visibility == Visibility::Hidden || st.opacity < 0.05 {
+    if st.opacity < 0.05 {
         return false;
     }
     true
+}
+
+fn style_visible(page: &Page, n: NodeId) -> bool {
+    subtree_visible(page, n) && page.styles.get(n).map(|s| s.visibility != Visibility::Hidden).unwrap_or(false)
 }
 
 fn visible(page: &Page, geo: &GeoMap, n: NodeId) -> bool {
@@ -67,11 +71,11 @@ fn visible(page: &Page, geo: &GeoMap, n: NodeId) -> bool {
 fn body_visible(page: &Page) -> bool {
     let mut current = page.doc.body();
     while let Some(n) = current {
-        if page.doc.element(n).is_some() && !style_visible(page, n) { return false; }
+        if page.doc.element(n).is_some() && !subtree_visible(page, n) { return false; }
         current = page.doc.parent(n);
     }
-    // Use style/ARIA here: a body with only positioned children need not have
-    // a nonempty own rectangle even when its descendants are visible.
+    // visibility:hidden is overridable on descendants. Nor does a body with
+    // positioned children need a nonempty own rectangle to have visible prose.
     true
 }
 
@@ -117,6 +121,9 @@ impl Content {
         let mut stack = vec![(root, false)];
         while let Some((n, visited)) = stack.pop() {
             if let Some(text) = doc.text(n) {
+                // The root is traversed even when visibility:hidden, because
+                // a child may restore visibility. Its own text stays hidden.
+                if doc.parent(n) == Some(root) && !style_visible(page, root) { continue; }
                 let mut stats = TextStats::default();
                 for word in text.split_whitespace() {
                     if stats.chars > 0 { stats.chars += 1; }
@@ -260,6 +267,7 @@ struct Md<'a> {
     frame: usize,
     links: bool,
     cites: bool,
+    omit_root_text: Option<NodeId>,
     out: String,
 }
 
@@ -496,6 +504,7 @@ impl Md<'_> {
         let doc = &self.page.doc;
         for c in doc.flat_children(n) {
             if let Some(t) = doc.text(c) {
+                if self.omit_root_text == Some(n) { continue; }
                 if !self.links { self.out.push_str(&esc_md(t)); continue; }
                 let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
                 if !t.is_empty() {
@@ -743,7 +752,7 @@ pub fn read_subtree(page: &Page, refs: &mut RefMap, frame: usize, root: NodeId) 
 
 pub fn read_subtree_with_options(page: &Page, refs: &mut RefMap, frame: usize, root: NodeId, links: bool, cites: bool) -> String {
     let geo = GeoMap::build(page);
-    let mut md = Md { page, geo: &geo, refs, frame, links, cites, out: String::new() };
+    let mut md = Md { page, geo: &geo, refs, frame, links, cites, omit_root_text: None, out: String::new() };
     if page.doc.is_element(root, "a") && md.omit_citation(root) { return String::new(); }
     md.block(root, 0);
     clean_blocks(&md.out)
@@ -759,7 +768,8 @@ pub fn read_with_options(page: &Page, refs: &mut RefMap, frame: usize, links: bo
     let geo = GeoMap::build(page);
     let doc = &page.doc;
     let root = main_content(page).or_else(|| doc.body()).unwrap_or(Document::ROOT);
-    let mut md = Md { page, geo: &geo, refs, frame, links, cites, out: String::new() };
+    let omit_root_text = if doc.element(root).is_some() && !style_visible(page, root) { Some(root) } else { None };
+    let mut md = Md { page, geo: &geo, refs, frame, links, cites, omit_root_text, out: String::new() };
     md.block(root, 0);
     let body = clean_blocks(&md.out);
     let mut out = String::new();
