@@ -4,6 +4,8 @@ use super::*;
 use crate::value::V;
 use crate::realm::{SYM_ITERATOR, SYM_MATCH, SYM_MATCH_ALL, SYM_REPLACE, SYM_SEARCH, SYM_SPLIT};
 
+mod normalization;
+
 pub fn register(realm: &mut Realm) {
     let sp = realm.intrinsics.string_proto;
     let ctor = define_ctor(realm, "String", 1, string_ctor, sp);
@@ -153,10 +155,6 @@ pub fn this_str(realm: &mut Realm, this: &Value, method: &str) -> JsResult<JsStr
     match this.v() {
         V::String(s) => Ok(s.clone()),
         V::Undefined | V::Null => realm.type_error(&format!("String.prototype.{} called on null or undefined", method)),
-        V::Object(id) => match &realm.obj(id).kind {
-            ObjectKind::String(s) => Ok(s.clone()),
-            _ => realm.to_string(this.clone()),
-        },
         other => realm.to_string(other.to_value()),
     }
 }
@@ -347,7 +345,10 @@ fn normalize(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
         return realm.range_error("The normalization form should be one of NFC, NFD, NFKC, NFKD.");
     }
-    Ok(Value::String(s))
+    if s.as_units().iter().all(|&unit| unit < 0x80) {
+        return Ok(Value::String(s));
+    }
+    Ok(Value::String(JsStr::from_units(normalization::normalize(s.as_units(), &form))))
 }
 
 fn pad(realm: &mut Realm, this: Value, args: &[Value], at_start: bool) -> JsResult<Value> {
@@ -787,4 +788,51 @@ fn html_sup(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> 
 fn iterator(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
     let s = this_str(realm, &this, "[Symbol.iterator]")?;
     Ok(iterator::create_string_iterator(realm, s))
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use crate::Realm;
+
+    #[test]
+    fn normalization_coerces_receiver_before_form_and_preserves_utf16() {
+        let mut realm = Realm::new();
+        let result = realm.eval(r#"
+            var log = [];
+            var boxed = new String('ignored');
+            boxed[Symbol.toPrimitive] = function(hint) { log.push(hint); return 'A\u030A'; };
+            var form = {toString() { log.push('form'); return 'NFC'; }};
+            var good = String.prototype.normalize.call(boxed, form) === '\u00C5'
+                && log.join(',') === 'string,form'
+                && '\uD800A\u030A\uDC00'.normalize() === '\uD800\u00C5\uDC00'
+                && '\u1100\u1161\u11A8'.normalize() === '\uAC01'
+                && '\uFB03'.normalize('NFKC') === 'ffi';
+            boxed.toString = function() { return 'overridden'; };
+            delete boxed[Symbol.toPrimitive];
+            good = good && boxed.normalize() === 'overridden' && boxed.charAt(0) === 'o';
+            var sentinel = {};
+            boxed.toString = function() { throw sentinel; };
+            try { boxed.normalize(form); good = false; }
+            catch (e) { if (e !== sentinel) good = false; }
+            good && log.join(',') === 'string,form'
+        "#, "normalize-coercion.js").unwrap_or_else(|e| panic!("{}", realm.error_to_string(&e)));
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn ascii_fast_path_still_coerces_and_validates_form() {
+        let mut realm = Realm::new();
+        let result = realm.eval(r#"
+            var calls = 0, good = true;
+            for (var str of ['', 'ascii']) {
+                good = good && str.normalize({toString() { calls++; return 'NFD'; }}) === str;
+                try { str.normalize('invalid'); good = false; }
+                catch (e) { if (!(e instanceof RangeError)) good = false; }
+                try { str.normalize(Symbol()); good = false; }
+                catch (e) { if (!(e instanceof TypeError)) good = false; }
+            }
+            good && calls === 2
+        "#, "normalize-ascii.js").unwrap_or_else(|e| panic!("{}", realm.error_to_string(&e)));
+        assert_eq!(result.as_bool(), Some(true));
+    }
 }
