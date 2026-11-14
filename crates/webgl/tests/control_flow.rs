@@ -279,7 +279,9 @@ fn statement_nesting_dead_branch_work_and_call_graph_costs_remain_bounded() {
         assert!(reject(version,"",&deep).contains("nesting"));
         let body=format!("float x=0.0;if(false){{{}}}{out}=vec4(x);","x=f(x);".repeat(80));
         assert!(reject(version,"float f(float x){if(x<0.0)return 0.0;return x;}",&body).contains("budget"));
-        for body in [format!("for(;;){{}}{out}=vec4(1.0);"),format!("while(true){{}}{out}=vec4(1.0);"),format!("{out}=true?vec4(1.0):vec4(0.0);")] {reject(version,"",&body);}
+        // Loops remain unsupported. Ternary selection is supported, but its
+        // condition must be a scalar bool; float conditions are not coerced.
+        for body in [format!("for(;;){{}}{out}=vec4(1.0);"),format!("while(true){{}}{out}=vec4(1.0);"),format!("{out}=1.0?vec4(1.0):vec4(0.0);")] {reject(version,"",&body);}
     }
 }
 
