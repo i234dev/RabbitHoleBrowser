@@ -604,3 +604,216 @@ fn open_returns_a_short_summary() {
     let out = ok(&mut a, "click", json!({ "ref": la }));
     assert!(out.contains("navigated to") && out.contains("h1 \"Arrived at A\" @e") && out.contains("Summary only"), "{out}");
 }
+
+fn find_result_lines(text: &str) -> Vec<&str> {
+    text.lines().filter(|line| line.starts_with("@e")).collect()
+}
+
+#[test]
+fn find_centres_long_text_and_unclipped_accessible_names_with_unicode_and_legacy_mode() {
+    let page = format!(
+        "<!doctype html><meta charset=utf-8><title>Search windows</title><main><p>{}NEEDLE &quot;quoted&quot; \\path NEEDLE NEEDLE {}</p><p>{}ΔTARGET{}</p><button aria-label=\"{}BUTTON_TARGET{}\">Go</button></main>",
+        "a ".repeat(200), "tail ".repeat(80), "İ".repeat(400), "𐐀".repeat(200), "label ".repeat(80), " ending".repeat(50),
+    );
+    let page: &'static str = Box::leak(page.into_boxed_str());
+    let srv = serve(Box::new(move |_| html(page)));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let found = ok(&mut a, "find", json!({"text":"needle"}));
+    let lines = find_result_lines(&found);
+    assert_eq!(lines.len(), 1, "{found}");
+    let snippet = lines[0].split('"').nth(1).unwrap();
+    assert!(snippet.starts_with('…') && snippet.ends_with('…') && snippet.contains("NEEDLE"), "{found}");
+    assert!(snippet.contains("'quoted' /path"), "{found}");
+    assert_eq!(snippet.chars().count(), 240, "{found}");
+    assert!(found.contains("(+2 más en este elemento)"), "{found}");
+    assert!(found.contains("⟦page ") && found.contains("⟦/page "), "{found}");
+    let reference = lines[0].split_whitespace().next().unwrap();
+    let legacy = ok(&mut a, "find", json!({"text":"needle","context":0}));
+    let legacy_line = find_result_lines(&legacy)[0];
+    let legacy_snippet = legacy_line.split('"').nth(1).unwrap();
+    assert_eq!(legacy_snippet.chars().count(), 120, "{legacy}");
+    assert!(!legacy_snippet.contains("NEEDLE"), "{legacy}");
+    assert_eq!(legacy_line.split_whitespace().next().unwrap(), reference);
+    let unicode = ok(&mut a, "find", json!({"text":"δtarget"}));
+    let unicode_snippet = find_result_lines(&unicode)[0].split('"').nth(1).unwrap();
+    assert_eq!(unicode_snippet.chars().count(), 240, "{unicode}");
+    assert!(unicode_snippet.contains("ΔTARGET") && unicode_snippet.contains('İ') && unicode_snippet.contains('𐐀'), "{unicode}");
+    let button = ok(&mut a, "find", json!({"text":"button_target"}));
+    assert!(button.contains(" button \"…") && button.contains("BUTTON_TARGET"), "{button}");
+    let by_name = ok(&mut a, "find", json!({"role":"button","name":"button_target"}));
+    assert!(by_name.contains(" button \"…") && by_name.contains("BUTTON_TARGET"), "{by_name}");
+    let read = ok(&mut a, "read", json!({"ref":reference}));
+    assert!(read.contains("NEEDLE"), "search ref remains usable: {read}");
+}
+
+#[test]
+fn find_any_terms_returns_document_order_and_only_reports_absence_after_all_elements() {
+    let srv = serve(Box::new(|path| match path {
+        "/same" => html("<main><p>Guido began in 1989 at CWI.</p></main>"),
+        _ => html("<title>Any terms</title><nav><a href=/before>Guido before main</a></nav><main><p>1989 in the article</p><p>CWI later in the article</p></main><p hidden>diciembre de 1989</p>"),
+    }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let terms = json!(["CWI", "1989", "Guido", "diciembre de 1989"]);
+    let found = ok(&mut a, "find", json!({"text":terms}));
+    let lines = find_result_lines(&found);
+    assert_eq!(lines.len(), 3, "{found}");
+    assert!(lines[0].contains("Guido before main") && lines[1].contains("1989 in the article") && lines[2].contains("CWI later"), "{found}");
+    assert_eq!(found.lines().find(|line| line.starts_with("Sin coincidencias:")), Some("Sin coincidencias: \"diciembre de 1989\""));
+    let limited = ok(&mut a, "find", json!({"text":terms,"limit":1}));
+    assert_eq!(find_result_lines(&limited).len(), 1, "{limited}");
+    assert!(limited.contains("Guido before main") && limited.contains("(2 more matches; raise limit)"), "{limited}");
+    assert_eq!(limited.lines().find(|line| line.starts_with("Sin coincidencias:")), Some("Sin coincidencias: \"diciembre de 1989\""));
+    let filtered = ok(&mut a, "find", json!({"text":["Guido","CWI"],"role":"link"}));
+    assert_eq!(filtered.lines().find(|line| line.starts_with("Sin coincidencias:")), Some("Sin coincidencias: \"CWI\""));
+    ok(&mut a, "open", json!({"url":srv.url("/same")}));
+    let same = ok(&mut a, "find", json!({"text":["CWI","1989","Guido"],"limit":1}));
+    assert_eq!(find_result_lines(&same).len(), 1, "{same}");
+    assert!(same.contains("[text: \"CWI\", \"1989\", \"Guido\"]") && same.contains("(+2 más en este elemento)"), "{same}");
+    assert!(!same.contains("more matches") && !same.contains("Sin coincidencias"), "{same}");
+}
+
+#[test]
+fn open_can_find_a_fact_in_one_short_call_with_optional_overview_and_overlay_warnings() {
+    const ARTICLE: &str = "<title>Python history</title><nav><a href=/home>Home</a></nav><main><h1>History</h1><p>Guido started Python at CWI in December 1989.</p><form><input name=q><button>Search</button></form></main>";
+    let srv = serve(Box::new(|path| match path {
+        "/overlay" => html("<title>Overlay</title><main><p>Guido started Python in December 1989.</p></main><div role=dialog aria-label=Privacy style='position:fixed;top:0;left:0;right:0;height:200px;background:white'>We use cookies<button>Reject all</button></div>"),
+        _ => html(ARTICLE),
+    }));
+    let mut a = agent();
+    let found = ok(&mut a, "open", json!({"url":srv.url("/"),"find":["December 1989"]}));
+    assert!(found.contains("[page] \"Python history\"") && found.contains("status=200"), "{found}");
+    assert!(found.contains("Guido started Python at CWI in December 1989."), "{found}");
+    assert!(found.chars().count() < 600, "{} chars: {found}", found.chars().count());
+    assert!(!found.contains("landmarks:") && !found.contains("outline:") && !found.contains("forms:") && !found.contains("Summary only:"), "{found}");
+    assert!(found.contains("⟦page ") && found.contains("⟦/page "), "{found}");
+    let reference = find_result_lines(&found)[0].split_whitespace().next().unwrap();
+    assert!(ok(&mut a, "read", json!({"ref":reference})).contains("December 1989"));
+    let both = ok(&mut a, "open", json!({"url":srv.url("/"),"find":"December 1989","summary":true}));
+    assert!(both.contains("landmarks:") && both.contains("outline:") && both.contains("forms:") && both.contains("December 1989"), "{both}");
+    let default = ok(&mut a, "open", json!({"url":srv.url("/")}));
+    assert!(default.contains("outline:") && default.contains("open … find=") && default.contains("read without ref starts at the article beginning"), "{default}");
+    let overlay = ok(&mut a, "open", json!({"url":srv.url("/overlay"),"find":"December 1989"}));
+    assert!(overlay.contains("⚠ [dialog") && overlay.contains("Reject all") && overlay.contains("December 1989"), "{overlay}");
+    assert!(!overlay.contains("outline:") && !overlay.contains("forms:"), "{overlay}");
+    let search_over_snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"find":"December 1989","snapshot":true}));
+    assert!(!search_over_snapshot.contains("outline:") && find_result_lines(&search_over_snapshot).len() == 1, "{search_over_snapshot}");
+    assert!(err(&mut a, "open", json!({"url":"not a URL","find":"December 1989"})).contains("invalid URL"));
+    assert!(err(&mut a, "open", json!({"url":srv.url("/overlay"),"find":[3]})).contains("only strings"));
+    assert_eq!(a.tabs[a.active.unwrap()].page().unwrap().title, "Python history");
+}
+
+#[test]
+fn find_groups_text_runs_and_inserts_child_documents_at_the_iframe() {
+    let srv = serve(Box::new(|path| match path {
+        "/frame" => html("<main><p>NEEDLE child document</p></main>"),
+        "/split" => html("<main><p>Guido <a href=/other>CWI</a> 1989</p></main>"),
+        _ => html("<title>Document order</title><p>NEEDLE first <a href=/other>middle link</a>NEEDLE repeated in first</p><iframe src=/frame title=Child style='width:300px;height:100px'></iframe><p>NEEDLE last</p>"),
+    }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let found = ok(&mut a, "find", json!({"text":"NEEDLE"}));
+    let lines = find_result_lines(&found);
+    assert_eq!(lines.len(), 3, "{found}");
+    assert!(lines[0].contains("first") && lines[0].contains("repeated in first") && lines[0].contains("(+1 más en este elemento)"), "{found}");
+    assert!(lines[1].contains("child document") && lines[1].contains("(in frame)") && lines[2].contains("last"), "{found}");
+    let limited = ok(&mut a, "find", json!({"text":"NEEDLE","limit":1}));
+    assert_eq!(find_result_lines(&limited).len(), 1, "{limited}");
+    assert!(limited.contains("(2 more matches; raise limit)"), "{limited}");
+    ok(&mut a, "open", json!({"url":srv.url("/split")}));
+    let nonexistent = ok(&mut a, "find", json!({"text":"Guido 1989"}));
+    assert!(find_result_lines(&nonexistent).is_empty() && nonexistent.contains("Sin coincidencias:"), "{nonexistent}");
+    let contiguous = ok(&mut a, "find", json!({"text":"Guido CWI 1989"}));
+    assert_eq!(find_result_lines(&contiguous).len(), 1, "{contiguous}");
+    assert!(contiguous.contains("text \"Guido CWI 1989\""), "{contiguous}");
+    let grouped = ok(&mut a, "find", json!({"text":["Guido","1989"]}));
+    assert_eq!(find_result_lines(&grouped).len(), 1, "{grouped}");
+    assert!(grouped.contains("[text: \"Guido\", \"1989\"]") && grouped.contains("(+1 más en este elemento)"), "{grouped}");
+    let second_run = ok(&mut a, "find", json!({"text":"1989"}));
+    assert!(find_result_lines(&second_run)[0].starts_with(&format!("{} text \"Guido CWI 1989\"", find_result_lines(&grouped)[0].split_whitespace().next().unwrap())), "{second_run}");
+}
+
+#[test]
+fn read_dispatch_preserves_link_defaults_and_passes_plain_text_and_citation_options() {
+    let srv = serve(Box::new(|_| html("<title>Reading</title><main><article><h1>Reading</h1><p id=passage>Intro <a href=/guide>guide</a><sup><a href=#note>[1]</a></sup> , area m<sup>2</sup>. <sup><a href=/another#note>other page</a></sup></p></article></main>")));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let default = ok(&mut a, "read", json!({}));
+    assert!(default.contains("[guide](@e") && default.contains("[other page](@e"), "{default}");
+    assert!(!default.contains("[1]") && !default.contains(" ,"), "{default}");
+    let plain = ok(&mut a, "read", json!({"links":false}));
+    assert!(plain.contains("guide") && plain.contains("other page") && !plain.contains("@e") && !plain.contains("[1]"), "{plain}");
+    let cited = ok(&mut a, "read", json!({"links":false,"cites":true}));
+    assert!(cited.contains("[1]") && !cited.contains("@e"), "{cited}");
+    let selector = ok(&mut a, "find", json!({"selector":"#passage"}));
+    let reference = find_result_lines(&selector)[0].split_whitespace().next().unwrap();
+    let subtree = ok(&mut a, "read", json!({"ref":reference,"links":false,"cites":true}));
+    assert!(subtree.contains("Intro") && subtree.contains("[1]") && !subtree.contains("@e"), "{subtree}");
+}
+
+#[test]
+fn article_reading_contract_is_compact_through_tool_dispatch_and_keeps_offsets_and_fences() {
+    const ARTICLE: &str = include_str!("fixtures/reading-article.html");
+    fn body(output: &str) -> &str {
+        output.split_once("⟧\n").unwrap().1.rsplit_once("\n⟦/page ").unwrap().0
+    }
+    let srv = serve(Box::new(|_| html(ARTICLE)));
+    let mut a = agent();
+    let summary = ok(&mut a, "open", json!({"url":srv.url("/")}));
+    assert!(summary.chars().count() < 900, "{} chars: {summary}", summary.chars().count());
+    assert!(summary.contains("[nav ×5] @e") && summary.contains("h2 \"Late One\"") && summary.contains("h2 \"Late Two\"") && summary.contains("+2 formularios sin campos de texto"), "{summary}");
+    let plain = ok(&mut a, "read", json!({"links":false}));
+    assert!(plain.chars().count() < 800 && !plain.contains("@e"), "{} chars: {plain}", plain.chars().count());
+    assert!(plain.contains("⟦page ") && plain.contains("⟦/page ") && plain.contains("December 1989,"), "{plain}");
+    let offset = ok(&mut a, "read", json!({"links":false,"offset":10}));
+    assert_eq!(body(&offset), body(&plain).chars().skip(10).collect::<String>());
+    assert!(body(&plain).chars().count() > 400, "fixture must exercise continuation: {plain}");
+    let limited = ok(&mut a, "read", json!({"links":false,"max_tokens":100}));
+    assert_eq!(body(&limited).chars().count(), 400);
+    assert!(limited.contains("(continues: read offset=400)"), "{limited}");
+}
+
+#[test]
+fn search_plain_linked_prose_keeps_visibility_secrets_normal_snapshots_and_node_refs() {
+    fn without_fences(text: &str) -> String {
+        text.lines().filter(|line| !line.starts_with("⟦page ") && !line.starts_with("⟦/page ")).collect::<Vec<_>>().join("\n")
+    }
+    let page = format!("<!doctype html><title>Linked phrases</title><main><h1>Linked phrases</h1><p>Guido <a href=/arrived>CWI</a> 1989</p><p>{}start <a href=/long>{}TAILEND</a> 1989</p><p>Before <span style='visibility:hidden'>HIDDEN_VISIBILITY</span><span style='opacity:0'>HIDDEN_OPACITY</span><span style='color:white'>HIDDEN_CONTRAST</span> visible.</p><a href=/hidden style='opacity:0'>HIDDEN_LINK</a><label>Password<input type=password value=TOP_SECRET_TOKEN></label><p>literal [CWI]@e123</p><p><span>Nora</span> <a href=/arrived>LAB</a> 2050</p></main>", "a ".repeat(100), "b ".repeat(110));
+    let page: &'static str = Box::leak(page.into_boxed_str());
+    let srv = serve(Box::new(move |path| match path {
+        "/arrived" => html("<title>Arrived</title><main><h1>Arrived</h1></main>"),
+        _ => html(page),
+    }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let snapshot_before = ok(&mut a, "snapshot", json!({"max_tokens":4000}));
+    let ti = a.active.unwrap();
+    let summary_before = a.summary_text(ti).unwrap();
+    let link_before = ref_of(&snapshot_before, "link \"CWI\"");
+    let phrase = ok(&mut a, "find", json!({"text":"Guido CWI 1989"}));
+    let paragraph = find_result_lines(&phrase)[0].split_whitespace().next().unwrap();
+    assert!(ok(&mut a, "read", json!({"ref":paragraph,"links":false})).contains("Guido CWI 1989"));
+    let spanning = ok(&mut a, "find", json!({"text":"Nora LAB 2050"}));
+    let spanning_ref = find_result_lines(&spanning)[0].split_whitespace().next().unwrap();
+    let spanning_read = ok(&mut a, "read", json!({"ref":spanning_ref,"links":false}));
+    assert!(spanning_read.contains("Nora LAB 2050"), "common owner must include every run: {spanning_read}");
+    let false_phrase = ok(&mut a, "find", json!({"text":"Guido 1989"}));
+    assert!(find_result_lines(&false_phrase).is_empty(), "{false_phrase}");
+    let long = ok(&mut a, "find", json!({"text":"TAILEND 1989"}));
+    assert_eq!(find_result_lines(&long).len(), 1, "{long}");
+    let snippet = find_result_lines(&long)[0].split('"').nth(1).unwrap();
+    assert!(snippet.contains("TAILEND 1989") && snippet.chars().count() <= 240 && !snippet.contains("@e"), "{long}");
+    let hidden = ok(&mut a, "find", json!({"text":["HIDDEN_VISIBILITY","HIDDEN_OPACITY","HIDDEN_CONTRAST","HIDDEN_LINK","TOP_SECRET_TOKEN"]}));
+    assert!(find_result_lines(&hidden).is_empty() && hidden.contains("Sin coincidencias:"), "{hidden}");
+    let literal = ok(&mut a, "find", json!({"text":"[CWI]@e123"}));
+    assert!(literal.contains("literal [CWI]@e123"), "{literal}");
+    let link = ok(&mut a, "find", json!({"text":"CWI","role":"link"}));
+    assert_eq!(find_result_lines(&link)[0].split_whitespace().next().unwrap(), link_before);
+    let snapshot_after = ok(&mut a, "snapshot", json!({"max_tokens":4000}));
+    let summary_after = a.summary_text(ti).unwrap();
+    assert_eq!(without_fences(&snapshot_after), without_fences(&snapshot_before));
+    assert_eq!(without_fences(&summary_after), without_fences(&summary_before));
+    let clicked = ok(&mut a, "click", json!({"ref":link_before}));
+    assert!(clicked.contains("navigated to") && clicked.contains("Arrived"), "{clicked}");
+}

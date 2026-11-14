@@ -557,6 +557,14 @@ impl Agent {
 
     /// Build the semantic tree of a tab.
     pub fn tree(&mut self, ti: usize, include_hidden: bool) -> (Ax, BuildStats, Vec<Overlay>) {
+        self.tree_mode(ti, include_hidden, false)
+    }
+
+    pub(crate) fn search_tree(&mut self, ti: usize) -> (Ax, BuildStats, Vec<Overlay>) {
+        self.tree_mode(ti, false, true)
+    }
+
+    fn tree_mode(&mut self, ti: usize, include_hidden: bool, search: bool) -> (Ax, BuildStats, Vec<Overlay>) {
         let tab = &mut self.tabs[ti];
         let page = &tab.frames[0].page;
         let geo = ax::geometry(page);
@@ -568,7 +576,7 @@ impl Agent {
         };
         let opts = BuildOptions { include_hidden, invalid: tab.invalid.clone(), overlays: overlays.iter().map(|o| o.node).collect(), main };
         let views = Self::frame_views(&tab.frames);
-        let (root, stats) = ax::build(&views, &mut tab.refs, &opts);
+        let (root, stats) = if search { ax::build_for_search(&views, &mut tab.refs, &opts) } else { ax::build(&views, &mut tab.refs, &opts) };
         (root, stats, overlays)
     }
 
@@ -657,10 +665,23 @@ impl Agent {
     /// The short page summary (default output of `open` and of actions
     /// that navigate): landmarks, heading outline, forms, overlays, counts.
     pub fn summary_text(&mut self, ti: usize) -> Result<String, String> {
-        let (root, _stats, overlays) = self.tree(ti, false);
+        let (root, _, overlays) = self.tree(ti, false);
+        Ok(self.page_overview_text(ti, &root, &overlays, true))
+    }
+
+    /// Search during navigation keeps the page header and covering-layer
+    /// warnings; the regular overview is opt-in via `summary=true`.
+    pub(crate) fn search_header_text(&mut self, ti: usize, root: &Ax, overlays: &[Overlay], summary: bool) -> String {
+        self.page_overview_text(ti, root, overlays, summary)
+    }
+
+    fn page_overview_text(&mut self, ti: usize, root: &Ax, overlays: &[Overlay], summary: bool) -> String {
         let header = self.page_line(ti);
         let tab = &mut self.tabs[ti];
-        let lines = crate::summary::render(&tab.frames[0].page, &root, &mut tab.refs, &overlays);
+        let mut lines = crate::summary::render(&tab.frames[0].page, root, &mut tab.refs, overlays);
+        if !summary {
+            lines.retain(|line| line.starts_with("⚠ "));
+        }
         let empty = root.children.is_empty();
         let mut body = header;
         body.push('\n');
@@ -675,10 +696,14 @@ impl Agent {
             notes.push(format!("An overlay {r} covers the page: deal with it first{}.", if o.cookie { " (click ref=\"cookies\" rejects cookies)" } else { "" }));
         }
         notes.extend(self.page_notes(ti));
-        notes.push("Summary only: snapshot (or open … snapshot=true) shows the full tree, read the main text, find locates elements.".into());
-        out.push('\n');
-        out.push_str(&notes.join("\n"));
-        Ok(out)
+        if summary {
+            notes.push("Summary only: open … find= or find text= locates facts with context; read without ref starts at the article beginning; snapshot shows the full tree.".into());
+        }
+        if !notes.is_empty() {
+            out.push('\n');
+            out.push_str(&notes.join("\n"));
+        }
+        out
     }
 
     /// Captcha / login / error notes about the current page.

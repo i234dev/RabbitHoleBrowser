@@ -246,12 +246,23 @@ struct Builder<'a> {
     opts: &'a BuildOptions,
     stats: BuildStats,
     geos: Vec<GeoMap>,
+    search: bool,
 }
 
 /// Build the semantic tree of frame 0 (child frames are inlined).
 pub fn build(frames: &[FrameView], refs: &mut RefMap, opts: &BuildOptions) -> (Ax, BuildStats) {
+    build_mode(frames, refs, opts, false)
+}
+
+/// Search shares the normal visibility rules and node refs, but keeps prose
+/// as plain text with complete link labels, even in short inline runs.
+pub(crate) fn build_for_search(frames: &[FrameView], refs: &mut RefMap, opts: &BuildOptions) -> (Ax, BuildStats) {
+    build_mode(frames, refs, opts, true)
+}
+
+fn build_mode(frames: &[FrameView], refs: &mut RefMap, opts: &BuildOptions, search: bool) -> (Ax, BuildStats) {
     let geos = frames.iter().map(|f| GeoMap::build(f.page)).collect();
-    let mut b = Builder { frames, refs, opts, stats: BuildStats::default(), geos };
+    let mut b = Builder { frames, refs, opts, stats: BuildStats::default(), geos, search };
     let root = b.frame_root(0, 0);
     (root, b.stats)
 }
@@ -793,7 +804,7 @@ impl<'a> Builder<'a> {
         if depth < 4 {
             self.children(frame, start, ctx, &mut out);
         }
-        root.children = finish(out);
+        root.children = finish(out, self.search.then_some(doc));
         root
     }
 
@@ -1011,7 +1022,8 @@ impl<'a> Builder<'a> {
                     }
                 }
                 a.hidden = hidden;
-                a.name = clip_text(&accessible_name(page, n, &role), 100);
+                let name = accessible_name(page, n, &role);
+                a.name = if self.search { name } else { clip_text(&name, 100) };
                 a.states = states_of(page, n, &role, invalid);
                 if role == "link" {
                     a.href = page.link_of(n).map(|u| u.to_string());
@@ -1020,7 +1032,7 @@ impl<'a> Builder<'a> {
                 // heading level too.
                 if let Some(h) = doc.descendants(n).find(|&d| matches!(doc.tag(d), Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6"))) {
                     a.level = doc.tag(h).and_then(|t| t[1..].parse().ok()).unwrap_or(0);
-                    if el.attr("aria-label").is_none() && el.attr("aria-labelledby").is_none() {
+                    if !self.search && el.attr("aria-label").is_none() && el.attr("aria-labelledby").is_none() {
                         let hn = content_text(page, h);
                         if !hn.is_empty() {
                             a.name = clip_text(&hn, 100);
@@ -1049,7 +1061,7 @@ impl<'a> Builder<'a> {
                     if has_inner_controls {
                         let mut inner = Vec::new();
                         self.children(frame, n, child_ctx, &mut inner);
-                        a.children = finish(inner);
+                        a.children = finish(inner, self.search.then_some(doc));
                     }
                 }
                 out.push(a);
@@ -1072,7 +1084,7 @@ impl<'a> Builder<'a> {
                 let mut ictx = child_ctx;
                 ictx.in_control = true;
                 self.children(frame, n, ictx, &mut inner);
-                a.children = finish(inner).into_iter().filter(|c| c.kind == Kind::Control).collect();
+                a.children = finish(inner, self.search.then_some(doc)).into_iter().filter(|c| c.kind == Kind::Control).collect();
                 out.push(Ax::new(frame, n, Kind::Break, ""));
                 out.push(a);
                 out.push(Ax::new(frame, n, Kind::Break, ""));
@@ -1137,7 +1149,7 @@ impl<'a> Builder<'a> {
                 }
                 let mut inner = Vec::new();
                 self.children(frame, n, child_ctx, &mut inner);
-                a.children = finish(inner);
+                a.children = finish(inner, self.search.then_some(doc));
                 if a.children.is_empty() && !matches!(kind, Kind::Dialog | Kind::Form) {
                     return;
                 }
@@ -1236,7 +1248,7 @@ impl<'a> Builder<'a> {
             groups.push(c);
         }
         for (owner, v) in groups {
-            let v = finish(v);
+            let v = finish(v, self.search.then_some(doc));
             if v.is_empty() {
                 continue;
             }
@@ -1264,8 +1276,8 @@ fn accessible_name_unstyled(doc: &Document, n: NodeId) -> String {
 }
 
 /// Clean a child list: drop leading/trailing/double breaks.
-fn finish(v: Vec<Ax>) -> Vec<Ax> {
-    let v = merge_prose(v);
+fn finish(v: Vec<Ax>, search: Option<&Document>) -> Vec<Ax> {
+    let v = merge_prose(v, search);
     let mut out: Vec<Ax> = Vec::with_capacity(v.len());
     for a in v {
         if a.kind == Kind::Break && (out.is_empty() || out.last().map(|l| l.kind == Kind::Break).unwrap_or(false)) {
@@ -1286,19 +1298,32 @@ fn is_inline_link(a: &Ax) -> bool {
 /// Prose with inline links becomes one text item with `[link]@eN`
 /// markers (the links stay as children for refs, marks and diffs), which
 /// is much shorter than alternating text/link items.
-fn merge_prose(v: Vec<Ax>) -> Vec<Ax> {
+fn merge_prose(v: Vec<Ax>, search: Option<&Document>) -> Vec<Ax> {
     let mut out: Vec<Ax> = Vec::with_capacity(v.len());
     let mut run: Vec<Ax> = Vec::new();
-    fn flush(run: &mut Vec<Ax>, out: &mut Vec<Ax>) {
+    fn flush(run: &mut Vec<Ax>, out: &mut Vec<Ax>, search: Option<&Document>) {
         let texts: usize = run.iter().filter(|a| a.kind == Kind::Text).map(|a| a.name.chars().count()).sum();
         let links = run.iter().filter(|a| is_inline_link(a)).count();
         let has_text = run.iter().any(|a| a.kind == Kind::Text);
-        if links == 0 || !has_text || texts < 30 || run.len() < 2 {
+        if links == 0 || !has_text || (search.is_none() && texts < 30) || run.len() < 2 {
             out.append(run);
             return;
         }
         let first = run.iter().position(|a| a.kind == Kind::Text).unwrap_or(0);
         let mut merged = run[first].clone();
+        if let Some(doc) = search {
+            // The first text run can be inside a span while the rest lives
+            // outside it. A real common owner keeps the returned ref useful
+            // for read/click, including composed shadow-tree content.
+            for part in run.iter() {
+                while !std::iter::successors(Some(part.node), |&n| doc.box_parent(n)).any(|n| n == merged.node) {
+                    match doc.box_parent(merged.node) {
+                        Some(parent) => merged.node = parent,
+                        None => break,
+                    }
+                }
+            }
+        }
         merged.children.clear();
         merged.name.clear();
         let mut rect = None;
@@ -1308,8 +1333,15 @@ fn merge_prose(v: Vec<Ax>) -> Vec<Ax> {
             }
             if a.kind == Kind::Text {
                 merged.name.push_str(&a.name);
+                if search.is_some() {
+                    merged.children.extend(a.children);
+                }
             } else {
-                merged.name.push_str(&format!("[{}]@e{}", a.name, a.reference.unwrap_or(0)));
+                if search.is_some() {
+                    merged.name.push_str(&a.name);
+                } else {
+                    merged.name.push_str(&format!("[{}]@e{}", a.name, a.reference.unwrap_or(0)));
+                }
                 merged.children.push(a.clone());
             }
             rect = match (rect, a.rect) {
@@ -1326,11 +1358,11 @@ fn merge_prose(v: Vec<Ax>) -> Vec<Ax> {
         if inline {
             run.push(a);
         } else {
-            flush(&mut run, &mut out);
+            flush(&mut run, &mut out, search);
             out.push(a);
         }
     }
-    flush(&mut run, &mut out);
+    flush(&mut run, &mut out, search);
     out
 }
 
