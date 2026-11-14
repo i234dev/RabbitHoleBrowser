@@ -4,7 +4,7 @@
 use crate::build::Builder;
 use crate::float::Bfc;
 use crate::text::Measurer;
-use crate::tree::{BoxKind, Flow, Formatting, LayoutBox, LayoutTree, Marker};
+use crate::tree::{BoxKind, Flow, Formatting, FragmentKind, LayoutBox, LayoutTree, Marker};
 use crate::LayoutContext;
 use rabbithole_gfx::{FontId, Rect};
 use rabbithole_style::{BoxSizing, Clear, ComputedStyle, Edges, Length, Position};
@@ -1055,21 +1055,67 @@ impl<'a> Layouter<'a> {
     /// is `b` (padding box `cb`).
     /// Returns whether any such descendant exists.
     pub(crate) fn layout_abs_descendants(&mut self, b: &mut LayoutBox, cb: Rect) -> bool {
+        // The common case needs no inline geometry or allocation. Preserve
+        // this fact on reused subtrees, just as the recursive walk below does.
+        if b.no_abs_below {
+            return false;
+        }
+        if !has_abs_descendants(b) {
+            b.no_abs_below = true;
+            return false;
+        }
+        let inline_cbs = inline_containing_blocks(b);
+        let mut ancestors = HashMap::new();
+        let found = self.layout_abs_descendants_with(b, cb, &inline_cbs, &mut ancestors);
+        b.no_abs_below = !found;
+        found
+    }
+
+    fn positioned_ancestor(&self, node: rabbithole_dom::NodeId, cache: &mut HashMap<rabbithole_dom::NodeId, Option<rabbithole_dom::NodeId>>) -> Option<rabbithole_dom::NodeId> {
+        if let Some(&ancestor) = cache.get(&node) {
+            return ancestor;
+        }
+        let ancestor = if self.ctx.styles.get(node).is_some_and(|s| s.position != Position::Static) {
+            Some(node)
+        } else {
+            self.ctx.doc.flat_parent(node).and_then(|parent| self.positioned_ancestor(parent, cache))
+        };
+        cache.insert(node, ancestor);
+        ancestor
+    }
+
+    fn layout_abs_descendants_with(&mut self, b: &mut LayoutBox, cb: Rect, inline_cbs: &HashMap<rabbithole_dom::NodeId, Rect>, ancestors: &mut HashMap<rabbithole_dom::NodeId, Option<rabbithole_dom::NodeId>>) -> bool {
         // Into a vertical subtree's logical space.
-        let cb = match b.wm_transform {
-            Some(m) => crate::wm::to_logical(m, cb),
-            None => cb,
+        let logical_cbs;
+        let (cb, inline_cbs) = match b.wm_transform {
+            Some(m) => {
+                logical_cbs = inline_cbs.iter().map(|(&n, &r)| (n, crate::wm::to_logical(m, r))).collect();
+                (crate::wm::to_logical(m, cb), &logical_cbs)
+            }
+            None => (cb, inline_cbs),
         };
         let mut found = false;
         for i in 0..b.children.len() {
             if b.children[i].flow == Flow::Absolute {
-                let area = b.children[i].node.and_then(|n| self.abs_cb.get(&n).copied());
+                let area = b.children[i].node.and_then(|n| {
+                    if inline_cbs.is_empty() {
+                        return self.abs_cb.get(&n).copied();
+                    }
+                    // Inline elements have no LayoutBox after flattening.
+                    // Their first/last fragments still establish the nearest
+                    // positioned ancestor's containing block, including for
+                    // absolutes nested inside static inline-blocks.
+                    let parent = if b.children[i].pseudo.is_some() { Some(n) } else { self.ctx.doc.flat_parent(n) };
+                    parent.and_then(|p| self.positioned_ancestor(p, ancestors))
+                        .and_then(|a| inline_cbs.get(&a).copied())
+                        .or_else(|| self.abs_cb.get(&n).copied())
+                });
                 self.layout_absolute(&mut b.children[i], area.unwrap_or(cb));
                 found = true;
             } else if b.children[i].style.position == Position::Static && !b.children[i].no_abs_below {
                 // Kept boxes remember having none (their subtree is
                 // unchanged), so large static subtrees are walked once.
-                let f = self.layout_abs_descendants(&mut b.children[i], cb);
+                let f = self.layout_abs_descendants_with(&mut b.children[i], cb, inline_cbs, ancestors);
                 b.children[i].no_abs_below = !f;
                 found |= f;
             }
@@ -1224,6 +1270,64 @@ impl<'a> Layouter<'a> {
             width,
         });
     }
+}
+
+fn has_abs_descendants(b: &LayoutBox) -> bool {
+    b.children.iter().any(|child| {
+        child.flow == Flow::Absolute
+            || (child.style.position == Position::Static && !child.no_abs_below && has_abs_descendants(child))
+    })
+}
+
+/// Positioned inlines are flattened into line fragments. Keep the first and
+/// last padding edges, rather than their union: a wider intervening line must
+/// not widen the absolute containing block (CSS Positioned Layout §2.1).
+fn inline_containing_blocks(b: &LayoutBox) -> HashMap<rabbithole_dom::NodeId, Rect> {
+    struct Edges {
+        first: Rect,
+        last: Rect,
+        rtl: bool,
+        transform: rabbithole_gfx::Matrix,
+    }
+    fn collect(b: &LayoutBox, transform: rabbithole_gfx::Matrix, out: &mut HashMap<rabbithole_dom::NodeId, Edges>) {
+        for line in &b.lines {
+            for fragment in &line.fragments {
+                let (Some(node), FragmentKind::InlineBox { style, left_edge, right_edge }) = (fragment.node, &fragment.kind) else { continue };
+                if style.position == Position::Static {
+                    continue;
+                }
+                // Inline background fragments include their horizontal
+                // margins; the containing block starts at the padding edge.
+                let left = if *left_edge { style.border_width.left + style.margin.left.resolve_or_zero(b.content_rect.w) } else { 0.0 };
+                let right = if *right_edge { style.border_width.right + style.margin.right.resolve_or_zero(b.content_rect.w) } else { 0.0 };
+                let rect = Rect::new(
+                    fragment.rect.x + left,
+                    fragment.rect.y + style.border_width.top,
+                    (fragment.rect.w - left - right).max(0.0),
+                    (fragment.rect.h - style.border_width.top - style.border_width.bottom).max(0.0),
+                );
+                out.entry(node).and_modify(|edges| edges.last = rect).or_insert(Edges {
+                    first: rect,
+                    last: rect,
+                    rtl: style.direction == rabbithole_style::Direction::Rtl,
+                    transform,
+                });
+            }
+        }
+        let transform = b.wm_transform.map(|m| rabbithole_style::multiply_matrix(transform, m)).unwrap_or(transform);
+        for child in &b.children {
+            if child.flow != Flow::Absolute && child.style.position == Position::Static {
+                collect(child, transform, out);
+            }
+        }
+    }
+    let mut fragments = HashMap::new();
+    collect(b, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], &mut fragments);
+    fragments.into_iter().map(|(node, edges)| {
+        let (left, right) = if edges.rtl { (edges.last.x, edges.first.right()) } else { (edges.first.x, edges.last.right()) };
+        let rect = Rect::new(left, edges.first.y, (right - left).max(0.0), (edges.last.bottom() - edges.first.y).max(0.0));
+        (node, rabbithole_gfx::path::transform_rect_bounds(&edges.transform, rect))
+    }).collect()
 }
 
 /// Union of a box's border box, its fragments and its descendants

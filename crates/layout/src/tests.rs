@@ -889,6 +889,72 @@ fn absolute_box_with_top_and_bottom_fills_the_containing_block() {
     assert!((get("pad").content_rect.h - 186.0).abs() < 0.01);
 }
 
+#[test]
+fn absolute_descendants_use_the_positioned_inline_padding_box() {
+    let fx = Fixture::new(
+        "<div id=outer><i id=prefix></i><span id=inline>XX<i id=static><b id=absolute></b></i><i id=positioned><b id=inner></b></i>XX</span></div>",
+        "body{margin:0} #outer{position:relative;width:400px;font:20px/20px monospace} \
+         i{display:inline-block;width:40px;height:20px} #prefix{width:60px} \
+         #inline{position:relative;border:3px solid;padding:5px 7px;margin:0 11px} \
+         #absolute{position:absolute;inset:0} #positioned{position:relative} \
+         #inner{position:absolute;left:0;top:0;width:50%;height:50%}",
+    );
+    let t = fx.layout();
+    let node = |id| fx.doc.element_by_id(id).unwrap();
+    let inline = t.inline_rect(&fx.doc, node("inline")).unwrap();
+    let absolute = t.box_of(&fx.doc, node("absolute")).unwrap().rect;
+    assert!((absolute.x - inline.x - 14.0).abs() < 0.01, "{absolute:?} vs {inline:?}");
+    assert!((absolute.y - inline.y - 3.0).abs() < 0.01);
+    assert!((absolute.w - inline.w + 28.0).abs() < 0.01);
+    assert!((absolute.h - inline.h + 6.0).abs() < 0.01);
+    let positioned = t.box_of(&fx.doc, node("positioned")).unwrap().rect;
+    let inner = t.box_of(&fx.doc, node("inner")).unwrap().rect;
+    assert!((inner.x - positioned.x).abs() < 0.01);
+    assert!((inner.y - positioned.y).abs() < 0.01);
+    assert!((inner.w - 20.0).abs() < 0.01);
+    assert!((inner.h - 10.0).abs() < 0.01);
+}
+
+#[test]
+fn inline_absolute_containing_block_uses_first_and_last_fragments() {
+    let fx = Fixture::new(
+        "<div id=outer><i class=prefix></i><span id=inline><i class=first></i><br><i class=wide></i><br><i class=last></i><b id=absolute></b></span></div><div id=other></div>",
+        "body{margin:0} #outer{position:relative;width:200px;font:20px/20px monospace} \
+         i{display:inline-block;height:20px} .prefix{width:60px}.first{width:40px}.wide{width:180px}.last{width:80px} \
+         #inline{position:relative} #absolute{position:absolute;inset:0}",
+    );
+    let mut t = fx.layout();
+    let absolute = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+    assert!((absolute.x - 60.0).abs() < 0.01, "{absolute:?}");
+    assert!((absolute.w - 20.0).abs() < 0.01, "the wider middle line must not widen the containing block: {absolute:?}");
+    let fragments = t.inline_client_rects(&fx.doc, fx.doc.element_by_id("inline").unwrap());
+    assert_eq!(fragments.len(), 3);
+    assert!((absolute.y - fragments[0].y).abs() < 0.01);
+    assert!((absolute.bottom() - fragments[2].bottom()).abs() < 0.01);
+    // Rebuilding a sibling must retain the first/last edges when reusing
+    // the positioned container's cached lines.
+    let images = HashMap::new();
+    let backgrounds = HashMap::new();
+    for _ in 0..3 {
+        let damage = crate::LayoutDamage { full: false, dirty: [fx.doc.element_by_id("other").unwrap()].into_iter().collect() };
+        t = crate::layout_incremental(t, &fx.ctx(&images, &backgrounds), &damage);
+        assert_eq!(t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect, absolute);
+    }
+}
+
+#[test]
+fn inline_relative_offsets_move_absolute_static_positions() {
+    let fx = Fixture::new(
+        "<div><span><b id=absolute></b></span></div>",
+        "body{margin:0} div{position:relative;left:100px;width:100px} \
+         span{position:relative;left:-100px;top:25px} #absolute{position:absolute;width:30px;height:40px}",
+    );
+    let t = fx.layout();
+    let absolute = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+    assert!((absolute.x - 0.0).abs() < 0.01, "{absolute:?}");
+    assert!((absolute.y - 25.0).abs() < 0.01, "{absolute:?}");
+}
+
 /// Text inputs are content-box (author height + padding add up) and show
 /// their line of text centered vertically.
 #[test]

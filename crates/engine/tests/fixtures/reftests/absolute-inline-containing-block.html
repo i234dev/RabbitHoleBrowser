@@ -1,0 +1,15 @@
+<!doctype html>
+<title>Absolute descendants use their inline ancestor's padding edges</title>
+<link rel="match" href="absolute-inline-containing-block-ref.html">
+<style>
+body { margin: 0; }
+#outer { position: relative; width: 200px; height: 100px; padding-top: 10px; font-size: 0; line-height: 0; }
+i { display: inline-block; height: 20px; vertical-align: top; }
+#prefix { width: 60px; }
+#inline { position: relative; padding: 10px 5px; border: 3px solid transparent; margin: 0 7px; }
+#holder { width: 40px; }
+b { position: absolute; background: green; }
+#start { left: 0; top: 0; width: 40%; height: 100%; }
+#end { right: 0; bottom: 0; width: 20px; height: 20px; }
+</style>
+<div id="outer"><i id="prefix"></i><span id="inline"><i id="holder"><b id="start"></b><b id="end"></b></i></span></div>

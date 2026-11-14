@@ -788,7 +788,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
                 Piece::Float(c) => self.place_float(*c),
                 Piece::Abs(c) => {
                     let (x, y) = (self.cur.x, self.cur.y);
-                    self.children[*c].static_pos = (x, y);
+                    let (rx, ry) = self.rel_kids.get(*c).copied().unwrap_or((0.0, 0.0));
+                    self.children[*c].static_pos = (x + rx, y + ry);
                 }
                 Piece::Break => self.finish_line(true),
                 Piece::Gap(w) => {
@@ -1855,7 +1856,10 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
 }
 
 fn needs_bg(style: &ComputedStyle) -> bool {
-    !style.background_color.is_transparent()
+    // Even a transparent positioned inline establishes a containing block.
+    // Preserve its fragments so absolute descendants can use its edges.
+    style.position != rabbithole_style::Position::Static
+        || !style.background_color.is_transparent()
         || style.has_visible_border()
         || style.background_image.is_some()
         || !style.background_layers.is_empty()
