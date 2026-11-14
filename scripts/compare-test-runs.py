@@ -13,14 +13,33 @@ import sys
 
 def outcomes(path):
     result = Counter()
+    pending = Counter()
+    summaries = []
     for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         match = re.fullmatch(r"test (.+) \.\.\. (ok|FAILED|ignored)(?:, .*)?", line)
         if match:
             result[(match[1], match[2])] += 1
+            pending[match[2]] += 1
+        summary = re.fullmatch(
+            r"test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored;.*", line
+        )
+        if summary:
+            summaries.append(summary.groups())
+            status, passed, failed, ignored = summary.groups()
+            if status != "ok" or int(failed):
+                raise ValueError(f"{path}: missing or failed test summaries")
+            expected = Counter({"ok": int(passed), "ignored": int(ignored)})
+            if pending != expected:
+                raise ValueError(f"{path}: test outcomes do not match summary totals: {dict(pending)} != {dict(expected)}")
+            pending.clear()
     if not result:
         raise ValueError(f"{path}: no test outcomes recorded")
     if any(status == "FAILED" for _, status in result):
         raise ValueError(f"{path}: contains failed tests")
+    if not summaries:
+        raise ValueError(f"{path}: missing or failed test summaries")
+    if pending:
+        raise ValueError(f"{path}: missing final test summary")
     return result
 
 

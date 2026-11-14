@@ -29,6 +29,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - id: build
         run: cargo build --workspace --release --locked
+      - name: Check test evidence parser
+        run: python -B -m unittest discover -s scripts/tests -p test_compare_test_runs.py -v
       # Default target selection retains example linking and library doctests.
       - id: tests_off
         name: Test interpreter with incremental GC stress
@@ -36,7 +38,12 @@ jobs:
         env:
           RABBITHOLE_JIT: "off"
           RH_GC_STRESS: inc
-        run: cargo test --workspace --profile ci --features jit --locked --no-fail-fast 2>&1 | tee tests-off.log
+        # Native codec diagnostics can interrupt libtest lines when streams
+        # are merged. Retain complete stdout for outcome comparison and stderr
+        # separately; the EXIT trap also prints diagnostics on Cargo failure.
+        run: |
+          trap 'cat tests-off.stderr.log >&2' EXIT
+          cargo test --workspace --profile ci --features jit --locked --no-fail-fast 2>tests-off.stderr.log | tee tests-off.log
       - id: tests_on
         name: Test baseline JIT with incremental GC stress
         if: always() && steps.build.outcome == 'success'
@@ -45,7 +52,9 @@ jobs:
           RABBITHOLE_JIT: "on"
           RABBITHOLE_JIT_THRESHOLD: "0"
           RH_GC_STRESS: inc
-        run: cargo test --workspace --profile ci --features jit --locked --no-fail-fast 2>&1 | tee tests-on.log
+        run: |
+          trap 'cat tests-on.stderr.log >&2' EXIT
+          cargo test --workspace --profile ci --features jit --locked --no-fail-fast 2>tests-on.stderr.log | tee tests-on.log
       - name: Compare executed test results
         if: always() && steps.build.outcome == 'success'
         run: python scripts/compare-test-runs.py tests-off.log tests-on.log
@@ -59,6 +68,8 @@ jobs:
             home.png
             tests-off.log
             tests-on.log
+            tests-off.stderr.log
+            tests-on.stderr.log
       - uses: actions/upload-artifact@v4
         if: always() && steps.build.outcome == 'success'
         with:
