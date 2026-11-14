@@ -10,8 +10,9 @@
 pub(super) const QUANTUM: usize = 128;
 const LOOK_AHEAD_SECONDS: f64 = 0.006;
 
-/// Internal mono is [sample, 0]; stereo shares a peak detector and gain.
-/// Channel mixing and graph summation belong to the renderer, before this DSP.
+/// Internal frames are always canonical stereo, with a shared detector/gain.
+/// The renderer must upmix a mono source to [sample, sample] before summation.
+/// [sample, 0] is a left-only stereo signal, not an implicit mono format.
 pub(super) type Frame = [f32; 2];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -103,9 +104,9 @@ fn db_to_linear(db: f64) -> f64 {
     10.0_f64.powf(db / 20.0)
 }
 
-// Halve a dB-distance over N samples. A reference 20dB transition therefore
-// changes gain by 10dB in the specified attack/release time. Smaller or larger
-// distances follow the same adaptive exponential curve, not a linear slew.
+// Attack halves a dB-distance over N samples. A reference 20dB transition
+// therefore changes gain by 10dB in the specified attack time. Other distances
+// follow the same adaptive exponential curve, not a linear slew.
 fn envelope_blend(frames: f64) -> f64 {
     if frames == 0.0 { 1.0 } else { -(-std::f64::consts::LN_2 / frames).exp_m1() }
 }
@@ -119,6 +120,19 @@ fn attack_rate(ratio: f64, blend: f64) -> f64 {
         // Continuous, increasing in q, and bounded by [0,1].
         -(-blend * log_ratio).exp_m1() / -(-log_ratio).exp_m1()
     }
+}
+
+fn release_coefficient(frames: f64) -> f64 {
+    // With detector=1, gain .1 becomes sqrt(.1) after N samples: a
+    // reference -20dB -> -10dB release. Subsample times take one sample.
+    (0.1_f64.sqrt() - 0.1) / frames.max(1.0)
+}
+
+fn release_rate(ratio: f64, coefficient: f64) -> f64 {
+    // R(q)=1+c/q is continuous, decreasing and strictly >1 for every q>0,
+    // including when the detector average is still below compressor gain.
+    // Preserve the strict lower bound if a tiny c/q rounds away in f64.
+    (1.0 + coefficient / ratio).max(f64::from_bits(1.0_f64.to_bits() + 1))
 }
 
 /// No shared/global state, locks, device handles or allocations in process().
@@ -176,7 +190,7 @@ impl Compressor {
         }
         let curve = Curve::new(parameters);
         let attack = envelope_blend(f64::from(parameters.attack) * f64::from(self.sample_rate));
-        let release = envelope_blend(f64::from(parameters.release) * f64::from(self.sample_rate));
+        let release = release_coefficient(f64::from(parameters.release) * f64::from(self.sample_rate));
         let len = self.delay.len();
         let mut metering_gain = 1.0;
         let mut active = false;
@@ -188,16 +202,15 @@ impl Compressor {
             // Identity detector curve D(a)=a: continuous, increasing, [0,1].
             self.detector_average += (attenuation - self.detector_average) * attenuation;
             self.detector_average = self.detector_average.clamp(0.0, 1.0);
+            // Stop rounding-scale asymptotic drift from alternating attack and
+            // release flags forever under a constant input. Real transitions
+            // (including a detector still substantially below gain) remain.
+            if (attenuation - self.detector_average).abs() <= 8.0 * f64::EPSILON * attenuation {
+                self.detector_average = attenuation;
+            }
             if releasing {
-                if self.detector_average > self.compressor_gain {
-                    if release == 1.0 {
-                        self.compressor_gain = self.detector_average;
-                    } else {
-                        // R(q)=q^(-blend): decreasing and >1 for 0<q<1.
-                        let q = self.compressor_gain / self.detector_average;
-                        self.compressor_gain *= (-q.ln() * release).exp();
-                    }
-                }
+                let q = self.compressor_gain / self.detector_average;
+                self.compressor_gain *= release_rate(q, release);
             } else {
                 let q = self.compressor_gain / self.detector_average;
                 let rate = attack_rate(q, attack);
@@ -362,6 +375,66 @@ mod tests {
             assert!((0.0..=1.0).contains(&rate) && rate >= previous);
             previous = rate;
         }
+    }
+
+    #[test]
+    fn release_increases_gain_when_detector_average_is_still_below_it() {
+        let params = Parameters { threshold: -40.0, ratio: 2.0, attack: 0.003, release: 0.25, ..hard() };
+        let mut core = Compressor::new(8000).unwrap();
+        core.process(&[[1.0; 2]], &mut [[0.0; 2]], params).unwrap();
+        let previous_gain = core.compressor_gain;
+        let previous_average = core.detector_average;
+        let second = 1.0_f32 / 81.0;
+        // Independently: T=-40,R=2 maps amplitude x to attenuation .1/sqrt(x).
+        let attenuation = 0.1 / f64::from(second).sqrt();
+        let average = previous_average + (attenuation - previous_average) * attenuation;
+        assert!(attenuation > previous_gain && average < previous_gain);
+        let increment = (0.1_f64.sqrt() - 0.1) * average / (8000.0 * 0.25);
+        core.process(&[[second; 2]], &mut [[0.0; 2]], params).unwrap();
+        assert!(core.compressor_gain > previous_gain + 0.00008);
+        close(core.compressor_gain, previous_gain + increment, 1e-12);
+        close(core.detector_average, average, 1e-12);
+    }
+
+    #[test]
+    fn release_curve_is_continuous_and_strictly_above_one_on_both_sides() {
+        let coefficient = release_coefficient(2000.0);
+        let mut previous = f64::INFINITY;
+        for q in [0.001, 0.1, 0.999999, 1.0, 1.000001, 1.1, 2.0, 1000.0, 1e80] {
+            let rate = release_rate(q, coefficient);
+            assert!(rate.is_finite() && rate > 1.0 && rate <= previous);
+            previous = rate;
+        }
+        close(release_rate(1.0, coefficient), 1.0 + coefficient, 1e-15);
+        assert!((release_rate(1.0 - 1e-6, coefficient) - release_rate(1.0 + 1e-6, coefficient)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_and_subsample_release_complete_the_reference_step_in_one_sample() {
+        for rate in [8000, 48000] {
+            for frames in [0.0, 0.5, 1.0] {
+                let params = Parameters { release: (frames / f64::from(rate)) as f32, ..hard() };
+                let mut core = Compressor::new(rate).unwrap();
+                core.compressor_gain = 0.1;
+                core.detector_average = 1.0;
+                core.process(&[[0.001; 2]], &mut [[0.0; 2]], params).unwrap();
+                close(core.compressor_gain, 0.1_f64.sqrt(), 1e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn detector_normalization_only_removes_relative_rounding_drift() {
+        let attenuation = Curve::new(hard()).attenuation(1.0);
+        let mut core = Compressor::new(48000).unwrap();
+        core.compressor_gain = attenuation;
+        core.detector_average = attenuation * (1.0 - 4.0 * f64::EPSILON);
+        core.process(&[[1.0; 2]], &mut [[0.0; 2]], hard()).unwrap();
+        assert_eq!(core.detector_average, attenuation);
+        assert_eq!(core.compressor_gain, attenuation);
+        core.detector_average = attenuation * (1.0 - 1e-8);
+        core.process(&[[1.0; 2]], &mut [[0.0; 2]], hard()).unwrap();
+        assert!(core.detector_average < attenuation);
     }
 
     #[test]

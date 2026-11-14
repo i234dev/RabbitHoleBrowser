@@ -5,8 +5,9 @@ constructor, audio device or change to the process mixer. The context graph
 and JS integration must be delivered separately before exposing a compressor.
 
 `audio::compressor::Compressor` owns one node's persistent state. Input is a
-block of 1–128 stereo frames containing the **already mixed** node input.
-Mono may use `[sample, 0]`. Channel conversion is the graph renderer's job.
+block of 1–128 canonical stereo frames containing the **already mixed** node
+input. The renderer upmixes mono to `[sample, sample]` before summation;
+`[sample, 0]` means left-only stereo. Channel conversion is the renderer's job.
 One instance must never be shared between nodes or contexts. There is no
 allocation in `process`; construction allocates at most 4,610 stereo frames
 (36,880 sample bytes) at the upper supported rate of 768 kHz. Supported rates
@@ -32,8 +33,9 @@ permits choices of smooth curve shapes. This implementation uses:
 * A stereo-linked peak detector and continuous identity detector-rate curve.
 * A quadratic knee in dB from threshold to threshold+knee, with unit slope
   below and slope 1/ratio above, joined continuously. Knee zero is hard knee.
-* Adaptive log-domain envelopes. A reference 20 dB gain step changes 10 dB
-  in attack/release seconds. Zero time makes that stage immediate.
+* Adaptive log-domain attack and a ratio-dependent release. A reference 20 dB
+  gain step changes 10 dB in attack/release seconds. Zero attack is immediate;
+  zero/subsample release performs that reference step within one sample.
 * A fractional, linearly interpolated 6 ms delay, retaining source-end tail.
 * Makeup `(1 / curve(1))^0.6` and block-end metering including that gain.
   A fully silent, drained block reports zero; low-level active signals can
@@ -60,11 +62,20 @@ by `(attenuation-average)*attenuation`. Compressor gain starts at one.
 Given `N = seconds * sampleRate`, define `b = 1 - 2^(-1/N)` (one when time is
 zero). For `q = compressorGain/detectorAverage`, the attack interpolation rate
 is `(q - q^(1-b))/(q-1)`, with its continuous limit `b` at `q=1`.
-It is increasing in `q` and lies in `[0,1]`. The release multiplier is
-`q^(-b)`, decreasing in `q` and greater than one for `0<q<1`.
-If the smoothed detector has not caught up to the current gain during a
-release transition, release waits rather than decreasing the gain. The meter
-is updated only after a successful complete block.
+It is increasing in `q` and lies in `[0,1]`. Release uses a different curve:
+`c = (sqrt(0.1)-0.1)/max(1, N)` and multiplier `1+c/q`. This is continuous,
+decreasing and strictly above one for every positive `q`, including when the
+detector is still below current gain. With a constant detector of one, gain
+increases from 0.1 to sqrt(0.1) after N samples, independently of attack.
+The f64 multiplier is rounded up to the next value above one if necessary.
+The meter is updated only after a successful complete block.
+
+The detector is normalized to its target only within eight relative f64
+epsilons. This prevents asymptotic rounding drift from alternating attack and
+release forever at steady input; it cannot hide a real transition such as
+detector 0.811 versus gain approximately 0.877. A two-sample regression reaches
+that state from a fresh node and checks the independently calculated release
+increment. Steady gain/meter oracles retain their original tolerances.
 
 ## Defensive boundaries
 
@@ -83,5 +94,7 @@ The written tests cover integer/fractional delay and tail, ratio-one identity,
 an independent hard-knee gain/meter oracle, knee continuity/slope, envelope
 timing at two rates, parameter changes without clearing state, stereo linking,
 input summation versus incorrect per-source processing, chunk persistence,
-finite extremes, error atomicity, per-node isolation and storage bounds.
+finite extremes, error atomicity, per-node isolation and storage bounds. They
+also check release for q below/equal/above one, zero/subsample times and the
+strict boundary between numerical detector normalization and a real gap.
 No Rust tests or audio have been executed for this source yet.
