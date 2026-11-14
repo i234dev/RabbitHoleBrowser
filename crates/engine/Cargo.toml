@@ -10,6 +10,8 @@ authors.workspace = true
 [features]
 # Baseline JavaScript compiler (off at run time unless enabled).
 jit = ["rabbithole-script/jit"]
+# Diagnostic counters only; never enabled by the default production build.
+layout-diagnostics = []
 
 [dependencies]
 rabbithole-dom.workspace = true

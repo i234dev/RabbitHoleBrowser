@@ -17,6 +17,8 @@ mod service_worker_navigation;
 pub use service_worker_navigation::PendingServiceWorkerNavigation;
 pub mod images;
 pub mod incremental;
+#[cfg(feature = "layout-diagnostics")]
+pub mod layout_diagnostics;
 pub mod pointer;
 pub mod reftest;
 pub mod scripting;

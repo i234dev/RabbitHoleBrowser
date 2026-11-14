@@ -116,6 +116,8 @@ impl IncrementalState {
         self.layout_dirty = true;
         self.dl_dirty = true;
         self.stats.style_incremental += 1;
+        #[cfg(feature = "layout-diagnostics")]
+        crate::layout_diagnostics::record(crate::layout_diagnostics::Event::StylePatch);
         self.clear_rects();
     }
 
@@ -176,6 +178,8 @@ impl IncrementalState {
     pub(crate) fn mark_display_list_clean(&mut self) {
         self.dl_dirty = false;
         self.stats.display_lists += 1;
+        #[cfg(feature = "layout-diagnostics")]
+        crate::layout_diagnostics::record(crate::layout_diagnostics::Event::DisplayListCommit);
     }
 }
 
@@ -316,6 +320,8 @@ impl Engine {
             page.styles = se.full(&page.doc, &page.sheets, &opts);
             incr.style = Some(se);
             incr.stats.style_full += 1;
+            #[cfg(feature = "layout-diagnostics")]
+            crate::layout_diagnostics::record(crate::layout_diagnostics::Event::StyleFull);
             incr.layout_full = true;
         } else {
             let se = incr.style.as_mut().expect("style engine");
@@ -329,10 +335,14 @@ impl Engine {
             }
             if out.full {
                 incr.stats.style_full += 1;
+                #[cfg(feature = "layout-diagnostics")]
+                crate::layout_diagnostics::record(crate::layout_diagnostics::Event::StyleFull);
                 incr.layout_full = true;
             } else {
                 incr.stats.style_incremental += 1;
                 incr.stats.elements_restyled += out.recomputed as u64;
+                #[cfg(feature = "layout-diagnostics")]
+                crate::layout_diagnostics::record(crate::layout_diagnostics::Event::StyleIncremental(out.recomputed as u64));
                 for c in &out.changes {
                     if c.old.as_ref().is_none_or(|s| s.display.is_none()) {
                         newly_styled.push(c.node);
@@ -394,6 +404,8 @@ impl Engine {
     /// Bring `page.layout` up to date (incrementally when possible). The
     /// display list is left stale (see [`Engine::flush_display_list`]).
     pub fn flush_layout(&self, page: &mut Page) {
+        #[cfg(feature = "layout-diagnostics")]
+        let mut diagnostic = crate::layout_diagnostics::begin_flush();
         self.flush_style(page);
         let _font_units = rabbithole_style::values::scope_unit_fonts(Some(page.fonts.clone()), rabbithole_style::values::font_unit_skip(&page.styles.font_faces));
         let Page { fonts, doc, styles, images, background_images, viewport, scroll_offsets, page_scroll, layout, incr, .. } = page;
@@ -444,6 +456,10 @@ impl Engine {
             incr.layout_dirty = true;
         }
         if !incr.layout_dirty && !incr.layout_full {
+            #[cfg(feature = "layout-diagnostics")]
+            if let Some(capture) = &mut diagnostic {
+                capture.clean();
+            }
             return;
         }
         let ctx = LayoutContext {
@@ -484,6 +500,10 @@ impl Engine {
         incr.dl_dirty = true;
         incr.scroll_dep = None;
         incr.clear_rects();
+        #[cfg(feature = "layout-diagnostics")]
+        if let Some(capture) = &mut diagnostic {
+            capture.rebuilt(damage.full);
+        }
     }
 
     /// Rebuild the display list if layout or paint inputs changed.
