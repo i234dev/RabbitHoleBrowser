@@ -1,0 +1,153 @@
+name: Layout flush diagnostics
+
+on:
+  push:
+    branches: ["validation/layout-flush-decisions-v012-20261114"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic-tests:
+    name: Opt-in layout diagnostics (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Select the standalone Windows C runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: printf '%s\n' 'RUSTFLAGS=-C target-feature=+crt-static' >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Record toolchain and feature selection
+        shell: bash
+        run: |
+          rustc -Vv > toolchain.log
+          cargo metadata --locked --format-version 1 > default-features.json
+          cargo metadata --locked --format-version 1 --features rabbithole-engine/layout-diagnostics > diagnostic-features.json
+          python -B - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import tomllib
+
+          assert "RH_LAYOUT_DIAGNOSTICS" not in os.environ, "runtime capture must remain opt-in"
+          packages = ("rabbithole-engine", "rabbithole-layout")
+          selected = {}
+          for mode in ("default", "diagnostic"):
+              graph = json.loads(Path(f"{mode}-features.json").read_text())
+              names = {p["id"]: p["name"] for p in graph["packages"]}
+              features = {names[n["id"]]: n["features"] for n in graph["resolve"]["nodes"] if names[n["id"]] in packages}
+              assert set(features) == set(packages)
+              assert all(("layout-diagnostics" in features[name]) == (mode == "diagnostic") for name in packages)
+              selected[mode] = features
+          engine = tomllib.loads(Path("crates/engine/Cargo.toml").read_text())
+          layout = tomllib.loads(Path("crates/layout/Cargo.toml").read_text())
+          assert engine["features"]["layout-diagnostics"] == ["rabbithole-layout/layout-diagnostics"]
+          assert layout["features"]["layout-diagnostics"] == []
+          result = {"source_revision": os.environ["GITHUB_SHA"], "selected_features": selected, "runtime_capture_environment_absent": True}
+          Path("feature-state.json").write_text(json.dumps(result, indent=2) + "\n")
+          PY
+      - name: Exercise eleven diagnostic controls with JIT off
+        shell: bash
+        env:
+          RABBITHOLE_JIT: "off"
+          RH_GC_STRESS: inc
+        run: |
+          trap 'cat layout-off.stderr.log engine-off.stderr.log >&2 2>/dev/null || true' EXIT
+          cargo test -p rabbithole-layout --lib --profile ci --locked --features layout-diagnostics diagnostics::tests -- --test-threads=1 2>layout-off.stderr.log | tee layout-off.log
+          cargo test -p rabbithole-engine --lib --profile ci --locked --features jit,layout-diagnostics layout_diagnostics::tests -- --test-threads=1 2>engine-off.stderr.log | tee engine-off.log
+      - name: Exercise eleven diagnostic controls with JIT on
+        shell: bash
+        env:
+          RABBITHOLE_JIT: "on"
+          RABBITHOLE_JIT_THRESHOLD: "0"
+          RH_GC_STRESS: inc
+        run: |
+          trap 'cat layout-on.stderr.log engine-on.stderr.log >&2 2>/dev/null || true' EXIT
+          cargo test -p rabbithole-layout --lib --profile ci --locked --features layout-diagnostics diagnostics::tests -- --test-threads=1 2>layout-on.stderr.log | tee layout-on.log
+          cargo test -p rabbithole-engine --lib --profile ci --locked --features jit,layout-diagnostics layout_diagnostics::tests -- --test-threads=1 2>engine-on.stderr.log | tee engine-on.log
+      - name: Require the exact test inventory and matching outcomes
+        shell: bash
+        run: |
+          python -B - <<'PY'
+          from collections import Counter
+          import json
+          import os
+          from pathlib import Path
+          import runpy
+
+          outcomes = runpy.run_path("scripts/compare-test-runs.py")["outcomes"]
+          names = {
+              "layout": [
+                  "diagnostics::tests::nested_observations_restore_pending_and_completed_enclosing_state",
+                  "diagnostics::tests::unwind_restores_enclosing_observation_and_missing_hook_stays_missing",
+              ],
+              "engine": [
+                  "layout_diagnostics::tests::clean_queries_are_entries_without_reconstruction",
+                  "layout_diagnostics::tests::mutation_and_explicit_full_invalidation_rebuild_then_become_clean",
+                  "layout_diagnostics::tests::empty_incremental_damage_returns_the_previous_tree_without_rebuilding",
+                  "layout_diagnostics::tests::unusable_previous_tree_falls_back_to_full_despite_incremental_request",
+                  "layout_diagnostics::tests::frame_counts_survive_retirement_and_reset_has_an_explicit_boundary",
+                  "layout_diagnostics::tests::disabled_capture_preserves_real_layout_without_recording",
+                  "layout_diagnostics::tests::nested_outcomes_reset_rejection_and_unwind_are_accounted_once",
+                  "layout_diagnostics::tests::saturated_counts_are_flagged_and_never_wrap",
+                  "layout_diagnostics::tests::missing_layout_decision_is_incomplete_and_never_defaults_to_incremental",
+              ],
+          }
+          checked = {}
+          for suite, tests in names.items():
+              expected = Counter({(name, "ok"): 1 for name in tests})
+              for mode in ("off", "on"):
+                  actual = outcomes(f"{suite}-{mode}.log")
+                  assert actual == expected, (suite, mode, actual, expected)
+              checked[suite] = {"tests": tests, "passed_per_mode": len(tests), "off_on_identical": True}
+          result = {"source_revision": os.environ["GITHUB_SHA"], "suites": checked, "performance_measurement": False}
+          Path("test-inventory.json").write_text(json.dumps(result, indent=2) + "\n")
+          PY
+      - name: Build the opt-in diagnostic reporter without running it
+        shell: bash
+        run: cargo build -p rabbithole-engine --example shot --profile ci --features jit,layout-diagnostics --locked
+      - name: Record evidence and reporter checksums
+        if: always()
+        shell: bash
+        run: |
+          python -B - <<'PY'
+          from hashlib import sha256
+          import json
+          import os
+          from pathlib import Path
+
+          paths = [Path(name) for name in ("toolchain.log", "default-features.json", "diagnostic-features.json", "feature-state.json", "test-inventory.json")]
+          paths += sorted(Path().glob("layout-*.log")) + sorted(Path().glob("engine-*.log"))
+          paths += [Path("target/ci/examples/shot"), Path("target/ci/examples/shot.exe")]
+          files = [{"path": str(path), "sha256": sha256(path.read_bytes()).hexdigest(), "size_bytes": path.stat().st_size} for path in paths if path.is_file()]
+          result = {"source_revision": os.environ["GITHUB_SHA"], "runner_os": os.environ["RUNNER_OS"], "scope": "opt-in branch-observation correctness; no timing, benchmark or optimization claim", "files": files}
+          Path("evidence-files.json").write_text(json.dumps(result, indent=2) + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: layout-flush-diagnostics-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            toolchain.log
+            default-features.json
+            diagnostic-features.json
+            feature-state.json
+            test-inventory.json
+            evidence-files.json
+            layout-*.log
+            engine-*.log
+            target/ci/examples/shot
+            target/ci/examples/shot.exe
+          if-no-files-found: error
