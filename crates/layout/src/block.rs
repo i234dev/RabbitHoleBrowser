@@ -572,6 +572,15 @@ impl<'a> Layouter<'a> {
             None if style.contain_size && b.kind != BoxKind::Inline => style.contain_intrinsic_height.unwrap_or(0.0),
             None => content_h,
         };
+        // The ratio-dependent automatic block size still has a content
+        // minimum, unless the author requested another minimum or scrolling.
+        if b.flow == Flow::Absolute && forced_h.is_none() && style.height.is_auto() && style.min_height.is_auto()
+            && style.aspect_ratio.is_some_and(|ratio| ratio > 0.0)
+            && !matches!(style.overflow_y, rabbithole_style::Overflow::Hidden | rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto)
+        {
+            let minimum = if style.contain_size { style.contain_intrinsic_height.unwrap_or(0.0) } else { content_h };
+            h = h.max(minimum);
+        }
         if explicit_h.is_none() {
             if let Some(fe) = float_extent {
                 h = h.max(fe);
@@ -1139,13 +1148,60 @@ impl<'a> Layouter<'a> {
         let mt = style.margin.top.resolve_or_zero(cb.w);
         let mb = style.margin.bottom.resolve_or_zero(cb.w);
         let pb_h = horizontal_extras(&style, cb.w);
-        let (mode, avail) = match (l, r, style.width.is_auto()) {
+        let p = resolve_edges(&style.padding, cb.w);
+        let pb_v = p.top + p.bottom + style.border_width.top + style.border_width.bottom;
+        let ratio = style.aspect_ratio.filter(|r| *r > 0.0 && c.kind != BoxKind::Image);
+        let mut ratio_stretched_height = None;
+        let (mut mode, mut avail) = match (l, r, style.width.is_auto()) {
             (Some(l), Some(r), true) => (WidthMode::Fixed((cb.w - l - r - ml - mr - pb_h).max(0.0)), cb.w),
             _ => {
                 let used = l.or(r).unwrap_or(0.0);
                 (WidthMode::ShrinkToFit, (cb.w - used).max(0.0))
             }
         };
+        if let Some(ratio) = ratio {
+            // Insets do not make both automatic axes stretch independently:
+            // the chosen axis determines the other through the ratio first.
+            // Keep percentage lengths based on the complete containing block.
+            avail = cb.w;
+            if style.width.is_auto() {
+                let from_height = |height: f32| {
+                    if style.box_sizing == BoxSizing::BorderBox { ((height + pb_v) * ratio - pb_h).max(0.0) } else { height * ratio }
+                };
+                let definite_h = self.resolve_height(&style, Some(cb.h), pb_v);
+                let stretched_h = match (t, btm, l, r) {
+                    (Some(t), Some(bt), _, _) if style.height.is_auto() && (l.is_none() || r.is_none()) => Some((cb.h - t - bt - mt - mb - pb_v).max(0.0)),
+                    _ => None,
+                };
+                if definite_h.is_none() {
+                    ratio_stretched_height = stretched_h;
+                }
+                let (min_content, max_content) = self.intrinsic(c);
+                let mut width = if let Some(height) = definite_h.or(stretched_h) {
+                    let mut width = from_height(height);
+                    if style.min_width.is_auto()
+                        && !matches!(style.overflow_x, rabbithole_style::Overflow::Hidden | rabbithole_style::Overflow::Scroll | rabbithole_style::Overflow::Auto)
+                    {
+                        width = width.max(min_content);
+                    }
+                    width
+                } else if let (Some(left), Some(right)) = (l, r) {
+                    (cb.w - left - right - ml - mr - pb_h).max(0.0)
+                } else {
+                    shrink_to_fit(min_content, max_content, (cb.w - l.or(r).unwrap_or(0.0) - ml - mr - pb_h).max(0.0))
+                };
+                // Definite constraints in the opposite axis also constrain
+                // an automatic width. A minimum wins over a smaller maximum.
+                let adjust_h = |height: f32| if style.box_sizing == BoxSizing::BorderBox { (height - pb_v).max(0.0) } else { height.max(0.0) };
+                if let Some(max) = style.max_height.resolve(cb.h) {
+                    width = width.min(from_height(adjust_h(max)));
+                }
+                if let Some(min) = style.min_height.resolve(cb.h) {
+                    width = width.max(from_height(adjust_h(min)));
+                }
+                mode = WidthMode::Fixed(self.clamp_width(&style, width, cb.w, pb_h));
+            }
+        }
         let inner_cb = Cb {
             x: cb.x,
             width: avail,
@@ -1153,10 +1209,10 @@ impl<'a> Layouter<'a> {
         };
         // `top` and `bottom` with an auto height: the box fills the space
         // between them (CSS 2.1 §10.6.4; overlays, outlines, `inset: 0`).
-        if let (Some(t), Some(bt), true) = (t, btm, style.height.is_auto()) {
-            if c.kind != BoxKind::Image {
-                let p = resolve_edges(&style.padding, cb.w);
-                let pb_v = p.top + p.bottom + style.border_width.top + style.border_width.bottom;
+        if let Some(height) = ratio_stretched_height {
+            self.forced_content_height = Some(height);
+        } else if let (Some(t), Some(bt), true) = (t, btm, style.height.is_auto()) {
+            if c.kind != BoxKind::Image && ratio.is_none() {
                 self.forced_content_height = Some((cb.h - t - bt - mt - mb - pb_v).max(0.0));
             }
         }
@@ -1166,8 +1222,8 @@ impl<'a> Layouter<'a> {
         // With both insets and a definite size, auto margins share the
         // remaining space (CSS 2.1 §10.3.7 / §10.6.4: centering with
         // `inset: 0; margin: auto`).
-        let sized_w = !style.width.is_auto() || c.kind == BoxKind::Image;
-        let sized_h = !style.height.is_auto() || c.kind == BoxKind::Image;
+        let sized_w = !style.width.is_auto() || c.kind == BoxKind::Image || ratio.is_some();
+        let sized_h = !style.height.is_auto() || c.kind == BoxKind::Image || ratio.is_some();
         let x = if let (Some(l), Some(r), true) = (l, r, sized_w) {
             let free = cb.w - l - r - c.rect.w;
             match (style.margin.left.is_auto(), style.margin.right.is_auto()) {

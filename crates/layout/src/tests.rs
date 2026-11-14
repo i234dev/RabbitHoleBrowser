@@ -955,6 +955,60 @@ fn inline_relative_offsets_move_absolute_static_positions() {
     assert!((absolute.y - 25.0).abs() < 0.01, "{absolute:?}");
 }
 
+#[test]
+fn absolute_aspect_ratio_selects_one_automatic_axis_before_stretching() {
+    for (container, style, expected) in [
+        ("width:100px;height:500px", "inset:0;aspect-ratio:1", (100.0, 100.0)),
+        ("width:100px;height:500px", "inset:0;width:100px;aspect-ratio:1", (100.0, 100.0)),
+        ("width:500px;height:100px", "inset:0;height:100px;aspect-ratio:1", (100.0, 100.0)),
+        ("width:500px;height:100px", "inset:0;height:100%;aspect-ratio:1", (100.0, 100.0)),
+        ("width:300px;height:50px", "left:0;top:0;bottom:0;aspect-ratio:2", (100.0, 50.0)),
+        ("width:200px;height:100px", "inset:0;max-height:50px;aspect-ratio:2", (100.0, 50.0)),
+        ("width:200px;height:100px", "inset:0;width:90px;height:40px;aspect-ratio:1", (90.0, 40.0)),
+        ("width:300px;height:100px", "left:20px;height:50px;aspect-ratio:2;box-sizing:border-box;padding:10px;border:2px solid", (100.0, 50.0)),
+        ("width:500px;height:100px", "aspect-ratio:1;max-height:100%;min-height:0;contain:size;contain-intrinsic-size:500px 500px", (100.0, 100.0)),
+    ] {
+        let fx = Fixture::new(
+            "<div id=container><div id=absolute></div></div>",
+            &format!("body{{margin:0}} #container{{position:relative;{container}}} #absolute{{position:absolute;{style}}}"),
+        );
+        let t = fx.layout();
+        let rect = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+        assert!((rect.w - expected.0).abs() < 0.01 && (rect.h - expected.1).abs() < 0.01, "{style}: {rect:?}, expected {expected:?}");
+    }
+}
+
+#[test]
+fn absolute_aspect_ratio_content_minimum_applies_to_the_dependent_axis() {
+    for (style, content, expected) in [
+        ("height:100px;aspect-ratio:1/2", "width:100px", (100.0, 100.0)),
+        ("width:100px;aspect-ratio:2", "height:100px", (100.0, 100.0)),
+        ("width:100px;aspect-ratio:2;min-height:0", "height:100px", (100.0, 50.0)),
+        ("width:100px;aspect-ratio:2;overflow:hidden", "height:100px", (100.0, 50.0)),
+        ("width:100px;aspect-ratio:2;overflow:clip", "height:100px", (100.0, 100.0)),
+        ("left:0;top:0;bottom:0;aspect-ratio:2", "height:100px", (100.0, 50.0)),
+    ] {
+        let fx = Fixture::new(
+            "<div id=container><div id=absolute><div id=content></div></div></div>",
+            &format!("body{{margin:0}} #container{{position:relative;width:300px;height:50px}} #absolute{{position:absolute;{style}}} #content{{{content}}}"),
+        );
+        let t = fx.layout();
+        let rect = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+        assert!((rect.w - expected.0).abs() < 0.01 && (rect.h - expected.1).abs() < 0.01, "{style}: {rect:?}, expected {expected:?}");
+    }
+}
+
+#[test]
+fn absolute_aspect_ratio_preserves_auto_margin_centering() {
+    let fx = Fixture::new(
+        "<div id=container><div id=absolute></div></div>",
+        "body{margin:0} #container{position:relative;width:500px;height:300px} #absolute{position:absolute;inset:0;margin:auto;height:100px;aspect-ratio:1}",
+    );
+    let t = fx.layout();
+    let rect = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+    assert_eq!(rect, Rect::new(200.0, 100.0, 100.0, 100.0));
+}
+
 /// Text inputs are content-box (author height + padding add up) and show
 /// their line of text centered vertically.
 #[test]

@@ -1,0 +1,26 @@
+<!doctype html>
+<title>Absolute aspect ratios, constraints and automatic margins</title>
+<link rel="match" href="absolute-aspect-ratio-sizing-ref.html">
+<style>
+body { margin: 0; }
+.container { position: absolute; top: 0; }
+.target { position: absolute; inset: 0; background: green; aspect-ratio: 1; }
+#width { left: 0; width: 100px; height: 500px; }
+#height { left: 120px; width: 500px; height: 100px; }
+#height .target { height: 100%; }
+#maximum { left: 240px; width: 200px; height: 0; }
+#maximum .target { max-height: 100px; }
+#minimum { left: 360px; width: 100px; height: 200px; }
+#minimum .target { width: 100px; aspect-ratio: 2; }
+#content { height: 100px; }
+#border { left: 480px; width: 300px; height: 100px; }
+#border .target { height: 50px; aspect-ratio: 2; box-sizing: border-box; padding: 10px; border: 2px solid green; }
+#center { left: 600px; width: 100px; height: 100px; }
+#center .target { height: 20px; margin: auto; }
+</style>
+<div class="container" id="width"><div class="target"></div></div>
+<div class="container" id="height"><div class="target"></div></div>
+<div class="container" id="maximum"><div class="target"></div></div>
+<div class="container" id="minimum"><div class="target"><div id="content"></div></div></div>
+<div class="container" id="border"><div class="target"></div></div>
+<div class="container" id="center"><div class="target"></div></div>
