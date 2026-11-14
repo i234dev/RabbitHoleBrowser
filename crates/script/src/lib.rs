@@ -548,6 +548,42 @@ impl ScriptHost {
         })
     }
 
+    /// Execute a cross-realm global access within the caller's remaining
+    /// task budget. Restore both the idle target budget and the thread-local
+    /// regexp deadline even when host code unwinds.
+    pub fn frame_call_with_deadline(&mut self, env: &mut dyn HostEnv, call: FrameCall, caller_deadline: Option<std::time::Instant>) -> FrameReply {
+        self.enter(env, |realm| {
+            struct DeadlineGuard<'a> {
+                realm: &'a mut Realm,
+                previous: Option<std::time::Instant>,
+                budget: Option<std::time::Duration>,
+                caller: Option<std::time::Instant>,
+            }
+            impl Drop for DeadlineGuard<'_> {
+                fn drop(&mut self) {
+                    self.realm.task_budget = self.budget;
+                    self.realm.set_deadline(self.previous);
+                    rabbithole_js::regex::set_deadline(self.caller);
+                }
+            }
+            let previous = realm.deadline;
+            let budget = realm.task_budget;
+            let deadline = match (previous, caller_deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            realm.task_budget = None;
+            realm.set_deadline(deadline);
+            let guard = DeadlineGuard { realm, previous, budget, caller: caller_deadline };
+            let r = frames::foreign(guard.realm, call);
+            shadow::flush(guard.realm);
+            r
+        })
+    }
+
+    /// False while a source JS stack is suspended inside a cross-realm call.
+    pub fn frame_checkpoint_allowed() -> bool { frames::checkpoint_allowed() }
+
     /// Something that observers depend on changed outside of scripts
     /// (e.g. an inner scroll container scrolled): run the "update the
     /// rendering" hook (IntersectionObserver / ResizeObserver) soon.

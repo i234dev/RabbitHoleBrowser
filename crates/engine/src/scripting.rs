@@ -545,7 +545,7 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
         if let Some(c) = self.page.frames.get(node) {
-            if c.page.is_some() {
+            if c.page.is_some() || crate::frames::frame_detached(c.id) {
                 return Some(c.id);
             }
         }
@@ -582,6 +582,9 @@ impl HostEnv for EngineEnv<'_> {
     }
     fn frame_call(&mut self, id: u64, call: rabbithole_script::FrameCall) -> Option<rabbithole_script::FrameReply> {
         self.engine.call_in_frame(self.page, id, call)
+    }
+    fn frame_call_with_deadline(&mut self, id: u64, call: rabbithole_script::FrameCall, deadline: Option<std::time::Instant>) -> Option<rabbithole_script::FrameReply> {
+        self.engine.call_in_frame_with_deadline(self.page, id, call, deadline)
     }
     fn frame_checkpoint(&mut self) {
         self.engine.frame_microtasks(self.page);
@@ -824,6 +827,7 @@ impl Engine {
         out.merge(anim_out);
         let frames_out = self.tick_frames(page);
         out.merge(frames_out);
+        out.merge(self.settle(page, false));
         out.relayout |= images_changed || img_out.relayout;
         if out.navigation.is_none() {
             out.navigation = img_out.navigation;
@@ -1047,6 +1051,7 @@ impl Engine {
     /// After script activity: restyle if the DOM changed and collect
     /// side effects.
     pub(crate) fn settle(&self, page: &mut Page, default_prevented: bool) -> ScriptOutcome {
+        self.frame_microtasks(page);
         let mut out = ScriptOutcome { default_prevented, ..Default::default() };
         let host_dirty = page.script.host.as_mut().map(|h| h.take_dirty()).unwrap_or(false);
         if page.script.dom_dirty || host_dirty {

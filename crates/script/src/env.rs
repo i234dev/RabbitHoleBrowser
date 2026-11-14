@@ -214,6 +214,12 @@ pub trait HostEnv {
     fn frame_call(&mut self, _id: u64, _call: crate::FrameCall) -> Option<crate::FrameReply> {
         None
     }
+    /// Global access can invoke getters or arbitrary functions in another
+    /// realm. The caller supplies its existing absolute deadline; a host must
+    /// not restart the task budget when crossing the realm boundary.
+    fn frame_call_with_deadline(&mut self, id: u64, call: crate::FrameCall, _deadline: Option<std::time::Instant>) -> Option<crate::FrameReply> {
+        self.frame_call(id, call)
+    }
     /// Microtask checkpoint of the frames this realm called into through
     /// [`HostEnv::frame_call`]: same-origin frames share the event loop, so
     /// their microtasks run when this realm's do.

@@ -52,6 +52,32 @@ thread_local! {
     static ANCESTORS: std::cell::RefCell<Vec<*mut Page>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    // A temporarily detached page still has a browsing context. In particular,
+    // a callback in its parent must not replace it with a new initial blank.
+    static DETACHED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn frame_detached(id: u64) -> bool {
+    DETACHED.with(|frames| frames.borrow().contains(&id))
+}
+
+struct DetachedGuard(u64);
+impl DetachedGuard {
+    fn enter(id: u64) -> Self {
+        DETACHED.with(|frames| frames.borrow_mut().push(id));
+        Self(id)
+    }
+}
+impl Drop for DetachedGuard {
+    fn drop(&mut self) {
+        DETACHED.with(|frames| {
+            let mut frames = frames.borrow_mut();
+            if let Some(index) = frames.iter().rposition(|id| *id == self.0) { frames.remove(index); }
+        });
+    }
+}
+
 /// Keeps a page on the ancestor stack while one of its child frames runs.
 pub(crate) struct AncestorGuard;
 
@@ -274,22 +300,39 @@ impl Engine {
     /// with `page` on the ancestor stack (so scripts in the child can reach
     /// their parent's document). The child is put back afterwards.
     pub(crate) fn with_child<R>(&self, page: &mut Page, i: usize, f: impl FnOnce(&mut Page) -> R) -> Option<R> {
-        let mut child = page.frames.children.get_mut(i)?.page.take()?;
-        let r = {
+        let (id, mut child) = {
+            let frame = page.frames.children.get_mut(i)?;
+            (frame.id, frame.page.take()?)
+        };
+        let detached = DetachedGuard::enter(id);
+        // Restore ownership even if host code panics, then preserve the panic.
+        // The callback can remove/reorder iframe elements while the page is
+        // detached, so the original vector index is not a context identity.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _g = AncestorGuard::push(page);
             f(&mut child)
-        };
-        if let Some(c) = page.frames.children.get_mut(i) {
-            if c.page.is_none() {
-                c.page = Some(child);
+        }));
+        let retained = if let Some(frame) = page.frames.children.iter_mut().find(|frame| frame.id == id) {
+            if frame.page.is_none() {
+                frame.page = Some(child);
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
+        drop(detached);
+        let r = match result {
+            Ok(r) => r,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
         // The child's scripts may have changed this document.
         if page.script.dom_dirty && page.script.host.is_some() {
             page.script.dom_dirty = false;
             self.restyle(page);
         }
-        Some(r)
+        retained.then_some(r)
     }
 
     /// Run `f` on the page of descendant frame `id` of `page` (detached
@@ -303,58 +346,92 @@ impl Engine {
         self.with_child(page, i, |c| self.with_frame(c, id, f)).flatten()
     }
 
-    /// Run a same-origin parent's request in the realm of descendant frame
-    /// `id` (see [`rabbithole_script::FrameCall`]). None when the frame is
-    /// cross-origin, gone, or running script itself.
+    /// Descendant requests retain their existing origin checks. The new
+    /// ancestor/sibling route is deliberately restricted to inactive HTTP(S)
+    /// documents with the same tuple origin, pending opaque identity support.
     pub(crate) fn call_in_frame(&self, page: &mut Page, id: u64, call: rabbithole_script::FrameCall) -> Option<rabbithole_script::FrameReply> {
+        self.call_in_frame_with_deadline(page, id, call, None)
+    }
+
+    pub(crate) fn call_in_frame_with_deadline(&self, page: &mut Page, id: u64, call: rabbithole_script::FrameCall, deadline: Option<std::time::Instant>) -> Option<rabbithole_script::FrameReply> {
         let origin = page_origin(page);
+        let source_http = matches!(page.url.scheme(), "http" | "https") && origin != "null" && page.url.origin() == origin;
+        let reverse_allowed = source_http && matches!(&call, rabbithole_script::FrameCall::GetGlobal { .. } | rabbithole_script::FrameCall::CallGlobal { .. });
         let mut call = Some(call);
-        let r = self.with_frame(page, id, &mut |child: &mut Page| {
-            if page_origin(child) != origin {
+        let mut invoke = |target: &mut Page| {
+            if page_origin(target) != origin { return None; }
+            if target.script.host.is_none() && !target.script.scripts_ran && self.scripting {
+                self.ensure_script_host(target);
+            }
+            let mut host = target.script.host.take()?;
+            let reply = {
+                let mut env = EngineEnv { engine: self, page: target };
+                host.frame_call_with_deadline(&mut env, call.take()?, deadline)
+            };
+            target.script.host = Some(host);
+            target.script.dom_dirty = true;
+            Some(reply)
+        };
+        let r = if find_frame_page(page, id) {
+            self.with_frame(page, id, &mut invoke).flatten()
+        } else {
+            // Only global reads/calls gain the reverse route. Do not broaden
+            // foreign DOM methods, blank/data inheritance or frame limits.
+            if !reverse_allowed {
                 return None;
             }
-            // A document without scripts of its own (the initial
-            // about:blank) gets its realm when a parent first scripts it.
-            if child.script.host.is_none() && !child.script.scripts_ran && self.scripting {
-                self.ensure_script_host(child);
-            }
-            let mut host = child.script.host.take()?;
-            let reply = {
-                let mut env = EngineEnv { engine: self, page: child };
-                host.frame_call(&mut env, call.take()?)
+            // `ancestors()` is nearest-first; choose the owning page that
+            // actually contains the target. Sibling calls must detach it,
+            // too: leaving an executing sibling inside an accessible parent
+            // would allow parent traversal to alias its mutable Page.
+            let owner = ancestors().into_iter().find(|p| {
+                // Same lifetime invariant as `ancestor_page`; never stored.
+                let p = unsafe { &**p };
+                p.frame_id == id || find_frame_page(p, id)
+            })?;
+            let owner = unsafe { &mut *owner };
+            let mut reverse = |target: &mut Page| {
+                if !matches!(target.url.scheme(), "http" | "https") || target.url.origin() != origin || target.script.host.is_none() { return None; }
+                invoke(target)
             };
-            child.script.host = Some(host);
-            // Restyled and repainted on the next sync (or layout query).
-            child.script.dom_dirty = true;
-            Some(reply)
-        })
-        .flatten();
+            if owner.frame_id == id { reverse(owner) } else { self.with_frame(owner, id, &mut reverse).flatten() }
+        };
         if r.is_some() {
             TOUCHED.with(|t| {
                 let mut t = t.borrow_mut();
-                if !t.contains(&id) {
-                    t.push(id);
-                }
+                if !t.contains(&id) { t.push(id); }
             });
         }
         r
     }
 
-    /// Microtask checkpoint of the frames scripts of `page` called into.
+    /// Drain only after the outer owner and all suspended source stacks have
+    /// returned. A nested checkpoint must not run ancestor Promise callbacks
+    /// inside the still-active calling JS stack. Unreachable live contexts
+    /// remain pending for their owning root; removed contexts are discarded.
     pub(crate) fn frame_microtasks(&self, page: &mut Page) {
+        if !ancestors().is_empty() || page.script.host.is_none() || !rabbithole_script::ScriptHost::frame_checkpoint_allowed() { return; }
         let ids = TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()));
         for id in ids {
-            self.with_frame(page, id, &mut |child: &mut Page| {
-                if let Some(mut host) = child.script.host.take() {
-                    {
-                        let mut env = EngineEnv { engine: self, page: child };
-                        host.run_jobs(&mut env);
-                    }
-                    child.script.host = Some(host);
-                    child.script.dom_dirty = true;
+            let mut drain = |target: &mut Page| {
+                let Some(mut host) = target.script.host.take() else { return false };
+                {
+                    let mut env = EngineEnv { engine: self, page: target };
+                    host.run_jobs(&mut env);
                 }
-            });
+                target.script.host = Some(host);
+                target.script.dom_dirty = true;
+                true
+            };
+            let drained = if page.frame_id == id { drain(page) } else { self.with_frame(page, id, &mut drain).unwrap_or(false) };
+            if !drained && self.frames.borrow().exists(id) {
+                TOUCHED.with(|t| {
+                    let mut t = t.borrow_mut();
+                    if !t.contains(&id) { t.push(id); }
+                });
+            }
         }
+        if TOUCHED.with(|t| !t.borrow().is_empty()) { set_mail_pending(); }
     }
 
     fn child_index(page: &Page, node: NodeId) -> Option<usize> {
@@ -544,7 +621,7 @@ impl Engine {
         // about:blank document now (not through a later load, which would
         // replace a document scripts already wrote into and fire a stray
         // `load`).
-        let blank: Vec<NodeId> = page.frames.children.iter().filter(|c| c.page.is_none() && c.pending.is_none() && c.source == FrameSource::Blank).map(|c| c.node).collect();
+        let blank: Vec<NodeId> = page.frames.children.iter().filter(|c| c.page.is_none() && !frame_detached(c.id) && c.pending.is_none() && c.source == FrameSource::Blank).map(|c| c.node).collect();
         for node in blank {
             self.create_blank_frame(page, node);
         }
@@ -573,7 +650,7 @@ impl Engine {
                     }
                 }
             }
-            if (c.page.is_none() || c.stale) && c.pending.is_none() {
+            if (c.stale || (c.page.is_none() && !frame_detached(c.id))) && c.pending.is_none() {
                 c.stale = false;
                 let vp = Viewport { width: c.size.0.max(1.0), height: c.size.1.max(1.0) };
                 let loader = base_loader.clone();
@@ -631,6 +708,10 @@ impl Engine {
     /// the next sync.
     pub(crate) fn create_blank_frame(&self, page: &mut Page, node: NodeId) -> Option<u64> {
         let existing = page.frames.children.iter().position(|c| c.node == node);
+        if let Some(index) = existing {
+            let id = page.frames.children[index].id;
+            if frame_detached(id) { return Some(id); }
+        }
         if existing.is_none() && (!page.doc.is_element(node, "iframe") || !page.doc.is_connected(node) || page.frame_depth >= MAX_DEPTH || page.frames.children.len() >= MAX_FRAMES_PER_PAGE) {
             return None;
         }
@@ -782,15 +863,19 @@ impl Engine {
             if let Some(result) = arrived {
                 page.frames.children[i].pending = None;
                 installed = true;
+                let id = page.frames.children[i].id;
                 self.install_frame(page, i, result, &mut out);
-                if i >= page.frames.children.len() {
-                    break;
-                }
+                let Some(current) = page.frames.children.iter().position(|c| c.id == id) else { continue };
+                i = current;
             }
             let now = self.start.elapsed().as_secs_f64() * 1000.0 + 0.5;
             let run = page.frames.children[i].page.as_ref().map(|child| child.next_script_due().map(|d| d <= now).unwrap_or(false) || !child.frames.children.is_empty()).unwrap_or(false);
             if run {
-                if let Some(o) = self.with_child(page, i, |child| self.tick(child)) {
+                let id = page.frames.children[i].id;
+                let result = self.with_child(page, i, |child| self.tick(child));
+                let Some(current) = page.frames.children.iter().position(|c| c.id == id) else { continue };
+                i = current;
+                if let Some(o) = result {
                     let node = page.frames.children.get_mut(i).map(|c| {
                         if o.relayout {
                             c.dirty = true;
@@ -861,12 +946,29 @@ impl Engine {
         if let Some(e) = self.frames.borrow_mut().entries.get_mut(&id) {
             e.url = child.url.to_string();
         }
-        {
+        // The new document is executing under the same browsing-context ID.
+        // Hide the previous document until commit rather than letting a
+        // callback address its realm as if it were the running document.
+        let old = page.frames.children[i].page.take();
+        let detached = DetachedGuard::enter(id);
+        let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _g = AncestorGuard::push(page);
             self.finish_page_load(&mut child);
+        }));
+        let current = page.frames.children.iter().position(|c| c.id == id);
+        if let Err(panic) = finished {
+            if let Some(i) = current { page.frames.children[i].page = old; }
+            drop(detached);
+            std::panic::resume_unwind(panic);
         }
+        let Some(i) = current else {
+            self.frames.borrow_mut().remove_tree(id);
+            return;
+        };
         let nav = child.script.pending_navigation.take();
-        if let Some(old) = page.frames.children[i].page.replace(Box::new(child)) {
+        page.frames.children[i].page = Some(Box::new(child));
+        drop(detached);
+        if let Some(old) = old {
             let mut reg = self.frames.borrow_mut();
             for g in &old.frames.children {
                 reg.remove_tree(g.id);
@@ -893,8 +995,8 @@ impl Engine {
 
     /// After a synthetic click inside child frame `i` (hosted by `node`):
     /// repaint the frame and apply its side effects.
-    pub(crate) fn frame_click_done(&self, page: &mut Page, node: NodeId, i: usize, o: ScriptOutcome, out: &mut ScriptOutcome) {
-        if let Some(c) = page.frames.children.get_mut(i) {
+    pub(crate) fn frame_click_done(&self, page: &mut Page, node: NodeId, _i: usize, o: ScriptOutcome, out: &mut ScriptOutcome) {
+        if let Some(c) = page.frame_mut(node) {
             c.dirty = true;
         }
         self.frame_side_effects(page, node, o, out);
@@ -973,7 +1075,7 @@ impl Engine {
             if let Some(i) = prev.and_then(|n| Self::child_index(page, n)) {
                 if let Some(o) = self.with_child(page, i, |child| self.pointer_move(child, -1.0, -1.0, m)) {
                     if o.relayout {
-                        page.frames.children[i].dirty = true;
+                        if let Some(c) = page.frames.children.iter_mut().find(|c| Some(c.node) == prev) { c.dirty = true; }
                     }
                 }
             }
@@ -983,7 +1085,7 @@ impl Engine {
         if let Some(i) = Self::child_index(page, node) {
             if let Some(o) = self.with_child(page, i, |child| self.pointer_move(child, cx, cy, m)) {
                 if o.relayout {
-                    page.frames.children[i].dirty = true;
+                    if let Some(c) = page.frame_mut(node) { c.dirty = true; }
                 }
                 self.frame_side_effects(page, node, o, out);
             }
@@ -1007,7 +1109,7 @@ impl Engine {
         let i = Self::child_index(page, node)?;
         let mut d = self.with_child(page, i, |child| self.pointer_down(child, cx, cy, button, m))?;
         let o = std::mem::take(&mut d.outcome);
-        page.frames.children[i].dirty = true;
+        page.frame_mut(node)?.dirty = true;
         self.frame_side_effects(page, node, o, &mut out);
         if self.paint_frames(page) {
             out.relayout = true;
@@ -1025,7 +1127,7 @@ impl Engine {
         let i = Self::child_index(page, node)?;
         let mut up = self.with_child(page, i, |child| self.pointer_up(child, cx, cy, button, m))?;
         let o = std::mem::take(&mut up.outcome);
-        page.frames.children[i].dirty = true;
+        page.frame_mut(node)?.dirty = true;
         let action = match up.action {
             crate::ClickAction::Navigate { url, new_tab: false } => {
                 self.navigate_frame_node(page, node, url);
@@ -1102,7 +1204,7 @@ impl Engine {
             None => key_into_page(self, child, key, code, pressed, m),
         })?;
         if o.relayout {
-            page.frames.children[i].dirty = true;
+            page.frame_mut(node)?.dirty = true;
         }
         let mut out = ScriptOutcome { default_prevented: o.default_prevented, ..Default::default() };
         let nav = o.navigation.take();
@@ -1230,12 +1332,15 @@ fn deliver_in_tree(engine: &Engine, page: &mut Page, m: &FrameMessage) -> Option
         page.script.host = Some(host);
         return Some(engine.settle(page, false));
     }
-    for i in 0..page.frames.children.len() {
+    let ids: Vec<_> = page.frames.children.iter().map(|c| c.id).collect();
+    for id in ids {
+        let Some(i) = page.frames.children.iter().position(|c| c.id == id) else { continue };
         let node = page.frames.children[i].node;
         if page.frames.children[i].page.is_none() {
             continue;
         }
         let r = engine.with_child(page, i, |child| deliver_in_tree(engine, child, m)).flatten();
+        let Some(i) = page.frames.children.iter().position(|c| c.id == id) else { continue };
         if let Some(o) = &r {
             if o.relayout {
                 page.frames.children[i].dirty = true;
@@ -1276,5 +1381,158 @@ impl EngineEnv<'_> {
         let from_origin = origin_of(self.page);
         self.engine.frames.borrow_mut().outbox.push(FrameMessage { from: self.page.frame_id, from_origin, to: target, data, target_origin });
         set_mail_pending();
+    }
+}
+
+#[cfg(test)]
+mod ancestor_call_tests {
+    use super::*;
+    use rabbithole_script::{FrameCall, FrameReply};
+    use std::time::{Duration, Instant};
+
+    fn fixture() -> (Engine, Page) {
+        let mut engine = Engine::new_bundled_fonts_only();
+        engine.scripting = true;
+        engine.loader.load_scripts = true;
+        let page = engine.load_html(
+            "<iframe></iframe><iframe></iframe><script>var marker='root'; var trace=[]; function value(){trace.push('sync'); Promise.resolve().then(()=>trace.push('promise'));return 42}</script>",
+            Url::parse("https://frame.test/root").unwrap(),
+            Viewport { width: 800.0, height: 600.0 },
+        );
+        assert_eq!(page.frames.children.len(), 2);
+        (engine, page)
+    }
+
+    // Real Engine/ScriptHost realms, constructed from in-memory HTML at HTTP
+    // URLs. This avoids network timing while preserving the real frame IDs,
+    // registry, host calls and ownership machinery.
+    fn replace_child(engine: &mut Engine, page: &mut Page, index: usize, url: &str, html: &str) {
+        let id = page.frames.children[index].id;
+        engine.frame_context.replace(Some(FrameContext { id, depth: 1, name: None, origin: None }));
+        let loaded = engine.loader.load_html(html, Url::parse(url).unwrap(), page.viewport);
+        let child = engine.build_page_unscripted(loaded, page.viewport);
+        engine.frame_context.replace(None);
+        page.frames.children[index].page = Some(Box::new(child));
+        engine.frames.borrow_mut().entries.get_mut(&id).unwrap().url = url.into();
+    }
+
+    fn eval(engine: &Engine, page: &mut Page, source: &str) -> String {
+        engine.eval_in_page(page, source).trim_matches(|c| c == '\'' || c == '"').to_owned()
+    }
+
+    fn finish(engine: &Engine, page: &mut Page, index: usize) {
+        engine.with_child(page, index, |child| engine.finish_page_load(child)).unwrap();
+        engine.frame_microtasks(page);
+    }
+
+    #[test]
+    fn inactive_http_ancestor_globals_and_calls_defer_ancestor_jobs_until_source_returns() {
+        let (mut engine, mut page) = fixture();
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/child", "<script>var report=parent.marker+':'+parent.value()+':'+parent.trace.join(','); Promise.resolve().then(()=>{report+=':'+parent.trace.join(',')})</script>");
+        finish(&engine, &mut page, 0);
+        // The parent Promise must not run inside the suspended child stack,
+        // nor inside that child's checkpoint while the owner is detached.
+        assert_eq!(eval(&engine, &mut page, "frames[0].report"), "root:42:sync:sync");
+        assert_eq!(eval(&engine, &mut page, "trace.join(',')"), "sync,promise");
+    }
+
+    #[test]
+    fn active_ancestor_stays_unavailable_instead_of_aliasing_its_script_host() {
+        let (mut engine, mut page) = fixture();
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/child", "<script>function readParent(){return typeof parent.marker}</script>");
+        finish(&engine, &mut page, 0);
+        assert_eq!(eval(&engine, &mut page, "frames[0].readParent()"), "undefined");
+        assert_eq!(eval(&engine, &mut page, "marker"), "root");
+    }
+
+    #[test]
+    fn reverse_route_rejects_cross_origin_without_running_the_getter() {
+        let (mut engine, mut page) = fixture();
+        eval(&engine, &mut page, "var reads=0;Object.defineProperty(window,'secret',{get(){reads++;return 1}})");
+        replace_child(&mut engine, &mut page, 0, "https://other.test/child", "<script>var report=typeof parent.secret</script>");
+        finish(&engine, &mut page, 0);
+        assert_eq!(eval(&engine, &mut page, "reads"), "0");
+    }
+
+    #[test]
+    fn sibling_call_detaches_and_restores_the_target_context() {
+        let (mut engine, mut page) = fixture();
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "");
+        replace_child(&mut engine, &mut page, 1, "https://frame.test/target", "<script>var target='sibling'</script>");
+        finish(&engine, &mut page, 0);
+        finish(&engine, &mut page, 1);
+        let id = page.frames.children[1].id;
+        let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_deadline(source, id, FrameCall::GetGlobal { name: "target".into() }, Some(Instant::now()+Duration::from_secs(1)))).flatten();
+        assert!(matches!(result, Some(FrameReply::Value(_))));
+        assert_eq!(page.frames.children[1].page.as_ref().unwrap().frame_id, id);
+        assert!(!frame_detached(id));
+    }
+
+    #[test]
+    fn detached_context_is_restored_by_id_after_sibling_reordering() {
+        let (engine, mut page) = fixture();
+        let id = page.frames.children[0].id;
+        let owner = page.frame_id;
+        let child_id = engine.with_child(&mut page, 0, |child| {
+            let parent = ancestor_page(owner).unwrap();
+            let node = parent.frames.children[0].node;
+            assert!(frame_detached(id));
+            assert_eq!(engine.create_blank_frame(parent, node), Some(id));
+            assert!(parent.frames.children[0].page.is_none());
+            parent.frames.children.swap(0, 1);
+            child.frame_id
+        });
+        assert_eq!(child_id, Some(id));
+        assert_eq!(page.frames.children[1].page.as_ref().unwrap().frame_id, id);
+        assert_ne!(page.frames.children[0].page.as_ref().unwrap().frame_id, id);
+        assert!(!frame_detached(id));
+    }
+
+    #[test]
+    fn removing_a_detached_context_does_not_replace_its_sibling() {
+        let (engine, mut page) = fixture();
+        let removed = page.frames.children[0].id;
+        let sibling = page.frames.children[1].id;
+        let owner = page.frame_id;
+        let result = engine.with_child(&mut page, 0, |_| {
+            ancestor_page(owner).unwrap().frames.children.remove(0);
+            7
+        });
+        assert_eq!(result, None);
+        assert_eq!(page.frames.children.len(), 1);
+        assert_eq!(page.frames.children[0].page.as_ref().unwrap().frame_id, sibling);
+        assert!(!frame_detached(removed));
+    }
+
+    #[test]
+    fn real_ancestor_callback_can_remove_its_calling_frame_without_overwriting_a_sibling() {
+        let (mut engine, mut page) = fixture();
+        eval(&engine, &mut page, "function removeSource(){document.querySelector('iframe').remove();return document.body.offsetWidth}");
+        let sibling = page.frames.children[1].id;
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "<script>parent.removeSource()</script>");
+        engine.with_child(&mut page, 0, |child| engine.finish_page_load(child));
+        engine.settle(&mut page, false);
+        assert_eq!(page.frames.children.len(), 1);
+        assert_eq!(page.frames.children[0].id, sibling);
+        assert_eq!(page.frames.children[0].page.as_ref().unwrap().frame_id, sibling);
+    }
+
+    #[test]
+    fn ancestor_getter_and_call_share_absolute_deadline_and_recover() {
+        for getter in [true, false] {
+            let (mut engine, mut page) = fixture();
+            eval(&engine, &mut page, "Object.defineProperty(window,'loopGetter',{get(){for(;;){}}});function loopCall(){for(;;){}}");
+            replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "");
+            finish(&engine, &mut page, 0);
+            let id = page.frame_id;
+            let call = if getter { FrameCall::GetGlobal { name: "loopGetter".into() } } else { FrameCall::CallGlobal { name: "loopCall".into(), args: r#"{"t":"a","id":0,"v":[],"l":0}"#.into() } };
+            let old_budget = page.script.host.as_mut().unwrap().realm().task_budget;
+            let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_deadline(source, id, call, Some(Instant::now()+Duration::from_millis(20)))).flatten();
+            assert!(matches!(result, Some(FrameReply::Error(ref message)) if message.contains("timed out")), "{result:?}");
+            let host = page.script.host.as_mut().unwrap();
+            assert!(host.realm().deadline.is_none());
+            assert_eq!(host.realm().task_budget, old_budget);
+            assert_eq!(eval(&engine, &mut page, "marker+':alive'"), "root:alive");
+        }
     }
 }

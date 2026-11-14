@@ -84,11 +84,15 @@ thread_local! {
     /// Some realm called into a same-origin frame's realm since the last
     /// microtask checkpoint (see [`checkpoint`]).
     static FOREIGN_CALLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FOREIGN_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Microtask checkpoint of the realm running now: frames it called into
 /// run theirs too (same-origin frames share one event loop).
 pub(crate) fn checkpoint() {
+    // A nested host API may request a checkpoint while the source JS stack
+    // is suspended in a cross-realm call. Keep its work pending until return.
+    if FOREIGN_DEPTH.with(|d| d.get() != 0) { return; }
     if FOREIGN_CALLS.with(|f| f.replace(false)) && crate::env::env_active() {
         with_env(|env| env.frame_checkpoint());
     }
@@ -96,11 +100,32 @@ pub(crate) fn checkpoint() {
 
 /// Run `call` in the realm of same-origin frame `id` (None when the frame
 /// cannot be scripted from this realm).
+struct ForeignCallGuard;
+impl ForeignCallGuard {
+    fn enter() -> Self {
+        FOREIGN_DEPTH.with(|d| d.set(d.get() + 1));
+        Self
+    }
+}
+impl Drop for ForeignCallGuard {
+    fn drop(&mut self) { FOREIGN_DEPTH.with(|d| d.set(d.get() - 1)); }
+}
+
+pub(crate) fn checkpoint_allowed() -> bool { FOREIGN_DEPTH.with(|d| d.get() == 0) }
+
 pub(crate) fn call_frame(id: u64, call: crate::FrameCall) -> Option<crate::FrameReply> {
+    let _guard = ForeignCallGuard::enter();
     let r = with_env(|env| env.frame_call(id, call));
     if r.is_some() {
         FOREIGN_CALLS.with(|f| f.set(true));
     }
+    r
+}
+
+fn call_global(realm: &Realm, id: u64, call: crate::FrameCall) -> Option<crate::FrameReply> {
+    let _guard = ForeignCallGuard::enter();
+    let r = with_env(|env| env.frame_call_with_deadline(id, call, realm.deadline));
+    if r.is_some() { FOREIGN_CALLS.with(|f| f.set(true)); }
     r
 }
 
@@ -202,13 +227,13 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         // functions run in the frame's realm.
         "global" => {
             let name = realm.to_rust_string(arg(args, 2))?;
-            let r = call_frame(id, crate::FrameCall::GetGlobal { name });
+            let r = call_global(realm, id, crate::FrameCall::GetGlobal { name });
             reply_value(realm, id, r)?
         }
         "call" => {
             let name = realm.to_rust_string(arg(args, 2))?;
             let a = realm.to_rust_string(arg(args, 3))?;
-            let r = call_frame(id, crate::FrameCall::CallGlobal { name, args: a });
+            let r = call_global(realm, id, crate::FrameCall::CallGlobal { name, args: a });
             reply_value(realm, id, r)?
         }
         "navigate" => {
