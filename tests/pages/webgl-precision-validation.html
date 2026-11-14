@@ -1,0 +1,38 @@
+<!doctype html><title>Versioned GLSL precision and program validation</title>
+<style>body{margin:0}canvas{display:block}</style>
+<canvas id="gl1" width="4" height="4"></canvas><canvas id="gl2" width="4" height="4"></canvas>
+<script>
+for (const version of [1,2]) {
+  const gl = document.getElementById('gl'+version).getContext(version===2?'webgl2':'webgl', {preserveDrawingBuffer:true,premultipliedAlpha:false});
+  function check(value, message) { if (!value) throw new Error(version+': '+message); }
+  function shader(kind, source) {
+    const s=gl.createShader(kind); gl.shaderSource(s,source); gl.compileShader(s);
+    check(gl.getShaderParameter(s,gl.COMPILE_STATUS),gl.getShaderInfoLog(s)); return s;
+  }
+  const prefix=version===2?'#version 300 es\n':'';
+  const types=['float','int','sampler2D','samplerCube'];
+  if(version===2) types.push('sampler3D','sampler2DArray','sampler2DShadow','samplerCubeShadow','sampler2DArrayShadow','isampler2D','isampler3D','isamplerCube','isampler2DArray','usampler2D','usampler3D','usamplerCube','usampler2DArray');
+  let header=prefix; for(const type of types) header+='precision highp '+type+';\n';
+  const p=gl.createProgram();
+  check(gl.getProgramParameter(p,gl.VALIDATE_STATUS)===false,'initial validate status');
+  check(gl.getError()===gl.NO_ERROR,'VALIDATE_STATUS is a recognized query');
+  gl.validateProgram(p);
+  check(gl.getProgramParameter(p,gl.VALIDATE_STATUS)===false,'unlinked program validated');
+  check(gl.getProgramInfoLog(p).length>0,'validation failure has no diagnostic');
+  check(gl.getError()===gl.NO_ERROR,'failed validation raised a GL error');
+  gl.attachShader(p,shader(gl.VERTEX_SHADER,header+(version===2?'in':'attribute')+' vec2 position;void main(){gl_Position=vec4(position,0.0,1.0);}'));
+  gl.attachShader(p,shader(gl.FRAGMENT_SHADER,header+(version===2?'out vec4 color;':'')+'void main(){'+(version===2?'color':'gl_FragColor')+'=vec4(0.0,1.0,0.0,1.0);}'));
+  gl.linkProgram(p);check(gl.getProgramParameter(p,gl.LINK_STATUS),gl.getProgramInfoLog(p));
+  check(gl.getProgramParameter(p,gl.VALIDATE_STATUS)===false,'link silently validated program');
+  gl.validateProgram(p);check(gl.getProgramParameter(p,gl.VALIDATE_STATUS)===true,gl.getProgramInfoLog(p));
+  check(gl.getProgramInfoLog(p)==='','successful validation retained failure log');
+  check(gl.getParameter(gl.CURRENT_PROGRAM)===null,'validation changed current program');
+  gl.useProgram(p);
+  const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+  const a=gl.getAttribLocation(p,'position');gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(a);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+  check(Array.from(pixel).join(',')==='0,255,0,255','precision header did not reach pixels');
+  check(gl.getError()===gl.NO_ERROR,'unexpected GL error');console.log(version+' precision validation ok');
+}
+</script>
