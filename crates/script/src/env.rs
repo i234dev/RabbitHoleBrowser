@@ -19,6 +19,8 @@ pub trait HostEnv {
     fn service_worker_scope(&self) -> Option<crate::ServiceWorkerScope> { None }
     fn doc(&mut self) -> &mut Document;
     fn document_url(&self) -> Url;
+    /// The document can finish loading before its first script realm exists.
+    fn document_is_complete(&self) -> bool { false }
     /// Effective origin, including inheritance by an initial about:blank.
     fn security_origin(&self) -> String { self.document_url().origin() }
     /// Top-level context owned by the embedder; absent in workers/headless hosts.
