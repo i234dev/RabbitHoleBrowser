@@ -177,14 +177,71 @@ fn waiting(page: &crate::Page) -> bool {
 pub fn render(engine: &mut Engine, url: &str, max_wait: Duration) -> Result<Frame, String> {
     let vp = Viewport { width: WIDTH, height: HEIGHT };
     let mut page = engine.load(url, vp).map_err(|e| e.to_string())?;
-    engine.settle_for_snapshot(&mut page, max_wait.min(Duration::from_secs(2)));
+    finish_render(engine, &mut page, max_wait)
+}
+
+fn finish_render(engine: &Engine, page: &mut crate::Page, max_wait: Duration) -> Result<Frame, String> {
     let deadline = Instant::now() + max_wait;
-    while waiting(&page) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
-        let _ = engine.tick(&mut page);
+    engine.settle_for_snapshot(page, max_wait.min(Duration::from_secs(2)));
+    check_watchdog(page)?;
+    if waiting(page) {
+        if Instant::now() >= deadline {
+            return Err("reftest-wait did not clear before the snapshot deadline".into());
+        }
+        // WPT's test-wait.js dispatches this bubbling event on the root after
+        // the initial render. It belongs to the reftest harness, not normal
+        // page loading. Take the first paint before letting the test proceed.
+        let _ = engine.snapshot(page);
+        dispatch_rendered(engine, page, deadline)?;
     }
-    let _ = engine.tick(&mut page);
-    Ok(engine.snapshot(&page))
+    loop {
+        if waiting(page) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("reftest-wait did not clear before the snapshot deadline".into());
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(5)));
+            let _ = engine.tick(page);
+            check_watchdog(page)?;
+            continue;
+        }
+        // Clearing the class can schedule paint/scroll/animation work. Flush
+        // it within the same deadline and recheck in case it restored the wait.
+        engine.settle_for_snapshot(page, deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(2)));
+        check_watchdog(page)?;
+        if !waiting(page) {
+            return Ok(engine.snapshot(page));
+        }
+    }
+}
+
+fn check_watchdog(page: &crate::Page) -> Result<(), String> {
+    if page.script.watchdog_abort_count() > 0 {
+        Err("script watchdog aborted before the reftest snapshot".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn dispatch_rendered(engine: &Engine, page: &mut crate::Page, deadline: Instant) -> Result<(), String> {
+    // Use a script-created event, as WPT does, so isTrusted remains false.
+    // Keep the page's normal task budget and the harness deadline, rather
+    // than the longer budget of the developer-console evaluation helper.
+    engine.ensure_script_host(page);
+    let Some(mut host) = page.script.host.take() else { return Err("TestRendered needs a script realm".into()) };
+    let result = {
+        let mut env = crate::scripting::EngineEnv { engine, page };
+        let task_budget = host.realm().task_budget.unwrap_or_else(rabbithole_script::task_budget);
+        host.realm().begin_task();
+        host.realm().set_deadline(Some(deadline.min(Instant::now() + task_budget)));
+        let result = host.eval_for_console(&mut env, "document.documentElement.dispatchEvent(new Event('TestRendered', {bubbles:true}))");
+        host.realm().set_deadline(None);
+        result
+    };
+    page.script.host = Some(host);
+    let _ = engine.settle(page, false);
+    check_watchdog(page)?;
+    if result == "true" { Ok(()) } else { Err(format!("TestRendered dispatch failed: {result}")) }
 }
 
 /// Outcome of one reftest.
@@ -405,6 +462,86 @@ pub fn test_engine(root: &Path) -> Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_event_bubbles_once_after_layout_and_waits_for_animation_pixels() {
+        let mut engine = Engine::new_bundled_fonts_only();
+        engine.loader.load_images = false;
+        let mut page = engine.load_html(
+            r#"<!doctype html><html class=reftest-wait><style>
+              body{margin:0}#result{width:100vw;height:100vh;background:red}
+            </style><div id=result></div><script>
+              let count=0;
+              document.addEventListener('TestRendered',event=>{
+                count++;document.documentElement.setAttribute('data-count',String(count));
+                if(event.target!==document.documentElement||!event.bubbles||event.isTrusted||document.readyState!=='complete')return;
+                const result=document.getElementById('result');
+                if(result.offsetWidth!==800||result.offsetHeight!==600)return;
+                requestAnimationFrame(()=>{
+                  result.style.backgroundColor='lime';
+                  document.documentElement.classList.remove('reftest-wait');
+                });
+              });
+            </script>"#,
+            rabbithole_net::Url::parse("https://example.test/").unwrap(),
+            Viewport { width: WIDTH, height: HEIGHT },
+        );
+        assert!(waiting(&page));
+        assert_eq!(page.doc.attr(page.doc.html_element().unwrap(), "data-count"), None);
+        let frame = finish_render(&engine, &mut page, Duration::from_secs(2)).unwrap();
+        assert!(!waiting(&page));
+        assert_eq!(page.doc.attr(page.doc.html_element().unwrap(), "data-count"), Some("1"));
+        assert!(frame.rgba.chunks_exact(4).all(|pixel| pixel == [0, 255, 0, 255]));
+        let errors: Vec<_> = page.take_console().into_iter().filter(|(level, _)| level == "error").collect();
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let mut reference = engine.load_html(
+            r#"<!doctype html><style>body{margin:0}#result{width:100vw;height:100vh;background:red}</style>
+            <body onload="requestAnimationFrame(()=>{document.getElementById('result').style.backgroundColor='lime'})"><div id=result></div>"#,
+            rabbithole_net::Url::parse("https://example.test/reference").unwrap(),
+            Viewport { width: WIDTH, height: HEIGHT },
+        );
+        let reference_frame = finish_render(&engine, &mut reference, Duration::from_secs(2)).unwrap();
+        assert!(compare_passes(&frame, &reference_frame, false, None).0);
+        let errors: Vec<_> = reference.take_console().into_iter().filter(|(level, _)| level == "error").collect();
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn unresolved_wait_is_an_error_instead_of_an_unchanged_reference_match() {
+        let mut engine = Engine::new_bundled_fonts_only();
+        let mut page = engine.load_html(
+            "<!doctype html><html class=reftest-wait><style>body{margin:0;background:red}</style>",
+            rabbithole_net::Url::parse("https://example.test/").unwrap(),
+            Viewport { width: WIDTH, height: HEIGHT },
+        );
+        let identical_reference = engine.snapshot(&page);
+        assert!(compare_passes(&identical_reference, &identical_reference, false, None).0);
+        let error = finish_render(&engine, &mut page, Duration::ZERO).unwrap_err();
+        assert!(error.contains("reftest-wait"), "{error}");
+        assert!(waiting(&page));
+    }
+
+    #[test]
+    fn removing_wait_before_a_watchdog_abort_cannot_produce_a_partial_pass() {
+        let mut engine = Engine::new_bundled_fonts_only();
+        let mut page = engine.load_html(
+            r#"<!doctype html><html class=reftest-wait><style>body{background:lime}</style><script>
+              document.documentElement.addEventListener('TestRendered',()=>{
+                document.documentElement.classList.remove('reftest-wait');
+                while(true){}
+              });
+            </script>"#,
+            rabbithole_net::Url::parse("https://example.test/").unwrap(),
+            Viewport { width: WIDTH, height: HEIGHT },
+        );
+        // A short budget belongs only to this test page, not the browser default.
+        page.script.host.as_mut().unwrap().realm().set_task_budget(Some(Duration::from_millis(10)));
+        let error = finish_render(&engine, &mut page, Duration::from_secs(2)).unwrap_err();
+        assert!(!waiting(&page));
+        assert!(page.script.watchdog_abort_count() > 0);
+        assert!(error.contains("watchdog"), "{error}");
+    }
 
     #[test]
     fn parses_links_and_fuzzy() {
