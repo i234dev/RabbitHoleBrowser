@@ -167,7 +167,7 @@ fn bool_types_reject_float_math_numeric_conditions_and_nonuniform_interfaces() {
             "if(1.0){}", "if(vec2(1.0)){}", "bool b=1.0;", "float f=true;",
             "bool b=true+false;", "bool b=-true;", "bool b=+false;",
             "bool b=!1.0;", "bool b=true&&1.0;", "bool b=1.0||true;",
-            "bool b=vec2(1.0)<vec2(2.0);", "bool b=1<2;", "bool b=true==1.0;",
+            "bool b=vec2(1.0)<vec2(2.0);", "if(1){}", "bool b=1<2.0;", "bool b=true==1.0;",
             "bool b=vec2(1.0)==vec3(1.0);", "float f=sin(true);", "float f=float(true);",
             "bool b=bool(1.0);", "lowp bool b=true;", "vec3 v=vec3(true);", "float f=true.x;",
             "bool b=true||unknown;", "bool b=false&&unknown;",

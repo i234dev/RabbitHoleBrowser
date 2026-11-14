@@ -213,16 +213,28 @@ impl Context {
         Ok(())
     }
     pub fn uniform_i32(&mut self, location: i32, values: &[i32]) -> Result<()> {
+        self.uniform_i32_components(location, 1, values)
+    }
+    pub fn uniform_i32_components(&mut self, location: i32, components: u32, values: &[i32]) -> Result<()> {
         if location < 0 {
             return Ok(());
         }
-        if values.is_empty() {
+        if !(1..=4).contains(&components) {
             return Err(Error::InvalidValue);
         }
-        if values.len() != 1 {
+        let u = self.uniform_mut(location)?;
+        let width = components as usize;
+        if values.len() < width || values.len() % width != 0 {
+            return Err(Error::InvalidValue);
+        }
+        if values.len() != width || u.ty.n() != width {
             return Err(Error::InvalidOperation);
         }
-        let u = self.uniform_mut(location)?;
+        if u.ty.is_integer() {
+            let next = Value::from_i32(u.ty, values)?;
+            u.value = next;
+            return Ok(());
+        }
         let value = match u.ty {
             Ty::Bool => u8::from(values[0] != 0) as f32,
             Ty::Sampler2D => {

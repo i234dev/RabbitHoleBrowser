@@ -9,9 +9,6 @@ const MAX_CALL_DEPTH: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ty {
-    // Integer literals can be converted by constructors, not assigned or
-    // used in arithmetic as if they were floating-point values.
-    IntLiteral,
     Int,
     IVec2,
     IVec3,
@@ -32,6 +29,10 @@ impl Ty {
             "sampler2D" => Self::Sampler2D,
             "float" => Self::Float,
             "bool" => Self::Bool,
+            "int" => Self::Int,
+            "ivec2" => Self::IVec2,
+            "ivec3" => Self::IVec3,
+            "ivec4" => Self::IVec4,
             "vec2" => Self::Vec2,
             "vec3" => Self::Vec3,
             "vec4" => Self::Vec4,
@@ -43,7 +44,7 @@ impl Ty {
     }
     pub fn n(self) -> usize {
         match self {
-            Self::IntLiteral | Self::Int | Self::Bool | Self::Sampler2D | Self::Float => 1,
+            Self::Int | Self::Bool | Self::Sampler2D | Self::Float => 1,
             Self::Vec2 | Self::IVec2 => 2,
             Self::Vec3 | Self::IVec3 => 3,
             Self::Vec4 | Self::IVec4 => 4,
@@ -65,6 +66,22 @@ impl Ty {
     }
     pub fn is_integer(self) -> bool {
         matches!(self, Self::Int | Self::IVec2 | Self::IVec3 | Self::IVec4)
+    }
+    fn is_vector(self) -> bool {
+        matches!(self, Self::Vec2 | Self::Vec3 | Self::Vec4 | Self::IVec2 | Self::IVec3 | Self::IVec4)
+    }
+    fn integer_vector(n: usize) -> Self {
+        [Self::Int, Self::IVec2, Self::IVec3, Self::IVec4][n - 1]
+    }
+    fn helper_type(self) -> bool {
+        matches!(self, Self::Bool | Self::Float | Self::Int) || self.is_vector()
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Precision { Low, Medium, High }
+impl Precision {
+    fn parse(name: &str) -> Option<Self> {
+        match name { "lowp" => Some(Self::Low), "mediump" => Some(Self::Medium), "highp" => Some(Self::High), _ => None }
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -136,6 +153,7 @@ struct Expr {
 #[derive(Clone, Debug)]
 enum ExprKind {
     Number(f32),
+    Integer(i32),
     Boolean(bool),
     Texture(Box<Expr>, Box<Expr>),
     Name(String),
@@ -468,6 +486,7 @@ pub(crate) struct Shader {
     pub output: String,
     pub locations: BTreeMap<String, u32>,
     pub symbols: BTreeMap<String, Symbol>,
+    pub integer_uniform_precisions: BTreeMap<String, Precision>,
     pub reads: BTreeSet<String>,
     pub writes: BTreeSet<String>,
     function_globals: BTreeSet<String>,
@@ -499,6 +518,9 @@ impl Shader {
         Ok(())
     }
     fn validate_program(&self) -> EvalResult<()> {
+        for (name, symbol) in &self.symbols {
+            if symbol.qual == Qual::Uniform && symbol.ty.is_integer() && !self.integer_uniform_precisions.contains_key(name) { return Err(EvalError::Type); }
+        }
         if self.symbols.get(&self.output).is_none_or(|symbol| symbol.ty != Ty::Vec4) { return Err(EvalError::Type); }
         let globals: BTreeMap<_, _> = self.function_globals.iter().map(|name| {
             let symbol = self.symbols.get(name).ok_or(EvalError::Type)?;
@@ -538,6 +560,25 @@ impl Shader {
 fn validation_step(budget: &mut usize) -> EvalResult<()> {
     *budget = budget.checked_sub(1).ok_or(EvalError::Shape)?;
     Ok(())
+}
+fn constructor_valid(ty: Ty, args: &[Expr]) -> bool {
+    if args.is_empty() || args.len() > 16 || ty == Ty::Sampler2D { return false; }
+    if ty == Ty::Bool { return args.len() == 1 && args[0].ty == Ty::Bool; }
+    if args.iter().any(|arg| matches!(arg.ty, Ty::Bool | Ty::Sampler2D)) { return false; }
+    if ty.is_integer() && args.iter().any(|arg| !arg.ty.is_integer()) { return false; }
+    if ty == Ty::Int { return args.len() == 1 && args[0].ty == Ty::Int; }
+    let scalar = args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::Int);
+    if ty == Ty::Float { return scalar; }
+    let total: usize = args.iter().map(|arg| arg.ty.n()).sum();
+    let conversion = ty.matrix_dim().is_some() && args.len() == 1 && args[0].ty.matrix_dim().is_some();
+    let trunc = args.len() == 1 && args[0].ty.matrix_dim().is_none() && total >= ty.n() && ty.matrix_dim().is_none();
+    let matrix_components = ty.matrix_dim().is_some() && total >= ty.n() && total - args[args.len()-1].ty.n() < ty.n();
+    (scalar || conversion || trunc || matrix_components || total == ty.n())
+        && (conversion || args.iter().all(|arg| arg.ty.matrix_dim().is_none()))
+}
+fn constructor_float_component(value: &Value, index: usize) -> EvalResult<f32> {
+    if value.ty().is_integer() { Ok(value.integers()?[index] as f32) }
+    else { Ok(value.floats()?[index]) }
 }
 fn validate_statements(body: &[Statement], locals: &BTreeMap<String, Ty>, globals: &BTreeMap<String, Ty>, result: Option<Ty>, budget: &mut usize) -> EvalResult<()> {
     for statement in body {
@@ -581,11 +622,9 @@ impl Function {
 impl Expr {
     fn validate(&self, locals: &BTreeMap<String, Ty>, globals: &BTreeMap<String, Ty>, budget: &mut usize) -> EvalResult<()> {
         validation_step(budget)?;
-        // The first checkpoint refactors storage only; integer expressions will
-        // be admitted by a subsequent compiler milestone, with typed rules.
-        if self.ty.is_integer() { return Err(EvalError::Type); }
         let valid = match &self.kind {
-            ExprKind::Number(_) => matches!(self.ty, Ty::Float | Ty::IntLiteral),
+            ExprKind::Number(_) => self.ty == Ty::Float,
+            ExprKind::Integer(_) => self.ty == Ty::Int,
             ExprKind::Boolean(_) => self.ty == Ty::Bool,
             ExprKind::Name(name) => locals.get(name) == Some(&self.ty),
             ExprKind::Global(name) => globals.get(name) == Some(&self.ty),
@@ -601,13 +640,13 @@ impl Expr {
             ExprKind::Compare(op, a, b) => {
                 a.validate(locals, globals, budget)?; b.validate(locals, globals, budget)?;
                 self.ty == Ty::Bool && a.ty == b.ty && if matches!(op, Compare::Equal | Compare::NotEqual) {
-                    !matches!(a.ty, Ty::IntLiteral | Ty::Sampler2D)
-                } else { a.ty == Ty::Float }
+                    a.ty != Ty::Sampler2D
+                } else { matches!(a.ty, Ty::Float | Ty::Int) }
             }
             ExprKind::Swizzle(expr, indices) => {
                 expr.validate(locals, globals, budget)?;
-                !indices.is_empty() && indices.len() <= 4 && matches!(expr.ty, Ty::Vec2 | Ty::Vec3 | Ty::Vec4)
-                    && indices.iter().all(|i| *i < expr.ty.n()) && self.ty == Ty::vector(indices.len())
+                !indices.is_empty() && indices.len() <= 4 && expr.ty.is_vector()
+                    && indices.iter().all(|i| *i < expr.ty.n()) && self.ty == if expr.ty.is_integer() { Ty::integer_vector(indices.len()) } else { Ty::vector(indices.len()) }
             }
             ExprKind::Texture(unit, uv) => {
                 unit.validate(locals, globals, budget)?; uv.validate(locals, globals, budget)?;
@@ -629,20 +668,11 @@ impl Expr {
             ExprKind::Construct(args) => {
                 if args.is_empty() || args.len() > 16 { return Err(EvalError::Shape); }
                 for arg in args { arg.validate(locals, globals, budget)?; }
-                let total: usize = args.iter().map(|arg| arg.ty.n()).sum();
-                let scalar = args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::IntLiteral);
-                let conversion = self.ty.matrix_dim().is_some() && args.len() == 1 && args[0].ty.matrix_dim().is_some();
-                let trunc = args.len() == 1 && args[0].ty.matrix_dim().is_none() && total >= self.ty.n() && self.ty.matrix_dim().is_none();
-                let components = self.ty.matrix_dim().is_some() && total >= self.ty.n() && total - args[args.len()-1].ty.n() < self.ty.n();
-                self.ty != Ty::Sampler2D
-                    && (scalar || conversion || trunc || components || total == self.ty.n())
-                    && (self.ty != Ty::Float || scalar)
-                    && if self.ty == Ty::Bool { args.len() == 1 && args[0].ty == Ty::Bool }
-                    else { args.iter().all(|arg| !matches!(arg.ty, Ty::Bool | Ty::Sampler2D) && (conversion || arg.ty.matrix_dim().is_none())) }
+                constructor_valid(self.ty, args)
             }
             ExprKind::Binary(op, a, b) => {
                 a.validate(locals, globals, budget)?; b.validate(locals, globals, budget)?;
-                if !matches!(op, '+' | '-' | '*' | '/') || matches!(a.ty, Ty::Bool | Ty::Sampler2D | Ty::IntLiteral) || matches!(b.ty, Ty::Bool | Ty::Sampler2D | Ty::IntLiteral) { return Err(EvalError::Type); }
+                if !matches!(op, '+' | '-' | '*' | '/') || matches!(a.ty, Ty::Bool | Ty::Sampler2D) || matches!(b.ty, Ty::Bool | Ty::Sampler2D) || a.ty.is_integer() || b.ty.is_integer() { return Err(EvalError::Type); }
                 let (ad, bd) = (a.ty.matrix_dim(), b.ty.matrix_dim());
                 let expected = if *op == '*' && ad.is_some_and(|n| b.ty == Ty::vector(n)) { Some(b.ty) }
                     else if *op == '*' && bd.is_some_and(|n| a.ty == Ty::vector(n)) { Some(a.ty) }
@@ -674,13 +704,22 @@ impl Expr {
             ExprKind::Compare(op,a,b) => {
                 let a=a.eval(env,globals,sample)?;
                 let b=b.eval(env,globals,sample)?;
-                let av = a.floats()?;
-                let bv = b.floats()?;
-                let value=match op {
-                    Compare::Less => av[0] < bv[0], Compare::LessEqual => av[0] <= bv[0],
-                    Compare::Greater => av[0] > bv[0], Compare::GreaterEqual => av[0] >= bv[0],
-                    Compare::Equal => av[..a.ty().n()] == bv[..b.ty().n()],
-                    Compare::NotEqual => av[..a.ty().n()] != bv[..b.ty().n()],
+                let value = if a.ty().is_integer() {
+                    let av = a.integers()?; let bv = b.integers()?;
+                    match op {
+                        Compare::Less => av[0] < bv[0], Compare::LessEqual => av[0] <= bv[0],
+                        Compare::Greater => av[0] > bv[0], Compare::GreaterEqual => av[0] >= bv[0],
+                        Compare::Equal => av[..a.ty().n()] == bv[..b.ty().n()],
+                        Compare::NotEqual => av[..a.ty().n()] != bv[..b.ty().n()],
+                    }
+                } else {
+                    let av = a.floats()?; let bv = b.floats()?;
+                    match op {
+                        Compare::Less => av[0] < bv[0], Compare::LessEqual => av[0] <= bv[0],
+                        Compare::Greater => av[0] > bv[0], Compare::GreaterEqual => av[0] >= bv[0],
+                        Compare::Equal => av[..a.ty().n()] == bv[..b.ty().n()],
+                        Compare::NotEqual => av[..a.ty().n()] != bv[..b.ty().n()],
+                    }
                 };
                 Value::from(Ty::Bool,&[u8::from(value) as f32])
             }
@@ -704,11 +743,16 @@ impl Expr {
                 Value::from(Ty::Vec4, &sample(unit.floats()?[0] as i32, [uv.floats()?[0], uv.floats()?[1]])?)
             }
             ExprKind::Number(n) => Value::from(self.ty, &[*n]),
+            ExprKind::Integer(n) => Value::from_i32(Ty::Int, &[*n]),
             ExprKind::Name(n) => env.get(n).copied().ok_or(EvalError::Type),
             ExprKind::Global(n) => globals.get(n).copied().ok_or(EvalError::Type),
             ExprKind::Neg(e) => {
                 let mut r = e.eval(env, globals, sample)?;
                 let n = r.ty().n();
+                if r.ty().is_integer() {
+                    let values = (*r.integers()?).map(i32::wrapping_neg);
+                    return Value::from_i32(r.ty(), &values[..n]);
+                }
                 for v in &mut r.floats_mut()?[..n] {
                     *v = -*v;
                 }
@@ -716,6 +760,11 @@ impl Expr {
             }
             ExprKind::Swizzle(e, ix) => {
                 let a = e.eval(env, globals, sample)?;
+                if self.ty.is_integer() {
+                    let mut values = [0; 4];
+                    for (i, &j) in ix.iter().enumerate() { values[i] = a.integers()?[j]; }
+                    return Value::from_i32(self.ty, &values[..self.ty.n()]);
+                }
                 let mut r = Value::zero(self.ty);
                 for (i, &j) in ix.iter().enumerate() {
                     r.floats_mut()?[i] = a.floats()?[j];
@@ -725,15 +774,29 @@ impl Expr {
             ExprKind::Construct(args) => {
                 let values: Vec<_> = args.iter().map(|a| a.eval(env, globals, sample)).collect::<EvalResult<_>>()?;
                 if values.is_empty() { return Err(EvalError::Shape); }
+                if self.ty.is_integer() {
+                    let mut output = [0; 4];
+                    if values.len() == 1 && values[0].ty() == Ty::Int {
+                        output[..self.ty.n()].fill(values[0].integers()?[0]);
+                    } else {
+                        let mut i = 0;
+                        for value in values {
+                            for j in 0..value.ty().n() {
+                                if i < self.ty.n() { output[i] = value.integers()?[j]; i += 1; }
+                            }
+                        }
+                    }
+                    return Value::from_i32(self.ty, &output[..self.ty.n()]);
+                }
                 let mut r = Value::zero(self.ty);
                 let output = r.floats_mut()?;
-                if values.len() == 1 && matches!(values[0].ty(), Ty::Float | Ty::IntLiteral) {
+                if values.len() == 1 && matches!(values[0].ty(), Ty::Float | Ty::Int) {
                     if let Some(n) = self.ty.matrix_dim() {
                         for i in 0..n {
-                            output[i * (n + 1)] = values[0].floats()?[0];
+                            output[i * (n + 1)] = constructor_float_component(&values[0], 0)?;
                         }
                     } else {
-                        output[..self.ty.n()].fill(values[0].floats()?[0]);
+                        output[..self.ty.n()].fill(constructor_float_component(&values[0], 0)?);
                     }
                 } else if let (Some(dst), Some(src)) = (self.ty.matrix_dim(), values[0].ty().matrix_dim()) {
                     // Matrix constructors preserve the common upper-left block;
@@ -750,7 +813,7 @@ impl Expr {
                     for v in values {
                         for j in 0..v.ty().n() {
                             if i < self.ty.n() {
-                                output[i] = v.floats()?[j];
+                                output[i] = constructor_float_component(&v, j)?;
                                 i += 1;
                             }
                         }
@@ -804,7 +867,8 @@ impl Expr {
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
     Id(String),
-    Num(f32, bool),
+    Num(f32),
+    Integer(u32),
     P(char),
     Op(String),
     End,
@@ -889,15 +953,16 @@ fn lex(src: &str, token_limit: usize) -> Result<(Vec<Tok>, u32), String> {
                     i += 1;
                 }
             }
-            let n: f32 = src[s..i].parse().map_err(|_| "invalid numeric literal")?;
-            if !n.is_finite() {
-                return Err("numeric literal is not finite".into());
-            }
             let integral = !src[s..i].contains(['.', 'e', 'E']);
-            if integral && (n > 16_777_216. || (i - s > 1 && b[s] == b'0')) {
-                return Err("integer literal is outside the supported decimal range".into());
+            if integral {
+                if i - s > 1 && b[s] == b'0' { return Err("octal integer literals are unsupported".into()); }
+                let bits: u32 = src[s..i].parse().map_err(|_| "integer literal exceeds 32 bits")?;
+                out.push(Tok::Integer(bits));
+            } else {
+                let number: f32 = src[s..i].parse().map_err(|_| "invalid numeric literal")?;
+                if !number.is_finite() { return Err("numeric literal is not finite".into()); }
+                out.push(Tok::Num(number));
             }
-            out.push(Tok::Num(n, integral));
             continue;
         }
         if let Some(op) = ["<=", ">=", "==", "!=", "&&", "||", "^^"].iter().find(|op| b.get(i..i+2) == Some(op.as_bytes())) {
@@ -928,6 +993,7 @@ struct Parser {
     result_type: Option<Ty>,
     statement_depth: usize,
     statement_count: usize,
+    default_int_precision: Precision,
 }
 #[derive(Clone)]
 struct Binding { key: String, symbol: Symbol }
@@ -998,15 +1064,13 @@ impl Parser {
         self.read_globals([name.to_string()]);
         Ok(())
     }
-    fn ty(&mut self) -> Result<Ty, String> {
-        let mut n = self.id()?;
-        let precision = matches!(n.as_str(), "lowp" | "mediump" | "highp");
-        if precision {
-            n = self.id()?;
-        }
-        let ty = Ty::parse(&n).ok_or_else(|| format!("unsupported type {n}"))?;
-        if precision && ty == Ty::Bool { return Err("bool cannot have a precision qualifier".into()); }
-        Ok(ty)
+    fn ty(&mut self) -> Result<(Ty, Option<Precision>), String> {
+        let mut name = self.id()?;
+        let precision = Precision::parse(&name);
+        if precision.is_some() { name = self.id()?; }
+        let ty = Ty::parse(&name).ok_or_else(|| format!("unsupported type {name}"))?;
+        if precision.is_some() && ty == Ty::Bool { return Err("bool cannot have a precision qualifier".into()); }
+        Ok((ty, precision))
     }
     fn declare(&mut self, name: String, ty: Ty, qual: Qual) -> Result<String, String> {
         if self.shader.version == 300
@@ -1083,7 +1147,7 @@ impl Parser {
             || matches!(first.as_str(), "lowp" | "mediump" | "highp")
         {
             self.pos -= 1;
-            let ty = self.ty()?;
+            let (ty, _) = self.ty()?;
             let name = self.id()?;
             (name, Some(ty))
         } else {
@@ -1158,8 +1222,8 @@ impl Parser {
                     return Err("only ordinary or in function parameters are supported".into());
                 }
                 self.eat_id("in");
-                let ty = self.ty()?;
-                if !matches!(ty, Ty::Bool | Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+                let (ty, _) = self.ty()?;
+                if !ty.helper_type() {
                     return Err("function parameters require bool, float or vector types".into());
                 }
                 let parameter = self.id()?;
@@ -1268,10 +1332,8 @@ impl Parser {
             return Err("shader exceeds expression budget".into());
         }
         let mut left = match self.next() {
-            Tok::Num(n, integral) => Expr {
-                ty: if integral { Ty::IntLiteral } else { Ty::Float },
-                kind: ExprKind::Number(n),
-            },
+            Tok::Num(n) => Expr { ty: Ty::Float, kind: ExprKind::Number(n) },
+            Tok::Integer(bits) => Expr { ty: Ty::Int, kind: ExprKind::Integer(bits as i32) },
             Tok::P('-') => {
                 let e = self.expr(8)?;
                 if matches!(e.ty,Ty::Sampler2D | Ty::Bool) {
@@ -1378,32 +1440,8 @@ impl Parser {
                         }
                     }
                     self.expect(Tok::P(')'))?;
-                    if ty == Ty::Bool && (args.len()!=1 || args[0].ty != Ty::Bool)
-                        || ty != Ty::Bool && args.iter().any(|arg| arg.ty == Ty::Bool) {
-                        return Err("numeric/bool constructor conversions are unsupported".into());
-                    }
-                    let total: usize = args.iter().map(|e| e.ty.n()).sum();
-                    let scalar =
-                        args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::IntLiteral);
-                    let conversion = ty.matrix_dim().is_some()
-                        && args.len() == 1 && args[0].ty.matrix_dim().is_some();
-                    let trunc = args.len() == 1
-                        && args[0].ty.matrix_dim().is_none()
-                        && total >= ty.n()
-                        && ty.matrix_dim().is_none();
-                    let matrix_components = ty.matrix_dim().is_some() && total >= ty.n()
-                        && total - args.last().unwrap().ty.n() < ty.n();
-                    if !scalar && !conversion && !trunc && !matrix_components && total != ty.n() {
-                        return Err("constructor component count mismatch".into());
-                    }
-                    if ty == Ty::Float && !scalar {
-                        return Err("float constructors require a scalar argument".into());
-                    }
-                    if args.iter().any(|a| a.ty == Ty::Sampler2D) {
-                        return Err("samplers cannot be converted".into());
-                    }
-                    if !conversion && args.iter().any(|a| a.ty.matrix_dim().is_some()) {
-                        return Err("a matrix constructor requires one matrix argument or scalar/vector components; matrix-to-vector conversion is unsupported".into());
+                    if !constructor_valid(ty, &args) {
+                        return Err("unsupported constructor types or component count; float-to-int and bool conversions are unsupported".into());
                     }
                     if ty.matrix_dim().is_some() {
                         self.shader.cost += ty.n();
@@ -1489,7 +1527,7 @@ impl Parser {
         };
         loop {
             if self.eat('.') {
-                if !matches!(left.ty, Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+                if !left.ty.is_vector() {
                     return Err("swizzles require a vector".into());
                 }
                 let s = self.id()?;
@@ -1515,7 +1553,7 @@ impl Parser {
                     ix.push(i);
                 }
                 left = Expr {
-                    ty: Ty::vector(ix.len()),
+                    ty: if left.ty.is_integer() { Ty::integer_vector(ix.len()) } else { Ty::vector(ix.len()) },
                     kind: ExprKind::Swizzle(Box::new(left), ix),
                 };
                 continue;
@@ -1543,11 +1581,11 @@ impl Parser {
                 kind=ExprKind::Logical(op,Box::new(left),Box::new(right));
             } else if matches!(op.as_str(),"<"|"<="|">"|">="|"=="|"!=") {
                 if matches!(op.as_str(),"=="|"!=") {
-                    if left.ty != right.ty || matches!(left.ty,Ty::IntLiteral|Ty::Sampler2D) {
+                    if left.ty != right.ty || left.ty == Ty::Sampler2D {
                         return Err("equality requires matching bool, float, vector or matrix operands".into());
                     }
-                } else if left.ty != Ty::Float || right.ty != Ty::Float {
-                    return Err("relational comparisons require two scalar float operands".into());
+                } else if left.ty != right.ty || !matches!(left.ty, Ty::Float | Ty::Int) {
+                    return Err("relational comparisons require matching scalar int or float operands".into());
                 }
                 let op=match op.as_str() {"<"=>Compare::Less,"<="=>Compare::LessEqual,">"=>Compare::Greater,">="=>Compare::GreaterEqual,"=="=>Compare::Equal,_=>Compare::NotEqual};
                 ty=Ty::Bool;
@@ -1556,8 +1594,8 @@ impl Parser {
                 if matches!(left.ty,Ty::Sampler2D|Ty::Bool) || matches!(right.ty,Ty::Sampler2D|Ty::Bool) {
                     return Err("arithmetic requires numeric operands".into());
                 }
-                if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
-                    return Err("integer arithmetic and implicit integer-to-float conversion are unsupported".into());
+                if left.ty.is_integer() || right.ty.is_integer() {
+                    return Err("binary integer arithmetic and implicit integer-to-float conversion are unsupported".into());
                 }
                 let (ad, bd) = (left.ty.matrix_dim(), right.ty.matrix_dim());
                 ty = if op == "*" && ad.is_some_and(|n| right.ty == Ty::vector(n)) {right.ty}
@@ -1607,6 +1645,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             },
             locations: BTreeMap::new(),
             symbols: BTreeMap::new(),
+            integer_uniform_precisions: BTreeMap::new(),
             reads: BTreeSet::new(),
             writes: BTreeSet::new(),
             function_globals: BTreeSet::new(),
@@ -1620,6 +1659,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         result_type: None,
         statement_depth: 0,
         statement_count: 0,
+        default_int_precision: if vertex { Precision::High } else { Precision::Medium },
         function_globals: None,
         function_name: None,
         function_depth: 0,
@@ -1654,7 +1694,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             p.expect(Tok::Id("location".into()))?;
             p.expect(Tok::P('='))?;
             let value = match p.next() {
-                Tok::Num(n, true) if n >= 0. && n < crate::MAX_VERTEX_ATTRIBS as f32 => n as u32,
+                Tok::Integer(n) if n < crate::MAX_VERTEX_ATTRIBS => n,
                 _ => return Err("location must be a supported decimal integer literal".into()),
             };
             location = Some(value);
@@ -1672,7 +1712,8 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             let ty = p.id()?;
             match ty.as_str() {
                 "float" => precision_float = true,
-                "int" | "sampler2D" => {}
+                "int" => p.default_int_precision = Precision::parse(&q).ok_or("invalid integer precision")?,
+                "sampler2D" => {}
                 _ => return Err("unsupported precision declaration type".into()),
             }
             p.expect(Tok::P(';'))?;
@@ -1680,14 +1721,14 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         }
         if matches!(
             n.as_str(),
-            "bool" | "float" | "vec2" | "vec3" | "vec4" | "lowp" | "mediump" | "highp"
+            "bool" | "float" | "vec2" | "vec3" | "vec4" | "int" | "ivec2" | "ivec3" | "ivec4" | "lowp" | "mediump" | "highp"
         ) {
             if location.is_some() {
                 return Err("layout cannot qualify a user function".into());
             }
             p.pos -= 1;
-            let result_type = p.ty()?;
-            if !matches!(result_type, Ty::Bool | Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+            let (result_type, _) = p.ty()?;
+            if !result_type.helper_type() {
                 return Err("functions must return bool, float or vector types".into());
             }
             let name = p.id()?;
@@ -1727,7 +1768,8 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
                 "multiple render targets are unsupported; output location must be zero".into(),
             );
         }
-        let ty = p.ty()?;
+        let (ty, precision) = p.ty()?;
+        if ty.is_integer() && qual != Qual::Uniform { return Err("integer interfaces other than uniforms are unsupported".into()); }
         if ty == Ty::Bool && qual != Qual::Uniform {
             return Err("bool interfaces other than uniforms are unsupported".into());
         }
@@ -1739,6 +1781,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         }
         let name = p.id()?;
         p.declare(name.clone(), ty, qual)?;
+        if ty.is_integer() && qual == Qual::Uniform { p.shader.integer_uniform_precisions.insert(name.clone(), precision.unwrap_or(p.default_int_precision)); }
         if qual == Qual::Output {
             if !p.shader.output.is_empty() {
                 return Err("multiple fragment outputs are unsupported".into());
@@ -1888,13 +1931,16 @@ mod typed_value_contract {
     }
 
     #[test]
-    fn integer_spellings_are_still_rejected_in_this_storage_only_checkpoint() {
+    fn integer_interfaces_outside_uniforms_are_still_rejected() {
         for version in [100, 300] {
             for ty in ["int", "ivec2", "ivec3", "ivec4"] {
                 let prefix = if version == 300 { "#version 300 es\nprecision mediump float;out vec4 pixel;" } else { "precision mediump float;" };
                 let output = if version == 300 { "pixel" } else { "gl_FragColor" };
-                let shader = format!("{prefix}uniform {ty} value;void main(){{{output}=vec4(1.0);}}");
+                let qualifier = if version == 300 { "in" } else { "varying" };
+                let shader = format!("{prefix}{qualifier} {ty} value;void main(){{{output}=vec4(1.0);}}");
                 assert!(compile(&shader, false, version).is_err(), "{shader}");
+                let vertex = format!("{}{} {ty} value;void main(){{gl_Position=vec4(1.0);}}", if version == 300 { "#version 300 es\n" } else { "" }, if version == 300 { "in" } else { "attribute" });
+                assert!(compile(&vertex, true, version).is_err(), "{vertex}");
             }
         }
     }

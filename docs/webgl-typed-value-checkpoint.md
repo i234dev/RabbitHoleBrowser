@@ -1,5 +1,9 @@
 # Typed shader values: storage checkpoint
 
+This describes the historical storage-only checkpoint `ce15131`; the later
+[integer shader checkpoint](webgl-integer-shader-checkpoint.md) separately
+enables the integer subset without changing that frozen source.
+
 This isolated checkpoint follows `b88c8ff7390fa687f3a74771b32fd6057c16be3f`
 and the three privately replayed uniform-validation changes. It does not enable
 `int` or `ivec` shader syntax, new setters, or integer interfaces. Those remain

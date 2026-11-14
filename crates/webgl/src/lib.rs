@@ -125,7 +125,6 @@ fn active_info(name: &str, ty: Ty) -> ActiveInfo {
         size: 1,
         kind: match ty {
             Ty::Bool => gl::BOOL,
-            Ty::IntLiteral => unreachable!("literal types are not interface variables"),
             Ty::Int => gl::INT,
             Ty::IVec2 => gl::INT_VEC2,
             Ty::IVec3 => gl::INT_VEC3,
@@ -639,6 +638,10 @@ impl Context {
                     if f.qual == Qual::Uniform && f.ty != s.ty {
                         return Err(format!("uniform type mismatch for {name}"));
                     }
+                    if f.qual == Qual::Uniform && s.ty.is_integer()
+                        && vertex.integer_uniform_precisions.get(name) != fragment.integer_uniform_precisions.get(name) {
+                        return Err(format!("integer uniform precision mismatch for {name}"));
+                    }
                 }
             }
         }
@@ -763,6 +766,10 @@ impl Context {
         let u = self.uniform(id, location)?;
         Ok(u.value.floats()?[..u.ty.n()].to_vec())
     }
+    pub fn get_uniform_i32(&self, id: u32, location: i32) -> Result<Vec<i32>> {
+        let u = self.uniform(id, location)?;
+        Ok(u.value.integers()?[..u.ty.n()].to_vec())
+    }
     pub fn get_uniform_kind(&self, id: u32, location: i32) -> Result<u32> {
         let u = self.uniform(id, location)?;
         Ok(active_info(&u.name, u.ty).kind)
@@ -784,7 +791,7 @@ impl Context {
             return Ok(());
         }
         let u = self.uniform_mut(location)?;
-        if u.ty.matrix_dim().is_some() || u.ty == Ty::Sampler2D || u.ty.n() != values.len() {
+        if u.ty.matrix_dim().is_some() || u.ty.is_integer() || u.ty == Ty::Sampler2D || u.ty.n() != values.len() {
             return Err(Error::InvalidOperation);
         }
         u.value = if u.ty == Ty::Bool {
