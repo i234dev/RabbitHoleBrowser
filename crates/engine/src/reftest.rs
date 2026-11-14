@@ -15,6 +15,16 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod actions;
+#[cfg(test)]
+mod actions_tests;
+
+/// Explicit automation for WPT only; ordinary render/serve APIs stay disabled.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Options {
+    pub mouse_actions: bool,
+}
+
 pub const WIDTH: f32 = 800.0;
 pub const HEIGHT: f32 = 600.0;
 
@@ -175,9 +185,14 @@ fn waiting(page: &crate::Page) -> bool {
 /// Load `url`, let it settle (and drop `reftest-wait`, bounded by
 /// `max_wait`) and paint the 800×600 viewport.
 pub fn render(engine: &mut Engine, url: &str, max_wait: Duration) -> Result<Frame, String> {
+    render_with_options(engine, url, max_wait, Options::default())
+}
+
+pub fn render_with_options(engine: &mut Engine, url: &str, max_wait: Duration, options: Options) -> Result<Frame, String> {
     let vp = Viewport { width: WIDTH, height: HEIGHT };
     let mut page = engine.load(url, vp).map_err(|e| e.to_string())?;
-    finish_render(engine, &mut page, max_wait)
+    if options.mouse_actions { actions::finish(engine, &mut page, max_wait) }
+    else { finish_render(engine, &mut page, max_wait) }
 }
 
 fn finish_render(engine: &Engine, page: &mut crate::Page, max_wait: Duration) -> Result<Frame, String> {
@@ -270,6 +285,10 @@ pub enum Outcome {
 /// resolved against the test URL; a `.png` reference is decoded from
 /// `fetch_png(url)`.
 pub fn run_test(engine: &mut Engine, test_url: &str, src: &str, max_wait: Duration, dump: Option<&Path>) -> Outcome {
+    run_test_with_options(engine, test_url, src, max_wait, dump, Options::default())
+}
+
+pub fn run_test_with_options(engine: &mut Engine, test_url: &str, src: &str, max_wait: Duration, dump: Option<&Path>, options: Options) -> Outcome {
     let meta = parse_meta(src);
     if meta.references.is_empty() {
         return Outcome::Skip("no reference".into());
@@ -278,7 +297,7 @@ pub fn run_test(engine: &mut Engine, test_url: &str, src: &str, max_wait: Durati
         Some(u) => u,
         None => return Outcome::Error("bad url".into()),
     };
-    let test = match render(engine, test_url, max_wait) {
+    let test = match render_with_options(engine, test_url, max_wait, options) {
         Ok(f) => f,
         Err(e) => return Outcome::Error(e),
     };
@@ -294,7 +313,7 @@ pub fn run_test(engine: &mut Engine, test_url: &str, src: &str, max_wait: Durati
                 Err(e) => return Outcome::Error(e.to_string()),
             }
         } else {
-            match render(engine, &ref_url, max_wait) {
+            match render_with_options(engine, &ref_url, max_wait, options) {
                 Ok(f) => f,
                 Err(e) => return Outcome::Error(format!("reference: {e}")),
             }
@@ -410,7 +429,7 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn handle(mut stream: TcpStream, root: &Path) {
+fn handle(mut stream: TcpStream, root: &Path, options: Options) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
@@ -435,6 +454,9 @@ fn handle(mut stream: TcpStream, root: &Path) {
     let safe = !rel.split('/').any(|s| s == "..");
     let file: PathBuf = root.join(&rel);
     let (status, body, ct) = match (safe, std::fs::read(&file)) {
+        (true, Ok(b)) if options.mouse_actions && rel == "resources/testdriver-vendor.js" && b.is_empty() => {
+            ("200 OK", actions::VENDOR.as_bytes().to_vec(), "text/javascript")
+        }
         (true, Ok(b)) if file.is_file() => ("200 OK", b, content_type(&file)),
         _ => ("404 Not Found", b"not found".to_vec(), "text/plain"),
     };
@@ -447,12 +469,19 @@ fn handle(mut stream: TcpStream, root: &Path) {
 /// connection, for the life of the process). Returns the base URL
 /// (`http://127.0.0.1:PORT/`).
 pub fn serve_dir(root: PathBuf) -> std::io::Result<String> {
+    serve_dir_with_options(root, Options::default())
+}
+
+pub fn serve_dir_with_options(root: PathBuf, options: Options) -> std::io::Result<String> {
+    if options.mouse_actions && !std::fs::read(root.join("resources/testdriver-vendor.js"))?.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "WPT mouse backend requires an empty vendor file; corpus was not modified"));
+    }
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     std::thread::spawn(move || {
         for s in listener.incoming().flatten() {
             let root = root.clone();
-            std::thread::spawn(move || handle(s, &root));
+            std::thread::spawn(move || handle(s, &root, options));
         }
     });
     Ok(format!("http://127.0.0.1:{port}/"))
