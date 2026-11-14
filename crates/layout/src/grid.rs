@@ -12,6 +12,16 @@ use std::collections::HashSet;
 use rabbithole_gfx::Rect;
 
 mod lanes;
+#[cfg(test)]
+mod tests;
+
+/// Intrinsic constraints have different free space during track maximization
+/// and flex expansion, even though neither provides a definite available size.
+#[derive(Clone, Copy, PartialEq)]
+enum SizingConstraint {
+    MinContent,
+    MaxContent,
+}
 
 /// A track sizing function (§11.1).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -369,6 +379,13 @@ fn distribute_extra(tracks: &mut [Track], candidates: &[usize], extra: f32, beyo
 
 /// §11 track sizing algorithm for one axis.
 fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f32>, gap: f32, stretch: bool) {
+    // An indefinite automatic size (such as an auto block size) uses the
+    // max-content constraint. Min-content callers must preserve that constraint
+    // explicitly instead of replacing the items' max-content contributions.
+    size_tracks_with_constraint(tracks, contribs, avail, gap, stretch, SizingConstraint::MaxContent);
+}
+
+fn size_tracks_with_constraint(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f32>, gap: f32, stretch: bool, constraint: SizingConstraint) {
     // §11.4 initialize.
     for t in tracks.iter_mut() {
         t.base = match t.min {
@@ -490,6 +507,13 @@ fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f3
             let cands: Vec<usize> = (0..tracks.len()).filter(|&i| !tracks[i].collapsed && !tracks[i].is_flex()).collect();
             distribute_extra(tracks, &cands, free, false, false);
         }
+    } else if constraint == SizingConstraint::MaxContent {
+        // Under a max-content constraint the free space is infinite: every
+        // non-flexible track can reach its growth limit. A min-content
+        // constraint has zero free space and keeps the intrinsic base sizes.
+        for t in tracks.iter_mut().filter(|t| !t.collapsed && !t.is_flex()) {
+            t.base = t.base.max(t.limit_or_base());
+        }
     }
     // §11.7 expand flexible tracks.
     let flex_idx: Vec<usize> = (0..tracks.len()).filter(|&i| tracks[i].is_flex() && !tracks[i].collapsed).collect();
@@ -499,6 +523,7 @@ fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f3
             _ => 0.0,
         };
         let fr = match avail {
+            _ if constraint == SizingConstraint::MinContent => 0.0,
             Some(a) => {
                 let non_flex: f32 = tracks.iter().filter(|t| !t.is_flex() && !t.collapsed).map(|t| t.base).sum();
                 let mut leftover = a - non_flex - gap * n_gaps;
@@ -1249,10 +1274,10 @@ impl<'a> Layouter<'a> {
         let col_gap = crate::flex::px_or_zero(style.column_gap);
         let (items, mut cols, _rows) = self.place_items(b, &style, None, None, col_gap, 0.0, 0.0, 0.0);
         let contribs = self.column_contributions(b, &items, 0.0);
-        // Min-content: size with min contributions only.
-        let min_contribs: Vec<Contribution> = contribs.iter().map(|c| Contribution { max: c.min, ..*c }).collect();
+        // Max-content minimum track sizing functions still need each item's
+        // max-content contribution under a min-content constraint (§11.5).
         let mut min_tracks = cols.tracks.clone();
-        size_tracks(&mut min_tracks, &min_contribs, None, col_gap, false);
+        size_tracks_with_constraint(&mut min_tracks, &contribs, None, col_gap, false, SizingConstraint::MinContent);
         let n_vis = min_tracks.iter().filter(|t| !t.collapsed).count();
         let gaps = col_gap * n_vis.saturating_sub(1) as f32;
         let min: f32 = min_tracks.iter().map(|t| t.base).sum::<f32>() + gaps;

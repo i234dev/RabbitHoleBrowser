@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Grid intrinsic constraints preserve growth limits and flexible minimums</title>
+<link rel="match" href="grid-intrinsic-constraints-ref.html">
+<style>
+.grid { display: grid; margin-bottom: 10px; border: 5px solid purple; }
+.item { height: 20px; background: green; }
+#fixed-min { width: min-content; grid-template-columns: minmax(10px, 100px); }
+#fixed-max { width: max-content; grid-template-columns: minmax(10px, 100px); }
+#flex-min { width: min-content; grid-template-columns: 1fr 30px; }
+#flex-min .item { grid-column: 1 / span 2; }
+#filler { width: 300px; height: 20px; background: green; }
+</style>
+<div class="grid" id="fixed-min"><div class="item"></div></div>
+<div class="grid" id="fixed-max"><div class="item"></div></div>
+<div class="grid" id="flex-min"><div class="item"><div id="filler"></div></div></div>
