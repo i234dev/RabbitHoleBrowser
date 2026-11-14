@@ -1329,7 +1329,15 @@ impl Gen<'_> {
             Op::SetGlobalR(s, ic) => self.global(pc, ic, Err(s)),
             Op::Nop | Op::Debugger => {}
             Op::ReturnR(slot) => {
-                self.call_helper(h_return as *const () as usize, "h_return", slot as u32);
+                // h_return never yields ST_NEXT: the frame was popped, the
+                // run finished, or the panic guard caught a failure. A native
+                // frame switch reloads SLOTS at INNER_ENTRY; every other
+                // outcome exits through the status stub. No old-frame slot
+                // reload or fall-through test is needed here.
+                self.a.mov_rr64(RDI, CTX);
+                self.a.mov_imm32(RSI, slot as u32);
+                self.a.call_abs(h_return as *const () as usize, "h_return");
+                self.a.jmp(self.status);
             }
             Op::CallR(..) | Op::NewR(..) => {
                 // The call's safe point precedes both helpers; packing static

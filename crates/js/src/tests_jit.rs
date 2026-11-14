@@ -311,3 +311,23 @@ fn calls_with_wide_static_operands_and_return_slots() {
     let locals = (0..300).map(|i| format!("let v{i}='v{i}';")).collect::<String>();
     check(&format!("function f(){{{locals}return v299;}}function g(){{let out='';for(let i=0;i<20;i++)out=f();return out;}}g()"), "v299");
 }
+
+#[test]
+fn return_status_switches_to_interpreter_entries_and_constructor_errors() {
+    // A loop makes native eligible even when called by interpreted code.
+    // Direct eval keeps bridge interpreted, so returns cross both boundaries.
+    check(r#"
+function native(x) { for (var i = 0; i < 2; i++) x++; return x; }
+function bridge(x) { eval(''); return native(x); }
+function outer(x) { for (var i = 0; i < 2; i++) x = bridge(x); return x; }
+var out = [bridge(1), outer(2), [1, 2, 3].map(native).join(':')];
+class A { constructor() { this.x = 'base'; } }
+class B extends A {
+  constructor() { super(); for (var i = 0; i < 2; i++) {} return 1; }
+}
+try { new B(); } catch (e) { out.push(e.name); }
+function counted(x) { for (var i = 0; i < 2; i++) {} return 'v:' + x; }
+for (var j = 0; j < 100; j++) out[4] = counted(bridge(j));
+out.join('|')
+"#, "3|6|3:4:5|TypeError|v:101");
+}
