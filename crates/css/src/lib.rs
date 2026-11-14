@@ -1,6 +1,7 @@
 //! CSS parsing: tokenizer, selectors and a stylesheet/declaration parser
 //! with `@media` evaluation and `@import` discovery.
 
+pub mod basic_shape;
 pub mod selector;
 pub mod supports;
 pub mod tokenizer;
