@@ -167,7 +167,12 @@ impl BrowsingContexts {
         request.initiator=Url::parse_absolute(&format!("{}/",from.origin));
         request.referer=if from.url.is_http(){Some(from.url)}else{request.initiator.clone()};
         if noreferrer {request.referrer_policy=rabbithole_engine::net::ReferrerPolicy::NoReferrer;}
-        let bytes=Self::url_bytes(&request.url).saturating_add(blank.as_ref().map_or(0,|seed|Self::url_bytes(&seed.base_url)+seed.origin.len()+seed.key.len())).saturating_add(512);
+        let bytes=Self::url_bytes(&request.url)
+            .saturating_add(request.referer.as_ref().map_or(0,Self::url_bytes))
+            .saturating_add(request.initiator.as_ref().map_or(0,Self::url_bytes))
+            .saturating_add(javascript_origin.as_ref().map_or(0,String::len))
+            .saturating_add(blank.as_ref().map_or(0,|seed|Self::url_bytes(&seed.base_url).saturating_add(seed.origin.len()).saturating_add(seed.key.len())))
+            .saturating_add(512);
         Self::enqueue(s,target,bytes,|ticket|ToContent::ContextNavigate{id:target,ticket,request,replace,blank,javascript_origin})
     }
 }
@@ -278,6 +283,14 @@ mod tests {
         assert!(accepted>0);let bytes=registry.state.lock().unwrap().pending_bytes;assert!(bytes<=MAX_CONTEXT_BYTES);
         registry.detach(parent.id,1,1);assert_eq!(registry.state.lock().unwrap().pending_bytes,bytes,"closing does not release bytes still held by a live receiver");
         drop(rx);registry.renderer_gone(parent.id,1,1);assert_eq!(registry.state.lock().unwrap().pending_bytes,0);
+    }
+    #[test]
+    fn navigation_budget_includes_owned_referrer_metadata(){
+        let registry=registry();let parent=parent(&registry);let host=parent.context().host;
+        let huge=url(&format!("https://one.example.test/page?{}","x".repeat(MAX_CONTEXT_BYTES)));
+        host.document_changed(parent.id,huge,"https://one.example.test".into());
+        assert!(!host.navigate(parent.id,parent.id,url("https://one.example.test/small"),false));
+        assert_eq!(registry.state.lock().unwrap().pending_bytes,0);
     }
     #[test]
     fn post_message_captures_send_origin_and_survives_sender_close(){
