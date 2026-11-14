@@ -265,6 +265,9 @@ pub struct LayoutBox {
     /// Inputs and results of the box's last content layout, so a box kept
     /// from the previous frame can be translated instead of laid out.
     pub(crate) layout_cache: Option<crate::incremental::LayoutCache>,
+    /// Used per-axis subgrid inputs. Computed styles retain the CSS request.
+    pub(crate) grid_columns: Option<crate::grid::subgrid::AxisInheritance>,
+    pub(crate) grid_rows: Option<crate::grid::subgrid::AxisInheritance>,
     /// `position: relative` offset currently applied to the box.
     pub(crate) rel_applied: (f32, f32),
     /// The last layout translated the contents from the cache (descendants
@@ -346,6 +349,8 @@ impl LayoutBox {
             pieces: None,
             intrinsic_cache: None,
             layout_cache: None,
+            grid_columns: None,
+            grid_rows: None,
             rel_applied: (0.0, 0.0),
             reused_layout: false,
             no_abs_below: false,
