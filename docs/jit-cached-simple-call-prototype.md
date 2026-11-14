@@ -46,7 +46,7 @@ closure identity changes, eight independent differential fixtures in off/0/3
 and ordinary/full/incremental GC modes, actual warm-push stack growth, a failed
 maximum-depth push followed by catch/finally/success, a watchdog interruption
 that must execute this new path, and a direct method-call control distinguishing
-warm strict primitive receivers from sloppy primitive boxing with exactly one
+warm strict numeric/string/BigInt receivers from sloppy primitive boxing with exactly one
 callee execution. Full/incremental labels also require actual GC work during
 each fixture, after resetting its tick countdown. Stack growth is witnessed by
 capacity or pointer change; an in-place realloc is not reported as relocation. Existing native-callback/getter GC, panic,

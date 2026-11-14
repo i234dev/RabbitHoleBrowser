@@ -221,5 +221,8 @@ fn cached_simple_direct_method_distinguishes_strict_and_sloppy_primitive_receive
         evaluate(&mut realm, "Number.prototype.__jitCachedReceiver=strictHandler");
         invoke(&mut realm, "directReceiver(6,'cold')", "number:6:cold", false);
         invoke(&mut realm, "directReceiver(6,'warm')", "number:6:warm", true);
+        evaluate(&mut realm, "String.prototype.__jitCachedReceiver=strictHandler;BigInt.prototype.__jitCachedReceiver=strictHandler");
+        invoke(&mut realm, "directReceiver('counted-this','string')", "string:counted-this:string", true);
+        invoke(&mut realm, "directReceiver(7n,'bigint')", "bigint:7:bigint", true);
     }
 }
