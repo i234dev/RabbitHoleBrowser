@@ -75,3 +75,40 @@ fn multiple_nested_ports_keep_order_identity_and_empty_transfer_lists() {
     until(&engine, &mut page, "trace.length>=4");
     assert_eq!(eval(&engine, &mut page, "trace.slice().sort().join('|')"), "first:left:true|probe:0:true|report:2:true:true:true|second:right:true");
 }
+
+
+fn announcing_child(generation: &str) -> String {
+    format!(r#"<script>
+      var channel=new MessageChannel();
+      channel.port1.onmessage=event=>parent.postMessage({{kind:'echo',generation:'{generation}',value:event.data,sourceNull:event.source===null}},'*');
+      parent.postMessage({{kind:'announce',generation:'{generation}'}},'*',[channel.port2]);
+    </script>"#)
+}
+
+#[test]
+fn old_port_capabilities_do_not_reconnect_after_same_frame_navigation() {
+    let mut engine = engine();
+    let child = announcing_child("A");
+    let parent = format!(r#"<script>
+      var ports={{}},trace=[],errors=[],sources=[];
+      addEventListener('message',event=>{{
+        if(event.data.kind==='announce'){{ports[event.data.generation]=event.ports[0];sources.push(event.source===document.getElementById('f').contentWindow)}}
+        if(event.data.kind==='echo')trace.push(event.data.generation+':'+event.data.value+':'+event.data.sourceNull);
+      }});
+      </script><iframe id=f srcdoc="{}"></iframe>"#, escape_attr(&child));
+    let mut page = engine.load_html(&parent, Url::parse("https://ports.test/root").unwrap(), Viewport { width: 800.0, height: 600.0 });
+    until(&engine, &mut page, "!!ports.A");
+    let id = page.frames.children[0].id;
+    eval(&engine, &mut page, "ports.A.postMessage('before')");
+    until(&engine, &mut page, "trace.includes('A:before:true')");
+    eval(&engine, &mut page, &format!("document.getElementById('f').srcdoc = {:?}", announcing_child("B")));
+    until(&engine, &mut page, "!!ports.B");
+    assert_eq!(page.frames.children[0].id, id, "navigation must preserve the browsing-context ID");
+    assert_eq!(eval(&engine, &mut page, "ports.A!==ports.B"), "true");
+    // Both sends are ordered from this realm. A stale bridge must not route
+    // into B just because its per-realm counter restarted at zero.
+    eval(&engine, &mut page, "ports.A.postMessage('stale');ports.B.postMessage('fresh')");
+    until(&engine, &mut page, "trace.includes('B:fresh:true')");
+    assert_eq!(eval(&engine, &mut page, "trace.slice().sort().join('|')"), "A:before:true|B:fresh:true");
+    assert_eq!(eval(&engine, &mut page, "sources.join(',')"), "true,true");
+}

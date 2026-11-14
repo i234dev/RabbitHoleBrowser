@@ -9,8 +9,22 @@ use crate::env::with_env;
 use crate::host::{arg, root_value, state};
 use rabbithole_js::{JsResult, Realm, Value};
 
+// A FrameId survives navigation, but transferred-port capabilities must not
+// reconnect to a new realm whose local bridge counter starts at zero.
+static NEXT_BRIDGE_NAMESPACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_bridge_namespace(counter: &std::sync::atomic::AtomicU64) -> Option<String> {
+    use std::sync::atomic::Ordering;
+    counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).ok().map(|id| id.to_string())
+}
+
 /// Install the frame accessors on the global. Call after `window::install`.
 pub(crate) fn install(realm: &mut Realm) {
+    let Some(namespace) = next_bridge_namespace(&NEXT_BRIDGE_NAMESPACE) else {
+        // Never wrap and reconnect an old capability, even on exhaustion.
+        eprintln!("[rabbithole] frames.js: bridge namespace exhausted");
+        return;
+    };
     let post = realm.new_native_function("post", 3, native_post);
     let info = realm.new_native_function("info", 3, native_info);
     let factory = match realm.eval(include_str!("frames.js"), "rabbithole:frames.js") {
@@ -21,7 +35,7 @@ pub(crate) fn install(realm: &mut Realm) {
             return;
         }
     };
-    match realm.call(factory, Value::Undefined, &[Value::Object(post), Value::Object(info)]) {
+    match realm.call(factory, Value::Undefined, &[Value::Object(post), Value::Object(info), Value::str(&namespace)]) {
         Ok(api) if api.is_object() => {
             let id = api.as_object().unwrap();
             root_value(realm, &api);
@@ -218,4 +232,24 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         }
         _ => Value::Undefined,
     })
+}
+
+#[cfg(test)]
+mod bridge_namespace_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn namespace_uses_exact_strings_and_never_wraps_or_reuses_an_id() {
+        let counter = AtomicU64::new((1u64 << 53) + 1);
+        assert_eq!(next_bridge_namespace(&counter).as_deref(), Some("9007199254740993"));
+        assert_eq!(next_bridge_namespace(&counter).as_deref(), Some("9007199254740994"));
+        // Local fixture counter: never mutate the process-global allocator
+        // or interfere with concurrently running ScriptHost tests.
+        let exhausted = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(next_bridge_namespace(&exhausted), Some((u64::MAX - 1).to_string()));
+        assert_eq!(next_bridge_namespace(&exhausted), None);
+        assert_eq!(next_bridge_namespace(&exhausted), None);
+        assert_eq!(exhausted.load(Ordering::Relaxed), u64::MAX);
+    }
 }

@@ -3,8 +3,9 @@
 // `event.source`), cross-realm `postMessage` with structured cloning.
 // Evaluated once per realm; `post(targetId, data, targetOrigin)` and
 // `info(id, what, index)` are natives implemented by the engine.
-(function (post, info) {
+(function (post, info, bridgeNamespace) {
   'use strict';
+  if (typeof bridgeNamespace !== 'string' || !bridgeNamespace) throw new TypeError('Missing frame bridge namespace');
   const SELF = info(-1, 'self', 0);
   const ids = new WeakMap();
   const proxies = new Map();
@@ -329,7 +330,7 @@
   // `port` (ours) goes to frame `frame`: messages arriving on it are sent
   // there; messages from there are posted into it.
   function bridgePort(port, frame) {
-    const bridge = SELF + ':' + nextBridge++;
+    const bridge = SELF + ':' + bridgeNamespace + ':' + nextBridge++;
     bridges.set(bridge, port);
     forward(port, bridge, frame);
     return bridge;
