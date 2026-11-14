@@ -1176,3 +1176,48 @@ gl.bindFramebuffer(gl.READ_FRAMEBUFFER,null);gl.readPixels(1,0,1,1,gl.RGBA,gl.UN
     assert_eq!(out,["undefined","2","true","1281","1280","1281","0,0,255,255","true","255,0,0,255 0"]);
     assert!(env.errors().is_empty(),"{:?}",env.errors());
 }
+
+#[test]
+fn webgl2_buffer_selection_controls_reads_clears_and_blits() {
+    let (mut env, mut host) = setup("<canvas id=a width=1 height=1></canvas>");
+    let out = run(&mut env, &mut host, r#"
+const gl=document.getElementById('a').getContext('webgl2',{preserveDrawingBuffer:true});
+console.log(gl.getParameter(gl.READ_BUFFER)===gl.BACK,gl.getParameter(gl.DRAW_BUFFER0)===gl.BACK,gl.getParameter(gl.MAX_DRAW_BUFFERS),gl.getParameter(gl.MAX_COLOR_ATTACHMENTS));
+gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.drawBuffers([gl.NONE]);gl.clearColor(1,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+const p=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);console.log(Array.from(p).join(','));
+const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,0,0,255]));
+const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+gl.readBuffer(gl.NONE);p.fill(7);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);console.log(gl.getError()===gl.INVALID_OPERATION,Array.from(p).join(','));
+console.log(gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT)===null,gl.getError()===gl.INVALID_OPERATION);
+gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,null);gl.blitFramebuffer(0,0,1,1,0,0,1,1,gl.COLOR_BUFFER_BIT,gl.NEAREST);console.log(gl.getError());
+gl.drawBuffers([gl.BACK]);gl.blitFramebuffer(0,0,1,1,0,0,1,1,gl.COLOR_BUFFER_BIT,gl.NEAREST);console.log(gl.getError()===gl.INVALID_OPERATION);
+gl.readBuffer(gl.COLOR_ATTACHMENT0);gl.blitFramebuffer(0,0,1,1,0,0,1,1,gl.COLOR_BUFFER_BIT,gl.NEAREST);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,null);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);console.log(Array.from(p).join(','),gl.getError());
+gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,f);gl.drawBuffers([]);gl.clearColor(0,1,0,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,f);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);console.log(Array.from(p).join(','),gl.getParameter(gl.DRAW_BUFFER0)===gl.NONE);
+gl.drawBuffers([gl.COLOR_ATTACHMENT0]);gl.clear(gl.COLOR_BUFFER_BIT);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);console.log(Array.from(p).join(','),gl.getError());
+"#);
+    assert_eq!(out, ["true true 1 1", "0,0,255,255", "true 7,7,7,7", "true true", "0", "true", "255,0,0,255 0", "255,0,0,255 true", "0,255,0,255 0"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn webgl2_buffer_selection_validates_sequences_and_allows_conversion_reentry() {
+    let (mut env, mut host) = setup("<canvas id=a></canvas><canvas id=b></canvas>");
+    let out = run(&mut env, &mut host, r#"
+const gl=document.getElementById('a').getContext('webgl2'),old=document.getElementById('b').getContext('webgl');
+console.log(typeof old.readBuffer,typeof old.drawBuffers);
+let thrown=0;for(const value of [null,{},'none']){try{gl.drawBuffers(value);}catch(e){thrown+=e instanceof TypeError;}}console.log(thrown);
+gl.drawBuffers([]);console.log(gl.getError()===gl.INVALID_OPERATION);gl.drawBuffers([gl.BACK,gl.BACK]);console.log(gl.getError()===gl.INVALID_VALUE);
+gl.drawBuffers([123]);console.log(gl.getError()===gl.INVALID_ENUM,gl.getParameter(gl.DRAW_BUFFER0)===gl.BACK);
+const a=gl.createFramebuffer(),b=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,a);
+gl.drawBuffers([{valueOf(){gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,b);return gl.NONE;}}]);
+console.log(gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)===b,gl.getParameter(gl.DRAW_BUFFER0)===gl.NONE);
+gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,a);console.log(gl.getParameter(gl.DRAW_BUFFER0)===gl.COLOR_ATTACHMENT0);
+gl.readBuffer({valueOf(){gl.bindFramebuffer(gl.READ_FRAMEBUFFER,b);return gl.NONE;}});
+console.log(gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)===b,gl.getParameter(gl.READ_BUFFER)===gl.NONE);
+gl.bindFramebuffer(gl.READ_FRAMEBUFFER,a);console.log(gl.getParameter(gl.READ_BUFFER)===gl.COLOR_ATTACHMENT0);
+gl.readBuffer(gl.COLOR_ATTACHMENT0+1);console.log(gl.getError()===gl.INVALID_OPERATION,gl.getParameter(gl.READ_BUFFER)===gl.COLOR_ATTACHMENT0);
+gl.drawBuffers(new Uint32Array([gl.NONE]));console.log(gl.getParameter(gl.DRAW_BUFFER0)===gl.NONE,gl.getError());
+"#);
+    assert_eq!(out, ["undefined undefined", "3", "true", "true", "true true", "true true", "true", "true true", "true", "true true", "true 0"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}

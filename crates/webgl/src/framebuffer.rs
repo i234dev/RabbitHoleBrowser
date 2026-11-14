@@ -5,10 +5,17 @@ use super::*;
 const MAX_OBJECTS: usize = 256;
 const MAX_RENDERBUFFER_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct Framebuffer {
     color: u32,
     depth: u32,
+    read_color: bool,
+    draw_color: bool,
+}
+impl Default for Framebuffer {
+    fn default() -> Self {
+        Self { color: 0, depth: 0, read_color: true, draw_color: true }
+    }
 }
 
 #[derive(Debug)]
@@ -37,6 +44,7 @@ struct BlitImage {
     height: u32,
     // Zero identifies the default image. Complete FBOs always have color.
     color: u32,
+    color_enabled: bool,
     // Some(0) is the default depth24 image; FBOs use depth16 renderbuffers.
     depth: Option<u32>,
 }
@@ -62,17 +70,19 @@ impl BlitAxis {
 }
 
 impl Context {
-    fn blit_image(&self, framebuffer: u32) -> Result<BlitImage> {
+    fn blit_image(&self, framebuffer: u32, reading: bool) -> Result<BlitImage> {
         if self.framebuffer_status(framebuffer) != gl::FRAMEBUFFER_COMPLETE {
             return Err(Error::InvalidFramebufferOperation);
         }
         if framebuffer == 0 {
             Ok(BlitImage { width: self.width, height: self.height, color: 0,
+                color_enabled: if reading { self.default_read_color } else { self.default_draw_color },
                 depth: self.default_depth_channel.then_some(0) })
         } else {
             let fb = &self.framebuffers[&framebuffer];
             let t = &self.textures[&fb.color];
             Ok(BlitImage { width: t.width, height: t.height, color: fb.color,
+                color_enabled: if reading { fb.read_color } else { fb.draw_color },
                 depth: (fb.depth != 0).then_some(fb.depth) })
         }
     }
@@ -114,9 +124,10 @@ impl Context {
         let d = destination.map(i64::from);
         let spans = [s[2] - s[0], s[3] - s[1], d[2] - d[0], d[3] - d[1]];
         if spans.iter().any(|span| span.abs() > i32::MAX as i64) { return Err(Error::InvalidValue); }
-        let src = self.blit_image(self.read_framebuffer)?;
-        let dst = self.blit_image(self.draw_framebuffer)?;
-        let color = mask & gl::COLOR_BUFFER_BIT != 0;
+        let src = self.blit_image(self.read_framebuffer, true)?;
+        let dst = self.blit_image(self.draw_framebuffer, false)?;
+        let color = mask & gl::COLOR_BUFFER_BIT != 0 && dst.color_enabled;
+        if color && !src.color_enabled { return Err(Error::InvalidOperation); }
         let depth = mask & gl::DEPTH_BUFFER_BIT != 0 && dst.depth.is_some();
         // Image identity, not framebuffer identity: two FBOs may alias storage.
         if color && src.color == dst.color { return Err(Error::InvalidOperation); }
@@ -164,6 +175,47 @@ impl Context {
     /// state is independent and also applies to depth attachments on FBOs.
     pub fn set_depth_channel(&mut self, enabled: bool) {
         self.default_depth_channel = enabled;
+    }
+    /// This software subset exposes one color output/attachment, not MRT.
+    pub fn draw_buffers(&mut self, buffers: &[u32]) -> Result<()> {
+        if self.context_version != 2 { return Err(Error::InvalidOperation); }
+        if buffers.len() > 1 { return Err(Error::InvalidValue); }
+        if buffers.iter().any(|b| !matches!(*b, gl::NONE | gl::BACK | 0x8CE0..=0x8CFF)) {
+            return Err(Error::InvalidEnum);
+        }
+        if self.draw_framebuffer == 0 {
+            if buffers.len() != 1 || !matches!(buffers[0], gl::BACK | gl::NONE) { return Err(Error::InvalidOperation); }
+            self.default_draw_color = buffers[0] == gl::BACK;
+        } else {
+            let selection = buffers.first().copied().unwrap_or(gl::NONE);
+            if !matches!(selection, gl::COLOR_ATTACHMENT0 | gl::NONE) { return Err(Error::InvalidOperation); }
+            self.framebuffers.get_mut(&self.draw_framebuffer).unwrap().draw_color = selection == gl::COLOR_ATTACHMENT0;
+        }
+        Ok(())
+    }
+    pub fn read_buffer_select(&mut self, selection: u32) -> Result<()> {
+        if self.context_version != 2 { return Err(Error::InvalidOperation); }
+        if !matches!(selection, gl::NONE | gl::BACK | 0x8CE0..=0x8CFF) { return Err(Error::InvalidEnum); }
+        if self.read_framebuffer == 0 {
+            if !matches!(selection, gl::BACK | gl::NONE) { return Err(Error::InvalidOperation); }
+            self.default_read_color = selection == gl::BACK;
+        } else {
+            if !matches!(selection, gl::COLOR_ATTACHMENT0 | gl::NONE) { return Err(Error::InvalidOperation); }
+            self.framebuffers.get_mut(&self.read_framebuffer).unwrap().read_color = selection == gl::COLOR_ATTACHMENT0;
+        }
+        Ok(())
+    }
+    pub fn read_buffer_selection(&self) -> Result<u32> {
+        if self.context_version != 2 { return Err(Error::InvalidOperation); }
+        Ok(if self.read_framebuffer == 0 {
+            if self.default_read_color { gl::BACK } else { gl::NONE }
+        } else if self.framebuffers[&self.read_framebuffer].read_color { gl::COLOR_ATTACHMENT0 } else { gl::NONE })
+    }
+    pub fn draw_buffer_selection(&self) -> Result<u32> {
+        if self.context_version != 2 { return Err(Error::InvalidOperation); }
+        Ok(if self.draw_framebuffer == 0 {
+            if self.default_draw_color { gl::BACK } else { gl::NONE }
+        } else if self.framebuffers[&self.draw_framebuffer].draw_color { gl::COLOR_ATTACHMENT0 } else { gl::NONE })
     }
     fn framebuffer_target(&self, target: u32) -> Result<u32> {
         match target {
@@ -482,6 +534,10 @@ impl Context {
         if self.framebuffer_status(self.read_framebuffer) != gl::FRAMEBUFFER_COMPLETE {
             return Err(Error::InvalidFramebufferOperation);
         }
+        if (self.read_framebuffer == 0 && !self.default_read_color)
+            || self.framebuffers.get(&self.read_framebuffer).is_some_and(|f| !f.read_color) {
+            return Err(Error::InvalidOperation);
+        }
         if self.read_framebuffer == 0 {
             return Ok((self.width, self.height, &self.rgba, false));
         }
@@ -519,18 +575,19 @@ impl Context {
             return op(self);
         }
         if self.draw_framebuffer == 0 {
-            let saved = (self.depth_test, self.depth_mask);
+            let saved = (self.depth_test, self.depth_mask, self.color_mask);
             self.depth_test &= self.default_depth_channel;
             self.depth_mask &= self.default_depth_channel;
+            if !self.default_draw_color { self.color_mask = [false; 4]; }
             let result = op(self);
-            (self.depth_test, self.depth_mask) = saved;
+            (self.depth_test, self.depth_mask, self.color_mask) = saved;
             return result;
         }
         if self.framebuffer_status(self.draw_framebuffer) != gl::FRAMEBUFFER_COMPLETE {
             return Err(Error::InvalidFramebufferOperation);
         }
         let f = &self.framebuffers[&self.draw_framebuffer];
-        let (texture, depth) = (f.color, f.depth);
+        let (texture, depth, draw_color) = (f.color, f.depth, f.draw_color);
         let t = self.textures.get_mut(&texture).unwrap();
         let size = (t.width, t.height);
         let rgba = std::mem::take(&mut t.pixels);
@@ -542,18 +599,19 @@ impl Context {
         let old_rgba = std::mem::replace(&mut self.rgba, rgba);
         let old_depth = std::mem::replace(&mut self.depth, target_depth);
         let old_size = (self.width, self.height);
-        let old_state = (self.alpha_channel, self.depth_test, self.depth_mask);
+        let old_state = (self.alpha_channel, self.depth_test, self.depth_mask, self.color_mask);
         self.width = size.0;
         self.height = size.1;
         self.alpha_channel = true;
         self.depth_test &= depth != 0;
         self.depth_mask &= depth != 0;
+        if !draw_color { self.color_mask = [false; 4]; }
         self.drawing_to_texture = true;
         let result = op(self);
         self.drawing_to_texture = false;
         self.width = old_size.0;
         self.height = old_size.1;
-        (self.alpha_channel, self.depth_test, self.depth_mask) = old_state;
+        (self.alpha_channel, self.depth_test, self.depth_mask, self.color_mask) = old_state;
         self.textures.get_mut(&texture).unwrap().pixels =
             std::mem::replace(&mut self.rgba, old_rgba);
         let target_depth = std::mem::replace(&mut self.depth, old_depth);

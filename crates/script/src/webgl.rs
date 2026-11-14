@@ -291,6 +291,9 @@ enum Command {
     DrawElements(u32, u32, u32, usize),
     ReadPixels(i32, i32, u32, u32),
     BlitFramebuffer([i32; 4], [i32; 4], u32, u32),
+    ReadBuffer(u32),
+    DrawBuffers(u32, u32),
+    BufferSelection(bool),
     Width,
     Height,
     ReadWidth,
@@ -417,6 +420,9 @@ impl Command {
             "blitFramebuffer" => Self::BlitFramebuffer(
                 [n!(2) as i32, n!(3) as i32, n!(4) as i32, n!(5) as i32],
                 [n!(6) as i32, n!(7) as i32, n!(8) as i32, n!(9) as i32], u!(10), u!(11)),
+            "readBuffer" => Self::ReadBuffer(u!(2)),
+            "drawBuffers" => Self::DrawBuffers(u!(2), u!(3)),
+            "bufferSelection" => Self::BufferSelection(b!(2)),
             "width" => Self::Width,
             "height" => Self::Height,
             "readWidth" => Self::ReadWidth,
@@ -690,6 +696,21 @@ impl Command {
                     ctx.blit_framebuffer(source, destination, mask, filter)?;
                     Reply::Void
                 }
+                Self::ReadBuffer(selection) => {
+                    ctx.read_buffer_select(selection)?;
+                    Reply::Void
+                }
+                Self::DrawBuffers(count, selection) => {
+                    match count {
+                        0 => ctx.draw_buffers(&[])?,
+                        1 => ctx.draw_buffers(&[selection])?,
+                        _ => return Err(rabbithole_webgl::Error::InvalidValue),
+                    }
+                    Reply::Void
+                }
+                Self::BufferSelection(read) => Reply::Number(if read {
+                    ctx.read_buffer_selection()?
+                } else { ctx.draw_buffer_selection()? } as f64),
                 Self::Width => Reply::Number(ctx.dimensions().0 as f64),
                 Self::Height => Reply::Number(ctx.dimensions().1 as f64),
                 Self::ReadWidth => Reply::Number(ctx.read_dimensions()?.0 as f64),

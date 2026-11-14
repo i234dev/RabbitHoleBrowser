@@ -356,6 +356,11 @@
         case GL.SHADER_COMPILER: return true;
         case 0x85B5: if (s.version === 2) return s.currentVAO; flag(s, GL.INVALID_ENUM); return null;
         case 0x8D6B: if (s.version === 2) return 4294967294; flag(s, GL.INVALID_ENUM); return null;
+        case 0x8824: case 0x8CDF: if (s.version === 2) return 1; flag(s, GL.INVALID_ENUM); return null;
+        case 0x0C02: case 0x8825: {
+          if (s.version !== 2) { flag(s, GL.INVALID_ENUM); return null; }
+          const r = call(s, 'bufferSelection', pname === 0x0C02); return r.error ? null : r.value;
+        }
         case GL.MAX_VERTEX_ATTRIBS: return limits.maxVertexAttribs;
         case GL.MAX_VIEWPORT_DIMS: return new Int32Array([limits.maxDimension, limits.maxDimension]);
         case GL.MAX_RENDERBUFFER_SIZE: case GL.MAX_TEXTURE_SIZE: return limits.maxDimension;
@@ -374,7 +379,10 @@
         case GL.ARRAY_BUFFER_BINDING: return s.bindings[GL.ARRAY_BUFFER] || null; case GL.ELEMENT_ARRAY_BUFFER_BINDING: return s.bindings[GL.ELEMENT_ARRAY_BUFFER] || null;
         case GL.PACK_ALIGNMENT: return s.packAlignment; case GL.UNPACK_ALIGNMENT: return s.unpackAlignment;
         case GL.UNPACK_FLIP_Y_WEBGL: return s.flipY; case GL.UNPACK_PREMULTIPLY_ALPHA_WEBGL: return s.unpackPremultiplied; case GL.UNPACK_COLORSPACE_CONVERSION_WEBGL: return s.unpackColorspace;
-        case GL.IMPLEMENTATION_COLOR_READ_FORMAT: return GL.RGBA; case GL.IMPLEMENTATION_COLOR_READ_TYPE: return GL.UNSIGNED_BYTE;
+        case GL.IMPLEMENTATION_COLOR_READ_FORMAT: case GL.IMPLEMENTATION_COLOR_READ_TYPE: {
+          if (s.version === 2 && (call(s, 'checkFramebuffer', 0x8CA8).value !== GL.FRAMEBUFFER_COMPLETE || call(s, 'bufferSelection', true).value === GL.NONE)) { flag(s, GL.INVALID_OPERATION); return null; }
+          return pname === GL.IMPLEMENTATION_COLOR_READ_FORMAT ? GL.RGBA : GL.UNSIGNED_BYTE;
+        }
         case GL.RED_BITS: case GL.GREEN_BITS: case GL.BLUE_BITS: return 8; case GL.ALPHA_BITS: return s.attrs.alpha ? 8 : 0;
         case GL.DEPTH_BITS: return s.attrs.depth ? 24 : 0; case GL.STENCIL_BITS: case GL.SAMPLES: case GL.SAMPLE_BUFFERS: return 0;
         case GL.FRAMEBUFFER_BINDING: return s.drawFramebuffer;
@@ -499,6 +507,18 @@
     Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
   }
   class WebGL2RenderingContext { constructor() { illegal(); }
+    readBuffer(selection) {
+      required('readBuffer', 1, arguments); const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation');
+      call(s, 'readBuffer', selection >>> 0);
+    }
+    drawBuffers(buffers) {
+      required('drawBuffers', 1, arguments); const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation');
+      if (buffers === null || (typeof buffers !== 'object' && typeof buffers !== 'function')) throw new TypeError('buffers must be iterable');
+      let count = 0, first = 0;
+      for (const value of buffers) { const selection = value >>> 0; if (count === 0) first = selection; count++; }
+      if (count > 1) { flag(s, GL.INVALID_VALUE); return; }
+      call(s, 'drawBuffers', count, first);
+    }
     blitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
       required('blitFramebuffer', 10, arguments); const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation');
       srcX0 |= 0; srcY0 |= 0; srcX1 |= 0; srcY1 |= 0; dstX0 |= 0; dstY0 |= 0; dstX1 |= 0; dstY1 |= 0; mask >>>= 0; filter >>>= 0;
@@ -542,8 +562,8 @@
     const base = WebGL2RenderingContext.prototype[name];
     hidden(WebGL2RenderingContext.prototype, name, function (...args) { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); if (args.length > maxArgs) { flag(s, GL.INVALID_OPERATION); return null; } return base.apply(this, args); });
   }
-  for (const [name, value] of Object.entries({ ...GL, VERTEX_ARRAY_BINDING: 0x85B5, MAX_ELEMENT_INDEX: 0x8D6B, VERTEX_ATTRIB_ARRAY_DIVISOR: 0x88FE, READ_FRAMEBUFFER: 0x8CA8, DRAW_FRAMEBUFFER: 0x8CA9, READ_FRAMEBUFFER_BINDING: 0x8CAA, DRAW_FRAMEBUFFER_BINDING: 0x8CA6 })) { Object.defineProperty(WebGL2RenderingContext, name, { value, enumerable: true }); if (!(name in WebGL2RenderingContext.prototype)) Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, enumerable: true }); }
-  for (const name of ['drawRangeElements', 'vertexAttribIPointer', 'vertexAttribI4i', 'vertexAttribI4ui', 'vertexAttribI4iv', 'vertexAttribI4uiv', 'texImage3D', 'texSubImage3D', 'copyTexSubImage3D', 'compressedTexImage3D', 'compressedTexSubImage3D', 'texStorage2D', 'texStorage3D', 'drawBuffers', 'readBuffer', 'invalidateFramebuffer', 'invalidateSubFramebuffer', 'framebufferTextureLayer', 'renderbufferStorageMultisample', 'copyBufferSubData', 'getBufferSubData', 'bindBufferBase', 'bindBufferRange', 'getIndexedParameter', 'getInternalformatParameter', 'getUniformIndices', 'getActiveUniforms', 'getUniformBlockIndex', 'getActiveUniformBlockParameter', 'getActiveUniformBlockName', 'uniformBlockBinding', 'createQuery', 'deleteQuery', 'isQuery', 'beginQuery', 'endQuery', 'getQuery', 'getQueryParameter', 'createSampler', 'deleteSampler', 'isSampler', 'bindSampler', 'samplerParameteri', 'samplerParameterf', 'getSamplerParameter', 'fenceSync', 'isSync', 'deleteSync', 'clientWaitSync', 'waitSync', 'getSyncParameter', 'createTransformFeedback', 'deleteTransformFeedback', 'isTransformFeedback', 'bindTransformFeedback', 'beginTransformFeedback', 'endTransformFeedback', 'transformFeedbackVaryings', 'getTransformFeedbackVarying', 'pauseTransformFeedback', 'resumeTransformFeedback', 'getFragDataLocation', 'clearBufferiv', 'clearBufferuiv', 'clearBufferfv', 'clearBufferfi', 'uniform1ui', 'uniform2ui', 'uniform3ui', 'uniform4ui', 'uniform1uiv', 'uniform2uiv', 'uniform3uiv', 'uniform4uiv', 'uniformMatrix2x3fv', 'uniformMatrix3x2fv', 'uniformMatrix2x4fv', 'uniformMatrix4x2fv', 'uniformMatrix3x4fv', 'uniformMatrix4x3fv']) hidden(WebGL2RenderingContext.prototype, name, function () { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); flag(s, GL.INVALID_OPERATION); return null; });
+  for (const [name, value] of Object.entries({ ...GL, VERTEX_ARRAY_BINDING: 0x85B5, MAX_ELEMENT_INDEX: 0x8D6B, VERTEX_ATTRIB_ARRAY_DIVISOR: 0x88FE, READ_FRAMEBUFFER: 0x8CA8, DRAW_FRAMEBUFFER: 0x8CA9, READ_FRAMEBUFFER_BINDING: 0x8CAA, DRAW_FRAMEBUFFER_BINDING: 0x8CA6, BACK: 0x0405, READ_BUFFER: 0x0C02, DRAW_BUFFER0: 0x8825, MAX_DRAW_BUFFERS: 0x8824, MAX_COLOR_ATTACHMENTS: 0x8CDF })) { Object.defineProperty(WebGL2RenderingContext, name, { value, enumerable: true }); if (!(name in WebGL2RenderingContext.prototype)) Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, enumerable: true }); }
+  for (const name of ['drawRangeElements', 'vertexAttribIPointer', 'vertexAttribI4i', 'vertexAttribI4ui', 'vertexAttribI4iv', 'vertexAttribI4uiv', 'texImage3D', 'texSubImage3D', 'copyTexSubImage3D', 'compressedTexImage3D', 'compressedTexSubImage3D', 'texStorage2D', 'texStorage3D', 'invalidateFramebuffer', 'invalidateSubFramebuffer', 'framebufferTextureLayer', 'renderbufferStorageMultisample', 'copyBufferSubData', 'getBufferSubData', 'bindBufferBase', 'bindBufferRange', 'getIndexedParameter', 'getInternalformatParameter', 'getUniformIndices', 'getActiveUniforms', 'getUniformBlockIndex', 'getActiveUniformBlockParameter', 'getActiveUniformBlockName', 'uniformBlockBinding', 'createQuery', 'deleteQuery', 'isQuery', 'beginQuery', 'endQuery', 'getQuery', 'getQueryParameter', 'createSampler', 'deleteSampler', 'isSampler', 'bindSampler', 'samplerParameteri', 'samplerParameterf', 'getSamplerParameter', 'fenceSync', 'isSync', 'deleteSync', 'clientWaitSync', 'waitSync', 'getSyncParameter', 'createTransformFeedback', 'deleteTransformFeedback', 'isTransformFeedback', 'bindTransformFeedback', 'beginTransformFeedback', 'endTransformFeedback', 'transformFeedbackVaryings', 'getTransformFeedbackVarying', 'pauseTransformFeedback', 'resumeTransformFeedback', 'getFragDataLocation', 'clearBufferiv', 'clearBufferuiv', 'clearBufferfv', 'clearBufferfi', 'uniform1ui', 'uniform2ui', 'uniform3ui', 'uniform4ui', 'uniform1uiv', 'uniform2uiv', 'uniform3uiv', 'uniform4uiv', 'uniformMatrix2x3fv', 'uniformMatrix3x2fv', 'uniformMatrix2x4fv', 'uniformMatrix4x2fv', 'uniformMatrix3x4fv', 'uniformMatrix4x3fv']) hidden(WebGL2RenderingContext.prototype, name, function () { const s = state(this); if (s.version !== 2) throw new TypeError('Illegal invocation'); flag(s, GL.INVALID_OPERATION); return null; });
   for (const C of [WebGLObject, WebGL2RenderingContext, WebGLVertexArrayObject, WebGLRenderingContext, WebGLShader, WebGLProgram, WebGLBuffer, WebGLTexture, WebGLFramebuffer, WebGLRenderbuffer, WebGLUniformLocation, WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLContextEvent]) { tag(C, C.name); hidden(g, C.name, C); }
   hidden(N, 'makeWebGLContext', function (canvas, surface, options, version = 1) {
     if (options !== null && typeof options !== 'object' && typeof options !== 'function') throw new TypeError('WebGL context attributes must be a dictionary');

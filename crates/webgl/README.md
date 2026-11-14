@@ -279,6 +279,17 @@ and the [WebGL2 blit and missing-attachment rules](https://registry.khronos.org/
 alias errors, filters, flips, clipping and canvas isolation. Broader formats,
 MRT and multisample resolves are outside this subset.
 
+WebGL2 `readBuffer` and `drawBuffers` select BACK on the default framebuffer,
+COLOR_ATTACHMENT0 on an FBO, or NONE. Selections belong to each framebuffer and
+survive binding changes and canvas resize. This subset reports one draw buffer
+and one color attachment; additional outputs/MRT are rejected. An empty FBO draw
+list disables its color output; the default buffer requires one entry. NONE
+suppresses color draws, clears and blits while depth continues independently.
+Reading NONE rejects readPixels without changing the caller's destination, and
+a color blit with a present destination rejects NONE as its source before depth
+or color changes. Source NONE is harmless when color drawing is also disabled.
+The backend, script and Engine buffer-selection tests cover these states.
+
 
 ## Combined validation
 

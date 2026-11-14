@@ -1,0 +1,15 @@
+<!doctype html><title>Color buffer selection</title>
+<canvas id="visible" width="2" height="2"></canvas><canvas id="disabled" width="2" height="2"></canvas>
+<script>
+for(const id of ['visible','disabled']) {
+ const gl=document.getElementById(id).getContext('webgl2',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+ gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);
+ gl.drawBuffers([gl.NONE]);gl.clearColor(1,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+ if(id==='visible') {
+  gl.drawBuffers([gl.BACK]);gl.enable(gl.SCISSOR_TEST);gl.scissor(0,0,1,2);gl.clearColor(0,1,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+ }
+ gl.readBuffer(gl.NONE);const bytes=new Uint8Array([7,7,7,7]);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,bytes);
+ if(gl.getError()!==gl.INVALID_OPERATION||bytes.some(value=>value!==7))throw new Error('disabled read changed output');
+ gl.readBuffer(gl.BACK);if(gl.getError()!==gl.NO_ERROR)throw new Error('buffer selection failed');
+}
+</script>
