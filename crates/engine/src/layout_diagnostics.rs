@@ -10,14 +10,23 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use rabbithole_layout::diagnostics::Decision;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Snapshot {
     pub flush_entries: u64,
     /// Returned because both existing layout dirty/full flags were clear.
     pub clean_flag_returns: u64,
-    pub full_rebuilds_completed: u64,
-    pub incremental_rebuilds_completed: u64,
+    /// Engine damage requests, not evidence that either algorithm ran.
+    pub full_damage_requests: u64,
+    pub incremental_damage_requests: u64,
+    /// Actual returned branches observed in layout_incremental, not global
+    /// process layout work or a count of individual boxes reconstructed.
+    pub noop_layout_completions: u64,
+    pub full_layout_requested_completions: u64,
+    pub full_layout_fallback_completions: u64,
+    pub incremental_layout_completions: u64,
+    pub missing_layout_decisions: u64,
     pub aborted_flushes: u64,
     pub active_flushes: u64,
     pub max_flush_depth: u64,
@@ -34,19 +43,26 @@ pub struct Snapshot {
 impl Snapshot {
     /// A final capture is incomplete if any call is active, aborted, or saturated.
     pub fn is_complete(&self) -> bool {
-        let completed = self.clean_flag_returns.checked_add(self.full_rebuilds_completed)
-            .and_then(|sum| sum.checked_add(self.incremental_rebuilds_completed));
+        let layouts = self.noop_layout_completions.checked_add(self.full_layout_requested_completions)
+            .and_then(|sum| sum.checked_add(self.full_layout_fallback_completions))
+            .and_then(|sum| sum.checked_add(self.incremental_layout_completions));
+        let completed = layouts.and_then(|sum| sum.checked_add(self.clean_flag_returns));
+        let requested = self.full_damage_requests.checked_add(self.incremental_damage_requests);
         !self.overflowed && self.active_flushes == 0 && self.aborted_flushes == 0
-            && completed == Some(self.flush_entries)
+            && self.missing_layout_decisions == 0 && completed == Some(self.flush_entries)
+            && requested == layouts
     }
 }
 
 // Integer/boolean-only JSON; no page identities, URLs, contents or clock values.
 impl fmt::Display for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{{\"complete\":{},\"flush_entries\":{},\"clean_flag_returns\":{},\"full_rebuilds_completed\":{},\"incremental_rebuilds_completed\":{},\"aborted_flushes\":{},\"active_flushes\":{},\"max_flush_depth\":{},\"style_full_updates\":{},\"style_incremental_updates\":{},\"incremental_elements_restyled\":{},\"style_overlay_patches\":{},\"display_list_commits\":{},\"overflowed\":{}}}",
+        write!(f, "{{\"complete\":{},\"flush_entries\":{},\"clean_flag_returns\":{},\"full_damage_requests\":{},\"incremental_damage_requests\":{},\"noop_layout_completions\":{},\"full_layout_requested_completions\":{},\"full_layout_fallback_completions\":{},\"incremental_layout_completions\":{},\"missing_layout_decisions\":{},\"aborted_flushes\":{},\"active_flushes\":{},\"max_flush_depth\":{},\"style_full_updates\":{},\"style_incremental_updates\":{},\"incremental_elements_restyled\":{},\"style_overlay_patches\":{},\"display_list_commits\":{},\"overflowed\":{}}}",
             self.is_complete(), self.flush_entries, self.clean_flag_returns,
-            self.full_rebuilds_completed, self.incremental_rebuilds_completed,
+            self.full_damage_requests, self.incremental_damage_requests,
+            self.noop_layout_completions, self.full_layout_requested_completions,
+            self.full_layout_fallback_completions, self.incremental_layout_completions,
+            self.missing_layout_decisions,
             self.aborted_flushes, self.active_flushes, self.max_flush_depth,
             self.style_full_updates, self.style_incremental_updates,
             self.incremental_elements_restyled, self.style_overlay_patches,
@@ -105,7 +121,7 @@ fn add(counter: &mut u64, amount: u64) -> bool {
 #[derive(Clone, Copy)]
 enum Outcome {
     Clean,
-    Rebuilt { full: bool },
+    Layout(Option<Decision>),
 }
 
 pub(crate) struct FlushCapture {
@@ -133,8 +149,20 @@ impl FlushCapture {
         self.outcome = Some(Outcome::Clean);
     }
 
-    pub(crate) fn rebuilt(&mut self, full: bool) {
-        self.outcome = Some(Outcome::Rebuilt { full });
+    pub(crate) fn request(&mut self, full: bool) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            let s = &mut state.counts;
+            s.overflowed |= if full {
+                add(&mut s.full_damage_requests, 1)
+            } else {
+                add(&mut s.incremental_damage_requests, 1)
+            };
+        });
+    }
+
+    pub(crate) fn completed(&mut self, decision: Option<Decision>) {
+        self.outcome = Some(Outcome::Layout(decision));
     }
 }
 
@@ -153,8 +181,11 @@ impl Drop for FlushCapture {
             let outcome = if std::thread::panicking() { None } else { self.outcome };
             s.overflowed |= match outcome {
                 Some(Outcome::Clean) => add(&mut s.clean_flag_returns, 1),
-                Some(Outcome::Rebuilt { full: true }) => add(&mut s.full_rebuilds_completed, 1),
-                Some(Outcome::Rebuilt { full: false }) => add(&mut s.incremental_rebuilds_completed, 1),
+                Some(Outcome::Layout(Some(Decision::NoopReuse))) => add(&mut s.noop_layout_completions, 1),
+                Some(Outcome::Layout(Some(Decision::FullRequested))) => add(&mut s.full_layout_requested_completions, 1),
+                Some(Outcome::Layout(Some(Decision::FullFallback))) => add(&mut s.full_layout_fallback_completions, 1),
+                Some(Outcome::Layout(Some(Decision::Incremental))) => add(&mut s.incremental_layout_completions, 1),
+                Some(Outcome::Layout(None)) => add(&mut s.missing_layout_decisions, 1),
                 None => add(&mut s.aborted_flushes, 1),
             };
         });
@@ -238,7 +269,7 @@ mod tests {
         let s = snapshot().unwrap();
         assert_eq!(s.flush_entries, 5);
         assert_eq!(s.clean_flag_returns, 5);
-        assert_eq!(s.full_rebuilds_completed + s.incremental_rebuilds_completed, 0);
+        assert_eq!(s.full_layout_requested_completions + s.full_layout_fallback_completions + s.incremental_layout_completions + s.noop_layout_completions, 0);
         assert_eq!(s.style_full_updates + s.style_incremental_updates, 0);
         assert!(s.is_complete());
     }
@@ -258,14 +289,63 @@ mod tests {
         let s = snapshot().unwrap();
         assert_eq!(s.flush_entries, 3);
         assert_eq!(s.clean_flag_returns, 1);
-        assert_eq!(s.full_rebuilds_completed, 1);
-        assert_eq!(s.incremental_rebuilds_completed, 1);
-        assert_eq!(s.full_rebuilds_completed, page.incr.stats.layout_full - before.layout_full);
-        assert_eq!(s.incremental_rebuilds_completed, page.incr.stats.layout_incremental - before.layout_incremental);
+        assert_eq!(s.full_damage_requests, 1);
+        assert_eq!(s.incremental_damage_requests, 1);
+        assert_eq!(s.full_layout_requested_completions, 1);
+        assert_eq!(s.incremental_layout_completions, 1);
+        assert_eq!(s.full_layout_fallback_completions, 0);
+        assert_eq!(s.noop_layout_completions, 0);
         assert_eq!(s.style_full_updates, page.incr.stats.style_full - before.style_full);
         assert_eq!(s.style_incremental_updates + s.style_overlay_patches, page.incr.stats.style_incremental - before.style_incremental);
         assert_eq!(s.incremental_elements_restyled, page.incr.stats.elements_restyled - before.elements_restyled);
         assert_eq!(s.display_list_commits, 1);
+        assert!(s.is_complete());
+    }
+
+    #[test]
+    fn empty_incremental_damage_returns_the_previous_tree_without_rebuilding() {
+        let (engine, mut page) = load("<div id=box style='width:10px;height:10px'></div>");
+        let before_tree = page.layout_dump();
+        let before_legacy_incremental = page.incr.stats.layout_incremental;
+        let _capture = TestScope::new(true);
+        page.incr.diagnostic_test_empty_incremental_request();
+        engine.flush_layout(&mut page);
+        assert_eq!(page.layout_dump(), before_tree);
+        let s = snapshot().unwrap();
+        assert_eq!(s.flush_entries, 1);
+        assert_eq!(s.clean_flag_returns, 0);
+        assert_eq!(s.incremental_damage_requests, 1);
+        assert_eq!(s.noop_layout_completions, 1);
+        assert_eq!(s.incremental_layout_completions, 0);
+        assert_eq!(s.full_layout_fallback_completions, 0);
+        // The old request counter increments even though no layout ran.
+        assert_eq!(page.incr.stats.layout_incremental, before_legacy_incremental + 1);
+        assert!(s.is_complete());
+    }
+
+    #[test]
+    fn unusable_previous_tree_falls_back_to_full_despite_incremental_request() {
+        let (engine, mut page) = load("<div id=box style='width:37px;height:19px'></div>");
+        let node = page.doc.element_by_id("box").unwrap();
+        let before_legacy_incremental = page.incr.stats.layout_incremental;
+        let _capture = TestScope::new(true);
+        page.layout = rabbithole_layout::LayoutTree::empty();
+        assert_eq!(page.layout.root.node, None);
+        page.incr.diagnostic_test_empty_incremental_request();
+        engine.flush_layout(&mut page);
+        assert_eq!(page.layout.root.node, page.doc.html_element());
+        let rect = page.rect_of(node).unwrap();
+        assert_eq!((rect.w, rect.h), (37.0, 19.0));
+        let s = snapshot().unwrap();
+        assert_eq!(s.full_damage_requests, 0);
+        assert_eq!(s.incremental_damage_requests, 1);
+        assert_eq!(s.full_layout_fallback_completions, 1);
+        assert_eq!(s.full_layout_requested_completions, 0);
+        assert_eq!(s.incremental_layout_completions, 0);
+        assert_eq!(s.noop_layout_completions, 0);
+        // Same legacy class as the no-op case; independent geometry and
+        // the observed branch distinguish the actual outcomes.
+        assert_eq!(page.incr.stats.layout_incremental, before_legacy_incremental + 1);
         assert!(s.is_complete());
     }
 
@@ -309,22 +389,24 @@ mod tests {
             let mut inner = begin_flush().unwrap();
             inner.clean();
         }
-        outer.rebuilt(false);
+        outer.request(false);
+        outer.completed(Some(Decision::Incremental));
         drop(outer);
         let s = snapshot().unwrap();
         assert_eq!(s.flush_entries, 2);
         assert_eq!(s.clean_flag_returns, 1);
-        assert_eq!(s.incremental_rebuilds_completed, 1);
+        assert_eq!(s.incremental_layout_completions, 1);
         assert_eq!(s.max_flush_depth, 2);
         assert!(s.is_complete());
         assert!(std::panic::catch_unwind(|| {
             let mut capture = begin_flush().unwrap();
-            capture.rebuilt(true);
+            capture.request(true);
+            capture.completed(Some(Decision::FullRequested));
             panic!("controlled unwind after outcome selection");
         }).is_err());
         let s = snapshot().unwrap();
         assert_eq!(s.flush_entries, 3);
-        assert_eq!(s.full_rebuilds_completed, 0);
+        assert_eq!(s.full_layout_requested_completions, 0);
         assert_eq!(s.aborted_flushes, 1);
         assert_eq!(s.active_flushes, 0);
         assert!(!s.is_complete());
@@ -340,6 +422,19 @@ mod tests {
         let s = snapshot().unwrap();
         assert_eq!(s.flush_entries, u64::MAX);
         assert!(s.overflowed);
+        assert!(!s.is_complete());
+    }
+
+    #[test]
+    fn missing_layout_decision_is_incomplete_and_never_defaults_to_incremental() {
+        let _capture = TestScope::new(true);
+        let mut capture = begin_flush().unwrap();
+        capture.request(false);
+        capture.completed(None);
+        drop(capture);
+        let s = snapshot().unwrap();
+        assert_eq!(s.missing_layout_decisions, 1);
+        assert_eq!(s.incremental_layout_completions, 0);
         assert!(!s.is_complete());
     }
 }

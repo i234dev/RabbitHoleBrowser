@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Observed layout decisions only; absent from default builds.
+layout-diagnostics = []
+
 [dependencies]
 rabbithole-dom.workspace = true
 rabbithole-css.workspace = true

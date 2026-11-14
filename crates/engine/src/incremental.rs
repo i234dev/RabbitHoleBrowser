@@ -134,6 +134,13 @@ impl IncrementalState {
         self.dl_dirty = true;
     }
 
+    #[cfg(all(test, feature = "layout-diagnostics"))]
+    pub(crate) fn diagnostic_test_empty_incremental_request(&mut self) {
+        self.layout_full = false;
+        self.layout_dirty = true;
+        self.box_dirty.clear();
+    }
+
     /// Cached [`rabbithole_layout::LayoutTree::depends_on_page_scroll`].
     pub(crate) fn depends_on_page_scroll(&mut self, layout: &rabbithole_layout::LayoutTree) -> bool {
         *self.scroll_dep.get_or_insert_with(|| layout.depends_on_page_scroll())
@@ -482,9 +489,23 @@ impl Engine {
         } else {
             incr.stats.layout_incremental += 1;
         }
+        #[cfg(feature = "layout-diagnostics")]
+        if let Some(capture) = &mut diagnostic {
+            capture.request(damage.full);
+        }
         let prev = std::mem::replace(layout, rabbithole_layout::LayoutTree::empty());
         let t = std::time::Instant::now();
+        #[cfg(not(feature = "layout-diagnostics"))]
         *layout = rabbithole_layout::layout_incremental(prev, &ctx, &damage);
+        #[cfg(feature = "layout-diagnostics")]
+        let effective_decision = if diagnostic.is_some() {
+            let (tree, decision) = rabbithole_layout::diagnostics::layout_incremental_observed(prev, &ctx, &damage);
+            *layout = tree;
+            decision
+        } else {
+            *layout = rabbithole_layout::layout_incremental(prev, &ctx, &damage);
+            None
+        };
         if debug_enabled() {
             let (h, m, n) = rabbithole_layout::take_cache_stats();
             eprintln!("[incr] layout {:?}: cache hits {h}, misses {m}, fresh {n}", t.elapsed());
@@ -502,7 +523,7 @@ impl Engine {
         incr.clear_rects();
         #[cfg(feature = "layout-diagnostics")]
         if let Some(capture) = &mut diagnostic {
-            capture.rebuilt(damage.full);
+            capture.completed(effective_decision);
         }
     }
 

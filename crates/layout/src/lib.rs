@@ -15,6 +15,8 @@ mod flex;
 mod float;
 mod grid;
 mod incremental;
+#[cfg(feature = "layout-diagnostics")]
+pub mod diagnostics;
 mod inline;
 mod intrinsic;
 mod table;

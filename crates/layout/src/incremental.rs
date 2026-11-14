@@ -152,9 +152,22 @@ pub fn layout_incremental(prev: LayoutTree, ctx: &LayoutContext, damage: &Layout
         && prev.root.node == html
         && prev.viewport == (ctx.viewport_width.max(1.0), ctx.viewport_height.max(1.0));
     if !usable {
+        #[cfg(feature = "layout-diagnostics")]
+        {
+            let tree = crate::layout(ctx);
+            crate::diagnostics::record(if damage.full {
+                crate::diagnostics::Decision::FullRequested
+            } else {
+                crate::diagnostics::Decision::FullFallback
+            });
+            return tree;
+        }
+        #[cfg(not(feature = "layout-diagnostics"))]
         return crate::layout(ctx);
     }
     if damage.dirty.is_empty() {
+        #[cfg(feature = "layout-diagnostics")]
+        crate::diagnostics::record(crate::diagnostics::Decision::NoopReuse);
         return prev;
     }
     let mut tainted = HashSet::new();
@@ -171,5 +184,12 @@ pub fn layout_incremental(prev: LayoutTree, ctx: &LayoutContext, damage: &Layout
     map.insert(html.expect("html"), prev.root);
     let reuse = Reuse { map: RefCell::new(map), tainted, uses_counters: prev.uses_counters };
     let mut layouter = Layouter::new(ctx);
+    #[cfg(feature = "layout-diagnostics")]
+    {
+        let tree = layouter.layout_document_with(Some(&reuse));
+        crate::diagnostics::record(crate::diagnostics::Decision::Incremental);
+        tree
+    }
+    #[cfg(not(feature = "layout-diagnostics"))]
     layouter.layout_document_with(Some(&reuse))
 }

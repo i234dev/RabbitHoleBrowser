@@ -294,6 +294,6 @@ fn main() {
     );
     #[cfg(feature = "layout-diagnostics")]
     if let Some(counters) = rabbithole_engine::layout_diagnostics::snapshot() {
-        eprintln!("[layout-diagnostics] {{\"schema\":1,\"kind\":\"layout-counters\",\"scope\":\"shot-main-thread/all-pages-including-retired\",\"counters\":{counters}}}");
+        eprintln!("[layout-diagnostics] {{\"schema\":2,\"kind\":\"layout-counters\",\"scope\":\"shot-main-thread/all-pages-including-retired\",\"layout_outcome_scope\":\"layout_incremental observed by Engine.flush_layout\",\"phase_event_scope\":\"existing Engine counter boundaries; excludes other cascade/layout work\",\"counters\":{counters}}}");
     }
 }
