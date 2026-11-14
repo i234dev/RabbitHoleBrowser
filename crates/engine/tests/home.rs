@@ -94,13 +94,23 @@ fn home_renders_real_version_and_current_baseline_results() {
     let dom = row(&page, "metric-dom");
     assert!(dom.contains("DOM / WPT dom/*"));
     assert!(dom.contains(&format!("{} / {}", grouped(passed), grouped(total))));
-    assert!(row(&page, "metric-html").contains("1,935 / 1,945"));
-    assert!(row(&page, "metric-wasm").contains("66,747 / 66,757"));
-
-    let historical = row(&page, "metric-speedometer");
-    assert!(historical.contains("0.148"));
-    assert!(historical.contains("Historical measurement"));
-    assert!(historical.contains("Date not recorded"));
+    // Recorded results must follow the supplied value, date and conditions
+    // when a new measurement replaces a historical one.
+    for line in include_str!("../../../tools/metrics/measurements.tsv").lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(fields.len(), 7, "invalid measurement record: {line}");
+        if fields[6] != "recorded" {
+            continue;
+        }
+        let shown = row(&page, &format!("metric-{}", fields[0]));
+        for field in &fields[1..6] {
+            assert!(!field.is_empty(), "empty field in measurement {}", fields[0]);
+            assert!(shown.contains(field), "measurement {} is missing {field:?}: {shown}", fields[0]);
+        }
+    }
     let frame = engine.snapshot(&page);
     assert_eq!((frame.width, frame.height), (1200, 1100));
     assert!(!frame.rgba.is_empty());
