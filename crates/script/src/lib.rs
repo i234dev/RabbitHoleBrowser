@@ -44,6 +44,8 @@ mod tests_media;
 #[cfg(test)]
 mod tests_realms;
 #[cfg(test)]
+mod tests_document_write;
+#[cfg(test)]
 mod tests_service_worker;
 #[cfg(test)]
 mod tests_webgl;
