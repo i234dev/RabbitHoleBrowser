@@ -290,6 +290,7 @@ enum Command {
     DrawArrays(u32, u32, u32),
     DrawElements(u32, u32, u32, usize),
     ReadPixels(i32, i32, u32, u32),
+    BlitFramebuffer([i32; 4], [i32; 4], u32, u32),
     Width,
     Height,
     ReadWidth,
@@ -413,6 +414,9 @@ impl Command {
             "drawArrays" => Self::DrawArrays(u!(2), u!(3), u!(4)),
             "drawElements" => Self::DrawElements(u!(2), u!(3), u!(4), n!(5) as usize),
             "readPixels" => Self::ReadPixels(n!(2) as i32, n!(3) as i32, u!(4), u!(5)),
+            "blitFramebuffer" => Self::BlitFramebuffer(
+                [n!(2) as i32, n!(3) as i32, n!(4) as i32, n!(5) as i32],
+                [n!(6) as i32, n!(7) as i32, n!(8) as i32, n!(9) as i32], u!(10), u!(11)),
             "width" => Self::Width,
             "height" => Self::Height,
             "readWidth" => Self::ReadWidth,
@@ -680,6 +684,10 @@ impl Command {
                         }
                     }
                     Reply::Bytes(bytes)
+                }
+                Self::BlitFramebuffer(source, destination, mask, filter) => {
+                    ctx.blit_framebuffer(source, destination, mask, filter)?;
+                    Reply::Void
                 }
                 Self::Width => Reply::Number(ctx.dimensions().0 as f64),
                 Self::Height => Reply::Number(ctx.dimensions().1 as f64),

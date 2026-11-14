@@ -31,7 +31,135 @@ impl Default for Renderbuffer {
     }
 }
 
+#[derive(Clone, Copy)]
+struct BlitImage {
+    width: u32,
+    height: u32,
+    // Zero identifies the default image. Complete FBOs always have color.
+    color: u32,
+    // Some(0) is the default depth24 image; FBOs use depth16 renderbuffers.
+    depth: Option<u32>,
+}
+impl BlitImage {
+    fn index(self, x: i64, y: i64) -> usize {
+        let row = if self.color == 0 { self.height as i64 - 1 - y } else { y };
+        (row * self.width as i64 + x) as usize
+    }
+}
+
+struct BlitAxis { source: i64, source_span: i64, destination: i64, destination_span: i64 }
+impl BlitAxis {
+    // Rational arithmetic keeps clipping and nearest selection exact even for
+    // rectangles near GLint's endpoints. The fraction is only used by LINEAR.
+    fn at(&self, pixel: i64, limit: u32) -> Option<(i64, f64)> {
+        let mut denominator = 2 * self.destination_span as i128;
+        let mut numerator = self.source as i128 * denominator
+            + (2 * (pixel - self.destination) as i128 + 1) * self.source_span as i128;
+        if denominator < 0 { denominator = -denominator; numerator = -numerator; }
+        if numerator < 0 || numerator >= limit as i128 * denominator { return None; }
+        Some(((numerator / denominator) as i64, (numerator % denominator) as f64 / denominator as f64))
+    }
+}
+
 impl Context {
+    fn blit_image(&self, framebuffer: u32) -> Result<BlitImage> {
+        if self.framebuffer_status(framebuffer) != gl::FRAMEBUFFER_COMPLETE {
+            return Err(Error::InvalidFramebufferOperation);
+        }
+        if framebuffer == 0 {
+            Ok(BlitImage { width: self.width, height: self.height, color: 0,
+                depth: self.default_depth_channel.then_some(0) })
+        } else {
+            let fb = &self.framebuffers[&framebuffer];
+            let t = &self.textures[&fb.color];
+            Ok(BlitImage { width: t.width, height: t.height, color: fb.color,
+                depth: (fb.depth != 0).then_some(fb.depth) })
+        }
+    }
+    fn blit_color(&self, image: BlitImage, x: i64, y: i64) -> [u8; 4] {
+        let bytes = if image.color == 0 { &self.rgba } else { &self.textures[&image.color].pixels };
+        let i = image.index(x, y) * 4;
+        let mut pixel: [u8; 4] = bytes[i..i + 4].try_into().unwrap();
+        if image.color == 0 && !self.alpha_channel { pixel[3] = 255; }
+        pixel
+    }
+    fn blit_linear_color(&self, image: BlitImage, x: (i64, f64), y: (i64, f64)) -> [u8; 4] {
+        let axis = |(pixel, fraction): (i64, f64), limit: u32| {
+            let (lo, weight) = if fraction < 0.5 { (pixel - 1, fraction + 0.5) } else { (pixel, fraction - 0.5) };
+            (lo.clamp(0, limit as i64 - 1), (lo + 1).clamp(0, limit as i64 - 1), weight)
+        };
+        let (x0, x1, fx) = axis(x, image.width);
+        let (y0, y1, fy) = axis(y, image.height);
+        let colors = [self.blit_color(image, x0, y0), self.blit_color(image, x1, y0),
+            self.blit_color(image, x0, y1), self.blit_color(image, x1, y1)];
+        std::array::from_fn(|k| {
+            let bottom = colors[0][k] as f64 * (1. - fx) + colors[1][k] as f64 * fx;
+            let top = colors[2][k] as f64 * (1. - fx) + colors[3][k] as f64 * fx;
+            (bottom * (1. - fy) + top * fy).round() as u8
+        })
+    }
+    /// Single-sample RGBA8/RGB8 color blits and matching depth16 blits.
+    /// See GLES 3.0.6 §4.3.3 and WebGL2's missing-attachment/rectangle rules.
+    /// Only scissor affects writes; viewport, masks, blending and depth test do not.
+    pub fn blit_framebuffer(&mut self, source: [i32; 4], destination: [i32; 4], mask: u32, filter: u32) -> Result<()> {
+        if self.context_version != 2 { return Err(Error::InvalidOperation); }
+        if mask & !(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT) != 0 {
+            return Err(Error::InvalidValue);
+        }
+        if !matches!(filter, gl::NEAREST | gl::LINEAR) { return Err(Error::InvalidEnum); }
+        if filter == gl::LINEAR && mask & (gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT) != 0 {
+            return Err(Error::InvalidOperation);
+        }
+        let s = source.map(i64::from);
+        let d = destination.map(i64::from);
+        let spans = [s[2] - s[0], s[3] - s[1], d[2] - d[0], d[3] - d[1]];
+        if spans.iter().any(|span| span.abs() > i32::MAX as i64) { return Err(Error::InvalidValue); }
+        let src = self.blit_image(self.read_framebuffer)?;
+        let dst = self.blit_image(self.draw_framebuffer)?;
+        let color = mask & gl::COLOR_BUFFER_BIT != 0;
+        let depth = mask & gl::DEPTH_BUFFER_BIT != 0 && dst.depth.is_some();
+        // Image identity, not framebuffer identity: two FBOs may alias storage.
+        if color && src.color == dst.color { return Err(Error::InvalidOperation); }
+        if depth {
+            let (Some(read), Some(draw)) = (src.depth, dst.depth) else { return Err(Error::InvalidOperation); };
+            if read == draw || (read == 0) != (draw == 0) { return Err(Error::InvalidOperation); }
+        }
+        // Stencil and multisample storage cannot be created by this backend.
+        // Missing destination attachments are ignored, as required by WebGL2.
+        if (!color && !depth) || spans.contains(&0) { return Ok(()); }
+        let ax = BlitAxis { source: s[0], source_span: spans[0], destination: d[0], destination_span: spans[2] };
+        let ay = BlitAxis { source: s[1], source_span: spans[1], destination: d[1], destination_span: spans[3] };
+        let mut rect = [d[0].min(d[2]).max(0), d[1].min(d[3]).max(0),
+            d[0].max(d[2]).min(dst.width as i64), d[1].max(d[3]).min(dst.height as i64)];
+        if self.scissor_enabled {
+            rect[0] = rect[0].max(self.scissor[0]); rect[1] = rect[1].max(self.scissor[1]);
+            rect[2] = rect[2].min(self.scissor[0] + self.scissor[2]); rect[3] = rect[3].min(self.scissor[1] + self.scissor[3]);
+        }
+        // All errors have been checked. No allocation or fallible operation may
+        // occur once the first pixel is written, including combined color/depth.
+        for y in rect[1]..rect[3] {
+            let Some(sy) = ay.at(y, src.height) else { continue };
+            for x in rect[0]..rect[2] {
+                let Some(sx) = ax.at(x, src.width) else { continue };
+                let di = dst.index(x, y);
+                if color {
+                    let mut pixel = if filter == gl::LINEAR { self.blit_linear_color(src, sx, sy) } else { self.blit_color(src, sx.0, sy.0) };
+                    let bytes = if dst.color == 0 {
+                        if !self.alpha_channel { pixel[3] = 255; }
+                        &mut self.rgba
+                    } else { &mut self.textures.get_mut(&dst.color).unwrap().pixels };
+                    bytes[di * 4..di * 4 + 4].copy_from_slice(&pixel);
+                }
+                if depth {
+                    let read = src.depth.unwrap(); let draw = dst.depth.unwrap();
+                    let si = src.index(sx.0, sy.0);
+                    let value = if read == 0 { self.depth[si] } else { self.renderbuffers[&read].depth[si] };
+                    if draw == 0 { self.depth[di] = value; } else { self.renderbuffers.get_mut(&draw).unwrap().depth[di] = value; }
+                }
+            }
+        }
+        Ok(())
+    }
     /// Whether the default drawing buffer has depth storage. Depth-test enable
     /// state is independent and also applies to depth attachments on FBOs.
     pub fn set_depth_channel(&mut self, enabled: bool) {

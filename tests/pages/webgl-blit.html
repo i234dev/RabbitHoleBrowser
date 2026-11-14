@@ -1,0 +1,21 @@
+<!doctype html><meta charset="utf-8"><title>Framebuffer copies</title>
+<style>canvas{width:128px;height:128px;image-rendering:pixelated}</style>
+<canvas id="scene" width="4" height="4"></canvas><canvas id="untouched" width="4" height="4"></canvas>
+<script>
+for(const id of ['scene','untouched']){
+ const gl=document.getElementById(id).getContext('webgl2',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+ gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);
+ const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);
+ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,0,0,255,0,255,0,255,0,0,255,255,255,255,255,255]));
+ const source=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,source);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,texture,0);
+ const copy=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,copy);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+ const destination=gl.createFramebuffer();gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,destination);gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,copy,0);
+ gl.blitFramebuffer(0,0,2,2,0,0,4,4,gl.COLOR_BUFFER_BIT,gl.NEAREST);
+ if(id==='scene'){
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER,destination);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,null);
+  gl.enable(gl.SCISSOR_TEST);gl.scissor(1,0,3,4);gl.viewport(100,100,0,0);gl.colorMask(false,false,false,false);
+  gl.blitFramebuffer(0,0,4,4,4,0,0,4,gl.COLOR_BUFFER_BIT,gl.NEAREST);
+ }
+ if(gl.getError()!==gl.NO_ERROR)throw new Error('blit failed');
+}
+</script>

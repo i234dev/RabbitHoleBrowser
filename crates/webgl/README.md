@@ -227,11 +227,36 @@ FBOs, and deleting an attachment detaches it from current framebuffer bindings.
 
 The current subset requires COLOR_ATTACHMENT0 to hold an RGBA8 2D texture at
 level zero. Optional depth storage must have matching dimensions. Depth-only
-FBOs, color renderbuffers, stencil, multiple attachments/MRT, multisampling and
-blits remain unsupported. Mismatched dimensions are INCOMPLETE_DIMENSIONS in
+FBOs, color renderbuffers, stencil, multiple attachments/MRT and multisampling
+remain unsupported. Mismatched dimensions are INCOMPLETE_DIMENSIONS in
 WebGL1 and explicitly FRAMEBUFFER_UNSUPPORTED in the WebGL2 subset. Renderbuffers
 have a separate 64 MiB budget and at most 256 live objects of each FBO kind.
 The existing framebuffer dimension and pixel-count limits also apply.
+
+## WebGL2 framebuffer blits
+
+`blitFramebuffer` copies actual pixels between the independent read/draw
+bindings, including the default canvas. RGBA8 color supports NEAREST and LINEAR
+filtering, scaling, either rectangle direction, source/destination clipping and
+destination scissor. Mapping is preserved when clipping; source-outside pixel
+centers leave the destination untouched. Bilinear sampling clamps to the source
+image edges. Viewport, blending, depth tests and color/depth write masks do not
+affect the copy. An opaque default buffer reads/writes alpha one.
+
+Depth copies support NEAREST between distinct DEPTH_COMPONENT16 renderbuffers.
+Mixing those attachments with the default depth24 buffer is rejected as a format
+mismatch. A missing destination depth/stencil attachment is ignored; missing
+source depth with a present destination is an error. Stencil and multisample
+storage remain unsupported by the allocation APIs. Errors, completeness,
+rectangle overflow and identical source/destination images (including images
+shared by different FBOs, even for disjoint rectangles) are validated before any
+color or depth write. Work is bounded by the clipped destination image.
+
+These rules follow [GLES 3.0.6 section 4.3.3](https://registry.khronos.org/OpenGL/specs/es/3.0/es_spec_3.0.pdf)
+and the [WebGL2 blit and missing-attachment rules](https://registry.khronos.org/webgl/specs/latest/2.0/).
+`tests/blit.rs`, the script bindings and the page fixture check actual pixels,
+alias errors, filters, flips, clipping and canvas isolation. Broader formats,
+MRT and multisample resolves are outside this subset.
 
 
 ## Combined validation
@@ -245,5 +270,5 @@ pixels, including sampling the resulting texture into the visible canvas. See
 [the joint pipeline demo](../../tests/pages/webgl-pipeline.html).
 
 These checks cover the implemented subset. Multiple color attachments/MRT,
-stencil, blits and multisampling remain open; there is no full WebGL2 conformance
+stencil and multisampling remain open; there is no full WebGL2 conformance
 or Three.js compatibility claim.

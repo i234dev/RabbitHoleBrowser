@@ -1022,3 +1022,47 @@ console.log(gl.getError());
     assert_eq!(out, ["255,0,0,255", "0,255,0,255", "0,0,255,255", "0"]);
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
+
+#[test]
+fn webgl2_blit_copies_real_pixels_and_keeps_default_canvas_separate() {
+    let (mut env,mut host)=setup("<canvas id=a width=3 height=3></canvas><canvas id=b width=3 height=3></canvas>");
+    let out=run(&mut env,&mut host,r#"
+const canvas=document.getElementById('a'),gl=canvas.getContext('webgl2',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);
+function target(w,h,data){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,data);const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);return f;}
+const src=target(2,2,new Uint8Array([255,0,0,255,0,255,0,255,0,0,255,255,255,255,255,255])),dst=target(3,3,null);
+gl.bindFramebuffer(gl.READ_FRAMEBUFFER,src);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,dst);
+gl.blitFramebuffer(0,0,2,2,0,0,3,3,gl.COLOR_BUFFER_BIT,gl.LINEAR);
+console.log(gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)===src,gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)===dst);
+function read(f,x,y){gl.bindFramebuffer(gl.READ_FRAMEBUFFER,f);const p=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);return Array.from(p).join(',');}
+console.log(read(dst,1,1),read(null,1,1));
+const copy=document.getElementById('b').getContext('2d');copy.drawImage(canvas,0,0);console.log(Array.from(copy.getImageData(1,1,1,1).data).join(','));
+gl.bindFramebuffer(gl.READ_FRAMEBUFFER,dst);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,null);gl.viewport(10,10,0,0);gl.colorMask(false,false,false,false);
+gl.blitFramebuffer(0,0,3,3,0,0,3,3,gl.COLOR_BUFFER_BIT,gl.NEAREST);console.log(read(null,1,1),gl.getError());
+copy.drawImage(canvas,0,0);console.log(Array.from(copy.getImageData(1,1,1,1).data).join(','));
+"#);
+    assert_eq!(out,["true true","128,128,128,255 0,0,255,255","0,0,255,255","128,128,128,255 0","128,128,128,255"]);
+    assert!(env.errors().is_empty(),"{:?}",env.errors());
+}
+
+#[test]
+fn webgl2_blit_validates_before_writes_and_rejects_image_aliases() {
+    let (mut env,mut host)=setup("<canvas id=a width=2 height=2></canvas><canvas id=b></canvas>");
+    let out=run(&mut env,&mut host,r#"
+const gl=document.getElementById('a').getContext('webgl2',{preserveDrawingBuffer:true}),old=document.getElementById('b').getContext('webgl');
+console.log(typeof old.blitFramebuffer);let thrown=0;try{gl.blitFramebuffer();}catch(e){thrown+=e instanceof TypeError;}try{WebGL2RenderingContext.prototype.blitFramebuffer.call(old,0,0,1,1,0,0,1,1,0,gl.NEAREST);}catch(e){thrown+=e instanceof TypeError;}console.log(thrown);
+gl.clearColor(0,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);
+const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,0,0,255,255,0,0,255,255,0,0,255,255,0,0,255]));
+const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+const rb=gl.createRenderbuffer();gl.bindRenderbuffer(gl.RENDERBUFFER,rb);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT16,2,2);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,rb);
+gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,null);gl.blitFramebuffer(0,0,2,2,0,0,2,2,gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT,gl.NEAREST);console.log(gl.getError()===gl.INVALID_OPERATION);
+for(const args of [[-2147483648,0,0,2,0,0,2,2,gl.COLOR_BUFFER_BIT,gl.NEAREST],[0,0,2,2,0,0,2,2,gl.COLOR_BUFFER_BIT,123],[0,0,2,2,0,0,2,2,1,gl.NEAREST]]){gl.blitFramebuffer(...args);console.log(gl.getError());}
+const p=new Uint8Array(4);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,null);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);console.log(Array.from(p).join(','));
+const alias=gl.createFramebuffer();gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,alias);gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,f);
+gl.blitFramebuffer(0,0,1,1,1,1,2,2,gl.COLOR_BUFFER_BIT,gl.NEAREST);console.log(gl.getError()===gl.INVALID_OPERATION);
+gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,null);gl.enable(gl.SCISSOR_TEST);gl.scissor(1,0,1,1);gl.blitFramebuffer(0,0,2,2,2,2,0,0,gl.COLOR_BUFFER_BIT,gl.NEAREST);
+gl.bindFramebuffer(gl.READ_FRAMEBUFFER,null);gl.readPixels(1,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);console.log(Array.from(p).join(','),gl.getError());
+"#);
+    assert_eq!(out,["undefined","2","true","1281","1280","1281","0,0,255,255","true","255,0,0,255 0"]);
+    assert!(env.errors().is_empty(),"{:?}",env.errors());
+}
