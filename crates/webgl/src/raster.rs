@@ -264,11 +264,11 @@ impl Context {
           // All array ranges, indices and resource budgets were checked
           // before the first pixel changes. Error draws leave the buffer intact.
         for triangle in triangles {
-            self.rasterize(&triangle, &executable, &uniforms);
+            self.rasterize(&triangle, &executable, &uniforms)?;
         }
         Ok(())
     }
-    fn rasterize(&mut self, t: &Triangle, e: &Executable, uniforms: &BTreeMap<String, Value>) {
+    fn rasterize(&mut self, t: &Triangle, e: &Executable, uniforms: &BTreeMap<String, Value>) -> Result<()> {
         let v = &t.vertices;
         let inc = [
             inclusive(&v[1], &v[2]),
@@ -366,5 +366,6 @@ impl Context {
                 }
             }
         }
+        Ok(())
     }
 }
