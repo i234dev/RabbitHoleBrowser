@@ -162,6 +162,9 @@ pub struct Client {
     /// Plain-http origins spoken to with HTTP/2 prior knowledge (tests).
     pub(crate) h2c: Mutex<HashSet<String>>,
     pub stats: Stats,
+    /// One-shot scheduling control; absent from production builds.
+    #[cfg(test)]
+    after_h2_miss: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -187,6 +190,8 @@ impl Client {
             limiter: Limiter { st: Mutex::new((HashMap::new(), 0)), cv: Condvar::new(), per_host: per_host.max(1) },
             h2c: Mutex::new(HashSet::new()),
             stats: Stats::default(),
+            #[cfg(test)]
+            after_h2_miss: Mutex::new(None),
         }
     }
 
@@ -327,7 +332,21 @@ impl Client {
                 // No HTTP/2 connection: if the origin's protocol is being
                 // discovered by another request, wait for it (so all
                 // requests share the one h2 connection).
+                #[cfg(test)]
+                {
+                    let hook = self.after_h2_miss.lock().unwrap().take();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
                 let mut o = self.origins.lock().unwrap();
+                // The fast-path miss can precede another thread publishing
+                // h2 and clearing `connecting`. Recheck before claiming
+                // discovery, or we would replace that live connection.
+                if self.live_h2(&key).is_some() {
+                    drop(o);
+                    continue;
+                }
                 loop {
                     let info = o.entry(key.clone()).or_default();
                     if info.no_h2 || info.is_h1 {
@@ -493,3 +512,6 @@ impl SlotGuard {
 pub(crate) fn plain(stream: std::net::TcpStream) -> Stream {
     Stream::Plain(stream)
 }
+
+#[cfg(test)]
+mod tests;
