@@ -1597,10 +1597,14 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
             to.flex_grow = from.flex_grow;
             to.flex_shrink = from.flex_shrink;
             to.flex_basis = from.flex_basis;
+            to.flex_basis_content = from.flex_basis_content;
         }
         "flex-grow" => to.flex_grow = from.flex_grow,
         "flex-shrink" => to.flex_shrink = from.flex_shrink,
-        "flex-basis" => to.flex_basis = from.flex_basis,
+        "flex-basis" => {
+            to.flex_basis = from.flex_basis;
+            to.flex_basis_content = from.flex_basis_content;
+        }
         "flex-wrap" => to.flex_wrap = from.flex_wrap,
         "flex-flow" => {
             to.flex_direction = from.flex_direction;
