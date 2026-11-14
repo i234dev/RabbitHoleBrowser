@@ -1719,6 +1719,24 @@ mod control_flow_evaluation {
     use std::cell::Cell;
 
     #[test]
+    fn boolean_vector_helper_parameters_results_and_nested_calls_preserve_width() {
+        for version in [100,300] {
+            let (prefix,output)=if version==300 {("#version 300 es\nprecision highp float;out vec4 pixel;","pixel")}else{("precision highp float;","gl_FragColor")};
+            let helpers="bvec2 flip(bvec2 value){return not(value);}bvec2 route(bvec2 value){return flip(value);}";
+            let source=format!("{prefix}{helpers}void main(){{{output}=vec4(vec2(route(bvec2(true,false))),0.25,1.0);}}");
+            let shader=compile(&source,false,version).unwrap();
+            let result=shader.run_with_sampler(BTreeMap::new(),&|_,_|panic!("no sampler"));
+            assert_eq!(result[output].v[..4],[0.0,1.0,0.25,1.0]);
+            for wrong in ["vec2(0.0)","bvec3(true)","true"] {
+                let source=format!("{prefix}{helpers}void main(){{{output}=vec4(vec2(route({wrong})),0.25,1.0);}}");
+                assert!(compile(&source,false,version).is_err(),"helper must reject {wrong}");
+            }
+            let source=format!("{prefix}bvec2 wrong(bvec2 value){{return bvec3(value,true);}}void main(){{{output}=vec4(1.0);}}");
+            assert!(compile(&source,false,version).is_err(),"helper result width must match even when uncalled");
+        }
+    }
+
+    #[test]
     fn const_input_parameters_and_local_constants_are_read_only_and_lexically_scoped() {
         for version in [100,300] {
             let (prefix,output)=if version==300 {("#version 300 es\nprecision highp float;out vec4 pixel;","pixel")}else{("precision highp float;","gl_FragColor")};
