@@ -929,8 +929,17 @@ fn inline_absolute_containing_block_uses_first_and_last_fragments() {
     assert!((absolute.w - 20.0).abs() < 0.01, "the wider middle line must not widen the containing block: {absolute:?}");
     let fragments = t.inline_client_rects(&fx.doc, fx.doc.element_by_id("inline").unwrap());
     assert_eq!(fragments.len(), 3);
-    assert!((absolute.y - fragments[0].y).abs() < 0.01);
-    assert!((absolute.bottom() - fragments[2].bottom()).abs() < 0.01);
+    // Atomic descendants can extend beyond the inline's font box. Its
+    // own vertical padding edges follow the font metrics at each baseline,
+    // rather than the CSSOM union of its descendants' rectangles.
+    let style = fx.styles.get(fx.doc.element_by_id("inline").unwrap()).unwrap();
+    let font = fx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+    let metrics = fx.fonts.metrics(font, style.font_size);
+    let outer = t.box_of(&fx.doc, fx.doc.element_by_id("outer").unwrap()).unwrap();
+    let top = outer.lines[0].baseline - metrics.ascent;
+    let bottom = outer.lines[2].baseline + metrics.descent;
+    assert!((absolute.y - top).abs() < 0.01, "{absolute:?}, expected top {top}");
+    assert!((absolute.bottom() - bottom).abs() < 0.01, "{absolute:?}, expected bottom {bottom}");
     // Rebuilding a sibling must retain the first/last edges when reusing
     // the positioned container's cached lines.
     let images = HashMap::new();
