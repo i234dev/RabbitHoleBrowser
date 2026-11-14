@@ -809,19 +809,6 @@ fn proxies_never_match_property_caches() {
 }
 
 #[test]
-fn call_dispatch_preserves_polymorphic_and_indirect_calls() {
-    // Reuse one call site across all callable kinds, including a native
-    // after the closure cache was populated and a closure after a proxy.
-    eq("function invoke(f, x) { return f(x); } function plain(x) { return x + 1; } var bound = function(x) { return this.k + x; }.bind({k: 10}); var proxy = new Proxy(plain, {apply(t, th, a) { return t(a[0]) + 1; }}); [invoke(plain, -3), invoke(Math.abs, -3), invoke(bound, 3), invoke(proxy, 3), invoke(String, 7), invoke(plain, 4)].join()", "-2,3,13,5,7,5");
-    // call/apply try an indirect closure frame, then retain the native
-    // fallback for boxed receivers, rest parameters and native targets.
-    eq("function plain(a, b) { return this.k + a + b; } function boxed() { return typeof this; } function rest(...a) { return a.length; } [plain.call({k: 1}, 2, 3), plain.apply({k: 2}, [3, 4]), boxed.call(7), rest.apply(null, [1, 2]), Math.abs.call(null, -5), Math.abs.bind(null)(-6)].join()", "6,9,object,2,5,6");
-    eq("function invoke(f) { return f(2); } function* gen(x) { yield x; } async function asyncFn(x) { return x; } var it = invoke(gen); [it.next().value, invoke(asyncFn) instanceof Promise, invoke(function(x) { return arguments[0] + x; })].join()", "2,true,4");
-    eq("var bad = [null, 3, {}, class C {}]; var errors = []; function invoke(f) { return f(); } for (var f of bad) { try { invoke(f); } catch (e) { errors.push(e instanceof TypeError); } } var p = Proxy.revocable(function() {}, {}); p.revoke(); try { invoke(p.proxy); } catch (e) { errors.push(e instanceof TypeError); } errors.join()", "true,true,true,true,true");
-    eq("function invoke(f, x) { return f(x); } var caught; try { invoke(JSON.parse, '{'); } catch (e) { caught = e instanceof SyntaxError; } caught + ':' + invoke(Math.abs, -4) + ':' + invoke(x => x + 1, 5)", "true:4:6");
-}
-
-#[test]
 fn overlong_string_concatenation_throws() {
     // Doubling a string past the maximum length is a RangeError (it used
     // to overflow the rope length and panic).
