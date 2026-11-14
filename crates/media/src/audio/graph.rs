@@ -228,6 +228,9 @@ impl ContextRenderer {
             index
         };
         self.payload += cost;
+        // A newly created isolated node is still alive and must advance with
+        // this context. It has no edges yet, so appending is topological.
+        self.plan.push(PlanEntry { slot: index, inputs: Vec::new() });
         Ok(self.id(index))
     }
 
@@ -333,14 +336,10 @@ impl ContextRenderer {
             }
         }
         if order.len() != count { return Err(GraphError::Cycle); }
-        let mut used = vec![false; n];
-        let mut pending = vec![0usize];
-        while let Some(index) = pending.pop() {
-            if used[index] { continue; }
-            used[index] = true;
-            pending.extend(inputs[index].iter().copied());
-        }
-        Ok(order.into_iter().filter(|&i| used[i]).map(|slot| PlanEntry { slot, inputs: std::mem::take(&mut inputs[slot]) }).collect())
+        // Web Audio's rendering loop considers all created, still-alive
+        // nodes. Destination culling would freeze a disconnected effect's
+        // delay/envelope and replay stale audio when it is reconnected.
+        Ok(order.into_iter().map(|slot| PlanEntry { slot, inputs: std::mem::take(&mut inputs[slot]) }).collect())
     }
 
     /// Caller-owned output is committed only after all segments succeed. An
@@ -580,6 +579,64 @@ mod tests {
         assert!((output[9][0] - 1.0).abs() < 1e-6);
         assert!((output[13][0] + 1.0).abs() < 1e-6);
         assert!(output.iter().all(|frame| frame[0] == frame[1]));
+    }
+
+    #[test]
+    fn disconnecting_the_destination_does_not_freeze_delay_or_replay_an_old_impulse() {
+        let input = [[1.0; 2]];
+        let initial = Parameters { ratio: 1.0, ..hard() };
+        let make = || {
+            let mut graph = ContextRenderer::new(48000).unwrap();
+            let source = graph.add_buffer(SourceBuffer::stereo(&input).unwrap(), START).unwrap();
+            let effect = graph.add_compressor(Timeline::constant(initial)).unwrap();
+            graph.connect(source, effect, 0, 0).unwrap();
+            graph.connect(effect, graph.destination(), 0, 0).unwrap();
+            (graph, effect)
+        };
+        let (mut disconnected, effect) = make();
+        let (mut control, _) = make();
+        assert_eq!(render(&mut disconnected, 128, &[128]), render(&mut control, 128, &[128]));
+        disconnected.disconnect(effect, disconnected.destination()).unwrap();
+        assert!(render(&mut disconnected, 1024, &[67, 64]).iter().all(|frame| *frame == [0.0; 2]));
+        let discarded = render(&mut control, 1024, &[128]);
+        assert_eq!(discarded[160], [1.0; 2]);
+        disconnected.connect(effect, disconnected.destination(), 0, 0).unwrap();
+        let after = render(&mut disconnected, 512, &[127, 7]);
+        assert_eq!(after, render(&mut control, 512, &[128]));
+        assert!(after.iter().all(|frame| *frame == [0.0; 2]));
+    }
+
+    #[test]
+    fn disconnected_live_nodes_keep_envelope_and_quantum_events_in_sync() {
+        let input = vec![[0.8, 0.2]; 4096];
+        let make = |connect_output: bool| {
+            let mut graph = ContextRenderer::new(48000).unwrap();
+            let source = graph.add_buffer(SourceBuffer::stereo(&input).unwrap(), START).unwrap();
+            let timeline = Timeline::new(Parameters { ratio: 1.0, ..hard() }, vec![(256, hard())]).unwrap();
+            let effect = graph.add_compressor(timeline).unwrap();
+            graph.connect(source, effect, 0, 0).unwrap();
+            if connect_output { graph.connect(effect, graph.destination(), 0, 0).unwrap(); }
+            (graph, effect)
+        };
+        let (mut unconnected, effect) = make(false);
+        let (mut control, _) = make(true);
+        assert!(render(&mut unconnected, 1152, &[67, 64, 7]).iter().all(|frame| *frame == [0.0; 2]));
+        let discarded = render(&mut control, 1152, &[128]);
+        assert!(discarded[288][0] > 0.0);
+        unconnected.connect(effect, unconnected.destination(), 0, 0).unwrap();
+        let after = render(&mut unconnected, 512, &[7, 127]);
+        assert_eq!(after, render(&mut control, 512, &[128]));
+        assert!(after.iter().all(|frame| frame[0] > 0.0));
+
+        // Even an isolated compressor is part of the prepared live-node plan
+        // immediately after add(), before any connect triggers prepare().
+        let mut isolated = ContextRenderer::new(48000).unwrap();
+        let id = isolated.add_compressor(Timeline::constant(hard())).unwrap();
+        render(&mut isolated, 128, &[128]);
+        match isolated.slots[id.slot].node.as_ref().unwrap() {
+            Node::Compressor { quantum, .. } => assert_eq!(*quantum, Some(0)),
+            _ => panic!("compressor fixture"),
+        }
     }
 
     #[test]

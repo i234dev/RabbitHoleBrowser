@@ -31,8 +31,11 @@ conversion are separate future work.
 
 Connections have one valid output/input port where the node kind supplies it.
 An identical connection is idempotent. The prepared topological plan validates
-all nodes, including disconnected cycles, then executes only the destination's
-ancestors. Each node executes once, so fan-out reuses its result. Incoming
+all nodes, including disconnected cycles, then executes every still-alive node
+once, independently of its connection to the destination. Only the destination
+block is published. This follows the [Web Audio rendering loop](https://www.w3.org/TR/2021/REC-webaudio-20210617/#rendering-loop);
+destination culling must not freeze a live effect's delay/envelope and replay
+old audio on reconnection. Fan-out reuses the single result. Incoming
 blocks are summed before that node's operation, with deterministic connection
 order. Compressor delay continues through zero input after a source ends.
 
@@ -64,11 +67,15 @@ turn failure into silence, or affect another context. A written corruption
 test reaches an invalid second segment deliberately bypassing the validated
 control path; ordinary API input cannot install that malformed timeline.
 
-The ten new tests are source-only until root validation: mono/stereo premix,
+The twelve graph tests are source-only until root validation: mono/stereo premix,
 shared compression versus incorrect per-source compression, stateful fan-out,
 gain placement, global/a-rate event boundaries with irregular call sizes,
 source schedules/tail, failed mutation atomicity, stale/generation/boundary
 guards, finite/budget/clock/context isolation, and defensive late failure.
+Two reconnection controls compare an expired impulse and an active source
+with mid-disconnection k-rate events against continuously rendered references
+whose temporary outputs are discarded. They also check a newly created
+isolated compressor advances before its first connection.
 They do not establish runtime correctness or performance before execution.
 
 ## Adapter blocker remains open
