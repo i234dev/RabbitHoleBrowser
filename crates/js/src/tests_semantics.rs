@@ -73,3 +73,67 @@ fn exponentiation_rejects_unparenthesized_unary_bases() {
     }
     assert_eq!(evaluate("var base=4; [(-base) ** 2, base ** -2, ++base ** -2].join(':')"), "16:0.0625:0.04");
 }
+
+#[test]
+fn for_using_iterable_observes_head_binding_tdz() {
+    for declaration in ["using", "await using"] {
+        let source = format!(r#"
+          var outcome='pending';
+          async function check() {{
+            let resource=[null];
+            let error='none';
+            try {{ for ({declaration} resource of resource) {{}} }}
+            catch(e) {{ error=e.name; }}
+            return error+':'+resource.length;
+          }}
+          check().then(value=>{{outcome=value;}});
+          ({{toString(){{return outcome;}}}})
+        "#);
+        assert_eq!(evaluate(&source), "ReferenceError:1", "declaration={declaration}");
+    }
+}
+
+#[test]
+fn for_using_iterable_closure_keeps_the_uninitialized_head_binding() {
+    for declaration in ["using", "await using"] {
+        let source = format!(r#"
+          var outcome='pending';
+          async function check() {{
+            let resource='outer';
+            let read;
+            for ({declaration} resource of (read=()=>resource,[null])) {{}}
+            try {{ read(); return 'no error'; }}
+            catch(e) {{ return e.name+':'+resource; }}
+          }}
+          check().then(value=>{{outcome=value;}});
+          ({{toString(){{return outcome;}}}})
+        "#);
+        assert_eq!(evaluate(&source), "ReferenceError:outer", "declaration={declaration}");
+    }
+}
+
+#[test]
+fn for_using_disposes_once_and_preserves_iteration_closures_on_continue_and_break() {
+    for (loop_kind, declaration) in [("for", "using"), ("for", "await using"), ("for await", "using"), ("for await", "await using")] {
+        let source = format!(r#"
+          var outcome='pending';
+          async function check() {{
+            const events=[], reads=[];
+            const resources=[1,2,3].map(id=>({{
+              id,
+              [Symbol.dispose](){{events.push(this.id);}},
+              [Symbol.asyncDispose](){{events.push(this.id);return Promise.resolve();}}
+            }}));
+            {loop_kind} ({declaration} resource of resources) {{
+              reads.push(()=>resource.id);
+              if (resource.id===1) continue;
+              break;
+            }}
+            return events.join(',')+':'+reads.map(read=>read()).join(',');
+          }}
+          check().then(value=>{{outcome=value;}});
+          ({{toString(){{return outcome;}}}})
+        "#);
+        assert_eq!(evaluate(&source), "1,2:1,2", "{loop_kind} ({declaration})");
+    }
+}

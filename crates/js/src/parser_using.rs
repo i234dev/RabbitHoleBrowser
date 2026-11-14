@@ -31,7 +31,6 @@ use super::*;
 const MARK: &str = "%usingDecl";
 const CAP: &str = "%using";
 const ERR: &str = "%usingErr";
-const FOR_VALUE: &str = "%usingValue";
 
 /// Hint of a `using` declarator: 0 sync, 1 async (`await using`).
 pub(super) const HINT_SYNC: f64 = 0.0;
@@ -514,18 +513,18 @@ impl Parser<'_> {
                     return Err(self.error_at(pos, format!("Identifier '{}' has already been declared", n.as_str())));
                 }
             }
-            // for (const %usingValue of right) { using target = %usingValue; body }
-            let value = Expr { pos, kind: ExprKind::Number(hint) };
-            let marked = Stmt {
-                pos,
-                kind: StmtKind::VarDecl(VarDecl {
-                    kind: VarKind::Const,
-                    declarations: vec![VarDeclarator { target, init: Some(call(pos, MARK, vec![ident(pos, FOR_VALUE), value])) }],
-                }),
+            // Keep the source binding in the for-head: its name is in the
+            // TDZ while evaluating `right`, then initialized per iteration.
+            // The disposing block registers that value without redeclaring
+            // it, so closures and the loop body see the same const binding.
+            let name = match &target {
+                Pattern::Identifier(n) => n.as_str(),
+                _ => unreachable!("using declarations only bind an identifier"),
             };
-            let inner = lower_statement_list(vec![marked, body], false);
+            let register = call_stmt(call(pos, "%UsingAdd", vec![ident(pos, CAP), ident(pos, name), Expr { pos, kind: ExprKind::Number(hint) }]));
+            let inner = wrap(pos, vec![register, body], hint == HINT_ASYNC);
             return Ok(StmtKind::ForOf {
-                left: Box::new(ForHead::VarDecl { kind: VarKind::Const, target: Pattern::Identifier(Name::new(FOR_VALUE)) }),
+                left: Box::new(ForHead::VarDecl { kind: VarKind::Const, target }),
                 right: Box::new(right),
                 body: Box::new(Stmt { pos, kind: StmtKind::Block(inner) }),
                 is_await,
