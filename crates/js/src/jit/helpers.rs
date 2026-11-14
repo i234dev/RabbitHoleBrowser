@@ -11,9 +11,9 @@
 //! no native frame is on the stack.
 
 use super::*;
-use crate::bytecode::Op;
+use crate::bytecode::{Op, CALL_ARROW, CALL_SIMPLE};
 use crate::value::Value;
-use crate::vm::Ctl;
+use crate::vm::{ArgSrc, Ctl, Flow};
 
 /// Context of a native activation (`rbx` in native code).
 #[repr(C)]
@@ -289,9 +289,61 @@ pub(crate) unsafe extern "sysv64" fn h_return(ctx: *mut Ctx, slot: u32) -> usize
 /// synchronization, unwind status and frame switch remain shared with the VM.
 pub(crate) unsafe extern "sysv64" fn h_call(ctx: *mut Ctx, pc: u32, args: u64) -> usize {
     guard(ctx, |r, ctx| {
-        let c = r.call_r(pc as usize + 1, args as u16, (args >> 16) as u16, (args >> 32) as u16);
+        let c = cached_simple_call(r, pc, args).unwrap_or_else(|| call_fallback(r, pc, args));
         status(r, ctx, c, pc)
     })
+}
+
+/// A warm monomorphic, register-only closure avoids inlining every CallR
+/// miss path into h_call. Admission is the existing CallIc contract: callee
+/// identity and collection epoch protect its borrowed code/scope pointers.
+/// All allocation, argument ownership and frame installation remain in the
+/// VM's shared push_simple_frame; this path adds no unrooted GC edge.
+#[inline(always)]
+fn cached_simple_call(r: &mut Realm, pc: u32, args: u64) -> Option<Ctl> {
+    let frame = r.frames.last_mut()?;
+    // Match call_r_impl even on a miss/panic: the caller is past this call.
+    frame.pc = pc as usize + 1;
+    let code = frame.code();
+    let (base, argc, cache) = (args as u16, (args >> 16) as u16, (args >> 32) as u16);
+    let rec = code.call_ics.get(cache as usize)?.get();
+    let cb = frame.base as usize + base as usize;
+    let callee = r.vstack[cb].bits();
+    if rec.callee != callee || rec.epoch != r.heap.collections || rec.scope == u32::MAX {
+        return None;
+    }
+    // SAFETY: a matching live closure and unchanged collection epoch are the
+    // same code-owner witness used by call_r_impl. Nothing before installation
+    // below executes JavaScript or a GC safe point.
+    let target = unsafe { rec.code.as_ref()? };
+    if target.realm.get() != r.current_realm || target.call_flags & (CALL_SIMPLE | CALL_ARROW) != CALL_SIMPLE {
+        return None;
+    }
+    let this = &r.vstack[cb + 1];
+    let this = if rec.strict {
+        this.undef_if_empty()
+    } else {
+        match this.v() {
+            crate::V::Undefined | crate::V::Null | crate::V::Empty => Value::Object(r.global),
+            crate::V::Object(id) => Value::Object(id),
+            _ => return None,
+        }
+    };
+    // Errors, notably maximum depth, must identify this call's continuation.
+    // Do not retain a Frame or slot borrow across reserve() in the shared push.
+    let pushed = r.push_simple_frame(crate::ObjectId(callee as u32), target, crate::ObjectId(rec.scope),
+        ArgSrc::Stack(cb + 2), argc as usize, this, Value::Undefined, base as u32, false, false);
+    #[cfg(test)]
+    match &pushed { Ok(()) => r.jit.cached_simple_calls += 1, Err(_) => r.jit.cached_simple_errors += 1 }
+    Some(r.ctl(pushed.map(|_| Flow::Reload)))
+}
+
+// Keep the full polymorphic/native/bound/proxy/lazy/scope-allocating path out
+// of h_call's common instruction stream. This is the original VM operation,
+// including PC synchronization, IC fill, exceptions and receiver coercion.
+#[inline(never)]
+fn call_fallback(r: &mut Realm, pc: u32, args: u64) -> Ctl {
+    r.call_r(pc as usize + 1, args as u16, (args >> 16) as u16, (args >> 32) as u16)
 }
 
 /// `NewR`.
