@@ -372,14 +372,15 @@ impl Md<'_> {
             url.fragment.is_some() && url.without_fragment() == self.page.url.without_fragment())
     }
 
+    fn block_element(&self, n: NodeId) -> bool {
+        matches!(
+            self.page.doc.tag(n),
+            Some("p" | "div" | "section" | "article" | "ul" | "ol" | "table" | "pre" | "blockquote" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "figure" | "header" | "dl" | "hr" | "main" | "aside" | "nav" | "footer" | "form" | "details")
+        )
+    }
+
     fn has_block_child(&self, n: NodeId) -> bool {
-        let doc = &self.page.doc;
-        doc.child_elements(n).any(|c| {
-            matches!(
-                doc.tag(c),
-                Some("p" | "div" | "section" | "article" | "ul" | "ol" | "table" | "pre" | "blockquote" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "figure" | "header" | "dl" | "hr" | "main" | "aside" | "nav" | "footer" | "form" | "details")
-            )
-        })
+        self.page.doc.child_elements(n).any(|c| self.block_element(c))
     }
 
     fn block(&mut self, n: NodeId, list_depth: usize) {
@@ -441,9 +442,11 @@ impl Md<'_> {
                                 if let Some(t) = doc.text(cc) {
                                     head.push_str(&esc_md(t));
                                 } else if doc.element(cc).is_some() && visible(self.page, self.geo, cc) {
-                                    if self.links { head.push(' '); }
+                                    // Blocks separate prose even when inline links do not.
+                                    let separate = self.links || self.block_element(cc);
+                                    if separate { head.push(' '); }
                                     self.inline_one(cc, &mut head);
-                                    if self.links { head.push(' '); }
+                                    if separate { head.push(' '); }
                                 }
                             }
                             let head = clean_inline(&head);
