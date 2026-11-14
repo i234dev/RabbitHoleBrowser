@@ -1111,3 +1111,16 @@ fn cached_scrolled_contents_keep_their_origin_when_another_box_is_rebuilt() {
         }
     }
 }
+
+#[test]
+fn rtl_inline_containing_block_preserves_fragments_open_at_line_end() {
+    let fx = Fixture::new(
+        "<div id=outer dir=rtl><i class=prefix></i><span><i class=first></i><br><i class=last></i><b id=absolute></b></span></div>",
+        "body{margin:0} #outer{position:relative;direction:rtl;width:200px;padding-top:10px;font-size:0;line-height:0} \
+         i{display:inline-block;height:20px;vertical-align:top}.prefix{width:60px}.first{width:40px}.last{width:80px} \
+         span{position:relative;padding:10px 0} #absolute{position:absolute;inset:0}",
+    );
+    let t = fx.layout();
+    let absolute = t.box_of(&fx.doc, fx.doc.element_by_id("absolute").unwrap()).unwrap().rect;
+    assert_eq!(absolute, Rect::new(120.0, 0.0, 20.0, 40.0));
+}

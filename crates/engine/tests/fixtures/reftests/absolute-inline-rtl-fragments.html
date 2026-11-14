@@ -1,0 +1,14 @@
+<!doctype html>
+<title>RTL inline fragments form a containing block across lines</title>
+<link rel="match" href="absolute-inline-rtl-fragments-ref.html">
+<style>
+body { margin: 0; }
+#outer { position: relative; direction: rtl; width: 200px; padding-top: 10px; font-size: 0; line-height: 0; }
+i { display: inline-block; height: 20px; vertical-align: top; }
+#prefix { width: 60px; }
+#first { width: 40px; }
+#last { width: 80px; }
+span { position: relative; padding: 10px 0; }
+b { position: absolute; inset: 0; background: green; }
+</style>
+<div id="outer" dir="rtl"><i id="prefix"></i><span><i id="first"></i><br><i id="last"></i><b></b></span></div>

@@ -1546,6 +1546,29 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
         if clamp_hit {
             self.done = true;
         }
+        // Complete open inline fragments in the same coordinates as closed
+        // ones. Bidi mirroring must transform their full widths, before it
+        // updates the cursor/open markers for the next line.
+        let line_end = self.cur.x;
+        for idx in 0..self.cur.open.len() {
+            let (start_x, item, started_here) = {
+                let o = &self.cur.open[idx];
+                (o.start_x, o.item, o.started_here)
+            };
+            if start_x > line_end + 0.01 {
+                continue;
+            }
+            if needs_bg(self.style(item)) {
+                self.cur.bg.push(BgFrag {
+                    x: start_x,
+                    w: (line_end - start_x).max(0.0),
+                    item,
+                    left_edge: started_here,
+                    right_edge: false,
+                });
+            }
+            self.cur.open[idx].started_here = false;
+        }
         self.bidi_line();
 
         // Vertical metrics.
@@ -1691,31 +1714,8 @@ impl<'l, 'a> InlineLayout<'l, 'a> {
             }
         };
 
-        let mut fragments: Vec<Fragment> = Vec::with_capacity(self.cur.frags.len() + self.cur.bg.len() + self.cur.open.len());
-        // Backgrounds of inline boxes still open at the line end.
-        let line_end = self.cur.x;
-        let mut extra_bg: Vec<BgFrag> = Vec::new();
-        for idx in 0..self.cur.open.len() {
-            let (start_x, item, started_here) = {
-                let o = &self.cur.open[idx];
-                (o.start_x, o.item, o.started_here)
-            };
-            if start_x > line_end + 0.01 {
-                continue; // started inside a carried-over run
-            }
-            let style = self.style(item).clone();
-            if needs_bg(&style) {
-                extra_bg.push(BgFrag {
-                    x: start_x,
-                    w: (line_end - start_x).max(0.0),
-                    item,
-                    left_edge: started_here,
-                    right_edge: false,
-                });
-            }
-            self.cur.open[idx].started_here = false;
-        }
-        for bg in self.cur.bg.iter().chain(extra_bg.iter()) {
+        let mut fragments: Vec<Fragment> = Vec::with_capacity(self.cur.frags.len() + self.cur.bg.len());
+        for bg in &self.cur.bg {
             let style = self.style(bg.item).clone();
             let tm = self.lay.text_metrics(&style);
             let cw = self.content_w;
