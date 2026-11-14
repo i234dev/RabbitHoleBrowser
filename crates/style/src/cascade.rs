@@ -134,7 +134,7 @@ impl RuleIndex {
                         match key {
                             SubjectKey::Id(id) => self.by_id.entry(id).or_default().push(idx),
                             SubjectKey::Class(class) => self.by_class.entry(class).or_default().push(idx),
-                            SubjectKey::Tag(tag) => self.by_tag.entry(tag).or_default().push(idx),
+                            SubjectKey::Tag(tag) => self.by_tag.entry(tag.to_ascii_lowercase()).or_default().push(idx),
                             SubjectKey::Attr(attr) => self.by_attr.entry(attr).or_default().push(idx),
                         }
                     }
@@ -151,9 +151,13 @@ impl RuleIndex {
             None => return,
         };
         out.extend_from_slice(&self.universal);
-        if let Some(v) = self.by_tag.get(&el.tag) {
-            out.extend_from_slice(v);
-        }
+        // The selector matcher compares SVG/XML local names without ASCII
+        // case; parent-derived tag covers must use the same lookup semantics.
+        let folded;
+        let tag = if el.tag.bytes().any(|b| b.is_ascii_uppercase()) {
+            folded = el.tag.to_ascii_lowercase(); folded.as_str()
+        } else { el.tag.as_str() };
+        if let Some(v) = self.by_tag.get(tag) { out.extend_from_slice(v); }
         if let Some(id) = el.id() {
             if let Some(v) = self.by_id.get(id) {
                 out.extend_from_slice(v);
@@ -3063,6 +3067,22 @@ mod subject_cover_tests {
                 .filter(|&i| !index.doc.rules[i].is_ua && rabbithole_css::matches_with(&index.doc.rules[i].selector, &doc, node, &state)).collect();
             assert_eq!(actual, expected, "node={node}");
         }
+    }
+
+    #[test]
+    fn nesting_tag_cover_preserves_current_foreign_name_matching() {
+        let mut doc = rabbithole_html::parse("<body></body>");
+        let foreign = doc.create_element_ns(rabbithole_dom::Namespace::Svg, None, "foreignObject", vec![]);
+        let body = doc.find_element("body").unwrap(); doc.append_child(body, foreign);
+        let sheets = vec![parse_stylesheet("foreignObject { & {color:green} }")];
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let index = ScopeIndex::build(&sheets, &env);
+        let mut candidates = Vec::new(); index.doc.candidates(&doc, foreign, &mut candidates);
+        let author: Vec<_> = index.doc.rules.iter().enumerate().filter(|(_, r)| !r.is_ua).collect();
+        assert_eq!(author.len(), 1);
+        let (rule, value) = author[0];
+        assert!(rabbithole_css::matches_with(&value.selector, &doc, foreign, &Default::default()));
+        assert!(candidates.contains(&rule), "index must not discard a matching parent-derived tag");
     }
 
     #[test]
