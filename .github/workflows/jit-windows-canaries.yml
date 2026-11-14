@@ -1,0 +1,44 @@
+name: Windows native JIT canaries
+
+on:
+  push:
+    branches: ["validation/jit-windows-active-frame-20261114"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-canaries:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      RH_GC_STRESS: inc
+      RABBITHOLE_JIT_THRESHOLD: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Native entry, watchdog, callback and live-frame GC evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'source_revision=%s\n' "$GITHUB_SHA"
+            printf 'runner_os=%s runner_arch=%s RH_GC_STRESS=%s RABBITHOLE_JIT_THRESHOLD=%s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$RH_GC_STRESS" "$RABBITHOLE_JIT_THRESHOLD"
+            rustc -Vv
+            for selector in off on; do
+              export RABBITHOLE_JIT="$selector"
+              printf 'RABBITHOLE_JIT=%s\n' "$RABBITHOLE_JIT"
+              for test in watchdog_stops_native_loop native_override_callback_reentry_keeps_values_alive_through_gc native_property_getter_keeps_generated_frame_live_during_gc; do
+                printf 'command=cargo test -p rabbithole-js --profile ci --features jit --locked tests_jit::%s -- --exact --nocapture --test-threads=1\n' "$test"
+                cargo test -p rabbithole-js --profile ci --features jit --locked "tests_jit::$test" -- --exact --nocapture --test-threads=1
+              done
+            done
+          } 2>&1 | tee native-canaries.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-canaries-windows-${{ github.sha }}
+          path: native-canaries.log
+          if-no-files-found: error
