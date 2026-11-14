@@ -77,8 +77,8 @@ jobs:
                       "return_status_switches_to_interpreter_entries_and_constructor_errors"]
           write("catalog.json", {"new_groups": groups, "previous_canaries": previous,
                                  "pure_unwind": "jit::windows_unwind::tests::",
-                                 "shared_backend": "rabbithole-jit (10 Windows unit tests)",
-                                 "expected_pure_unwind_tests": 6, "expected_shared_backend_tests": 10})
+                                 "shared_backend": "rabbithole-jit (11 Windows x64 unit tests)",
+                                 "expected_pure_unwind_tests": 6, "expected_shared_backend_tests": 11})
           records = []
           def run_case(selector, package, test=None, exact=False, expected_count=None):
               name = test or "all"
@@ -139,7 +139,7 @@ jobs:
               for name in groups: run_case(selector, "rabbithole-js", "tests_jit_cached_simple::" + name, True)
               for name in previous: run_case(selector, "rabbithole-js", "tests_jit::" + name, True)
               run_case(selector, "rabbithole-js", "jit::windows_unwind::tests::", expected_count=6)
-              run_case(selector, "rabbithole-jit", expected_count=10)
+              run_case(selector, "rabbithole-jit", expected_count=11)
           after = source_manifest()
           write("source-after.json", after)
           unchanged = before == after and not git("status", "--porcelain", "--untracked-files=no")
