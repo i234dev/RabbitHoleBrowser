@@ -50,11 +50,18 @@
   // A local MessagePort bridged to the owner's realm under id `b`.
   function bridge(port, b) {
     bridges.set(b, port);
-    port.onmessage = (ev) => post({ t: 'port', b, d: C.serialize(ev.data) });
+    port.onmessage = (ev) => post({ t: 'port', b, d: C.serialize(ev.data), ports: outgoingPorts(ev.ports) });
   }
   function portsOf(transfer) {
     const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
     return list.filter((t) => typeof g.MessagePort === 'function' && t instanceof g.MessagePort);
+  }
+  function outgoingPorts(transfer) {
+    return portsOf(transfer).map((p) => {
+      const b = 'w' + info.id + '.' + nextBridge++;
+      bridge(p, b);
+      return b;
+    });
   }
   function incomingPorts(ids) {
     return (ids || []).map((b) => {
@@ -67,7 +74,7 @@
   const scope = {
     postMessage(message, transfer) {
       const d = C.serialize(message);
-      const ports = portsOf(transfer).map((p) => { const b = 'w' + info.id + '.' + nextBridge++; bridge(p, b); return b; });
+      const ports = outgoingPorts(transfer);
       post({ t: 'msg', d, ports });
     },
     close() { N.workerClose(); },
@@ -89,7 +96,7 @@
     try { m = JSON.parse(text); } catch (e) { return; }
     if (m.t === 'port') {
       const p = bridges.get(m.b);
-      if (p) p.postMessage(C.deserialize(m.d));
+      if (p) p.postMessage(C.deserialize(m.d), incomingPorts(m.ports));
       return;
     }
     if (m.t === 'connect') {
