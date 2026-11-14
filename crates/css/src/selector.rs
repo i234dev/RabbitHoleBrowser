@@ -3,6 +3,9 @@
 
 use super::tokenizer::Token;
 use std::sync::Arc;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::marker::PhantomData;
 use rabbithole_dom::{Document, NodeData, NodeId};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -822,6 +825,58 @@ impl MatchState {
     }
 }
 
+/// Matching state for one immutable document/state pass. The selector
+/// lifetime prevents pointer-key reuse after a temporary AST is dropped.
+/// Drop this context before mutating the DOM or changing dynamic state.
+pub struct SelectorMatcher<'d, 's> {
+    doc: &'d Document,
+    state: &'d MatchState,
+    nth: RefCell<HashMap<(usize, NodeId), Arc<NthRanks>>>,
+    cached_nodes: Cell<usize>,
+    selectors: PhantomData<Cell<&'s Selector>>,
+    #[cfg(test)]
+    rank_builds: Cell<usize>,
+}
+
+struct NthRanks { indices: HashMap<NodeId, i32>, count: i32 }
+
+impl<'d, 's> SelectorMatcher<'d, 's> {
+    pub fn new(doc: &'d Document, state: &'d MatchState) -> Self {
+        Self { doc, state, nth: RefCell::new(HashMap::new()), cached_nodes: Cell::new(0), selectors: PhantomData,
+            #[cfg(test)] rank_builds: Cell::new(0) }
+    }
+
+    pub fn matches(&self, selector: &'s Selector, node: NodeId) -> bool {
+        match_from(selector, selector.compounds.len() - 1, self.doc, node, self.state, self)
+    }
+
+    fn nth_index(&self, list: &'s [Selector], node: NodeId, backwards: bool) -> Option<i32> {
+        let parent = self.doc.parent(node)?;
+        let key = (list.as_ptr() as usize, parent);
+        let existing = self.nth.borrow().get(&key).cloned();
+        let ranks = if let Some(ranks) = existing { ranks } else {
+            #[cfg(test)] self.rank_builds.set(self.rank_builds.get() + 1);
+            let mut indices = HashMap::new();
+            let mut count = 0;
+            for sibling in self.doc.child_elements(parent) {
+                if list.iter().any(|selector| self.matches(selector, sibling)) {
+                    count += 1; indices.insert(sibling, count);
+                }
+            }
+            let ranks = Arc::new(NthRanks { indices, count });
+            // Bound auxiliary memory on pages with many unrelated filters.
+            // Exceeding this budget falls back to uncached matching, preserving
+            // results; no state or pointers survive this matching pass.
+            if self.cached_nodes.get() + ranks.indices.len() <= 1_000_000 && self.nth.borrow().len() < 4096 {
+                self.cached_nodes.set(self.cached_nodes.get() + ranks.indices.len());
+                self.nth.borrow_mut().insert(key, ranks.clone());
+            }
+            ranks
+        };
+        ranks.indices.get(&node).map(|&i| if backwards { ranks.count - i + 1 } else { i })
+    }
+}
+
 /// Match a selector against an element without dynamic state.
 pub fn matches(sel: &Selector, doc: &Document, node: NodeId) -> bool {
     matches_with(sel, doc, node, &MatchState::default())
@@ -831,12 +886,11 @@ pub fn matches(sel: &Selector, doc: &Document, node: NodeId) -> bool {
 /// the element part of the selector is considered; a pseudo-element on the
 /// selector is the caller's business.
 pub fn matches_with(sel: &Selector, doc: &Document, node: NodeId, state: &MatchState) -> bool {
-    let n = sel.compounds.len();
-    match_from(sel, n - 1, doc, node, state)
+    SelectorMatcher::new(doc, state).matches(sel, node)
 }
 
-fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId, state: &MatchState) -> bool {
-    if !match_compound_with(&sel.compounds[idx], doc, node, state) {
+fn match_from<'s>(sel: &'s Selector, idx: usize, doc: &Document, node: NodeId, state: &MatchState, matcher: &SelectorMatcher<'_, 's>) -> bool {
+    if !match_compound_cached(&sel.compounds[idx], doc, node, state, matcher) {
         return false;
     }
     if idx == 0 {
@@ -847,16 +901,16 @@ fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId, state: &
         Combinator::Child => match element_parent(doc, node) {
             // Crossing from a shadow tree to its host: only `:host`
             // compounds can match the (featureless) host.
-            Some((p, crossed)) => (!crossed || compound_is_host(&sel.compounds[idx - 1])) && match_from(sel, idx - 1, doc, p, state),
+            Some((p, crossed)) => (!crossed || compound_is_host(&sel.compounds[idx - 1])) && match_from(sel, idx - 1, doc, p, state, matcher),
             None => false,
         },
         Combinator::Descendant => {
             let mut cur = element_parent(doc, node);
             while let Some((p, crossed)) = cur {
                 if crossed {
-                    return compound_is_host(&sel.compounds[idx - 1]) && match_from(sel, idx - 1, doc, p, state);
+                    return compound_is_host(&sel.compounds[idx - 1]) && match_from(sel, idx - 1, doc, p, state, matcher);
                 }
-                if match_from(sel, idx - 1, doc, p, state) {
+                if match_from(sel, idx - 1, doc, p, state, matcher) {
                     return true;
                 }
                 cur = element_parent(doc, p);
@@ -864,13 +918,13 @@ fn match_from(sel: &Selector, idx: usize, doc: &Document, node: NodeId, state: &
             false
         }
         Combinator::NextSibling => match prev_element_sibling(doc, node) {
-            Some(s) => match_from(sel, idx - 1, doc, s, state),
+            Some(s) => match_from(sel, idx - 1, doc, s, state, matcher),
             None => false,
         },
         Combinator::SubsequentSibling => {
             let mut cur = prev_element_sibling(doc, node);
             while let Some(s) = cur {
-                if match_from(sel, idx - 1, doc, s, state) {
+                if match_from(sel, idx - 1, doc, s, state, matcher) {
                     return true;
                 }
                 cur = prev_element_sibling(doc, s);
@@ -967,6 +1021,10 @@ pub fn match_compound(c: &Compound, doc: &Document, node: NodeId) -> bool {
 }
 
 pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &MatchState) -> bool {
+    match_compound_cached(c, doc, node, state, &SelectorMatcher::new(doc, state))
+}
+
+fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, state: &MatchState, matcher: &SelectorMatcher<'_, 's>) -> bool {
     let el = match doc.element(node) {
         Some(e) => e,
         None => return false,
@@ -1045,24 +1103,21 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
             Pseudo::NthChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, false)),
             Pseudo::NthLastChild(a, b) => nth_matches(*a, *b, child_index(doc, node, false, true)),
             Pseudo::NthChildOf(a, b, list) | Pseudo::NthLastChildOf(a, b, list) => {
-                let accepts = |n| list.iter().any(|s| matches_with(s, doc, n, state));
-                if !accepts(node) { false } else {
-                    let backwards = matches!(p, Pseudo::NthLastChildOf(..));
-                    let mut index = 1;
-                    let mut sibling = if backwards { next_element_sibling(doc, node) } else { prev_element_sibling(doc, node) };
-                    while let Some(n) = sibling {
-                        if accepts(n) { index += 1; }
-                        sibling = if backwards { next_element_sibling(doc, n) } else { prev_element_sibling(doc, n) };
-                    }
-                    nth_matches(*a, *b, index)
+                if *a == 1 && *b <= 1 {
+                    // Every positive filtered rank matches n / n+1. This
+                    // common nested filter needs no sibling scan at all.
+                    list.iter().any(|selector| matcher.matches(selector, node))
+                } else if *a == 0 && *b <= 0 { false } else {
+                    matcher.nth_index(list, node, matches!(p, Pseudo::NthLastChildOf(..)))
+                        .is_some_and(|index| nth_matches(*a, *b, index))
                 }
             }
             Pseudo::NthOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, false)),
-            Pseudo::Not(list) => !list.iter().any(|s| matches_with(s, doc, node, state)),
-            Pseudo::Is(list) | Pseudo::Where(list) => list.iter().any(|s| matches_with(s, doc, node, state)),
-            Pseudo::Nesting(list) => list.iter().any(|s| s.pseudo_element.is_none() && matches_with(s, doc, node, state)),
+            Pseudo::Not(list) => !list.iter().any(|s| matcher.matches(s, node)),
+            Pseudo::Is(list) | Pseudo::Where(list) => list.iter().any(|s| matcher.matches(s, node)),
+            Pseudo::Nesting(list) => list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, node)),
             Pseudo::NthLastOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, true)),
-            Pseudo::Has(list) => list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node, state)),
+            Pseudo::Has(list) => list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node, state, matcher)),
             Pseudo::Lang(lang) => {
                 let mut cur = Some(node);
                 let mut found = false;
@@ -1144,13 +1199,13 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
                 _ => false,
             },
             Pseudo::Visited => matches!(el.tag.as_str(), "a" | "area") && el.attr("href").is_some() && state.visited.contains(&node),
-            Pseudo::Host(list) => doc.shadow_root(node).is_some() && (list.is_empty() || list.iter().any(|s| matches_with(s, doc, node, state))),
+            Pseudo::Host(list) => doc.shadow_root(node).is_some() && (list.is_empty() || list.iter().any(|s| matcher.matches(s, node))),
             Pseudo::HostContext(list) => {
                 doc.shadow_root(node).is_some() && {
                     let mut cur = Some(node);
                     let mut found = false;
                     while let Some(n) = cur {
-                        if doc.element(n).map(|e| !e.tag.starts_with('#')).unwrap_or(false) && list.iter().any(|s| matches_with(s, doc, n, state)) {
+                        if doc.element(n).map(|e| !e.tag.starts_with('#')).unwrap_or(false) && list.iter().any(|s| matcher.matches(s, n)) {
                             found = true;
                             break;
                         }
@@ -1394,15 +1449,15 @@ fn is_default_button(doc: &Document, node: NodeId) -> bool {
 }
 
 /// `:has()` support: does any element related to `node` by `comb` match `sel`?
-fn has_matches(comb: Combinator, sel: &Selector, doc: &Document, node: NodeId, state: &MatchState) -> bool {
+fn has_matches<'s>(comb: Combinator, sel: &'s Selector, doc: &Document, node: NodeId, _state: &MatchState, matcher: &SelectorMatcher<'_, 's>) -> bool {
     match comb {
-        Combinator::Child => doc.child_elements(node).any(|c| matches_with(sel, doc, c, state)),
-        Combinator::Descendant => doc.descendants(node).skip(1).any(|d| matches_with(sel, doc, d, state)),
-        Combinator::NextSibling => next_element_sibling(doc, node).map(|s| matches_with(sel, doc, s, state)).unwrap_or(false),
+        Combinator::Child => doc.child_elements(node).any(|c| matcher.matches(sel, c)),
+        Combinator::Descendant => doc.descendants(node).skip(1).any(|d| matcher.matches(sel, d)),
+        Combinator::NextSibling => next_element_sibling(doc, node).map(|s| matcher.matches(sel, s)).unwrap_or(false),
         Combinator::SubsequentSibling => {
             let mut cur = next_element_sibling(doc, node);
             while let Some(s) = cur {
-                if matches_with(sel, doc, s, state) {
+                if matcher.matches(sel, s) {
                     return true;
                 }
                 cur = next_element_sibling(doc, s);
@@ -1459,6 +1514,44 @@ mod tests {
         }
         assert!(nth_matches(1, i32::MIN, 1));
         assert!(!nth_matches(i32::MIN, i32::MAX, 1));
+    }
+
+    #[test]
+    fn nth_of_nested_ranks_are_built_once_per_filter_and_pass() {
+        let mut html = String::from("<ul>");
+        for _ in 0..2000 { html.push_str("<li class=item></li>"); }
+        html.push_str("</ul>");
+        let doc = rabbithole_html::parse(&html);
+        let selectors = parse("li:nth-child(odd of :nth-child(odd of .item))");
+        let state = MatchState::default();
+        let matcher = SelectorMatcher::new(&doc, &state);
+        let count = doc.descendants(0).filter(|&n| matcher.matches(&selectors[0], n)).count();
+        assert_eq!(count, 500);
+        assert_eq!(matcher.rank_builds.get(), 2);
+        assert_eq!(matcher.cached_nodes.get(), 3000);
+    }
+
+    #[test]
+    fn nth_of_pass_caches_do_not_survive_mutation_or_dynamic_state_changes() {
+        let mut doc = rabbithole_html::parse("<ul><li id=a class=item></li><li id=b class=item></li><li id=c class=item></li></ul>");
+        let selectors = parse("li:nth-child(2 of .item), li:nth-child(1 of :hover)");
+        let a = doc.element_by_id("a").unwrap();
+        let b = doc.element_by_id("b").unwrap();
+        let c = doc.element_by_id("c").unwrap();
+        {
+            let state = MatchState { hovered: Some(a), ..Default::default() };
+            let matcher = SelectorMatcher::new(&doc, &state);
+            assert!(matcher.matches(&selectors[0], b));
+            assert!(matcher.matches(&selectors[1], a));
+            assert!(!matcher.matches(&selectors[1], c));
+        }
+        doc.set_attr(a, "class", None);
+        let state = MatchState { hovered: Some(c), ..Default::default() };
+        let matcher = SelectorMatcher::new(&doc, &state);
+        assert!(!matcher.matches(&selectors[0], b));
+        assert!(matcher.matches(&selectors[0], c));
+        assert!(!matcher.matches(&selectors[1], a));
+        assert!(matcher.matches(&selectors[1], c));
     }
 
     #[test]

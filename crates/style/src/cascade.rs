@@ -6,9 +6,9 @@ use crate::computed::*;
 use crate::props::{self, ApplyCtx};
 use crate::values::{self, ColorValue, LengthContext};
 use crate::{FontFace, FontSource, MediaEnv, StyleOptions, StyledTree, Stylesheet};
-use rabbithole_css::selector::{Compound, Pseudo, Selector, Specificity};
+use rabbithole_css::selector::{Compound, Pseudo, Selector, SelectorMatcher, Specificity};
 use rabbithole_css::selector::{is_host_selector, is_slotted_selector, matches_slotted};
-use rabbithole_css::{matches_with, parse_declaration_list, parse_stylesheet, Declaration, PseudoElement, StyleRule, Token};
+use rabbithole_css::{parse_declaration_list, parse_stylesheet, Declaration, PseudoElement, StyleRule, Token};
 use rabbithole_dom::{Document, NodeId};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -403,6 +403,7 @@ pub(crate) struct MatchCtx<'a, 'b, 'o> {
     pub(crate) scopes: &'a ScopeIndex,
     pub(crate) env: &'b MediaEnv,
     pub(crate) opts: &'b StyleOptions<'o>,
+    pub(crate) matcher: &'b SelectorMatcher<'b, 'a>,
     /// Ancestor bloom filter for the element being styled (fast rejection
     /// of descendant/child selectors), when the traversal maintains one.
     pub(crate) bloom: Option<&'b crate::restyle::AncestorBloom>,
@@ -434,7 +435,7 @@ pub(crate) fn compute_element<'a>(
                 continue;
             }
         }
-        if matches_with(&r.selector, doc, node, opts.state) {
+        if cx.matcher.matches(&r.selector, node) {
             rules.push((index_id, ci as u32));
             for d in r.decls.iter() {
                 let rank = match (r.is_ua, d.important) {
@@ -459,7 +460,7 @@ pub(crate) fn compute_element<'a>(
         let ix = scopes.for_scope(Some(root));
         for &hi in &ix.host {
             let r = &ix.rules[hi];
-            if matches_with(&r.selector, doc, node, opts.state) {
+            if cx.matcher.matches(&r.selector, node) {
                 rules.push((ix as *const RuleIndex as usize | 1, hi as u32));
                 for d in r.decls.iter() {
                     let rank = if d.important { Rank::ShadowImportant } else { Rank::ShadowNormal };
@@ -3041,7 +3042,7 @@ mod subject_cover_tests {
             index.doc.candidates(&doc, node, &mut candidates);
             let author: Vec<_> = candidates.iter().filter(|&&i| !index.doc.rules[i].is_ua).collect();
             assert_eq!(author.len(), if tag == "em" { 1 } else { 2 }, "{tag}");
-            assert!(author.iter().all(|&&i| matches_with(&index.doc.rules[i].selector, &doc, node, &Default::default())));
+            assert!(author.iter().all(|&&i| rabbithole_css::matches_with(&index.doc.rules[i].selector, &doc, node, &Default::default())));
         }
     }
 

@@ -906,9 +906,11 @@ fn e_closest(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
     let s = arg_str(realm, args, 0)?;
     let list = node::parse_selectors(realm, &s)?;
     let found = with_doc(n.doc, |doc| {
+        let state = rabbithole_css::MatchState::default();
+        let matcher = rabbithole_css::selector::SelectorMatcher::new(doc, &state);
         let mut cur = Some(n.node);
         while let Some(c) = cur {
-            if doc.element(c).is_some() && list.iter().any(|sel| rabbithole_css::matches(sel, doc, c)) {
+            if doc.element(c).is_some() && list.iter().any(|sel| matcher.matches(sel, c)) {
                 return Some(c);
             }
             cur = doc.parent(c);

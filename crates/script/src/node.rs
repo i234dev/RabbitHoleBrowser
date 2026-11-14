@@ -4,7 +4,7 @@
 use crate::env::with_env;
 use rabbithole_js::V;
 use crate::host::*;
-use rabbithole_css::{selector::SelectorParser, Selector, Tokenizer};
+use rabbithole_css::{selector::{SelectorMatcher, SelectorParser}, Selector, Tokenizer};
 use rabbithole_dom::{Document, NodeData, NodeId};
 use rabbithole_js::{JsResult, ObjectId, Realm, Value, HIDDEN};
 
@@ -122,12 +122,14 @@ pub(crate) fn parse_selectors(realm: &mut Realm, src: &str) -> JsResult<Vec<Sele
 pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first_only: bool) -> JsResult<Vec<NodeRef>> {
     let list = parse_selectors(realm, selectors)?;
     Ok(with_doc(root.doc, |doc| {
+        let state = rabbithole_css::MatchState::default();
+        let matcher = SelectorMatcher::new(doc, &state);
         let mut out = Vec::new();
         for n in doc.descendants(root.node).skip(1) {
             if doc.element(n).is_none() {
                 continue;
             }
-            if list.iter().any(|s| s.pseudo_element.is_none() && rabbithole_css::matches(s, doc, n)) {
+            if list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, n)) {
                 out.push(NodeRef { doc: root.doc, node: n });
                 if first_only {
                     break;
@@ -140,7 +142,11 @@ pub(crate) fn query_all(realm: &mut Realm, root: NodeRef, selectors: &str, first
 
 pub(crate) fn element_matches(realm: &mut Realm, n: NodeRef, selectors: &str) -> JsResult<bool> {
     let list = parse_selectors(realm, selectors)?;
-    Ok(with_doc(n.doc, |doc| doc.element(n.node).is_some() && list.iter().any(|s| s.pseudo_element.is_none() && rabbithole_css::matches(s, doc, n.node))))
+    Ok(with_doc(n.doc, |doc| {
+        let state = rabbithole_css::MatchState::default();
+        let matcher = SelectorMatcher::new(doc, &state);
+        doc.element(n.node).is_some() && list.iter().any(|s| s.pseudo_element.is_none() && matcher.matches(s, n.node))
+    }))
 }
 
 // ---------------------------------------------------------------- mutation
@@ -1829,4 +1835,40 @@ pub(crate) fn install(realm: &mut Realm) {
     let deliver = realm.new_native_function("deliverScriptEvents", 0, deliver_script_events);
     realm.extra_roots.push(Value::Object(deliver));
     state().borrow_mut().protos.insert("__deliver_script_events", deliver);
+}
+
+#[cfg(test)]
+mod selector_pass_tests {
+    use crate::tests::{run, setup};
+
+    #[test]
+    fn nested_filtered_queries_share_ranks_and_reset_after_dom_mutation() {
+        let mut html = String::from("<ul id=list>");
+        for i in 0..2000 { html.push_str(&format!("<li class=item id=i{i}></li>")); }
+        html.push_str("</ul>");
+        let (mut env, mut host) = setup(&html);
+        let out = run(&mut env, &mut host, r#"
+            const list=document.getElementById('list');
+            console.log(list.querySelectorAll('li:nth-child(odd of :nth-child(odd of .item))').length);
+            console.log(list.querySelector('li:nth-child(1 of .item)').id);
+            document.getElementById('i0').className='';
+            const next=list.querySelector('li:nth-child(1 of .item)');
+            console.log(next.id,next.matches('li:nth-child(1 of .item)'),next.closest('ul:nth-child(1 of ul)')===list);
+        "#);
+        assert_eq!(out, ["500", "i0", "i1 true true"]);
+        assert!(env.errors().is_empty(), "{:?}", env.errors());
+    }
+
+    #[test]
+    fn form_selector_apis_preserve_ordinary_filters_and_closest() {
+        let (mut env, mut host) = setup("<form id=form><input id=email type=email required><input type=hidden><input disabled><button disabled></button></form>");
+        let out = run(&mut env, &mut host, r#"
+            const form=document.getElementById('form');
+            const fields=form.querySelectorAll('input:not([type=hidden]):not(:disabled)');
+            console.log(fields.length,fields[0].id,fields[0].closest('form')===form);
+            console.log(fields[0].matches(':is(input,button):not(:disabled)'));
+        "#);
+        assert_eq!(out, ["1 email true", "true"]);
+        assert!(env.errors().is_empty(), "{:?}", env.errors());
+    }
 }

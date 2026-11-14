@@ -21,7 +21,7 @@
 use crate::cascade::{compute_element, DeclCache, ElementOut, MatchCtx, Matched, ScopeIndex, ShareCache, Vars};
 use crate::computed::*;
 use crate::{FontFace, MediaEnv, StyleOptions, StyledTree, Stylesheet};
-use rabbithole_css::selector::{Combinator, Compound, Pseudo, Selector};
+use rabbithole_css::selector::{Combinator, Compound, Pseudo, Selector, SelectorMatcher};
 use rabbithole_css::MatchState;
 use rabbithole_dom::{Document, Mutation, MutationLog, NodeId};
 use std::collections::{HashMap, HashSet};
@@ -1057,6 +1057,7 @@ impl StyleEngine {
             Enter { node: NodeId, parent: Rc<ComputedStyle>, pvars: Rc<Vars>, root_fs: f32, force: bool, pchange: u8 },
             Exit(NodeId),
         }
+        let matcher = SelectorMatcher::new(doc, opts.state);
         let mut bloom = AncestorBloom::default();
         let mut candidates = Vec::new();
         let mut matched: Vec<Matched> = Vec::new();
@@ -1089,7 +1090,7 @@ impl StyleEngine {
             let mut root_fs = root_fs;
             let (style, vars) = if recompute {
                 recomputed += 1;
-                let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, bloom: Some(&bloom) };
+                let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: Some(&bloom) };
                 let out: ElementOut = compute_element(doc, node, &parent, &pvars, root_fs, &cx, &mut decls, Some(&mut share), &mut candidates, &mut matched);
                 self.inherit_dep[node] = out.inherit_dep;
                 if node == html {
@@ -1233,7 +1234,8 @@ impl StyleEngine {
             Some((st, v)) => (st, v, tree.map(|t| t.root_font_size).unwrap_or(16.0)),
             None => (Rc::new(ComputedStyle::initial()), Rc::new(HashMap::new()), 16.0),
         };
-        let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, bloom: None };
+        let matcher = SelectorMatcher::new(doc, opts.state);
+        let cx = MatchCtx { scopes: &self.index, env: &self.env, opts, matcher: &matcher, bloom: None };
         for &node in &chain {
             let out = compute_element(doc, node, &parent, &vars, root_fs, &cx, &mut decls, None, &mut candidates, &mut matched);
             if node == html {
