@@ -818,6 +818,7 @@ fn apply_declarations(
     // Blockification (CSS Display §2.7): the root, out-of-flow and floated
     // boxes, and the children of flex/grid containers (flex/grid items,
     // including their ::before/::after).
+    style.display_before_blockification = style.display;
     let in_flex_or_grid = !is_root && matches!(parent.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid);
     if is_root || in_flex_or_grid || style.position == Position::Absolute || style.position == Position::Fixed || style.float != Float::None {
         style.display = match style.display {
@@ -3022,6 +3023,7 @@ mod tests {
         let span = style_of(&doc, &t, "span");
         assert_eq!(span.color, Color::rgb(0, 0, 255));
         assert_eq!(span.display, Display::Block);
+        assert_eq!(span.display_before_blockification, Display::Inline);
     }
 
     #[test]

@@ -967,6 +967,9 @@ pub fn multiply_matrix(m: [f32; 6], n: [f32; 6]) -> [f32; 6] {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub display: Display,
+    /// Display without root/item/out-of-flow blockification. Absolute static
+    /// positions distinguish hypothetical block and inline-level boxes.
+    pub display_before_blockification: Display,
     pub position: Position,
     pub float: Float,
     pub clear: Clear,
@@ -1234,6 +1237,7 @@ impl ComputedStyle {
     pub fn initial() -> ComputedStyle {
         ComputedStyle {
             display: Display::Inline,
+            display_before_blockification: Display::Inline,
             position: Position::Static,
             float: Float::None,
             clear: Clear::None,
