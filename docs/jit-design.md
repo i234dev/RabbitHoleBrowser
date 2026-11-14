@@ -1573,3 +1573,20 @@ Contrato primario: [FlushInstructionCache](https://learn.microsoft.com/en-us/win
 [MEMORY_BASIC_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information).
 El selector Windows, el ABI y las tablas de unwind permanecen fuera de este
 cambio.
+
+
+### Fase pura del descriptor de unwind Windows (candidato sin ejecutar)
+
+`jit/windows_unwind.rs` es un prototipo privado bajo `cfg(test, x86_64)`:
+valida los bytes de los mismos helpers de prolog/epílogo usados por el emisor
+JS y deriva sus offsets antes de serializar `UNWIND_INFO` V1 y los tres RVA de
+`RUNTIME_FUNCTION`. Mantiene `FrameRegister=0`, la forma completa de 56 bytes
+en `+40` y el final ejecutable separado del padding, la tabla de saltos y xdata.
+Rechaza otras recetas, rangos solapados, desalineados o fuera de la imagen.
+
+Los controles escritos son puros: no asignan `ExecMem`, llaman APIs Windows,
+registran tablas ni publican entradas. Quedan pendientes de compilación/CI.
+Los dos `jmp RAX` actuales sin REX.W también necesitan un control posterior
+con el scanner real de `RtlVirtualUnwind`; una descripción estructural de la
+pila no demuestra cómo interpreta el SO esos PCs. Ownership, leases,
+registro/borrado, Wasm y retirada del guard pertenecen a fases posteriores.

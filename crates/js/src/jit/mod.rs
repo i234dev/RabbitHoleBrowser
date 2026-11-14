@@ -38,6 +38,8 @@ pub(crate) const PHASE: u8 = 0;
 mod debug;
 #[cfg(target_arch = "x86_64")]
 mod helpers;
+#[cfg(all(test, target_arch = "x86_64"))]
+mod windows_unwind;
 #[cfg(target_arch = "x86_64")]
 mod layout;
 
