@@ -669,6 +669,23 @@ fn span_size(tracks: &[Track], pos: &[f32], start: usize, end: usize) -> (f32, f
 }
 
 impl<'a> Layouter<'a> {
+    /// An automatic subgrid span comes from its line-name list (Grid2 §8/§9).
+    /// Explicit spans and distinct start/end lines retain their own span.
+    fn item_pair(&mut self,child:&LayoutBox,rows:bool,start:LineSpec,end:LineSpec)->Result<(i32,i32),i32> {
+        if matches!(start,LineSpec::Span(_))||matches!(end,LineSpec::Span(_))||matches!((start,end),(LineSpec::Line(a),LineSpec::Line(b)) if a!=b) {
+            return resolve_pair(start,end);
+        }
+        let Some(span)=subgrid::automatic_span(child,rows) else {return resolve_pair(start,end);};
+        let edge=match (start,end) {(LineSpec::Line(line),_)|(_,LineSpec::Line(line))=>line.unsigned_abs()as usize,_=>0};
+        self.grid_work.charge(span.saturating_add(edge).saturating_mul(8));
+        let span=span.min(i32::MAX as usize)as i32;
+        match (start,end) {
+            (LineSpec::Line(line),_)=>Ok((line,line.saturating_add(span))),
+            (_,LineSpec::Line(line))=>Ok((line.saturating_sub(span),line)),
+            _=>Err(span),
+        }
+    }
+
     /// Lay out the grid items of `b`; returns the content height.
     pub(crate) fn layout_grid(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
         if b.style.grid_lanes || subgrid::inherits_stacking(b) {
@@ -886,7 +903,7 @@ impl<'a> Layouter<'a> {
             let re = line_spec(&s.grid_row_end, &rows.names, n_row_lines, true);
             let cs = line_spec(&s.grid_column_start, &cols.names, n_col_lines, false);
             let ce = line_spec(&s.grid_column_end, &cols.names, n_col_lines, true);
-            let (mut row,mut col)=(resolve_pair(rs,re),resolve_pair(cs,ce));
+            let (mut row,mut col)=(self.item_pair(&b.children[idx],true,rs,re),self.item_pair(&b.children[idx],false,cs,ce));
             if cols.inherited.is_some() {col=subgrid::clamp_placement(col,cols.tracks.len());}
             if rows.inherited.is_some() {row=subgrid::clamp_placement(row,rows.tracks.len());}
             pending.push(Pending {
