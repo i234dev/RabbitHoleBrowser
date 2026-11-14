@@ -199,12 +199,18 @@ fn uri_decode(realm: &mut Realm, v: Value, reserved: &str) -> JsResult<Value> {
     let units = s.as_units();
     let mut out: Vec<u16> = Vec::with_capacity(units.len());
     let mut i = 0;
-    let hex = |u: &[u16], i: usize| -> Option<u8> {
-        if i + 2 >= u.len() + 0 && i + 2 > u.len() {
-            return None;
+    let hex_digit = |c: u16| -> Option<u8> {
+        match c {
+            0x30..=0x39 => Some((c - 0x30) as u8),
+            0x41..=0x46 => Some((c - 0x41 + 10) as u8),
+            0x61..=0x66 => Some((c - 0x61 + 10) as u8),
+            _ => None,
         }
-        let h = String::from_utf16_lossy(&u[i + 1..i + 3]);
-        u8::from_str_radix(&h, 16).ok()
+    };
+    let hex = |u: &[u16], i: usize| -> Option<u8> {
+        // Each UTF-16 code unit must be an ASCII hex digit. Integer parsing
+        // also accepts a leading '+', which is invalid in a percent escape.
+        Some(hex_digit(*u.get(i + 1)?)? * 16 + hex_digit(*u.get(i + 2)?)?)
     };
     while i < units.len() {
         let c = units[i];
@@ -516,4 +522,50 @@ fn console_count(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Va
 }
 fn console_noop(_realm: &mut Realm, _this: Value, _args: &[Value]) -> JsResult<Value> {
     Ok(Value::Undefined)
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use crate::Realm;
+
+    fn check(src: &str) {
+        let mut realm = Realm::new();
+        let value = realm.eval(src, "uri-conformance.js").unwrap_or_else(|e| panic!("{}", realm.error_to_string(&e)));
+        assert_eq!(value.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn percent_escapes_require_two_ascii_hex_digits() {
+        check(r#"
+            var invalid = ['%+1', '%0+', '%\uFF101', '%\uD8001', '%', '%0',
+                '%80', '%C0%AF', '%ED%A0%80', '%F4%90%80%80', '%E2%+1%AC'];
+            var good = true;
+            for (var decode of [decodeURI, decodeURIComponent]) {
+                for (var input of invalid) {
+                    try { decode(input); good = false; }
+                    catch (e) { if (!(e instanceof URIError)) good = false; }
+                }
+            }
+            good
+        "#);
+    }
+
+    #[test]
+    fn utf8_limits_reserved_spelling_and_coercion_survive_decoding() {
+        check(r#"
+            var good = decodeURI('%2f%3F%41') === '%2f%3FA'
+                && decodeURIComponent('%2f%3F%41') === '/?A'
+                && decodeURIComponent('%EF%BF%BF') === '\uFFFF'
+                && decodeURIComponent('%F4%8F%BF%BF') === '\uDBFF\uDFFF'
+                && decodeURIComponent('\uD800a\uDC00') === '\uD800a\uDC00';
+            for (var decode of [decodeURI, decodeURIComponent]) {
+                var calls = 0;
+                good = good && decode({toString() { calls++; return '%41'; }}) === 'A' && calls === 1;
+                var sentinel = {};
+                try { decode({toString() { throw sentinel; }}); good = false; }
+                catch (e) { if (e !== sentinel) good = false; }
+            }
+            good
+        "#);
+    }
 }
