@@ -1771,6 +1771,7 @@ fn sheet_has_dynamic_rules(sheet: &Stylesheet) -> bool {
         c.pseudos.iter().any(|p| match p {
             Pseudo::Hover | Pseudo::Active | Pseudo::Focus | Pseudo::FocusVisible | Pseudo::FocusWithin | Pseudo::Target => true,
             Pseudo::Not(l) | Pseudo::Is(l) | Pseudo::Where(l) => l.iter().any(|s| s.compounds.iter().any(compound_dynamic)),
+            Pseudo::Nesting(l) => l.iter().any(|s| s.compounds.iter().any(compound_dynamic)),
             Pseudo::Has(l) => l.iter().any(|(_, s)| s.compounds.iter().any(compound_dynamic)),
             _ => false,
         })

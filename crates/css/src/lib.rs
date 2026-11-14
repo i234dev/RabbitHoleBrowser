@@ -407,6 +407,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_rules(&mut self, top_level: bool) -> Vec<Rule> {
+        self.parse_rule_context(top_level, None, 0)
+    }
+
+    fn parse_rule_context(&mut self, top_level: bool, parent: Option<std::sync::Arc<Vec<Selector>>>, depth: usize) -> Vec<Rule> {
+        if depth > 64 { return Vec::new(); }
         let mut rules = Vec::new();
         loop {
             self.skip_ws();
@@ -432,19 +437,19 @@ impl<'a> Parser<'a> {
                                     let mut sub = Parser { toks: inner, pos: 0 };
                                     rules.push(Rule::Media {
                                         query,
-                                        rules: sub.parse_rules(false),
+                                        rules: if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) },
                                     });
                                 }
                                 "supports" => {
                                     let mut sub = Parser { toks: inner, pos: 0 };
                                     rules.push(Rule::Supports {
                                         matches: supports::evaluate(prelude),
-                                        rules: sub.parse_rules(false),
+                                        rules: if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) },
                                     });
                                 }
                                 "layer" => {
                                     let mut sub = Parser { toks: inner, pos: 0 };
-                                    let mut inner_rules = sub.parse_rules(false);
+                                    let mut inner_rules = if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) };
                                     let name = layer_names(prelude).into_iter().next().unwrap_or_else(|| {
                                         // An anonymous layer is unique.
                                         let n = ANON_LAYERS.with(|c| {
@@ -461,13 +466,13 @@ impl<'a> Parser<'a> {
                                 "container" | "scope" => {
                                     // Transparent grouping.
                                     let mut sub = Parser { toks: inner, pos: 0 };
-                                    rules.extend(sub.parse_rules(false));
+                                    rules.extend(if let Some(p) = &parent { sub.parse_style_body(p.clone(), depth + 1) } else { sub.parse_rule_context(false, None, depth + 1) });
                                 }
-                                "font-face" => {
+                                "font-face" if parent.is_none() => {
                                     let mut dp = Parser { toks: inner, pos: 0 };
                                     rules.push(Rule::FontFace(dp.parse_declarations()));
                                 }
-                                "keyframes" | "-webkit-keyframes" => {
+                                "keyframes" | "-webkit-keyframes" if parent.is_none() => {
                                     let kname = prelude
                                         .iter()
                                         .find_map(|t| match t {
@@ -489,12 +494,12 @@ impl<'a> Parser<'a> {
                             if self.peek() == Some(&Token::Semicolon) {
                                 self.pos += 1;
                             }
-                            if name == "import" {
+                            if name == "import" && parent.is_none() {
                                 if let Some(imp) = parse_import(prelude) {
                                     rules.push(imp);
                                 }
                             }
-                            if name == "layer" {
+                            if name == "layer" && parent.is_none() {
                                 // `@layer a, b;` fixes the order of layers.
                                 for n in layer_names(prelude) {
                                     rules.push(Rule::Style(StyleRule { selectors: Vec::new(), declarations: Vec::new(), layer: Some(std::sync::Arc::from(n.as_str())) }));
@@ -510,20 +515,51 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     let inner = self.consume_block();
-                    let mut sp = selector::SelectorParser::new(prelude);
+                    let mut sp = if let Some(p) = &parent { selector::SelectorParser::nested(prelude, p.clone()) } else { selector::SelectorParser::new(prelude) };
                     if let Some(selectors) = sp.parse_list() {
                         let mut dp = Parser { toks: inner, pos: 0 };
-                        let declarations = dp.parse_declarations();
-                        if !declarations.is_empty() {
-                            rules.push(Rule::Style(StyleRule {
-                                selectors,
-                                declarations,
-                                layer: None,
-                            }));
-                        }
+                        rules.extend(dp.parse_style_body(std::sync::Arc::new(selectors), depth + 1));
                     }
                 }
             }
+        }
+        rules
+    }
+
+    /// Preserve declaration runs around nested rules in source order. Parent
+    /// selector lists are shared by the nesting AST rather than expanded.
+    fn parse_style_body(&mut self, parent: std::sync::Arc<Vec<Selector>>, depth: usize) -> Vec<Rule> {
+        if depth > 64 { return Vec::new(); }
+        let mut budget = 4096;
+        if !parent.iter().all(|s| s.fits_nesting_budget(&mut budget)) { return Vec::new(); }
+        let mut rules = Vec::new();
+        let mut declarations = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.peek().is_none() { break; }
+            if self.peek() == Some(&Token::Semicolon) { self.pos += 1; continue; }
+            let start = self.pos;
+            let at_rule = matches!(self.peek(), Some(Token::AtKeyword(_)));
+            let custom = matches!(self.peek(), Some(Token::Ident(n)) if n.starts_with("--"))
+                && self.toks[self.pos + 1..].iter().find(|t| **t != Token::Whitespace) == Some(&Token::Colon);
+            self.consume_until(true, !custom);
+            let block = self.peek() == Some(&Token::OpenBrace);
+            if block { self.consume_block(); }
+            if self.peek() == Some(&Token::Semicolon) { self.pos += 1; }
+            let end = self.pos;
+            if end == start { self.pos += 1; continue; }
+            let mut sub = Parser { toks: &self.toks[start..end], pos: 0 };
+            if at_rule || block {
+                if !declarations.is_empty() {
+                    rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations: std::mem::take(&mut declarations), layer: None }));
+                }
+                rules.extend(sub.parse_rule_context(false, Some(parent.clone()), depth + 1));
+            } else {
+                declarations.extend(sub.parse_declarations());
+            }
+        }
+        if !declarations.is_empty() {
+            rules.push(Rule::Style(StyleRule { selectors: parent.as_ref().clone(), declarations, layer: None }));
         }
         rules
     }
@@ -827,6 +863,63 @@ fn to_px(v: f32, unit: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nesting_parent_lists_order_and_conditions() {
+        let sheet = parse_stylesheet(".parent, #absent { color:red; > span { color:blue } color:green; @media (min-width:1px) { @supports(display:grid) { &.parent { color:black } } } }");
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let mut rules = Vec::new();
+        sheet.active_rules(&env, &mut rules);
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[0].declarations[0].value, vec![Token::Ident("red".into())]);
+        assert_eq!(rules[2].declarations[0].value, vec![Token::Ident("green".into())]);
+        assert_eq!(rules[1].selectors[0].specificity(), Specificity(1, 0, 1));
+        assert_eq!(rules[3].selectors[0].specificity(), Specificity(1, 1, 0));
+        let doc = rabbithole_html::parse("<div class=parent><span></span></div><span></span>");
+        assert!(matches(&rules[1].selectors[0], &doc, doc.find_element("span").unwrap()));
+        assert!(matches(&rules[3].selectors[0], &doc, doc.find_element("div").unwrap()));
+    }
+
+    #[test]
+    fn nesting_explicit_ampersand_inside_functions_suppresses_implicit_parent() {
+        let sheet = parse_stylesheet(".outer { :is(.target, &.absent) {color:green} :where(&) > span {color:blue} } ");
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let mut rules = Vec::new(); sheet.active_rules(&env, &mut rules);
+        let doc = rabbithole_html::parse("<div class=target></div><section class=outer><span></span></section>");
+        assert_eq!(rules.len(), 2);
+        assert!(matches(&rules[0].selectors[0], &doc, doc.find_element("div").unwrap()));
+        assert!(matches(&rules[1].selectors[0], &doc, doc.find_element("span").unwrap()));
+        assert_eq!(rules[1].selectors[0].specificity(), Specificity(0, 0, 1));
+    }
+
+    #[test]
+    fn nesting_custom_braces_invalid_rules_and_pseudo_elements() {
+        let sheet = parse_stylesheet("div::before {content:'x'; & {color:red} color:green} .x {--a:{x:y}; &foo {color:red} & {color:blue} }");
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let mut rules = Vec::new(); sheet.active_rules(&env, &mut rules);
+        assert_eq!(rules.len(), 5);
+        assert_eq!(rules[0].selectors[0].pseudo_element, Some(PseudoElement::Before));
+        assert_eq!(rules[2].selectors[0].pseudo_element, Some(PseudoElement::Before));
+        assert_eq!(rules[3].declarations[0].name, "--a");
+        let doc = rabbithole_html::parse("<div class=x></div>");
+        let div = doc.find_element("div").unwrap();
+        assert!(!matches(&rules[1].selectors[0], &doc, div));
+        assert!(matches(&rules[4].selectors[0], &doc, div));
+    }
+
+    #[test]
+    fn nesting_repeated_parent_work_is_bounded_and_following_rules_survive() {
+        let mut css = String::from(".x {");
+        for _ in 0..20 { css.push_str("&& {"); }
+        css.push_str("color:red;");
+        for _ in 0..21 { css.push('}'); }
+        css.push_str(".safe { color:green }");
+        let sheet = parse_stylesheet(&css);
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let mut rules = Vec::new(); sheet.active_rules(&env, &mut rules);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].selectors[0].compounds[0].classes, vec!["safe"]);
+    }
 
     #[test]
     fn media_queries_color_features() {

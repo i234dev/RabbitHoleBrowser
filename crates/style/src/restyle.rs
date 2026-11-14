@@ -260,7 +260,7 @@ impl InvalidationMap {
     fn add_compound(&mut self, c: &Compound, rel: u8, in_has: bool) {
         if in_has {
             let tag = c.tag.as_ref().filter(|t| *t != "*");
-            let nested = c.pseudos.iter().any(|p| matches!(p, Pseudo::Is(_) | Pseudo::Where(_)));
+            let nested = c.pseudos.iter().any(|p| matches!(p, Pseudo::Is(_) | Pseudo::Where(_) | Pseudo::Nesting(_)));
             if tag.is_none() && c.id.is_none() && c.classes.is_empty() && c.attrs.is_empty() && !nested {
                 self.has_any = true;
             }
@@ -341,6 +341,9 @@ impl InvalidationMap {
                     for s in list {
                         self.add_selector(s, rel, in_has);
                     }
+                }
+                Pseudo::Nesting(list) => {
+                    for s in list.iter() { self.add_selector(s, rel, in_has); }
                 }
                 Pseudo::Has(list) => {
                     self.has_has = true;

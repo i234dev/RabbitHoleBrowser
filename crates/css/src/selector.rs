@@ -2,6 +2,7 @@
 //! `:is()`/`:where()`, `:nth-child()` and attribute operators).
 
 use super::tokenizer::Token;
+use std::sync::Arc;
 use rabbithole_dom::{Document, NodeData, NodeId};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +41,8 @@ pub enum Pseudo {
     NthOfType(i32, i32),
     Not(Vec<Selector>),
     Is(Vec<Selector>),
+    /// Shared nesting parent: avoid exponential expansion of repeated `&`.
+    Nesting(Arc<Vec<Selector>>),
     Where(Vec<Selector>),
     NthLastOfType(i32, i32),
     /// `:has(> a, b)` relative selectors.
@@ -158,6 +161,24 @@ pub struct Selector {
 pub struct Specificity(pub u32, pub u32, pub u32);
 
 impl Selector {
+    /// Bound work across the shared nesting DAG, including repeated `&`.
+    pub(crate) fn fits_nesting_budget(&self, budget: &mut usize) -> bool {
+        for c in &self.compounds {
+            if *budget == 0 { return false; }
+            *budget -= 1;
+            for p in &c.pseudos {
+                let valid = match p {
+                    Pseudo::Nesting(list) => list.iter().all(|s| s.fits_nesting_budget(budget)),
+                    Pseudo::Is(list) | Pseudo::Where(list) | Pseudo::Not(list)
+                    | Pseudo::Host(list) | Pseudo::HostContext(list) | Pseudo::Slotted(list) => list.iter().all(|s| s.fits_nesting_budget(budget)),
+                    Pseudo::Has(list) => list.iter().all(|(_, s)| s.fits_nesting_budget(budget)),
+                    _ => true,
+                };
+                if !valid { return false; }
+            }
+        }
+        true
+    }
     pub fn specificity(&self) -> Specificity {
         let mut s = Specificity(0, 0, 0);
         for c in &self.compounds {
@@ -204,6 +225,11 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
                     s.2 += m.2;
                 }
             }
+            Pseudo::Nesting(list) => {
+                if let Some(m) = list.iter().map(Selector::specificity).max() {
+                    s.0 += m.0; s.1 += m.1; s.2 += m.2;
+                }
+            }
             Pseudo::Where(_) => {}
             Pseudo::Never => s.1 += 1,
             _ => s.1 += 1,
@@ -214,13 +240,28 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
 // ---------------------------------------------------------------- parsing
 
 pub struct SelectorParser<'a> {
+    parent: Option<Arc<Vec<Selector>>>,
+    implicit_parent: bool,
     toks: &'a [Token],
     pos: usize,
 }
 
 impl<'a> SelectorParser<'a> {
     pub fn new(toks: &'a [Token]) -> Self {
-        SelectorParser { toks, pos: 0 }
+        SelectorParser { toks, pos: 0, parent: None, implicit_parent: false }
+    }
+
+    pub(crate) fn nested(toks: &'a [Token], parent: Arc<Vec<Selector>>) -> Self {
+        Self { toks, pos: 0, parent: Some(parent), implicit_parent: true }
+    }
+
+    fn subparser(&self, toks: &'a [Token]) -> Self {
+        Self { toks, pos: 0, parent: self.parent.clone(), implicit_parent: false }
+    }
+
+    fn nesting(&self) -> Pseudo {
+        self.parent.as_ref().map(|p| Pseudo::Nesting(p.clone()))
+            .unwrap_or_else(|| Pseudo::Where(vec![Selector { compounds: vec![Compound { pseudos: vec![Pseudo::Scope], ..Compound::default() }], combinators: vec![], pseudo_element: None }]))
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -248,7 +289,13 @@ impl<'a> SelectorParser<'a> {
         let mut list = Vec::new();
         loop {
             self.skip_ws();
-            let sel = self.parse_complex()?;
+            let start = self.pos;
+            let leading = self.implicit_parent && matches!(self.peek(), Some(Token::Delim('>' | '+' | '~')));
+            let mut sel = self.parse_complex()?;
+            if self.implicit_parent && !leading && !self.toks[start..self.pos].contains(&Token::Delim('&')) {
+                sel.compounds.insert(0, Compound { pseudos: vec![self.nesting()], ..Compound::default() });
+                sel.combinators.insert(0, Combinator::Descendant);
+            }
             list.push(sel);
             self.skip_ws();
             match self.peek() {
@@ -262,7 +309,8 @@ impl<'a> SelectorParser<'a> {
     }
 
     fn parse_complex(&mut self) -> Option<Selector> {
-        let mut compounds = vec![self.parse_compound()?];
+        let leading = self.implicit_parent && matches!(self.peek(), Some(Token::Delim('>' | '+' | '~')));
+        let mut compounds = vec![if leading { Compound { pseudos: vec![self.nesting()], ..Compound::default() } } else { self.parse_compound()? }];
         let mut combinators = Vec::new();
         loop {
             let saw_ws = self.skip_ws();
@@ -331,6 +379,10 @@ impl<'a> SelectorParser<'a> {
         }
         loop {
             match self.peek() {
+                Some(Token::Delim('&')) => {
+                    c.pseudos.push(self.nesting());
+                    self.pos += 1;
+                }
                 Some(Token::Hash(id)) => {
                     c.id = Some(id.clone());
                     self.pos += 1;
@@ -527,14 +579,14 @@ impl<'a> SelectorParser<'a> {
                 }
                 if pseudo_element {
                     if lname == "slotted" {
-                        let mut sub = SelectorParser::new(inner);
+                        let mut sub = self.subparser(inner);
                         return Some(PseudoParse::Class(Pseudo::Slotted(sub.parse_list_forgiving())));
                     }
                     return Some(PseudoParse::Class(Pseudo::Never));
                 }
                 Some(PseudoParse::Class(match lname.as_str() {
                     "host" | "host-context" => {
-                        let mut sub = SelectorParser::new(inner);
+                        let mut sub = self.subparser(inner);
                         let list = sub.parse_list_forgiving();
                         if lname == "host" {
                             Pseudo::Host(list)
@@ -543,7 +595,7 @@ impl<'a> SelectorParser<'a> {
                         }
                     }
                     "not" | "is" | "where" | "matches" | "-webkit-any" | "-moz-any" => {
-                        let mut sub = SelectorParser::new(inner);
+                        let mut sub = self.subparser(inner);
                         // Forgiving selector list: drop invalid parts.
                         let list = sub.parse_list_forgiving();
                         match lname.as_str() {
@@ -562,7 +614,7 @@ impl<'a> SelectorParser<'a> {
                         }
                     }
                     "has" => {
-                        let mut sub = SelectorParser::new(inner);
+                        let mut sub = self.subparser(inner);
                         Pseudo::Has(sub.parse_relative_list())
                     }
                     "lang" => Pseudo::Lang(
@@ -964,6 +1016,7 @@ pub fn match_compound_with(c: &Compound, doc: &Document, node: NodeId, state: &M
             Pseudo::NthOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, false)),
             Pseudo::Not(list) => !list.iter().any(|s| matches_with(s, doc, node, state)),
             Pseudo::Is(list) | Pseudo::Where(list) => list.iter().any(|s| matches_with(s, doc, node, state)),
+            Pseudo::Nesting(list) => list.iter().any(|s| s.pseudo_element.is_none() && matches_with(s, doc, node, state)),
             Pseudo::NthLastOfType(a, b) => nth_matches(*a, *b, child_index(doc, node, true, true)),
             Pseudo::Has(list) => list.iter().any(|(comb, sel)| has_matches(*comb, sel, doc, node, state)),
             Pseudo::Lang(lang) => {

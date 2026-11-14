@@ -556,3 +556,40 @@ fn shadow_tree_scoping_host_and_slotted() {
     assert_eq!(tree.get(h1).unwrap().margin.left, Length::Px(5.0));
     assert_eq!(tree.get(slot_t).unwrap().display, Display::Contents);
 }
+
+#[test]
+fn nesting_cascade_source_order_and_parent_specificity() {
+    let (doc, tree) = styled("<div class=parent><span class=child>x</span></div>",
+        ".parent, #absent { & > .child { color:green } } .parent { & {background:red} background:blue; } .parent > .child {color:red}");
+    assert_eq!(style_of(&doc, &tree, "span").color, Color::rgb(0, 128, 0));
+    assert_eq!(style_of(&doc, &tree, "div").background_color, Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn nesting_incremental_parent_class_and_dynamic_state() {
+    use crate::restyle::StyleEngine;
+    let mut doc = rabbithole_html::parse("<div><span>x</span></div>");
+    let sheets = vec![parse_stylesheet("span {color:red} .active { > span {color:green} &:hover > span {color:blue} }")];
+    let parent = doc.find_element("div").unwrap();
+    let child = doc.find_element("span").unwrap();
+    let env = env();
+    let state = MatchState::default();
+    let opts = StyleOptions { state: &state, resolve_url: &|_, s| Some(s.to_string()), document_base: "" };
+    let mut engine = StyleEngine::new(&sheets, &env);
+    let mut tree = engine.full(&doc, &sheets, &opts);
+    assert_eq!(tree.get(child).unwrap().color, Color::rgb(255, 0, 0));
+    doc.track_mutations(true);
+    doc.set_attr(parent, "class", Some("active"));
+    let log = doc.take_mutations();
+    engine.update(&doc, &mut tree, &log, &opts, &sheets);
+    assert_eq!(tree.get(child).unwrap().color, Color::rgb(0, 128, 0));
+    let hovered = MatchState { hovered: Some(parent), ..Default::default() };
+    let opts = StyleOptions { state: &hovered, ..opts };
+    let log = doc.take_mutations();
+    engine.update(&doc, &mut tree, &log, &opts, &sheets);
+    assert_eq!(tree.get(child).unwrap().color, Color::rgb(0, 0, 255));
+    doc.set_attr(parent, "class", None);
+    let log = doc.take_mutations();
+    engine.update(&doc, &mut tree, &log, &opts, &sheets);
+    assert_eq!(tree.get(child).unwrap().color, Color::rgb(255, 0, 0));
+}
