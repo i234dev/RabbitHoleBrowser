@@ -378,6 +378,12 @@ impl Drop for WallDeadlineGuard {
     fn drop(&mut self) { WALL_DEADLINE.with(|slot| slot.set(self.previous)); }
 }
 
+fn remaining_cpu_allowance(deadline: std::time::Instant, now: std::time::Instant, credit: std::time::Duration) -> std::time::Duration {
+    // Preserve overdue time before applying host credit. Overflow is rejected
+    // conservatively rather than reviving an unbounded allowance.
+    deadline.checked_add(credit).map(|credited| credited.saturating_duration_since(now)).unwrap_or(std::time::Duration::ZERO)
+}
+
 pub(crate) fn wall_deadline() -> Option<std::time::Instant> {
     WALL_DEADLINE.with(|deadline| deadline.get())
 }
@@ -1210,7 +1216,7 @@ impl Realm {
         self.deadline.map(|deadline| {
             if self.terminating { return std::time::Duration::ZERO; }
             let credit = WATCHDOG_CREDIT.with(|c| c.get());
-            deadline.saturating_duration_since(self.watch_now()).saturating_add(credit)
+            remaining_cpu_allowance(deadline, self.watch_now(), credit)
         })
     }
 
@@ -1484,5 +1490,21 @@ impl Realm {
 
     pub fn take_unhandled_rejections(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.unhandled_rejections)
+    }
+}
+
+#[cfg(test)]
+mod console_watchdog_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    #[test]
+    fn console_cpu_credit_preserves_overdue_debt() {
+        let deadline = Instant::now();
+        let now = deadline + Duration::from_millis(100);
+        assert_eq!(remaining_cpu_allowance(deadline, now, Duration::from_millis(10)), Duration::ZERO);
+        assert_eq!(remaining_cpu_allowance(deadline, now, Duration::from_millis(100)), Duration::ZERO);
+        assert_eq!(remaining_cpu_allowance(deadline, now, Duration::from_millis(150)), Duration::from_millis(50));
+        assert_eq!(remaining_cpu_allowance(now, deadline, Duration::from_millis(10)), Duration::from_millis(110));
+        assert_eq!(remaining_cpu_allowance(deadline, now, Duration::MAX), Duration::ZERO);
     }
 }
