@@ -63,7 +63,7 @@ fn check_dynamic_markup(realm: &mut Realm, d: u32, method: &str) -> JsResult<()>
 /// without running scripts).
 fn in_frame(realm: &mut Realm, d: u32, op: crate::DocumentOp) -> Option<JsResult<()>> {
     let id = (d & !FRAME_DOC) as u64;
-    match crate::frames::call_frame(id, crate::FrameCall::Document { op })? {
+    match crate::frames::call_frame(realm, id, crate::FrameCall::Document { op })? {
         crate::FrameReply::Error(msg) => {
             let (name, message) = msg.split_once(": ").unwrap_or(("InvalidStateError", msg.as_str()));
             Some(Err(crate::misc::dom_exception(realm, name, message)))

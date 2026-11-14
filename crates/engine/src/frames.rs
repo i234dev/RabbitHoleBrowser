@@ -39,19 +39,6 @@ thread_local! {
 }
 
 thread_local! {
-    /// Frames whose realm a parent's script called into since the parent's
-    /// last microtask checkpoint (see [`Engine::frame_microtasks`]).
-    static TOUCHED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-thread_local! {
-    /// Reverse calls need the outer owning host restored before their target
-    /// can run jobs. Keep this separate from the existing descendant queue,
-    /// whose checkpoint still runs between consecutive classic scripts.
-    static REVERSE_TOUCHED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-thread_local! {
     /// Pages whose child frame is running scripts right now, outermost
     /// first. The running child is detached from its owner (see
     /// [`Engine::with_child`]), so the owner can be reached here without
@@ -216,6 +203,10 @@ pub struct FrameRegistry {
     entries: HashMap<u64, FrameEntry>,
     pub(crate) outbox: Vec<FrameMessage>,
     pub(crate) navigations: Vec<(u64, Url)>,
+    // Cross-realm jobs belong to this Engine, never a thread-global queue.
+    touched: Vec<u64>,
+    reverse_touched: Vec<u64>,
+    pub(crate) jobs_pending: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl FrameRegistry {
@@ -246,6 +237,9 @@ impl FrameRegistry {
             }
         }
         self.outbox.retain(|m| m.to != id);
+        self.touched.retain(|target| *target != id);
+        self.reverse_touched.retain(|target| *target != id);
+        self.jobs_pending.set(!self.reverse_touched.is_empty());
     }
 }
 
@@ -357,10 +351,10 @@ impl Engine {
     /// ancestor/sibling route is deliberately restricted to inactive HTTP(S)
     /// documents with the same tuple origin, pending opaque identity support.
     pub(crate) fn call_in_frame(&self, page: &mut Page, id: u64, call: rabbithole_script::FrameCall) -> Option<rabbithole_script::FrameReply> {
-        self.call_in_frame_with_deadline(page, id, call, None)
+        self.call_in_frame_with_watchdog(page, id, call, None)
     }
 
-    pub(crate) fn call_in_frame_with_deadline(&self, page: &mut Page, id: u64, call: rabbithole_script::FrameCall, deadline: Option<std::time::Instant>) -> Option<rabbithole_script::FrameReply> {
+    pub(crate) fn call_in_frame_with_watchdog(&self, page: &mut Page, id: u64, call: rabbithole_script::FrameCall, mut watchdog: Option<&mut rabbithole_js::WatchdogState>) -> Option<rabbithole_script::FrameReply> {
         let origin = page_origin(page);
         let source_http = matches!(page.url.scheme(), "http" | "https") && origin != "null" && page.url.origin() == origin;
         let reverse_allowed = source_http && matches!(&call, rabbithole_script::FrameCall::GetGlobal { .. } | rabbithole_script::FrameCall::CallGlobal { .. });
@@ -373,7 +367,11 @@ impl Engine {
             let mut host = target.script.host.take()?;
             let reply = {
                 let mut env = EngineEnv { engine: self, page: target };
-                host.frame_call_with_deadline(&mut env, call.take()?, deadline)
+                let call = call.take()?;
+                match watchdog.as_deref_mut() {
+                    Some(watchdog) => host.frame_call_with_watchdog(&mut env, call, watchdog),
+                    None => host.frame_call(&mut env, call),
+                }
             };
             target.script.host = Some(host);
             target.script.dom_dirty = true;
@@ -405,11 +403,10 @@ impl Engine {
             if owner.frame_id == id { reverse(owner) } else { self.with_frame(owner, id, &mut reverse).flatten() }
         };
         if r.is_some() {
-            let remember = |t: &std::cell::RefCell<Vec<u64>>| {
-                let mut t = t.borrow_mut();
-                if !t.contains(&id) { t.push(id); }
-            };
-            if descendant { TOUCHED.with(remember); } else { REVERSE_TOUCHED.with(remember); }
+            let mut registry = self.frames.borrow_mut();
+            let touched = if descendant { &mut registry.touched } else { &mut registry.reverse_touched };
+            if !touched.contains(&id) { touched.push(id); }
+            registry.jobs_pending.set(!registry.reverse_touched.is_empty());
         }
         r
     }
@@ -419,40 +416,42 @@ impl Engine {
     pub(crate) fn frame_microtasks(&self, page: &mut Page) {
         if !rabbithole_script::ScriptHost::frame_checkpoint_allowed() { return; }
         let mut drain = |target: &mut Page| {
-            let Some(mut host) = target.script.host.take() else { return false };
+            let Some(mut host) = target.script.host.take() else { return None };
             {
                 let mut env = EngineEnv { engine: self, page: target };
                 host.run_jobs(&mut env);
             }
+            let pending = host.has_frame_jobs();
             target.script.host = Some(host);
             target.script.dom_dirty = true;
-            true
+            Some(pending)
         };
-        let ids = TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()));
+        let ids = std::mem::take(&mut self.frames.borrow_mut().touched);
         for id in ids {
-            let drained = self.with_frame(page, id, &mut drain).unwrap_or(false);
-            if !drained && self.frames.borrow().exists(id) {
+            let pending = self.with_frame(page, id, &mut drain).flatten();
+            let live = self.frames.borrow().exists(id);
+            if pending != Some(false) && live {
                 // A reverse call can itself touch a sibling below its owner.
                 // That context is not below the original calling child.
                 // Preserve its work until the root owns the whole tree again.
-                REVERSE_TOUCHED.with(|t| {
-                    let mut t = t.borrow_mut();
-                    if !t.contains(&id) { t.push(id); }
-                });
+                let mut registry = self.frames.borrow_mut();
+                if !registry.reverse_touched.contains(&id) { registry.reverse_touched.push(id); }
+                registry.jobs_pending.set(true);
             }
         }
         if !ancestors().is_empty() || page.script.host.is_none() { return; }
-        let ids = REVERSE_TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()));
+        let ids = std::mem::take(&mut self.frames.borrow_mut().reverse_touched);
         for id in ids {
-            let drained = if page.frame_id == id { drain(page) } else { self.with_frame(page, id, &mut drain).unwrap_or(false) };
-            if !drained && self.frames.borrow().exists(id) {
-                REVERSE_TOUCHED.with(|t| {
-                    let mut t = t.borrow_mut();
-                    if !t.contains(&id) { t.push(id); }
-                });
+            let pending = if page.frame_id == id { drain(page) } else { self.with_frame(page, id, &mut drain).flatten() };
+            let live = self.frames.borrow().exists(id);
+            if pending != Some(false) && live {
+                let mut registry = self.frames.borrow_mut();
+                if !registry.reverse_touched.contains(&id) { registry.reverse_touched.push(id); }
+                registry.jobs_pending.set(true);
             }
         }
-        if REVERSE_TOUCHED.with(|t| !t.borrow().is_empty()) { set_mail_pending(); }
+        let registry = self.frames.borrow();
+        registry.jobs_pending.set(!registry.reverse_touched.is_empty());
     }
 
     fn child_index(page: &Page, node: NodeId) -> Option<usize> {
@@ -1437,6 +1436,12 @@ mod ancestor_call_tests {
         engine.frames.borrow_mut().entries.get_mut(&id).unwrap().url = url.into();
     }
 
+    fn task_state(budget: Duration) -> rabbithole_js::WatchdogState {
+        let mut realm = rabbithole_js::Realm::new();
+        realm.set_deadline(Some(Instant::now() + budget));
+        realm.watchdog_state()
+    }
+
     fn eval(engine: &Engine, page: &mut Page, source: &str) -> String {
         engine.eval_in_page(page, source).trim_matches(|c| c == '\'' || c == '"').to_owned()
     }
@@ -1509,7 +1514,7 @@ mod ancestor_call_tests {
         finish(&engine, &mut page, 0);
         finish(&engine, &mut page, 1);
         let id = page.frames.children[1].id;
-        let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_deadline(source, id, FrameCall::GetGlobal { name: "target".into() }, Some(Instant::now()+Duration::from_secs(1)))).flatten();
+        let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_watchdog(source, id, FrameCall::GetGlobal { name: "target".into() }, Some(&mut task_state(Duration::from_secs(1))))).flatten();
         assert!(matches!(result, Some(FrameReply::Value(_))));
         assert_eq!(page.frames.children[1].page.as_ref().unwrap().frame_id, id);
         assert!(!frame_detached(id));
@@ -1572,10 +1577,72 @@ mod ancestor_call_tests {
         let id = page.frame_id;
         let expired = Instant::now() - Duration::from_secs(1);
         page.script.host.as_mut().unwrap().realm().set_deadline(Some(expired));
-        let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_deadline(source, id, FrameCall::GetGlobal { name: "marker".into() }, Some(Instant::now()+Duration::from_secs(1)))).flatten();
+        let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_watchdog(source, id, FrameCall::GetGlobal { name: "marker".into() }, Some(&mut task_state(Duration::from_secs(1))))).flatten();
         assert!(matches!(result, Some(FrameReply::Value(ref value)) if value == "\"root\""), "{result:?}");
         assert_eq!(page.script.host.as_mut().unwrap().realm().deadline, Some(expired));
         page.script.host.as_mut().unwrap().realm().set_deadline(None);
+    }
+
+    #[test]
+    fn reverse_jobs_wake_after_frame_key_input_and_are_not_stolen_by_another_engine() {
+        let (mut engine, mut page) = fixture();
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "<script>addEventListener('keydown',()=>parent.value())</script>");
+        finish(&engine, &mut page, 0);
+        let node = page.frames.children[0].node;
+        engine.focus_element(&mut page, Some(node));
+        engine.frame_key_event(&mut page, "x", "KeyX", true, crate::Modifiers::default()).unwrap();
+        // No eval, tick or settle is allowed before this assertion: those
+        // would mask the missing wakeup at the input callback boundary.
+        assert_eq!(page.next_script_due(), Some(0.0));
+        assert!(page.frame_jobs_pending.get());
+        let (other, mut other_page) = fixture();
+        eval(&other, &mut other_page, "marker");
+        assert_eq!(page.next_script_due(), Some(0.0));
+        assert!(!engine.frames.borrow().reverse_touched.is_empty());
+        engine.tick(&mut page);
+        assert_eq!(eval(&engine, &mut page, "trace.join(',')"), "sync,promise");
+        assert!(engine.frames.borrow().reverse_touched.is_empty());
+        assert!(!page.frame_jobs_pending.get());
+    }
+
+    #[test]
+    fn reverse_checkpoint_keeps_wakeup_for_jobs_left_after_its_budget_expires() {
+        let (mut engine, mut page) = fixture();
+        eval(&engine, &mut page, "function queueJobs(){Promise.resolve().then(()=>{for(;;){}});Promise.resolve().then(()=>trace.push('after-timeout'))}");
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "<script>addEventListener('keydown',()=>parent.queueJobs())</script>");
+        finish(&engine, &mut page, 0);
+        let node = page.frames.children[0].node;
+        engine.focus_element(&mut page, Some(node));
+        page.script.host.as_mut().unwrap().realm().set_task_budget(Some(Duration::from_millis(20)));
+        engine.frame_key_event(&mut page, "x", "KeyX", true, crate::Modifiers::default()).unwrap();
+        assert_eq!(page.next_script_due(), Some(0.0));
+        // One bounded checkpoint aborts its first job and leaves the second
+        // queued. No extra eval/settle may hide the scheduler requirement.
+        engine.frame_microtasks(&mut page);
+        assert!(page.script.host.as_ref().unwrap().has_frame_jobs());
+        assert!(page.script.host.as_ref().unwrap().watchdog_abort_count() > 0);
+        assert_eq!(page.next_script_due(), Some(0.0));
+        engine.frame_microtasks(&mut page);
+        assert!(!page.script.host.as_ref().unwrap().has_frame_jobs());
+        assert!(!page.frame_jobs_pending.get());
+        assert_eq!(eval(&engine, &mut page, "trace.join(',')"), "after-timeout");
+    }
+
+    #[test]
+    fn borrowed_watchdog_restores_idle_target_after_a_getter_exception() {
+        let (mut engine, mut page) = fixture();
+        eval(&engine, &mut page, "Object.defineProperty(window,'badGetter',{get(){throw Error('fixture failure')}})");
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/source", "");
+        finish(&engine, &mut page, 0);
+        let id = page.frame_id;
+        let idle = page.script.host.as_mut().unwrap().realm().watchdog_state();
+        let mut task = task_state(Duration::from_secs(1));
+        let original_task = task;
+        let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_watchdog(source, id, FrameCall::GetGlobal { name: "badGetter".into() }, Some(&mut task))).flatten();
+        assert!(matches!(result, Some(FrameReply::Error(ref message)) if message.contains("fixture failure")), "{result:?}");
+        assert_eq!(task, original_task);
+        assert_eq!(page.script.host.as_mut().unwrap().realm().watchdog_state(), idle);
+        assert_eq!(eval(&engine, &mut page, "marker"), "root");
     }
 
     #[test]
@@ -1588,7 +1655,11 @@ mod ancestor_call_tests {
             let id = page.frame_id;
             let call = if getter { FrameCall::GetGlobal { name: "loopGetter".into() } } else { FrameCall::CallGlobal { name: "loopCall".into(), args: r#"{"t":"a","id":0,"v":[],"l":0}"#.into() } };
             let old_budget = page.script.host.as_mut().unwrap().realm().task_budget;
-            let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_deadline(source, id, call, Some(Instant::now()+Duration::from_millis(20)))).flatten();
+            let mut task = task_state(Duration::from_millis(20));
+            let result = engine.with_child(&mut page, 0, |source| engine.call_in_frame_with_watchdog(source, id, call, Some(&mut task))).flatten();
+            let mut caller_probe = rabbithole_js::Realm::new();
+            caller_probe.replace_watchdog_state(task);
+            assert!(caller_probe.timed_out());
             assert!(matches!(result, Some(FrameReply::Error(ref message)) if message.contains("timed out")), "{result:?}");
             let host = page.script.host.as_mut().unwrap();
             assert!(host.realm().deadline.is_none());

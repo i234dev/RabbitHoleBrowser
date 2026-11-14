@@ -583,8 +583,8 @@ impl HostEnv for EngineEnv<'_> {
     fn frame_call(&mut self, id: u64, call: rabbithole_script::FrameCall) -> Option<rabbithole_script::FrameReply> {
         self.engine.call_in_frame(self.page, id, call)
     }
-    fn frame_call_with_deadline(&mut self, id: u64, call: rabbithole_script::FrameCall, deadline: Option<std::time::Instant>) -> Option<rabbithole_script::FrameReply> {
-        self.engine.call_in_frame_with_deadline(self.page, id, call, deadline)
+    fn frame_call_with_watchdog(&mut self, id: u64, call: rabbithole_script::FrameCall, watchdog: &mut rabbithole_js::WatchdogState) -> Option<rabbithole_script::FrameReply> {
+        self.engine.call_in_frame_with_watchdog(self.page, id, call, Some(watchdog))
     }
     fn frame_checkpoint(&mut self) {
         self.engine.frame_microtasks(self.page);
@@ -1098,7 +1098,7 @@ impl Page {
         if !self.script.link_events.is_empty() {
             due = Some(0.0);
         }
-        let frames = if crate::frames::mail_pending() { Some(0.0) } else { self.frames_next_due() };
+        let frames = if self.frame_jobs_pending.get() || crate::frames::mail_pending() { Some(0.0) } else { self.frames_next_due() };
         if let Some(f) = frames {
             due = Some(due.map(|d| d.min(f)).unwrap_or(f));
         }

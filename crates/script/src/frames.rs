@@ -113,19 +113,14 @@ impl Drop for ForeignCallGuard {
 
 pub(crate) fn checkpoint_allowed() -> bool { FOREIGN_DEPTH.with(|d| d.get() == 0) }
 
-pub(crate) fn call_frame(id: u64, call: crate::FrameCall) -> Option<crate::FrameReply> {
+pub(crate) fn call_frame(realm: &mut Realm, id: u64, call: crate::FrameCall) -> Option<crate::FrameReply> {
     let _guard = ForeignCallGuard::enter();
-    let r = with_env(|env| env.frame_call(id, call));
+    let mut watchdog = realm.watchdog_state();
+    let r = with_env(|env| env.frame_call_with_watchdog(id, call, &mut watchdog));
+    realm.replace_watchdog_state(watchdog);
     if r.is_some() {
         FOREIGN_CALLS.with(|f| f.set(true));
     }
-    r
-}
-
-fn call_global(realm: &Realm, id: u64, call: crate::FrameCall) -> Option<crate::FrameReply> {
-    let _guard = ForeignCallGuard::enter();
-    let r = with_env(|env| env.frame_call_with_deadline(id, call, realm.deadline));
-    if r.is_some() { FOREIGN_CALLS.with(|f| f.set(true)); }
     r
 }
 
@@ -227,13 +222,13 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         // functions run in the frame's realm.
         "global" => {
             let name = realm.to_rust_string(arg(args, 2))?;
-            let r = call_global(realm, id, crate::FrameCall::GetGlobal { name });
+            let r = call_frame(realm, id, crate::FrameCall::GetGlobal { name });
             reply_value(realm, id, r)?
         }
         "call" => {
             let name = realm.to_rust_string(arg(args, 2))?;
             let a = realm.to_rust_string(arg(args, 3))?;
-            let r = call_global(realm, id, crate::FrameCall::CallGlobal { name, args: a });
+            let r = call_frame(realm, id, crate::FrameCall::CallGlobal { name, args: a });
             reply_value(realm, id, r)?
         }
         "navigate" => {

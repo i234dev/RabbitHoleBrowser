@@ -750,7 +750,7 @@ fn dispatch_into_frame(realm: &mut Realm, n: NodeRef, eid: ObjectId, ev: &Value)
         None => ("Event".to_string(), "{}".to_string()),
     };
     let ty = realm.host_data::<EventData>(eid).map(|d| d.ty.clone()).unwrap_or_default();
-    match crate::frames::call_frame(frame, crate::FrameCall::Dispatch { node: n.node, iface, ty, init }) {
+    match crate::frames::call_frame(realm, frame, crate::FrameCall::Dispatch { node: n.node, iface, ty, init }) {
         Some(crate::FrameReply::Bool(not_cancelled)) => {
             if !not_cancelled {
                 if let Some(d) = realm.host_data_mut::<EventData>(eid) {

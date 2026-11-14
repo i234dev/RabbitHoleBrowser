@@ -3341,3 +3341,24 @@ mod tests {
         assert_eq!(whole("^(?:a+){2,}$", "", "aaaa").as_deref(), Some("aaaa"));
     }
 }
+
+#[cfg(test)]
+mod watchdog_loan_tests {
+    use super::*;
+
+    #[test]
+    fn realm_watchdog_loan_preserves_regexp_deadline_and_expiration() {
+        let mut source = crate::Realm::new();
+        let mut target = crate::Realm::new();
+        source.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_secs(10)));
+        let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        set_deadline(Some(expired));
+        assert!(deadline_passed());
+        let before = (DEADLINE.with(|d| d.get()), EXPIRED.with(|e| e.get()));
+        let idle = target.replace_watchdog_state(source.watchdog_state());
+        assert_eq!((DEADLINE.with(|d| d.get()), EXPIRED.with(|e| e.get())), before);
+        source.replace_watchdog_state(target.replace_watchdog_state(idle));
+        assert_eq!((DEADLINE.with(|d| d.get()), EXPIRED.with(|e| e.get())), before);
+        source.set_deadline(None);
+    }
+}

@@ -1453,7 +1453,7 @@ fn e_scroll_by(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value
 
 fn e_focus(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "focus")?;
-    if forward_to_frame(n, "focus") {
+    if forward_to_frame(realm, n, "focus") {
         return Ok(Value::Undefined);
     }
     if n.doc != 0 {
@@ -1476,7 +1476,7 @@ fn e_focus(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 fn e_blur(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "blur")?;
-    if forward_to_frame(n, "blur") {
+    if forward_to_frame(realm, n, "blur") {
         return Ok(Value::Undefined);
     }
     if state().borrow().focused != Some(n.node) {
@@ -1491,12 +1491,12 @@ fn e_blur(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
 
 /// `click()` / `focus()` / `blur()` on a node of a same-origin child
 /// frame run in the frame's realm (its listeners and default actions).
-fn forward_to_frame(n: NodeRef, method: &str) -> bool {
+fn forward_to_frame(realm: &mut Realm, n: NodeRef, method: &str) -> bool {
     if n.doc & crate::host::FRAME_DOC == 0 {
         return false;
     }
     let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
-    match crate::frames::call_frame(frame, crate::FrameCall::Method { node: n.node, name: method.to_string() }) {
+    match crate::frames::call_frame(realm, frame, crate::FrameCall::Method { node: n.node, name: method.to_string() }) {
         Some(crate::FrameReply::Error(m)) => {
             crate::host::log("error", &format!("Uncaught {m}"));
             true
@@ -1509,7 +1509,7 @@ fn forward_to_frame(n: NodeRef, method: &str) -> bool {
 /// `element.click()`: dispatch a synthetic click and run the default action.
 fn e_click(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "click")?;
-    if forward_to_frame(n, "click") {
+    if forward_to_frame(realm, n, "click") {
         return Ok(Value::Undefined);
     }
     crate::events::synthetic_click(realm, n);

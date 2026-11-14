@@ -355,6 +355,21 @@ pub(crate) fn take_post_native() -> bool {
     POST_NATIVE.with(|p| p.replace(false))
 }
 
+/// Opaque state of an existing task's watchdog. Lending this state to an
+/// inactive realm preserves the original CPU clock domain and remaining task
+/// budget. No JavaScript values or realm-owned pointers cross the boundary.
+///
+/// This deliberately excludes the thread-local host credit and regexp state:
+/// they remain shared by the running task, never reset or duplicated on a
+/// realm switch. Return the effective state to the caller after execution so
+/// consumed credit and termination propagate with the same task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatchdogState {
+    deadline: Option<std::time::Instant>,
+    origin: Option<(std::time::Instant, std::time::Duration)>,
+    terminating: bool,
+}
+
 /// CPU time used by the calling thread.
 pub fn thread_cpu_time() -> Option<std::time::Duration> {
     #[cfg(target_os = "linux")]
@@ -1138,6 +1153,23 @@ impl Realm {
         WATCHDOG_CREDIT.with(|c| c.set(std::time::Duration::ZERO));
     }
 
+    /// Capture a task without restarting its watchdog or consuming host credit.
+    pub fn watchdog_state(&self) -> WatchdogState {
+        WatchdogState { deadline: self.deadline, origin: self.watch_origin, terminating: self.terminating }
+    }
+
+    /// Swap a borrowed task state, leaving thread-local credit and regexp
+    /// deadline/expiration untouched. The host must restore the idle target
+    /// and return its effective state to the source, including on failure.
+    /// This is not a new task and does not reset watchdog counters.
+    pub fn replace_watchdog_state(&mut self, state: WatchdogState) -> WatchdogState {
+        let previous = self.watchdog_state();
+        self.deadline = state.deadline;
+        self.watch_origin = state.origin;
+        self.terminating = state.terminating;
+        previous
+    }
+
     /// Set the per-task watchdog budget used by [`Realm::begin_task`].
     pub fn set_task_budget(&mut self, budget: Option<std::time::Duration>) {
         self.task_budget = budget;
@@ -1403,5 +1435,85 @@ impl Realm {
 
     pub fn take_unhandled_rejections(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.unhandled_rejections)
+    }
+}
+
+#[cfg(test)]
+mod watchdog_state_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn borrowed_watchdog_preserves_the_cpu_clock_domain_and_idle_target_state() {
+        let mut source = Realm::new();
+        let mut target = Realm::new();
+        source.set_deadline(Some(Instant::now() + Duration::from_secs(1)));
+        // Model descheduling without a timing-dependent sleep: the source's
+        // virtual CPU clock can be behind wall time. Linux/Windows provide
+        // the thread clock; on other hosts equality/restoration still applies.
+        if let Some(cpu) = thread_cpu_time() {
+            let origin = Instant::now() - Duration::from_secs(10);
+            source.watch_origin = Some((origin, cpu));
+            source.deadline = Some(origin + Duration::from_secs(1));
+        }
+        let loan = source.watchdog_state();
+        let idle = target.watchdog_state();
+        assert_eq!(target.replace_watchdog_state(loan), idle);
+        assert_eq!(target.watch_origin, source.watch_origin);
+        assert_eq!(target.deadline, source.deadline);
+        assert!(target.check_watchdog().is_ok());
+        let effective = target.replace_watchdog_state(idle);
+        assert_eq!(effective, loan);
+        assert_eq!(target.watchdog_state(), idle);
+        source.set_deadline(None);
+    }
+
+    #[test]
+    fn borrowed_watchdog_returns_consumed_host_credit_once() {
+        let mut source = Realm::new();
+        let mut target = Realm::new();
+        let deadline = Instant::now() - Duration::from_secs(1);
+        source.set_deadline(Some(deadline));
+        exclude_from_watchdog(Duration::from_secs(2));
+        let idle = target.replace_watchdog_state(source.watchdog_state());
+        assert!(target.check_watchdog().is_ok());
+        assert_eq!(target.deadline, Some(deadline + Duration::from_secs(2)));
+        assert!(WATCHDOG_CREDIT.with(|c| c.get()).is_zero());
+        source.replace_watchdog_state(target.replace_watchdog_state(idle));
+        assert!(source.check_watchdog().is_ok());
+        assert_eq!(source.deadline, Some(deadline + Duration::from_secs(2)));
+        assert!(WATCHDOG_CREDIT.with(|c| c.get()).is_zero());
+        source.set_deadline(None);
+    }
+
+    #[test]
+    fn borrowed_watchdog_keeps_unconsumed_credit_pending() {
+        let mut source = Realm::new();
+        let mut target = Realm::new();
+        source.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
+        exclude_from_watchdog(Duration::from_millis(25));
+        let original = source.watchdog_state();
+        let idle = target.replace_watchdog_state(original);
+        assert!(target.check_watchdog().is_ok());
+        source.replace_watchdog_state(target.replace_watchdog_state(idle));
+        assert_eq!(source.watchdog_state(), original);
+        assert_eq!(WATCHDOG_CREDIT.with(|c| c.get()), Duration::from_millis(25));
+        source.set_deadline(None);
+    }
+
+    #[test]
+    fn borrowed_watchdog_propagates_termination_without_poisoning_the_idle_target() {
+        let mut source = Realm::new();
+        let mut target = Realm::new();
+        source.set_deadline(Some(Instant::now() - Duration::from_secs(1)));
+        let idle = target.replace_watchdog_state(source.watchdog_state());
+        assert!(target.check_watchdog().is_err());
+        assert!(target.timed_out());
+        source.replace_watchdog_state(target.replace_watchdog_state(idle));
+        assert!(source.timed_out());
+        assert!(source.check_watchdog().is_err());
+        assert_eq!(target.watchdog_state(), idle);
+        assert!(!target.timed_out());
+        source.set_deadline(None);
     }
 }

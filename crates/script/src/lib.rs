@@ -548,35 +548,30 @@ impl ScriptHost {
         })
     }
 
-    /// Execute a cross-realm global access within the caller's remaining
-    /// task budget. Restore both the idle target budget and the thread-local
-    /// regexp deadline even when host code unwinds.
-    pub fn frame_call_with_deadline(&mut self, env: &mut dyn HostEnv, call: FrameCall, caller_deadline: Option<std::time::Instant>) -> FrameReply {
+    /// Lend the source task to an inactive realm without restarting its CPU
+    /// clock. Host credit and regexp deadline/expiration remain shared TLS;
+    /// the effective target state (including termination/consumed credit)
+    /// returns to the source. Only the target's idle state is restored.
+    pub fn frame_call_with_watchdog(&mut self, env: &mut dyn HostEnv, call: FrameCall, watchdog: &mut rabbithole_js::WatchdogState) -> FrameReply {
         self.enter(env, |realm| {
-            struct DeadlineGuard<'a> {
+            struct WatchdogLoan<'a> {
                 realm: &'a mut Realm,
-                previous: Option<std::time::Instant>,
+                source: &'a mut rabbithole_js::WatchdogState,
+                previous: rabbithole_js::WatchdogState,
                 budget: Option<std::time::Duration>,
-                caller: Option<std::time::Instant>,
             }
-            impl Drop for DeadlineGuard<'_> {
+            impl Drop for WatchdogLoan<'_> {
                 fn drop(&mut self) {
+                    *self.source = self.realm.replace_watchdog_state(self.previous);
                     self.realm.task_budget = self.budget;
-                    self.realm.set_deadline(self.previous);
-                    rabbithole_js::regex::set_deadline(self.caller);
                 }
             }
-            let previous = realm.deadline;
+            let previous = realm.replace_watchdog_state(*watchdog);
             let budget = realm.task_budget;
-            // An inactive target can retain an expired deadline from its last
-            // completed checkpoint. That is not a still-running task budget.
-            // Use the source's existing task deadline without restarting it.
-            let deadline = caller_deadline.or(previous);
             realm.task_budget = None;
-            realm.set_deadline(deadline);
-            let guard = DeadlineGuard { realm, previous, budget, caller: caller_deadline };
-            let r = frames::foreign(guard.realm, call);
-            shadow::flush(guard.realm);
+            let loan = WatchdogLoan { realm, source: watchdog, previous, budget };
+            let r = frames::foreign(loan.realm, call);
+            shadow::flush(loan.realm);
             r
         })
     }
@@ -684,6 +679,12 @@ impl ScriptHost {
             }
             frames::checkpoint();
         });
+    }
+
+    /// Work a bounded cross-frame checkpoint left for a later task.
+    pub fn has_frame_jobs(&self) -> bool {
+        let state = self.state.borrow();
+        self.realm.has_pending_jobs() || !state.mutation_records.is_empty() || !state.shadow.ce_queue.is_empty() || !state.shadow.slots_dirty.is_empty()
     }
 
     /// Run timers and animation frames that are due at `now_ms`. Returns

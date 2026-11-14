@@ -215,9 +215,10 @@ pub trait HostEnv {
         None
     }
     /// Global access can invoke getters or arbitrary functions in another
-    /// realm. The caller supplies its existing absolute deadline; a host must
-    /// not restart the task budget when crossing the realm boundary.
-    fn frame_call_with_deadline(&mut self, id: u64, call: crate::FrameCall, _deadline: Option<std::time::Instant>) -> Option<crate::FrameReply> {
+    /// realm. Lend the existing task state and return its effective state;
+    /// do not restart its CPU clock, reset credit/regexp state, or discard a
+    /// target timeout. Descendant DOM calls use the same task loan.
+    fn frame_call_with_watchdog(&mut self, id: u64, call: crate::FrameCall, _watchdog: &mut rabbithole_js::WatchdogState) -> Option<crate::FrameReply> {
         self.frame_call(id, call)
     }
     /// Microtask checkpoint of the frames this realm called into through
