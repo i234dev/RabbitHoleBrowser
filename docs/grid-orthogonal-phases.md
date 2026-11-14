@@ -194,3 +194,12 @@ on unwind, with distinct padding percentages and the original edge reference.
 These checks preserve the pending per-axis/subgrid requirements and do not
 claim complete aspect-ratio, replaced-element or writing-mode conformance.
 The legacy final Grid item sizing and global WM helpers are unchanged.
+
+The later replaced-item follow-up also keeps real block percentage bases in
+the local content oracle and resolves content-box dimensions before ordinary
+Image execution. This avoids the generic intrinsic path's absent block base
+and repeated border-box minimum constraints. Natural content ratios remain
+distinct from an explicit border-box aspect ratio. A further control includes
+percentage preferred/min/max heights, numeric border-box preferred/minimum
+sizes and both natural/explicit-ratio padding geometry. The global replaced
+sizing helper is unchanged; no complete replaced-size conformance is claimed.
