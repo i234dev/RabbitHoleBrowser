@@ -107,6 +107,17 @@ struct PlainCall {
     new_target: Value,
 }
 
+/// Result of the closure fast path, retaining the callee classification
+/// so a miss does not try paths that cannot handle that object kind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FastCall {
+    Pushed,
+    Native,
+    IndirectNative,
+    Bound,
+    Slow,
+}
+
 impl Default for Value {
     fn default() -> Value {
         Value::Undefined
@@ -505,29 +516,34 @@ impl Realm {
     /// `Call(argc)` of a plain closure (no `arguments`, rest parameter,
     /// generator/async or class constructor): builds the callee frame by
     /// moving the arguments straight from the caller's operand stack.
-    /// Returns false (nothing done) when the general path is needed. The
+    /// A miss reports which other call path can handle the callee. The
     /// caller's frame must be synced.
     #[inline(always)]
-    pub(crate) fn try_fast_call(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<bool> {
+    pub(crate) fn try_fast_call(&mut self, fi: usize, b: usize, argc: usize) -> JsResult<FastCall> {
         // SAFETY: `fi` is the running frame.
         let cb = unsafe { self.frames.get_unchecked(fi) }.base as usize + b;
         let id = match self.vstack[cb].v() {
             V::Object(id) => id,
-            _ => return Ok(false),
+            _ => return Ok(FastCall::Slow),
         };
-        let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
-        let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
+        let Some(obj) = self.heap.try_get(id) else { return Ok(FastCall::Slow) };
+        let c = match &obj.kind {
+            ObjectKind::Function(c) => c,
+            ObjectKind::Native(n) => return Ok(if matches!(n.intrinsic, INTRINSIC_FN_CALL | INTRINSIC_FN_APPLY) { FastCall::IndirectNative } else { FastCall::Native }),
+            ObjectKind::Bound(_) => return Ok(FastCall::Bound),
+            _ => return Ok(FastCall::Slow),
+        };
         let cf = c.code.call_flags;
         if cf & CALL_PLAIN == 0 {
             if c.code.lazy.is_some() {
                 self.ensure_compiled(id)?;
                 return self.try_fast_call(fi, b, argc);
             }
-            return Ok(false);
+            return Ok(FastCall::Slow);
         }
         let (this, new_target) = if cf & CALL_ARROW != 0 {
             if c.arguments.is_some() {
-                return Ok(false);
+                return Ok(FastCall::Slow);
             }
             (c.this_value.clone().unwrap_or(Value::Undefined), c.new_target.clone().unwrap_or(Value::Undefined))
         } else if cf & CALL_STRICT != 0 {
@@ -536,13 +552,13 @@ impl Realm {
             match self.vstack[cb + 1].v() {
                 V::Undefined | V::Null | V::Empty => (Value::Object(self.realm_global(c.code.realm.get())), Value::Undefined),
                 V::Object(o) => (Value::Object(o), Value::Undefined),
-                _ => return Ok(false),
+                _ => return Ok(FastCall::Slow),
             }
         };
         let code = std::ptr::NonNull::from(&*c.code);
         let parent_scope = c.scope;
         self.push_closure_frame(id, code, parent_scope, ArgSrc::Stack(cb + 2), argc, this, new_target, b as u32, false, false)?;
-        Ok(true)
+        Ok(FastCall::Pushed)
     }
 
     /// Push the frame of a call to closure `id`, whose compiled `code` has
@@ -2672,7 +2688,7 @@ impl Realm {
         // SAFETY: the code outlives this call (the frame stays).
         let code: &FunctionCode = unsafe { f.code.as_ref() };
         let fbase = f.base as usize;
-        if let Some(cell) = code.call_ics.get(cic as usize) {
+        let kind = if let Some(cell) = code.call_ics.get(cic as usize) {
             let rec = cell.get();
             let cb = fbase + b as usize;
             let callee = self.vstack[cb].bits();
@@ -2696,17 +2712,23 @@ impl Realm {
                     return Ok(Flow::Reload);
                 }
             }
-            if self.try_fast_call(fi, b as usize, argc as usize)? {
+            let kind = self.try_fast_call(fi, b as usize, argc as usize)?;
+            if kind == FastCall::Pushed {
                 self.fill_call_ic(cell, callee);
                 return Ok(Flow::Reload);
             }
-        } else if self.try_fast_call(fi, b as usize, argc as usize)? {
+            kind
+        } else {
+            let kind = self.try_fast_call(fi, b as usize, argc as usize)?;
+            if kind == FastCall::Pushed {
+                return Ok(Flow::Reload);
+            }
+            kind
+        };
+        if matches!(kind, FastCall::IndirectNative | FastCall::Bound) && self.try_call_indirect(fi, b as usize, argc as usize)? {
             return Ok(Flow::Reload);
         }
-        if self.try_call_indirect(fi, b as usize, argc as usize)? {
-            return Ok(Flow::Reload);
-        }
-        if self.try_native_call(fi, b as usize, argc as usize)? {
+        if matches!(kind, FastCall::Native | FastCall::IndirectNative) && self.try_native_call(fi, b as usize, argc as usize)? {
             return Ok(if self.frames.len() != fi + 1 { Flow::Reload } else { Flow::Next });
         }
         let op = code.ops[pc - 1];
