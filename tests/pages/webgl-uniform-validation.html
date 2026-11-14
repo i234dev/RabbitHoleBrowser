@@ -116,6 +116,19 @@
         check(iteratorCalls===0,'Native uniform invocation read Array iterator');
         check(gl.getError()===gl.NO_ERROR&&snapshot()==='0.75,0.25,0.5,1'&&pixel()==='191,64,128,255','Scalar update did not reach native pixels');
         set(location,initial);unchanged();
+        const numericDescriptor=Object.getOwnPropertyDescriptor(Object.prototype,'2');let numericSets=0;
+        try {
+          Object.defineProperty(Object.prototype,'2',{configurable:true,set(){++numericSets;throw sentinel;}});
+          let observed=false;try{const ordinary={};ordinary[2]=0;}catch(e){observed=e===sentinel;}
+          check(observed&&numericSets===1,'Numeric setter control did not observe prototype');
+          numericSets=0;gl.uniform4f(location,0.25,1,0.5,1);
+        } finally {
+          if(numericDescriptor)Object.defineProperty(Object.prototype,'2',numericDescriptor);
+          else delete Object.prototype[2];
+        }
+        check(numericSets===0,'Native uniform arguments invoked inherited numeric setter');
+        check(gl.getError()===gl.NO_ERROR&&snapshot()==='0.25,1,0.5,1'&&pixel()==='64,255,128,255','Numeric setter changed native uniform update');
+        set(location,initial);unchanged();
         const prototype=Object.getPrototypeOf(Float32Array.prototype),descriptor=Object.getOwnPropertyDescriptor(prototype,'length');
         for(const throwing of [false,true]) {
           let lengthReads=0;
