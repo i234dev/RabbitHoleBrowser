@@ -849,7 +849,7 @@ fn realistic_vanilla_script() {
     // Input event filtering.
     let search = env.doc.element_by_id("search").unwrap();
     env.doc.set_attr(search, "value", Some("a"));
-    host.dispatch_event(&mut env, search, "input", EventInit { bubbles: true, cancelable: false, detail: Some(EventDetail::Input { data: Some("a".into()) }) });
+    host.dispatch_event(&mut env, search, "input", EventInit { bubbles: true, cancelable: false, detail: Some(EventDetail::Input { data: Some("a".into()), input_type: "insertText".into(), is_composing: false }) });
     let out = run(&mut env, &mut host, "console.log($$('li.item').map(l => l.textContent).join())");
     assert_eq!(out[0], "ALPHA,BETA,GAMMA,DELTA");
     env.doc.set_attr(search, "value", Some("et"));

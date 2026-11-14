@@ -154,10 +154,10 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
             }
             realm.define_method(id, "getModifierState", 1, key_get_modifier_state);
         }
-        Some(EventDetail::Input { data }) => {
+        Some(EventDetail::Input { data, input_type, is_composing }) => {
             realm.define_property(id, "data", data.as_deref().map(Value::str).unwrap_or(Value::Null), ACC);
-            realm.define_property(id, "inputType", Value::str("insertText"), ACC);
-            realm.define_property(id, "isComposing", Value::Bool(false), ACC);
+            realm.define_property(id, "inputType", Value::str(input_type), ACC);
+            realm.define_property(id, "isComposing", Value::Bool(*is_composing), ACC);
             realm.define_property(id, "dataTransfer", Value::Null, ACC);
         }
         Some(EventDetail::Animation { name, elapsed, pseudo, transition }) => {

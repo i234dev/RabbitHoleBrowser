@@ -1081,7 +1081,13 @@ pub fn key_init(key: &str, code: &str, ctrl: bool, shift: bool, alt: bool, meta:
 
 /// Build an input event init.
 pub fn input_init(data: Option<&str>) -> EventInit {
-    EventInit { bubbles: true, cancelable: false, detail: Some(EventDetail::Input { data: data.map(|d| d.to_string()) }) }
+    input_event_init("insertText", data, false)
+}
+
+/// Build a text-editing event. `beforeinput` is cancelable; the matching
+/// `input` describes the same operation after its default mutation.
+pub fn input_event_init(input_type: &str, data: Option<&str>, cancelable: bool) -> EventInit {
+    EventInit { bubbles: true, cancelable, detail: Some(EventDetail::Input { data: data.map(str::to_string), input_type: input_type.to_string(), is_composing: false }) }
 }
 
 /// Plain bubbling event init (change, submit, ...).

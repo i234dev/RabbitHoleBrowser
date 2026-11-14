@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use rabbithole_engine::net::{Request, Url};
 
 mod consent;
+mod editing;
 mod feeds;
 mod focus;
 mod service_workers;

@@ -11,7 +11,7 @@ use rabbithole_engine::gfx::{Canvas, Color, Rect};
 use rabbithole_engine::layout::LayoutBox;
 use rabbithole_engine::net::{Request, Url};
 use rabbithole_engine::script::EventInit;
-use rabbithole_engine::scripting::{input_init, key_init, mouse_init, plain_init};
+use rabbithole_engine::scripting::{input_event_init, input_init, key_init, mouse_init, plain_init};
 use rabbithole_engine::consent::{ConsentDriver, ConsentReport, ConsentStep};
 use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page, ScriptOutcome, Selection};
 
@@ -43,6 +43,14 @@ struct ControlEdit {
     max_len: Option<usize>,
     /// Value when editing started (`change` fires on blur if it differs).
     initial: String,
+}
+
+#[derive(Clone, Copy)]
+enum ControlAction<'a> {
+    Insert(&'a str),
+    Backspace(bool),
+    Delete(bool),
+    Cut,
 }
 
 /// A primary/auxiliary button press on the page.
@@ -465,13 +473,8 @@ impl Worker {
             }
             ToContent::Key(k) => self.key(&k),
             ToContent::Text(text) => {
-                if self.edit.as_ref().map(|e| self.control_is_mutable(e.node)).unwrap_or(false) {
-                    if let Some(edit) = self.edit.as_mut() {
-                        let max = edit.max_len;
-                        edit.buf.insert(&text, max);
-                        self.commit_edit();
-                    }
-                }
+                // This message carries committed text, not IME preedit.
+                self.edit_control(ControlAction::Insert(&text), "insertText", Some(&text));
             }
             ToContent::Find(query) => {
                 self.find.query = query;
@@ -1582,7 +1585,7 @@ impl Worker {
     }
 
     /// Push the edit buffer into the DOM.
-    fn commit_edit(&mut self) {
+    fn commit_edit(&mut self, input_type: &str, data: Option<&str>) {
         let Some(edit) = self.edit.as_ref() else { return };
         let (node, text) = (edit.node, edit.buf.text.clone());
         if let Some(page) = self.page.as_mut() {
@@ -1592,7 +1595,43 @@ impl Worker {
             self.engine.set_page_scroll(page, x, y);
         }
         self.dirty = true;
-        self.dispatch_to(node, "input", input_init(Some(&text)));
+        self.dispatch_to(node, "input", input_event_init(input_type, data, false));
+    }
+
+    /// All native text mutations share the same cancelable default action.
+    /// Handlers may replace the value, move focus, or make a control read-only.
+    fn edit_control(&mut self, action: ControlAction<'_>, input_type: &str, data: Option<&str>) {
+        let Some(node) = self.edit.as_ref().map(|e| e.node) else { return };
+        let cutting = matches!(action, ControlAction::Cut);
+        let allowed = |worker: &Self| worker.control_is_mutable(node)
+            && (!cutting || worker.page.as_ref().map(|p| p.control_kind(node) != ControlKind::Password).unwrap_or(false));
+        if !allowed(self) {
+            return;
+        }
+        let (prevented, navigated) = self.dispatch_to(node, "beforeinput", input_event_init(input_type, data, true));
+        if prevented || navigated || self.edit.as_ref().map(|e| e.node) != Some(node) || !allowed(self) {
+            return;
+        }
+        let edit = self.edit.as_mut().expect("same edit after beforeinput");
+        let before = edit.buf.text.clone();
+        let mut clipboard = None;
+        match action {
+            ControlAction::Insert(text) => edit.buf.insert(text, edit.max_len),
+            ControlAction::Backspace(word) => edit.buf.backspace(word),
+            ControlAction::Delete(word) => edit.buf.delete(word),
+            ControlAction::Cut => {
+                clipboard = edit.buf.selected_text().map(str::to_string);
+                edit.buf.delete_selection();
+            }
+        }
+        self.dirty = true;
+        if edit.buf.text == before {
+            return;
+        }
+        if let Some(text) = clipboard {
+            self.send(FromContent::Clipboard(text));
+        }
+        self.commit_edit(input_type, data);
     }
 
     /// Read-only controls keep their caret and selection, but user input
@@ -1733,91 +1772,47 @@ impl Worker {
         let shift = k.mods.shift;
         let Some(node) = self.edit.as_ref().map(|e| e.node) else { return };
         let Some(page) = self.page.as_ref() else { return };
-        // keydown may change type or readonly, including while this
-        // control already owns an edit buffer.
+        // keydown may change type or readonly while a buffer is active.
         let kind = page.control_kind(node);
-        let mutable = self.control_is_mutable(node);
-        // Masked passwords must not reach the UI clipboard, even via cut.
-        let copyable = kind != ControlKind::Password;
-        let mut changed = false;
-        let mut clipboard = None;
-        {
-            let edit = self.edit.as_mut().expect("edit");
-            match k.key.as_str() {
-                "Enter" => {
-                    if kind == ControlKind::TextArea && !ctrl {
-                        if mutable {
-                            edit.buf.insert("\n", edit.max_len);
-                            changed = true;
-                        }
-                    } else {
-                        self.submit_form(node, None);
-                        return;
+        match k.key.as_str() {
+            "Enter" => {
+                if kind == ControlKind::TextArea && !ctrl {
+                    self.edit_control(ControlAction::Insert("\n"), "insertLineBreak", None);
+                } else {
+                    self.submit_form(node, None);
+                }
+            }
+            "Escape" => self.end_edit(),
+            "Tab" => self.focus_next(!shift),
+            "Backspace" => self.edit_control(ControlAction::Backspace(ctrl), if ctrl { "deleteWordBackward" } else { "deleteContentBackward" }, None),
+            "Delete" => self.edit_control(ControlAction::Delete(ctrl), if ctrl { "deleteWordForward" } else { "deleteContentForward" }, None),
+            "ArrowLeft" => self.edit.as_mut().unwrap().buf.move_left(shift, ctrl),
+            "ArrowRight" => self.edit.as_mut().unwrap().buf.move_right(shift, ctrl),
+            "Home" => self.edit.as_mut().unwrap().buf.home(shift),
+            "End" => self.edit.as_mut().unwrap().buf.end(shift),
+            " " if !ctrl => self.edit_control(ControlAction::Insert(" "), "insertText", Some(" ")),
+            key if ctrl && key.chars().count() == 1 => match key.to_lowercase().as_str() {
+                "a" => self.edit.as_mut().unwrap().buf.select_all(),
+                "c" if kind != ControlKind::Password => {
+                    if let Some(text) = self.edit.as_ref().and_then(|e| e.buf.selected_text()).map(str::to_string) {
+                        self.send(FromContent::Clipboard(text));
                     }
                 }
-                "Escape" => {
-                    self.end_edit();
-                    return;
-                }
-                "Tab" => {
-                    self.focus_next(!shift);
-                    return;
-                }
-                "Backspace" => {
-                    if mutable {
-                        edit.buf.backspace(ctrl);
-                        changed = true;
+                "x" => self.edit_control(ControlAction::Cut, "deleteByCut", None),
+                "v" => {
+                    if let Some(text) = &k.clipboard {
+                        self.edit_control(ControlAction::Insert(text), "insertFromPaste", Some(text));
                     }
                 }
-                "Delete" => {
-                    if mutable {
-                        edit.buf.delete(ctrl);
-                        changed = true;
-                    }
-                }
-                "ArrowLeft" => edit.buf.move_left(shift, ctrl),
-                "ArrowRight" => edit.buf.move_right(shift, ctrl),
-                "Home" => edit.buf.home(shift),
-                "End" => edit.buf.end(shift),
-                " " if !ctrl => {
-                    if mutable {
-                        edit.buf.insert(" ", edit.max_len);
-                        changed = true;
-                    }
-                }
-                key if ctrl && key.chars().count() == 1 => match key.to_lowercase().as_str() {
-                    "a" => edit.buf.select_all(),
-                    "c" if copyable => clipboard = edit.buf.selected_text().map(|s| s.to_string()),
-                    "x" if mutable && copyable => {
-                        if let Some(t) = edit.buf.selected_text().map(|s| s.to_string()) {
-                            edit.buf.delete_selection();
-                            changed = true;
-                            clipboard = Some(t);
-                        }
-                    }
-                    "v" if mutable => {
-                        if let Some(t) = &k.clipboard {
-                            edit.buf.insert(t, edit.max_len);
-                            changed = true;
-                        }
-                    }
-                    _ => {}
-                },
-                _ => {
-                    if let Some(text) = k.text.as_ref().filter(|t| !t.chars().any(|c| c.is_control())) {
-                        if !ctrl && mutable {
-                            edit.buf.insert(text, edit.max_len);
-                            changed = true;
-                        }
+                _ => {}
+            },
+            _ => {
+                if let Some(text) = k.text.as_ref().filter(|t| !t.chars().any(|c| c.is_control())) {
+                    if !ctrl {
+                        self.edit_control(ControlAction::Insert(text), "insertText", Some(text));
                     }
                 }
             }
-        }
-        if let Some(t) = clipboard {
-            self.send(FromContent::Clipboard(t));
-        }
-        if changed {
-            self.commit_edit();
         }
         self.dirty = true;
     }

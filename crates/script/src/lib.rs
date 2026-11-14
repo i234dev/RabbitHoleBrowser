@@ -121,7 +121,7 @@ pub enum EventDetail {
     /// (`deltaMode` 0).
     Wheel { x: f32, y: f32, dx: f32, dy: f32, ctrl: bool, shift: bool, alt: bool, meta: bool },
     Key { key: String, code: String, ctrl: bool, shift: bool, alt: bool, meta: bool, repeat: bool },
-    Input { data: Option<String> },
+    Input { data: Option<String>, input_type: String, is_composing: bool },
     /// `transition*` (TransitionEvent: `name` = propertyName) or
     /// `animation*` (AnimationEvent: `name` = animationName) events.
     Animation { name: String, elapsed: f32, pseudo: String, transition: bool },
