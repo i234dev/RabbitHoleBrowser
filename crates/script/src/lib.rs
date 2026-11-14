@@ -287,10 +287,15 @@ impl ScriptHost {
         rabbithole_wasm_js::install(&mut realm);
         let now = env.now_ms();
         let document_complete = env.document_is_complete();
+        let url_links = (
+            realm.new_private_symbol(rabbithole_js::JsStr::new("URL.queryList")),
+            realm.new_private_symbol(rabbithole_js::JsStr::new("URLSearchParams.url")),
+        );
         let state = Rc::new(RefCell::new(HostState {
             wrappers: HashMap::default(),
             child_lists: HashMap::default(),
             protos: HashMap::default(),
+            url_links,
             listeners: HashMap::default(),
             listener_counts: HashMap::default(),
             timers: Vec::new(),

@@ -95,6 +95,9 @@ pub struct HostState {
     /// document changed: `el.childNodes === el.childNodes`).
     pub child_lists: HashMap<NodeRef, (ObjectId, u64)>,
     pub protos: HashMap<&'static str, ObjectId>,
+    /// Private property keys for URL <-> query-list GC edges. The keys do
+    /// not root any instances; the owning objects hold the traced values.
+    pub url_links: (rabbithole_js::SymbolId, rabbithole_js::SymbolId),
     pub listeners: HashMap<TargetKey, Vec<Listener>>,
     /// Count of listeners per (node, type) for fast existence checks.
     pub listener_counts: HashMap<(TargetKey, String), usize>,
