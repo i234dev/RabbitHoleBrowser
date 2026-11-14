@@ -320,11 +320,12 @@ impl<'a> Layouter<'a> {
                 virt.push(Self::lane_grid_item(it, s, false));
             }
         }
-        let mut contribs = self.column_contributions(b, &virt, cbw);
+        let contribs = self.column_contributions(b, &virt, cbw);
         if min_only {
-            contribs.iter_mut().for_each(|c| c.max = c.min);
+            size_tracks_with_constraint(&mut tl.tracks, &contribs, avail, gap, stretch, SizingConstraint::MinContent);
+        } else {
+            size_tracks(&mut tl.tracks, &contribs, avail, gap, stretch);
         }
-        size_tracks(&mut tl.tracks, &contribs, avail, gap, stretch);
     }
 
     /// Inner (content-box) width of an item in the stacking axis of row
@@ -441,12 +442,11 @@ impl<'a> Layouter<'a> {
             let it = &items[i];
             let (ay, ah) = span_size(&tracks, &row_pos, s, s + it.span);
             let child = &mut b.children[it.idx];
-            let bb = child.style.box_sizing == BoxSizing::BorderBox;
             let mut margin = it.edges.margin;
             let stretch = matches!(it.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto)
                 && !it.edges.auto.top
                 && !it.edges.auto.bottom
-                && resolve_size(child.style.height, Some(ah), bb, it.edges.pb_v).is_none()
+                && child.style.height.is_auto()
                 && child.kind != BoxKind::Image;
             let lcb = Cb { x: 0.0, width: cbw, height: Some(ah) };
             let mut bfc = Bfc::new();
