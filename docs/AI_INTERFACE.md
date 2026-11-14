@@ -25,10 +25,10 @@ Design goals, in order:
 
 | Tool         | What it does |
 |--------------|--------------|
-| `open`       | Load a URL (or `back` / `forward` / `reload`) and return a short [page summary](#the-page-summary) (title, landmarks, heading outline, forms, overlays, counts). `snapshot=true` (alias `full=true`, or any `max_tokens`) returns the full snapshot instead. Options: `new_tab`, `context` (isolated cookies/storage), `snapshot`, `max_tokens`, `bot`, `robots`, `allowlist`, `javascript`, `dialog`. |
+| `open`       | Load a URL (or `back` / `forward` / `reload`); default: short [page summary](#the-page-summary). `find` (string or string array) returns the header, covering-layer warnings and matching passages instead; `summary=true` adds the overview. Without `find`, `snapshot=true` (alias `full=true`, or any `max_tokens`) returns the full snapshot. Other options: `new_tab`, `context` (isolated cookies/storage), `bot`, `robots`, `allowlist`, `javascript`, `dialog`. |
 | `snapshot`   | The semantic tree of the page. `ref` expands one element (a truncated list, a collapsed landmark); `max_tokens` (default 2500); `hidden=true` also lists hidden content, marked; `urls=true` shows link targets. |
-| `read`       | The main content as Markdown (Readability-style), links as `[text](@eN)`, without navigation, footers, related blocks or hidden text. `max_tokens` (default 4000), `offset` to continue, `ref` for one element. |
-| `find`       | Elements by `text`, by `role` + `name`, or by CSS `selector`. Returns refs (assigning them if needed) and whether each is above/below the viewport. |
+| `read`       | Main content as Markdown, without nav/footer/related; without `ref`, starts at the article beginning. Optional `ref` reads that subtree. `max_tokens` defaults to 4000; `offset` counts characters. `links=true` keeps link refs; `links=false` uses plain text. `cites=false` omits same-page superscript citation links; `cites=true` includes them. Use `find` for a particular fact. |
+| `find`       | Search `text` (string or string array, any term), `role` + `name`, or CSS `selector`. Returns element refs in document order. Text search includes surrounding `context` (default 240 characters; 0 keeps the legacy first 120), matching terms and absent terms. `limit` counts elements (default 20). |
 | `click`      | Click by ref (real hit-tested pointer sequence). `hover=true` only hovers. `force=true` dispatches even if covered/invisible. `ref="cookies"` rejects a cookie banner. |
 | `type`       | Type `text` into a field with per-key events (`clear=true` replaces), and/or press a `key` (`Enter`, `Tab`, `Escape`, `ArrowDown`, `Backspace`, …). `submit=true` presses Enter afterwards (implicit submission). |
 | `fill`       | Forms as a unit. No arguments: list the forms. `ref=@fN`: list its fields. `values={label|name|id|@eN: value}` fills (text, `true`/`false` for checkboxes, option label/value for selects and radios). `submit=true` runs constraint validation and submits. A single field: `ref=@eN value=…`. |
@@ -109,7 +109,7 @@ forms:
 main @e9: 120 links, 8 buttons, 1 inputs; whole page: 310 links, 14 buttons, 2 inputs
 ⟦/page 3f9a1c2b⟧
 An overlay @e200 covers the page: deal with it first (click ref="cookies" rejects cookies).
-Summary only: snapshot (or open … snapshot=true) shows the full tree, read the main text, find locates elements.
+Summary only: open … find= or find text= locates facts with context; read without ref starts at the article beginning; snapshot shows the full tree.
 ```
 
 * Overlays and dialogs come first (`⚠`), with their buttons.
@@ -127,6 +127,62 @@ Summary only: snapshot (or open … snapshot=true) shows the full tree, read the
 
 The refs are the same ones `snapshot`, `find` and the actions use.
 `open url=… snapshot=true` (or the `snapshot` tool) gives the full tree.
+
+## Finding facts
+
+Search during navigation to locate a fact in one call:
+
+```json
+{"url":"https://example.test/article","find":["Guido","1989","CWI"]}
+```
+
+`open` with `find` preserves the page header, navigation notices and covering-layer
+warnings, then returns search results. It omits landmarks, outline, forms and
+counts unless `summary=true`. Search uses the default 240-character window and
+20-element limit. `find` takes precedence over snapshot options; ordinary
+`open` and `snapshot` output keep their existing behaviour.
+
+On a loaded page, `find {"text":["Guido","1989","CWI"],"limit":10}` searches
+all eligible elements once, returning an element when any term matches. Results
+follow document order, including child documents at their iframe. Multiple text
+runs belonging to one element count as one result. `role` and `name` restrict the
+eligible elements before matching. CSS selector search keeps its existing format.
+Search excludes hidden content, as before.
+
+Inline links contribute their complete labels to searchable prose: a paragraph
+`Guido <a>CWI</a> 1989` matches `Guido CWI 1989`, never `Guido 1989`. Search builds
+this plain text with the normal tree's visibility rules and node refs; it does
+not parse snapshot link markers or change snapshot rendering. Other separate
+semantic runs keep their boundaries. Hits in different runs of one element
+share a result, whose snippet comes from its first matching run.
+Linked prose uses its real common containing element, including across inline
+spans, so the result ref can read the complete passage.
+
+```text
+@e17 text "…Guido began Python in December 1989 at CWI…" (below viewport) [text: "Guido", "1989", "CWI"] (+2 más en este elemento)
+Sin coincidencias: "diciembre de 1989"
+```
+
+The core result grammar stays `@eN role "snippet" (position)`, with an optional
+position; text matches append `[text: "term", …]` in request order. Repeated
+occurrences, including occurrences of different requested terms, append
+`(+N más en este elemento)`. Terms are case-insensitive literals; duplicate terms
+that lowercase identically are combined. There is no regex option. Empty searches
+and arrays containing nonstrings are errors.
+
+`context` is an integer from 0 through 4096. A positive value caps the total
+original Unicode characters in the snippet, including `…` at clipped ends;
+the window centres on the earliest match. Small budgets can clip the match
+itself. A name that fits is returned whole. Lowercase expansions such as `İ`
+map back to original character positions. `context=0` preserves the old initial
+120-character clipping. Quotes, backslashes and control characters keep the
+existing display escaping rules.
+
+`limit` truncates returned elements, not the scan: a term found later is never
+listed as absent just because its element was omitted. The final
+`Sin coincidencias:` line reports terms absent from the entire eligible selection.
+Search results and this line remain inside the untrusted-content fences; refs
+remain usable with `read`, `snapshot` and actions.
 
 ## The snapshot
 

@@ -1,9 +1,9 @@
 # MCP reading improvements
 
-Status: planned. Implement against the current development revision when this
-milestone starts; recheck the code and tool catalogue at that time. The source
-revision used by the original investigation is historical, not an implementation
-base. This work follows the current compatibility and stability delivery.
+Status: items 1, 2, 3 and 6 have an implementation candidate based on published
+revision `a8705bf` (0.1.9), pending Rust compilation and regression execution.
+No benchmark has been rerun. The original investigation's source revision is
+historical, not the implementation base. Other items retain their own status.
 
 ## Goal and evidence
 
@@ -101,3 +101,39 @@ remeasured. The expected benefit comes primarily from avoiding `open` → `find`
 - Add a separate interaction benchmark before generalising to clicks, forms,
   JavaScript-heavy sites or cookie banners. The original evidence covers one
   factual Wikipedia task only.
+
+## Search implementation checkpoint (14 November 2026)
+
+Items 1–3 retain the existing snapshot/AX rendering. A separate search build
+shares its visibility filters and stable node refs, merging inline prose with
+complete link labels as plain text, including short linked phrases. It never
+parses display markers or drops a link to invent a phrase. Search alone orders eligible
+elements by composed document order, inserts loaded child documents at iframes,
+and groups text runs by element before applying the result limit. Presence is
+collected across the entire eligible selection before reporting absent terms.
+Other separate semantic runs retain their boundaries; grouped results centre on
+their first matching run. Both `find` and `open find=…` build one semantic tree
+per call, reusing it for navigation warnings/optional summary and search. No
+persistent cache or new invalidation policy is introduced.
+Case-insensitive search maps lowercase expansions back to original Unicode
+characters. `context` accepts integers from 0 through 4096; its positive budget
+includes clipping ellipses. `open find=…` uses the default 240-character context
+and 20-element limit; `summary=true` adds the regular overview. Search takes
+precedence over snapshot options on the same `open` call. No regex is included.
+
+The exact compact `tools/list` **result object**, `{"tools":[…]}`, was materialized
+from the JSON macro literals without running Rust, with sorted object keys,
+UTF-8 characters and no insignificant whitespace or final newline:
+
+| Candidate catalogue | Characters | UTF-8 bytes | SHA-256 |
+| --- | ---: | ---: | --- |
+| Before, `a8705bf` | 6,262 | 6,268 | `1342499f9d4f9e9e9f4122d7db241bdc471f055a5305abd5c181b7807c2ccce2` |
+| After, including `read links/cites` schemas | 6,446 | 6,452 | `99570edb40101cda6ab1859fead7e85b0494a7536e37c70b392a1c3ae0bffe71` |
+
+The latter leaves 454 characters below the 6,900-character ceiling. Raw JSON
+objects are retained with the implementation evidence. The `tool_budget` test
+serializes the actual result with `serde_json`, asserts that ceiling and emits
+the serialization and character count when test output is requested. These
+static counts await that runtime cross-check; they are neither benchmark tokens
+nor a JSON-RPC envelope size. Historical supplied catalogue sizes above remain
+identified as historical.

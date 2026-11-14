@@ -1,6 +1,7 @@
 //! The agent tools (shared by the MCP server and the CLI): definitions,
 //! argument handling and dispatch.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,25 +19,30 @@ use crate::refs::Ref;
 
 /// Default snapshot budget (tokens).
 pub const SNAPSHOT_TOKENS: usize = 2500;
+/// Search windows are measured in original Unicode characters, including ellipses.
+const FIND_CONTEXT: usize = 240;
+const MAX_FIND_CONTEXT: usize = 4096;
 
 /// Tool names, in the order they are listed.
 pub const TOOLS: &[&str] = &["open", "snapshot", "read", "find", "click", "type", "fill", "scroll", "screenshot", "network", "tabs", "debug"];
 
 /// JSON schemas of the tools (MCP `tools/list`).
 pub fn definitions() -> Vec<Value> {
-    let r = json!({ "type": "string", "description": "Element ref from a snapshot, e.g. @e12 (forms: @f1)" });
-    let dialog = json!({ "type": "string", "description": "Answer to alert/confirm/prompt raised during this call: accept, dismiss (default) or the prompt text" });
+    let r = json!({ "type": "string", "description": "Element @e12 or form @f1 ref" });
+    let dialog = json!({ "type": "string", "description": "Dialog answer: accept, dismiss (default), or prompt text" });
     vec![
-        json!({ "name": "open", "description": "Load a URL (or back/forward/reload) and return a short page summary: landmarks, outline, forms, overlays. snapshot=true: full tree. bot=true: RabbitHoleBot identity + robots.txt.",
+        json!({ "name": "open", "description": "Load URL (or back/forward/reload). Default: short summary. find: fact search in one call; summary=true adds overview. snapshot=true: full tree. bot=true: RabbitHoleBot + robots.txt.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "Absolute URL, or back | forward | reload" },
                 "new_tab": { "type": "boolean" },
                 "context": { "type": "string", "description": "Isolated context (cookies, storage) to use; created on demand" },
                 "snapshot": { "type": "boolean", "description": "Return the full semantic snapshot instead of the short summary (alias: full)" },
                 "full": { "type": "boolean", "description": "Alias of snapshot" },
+                "find": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Any term; returns context instead of overview" },
+                "summary": { "type": "boolean", "description": "Include overview with find" },
                 "max_tokens": { "type": "integer", "description": "Full-snapshot budget (default 2500; implies snapshot=true)" },
-                "bot": { "type": "boolean", "description": "Session option: identify as RabbitHoleBot (bot User-Agent, no client hints) and respect robots.txt (default false: standard browser headers)" },
-                "robots": { "type": "boolean", "description": "Respect robots.txt (default: on in bot mode, off otherwise)" },
+                "bot": { "type": "boolean", "description": "RabbitHoleBot headers + robots.txt; default false (browser headers)" },
+                "robots": { "type": "boolean", "description": "Respect robots.txt; defaults to bot mode" },
                 "allowlist": { "type": "array", "items": { "type": "string" }, "description": "Only allow these domains from now on" },
                 "javascript": { "type": "boolean" },
                 "dialog": dialog
@@ -48,13 +54,15 @@ pub fn definitions() -> Vec<Value> {
                 "hidden": { "type": "boolean", "description": "Also list hidden content, marked" },
                 "urls": { "type": "boolean", "description": "Show link targets" }
             } } }),
-        json!({ "name": "read", "description": "Main content as clean Markdown (article text, links as refs), without nav/footer/related.",
+        json!({ "name": "read", "description": "Main text as Markdown; without ref, starts at article beginning. For a particular fact, find is cheaper. Links use refs by default.",
             "inputSchema": { "type": "object", "properties": {
-                "ref": r.clone(), "max_tokens": { "type": "integer", "description": "Default 4000" }, "offset": { "type": "integer", "description": "Character offset to continue from" }
+                "ref": r.clone(), "max_tokens": { "type": "integer", "description": "Default 4000" }, "offset": { "type": "integer", "description": "Character offset to continue from" },
+                "links": { "type": "boolean", "default": true }, "cites": { "type": "boolean", "default": false }
             } } }),
-        json!({ "name": "find", "description": "Find elements by text, role/name or CSS selector; returns refs.",
+        json!({ "name": "find", "description": "Search any text term with surrounding context; cheaper than read for a fact. Also role/name or CSS selector. Returns refs in document order, matching terms and absent terms.",
             "inputSchema": { "type": "object", "properties": {
-                "text": { "type": "string" }, "role": { "type": "string" }, "name": { "type": "string" }, "selector": { "type": "string" }, "limit": { "type": "integer" }
+                "text": { "type": ["string", "array"], "items": { "type": "string" } }, "role": { "type": "string" }, "name": { "type": "string" }, "selector": { "type": "string" }, "limit": { "type": "integer" },
+                "context": { "type": "integer", "minimum": 0, "maximum": 4096, "default": 240, "description": "Total chars; 0: legacy first 120" }
             } } }),
         json!({ "name": "click", "description": "Click an element (or hover=true). Waits until the page settles and returns what changed. ref=\"cookies\" rejects a cookie banner.",
             "inputSchema": { "type": "object", "properties": {
@@ -104,6 +112,35 @@ fn b(a: &Value, k: &str) -> Option<bool> {
 
 fn n(a: &Value, k: &str) -> Option<f64> {
     a.get(k).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+}
+
+/// Accept literal terms, preserving their spelling for result labels.
+fn search_terms(a: &Value, key: &str) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = a.get(key) else { return Ok(None) };
+    let values: Vec<&str> = match value {
+        Value::String(s) => vec![s],
+        Value::Array(items) => items.iter().map(|v| v.as_str().ok_or_else(|| format!("{key} must contain only strings"))).collect::<Result<_, _>>()?,
+        _ => return Err(format!("{key} needs a string or an array of strings")),
+    };
+    let mut terms: Vec<String> = Vec::new();
+    for term in values.into_iter().map(str::trim).filter(|s| !s.is_empty()) {
+        if !terms.iter().any(|t| t.to_lowercase() == term.to_lowercase()) {
+            terms.push(term.to_string());
+        }
+    }
+    if terms.is_empty() {
+        return Err(format!("{key} needs at least one nonempty search term"));
+    }
+    Ok(Some(terms))
+}
+
+fn find_context(a: &Value) -> Result<usize, String> {
+    let Some(value) = a.get("context") else { return Ok(FIND_CONTEXT) };
+    let context = value.as_u64().ok_or("context needs an integer between 0 and 4096")?;
+    if context > MAX_FIND_CONTEXT as u64 {
+        return Err("context needs an integer between 0 and 4096".into());
+    }
+    Ok(context as usize)
 }
 
 /// Dialog policy from a `dialog` argument.
@@ -204,6 +241,8 @@ fn dispatch(agent: &mut Agent, name: &str, a: &Value) -> Result<Out, String> {
 
 fn open(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let url = s(a, "url").ok_or("open needs url")?.to_string();
+    // Validate search arguments before changing the current page.
+    let terms = search_terms(a, "find")?;
     if let Some(bot) = b(a, "bot") {
         agent.set_bot(bot);
     } else if let Some(bh) = b(a, "browser_headers") {
@@ -261,16 +300,23 @@ fn open(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         return Ok(Out::text(text));
     }
     let full = b(a, "snapshot").or(b(a, "full")).unwrap_or(agent.cfg.full_snapshot_on_open) || n(a, "max_tokens").is_some();
-    if full {
+    if let Some(terms) = terms {
+        let (root, _, overlays) = agent.search_tree(ti);
+        text.push_str(&agent.search_header_text(ti, &root, &overlays, b(a, "summary").unwrap_or(false)));
+        text.push('\n');
+        text.push_str(&find_elements(agent, ti, &root, Some(&terms), None, None, 20, FIND_CONTEXT));
+    } else if full {
         let max = n(a, "max_tokens").map(|x| x as usize).unwrap_or(SNAPSHOT_TOKENS).max(100);
         text.push_str(&agent.snapshot_text(ti, max, None, false, false)?);
     } else {
         text.push_str(&agent.summary_text(ti)?);
     }
-    let hints = crate::netinfo::page_hints(&agent.tabs[ti]);
-    for h in hints.into_iter().take(2) {
-        text.push('\n');
-        text.push_str(&h);
+    if a.get("find").is_none() {
+        let hints = crate::netinfo::page_hints(&agent.tabs[ti]);
+        for h in hints.into_iter().take(2) {
+            text.push('\n');
+            text.push_str(&h);
+        }
     }
     Ok(Out::text(text))
 }
@@ -290,8 +336,8 @@ fn read(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     };
     let page = &tab.frames[frame].page;
     let md = match root {
-        Some(node) => crate::read::read_subtree(page, &mut tab.refs, frame, node),
-        None => crate::read::read(page, &mut tab.refs, frame),
+        Some(node) => crate::read::read_subtree_with_options(page, &mut tab.refs, frame, node, b(a, "links").unwrap_or(true), b(a, "cites").unwrap_or(false)),
+        None => crate::read::read_with_options(page, &mut tab.refs, frame, b(a, "links").unwrap_or(true), b(a, "cites").unwrap_or(false)),
     };
     let total = md.chars().count();
     let body: String = md.chars().skip(offset).take(max_chars).collect();
@@ -315,26 +361,171 @@ fn agent_resolve(tab: &crate::browser::Tab, r: &str) -> Result<(usize, NodeId), 
     Ok((f, node))
 }
 
+/// Lowercase the complete string (including context-sensitive sigma), while
+/// mapping every folded byte to its original Unicode character. A match can
+/// begin inside an expansion such as İ → i + combining dot.
+fn text_matches(name: &str, terms: &[String]) -> Vec<Vec<(usize, usize)>> {
+    let lower = name.to_lowercase();
+    let origins: Vec<usize> = name.chars().enumerate().flat_map(|(i, c)| c.to_lowercase().map(move |_| i)).collect();
+    let mut original = Vec::with_capacity(lower.len());
+    for (c, index) in lower.chars().zip(origins) {
+        original.extend(std::iter::repeat_n(index, c.len_utf8()));
+    }
+    terms.iter().map(|term| {
+        let folded = term.to_lowercase();
+        lower.match_indices(folded.as_str()).map(|(start, matched)| (original[start], original[start + matched.len() - 1] + 1)).collect()
+    }).collect()
+}
+
+fn match_context(name: &str, first: Option<(usize, usize)>, context: usize) -> String {
+    if context == 0 {
+        return clip_text(name, 120);
+    }
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= context {
+        return name.to_string();
+    }
+    if context == 1 {
+        return "…".into();
+    }
+    let width = context - 2;
+    let center = first.map(|(start, end)| start + (end - start) / 2).unwrap_or(0);
+    let mut start = center.saturating_sub(width / 2).min(chars.len() - width);
+    let mut end = start + width;
+    // At an edge, spend the unused ellipsis character on the passage.
+    if start == 0 {
+        end = context - 1;
+    } else if end == chars.len() {
+        start = chars.len() - (context - 1);
+    }
+    let mut snippet = String::new();
+    if start > 0 { snippet.push('…'); }
+    snippet.extend(chars[start..end].iter());
+    if end < chars.len() { snippet.push('…'); }
+    snippet
+}
+
+/// Flatten composed DOM order, inserting child documents at their iframe.
+/// Snapshot rendering prioritizes main; search keeps document order instead.
+fn search_order(tab: &crate::browser::Tab) -> HashMap<(usize, NodeId), usize> {
+    let children: HashMap<_, _> = tab.frames.iter().enumerate().filter_map(|(i, f)| f.parent.map(|parent| (parent, i))).collect();
+    let mut order = HashMap::new();
+    let mut stack = vec![(0, Document::ROOT)];
+    while let Some((frame, node)) = stack.pop() {
+        if order.contains_key(&(frame, node)) { continue; }
+        order.insert((frame, node), order.len());
+        let doc = &tab.frames[frame].page.doc;
+        stack.extend(doc.flat_children(node).into_iter().rev().map(|n| (frame, n)));
+        if let Some(&child) = children.get(&(frame, node)) {
+            stack.push((child, Document::ROOT));
+        }
+    }
+    order
+}
+
+fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Option<&[String]>, role: Option<&str>, name: Option<&str>, limit: usize, context: usize) -> String {
+    let tab = &mut agent.tabs[ti];
+    let order = search_order(tab);
+    let role = role.map(str::to_lowercase);
+    let name = name.map(str::to_lowercase);
+    let mut candidates: Vec<(usize, NodeId, String, Vec<String>, Option<u32>)> = Vec::new();
+    let mut elements: HashMap<(usize, NodeId), usize> = HashMap::new();
+    root.visit(&mut |x, _| {
+        if !matches!(x.kind, Kind::Control | Kind::Heading | Kind::Text | Kind::Image | Kind::Landmark | Kind::Dialog | Kind::Form | Kind::Frame) {
+            return;
+        }
+        // AX labels are clipped for snapshots. Search full accessible names;
+        // text runs already retain their complete, normalized content.
+        let full_name = if x.kind == Kind::Text { x.name.clone() } else {
+            let full = crate::ax::accessible_name(&tab.frames[x.frame].page, x.node, &x.role);
+            if full.is_empty() { x.name.clone() } else { full }
+        };
+        if full_name.is_empty() { return; }
+        if let Some(&i) = elements.get(&(x.frame, x.node)) {
+            let candidate = &mut candidates[i];
+            if x.kind == Kind::Text {
+                // A control can separate two runs of the same element.
+                // Group their results, but never invent a contiguous phrase.
+                candidate.3.push(full_name);
+            }
+        } else {
+            elements.insert((x.frame, x.node), candidates.len());
+            candidates.push((x.frame, x.node, x.role.clone(), vec![full_name], x.reference));
+        }
+    });
+    candidates.sort_by_key(|(f, nd, _, _, _)| order.get(&(*f, *nd)).copied().unwrap_or(usize::MAX));
+    let mut seen = vec![false; terms.map_or(0, |terms| terms.len())];
+    let mut lines = Vec::new();
+    let mut total = 0;
+    for (frame, node, role_name, passages, reference) in candidates {
+        let ok_role = role.as_ref().map(|r| role_name == *r || (r == "textbox" && role_name == "searchbox")).unwrap_or(true);
+        let ok_name = name.as_ref().map(|n| passages.iter().any(|p| p.to_lowercase().contains(n.as_str()))).unwrap_or(true);
+        if !ok_role || !ok_name { continue; }
+        let passage_hits: Vec<_> = passages.iter().map(|p| terms.map(|terms| text_matches(p, terms)).unwrap_or_default()).collect();
+        let mut counts = vec![0; seen.len()];
+        for hits in &passage_hits {
+            for (count, hits) in counts.iter_mut().zip(hits) { *count += hits.len(); }
+        }
+        for (seen, count) in seen.iter_mut().zip(&counts) { *seen |= *count > 0; }
+        let count: usize = counts.iter().sum();
+        if terms.is_some() && count == 0 { continue; }
+        total += 1;
+        if lines.len() >= limit { continue; }
+        let reference = reference.unwrap_or_else(|| tab.refs.assign(frame, node, &role_name, &clip_text(&passages[0], 60)));
+        let page = &tab.frames[frame].page;
+        let position = if frame != 0 { " (in frame)" } else {
+            page.rect_of(node).map(|rc| {
+                let vy = rc.y - page.page_scroll.1;
+                if vy < 0.0 { " (above viewport)" } else if vy > page.viewport.height { " (below viewport)" } else { "" }
+            }).unwrap_or("")
+        };
+        let first = passage_hits.iter().enumerate().find_map(|(i, hits)| {
+            hits.iter().flatten().copied().min_by_key(|&(start, end)| (start, end)).map(|hit| (i, hit))
+        }).or_else(|| {
+            let term = name.as_ref()?;
+            passages.iter().enumerate().find_map(|(i, p)| {
+                text_matches(p, std::slice::from_ref(term)).into_iter().next()?.into_iter().next().map(|hit| (i, hit))
+            })
+        });
+        let passage = first.map_or(0, |(i, _)| i);
+        let snippet = match_context(&passages[passage], first.map(|(_, hit)| hit), context);
+        let mut line = format!("@e{reference} {role_name} \"{}\"{position}", esc(&snippet));
+        if let Some(terms) = terms {
+            let labels: Vec<_> = terms.iter().zip(&counts).filter(|(_, count)| **count > 0).map(|(term, _)| format!("\"{}\"", esc(term))).collect();
+            line.push_str(&format!(" [text: {}]", labels.join(", ")));
+        }
+        if count > 1 { line.push_str(&format!(" (+{} más en este elemento)", count - 1)); }
+        lines.push(line);
+    }
+    let mut body = if lines.is_empty() { "No matches.".to_string() } else { lines.join("\n") };
+    if let Some(terms) = terms {
+        let missing: Vec<_> = terms.iter().zip(seen).filter(|(_, seen)| !seen).map(|(term, _)| format!("\"{}\"", esc(term))).collect();
+        if !missing.is_empty() { body.push_str(&format!("\nSin coincidencias: {}", missing.join(", "))); }
+    }
+    // Search terms and passage text both remain inside the untrusted fence.
+    let mut output = fence(&body);
+    if total > lines.len() { output.push_str(&format!("\n({} more matches; raise limit)", total - lines.len())); }
+    output
+}
+
 fn find(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let ti = agent.tab_index()?;
     agent.ensure_loaded(ti)?;
     let limit = n(a, "limit").map(|x| x as usize).unwrap_or(20).max(1);
-    let mut lines: Vec<String> = Vec::new();
-    let mut total = 0;
+    let context = find_context(a)?;
+    let terms = search_terms(a, "text")?;
     if let Some(sel) = s(a, "selector") {
         let toks = Tokenizer::tokenize(sel);
         let list = SelectorParser::new(&toks).parse_list().ok_or_else(|| format!("invalid selector: {sel}"))?;
         let tab = &mut agent.tabs[ti];
+        let mut lines = Vec::new();
+        let mut total = 0;
         for (fi, f) in tab.frames.iter().enumerate() {
             let doc = &f.page.doc;
             for nd in doc.descendants(Document::ROOT) {
-                if doc.element(nd).is_none() || !list.iter().any(|s| matches(s, doc, nd)) {
-                    continue;
-                }
+                if doc.element(nd).is_none() || !list.iter().any(|s| matches(s, doc, nd)) { continue; }
                 total += 1;
-                if lines.len() >= limit {
-                    continue;
-                }
+                if lines.len() >= limit { continue; }
                 let role = doc.tag(nd).unwrap_or("").to_string();
                 let text = crate::ax::content_text(&f.page, nd);
                 let r = tab.refs.assign(fi, nd, &role, &clip_text(&text, 60));
@@ -342,54 +533,17 @@ fn find(agent: &mut Agent, a: &Value) -> Result<Out, String> {
                 lines.push(format!("@e{r} <{role}> \"{}\"{vis}", esc(&clip_text(&text, 100))));
             }
         }
-    } else {
-        let text = s(a, "text").map(|t| t.to_lowercase());
-        let role = s(a, "role").map(|t| t.to_lowercase());
-        let name = s(a, "name").map(|t| t.to_lowercase());
-        if text.is_none() && role.is_none() && name.is_none() {
-            return Err("find needs text, role/name or selector".into());
-        }
-        let (root, _, _) = agent.tree(ti, false);
-        let tab = &mut agent.tabs[ti];
-        let mut found: Vec<(usize, NodeId, String, String, Option<u32>)> = Vec::new();
-        // Track the nearest heading for context.
-        root.visit(&mut |x, _| {
-            if x.kind == Kind::Break {
-                return;
-            }
-            let nm = x.name.to_lowercase();
-            let ok_text = text.as_ref().map(|t| nm.contains(t.as_str())).unwrap_or(true);
-            let ok_role = role.as_ref().map(|r| x.role == *r || (r == "textbox" && x.role == "searchbox")).unwrap_or(true);
-            let ok_name = name.as_ref().map(|t| nm.contains(t.as_str())).unwrap_or(true);
-            let leafish = matches!(x.kind, Kind::Control | Kind::Heading | Kind::Text | Kind::Image | Kind::Landmark | Kind::Dialog | Kind::Form | Kind::Frame);
-            if ok_text && ok_role && ok_name && leafish && !x.name.is_empty() {
-                found.push((x.frame, x.node, x.role.clone(), x.name.clone(), x.reference));
-            }
-        });
-        total = found.len();
-        for (f, nd, role, nm, r) in found.into_iter().take(limit) {
-            let r = r.unwrap_or_else(|| tab.refs.assign(f, nd, &role, &clip_text(&nm, 60)));
-            let page = &tab.frames[f].page;
-            let pos = page.rect_of(nd).map(|rc| {
-                let vy = rc.y - page.page_scroll.1;
-                if f != 0 {
-                    " (in frame)".to_string()
-                } else if vy < 0.0 {
-                    " (above viewport)".to_string()
-                } else if vy > page.viewport.height {
-                    " (below viewport)".to_string()
-                } else {
-                    String::new()
-                }
-            });
-            lines.push(format!("@e{r} {role} \"{}\"{}", esc(&clip_text(&nm, 120)), pos.unwrap_or_default()));
-        }
+        let mut text = if lines.is_empty() { "No matches.".to_string() } else { fence(&lines.join("\n")) };
+        if total > lines.len() { text.push_str(&format!("\n({} more matches; raise limit)", total - lines.len())); }
+        return Ok(Out::text(text));
     }
-    let mut text = if lines.is_empty() { "No matches.".to_string() } else { fence(&lines.join("\n")) };
-    if total > lines.len() {
-        text.push_str(&format!("\n({} more matches; raise limit)", total - lines.len()));
+    let role = s(a, "role");
+    let name = s(a, "name");
+    if terms.is_none() && role.is_none() && name.is_none() {
+        return Err("find needs text, role/name or selector".into());
     }
-    Ok(Out::text(text))
+    let (root, _, _) = agent.search_tree(ti);
+    Ok(Out::text(find_elements(agent, ti, &root, terms.as_deref(), role, name, limit, context)))
 }
 
 fn type_(agent: &mut Agent, a: &Value) -> Result<Out, String> {
@@ -1001,7 +1155,7 @@ pub fn parse_line(line: &str) -> Result<(String, Value), String> {
         if let Some((k, v)) = t.split_once('=').filter(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
             let val = serde_json::from_str::<Value>(v).unwrap_or_else(|_| Value::String(v.to_string()));
             // Keep strings that merely look like numbers for text fields.
-            let val = if matches!(k, "text" | "url" | "ref" | "value" | "path" | "eval") { Value::String(v.to_string()) } else { val };
+            let val = if matches!(k, "text" | "url" | "ref" | "value" | "path" | "eval") && !(k == "text" && val.is_array()) { Value::String(v.to_string()) } else { val };
             args.insert(k.to_string(), val);
         } else if tool == "scroll" && t.starts_with('@') {
             args.insert("ref".into(), Value::String(t));
@@ -1084,6 +1238,39 @@ mod tests {
         }
         let names: Vec<&str> = d.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, TOOLS);
+        let catalogue = serde_json::to_string(&json!({ "tools": d })).unwrap();
+        assert!(catalogue.chars().count() <= 6900, "tools/list: {} chars", catalogue.chars().count());
+        eprintln!("tools/list ({} chars): {catalogue}", catalogue.chars().count());
+    }
+
+    #[test]
+    fn search_windows_map_expanding_lowercase_back_to_original_characters() {
+        let terms = ["x", "ος", "i", "\u{307}"].map(str::to_string);
+        assert_eq!(text_matches("İx ΟΣ!", &terms), [vec![(1, 2)], vec![(3, 5)], vec![(0, 1)], vec![(0, 1)]]);
+        let name = format!("{}NEEDLE{}", "İ".repeat(400), "𐐀".repeat(400));
+        let hits = text_matches(&name, &["needle".into()]);
+        assert_eq!(hits, [vec![(400, 406)]]);
+        let snippet = match_context(&name, Some(hits[0][0]), 240);
+        assert_eq!(snippet.chars().count(), 240);
+        assert!(snippet.starts_with('…') && snippet.ends_with('…') && snippet.contains("NEEDLE"), "{snippet}");
+        assert!(!match_context(&name, Some(hits[0][0]), 0).contains("NEEDLE"));
+    }
+
+    #[test]
+    fn search_windows_preserve_whole_names_edges_and_legacy_clipping() {
+        assert_eq!(match_context("short", Some((0, 2)), 240), "short");
+        assert_eq!(match_context("abcdefghij", Some((0, 1)), 5), "abcd…");
+        assert_eq!(match_context("abcdefghij", Some((9, 10)), 5), "…ghij");
+        assert_eq!(match_context("abcdefghij", Some((4, 5)), 5), "…def…");
+        assert_eq!(match_context("abcdefghij", Some((4, 5)), 1), "…");
+        assert_eq!(match_context(&"a".repeat(121), None, 0), format!("{}…", "a".repeat(119)));
+        assert_eq!(search_terms(&json!({"text":["Guido","GUIDO","1989"]}), "text").unwrap().unwrap(), ["Guido", "1989"]);
+        for args in [json!({"text":[]}), json!({"text":["ok",3]}), json!({"text":" "})] {
+            assert!(search_terms(&args, "text").is_err());
+        }
+        for value in [json!(-1), json!(1.5), json!(4097), json!("240")] {
+            assert!(find_context(&json!({"context":value})).is_err());
+        }
     }
 
     #[test]
@@ -1099,6 +1286,10 @@ mod tests {
         let (_, a) = parse_line("open https://example.com/ max_tokens=500").unwrap();
         assert_eq!(a["url"], "https://example.com/");
         assert_eq!(a["max_tokens"], 500);
+        let (_, a) = parse_line("find text='[\"Guido\",\"1989\"]'").unwrap();
+        assert_eq!(a["text"], json!(["Guido", "1989"]));
+        let (_, a) = parse_line("find text=1989").unwrap();
+        assert_eq!(a["text"], "1989");
         let (_, a) = parse_line("network 12").unwrap();
         assert_eq!(a["id"], 12.0);
         let (_, a) = parse_line("debug document.title + 1").unwrap();
