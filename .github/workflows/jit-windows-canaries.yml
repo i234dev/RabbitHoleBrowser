@@ -1,57 +1,176 @@
-name: Windows native JIT canaries
+name: Windows console source selector
+run-name: Windows console checks at ${{ inputs.source_revision }}
 
+# Private diagnostic selector. It never runs on push and is not release CI or
+# the release branch's separate native-JIT supplemental workflow.
 on:
-  push:
-    branches: ["validation/jit-windows-active-frame-20261114", "validation/jit-windows-canary-baseline-20261114", "validation/jit-windows-wx-flush-20261114"]
   workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Exact source commit SHA (40 hexadecimal characters)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  native-canaries:
+  script-console:
     runs-on: windows-latest
     timeout-minutes: 20
     env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
       RH_GC_STRESS: inc
       RABBITHOLE_JIT_THRESHOLD: "0"
+      CARGO_TERM_COLOR: never
     steps:
-      - uses: actions/checkout@v4
+      - name: Validate the explicit source selector
+        id: selector
+        shell: bash
+        env:
+          REQUESTED_SOURCE: ${{ inputs.source_revision }}
+        run: |
+          python - <<'PYCODE'
+          import json, os, re
+          from pathlib import Path
+          requested = os.environ['REQUESTED_SOURCE']
+          if not re.fullmatch(r'[0-9a-fA-F]{40}', requested):
+              raise SystemExit('source_revision must be an explicit full40hex SHA')
+          if (os.environ['RUNNER_OS'], os.environ['RUNNER_ARCH']) != ('Windows', 'X64'):
+              raise SystemExit('WindowsX64 is required')
+          source = requested.lower()
+          evidence = Path(os.environ['GITHUB_WORKSPACE']) / 'console-evidence'
+          evidence.mkdir(exist_ok=False)
+          record = {'source_revision_requested': source,
+                    'workflow_revision': os.environ['GITHUB_SHA'],
+                    'workflow_ref': os.environ.get('GITHUB_WORKFLOW_REF'),
+                    'run_id': os.environ['GITHUB_RUN_ID'],
+                    'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                    'runner_os': os.environ['RUNNER_OS'], 'runner_arch': os.environ['RUNNER_ARCH'],
+                    'scope': 'Directed console diagnostic, not full release CI or native-JIT canaries'}
+          with (evidence / 'selector.json').open('x') as stream:
+              json.dump(record, stream, indent=2)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write('source_revision=' + source + '\n')
+          PYCODE
+      - name: Pin the workflow definition separately
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-definition
+          persist-credentials: false
+          sparse-checkout: .github/workflows/jit-windows-canaries.yml
+          sparse-checkout-cone-mode: false
+      - name: Checkout the requested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.selector.outputs.source_revision }}
+          path: source
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Windows executable mapping and cache flush evidence
-        if: startsWith(github.ref, 'refs/heads/validation/jit-windows-wx-flush-')
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            printf 'source_revision=%s runner_os=%s runner_arch=%s\n' "$GITHUB_SHA" "$RUNNER_OS" "$RUNNER_ARCH"
-            rustc -Vv
-            printf 'command=cargo test -p rabbithole-jit --profile ci --locked -- --nocapture --test-threads=1\n'
-            cargo test -p rabbithole-jit --profile ci --locked -- --nocapture --test-threads=1
-          } 2>&1 | tee windows-wx.log
-      - name: Native entry, watchdog, callback and live-frame GC evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            printf 'source_revision=%s\n' "$GITHUB_SHA"
-            printf 'runner_os=%s runner_arch=%s RH_GC_STRESS=%s RABBITHOLE_JIT_THRESHOLD=%s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$RH_GC_STRESS" "$RABBITHOLE_JIT_THRESHOLD"
-            rustc -Vv
-            for selector in off on; do
-              export RABBITHOLE_JIT="$selector"
-              printf 'RABBITHOLE_JIT=%s\n' "$RABBITHOLE_JIT"
-              for test in watchdog_stops_native_loop native_override_callback_reentry_keeps_values_alive_through_gc native_property_getter_keeps_generated_frame_live_during_gc; do
-                printf 'command=cargo test -p rabbithole-js --profile ci --features jit --locked tests_jit::%s -- --exact --nocapture --test-threads=1\n' "$test"
-                cargo test -p rabbithole-js --profile ci --features jit --locked "tests_jit::$test" -- --exact --nocapture --test-threads=1
-              done
-            done
-          } 2>&1 | tee native-canaries.log
-      - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: native-canaries-windows-${{ github.sha }}
-          path: |
-            native-canaries.log
-            windows-wx.log
-          if-no-files-found: error
+          workspaces: source -> target
+          cache-on-failure: true
+      - name: Run both console modes and verify the actual named inventory
+        shell: bash
+        working-directory: source
+        env:
+          EXPECTED_SOURCE: ${{ steps.selector.outputs.source_revision }}
+        run: |
+          python - <<'PYCODE'
+          import hashlib, json, os, re, subprocess, sys
+          from pathlib import Path
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          evidence, source, definition = workspace / 'console-evidence', Path.cwd(), workspace / 'workflow-definition'
+          def digest(data): return hashlib.sha256(data).hexdigest()
+          def write(name, value):
+              with (evidence / name).open('x', encoding='utf-8') as stream:
+                  json.dump(value, stream, indent=2); stream.write('\n')
+          def git(folder, *args):
+              return subprocess.check_output(['git', '--no-optional-locks', '-C', str(folder), *args])
+          def snapshot():
+              head = git(source, 'rev-parse', 'HEAD').decode().strip()
+              status = git(source, 'status', '--porcelain', '--untracked-files=all').decode()
+              paths = git(source, 'ls-files', '-z').decode().split('\0')
+              return {'source_revision': head, 'source_tree': git(source, 'rev-parse', 'HEAD^{tree}').decode().strip(),
+                      'files': {name: digest((source / name).read_bytes()) for name in paths if name}, 'status': status}
+          def command(label, argv, env):
+              with (evidence / (label + '.stdout')).open('xb') as stdout, (evidence / (label + '.stderr')).open('xb') as stderr:
+                  print('command=' + ' '.join(argv), flush=True)
+                  result = subprocess.run(argv, env=env, stdout=stdout, stderr=stderr)
+              write(label + '.command.json', {'command': argv, 'exit_code': result.returncode,
+                    'environment': {key: env.get(key) for key in ('RUSTFLAGS','RH_GC_STRESS','RABBITHOLE_JIT','RABBITHOLE_JIT_THRESHOLD')},
+                    'stdout_sha256': digest((evidence / (label + '.stdout')).read_bytes()),
+                    'stderr_sha256': digest((evidence / (label + '.stderr')).read_bytes())})
+              return result.returncode, (evidence / (label + '.stdout')).read_text(encoding='utf-8', errors='strict')
+          workflow_head = git(definition, 'rev-parse', 'HEAD').decode().strip()
+          if workflow_head != os.environ['GITHUB_SHA']:
+              raise ValueError('workflow checkout differs from its run commit')
+          workflow_bytes = (definition / '.github/workflows/jit-windows-canaries.yml').read_bytes()
+          with (evidence / 'workflow-definition.yml').open('xb') as stream: stream.write(workflow_bytes)
+          write('workflow-provenance.json', {'workflow_revision': workflow_head,
+                'workflow_file_sha256': digest(workflow_bytes), 'source_revision': os.environ['EXPECTED_SOURCE']})
+          before = snapshot(); write('source-before.json', before)
+          if before['source_revision'] != os.environ['EXPECTED_SOURCE'] or before['status'].strip():
+              raise ValueError('source must match the exact input and be clean before tests')
+          # This file has one flat console::tests module. Derive every test from
+          # the exact tracked source blob, then compare the compiled --list too.
+          blob = git(source, 'show', os.environ['EXPECTED_SOURCE'] + ':crates/script/src/console.rs').decode()
+          leaves = re.findall(r'#\[test\]\s*(?:#\[[^\]]+\]\s*)*(?:pub\s+)?fn\s+(\w+)\s*\(', blob)
+          expected = ['console::tests::' + leaf for leaf in leaves]
+          required = {'console::tests::' + leaf for leaf in (
+              'console_await_tracks_completion_and_preserves_normal_script_scope',
+              'console_observation_is_rooted_and_rejects_foreign_or_replaced_documents',
+              'console_timeout_drops_observation_without_cancelling_later_page_work',
+              'console_wall_cap_bounds_microtasks_and_restores_watchdog_on_unwind')}
+          if len(expected) != len(set(expected)) or not required <= set(expected):
+              raise ValueError('source inventory must retain all four original console cases without duplicates')
+          write('source-test-inventory.json', {'source_revision': before['source_revision'],
+                'console_source_git_sha256': digest(blob.encode()), 'expected_names': expected,
+                'expected_count': len(expected), 'baseline_required_names': sorted(required)})
+          env = os.environ.copy(); env['RABBITHOLE_JIT'] = 'off'
+          rust_rc, rust_info = command('rustc', ['rustc','-Vv'], env)
+          base = ['cargo','test','-p','rabbithole-script','--lib','--profile','ci','--features','jit','--locked','console::tests::','--']
+          list_rc, listed = command('compiled-list', base + ['--list'], env)
+          ansi = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+          actual_list = re.findall(r'^(console::tests::\w+): test$', ansi.sub('', listed), re.M)
+          problems, observations = [], []
+          if (rust_rc != 0 or not re.search(r'^host: x86_64-pc-windows-msvc$', rust_info, re.M)
+                  or list_rc != 0 or len(actual_list) != len(expected) or set(actual_list) != set(expected)):
+              problems.append('compiled inventory/toolchain does not match exact nonempty source inventory')
+          for mode in ('off','on'):
+              env['RABBITHOLE_JIT'] = mode
+              rc, text = command(mode, base + ['--nocapture','--test-threads=1'], env)
+              clean = ansi.sub('', text)
+              rows = re.findall(r'^test (console::tests::\w+) \.\.\. (ok|FAILED|ignored)$', clean, re.M)
+              executed = re.findall(r'^test (console::tests::\w+) \.\.\.', clean, re.M)
+              summaries = re.findall(r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;', clean, re.M)
+              # Single-threaded nocapture may put diagnostic stdout between a
+              # test header and its final 'ok'; named headers plus exact libtest
+              # summary/rc prove the run without interpreting caught-panic stderr.
+              passed = (rc == 0 and len(executed) == len(expected) and set(executed) == set(expected)
+                        and len(summaries) == 1
+                        and summaries[0][0] == 'ok' and int(summaries[0][1]) == len(expected)
+                        and all(int(summaries[0][index]) == 0 for index in (2,3,4)))
+              observations.append({'mode': mode, 'exit_code': rc, 'executed_names': executed,
+                                   'direct_outcome_lines': rows, 'summaries': summaries, 'passed': passed})
+              if not passed: problems.append(mode + ' runtime rc/names/summary did not prove every expected test passed')
+              print(json.dumps(observations[-1]), flush=True)
+          after = snapshot(); write('source-after.json', after)
+          if before != after: problems.append('tracked source changed during diagnostics')
+          write('result.json', {'source_revision': before['source_revision'], 'workflow_revision': workflow_head,
+                'expected_count': len(expected), 'expected_names': expected, 'compiled_names': actual_list,
+                'observations': observations, 'source_unchanged': before == after, 'problems': problems,
+                'valid': not problems, 'scope': 'Only named Script console tests on WindowsX64, requested JIT off/on and incremental GC. Not complete CI, release acceptance or native-entry proof.',
+                'stderr_policy': 'Preserve raw stderr. The caught scope-panic may print panicked at with nocapture; gate by rc plus exact inventory/summary, never stderr substring.',
+                'review': {'accepted': False}})
+          if problems: raise SystemExit(1)
+          PYCODE
+      - name: Preserve source-pinned private diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: script-console-windows-${{ steps.selector.outputs.source_revision }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: console-evidence/
+          if-no-files-found: warn
