@@ -16,11 +16,20 @@ pub(super) struct OrdinaryItemMeasurement {
 
 /// Initial consumer eligibility is deliberately narrower than the helper's
 /// representable inputs. Reject the whole new Grid path if any sibling has
-/// an inherited axis or a replaced/ratio item hidden by its wrapper chain.
+/// an inherited axis, replaced/ratio item or wrapper padding/border whose
+/// physical metric is not yet represented by the helper.
 pub(super) fn supports_ordinary_item(mut child:&LayoutBox)->bool {
+    let wrapped=child.wm_wrapper;
     for _ in 0..128 {
         if child.kind==BoxKind::Image||child.ratio_only||child.style.aspect_ratio.is_some_and(|ratio|ratio>0.&&ratio.is_finite()) {
             return false;
+        }
+        if wrapped {
+            let p=child.style.padding;let b=child.style.border_width;
+            if [p.left,p.right,p.top,p.bottom].into_iter().any(|value|value!=Length::ZERO)
+                || [b.left,b.right,b.top,b.bottom].into_iter().any(|value|value!=0.) {
+                return false;
+            }
         }
         if !child.wm_wrapper {return subgrid::requests(child)==(false,false);}
         let Some(inner)=child.children.first() else {return false;};child=inner;
@@ -172,6 +181,25 @@ mod tests {
         let image=LayoutBox::new(BoxKind::Image,None,style.clone());assert!(!supports_ordinary_item(&image));
         let mut wrapper=LayoutBox::new(BoxKind::Block,None,style);wrapper.wm_wrapper=true;wrapper.children.push(image);assert!(!supports_ordinary_item(&wrapper));
         with_item("","#probe{display:grid;grid-template-columns:subgrid}",|_,node,_|assert!(!supports_ordinary_item(node)));
+    }
+
+    #[test]
+    fn wrapper_padding_and_border_require_a_separate_physical_metric() {
+        let style=Rc::new(rabbithole_style::ComputedStyle::initial());
+        for padding in [Length::Px(10.),Length::Percent(10.),Length::Calc(0.,0.)] {
+            let mut padded=(*style).clone();padded.padding.left=padding;
+            let ordinary=LayoutBox::new(BoxKind::Block,None,Rc::new(padded));
+            assert!(supports_ordinary_item(&ordinary),"ordinary content/PB metric remains supported");
+            let mut wrapper=LayoutBox::new(BoxKind::Block,None,style.clone());wrapper.wm_wrapper=true;wrapper.children.push(ordinary);
+            assert!(!supports_ordinary_item(&wrapper),"wrapper needs a physical PB metric for {padding:?}");
+        }
+        let mut bordered=(*style).clone();bordered.border_width.bottom=2.;
+        let ordinary=LayoutBox::new(BoxKind::Block,None,Rc::new(bordered));assert!(supports_ordinary_item(&ordinary));
+        let mut wrapper=LayoutBox::new(BoxKind::Block,None,style.clone());wrapper.wm_wrapper=true;wrapper.children.push(ordinary);assert!(!supports_ordinary_item(&wrapper));
+        let mut padded=(*style).clone();padded.padding.top=Length::Px(5.);
+        let mut middle=LayoutBox::new(BoxKind::Block,None,Rc::new(padded));middle.wm_wrapper=true;middle.children.push(LayoutBox::new(BoxKind::Block,None,style.clone()));
+        let mut outer=LayoutBox::new(BoxKind::Block,None,style.clone());outer.wm_wrapper=true;outer.children.push(middle);assert!(!supports_ordinary_item(&outer));
+        let mut zero=LayoutBox::new(BoxKind::Block,None,style.clone());zero.wm_wrapper=true;zero.children.push(LayoutBox::new(BoxKind::Block,None,style));assert!(supports_ordinary_item(&zero));
     }
 
     #[test]
