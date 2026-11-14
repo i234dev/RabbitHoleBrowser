@@ -452,14 +452,26 @@ impl<'a> Layouter<'a> {
         let specified = resolve_size(size_prop, avail_main, bb, pb_main);
         let max = resolve_size(max_prop, avail_main, bb, pb_main).unwrap_or(f32::INFINITY);
 
-        // Flex basis.
-        let basis = match child_style.flex_basis {
-            Length::Auto => specified,
-            l => resolve_size(l, avail_main, bb, pb_main),
+        // Flex §7.2.3 / §9.2: `auto` retrieves the preferred main-size
+        // property, including its intrinsic keyword; `content` does not.
+        // Keep `specified` numeric for the separate automatic-minimum rule.
+        let used_basis = if child_style.flex_basis == Length::Auto && !child_style.flex_basis_content {
+            size_prop
+        } else {
+            child_style.flex_basis
         };
+        let basis = resolve_size(used_basis, avail_main, bb, pb_main);
         // Content size along the main axis (also the automatic minimum).
         let (content_min, content_max) = self.flex_content_sizes(b, idx, axis, cbw, cbh);
-        let base = basis.unwrap_or(content_max).max(0.0);
+        let base = match used_basis {
+            Length::MinContent => content_min,
+            Length::MaxContent => content_max,
+            Length::FitContent => {
+                let available = avail_main.map(|space| (space - pb_main - edges.margin_sum(axis)).max(0.0));
+                available.map(|space| content_max.min(space).max(content_min)).unwrap_or(content_max)
+            }
+            _ => basis.unwrap_or(content_max),
+        }.max(0.0);
 
         let min = match resolve_size(min_prop, avail_main, bb, pb_main) {
             Some(m) => m,
