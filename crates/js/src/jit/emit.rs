@@ -1366,18 +1366,10 @@ impl Gen<'_> {
 /// function's code.
 pub(super) const INNER_ENTRY: usize = 40;
 
-/// Compile `code` (validated here) into native code.
-pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Option<String>), String> {
-    for op in &code.ops {
-        if let Class::Reject(why) = classify(op) {
-            return Err(format!("{why} ({op:?})"));
-        }
-    }
-    validate(code)?;
-    let n = code.ops.len();
-    let mut a = Asm::new(dump);
-    let labels: Vec<Label> = (0..n).map(|_| a.label()).collect();
-    let (status, dispatch, epilogue, table, interp) = (a.label(), a.label(), a.label(), a.label(), a.label());
+// Shared with the pure unwind descriptor tests: these helpers emit exactly the
+// same instructions used by the compiler, without allocating executable memory.
+pub(super) fn emit_prologue(a: &mut Asm) {
+    let start = a.pos();
     // Prologue: entry(ctx = rdi, pc = esi).
     a.comment(|| "prologue".into());
     a.push(RBP);
@@ -1392,7 +1384,32 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     // Inner entry (INNER_ENTRY bytes in): the native frame is already set
     // up by some function's prologue (they are all identical) and `ctx`
     // describes this function's frame; `esi` = pc.
-    assert_eq!(a.pos(), INNER_ENTRY, "prologue size");
+    assert_eq!(a.pos() - start, INNER_ENTRY, "prologue size");
+}
+
+pub(super) fn emit_epilogue(a: &mut Asm) {
+    a.comment(|| "epilogue".into());
+    a.alu_ri64(Alu::Add, RSP, 8);
+    for r in [R15, R14, R13, R12, RBX] {
+        a.pop(r);
+    }
+    a.pop(RBP);
+    a.ret();
+}
+
+/// Compile `code` (validated here) into native code.
+pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Option<String>), String> {
+    for op in &code.ops {
+        if let Class::Reject(why) = classify(op) {
+            return Err(format!("{why} ({op:?})"));
+        }
+    }
+    validate(code)?;
+    let n = code.ops.len();
+    let mut a = Asm::new(dump);
+    let labels: Vec<Label> = (0..n).map(|_| a.label()).collect();
+    let (status, dispatch, epilogue, table, interp) = (a.label(), a.label(), a.label(), a.label(), a.label());
+    emit_prologue(&mut a);
     a.load64(SLOTS, Mem::base(CTX, CTX_SLOTS));
     a.load64(CONSTS, Mem::base(CTX, CTX_CONSTS));
     a.alu_rr32(Alu::Or, RSI, RSI); // zero-extend the pc
@@ -1494,13 +1511,7 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     a.bind(interp);
     a.mov_imm32(RAX, ST_INTERP as u32);
     a.bind(epilogue);
-    a.comment(|| "epilogue".into());
-    a.alu_ri64(Alu::Add, RSP, 8);
-    for r in [R15, R14, R13, R12, RBX] {
-        a.pop(r);
-    }
-    a.pop(RBP);
-    a.ret();
+    emit_epilogue(&mut a);
     // Entry table: offset of each instruction from the table.
     a.align(4);
     a.bind(table);
