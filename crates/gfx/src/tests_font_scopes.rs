@@ -115,3 +115,20 @@ fn limits_are_shared_atomic_and_allow_interning_at_capacity() {
     assert!(!low.has_family("Rejected"));
     assert!(low.add_font_data("Still available", 400, false, SANS).is_some());
 }
+
+#[test]
+fn selection_revisions_track_local_and_late_host_bindings() {
+    let host = FontContext::new();
+    let page = host.document_scope();
+    let initial = page.selection_generation();
+    page.add_font_data("Local", 400, false, SANS).unwrap();
+    let local = page.selection_generation();
+    assert_eq!(initial.0, local.0);
+    assert_ne!(initial.1, local.1);
+    page.add_font_data("Local", 400, false, SANS).unwrap();
+    assert_eq!(page.selection_generation(), local);
+    host.add_font_data("Host", 400, false, MONO).unwrap();
+    let updated = page.selection_generation();
+    assert_ne!(updated.0, local.0);
+    assert_eq!(updated.1, local.1);
+}

@@ -68,7 +68,11 @@ impl FontContext {
     /// `family` with the given weight/style (from the `@font-face`
     /// descriptors). Returns None when the data cannot be decoded.
     pub fn add_font_data(&self, family: &str, weight: u16, italic: bool, data: &[u8]) -> Option<FontId> {
-        let sfnt = decode_font_container(data)?;
+        // Raw SFNT can be compared against the store without first copying it.
+        let sfnt = match data.get(..4) {
+            Some([0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true") => std::borrow::Cow::Borrowed(data),
+            _ => std::borrow::Cow::Owned(decode_font_container(data)?),
+        };
         let family = family.trim().trim_matches('"').trim_matches('\'').to_string();
         if family.is_empty() {
             return None;
@@ -80,10 +84,10 @@ impl FontContext {
             let mut binding = None;
             let mut data = None;
             let candidates = self.byte_faces.borrow();
-            for &idx in candidates.get(&Self::bytes_key(&sfnt)).into_iter().flatten() {
+            for &idx in candidates.get(&Self::bytes_key(sfnt.as_ref())).into_iter().flatten() {
                 let slot = &faces[idx];
                 let FaceSource::Bytes(bytes) = &slot.source else { continue };
-                if bytes.as_slice() != sfnt.as_slice() {
+                if bytes.as_slice() != sfnt.as_ref() {
                     continue;
                 }
                 data = Some((bytes.clone(), slot.font.borrow().clone()));
@@ -108,8 +112,8 @@ impl FontContext {
         let (bytes, font) = if let Some((bytes, Some(font))) = existing_data {
             (bytes, font)
         } else {
-            let font = fontdue::Font::from_bytes(sfnt.as_slice(), crate::font::fontdue_settings()).ok()?;
-            (Rc::new(sfnt), Rc::new(font))
+            let font = fontdue::Font::from_bytes(sfnt.as_ref(), crate::font::fontdue_settings()).ok()?;
+            (Rc::new(sfnt.into_owned()), Rc::new(font))
         };
         let name = format!("{family} {weight}{}", if italic { " Italic" } else { "" });
         let id = self.register(FaceSlot {

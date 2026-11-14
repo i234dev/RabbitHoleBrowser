@@ -132,6 +132,7 @@ pub struct FontContext {
     pub(crate) web_bindings: Rc<Cell<usize>>,
     pub(crate) web_sfnt_bytes: Rc<Cell<usize>>,
     seen_base_generation: Cell<u64>,
+    local_generation: Cell<u64>,
     /// (face, glyph, size×4, subpixel quarter) → bitmap
     cache: Rc<RefCell<HashMap<(usize, u16, u32, u8), Rc<GlyphBitmap>>>>,
     /// (primary face, char) → face that has the char (None = nowhere)
@@ -268,6 +269,7 @@ impl FontContext {
             web_bindings: Rc::new(Cell::new(0)),
             web_sfnt_bytes: Rc::new(Cell::new(0)),
             seen_base_generation: Cell::new(0),
+            local_generation: Cell::new(0),
             cache: Rc::new(RefCell::new(HashMap::new())),
             fallback_cache: RefCell::new(HashMap::new()),
             system_loaded: Rc::new(Cell::new(false)),
@@ -312,12 +314,19 @@ impl FontContext {
             web_bindings: self.web_bindings.clone(),
             web_sfnt_bytes: self.web_sfnt_bytes.clone(),
             seen_base_generation: Cell::new(self.base_generation.get()),
+            local_generation: Cell::new(0),
             cache: self.cache.clone(),
             fallback_cache: RefCell::new(HashMap::new()),
             system_loaded: self.system_loaded.clone(),
             shaping: self.shaping.clone(),
             color_cache: self.color_cache.clone(),
         }
+    }
+
+    /// O(1) revision for caches owned by this view. Scope identity still
+    /// belongs to the cache owner: equal revisions do not identify two views.
+    pub fn selection_generation(&self) -> (u64, u64) {
+        (self.base_generation.get(), self.local_generation.get())
     }
 
     pub(crate) fn host_scope(&self) -> Self {
@@ -355,6 +364,7 @@ impl FontContext {
         let ids = families.entry(key).or_default();
         if !ids.contains(&idx) {
             ids.push(idx);
+            self.local_generation.set(self.local_generation.get().wrapping_add(1));
             self.fallback_cache.borrow_mut().clear();
             if Rc::ptr_eq(&self.by_family, &self.base_families) {
                 self.base_generation.set(self.base_generation.get().wrapping_add(1));
