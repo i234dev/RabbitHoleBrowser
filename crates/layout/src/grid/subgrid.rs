@@ -304,17 +304,35 @@ fn install(b:&mut LayoutBox,columns:Option<AxisInheritance>,rows:Option<AxisInhe
     }
 }
 fn restore(b:&mut LayoutBox,saved:&mut impl Iterator<Item=Saved>) {
-    let old=saved.next().unwrap();b.style=old.style;b.grid_columns=old.columns;b.grid_rows=old.rows;
+    let Some(old)=saved.next() else {return;};b.style=old.style;b.grid_columns=old.columns;b.grid_rows=old.rows;
     if b.wm_wrapper {if let Some(inner)=b.children.first_mut() {restore(inner,saved);}}
+}
+
+struct Scope<'b> {
+    node:&'b mut LayoutBox,
+    saved:Vec<Saved>,
+}
+impl<'b> Scope<'b> {
+    fn new(node:&'b mut LayoutBox,columns:Option<AxisInheritance>,rows:Option<AxisInheritance>,reference:f32)->Self {
+        let mut scope=Self{node,saved:Vec::new()};
+        invalidate(scope.node);
+        install(scope.node,columns,rows,reference,&mut scope.saved);
+        scope
+    }
+}
+impl Drop for Scope<'_> {
+    fn drop(&mut self) {
+        restore(self.node,&mut self.saved.drain(..));
+        invalidate(self.node);
+    }
 }
 
 impl<'a> Layouter<'a> {
     pub(super) fn with_subgrid<R>(&mut self,b:&mut LayoutBox,columns:Option<AxisInheritance>,rows:Option<AxisInheritance>,reference:f32,body:impl FnOnce(&mut Self,&mut LayoutBox)->R)->R {
         let (column_request,row_request)=requests(b);
         if (!column_request||columns.is_none())&&(!row_request||rows.is_none()) {return body(self,b);}
-        let mut saved=Vec::new();invalidate(b);install(b,columns,rows,reference,&mut saved);
-        let result=body(self,b);
-        restore(b,&mut saved.into_iter());invalidate(b);result
+        let scope=Scope::new(b,columns,rows,reference);
+        body(self,&mut *scope.node)
     }
 
     /// Contributions in the requested axis, in this box's local grid lines.
@@ -493,5 +511,17 @@ mod tests {
         let mut items=vec![Contribution{start:1,end:3,min:10.,max:100.},Contribution{start:0,end:1,min:5.,max:5.},Contribution{start:1,end:3,min:20.,max:50.}];
         compact_contributions(&mut items);
         assert_eq!(items,[Contribution{start:0,end:1,min:5.,max:5.},Contribution{start:1,end:3,min:20.,max:100.}]);
+    }
+
+    #[test]
+    fn scoped_styles_are_restored_when_measurement_unwinds() {
+        let parent=parent();let mut b=child();let original=b.style.clone();
+        let source=section(&parent,&[0.,150.],0,2,50.,true);
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let scope=Scope::new(&mut b,Some(source),None,300.);
+            assert!(scope.node.grid_columns.is_some());
+            panic!("simulated measurement failure");
+        }));
+        assert!(result.is_err());assert!(Rc::ptr_eq(&original,&b.style));assert!(b.grid_columns.is_none());
     }
 }
