@@ -1524,12 +1524,12 @@ fn supported_values_of(realm: &mut Realm, _this: Value, args: &[Value]) -> JsRes
     Ok(realm.new_array_value(vals))
 }
 
-fn new_intl_object<T: 'static>(realm: &mut Realm, proto_key: &str, data: T) -> ObjectId {
+fn new_intl_object<T: 'static>(realm: &mut Realm, proto_key: &str, data: T) -> JsResult<ObjectId> {
     let default = realm.intrinsics.others[proto_key];
-    let proto = realm.proto_from_new_target(default);
+    let proto = realm.proto_from_new_target_checked(default)?;
     let id = realm.new_object_with_proto(Some(proto));
     realm.set_host_data(id, Box::new(data));
-    id
+    Ok(id)
 }
 
 fn host<T: 'static + Clone>(realm: &mut Realm, this: &Value, what: &str) -> JsResult<T> {
@@ -1557,7 +1557,7 @@ fn bound_this(realm: &Realm) -> Value {
 // DateTimeFormat
 fn dtf_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let o = read_dt_options(realm, arg(args, 0), arg(args, 1), DateDefaults::Date)?;
-    Ok(Value::Object(new_intl_object(realm, "Intl.DateTimeFormat", o)))
+    Ok(Value::Object(new_intl_object(realm, "Intl.DateTimeFormat", o)?))
 }
 
 fn dtf_format_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -1708,7 +1708,7 @@ fn dtf_resolved_options(realm: &mut Realm, this: Value, _args: &[Value]) -> JsRe
 // NumberFormat
 fn nf_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let o = read_nf_options(realm, arg(args, 0), arg(args, 1))?;
-    Ok(Value::Object(new_intl_object(realm, "Intl.NumberFormat", o)))
+    Ok(Value::Object(new_intl_object(realm, "Intl.NumberFormat", o)?))
 }
 
 fn nf_format_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -1837,7 +1837,7 @@ fn string_locale_compare(realm: &mut Realm, this: Value, args: &[Value]) -> JsRe
 // Collator
 fn collator_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let o = read_collator_options(realm, arg(args, 0), arg(args, 1))?;
-    Ok(Value::Object(new_intl_object(realm, "Intl.Collator", o)))
+    Ok(Value::Object(new_intl_object(realm, "Intl.Collator", o)?))
 }
 
 fn collator_compare_getter(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -1874,7 +1874,7 @@ fn plural_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
     let locale = resolve_locale(realm, arg(args, 0))?;
     let opts = options_object(realm, arg(args, 1))?;
     let ordinal = opt_str(realm, opts, "type")?.as_deref() == Some("ordinal");
-    Ok(Value::Object(new_intl_object(realm, "Intl.PluralRules", PluralOptions { locale, ordinal })))
+    Ok(Value::Object(new_intl_object(realm, "Intl.PluralRules", PluralOptions { locale, ordinal })?))
 }
 
 fn plural_select(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1906,7 +1906,7 @@ fn rtf_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> 
     let opts = options_object(realm, arg(args, 1))?;
     let numeric_auto = opt_str(realm, opts, "numeric")?.as_deref() == Some("auto");
     let style = opt_str(realm, opts, "style")?.unwrap_or_else(|| "long".into());
-    Ok(Value::Object(new_intl_object(realm, "Intl.RelativeTimeFormat", RtfOptions { locale, numeric_auto, style })))
+    Ok(Value::Object(new_intl_object(realm, "Intl.RelativeTimeFormat", RtfOptions { locale, numeric_auto, style })?))
 }
 
 fn rtf_format(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -1944,7 +1944,7 @@ fn lf_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let opts = options_object(realm, arg(args, 1))?;
     let kind = opt_str(realm, opts, "type")?.unwrap_or_else(|| "conjunction".into());
     let style = opt_str(realm, opts, "style")?.unwrap_or_else(|| "long".into());
-    Ok(Value::Object(new_intl_object(realm, "Intl.ListFormat", ListOptions { locale, kind, style })))
+    Ok(Value::Object(new_intl_object(realm, "Intl.ListFormat", ListOptions { locale, kind, style })?))
 }
 
 fn lf_items(realm: &mut Realm, v: Value) -> JsResult<Vec<String>> {
@@ -2016,7 +2016,7 @@ fn locale_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
         _ => return realm.type_error("First argument to Intl.Locale constructor can't be empty or missing"),
     };
     let Some(l) = Locale::parse(&tag) else { return realm.range_error("Incorrect locale information provided") };
-    Ok(Value::Object(new_intl_object(realm, "Intl.Locale", l)))
+    Ok(Value::Object(new_intl_object(realm, "Intl.Locale", l)?))
 }
 
 fn locale_to_string(realm: &mut Realm, this: Value, _args: &[Value]) -> JsResult<Value> {
@@ -2046,7 +2046,7 @@ fn display_names_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
     let locale = resolve_locale(realm, arg(args, 0))?;
     let opts = options_object(realm, arg(args, 1))?;
     let Some(kind) = opt_str(realm, opts, "type")? else { return realm.type_error("Required option 'type' is missing") };
-    Ok(Value::Object(new_intl_object(realm, "Intl.DisplayNames", DisplayNamesOptions { locale, kind })))
+    Ok(Value::Object(new_intl_object(realm, "Intl.DisplayNames", DisplayNamesOptions { locale, kind })?))
 }
 
 fn display_names_of(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
@@ -2092,7 +2092,7 @@ fn segmenter_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<V
     let locale = resolve_locale(realm, arg(args, 0))?;
     let opts = options_object(realm, arg(args, 1))?;
     let granularity = opt_str(realm, opts, "granularity")?.unwrap_or_else(|| "grapheme".into());
-    Ok(Value::Object(new_intl_object(realm, "Intl.Segmenter", SegmenterOptions { locale, granularity })))
+    Ok(Value::Object(new_intl_object(realm, "Intl.Segmenter", SegmenterOptions { locale, granularity })?))
 }
 
 /// `segment()` returns an array-like iterable of `{segment, index, input, isWordLike}`.

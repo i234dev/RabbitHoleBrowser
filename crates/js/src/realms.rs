@@ -196,9 +196,8 @@ impl Realm {
         if let V::Object(p) = self.get(Value::Object(nt), crate::value::names::prototype())?.v() {
             return Ok(p);
         }
-        if self.realms.is_empty() {
-            return Ok(default);
-        }
+        // Resolving the fallback realm also validates proxies that the
+        // prototype getter may have revoked.
         let r = self.function_realm(nt)?;
         Ok(self.same_intrinsic_in(default, r))
     }
