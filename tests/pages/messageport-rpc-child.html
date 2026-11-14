@@ -1,0 +1,24 @@
+<!doctype html><meta charset=utf-8><title>Nested port receiver</title>
+<script>
+addEventListener('message',function(initial) {
+  if (initial.data!=='bootstrap') return;
+  var primary=initial.ports[0];
+  primary.onmessage=function(request) {
+    try {
+      var reply=request.ports[0];
+      var ack=new MessageChannel();
+      ack.port1.onmessage=function(acknowledgement) {
+        acknowledgement.ports[0].postMessage('done');
+        parent.postMessage({kind:'child-finished'},'*');
+      };
+      // The failure occurs here when the bridge dropped the transferred
+      // reply port. Source WindowProxy is intentionally not used as a port.
+      reply.postMessage('answer',[ack.port2]);
+    } catch(error) {
+      parent.postMessage({kind:'diagnostic',error:String(error),ports:request.ports.length,
+        portSourceNull:request.source===null},'*');
+    }
+  };
+  primary.postMessage('ready');
+});
+</script>

@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8><title>Nested MessagePort request/reply fixture</title>
+<script>
+var trace=[], errors=[];
+addEventListener('message', function (e) {
+  if (e.data && e.data.kind==='diagnostic') {
+    errors.push({error:e.data.error, ports:e.data.ports, portSourceNull:e.data.portSourceNull,
+      sourceWindow:e.source===document.getElementById('f').contentWindow,
+      sourcePostMessage:typeof e.source.postMessage});
+  }
+  if (e.data && e.data.kind==='child-finished') trace.push('child-finished');
+});
+function bootstrap() {
+  if (window.sent) return;
+  window.sent=true;
+  var primary=new MessageChannel();
+  primary.port1.onmessage=function (event) {
+    trace.push('primary:'+event.data);
+    var reply=new MessageChannel();
+    reply.port1.onmessage=function (answer) {
+      trace.push('reply:'+answer.data+':ports='+answer.ports.length+':source-null='+(answer.source===null));
+      var completion=new MessageChannel();
+      completion.port1.onmessage=function(done) { trace.push('complete:'+done.data); };
+      answer.ports[0].postMessage('ack',[completion.port2]);
+    };
+    primary.port1.postMessage('request',[reply.port2]);
+  };
+  document.getElementById('f').contentWindow.postMessage('bootstrap','*',[primary.port2]);
+}
+</script>
+<iframe id=f src=/child.html onload=bootstrap()></iframe>

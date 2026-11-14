@@ -321,7 +321,10 @@
   const bridges = new Map();
   let nextBridge = 0;
   function forward(port, bridge, frame) {
-    port.onmessage = (ev) => post(frame, JSON.stringify({ t: 'port', id: bridge, d: serialize(ev.data) }), '*');
+    port.onmessage = (ev) => post(frame, JSON.stringify({
+      t: 'port', id: bridge, d: serialize(ev.data),
+      ports: Array.from(ev.ports || [], (p) => bridgePort(p, frame)),
+    }), '*');
   }
   // `port` (ours) goes to frame `frame`: messages arriving on it are sent
   // there; messages from there are posted into it.
@@ -332,22 +335,26 @@
     return bridge;
   }
 
-  function deliver(text, origin, source) {
-    let env;
-    try { env = JSON.parse(text); } catch (e) { return; }
-    if (env && env.t === 'port') {
-      const port = bridges.get(env.id);
-      if (port) port.postMessage(deserialize(env.d));
-      return;
-    }
-    let value;
-    try { value = deserialize(env.d); } catch (e) { value = null; }
-    const ports = (env.ports || []).map((bridge) => {
+  function incomingPorts(ids, source) {
+    return (ids || []).map((bridge) => {
       const ch = new MessageChannel();
       bridges.set(bridge, ch.port2);
       forward(ch.port2, bridge, source);
       return ch.port1;
     });
+  }
+
+  function deliver(text, origin, source) {
+    let env;
+    try { env = JSON.parse(text); } catch (e) { return; }
+    if (env && env.t === 'port') {
+      const port = bridges.get(env.id);
+      if (port) port.postMessage(deserialize(env.d), incomingPorts(env.ports, source));
+      return;
+    }
+    let value;
+    try { value = deserialize(env.d); } catch (e) { value = null; }
+    const ports = incomingPorts(env.ports, source);
     const ev = new MessageEvent('message', { data: value, origin, source: windowFor(source), ports });
     g.dispatchEvent(ev);
   }
