@@ -1,9 +1,12 @@
-name: Windows native JIT canaries
+name: Windows cached-simple JIT validation (manual)
 
 on:
-  push:
-    branches: ["validation/jit-windows-active-frame-20261114", "validation/jit-windows-canary-baseline-20261114", "validation/jit-windows-wx-flush-20261114"]
   workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Exact 40-hex source commit; workflow and source revisions are recorded separately
+        required: true
+        default: dbbd3ac01df2a4a3ef6bb194828d623a3e47cbe7
 
 permissions:
   contents: read
@@ -11,47 +14,139 @@ permissions:
 jobs:
   native-canaries:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       RH_GC_STRESS: inc
       RABBITHOLE_JIT_THRESHOLD: "0"
+      RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_TERM_COLOR: never
+      EXPECTED_SOURCE_REVISION: ${{ inputs.source_revision }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Windows executable mapping and cache flush evidence
-        if: startsWith(github.ref, 'refs/heads/validation/jit-windows-wx-flush-')
-        shell: bash
+      - name: Exact source, six cached-call groups and native canaries
+        shell: python {0}
         run: |
-          set -euo pipefail
-          {
-            printf 'source_revision=%s runner_os=%s runner_arch=%s\n' "$GITHUB_SHA" "$RUNNER_OS" "$RUNNER_ARCH"
-            rustc -Vv
-            printf 'command=cargo test -p rabbithole-jit --profile ci --locked -- --nocapture --test-threads=1\n'
-            cargo test -p rabbithole-jit --profile ci --locked -- --nocapture --test-threads=1
-          } 2>&1 | tee windows-wx.log
-      - name: Native entry, watchdog, callback and live-frame GC evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            printf 'source_revision=%s\n' "$GITHUB_SHA"
-            printf 'runner_os=%s runner_arch=%s RH_GC_STRESS=%s RABBITHOLE_JIT_THRESHOLD=%s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$RH_GC_STRESS" "$RABBITHOLE_JIT_THRESHOLD"
-            rustc -Vv
-            for selector in off on; do
-              export RABBITHOLE_JIT="$selector"
-              printf 'RABBITHOLE_JIT=%s\n' "$RABBITHOLE_JIT"
-              for test in watchdog_stops_native_loop native_override_callback_reentry_keeps_values_alive_through_gc native_property_getter_keeps_generated_frame_live_during_gc; do
-                printf 'command=cargo test -p rabbithole-js --profile ci --features jit --locked tests_jit::%s -- --exact --nocapture --test-threads=1\n' "$test"
-                cargo test -p rabbithole-js --profile ci --features jit --locked "tests_jit::$test" -- --exact --nocapture --test-threads=1
-              done
-            done
-          } 2>&1 | tee native-canaries.log
+          import hashlib, json, os, pathlib, re, subprocess, sys
+
+          output = pathlib.Path("jit-cached-windows-evidence")
+          output.mkdir(exist_ok=False)
+          def sha(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          def write(name, value):
+              (output / name).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          def source_manifest():
+              names = subprocess.check_output(["git", "ls-files", "-z"]).decode("utf-8").split("\0")
+              return {name: sha(pathlib.Path(name)) for name in names if name}
+
+          actual = git("rev-parse", "HEAD")
+          expected = os.environ["EXPECTED_SOURCE_REVISION"]
+          metadata = {"source_revision": actual, "requested_source_revision": expected,
+                      "workflow_revision": os.environ["GITHUB_SHA"],
+                      "workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF"),
+                      "runner_os": os.environ["RUNNER_OS"], "runner_arch": os.environ["RUNNER_ARCH"],
+                      "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
+                      "RUSTFLAGS": os.environ.get("RUSTFLAGS"), "RH_GC_STRESS": os.environ["RH_GC_STRESS"],
+                      "scope": "Windows validation overrides only; production environment selection remains blocked.",
+                      "performance_measurement": False, "review": {"accepted": False}}
+          write("metadata.json", metadata)
+          if not re.fullmatch(r"[0-9a-f]{40}", expected) or actual != expected:
+              raise SystemExit("checkout does not match the exact requested source")
+          if os.environ["RUNNER_OS"] != "Windows" or os.environ["RUNNER_ARCH"].upper() != "X64":
+              raise SystemExit("this selector requires an actual Windows x86-64 runner")
+          before = source_manifest()
+          write("source-before.json", before)
+          groups = [
+              "cached_simple_witness_is_per_invocation_and_collection_invalidates_it",
+              "cached_simple_differential_adversaries_preserve_fallbacks_and_counted_values",
+              "cached_simple_refreshes_slots_after_a_warm_push_grows_the_stack",
+              "cached_simple_depth_errors_sync_pc_and_restore_for_catch_finally_and_later_calls",
+              "cached_simple_call_loop_keeps_watchdog_ticks_before_the_fast_path",
+              "cached_simple_direct_method_distinguishes_strict_and_sloppy_primitive_receivers",
+          ]
+          previous = ["watchdog_stops_native_loop",
+                      "native_override_callback_reentry_keeps_values_alive_through_gc",
+                      "native_property_getter_keeps_generated_frame_live_during_gc",
+                      "frame_switches_reload_slots_and_constants",
+                      "calls_with_wide_static_operands_and_return_slots",
+                      "return_status_switches_to_interpreter_entries_and_constructor_errors"]
+          write("catalog.json", {"new_groups": groups, "previous_canaries": previous,
+                                 "pure_unwind": "jit::windows_unwind::tests::",
+                                 "shared_backend": "rabbithole-jit (all unit tests)"})
+          records = []
+          def run_case(selector, package, test=None, exact=False):
+              name = test or "all"
+              index = len(records)
+              stem = f"{index:02d}-{selector}-{package}-{name.replace('::', '_')}"
+              argv = ["cargo", "test", "-p", package, "--profile", "ci", "--locked", "--lib"]
+              if package == "rabbithole-js": argv += ["--features", "jit"]
+              if test: argv += [test]
+              argv += ["--", "--nocapture", "--test-threads=1"]
+              if exact: argv += ["--exact"]
+              env = os.environ.copy()
+              env["RABBITHOLE_JIT"] = selector
+              stdout = output / (stem + ".stdout.log")
+              stderr = output / (stem + ".stderr.log")
+              print(json.dumps({"command": argv, "RABBITHOLE_JIT": selector}), flush=True)
+              with stdout.open("wb") as out, stderr.open("wb") as err:
+                  result = subprocess.run(argv, env=env, stdout=out, stderr=err, check=False)
+              text = stdout.read_text(encoding="utf-8", errors="replace")
+              errors = stderr.read_text(encoding="utf-8", errors="replace")
+              print(text, flush=True)
+              print(errors, file=sys.stderr, flush=True)
+              count = re.search(r"test result: ok\. (\d+) passed; 0 failed; 0 ignored;", text)
+              valid = result.returncode == 0 and count is not None and int(count[1]) > 0
+              if exact:
+                  valid = valid and count is not None and int(count[1]) == 1 and bool(re.search(r"(?m)^test " + re.escape(name) + r" \.\.\. ok\s*$", text))
+              combined = text + "\n" + errors
+              evidence = []
+              if name.endswith("cached_simple_witness_is_per_invocation_and_collection_invalidates_it"):
+                  evidence = re.findall(r"native-canary cached-simple .*requested=true enabled=true hits=(\d+)", combined)
+                  valid = valid and bool(evidence) and all(int(n) > 0 for n in evidence)
+              if name.endswith("cached_simple_call_loop_keeps_watchdog_ticks_before_the_fast_path"):
+                  evidence = re.findall(r"native-canary cached-simple-watchdog .*enabled=true entry_delta=(\d+) hit_delta=(\d+) watchdog_aborts=(\d+)", combined)
+                  valid = valid and bool(evidence) and all(all(int(n) > 0 for n in row) for row in evidence)
+              if name.endswith("native_override_callback_reentry_keeps_values_alive_through_gc"):
+                  evidence = re.findall(r"native-canary callback-gc .*requested_override=true enabled=true .*explicit_collections=(\d+)", combined)
+                  valid = valid and len(evidence) == 2 and all(int(n) >= 2 for n in evidence)
+              if name.endswith("native_property_getter_keeps_generated_frame_live_during_gc"):
+                  evidence = re.findall(r"native-canary live-frame .*requested_override=true enabled=true .*getter_live_depth=(\d+) gc_live_depth=(\d+) live_entries_after=0", combined)
+                  valid = valid and len(evidence) == 2 and all(all(int(n) > 0 for n in row) for row in evidence)
+              binaries = []
+              for executable in re.findall(r"Running unittests[^\r\n]* \(([^\r\n]+?\.exe)\)", errors):
+                  path = pathlib.Path(executable)
+                  if path.is_file(): binaries.append({"path": str(path), "sha256": sha(path)})
+              valid = valid and bool(binaries)
+              records.append({"selector": selector, "command": argv, "test": name,
+                              "exit_code": result.returncode, "passed": int(count[1]) if count else None,
+                              "validated": bool(valid), "native_marker_matches": evidence,
+                              "files": [{"path": str(stdout), "sha256": sha(stdout)},
+                                        {"path": str(stderr), "sha256": sha(stderr)}],
+                              "test_executables": binaries})
+              write("results.pending.json", {"source_revision": actual, "records": records,
+                                              "review": {"accepted": False}})
+
+          for selector in ["off", "on"]:
+              for name in groups: run_case(selector, "rabbithole-js", "tests_jit_cached_simple::" + name, True)
+              for name in previous: run_case(selector, "rabbithole-js", "tests_jit::" + name, True)
+              run_case(selector, "rabbithole-js", "jit::windows_unwind::tests::")
+              run_case(selector, "rabbithole-jit")
+          after = source_manifest()
+          write("source-after.json", after)
+          unchanged = before == after and not git("status", "--porcelain", "--untracked-files=no")
+          write("summary.pending.json", {"source_revision": actual, "workflow_revision": os.environ["GITHUB_SHA"],
+                                         "source_unchanged": unchanged, "all_checks_passed": unchanged and all(r["validated"] for r in records),
+                                         "invocations": len(records), "performance_measurement": False,
+                                         "review": {"accepted": False}})
+          if not unchanged or not all(r["validated"] for r in records): raise SystemExit(1)
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-canaries-windows-${{ github.sha }}
-          path: |
-            native-canaries.log
-            windows-wx.log
+          name: cached-simple-native-windows-${{ inputs.source_revision }}-${{ github.run_id }}
+          path: jit-cached-windows-evidence/
           if-no-files-found: error
