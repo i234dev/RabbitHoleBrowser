@@ -116,6 +116,10 @@ impl RefMap {
     pub fn drop_frame(&mut self, frame: usize) {
         self.by_node.retain(|k, _| k.0 != frame);
         self.forms.retain(|k, _| k.0 != frame);
+        // A replacement document can reuse connected NodeIds in this frame.
+        // Old entries must therefore stop resolving, not only lose their index.
+        self.entries.retain(|_, entry| entry.frame != frame);
+        self.form_entries.retain(|_, entry| entry.0 != frame);
     }
 
     /// Forget a node's ref (it was removed from the document).
