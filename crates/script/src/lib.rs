@@ -609,6 +609,7 @@ impl ScriptHost {
     /// then `complete` and `load`.
     pub fn document_ready(&mut self, env: &mut dyn HostEnv) {
         self.enter(env, |realm| {
+            docparser::finish_snapshot(realm);
             {
                 let st = state();
                 let mut st = st.borrow_mut();
@@ -648,9 +649,18 @@ impl ScriptHost {
                     shadow::check_slots(realm);
                 }
                 if !realm.has_pending_jobs() && !observers::has_pending_mutations() && !shadow::has_pending_reactions() && !shadow::has_pending_slot_checks() {
+                    if docparser::finish_snapshot(realm) {
+                        // Completion can run pending written scripts and
+                        // queue jobs/reactions; drain them in this same
+                        // bounded checkpoint before leaving.
+                        continue;
+                    }
                     break;
                 }
             }
+            // A watchdog/iteration limit must not leave the previous
+            // engine script's insertion point active for the next task.
+            docparser::finish_snapshot(realm);
             for r in realm.take_unhandled_rejections() {
                 let msg = realm.error_to_string(&r);
                 host::log("error", &format!("Uncaught (in promise) {msg}"));

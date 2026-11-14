@@ -612,40 +612,16 @@ fn d_writeln(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> 
 }
 
 fn write_html(realm: &mut Realm, d: u32, html: &str) -> JsResult<Value> {
-    // The page's own load-time parse: the engine parsed the whole page
-    // before running its scripts, so a script's writes are inserted right
-    // after it (or at the end of the body for scripts that are not
-    // parser-inserted).
+    // Snapshot loading and document.open writers share docparser's live
+    // insertion point, including partial tokens and nested script writes.
     let (loading, current) = {
         let st = state();
         let st = st.borrow();
         (st.loading, st.current_script)
     };
-    if d == 0 && loading && !crate::docparser::has_insertion_point(0) {
-        if !with_doc(0, |doc| doc.is_html) {
-            return Err(crate::misc::dom_exception(realm, "InvalidStateError", "Failed to execute 'write' on 'Document': Only HTML documents support write()."));
-        }
-        let body = with_doc(d, |doc| doc.body());
-        let Some(body) = body else { return Ok(Value::Undefined) };
-        let body_ref = NodeRef { doc: d, node: body };
-        let nodes = node::parse_html_into(body_ref, html);
-        if let Some(cs) = current {
-            let (parent, next) = with_doc(0, |doc| (doc.parent(cs.node), doc.next_sibling(cs.node)));
-            if let Some(p) = parent {
-                for n in nodes {
-                    insert_node(realm, NodeRef::main(p), n, next)?;
-                }
-                return Ok(Value::Undefined);
-            }
-        }
-        for n in nodes {
-            insert_node(realm, body_ref, n, None)?;
-        }
-        return Ok(Value::Undefined);
-    }
     // Like browsers: an external script that is not parser-inserted (async
     // or injected) cannot write into a document it did not open.
-    if d == 0 && !crate::docparser::has_insertion_point(0) {
+    if d == 0 && !loading && !crate::docparser::has_insertion_point(0) {
         if let Some(cs) = current {
             if with_doc(0, |doc| doc.attr(cs.node, "src").is_some()) {
                 crate::host::log("warn", "Failed to execute 'write' on 'Document': It isn't possible to write into a document from an asynchronously-loaded external script unless it is explicitly opened.");

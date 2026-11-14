@@ -99,3 +99,91 @@ fn script_created_parser_keeps_nested_writes_and_chunk_continuation() {
     assert_ids(&env.doc,env.doc.element_by_id("target").unwrap(),&["one","nested","inside","two"]);
     assert_eq!(env.doc.text_content(env.doc.element_by_id("one").unwrap()),"á•");
 }
+
+#[test]
+fn loading_writer_survives_microtasks_and_close_without_duplicate_load_events() {
+    let (mut env,mut host)=setup("<div id=a></div><script id=s></script><div id=b></div>");
+    host.set_current_script(Some(find(&env,"script")));
+    run(&mut env,&mut host,r#"
+        window.events=[];
+        document.addEventListener('readystatechange',()=>events.push(document.readyState));
+        document.addEventListener('DOMContentLoaded',()=>events.push('dom'));
+        addEventListener('load',()=>events.push('load'));
+        document.write('<section id=group><p id=one>uno</p>');
+        document.open(); document.close();
+        document.write('<p id=two>dos</p>');
+        Promise.resolve().then(()=>{
+            document.write('<p id=micro>á•😀中</p></section>');
+        });
+    "#);
+    host.set_current_script(None);
+    assert_ids(&env.doc,env.doc.body().unwrap(),&["a","s","group","b"]);
+    assert_ids(&env.doc,env.doc.element_by_id("group").unwrap(),&["one","two","micro"]);
+    let logs=run(&mut env,&mut host,"console.log(document.readyState,events.join(','))");
+    assert_eq!(logs,["loading "]);
+    host.document_ready(&mut env);host.run_jobs(&mut env);
+    assert_eq!(run(&mut env,&mut host,"console.log(events.join(','))"),["interactive,dom,complete,load"]);
+    assert!(env.errors().is_empty(),"{:?}",env.errors());
+}
+
+#[test]
+fn loading_written_external_script_waits_for_outer_checkpoint_and_keeps_its_point() {
+    let (mut env,mut host)=setup("<div id=a></div><script id=s></script><div id=b></div>");
+    env.fetches.insert("https://example.test/writer.js".into(),(200,"text/javascript".into(),r#"
+        sequence.push('external');
+        document.write('<i id=inner1>á</i>');
+        document.write('<i id=inner2>中</i>');
+        Promise.resolve().then(()=>sequence.push('external-micro'));
+    "#.into()));
+    host.set_current_script(Some(find(&env,"script")));
+    let logs=run(&mut env,&mut host,r#"
+        window.sequence=[];
+        document.write('<p id=one>uno</p><script id=external src=/writer.js><\/script><p id=suffix>cola</p>');
+        sequence.push('outer');
+        document.write('<p id=last>ultimo</p>');
+        Promise.resolve().then(()=>{
+            sequence.push('micro');
+            document.write('<p id=micro>micro</p>');
+        });
+        console.log(sequence.join(','));
+    "#);
+    host.set_current_script(None);
+    assert_eq!(logs,["outer"]);
+    assert_ids(&env.doc,env.doc.body().unwrap(),&["a","s","one","external","inner1","inner2","suffix","last","micro","b"]);
+    assert_eq!(run(&mut env,&mut host,"console.log(sequence.join(','))"),["outer,micro,external,external-micro"]);
+    assert!(env.errors().is_empty(),"{:?}",env.errors());
+}
+
+#[test]
+fn script_created_stream_stays_open_across_checkpoints_and_runs_external_immediately() {
+    let (mut env,mut host)=setup("<p id=old>old</p>");host.mark_loaded();
+    env.fetches.insert("https://example.test/writer.js".into(),(200,"text/javascript".into(),r#"
+        sequence.push('external');document.write('<i id=inside>中</i>');
+    "#.into()));
+    run(&mut env,&mut host,r#"
+        window.sequence=[];document.open();
+        document.write('<main id=target><p id=one>uno</p><script id=external src=/writer.js><\/script>');
+        sequence.push('outer');
+    "#);
+    run(&mut env,&mut host,"document.write('<p id=two>dos</p></main>');document.close();console.log(sequence.join(','));");
+    assert_ids(&env.doc,env.doc.element_by_id("target").unwrap(),&["one","external","inside","two"]);
+    assert_eq!(run(&mut env,&mut host,"console.log(sequence.join(','))"),["external,outer"]);
+    assert!(env.doc.element_by_id("old").is_none());
+    assert!(env.errors().is_empty(),"{:?}",env.errors());
+}
+
+#[test]
+fn fragment_stream_keeps_script_policy_and_order_when_scripts_write() {
+    let (mut env,mut host)=setup("<div id=target></div><div id=inert></div>");
+    run(&mut env,&mut host,r#"
+        window.streamRuns=0;
+        const writer=document.getElementById('target').streamAppendHTMLUnsafe({runScripts:true}).getWriter();
+        writer.write('<p id=first>primero</p><script id=nested>streamRuns++;document.write("<i id=inner1>uno</i>");document.write("<i id=inner2>dos</i>");<\/script><p id=last>ultimo</p>').then(()=>writer.close());
+        const inert=document.getElementById('inert').streamAppendHTMLUnsafe().getWriter();
+        inert.write('<script id=unused>streamRuns+=100;<\/script><p id=untouched>no script</p>').then(()=>inert.close());
+    "#);
+    assert_ids(&env.doc,env.doc.element_by_id("target").unwrap(),&["first","nested","inner1","inner2","last"]);
+    assert_ids(&env.doc,env.doc.element_by_id("inert").unwrap(),&["unused","untouched"]);
+    assert_eq!(run(&mut env,&mut host,"console.log(streamRuns)"),["1"]);
+    assert!(env.errors().is_empty(),"{:?}",env.errors());
+}

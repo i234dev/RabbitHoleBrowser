@@ -15,6 +15,12 @@
 //!
 //! Documents of same-origin child frames are written through their own
 //! realm (scripts in them run there), see [`crate::FrameCall::Document`].
+//!
+//! The engine's load-time document is already a parsed snapshot. Its
+//! running scripts use a live incremental fragment parser anchored once
+//! before the original following sibling. This preserves tokens, open
+//! elements and nested insertion points between writes, without replacing
+//! the snapshot or firing a second document loading lifecycle.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,9 +32,16 @@ use rabbithole_js::{JsResult, Realm, Value};
 use crate::env::with_env;
 use crate::host::{mark_dirty, state, with_doc, NodeRef, FRAME_DOC};
 
-/// The script-created parser of one document of this realm.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParserKind {
+    ScriptCreated,
+    Snapshot,
+}
+
+/// The active writing parser of one document of this realm.
 pub(crate) struct ActiveParser {
     parser: Parser,
+    kind: ParserKind,
     /// The parser's script nesting level.
     nesting: u32,
     /// External parser-blocking script waiting to run (a nested write
@@ -117,7 +130,7 @@ pub(crate) fn open(realm: &mut Realm, d: u32) -> JsResult<()> {
     crate::node::record_child_list(root, Vec::new(), removed);
     let mut parser = Parser::new(scripting(d));
     parser.set_insertion_point_at_end();
-    let ap = Rc::new(RefCell::new(ActiveParser { parser, nesting: 0, pending_blocking: None, deferred: Vec::new() }));
+    let ap = Rc::new(RefCell::new(ActiveParser { parser, kind: ParserKind::ScriptCreated, nesting: 0, pending_blocking: None, deferred: Vec::new() }));
     state().borrow_mut().doc_parsers.insert(d, ap);
     if d == 0 {
         state().borrow_mut().ready_state = "loading";
@@ -131,6 +144,30 @@ fn scripting(d: u32) -> bool {
     d == 0
 }
 
+/// Adapt the engine's pre-parsed load-time snapshot to the same live
+/// writer used by script-created parsers. In particular, `before` is
+/// captured once: recomputing nextSibling after every write prepends the
+/// next call before the previous call's nodes.
+fn open_snapshot() {
+    let current = state().borrow().current_script;
+    let context = with_doc(0, |doc| {
+        let place = current.filter(|n| n.doc == 0).and_then(|n| {
+            doc.parent(n.node).map(|parent| (parent, doc.next_sibling(n.node)))
+        }).or_else(|| doc.body().map(|body| (body, None)))?;
+        let e = doc.element(place.0)?;
+        let form = doc.ancestor_or_self(place.0, |n| doc.element(n).is_some_and(|e| e.tag == "form" && e.ns == rabbithole_dom::Namespace::Html));
+        Some((place.0, place.1, e.tag.clone(), e.ns.clone(), form))
+    });
+    let Some((parent, before, tag, ns, form)) = context else { return };
+    let mut parser = Parser::new_fragment(parent, &tag, ns, parent, before, form, true, false);
+    parser.set_pause_on_scripts(true);
+    parser.set_insertion_point_at_end();
+    // The engine's outer script is already executing. A written external
+    // blocking script must wait until that script and its checkpoint end.
+    let ap = ActiveParser { parser, kind: ParserKind::Snapshot, nesting: 1, pending_blocking: None, deferred: Vec::new() };
+    state().borrow_mut().doc_parsers.insert(0, Rc::new(RefCell::new(ap)));
+}
+
 /// `document.write(text)` (HTML §8.4.3 "document write steps").
 pub(crate) fn write(realm: &mut Realm, d: u32, text: &str) -> JsResult<()> {
     if d & FRAME_DOC != 0 {
@@ -140,6 +177,10 @@ pub(crate) fn write(realm: &mut Realm, d: u32, text: &str) -> JsResult<()> {
     }
     check_dynamic_markup(realm, d, "write")?;
     let mut ap = parser_of(d);
+    if ap.is_none() && d == 0 && state().borrow().loading {
+        open_snapshot();
+        ap = parser_of(d);
+    }
     if ap.as_ref().map(|a| a.borrow().parser.insertion_point().is_none()).unwrap_or(true) {
         open(realm, d)?;
         ap = parser_of(d);
@@ -161,6 +202,12 @@ pub(crate) fn close(realm: &mut Realm, d: u32) -> JsResult<()> {
     }
     check_dynamic_markup(realm, d, "close")?;
     let Some(ap) = parser_of(d) else { return Ok(()) };
+    // Only document.open-created parsers are closed by document.close.
+    // Closing the snapshot here would discard the running outer script's
+    // persistent insertion point before its following write.
+    if ap.borrow().kind != ParserKind::ScriptCreated {
+        return Ok(());
+    }
     ap.borrow_mut().parser.close();
     if ap.borrow().pending_blocking.is_none() {
         pump(realm, d, &ap);
@@ -174,15 +221,49 @@ pub(crate) fn has_insertion_point(d: u32) -> bool {
     parser_of(d).map(|a| a.borrow().parser.insertion_point().is_some()).unwrap_or(false)
 }
 
+/// The engine's outer script and its microtask checkpoint have ended.
+/// Complete only its snapshot writer; document.open streams remain open
+/// across checkpoints until their explicit document.close().
+pub(crate) fn finish_snapshot(realm: &mut Realm) -> bool {
+    let Some(ap) = parser_of(0) else { return false };
+    {
+        let mut a = ap.borrow_mut();
+        if a.kind != ParserKind::Snapshot || a.nesting != 1 {
+            return false;
+        }
+        a.nesting = 0;
+        a.parser.close();
+    }
+    pump(realm, 0, &ap);
+    true
+}
+
 /// Run the parser until it needs input, or the stream ends.
 fn pump(realm: &mut Realm, d: u32, ap: &Shared) {
     loop {
+        let pending = {
+            let mut a = ap.borrow_mut();
+            if a.nesting == 0 { a.pending_blocking.take() } else { None }
+        };
+        if let Some(node) = pending {
+            run_parser_script(realm, d, ap, node);
+            continue;
+        }
+        if ap.borrow().pending_blocking.is_some() {
+            break;
+        }
         let before = with_doc(d, |doc| doc.node_count());
         let status = with_doc(d, |doc| ap.borrow_mut().parser.run(doc));
         after_parse_slice(d, before);
         match status {
             ParseStatus::NeedInput => break,
             ParseStatus::Script(node) => {
+                if ap.borrow().kind == ParserKind::Snapshot {
+                    // HTML fragment parsing normally marks scripts as
+                    // already started. This fragment represents parser
+                    // input, so its script is parser-inserted instead.
+                    with_doc(d, |doc| doc.script_started.remove(&node));
+                }
                 let kind = classify(d, node);
                 match kind {
                     ScriptKind::Ignore => {
@@ -200,23 +281,8 @@ fn pump(realm: &mut Realm, d: u32, ap: &Shared) {
                     }
                     ScriptKind::Inline | ScriptKind::Blocking => run_parser_script(realm, d, ap, node),
                 }
-                // A nested write left a parser-blocking script: run it now
-                // (we are the outer invocation once nesting is back to 0).
-                loop {
-                    let pending = {
-                        let mut a = ap.borrow_mut();
-                        if a.nesting > 0 {
-                            None
-                        } else {
-                            a.pending_blocking.take()
-                        }
-                    };
-                    let Some(p) = pending else { break };
-                    run_parser_script(realm, d, ap, p);
-                }
-                if ap.borrow().pending_blocking.is_some() {
-                    break;
-                }
+                // The next iteration either drains a pending blocker
+                // at nesting zero, or leaves it for the outer script.
             }
             ParseStatus::Finished => {
                 finish(realm, d, ap);
@@ -314,6 +380,7 @@ fn after_parse_slice(d: u32, before: usize) {
 
 /// "The end" (HTML §13.2.7) for a script-created parser.
 fn finish(realm: &mut Realm, d: u32, ap: &Shared) {
+    let kind = ap.borrow().kind;
     let deferred = std::mem::take(&mut ap.borrow_mut().deferred);
     {
         let st = state();
@@ -325,12 +392,16 @@ fn finish(realm: &mut Realm, d: u32, ap: &Shared) {
     if d != 0 {
         return;
     }
-    state().borrow_mut().ready_state = "interactive";
-    crate::events::dispatch(realm, crate::host::TargetKey::Node(NodeRef::main(Document::ROOT)), "readystatechange", crate::EventInit::simple(false, false), true);
+    if kind == ParserKind::ScriptCreated {
+        state().borrow_mut().ready_state = "interactive";
+        crate::events::dispatch(realm, crate::host::TargetKey::Node(NodeRef::main(Document::ROOT)), "readystatechange", crate::EventInit::simple(false, false), true);
+    }
     for s in deferred {
         crate::node::run_script_element_sync(realm, NodeRef { doc: d, node: s });
     }
-    crate::window::queue_task(realm, "DOMContentLoaded", task_dom_content_loaded);
+    if kind == ParserKind::ScriptCreated {
+        crate::window::queue_task(realm, "DOMContentLoaded", task_dom_content_loaded);
+    }
 }
 
 fn task_dom_content_loaded(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
