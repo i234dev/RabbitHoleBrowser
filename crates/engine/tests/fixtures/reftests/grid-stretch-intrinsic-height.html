@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Grid stretching applies only to an automatic preferred block size</title>
+<link rel="match" href="grid-stretch-intrinsic-height-ref.html">
+<style>
+.grid { display: grid; width: 100px; height: 100px; margin-bottom: 10px; grid-template: 100px / 100px; background: green; }
+.item { background: red; }
+#max .item { height: max-content; }
+#min .item { height: min-content; }
+#fit .item { height: fit-content; }
+#fit .content { height: 20px; background: blue; }
+#auto .item { height: auto; background: blue; }
+</style>
+<div class="grid" id="max"><div class="item"></div></div>
+<div class="grid" id="min"><div class="item"></div></div>
+<div class="grid" id="fit"><div class="item"><div class="content"></div></div></div>
+<div class="grid" id="auto"><div class="item"></div></div>

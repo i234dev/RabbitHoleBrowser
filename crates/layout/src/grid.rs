@@ -1215,11 +1215,12 @@ impl<'a> Layouter<'a> {
     fn layout_grid_item(&mut self, b: &mut LayoutBox, it: &mut GridItem, ax: f32, ay: f32, aw: f32, ah: f32, cbw: f32) {
         let child = &mut b.children[it.idx];
         let inner_w = self.grid_item_width(child, it, aw, cbw);
-        let bb = child.style.box_sizing == BoxSizing::BorderBox;
+        // Intrinsic block sizes also lack a numeric resolution, but only an
+        // automatic preferred size is eligible for stretch (§6.2).
         let stretch_h = matches!(it.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto)
             && !it.edges.auto.top
             && !it.edges.auto.bottom
-            && resolve_size(child.style.height, Some(ah), bb, it.edges.pb_v).is_none()
+            && child.style.height.is_auto()
             && child.kind != BoxKind::Image;
         let forced = if stretch_h { Some((ah - it.edges.pb_v - it.edges.margin_sum(Axis::Column)).max(0.0)) } else { None };
         let cb = Cb {
