@@ -34,6 +34,15 @@ enum MeasurePhase {
     Adjusted,
 }
 
+/// Definite container sizes used for distributed track geometry. Intrinsic
+/// constraints are None, including when cbw's numeric measurement reference
+/// is zero; a real definite zero remains Some(0).
+#[derive(Clone, Copy)]
+struct GridGeometry {
+    inline:Option<f32>,
+    block:Option<f32>,
+}
+
 /// A track sizing function (§11.1).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Sizing {
@@ -707,7 +716,7 @@ impl<'a> Layouter<'a> {
         let mut row_contribs=Vec::new();
         // Column sizing.
         if cols.inherited.is_none() {
-            col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw)};
+            col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw)};
             size_tracks(&mut cols.tracks, &col_contribs, Some(cbw), col_gap, col_stretch);
         }
         let (mut col_pos, _) = subgrid::positions(&cols, col_gap, Some(cbw), style.justify_content);
@@ -722,7 +731,7 @@ impl<'a> Layouter<'a> {
         // observe the used opposite-axis sizes instead of a recursive layout.
         if project {
             if cols.inherited.is_none() {
-                let adjusted=self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,MeasurePhase::Adjusted);
+                let adjusted=self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Adjusted);
                 if adjusted!=col_contribs {
                     size_tracks(&mut cols.tracks,&adjusted,Some(cbw),col_gap,col_stretch);
                     col_pos=subgrid::positions(&cols,col_gap,Some(cbw),style.justify_content).0;
@@ -1167,7 +1176,8 @@ impl<'a> Layouter<'a> {
     /// Shared-axis items are empty for this sizing pass: their descendants
     /// contribute at the corresponding parent lines (Grid2 §12.1).
     #[allow(clippy::too_many_arguments)]
-    fn projected_columns(&mut self,b:&mut LayoutBox,items:&[GridItem],cols:&TrackList,rows:Option<&TrackList>,col_gap:f32,row_gap:f32,cbw:f32,phase:MeasurePhase)->Vec<Contribution> {
+    fn projected_columns(&mut self,b:&mut LayoutBox,items:&[GridItem],cols:&TrackList,rows:Option<&TrackList>,col_gap:f32,row_gap:f32,cbw:f32,geometry:GridGeometry,phase:MeasurePhase)->Vec<Contribution> {
+        let style=b.style.clone();
         let mut out=Vec::new();
         for it in items {
             let child=&mut b.children[it.idx];
@@ -1177,14 +1187,15 @@ impl<'a> Layouter<'a> {
                 continue;
             }
             self.grid_work.charge(1);
-            let reference=subgrid::placement_reference(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap);
+            let column_geometry=Some(subgrid::sizing_section_aligned(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names,geometry.inline,style.justify_content));
+            let reference=subgrid::scope_reference(&column_geometry,0.);
             let item=subgrid::rebase_item(it,&child.style,cbw,reference);let it=&item;
             let row_source=rows.map_or(Some(subgrid::AxisInheritance::Stacking),|rows| {
-                if phase==MeasurePhase::Initial {subgrid::fixed_section(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names)}
-                else {let (positions,_)=subgrid::positions(rows,row_gap,None,ContentDistribution::FlexStart);Some(subgrid::section(rows,&positions,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names))}
+                if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,geometry.block,style.align_content)}
+                else {let (positions,_)=subgrid::positions(rows,row_gap,geometry.block,style.align_content);Some(subgrid::section(rows,&positions,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names))}
             });
             if column_request {
-                let columns=subgrid::sizing_section(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names);
+                let columns=column_geometry.unwrap();
                 let columns=subgrid::item_layer_source(columns,it,&child.style,false,reference);
                 let rows=if row_request {row_source} else {None};
                 let mut nested=self.with_subgrid(child,Some(columns),rows,reference,|this,child|this.subgrid_axis_contributions(child,false,None,phase));
@@ -1223,6 +1234,7 @@ impl<'a> Layouter<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn projected_rows(&mut self,b:&mut LayoutBox,items:&[GridItem],rows:&TrackList,cols:&TrackList,col_pos:&[f32],col_gap:f32,row_gap:f32,cbw:f32,cbh:Option<f32>,phase:MeasurePhase)->Vec<Contribution> {
+        let align=b.style.align_content;
         let ordinary:Vec<GridItem>=items.iter().copied().filter(|it|!subgrid::requests(&b.children[it.idx]).1).collect();
         let mut out=self.row_contributions(b,&ordinary,cols,col_pos,col_gap,cbw,cbh);
         for it in items {
@@ -1234,7 +1246,7 @@ impl<'a> Layouter<'a> {
             let item=subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw);let it=&item;
             let child=&mut b.children[it.idx];
             let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names));
-            let rows=subgrid::sizing_section(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names);
+            let rows=subgrid::sizing_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,cbh,align);
             let rows=subgrid::item_layer_source(rows,it,&child.style,true,aw);
             let mut nested=self.with_subgrid(child,columns,Some(rows),aw,|this,child| {
                 let mut item=*it;subgrid::stretch_item(child,&mut item);
@@ -1418,8 +1430,9 @@ impl<'a> Layouter<'a> {
         }
         let col_gap = subgrid::gap(b,false,0.);
         let row_gap=subgrid::gap(b,true,0.);
-        let (items, mut cols, rows) = self.place_items(b, &style, None, None, col_gap, row_gap, 0.0, 0.0);
-        let contribs = self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,0.,MeasurePhase::Initial);
+        let block=subgrid::known_block_size(b,0.);
+        let (items, mut cols, rows) = self.place_items(b, &style, None, block, col_gap, row_gap, 0.0, 0.0);
+        let contribs = self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,0.,GridGeometry{inline:None,block},MeasurePhase::Initial);
         // A max-content minimum sizing function still needs the item's
         // maximum contribution under a min-content constraint.
         let mut min_tracks = cols.tracks.clone();
