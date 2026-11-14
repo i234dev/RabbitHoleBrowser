@@ -105,12 +105,14 @@ pub(super) fn run(tab_id: u64, epoch: u64, config: ContentConfig, sink: Sink, rx
     // A Rust panic anywhere in the page's engine (parsing, style, layout,
     // a VM bug) ends only this tab's thread: the UI is told so it can show
     // a crash page and start a fresh content thread.
+    let window_context = config.window_context.clone();
     let crash_sink = sink.clone();
     let crash_busy = busy.clone();
     let r = rabbithole_js::panics::catch(move || {
         let mut w = Worker::new(tab_id, epoch, config, sink, tx, busy);
         w.main_loop(rx);
     });
+    if let Some(binding) = window_context { binding.registry.renderer_gone(binding.id, tab_id, epoch); }
     if let Err((msg, loc)) = r {
         crash_busy.store(0, Ordering::Relaxed);
         let at = if loc.is_empty() { String::new() } else { format!(" at {loc}") };
@@ -179,6 +181,7 @@ struct Worker {
 impl Worker {
     fn new(tab_id: u64, epoch: u64, config: ContentConfig, sink: Sink, tx: Sender<Inbox>, busy: Arc<AtomicU64>) -> Worker {
         let mut engine = if config.system_fonts { Engine::new() } else { Engine::new_bundled_fonts_only() };
+        engine.window_context = config.window_context.as_ref().map(|binding| binding.context());
         engine.loader = config.loader.clone();
         // Progressive loading: paint before images and scripts arrive.
         engine.loader.prefetch_images = false;
@@ -234,6 +237,9 @@ impl Worker {
         w.engine.loader.fetcher.observer = Some(rabbithole_engine::net::NetObserver(Arc::new(move |ev: &rabbithole_engine::net::NetEvent| sink(tab_id, epoch, FromContent::Network(ev.clone())))));
         let settings = w.config.settings.clone();
         w.apply_settings(settings);
+        if w.config.window_context.as_ref().is_some_and(|binding| binding.initial_blank) {
+            w.show_html("<!doctype html><html><head></head><body></body></html>", Url::parse_absolute("about:blank").unwrap(), false);
+        }
         w
     }
 
@@ -415,6 +421,33 @@ impl Worker {
     fn handle(&mut self, msg: ToContent) {
         match msg {
             ToContent::Navigate { request, push_history } => self.navigate(request, push_history),
+            ToContent::ContextNavigate { id, ticket, request, replace, blank, javascript_origin } => {
+                let Some(binding) = self.config.window_context.clone().filter(|binding| binding.id == id) else { return };
+                if !binding.registry.acknowledge(id, self.tab_id, self.epoch, ticket) { return; }
+                if let Some(seed) = blank {
+                    self.generation += 1;
+                    self.service_worker_navigation = None;
+                    self.navigation_client = None;
+                    self.pending = None;
+                    if !binding.registry.prepare_blank(id, self.tab_id, self.epoch, seed) { return; }
+                    self.show_html("<!doctype html><html><head></head><body></body></html>", request.url, !replace);
+                } else {
+                    // The owner already checked scheme/familiarity and bounded
+                    // this command. Avoid moving large URLs into the UI queue.
+                    if request.url.scheme == "javascript" {
+                        if javascript_origin.as_ref().is_some_and(|key| binding.registry.allow_javascript(id, self.tab_id, self.epoch, key)) { self.handle(ToContent::JavascriptUrl(request.url)); }
+                    }
+                    else { self.send(FromContent::Loading(Some("Loading"))); self.navigate(request, !replace); }
+                }
+            }
+            ToContent::ContextMessage { id, ticket, message } => {
+                let Some(binding) = self.config.window_context.as_ref().filter(|binding| binding.id == id) else { return };
+                if !binding.registry.acknowledge(id, self.tab_id, self.epoch, ticket) { return; }
+                if let Some(page) = self.page.as_mut() {
+                    let out = self.engine.deliver_window_message(page, &message);
+                    self.apply_outcome(out);
+                }
+            }
             ToContent::LoadHtml { html, url, push_history } => {
                 self.generation += 1;
                 self.service_worker_navigation = None;
@@ -837,6 +870,7 @@ impl Worker {
         let fragment = page.url.fragment.clone();
         self.consent = self.consent_choice(&page).map(|c| ConsentDriver::new(c, Instant::now()));
         self.page = Some(page);
+        if let Some(binding) = &self.config.window_context { binding.registry.ready(binding.id, self.tab_id, self.epoch); }
         self.dirty = true;
         if let Some(f) = fragment {
             self.scroll_to_fragment(&f);
