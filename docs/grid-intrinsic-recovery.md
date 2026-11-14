@@ -10,7 +10,9 @@ reverse those axes. Scoped installation restores computed styles and invalidates
 caches, including when a measurement unwinds. Shared axes ignore preferred/min/max sizes and self alignment, cannot
 append implicit tracks, and retain ancestor edge/gap layers through nesting.
 
-Descendants contribute to the corresponding parent tracks. A grid performs an
+Descendants contribute to the corresponding parent tracks. An automatically
+placed subgrid in a lanes parent projects every sub-item into all possible
+parent tracks, ignoring its own explicit local placement for sizing only. A grid performs an
 initial column/row pass and at most one adjustment of each axis. The initial
 perpendicular estimate uses definite maximum track sizes, floored by definite
 minimums. An empty subgrid does not synthesize padding contributions; a nonempty
@@ -20,7 +22,7 @@ min/max maxima. Row-lanes measurement receives definite inherited geometry
 before computing inline contributions; explicit intrinsic preferred sizes remain
 in force in an independent axis. Stretch relayout keeps inherited geometry.
 
-Written, not executed: fifteen geometry/compaction/unwind/budget unit tests, nine layout tests,
+Written, not executed: sixteen geometry/compaction/unwind/budget unit tests, eleven layout tests,
 two new visual reftest pairs and the seven prior GridSpace tests. The original
 four deferred intrinsic constraint fixtures are preserved byte-for-byte. Style
 metadata/gap tests are in the dependency commits.

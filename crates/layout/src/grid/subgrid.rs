@@ -285,6 +285,20 @@ pub(super) fn compact_contributions(items:&mut Vec<Contribution>) {
     items.truncate(write);
 }
 
+/// Grid3 §3.4.1 ignores a sub-item's placement when its own subgrid has an
+/// automatic position in a lanes parent. The parent already copies the
+/// subgrid at every possible start; cover every local position of this span.
+pub(super) fn automatic_contributions(budget:&mut WorkBudget,items:Vec<Contribution>,count:usize)->Vec<Contribution> {
+    let mut out=Vec::new();
+    if count==0 {return out;}
+    for item in items {
+        let span=item.end.saturating_sub(item.start).max(1).min(count);
+        let positions=count-span+1;budget.charge(positions);
+        for start in 0..positions {out.push(Contribution{start,end:start+span,min:item.min,max:item.max});}
+    }
+    compact_contributions(&mut out);out
+}
+
 /// Grid2 §9 accounts for an edge with empty adjacent tracks using a
 /// hypothetical item spanning those tracks. An entirely empty subgrid
 /// contributes nothing. Real items touching the edge already carry its layer.
@@ -426,7 +440,7 @@ mod tests {
         let mut b=LayoutBox::new(BoxKind::Block,None,Rc::new(style));b.formatting=Formatting::Grid;b
     }
     fn item(start:i32,end:i32)->GridItem {
-        GridItem{idx:0,area:super::super::Area{col:(start,end),row:(0,1)},edges:ItemEdges::new(&ComputedStyle::default(),0.),justify:ItemAlign::Stretch,align:ItemAlign::Stretch,column_names:true,row_names:true}
+        GridItem{idx:0,area:super::super::Area{col:(start,end),row:(0,1)},edges:ItemEdges::new(&ComputedStyle::default(),0.),justify:ItemAlign::Stretch,align:ItemAlign::Stretch,column_names:true,row_names:true,parent_lanes_auto:false}
     }
 
     #[test]
@@ -582,5 +596,12 @@ mod tests {
         drop(guards);assert_eq!(budget.depth.as_ref().unwrap().get(),0);
         drop(budget.enter(1));assert_eq!(budget.depth.as_ref().unwrap().get(),0);
         let fresh=WorkBudget::default();assert_eq!(fresh.remaining,1_000_000);assert!(fresh.depth.is_none());
+    }
+
+    #[test]
+    fn automatic_parent_positions_ignore_the_subitems_local_placement() {
+        let mut budget=WorkBudget::default();
+        let out=automatic_contributions(&mut budget,vec![Contribution{start:1,end:2,min:40.,max:40.}],2);
+        assert_eq!(out,[Contribution{start:0,end:1,min:40.,max:40.},Contribution{start:1,end:2,min:40.,max:40.}]);
     }
 }

@@ -361,6 +361,9 @@ struct GridItem {
     align: ItemAlign,
     column_names: bool,
     row_names: bool,
+    /// Grid3 §3.4.1: ignore sub-item placement while sizing an automatically
+    /// positioned subgrid in a lanes parent.
+    parent_lanes_auto: bool,
 }
 
 /// §11.5.1 distribute `extra` space equally among `candidates` (indices),
@@ -1130,6 +1133,7 @@ impl<'a> Layouter<'a> {
                 align,
                 column_names: true,
                 row_names: true,
+                parent_lanes_auto: false,
             };
             subgrid::item_edges(b,&mut item,col_gap,row_gap);
             items.push(item);
@@ -1162,6 +1166,7 @@ impl<'a> Layouter<'a> {
                 let columns=subgrid::sizing_section(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names);
                 let rows=if row_request {row_source} else {None};
                 let mut nested=self.with_subgrid(child,Some(columns),rows,cbw,|this,child|this.subgrid_axis_contributions(child,false,None,phase));
+                if it.parent_lanes_auto {nested=subgrid::automatic_contributions(&mut self.grid_work,nested,(it.area.col.1-it.area.col.0)as usize);}
                 for c in &mut nested {c.start+=it.area.col.0 as usize;c.end+=it.area.col.0 as usize;}
                 self.grid_work.charge(nested.len());
                 out.extend(nested);
