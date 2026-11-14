@@ -141,6 +141,50 @@ fn line_names(cur: &mut Cur) -> Option<Vec<String>> {
     Some(names)
 }
 
+/// Unlike a standalone track list, adjacent bracket groups are distinct
+/// subgrid lines; name repeats cannot contain sizes or nested repeats.
+fn subgrid_line_names(cur: &mut Cur) -> Option<Vec<String>> {
+    if cur.bump()? != &Token::OpenBracket { return None; }
+    let mut names = Vec::new();
+    loop {
+        match cur.bump()? {
+            Token::Ident(name) if !matches!(name.to_ascii_lowercase().as_str(), "auto" | "span" | "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default") => names.push(name.clone()),
+            Token::CloseBracket => return Some(names),
+            _ => return None,
+        }
+    }
+}
+
+fn subgrid_names(cur: &mut Cur) -> Option<Vec<SubgridLineNames>> {
+    let mut result = Vec::new();
+    let mut auto_fill = false;
+    while let Some(token) = cur.peek() {
+        match token {
+            Token::OpenBracket => result.push(SubgridLineNames::Names(subgrid_line_names(cur)?)),
+            Token::Function(name) if name.eq_ignore_ascii_case("repeat") => {
+                let call = cur.function()?;
+                if call.last() != Some(&Token::CloseParen) { return None; }
+                let mut args = Cur::new(&call[1..call.len()-1]);
+                let count = match args.bump()? {
+                    Token::Number(n) if n.is_finite() && *n >= 1. && n.fract() == 0. && *n < u32::MAX as f32 => Some(*n as u32),
+                    Token::Ident(name) if name.eq_ignore_ascii_case("auto-fill") && !auto_fill => {
+                        auto_fill = true;
+                        None
+                    }
+                    _ => return None,
+                };
+                if args.bump()? != &Token::Comma { return None; }
+                let mut names = Vec::new();
+                while !args.done() { names.push(subgrid_line_names(&mut args)?); }
+                if names.is_empty() { return None; }
+                result.push(SubgridLineNames::Repeat { count, names });
+            }
+            _ => return None,
+        }
+    }
+    Some(result)
+}
+
 /// Parse a full track list (`grid-template-columns` value).
 pub fn parse_track_list(toks: &[Token], ctx: &LengthContext) -> Option<Vec<TrackListItem>> {
     let mut cur = Cur::new(toks);
@@ -148,7 +192,11 @@ pub fn parse_track_list(toks: &[Token], ctx: &LengthContext) -> Option<Vec<Track
         if i.eq_ignore_ascii_case("none") {
             return Some(Vec::new());
         }
-        if i.eq_ignore_ascii_case("subgrid") || i.eq_ignore_ascii_case("masonry") {
+        if i.eq_ignore_ascii_case("subgrid") {
+            cur.bump();
+            return Some(vec![TrackListItem::Subgrid { line_names: subgrid_names(&mut cur)? }]);
+        }
+        if i.eq_ignore_ascii_case("masonry") {
             return Some(Vec::new());
         }
     }
