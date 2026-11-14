@@ -18,6 +18,9 @@ mod null;
 // realtime and offline contexts. No public factory is exposed by this core.
 #[allow(dead_code)]
 mod compressor;
+// Pure graph execution only. Device adapters and JS APIs are separate work.
+#[allow(dead_code)]
+mod graph;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod pulse;
 #[cfg(all(unix, not(target_os = "macos")))]

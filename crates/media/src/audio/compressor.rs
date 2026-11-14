@@ -39,7 +39,7 @@ pub(super) enum ProcessError {
 }
 
 impl Parameters {
-    fn validate(self) -> Result<(), ProcessError> {
+    pub(super) fn validate(self) -> Result<(), ProcessError> {
         for (value, min, max) in [
             (self.threshold, -100.0, 0.0),
             (self.knee, 0.0, 40.0),
