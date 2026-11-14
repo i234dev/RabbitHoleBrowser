@@ -789,11 +789,13 @@
       return { request, record };
     });
   };
-  const cacheStore = (id, request, record) => {
-    for (const entry of cacheEntries(id)) if (cacheMatches(entry.record, request, {})) cacheOp('remove', id, entry.key);
-    const key = JSON.stringify(record.request);
-    cacheOp('put', id, key, JSON.stringify(record));
+  const cacheStoreBatch = (id, entries) => {
+    const removals = cacheEntries(id).filter(previous => entries.some(entry => cacheMatches(previous.record, entry.request, {}))).map(entry => entry.key);
+    const keys = entries.map(entry => JSON.stringify(entry.record.request));
+    const records = entries.map(entry => JSON.stringify(entry.record));
+    N.cacheBatchOperation(id, removals, keys, records);
   };
+  const cacheStore = (id, request, record) => cacheStoreBatch(id, [{ request, record }]);
   class Cache {
     constructor() { ILLEGAL(); }
     match(req, opts = {}) { return this.matchAll(req, opts).then(list => list[0]); }
@@ -814,15 +816,15 @@
           if (!response.ok) throw new TypeError('Cache.addAll request failed.');
           return cacheEncode(request, response);
         })));
-      }).then(entries => { for (const e of entries) cacheStore(this[S], e.request, e.record); });
+      }).then(entries => cacheStoreBatch(this[S], entries));
     }
     put(req, response) { return Promise.resolve().then(() => cacheEncode(req, response)).then(e => cacheStore(this[S], e.request, e.record)); }
     delete(req, opts = {}) {
       return Promise.resolve().then(() => {
         const request = cacheRequest(req);
-        let deleted = false;
-        for (const entry of cacheEntries(this[S])) if (cacheMatches(entry.record, request, opts)) { cacheOp('remove', this[S], entry.key); deleted = true; }
-        return deleted;
+        const removals = cacheEntries(this[S]).filter(entry => cacheMatches(entry.record, request, opts)).map(entry => entry.key);
+        N.cacheBatchOperation(this[S], removals, [], []);
+        return removals.length !== 0;
       });
     }
     keys(req, opts = {}) {

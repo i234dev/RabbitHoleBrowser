@@ -23,6 +23,44 @@ impl std::fmt::Debug for ServiceWorkerRegistry {
     }
 }
 
+/// Cache Storage data budgets. Encoded UTF-8 keys, records, names and origin
+/// strings are charged; entry/cache counts separately bound container overhead.
+/// The default memory store belongs to one Engine; these are not a heap estimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheStorageLimits {
+    pub max_total_bytes: usize,
+    pub max_origin_bytes: usize,
+    pub max_entries: usize,
+    pub max_caches: usize,
+}
+impl Default for CacheStorageLimits {
+    fn default() -> Self { Self { max_total_bytes: 64 * 1024 * 1024, max_origin_bytes: 16 * 1024 * 1024, max_entries: 16_384, max_caches: 256 } }
+}
+/// Current charged data bytes and global counts in this Cache Storage instance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheStorageUsage {
+    pub total_bytes: usize,
+    pub origin_bytes: usize,
+    pub entries: usize,
+    pub caches: usize,
+}
+impl ServiceWorkerRegistry {
+    /// Configure budgets without deleting existing data. Limits below current
+    /// usage fail and leave the previous configuration unchanged.
+    pub fn set_cache_storage_limits(&self, limits: CacheStorageLimits) -> Result<(), String> {
+        let mut s = self.0.borrow_mut();
+        let usage = cache_data_usage(&s, None).ok_or("Cache Storage usage overflow")?;
+        if !usage.fits(limits) { return Err("Cache Storage limits are below current usage".into()); }
+        s.cache_limits = limits;
+        Ok(())
+    }
+    pub fn cache_storage_usage(&self, origin: &Url) -> CacheStorageUsage {
+        let s = self.0.borrow();
+        let usage = cache_data_usage(&s, None).expect("validated Cache Storage usage");
+        CacheStorageUsage { total_bytes: usage.bytes, origin_bytes: usage.origins.get(&origin.origin()).copied().unwrap_or(0), entries: usage.entries, caches: usage.caches }
+    }
+}
+
 /// A reserved navigation client. The last lease removes an uncommitted client;
 /// once a Window realm adopts it, normal ScriptHost teardown owns its lifetime.
 #[derive(Clone)]
@@ -71,6 +109,7 @@ struct Store {
     runtimes: BTreeMap<u64, Runtime>,
     jobs: VecDeque<Job>,
     fetches: BTreeMap<u64, FetchTask>,
+    cache_limits: CacheStorageLimits,
     cache_names: BTreeMap<String, Vec<(String, u64)>>,
     caches: BTreeMap<u64, CacheRecord>,
 }
@@ -354,6 +393,7 @@ pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
     realm.define_method(n, "swFetchFallback", 1, fetch_fallback);
     realm.define_method(n, "swFetchDone", 1, fetch_done);
     realm.define_method(n, "cacheOperation", 4, cache_operation);
+    realm.define_method(n, "cacheBatchOperation", 4, cache_batch_operation);
     realm.define_method(n, "swRegister", 4, register);
     realm.define_method(n, "swUnregister", 1, unregister);
     realm.define_method(n, "swSnapshot", 0, snapshot);
@@ -509,6 +549,90 @@ fn pump_fetches(registry: &ServiceWorkerRegistry, worker: u64, runtime: &mut Run
     }
 }
 
+#[derive(Default)]
+struct CacheUsage {
+    bytes: usize,
+    origins: BTreeMap<String, usize>,
+    entries: usize,
+    caches: usize,
+}
+impl CacheUsage {
+    fn charge(&mut self, origin: &str, bytes: usize) -> Option<()> {
+        self.bytes = self.bytes.checked_add(bytes)?;
+        let used = self.origins.entry(origin.into()).or_default();
+        *used = used.checked_add(bytes)?;
+        Some(())
+    }
+    fn fits(&self, limits: CacheStorageLimits) -> bool {
+        self.bytes <= limits.max_total_bytes && self.origins.values().all(|bytes| *bytes <= limits.max_origin_bytes) && self.entries <= limits.max_entries && self.caches <= limits.max_caches
+    }
+}
+fn cache_data_usage(s: &Store, replacement: Option<(u64, &[(String, String)])>) -> Option<CacheUsage> {
+    let mut usage = CacheUsage::default();
+    for (origin, names) in &s.cache_names {
+        usage.charge(origin, origin.len())?;
+        for (name, _) in names { usage.charge(origin, name.len())?; }
+    }
+    for (&id, cache) in &s.caches {
+        usage.caches = usage.caches.checked_add(1)?;
+        usage.charge(&cache.origin, cache.origin.len())?;
+        let entries = replacement.filter(|(changed, _)| *changed == id).map(|(_, rows)| rows).unwrap_or(&cache.entries);
+        usage.entries = usage.entries.checked_add(entries.len())?;
+        for (key, record) in entries { usage.charge(&cache.origin, key.len().checked_add(record.len())?)?; }
+    }
+    Some(usage)
+}
+enum CacheWriteError { Identity, Quota }
+fn cache_replace(s: &mut Store, id: u64, origin: &str, removals: &[String], puts: Vec<(String, String)>) -> Result<(), CacheWriteError> {
+    let cache = s.caches.get(&id).filter(|cache| cache.origin == origin).ok_or(CacheWriteError::Identity)?;
+    let new_bytes = puts.iter().try_fold(0usize, |sum, (key, record)| sum.checked_add(key.len())?.checked_add(record.len()));
+    if new_bytes.is_none_or(|bytes| bytes > s.cache_limits.max_total_bytes || bytes > s.cache_limits.max_origin_bytes) { return Err(CacheWriteError::Quota); }
+    // Mutate a candidate only. Quota errors cannot discard the previous value
+    // or partially commit addAll/remove-and-replace batches.
+    let remove: std::collections::BTreeSet<&str> = removals.iter().map(String::as_str).collect();
+    let mut candidate = cache.entries.clone();
+    candidate.retain(|(key, _)| !remove.contains(key.as_str()));
+    let mut index: BTreeMap<String, usize> = candidate.iter().enumerate().map(|(index, (key, _))| (key.clone(), index)).collect();
+    for (key, record) in puts {
+        if let Some(&index) = index.get(&key) { candidate[index].1 = record; }
+        else { index.insert(key.clone(), candidate.len()); candidate.push((key, record)); }
+    }
+    let usage = cache_data_usage(s, Some((id, &candidate))).ok_or(CacheWriteError::Quota)?;
+    if !usage.fits(s.cache_limits) { return Err(CacheWriteError::Quota); }
+    s.caches.get_mut(&id).unwrap().entries = candidate;
+    Ok(())
+}
+fn cache_write_error(realm: &mut Realm, error: CacheWriteError) -> Value {
+    match error {
+        CacheWriteError::Identity => realm.throw_type_error("Invalid cache storage identity"),
+        CacheWriteError::Quota => exception(realm, "QuotaExceededError", "Cache Storage data budget exceeded"),
+    }
+}
+fn cache_batch_strings(realm: &mut Realm, value: Value) -> JsResult<Vec<String>> {
+    let length = realm.get_str(value.clone(), "length")?;
+    realm.native_root(length.clone());
+    let length = realm.to_length(length)?;
+    if length > 65_536 { return Err(exception(realm, "QuotaExceededError", "Cache Storage batch is too large")); }
+    let mut values = Vec::with_capacity(length);
+    for index in 0..length {
+        let item = realm.get_str(value.clone(), &index.to_string())?;
+        realm.native_root(item.clone()); values.push(item);
+    }
+    values.into_iter().map(|value| realm.to_rust_string(value)).collect()
+}
+fn cache_batch_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let id = realm.to_number(arg(args, 0))? as u64;
+    let removals = cache_batch_strings(realm, arg(args, 1))?;
+    let keys = cache_batch_strings(realm, arg(args, 2))?;
+    let records = cache_batch_strings(realm, arg(args, 3))?;
+    if keys.len() != records.len() || keys.iter().collect::<std::collections::BTreeSet<_>>().len() != keys.len() { return Err(realm.throw_type_error("Invalid Cache Storage batch")); }
+    let url = with_env(|e| e.document_url());
+    if !trustworthy(&url) { return Err(exception(realm, "SecurityError", "Cache Storage requires a secure, non-opaque origin")); }
+    let store = registry(realm)?;
+    let result = cache_replace(&mut store.borrow_mut(), id, &url.origin(), &removals, keys.into_iter().zip(records).collect());
+    result.map(|_| Value::Undefined).map_err(|error| cache_write_error(realm, error))
+}
+
 // Serialized response records cross realms without retaining any foreign GC
 // values. Cache objects keep their storage identity even after name deletion.
 fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
@@ -528,6 +652,11 @@ fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Valu
         }
         "open" => {
             if let Some(id) = s.cache_names.get(&origin).and_then(|names| names.iter().find(|(name, _)| name == &key).map(|(_, id)| *id)) { return Ok(Value::Number(id as f64)); }
+            let mut usage = cache_data_usage(&s, None).ok_or_else(|| exception(realm, "QuotaExceededError", "Cache Storage usage overflow"))?;
+            let name_bytes = key.len().checked_add(origin.len()).and_then(|bytes| bytes.checked_add(if s.cache_names.contains_key(&origin) { 0 } else { origin.len() }));
+            if name_bytes.and_then(|bytes| usage.charge(&origin, bytes)).is_none() { return Err(exception(realm, "QuotaExceededError", "Cache Storage usage overflow")); }
+            usage.caches = usage.caches.saturating_add(1);
+            if !usage.fits(s.cache_limits) { return Err(exception(realm, "QuotaExceededError", "Cache Storage data budget exceeded")); }
             let id = s.id();
             s.caches.insert(id, CacheRecord { origin: origin.clone(), entries: Vec::new() });
             s.cache_names.entry(origin).or_default().push((key, id));
@@ -539,6 +668,11 @@ fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Valu
             if let Some(i) = found { names.remove(i); }
             Ok(Value::Bool(found.is_some()))
         }
+        "put" => {
+            let result = cache_replace(&mut s, id, &origin, &[], vec![(key, payload)]);
+            drop(s);
+            result.map(|_| Value::Undefined).map_err(|error| cache_write_error(realm, error))
+        }
         _ => {
             let cache = s.caches.get_mut(&id).filter(|cache| cache.origin == origin).ok_or_else(|| realm.throw_type_error("Invalid cache storage identity"))?;
             match op.as_str() {
@@ -546,11 +680,6 @@ fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Valu
                     let mut out = Vec::new();
                     for (key, payload) in &cache.entries { out.push(object(realm, &[("key", Value::str(key)), ("record", Value::str(payload))])); }
                     Ok(realm.new_array_value(out))
-                }
-                "put" => {
-                    if let Some(entry) = cache.entries.iter_mut().find(|(k, _)| *k == key) { entry.1 = payload; }
-                    else { cache.entries.push((key, payload)); }
-                    Ok(Value::Undefined)
                 }
                 "remove" => {
                     let found = cache.entries.iter().position(|(k, _)| *k == key);

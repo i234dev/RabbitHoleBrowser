@@ -1148,6 +1148,14 @@ impl Engine {
         *self.local_storage.lock().unwrap() = LocalStorage::load(path);
     }
 
+    /// Configure Cache Storage data budgets without clearing existing entries.
+    pub fn set_cache_storage_limits(&self, limits: rabbithole_script::CacheStorageLimits) -> Result<(), String> {
+        self.service_workers.set_cache_storage_limits(limits)
+    }
+    pub fn cache_storage_usage(&self, origin: &Url) -> rabbithole_script::CacheStorageUsage {
+        self.service_workers.cache_storage_usage(origin)
+    }
+
     /// Use another engine's `localStorage` (engines on several threads,
     /// e.g. one per browser tab, then see the same data and file).
     pub fn share_local_storage(&mut self, storage: Arc<Mutex<LocalStorage>>) {

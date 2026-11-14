@@ -422,3 +422,44 @@ fn navigation_mode_cannot_be_acquired_through_public_request_properties_or_init(
     "#);
     assert_eq!(output, ["constructor TypeError", "init TypeError", "forged TypeError"]);
 }
+
+#[test]
+fn cache_quota_replacement_rejects_without_losing_binary_response() {
+    let (mut env, mut host) = setup("<body></body>");
+    host.service_workers.as_ref().unwrap().set_cache_storage_limits(crate::CacheStorageLimits { max_total_bytes: 8192, max_origin_bytes: 2048, max_entries: 8, max_caches: 4 }).unwrap();
+    let output = run(&mut env, &mut host, r#"
+      let cache, failure;
+      caches.open('quota').then(c=>{cache=c;return c.put('entry',new Response(new Uint8Array([0,128,255]),{status:203,statusText:'Stored',headers:{'x-version':'old'}}));})
+        .then(()=>cache.put('entry',new Response(new Uint8Array(3000))))
+        .then(()=>console.log('unexpected success'),error=>{failure=error;return cache.match('entry');})
+        .then(response=>Promise.all([response.status,response.statusText,response.headers.get('x-version'),response.arrayBuffer()]))
+        .then(values=>console.log(failure.name,failure.code,failure instanceof DOMException,values[0],values[1],values[2],Array.from(new Uint8Array(values[3])).join(',')));
+    "#);
+    assert_eq!(output,["QuotaExceededError 22 true 203 Stored old 0,128,255"]);
+}
+
+#[test]
+fn cache_add_all_over_quota_is_atomic_and_deletion_reclaims_entry_budget() {
+    let (mut env, mut host) = setup("<body></body>");
+    env.fetches.insert("https://example.test/dir/first".into(),(200,"text/plain".into(),"new first".into()));
+    env.fetches.insert("https://example.test/dir/second".into(),(200,"text/plain".into(),"z".repeat(3000)));
+    let registry=host.service_workers.as_ref().unwrap().clone();
+    registry.set_cache_storage_limits(crate::CacheStorageLimits { max_total_bytes:8192,max_origin_bytes:2048,max_entries:8,max_caches:4 }).unwrap();
+    let output=run(&mut env,&mut host,r#"
+      let quotaCache;
+      caches.open('batch').then(cache=>{quotaCache=cache;return cache.put('first',new Response('old first'));})
+        .then(()=>quotaCache.addAll(['first','second']))
+        .then(()=>console.log('unexpected success'),error=>{
+          console.log(error.name);
+          return Promise.all([quotaCache.match('first').then(r=>r.text()),quotaCache.match('second')]);
+        }).then(values=>console.log(values[0],values[1]===undefined));
+    "#);
+    assert_eq!(output,["QuotaExceededError","old first true"]);
+    let before=registry.cache_storage_usage(&env.url);
+    assert!(registry.set_cache_storage_limits(crate::CacheStorageLimits { max_total_bytes:0,max_origin_bytes:0,max_entries:0,max_caches:0 }).is_err());
+    assert_eq!(registry.cache_storage_usage(&env.url),before,"failed reconfiguration preserves data and budgets");
+    assert_eq!(run(&mut env,&mut host,"quotaCache.delete('first').then(console.log);"),["true"]);
+    let after=registry.cache_storage_usage(&env.url);
+    assert_eq!(after.entries,0);assert!(after.total_bytes<before.total_bytes);
+    assert_eq!(run(&mut env,&mut host,"quotaCache.put('small',new Response('fits')).then(()=>quotaCache.match('small')).then(r=>r.text()).then(console.log);"),["fits"]);
+}
