@@ -130,7 +130,9 @@ See [measurement sources and updates](tools/metrics/README.md).
 
 - WebGL1/WebGL2 remain experimental: RGBA8 render-to-texture and WebGL2
   divisor-based instancing work, but MRT, stencil, blits, multisampling, mipmaps,
-  general shader control flow and user-defined functions remain unsupported.
+  and general shader control flow remain unsupported. Typed float/vector user
+  helpers support input parameters, locals and a final return within bounded
+  nonrecursive call graphs.
   Texture minification/magnification filters must both be `NEAREST` or both
   `LINEAR`; mixed filters are unsupported. WebGPU is unavailable. Full WebGL2
   conformance and Three.js compatibility have not been established.

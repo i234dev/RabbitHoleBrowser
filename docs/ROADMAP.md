@@ -79,9 +79,11 @@ and buffer APIs drive our software backend, produce visible canvas pixels and
 support `readPixels`. Depth, uniforms, independent RGB/alpha blending and RGBA8
 nearest/bilinear 2D textures are implemented. Minification and magnification
 filters must match; mipmaps and derivative-based LOD selection remain open.
-The bounded shader evaluator includes 32 typed float/vector math built-ins,
-but still lacks general control flow and user-defined functions. Backend pixel
-tests, API tests and page-renderer fixtures cover these milestones. See
+The bounded shader evaluator includes 32 typed float/vector math built-ins and
+typed user helpers with input parameters, local values and a final return.
+Nonrecursive calls have an accumulated evaluation budget; general shader control
+flow remains open. Backend pixel tests, API tests and page-renderer fixtures
+cover these milestones. See
 [the current surface and limits](webgl.md).
 
 An experimental WebGL2 context is now exposed with a distinct JavaScript
