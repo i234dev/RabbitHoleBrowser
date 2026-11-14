@@ -59,11 +59,12 @@ impl Drop for Scope<'_> {
 pub(super) struct FiniteInline {
     content:f32,
     available:AvailableSpace,
+    percentage_basis:Option<f32>,
 }
 impl FiniteInline {
     pub(super) fn content(self)->f32 {self.content}
     pub(super) fn available(self)->AvailableSpace {self.available}
-    pub(super) fn percentage_basis(self)->Option<f32> {self.available.definite()}
+    pub(super) fn percentage_basis(self)->Option<f32> {self.percentage_basis}
 }
 
 pub(super) struct RowItemEstimate {
@@ -91,7 +92,7 @@ impl<'a> Layouter<'a> {
         edges.margin.bottom+=item.edges.margin.bottom-original.margin.bottom;
         let content=self.intrinsic(scope.node);
         let stretch=style.width.is_auto()&&matches!(item.justify,ItemAlign::Stretch|ItemAlign::Normal|ItemAlign::Auto)&&!edges.auto.left&&!edges.auto.right;
-        let inline=realize(&style,spaces[0],content,edges.pb_h,edges.margin_sum(Axis::Row),stretch);
+        let inline=realize(&style,spaces[0],spaces[0],content,edges.pb_h,edges.margin_sum(Axis::Row),stretch);
         // Only execution uses a finite proxy; own cyclic preferred/min/max
         // lengths and percentage edges were normalized in the scope above.
         let proxy=inline.percentage_basis().unwrap_or_else(||(inline.content()+edges.pb_h+edges.margin_sum(Axis::Row)).max(0.));
@@ -103,14 +104,16 @@ impl<'a> Layouter<'a> {
 }
 
 /// `style` must already have the percentage policy for this measurement
-/// applied. Even so, numeric resolution uses only the original definite
-/// space, never the subsequently realized content width. The result sizes
-/// an item for measurement; it is not a CompletedAxis.
-pub(super) fn realize(style:&ComputedStyle,available:AvailableSpace,content:(f32,f32),padding_border:f32,margins:f32,stretch:bool)->FiniteInline {
+/// applied. The item's min/max-content constraint and its containing-block
+/// percentage basis are separate inputs: a fixed parent track may provide
+/// a real basis while an automatic item is measured under MinContent.
+/// Neither input is inferred from the subsequently realized content width.
+/// The result sizes an item for measurement; it is not a CompletedAxis.
+pub(super) fn realize(style:&ComputedStyle,available:AvailableSpace,percentage_basis:AvailableSpace,content:(f32,f32),padding_border:f32,margins:f32,stretch:bool)->FiniteInline {
     assert!(content.0.is_finite()&&content.1.is_finite()&&content.1>=content.0,"Invalid intrinsic Grid item size");
-    let reference=available.definite();
+    let reference=percentage_basis.definite();
     let inner=|value:f32|if style.box_sizing==BoxSizing::BorderBox {(value-padding_border).max(0.)} else {value.max(0.)};
-    let room=reference.map(|size|(size-padding_border-margins).max(0.));
+    let room=available.definite().map(|size|(size-padding_border-margins).max(0.));
     let fit=|min:f32,max:f32|match available {
         AvailableSpace::MinContent=>min,
         _=>room.map_or(max,|room|crate::block::shrink_to_fit(min,max,room)),
@@ -137,7 +140,7 @@ pub(super) fn realize(style:&ComputedStyle,available:AvailableSpace,content:(f32
     let min=bound(style.min_width).unwrap_or(0.);
     let size=max.map_or(size,|max|size.min(max)).max(min).max(0.);
     assert!(size.is_finite(),"Non-finite Grid item estimate");
-    FiniteInline{content:size,available}
+    FiniteInline{content:size,available,percentage_basis:reference}
 }
 
 #[cfg(test)]
@@ -147,6 +150,10 @@ mod tests {
     use std::collections::HashMap;
     use rabbithole_gfx::FontContext;
     use rabbithole_css::{parse_stylesheet,MediaEnv};
+
+    fn realize_same_basis(style:&ComputedStyle,available:AvailableSpace,content:(f32,f32),padding_border:f32,margins:f32,stretch:bool)->FiniteInline {
+        super::realize(style,available,available,content,padding_border,margins,stretch)
+    }
 
     fn find_mut(node:&mut LayoutBox,id:usize)->Option<&mut LayoutBox> {
         if node.node==Some(id)&&node.kind!=BoxKind::Text {return Some(node);}
@@ -181,10 +188,10 @@ mod tests {
     #[test]
     fn infinite_auto_realization_is_finite_and_keeps_the_original_percentage_tag() {
         let style=ComputedStyle::initial();
-        let realized=realize(&style,AvailableSpace::Indefinite,(30.,80.),0.,0.,true);
+        let realized=realize_same_basis(&style,AvailableSpace::Indefinite,(30.,80.),0.,0.,true);
         assert_eq!(realized.content(),80.);assert_eq!(realized.available(),AvailableSpace::Indefinite);
         assert_eq!(realized.percentage_basis(),None);
-        let zero=realize(&style,AvailableSpace::Definite(0.),(30.,80.),0.,0.,true);
+        let zero=realize_same_basis(&style,AvailableSpace::Definite(0.),(30.,80.),0.,0.,true);
         assert_eq!(zero.content(),0.);assert_eq!(zero.percentage_basis(),Some(0.));
     }
 
@@ -192,47 +199,47 @@ mod tests {
     fn preferred_keywords_and_definite_sizes_override_an_infinite_estimate() {
         for (preferred,expected) in [(Length::MinContent,30.),(Length::MaxContent,80.),(Length::FitContent,80.),(Length::Px(55.),55.)] {
             let mut style=ComputedStyle::initial();style.width=preferred;
-            assert_eq!(realize(&style,AvailableSpace::Indefinite,(30.,80.),0.,0.,true).content(),expected);
+            assert_eq!(realize_same_basis(&style,AvailableSpace::Indefinite,(30.,80.),0.,0.,true).content(),expected);
         }
     }
 
     #[test]
     fn definite_fit_and_stretch_do_not_share_the_max_content_fallback() {
         let mut style=ComputedStyle::initial();style.width=Length::FitContent;
-        assert_eq!(realize(&style,AvailableSpace::Definite(63.),(30.,80.),8.,5.,true).content(),50.);
-        assert_eq!(realize(&style,AvailableSpace::MinContent,(30.,80.),8.,5.,true).content(),30.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::Definite(63.),(30.,80.),8.,5.,true).content(),50.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::MinContent,(30.,80.),8.,5.,true).content(),30.);
         style.width=Length::Auto;
-        assert_eq!(realize(&style,AvailableSpace::Definite(150.),(30.,80.),8.,5.,true).content(),137.);
-        assert_eq!(realize(&style,AvailableSpace::Definite(150.),(30.,80.),8.,5.,false).content(),80.);
-        assert_eq!(realize(&style,AvailableSpace::MinContent,(30.,80.),8.,5.,true).content(),30.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::Definite(150.),(30.,80.),8.,5.,true).content(),137.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::Definite(150.),(30.,80.),8.,5.,false).content(),80.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::MinContent,(30.,80.),8.,5.,true).content(),30.);
     }
 
     #[test]
     fn cyclic_min_calc_preserves_its_absolute_floor_without_using_the_finite_proxy() {
         let mut style=ComputedStyle::initial();style.width=Length::Percent(50.);style.min_width=Length::Calc(90.,20.);style.max_width=Length::Percent(25.);
         percentages::normalize(&mut style,[AvailableSpace::Indefinite,AvailableSpace::Indefinite],AvailableSpace::Indefinite,GridAxis::Rows,OperationKind::Layout,false);
-        let realized=realize(&style,AvailableSpace::Indefinite,(30.,80.),0.,0.,false);
+        let realized=realize_same_basis(&style,AvailableSpace::Indefinite,(30.,80.),0.,0.,false);
         assert_eq!(realized.content(),90.);assert_eq!(realized.percentage_basis(),None);
         // A real base keeps percentages and yields a different used width.
         let mut defined=ComputedStyle::initial();defined.width=Length::Percent(50.);
-        assert_eq!(realize(&defined,AvailableSpace::Definite(200.),(30.,80.),0.,0.,false).content(),100.);
+        assert_eq!(realize_same_basis(&defined,AvailableSpace::Definite(200.),(30.,80.),0.,0.,false).content(),100.);
     }
 
     #[test]
     fn numeric_border_box_bounds_subtract_edges_once_and_minimum_wins_conflicts() {
         let mut style=ComputedStyle::initial();style.box_sizing=BoxSizing::BorderBox;
         style.width=Length::Px(60.);style.min_width=Length::Px(90.);style.max_width=Length::Px(70.);
-        assert_eq!(realize(&style,AvailableSpace::Indefinite,(30.,80.),10.,4.,false).content(),80.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::Indefinite,(30.,80.),10.,4.,false).content(),80.);
     }
 
     #[test]
     fn intrinsic_minimum_and_maximum_keywords_do_not_disappear_in_a_numeric_proxy() {
         let mut style=ComputedStyle::initial();style.width=Length::Px(55.);style.min_width=Length::MaxContent;
-        assert_eq!(realize(&style,AvailableSpace::Indefinite,(30.,80.),10.,4.,false).content(),80.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::Indefinite,(30.,80.),10.,4.,false).content(),80.);
         style.min_width=Length::Auto;style.max_width=Length::MinContent;
-        assert_eq!(realize(&style,AvailableSpace::Indefinite,(30.,80.),10.,4.,false).content(),30.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::Indefinite,(30.,80.),10.,4.,false).content(),30.);
         style.width=Length::MaxContent;style.max_width=Length::FitContent;
-        assert_eq!(realize(&style,AvailableSpace::Definite(64.),(30.,80.),10.,4.,false).content(),50.);
+        assert_eq!(realize_same_basis(&style,AvailableSpace::Definite(64.),(30.,80.),10.,4.,false).content(),50.);
     }
 
     #[test]
@@ -278,5 +285,17 @@ mod tests {
         let (measured,expected)=measured_item("#probe{width:50%;padding-left:10%}#reference{width:max-content;padding-left:30px}",AvailableSpace::Indefinite,AvailableSpace::Definite(300.));
         assert!((measured.inline.content()-expected.0).abs()<0.02);
         assert!((measured.outer_block-expected.1).abs()<0.02);
+    }
+
+    #[test]
+    fn min_content_constraint_does_not_erase_a_definite_containing_block_percentage_base() {
+        let mut style=ComputedStyle::initial();style.width=Length::Percent(50.);
+        let fixed=super::realize(&style,AvailableSpace::MinContent,AvailableSpace::Definite(100.),(30.,80.),0.,0.,false);
+        assert_eq!(fixed.content(),50.);assert_eq!(fixed.available(),AvailableSpace::MinContent);
+        assert_eq!(fixed.percentage_basis(),Some(100.));
+        style.width=Length::Auto;
+        assert_eq!(super::realize(&style,AvailableSpace::MinContent,AvailableSpace::Definite(100.),(30.,80.),0.,0.,false).content(),30.);
+        style.width=Length::FitContent;
+        assert_eq!(super::realize(&style,AvailableSpace::MinContent,AvailableSpace::Definite(100.),(30.,80.),0.,0.,false).content(),30.);
     }
 }

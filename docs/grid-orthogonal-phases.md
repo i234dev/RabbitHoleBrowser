@@ -155,3 +155,10 @@ real projected descendants, mixed fixed/infinite span transport and full
 orthogonal orientation/relayout visual controls remain required before
 activation, followed by the unchanged 26-case and wider gates. No reference or
 baseline is changed to make this preparatory checkpoint pass.
+
+The contribution consumer additionally supplies its intrinsic constraint
+separately from the real containing-block percentage basis. For example, an
+item measured under MinContent in a fixed 100px track still resolves its
+`width:50%` to 50px, whereas an automatic item selects its min-content size.
+Realizing a finite width cannot create or erase that definite base. This is
+covered by a further control before the general column collector is wired.
