@@ -5,7 +5,8 @@
 //! completion value, exception and console output must be identical.
 
 use crate::realm::Realm;
-use std::cell::RefCell;
+use crate::{JsResult, Value};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Completion value or error, then the console output.
@@ -196,10 +197,118 @@ fn native_code_is_freed_with_its_function() {
 fn watchdog_stops_native_loop() {
     let mut realm = Realm::new();
     realm.set_jit(true, 0);
+    // Compile and enter this same loop before starting the deadline. Measuring
+    // only cumulative entries could pass on a previous, unrelated native call.
+    realm.eval("function spin(stop) { var i = 0; while (i !== stop) { i = (i + 1) | 0 } return i; } spin(1)", "spin-prepare.js").unwrap();
+    let before = realm.jit_entries();
     realm.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(200)));
-    let r = realm.eval("function spin() { var i = 0; while (true) { i = (i + 1) | 0 } } spin()", "spin.js");
-    let e = r.expect_err("the watchdog stops the loop");
-    assert!(realm.error_to_string(&e).contains("timed out"), "{}", realm.error_to_string(&e));
+    let r = realm.eval("spin(Infinity)", "spin.js");
+    let error = realm.root(r.expect_err("the watchdog stops the loop"));
+    let entries = realm.jit_entries();
+    let aborts = realm.watchdog_abort_count();
+    realm.set_deadline(None);
+    let message = realm.error_to_string(&error.value());
+    assert!(message.contains("timed out"), "{message}");
+    assert!(aborts > 0, "the watchdog really aborted execution");
+    if rabbithole_jit::supported() {
+        assert!(entries > before, "the interrupted invocation must enter native code, not just its warmup");
+    } else { assert_eq!(entries, 0); }
+    eprintln!("native-canary watchdog target={}-{} override_enabled={} entries_before={before} entries_after={entries} watchdog_aborts={aborts}", std::env::consts::OS, std::env::consts::ARCH, realm.jit_enabled());
+}
+
+// Unlike general differential checks, these record entry at the native host
+// callback and after its reentrant JS call. Windows uses only the existing
+// validation override; Options::on remains blocked there.
+#[derive(Default)]
+struct CallbackGcCanary {
+    entries_at_callback: Cell<u64>,
+    entries_after_reentry: Cell<u64>,
+    collections: Cell<usize>,
+}
+
+fn canary_collect(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+    let stats = realm.native_data::<CallbackGcCanary>(realm.current_native().unwrap()).unwrap();
+    realm.gc();
+    stats.collections.set(stats.collections.get() + 1);
+    Ok(Value::Undefined)
+}
+
+fn canary_reenter_and_collect(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+    let stats = realm.native_data::<CallbackGcCanary>(realm.current_native().unwrap()).unwrap();
+    stats.entries_at_callback.set(realm.jit_entries());
+    let callback = args[0].clone();
+    let held = args[1].clone();
+    let result = realm.call(callback, Value::Undefined, &[held])?;
+    // This host is GC-safe: its arguments are rooted by call_native, and its
+    // newly returned value needs a root until this extra collection finishes.
+    realm.native_root(result.clone());
+    stats.entries_after_reentry.set(realm.jit_entries());
+    realm.gc();
+    stats.collections.set(stats.collections.get() + 1);
+    Ok(result)
+}
+
+#[test]
+fn native_override_callback_reentry_keeps_values_alive_through_gc() {
+    const SOURCE: &str = r#"
+        function callback(kept) {
+            var sum = 0;
+            for (var i = 0; i < 2048; i++) {
+                var trash = { index: i, values: [i, i + 1] };
+                sum += trash.index;
+            }
+            __canaryCollect();
+            if (kept.marker !== 'alive' || kept.nested.value !== 7) throw 'callback lost its argument';
+            return { kept: kept, sum: sum };
+        }
+        function outer() {
+            var held = { marker: 'alive', nested: { value: 7 } };
+            for (var i = 0; i < 2048; i++) { var trash = [i, { value: i }]; }
+            var result = __canaryReenter(callback, held);
+            __canaryCollect();
+            return result.kept === held && result.sum === 2096128 && held.nested.value === 7;
+        }
+        outer()
+    "#;
+    for stress in [crate::realm::GC_STRESS_FULL, crate::realm::GC_STRESS_INCREMENTAL] {
+        for requested in [false, true] {
+            let mut realm = Realm::new();
+            realm.set_jit(requested, 0);
+            realm.gc_enabled = true;
+            realm.gcx.no_gc = false;
+            realm.gcx.stress = stress;
+            realm.gcx.incremental = stress == crate::realm::GC_STRESS_INCREMENTAL;
+            let stats = Rc::new(CallbackGcCanary::default());
+            let global = realm.global();
+            for (name, arity, function) in [
+                ("__canaryCollect", 0, canary_collect as crate::NativeFn),
+                ("__canaryReenter", 2, canary_reenter_and_collect as crate::NativeFn),
+            ] {
+                let native = realm.new_native_function_full(name, arity, function, Some(stats.clone()), Vec::new(), false);
+                realm.define_property(global, name, Value::Object(native), crate::HIDDEN);
+                realm.mark_gc_safe(global, name);
+            }
+            realm.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_secs(30)));
+            let outcome = realm.eval(SOURCE, "native-callback-gc-canary.js");
+            realm.set_deadline(None);
+            let result = outcome.unwrap();
+            assert_eq!(result, Value::Bool(true), "requested={requested} stress={stress}");
+            assert_eq!(stats.collections.get(), 3, "three explicit collections actually ran");
+            if requested && rabbithole_jit::supported() {
+                assert!(realm.jit_enabled());
+                assert!(stats.entries_at_callback.get() > 0, "outer entered native before its host callback");
+                assert!(stats.entries_after_reentry.get() > stats.entries_at_callback.get(), "the reentrant callback itself entered native");
+            } else {
+                assert!(!realm.jit_enabled());
+                assert_eq!(realm.jit_entries(), 0);
+                assert_eq!(stats.entries_at_callback.get(), 0);
+                assert_eq!(stats.entries_after_reentry.get(), 0);
+            }
+            assert!(realm.frames.is_empty() && realm.vstack.is_empty() && realm.new_target_stack.is_empty());
+            assert_eq!(realm.native_depth, 0);
+            eprintln!("native-canary callback-gc target={}-{} requested_override={requested} enabled={} stress={stress} entries_at_callback={} entries_after_reentry={} total_entries={} explicit_collections={}", std::env::consts::OS, std::env::consts::ARCH, realm.jit_enabled(), stats.entries_at_callback.get(), stats.entries_after_reentry.get(), realm.jit_entries(), stats.collections.get());
+        }
+    }
 }
 
 #[test]
