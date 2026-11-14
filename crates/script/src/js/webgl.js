@@ -117,8 +117,15 @@
   }
   function offset(s, value) {
     value = +value;
-    if (!Number.isSafeInteger(value) || value < 0) { flag(s, GL.INVALID_VALUE); return null; }
-    return value;
+    // GLintptr/GLsizeiptr are ordinary signed Web IDL long long values:
+    // non-finite values become zero, fractions truncate, then wrap at 64 bits.
+    // Keep a signed remainder so adding 2^64 cannot round a small negative to zero.
+    if (!Number.isFinite(value) || value === 0) return 0;
+    value = Math.trunc(value) % 0x10000000000000000;
+    if (value >= 0x8000000000000000) value -= 0x10000000000000000;
+    else if (value < -0x8000000000000000) value += 0x10000000000000000;
+    if (value < 0) { flag(s, GL.INVALID_VALUE); return null; }
+    return value === 0 ? 0 : value;
   }
   const index = (s, value) => { value >>>= 0; if (value >= limits.maxVertexAttribs) { flag(s, GL.INVALID_VALUE); return null; } return value; };
   function uniformLocation(s, value) {

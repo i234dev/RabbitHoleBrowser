@@ -1,0 +1,85 @@
+<!doctype html>
+<title>WebGL signed 64-bit offsets</title>
+<link rel="match" href="webgl-idl-offsets-ref.html">
+<style>body{margin:0}canvas{display:block}</style>
+<canvas id="gl1" width="4" height="4"></canvas><canvas id="gl2" width="4" height="4"></canvas>
+<script>
+for (const [id, version] of [['gl1', 1], ['gl2', 2]]) {
+  const gl = document.getElementById(id).getContext(version === 2 ? 'webgl2' : 'webgl', {preserveDrawingBuffer:true, premultipliedAlpha:false});
+  function check(condition, message) { if (!condition) throw new Error(version + ': ' + message); }
+  function error(expected, message) { check(gl.getError() === expected, message); }
+  function compile(kind, source) {
+    const shader = gl.createShader(kind); gl.shaderSource(shader, source); gl.compileShader(shader);
+    check(gl.getShaderParameter(shader, gl.COMPILE_STATUS), gl.getShaderInfoLog(shader)); return shader;
+  }
+  const prefix = version === 2 ? '#version 300 es\n' : '';
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, prefix + (version === 2 ? 'in' : 'attribute') + ' vec2 p;' + (version === 2 ? 'in' : 'attribute') + ' vec4 color;' + (version === 2 ? 'out' : 'varying') + ' vec4 tint;void main(){gl_Position=vec4(p,0.0,1.0);tint=color;}'));
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, prefix + 'precision mediump float;' + (version === 2 ? 'in vec4 tint;out vec4 pixel;' : 'varying vec4 tint;') + 'void main(){' + (version === 2 ? 'pixel' : 'gl_FragColor') + '=tint;}'));
+  gl.linkProgram(program); check(gl.getProgramParameter(program, gl.LINK_STATUS), gl.getProgramInfoLog(program)); gl.useProgram(program);
+  const positions = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, positions);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), gl.STATIC_DRAW);
+  const position = gl.getAttribLocation(program, 'p'); gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(position);
+  const colors = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, colors);
+  const red = new Uint8Array([255,0,0,255,255,0,0,255,255,0,0,255]);
+  const green = new Uint8Array([0,255,0,255,0,255,0,255,0,255,0,255]);
+  gl.bufferData(gl.ARRAY_BUFFER, red, gl.STATIC_DRAW);
+  const color = gl.getAttribLocation(program, 'color'); gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, 0); gl.enableVertexAttribArray(color);
+  const indices = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indices);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0,1,2,0,1,2]), gl.STATIC_DRAW);
+  function pixel() { const bytes = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes); error(gl.NO_ERROR, 'read'); return Array.from(bytes).join(','); }
+  function draw(offset) { gl.drawElements(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, offset); error(gl.NO_ERROR, 'draw'); }
+  draw(0); check(pixel() === '255,0,0,255', 'initial red control');
+
+  for (const zero of [NaN, undefined, Infinity, -Infinity, -0, -0.9, 2 ** 64, -(2 ** 64)]) {
+    gl.bufferSubData(gl.ARRAY_BUFFER, zero, green); error(gl.NO_ERROR, 'zero-like update');
+    gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, zero); error(gl.NO_ERROR, 'zero-like pointer');
+    const pointer = gl.getVertexAttribOffset(color, gl.VERTEX_ATTRIB_ARRAY_POINTER);
+    check(pointer === 0 && !Object.is(pointer, -0), 'canonical positive zero');
+    draw(zero); check(pixel() === '0,255,0,255', 'converted update/draw');
+    if (version === 2) { gl.drawElementsInstanced(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, zero, 1); error(gl.NO_ERROR, 'zero-like instanced draw'); }
+  }
+
+  const halfGreen = new Uint8Array([0,128,0,255,0,128,0,255,0,128,0,255]);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 1.9, halfGreen.subarray(1)); error(gl.NO_ERROR, 'fractional update');
+  draw(2.9); check(pixel() === '0,128,0,255', 'fraction truncates to byte offset');
+  gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, 1.9); error(gl.NO_ERROR, 'fractional pointer');
+  check(gl.getVertexAttribOffset(color, gl.VERTEX_ATTRIB_ARRAY_POINTER) === 1, 'pointer truncates');
+  gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, positions); gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 3.9);
+  error(gl.INVALID_OPERATION, 'alignment after truncation');
+  check(gl.getVertexAttribOffset(position, gl.VERTEX_ATTRIB_ARRAY_POINTER) === 0, 'bad pointer unchanged');
+  gl.bindBuffer(gl.ARRAY_BUFFER, colors);
+
+  for (const invalid of [-1, -1.9, 2 ** 63, -(2 ** 63), 2 ** 32, 2 ** 53, 2 ** 63 - 1024, -(2 ** 63) - 2048, 2 ** 64 + 4096]) {
+    gl.bufferSubData(gl.ARRAY_BUFFER, invalid, red); error(gl.INVALID_VALUE, 'invalid update');
+    draw(0); check(pixel() === '0,128,0,255', 'rejected update preserved colors');
+  }
+  for (const [invalid, expected] of [[-1.9, gl.INVALID_VALUE], [2 ** 63, gl.INVALID_VALUE], [1.9, gl.INVALID_OPERATION], [2 ** 32, gl.INVALID_OPERATION], [2 ** 53, gl.INVALID_OPERATION], [2 ** 63 - 1024, gl.INVALID_OPERATION]]) {
+    gl.drawElements(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, invalid); error(expected, 'invalid element range/alignment');
+    check(pixel() === '0,128,0,255', 'rejected draw preserved pixels');
+    if (version === 2) {
+      gl.drawElementsInstanced(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, invalid, 1); error(expected, 'invalid instanced range/alignment');
+      check(pixel() === '0,128,0,255', 'rejected instanced draw preserved pixels');
+    }
+  }
+  for (const large of [2 ** 32, 2 ** 53, 2 ** 63 - 1024]) {
+    gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, large); error(gl.NO_ERROR, 'large pointer definition');
+    check(gl.getVertexAttribOffset(color, gl.VERTEX_ATTRIB_ARRAY_POINTER) === large, 'pointer kept 64-bit range');
+    gl.drawArrays(gl.TRIANGLES, 0, 3); error(gl.INVALID_OPERATION, 'large pointer draw checked');
+    check(pixel() === '0,128,0,255', 'large pointer draw was atomic');
+  }
+  gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+  let conversions = 0;
+  const numeric = {valueOf(){ conversions++; return NaN; }};
+  gl.bufferSubData(gl.ARRAY_BUFFER, numeric, green); error(gl.NO_ERROR, 'object offset'); check(conversions === 1, 'one update conversion');
+  conversions = 0; gl.vertexAttribPointer(color, 4, gl.UNSIGNED_BYTE, true, 0, numeric); error(gl.NO_ERROR, 'object pointer'); check(conversions === 1, 'one pointer conversion');
+  conversions = 0; draw(numeric); check(conversions === 1, 'one draw conversion');
+  if (version === 2) { conversions = 0; gl.drawElementsInstanced(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, numeric, 1); error(gl.NO_ERROR, 'object instanced offset'); check(conversions === 1, 'one instanced conversion'); }
+  const sentinel = new Error('offset conversion'); let caught = false;
+  try { gl.bufferSubData(gl.ARRAY_BUFFER, {valueOf(){throw sentinel;}}, red); } catch (exception) { caught = exception === sentinel; }
+  check(caught, 'conversion exception propagated'); error(gl.NO_ERROR, 'conversion exception has no GL error');
+  draw(0); check(pixel() === '0,255,0,255', 'exception preserved green buffer');
+  console.log(version, pixel());
+}
+</script>

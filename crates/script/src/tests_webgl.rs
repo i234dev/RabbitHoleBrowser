@@ -1,6 +1,9 @@
 //! WebGL bindings exercise the real software backend through JavaScript.
 use crate::tests::{run, setup};
 
+#[path = "tests_webgl_offsets.rs"]
+mod offsets;
+
 
 #[test]
 fn webgl_float_uniform_families_cannot_be_inferred_from_array_lengths() {
