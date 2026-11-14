@@ -71,7 +71,7 @@ Options shared with `rabbithole mcp`: `--bot`, `--no-robots`,
 
 ## Lighter read output
 
-Candidate reading contract (pending combined validation): `links` defaults to
+The published reading contract keeps `links` set to
 `true`, retaining `[text](@eN)` and stable navigation refs. `links=false` emits
 plain anchor text without assigning link refs. `cites` defaults to `false`:
 anchors inside a `<sup>` that resolve to a fragment of this same document are
@@ -504,8 +504,10 @@ still accepted and mean the default.
 
 ## Performance
 
-Measured on the development machine (release build, Linux x86-64, while
-other builds were running):
+Historical observations on the development machine (release build, Linux
+x86-64, while other builds were running). Interface changes do not refresh
+these measurements. Rows without a source revision or date are historical
+observations, not measurements of the current version:
 
 | What | Result |
 |------|--------|
