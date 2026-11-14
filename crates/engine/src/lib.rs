@@ -1022,6 +1022,8 @@ pub struct Engine {
     /// How `confirm()`/`prompt()` are answered on newly built pages
     /// (before their scripts run).
     pub dialog_policy: scripting::DialogPolicy,
+    /// Real top-level context transport, configured by the browser embedder.
+    pub window_context: Option<rabbithole_script::WindowContext>,
     registered_fonts: std::cell::RefCell<HashSet<String>>,
     /// Frame tree of all pages (what scripts see of other frames) and
     /// queued cross-frame messages.
@@ -1115,6 +1117,7 @@ impl Engine {
             start: std::time::Instant::now(),
             device_pixel_ratio: 1.0,
             dialog_policy: scripting::DialogPolicy::default(),
+            window_context: None,
             registered_fonts: Default::default(),
             frames: Default::default(),
             frame_context: Default::default(),
@@ -1136,6 +1139,7 @@ impl Engine {
             start: std::time::Instant::now(),
             device_pixel_ratio: 1.0,
             dialog_policy: scripting::DialogPolicy::default(),
+            window_context: None,
             registered_fonts: Default::default(),
             frames: Default::default(),
             frame_context: Default::default(),
@@ -1260,6 +1264,17 @@ impl Engine {
             frames: frames::Frames::default(),
             anim: animations::AnimationState::default(),
         };
+        if page.frame_depth == 0 {
+            if let Some(context) = &self.window_context {
+                if page.url.scheme == "about" && page.url.path == "blank" {
+                    if let Some(info) = context.host.info(context.id) {
+                        page.frame_origin = Some(info.origin);
+                        page.base_url = info.base_url;
+                    }
+                }
+                context.host.document_changed(context.id, page.url.clone(), frames::page_origin(&page));
+            }
+        }
         page.script.dialog_policy = self.dialog_policy.clone();
         page.sheet_signature = stylesheet_signature(&page.doc);
         self.restyle(&mut page);

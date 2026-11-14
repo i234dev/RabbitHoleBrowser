@@ -19,6 +19,10 @@ pub trait HostEnv {
     fn service_worker_scope(&self) -> Option<crate::ServiceWorkerScope> { None }
     fn doc(&mut self) -> &mut Document;
     fn document_url(&self) -> Url;
+    /// Effective origin, including inheritance by an initial about:blank.
+    fn security_origin(&self) -> String { self.document_url().origin() }
+    /// Top-level context owned by the embedder; absent in workers/headless hosts.
+    fn window_context(&self) -> Option<crate::WindowContext> { None }
     fn base_url(&self) -> Url;
     /// DOM or style changed: the engine should restyle + relayout lazily.
     fn mark_dom_dirty(&mut self);

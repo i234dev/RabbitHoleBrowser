@@ -195,6 +195,10 @@ impl HostEnv for EngineEnv<'_> {
     fn document_url(&self) -> Url {
         self.page.url.clone()
     }
+    fn security_origin(&self) -> String { crate::frames::page_origin(self.page) }
+    fn window_context(&self) -> Option<rabbithole_script::WindowContext> {
+        if self.page.frame_depth == 0 { self.engine.window_context.clone() } else { None }
+    }
     fn base_url(&self) -> Url {
         // The document base URL follows the current `<base href>` (scripts
         // add and change it); only the head is searched, which is where
@@ -962,6 +966,24 @@ impl Engine {
     /// Evaluate JavaScript in the page (devtools console / CLI).
     pub fn eval_in_page(&self, page: &mut Page, src: &str) -> String {
         self.eval_with_outcome(page, src).0
+    }
+
+    /// Deliver a real cross-tab message after checking the receiver's live
+    /// origin again. The sender origin was captured by the context owner.
+    pub fn deliver_window_message(&self, page: &mut Page, message: &rabbithole_script::WindowMessage) -> ScriptOutcome {
+        if !self.scripting || page.frame_depth != 0 { return ScriptOutcome::default(); }
+        let Some(context) = &self.window_context else { return ScriptOutcome::default() };
+        let Some(target) = context.host.info(context.id).filter(|info| !info.closed) else { return ScriptOutcome::default() };
+        if message.target_origin_key.as_ref().map(|key| key != &target.origin_key).unwrap_or(false) { return ScriptOutcome::default(); }
+        self.ensure_script_host(page);
+        let Some(mut host) = page.script.host.take() else { return ScriptOutcome::default() };
+        {
+            let mut env = EngineEnv { engine: self, page };
+            host.deliver_window_message(&mut env, message);
+            host.run_jobs(&mut env);
+        }
+        page.script.host = Some(host);
+        self.settle(page, false)
     }
 
     /// Evaluate JavaScript in the page and report its side effects

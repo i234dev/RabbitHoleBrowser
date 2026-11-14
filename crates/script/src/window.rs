@@ -798,15 +798,7 @@ fn win_prompt(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value
 }
 
 fn win_open(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
-    let url = arg_str_opt(realm, args, 0)?.unwrap_or_default();
-    if url.is_empty() {
-        return Ok(Value::Null);
-    }
-    match resolve_url(&url) {
-        Some(u) => with_env(|env| env.open_window(u)),
-        None => return Err(crate::misc::dom_exception(realm, "SyntaxError", &format!("Failed to execute 'open' on 'Window': Unable to open a window with invalid URL '{url}'."))),
-    }
-    Ok(Value::Null)
+    crate::windows::open(realm, args)
 }
 
 fn win_post_message(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -851,7 +843,7 @@ fn win_event(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
 }
 
 fn win_origin(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::str(&current_url().origin()))
+    Ok(Value::str(&with_env(|env| env.security_origin())))
 }
 
 fn win_is_secure(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {

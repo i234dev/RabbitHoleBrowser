@@ -366,5 +366,6 @@
     g.dispatchEvent(ev);
   }
 
-  return { serialize, deserialize, windowFor, deliver, foreignGet, foreignCall, foreignDispatch, eventInit };
+  return { serialize, deserialize, windowFor, deliver, foreignGet, foreignCall, foreignDispatch, eventInit,
+    registerWindow(proxy) { ids.set(proxy, -1); } };
 })
