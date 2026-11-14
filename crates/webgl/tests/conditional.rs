@@ -24,7 +24,7 @@ fn typed_ternary_selections_in_vertex_and_fragment_produce_real_pixels() {
         c.buffer_data(ARRAY_BUFFER, &bytes).unwrap();
         let location = c.get_attrib_location(program, "position").unwrap() as u32;
         c.vertex_attrib_pointer(location, 2, FLOAT, false, 0, 0).unwrap(); c.enable_vertex_attrib_array(location, true).unwrap();
-        let selected = c.get_uniform_location(program, "selected").unwrap();
+        let selected = c.get_uniform_location(program, "selected").unwrap().expect("selected is an active bool uniform");
         for (value, expected) in [(0, [0,255,0,255]), (1, [255,0,0,255]), (0, [0,255,0,255])] {
             c.uniform_i32(selected, &[value]).unwrap();
             c.draw_arrays(TRIANGLES, 0, 3).unwrap();
