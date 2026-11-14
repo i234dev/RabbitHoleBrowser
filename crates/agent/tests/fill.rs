@@ -360,3 +360,60 @@ fn fill_focus_changes_to_readonly_disabled_or_type_prevent_value_writes() {
         assert_eq!(control_value(&a, "field"), "keep", "{path}: {output}");
     }
 }
+
+#[test]
+fn fill_focus_document_open_keeps_new_controls_untouched() {
+    let srv = serve(Box::new(|_| html(r#"<html><body><label>Original<input id="original" value="original-keep" onfocus="document.open();document.write('&lt;html>&lt;body>&lt;label>Replacement&lt;input id=&quot;replacement&quot; value=&quot;replacement-keep&quot;>&lt;/label>&lt;/body>&lt;/html>');document.close()"></label></body></html>"#)));
+    let mut a = agent();
+    let snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
+    let old_ref = ref_of(&snapshot, "textbox \"Original\"");
+    let ti = a.active.unwrap();
+    let old_node = a.tabs[ti].frames[0].page.doc.element_by_id("original").unwrap();
+    let document = a.tabs[ti].frames[0].page.doc.weak_identity();
+    let result = call(&mut a, "fill", &json!({"ref":old_ref,"value":"must-not-write"}));
+    let page = &a.tabs[ti].frames[0].page;
+    assert!(!document.is_for(&page.doc), "focus must really replace the document incarnation");
+    let replacement = page.doc.element_by_id("replacement").unwrap();
+    assert_ne!(replacement, old_node, "ordinary document.write appends arena nodes");
+    assert!(!page.doc.is_connected(old_node));
+    assert_eq!(page.control_text(replacement), "replacement-keep");
+    assert!(result.is_err(), "a disconnected old target must not be filled");
+}
+
+#[test]
+fn fill_focus_document_open_with_reattached_node_stops_values_and_submit() {
+    let srv = serve(Box::new(|path| {
+        if path == "/" {
+            return html(r#"<html><body><form id="original-form" action="/wrong-submit"><label>First<input id="first" name="a" value="original-keep" onfocus="var saved=this.form;document.open();document.write('&lt;html>&lt;body>&lt;h1>Replacement document&lt;/h1>&lt;/body>&lt;/html>');document.close();document.body.appendChild(saved);this.removeAttribute('onfocus');this.value='replacement-keep'" oninput="document.body.setAttribute('data-wrong-input','yes')" onchange="document.body.setAttribute('data-wrong-change','yes')"></label><label>Tail<input id="tail" name="z" value="tail-keep"></label><button type="submit">Send</button></form></body></html>"#);
+        }
+        html("<html><body><h1>Wrong submission</h1></body></html>")
+    }));
+    let mut a = agent();
+    let snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
+    let old_ref = ref_of(&snapshot, "textbox \"First\"");
+    assert!(ok(&mut a, "fill", json!({})).contains("@f1 form"));
+    let ti = a.active.unwrap();
+    let old_node = a.tabs[ti].frames[0].page.doc.element_by_id("first").unwrap();
+    let document = a.tabs[ti].frames[0].page.doc.weak_identity();
+    let result = call(&mut a, "fill", &json!({"ref":"@f1","values":{"a":"must-not-write","z":"must-not-write"},"submit":true}));
+    let page = &a.tabs[ti].frames[0].page;
+    assert!(!document.is_for(&page.doc), "focus must really replace the document incarnation");
+    let replacement = page.doc.element_by_id("first").unwrap();
+    assert_eq!(replacement, old_node, "the callback reattaches the same arena node in the new incarnation");
+    assert!(page.doc.is_connected(replacement));
+    assert_eq!(page.control_text(replacement), "replacement-keep", "fill must not overwrite a target from a replaced document");
+    assert_eq!(page.control_text(page.doc.element_by_id("tail").unwrap()), "tail-keep");
+    let body = page.doc.body().unwrap();
+    assert!(page.doc.attr(body, "data-wrong-input").is_none());
+    assert!(page.doc.attr(body, "data-wrong-change").is_none());
+    assert!(srv.requests().iter().all(|(path, _)| path != "/wrong-submit"));
+    let output = match result { Err(error) => error, Ok(out) => panic!("replaced document must stop fill, got {}", out.text) };
+    assert!(output.contains("document was replaced") && output.contains("Not attempted after document replacement: \"z\"") && output.contains("submit=true was not attempted"), "{output}");
+    assert!(err(&mut a, "fill", json!({"ref":old_ref,"value":"late"})).contains("unknown"));
+    assert!(err(&mut a, "fill", json!({"ref":"@f1"})).contains("unknown"));
+    let snapshot = ok(&mut a, "snapshot", json!({}));
+    let fresh_ref = ref_of(&snapshot, "textbox \"First\"");
+    assert_ne!(fresh_ref, old_ref);
+    ok(&mut a, "fill", json!({"ref":fresh_ref,"value":"fresh"}));
+    assert_eq!(control_value(&a, "first"), "fresh");
+}
