@@ -486,6 +486,7 @@ impl Command {
         matches!(
             self,
             Self::Clear(_)
+                | Self::BlitFramebuffer(..)
                 | Self::DrawArrays(..)
                 | Self::DrawElements(..)
                 | Self::DrawArraysInstanced(..)
