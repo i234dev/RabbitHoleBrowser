@@ -235,6 +235,16 @@ fn dispatch_rendered(engine: &Engine, page: &mut crate::Page, deadline: Instant)
         host.realm().begin_task();
         host.realm().set_deadline(Some(deadline.min(Instant::now() + task_budget)));
         let result = host.eval_for_console(&mut env, "document.documentElement.dispatchEvent(new Event('TestRendered', {bubbles:true}))");
+        if host.watchdog_abort_count() == 0 {
+            // Complete this dispatch's microtask checkpoint before any rAF.
+            // run_jobs normally starts fresh tasks; keep this checkpoint on
+            // one explicit deadline, then restore the page's original budget.
+            let original_budget = host.realm().task_budget;
+            host.realm().set_task_budget(None);
+            host.realm().set_deadline(Some(deadline.min(Instant::now() + task_budget)));
+            host.run_jobs(&mut env);
+            host.realm().set_task_budget(original_budget);
+        }
         host.realm().set_deadline(None);
         result
     };
@@ -477,7 +487,10 @@ mod tests {
                 if(event.target!==document.documentElement||!event.bubbles||event.isTrusted||document.readyState!=='complete')return;
                 const result=document.getElementById('result');
                 if(result.offsetWidth!==800||result.offsetHeight!==600)return;
+                let checkpoint=false;
+                Promise.resolve().then(()=>{checkpoint=true;});
                 requestAnimationFrame(()=>{
+                  document.documentElement.setAttribute('data-order',checkpoint?'promise,frame':'frame');
                   result.style.backgroundColor='lime';
                   document.documentElement.classList.remove('reftest-wait');
                 });
@@ -491,6 +504,7 @@ mod tests {
         let frame = finish_render(&engine, &mut page, Duration::from_secs(2)).unwrap();
         assert!(!waiting(&page));
         assert_eq!(page.doc.attr(page.doc.html_element().unwrap(), "data-count"), Some("1"));
+        assert_eq!(page.doc.attr(page.doc.html_element().unwrap(), "data-order"), Some("promise,frame"));
         assert!(frame.rgba.chunks_exact(4).all(|pixel| pixel == [0, 255, 0, 255]));
         let errors: Vec<_> = page.take_console().into_iter().filter(|(level, _)| level == "error").collect();
         assert!(errors.is_empty(), "{errors:?}");
@@ -504,6 +518,37 @@ mod tests {
         let reference_frame = finish_render(&engine, &mut reference, Duration::from_secs(2)).unwrap();
         assert!(compare_passes(&frame, &reference_frame, false, None).0);
         let errors: Vec<_> = reference.take_console().into_iter().filter(|(level, _)| level == "error").collect();
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn rendered_dispatch_finishes_promise_only_completion_before_returning() {
+        let mut engine = Engine::new_bundled_fonts_only();
+        let mut page = engine.load_html(
+            r#"<!doctype html><html class=reftest-wait><style>
+              body{margin:0}#result{width:100vw;height:100vh;background:red}
+            </style><div id=result></div><script>
+              document.documentElement.addEventListener('TestRendered',()=>{
+                Promise.resolve().then(()=>{
+                  document.getElementById('result').style.backgroundColor='lime';
+                  document.documentElement.setAttribute('data-completion','promise');
+                  document.documentElement.classList.remove('reftest-wait');
+                });
+              });
+            </script>"#,
+            rabbithole_net::Url::parse("https://example.test/").unwrap(),
+            Viewport { width: WIDTH, height: HEIGHT },
+        );
+        assert!(waiting(&page));
+        let original_budget = page.script.host.as_mut().unwrap().realm().task_budget;
+        dispatch_rendered(&engine, &mut page, Instant::now() + Duration::from_secs(2)).unwrap();
+        // No timer/rAF/tick may rescue a checkpoint omitted by the dispatch.
+        assert!(!waiting(&page));
+        assert_eq!(page.doc.attr(page.doc.html_element().unwrap(), "data-completion"), Some("promise"));
+        assert_eq!(page.script.host.as_mut().unwrap().realm().task_budget, original_budget);
+        let frame = engine.snapshot(&page);
+        assert!(frame.rgba.chunks_exact(4).all(|pixel| pixel == [0, 255, 0, 255]));
+        let errors: Vec<_> = page.take_console().into_iter().filter(|(level, _)| level == "error").collect();
         assert!(errors.is_empty(), "{errors:?}");
     }
 
@@ -524,23 +569,32 @@ mod tests {
 
     #[test]
     fn removing_wait_before_a_watchdog_abort_cannot_produce_a_partial_pass() {
-        let mut engine = Engine::new_bundled_fonts_only();
-        let mut page = engine.load_html(
-            r#"<!doctype html><html class=reftest-wait><style>body{background:lime}</style><script>
+        for microtask in [false, true] {
+            let mut engine = Engine::new_bundled_fonts_only();
+            let script = r#"
               document.documentElement.addEventListener('TestRendered',()=>{
-                document.documentElement.classList.remove('reftest-wait');
-                while(true){}
+                const spin=()=>{
+                  document.documentElement.classList.remove('reftest-wait');
+                  while(true){}
+                };
+                if(MICROTASK)Promise.resolve().then(spin);else spin();
               });
-            </script>"#,
-            rabbithole_net::Url::parse("https://example.test/").unwrap(),
-            Viewport { width: WIDTH, height: HEIGHT },
-        );
-        // A short budget belongs only to this test page, not the browser default.
-        page.script.host.as_mut().unwrap().realm().set_task_budget(Some(Duration::from_millis(10)));
-        let error = finish_render(&engine, &mut page, Duration::from_secs(2)).unwrap_err();
-        assert!(!waiting(&page));
-        assert!(page.script.watchdog_abort_count() > 0);
-        assert!(error.contains("watchdog"), "{error}");
+            "#.replace("MICROTASK", if microtask { "true" } else { "false" });
+            let html = format!("<!doctype html><html class=reftest-wait><style>body{{background:lime}}</style><script>{script}</script>");
+            let mut page = engine.load_html(
+                &html,
+                rabbithole_net::Url::parse("https://example.test/").unwrap(),
+                Viewport { width: WIDTH, height: HEIGHT },
+            );
+            // A short budget belongs only to this test page, not the browser default.
+            let test_budget = Some(Duration::from_millis(10));
+            page.script.host.as_mut().unwrap().realm().set_task_budget(test_budget);
+            let error = finish_render(&engine, &mut page, Duration::from_secs(2)).unwrap_err();
+            assert!(!waiting(&page), "microtask={microtask}");
+            assert!(page.script.watchdog_abort_count() > 0, "microtask={microtask}");
+            assert!(error.contains("watchdog"), "microtask={microtask}: {error}");
+            assert_eq!(page.script.host.as_mut().unwrap().realm().task_budget, test_budget);
+        }
     }
 
     #[test]
