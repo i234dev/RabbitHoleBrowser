@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Intrinsic grid contributions respect the item's preferred width</title>
+<link rel="match" href="grid-item-intrinsic-preferred-width-ref.html">
+<style>
+.grid { display: grid; width: max-content; border: 5px solid purple; margin-bottom: 10px; font-size: 0; }
+.item > span { display: inline-block; width: 40px; height: 20px; background: green; }
+#max { grid-template-columns: min-content; }
+#max .item { width: max-content; }
+#min { grid-template-columns: max-content; }
+#min .item { width: min-content; }
+</style>
+<div class="grid" id="max"><div class="item"><span></span> <span></span></div></div>
+<div class="grid" id="min"><div class="item"><span></span> <span></span></div></div>

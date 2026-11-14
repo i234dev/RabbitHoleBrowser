@@ -1080,7 +1080,17 @@ impl<'a> Layouter<'a> {
                         let (w, _) = self.replaced_size(child, Some(cbw), None, it.edges.pb_h);
                         (w, w)
                     } else {
-                        self.intrinsic(child)
+                        let (min, max) = self.intrinsic(child);
+                        // The preferred intrinsic width also constrains the
+                        // contribution to the opposite intrinsic track size.
+                        // A max-content item cannot shrink to min-content,
+                        // and a min-content item does not contribute its
+                        // unconstrained max-content size (§6.2).
+                        match child.style.width {
+                            Length::MinContent => (min, min),
+                            Length::MaxContent => (max, max),
+                            _ => (min, max),
+                        }
                     }
                 }
             };
