@@ -1,0 +1,51 @@
+{
+  "source_revision": "6646f49a9fb7fd36c46c5c0cbe8fc51214247e3b",
+  "version": "0.1.10",
+  "measurement_date": "2026-11-14",
+  "timezone": "Europe/Madrid",
+  "platform": "Linux x86-64, WSL2",
+  "compiler": "Rust 1.99.1, existing WSL toolchain",
+  "profile": "ci",
+  "command": "cargo test --workspace --profile ci --features jit --locked --no-fail-fast",
+  "fixture_source": "crates/agent/tests/frameworks.rs",
+  "scope": "All 66 existing functional DOM/input framework fixtures extracted from complete workspace runs. Not a timing benchmark or an authenticated website test.",
+  "modes": {
+    "off": {
+      "passed": 66,
+      "failed": 0,
+      "ignored": 0,
+      "requested_environment": {
+        "RABBITHOLE_JIT": "off",
+        "RH_GC_STRESS": "inc"
+      }
+    },
+    "on": {
+      "passed": 66,
+      "failed": 0,
+      "ignored": 0,
+      "requested_environment": {
+        "RABBITHOLE_JIT": "on",
+        "RH_GC_STRESS": "inc",
+        "RABBITHOLE_JIT_THRESHOLD": "0"
+      }
+    }
+  },
+  "evidence_files": [
+    {
+      "file": "workspace-6646f49-off.log",
+      "sha256": "aa5269e0ad172ae570eea55246aeda248637ba4259c5108004da9e016ac5bf86"
+    },
+    {
+      "file": "workspace-6646f49-off.stderr.log",
+      "sha256": "510014d9e1130669b88d4ec771ad788005fd0aa8bf5440f46a0ab58ddfa141c1"
+    },
+    {
+      "file": "workspace-6646f49-on.log",
+      "sha256": "b3390911d7ea06087bc0a132fe2cb3c0e76a2eecce2caf40e490f40f9288bf07"
+    },
+    {
+      "file": "workspace-6646f49-on.stderr.log",
+      "sha256": "1ed189a5809ea4d0eef71be3ff5555fa0ccd973498eb61ba2375652e45920337"
+    }
+  ]
+}
