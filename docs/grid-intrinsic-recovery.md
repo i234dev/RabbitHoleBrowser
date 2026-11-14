@@ -31,7 +31,7 @@ min/max maxima. Row-lanes measurement receives definite inherited geometry
 before computing inline contributions; explicit intrinsic preferred sizes remain
 in force in an independent axis. Stretch relayout keeps inherited geometry.
 
-Written, not executed: twenty-three geometry/compaction/unwind/budget unit tests, nineteen layout tests,
+Written, not executed: twenty-five geometry/compaction/unwind/budget unit tests, nineteen layout tests,
 two new visual reftest pairs and the seven prior GridSpace tests. The original
 four deferred intrinsic constraint fixtures are preserved byte-for-byte. Style
 metadata/gap tests are in the dependency commits.
@@ -46,7 +46,8 @@ Blocking validation and algorithm limits:
   intrinsic estimate and final orthogonal layout. The bounded adjustment alone
   must not be presented as a complete solution.
 - New subgrid work has a per-Layouter budget of 1,000,000 charged transport,
-  placement and contribution units and a maximum of 128 active projection frames.
+  placement and contribution units (including full track/name copies and subtree
+  invalidation visits, reserved before that work) and a maximum of 128 active projection frames.
   Exhaustion explicitly fails layout through the existing panic boundary; it
   does not return a truncated contribution set. Scope guards restore styles and
   recursion counters while unwinding. Ordinary Grid work is not charged. This
