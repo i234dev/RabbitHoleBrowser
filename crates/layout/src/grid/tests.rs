@@ -1,4 +1,4 @@
-use super::{auto_track, expand_tracks, repeat_fixed_size, size_tracks, size_tracks_with_space, Contribution, GridSpace, Sizing, Track};
+use super::{auto_track, complete_track_sizing, expand_tracks, repeat_fixed_size, resolve_intrinsic_tracks, size_tracks, size_tracks_with_space, Contribution, GridSpace, Sizing, Track};
 use rabbithole_style::{Length, TrackListItem, TrackSize};
 
 fn intrinsic_sizes(tracks: &[Track], contributions: &[Contribution]) -> (Vec<f32>, Vec<f32>) {
