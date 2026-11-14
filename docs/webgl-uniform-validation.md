@@ -47,8 +47,8 @@ or array-length cap changes sequence semantics. Typed arrays use their captured
 intrinsic length getter rather than an overridable page property. Conversion
 and validation finish before a native command can write a uniform; native copies
 receive at most one supported element. Scalar wrappers do not iterate arrays.
-The native bridge is invoked with captured `Reflect.apply` and an array-like
-argument list; the retained sequence is copied using its already computed size.
+The native bridge is invoked with captured `Reflect.apply` and a null-prototype
+array-like argument list; the retained sequence is copied using its already computed size.
 Both operations avoid consulting a public iterator or typed-array length getter.
 
 GLSL uniform arrays, integer vector types, and WebGL 2 source-offset/source-length
@@ -79,5 +79,7 @@ locations, and scalar argument order. Causal controls poison `Array.iterator`
 and `%TypedArray%.prototype.length`, restore both in `finally`, and require
 different native readback and pixel values. An explicit throwing-spread control
 prevents a broken VM optimization from hiding the native-call regression.
+A throwing numeric setter on `Object.prototype` must also leave the native
+argument list, uniform readback and changed pixels unaffected.
 Run Script tests with GC stress both off
 and on. No CTS suite or full WebGL conformance result is claimed.

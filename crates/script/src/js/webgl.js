@@ -62,7 +62,7 @@
     syncSize(s);
     if (s.lost) return { error: GL.CONTEXT_LOST_WEBGL, value: null };
     // Native invocation consumes an array-like list, never a page iterator.
-    const nativeArgs = { 0: s.surface.id, 1: command, length: args.length + 2 };
+    const nativeArgs = { __proto__: null, 0: s.surface.id, 1: command, length: args.length + 2 };
     for (let i = 0; i < args.length; ++i) nativeArgs[i + 2] = args[i];
     const result = invoke(N.webglCall, N, nativeArgs);
     if (result.error) flag(s, result.error);
