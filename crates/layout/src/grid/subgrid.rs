@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::cell::Cell;
 
-use super::{expand_tracks, size_tracks_with_space, Contribution, GridItem, GridSpace, MeasurePhase, Sizing, Track, TrackList};
+use super::{expand_tracks, size_tracks_with_space, Contribution, GridGeometry, GridItem, GridSpace, MeasurePhase, Sizing, Track, TrackList};
 use crate::block::Layouter;
 use crate::flex::ItemEdges;
 use crate::tree::{Formatting, LayoutBox, WmKind};
@@ -52,7 +52,7 @@ pub(crate) struct SharedTracks {
     pub(super) collapsed: Vec<bool>,
     pub(super) gap: f32,
     /// Placement-only geometry must not resolve cyclic percentage edges.
-    definite: bool,
+    pub(super) definite: bool,
     /// Accumulated ancestor edge layers at internal track boundaries. A
     /// nested subgrid must retain its parent's own gap adjustments as well.
     edge_before: Vec<f32>,
@@ -212,7 +212,12 @@ pub(super) fn tracks(b:&LayoutBox,rows:bool,avail:Option<f32>,gap:f32)->TrackLis
 
 /// Grid2 §12.1's initial opposite-axis estimate uses definite maximum track
 /// sizes, floored by definite minimums. Other tracks remain indefinite.
-pub(super) fn fixed_section(list:&TrackList,start:usize,end:usize,gap:f32,names:bool)->Option<AxisInheritance> {
+#[cfg(test)]
+fn fixed_section(list:&TrackList,start:usize,end:usize,gap:f32,names:bool)->Option<AxisInheritance> {
+    fixed_section_aligned(list,start,end,gap,names,None,ContentDistribution::FlexStart)
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fixed_section_aligned(list:&TrackList,start:usize,end:usize,gap:f32,names:bool,available:Option<f32>,align:ContentDistribution)->Option<AxisInheritance> {
     if list.inherited.is_some() {
         let (positions,_)=positions(list,gap,None,ContentDistribution::FlexStart);
         return Some(section(list,&positions,start,end,gap,names));
@@ -228,21 +233,28 @@ pub(super) fn fixed_section(list:&TrackList,start:usize,end:usize,gap:f32,names:
         if t.collapsed {t.base=0.;}t.limit=Some(t.base);t
     }).collect();
     let fixed=TrackList{tracks,names:list.names.clone(),inherited:None};
-    let (positions,_)=positions(&fixed,gap,None,ContentDistribution::FlexStart);
+    let available=if list.tracks.iter().all(|t|matches!(t.max,Sizing::Fixed(_))) {available} else {None};
+    let (positions,_)=positions(&fixed,gap,available,align);
     Some(section(&fixed,&positions,start,end,gap,names))
 }
 
 /// During contribution collection the span and line names are definite, but
 /// intrinsic track sizes are not. Keep that placement geometry separate from
 /// used geometry; grandchildren contribute directly without sizing this axis.
-pub(super) fn sizing_section(list:&TrackList,start:usize,end:usize,gap:f32,names:bool)->AxisInheritance {
+#[cfg(test)]
+fn sizing_section(list:&TrackList,start:usize,end:usize,gap:f32,names:bool)->AxisInheritance {
+    sizing_section_aligned(list,start,end,gap,names,None,ContentDistribution::FlexStart)
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sizing_section_aligned(list:&TrackList,start:usize,end:usize,gap:f32,names:bool,available:Option<f32>,align:ContentDistribution)->AxisInheritance {
     let tracks=list.tracks.iter().cloned().map(|mut t| {
         t.base=match t.min {Sizing::Fixed(v)=>v,_=>0.};
         if t.collapsed {t.base=0.;}
         t
     }).collect();
     let probe=TrackList{tracks,names:list.names.clone(),inherited:list.inherited.clone()};
-    let (positions,_)=positions(&probe,gap,None,ContentDistribution::FlexStart);
+    let available=if list.tracks.iter().all(|t|matches!((t.min,t.max),(Sizing::Fixed(a),Sizing::Fixed(b)) if a==b)) {available} else {None};
+    let (positions,_)=positions(&probe,gap,available,align);
     let mut source=section(&probe,&positions,start,end,gap,names);
     if let AxisInheritance::Tracks(axis)=&mut source {
         let definite=list.inherited.as_ref().map_or_else(||list.tracks[start..end].iter().all(|t|matches!((t.min,t.max),(Sizing::Fixed(a),Sizing::Fixed(b)) if a==b)),|parent|parent.definite);
@@ -255,16 +267,12 @@ pub(super) fn scope_reference(columns:&Option<AxisInheritance>,fallback:f32)->f3
     match columns {Some(AxisInheritance::Tracks(axis))=>if axis.definite {axis.extent()} else {0.},_=>fallback}
 }
 
-/// An intrinsic axis is indefinite for percentage contributions. A placement
-/// span consisting entirely of fixed tracks already supplies a definite area.
-pub(super) fn placement_reference(list:&TrackList,start:usize,end:usize,gap:f32)->f32 {
-    if let Some(axis)=&list.inherited {
-        return if axis.definite {axis.starts[end-1]+axis.sizes[end-1]-axis.starts[start]} else {0.};
+pub(super) fn known_block_size(b:&LayoutBox,reference:f32)->Option<f32> {
+    if let Some(axis)=shared(b,true) {
+        if axis.definite {return Some((axis.extent()-axis.inset_start-axis.inset_end).max(0.));}
     }
-    let tracks=&list.tracks[start..end];
-    if !tracks.iter().all(|t|matches!((t.min,t.max),(Sizing::Fixed(a),Sizing::Fixed(b)) if a==b)) {return 0.;}
-    let count=tracks.iter().filter(|t|!t.collapsed).count();
-    tracks.iter().map(|t|if t.collapsed {0.} else if let Sizing::Fixed(size)=t.min {size} else {0.}).sum::<f32>()+gap*count.saturating_sub(1)as f32
+    let pb=b.style.padding.top.resolve_or_zero(reference)+b.style.padding.bottom.resolve_or_zero(reference)+b.style.border_width.top+b.style.border_width.bottom;
+    crate::flex::resolve_size(b.style.height,None,b.style.box_sizing==rabbithole_style::BoxSizing::BorderBox,pb)
 }
 
 /// Preserve the inherited/hypothetical margin layer while resolving the
@@ -478,7 +486,7 @@ impl<'a> Layouter<'a> {
             let reverse=if rows {b.wm_kind==WmKind::Ccw} else {b.wm_kind==WmKind::Cw};
             let count=shared(b,rows).map_or(0,|axis|axis.sizes.len());
             let Some(inner)=b.children.first_mut() else {return Vec::new();};
-            let inner_inline=shared(inner,false).map(|axis|(axis.extent()-axis.inset_start-axis.inset_end).max(0.));
+            let inner_inline=shared(inner,false).filter(|axis|axis.definite).map(|axis|(axis.extent()-axis.inset_start-axis.inset_end).max(0.));
             let mut result=self.subgrid_axis_contributions(inner,!rows,inner_inline,phase);
             if reverse {for c in &mut result {let start=c.start;c.start=count.saturating_sub(c.end);c.end=count.saturating_sub(start);}}
             return result;
@@ -489,17 +497,19 @@ impl<'a> Layouter<'a> {
         let style=b.style.clone();
         let col_gap=gap(b,false,inline_size.unwrap_or(0.));
         let row_gap=gap(b,true,0.);
-        let (items,mut cols,row_tracks)=self.place_items(b,&style,inline_size,None,col_gap,row_gap,0.,0.);
+        let block=known_block_size(b,inline_size.unwrap_or(0.));
+        let geometry=GridGeometry{inline:inline_size,block};
+        let (items,mut cols,row_tracks)=self.place_items(b,&style,inline_size,block,col_gap,row_gap,0.,0.);
         let mut result=if !rows {
-            self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),phase)
+            self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase)
         } else {
             if cols.inherited.is_none() {
-                let contributions=self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),phase);
+                let contributions=self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase);
                 let space=inline_size.map(GridSpace::Definite).unwrap_or(GridSpace::MaxContent);
                 size_tracks_with_space(&mut cols.tracks,&contributions,space,col_gap,false);
             }
             let (positions,_)=positions(&cols,col_gap,inline_size,style.justify_content);
-            self.projected_rows(b,&items,&row_tracks,&cols,&positions,col_gap,row_gap,inline_size.unwrap_or(0.),None,phase)
+            self.projected_rows(b,&items,&row_tracks,&cols,&positions,col_gap,row_gap,inline_size.unwrap_or(0.),block,phase)
         };
         empty_edge_contributions(b,rows,if rows {row_gap} else {col_gap},&mut result);
         result
@@ -735,5 +745,26 @@ mod tests {
         let mut style=ComputedStyle::initial();style.margin.left=Length::Percent(10.);style.padding.left=Length::Percent(10.);
         let mut item=item(0,1);item.edges=ItemEdges::new(&style,300.);item.edges.margin.left+=7.;
         let item=rebase_item(&item,&style,300.,100.);assert_eq!(item.edges.margin.left,17.);assert_eq!(item.edges.pb_h,10.);
+    }
+
+    #[test]
+    fn initial_and_used_geometry_keep_definite_distributed_gaps() {
+        let tracks=vec![Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.));2];
+        let mut list=TrackList{tracks,names:vec![vec![],vec![],vec![]],inherited:None};
+        let Some(AxisInheritance::Tracks(initial))=fixed_section_aligned(&list,0,2,0.,true,Some(300.),ContentDistribution::SpaceBetween) else {panic!("missing initial geometry")};
+        assert_eq!(initial.starts,[0.,250.]);assert_eq!(initial.extent(),300.);
+        let AxisInheritance::Tracks(sizing)=sizing_section_aligned(&list,0,2,0.,true,Some(300.),ContentDistribution::SpaceBetween) else {panic!("missing sizing geometry")};
+        assert_eq!(sizing.starts,[0.,250.]);
+        for track in &mut list.tracks {track.base=50.;track.limit=Some(50.);}
+        let (used,_)=positions(&list,0.,Some(300.),ContentDistribution::SpaceBetween);
+        let AxisInheritance::Tracks(used)=section(&list,&used,0,2,0.,true) else {panic!("missing used geometry")};
+        assert_eq!(used.starts,initial.starts);assert_eq!(used.extent(),300.);
+    }
+
+    #[test]
+    fn an_indefinite_track_outside_the_span_prevents_initial_distribution() {
+        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.)),Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.)),Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![],vec![],vec![]],inherited:None};
+        let Some(AxisInheritance::Tracks(initial))=fixed_section_aligned(&list,0,2,0.,true,Some(300.),ContentDistribution::SpaceBetween) else {panic!("missing fixed section")};
+        assert_eq!(initial.starts,[0.,50.]);assert_eq!(initial.extent(),100.);
     }
 }
