@@ -22,6 +22,7 @@ impl<'b> Scope<'b> {
     pub(super) fn new(node:&'b mut LayoutBox,mut bases:[AvailableSpace;2],edge_basis:AvailableSpace,mut contribution:GridAxis,kind:OperationKind,budget:&mut WorkBudget)->Self {
         Self::map(node,budget,|style,box_kind,wrapper| {
             percentages::normalize(style,bases,edge_basis,contribution,kind,box_kind==BoxKind::Image);
+            percentages::freeze_sizes(style,bases);
             percentages::freeze_edges(style,edge_basis);
             if wrapper {bases.swap(0,1);contribution=contribution.opposite();}
         })
@@ -86,8 +87,29 @@ impl FiniteInline {
 
 pub(super) struct RowItemEstimate {
     pub(super) inline:FiniteInline,
+    pub(super) outer_inline:f32,
     pub(super) outer_block:f32,
     pub(super) baseline:f32,
+}
+
+/// The item area's sizing constraints and actual percentage bases are
+/// independent. In particular, MinContent can coexist with a fixed 100px
+/// containing block. A finite execution proxy is neither of these inputs.
+#[derive(Clone,Copy,Debug)]
+pub(super) struct ItemSpace {
+    pub(super) constraints:[AvailableSpace;2],
+    pub(super) bases:[AvailableSpace;2],
+    pub(super) edge_basis:AvailableSpace,
+}
+impl ItemSpace {
+    pub(super) fn new(constraints:[AvailableSpace;2],bases:[AvailableSpace;2],edge_basis:AvailableSpace)->Self {
+        for space in constraints.into_iter().chain(bases).chain([edge_basis]) {
+            if let AvailableSpace::Definite(size)=space {
+                assert!(size.is_finite()&&size>=0.,"Invalid Grid item area space");
+            }
+        }
+        Self{constraints,bases,edge_basis}
+    }
 }
 
 fn vertical_edges(style:&ComputedStyle)->f32 {
@@ -183,24 +205,31 @@ impl<'a> Layouter<'a> {
     /// intercept subgrid descendants before reaching this ordinary path.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn estimate_row_item(&mut self,child:&mut LayoutBox,item:&super::GridItem,spaces:[AvailableSpace;2],edge_basis:AvailableSpace,kind:OperationKind,old_reference:f32)->RowItemEstimate {
+        self.estimate_item(child,item,ItemSpace::new(spaces,spaces,edge_basis),GridAxis::Rows,kind,old_reference)
+    }
+
+    /// The ordinary-item consumer supplies fresh area constraints/bases at
+    /// every pass. The legacy helper keeps its original identical-input
+    /// contract through estimate_row_item above.
+    pub(super) fn estimate_item(&mut self,child:&mut LayoutBox,item:&super::GridItem,space:ItemSpace,axis:GridAxis,kind:OperationKind,old_reference:f32)->RowItemEstimate {
         assert_eq!(subgrid::requests(child),(false,false),"Subgrid measurement must remain in the parent phase");
         let original=ItemEdges::new(&child.style,old_reference);
-        let scope=Scope::new(child,spaces,edge_basis,GridAxis::Rows,kind,&mut self.grid_work);
+        let scope=Scope::new(child,space.bases,space.edge_basis,axis,kind,&mut self.grid_work);
         let style=scope.node.style.clone();
-        let mut edges=ItemEdges::new(&style,edge_basis.definite().unwrap_or(0.));
+        let mut edges=ItemEdges::new(&style,space.edge_basis.definite().unwrap_or(0.));
         // The item's hypothetical inherited layer is not part of its own
         // computed margins. Preserve it separately while normalizing %.
         edges.margin.left+=item.edges.margin.left-original.margin.left;
         edges.margin.right+=item.edges.margin.right-original.margin.right;
         edges.margin.top+=item.edges.margin.top-original.margin.top;
         edges.margin.bottom+=item.edges.margin.bottom-original.margin.bottom;
-        let content=self.estimated_inline_content(scope.node,spaces);
+        let content=self.estimated_inline_content(scope.node,space.bases);
         let natural=scope.node.kind==BoxKind::Image||style.aspect_ratio.is_some_and(|ratio|ratio>0.);
         let stretch=style.width.is_auto()&&!edges.auto.left&&!edges.auto.right&&(item.justify==ItemAlign::Stretch||(!natural&&matches!(item.justify,ItemAlign::Normal|ItemAlign::Auto)));
         let preferred=if style.width.is_auto()&&!stretch&&scope.node.kind!=BoxKind::Image {
-            style.aspect_ratio.filter(|ratio|*ratio>0.).zip(style.height.resolve_definite(spaces[1].definite())).map(|(ratio,height)|Length::Px(height*ratio)).unwrap_or(style.width)
+            style.aspect_ratio.filter(|ratio|*ratio>0.).zip(style.height.resolve_definite(space.bases[1].definite())).map(|(ratio,height)|Length::Px(height*ratio)).unwrap_or(style.width)
         } else {style.width};
-        let inline=realize_preferred(&style,preferred,spaces[0],spaces[0],content,edges.pb_h,edges.margin_sum(Axis::Row),stretch);
+        let inline=realize_preferred(&style,preferred,space.constraints[0],space.bases[0],content,edges.pb_h,edges.margin_sum(Axis::Row),stretch);
         // Only execution uses a finite proxy; own cyclic preferred/min/max
         // lengths and percentage edges were normalized in the scope above.
         let proxy=inline.percentage_basis().unwrap_or_else(||(inline.content()+edges.pb_h+edges.margin_sum(Axis::Row)).max(0.));
@@ -209,7 +238,7 @@ impl<'a> Layouter<'a> {
             // scoped preferred width, including explicit stretch, so the
             // reported estimate and executed content width stay coherent.
             self.grid_work.charge(1);
-            let height=image_used_height(scope.node,inline.content(),spaces,edges.pb_h,edges.pb_v);
+            let height=image_used_height(scope.node,inline.content(),space.bases,edges.pb_h,edges.pb_v);
             let mut execution=(*style).clone();
             // Both dimensions are already content sizes with local bounds
             // applied. Avoid the old replaced helper's independent clamp
@@ -220,10 +249,10 @@ impl<'a> Layouter<'a> {
             execution.min_height=Length::ZERO;execution.max_height=Length::Auto;
             scope.node.style=Rc::new(execution);
         }
-        let cb=Cb{x:0.,width:proxy,height:spaces[1].definite()};
+        let cb=Cb{x:0.,width:proxy,height:space.bases[1].definite()};
         let mut bfc=Bfc::new();self.forced_content_height=None;
         self.layout_block(scope.node,&cb,0.,&mut bfc,WidthMode::Fixed(inline.content()));
-        RowItemEstimate{inline,outer_block:scope.node.rect.h+edges.margin_sum(Axis::Column),baseline:Self::item_baseline(scope.node)}
+        RowItemEstimate{inline,outer_inline:inline.content()+edges.pb_h+edges.margin_sum(Axis::Row),outer_block:scope.node.rect.h+edges.margin_sum(Axis::Column),baseline:Self::item_baseline(scope.node)}
     }
 }
 
@@ -303,6 +332,9 @@ mod tests {
         measured_case("<div id=probe>XXXX XX</div><div id=reference>XXXX XX</div>",css,[inline,AvailableSpace::Indefinite],edge_basis,ItemAlign::Stretch)
     }
     fn measured_case(html:&str,css:&str,bases:[AvailableSpace;2],edge_basis:AvailableSpace,justify:ItemAlign)->(RowItemEstimate,(f32,f32)) {
+        measured_case_in_space(html,css,ItemSpace::new(bases,bases,edge_basis),justify)
+    }
+    fn measured_case_in_space(html:&str,css:&str,space:ItemSpace,justify:ItemAlign)->(RowItemEstimate,(f32,f32)) {
         let doc=rabbithole_html::parse(html);
         let sheets=[parse_stylesheet(&format!("*{{font:10px/1 monospace}}div{{display:block;min-width:0}}{css}"))];
         let styles=rabbithole_style::style_tree(&doc,&sheets,&MediaEnv{width:800.,height:600.,screen:true,scripting:true});
@@ -321,7 +353,7 @@ mod tests {
         let original=node.style.clone();
         let item=super::super::GridItem{idx:0,area:super::super::Area{row:(0,1),col:(0,1)},edges:ItemEdges::new(&node.style,800.),justify,align:ItemAlign::FlexStart,column_names:true,row_names:true,parent_lanes_auto:false};
         let mut layouter=Layouter::new(&ctx);
-        let measured=layouter.estimate_row_item(node,&item,bases,edge_basis,OperationKind::Layout,800.);
+        let measured=layouter.estimate_item(node,&item,space,GridAxis::Rows,OperationKind::Layout,800.);
         assert!(Rc::ptr_eq(&node.style,&original));assert!(node.intrinsic_cache.is_none());
         assert!((measured.inline.content()-node.content_rect.w).abs()<0.02,"reported {} != executed {}",measured.inline.content(),node.content_rect.w);
         (measured,expected)
@@ -335,6 +367,49 @@ mod tests {
         assert_eq!(realized.percentage_basis(),None);
         let zero=realize_same_basis(&style,AvailableSpace::Definite(0.),(30.,80.),0.,0.,true);
         assert_eq!(zero.content(),0.);assert_eq!(zero.percentage_basis(),Some(0.));
+    }
+
+    #[test]
+    fn ordinary_item_keeps_constraints_and_actual_percentage_bases_separate_end_to_end() {
+        let html="<div id=probe><span></span><span></span></div><div id=reference></div>";
+        for (preferred,constraint,width,height) in [
+            ("50%",AvailableSpace::MinContent,50.,20.),
+            ("calc(10px + 40%)",AvailableSpace::MinContent,50.,20.),
+            ("auto",AvailableSpace::MinContent,40.,20.),
+            ("auto",AvailableSpace::MaxContent,80.,10.),
+        ] {
+            let css=format!("#probe,#probe *{{font:0/0 monospace}}#probe{{width:{preferred};min-width:0}}#probe span{{display:inline-block;width:40px;height:10px;vertical-align:top}}#reference{{width:{width}px;height:{height}px}}");
+            let space=ItemSpace::new([constraint,AvailableSpace::Indefinite],[AvailableSpace::Definite(100.),AvailableSpace::Indefinite],AvailableSpace::Definite(100.));
+            let (measured,expected)=measured_case_in_space(html,&css,space,ItemAlign::FlexStart);
+            assert!((measured.inline.content()-expected.0).abs()<0.02,"{preferred}/{constraint:?}");
+            assert!((measured.outer_block-expected.1).abs()<0.02);
+            assert_eq!(measured.inline.available(),constraint);
+            assert_eq!(measured.inline.percentage_basis(),Some(100.));
+        }
+    }
+
+    #[test]
+    fn item_area_spaces_reject_nonfinite_and_negative_definite_inputs() {
+        for value in [f32::NAN,f32::INFINITY,-1.] {
+            assert!(catch_unwind(||ItemSpace::new([AvailableSpace::Definite(value),AvailableSpace::Indefinite],[AvailableSpace::Indefinite;2],AvailableSpace::Indefinite)).is_err());
+            assert!(catch_unwind(||ItemSpace::new([AvailableSpace::Indefinite;2],[AvailableSpace::Definite(value),AvailableSpace::Indefinite],AvailableSpace::Indefinite)).is_err());
+            assert!(catch_unwind(||ItemSpace::new([AvailableSpace::Indefinite;2],[AvailableSpace::Indefinite;2],AvailableSpace::Definite(value))).is_err());
+        }
+        let zero=ItemSpace::new([AvailableSpace::MinContent,AvailableSpace::Indefinite],[AvailableSpace::Definite(0.),AvailableSpace::Indefinite],AvailableSpace::Definite(0.));
+        assert_eq!(zero.bases[0],AvailableSpace::Definite(0.));
+    }
+
+    #[test]
+    fn wrapper_percent_dimensions_resolve_once_against_the_original_area_axes() {
+        for mode in ["vertical-rl","vertical-lr","sideways-lr"] {
+            let css=format!("#probe{{writing-mode:{mode};width:50%;height:50%;min-height:0}}#reference{{width:50px;height:40px}}");
+            let space=ItemSpace::new([AvailableSpace::MinContent,AvailableSpace::Indefinite],[AvailableSpace::Definite(100.),AvailableSpace::Definite(80.)],AvailableSpace::Definite(300.));
+            let (measured,expected)=measured_case_in_space("<div id=probe></div><div id=reference></div>",&css,space,ItemAlign::Normal);
+            assert_eq!(measured.inline.percentage_basis(),Some(100.));
+            assert_eq!(measured.inline.available(),AvailableSpace::MinContent);
+            assert!((measured.outer_inline-expected.0).abs()<0.02,"{mode}: width {} != {}",measured.outer_inline,expected.0);
+            assert!((measured.outer_block-expected.1).abs()<0.02,"{mode}: height {} != {}",measured.outer_block,expected.1);
+        }
     }
 
     #[test]
@@ -459,7 +534,7 @@ mod tests {
         let mut budget=WorkBudget::default();
         {
             let scope=Scope::new(&mut node,[AvailableSpace::Definite(100.),AvailableSpace::Indefinite],AvailableSpace::Definite(100.),GridAxis::Columns,OperationKind::IntrinsicMin,&mut budget);
-            assert_eq!(scope.node.style.width,Length::Percent(50.));
+            assert_eq!(scope.node.style.width,Length::Px(50.));
             let measured=super::realize(&scope.node.style,AvailableSpace::MinContent,AvailableSpace::Definite(100.),(30.,80.),0.,0.,false);
             assert_eq!(measured.content(),50.);assert_eq!(measured.available(),AvailableSpace::MinContent);
         }
