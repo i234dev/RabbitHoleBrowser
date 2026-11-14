@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Popup lifecycle and message fixture</title>
+<style>body{font:18px sans-serif;margin:40px}button{padding:12px}pre{white-space:pre-wrap}</style>
+<h1>Popup lifecycle and message fixture</h1>
+<p>Serve this directory over HTTP together with popup-callback.html.</p>
+<button id="start">Open test popup</button>
+<pre id="result">Ready</pre>
+<script>
+  var popup, received = [];
+  var result = document.getElementById('result');
+  document.getElementById('start').addEventListener('click', function () {
+    popup = window.open('', 'popup-contract');
+    if (!popup) { result.textContent = 'Popup was blocked or unavailable'; return; }
+    result.textContent = 'Opened blank: closed=' + popup.closed;
+    popup.location = new URL('popup-callback.html', location.href).href;
+    popup.focus();
+  });
+  addEventListener('message', function (event) {
+    if (event.origin !== location.origin || event.source !== popup) return;
+    received.push({data:event.data, origin:event.origin, trusted:event.isTrusted});
+    result.textContent = JSON.stringify(received);
+    setTimeout(function () { result.textContent += '\nPopup closed=' + popup.closed; }, 100);
+  });
+</script>

@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Popup callback fixture</title>
+<p id="status">Testing opener callback.</p>
+<script>
+  if (window.opener) {
+    window.opener.postMessage({kind:'popup-contract', value:42}, location.origin);
+    window.close();
+  } else {
+    document.getElementById('status').textContent = 'No opener';
+  }
+</script>
