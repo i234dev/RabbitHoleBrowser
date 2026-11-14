@@ -1181,6 +1181,7 @@ impl<'a> Layouter<'a> {
             });
             if column_request {
                 let columns=subgrid::sizing_section(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names);
+                let columns=subgrid::item_layer_source(columns,it,&child.style,false,cbw);
                 let rows=if row_request {row_source} else {None};
                 let mut nested=self.with_subgrid(child,Some(columns),rows,cbw,|this,child|this.subgrid_axis_contributions(child,false,None,phase));
                 if it.parent_lanes_auto {nested=subgrid::automatic_contributions(&mut self.grid_work,nested,(it.area.col.1-it.area.col.0)as usize);}
@@ -1229,6 +1230,7 @@ impl<'a> Layouter<'a> {
             let child=&mut b.children[it.idx];
             let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names));
             let rows=subgrid::sizing_section(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names);
+            let rows=subgrid::item_layer_source(rows,it,&child.style,true,cbw);
             let mut nested=self.with_subgrid(child,columns,Some(rows),cbw,|this,child| {
                 let mut item=*it;subgrid::stretch_item(child,&mut item);
                 let inner_w=this.grid_item_width(child,&item,aw,cbw);

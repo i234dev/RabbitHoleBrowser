@@ -409,14 +409,17 @@ impl<'a> Layouter<'a> {
                 continue;
             }
             self.grid_work.charge(if it.fixed.is_some() {1} else {tl.tracks.len().saturating_sub(it.span.min(tl.tracks.len())).saturating_add(1)});
-            for s in Self::lane_positions(it, &tl.tracks) {
+            let positions=Self::lane_positions(it,&tl.tracks);
+            let largest=if it.fixed.is_none() {subgrid::largest_automatic_layer(b,true,gap,it.span,&positions)} else {None};
+            for s in positions {
                 let mut item=Self::lane_grid_item(it,s,true);
                 subgrid::item_edges(b,&mut item,0.,gap);
+                if let Some((before,after))=largest {item.edges.margin.top=it.edges.margin.top+before;item.edges.margin.bottom=it.edges.margin.bottom+after;}
                 let mut lane=*it;lane.edges=item.edges;
                 let child=&mut b.children[it.idx];
                 let (columns,rows)=subgrid::requests(child);
                 let columns=columns.then_some(subgrid::AxisInheritance::Stacking);
-                let rows=rows.then(||subgrid::sizing_section(tl,s,s+it.span,gap,it.fixed.is_some()));
+                let rows=rows.then(||subgrid::item_layer_source(subgrid::sizing_section(tl,s,s+it.span,gap,it.fixed.is_some()),&item,&child.style,true,cbw));
                 let mut nested=self.with_subgrid(child,columns,rows,cbw,|this,child| {
                     if subgrid::shared(child,true).is_some() {this.subgrid_axis_contributions(child,true,Some(w),phase)}
                     else {let h=this.lane_item_height(child,&lane,w,cbw);vec![Contribution{start:0,end:it.span.min(tl.tracks.len()),min:h,max:h}]}
@@ -587,9 +590,12 @@ impl<'a> Layouter<'a> {
             let mut virtual_items=Vec::new();
             for it in &items {
                 self.grid_work.charge(if it.fixed.is_some() {1} else {tl.tracks.len().saturating_sub(it.span.min(tl.tracks.len())).saturating_add(1)});
-                for start in Self::lane_positions(it,&tl.tracks) {
+                let positions=Self::lane_positions(it,&tl.tracks);
+                let largest=if it.fixed.is_none() {subgrid::largest_automatic_layer(b,false,col_gap,it.span,&positions)} else {None};
+                for start in positions {
                 let mut item=Self::lane_grid_item(it,start,false);
                 subgrid::item_edges(b,&mut item,col_gap,row_gap);
+                if let Some((before,after))=largest {item.edges.margin.left=it.edges.margin.left+before;item.edges.margin.right=it.edges.margin.right+after;}
                 virtual_items.push(item);
             }}
             out=self.projected_columns(b,&virtual_items,&tl,None,col_gap,row_gap,inline_size.unwrap_or(0.),phase);
