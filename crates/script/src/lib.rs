@@ -60,6 +60,8 @@ mod tests_webgl_matrix_validation;
 mod tests_webgl_matrices;
 #[cfg(test)]
 mod tests_webgl_precision;
+#[cfg(test)]
+mod tests_webgl_facing;
 
 pub use env::HostEnv;
 pub use host::{NodeRef, TargetKey};

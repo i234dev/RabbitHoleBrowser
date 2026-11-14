@@ -35,6 +35,7 @@ struct Triangle {
     vertices: [Screen; 3],
     bounds: [i64; 4],
     area: f64,
+    front_facing: bool,
 }
 fn edge(a: &Screen, b: &Screen, x: f64, y: f64) -> f64 {
     (b.position[0] - a.position[0]) * (y - a.position[1])
@@ -193,6 +194,9 @@ impl Context {
                     if area == 0. || !area.is_finite() {
                         continue;
                     }
+                    // Preserve the projected polygon's original orientation.
+                    // The swap below only canonicalizes coverage edge tests.
+                    let front_facing = (area > 0.) == (self.front_face == gl::CCW);
                     if area < 0. {
                         v.swap(1, 2);
                         area = -area;
@@ -252,6 +256,7 @@ impl Context {
                         vertices: v,
                         bounds,
                         area,
+                        front_facing,
                     });
                 }
             }
@@ -339,6 +344,7 @@ impl Context {
                     "gl_FragCoord".into(),
                     Value::from(Ty::Vec4, &[px as f32, py as f32, depth, iw as f32]),
                 );
+                env.insert("gl_FrontFacing".into(), Value::from(Ty::Bool, &[u8::from(t.front_facing) as f32]));
                 let out = e
                     .fragment
                     .run_with_sampler(env, &|unit, uv| self.sample_texture(unit, uv));

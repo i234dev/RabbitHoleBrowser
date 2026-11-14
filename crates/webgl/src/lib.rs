@@ -157,6 +157,7 @@ pub struct Context {
     depth_mask: bool,
     depth_test: bool,
     depth_func: u32,
+    front_face: u32,
     context_version: u32,
     max_glsl_version: u32,
     current_vertex_array: u32,
@@ -231,6 +232,7 @@ impl Context {
             depth_mask: true,
             depth_test: false,
             depth_func: gl::LESS,
+            front_face: gl::CCW,
             context_version: 1,
             max_glsl_version: 100,
             current_vertex_array: 0,
@@ -340,6 +342,11 @@ impl Context {
             return Err(Error::InvalidEnum);
         }
         self.depth_func = func;
+        Ok(())
+    }
+    pub fn front_face(&mut self, winding: u32) -> Result<()> {
+        if !matches!(winding, gl::CW | gl::CCW) { return Err(Error::InvalidEnum); }
+        self.front_face = winding;
         Ok(())
     }
     pub fn clear(&mut self, mask: u32) -> Result<()> {

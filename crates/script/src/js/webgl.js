@@ -17,6 +17,7 @@
     NO_ERROR: 0, INVALID_ENUM: 0x0500, INVALID_VALUE: 0x0501, INVALID_OPERATION: 0x0502, OUT_OF_MEMORY: 0x0505, INVALID_FRAMEBUFFER_OPERATION: 0x0506, CONTEXT_LOST_WEBGL: 0x9242,
     DEPTH_BUFFER_BIT: 0x0100, STENCIL_BUFFER_BIT: 0x0400, COLOR_BUFFER_BIT: 0x4000,
     POINTS: 0, LINES: 1, LINE_LOOP: 2, LINE_STRIP: 3, TRIANGLES: 4, TRIANGLE_STRIP: 5, TRIANGLE_FAN: 6,
+    CW: 0x0900, CCW: 0x0901, FRONT_FACE: 0x0B46,
     SRC_COLOR: 0x0300, ONE_MINUS_SRC_COLOR: 0x0301, SRC_ALPHA: 0x0302, ONE_MINUS_SRC_ALPHA: 0x0303,
     DST_ALPHA: 0x0304, ONE_MINUS_DST_ALPHA: 0x0305, DST_COLOR: 0x0306, ONE_MINUS_DST_COLOR: 0x0307, SRC_ALPHA_SATURATE: 0x0308,
     CONSTANT_COLOR: 0x8001, ONE_MINUS_CONSTANT_COLOR: 0x8002, CONSTANT_ALPHA: 0x8003, ONE_MINUS_CONSTANT_ALPHA: 0x8004,
@@ -372,6 +373,7 @@
     colorMask(r, green, b, a) { required('colorMask', 4, arguments); const s = state(this), mask = [!!r, !!green, !!b, !!a]; if (!call(s, 'colorMask', ...mask).error) s.colorMask = mask; }
     depthMask(value) { required('depthMask', 1, arguments); const s = state(this); if (!call(s, 'depthMask', !!value).error) s.depthMask = !!value; }
     depthFunc(func) { required('depthFunc', 1, arguments); const s = state(this); if (!call(s, 'depthFunc', func >>> 0).error) s.depthFunc = func >>> 0; }
+    frontFace(winding) { required('frontFace', 1, arguments); const s = state(this); winding >>>= 0; if (!call(s, 'frontFace', winding).error) s.frontFace = winding; }
     clear(mask) { required('clear', 1, arguments); const s = state(this); changed(s, call(s, 'clear', mask >>> 0)); }
     drawArrays(mode, first, count) { required('drawArrays', 3, arguments); const s = state(this); first |= 0; count |= 0; if (first < 0 || count < 0) { flag(s, GL.INVALID_VALUE); return; } changed(s, call(s, 'drawArrays', mode >>> 0, first, count)); }
     drawElements(mode, count, type, byteOffset) { required('drawElements', 4, arguments); const s = state(this); count |= 0; byteOffset = offset(s, byteOffset); if (count < 0) { flag(s, GL.INVALID_VALUE); return; } if (byteOffset !== null) changed(s, call(s, 'drawElements', mode >>> 0, count, type >>> 0, byteOffset)); }
@@ -440,6 +442,7 @@
         case GL.SCISSOR_TEST: return s.scissorEnabled; case GL.DEPTH_TEST: return s.depthEnabled;
         case GL.COLOR_CLEAR_VALUE: return new Float32Array(s.clearColor); case GL.COLOR_WRITEMASK: return s.colorMask.slice();
         case GL.DEPTH_CLEAR_VALUE: return s.clearDepth; case GL.DEPTH_WRITEMASK: return s.depthMask; case GL.DEPTH_FUNC: return s.depthFunc;
+        case GL.FRONT_FACE: return s.frontFace;
         case GL.CURRENT_PROGRAM: return s.program;
         case GL.ARRAY_BUFFER_BINDING: return s.bindings[GL.ARRAY_BUFFER] || null; case GL.ELEMENT_ARRAY_BUFFER_BINDING: return s.bindings[GL.ELEMENT_ARRAY_BUFFER] || null;
         case GL.PACK_ALIGNMENT: return s.packAlignment; case GL.UNPACK_ALIGNMENT: return s.unpackAlignment;
@@ -566,7 +569,7 @@
   }
   // These operations are deliberately unavailable until their rendering
   // semantics exist. Libraries get an observable GL error, never fake IDs.
-  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'cullFace', 'frontFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'uniform2i', 'uniform3i', 'uniform4i']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
+  for (const name of ['generateMipmap', 'compressedTexImage2D', 'compressedTexSubImage2D', 'copyTexImage2D', 'copyTexSubImage2D', 'cullFace', 'polygonOffset', 'sampleCoverage', 'stencilFunc', 'stencilFuncSeparate', 'stencilMask', 'stencilMaskSeparate', 'stencilOp', 'stencilOpSeparate', 'clearStencil', 'depthRange', 'lineWidth', 'detachShader', 'uniform2i', 'uniform3i', 'uniform4i']) hidden(WebGLRenderingContext.prototype, name, function () { flag(state(this), GL.INVALID_OPERATION); });
   for (const [name, value] of Object.entries(GL)) {
     Object.defineProperty(WebGLRenderingContext, name, { value, enumerable: true });
     Object.defineProperty(WebGLRenderingContext.prototype, name, { value, enumerable: true });
@@ -643,7 +646,7 @@
     const result = N.webglNew(surface.id, w, h, attrs.alpha, attrs.premultipliedAlpha, version, attrs.depth);
     if (result.error) { canvas.dispatchEvent(new WebGLContextEvent('webglcontextcreationerror', { cancelable: true, statusMessage: 'Software drawing buffer creation failed' })); return null; }
     const ctx = Object.create(version === 2 ? WebGL2RenderingContext.prototype : WebGLRenderingContext.prototype);
-    const s = { canvas, surface, attrs, version, drawFramebuffer: null, readFramebuffer: null, renderbuffer: null, currentVAO: null, defaultVAO: null, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, blendEnabled: false, blendFactors: [GL.ONE, GL.ZERO, GL.ONE, GL.ZERO], blendEquations: [GL.FUNC_ADD, GL.FUNC_ADD], blendColor: [0, 0, 0, 0], clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, divisor: 0, current: [0, 0, 0, 1] })) };
+    const s = { canvas, surface, attrs, version, drawFramebuffer: null, readFramebuffer: null, renderbuffer: null, currentVAO: null, defaultVAO: null, lost: false, errors: [], logicalWidth: w, logicalHeight: h, viewport: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissor: [0, 0, Math.max(w, 1), Math.max(h, 1)], scissorEnabled: false, depthEnabled: false, blendEnabled: false, blendFactors: [GL.ONE, GL.ZERO, GL.ONE, GL.ZERO], blendEquations: [GL.FUNC_ADD, GL.FUNC_ADD], blendColor: [0, 0, 0, 0], clearColor: [0, 0, 0, 0], clearDepth: 1, depthMask: true, depthFunc: GL.LESS, frontFace: GL.CCW, colorMask: [true, true, true, true], program: null, bindings: {}, activeTexture: 0, textures: Array.from({ length: limits.maxTextureUnits }, () => null), packAlignment: 4, unpackAlignment: 4, flipY: false, unpackPremultiplied: false, unpackColorspace: GL.BROWSER_DEFAULT_WEBGL, attribs: Array.from({ length: limits.maxVertexAttribs }, () => ({ enabled: false, buffer: null, size: 4, type: GL.FLOAT, normalized: false, stride: 0, offset: 0, divisor: 0, current: [0, 0, 0, 1] })) };
     s.defaultVAO = { attribs: s.attribs, element: null };
     contexts.set(ctx, s); surface.ctx = ctx; surface.mode = 'webgl';
     N.canvasMarkDirty(surface);

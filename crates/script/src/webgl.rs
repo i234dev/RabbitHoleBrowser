@@ -282,6 +282,7 @@ enum Command {
     BlendColor([f32; 4]),
     DepthMask(bool),
     DepthFunc(u32),
+    FrontFace(u32),
     ColorMask([bool; 4]),
     ClearColor([f32; 4]),
     ClearDepth(f32),
@@ -409,6 +410,7 @@ impl Command {
             }
             "depthMask" => Self::DepthMask(b!(2)),
             "depthFunc" => Self::DepthFunc(u!(2)),
+            "frontFace" => Self::FrontFace(u!(2)),
             "colorMask" => Self::ColorMask([b!(2), b!(3), b!(4), b!(5)]),
             "clearColor" => {
                 Self::ClearColor([n!(2) as f32, n!(3) as f32, n!(4) as f32, n!(5) as f32])
@@ -656,6 +658,10 @@ impl Command {
                 }
                 Self::DepthFunc(func) => {
                     ctx.depth_func(func)?;
+                    Reply::Void
+                }
+                Self::FrontFace(winding) => {
+                    ctx.front_face(winding)?;
                     Reply::Void
                 }
                 Self::ColorMask(mask) => {

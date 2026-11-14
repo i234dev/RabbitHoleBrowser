@@ -1489,6 +1489,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         );
     }
     if !vertex {
+        p.shader.symbols.insert("gl_FrontFacing".into(), Symbol { ty: Ty::Bool, qual: Qual::Input });
         p.shader.symbols.insert(
             "gl_FragCoord".into(),
             Symbol {

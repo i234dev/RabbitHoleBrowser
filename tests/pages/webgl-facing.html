@@ -1,0 +1,26 @@
+<!doctype html><title>Projected winding and fragment facing</title>
+<style>body{margin:0}canvas{display:block}</style>
+<canvas id="gl1" width="4" height="4"></canvas><canvas id="gl2" width="4" height="4"></canvas>
+<script>
+for(const version of [1,2]){
+  const gl=document.getElementById('gl'+version).getContext(version===2?'webgl2':'webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+  function check(value,message){if(!value)throw new Error(version+': '+message);}
+  function compile(kind,source){const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);check(gl.getShaderParameter(s,gl.COMPILE_STATUS),gl.getShaderInfoLog(s));return s;}
+  const prefix=version===2?'#version 300 es\n':'';
+  const p=gl.createProgram();
+  gl.attachShader(p,compile(gl.VERTEX_SHADER,prefix+(version===2?'in':'attribute')+' vec2 position;void main(){gl_Position=vec4(position,0.0,1.0);}'));
+  gl.attachShader(p,compile(gl.FRAGMENT_SHADER,prefix+'precision highp float;'+(version===2?'out vec4 pixel;':'')+'void main(){'+(version===2?'pixel':'gl_FragColor')+'=gl_FrontFacing?vec4(1.0,0.0,0.0,1.0):vec4(0.0,1.0,0.0,1.0);}'));
+  gl.linkProgram(p);check(gl.getProgramParameter(p,gl.LINK_STATUS),gl.getProgramInfoLog(p));gl.useProgram(p);
+  check(gl.getParameter(gl.FRONT_FACE)===gl.CCW,'initial frontFace');
+  const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);
+  const a=gl.getAttribLocation(p,'position');gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(a);
+  function draw(mode,vertices,expected){gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(vertices),gl.STATIC_DRAW);gl.drawArrays(mode,0,vertices.length/2);const pixel=new Uint8Array(4);gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);check(Array.from(pixel).join(',')===expected,'winding pixel '+pixel);}
+  draw(gl.TRIANGLES,[-1,-1,3,-1,-1,3],'255,0,0,255');
+  draw(gl.TRIANGLES,[-1,-1,-1,3,3,-1],'0,255,0,255');
+  gl.frontFace(gl.CW);check(gl.getParameter(gl.FRONT_FACE)===gl.CW,'changed frontFace');
+  gl.frontFace(0);check(gl.getError()===gl.INVALID_ENUM,'invalid winding error');check(gl.getParameter(gl.FRONT_FACE)===gl.CW,'invalid winding mutated state');
+  draw(gl.TRIANGLES,[-1,-1,-1,3,3,-1],'255,0,0,255');
+  draw(gl.TRIANGLE_STRIP,[-1,-1,1,-1,-1,1,1,1],'0,255,0,255');
+  check(gl.getError()===gl.NO_ERROR,'unexpected error');console.log(version+' facing ok');
+}
+</script>
