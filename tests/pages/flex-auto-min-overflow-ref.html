@@ -1,0 +1,14 @@
+<!doctype html><title>Non-scrollable flex automatic minimum reference</title>
+<style>
+body{margin:0}section{width:100px;height:20px;margin-bottom:4px}
+section>div{width:150px;height:20px;background:green}
+.hidden>div,.explicit>div{width:100px}
+.column{height:100px}.column>div{width:20px;height:150px}
+.column.hidden>div,.column.explicit>div{height:100px}
+</style>
+<section><div></div></section>
+<section class=hidden><div></div></section>
+<section class=explicit><div></div></section>
+<section class=column><div></div></section>
+<section class="column hidden"><div></div></section>
+<section class="column explicit"><div></div></section>

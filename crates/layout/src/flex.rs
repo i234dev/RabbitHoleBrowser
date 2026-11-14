@@ -180,7 +180,11 @@ fn other(axis: Axis) -> Axis {
 }
 
 pub(crate) fn is_scroll_container(style: &ComputedStyle) -> bool {
-    !matches!(style.overflow_x, Overflow::Visible) || !matches!(style.overflow_y, Overflow::Visible)
+    // Flex §4.5 and Grid §6.6 use the computed scrollable overflow values,
+    // not whether the element clips its painting or currently overflows.
+    // `clip`, like `visible`, preserves the content-based automatic minimum.
+    let scrollable = |overflow| matches!(overflow, Overflow::Hidden | Overflow::Scroll | Overflow::Auto);
+    scrollable(style.overflow_x) || scrollable(style.overflow_y)
 }
 
 impl<'a> Layouter<'a> {
