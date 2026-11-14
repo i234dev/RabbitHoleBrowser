@@ -96,14 +96,27 @@ mod tests {
         if node.node==Some(id)&&node.kind!=BoxKind::Text {return Some(node);}
         node.children.iter_mut().find_map(|child|find_mut(child,id))
     }
+    fn assert_zero_strut(node:&LayoutBox) {
+        assert_eq!(node.style.font_size,0.,"fixture font size must not enlarge its atomic boxes");
+        assert_eq!(node.style.line_height,Some(0.),"fixture line height must remain zero through wrappers");
+        for child in &node.children {assert_zero_strut(child);}
+    }
     fn with_item(body:&str,css:&str,test:impl FnOnce(&mut Layouter<'_>,&mut LayoutBox,&GridItem)) {
         let doc=rabbithole_html::parse(&format!("<!doctype html><div id=probe>{body}</div>"));
-        let sheets=[rabbithole_css::parse_stylesheet(&format!("*{{font:0/0 monospace}}#probe{{min-width:0}}span{{display:inline-block;width:40px;height:10px;vertical-align:top}}{css}"))];
+        // The current font-shorthand parser rejects font:0/0 monospace.
+        // Use supported longhands so these atomic-box geometry controls do
+        // not accidentally retain the inherited 16px/normal line strut.
+        let sheets=[rabbithole_css::parse_stylesheet(&format!("*{{font-size:0;line-height:0;font-family:monospace}}#probe{{min-width:0}}span{{display:inline-block;width:40px;height:10px;vertical-align:top}}{css}"))];
         let styles=rabbithole_style::style_tree(&doc,&sheets,&rabbithole_css::MediaEnv{width:800.,height:600.,screen:true,scripting:true});
+        for style in styles.styles.iter().flatten() {
+            assert_eq!(style.font_size,0.,"fixture zero font size must be applied before measuring");
+            assert_eq!(style.line_height,Some(0.),"fixture zero line height must be applied before measuring");
+        }
         let fonts=FontContext::new();let images=HashMap::new();let backgrounds=HashMap::new();let scrolls=HashMap::new();
         let ctx=crate::LayoutContext{doc:&doc,styles:&styles,fonts:&fonts,images:&images,background_images:&backgrounds,scroll_offsets:&scrolls,viewport_width:800.,viewport_height:600.,page_scroll:(0.,0.)};
         let mut root=crate::wm::prepare(crate::build::Builder::new(&ctx,None).build_root(),doc.body());
         let node=find_mut(&mut root,doc.element_by_id("probe").unwrap()).unwrap();
+        assert_zero_strut(node);
         let item=GridItem{idx:0,area:super::super::Area{row:(0,1),col:(0,1)},edges:ItemEdges::new(&node.style,800.),justify:ItemAlign::Normal,align:ItemAlign::FlexStart,column_names:true,row_names:true,parent_lanes_auto:false};
         test(&mut Layouter::new(&ctx),node,&item);
     }
