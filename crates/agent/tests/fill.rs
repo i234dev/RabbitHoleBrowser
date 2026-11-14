@@ -317,3 +317,44 @@ fn fill_frame_navigation_rejects_old_element_and_form_refs_with_reused_node_ids(
     ok(&mut a, "fill", json!({"ref":new,"value":"One"}));
     assert!(ok(&mut a, "fill", json!({"ref":new_form})).contains("combobox"));
 }
+
+#[test]
+fn fill_focus_navigation_stops_before_value_input_change_and_remaining_fields() {
+    let srv = serve(Box::new(|path| {
+        if path == "/" {
+            return html(r#"<html><body><form action="/wrong-submit"><label>First<input name="a" value="untouched" onfocus="location.href='/focused?before='+this.value" oninput="location.href='/wrong-input'" onchange="location.href='/wrong-change'"></label><label>Tail<input name="z" value="keep" onfocus="location.href='/wrong-tail'"></label><button type="submit">Send</button></form></body></html>"#);
+        }
+        if path.starts_with("/focused?") {
+            return html("<html><body><h1>Focus arrived</h1></body></html>");
+        }
+        html("<html><body><h1>Wrong navigation</h1></body></html>")
+    }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let output = ok(&mut a, "fill", json!({"ref":"@f1","values":{"a":"must-not-write","z":"must-not-write"},"submit":true}));
+    assert!(output.contains("→ navigated to") && output.contains("before=untouched") && output.contains("Focus arrived"), "{output}");
+    assert!(output.contains("a was not changed: navigation was requested while focusing"), "{output}");
+    assert!(output.contains("Not attempted after navigation: \"z\"") && output.contains("submit=true was not attempted"), "{output}");
+    assert!(srv.requests().iter().all(|(path, _)| !path.starts_with("/wrong-")));
+}
+
+#[test]
+fn fill_focus_changes_to_readonly_disabled_or_type_prevent_value_writes() {
+    let srv = serve(Box::new(|path| {
+        let change = match path {
+            "/readonly" => "this.setAttribute('readonly','')",
+            "/disabled" => "this.setAttribute('disabled','')",
+            _ => "this.setAttribute('type','checkbox')",
+        };
+        let page = format!("<html><body><form><label>Field<input id=\"field\" name=\"q\" value=\"keep\" onfocus=\"{change}\"></label></form></body></html>");
+        Some((200, "text/html; charset=utf-8", page.into_bytes(), vec![]))
+    }));
+    let mut a = agent();
+    for (path, reason) in [("/readonly", "read-only"), ("/disabled", "disabled"), ("/type", "changed type")] {
+        let snapshot = ok(&mut a, "open", json!({"url":srv.url(path),"snapshot":true}));
+        let field = ref_of(&snapshot, "textbox \"Field\"");
+        let output = err(&mut a, "fill", json!({"ref":field,"value":"must-not-write"}));
+        assert!(output.contains("Not filled") && output.contains(reason), "{path}: {output}");
+        assert_eq!(control_value(&a, "field"), "keep", "{path}: {output}");
+    }
+}
