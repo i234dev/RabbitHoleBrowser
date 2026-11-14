@@ -417,8 +417,9 @@ fn match_context(name: &str, first: Option<(usize, usize)>, context: usize) -> S
 
 fn window_bounds(len: usize, first: Option<(usize, usize)>, window: usize) -> (usize, usize) {
     if len <= window { return (0, len); }
-    let width = window - 2;
     let center = first.map(|(start, end)| start + (end - start) / 2).unwrap_or(0);
+    if window == 1 { return (center, center); }
+    let width = window - 2;
     let mut start = center.saturating_sub(width / 2).min(len - width);
     let mut end = start + width;
     // Spend a missing edge ellipsis on one more original character.
@@ -446,10 +447,14 @@ fn merge_windows(mut windows: Vec<SearchWindow>) -> Vec<SearchWindow> {
 }
 
 fn windows_len(windows: &[SearchWindow], passages: &[Vec<char>]) -> usize {
-    let Some(first) = windows.first() else { return 0 };
-    let last = windows.last().unwrap();
-    windows.iter().map(|w| w.end - w.start).sum::<usize>() + windows.len() - 1
-        + usize::from(first.start > 0) + usize::from(last.end < passages[last.passage].len())
+    let mut len = 0;
+    let mut gap = false;
+    for (i, w) in windows.iter().enumerate() {
+        if (i > 0 || w.start > 0) && !gap { len += 1; gap = true; }
+        if w.end > w.start { len += w.end - w.start; gap = false; }
+    }
+    if windows.last().map(|w| w.end < passages[w.passage].len()).unwrap_or(false) && !gap { len += 1; }
+    len
 }
 
 /// The first occurrence of each requested term gets a window, in request
@@ -459,12 +464,11 @@ fn search_snippet(passages: &[String], hits: &[Vec<Vec<(usize, usize)>>], window
     let first = hits.iter().enumerate().find_map(|(i, terms)| {
         terms.iter().flatten().copied().min().map(|hit| (i, hit))
     });
-    if window <= 1 {
+    if window == 0 {
         let passage = first.map_or(0, |(i, _)| i);
         let text = match_context(&passages[passage], first.map(|(_, hit)| hit), window);
         let len = passages[passage].chars().count();
-        let visible = if window == 0 { if len <= 120 { len } else { 119 } }
-            else if len <= 1 { len } else { 0 };
+        let visible = if len <= 120 { len } else { 119 };
         let shown = hits[passage].iter().flatten().filter(|&&(start, end)| start < end && end <= visible).count();
         return (text, shown);
     }
@@ -483,12 +487,16 @@ fn search_snippet(passages: &[String], hits: &[Vec<Vec<(usize, usize)>>], window
         windows.push(SearchWindow { passage: 0, start, end });
     }
     let mut text = String::new();
+    let mut gap = false;
     for (i, w) in windows.iter().enumerate() {
-        if i > 0 || w.start > 0 { text.push('…'); }
-        text.extend(chars[w.passage][w.start..w.end].iter());
+        if (i > 0 || w.start > 0) && !gap { text.push('…'); gap = true; }
+        if w.end > w.start {
+            text.extend(chars[w.passage][w.start..w.end].iter());
+            gap = false;
+        }
     }
     let last = windows.last().unwrap();
-    if last.end < chars[last.passage].len() { text.push('…'); }
+    if last.end < chars[last.passage].len() && !gap { text.push('…'); }
     let shown = hits.iter().enumerate().map(|(passage, terms)| terms.iter().flatten().filter(|&&(start, end)| {
         windows.iter().any(|w| w.passage == passage && w.start <= start && end <= w.end)
     }).count()).sum();
@@ -1435,6 +1443,17 @@ mod tests {
         for value in [json!(-1), json!(1.5), json!(4097), json!("240")] {
             assert!(find_context(&json!({"window":value})).is_err());
         }
+        let passages = ["A", "B", "C", "D"].map(str::to_string);
+        let terms = ["D", "B"].map(str::to_string);
+        let hits: Vec<_> = passages.iter().map(|p| text_matches(p, &terms)).collect();
+        let (text, shown) = search_snippet(&passages, &hits, 1);
+        assert_eq!(text, "B…D", "single-character windows still follow request selection and text order");
+        assert_eq!(shown, 2);
+        let terms = ["D", "C", "B", "A"].map(str::to_string);
+        let hits: Vec<_> = passages.iter().map(|p| text_matches(p, &terms)).collect();
+        let (text, shown) = search_snippet(&passages, &hits, 1);
+        assert_eq!(text, "C…D", "the first two requested terms exhaust the three-character budget");
+        assert_eq!(shown, 2);
     }
 
     #[test]
