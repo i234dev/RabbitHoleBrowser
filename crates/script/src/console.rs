@@ -43,10 +43,14 @@ impl ScriptHost {
         self.realm.set_task_budget(None);
         self.realm.set_deadline(Some(cap));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        // Job draining can absorb a CPU-watchdog error before the wall cap.
+        // Observe that entry's stop flag before restoring the caller's state.
+        let timed_out = self.realm.timed_out();
         self.realm.restore_watchdog(saved);
         match result {
-            Ok(result) if Instant::now() < cap => result,
-            Ok(_) => Err("Console evaluation deadline expired".into()),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) if timed_out || Instant::now() >= cap => Err("Console evaluation deadline expired".into()),
+            Ok(Ok(value)) => Ok(value),
             Err(payload) => std::panic::resume_unwind(payload),
         }
     }
