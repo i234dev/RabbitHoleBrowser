@@ -388,6 +388,7 @@ impl<'a> Layouter<'a> {
             let child=&mut b.children[it.idx];
             let (columns,rows)=subgrid::requests(child);
             let start=it.fixed.unwrap_or(0);
+            if rows {self.grid_work.tracks(tl);}
             let rows=if !rows {None} else if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(tl,start,start+it.span,row_gap,it.fixed.is_some(),row_available,align)}
                 else {let (positions,_)=subgrid::positions(tl,row_gap,row_available,align);Some(subgrid::section(tl,&positions,start,start+it.span,row_gap,it.fixed.is_some()))};
             self.with_subgrid(child,columns.then_some(subgrid::AxisInheritance::Stacking),rows,cbw,|this,child|this.lane_item_width(child,it,cbw,available))
@@ -421,6 +422,7 @@ impl<'a> Layouter<'a> {
                 let mut lane=*it;lane.edges=item.edges;
                 let child=&mut b.children[it.idx];
                 let (columns,rows)=subgrid::requests(child);
+                if rows {self.grid_work.tracks(tl);}
                 let columns=columns.then_some(subgrid::AxisInheritance::Stacking);
                 let rows=rows.then(||subgrid::item_layer_source(subgrid::sizing_section_aligned(tl,s,s+it.span,gap,it.fixed.is_some(),row_available,align),&item,&child.style,true,cbw));
                 let mut nested=self.with_subgrid(child,columns,rows,cbw,|this,child| {

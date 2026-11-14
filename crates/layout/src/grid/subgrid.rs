@@ -35,6 +35,27 @@ impl WorkBudget {
         let depth=self.depth.get_or_insert_with(||Rc::new(Cell::new(0)));
         depth.set(depth.get()+1);DepthGuard(depth.clone())
     }
+
+    /// Reserve work before helpers clone full placement track/name lists.
+    pub(super) fn tracks(&mut self,list:&TrackList) {
+        self.charge(list.tracks.len().saturating_mul(8));
+        for names in &list.names {
+            self.charge(1);
+            for name in names {self.charge(name.len().saturating_add(1));}
+        }
+    }
+
+    /// Each scoped measure visits the entire subtree to count it, invalidate
+    /// before layout, and invalidate after restoration. Charge before growing
+    /// the pending stack or installing any temporary style.
+    fn subtree(&mut self,node:&LayoutBox) {
+        self.charge(3);
+        let mut pending=vec![node];
+        while let Some(node)=pending.pop() {
+            self.charge(node.children.len().saturating_mul(3));
+            pending.extend(node.children.iter());
+        }
+    }
 }
 
 fn source_work(source:&Option<AxisInheritance>)->usize {
@@ -472,7 +493,10 @@ impl<'a> Layouter<'a> {
         let (column_request,row_request)=requests(b);
         if (!column_request||columns.is_none())&&(!row_request||rows.is_none()) {return body(self,b);}
         let reference=scope_reference(&columns,reference);
-        self.grid_work.charge(source_work(&columns).saturating_add(source_work(&rows)).saturating_add(b.children.len()));
+        let mut layers=1usize;let mut node=&*b;
+        while node.wm_wrapper {let Some(inner)=node.children.first() else {break;};layers=layers.saturating_add(1);node=inner;}
+        self.grid_work.charge(source_work(&columns).saturating_add(source_work(&rows)).saturating_mul(layers.saturating_mul(2)));
+        self.grid_work.subtree(b);
         let scope=Scope::new(b,columns,rows,reference);
         body(self,&mut *scope.node)
     }
@@ -766,5 +790,22 @@ mod tests {
         let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.)),Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.)),Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![],vec![],vec![]],inherited:None};
         let Some(AxisInheritance::Tracks(initial))=fixed_section_aligned(&list,0,2,0.,true,Some(300.),ContentDistribution::SpaceBetween) else {panic!("missing fixed section")};
         assert_eq!(initial.starts,[0.,50.]);assert_eq!(initial.extent(),100.);
+    }
+
+    #[test]
+    fn subtree_invalidations_are_charged_before_temporary_styles_are_installed() {
+        let mut b=child();let original=b.style.clone();
+        b.children.push(LayoutBox::new(BoxKind::Block,None,original.clone()));
+        b.children.push(LayoutBox::new(BoxKind::Block,None,original.clone()));
+        let mut budget=WorkBudget{remaining:8,depth:None};
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||budget.subtree(&b)));
+        assert!(result.is_err());assert_eq!(budget.remaining,5);assert!(Rc::ptr_eq(&original,&b.style));assert!(b.grid_columns.is_none());
+    }
+
+    #[test]
+    fn track_copy_work_is_reserved_before_cloning_placement_lists() {
+        let list=parent();let mut budget=WorkBudget{remaining:15,depth:None};
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||budget.tracks(&list)));
+        assert!(result.is_err());assert_eq!(budget.remaining,15);
     }
 }

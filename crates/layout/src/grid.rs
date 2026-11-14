@@ -1187,13 +1187,15 @@ impl<'a> Layouter<'a> {
                 continue;
             }
             self.grid_work.charge(1);
+            self.grid_work.tracks(cols);
             let column_geometry=Some(subgrid::sizing_section_aligned(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names,geometry.inline,style.justify_content));
             let reference=subgrid::scope_reference(&column_geometry,0.);
             let item=subgrid::rebase_item(it,&child.style,cbw,reference);let it=&item;
-            let row_source=rows.map_or(Some(subgrid::AxisInheritance::Stacking),|rows| {
+            let row_source=if !row_request {None} else {rows.map_or(Some(subgrid::AxisInheritance::Stacking),|rows| {
+                self.grid_work.tracks(rows);
                 if phase==MeasurePhase::Initial {subgrid::fixed_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,geometry.block,style.align_content)}
                 else {let (positions,_)=subgrid::positions(rows,row_gap,geometry.block,style.align_content);Some(subgrid::section(rows,&positions,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names))}
-            });
+            })};
             if column_request {
                 let columns=column_geometry.unwrap();
                 let columns=subgrid::item_layer_source(columns,it,&child.style,false,reference);
@@ -1245,6 +1247,8 @@ impl<'a> Layouter<'a> {
             let (_,aw)=span_size(&cols.tracks,col_pos,it.area.col.0 as usize,it.area.col.1 as usize);
             let item=subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw);let it=&item;
             let child=&mut b.children[it.idx];
+            self.grid_work.tracks(rows);
+            if subgrid::requests(child).0 {self.grid_work.tracks(cols);}
             let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names));
             let rows=subgrid::sizing_section_aligned(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names,cbh,align);
             let rows=subgrid::item_layer_source(rows,it,&child.style,true,aw);
