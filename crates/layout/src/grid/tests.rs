@@ -1,5 +1,69 @@
-use super::{auto_track, expand_tracks, repeat_fixed_size, Sizing};
+use super::{auto_track, expand_tracks, repeat_fixed_size, size_tracks, size_tracks_with_space, Contribution, GridSpace, Sizing, Track};
 use rabbithole_style::{Length, TrackListItem, TrackSize};
+
+fn intrinsic_sizes(tracks: &[Track], contributions: &[Contribution]) -> (Vec<f32>, Vec<f32>) {
+    let mut min = tracks.to_vec();
+    let mut max = tracks.to_vec();
+    size_tracks_with_space(&mut min, contributions, GridSpace::MinContent, 0., false);
+    size_tracks_with_space(&mut max, contributions, GridSpace::MaxContent, 0., false);
+    (min.iter().map(|t| t.base).collect(),max.iter().map(|t| t.base).collect())
+}
+
+#[test]
+fn intrinsic_constraints_keep_fixed_minimum_and_maximum_distinct() {
+    let (min,max)=intrinsic_sizes(&[Track::new(Sizing::Fixed(10.),Sizing::Fixed(100.))],&[]);
+    assert_eq!(min,[10.]);assert_eq!(max,[100.]);
+}
+
+#[test]
+fn max_content_constraint_maximizes_intrinsic_growth_limits() {
+    let contributions=[Contribution {start:0,end:1,min:40.,max:120.}];
+    let (min,max)=intrinsic_sizes(&[Track::new(Sizing::Auto,Sizing::Auto)],&contributions);
+    assert_eq!(min,[40.]);assert_eq!(max,[120.]);
+    let (min,max)=intrinsic_sizes(&[Track::new(Sizing::Fixed(0.),Sizing::MaxContent)],&contributions);
+    assert_eq!(min,[0.]);assert_eq!(max,[120.]);
+}
+
+#[test]
+fn min_content_constraint_preserves_max_content_track_minimum() {
+    let contributions=[Contribution {start:0,end:1,min:40.,max:120.}];
+    let (min,max)=intrinsic_sizes(&[Track::new(Sizing::MaxContent,Sizing::MaxContent)],&contributions);
+    assert_eq!(min,[120.]);assert_eq!(max,[120.]);
+}
+
+#[test]
+fn min_content_constraint_does_not_expand_spanning_flexible_tracks() {
+    let tracks=[Track::new(Sizing::Auto,Sizing::Flex(1.)),Track::new(Sizing::Fixed(30.),Sizing::Fixed(30.))];
+    let contributions=[Contribution {start:0,end:2,min:300.,max:300.}];
+    let (min,max)=intrinsic_sizes(&tracks,&contributions);
+    assert_eq!(min,[0.,30.]);assert_eq!(max,[270.,30.]);
+}
+
+#[test]
+fn max_content_constraint_respects_fit_content_and_collapsed_tracks() {
+    let mut collapsed=Track::new(Sizing::Fixed(40.),Sizing::Fixed(100.));collapsed.collapsed=true;
+    let tracks=[Track::new(Sizing::Auto,Sizing::FitContent(80.)),collapsed];
+    let contributions=[Contribution {start:0,end:1,min:40.,max:120.}];
+    let (min,max)=intrinsic_sizes(&tracks,&contributions);
+    assert_eq!(min,[40.,0.]);assert_eq!(max,[80.,0.]);
+}
+
+#[test]
+fn definite_available_space_is_neither_intrinsic_constraint() {
+    let original=[Track::new(Sizing::Fixed(10.),Sizing::Fixed(100.))];
+    for (space,expected) in [(GridSpace::Definite(80.),80.),(GridSpace::MinContent,10.),(GridSpace::MaxContent,100.)] {
+        let mut tracks=original.clone();
+        size_tracks_with_space(&mut tracks,&[],space,0.,false);
+        assert_eq!(tracks[0].base,expected);
+    }
+}
+
+#[test]
+fn automatic_content_based_layout_size_uses_max_content() {
+    let mut tracks=[Track::new(Sizing::Fixed(10.),Sizing::Fixed(100.))];
+    size_tracks(&mut tracks,&[],None,0.,false);
+    assert_eq!(tracks[0].base,100.);
+}
 
 #[test]
 fn auto_track_patterns_repeat_forward_and_backward() {

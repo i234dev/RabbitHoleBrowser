@@ -318,18 +318,15 @@ impl<'a> Layouter<'a> {
 
     /// Column-lane track sizing: every item contributes to every position
     /// it could take.
-    fn size_column_lanes(&mut self, b: &mut LayoutBox, tl: &mut TrackList, items: &[LaneItem], avail: Option<f32>, gap: f32, cbw: f32, stretch: bool, min_only: bool) {
+    fn size_column_lanes(&mut self, b: &mut LayoutBox, tl: &mut TrackList, items: &[LaneItem], space: GridSpace, gap: f32, cbw: f32, stretch: bool) {
         let mut virt = Vec::new();
         for it in items {
             for s in Self::lane_positions(it, &tl.tracks) {
                 virt.push(Self::lane_grid_item(it, s, false));
             }
         }
-        let mut contribs = self.column_contributions(b, &virt, cbw);
-        if min_only {
-            contribs.iter_mut().for_each(|c| c.max = c.min);
-        }
-        size_tracks(&mut tl.tracks, &contribs, avail, gap, stretch);
+        let contribs = self.column_contributions(b, &virt, cbw);
+        size_tracks_with_space(&mut tl.tracks, &contribs, space, gap, stretch);
     }
 
     /// Inner (content-box) width of an item in the stacking axis of row
@@ -389,7 +386,7 @@ impl<'a> Layouter<'a> {
             let avail = Some(cbw);
             let (mut tl, items) = self.lanes_setup(b, &style, false, avail, col_gap, cbw, (cx, cy));
             let stretch = matches!(style.justify_content, ContentDistribution::Stretch | ContentDistribution::FlexStart);
-            self.size_column_lanes(b, &mut tl, &items, avail, col_gap, cbw, stretch, false);
+            self.size_column_lanes(b, &mut tl, &items, GridSpace::Definite(cbw), col_gap, cbw, stretch);
             let (col_pos, _) = track_positions(&tl.tracks, col_gap, avail, style.justify_content);
             let tol = tolerance(&style, avail);
             let tracks = tl.tracks.clone();
@@ -493,9 +490,9 @@ impl<'a> Layouter<'a> {
         if !row_lanes(&style) {
             let (tl, items) = self.lanes_setup(b, &style, false, None, col_gap, 0.0, (0.0, 0.0));
             let mut min_t = TrackList { tracks: tl.tracks.clone(), names: Vec::new() };
-            self.size_column_lanes(b, &mut min_t, &items, None, col_gap, 0.0, false, true);
+            self.size_column_lanes(b, &mut min_t, &items, GridSpace::MinContent, col_gap, 0.0, false);
             let mut max_t = tl;
-            self.size_column_lanes(b, &mut max_t, &items, None, col_gap, 0.0, false, false);
+            self.size_column_lanes(b, &mut max_t, &items, GridSpace::MaxContent, col_gap, 0.0, false);
             let sum = |t: &[Track]| t.iter().filter(|t| !t.collapsed).map(|t| t.base).sum::<f32>() + col_gap * t.iter().filter(|t| !t.collapsed).count().saturating_sub(1) as f32;
             let (min, max) = (sum(&min_t.tracks), sum(&max_t.tracks));
             return (min, max.max(min));
