@@ -268,7 +268,7 @@ fn native_info(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Valu
             let target_origin = realm.to_rust_string(arg(args, 3))?;
             let key = match target_origin.as_str() {
                 "*" => None,
-                "/" => context.host.info(context.id).map(|i| i.origin_key),
+                "/" => context.host.info(context.id).filter(|i| !i.origin_key.is_empty()).map(|i| i.origin_key),
                 _ => {
                     let url = Url::parse(&target_origin).ok_or_else(|| crate::misc::dom_exception(realm, "SyntaxError", "Invalid target origin."))?;
                     Some(url.origin())
