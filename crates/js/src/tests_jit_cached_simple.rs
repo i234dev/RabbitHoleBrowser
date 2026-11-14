@@ -85,7 +85,7 @@ fn cached_simple_differential_adversaries_preserve_fallbacks_and_counted_values(
                 let collections = realm.heap.collections;
                 let console = Rc::new(RefCell::new(String::new()));
                 let output = console.clone();
-                realm.set_console_sink(Box::new(move |_, text| { output.borrow_mut().push_str(text); output.borrow_mut().push('\n'); }));
+                realm.set_console_sink(Box::new(move |_, text| { output.borrow_mut().push_str(&text); output.borrow_mut().push('\n'); }));
                 realm.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_secs(30)));
                 let result = evaluate(&mut realm, source);
                 realm.run_jobs();
