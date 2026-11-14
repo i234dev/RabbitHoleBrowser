@@ -713,7 +713,7 @@ impl Realm {
     /// moved into the parameter registers, the closure's scope.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn push_simple_frame(
+    pub(crate) fn push_simple_frame(
         &mut self,
         id: ObjectId,
         cr: &FunctionCode,
@@ -2371,7 +2371,7 @@ impl Realm {
     /// Convert the result of an out-of-line step for the run loop, keeping
     /// an exit or error in `loop_end`.
     #[inline(always)]
-    fn ctl(&mut self, r: JsResult<Flow>) -> Ctl {
+    pub(crate) fn ctl(&mut self, r: JsResult<Flow>) -> Ctl {
         match r {
             Ok(Flow::Next) => Ctl::Next,
             Ok(Flow::Reload) => Ctl::Reload,

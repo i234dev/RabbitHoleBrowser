@@ -70,6 +70,8 @@ mod tests_panic;
 mod tests_resources;
 #[cfg(all(test, feature = "jit"))]
 mod tests_jit;
+#[cfg(all(test, feature = "jit"))]
+mod tests_jit_cached_simple;
 
 pub use heap::{NativeFn, ObjectKind, Property, ALL, CONFIGURABLE, ENUMERABLE, HIDDEN, WRITABLE};
 pub use interop::JsResult;
