@@ -475,6 +475,20 @@ pub(crate) struct Shader {
     pub cost: usize,
 }
 impl Shader {
+    /// Uniforms share program storage, but other names remain stage-local. A
+    /// uniform from the other stage must not initialize this stage's attribute,
+    /// varying or output when their legal names happen to be equal.
+    pub fn uniform_inputs(&self, program: &BTreeMap<String, Value>) -> EvalResult<BTreeMap<String, Value>> {
+        let mut env = BTreeMap::new();
+        for (name, symbol) in &self.symbols {
+            if symbol.qual != Qual::Uniform { continue; }
+            if let Some(value) = program.get(name) {
+                value.validate(symbol.ty)?;
+                env.insert(name.clone(), *value);
+            } else if self.reads.contains(name) { return Err(EvalError::Type); }
+        }
+        Ok(env)
+    }
     /// Values supplied by the context must match both the declared type and the
     /// payload variant. Missing locals are initialized by run_with_sampler.
     pub fn validate_inputs(&self, env: &BTreeMap<String, Value>) -> EvalResult<()> {

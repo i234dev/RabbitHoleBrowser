@@ -108,8 +108,8 @@ impl Context {
         }
         // The compiler verifies every AST path. Check context-owned payloads
         // before preparing geometry or committing any depth/color fragment.
-        executable.vertex.validate_inputs(&uniforms)?;
-        executable.fragment.validate_inputs(&uniforms)?;
+        let vertex_uniforms = executable.vertex.uniform_inputs(&uniforms)?;
+        let fragment_uniforms = executable.fragment.uniform_inputs(&uniforms)?;
         let vertex_work = indices
             .len()
             .checked_mul(instances as usize)
@@ -132,7 +132,7 @@ impl Context {
                 .try_reserve_exact(indices.len())
                 .map_err(|_| Error::OutOfMemory)?;
             for &index in indices {
-                let mut env = uniforms.clone();
+                let mut env = vertex_uniforms.clone();
                 for (name, &location) in &executable.attributes {
                     let ty = executable.vertex.symbols[name].ty;
                     env.insert(
@@ -264,7 +264,7 @@ impl Context {
           // All array ranges, indices and resource budgets were checked
           // before the first pixel changes. Error draws leave the buffer intact.
         for triangle in triangles {
-            self.rasterize(&triangle, &executable, &uniforms)?;
+            self.rasterize(&triangle, &executable, &fragment_uniforms)?;
         }
         Ok(())
     }

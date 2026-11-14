@@ -32,10 +32,17 @@ remaining generated fragment inputs to float payloads. The evaluator retains
 its `Result` checks as defense; there is no second execution or framebuffer
 copy used to hide a late validation error.
 
+Uniform environments are projected per stage before either shader runs. A
+fragment uniform may legally share a name with a vertex attribute, and a vertex
+uniform may share a name with a fragment output. These declarations must not
+initialize or be compared to another stage's non-uniform symbols. Positive
+pixel controls cover both cases while malformed actual uniform payloads still
+fail before any color or depth write.
+
 The float algorithms keep their operation and matrix accumulation order.
 Uniform values are not filtered for finiteness. Tests preserve NaN payload bits,
 infinities and signed zero, reject same-type/wrong-variant payloads before any
 color or depth write, and exercise invalid untaken branches/transitive helpers.
-All seven new tests, existing backend regressions, and Script/Engine validation
+All nine new tests, existing backend regressions, and Script/Engine validation
 remain pending root CI. No Rust tools, builds, runtime checks or SSH were used
 by the implementing agent.
