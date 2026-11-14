@@ -75,13 +75,13 @@ complete bound for all preexisting Grid/template work.
 
 ## Written controls and remaining gates
 
-Eleven new unit controls cover tagged availability, definite-zero/infinite
+Twelve new unit controls cover tagged availability, definite-zero/infinite
 estimates and names, maximum/minimum flooring and distributed positions,
 clockwise/counter-clockwise/reflected transport, complete maximization versus
 intrinsic minimum, fresh geometry with unchanged placement, min-only versus
 max-only adjustment triggers, operation/virtual-slot isolation, precharged
 recording failure, bounded pass ordering and projection without completed
-geometry. The split's two existing controls
+geometry, including source retention for an empty projection. The split's two existing controls
 are retained; their missing test imports are corrected in this checkpoint.
 No Rust build or test execution has been performed for this checkpoint.
 
