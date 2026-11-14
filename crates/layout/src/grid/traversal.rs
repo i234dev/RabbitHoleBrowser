@@ -62,6 +62,7 @@ impl<'a> Layouter<'a> {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn ordinary_grid_axis_tracks(&mut self,b:&mut LayoutBox,items:&[GridItem],columns:TrackList,rows:TrackList,inputs:MeasureInputs,kind:OperationKind,old_reference:f32)->(TrackList,TrackList) {
+        let _depth=self.grid_work.enter_sizing_operation();
         assert!(ordinary_orthogonal_grid(b),"Grid axis consumer requires independent ordinary orthogonal items");
         assert!(columns.inherited.is_none()&&rows.inherited.is_none(),"Inherited Grid tracks require the recursive consumer");
         let templates=[columns,rows];
@@ -169,5 +170,32 @@ mod tests {
         let mut deep=node(BoxKind::Block);
         for _ in 0..129 {deep=wrapper(deep);}
         assert!(!ordinary_orthogonal_grid(&grid(vec![deep])));
+    }
+
+    #[test]
+    fn ordinary_consumer_shares_the_depth_limit_before_mutation_and_restores_it_on_return() {
+        use std::panic::{catch_unwind,AssertUnwindSafe};
+        let doc=rabbithole_html::parse("<!doctype html><body></body>");
+        let styles=rabbithole_style::style_tree(&doc,&[],&rabbithole_css::MediaEnv{width:800.,height:600.,screen:true,scripting:true});
+        let fonts=rabbithole_gfx::FontContext::new();let images=HashMap::new();let backgrounds=HashMap::new();let scrolls=HashMap::new();
+        let context=crate::LayoutContext{doc:&doc,styles:&styles,fonts:&fonts,images:&images,background_images:&backgrounds,scroll_offsets:&scrolls,viewport_width:800.,viewport_height:600.,page_scroll:(0.,0.)};
+        let mut layouter=Layouter::new(&context);
+        let mut grid=grid(vec![wrapper(node(BoxKind::Block))]);
+        let original=grid.children[0].style.clone();grid.children[0].intrinsic_cache=Some((42.,42.));
+        let item=GridItem{idx:0,area:super::super::Area{col:(0,1),row:(0,1)},edges:crate::flex::ItemEdges::new(&original,1.),justify:ItemAlign::FlexStart,align:ItemAlign::FlexStart,column_names:true,row_names:true,parent_lanes_auto:false};
+        let templates=||TrackList{tracks:vec![super::super::Track::new(super::super::Sizing::Fixed(1.),super::super::Sizing::Fixed(1.))],names:vec![vec![],vec![]],inherited:None};
+        let inputs=ordinary_inputs(&grid,[AvailableSpace::Definite(1.);2],[0.;2]);
+        let mut guards=Vec::new();
+        for _ in 0..128 {guards.push(layouter.grid_work.enter_sizing_operation());}
+        let failure=catch_unwind(AssertUnwindSafe(||layouter.ordinary_grid_axis_tracks(&mut grid,&[item],templates(),templates(),inputs.clone(),OperationKind::Layout,1.)));
+        let Err(error)=failure else {panic!("ordinary Grid sizing bypassed the shared recursion limit")};
+        let message=error.downcast_ref::<String>().map(String::as_str).or_else(||error.downcast_ref::<&str>().copied()).unwrap_or("");
+        assert!(message.contains("recursion budget exceeded"),"{message}");
+        assert!(Rc::ptr_eq(&grid.children[0].style,&original));assert_eq!(grid.children[0].intrinsic_cache,Some((42.,42.)));
+        drop(guards);
+        let (columns,rows)=layouter.ordinary_grid_axis_tracks(&mut grid,&[item],templates(),templates(),inputs,OperationKind::Layout,1.);
+        assert_eq!(columns.tracks[0].base,1.);assert_eq!(rows.tracks[0].base,1.);
+        // Returning from the real consumer must release its operation guard.
+        let guards:Vec<_>=(0..128).map(|_|layouter.grid_work.enter_sizing_operation()).collect();drop(guards);
     }
 }
