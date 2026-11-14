@@ -152,3 +152,12 @@ sign-in still needs interactive validation.
 Publish platform builds from the tested revision and record which revision
 each executable contains. Expand macOS/Linux packaging and Windows execution
 coverage alongside compatibility work.
+
+## 6. Reduce MCP reading round trips
+
+Implement the [MCP reading milestone](mcp-reading-plan.md) on the development
+revision current at that time. Prioritise context around matches, multiple
+search terms and `open` with an inline search, then lighter article reading
+and summaries. Preserve refs, untrusted-content fences and existing defaults;
+keep tool definitions within the recorded size budget. Verify gains with ten
+RH-AGENT-001 runs per arm before publishing performance claims.
