@@ -362,10 +362,11 @@ impl LayoutBox {
 
     /// Is this an inline-level box (participates in a line)?
     pub fn is_inline_level(&self) -> bool {
-        matches!(
-            self.kind,
-            BoxKind::Inline | BoxKind::InlineBlock | BoxKind::Text | BoxKind::LineBreak | BoxKind::Image
-        ) && self.flow.is_in_flow()
+        self.flow.is_in_flow() && match self.kind {
+            BoxKind::Image => self.style.display.is_inline_level(),
+            BoxKind::Inline | BoxKind::InlineBlock | BoxKind::Text | BoxKind::LineBreak => true,
+            _ => false,
+        }
     }
 
     /// Does this box contribute to its parent's height?
