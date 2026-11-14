@@ -1466,6 +1466,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
     match prop {
         "display" => {
             to.display = from.display;
+            to.display_before_blockification = from.display;
             to.webkit_box = from.webkit_box;
             to.grid_lanes = from.grid_lanes;
         }
@@ -2221,6 +2222,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
             }
             // keep font-size from pass 1 semantics simple: take from `from`
             fresh.font_size = from.font_size;
+            fresh.display_before_blockification = fresh.display;
             *style = fresh;
         } else {
             copy_property(name, from, style);
@@ -2247,6 +2249,7 @@ fn apply_property(name: &str, value: &[Token], style: &mut ComputedStyle, parent
         "display" => {
             if let Some(d) = display_of(&comps) {
                 style.display = d;
+                style.display_before_blockification = d;
                 style.webkit_box = comps.len() == 1 && values::ident(comps[0]).is_some_and(|k| k == "-webkit-box" || k == "-webkit-inline-box");
                 style.grid_lanes = comps.iter().any(|c| values::ident(c).is_some_and(|k| k == "grid-lanes" || k == "inline-grid-lanes"));
             }
@@ -3024,6 +3027,25 @@ mod tests {
         assert_eq!(span.color, Color::rgb(0, 0, 255));
         assert_eq!(span.display, Display::Block);
         assert_eq!(span.display_before_blockification, Display::Inline);
+    }
+
+    #[test]
+    fn overrides_keep_hypothetical_display_in_sync() {
+        let (doc, tree) = styled("<p><span></span></p>", "span{position:absolute}");
+        let span = style_of(&doc, &tree, "span");
+        let parent = style_of(&doc, &tree, "p");
+        for (declarations, expected) in [
+            ("display:block", Display::Block),
+            ("display:inline-block", Display::InlineBlock),
+            ("display:inherit", Display::Block),
+            ("display:initial", Display::Inline),
+            ("all:inherit", Display::Block),
+            ("display:invalid", Display::Inline),
+            ("color:red", Display::Inline),
+        ] {
+            let result = apply_over(span, parent, &parse_declaration_list(declarations), 16.0, (800.0, 600.0));
+            assert_eq!(result.display_before_blockification, expected, "{declarations}");
+        }
     }
 
     #[test]
