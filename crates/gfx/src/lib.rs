@@ -21,6 +21,8 @@ pub use shaping::{DecorationMetrics, ShapeFeatures};
 mod tests_v02;
 #[cfg(test)]
 mod tests_font_scopes;
+#[cfg(test)]
+mod clip_group_prototype;
 
 pub use canvas::{Canvas, Color, ColorStop, FillRule, LineCap, LineJoin, Matrix, Paint, PathSeg, Point, Radii, Rect, StrokeStyle, IDENTITY};
 pub use canvas_ext::{blend_mode_index, blend_pixel, ellipse_path, parse_svg_path, rounded_rect_path};
