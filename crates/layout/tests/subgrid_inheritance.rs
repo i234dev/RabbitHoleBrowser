@@ -129,3 +129,21 @@ fn automatic_subgrid_spans_use_local_line_groups_and_fixed_repeats() {
         close(by_id(&d,&t,"s").content_rect.h,100.);close(by_id(&d,&t,"x").content_rect.h,70.);
     }
 }
+
+#[test]
+fn automatic_items_in_a_fixed_column_lanes_subgrid_use_the_largest_edge_mbp() {
+    for (placement,expected) in [("auto",120.),("1",60.)] {
+        let(d,t)=render("<section id=p><div id=s><i></i></div></section>",
+            &format!("section{{display:grid;width:max-content;grid-template-columns:auto auto}}#s{{display:grid-lanes;grid-column:1/span 2;grid-template-columns:subgrid;padding-left:17px;border-left:3px solid}}i{{grid-column:{placement};width:40px;height:10px}}"));
+        close(by_id(&d,&t,"p").content_rect.w,expected);
+    }
+}
+
+#[test]
+fn automatic_items_in_a_fixed_row_lanes_subgrid_use_the_largest_edge_mbp() {
+    for (placement,expected) in [("auto",120.),("1",60.)] {
+        let(d,t)=render("<section id=p><div id=s><i></i></div></section>",
+            &format!("section{{display:grid;width:10px;grid-template-columns:10px;grid-template-rows:auto auto}}#s{{display:grid-lanes;grid-row:1/span 2;grid-template-rows:subgrid;padding-top:17px;border-top:3px solid}}i{{grid-row:{placement};width:10px;height:40px}}"));
+        close(by_id(&d,&t,"p").content_rect.h,expected);
+    }
+}
