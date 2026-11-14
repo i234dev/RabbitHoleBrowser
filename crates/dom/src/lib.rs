@@ -13,6 +13,22 @@ pub use live::{BoundaryPoint, IteratorPosition};
 
 pub type NodeId = usize;
 
+/// Text-control offsets use UTF-16 code units, as the HTML selection API does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlSelection {
+    pub start: usize,
+    pub end: usize,
+    pub direction: ControlDirection,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ControlDirection {
+    #[default]
+    None,
+    Forward,
+    Backward,
+}
+
 #[derive(Debug, Clone)]
 pub enum NodeData {
     Document,
@@ -243,6 +259,8 @@ pub struct Document {
     /// Current values of form controls changed by the user or a script
     /// (HTML "dirty value"); the `value` attribute stays the default value.
     pub control_values: HashMap<NodeId, String>,
+    /// Caret/selection state, independent of live DOM Range boundaries.
+    pub control_selections: HashMap<NodeId, ControlSelection>,
     /// Checkedness of checkboxes / radio buttons changed by the user or a
     /// script (HTML "dirty checkedness"); the `checked` attribute stays the
     /// default.
@@ -322,6 +340,7 @@ impl Document {
             live_points: Vec::new(),
             live_iterators: Vec::new(),
             control_values: HashMap::new(),
+            control_selections: HashMap::new(),
             checkedness: HashMap::new(),
             media_ui: HashMap::new(),
             character_set: "UTF-8".to_string(),
@@ -566,6 +585,29 @@ impl Document {
     /// or a script changed it, else the `value` attribute (default value).
     pub fn control_value(&self, id: NodeId) -> Option<&str> {
         self.control_values.get(&id).map(|s| s.as_str()).or_else(|| self.attr(id, "value"))
+    }
+
+    fn control_text_length(&self, id: NodeId) -> usize {
+        if self.is_element(id, "textarea") && self.control_value(id).is_none() {
+            self.text_content(id).encode_utf16().count()
+        } else {
+            self.control_value(id).unwrap_or("").encode_utf16().count()
+        }
+    }
+
+    /// The initial text-entry cursor is zero, including when not rendered.
+    pub fn control_selection(&self, id: NodeId) -> ControlSelection {
+        let mut selection = self.control_selections.get(&id).copied().unwrap_or_default();
+        let length = self.control_text_length(id);
+        selection.end = selection.end.min(length);
+        selection.start = selection.start.min(selection.end);
+        selection
+    }
+
+    /// Set a control selection without changing its value or DOM ranges.
+    pub fn set_control_selection(&mut self, id: NodeId, start: usize, end: usize, direction: ControlDirection) {
+        let end = end.min(self.control_text_length(id));
+        self.control_selections.insert(id, ControlSelection { start: start.min(end), end, direction });
     }
 
     /// Set (`Some`) or clear (`None`, back to the default value) the dirty

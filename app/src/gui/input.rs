@@ -31,6 +31,27 @@ impl TextBuffer {
         self.anchor = None;
     }
 
+    /// Import HTML control offsets while preserving UTF-8 byte boundaries.
+    pub fn set_utf16_selection(&mut self, start: usize, end: usize, backward: bool) {
+        let byte_index = |offset| {
+            let mut units = 0;
+            for (byte, ch) in self.text.char_indices() {
+                if units + ch.len_utf16() > offset { return byte; }
+                units += ch.len_utf16();
+            }
+            self.text.len()
+        };
+        let end = byte_index(end);
+        let start = byte_index(start).min(end);
+        self.caret = if backward { start } else { end };
+        self.anchor = if start == end { None } else { Some(if backward { end } else { start }) };
+    }
+
+    pub fn utf16_selection(&self) -> (usize, usize, bool) {
+        let (start, end) = self.selection().unwrap_or((self.caret, self.caret));
+        (self.text[..start].encode_utf16().count(), self.text[..end].encode_utf16().count(), self.anchor.map(|anchor| self.caret < anchor).unwrap_or(false))
+    }
+
     /// Selected byte range (start < end), if any.
     pub fn selection(&self) -> Option<(usize, usize)> {
         let a = self.anchor?;

@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rabbithole_engine::dom::NodeId;
+use rabbithole_engine::dom::{ControlDirection, NodeId};
 use rabbithole_engine::gfx::{Canvas, Color, Rect};
 use rabbithole_engine::layout::LayoutBox;
 use rabbithole_engine::net::{Request, Url};
@@ -1264,13 +1264,6 @@ impl Worker {
             if let Some(page) = self.page.as_mut() {
                 let (x, y) = self.scroll;
                 self.engine.set_page_scroll(page, x, y);
-                // Keep an edit buffer in sync when scripts changed the value.
-                if let Some(edit) = self.edit.as_mut() {
-                    let now = page.control_text(edit.node);
-                    if now != edit.buf.text {
-                        edit.buf.set_text(&now);
-                    }
-                }
             }
             let (x, y) = self.scroll;
             let (mx, my) = self.max_scroll();
@@ -1302,6 +1295,7 @@ impl Worker {
             return;
         }
         self.sync_script_focus();
+        self.sync_edit_from_page();
     }
 
     // ------------------------------------------------------------- pointer
@@ -1541,6 +1535,7 @@ impl Worker {
         });
         self.ending_edit = false;
         self.sync_script_focus();
+        self.sync_edit_from_page();
     }
 
     /// Follow focus moved by scripts (`el.focus()`, a click handler that
@@ -1594,13 +1589,37 @@ impl Worker {
             let (x, y) = self.scroll;
             self.engine.set_page_scroll(page, x, y);
         }
+        self.publish_edit_selection();
         self.dirty = true;
         self.dispatch_to(node, "input", input_event_init(input_type, data, false));
+    }
+
+    /// Script setters and native navigation share the same control state.
+    fn sync_edit_from_page(&mut self) {
+        let (Some(page), Some(edit)) = (self.page.as_mut(), self.edit.as_mut()) else { return };
+        let now = page.control_text(edit.node);
+        if edit.buf.text != now { edit.buf.set_text(&now); }
+        edit.max_len = page.max_length(edit.node);
+        if page.doc.control_selections.contains_key(&edit.node) {
+            let selection = page.doc.control_selection(edit.node);
+            edit.buf.set_utf16_selection(selection.start, selection.end, selection.direction == ControlDirection::Backward);
+        } else {
+            let (start, end, _) = edit.buf.utf16_selection();
+            page.doc.set_control_selection(edit.node, start, end, ControlDirection::None);
+        }
+    }
+
+    fn publish_edit_selection(&mut self) {
+        let (Some(page), Some(edit)) = (self.page.as_mut(), self.edit.as_ref()) else { return };
+        let (start, end, backward) = edit.buf.utf16_selection();
+        let direction = if start == end { ControlDirection::None } else if backward { ControlDirection::Backward } else { ControlDirection::Forward };
+        page.doc.set_control_selection(edit.node, start, end, direction);
     }
 
     /// All native text mutations share the same cancelable default action.
     /// Handlers may replace the value, move focus, or make a control read-only.
     fn edit_control(&mut self, action: ControlAction<'_>, input_type: &str, data: Option<&str>) {
+        self.sync_edit_from_page();
         let Some(node) = self.edit.as_ref().map(|e| e.node) else { return };
         let cutting = matches!(action, ControlAction::Cut);
         let allowed = |worker: &Self| worker.control_is_mutable(node)
@@ -1626,6 +1645,7 @@ impl Worker {
         }
         self.dirty = true;
         if edit.buf.text == before {
+            self.publish_edit_selection();
             return;
         }
         if let Some(text) = clipboard {
@@ -1659,6 +1679,7 @@ impl Worker {
         if let Some(edit) = self.edit.as_mut() {
             edit.buf.set_caret(best, false);
         }
+        self.publish_edit_selection();
         self.dirty = true;
     }
 
@@ -1768,6 +1789,7 @@ impl Worker {
     }
 
     fn control_key(&mut self, k: &KeyInput) {
+        self.sync_edit_from_page();
         let ctrl = k.mods.ctrl || k.mods.meta;
         let shift = k.mods.shift;
         let Some(node) = self.edit.as_ref().map(|e| e.node) else { return };
@@ -1786,13 +1808,13 @@ impl Worker {
             "Tab" => self.focus_next(!shift),
             "Backspace" => self.edit_control(ControlAction::Backspace(ctrl), if ctrl { "deleteWordBackward" } else { "deleteContentBackward" }, None),
             "Delete" => self.edit_control(ControlAction::Delete(ctrl), if ctrl { "deleteWordForward" } else { "deleteContentForward" }, None),
-            "ArrowLeft" => self.edit.as_mut().unwrap().buf.move_left(shift, ctrl),
-            "ArrowRight" => self.edit.as_mut().unwrap().buf.move_right(shift, ctrl),
-            "Home" => self.edit.as_mut().unwrap().buf.home(shift),
-            "End" => self.edit.as_mut().unwrap().buf.end(shift),
+            "ArrowLeft" => { self.edit.as_mut().unwrap().buf.move_left(shift, ctrl); self.publish_edit_selection(); }
+            "ArrowRight" => { self.edit.as_mut().unwrap().buf.move_right(shift, ctrl); self.publish_edit_selection(); }
+            "Home" => { self.edit.as_mut().unwrap().buf.home(shift); self.publish_edit_selection(); }
+            "End" => { self.edit.as_mut().unwrap().buf.end(shift); self.publish_edit_selection(); }
             " " if !ctrl => self.edit_control(ControlAction::Insert(" "), "insertText", Some(" ")),
             key if ctrl && key.chars().count() == 1 => match key.to_lowercase().as_str() {
-                "a" => self.edit.as_mut().unwrap().buf.select_all(),
+                "a" => { self.edit.as_mut().unwrap().buf.select_all(); self.publish_edit_selection(); }
                 "c" if kind != ControlKind::Password => {
                     if let Some(text) = self.edit.as_ref().and_then(|e| e.buf.selected_text()).map(str::to_string) {
                         self.send(FromContent::Clipboard(text));

@@ -4,7 +4,7 @@ use crate::env::with_env;
 use rabbithole_js::V;
 use crate::host::*;
 use crate::node::{self, children_of, inner_text, insert_node, remove_node, set_inner_html, set_text_content};
-use rabbithole_dom::{Document, NodeData, NodeId};
+use rabbithole_dom::{ControlDirection, Document, NodeData, NodeId};
 use rabbithole_js::{JsResult, ObjectId, PropertyKey, Realm, Value, ALL, CONFIGURABLE, ENUMERABLE};
 use std::rc::Rc;
 
@@ -1721,7 +1721,14 @@ fn input_value_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<V
         set_select_value(n, &v);
     } else if tag == "textarea" || (tag == "input" && input_value_mode_is_value(n)) {
         // "value" mode: set the dirty value; the attribute is the default.
-        with_doc(n.doc, |doc| doc.set_control_value(n.node, Some(&v)));
+        with_doc(n.doc, |doc| {
+            let old = if tag == "textarea" { doc.control_value(n.node).map(str::to_string).unwrap_or_else(|| doc.text_content(n.node)) } else { doc.control_value(n.node).unwrap_or("").to_string() };
+            doc.set_control_value(n.node, Some(&v));
+            if old != v {
+                let end = v.encode_utf16().count();
+                doc.set_control_selection(n.node, end, end, ControlDirection::None);
+            }
+        });
         if n.doc == 0 {
             mark_dirty();
         }
@@ -1836,7 +1843,10 @@ fn input_labels(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
 }
 
 fn input_select(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
-    let _ = this_node(realm, &this, "select")?;
+    let n = this_node(realm, &this, "select")?;
+    if control_selection_applies(n) {
+        set_control_selection(n, 0, usize::MAX, ControlDirection::None);
+    }
     Ok(Value::Undefined)
 }
 
@@ -1859,8 +1869,86 @@ fn input_check_validity(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult
     Ok(Value::Bool(!missing))
 }
 
-fn input_selection(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
-    Ok(Value::Number(0.0))
+fn control_selection_applies(n: NodeRef) -> bool {
+    if tag_of(n).as_deref() == Some("textarea") { return true; }
+    let ty = get_attribute(n, "type").unwrap_or_default().to_ascii_lowercase();
+    // Invalid input types fall back to the text state.
+    !matches!(ty.as_str(), "hidden" | "email" | "date" | "month" | "week" | "time" | "datetime-local" | "number" | "range" | "color" | "checkbox" | "radio" | "file" | "submit" | "image" | "reset" | "button")
+}
+
+fn set_control_selection(n: NodeRef, start: usize, end: usize, direction: ControlDirection) {
+    with_doc(n.doc, |doc| doc.set_control_selection(n.node, start, end, direction));
+    if n.doc == 0 { mark_dirty(); }
+}
+
+fn selection_offset(realm: &mut Realm, value: Value) -> JsResult<usize> {
+    let number = realm.to_number(value)?;
+    Ok(if number.is_finite() { number.trunc().rem_euclid(4294967296.0) as usize } else { 0 })
+}
+
+fn selection_direction(value: &str) -> ControlDirection {
+    match value { "forward" => ControlDirection::Forward, "backward" => ControlDirection::Backward, _ => ControlDirection::None }
+}
+
+fn require_control_selection(realm: &mut Realm, n: NodeRef) -> JsResult<()> {
+    if control_selection_applies(n) { return Ok(()); }
+    Err(crate::misc::dom_exception(realm, "InvalidStateError", "The input type does not support text selection."))
+}
+
+fn input_selection_start(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "selectionStart")?;
+    if !control_selection_applies(n) { return Ok(Value::Null); }
+    Ok(Value::Number(with_doc(n.doc, |doc| doc.control_selection(n.node).start) as f64))
+}
+
+fn input_selection_end(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "selectionEnd")?;
+    if !control_selection_applies(n) { return Ok(Value::Null); }
+    Ok(Value::Number(with_doc(n.doc, |doc| doc.control_selection(n.node).end) as f64))
+}
+
+fn input_selection_direction(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "selectionDirection")?;
+    if !control_selection_applies(n) { return Ok(Value::Null); }
+    let direction = with_doc(n.doc, |doc| doc.control_selection(n.node).direction);
+    Ok(Value::str(match direction { ControlDirection::Forward => "forward", ControlDirection::Backward => "backward", ControlDirection::None => "none" }))
+}
+
+fn input_selection_start_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "selectionStart")?;
+    require_control_selection(realm, n)?;
+    let start = selection_offset(realm, arg(args, 0))?;
+    let old = with_doc(n.doc, |doc| doc.control_selection(n.node));
+    set_control_selection(n, start, old.end.max(start), old.direction);
+    Ok(Value::Undefined)
+}
+
+fn input_selection_end_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "selectionEnd")?;
+    require_control_selection(realm, n)?;
+    let end = selection_offset(realm, arg(args, 0))?;
+    let old = with_doc(n.doc, |doc| doc.control_selection(n.node));
+    set_control_selection(n, old.start, end, old.direction);
+    Ok(Value::Undefined)
+}
+
+fn input_selection_direction_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "selectionDirection")?;
+    require_control_selection(realm, n)?;
+    let direction = selection_direction(&arg_str(realm, args, 0)?);
+    let old = with_doc(n.doc, |doc| doc.control_selection(n.node));
+    set_control_selection(n, old.start, old.end, direction);
+    Ok(Value::Undefined)
+}
+
+fn input_set_selection_range(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "setSelectionRange")?;
+    require_control_selection(realm, n)?;
+    let start = selection_offset(realm, arg(args, 0))?;
+    let end = selection_offset(realm, arg(args, 1))?;
+    let direction = if args.len() > 2 { selection_direction(&arg_str(realm, args, 2)?) } else { ControlDirection::None };
+    set_control_selection(n, start, end, direction);
+    Ok(Value::Undefined)
 }
 
 fn input_set_custom_validity(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -2602,13 +2690,13 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(input, "validity", Some(input_validity), None, ACC);
     realm.define_accessor(input, "validationMessage", Some(empty_string), None, ACC);
     realm.define_accessor(input, "willValidate", Some(node_true), None, ACC);
-    realm.define_accessor(input, "selectionStart", Some(input_selection), Some(e_noop), ACC);
-    realm.define_accessor(input, "selectionEnd", Some(input_selection), Some(e_noop), ACC);
-    realm.define_accessor(input, "selectionDirection", Some(empty_string), Some(e_noop), ACC);
+    realm.define_accessor(input, "selectionStart", Some(input_selection_start), Some(input_selection_start_set), ACC);
+    realm.define_accessor(input, "selectionEnd", Some(input_selection_end), Some(input_selection_end_set), ACC);
+    realm.define_accessor(input, "selectionDirection", Some(input_selection_direction), Some(input_selection_direction_set), ACC);
     realm.define_accessor(input, "valueAsNumber", Some(input_value_as_number), Some(input_value_set), ACC);
     realm.define_accessor(input, "list", Some(node_null), None, ACC);
     realm.define_method(input, "select", 0, input_select);
-    realm.define_method(input, "setSelectionRange", 2, e_noop);
+    realm.define_method(input, "setSelectionRange", 2, input_set_selection_range);
     realm.define_method(input, "setRangeText", 1, e_noop);
     realm.define_method(input, "checkValidity", 0, input_check_validity);
     realm.define_method(input, "reportValidity", 0, input_check_validity);
@@ -2634,11 +2722,12 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(ta, "form", Some(input_form), None, ACC);
     realm.define_accessor(ta, "labels", Some(input_labels), None, ACC);
     realm.define_accessor(ta, "validity", Some(input_validity), None, ACC);
-    realm.define_accessor(ta, "selectionStart", Some(input_selection), Some(e_noop), ACC);
-    realm.define_accessor(ta, "selectionEnd", Some(input_selection), Some(e_noop), ACC);
+    realm.define_accessor(ta, "selectionStart", Some(input_selection_start), Some(input_selection_start_set), ACC);
+    realm.define_accessor(ta, "selectionEnd", Some(input_selection_end), Some(input_selection_end_set), ACC);
+    realm.define_accessor(ta, "selectionDirection", Some(input_selection_direction), Some(input_selection_direction_set), ACC);
     realm.define_accessor(ta, "textLength", Some(ta_text_length), None, ACC);
     realm.define_method(ta, "select", 0, input_select);
-    realm.define_method(ta, "setSelectionRange", 2, e_noop);
+    realm.define_method(ta, "setSelectionRange", 2, input_set_selection_range);
     realm.define_method(ta, "checkValidity", 0, input_check_validity);
     realm.define_method(ta, "reportValidity", 0, input_check_validity);
     realm.define_method(ta, "setCustomValidity", 1, input_set_custom_validity);
