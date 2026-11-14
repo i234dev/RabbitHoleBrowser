@@ -255,7 +255,7 @@ enum Command {
     AttribLocation(u32, String),
     BindAttrib(u32, u32, String),
     UniformLocation(u32, String),
-    Uniform(i32, Vec<f32>),
+    Uniform(i32, u32, Vec<f32>),
     Matrix(i32, bool, Vec<f32>),
     CreateVertexArray,
     BindVertexArray(u32),
@@ -366,7 +366,7 @@ impl Command {
             "attribLocation" => Self::AttribLocation(u!(2), arg_str(realm, args, 3)?),
             "bindAttrib" => Self::BindAttrib(u!(2), u!(3), arg_str(realm, args, 4)?),
             "uniformLocation" => Self::UniformLocation(u!(2), arg_str(realm, args, 3)?),
-            "uniform" => Self::Uniform(n!(2) as i32, floats(realm, 3)?),
+            "uniform" => Self::Uniform(n!(2) as i32, u!(3), floats(realm, 4)?),
             "matrix4" => Self::Matrix(n!(2) as i32, b!(3), floats(realm, 4)?),
             "createVertexArray" => Self::CreateVertexArray,
             "bindVertexArray" => Self::BindVertexArray(u!(2)),
@@ -545,8 +545,8 @@ impl Command {
                 Self::UniformLocation(p, name) => {
                     Reply::Number(ctx.get_uniform_location(p, &name)?.unwrap_or(-1) as f64)
                 }
-                Self::Uniform(location, values) => {
-                    ctx.uniform_f32(location, &values)?;
+                Self::Uniform(location, components, values) => {
+                    ctx.uniform_f32_components(location, components, &values)?;
                     Reply::Void
                 }
                 Self::Matrix(location, transpose, values) => {

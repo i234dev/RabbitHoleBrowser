@@ -150,9 +150,13 @@
     if (data.length !== 16) { flag(s, GL.INVALID_OPERATION); return; }
     call(s, 'matrix4', loc.id, false, data);
   }
-  function uniform(s, location, data) {
+  function uniform(s, location, data, components) {
     const loc = uniformLocation(s, location);
-    if (loc) { data = floats(data); if (data.length > 4) { flag(s, GL.INVALID_OPERATION); return; } call(s, 'uniform', loc.id, data); }
+    if (!loc) return;
+    data = floats(data);
+    if (data.length < components || data.length % components !== 0) { flag(s, GL.INVALID_VALUE); return; }
+    if (data.length > 4) { flag(s, GL.INVALID_OPERATION); return; }
+    call(s, 'uniform', loc.id, components, data);
   }
   function changed(s, result) { if (!result.error && !s.drawFramebuffer) N.canvasMarkDirty(s.surface); }
 
@@ -231,14 +235,14 @@
     }
     uniform1i(location, value) { required('uniform1i', 2, arguments); const s = state(this), loc = uniformLocation(s, location); if (loc) call(s, 'uniformI', loc.id, new Int32Array([value | 0])); }
     uniform1iv(location, values) { required('uniform1iv', 2, arguments); const s = state(this), loc = uniformLocation(s, location); if (!loc) return; values = ints(values); if (values.length !== 1) { flag(s, GL.INVALID_OPERATION); return; } call(s, 'uniformI', loc.id, values); }
-    uniform1f(location, x) { required('uniform1f', 2, arguments); uniform(state(this), location, [+(x)]); }
-    uniform2f(location, x, y) { required('uniform2f', 3, arguments); uniform(state(this), location, [+(x), +(y)]); }
-    uniform3f(location, x, y, z) { required('uniform3f', 4, arguments); uniform(state(this), location, [+(x), +(y), +(z)]); }
-    uniform4f(location, x, y, z, w) { required('uniform4f', 5, arguments); uniform(state(this), location, [+(x), +(y), +(z), +(w)]); }
-    uniform1fv(location, value) { required('uniform1fv', 2, arguments); uniform(state(this), location, value); }
-    uniform2fv(location, value) { required('uniform2fv', 2, arguments); uniform(state(this), location, value); }
-    uniform3fv(location, value) { required('uniform3fv', 2, arguments); uniform(state(this), location, value); }
-    uniform4fv(location, value) { required('uniform4fv', 2, arguments); uniform(state(this), location, value); }
+    uniform1f(location, x) { required('uniform1f', 2, arguments); uniform(state(this), location, [+(x)], 1); }
+    uniform2f(location, x, y) { required('uniform2f', 3, arguments); uniform(state(this), location, [+(x), +(y)], 2); }
+    uniform3f(location, x, y, z) { required('uniform3f', 4, arguments); uniform(state(this), location, [+(x), +(y), +(z)], 3); }
+    uniform4f(location, x, y, z, w) { required('uniform4f', 5, arguments); uniform(state(this), location, [+(x), +(y), +(z), +(w)], 4); }
+    uniform1fv(location, value) { required('uniform1fv', 2, arguments); uniform(state(this), location, value, 1); }
+    uniform2fv(location, value) { required('uniform2fv', 2, arguments); uniform(state(this), location, value, 2); }
+    uniform3fv(location, value) { required('uniform3fv', 2, arguments); uniform(state(this), location, value, 3); }
+    uniform4fv(location, value) { required('uniform4fv', 2, arguments); uniform(state(this), location, value, 4); }
     uniformMatrix4fv(location, transpose, value) { required('uniformMatrix4fv', 3, arguments); matrix(state(this), location, !!transpose, value); }
     createBuffer() { const s = state(this), r = call(s, 'createBuffer'); return r.error ? null : wrap(s, 'Buffer', r.value, { target: null, size: 0, usage: GL.STATIC_DRAW }); }
     bindBuffer(target, object) {

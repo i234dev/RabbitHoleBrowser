@@ -3,6 +3,50 @@ use crate::tests::{run, setup};
 
 
 #[test]
+fn webgl_float_uniform_families_cannot_be_inferred_from_array_lengths() {
+    let(mut env,mut host)=setup("<canvas id=a width=1 height=1></canvas><canvas id=b width=1 height=1></canvas>");
+    let out=run(&mut env,&mut host,r#"
+      for(const [id,version] of [['a',1],['b',2]]) {
+        const gl=document.getElementById(id).getContext(version===2?'webgl2':'webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+        const prefix=version===2?'#version 300 es\n':'';
+        const vertex=prefix+(version===2?'in':'attribute')+' vec2 position;void main(){gl_Position=vec4(position,0.0,1.0);}';
+        const fragment=prefix+'precision mediump float;'+(version===2?'out vec4 pixel;':'')+'uniform bool flag;uniform float gain;uniform vec4 tint;void main(){if(flag){'+(version===2?'pixel':'gl_FragColor')+'=tint*gain;}else{'+(version===2?'pixel':'gl_FragColor')+'=vec4(0.0);}}';
+        function compile(kind,source){const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+        const p=gl.createProgram();gl.attachShader(p,compile(gl.VERTEX_SHADER,vertex));gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fragment));gl.linkProgram(p);
+        if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));gl.useProgram(p);
+        const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+        const position=gl.getAttribLocation(p,'position');gl.vertexAttribPointer(position,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(position);
+        const locations={flag:gl.getUniformLocation(p,'flag'),gain:gl.getUniformLocation(p,'gain'),tint:gl.getUniformLocation(p,'tint')};
+        gl.uniform1i(locations.flag,1);gl.uniform1fv(locations.gain,[0.5]);gl.uniform4fv(locations.tint,[1,0.5,0.25,1]);
+        function pixel(){gl.drawArrays(gl.TRIANGLES,0,3);const bytes=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,bytes);return Array.from(bytes).join(',');}
+        console.log(version,pixel());
+        for(const [target,method,data,error] of [
+          ['tint','uniform1fv',[0,0,0,0],gl.INVALID_OPERATION],
+          ['tint','uniform2fv',[0,0,0,0],gl.INVALID_OPERATION],
+          ['gain','uniform4fv',[0,0,0,0],gl.INVALID_OPERATION],
+          ['gain','uniform2fv',[0],gl.INVALID_VALUE],
+          ['flag','uniform2fv',[0,0],gl.INVALID_OPERATION],
+          ['gain','uniform1fv',[],gl.INVALID_VALUE]
+        ]) {
+          gl[method](locations[target],new Float32Array(data));
+          console.log(gl.getError()===error,gl.getUniform(p,locations.flag),gl.getUniform(p,locations.gain),Array.from(gl.getUniform(p,locations.tint)).join(','),pixel());
+        }
+        gl.uniform1fv(null,new Float32Array([]));console.log(gl.getError(),pixel());
+        gl.uniform1fv(locations.gain,[0.25]);console.log(gl.getError(),pixel());
+      }
+    "#);
+    let mut expected=Vec::new();
+    for version in [1,2] {
+        expected.push(format!("{version} 128,64,32,128"));
+        for _ in 0..6 { expected.push("true true 0.5 1,0.5,0.25,1 128,64,32,128".to_string()); }
+        expected.push("0 128,64,32,128".to_string());
+        expected.push("0 64,32,16,64".to_string());
+    }
+    assert_eq!(out,expected);assert!(env.errors().is_empty(),"{:?}",env.errors());
+}
+
+
+#[test]
 fn webgl_scalar_boolean_uniforms_preserve_types_updates_and_relink_defaults() {
     let(mut env,mut host)=setup("<canvas id=a width=1 height=1></canvas><canvas id=b width=1 height=1></canvas>");
     let out=run(&mut env,&mut host,r#"

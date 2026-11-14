@@ -90,7 +90,9 @@ stages. Integer and floating-point scalar uniform setters normalize zero to fals
 and every other value to true, including negative integers; sampler setters keep
 their texture-unit range checks. Reflection reports `BOOL` and JavaScript
 `getUniform` returns a boolean. Relinking resets the value to false and invalidates
-old locations. Setters with incompatible dimensions or types fail atomically. Both branches and logical operands are typed and reflected statically,
+old locations. Setters with incompatible dimensions or types fail atomically.
+The float setter family keeps its declared component width independently of the
+input array length, so `uniform2fv` cannot update a scalar or `vec4` uniform. Both branches and logical operands are typed and reflected statically,
 including constant dead paths. Blocks have lexical scopes; a new local enters
 scope after its initializer, and leaving a block restores the enclosing binding.
 At most 16 nested statement levels and 128 statements per body are supported.

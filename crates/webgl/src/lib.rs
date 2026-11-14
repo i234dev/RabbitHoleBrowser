@@ -776,6 +776,23 @@ impl Context {
         } else { Value::from(u.ty, values) };
         Ok(())
     }
+    pub fn uniform_f32_components(
+        &mut self,
+        location: i32,
+        components: u32,
+        values: &[f32],
+    ) -> Result<()> {
+        if location < 0 {
+            return Ok(());
+        }
+        if !(1..=4).contains(&components) {
+            return Err(Error::InvalidValue);
+        }
+        if self.uniform_mut(location)?.ty.n() != components as usize {
+            return Err(Error::InvalidOperation);
+        }
+        self.uniform_f32(location, values)
+    }
     pub fn uniform_matrix4fv(
         &mut self,
         location: i32,
