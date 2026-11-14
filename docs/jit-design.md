@@ -1541,3 +1541,11 @@ casos distinguen override apagado/encendido y estrés completo/incremental.
 Un workflow dirigido a la rama de validación Windows conserva `--nocapture`,
 comandos, configuración, revisión y contadores. Sigue pendiente de ejecución;
 no prueba unwind ni habilita el JIT del navegador en Windows.
+
+
+Los contadores de los canarios se toman como incrementos desde un snapshot
+posterior a `set_jit`: `Realm::new()` puede ejecutar código de bootstrap con
+el selector del entorno antes del override del test. Un contador acumulado
+anterior no acredita ejecución durante la fase medida; el control apagado
+exige que no aumente. Las profundidades vivas son observaciones dinámicas y
+deben seguir a cero en ese control.

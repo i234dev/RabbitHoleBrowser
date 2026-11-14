@@ -221,6 +221,7 @@ fn watchdog_stops_native_loop() {
 // validation override; Options::on remains blocked there.
 #[derive(Default)]
 struct CallbackGcCanary {
+    initial_entries: u64,
     entries_at_callback: Cell<u64>,
     entries_after_reentry: Cell<u64>,
     collections: Cell<usize>,
@@ -235,14 +236,14 @@ fn canary_collect(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
 
 fn canary_reenter_and_collect(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let stats = realm.native_data::<CallbackGcCanary>(realm.current_native().unwrap()).unwrap();
-    stats.entries_at_callback.set(realm.jit_entries());
+    stats.entries_at_callback.set(realm.jit_entries() - stats.initial_entries);
     let callback = args[0].clone();
     let held = args[1].clone();
     let result = realm.call(callback, Value::Undefined, &[held])?;
     // This host is GC-safe: its arguments are rooted by call_native, and its
     // newly returned value needs a root until this extra collection finishes.
     realm.native_root(result.clone());
-    stats.entries_after_reentry.set(realm.jit_entries());
+    stats.entries_after_reentry.set(realm.jit_entries() - stats.initial_entries);
     realm.gc();
     stats.collections.set(stats.collections.get() + 1);
     Ok(result)
@@ -278,7 +279,10 @@ fn native_override_callback_reentry_keeps_values_alive_through_gc() {
             realm.gcx.no_gc = false;
             realm.gcx.stress = stress;
             realm.gcx.incremental = stress == crate::realm::GC_STRESS_INCREMENTAL;
-            let stats = Rc::new(CallbackGcCanary::default());
+            // Realm bootstrap observes the ambient selector before set_jit.
+            // Measure only this explicit override, not those earlier entries.
+            let initial_entries = realm.jit_entries();
+            let stats = Rc::new(CallbackGcCanary { initial_entries, ..Default::default() });
             let global = realm.global();
             for (name, arity, function) in [
                 ("__canaryCollect", 0, canary_collect as crate::NativeFn),
@@ -300,13 +304,13 @@ fn native_override_callback_reentry_keeps_values_alive_through_gc() {
                 assert!(stats.entries_after_reentry.get() > stats.entries_at_callback.get(), "the reentrant callback itself entered native");
             } else {
                 assert!(!realm.jit_enabled());
-                assert_eq!(realm.jit_entries(), 0);
+                assert_eq!(realm.jit_entries(), initial_entries);
                 assert_eq!(stats.entries_at_callback.get(), 0);
                 assert_eq!(stats.entries_after_reentry.get(), 0);
             }
             assert!(realm.frames.is_empty() && realm.vstack.is_empty() && realm.new_target_stack.is_empty());
             assert_eq!(realm.native_depth, 0);
-            eprintln!("native-canary callback-gc target={}-{} requested_override={requested} enabled={} stress={stress} entries_at_callback={} entries_after_reentry={} total_entries={} explicit_collections={}", std::env::consts::OS, std::env::consts::ARCH, realm.jit_enabled(), stats.entries_at_callback.get(), stats.entries_after_reentry.get(), realm.jit_entries(), stats.collections.get());
+            eprintln!("native-canary callback-gc target={}-{} requested_override={requested} enabled={} stress={stress} initial_entries={initial_entries} entries_at_callback={} entries_after_reentry={} measured_entries={} explicit_collections={}", std::env::consts::OS, std::env::consts::ARCH, realm.jit_enabled(), stats.entries_at_callback.get(), stats.entries_after_reentry.get(), realm.jit_entries() - initial_entries, stats.collections.get());
         }
     }
 }
@@ -382,6 +386,7 @@ fn native_property_getter_keeps_generated_frame_live_during_gc() {
             realm.gcx.no_gc = false;
             realm.gcx.stress = stress;
             realm.gcx.incremental = stress == crate::realm::GC_STRESS_INCREMENTAL;
+            let initial_entries = realm.jit_entries();
             let stats = Rc::new(ActiveFrameCanary {
                 expected_native: requested && rabbithole_jit::supported(),
                 getter_depth: Cell::new(0), gc_depth: Cell::new(0),
@@ -403,11 +408,12 @@ fn native_property_getter_keeps_generated_frame_live_during_gc() {
             assert_eq!(stats.getter_calls.get(), 3, "exercise both initial lookup and cached getter");
             assert_eq!(stats.collections.get(), 3, "all three GC probes were really reclaimed");
             assert_eq!(realm.jit.live_entries, 0);
+            if !stats.expected_native { assert_eq!(realm.jit_entries(), initial_entries); }
             assert!(realm.frames.is_empty() && realm.vstack.is_empty() && realm.new_target_stack.is_empty());
             assert!(realm.native_roots.is_empty());
             assert_eq!(realm.native_depth, 0);
             assert_eq!(realm.gc_block, 0);
-            eprintln!("native-canary live-frame target={}-{} requested_override={requested} enabled={} stress={stress} entries={} getter_calls={} verified_collections={} getter_live_depth={} gc_live_depth={} live_entries_after={}", std::env::consts::OS, std::env::consts::ARCH, realm.jit_enabled(), realm.jit_entries(), stats.getter_calls.get(), stats.collections.get(), stats.getter_depth.get(), stats.gc_depth.get(), realm.jit.live_entries);
+            eprintln!("native-canary live-frame target={}-{} requested_override={requested} enabled={} stress={stress} initial_entries={initial_entries} measured_entries={} getter_calls={} verified_collections={} getter_live_depth={} gc_live_depth={} live_entries_after={}", std::env::consts::OS, std::env::consts::ARCH, realm.jit_enabled(), realm.jit_entries() - initial_entries, stats.getter_calls.get(), stats.collections.get(), stats.getter_depth.get(), stats.gc_depth.get(), realm.jit.live_entries);
         }
     }
 }
