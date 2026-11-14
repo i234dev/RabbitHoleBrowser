@@ -41,3 +41,27 @@ fn invalid_subgrid_names_do_not_overwrite_a_valid_track_list() {
     }
     assert!(computed("grid-template-columns:subgrid;grid-template-columns:none").grid_template_columns.is_empty());
 }
+
+#[test]
+fn normal_gaps_keep_their_origin_without_changing_ordinary_used_lengths() {
+    let normal=computed("");
+    assert!(normal.row_gap_normal&&normal.column_gap_normal);
+    assert_eq!((normal.row_gap,normal.column_gap),(Length::ZERO,Length::ZERO));
+    let mixed=computed("gap:0 normal");
+    assert!(!mixed.row_gap_normal&&mixed.column_gap_normal);
+    assert_eq!((mixed.row_gap,mixed.column_gap),(Length::ZERO,Length::ZERO));
+    let mixed=computed("gap:normal 0;grid-row-gap:0;column-gap:normal");
+    assert!(!mixed.row_gap_normal&&mixed.column_gap_normal);
+    let reset=computed("gap:0;row-gap:initial;column-gap:unset");
+    assert!(reset.row_gap_normal&&reset.column_gap_normal);
+}
+
+#[test]
+fn inherited_gap_metadata_follows_the_same_property_as_its_length() {
+    let doc=rabbithole_html::parse("<div id=parent><div id=target></div></div>");
+    let sheets=[parse_stylesheet("#parent{gap:normal 0}#target{gap:inherit}")];
+    let tree=style_tree(&doc,&sheets,&MediaEnv{width:800.,height:600.,screen:true,scripting:true});
+    let child=tree.get(doc.element_by_id("target").unwrap()).unwrap();
+    assert!(child.row_gap_normal&&!child.column_gap_normal);
+    assert_eq!((child.row_gap,child.column_gap),(Length::ZERO,Length::ZERO));
+}

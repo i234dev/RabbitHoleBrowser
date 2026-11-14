@@ -1616,9 +1616,11 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "gap" | "grid-gap" => {
             to.row_gap = from.row_gap;
             to.column_gap = from.column_gap;
+            to.row_gap_normal = from.row_gap_normal;
+            to.column_gap_normal = from.column_gap_normal;
         }
-        "row-gap" | "grid-row-gap" => to.row_gap = from.row_gap,
-        "column-gap" | "grid-column-gap" => to.column_gap = from.column_gap,
+        "row-gap" | "grid-row-gap" => { to.row_gap = from.row_gap; to.row_gap_normal = from.row_gap_normal; }
+        "column-gap" | "grid-column-gap" => { to.column_gap = from.column_gap; to.column_gap_normal = from.column_gap_normal; }
         "grid-template-columns" => to.grid_template_columns = from.grid_template_columns.clone(),
         "grid-template-rows" => to.grid_template_rows = from.grid_template_rows.clone(),
         "grid-template-areas" => to.grid_template_areas = from.grid_template_areas.clone(),
