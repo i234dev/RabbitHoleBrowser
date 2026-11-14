@@ -77,6 +77,12 @@ fn cached_simple_differential_adversaries_preserve_fallbacks_and_counted_values(
                 normal_gc(&mut realm);
                 realm.gcx.stress = stress;
                 realm.gcx.incremental = stress != crate::realm::GC_STRESS_FULL;
+                // Changing stress alone does not reset the running countdown.
+                // Activate it for this fixture's first call/backedge and prove
+                // that collection work really happened during its execution.
+                realm.tick = realm.tick_interval();
+                realm.gcx.stress_n = 0;
+                let collections = realm.heap.collections;
                 let console = Rc::new(RefCell::new(String::new()));
                 let output = console.clone();
                 realm.set_console_sink(Box::new(move |_, text| { output.borrow_mut().push_str(text); output.borrow_mut().push('\n'); }));
@@ -84,6 +90,11 @@ fn cached_simple_differential_adversaries_preserve_fallbacks_and_counted_values(
                 let result = evaluate(&mut realm, source);
                 realm.run_jobs();
                 realm.set_deadline(None);
+                if stress == crate::realm::GC_STRESS_FULL {
+                    assert!(realm.heap.collections > collections, "{name}: no full collection during fixture mode={mode:?}");
+                } else if stress == crate::realm::GC_STRESS_INCREMENTAL {
+                    assert!(realm.gcx.stress_n > 0, "{name}: no incremental slice during fixture mode={mode:?}");
+                }
                 assert_eq!(result, expected, "{name} stress={stress} mode={mode:?}");
                 let output = console.borrow().clone();
                 if name == "interpreted-bridge-and-suspension" { assert_eq!(output, "async:v3\n"); }
@@ -97,7 +108,7 @@ fn cached_simple_differential_adversaries_preserve_fallbacks_and_counted_values(
 }
 
 #[derive(Default)]
-struct StackGrowth { before_ptr: Cell<usize>, before_capacity: Cell<usize>, before_hits: Cell<u64>, moved_on_hit: Cell<bool> }
+struct StackGrowth { before_ptr: Cell<usize>, before_capacity: Cell<usize>, before_hits: Cell<u64>, grew_on_hit: Cell<bool> }
 fn stack_before(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
     let state = realm.native_data::<StackGrowth>(realm.current_native().unwrap()).unwrap();
     state.before_ptr.set(realm.vstack.as_ptr() as usize);
@@ -109,7 +120,7 @@ fn stack_after(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
     let state = realm.native_data::<StackGrowth>(realm.current_native().unwrap()).unwrap();
     if realm.jit.cached_simple_calls > state.before_hits.get()
         && (realm.vstack.as_ptr() as usize != state.before_ptr.get() || realm.vstack.capacity() > state.before_capacity.get()) {
-        state.moved_on_hit.set(true);
+        state.grew_on_hit.set(true);
     }
     Ok(Value::Undefined)
 }
@@ -132,9 +143,9 @@ fn cached_simple_refreshes_slots_after_a_warm_push_grows_the_stack() {
     // The live dispatcher fits a small allocation; its already-warm target
     // needs >300 slots and must enlarge it while the helper is executing.
     realm.vstack.shrink_to_fit();
-    state.moved_on_hit.set(false);
+    state.grew_on_hit.set(false);
     assert_eq!(evaluate(&mut realm, "invokeWide(wide,'actual')"), "counted-299:actual");
-    if realm.jit_enabled() { assert!(state.moved_on_hit.get(), "the warm fast push must really grow/move vstack"); }
+    if realm.jit_enabled() { assert!(state.grew_on_hit.get(), "the warm fast push must really grow/move vstack"); }
     empty_stacks(&realm);
 }
 
@@ -176,4 +187,39 @@ fn cached_simple_call_loop_keeps_watchdog_ticks_before_the_fast_path() {
     empty_stacks(&realm);
     assert_eq!(evaluate(&mut realm, "leaf(0)"), "1");
     eprintln!("native-canary cached-simple-watchdog target={}-{} enabled={} entry_delta={} hit_delta={} watchdog_aborts={aborts}", std::env::consts::OS, std::env::consts::ARCH, realm.jit_enabled(), after_entries-entries, after_hits-hits);
+}
+
+
+#[test]
+fn cached_simple_direct_method_distinguishes_strict_and_sloppy_primitive_receivers() {
+    for requested in [false, true] {
+        let mut realm = Realm::new();
+        realm.set_jit(requested, 0);
+        normal_gc(&mut realm);
+        let padding = "padding += 1;".repeat(32);
+        evaluate(&mut realm, &format!("var receiverEffects=0;var strictHandler=Number.prototype.__jitCachedReceiver=function(x){{'use strict';receiverEffects++;return typeof this+':'+this+':'+x}};function directReceiver(receiver,value){{var padding=0;{padding}return receiver.__jitCachedReceiver(value)}};var boxedReceiver=new Number(4);"));
+        let active = realm.jit_enabled();
+        let mut expected_effects = 0;
+        let mut invoke = |realm: &mut Realm, source: &str, expected: &str, hit: bool| {
+            let before = realm.jit.cached_simple_calls;
+            assert_eq!(evaluate(realm, source), expected);
+            assert_eq!(realm.jit.cached_simple_calls-before, u64::from(active && hit), "{source}");
+            expected_effects += 1;
+            assert_eq!(evaluate(realm, "receiverEffects"), expected_effects.to_string(), "callee must execute exactly once");
+            empty_stacks(realm);
+        };
+        invoke(&mut realm, "directReceiver(3,'cold')", "number:3:cold", false);
+        invoke(&mut realm, "directReceiver(3,'warm')", "number:3:warm", true);
+        evaluate(&mut realm, "Number.prototype.__jitCachedReceiver=function(x){receiverEffects++;return typeof this+':'+this+':'+x}");
+        // Populate the SAME sloppy callee's IC with an object, then send a
+        // primitive through that warm record. It must box on the fallback,
+        // rather than using the fast path's existing-object receiver rule.
+        invoke(&mut realm, "directReceiver(boxedReceiver,'cold')", "object:4:cold", false);
+        invoke(&mut realm, "directReceiver(boxedReceiver,'warm')", "object:4:warm", true);
+        invoke(&mut realm, "directReceiver(4,'primitive')", "object:4:primitive", false);
+        invoke(&mut realm, "directReceiver(5,'again')", "object:5:again", false);
+        evaluate(&mut realm, "Number.prototype.__jitCachedReceiver=strictHandler");
+        invoke(&mut realm, "directReceiver(6,'cold')", "number:6:cold", false);
+        invoke(&mut realm, "directReceiver(6,'warm')", "number:6:warm", true);
+    }
 }
