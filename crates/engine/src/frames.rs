@@ -45,6 +45,13 @@ thread_local! {
 }
 
 thread_local! {
+    /// Reverse calls need the outer owning host restored before their target
+    /// can run jobs. Keep this separate from the existing descendant queue,
+    /// whose checkpoint still runs between consecutive classic scripts.
+    static REVERSE_TOUCHED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+thread_local! {
     /// Pages whose child frame is running scripts right now, outermost
     /// first. The running child is detached from its owner (see
     /// [`Engine::with_child`]), so the owner can be reached here without
@@ -372,7 +379,8 @@ impl Engine {
             target.script.dom_dirty = true;
             Some(reply)
         };
-        let r = if find_frame_page(page, id) {
+        let descendant = find_frame_page(page, id);
+        let r = if descendant {
             self.with_frame(page, id, &mut invoke).flatten()
         } else {
             // Only global reads/calls gain the reverse route. Do not broaden
@@ -397,41 +405,45 @@ impl Engine {
             if owner.frame_id == id { reverse(owner) } else { self.with_frame(owner, id, &mut reverse).flatten() }
         };
         if r.is_some() {
-            TOUCHED.with(|t| {
+            let remember = |t: &std::cell::RefCell<Vec<u64>>| {
                 let mut t = t.borrow_mut();
                 if !t.contains(&id) { t.push(id); }
-            });
+            };
+            if descendant { TOUCHED.with(remember); } else { REVERSE_TOUCHED.with(remember); }
         }
         r
     }
 
-    /// Drain only after the outer owner and all suspended source stacks have
-    /// returned. A nested checkpoint must not run ancestor Promise callbacks
-    /// inside the still-active calling JS stack. Unreachable live contexts
-    /// remain pending for their owning root; removed contexts are discarded.
+    /// Preserve descendant checkpoints between classic scripts. Reverse
+    /// targets wait until the outer owner and suspended source hosts return.
     pub(crate) fn frame_microtasks(&self, page: &mut Page) {
-        if !ancestors().is_empty() || page.script.host.is_none() || !rabbithole_script::ScriptHost::frame_checkpoint_allowed() { return; }
+        if !rabbithole_script::ScriptHost::frame_checkpoint_allowed() { return; }
+        let mut drain = |target: &mut Page| {
+            let Some(mut host) = target.script.host.take() else { return false };
+            {
+                let mut env = EngineEnv { engine: self, page: target };
+                host.run_jobs(&mut env);
+            }
+            target.script.host = Some(host);
+            target.script.dom_dirty = true;
+            true
+        };
         let ids = TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()));
         for id in ids {
-            let mut drain = |target: &mut Page| {
-                let Some(mut host) = target.script.host.take() else { return false };
-                {
-                    let mut env = EngineEnv { engine: self, page: target };
-                    host.run_jobs(&mut env);
-                }
-                target.script.host = Some(host);
-                target.script.dom_dirty = true;
-                true
-            };
+            self.with_frame(page, id, &mut drain);
+        }
+        if !ancestors().is_empty() || page.script.host.is_none() { return; }
+        let ids = REVERSE_TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()));
+        for id in ids {
             let drained = if page.frame_id == id { drain(page) } else { self.with_frame(page, id, &mut drain).unwrap_or(false) };
             if !drained && self.frames.borrow().exists(id) {
-                TOUCHED.with(|t| {
+                REVERSE_TOUCHED.with(|t| {
                     let mut t = t.borrow_mut();
                     if !t.contains(&id) { t.push(id); }
                 });
             }
         }
-        if TOUCHED.with(|t| !t.borrow().is_empty()) { set_mail_pending(); }
+        if REVERSE_TOUCHED.with(|t| !t.borrow().is_empty()) { set_mail_pending(); }
     }
 
     fn child_index(page: &Page, node: NodeId) -> Option<usize> {
@@ -1423,6 +1435,20 @@ mod ancestor_call_tests {
     fn finish(engine: &Engine, page: &mut Page, index: usize) {
         engine.with_child(page, index, |child| engine.finish_page_load(child)).unwrap();
         engine.frame_microtasks(page);
+    }
+
+    #[test]
+    fn descendant_jobs_still_run_between_consecutive_parent_classic_scripts() {
+        let mut engine = Engine::new_bundled_fonts_only();
+        engine.scripting = true;
+        engine.loader.load_scripts = true;
+        let viewport = Viewport { width: 800.0, height: 600.0 };
+        let loaded = engine.loader.load_html("<iframe></iframe><script>frames[0].queue()</script><script>var observed=frames[0].flag</script>", Url::parse("https://frame.test/root").unwrap(), viewport);
+        let mut page = engine.build_page_unscripted(loaded, viewport);
+        replace_child(&mut engine, &mut page, 0, "https://frame.test/child", "<script>var flag=0;function queue(){Promise.resolve().then(()=>flag=1)}</script>");
+        finish(&engine, &mut page, 0);
+        engine.finish_page_load(&mut page);
+        assert_eq!(eval(&engine, &mut page, "observed"), "1");
     }
 
     #[test]

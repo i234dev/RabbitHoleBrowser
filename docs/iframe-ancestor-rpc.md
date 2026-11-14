@@ -3,7 +3,7 @@
 This candidate extends the existing Engine cross-realm bridge for global
 property reads and function calls from an iframe to a reachable, inactive
 ancestor or sibling. It is based on source 34780e675d84a769bfb427e07af34d9ba053a0ae.
-The source changes and nine tests have not been compiled or executed yet.
+The source changes and ten tests have not been compiled or executed yet.
 
 The reverse route accepts only HTTP(S) documents whose effective origin equals
 their URL's non-opaque tuple origin, and whose tuple origins agree. This is a
@@ -27,8 +27,9 @@ discards its detached result instead of replacing the next sibling. New
 frame document installation follows the same ownership boundary.
 
 A checkpoint requested inside a foreign call remains pending. Engine drains
-foreign jobs only after the owner and suspended source hosts are restored;
-settle/tick provides that boundary. This preserves completion of the source
+reverse-call jobs only after the owner and suspended source hosts are restored;
+settle/tick provides that boundary. Descendant jobs retain their existing
+checkpoint between consecutive classic scripts through a separate queue. This preserves completion of the source
 synchronous stack before ancestor jobs. Separate realm queues remain: this
 candidate does not implement a single global FIFO microtask queue across all
 realms, and does not claim complete event-loop conformance.
