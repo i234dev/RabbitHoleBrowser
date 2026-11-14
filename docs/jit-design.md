@@ -1495,3 +1495,32 @@ pero esa mejora no se trasladó a la compilación JavaScript. Se descartó esta
 variante tras validar sus pruebas de memoria, JavaScript, GC y 2.000 programas
 diferenciales. Los objetivos de coste de compilación y asignación siguen
 abiertos; el JIT continúa apagado por defecto.
+
+
+## Canarios de entrada nativa en Windows (candidato, 2026-11-14)
+
+La selección normal de `Options::on` sigue deshabilitada en Windows. El
+`Realm::set_jit` de validación permite comprobar el backend sin activar el JIT
+del navegador. El ABI existente `sysv64` no cambia.
+
+`tests_jit::watchdog_stops_native_loop` exige ahora nuevas entradas nativas
+durante la invocación interrumpida, además del error y del contador del watchdog;
+la compilación de ese mismo bucle se prepara antes de armar el plazo.
+`tests_jit::native_override_callback_reentry_keeps_values_alive_through_gc`
+compara override apagado/encendido con GC completa e incremental: observa
+entradas antes del callback de Rust y nuevas entradas al volver a JS, fuerza
+tres recolecciones y comprueba identidad, valores y limpieza de las pilas.
+
+Estos cambios están **pendientes de compilación y ejecución**. Los tests se
+incluyen en la suite `--features jit`; para conservar sus contadores en un
+runner Windows se pueden ejecutar individualmente:
+
+```text
+cargo test -p rabbithole-js --profile ci --features jit --locked tests_jit::watchdog_stops_native_loop -- --exact --nocapture
+cargo test -p rabbithole-js --profile ci --features jit --locked tests_jit::native_override_callback_reentry_keeps_values_alive_through_gc -- --exact --nocapture
+```
+
+Un resultado verde de esos canarios no valida unwind de Windows, consulta de
+permisos de página ni errores de `FlushInstructionCache`. Los diagnósticos que
+provoquen panic a través de código generado necesitan un subproceso acotado;
+no se añaden al proceso general de tests sin resolver antes ese riesgo.
