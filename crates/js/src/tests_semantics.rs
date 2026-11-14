@@ -3,11 +3,16 @@ use crate::Realm;
 
 fn evaluate(source: &str) -> String {
     let mut realm = Realm::new();
-    let result = realm.eval(source, "semantics.js");
+    // Jobs can collect the completion value (notably the deferred
+    // toString objects used by the async cases), so keep it in the root set.
+    let result = match realm.eval(source, "semantics.js") {
+        Ok(value) => Ok(realm.root(value)),
+        Err(error) => Err(realm.root(error)),
+    };
     realm.run_jobs();
     match result {
-        Ok(value) => realm.to_rust_string(value).unwrap(),
-        Err(error) => panic!("{} threw: {}", source, realm.error_to_string(&error)),
+        Ok(value) => realm.to_rust_string(value.value()).unwrap(),
+        Err(error) => panic!("{} threw: {}", source, realm.error_to_string(&error.value())),
     }
 }
 
