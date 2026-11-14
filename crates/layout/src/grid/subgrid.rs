@@ -263,15 +263,43 @@ pub(super) fn positions(list:&TrackList,gap:f32,avail:Option<f32>,align:ContentD
 
 /// Match the shared grid lines, applying the subgrid's own edge layer only
 /// to items touching it. A non-normal child gap adjusts internal item edges.
+fn item_layer(tracks:&SharedTracks,start:usize,end:usize,gap:f32)->(f32,f32) {
+    let before=if start==0 {tracks.inset_start} else {tracks.edge_before[start]+(gap-tracks.gap)*0.5};
+    let after=if end==tracks.sizes.len() {tracks.inset_end} else {tracks.edge_after[end-1]+(gap-tracks.gap)*0.5};
+    (before,after)
+}
 pub(super) fn item_edges(b:&LayoutBox,it:&mut GridItem,column_gap:f32,row_gap:f32) {
     for (rows,gap) in [(false,column_gap),(true,row_gap)] {
         let Some(tracks)=shared(b,rows) else {continue;};
         let (start,end)=if rows {it.area.row} else {it.area.col};
-        let before=if start==0 {tracks.inset_start} else {tracks.edge_before[start as usize]+(gap-tracks.gap)*0.5};
-        let after=if end as usize==tracks.sizes.len() {tracks.inset_end} else {tracks.edge_after[end as usize-1]+(gap-tracks.gap)*0.5};
+        let (before,after)=item_layer(&tracks,start as usize,end as usize,gap);
         if rows {it.edges.margin.top+=before;it.edges.margin.bottom+=after;}
         else {it.edges.margin.left+=before;it.edges.margin.right+=after;}
     }
+}
+
+/// An auto-positioned item in a lanes subgrid receives the largest possible
+/// contribution at each edge in every hypothetical placement (Grid3 §3.4.1).
+pub(super) fn largest_automatic_layer(b:&LayoutBox,rows:bool,gap:f32,span:usize,positions:&[usize])->Option<(f32,f32)> {
+    let tracks=shared(b,rows)?;
+    let mut largest:Option<(f32,f32)>=None;
+    for &start in positions {
+        let (before,after)=item_layer(&tracks,start,(start+span).min(tracks.sizes.len()),gap);
+        largest=Some(match largest {Some((left,right))=>(left.max(before),right.max(after)),None=>(before,after)});
+    }
+    largest
+}
+
+/// Carry the hypothetical item's edge layer into a nested subgrid too. Its
+/// geometry still follows the shared lines; only these contribution layers
+/// can differ from the actual placement used during final layout.
+pub(super) fn item_layer_source(mut source:AxisInheritance,item:&GridItem,style:&ComputedStyle,rows:bool,reference:f32)->AxisInheritance {
+    if let AxisInheritance::Tracks(axis)=&mut source {
+        let edges=ItemEdges::new(style,reference);
+        let (before,after)=if rows {(item.edges.margin.top-edges.margin.top,item.edges.margin.bottom-edges.margin.bottom)} else {(item.edges.margin.left-edges.margin.left,item.edges.margin.right-edges.margin.right)};
+        if axis.inset_start!=before||axis.inset_end!=after {let axis=Arc::make_mut(axis);axis.inset_start=before;axis.inset_end=after;}
+    }
+    source
 }
 
 /// Shared-axis sizing and alignment are ignored, including automatic margins.
@@ -628,5 +656,17 @@ mod tests {
         b.style=Rc::new(style);assert_eq!(automatic_span(&b,false),Some(2));
         let mut style=(*b.style).clone();style.grid_template_columns=vec![TrackListItem::Subgrid{line_names:vec![SubgridLineNames::Repeat{count:Some(1_000_000),names:vec![vec![]]}]}];
         b.style=Rc::new(style);assert_eq!(automatic_span(&b,false),Some(999_999));
+    }
+
+    #[test]
+    fn automatic_items_keep_the_largest_edge_layer_in_every_position() {
+        let parent=parent();let mut b=child();let mut saved=Vec::new();
+        install(&mut b,Some(section(&parent,&[0.,150.],0,2,50.,true)),None,300.,&mut saved);
+        assert_eq!(largest_automatic_layer(&b,false,50.,1,&[0,1]),Some((10.,10.)));
+        let list=tracks(&b,false,None,50.);let mut hypothetical=item(1,2);
+        hypothetical.edges.margin.left=10.;hypothetical.edges.margin.right=10.;
+        let source=sizing_section(&list,1,2,50.,true);
+        let AxisInheritance::Tracks(axis)=item_layer_source(source,&hypothetical,&ComputedStyle::default(),false,0.) else {panic!("missing source")};
+        assert_eq!((axis.inset_start,axis.inset_end),(10.,10.));
     }
 }
