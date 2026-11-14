@@ -24,6 +24,9 @@ pub(crate) struct MockEnv {
     pub(crate) focused: Option<NodeId>,
     pub(crate) now: f64,
     pub(crate) opened: Vec<String>,
+    /// Simulate a host failure after returning an effective watchdog loan.
+    pub(crate) frame_watchdog_outcome: Option<rabbithole_js::WatchdogState>,
+    pub(crate) frame_watchdog_panic: bool,
     /// Real network client for WebSocket / EventSource tests.
     pub(crate) net: Option<rabbithole_net::Fetcher>,
 }
@@ -47,6 +50,8 @@ impl MockEnv {
             now: 1000.0,
             opened: Vec::new(),
             net: None,
+            frame_watchdog_outcome: None,
+            frame_watchdog_panic: false,
         }
     }
 
@@ -57,6 +62,12 @@ impl MockEnv {
 }
 
 impl HostEnv for MockEnv {
+    fn frame_call_with_watchdog(&mut self, _id: u64, _call: FrameCall, watchdog: &mut rabbithole_js::WatchdogState) -> Option<FrameReply> {
+        let outcome = self.frame_watchdog_outcome.take()?;
+        *watchdog = outcome;
+        assert!(!self.frame_watchdog_panic, "fixture host unwind after watchdog outcome");
+        Some(FrameReply::Undefined)
+    }
     fn doc(&mut self) -> &mut Document {
         &mut self.doc
     }
@@ -1560,4 +1571,24 @@ fn document_open_write_close_replaces_the_document() {
         console.log(doc.childNodes.length, doc.firstChild.publicId, doc.compatMode, doc.body.firstChild.tagName);
     "#);
     assert_eq!(out[0], "2 -//W3C//DTD HTML 4.0 Transitional//EN BackCompat SPAN");
+}
+
+#[test]
+fn caller_watchdog_outcome_is_adopted_on_rust_host_unwind_without_js_frames() {
+    let (mut env, mut host) = setup("");
+    let mut failed = rabbithole_js::Realm::new();
+    failed.set_deadline(Some(std::time::Instant::now() - std::time::Duration::from_secs(1)));
+    assert!(failed.check_watchdog().is_err());
+    let outcome = failed.watchdog_state();
+    env.frame_watchdog_outcome = Some(outcome);
+    env.frame_watchdog_panic = true;
+    host.realm().set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_secs(1)));
+    // Deliberately pure Rust host dispatch: no interpreted or generated JS
+    // frame is active during this panic. This does not test native unwind.
+    host.enter(&mut env, |realm| {
+        crate::frames::call_frame(realm, 123, FrameCall::GetGlobal { name: "fixture".into() });
+    });
+    assert_eq!(host.realm().watchdog_state(), outcome);
+    assert!(host.realm().timed_out());
+    host.realm().set_deadline(None);
 }

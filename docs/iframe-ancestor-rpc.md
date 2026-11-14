@@ -3,7 +3,7 @@
 This candidate extends the existing Engine cross-realm bridge for global
 property reads and function calls from an iframe to a reachable, inactive
 ancestor or sibling. It is based on source 34780e675d84a769bfb427e07af34d9ba053a0ae.
-The source changes and nineteen tests (fourteen Engine, five JS) have not been
+The source changes and twenty tests (fourteen Engine, five JS, one Script) have not been
 compiled or executed yet.
 
 The reverse route accepts only HTTP(S) documents whose effective origin equals
@@ -33,7 +33,7 @@ through the default forwarding method.
 The pre-existing module dependency loader still explicitly restarts a deadline
 when compensating compilation. That transitive path requires its own follow-up
 before this candidate can claim that the loan survives synchronous module
-loading; it is not covered by the nineteen tests in this commit.
+loading; it is not covered by the twenty tests in this chain.
 
 Executing frame pages are detached from their owners, including sibling
 calls. Restoration and subsequent input/tick/message effects resolve stable
@@ -69,5 +69,7 @@ reorder/removal, JS removal of the source frame, borrowed deadline recovery,
 getter failure, focus/key wakeup, multiple Engines and partial checkpoints.
 JS tests cover original CPU clock identity, consumed/pending credit,
 termination propagation, target-state restoration and regexp TLS preservation.
+A Script test checks caller adoption during a Rust host unwind with no JS or
+generated frame active; it provides no native unwind evidence.
 No account/site authentication was tested. Opaque origins, named-global
 lookup and deeper/wider frame limits remain separate work.
