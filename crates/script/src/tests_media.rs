@@ -59,7 +59,9 @@ fn audio_element_plays_blob_wav_with_spec_events() {
         a.play().then(() => log.push('resolved'), (e) => log.push('rejected:' + e.name));
         "#
     ));
-    let out = pump(&mut env, &mut host, 30.0, "a.ended", "[a.ended, a.paused, a.readyState, a.networkState, Math.abs(a.currentTime - a.duration) < 0.05, a.duration.toFixed(2), a.played.length].join(',') + '|' + log.filter(e => e !== 'timeupdate' && e !== 'progress').join(',')");
+    // reachedEnd updates the state synchronously, then queues the terminal
+    // events. A timer slice can yield before delivery; await the events too.
+    let out = pump(&mut env, &mut host, 30.0, "a.ended && log.includes('ended')", "[a.ended, a.paused, a.readyState, a.networkState, Math.abs(a.currentTime - a.duration) < 0.05, a.duration.toFixed(2), a.played.length].join(',') + '|' + log.filter(e => e !== 'timeupdate' && e !== 'progress').join(',')");
     let (state, events) = out.trim_matches('\'').split_once('|').unwrap();
     assert_eq!(state, "true,true,4,1,true,0.60,1", "{out}");
     let ev: Vec<&str> = events.split(',').collect();
