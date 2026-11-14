@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+*{font:10px/1 monospace;font-style:normal}
+body{margin:8px}
+section{width:300px;height:24px}
+i{display:block;background:green;color:white}
+.min{width:min-content}.max{width:max-content}.explicit{width:50px}
+.reverse i{margin-left:auto}
+.column{width:40px;height:90px}
+.column i{width:40px;height:30px}
+.column .preferred{height:80px}
+.column b{display:block;width:20px;height:30px}
+</style>
+<section><i class=min>XXXX XX</i></section>
+<section class=reverse><i class=min>XXXX XX</i></section>
+<section><i class=max>XXXX XX</i></section>
+<section><i class=max>XXXX XX</i></section>
+<section><i class=explicit>XXXX XX</i></section>
+<section class=column><i><b></b></i></section>
+<section class=column><i class=preferred><b></b></i></section>
+<section class=column><i><b></b></i></section>
