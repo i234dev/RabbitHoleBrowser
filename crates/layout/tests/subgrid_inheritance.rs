@@ -173,3 +173,24 @@ fn percentage_edges_keep_the_same_area_reference_through_orthogonal_wrappers() {
         close(by_id(&d,&t,"x").content_rect.h,80.);
     }
 }
+
+#[test]
+fn distributed_tracks_keep_shared_lines_and_area_percentages() {
+    let(d,t)=render("<section id=p><div id=s><i id=a></i><i id=b></i></div></section>",
+        "section{display:grid;width:300px;height:300px;grid-template-columns:50px 50px;grid-template-rows:50px 50px;place-content:space-between}#s{display:grid;grid-column:span 2;grid-row:span 2;grid-template-columns:subgrid;grid-template-rows:subgrid;padding:10%}#a{grid-column:1;grid-row:1}#b{grid-column:2;grid-row:2}");
+    let p=by_id(&d,&t,"p");let a=by_id(&d,&t,"a");let b=by_id(&d,&t,"b");
+    close(a.rect.x-p.content_rect.x,30.);close(a.rect.y-p.content_rect.y,30.);close(a.content_rect.w,20.);close(a.content_rect.h,20.);
+    close(b.rect.x-p.content_rect.x,250.);close(b.rect.y-p.content_rect.y,250.);close(b.content_rect.w,20.);close(b.content_rect.h,20.);
+}
+
+#[test]
+fn automatic_edge_layers_include_both_asymmetric_edges_and_full_spans() {
+    for (placement,expected) in [("auto",146.),("1",73.),("span 2",73.)] {
+        let(d,t)=render("<section id=p><div id=s><i></i></div></section>",
+            &format!("section{{display:grid;width:max-content;grid-template-columns:auto auto}}#s{{display:grid-lanes;grid-column:1/span 2;grid-template-columns:subgrid;padding-left:17px;border-left:3px solid;padding-right:11px;border-right:2px solid}}i{{grid-column:{placement};width:40px;height:10px}}"));
+        close(by_id(&d,&t,"p").content_rect.w,expected);
+        let(d,t)=render("<section id=p><div id=s><i></i></div></section>",
+            &format!("section{{display:grid;width:10px;grid-template-columns:10px;grid-template-rows:auto auto}}#s{{display:grid-lanes;grid-row:1/span 2;grid-template-rows:subgrid;padding-top:17px;border-top:3px solid;padding-bottom:11px;border-bottom:2px solid}}i{{grid-row:{placement};width:10px;height:40px}}"));
+        close(by_id(&d,&t,"p").content_rect.h,expected);
+    }
+}

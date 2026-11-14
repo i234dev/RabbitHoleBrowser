@@ -21,14 +21,17 @@ Automatic items inside a fixed lanes subgrid receive the largest possible layer
 of margin, border and padding at each edge in every hypothetical placement. A grid performs an
 initial column/row pass and at most one adjustment of each axis. The initial
 perpendicular estimate uses definite maximum track sizes, floored by definite
-minimums. An empty subgrid does not synthesize padding contributions; a nonempty
+minimums. Initial estimates apply content distribution only when the container
+and all tracks are definite; adjusted estimates use the actual opposite-axis
+available size and alignment. Intrinsic versus definite-zero geometry is
+carried explicitly. An empty subgrid does not synthesize padding contributions; a nonempty
 subgrid with empty edge tracks creates the hypothetical edge items required by
 Grid2. Identical contribution spans are compacted in place using independent
 min/max maxima. Row-lanes measurement receives definite inherited geometry
 before computing inline contributions; explicit intrinsic preferred sizes remain
 in force in an independent axis. Stretch relayout keeps inherited geometry.
 
-Written, not executed: twenty-one geometry/compaction/unwind/budget unit tests, seventeen layout tests,
+Written, not executed: twenty-three geometry/compaction/unwind/budget unit tests, nineteen layout tests,
 two new visual reftest pairs and the seven prior GridSpace tests. The original
 four deferred intrinsic constraint fixtures are preserved byte-for-byte. Style
 metadata/gap tests are in the dependency commits.
