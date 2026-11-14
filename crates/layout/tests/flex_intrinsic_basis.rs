@@ -53,17 +53,23 @@ fn row_auto_retrieves_intrinsic_width_but_content_and_explicit_bases_do_not() {
 
 #[test]
 fn fit_content_uses_available_main_space_after_margin_padding_and_border() {
-    let (d,t) = render(r#"
-      <article id=min>XXXXX XXXXX</article><article id=max>XXXXX XXXXX</article>
-      <section style="width:50px"><i id=middle>XXXXX XXXXX</i></section>
-      <section style="width:20px"><i id=small>XXXXX XXXXX</i></section>
-      <section style="width:300px"><i id=large>XXXXX XXXXX</i></section>
-      <section style="width:50px"><i id=explicit style="width:max-content;flex-basis:fit-content">XXXXX XXXXX</i></section>
-      <section style="width:50px"><i id=content style="flex-basis:content">XXXXX XXXXX</i></section>
-    "#, "*{font:10px/1 monospace}#min{width:min-content}#max{width:max-content}section{display:flex}i{display:block;flex:0 0 auto;min-width:0;width:fit-content;margin-left:3px;margin-right:5px;padding-left:2px;padding-right:4px;border-left:1px solid;border-right:3px solid}");
+    // Choose three actual sizing regimes using independent block controls;
+    // no platform/font metric is assumed to straddle a fixed 32px threshold.
+    let (d,t) = render("<article id=min>XXXXX XXXXX</article><article id=max>XXXXX XXXXX</article>",
+        "*{font:10px/1 monospace}#min{width:min-content}#max{width:max-content}");
     let min=by_id(&d,&t,"min").content_rect.w; let max=by_id(&d,&t,"max").content_rect.w;
-    assert!(min<32. && max>32.);
-    for id in ["middle", "explicit"] { close(by_id(&d,&t,id).content_rect.w,32.); }
+    assert!(max>min+1., "block controls must differ: min={min}, max={max}");
+    let middle=(min+max)/2.;
+    // Horizontal PB is 10px and margins are 8px, independent of font metrics.
+    let (d,t) = render(&format!(r#"
+      <section style="width:{}px"><i id=middle>XXXXX XXXXX</i></section>
+      <section style="width:{}px"><i id=small>XXXXX XXXXX</i></section>
+      <section style="width:{}px"><i id=large>XXXXX XXXXX</i></section>
+      <section style="width:{}px"><i id=explicit style="width:max-content;flex-basis:fit-content">XXXXX XXXXX</i></section>
+      <section style="width:{}px"><i id=content style="flex-basis:content">XXXXX XXXXX</i></section>
+    "#,middle+18.,min/2.+18.,max+38.,middle+18.,middle+18.),
+        "*{font:10px/1 monospace}section{display:flex}i{display:block;flex:0 0 auto;min-width:0;width:fit-content;margin-left:3px;margin-right:5px;padding-left:2px;padding-right:4px;border-left:1px solid;border-right:3px solid}");
+    for id in ["middle", "explicit"] { close(by_id(&d,&t,id).content_rect.w,middle); }
     close(by_id(&d,&t,"small").content_rect.w,min);
     for id in ["large", "content"] { close(by_id(&d,&t,id).content_rect.w,max); }
 }
