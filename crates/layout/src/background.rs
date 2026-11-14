@@ -206,62 +206,43 @@ fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLay
     let space_x = layer.repeat.0 == BackgroundRepeat::Space;
     let space_y = layer.repeat.1 == BackgroundRepeat::Space;
     match (&layer.image, image) {
-        (BackgroundImage::Url(_), Some(img)) if space_x || space_y => {
-            // Tile origins along one axis: (start, count, step).
-            let axis = |space: bool, repeat: bool, start: f32, len: f32, size: f32, pos: f32, clip0: f32, clip1: f32| -> Vec<f32> {
-                if space {
-                    let n = (len / size + 0.001).floor();
-                    if n >= 2.0 {
-                        let step = size + (len - n * size) / (n - 1.0);
-                        // Repeat the spaced tiles over the painting area too.
-                        let mut first = start;
-                        while first - step + size > clip0 {
-                            first -= step;
-                        }
-                        let mut out = Vec::new();
-                        let mut x = first;
-                        while x < clip1 && out.len() < 10_000 {
-                            out.push(x);
-                            x += step;
-                        }
-                        return out;
-                    }
-                    if n < 1.0 {
-                        return Vec::new();
-                    }
-                    return vec![start + pos];
-                }
-                if repeat {
-                    let mut first = start + pos;
-                    while first > clip0 {
-                        first -= size;
-                    }
-                    let mut out = Vec::new();
-                    let mut x = first;
-                    while x < clip1 && out.len() < 10_000 {
-                        out.push(x);
-                        x += size;
-                    }
-                    return out;
-                }
-                vec![start + pos]
-            };
-            let xs = axis(space_x, repeat_x, area.x, area.w, tw, px, clip_rect.x, clip_rect.right());
-            let ys = axis(space_y, repeat_y, area.y, area.h, th, py, clip_rect.y, clip_rect.bottom());
+        (_, image) if space_x || space_y => {
+            let xs = tile_origins(layer.repeat.0, area.x, area.w, tw, px, clip_rect.x, clip_rect.right());
+            let ys = tile_origins(layer.repeat.1, area.y, area.h, th, py, clip_rect.y, clip_rect.bottom());
             if xs.len() * ys.len() <= 4096 {
                 for &y in &ys {
                     for &x in &xs {
-                        let r = Rect::new(x, y, tw, th);
-                        if r.intersect(&clip_rect).is_empty() {
+                        let tile = Rect::new(x, y, tw, th);
+                        let shown = tile.intersect(&clip_rect);
+                        if shown.is_empty() {
                             continue;
                         }
-                        list.items.push(DisplayItem::Image {
-                            rect: r,
-                            src: Rect::new(0.0, 0.0, img.width as f32, img.height as f32),
-                            image: img.clone(),
-                            opacity: 1.0,
-                            pixelated: false,
-                        });
+                        if let Some(image) = &image {
+                            list.items.push(DisplayItem::Image {
+                                rect: tile,
+                                src: Rect::new(0.0, 0.0, image.width as f32, image.height as f32),
+                                image: image.clone(),
+                                opacity: 1.0,
+                                pixelated: false,
+                            });
+                        } else {
+                            let paint = match &layer.image {
+                                BackgroundImage::LinearGradient { direction, stops, repeating } => {
+                                    linear_paint(direction, stops, *repeating, tile)
+                                }
+                                BackgroundImage::RadialGradient { shape, size, position, stops, repeating } => {
+                                    radial_paint(shape, size, *position, stops, *repeating, tile)
+                                }
+                                _ => None,
+                            };
+                            if let Some(paint) = paint {
+                                list.items.push(DisplayItem::RectRadii {
+                                    rect: shown,
+                                    radii: [(0.0, 0.0); 4],
+                                    paint,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -336,6 +317,52 @@ fn paint_layer(list: &mut DisplayList, geom: &BoxGeometry, layer: &BackgroundLay
         _ => {}
     }
     list.items.push(DisplayItem::PopClip);
+}
+
+/// Visible tile origins for an axis of a spaced background. The other axis
+/// may repeat normally, round, or place just one tile. CSS Backgrounds 3 §2.4:
+/// fewer than two copies makes `space` use background-position, even when the
+/// image is larger than the positioning area. Otherwise position is ignored.
+fn tile_origins(
+    repeat: BackgroundRepeat,
+    start: f32,
+    length: f32,
+    size: f32,
+    position: f32,
+    clip_start: f32,
+    clip_end: f32,
+) -> Vec<f32> {
+    if ![start, length, size, position, clip_start, clip_end].iter().all(|v| v.is_finite())
+        || size <= 0.0 || clip_end <= clip_start
+    {
+        return Vec::new();
+    }
+    let (start, length, size, position, clip_start, clip_end) = (
+        start as f64, length as f64, size as f64, position as f64,
+        clip_start as f64, clip_end as f64,
+    );
+    let (anchor, step) = if repeat == BackgroundRepeat::Space {
+        let count = (length / size).floor();
+        if count < 2.0 {
+            return vec![(start + position) as f32];
+        }
+        (start, (length - size) / (count - 1.0))
+    } else if repeat == BackgroundRepeat::NoRepeat {
+        return vec![(start + position) as f32];
+    } else {
+        (start + position, size)
+    };
+    if !step.is_finite() || step <= 0.0 {
+        return Vec::new();
+    }
+    // Normalize in constant time. Repeated subtraction can stop progressing
+    // for large finite CSS offsets, and must not hang display-list creation.
+    let mut first = clip_start - (clip_start - anchor).rem_euclid(step);
+    if first + size <= clip_start {
+        first += step;
+    }
+    let count = ((clip_end - first) / step).ceil().max(0.0).min(10_000.0) as usize;
+    (0..count).map(|index| (first + index as f64 * step) as f32).collect()
 }
 
 /// Gradients repeat seamlessly only when the tile covers the area; when
@@ -641,5 +668,37 @@ mod tests {
         assert_eq!(tile_size(BackgroundSize::Explicit(Length::Px(40.0), Length::Auto), Some((50.0, 25.0)), area), (40.0, 20.0));
         assert_eq!(bg_position(Length::Percent(50.0), 200.0, 50.0), 75.0);
         assert_eq!(bg_position(Length::Px(10.0), 200.0, 50.0), 10.0);
+    }
+}
+
+#[cfg(test)]
+mod space_tiling_tests {
+    use super::*;
+
+    #[test]
+    fn space_anchors_edges_and_ignores_position_when_two_copies_fit() {
+        assert_eq!(tile_origins(BackgroundRepeat::Space, 0., 106., 32., 15., 0., 106.), [0., 37., 74.]);
+        assert_eq!(tile_origins(BackgroundRepeat::Space, 35., 65., 30., 99., 0., 135.), [0., 35., 70., 105.]);
+    }
+
+    #[test]
+    fn space_places_one_positioned_tile_even_when_it_is_oversized() {
+        assert_eq!(tile_origins(BackgroundRepeat::Space, 0., 40., 80., -20., 0., 40.), [-20.]);
+        assert_eq!(tile_origins(BackgroundRepeat::Space, 0., 100., 60., 30., -30., 130.), [30.]);
+        assert_eq!(tile_origins(BackgroundRepeat::NoRepeat, 0., 70., 20., 8., 0., 70.), [8.]);
+    }
+
+    #[test]
+    fn repeated_cross_axis_normalizes_large_offsets_without_subtraction_loops() {
+        assert_eq!(tile_origins(BackgroundRepeat::Repeat, 0., 16., 8., 1e30, 0., 16.), [0., 8.]);
+        assert_eq!(tile_origins(BackgroundRepeat::Repeat, 0., 16., 8., -1e30, 0., 16.), [0., 8.]);
+    }
+
+    #[test]
+    fn tile_enumeration_is_bounded_and_invalid_geometry_emits_nothing() {
+        assert_eq!(tile_origins(BackgroundRepeat::Repeat, 0., 100., 0.0001, 0., 0., 100.).len(), 10_000);
+        assert!(tile_origins(BackgroundRepeat::Space, 0., 100., 0., 0., 0., 100.).is_empty());
+        assert!(tile_origins(BackgroundRepeat::Space, 0., 100., f32::NAN, 0., 0., 100.).is_empty());
+        assert!(tile_origins(BackgroundRepeat::Space, 0., 100., 10., 0., 100., 0.).is_empty());
     }
 }
