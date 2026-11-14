@@ -2085,7 +2085,7 @@ pub fn resolve_font_shorthand(value: &[Token], parent: &ComputedStyle, context: 
         Some(weight) => weight_of(weight, parent)?,
         None => 400,
     };
-    Ok(ResolvedFontShorthand {
+    Some(ResolvedFontShorthand {
         size: computed.font_size,
         weight,
         italic: matches!(parsed.style, Some(FontStyle::Italic)),
