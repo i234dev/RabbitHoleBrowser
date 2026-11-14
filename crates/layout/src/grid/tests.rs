@@ -96,3 +96,28 @@ fn auto_repeat_floors_a_definite_maximum_by_the_definite_minimum() {
         assert_eq!(expand_tracks(&list, Some(100.0), 0.0).tracks.len(), 2);
     }
 }
+
+#[test]
+fn staged_intrinsic_resolution_preserves_bases_and_limits_for_later_available_space() {
+    let original=[Track::new(Sizing::Auto,Sizing::Auto),Track::new(Sizing::Auto,Sizing::Auto)];
+    let contributions=[Contribution{start:0,end:1,min:100.,max:100.},Contribution{start:1,end:2,min:10.,max:48.}];
+    let mut initial=original;
+    resolve_intrinsic_tracks(&mut initial,&contributions,0.);
+    assert_eq!([initial[0].base,initial[1].base],[100.,10.]);
+    assert_eq!([initial[0].limit,initial[1].limit],[Some(100.),Some(48.)]);
+    let mut definite=initial.clone();
+    complete_track_sizing(&mut definite,&contributions,GridSpace::Definite(130.),0.,false);
+    assert_eq!([definite[0].base,definite[1].base],[100.,30.]);
+    complete_track_sizing(&mut initial,&contributions,GridSpace::MaxContent,0.,false);
+    assert_eq!([initial[0].base,initial[1].base],[100.,48.]);
+}
+
+#[test]
+fn completing_staged_tracks_still_expands_flexible_tracks_from_spanning_content() {
+    let mut tracks=[Track::new(Sizing::Auto,Sizing::Flex(1.)),Track::new(Sizing::Fixed(30.),Sizing::Fixed(30.))];
+    let contributions=[Contribution{start:0,end:2,min:300.,max:300.}];
+    resolve_intrinsic_tracks(&mut tracks,&contributions,0.);
+    assert_eq!([tracks[0].base,tracks[1].base],[0.,30.]);
+    complete_track_sizing(&mut tracks,&contributions,GridSpace::MaxContent,0.,false);
+    assert_eq!([tracks[0].base,tracks[1].base],[270.,30.]);
+}
