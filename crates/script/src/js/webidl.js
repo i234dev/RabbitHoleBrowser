@@ -37,16 +37,18 @@
     fix(C);
   }
 
-  // The named properties object of Window (HTML §7.2.3.5): elements with an
-  // id (and embed/form/img/object elements with a name) are reachable as
-  // properties of window — and so as global variables — after the
-  // window's own and inherited properties.
+  // The named properties object of Window: named child browsing contexts,
+  // elements with an id, and embed/form/img/object elements with a name
+  // are reachable as properties of window — and so as global variables —
+  // after the window's own and inherited properties.
   const W = g.Window, doc = g.document;
   if (typeof W === 'function' && W.prototype && doc && typeof Proxy === 'function') {
     const base = Object.getPrototypeOf(W.prototype);
     const byId = Object.getOwnPropertyDescriptor(g.Document.prototype, 'getElementById');
     const byName = Object.getOwnPropertyDescriptor(g.Document.prototype, 'getElementsByName');
     const getById = byId && byId.value, getByName = byName && byName.value;
+    const frameWindow = g.HTMLIFrameElement && Object.getOwnPropertyDescriptor(g.HTMLIFrameElement.prototype, 'contentWindow');
+    const getFrameWindow = frameWindow && frameWindow.get;
     const NAMED = new Set(['embed', 'form', 'img', 'object']);
     let busy = false;
     const named = (k) => {
@@ -58,10 +60,22 @@
     };
     const lookup = (k) => {
       const d = doc;
+      const list = getByName ? getByName.call(d, k) : null;
+      // A named child navigable wins over a matching element id. Use the
+      // native getter captured at startup, not a page-defined property,
+      // and query the live document so rename/removal need no refresh.
+      if (list && getFrameWindow) {
+        for (let i = 0; i < list.length; i++) {
+          const e = list[i];
+          if (e.localName === 'iframe' && e.namespaceURI === 'http://www.w3.org/1999/xhtml') {
+            const w = getFrameWindow.call(e);
+            if (w !== null) return w;
+          }
+        }
+      }
       const el = getById.call(d, k);
       if (el) return el;
-      if (getByName) {
-        const list = getByName.call(d, k);
+      if (list) {
         for (let i = 0; i < list.length; i++) {
           const e = list[i];
           if (NAMED.has(e.localName) && e.namespaceURI === 'http://www.w3.org/1999/xhtml') return e;

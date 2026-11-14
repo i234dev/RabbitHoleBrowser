@@ -282,34 +282,20 @@
   for (const k of Object.keys(own)) {
     Object.defineProperty(g, k, { get: own[k], set(v) { Object.defineProperty(g, k, { value: v, writable: true, configurable: true }); }, configurable: true });
   }
-  // Named access to child frames (`window.frames['name']`, `window.name`
-  // of a child): getters on the global for the current children's names,
-  // refreshed whenever `frames` / `length` is read.
-  const named = new Set();
-  function defineNamed() {
-    const n = info(SELF, 'length', 0);
-    for (let i = 0; i < n; i++) {
-      const name = info(info(SELF, 'child', i), 'name', 0);
-      if (typeof name !== 'string' || name === '' || named.has(name) || name in g) continue;
-      named.add(name);
-      Object.defineProperty(g, name, {
-        get() { const c = info(SELF, 'named', name); return c < 0 ? undefined : windowFor(c); },
-        set(v) { named.delete(name); Object.defineProperty(g, name, { value: v, writable: true, configurable: true, enumerable: true }); },
-        configurable: true,
-      });
-    }
-  }
+  // Own-frame named access is handled by Window's named properties
+  // object (webidl.js), using the live document instead of stale own
+  // getters installed as a side effect of reading frames or length.
   const framesDesc = Object.getOwnPropertyDescriptor(g, 'frames');
   if (!framesDesc || framesDesc.configurable) {
     Object.defineProperty(g, 'frames', {
-      get() { defineNamed(); return g; },
+      get() { return g; },
       set(v) { Object.defineProperty(g, 'frames', { value: v, writable: true, configurable: true }); },
       configurable: true,
     });
   }
   const lengthGet = own.length;
   Object.defineProperty(g, 'length', {
-    get() { defineNamed(); return lengthGet(); },
+    get() { return lengthGet(); },
     set(v) { Object.defineProperty(g, 'length', { value: v, writable: true, configurable: true }); },
     configurable: true,
   });
