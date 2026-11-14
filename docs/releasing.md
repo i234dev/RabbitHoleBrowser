@@ -90,6 +90,13 @@ library documentation tests. Existing ignored tests remain ignored. The
 production release build and smoke test continue to validate the delivered
 browser's profile. Example linking is not replaced by `cargo check`.
 
+Windows CI selects the static C runtime with
+`RUSTFLAGS=-C target-feature=+crt-static` before restoring the build cache.
+When packaging, inspect the delivered PE imports and verify that a separate
+Visual C++ runtime DLL is not required. Run the native Windows smoke test on
+that executable, alongside the checks above. Rust documents this option under
+[static and dynamic C runtimes](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes).
+
 The expected CI time saving has not been measured. Compare complete GitHub
 runs before claiming an improvement; a changed profile also creates a separate
 artifact cache on its first run. See the Cargo references for

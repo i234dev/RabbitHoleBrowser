@@ -21,6 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Select the standalone Windows C runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: printf '%s\n' 'RUSTFLAGS=-C target-feature=+crt-static' >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
