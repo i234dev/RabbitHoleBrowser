@@ -1304,20 +1304,23 @@ impl Engine {
     /// done, apply `<meta http-equiv=refresh>`. Returns true when the load
     /// is complete.
     pub fn continue_page_load(&self, page: &mut Page, slice: Option<std::time::Duration>) -> bool {
-        if self.page_scripts_pending(page) {
+        let out = if self.page_scripts_pending(page) {
             let Some(out) = self.run_page_scripts_for(page, slice) else {
                 return false;
             };
-            // Keep what the scripts asked for during load (redirects via
-            // `location`, `window.open`, dialogs) for the embedder to apply.
-            if out.navigation.is_some() {
-                page.script.pending_navigation = out.navigation;
-            }
-            page.script.new_windows.extend(out.new_windows);
-            page.script.dialogs.extend(out.dialogs);
-            if out.scroll_to.is_some() {
-                page.requested_scroll = out.scroll_to;
-            }
+            out
+        } else {
+            self.complete_document_without_scripts(page)
+        };
+        // Keep what the scripts asked for during load (redirects via
+        // `location`, `window.open`, dialogs) for the embedder to apply.
+        if out.navigation.is_some() {
+            page.script.pending_navigation = out.navigation;
+        }
+        page.script.new_windows.extend(out.new_windows);
+        page.script.dialogs.extend(out.dialogs);
+        if out.scroll_to.is_some() {
+            page.requested_scroll = out.scroll_to;
         }
         self.shrink_oversized_images(page);
         // `<meta http-equiv="refresh" content="N; url=...">` (N <= 5 s is

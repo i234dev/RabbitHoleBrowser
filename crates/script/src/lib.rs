@@ -276,6 +276,7 @@ impl ScriptHost {
         realm.set_task_budget(Some(task_budget()));
         rabbithole_wasm_js::install(&mut realm);
         let now = env.now_ms();
+        let document_complete = env.document_is_complete();
         let state = Rc::new(RefCell::new(HostState {
             wrappers: HashMap::default(),
             child_lists: HashMap::default(),
@@ -288,8 +289,8 @@ impl ScriptHost {
             last_frame: now,
             last_tick: 0.0,
             dirty: false,
-            ready_state: "loading",
-            loading: true,
+            ready_state: if document_complete { "complete" } else { "loading" },
+            loading: !document_complete,
             current_script: None,
             focused: None,
             extra_docs: Vec::new(),

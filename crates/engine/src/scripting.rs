@@ -55,6 +55,8 @@ pub struct ScriptState {
     pub console: Vec<(String, String)>,
     pub dialogs: Vec<Dialog>,
     pub scripts_ran: bool,
+    /// Loading state belongs to the document, including documents without JS.
+    pub(crate) load_complete: bool,
     /// Page scripts not run yet (load-time scripts run in slices, see
     /// [`Engine::run_page_scripts_for`]).
     pub(crate) pending_scripts: Option<std::collections::VecDeque<crate::ScriptSource>>,
@@ -195,6 +197,7 @@ impl HostEnv for EngineEnv<'_> {
     fn document_url(&self) -> Url {
         self.page.url.clone()
     }
+    fn document_is_complete(&self) -> bool { self.page.script.load_complete }
     fn security_origin(&self) -> String { crate::frames::page_origin(self.page) }
     fn window_context(&self) -> Option<rabbithole_script::WindowContext> {
         if self.page.frame_depth == 0 { self.engine.window_context.clone() } else { None }
@@ -575,11 +578,13 @@ impl HostEnv for EngineEnv<'_> {
         self.engine.frame_microtasks(self.page);
     }
     fn document_load_complete(&mut self) {
+        self.page.script.load_complete = true;
         if self.page.frame_depth > 0 {
             self.page.script.frame_load_pending = true;
         }
     }
     fn document_load_started(&mut self) {
+        self.page.script.load_complete = false;
         self.page.script.frame_load_pending = false;
         self.page.script.frame_initial_load_pending = false;
     }
@@ -664,6 +669,7 @@ impl Engine {
             return false;
         }
         page.script.scripts_ran = true;
+        page.script.load_complete = false;
         let scripts = std::mem::take(&mut page.scripts);
         let prepared = if page.script.service_worker_client.is_some() { page.script.host.take() } else { None };
         let host = prepared.unwrap_or_else(|| {
@@ -697,6 +703,7 @@ impl Engine {
             return;
         }
         page.script.scripts_ran = true;
+        page.script.load_complete = true;
         let mut host = {
             let mut env = EngineEnv { engine: self, page };
             ScriptHost::new(&mut env)
@@ -747,6 +754,7 @@ impl Engine {
                 }
             }
             if queue.is_empty() {
+                env.page.script.load_complete = true;
                 host.document_ready(&mut env);
                 host.run_jobs(&mut env);
             }
@@ -762,6 +770,22 @@ impl Engine {
             page.script.pending_scripts = Some(queue);
             None
         }
+    }
+
+    /// Complete a document that did not need a load-time script queue.
+    /// A realm created by an early console evaluation still receives its
+    /// real ready/load events once; a later realm starts already complete.
+    pub(crate) fn complete_document_without_scripts(&self, page: &mut Page) -> ScriptOutcome {
+        if page.script.load_complete { return ScriptOutcome::default(); }
+        page.script.load_complete = true;
+        let Some(mut host) = page.script.host.take() else { return ScriptOutcome::default() };
+        {
+            let mut env = EngineEnv { engine: self, page };
+            host.document_ready(&mut env);
+            host.run_jobs(&mut env);
+        }
+        page.script.host = Some(host);
+        self.settle(page, false)
     }
 
     /// Run due timers, rAF callbacks and microtasks. Call from the UI loop;
