@@ -134,6 +134,7 @@ enum ExprKind {
     Not(Box<Expr>),
     Compare(Compare, Box<Expr>, Box<Expr>),
     Logical(Logical, Box<Expr>, Box<Expr>),
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
     Binary(char, Box<Expr>, Box<Expr>),
     Construct(Vec<Expr>),
     Builtin(Builtin, Vec<Expr>),
@@ -495,6 +496,13 @@ impl Expr {
     ) -> Value {
         match &self.kind {
             ExprKind::Boolean(value) => Value::from(Ty::Bool, &[u8::from(*value) as f32]),
+            ExprKind::Conditional(condition, yes, no) => {
+                if condition.eval(env, globals, sample).v[0] != 0. {
+                    yes.eval(env, globals, sample)
+                } else {
+                    no.eval(env, globals, sample)
+                }
+            }
             ExprKind::Not(expr) => Value::from(Ty::Bool, &[u8::from(expr.eval(env,globals,sample).v[0] == 0.) as f32]),
             ExprKind::Logical(op,a,b) => {
                 let a = a.eval(env,globals,sample).v[0] != 0.;
@@ -729,7 +737,7 @@ fn lex(src: &str, token_limit: usize) -> Result<(Vec<Tok>, u32), String> {
         if let Some(op) = ["<=", ">=", "==", "!=", "&&", "||", "^^"].iter().find(|op| b.get(i..i+2) == Some(op.as_bytes())) {
             out.push(Tok::Op((*op).into())); i+=2; continue;
         }
-        if b";{}(),=+-*/.!<>".contains(&c) {
+        if b";{}(),=+-*/.!<>?:".contains(&c) {
             out.push(Tok::P(c as char));
             i += 1;
             continue;
@@ -1411,6 +1419,19 @@ impl Parser {
             }
             left=Expr {ty,kind};
         }
+        // Ternary selection binds below || and associates to the right. Both
+        // alternatives are parsed, typed and charged, but only the selected
+        // alternative is evaluated (including helper calls and texture reads).
+        if min_prec == 0 && self.eat('?') {
+            if left.ty != Ty::Bool { return Err("ternary condition must be scalar bool".into()); }
+            let yes = self.expr(0)?;
+            self.expect(Tok::P(':'))?;
+            let no = self.expr(0)?;
+            if yes.ty != no.ty || matches!(yes.ty, Ty::Sampler2D | Ty::IntLiteral) {
+                return Err("ternary alternatives must have matching supported non-opaque types".into());
+            }
+            left = Expr { ty: yes.ty, kind: ExprKind::Conditional(Box::new(left), Box::new(yes), Box::new(no)) };
+        }
         self.depth -= 1;
         Ok(left)
     }
@@ -1599,6 +1620,37 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
 mod control_flow_evaluation {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn ternary_types_both_alternatives_but_evaluates_only_the_selected_one() {
+        for version in [100, 300] {
+            let (prefix, sample, output) = if version == 300 {
+                ("#version 300 es\nprecision highp float;out vec4 pixel;", "texture", "pixel")
+            } else { ("precision highp float;", "texture2D", "gl_FragColor") };
+            for (expression, calls, expected) in [
+                ("true ? vec4(0.25) : touched()", 0, 0.25),
+                ("false ? touched() : vec4(0.75)", 0, 0.75),
+                ("true ? touched() : vec4(0.0)", 1, 0.5),
+                ("false ? vec4(0.0) : touched()", 1, 0.5),
+                ("false ? vec4(0.0) : true ? vec4(0.25) : touched()", 0, 0.25),
+                ("true || false ? vec4(0.75) : touched()", 0, 0.75),
+                ("(false ? true : false) ? touched() : vec4(0.25)", 0, 0.25),
+                ("vec4((true ? mat2(0.25) : mat2(1.0)) * vec2(1.0),0.0,1.0)", 0, 0.25),
+            ] {
+                let source = format!("{prefix}uniform sampler2D image;vec4 touched(){{return {sample}(image,vec2(0.5));}}void main(){{{output}={expression};}}");
+                let shader = compile(&source, false, version).unwrap();
+                assert_eq!(shader.reads.contains("image"), expression.contains("touched"), "unchosen alternatives retain sampler reflection");
+                let count = Cell::new(0);
+                let values = shader.run_with_sampler(BTreeMap::new(), &|_,_| { count.set(count.get()+1); [0.5;4] });
+                assert_eq!(count.get(), calls, "{version} {expression}");
+                assert_eq!(values[output].v[0], expected, "{version} {expression}");
+            }
+            for expression in ["1.0 ? vec4(1.0) : vec4(0.0)", "true ? vec4(1.0) : 0.0", "true ? vec4(1.0) : missing", "true ? vec4(1.0) : false ? 0.0 : vec4(0.0)"] {
+                let source = format!("{prefix}void main(){{{output}={expression};}}");
+                assert!(compile(&source, false, version).is_err(), "{expression}");
+            }
+        }
+    }
 
     #[test]
     fn logical_short_circuit_and_early_returns_skip_actual_sampler_execution() {
