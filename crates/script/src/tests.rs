@@ -1435,6 +1435,69 @@ fn character_data_null_conversion_and_native_editing_ignore_method_overrides() {
 }
 
 #[test]
+fn range_comparisons_convert_unsigned_short_and_long_arguments() {
+    let (mut env, mut host) = setup("<body>abcdef</body>");
+    let out = run(&mut env, &mut host, r#"
+        const t = document.body.firstChild;
+        const a = document.createRange(), b = document.createRange();
+        a.setStart(t, 1); a.setEnd(t, 4);
+        b.setStart(t, 2); b.setEnd(t, 5);
+        for (const base of [0, 65536, 4294967296, -65536]) {
+            console.log('short', [0, 1, 2, 3].map(how => a.compareBoundaryPoints(base + how, b)).join(','));
+        }
+        console.log('strings', a.compareBoundaryPoints('1', b), a.compareBoundaryPoints({valueOf() {return 65537;}}, b));
+        console.log('nonfinite', [NaN, Infinity, -Infinity].map(how => a.compareBoundaryPoints(how, b)).join(','));
+        for (const offset of [4294967297, -4294967295, Infinity, NaN, '2', 4294967301]) {
+            console.log('point', a.comparePoint(t, offset), a.isPointInRange(t, offset));
+        }
+        const errors = [];
+        for (const offset of [-1, 4294967295]) {
+            for (const method of ['comparePoint', 'isPointInRange']) {
+                try { a[method](t, offset); } catch (e) { errors.push(e.name); }
+            }
+        }
+        console.log('negative', errors.join(','));
+        const foreign = document.implementation.createHTMLDocument('other').createRange();
+        const precedence = [];
+        for (const how of [4, 65540, -1, 0]) {
+            try { a.compareBoundaryPoints(how, foreign); } catch (e) { precedence.push(e.name); }
+        }
+        console.log('precedence', precedence.join(','));
+    "#);
+    assert_eq!(out, [
+        "short -1,1,-1,-1", "short -1,1,-1,-1", "short -1,1,-1,-1", "short -1,1,-1,-1",
+        "strings 1 1", "nonfinite -1,-1,-1", "point 0 true", "point 0 true",
+        "point -1 false", "point -1 false", "point 0 true", "point 1 false",
+        "negative IndexSizeError,IndexSizeError,IndexSizeError,IndexSizeError",
+        "precedence NotSupportedError,NotSupportedError,NotSupportedError,WrongDocumentError",
+    ]);
+}
+
+#[test]
+fn range_boundary_argument_errors_do_not_change_ranges_or_coerce_missing_arguments() {
+    let (mut env, mut host) = setup("<body>abcdef</body>");
+    let out = run(&mut env, &mut host, r#"
+        const t = document.body.firstChild;
+        const r = document.createRange(); r.setStart(t, 1); r.setEnd(t, 4);
+        let conversions = 0;
+        const value = {valueOf() {conversions++; return 0;}};
+        const missing = [() => r.setStart(t), () => r.setEnd(t), () => r.comparePoint(t),
+            () => r.isPointInRange(t), () => r.compareBoundaryPoints(value)];
+        console.log('missing', missing.map(f => {try {f(); return false;} catch (e) {return e instanceof TypeError;}}).join(','), conversions);
+        const invalid = [() => r.setStart(t, 1n), () => r.setEnd(t, 1n),
+            () => r.comparePoint(t, 1n), () => r.isPointInRange(t, 1n), () => r.compareBoundaryPoints(0n, r),
+            () => r.compareBoundaryPoints(Symbol(), r), () => r.compareBoundaryPoints(0, {}),
+            () => r.comparePoint({}, 0), () => r.isPointInRange({}, 0)];
+        console.log('types', invalid.map(f => {try {f(); return false;} catch (e) {return e instanceof TypeError;}}).join(','));
+        console.log('unchanged', r.startContainer === t, r.endContainer === t, r.startOffset, r.endOffset);
+    "#);
+    assert_eq!(out, [
+        "missing true,true,true,true,true 0", "types true,true,true,true,true,true,true,true,true",
+        "unchanged true true 1 4",
+    ]);
+}
+
+#[test]
 fn node_iterator_survives_removal_by_its_filter() {
     let (mut env, mut host) = setup("<body></body>");
     let out = run(&mut env, &mut host, r#"

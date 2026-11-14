@@ -308,6 +308,17 @@
   acc(g.AbortController, 'signal', function () { return null; });
 
   // ------------------------------------------------------------- ranges
+  // WebIDL unsigned conversions use ToNumber, which rejects BigInt (the
+  // Number() constructor would accept it). Bitwise conversion also handles
+  // non-finite values, truncation and modulo 2^32.
+  const rangeUnsignedLong = (value) => +value >>> 0;
+  function rangeArguments(args, required, method) {
+    if (args.length < required) throw new TypeError(`Failed to execute '${method}' on 'Range': ${required} arguments required, but only ${args.length} present.`);
+  }
+  function rangeNode(node) {
+    if (!(node instanceof g.Node)) throw new TypeError("parameter 1 is not of type 'Node'.");
+    return node;
+  }
   const index = (n) => { let i = 0; while ((n = n.previousSibling)) i++; return i; };
   const nodeLength = (n) => (n.nodeType === 10 ? 0 : n.nodeType === 3 || n.nodeType === 8 || n.nodeType === 7 || n.nodeType === 4 ? n.data.length : n.childNodes.length);
   const rootOf = (n) => { while (n.parentNode) n = n.parentNode; return n; };
@@ -368,8 +379,8 @@
       return r;
     }
     get commonAncestorContainer() { let a = this[S].sc; while (!isInclusiveAncestor(a, this[S].ec)) a = a.parentNode; return a; }
-    setStart(node, offset) { setBoundary(this, node, offset, true); }
-    setEnd(node, offset) { setBoundary(this, node, offset, false); }
+    setStart(node, offset) { rangeArguments(arguments, 2, 'setStart'); setBoundary(this, node, offset, true); }
+    setEnd(node, offset) { rangeArguments(arguments, 2, 'setEnd'); setBoundary(this, node, offset, false); }
     setStartBefore(node) { const p = parentOrThrow(node); this.setStart(p, index(node)); }
     setStartAfter(node) { const p = parentOrThrow(node); this.setStart(p, index(node) + 1); }
     setEndBefore(node) { const p = parentOrThrow(node); this.setEnd(p, index(node)); }
@@ -378,7 +389,11 @@
     selectNode(node) { const p = parentOrThrow(node); const i = index(node); const s = this[S]; s.sc = p; s.so = i; s.ec = p; s.eo = i + 1; }
     selectNodeContents(node) { if (node.nodeType === 10) throw domError("Failed to execute 'selectNodeContents' on 'Range': The node provided is of type 'DocumentType'.", 'InvalidNodeTypeError'); const s = this[S]; s.sc = node; s.so = 0; s.ec = node; s.eo = nodeLength(node); }
     compareBoundaryPoints(how, src) {
-      const s = this[S], o = src[S];
+      rangeArguments(arguments, 2, 'compareBoundaryPoints');
+      how = rangeUnsignedLong(how) & 0xFFFF;
+      const s = this[S], o = src == null ? null : src[S];
+      if (!(o instanceof RangeState)) throw new TypeError("parameter 2 is not of type 'Range'.");
+      if (how > 3) throw domError('The comparison method provided must be one of START_TO_START, START_TO_END, END_TO_END, or END_TO_START.', 'NotSupportedError');
       if (rootOf(s.sc) !== rootOf(o.sc)) throw domError("The two Ranges are not in the same tree.", 'WrongDocumentError');
       switch (how) {
         case 0: return comparePoints(s.sc, s.so, o.sc, o.so);
@@ -424,12 +439,18 @@
     cloneRange() { const r = new Range(); const s = this[S], t = r[S]; t.sc = s.sc; t.so = s.so; t.ec = s.ec; t.eo = s.eo; return r; }
     detach() {}
     isPointInRange(node, offset) {
+      rangeArguments(arguments, 2, 'isPointInRange');
+      rangeNode(node);
+      offset = rangeUnsignedLong(offset);
       const s = this[S];
       if (rootOf(node) !== rootOf(s.sc)) return false;
       checkOffset(node, offset);
       return comparePoints(node, offset, s.sc, s.so) >= 0 && comparePoints(node, offset, s.ec, s.eo) <= 0;
     }
     comparePoint(node, offset) {
+      rangeArguments(arguments, 2, 'comparePoint');
+      rangeNode(node);
+      offset = rangeUnsignedLong(offset);
       const s = this[S];
       if (rootOf(node) !== rootOf(s.sc)) throw domError("The node provided and the Range are not in the same tree.", 'WrongDocumentError');
       checkOffset(node, offset);
@@ -490,8 +511,8 @@
   }
   function parentOrThrow(node) { const p = node.parentNode; if (!p) throw domError('the given Node has no parent.', 'InvalidNodeTypeError'); return p; }
   function setBoundary(range, node, offset, start) {
-    if (!(node instanceof g.Node)) throw new TypeError("parameter 1 is not of type 'Node'.");
-    offset = Number(offset) >>> 0;
+    rangeNode(node);
+    offset = rangeUnsignedLong(offset);
     checkOffset(node, offset);
     const s = range[S];
     if (start) {
