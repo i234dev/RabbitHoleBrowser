@@ -113,6 +113,10 @@ fn plain_links_preserve_real_source_boundaries_instead_of_trimming_or_inventing_
         ("<p>A<a href='/x'><strong> B </strong></a>C</p>","A **B** C"),
         ("<p>A<a href='/x'><strong>B</strong></a>C</p>","A**B**C"),
         ("<p>A<a href='/x'><code>B</code></a>C</p>","A`B`C"),
+        ("<ul><li><p>A</p><p>B</p></li></ul>","- A B"),
+        ("<ul><li>A<p>B</p>C</li></ul>","- A B C"),
+        ("<ul><li>A<a href='/x'>B</a>C</li></ul>","- ABC"),
+        ("<ul><li>A<a href='/x'> B </a>C</li></ul>","- A B C"),
         ("<ul><li>A<a href='/x'> B </a>C<ul><li>N</li></ul></li></ul>","- A B C\n  - N"),
         ("<ul><li>A<a href='/x'>B</a>C<ul><li>N</li></ul></li></ul>","- ABC\n  - N"),
     ] {
