@@ -15,6 +15,15 @@ mod lanes;
 #[cfg(test)]
 mod tests;
 
+/// Available grid space (Grid2 §12.2). Intrinsic constraints are distinct
+/// states, not fabricated definite widths or modified item contributions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GridSpace {
+    Definite(f32),
+    MinContent,
+    MaxContent,
+}
+
 /// A track sizing function (§11.1).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Sizing {
@@ -383,6 +392,12 @@ fn distribute_extra(tracks: &mut [Track], candidates: &[usize], extra: f32, beyo
 
 /// §11 track sizing algorithm for one axis.
 fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f32>, gap: f32, stretch: bool) {
+    // Content-based automatic sizes, including auto block sizes, use the
+    // max-content constraint. Intrinsic minimum callers must opt in below.
+    size_tracks_with_space(tracks, contribs, avail.map(GridSpace::Definite).unwrap_or(GridSpace::MaxContent), gap, stretch);
+}
+
+fn size_tracks_with_space(tracks: &mut [Track], contribs: &[Contribution], space: GridSpace, gap: f32, stretch: bool) {
     // §11.4 initialize.
     for t in tracks.iter_mut() {
         t.base = match t.min {
@@ -497,12 +512,16 @@ fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f3
     }
     let n_gaps = tracks.iter().filter(|t| !t.collapsed).count().saturating_sub(1) as f32;
     // §11.6 maximize tracks.
-    if let Some(a) = avail {
+    if let GridSpace::Definite(a) = space {
         let used: f32 = tracks.iter().map(|t| t.base).sum::<f32>() + gap * n_gaps;
         let free = a - used;
         if free > 0.0 {
             let cands: Vec<usize> = (0..tracks.len()).filter(|&i| !tracks[i].collapsed && !tracks[i].is_flex()).collect();
             distribute_extra(tracks, &cands, free, false, false);
+        }
+    } else if space == GridSpace::MaxContent {
+        for track in tracks.iter_mut().filter(|track| !track.collapsed && !track.is_flex()) {
+            track.base = track.base.max(track.limit_or_base());
         }
     }
     // §11.7 expand flexible tracks.
@@ -512,8 +531,9 @@ fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f3
             Sizing::Flex(f) => f,
             _ => 0.0,
         };
-        let fr = match avail {
-            Some(a) => {
+        let fr = match space {
+            GridSpace::MinContent => 0.0,
+            GridSpace::Definite(a) => {
                 let non_flex: f32 = tracks.iter().filter(|t| !t.is_flex() && !t.collapsed).map(|t| t.base).sum();
                 let mut leftover = a - non_flex - gap * n_gaps;
                 let mut active: Vec<usize> = flex_idx.clone();
@@ -542,7 +562,7 @@ fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f3
                 }
                 fr
             }
-            None => {
+            GridSpace::MaxContent => {
                 let mut fr: f32 = 0.0;
                 for &i in &flex_idx {
                     let f = factor(&tracks[i]);
@@ -573,7 +593,7 @@ fn size_tracks(tracks: &mut [Track], contribs: &[Contribution], avail: Option<f3
         }
     }
     // §11.8 stretch auto tracks.
-    if let Some(a) = avail {
+    if let GridSpace::Definite(a) = space {
         if stretch {
             let used: f32 = tracks.iter().map(|t| t.base).sum::<f32>() + gap * n_gaps;
             let free = a - used;
@@ -1272,14 +1292,14 @@ impl<'a> Layouter<'a> {
         let col_gap = crate::flex::px_or_zero(style.column_gap);
         let (items, mut cols, _rows) = self.place_items(b, &style, None, None, col_gap, 0.0, 0.0, 0.0);
         let contribs = self.column_contributions(b, &items, 0.0);
-        // Min-content: size with min contributions only.
-        let min_contribs: Vec<Contribution> = contribs.iter().map(|c| Contribution { max: c.min, ..*c }).collect();
+        // A max-content minimum sizing function still needs the item's
+        // maximum contribution under a min-content constraint.
         let mut min_tracks = cols.tracks.clone();
-        size_tracks(&mut min_tracks, &min_contribs, None, col_gap, false);
+        size_tracks_with_space(&mut min_tracks, &contribs, GridSpace::MinContent, col_gap, false);
         let n_vis = min_tracks.iter().filter(|t| !t.collapsed).count();
         let gaps = col_gap * n_vis.saturating_sub(1) as f32;
         let min: f32 = min_tracks.iter().map(|t| t.base).sum::<f32>() + gaps;
-        size_tracks(&mut cols.tracks, &contribs, None, col_gap, false);
+        size_tracks_with_space(&mut cols.tracks, &contribs, GridSpace::MaxContent, col_gap, false);
         let max: f32 = cols.tracks.iter().map(|t| t.base).sum::<f32>() + gaps;
         (min, max.max(min))
     }
