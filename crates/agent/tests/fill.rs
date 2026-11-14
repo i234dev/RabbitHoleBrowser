@@ -381,6 +381,26 @@ fn fill_focus_document_open_keeps_new_controls_untouched() {
 }
 
 #[test]
+fn fill_focus_document_open_reused_node_is_not_overwritten() {
+    let srv = serve(Box::new(|_| html(r#"<html><body><label>Original<input id="target" value="original-keep" onfocus="var saved=this;document.open();document.write('&lt;html>&lt;body>&lt;label id=&quot;replacement-label&quot;>Replacement&lt;/label>&lt;/body>&lt;/html>');document.close();document.getElementById('replacement-label').appendChild(saved);this.removeAttribute('onfocus');this.value='replacement-keep'"></label></body></html>"#)));
+    let mut a = agent();
+    let snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
+    let old_ref = ref_of(&snapshot, "textbox \"Original\"");
+    let ti = a.active.unwrap();
+    let old_node = a.tabs[ti].frames[0].page.doc.element_by_id("target").unwrap();
+    let document = a.tabs[ti].frames[0].page.doc.weak_identity();
+    let result = call(&mut a, "fill", &json!({"ref":old_ref,"value":"must-not-write"}));
+    let page = &a.tabs[ti].frames[0].page;
+    assert!(!document.is_for(&page.doc), "focus must really replace the document incarnation");
+    assert_eq!(page.doc.element_by_id("target"), Some(old_node), "the callback reattaches the same arena node");
+    assert!(page.doc.is_connected(old_node));
+    assert_eq!(page.control_text(old_node), "replacement-keep", "fill must revalidate document identity before applying its value");
+    let output = match result { Err(error) => error, Ok(out) => panic!("replaced document must reject fill, got {}", out.text) };
+    assert!(output.contains("document was replaced"), "{output}");
+    assert!(err(&mut a, "fill", json!({"ref":old_ref,"value":"late"})).contains("unknown"));
+}
+
+#[test]
 fn fill_focus_document_open_with_reattached_node_stops_values_and_submit() {
     let srv = serve(Box::new(|path| {
         if path == "/" {
