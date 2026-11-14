@@ -22,6 +22,8 @@ mod percentages;
 mod estimate;
 #[allow(dead_code)]
 mod pass;
+mod item_measure;
+mod traversal;
 pub(crate) mod subgrid;
 #[cfg(test)]
 mod tests;
@@ -737,34 +739,43 @@ impl<'a> Layouter<'a> {
         let project=b.children.iter().any(|child|subgrid::requests(child)!=(false,false));
         let col_stretch=matches!(style.justify_content,ContentDistribution::Stretch|ContentDistribution::FlexStart);
         let row_stretch=matches!(style.align_content,ContentDistribution::Stretch|ContentDistribution::FlexStart);
-        let mut col_contribs=Vec::new();
-        let mut row_contribs=Vec::new();
-        // Column sizing.
-        if cols.inherited.is_none() {
-            col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw)};
-            size_tracks(&mut cols.tracks, &col_contribs, Some(cbw), col_gap, col_stretch);
-        }
-        let (mut col_pos, _) = subgrid::positions(&cols, col_gap, Some(cbw), style.justify_content);
-
-        // Row sizing: contributions are item heights at their column width.
-        if rows.inherited.is_none() {
-            row_contribs=if project {self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Initial)} else {self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,cb.height)};
-            size_tracks(&mut rows.tracks, &row_contribs, cb.height, row_gap, row_stretch);
-        }
-        // Grid2 §12.1 steps 3-4: at most one adjustment of each axis.
-        // Ordinary grids retain the existing path; subgrid descendants now
-        // observe the used opposite-axis sizes instead of a recursive layout.
-        if project {
+        let ordinary_axis_consumer=traversal::ordinary_orthogonal_grid(b);
+        let mut col_pos;
+        if ordinary_axis_consumer {
+            let spaces=[phases::AvailableSpace::Definite(cbw),cb.height.map(phases::AvailableSpace::Definite).unwrap_or(phases::AvailableSpace::Indefinite)];
+            let inputs=traversal::ordinary_inputs(b,spaces,[col_gap,row_gap]);
+            (cols,rows)=self.ordinary_grid_axis_tracks(b,&items,cols,rows,inputs,phases::OperationKind::Layout,cbw);
+            col_pos=subgrid::positions(&cols,col_gap,Some(cbw),style.justify_content).0;
+        } else {
+            let mut col_contribs=Vec::new();
+            let mut row_contribs=Vec::new();
+            // Column sizing.
             if cols.inherited.is_none() {
-                let adjusted=self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Adjusted);
-                if adjusted!=col_contribs {
-                    size_tracks(&mut cols.tracks,&adjusted,Some(cbw),col_gap,col_stretch);
-                    col_pos=subgrid::positions(&cols,col_gap,Some(cbw),style.justify_content).0;
-                }
+                col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw)};
+                size_tracks(&mut cols.tracks, &col_contribs, Some(cbw), col_gap, col_stretch);
             }
+            col_pos = subgrid::positions(&cols, col_gap, Some(cbw), style.justify_content).0;
+
+            // Row sizing: contributions are item heights at their column width.
             if rows.inherited.is_none() {
-                let adjusted=self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Adjusted);
-                if adjusted!=row_contribs {size_tracks(&mut rows.tracks,&adjusted,cb.height,row_gap,row_stretch);}
+                row_contribs=if project {self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Initial)} else {self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,cb.height)};
+                size_tracks(&mut rows.tracks, &row_contribs, cb.height, row_gap, row_stretch);
+            }
+            // Grid2 §12.1 steps 3-4: at most one adjustment of each axis.
+            // Ordinary grids retain the existing path; subgrid descendants now
+            // observe the used opposite-axis sizes instead of a recursive layout.
+            if project {
+                if cols.inherited.is_none() {
+                    let adjusted=self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,GridGeometry{inline:Some(cbw),block:cb.height},MeasurePhase::Adjusted);
+                    if adjusted!=col_contribs {
+                        size_tracks(&mut cols.tracks,&adjusted,Some(cbw),col_gap,col_stretch);
+                        col_pos=subgrid::positions(&cols,col_gap,Some(cbw),style.justify_content).0;
+                    }
+                }
+                if rows.inherited.is_none() {
+                    let adjusted=self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Adjusted);
+                    if adjusted!=row_contribs {size_tracks(&mut rows.tracks,&adjusted,cb.height,row_gap,row_stretch);}
+                }
             }
         }
         let (row_pos, rows_extent) = subgrid::positions(&rows, row_gap, cb.height, style.align_content);
@@ -773,11 +784,15 @@ impl<'a> Layouter<'a> {
         for it in items.iter_mut() {
             let (ax, aw) = span_size(&cols.tracks, &col_pos, it.area.col.0 as usize, it.area.col.1 as usize);
             let (ay, ah) = span_size(&rows.tracks, &row_pos, it.area.row.0 as usize, it.area.row.1 as usize);
-            if subgrid::requests(&b.children[it.idx])!=(false,false) {*it=subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw);}
+            if ordinary_axis_consumer||subgrid::requests(&b.children[it.idx])!=(false,false) {*it=subgrid::rebase_item(it,&b.children[it.idx].style,cbw,aw);}
             let child=&mut b.children[it.idx];
             let (column_request,row_request)=subgrid::requests(child);
             if !column_request&&!row_request {
-                self.layout_grid_item(child,it,ax+content_x,ay+content_y,aw,ah,cbw);
+                if ordinary_axis_consumer {
+                    self.layout_ordinary_grid_item(child,it,ax+content_x,ay+content_y,aw,ah);
+                } else {
+                    self.layout_grid_item(child,it,ax+content_x,ay+content_y,aw,ah,cbw);
+                }
                 continue;
             }
             self.grid_work.charge(1);
@@ -1378,6 +1393,11 @@ impl<'a> Layouter<'a> {
     #[allow(clippy::too_many_arguments)]
     fn layout_grid_item(&mut self, child: &mut LayoutBox, it: &mut GridItem, ax: f32, ay: f32, aw: f32, ah: f32, cbw: f32) {
         let inner_w = self.grid_item_width(child, it, aw, cbw);
+        self.layout_grid_item_with_inline(child,it,ax,ay,aw,ah,inner_w);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_grid_item_with_inline(&mut self,child:&mut LayoutBox,it:&mut GridItem,ax:f32,ay:f32,aw:f32,ah:f32,inner_w:f32) {
         // Intrinsic block sizes also lack a numeric resolution, but only an
         // automatic preferred size is eligible for stretch (§6.2).
         let stretch_h = matches!(it.align, ItemAlign::Stretch | ItemAlign::Normal | ItemAlign::Auto)
@@ -1458,8 +1478,20 @@ impl<'a> Layouter<'a> {
             return (width.max(0.),width.max(0.));
         }
         let col_gap = subgrid::gap(b,false,0.);
-        let row_gap=subgrid::gap(b,true,0.);
         let block=subgrid::known_block_size(b,0.);
+        let row_gap=subgrid::gap(b,true,0.);
+        if traversal::ordinary_orthogonal_grid(b) {
+            let row_gap=subgrid::gap(b,true,block.unwrap_or(0.));
+            let mut widths=[0.;2];
+            for (index,(constraint,kind)) in [(phases::AvailableSpace::MinContent,phases::OperationKind::IntrinsicMin),(phases::AvailableSpace::MaxContent,phases::OperationKind::IntrinsicMax)].into_iter().enumerate() {
+                let (items,columns,rows)=self.place_items(b,&style,None,block,col_gap,row_gap,0.,0.);
+                let spaces=[constraint,block.map(phases::AvailableSpace::Definite).unwrap_or(phases::AvailableSpace::Indefinite)];
+                let inputs=traversal::ordinary_inputs(b,spaces,[col_gap,row_gap]);
+                let (columns,_)=self.ordinary_grid_axis_tracks(b,&items,columns,rows,inputs,kind,0.);
+                widths[index]=subgrid::positions(&columns,col_gap,None,style.justify_content).1;
+            }
+            return (widths[0],widths[1].max(widths[0]));
+        }
         let (items, mut cols, rows) = self.place_items(b, &style, None, block, col_gap, row_gap, 0.0, 0.0);
         let contribs = self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,0.,GridGeometry{inline:None,block},MeasurePhase::Initial);
         // A max-content minimum sizing function still needs the item's
