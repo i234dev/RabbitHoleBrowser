@@ -62,7 +62,8 @@ tagged. Neither is an instruction to choose a min-content constraint.
 Adjustment compares separately supplied **true min-content** probes, including
 their descendant path. `Contribution.min` is a minimum contribution and may be
 zero after `min-width:0` or overflow rules; it is not that probe. A change only
-in maximum contribution or extent does not trigger an adjustment. Once a true
+in maximum contribution or extent does not trigger an adjustment while the
+axis's own sizing/layout conditions are unchanged. Once a true
 min-content change triggers a pass, both fresh min/max contributions must be
 used. Each axis can adjust at most once and the parent points cannot run
 backwards.
@@ -235,16 +236,16 @@ A standalone target's completion constraint must agree with its own available
 space, with an explicit max-content rule for an automatic indefinite target.
 No containing-block base is derived from the content width later realized.
 
-The perpendicular axis is supplied as fresh definite inherited geometry, an
-earlier completed axis with its actual producer, or an initial fixed-maximum
+The perpendicular axis is supplied as fresh definite inherited geometry, a
+compatible earlier completed axis with its actual producer, or an initial fixed-maximum
 estimate. The latter never exposes zero placement bases as used geometry.
 Used geometry comes only from CompletedAxis, and its definite completion
 space controls distribution. Same track count does not make old geometry
 fresh: new entries supply the new spaces, containing bases, gaps and sources.
 
 The dispatcher completes only the requested standalone axis, or records only
-a projection for an inherited target. During an adjustment, an unchanged
-min-content observation retains the earlier completion and its original
+a projection for an inherited target. During an adjustment, unchanged
+min-content and own conditions retain the earlier completion and its original
 producer instead of maximizing again for a max-only change. A newly created
 virtual slot without an earlier completion can first size its requested axis
 at the current parent point; it does not fabricate a prior producer.
@@ -276,3 +277,57 @@ IntrinsicMin replaced-item opposite minimum transfer and the external fixture
 failures remain gates before activation, followed by unchanged Grid26, own
 pairs, orthogonal002/mix2 and the wider agreed corpus. These controls and this
 dispatcher do not justify integration by themselves.
+
+## Own conditions and opposite-history invalidation
+
+This isolated successor preserves the frozen dispatcher tree `f368dee4` as
+commit `42c977b` without changing its original staged worktree. Four causal
+controls were committed separately before the fix. No Rust compilation, test
+execution, CI, renderer hook or external-corpus change has been performed for
+this successor. The nine added controls are written tests, not measured passes.
+
+Unchanged min-content alone is insufficient to retain a completed axis. Its
+own available-space tag/value, gap, distribution, auto-track stretch setting,
+local-axis mapping and resolved template must still agree with its producer.
+Template comparison includes minimum/maximum sizing functions, flex factors,
+auto-fit and collapse flags, and line names. It excludes solver-produced base
+sizes, growth limits and the temporary infinitely-growable flag. Both complete
+track/name lists are charged before comparison, including a failed match.
+
+Distribution and stretching are now explicit per-axis `AxisLayout` inputs.
+They cross a wrapper with the corresponding available space and gap. The
+dispatcher verifies the target's stretch flag, and used geometry reads the
+distribution of its own producer rather than a separate current-style argument.
+
+At a requested adjustment, incompatible own conditions cause a complete sizing
+pass with fresh contributions even if the true min-content probes are equal.
+`own_conditions_changed` records this cause independently of
+`min_content_changed`. A pure maximum-only observation under the same own
+conditions still retains its earlier sizes, growth limits and producer. Fresh
+opposite-axis bases and edge references continue to feed measurement; they do
+not independently bypass the min-content rule for an otherwise unchanged axis.
+
+An incompatible historical opposite axis is not numeric geometry for the new
+entry. The dispatcher uses `InitialEstimate` from the fresh template, space,
+gap and layout inputs until that axis is requested in the parent's existing
+order. An auto maximum remains Infinite; fully fixed maxima, including a real
+definite zero, can yield definite estimated geometry. The older completion
+stays in history for provenance inspection, never relabeled as current or
+installed as a new completion. No prerequisite is added and no later axis is
+completed early. A repeated/backward adjustment remains rejected; further
+changes after the bounded passes require a new operation.
+
+The added dispatcher controls cover Definite100 to Definite200 in ordinary,
+clockwise, counter-clockwise and reflected mappings; changed own gap, template,
+stretch and alignment; and invalidated opposite constraints, gaps, templates,
+alignment and fixed zero. They assert fresh producer identities, tagged
+estimates and the subsequent ordered completion. Two state controls cover
+template metadata versus solver outputs, comparison precharge and rejection of
+unchanged observations under changed own conditions. Existing max-only and
+prerequisite controls are retained. The dispatcher now has sixteen written
+controls, and the phase-state module twenty; other module counts are unchanged.
+
+The actual recursive collectors, stacking result, IntrinsicMin replaced-item
+minimum-transfer gate, orthogonal002/mix2, eleven gains/thirteen retained cases
+and wider conformance gates remain outstanding. This checkpoint changes no
+claim about those results and is not integrable on static review alone.
