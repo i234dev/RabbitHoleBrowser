@@ -10,7 +10,7 @@ wpt	Web platform / WPT	107993/131464	2026-11-13	DOM, HTML, URL, Encoding, Indexe
 html	HTML / html5lib	1,935 / 1,945	2026-11-13	Tree-construction tests	README conformance record	recorded
 wasm	WebAssembly spec	66,747 / 66,757 (99.99%)	Date not recorded	Latest recorded spec-suite result; not rerun for every browser build	README conformance record	recorded
 url	WHATWG URL	899 / 899; 278 / 278 setters	Date not recorded	Latest recorded URL parsing and setter tests	README conformance record	recorded
-frameworks	Framework applications	66 / 66 in both modes	2026-11-14 (Europe/Madrid)	Functional DOM/input fixtures on 0.1.7 (d131916): JIT off; JIT on with threshold 0 and incremental-GC stress; not a timing benchmark	crates/agent/tests/frameworks.rs; workspace profile-ci validation	recorded
+frameworks	Framework applications	66 / 66 in both modes	2026-11-14 (Europe/Madrid)	Functional DOM/input fixtures on 0.1.9 (7443458), Linux x86-64; JIT off and on with threshold 0, incremental-GC stress, profile ci; not a timing benchmark	crates/agent/tests/frameworks.rs; workspace profile-ci validation	recorded
 acid2	Acid2	0 different pixels	Date not recorded	Latest recorded comparison with the reference image	README conformance record	recorded
 acid3	Acid3	96 / 100	Date not recorded	Latest recorded run	README conformance record	recorded
 speedometer	Speedometer 3.1	2.19 ± 0.065	2026-11-14 (Europe/Madrid)	20 default workloads, 3 iterations; headless release 0.1.7 (d131916); i7-12700H, WSL2, CPU 0; JIT off	docs/benchmarks/speedometer-2026-11-14.md	recorded

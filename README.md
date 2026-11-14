@@ -37,7 +37,7 @@ code unless noted in [Dependencies](#dependencies).
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
 | Acid2 | **0 pixels** different from the reference | |
 | Acid3 | 96 / 100 | |
-| Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 in both modes | functional DOM/input checks on 2026-11-14 (Europe/Madrid), v0.1.7; JIT off and JIT on with incremental-GC stress; not a timing benchmark |
+| Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 in both modes | functional DOM/input checks on 2026-11-14 (Europe/Madrid), v0.1.9 (`7443458`), Linux x86-64; JIT off/on with threshold 0 and incremental-GC stress, profile ci; not a timing benchmark |
 | Speedometer 3.1 | **2.19 ± 0.065** | 2026-11-14 (Europe/Madrid); 20 default workloads, 3 iterations; headless release v0.1.7, JIT off, i7-12700H/WSL2, CPU 0; [method and scope](docs/benchmarks/speedometer-2026-11-14.md) |
 
 The built-in start page shows the complete compiled version and the latest
