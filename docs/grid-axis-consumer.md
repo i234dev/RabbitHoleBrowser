@@ -93,3 +93,22 @@ The adapter's plain preferred-bound/percentage Engine pairs remain preserved
 in the separate TEST-ONLY checkpoint `e7f66ba`; this narrower consumer does not
 claim to exercise or recover them. Neither subgrid recursion, lanes stacking
 nor orthogonal002/mix2 is transferred to the new path by this hook.
+
+## Shared recursion guard follow-up
+
+Static peer review of `ddfa29e` found that the new ordinary consumer entered
+the charged-work budget but not its shared recursion counter. An item estimate
+can reenter an independent ordinary Grid through intrinsic/layout measurement,
+so this new route also needs the existing 128-entry bound. This was a static
+missing-guard finding, not an observed crash or a complete audit of all legacy
+layout recursion.
+
+The successor keeps a `DepthGuard` for the entire ordinary sizing operation.
+It delegates to the same budget entry used by subgrid projection, so mixed
+projection/ordinary recursion shares the limit and RAII restores it on normal
+return or unwind. A real-consumer control saturates the counter, verifies
+rejection before style/cache mutation, drops the outer guards and retries the
+consumer, then checks that its normal return released the slot. A second
+control interleaves projection with ordinary sizing and checks unwind restores
+the projection's depth. These two controls, the earlier fourteen new unit
+controls and both Engine tests remain uncompiled and unexecuted here.

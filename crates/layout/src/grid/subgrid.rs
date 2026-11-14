@@ -39,6 +39,11 @@ impl WorkBudget {
         depth.set(depth.get()+1);DepthGuard(depth.clone())
     }
 
+    /// Independent ordinary Grid sizing can recurse through item estimates
+    /// as well as subgrid projection. Share the same depth counter and keep
+    /// its RAII guard alive for the entire sizing operation.
+    pub(super) fn enter_sizing_operation(&mut self)->DepthGuard {self.enter(1)}
+
     /// Reserve work before helpers clone full placement track/name lists.
     pub(super) fn tracks(&mut self,list:&TrackList) {
         self.charge(list.tracks.len().saturating_mul(8));
@@ -810,5 +815,18 @@ mod tests {
         let list=parent();let mut budget=WorkBudget{remaining:15,depth:None};
         let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||budget.tracks(&list)));
         assert!(result.is_err());assert_eq!(budget.remaining,15);
+    }
+
+    #[test]
+    fn ordinary_sizing_and_projection_share_depth_and_restore_it_on_unwind() {
+        let mut budget=WorkBudget::default();
+        let projection=budget.enter(1);
+        let depth=budget.depth.as_ref().unwrap().clone();assert_eq!(depth.get(),1);
+        let failure=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ordinary=budget.enter_sizing_operation();assert_eq!(depth.get(),2);
+            panic!("intentional sizing-operation unwind");
+        }));
+        assert!(failure.is_err());assert_eq!(depth.get(),1);
+        drop(projection);assert_eq!(depth.get(),0);
     }
 }
