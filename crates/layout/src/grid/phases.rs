@@ -174,20 +174,24 @@ impl CompletedAxis {
 #[derive(Clone, Debug)]
 struct Entry { id:MeasurementId, point:MeasurePoint, inputs:MeasureInputs }
 
+#[derive(Clone)]
+struct ProducedAxis { axis:CompletedAxis, entry:Entry }
+
 /// A shared axis can project descendants before its parent resolves its used
 /// sizes. That result contains no track sizes. Only an explicit completion
 /// provides geometry, together with the point and inputs that produced it.
 pub(super) struct AxisRecord {
     entry:Entry,
-    complete:Option<CompletedAxis>,
+    complete:Option<ProducedAxis>,
     pub(super) contributions:Vec<Contribution>,
     min_content:Vec<MinContentProbe>,
 }
 
 impl AxisRecord {
-    pub(super) fn producer(&self)->MeasurePoint {self.entry.point}
+    pub(super) fn measurement_point(&self)->MeasurePoint {self.entry.point}
     pub(super) fn inputs(&self)->&MeasureInputs {&self.entry.inputs}
-    pub(super) fn completion(&self)->Option<&CompletedAxis> {self.complete.as_ref()}
+    pub(super) fn completion(&self)->Option<&CompletedAxis> {self.complete.as_ref().map(|complete|&complete.axis)}
+    pub(super) fn completion_origin(&self)->Option<(MeasurePoint,&MeasureInputs)> {self.complete.as_ref().map(|complete|(complete.entry.point,&complete.entry.inputs))}
 }
 
 pub(super) struct GridOperation {
@@ -229,25 +233,50 @@ impl GridOperation {
     /// Every call records freshly measured inputs. Comparison uses only true
     /// min-content probes; a max-only change must not request an adjustment.
     pub(super) fn record(&mut self,id:&MeasurementId,completed:&CompletedAxis,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
-        self.record_inner(id,Some(completed),contributions,probes,budget)
+        self.record_inner(id,Some(completed),false,contributions,probes,budget)
     }
     /// Hoisted descendants of an unresolved inherited axis are measured, not
     /// completed. In particular this cannot turn placement bases into sizes.
     pub(super) fn record_projection(&mut self,id:&MeasurementId,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
-        self.record_inner(id,None,contributions,probes,budget)
+        self.record_inner(id,None,false,contributions,probes,budget)
     }
-    fn record_inner(&mut self,id:&MeasurementId,complete:Option<&CompletedAxis>,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
+    /// An adjustment that observes no min-content change must not maximize
+    /// again merely because a maximum changed. Retain the previous geometry
+    /// with its ORIGINAL producer, while recording the fresh observation.
+    pub(super) fn observe_unchanged(&mut self,id:&MeasurementId,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget) {
+        self.record_inner(id,None,true,contributions,probes,budget);
+    }
+    pub(super) fn min_content_changed(&self,id:&MeasurementId,probes:&[MinContentProbe],budget:&mut WorkBudget)->Option<bool> {
+        let entry=self.active.as_ref().filter(|entry|entry.id==*id).expect("Stale Grid measurement query");
+        for probe in probes {budget.charge(probe.path.len().saturating_add(1));}
+        self.axes[entry.inputs.local_axis(entry.point).index()].as_ref().map(|before|before.min_content!=probes)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn record_inner(&mut self,id:&MeasurementId,complete:Option<&CompletedAxis>,retain:bool,contributions:&[Contribution],probes:&[MinContentProbe],budget:&mut WorkBudget)->bool {
         let entry=self.active.as_ref().filter(|entry|entry.id==*id).expect("Stale Grid measurement result");
         let axis=entry.inputs.local_axis(entry.point).index();
+        let previous=self.axes[axis].as_ref();
+        if previous.is_some() {for probe in probes {budget.charge(probe.path.len().saturating_add(1));}}
+        let retained=retain.then(|| {
+            let previous=previous.expect("Grid unchanged observation requires an earlier measurement");
+            assert!(previous.min_content==probes,"Changed Grid min-content cannot retain old completion");
+            previous.complete.as_ref().expect("Grid unchanged observation requires completed geometry")
+        });
         // Sources currently share Arc-backed payloads, but retaining a new
         // record still consumes the operation's input-retention allowance.
         // Charge before Entry::clone, including projections with no items.
         budget.charge(subgrid::source_work(&entry.inputs.columns).saturating_add(subgrid::source_work(&entry.inputs.rows)));
-        if let Some(complete)=complete {budget.tracks(&complete.tracks);}
+        let geometry=complete.or_else(||retained.map(|retained|&retained.axis));
+        if let Some(geometry)=geometry {
+            budget.tracks(&geometry.tracks);
+            let producer=retained.map_or(entry,|retained|&retained.entry);
+            budget.charge(subgrid::source_work(&producer.inputs.columns).saturating_add(subgrid::source_work(&producer.inputs.rows)));
+        }
         budget.charge(contributions.len().saturating_mul(3));
         for probe in probes {budget.charge(probe.path.len().saturating_add(1));}
-        let changed=self.axes[axis].as_ref().is_some_and(|before|before.min_content!=probes);
-        let record=AxisRecord{entry:entry.clone(),complete:complete.cloned(),contributions:contributions.to_vec(),min_content:probes.to_vec()};
+        let changed=previous.is_some_and(|before|before.min_content!=probes);
+        let complete=retained.cloned().or_else(||complete.map(|axis|ProducedAxis{axis:axis.clone(),entry:entry.clone()}));
+        let record=AxisRecord{entry:entry.clone(),complete,contributions:contributions.to_vec(),min_content:probes.to_vec()};
         self.axes[axis]=Some(record);
         changed
     }
@@ -392,7 +421,7 @@ mod tests {
         assert_ne!(first,second);assert!(operation.result(&first).is_none());assert!(operation.result(&second).is_none());
         operation.record(&second,&done,&contributions,&probes,&mut budget);
         let record=operation.result(&second).unwrap();
-        assert_eq!(record.producer(),MeasurePoint::Columns);
+        assert_eq!(record.measurement_point(),MeasurePoint::Columns);
         assert_eq!(record.inputs().gaps,[2.,25.]);assert_eq!(tracks(&record.inputs().rows).starts,[0.,75.]);
     }
 
@@ -502,7 +531,7 @@ mod tests {
         let rows=operation.begin(MeasurePoint::Rows,fresh,&mut budget);
         assert!(operation.result(&id).is_none());assert!(operation.result(&rows).is_none());
         let previous=operation.opposite_history(&rows).unwrap();
-        assert_eq!(previous.producer(),MeasurePoint::Columns);assert_eq!(previous.inputs().gaps,[2.,3.]);
+        assert_eq!(previous.measurement_point(),MeasurePoint::Columns);assert_eq!(previous.inputs().gaps,[2.,3.]);
         assert_eq!(previous.completion().unwrap().tracks().tracks[0].base,40.);
     }
 
@@ -515,5 +544,55 @@ mod tests {
         assert_eq!(child.spaces,[AvailableSpace::Definite(75.),AvailableSpace::Indefinite]);
         assert_eq!(child.edge_basis,AvailableSpace::Definite(180.));
         assert_eq!(MeasurePoint::AdjustRows.legacy_phase(),super::super::MeasurePhase::Adjusted);
+    }
+
+    #[test]
+    fn max_only_observation_preserves_old_geometry_and_its_original_producer() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let original=[contribution(10.,40.)];let done=completed(&original,&mut budget);
+        let probes=[MinContentProbe::new(&[7],10.,&mut budget)];
+        let first=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        operation.record(&first,&done,&original,&probes,&mut budget);
+        let mut changed_inputs=inputs();changed_inputs.gaps[1]=25.;
+        let next=operation.begin(MeasurePoint::AdjustColumns,changed_inputs,&mut budget);
+        let maximum_changed=[contribution(10.,80.)];
+        assert_eq!(operation.min_content_changed(&next,&probes,&mut budget),Some(false));
+        operation.observe_unchanged(&next,&maximum_changed,&probes,&mut budget);
+        let record=operation.result(&next).unwrap();
+        assert_eq!(record.measurement_point(),MeasurePoint::AdjustColumns);assert_eq!(record.inputs().gaps,[2.,25.]);
+        assert_eq!(record.contributions,maximum_changed);
+        assert_eq!(record.completion().unwrap().tracks().tracks[0].base,40.);
+        let (point,inputs)=record.completion_origin().unwrap();
+        assert_eq!(point,MeasurePoint::Columns);assert_eq!(inputs.gaps,[2.,3.]);
+    }
+
+    #[test]
+    fn a_changed_minimum_cannot_be_disguised_as_an_unchanged_observation() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let original=[contribution(0.,40.)];let done=completed(&original,&mut budget);
+        let first=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        operation.record(&first,&done,&original,&[MinContentProbe::new(&[7],10.,&mut budget)],&mut budget);
+        let next=operation.begin(MeasurePoint::AdjustColumns,inputs(),&mut budget);
+        let probes=[MinContentProbe::new(&[7],25.,&mut budget)];
+        assert_eq!(operation.min_content_changed(&next,&probes,&mut budget),Some(true));
+        assert!(catch_unwind(AssertUnwindSafe(||operation.observe_unchanged(&next,&original,&probes,&mut budget))).is_err());
+        assert!(operation.result(&next).is_none());
+    }
+
+    #[test]
+    fn unchanged_observation_precharges_retained_geometry_before_installing_a_new_result() {
+        let mut budget=WorkBudget::default();let mut operation=GridOperation::new(OperationKind::Layout,&mut budget);
+        let original=[contribution(10.,40.)];let done=completed(&original,&mut budget);
+        let probes=[MinContentProbe::new(&[7],10.,&mut budget)];
+        let first=operation.begin(MeasurePoint::Columns,inputs(),&mut budget);
+        operation.record(&first,&done,&original,&probes,&mut budget);
+        let next=operation.begin(MeasurePoint::AdjustColumns,inputs(),&mut budget);
+        let mut exhausted=WorkBudget::limited_for_test(0);
+        assert!(catch_unwind(AssertUnwindSafe(||operation.observe_unchanged(&next,&original,&probes,&mut exhausted))).is_err());
+        assert!(operation.result(&next).is_none());
+        operation.observe_unchanged(&next,&original,&probes,&mut budget);
+        let record=operation.result(&next).unwrap();
+        assert_eq!(record.completion().unwrap().tracks().tracks[0].base,40.);
+        assert_eq!(record.completion_origin().unwrap().0,MeasurePoint::Columns);
     }
 }
