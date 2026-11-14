@@ -39,8 +39,8 @@ operations must be rejected by the bindings instead of reporting fake success.
 
 ## GLSL subset
 
-One `void main()` with straight-line, whole-variable assignments and initialized
-local declarations. Global `attribute` (vertex only), `varying`, and `uniform`
+One `void main()` with whole-variable assignments, initialized local declarations,
+blocks, bounded `if`/`else` selection and `return;`. Global `attribute` (vertex only), `varying`, and `uniform`
 declarations; scalar `float`, `vec2/3/4`, and uniform/local `mat4` types. Precision
 qualifiers, `precision ... float;`, comments and optional `#version 100` are
 recognized. Fragment shaders require an explicit float precision declaration.
@@ -58,9 +58,11 @@ shared uniform types must agree. Uniforms start at zero after linking.
 The evaluator also supports 32 typed float/vector math built-ins, with checked
 argument counts, types and expression costs. See
 [the supported functions](../../docs/webgl.md#shader-language-subset).
-User helpers may return `float` or `vec2/3/4`, take up to eight named parameters
-of those types by value (ordinary or `in` parameters), and use initialized locals
-plus one final `return` expression. Precision qualifiers and zero-argument helpers
+User helpers may return scalar `bool`, `float` or `vec2/3/4`, take up to eight
+named parameters of those types by value (ordinary or `in` parameters), and use
+initialized locals, nested blocks, `if`/`else` and typed early returns. Every
+helper path must return a value; every main path must write its stage output
+before returning or falling through. Precision qualifiers and zero-argument helpers
 are accepted. Definitions must precede their callers and `main`; helpers may call
 earlier helpers, the math built-ins and supported fragment texture operations.
 They can read immutable globals such as uniforms, vertex attributes and fragment
@@ -74,10 +76,21 @@ share immutable ASTs; the 512-unit expression budget includes every nested call
 site, argument, body and local binding so shared bodies do not hide exponential
 execution. Unused helpers do not activate their referenced uniforms. Recursion,
 forward calls, prototypes, overloading/redefinition, `out`/`inout`/`const`
-parameters, extra statements after the final return and general control flow are
-rejected with diagnostics; they are not silently ignored.
+parameters and statements after an unconditional return are rejected with
+diagnostics; they are not silently ignored.
 
-General control flow, arrays, integer/bool variables, derivatives,
+Scalar `bool` supports `true`/`false`, bool-only `!`, `&&`, `||`, `^^`, and
+`bool(bool)`. `&&` and `||` skip the right operand when its value is unnecessary;
+`^^` evaluates both. Relational comparisons require two scalar floats; `==` and
+`!=` require matching bool, float, vector or matrix types and produce one bool.
+Numeric/bool conversions, boolean vectors and boolean interface variables are
+rejected. Both branches and logical operands are typed and reflected statically,
+including constant dead paths. Blocks have lexical scopes; a new local enters
+scope after its initializer, and leaving a block restores the enclosing binding.
+At most 16 nested statement levels and 128 statements per body are supported.
+All branches add to the expression/call-site cost, even when runtime skips them.
+
+Loops, switch, ternary expressions, arrays, integer variables, derivatives,
 discard, swizzle assignments, stencil, points/lines, culling, multisampling and
 extensions remain unsupported. Texture sampling has the explicit bounded subset
 below. Unsupported shader operations fail compilation with diagnostics.

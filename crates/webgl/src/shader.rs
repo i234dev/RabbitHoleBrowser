@@ -12,6 +12,7 @@ pub(crate) enum Ty {
     // Integer literals can be converted by constructors, not assigned or
     // used in arithmetic as if they were floating-point values.
     IntLiteral,
+    Bool,
     Sampler2D,
     Float,
     Vec2,
@@ -24,6 +25,7 @@ impl Ty {
         Some(match s {
             "sampler2D" => Self::Sampler2D,
             "float" => Self::Float,
+            "bool" => Self::Bool,
             "vec2" => Self::Vec2,
             "vec3" => Self::Vec3,
             "vec4" => Self::Vec4,
@@ -33,7 +35,7 @@ impl Ty {
     }
     pub fn n(self) -> usize {
         match self {
-            Self::IntLiteral | Self::Sampler2D | Self::Float => 1,
+            Self::IntLiteral | Self::Bool | Self::Sampler2D | Self::Float => 1,
             Self::Vec2 => 2,
             Self::Vec3 => 3,
             Self::Vec4 => 4,
@@ -81,15 +83,82 @@ struct Expr {
 #[derive(Clone, Debug)]
 enum ExprKind {
     Number(f32),
+    Boolean(bool),
     Texture(Box<Expr>, Box<Expr>),
     Name(String),
     Global(String),
     Swizzle(Box<Expr>, Vec<usize>),
     Neg(Box<Expr>),
+    Not(Box<Expr>),
+    Compare(Compare, Box<Expr>, Box<Expr>),
+    Logical(Logical, Box<Expr>, Box<Expr>),
     Binary(char, Box<Expr>, Box<Expr>),
     Construct(Vec<Expr>),
     Builtin(Builtin, Vec<Expr>),
     Call(Arc<Function>, Vec<Expr>),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Compare { Less, LessEqual, Greater, GreaterEqual, Equal, NotEqual }
+#[derive(Clone, Copy, Debug)]
+enum Logical { And, Or, Xor }
+
+#[derive(Clone, Debug)]
+enum Statement {
+    Assign(String, Expr),
+    Block(Vec<Statement>),
+    If(Expr, Vec<Statement>, Vec<Statement>),
+    Return(Option<Expr>),
+}
+impl Statement {
+    fn returns(&self) -> bool {
+        match self {
+            Self::Return(_) => true,
+            Self::Block(body) => body.last().is_some_and(Self::returns),
+            Self::If(_, yes, no) => yes.last().is_some_and(Self::returns) && no.last().is_some_and(Self::returns),
+            Self::Assign(_, _) => false,
+        }
+    }
+}
+enum Flow { Next, Return(Option<Value>) }
+fn execute(statements: &[Statement], env: &mut BTreeMap<String,Value>, globals: &BTreeMap<String,Value>, sample: &dyn Fn(i32,[f32;2])->[f32;4]) -> Flow {
+    for statement in statements {
+        let flow = match statement {
+            Statement::Assign(name, expr) => {
+                let value = expr.eval(env, globals, sample);
+                env.insert(name.clone(), value);
+                Flow::Next
+            }
+            Statement::Block(body) => execute(body,env,globals,sample),
+            Statement::If(condition, yes, no) => execute(if condition.eval(env,globals,sample).v[0] != 0. { yes } else { no }, env,globals,sample),
+            Statement::Return(expr) => Flow::Return(expr.as_ref().map(|expr| expr.eval(env,globals,sample))),
+        };
+        if !matches!(flow, Flow::Next) { return flow; }
+    }
+    Flow::Next
+}
+
+/// Every reachable return and fallthrough in main must have written its output.
+/// Both branches remain checked even when a condition is a constant.
+fn output_paths(statements: &[Statement], output: &str, mut written: bool) -> Result<Option<bool>,String> {
+    for statement in statements {
+        match statement {
+            Statement::Assign(name, _) => written |= name == output,
+            Statement::Block(body) => match output_paths(body,output,written)? { Some(value) => written=value, None => return Ok(None) },
+            Statement::If(_,yes,no) => {
+                written = match (output_paths(yes,output,written)?,output_paths(no,output,written)?) {
+                    (Some(a),Some(b)) => a && b,
+                    (Some(a),None) | (None,Some(a)) => a,
+                    (None,None) => return Ok(None),
+                };
+            }
+            Statement::Return(_) => {
+                if !written { return Err(format!("main must write {output} before returning")); }
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(written))
 }
 
 /// Definitions form a DAG: calls can target only a previously defined helper.
@@ -100,8 +169,7 @@ struct Function {
     parameters: Vec<(String, Ty)>,
     locals: BTreeMap<String, Symbol>,
     globals: BTreeSet<String>,
-    statements: Vec<(String, Expr)>,
-    result: Expr,
+    statements: Vec<Statement>,
     cost: usize,
     call_depth: usize,
 }
@@ -119,11 +187,10 @@ impl Function {
         for ((name, _), value) in self.parameters.iter().zip(values) {
             env.insert(name.clone(), *value);
         }
-        for (name, expression) in &self.statements {
-            let value = expression.eval(&env, globals, sample);
-            env.insert(name.clone(), value);
+        match execute(&self.statements, &mut env, globals, sample) {
+            Flow::Return(Some(value)) => value,
+            _ => unreachable!("helpers have typed returns on every path"),
         }
-        self.result.eval(&env, globals, sample)
     }
 }
 
@@ -346,7 +413,7 @@ pub(crate) struct Shader {
     pub reads: BTreeSet<String>,
     pub writes: BTreeSet<String>,
     function_globals: BTreeSet<String>,
-    statements: Vec<(String, Expr)>,
+    statements: Vec<Statement>,
     pub cost: usize,
 }
 impl Shader {
@@ -371,10 +438,7 @@ impl Shader {
             .iter()
             .map(|name| (name.clone(), env[name]))
             .collect();
-        for (name, expr) in &self.statements {
-            let v = expr.eval(&env, &globals, sample);
-            env.insert(name.clone(), v);
-        }
+        execute(&self.statements, &mut env, &globals, sample);
         env
     }
 }
@@ -386,6 +450,28 @@ impl Expr {
         sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
     ) -> Value {
         match &self.kind {
+            ExprKind::Boolean(value) => Value::from(Ty::Bool, &[u8::from(*value) as f32]),
+            ExprKind::Not(expr) => Value::from(Ty::Bool, &[u8::from(expr.eval(env,globals,sample).v[0] == 0.) as f32]),
+            ExprKind::Logical(op,a,b) => {
+                let a = a.eval(env,globals,sample).v[0] != 0.;
+                let value = match op {
+                    Logical::And => a && b.eval(env,globals,sample).v[0] != 0.,
+                    Logical::Or => a || b.eval(env,globals,sample).v[0] != 0.,
+                    Logical::Xor => a != (b.eval(env,globals,sample).v[0] != 0.),
+                };
+                Value::from(Ty::Bool,&[u8::from(value) as f32])
+            }
+            ExprKind::Compare(op,a,b) => {
+                let a=a.eval(env,globals,sample);
+                let b=b.eval(env,globals,sample);
+                let value=match op {
+                    Compare::Less => a.v[0] < b.v[0], Compare::LessEqual => a.v[0] <= b.v[0],
+                    Compare::Greater => a.v[0] > b.v[0], Compare::GreaterEqual => a.v[0] >= b.v[0],
+                    Compare::Equal => a.v[..a.ty.n()] == b.v[..b.ty.n()],
+                    Compare::NotEqual => a.v[..a.ty.n()] != b.v[..b.ty.n()],
+                };
+                Value::from(Ty::Bool,&[u8::from(value) as f32])
+            }
             ExprKind::Call(function, args) => {
                 let mut values = [Value::zero(Ty::Float); MAX_PARAMETERS];
                 for (i, arg) in args.iter().enumerate() {
@@ -488,6 +574,7 @@ enum Tok {
     Id(String),
     Num(f32, bool),
     P(char),
+    Op(String),
     End,
 }
 fn lex(src: &str, token_limit: usize) -> Result<(Vec<Tok>, u32), String> {
@@ -581,7 +668,10 @@ fn lex(src: &str, token_limit: usize) -> Result<(Vec<Tok>, u32), String> {
             out.push(Tok::Num(n, integral));
             continue;
         }
-        if b";{}(),=+-*/.".contains(&c) {
+        if let Some(op) = ["<=", ">=", "==", "!=", "&&", "||", "^^"].iter().find(|op| b.get(i..i+2) == Some(op.as_bytes())) {
+            out.push(Tok::Op((*op).into())); i+=2; continue;
+        }
+        if b";{}(),=+-*/.!<>".contains(&c) {
             out.push(Tok::P(c as char));
             i += 1;
             continue;
@@ -598,11 +688,17 @@ struct Parser {
     shader: Shader,
     depth: usize,
     functions: BTreeMap<String, Arc<Function>>,
-    locals: Option<BTreeMap<String, Symbol>>,
+    locals: BTreeMap<String, Symbol>,
+    scopes: Vec<BTreeMap<String, Binding>>,
     function_globals: Option<BTreeSet<String>>,
     function_name: Option<String>,
     function_depth: usize,
+    result_type: Option<Ty>,
+    statement_depth: usize,
+    statement_count: usize,
 }
+#[derive(Clone)]
+struct Binding { key: String, symbol: Symbol }
 impl Parser {
     fn peek(&self) -> &Tok {
         &self.tokens[self.pos]
@@ -644,10 +740,11 @@ impl Parser {
         }
     }
     fn variable(&self, name: &str) -> Option<&Symbol> {
-        self.locals
-            .as_ref()
-            .and_then(|locals| locals.get(name))
+        self.local(name).map(|binding| &binding.symbol)
             .or_else(|| self.shader.symbols.get(name))
+    }
+    fn local(&self, name: &str) -> Option<&Binding> {
+        self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
     fn read_globals(&mut self, names: impl IntoIterator<Item = String>) {
         if let Some(reads) = self.function_globals.as_mut() {
@@ -657,10 +754,8 @@ impl Parser {
         }
     }
     fn read_name(&mut self, name: &str) -> Result<(), String> {
-        if let Some(locals) = &self.locals {
-            if locals.contains_key(name) {
-                return Ok(());
-            }
+        if self.local(name).is_some() { return Ok(()); }
+        if self.function_name.is_some() {
             let symbol = &self.shader.symbols[name];
             if !matches!(symbol.qual, Qual::Uniform | Qual::Attribute | Qual::Input)
                 && !(symbol.qual == Qual::Varying && !self.vertex)
@@ -673,12 +768,15 @@ impl Parser {
     }
     fn ty(&mut self) -> Result<Ty, String> {
         let mut n = self.id()?;
-        if matches!(n.as_str(), "lowp" | "mediump" | "highp") {
+        let precision = matches!(n.as_str(), "lowp" | "mediump" | "highp");
+        if precision {
             n = self.id()?;
         }
-        Ty::parse(&n).ok_or_else(|| format!("unsupported type {n}"))
+        let ty = Ty::parse(&n).ok_or_else(|| format!("unsupported type {n}"))?;
+        if precision && ty == Ty::Bool { return Err("bool cannot have a precision qualifier".into()); }
+        Ok(ty)
     }
-    fn declare(&mut self, name: String, ty: Ty, qual: Qual) -> Result<(), String> {
+    fn declare(&mut self, name: String, ty: Ty, qual: Qual) -> Result<String, String> {
         if self.shader.version == 300
             && qual != Qual::Local
             && (name == "texture" || Builtin::parse(&name).is_some())
@@ -714,6 +812,9 @@ impl Parser {
                     | "break"
                     | "continue"
                     | "struct"
+                    | "switch"
+                    | "case"
+                    | "default"
                     | "bool"
                     | "int"
                     | "true"
@@ -725,28 +826,24 @@ impl Parser {
                     | "mediump"
                     | "highp"
             )
-            || self.locals.as_ref().map_or_else(
-                || self.shader.symbols.contains_key(&name),
-                |locals| locals.contains_key(&name),
-            )
+            || if qual == Qual::Local { self.scopes.last().is_some_and(|scope| scope.contains_key(&name)) } else { self.shader.symbols.contains_key(&name) }
             || (qual != Qual::Local && self.functions.contains_key(&name))
         {
             return Err(format!("invalid or duplicate declaration {name}"));
         }
-        if self
-            .locals
-            .as_ref()
-            .map_or(self.shader.symbols.len(), BTreeMap::len)
-            >= 64
-        {
+        if (if qual == Qual::Local { self.locals.len() + if self.function_name.is_none() { self.shader.symbols.len() } else {0} } else {self.shader.symbols.len()}) >= 64 {
             return Err("too many shader variables".into());
         }
-        if let Some(locals) = self.locals.as_mut() {
-            locals.insert(name, Symbol { ty, qual });
+        if qual == Qual::Local {
+            let key = format!("@local{}",self.locals.len());
+            let symbol = Symbol {ty,qual};
+            self.scopes.last_mut().expect("locals require a scope").insert(name,Binding {key:key.clone(),symbol:symbol.clone()});
+            self.locals.insert(key.clone(),symbol);
+            Ok(key)
         } else {
-            self.shader.symbols.insert(name, Symbol { ty, qual });
+            self.shader.symbols.insert(name.clone(), Symbol { ty, qual });
+            Ok(name)
         }
-        Ok(())
     }
     fn assignment(&mut self) -> Result<(String, Expr), String> {
         let first = self.id()?;
@@ -770,11 +867,7 @@ impl Parser {
                 .ok_or_else(|| format!("unknown assignment target {name}"))?
                 .clone()
         };
-        if declaration.is_none()
-            && self
-                .locals
-                .as_ref()
-                .is_some_and(|locals| !locals.contains_key(&name))
+        if declaration.is_none() && self.function_name.is_some() && self.local(&name).is_none()
         {
             return Err(format!("helpers cannot write global {name}"));
         }
@@ -789,13 +882,14 @@ impl Parser {
             return Err(format!("assignment type mismatch for {name}"));
         }
         self.expect(Tok::P(';'))?;
-        if let Some(ty) = declaration {
+        let target = if let Some(ty) = declaration {
             // GLSL ES 1.00 section 4.2 and 3.00 section 4.2.2: the new
             // name becomes visible only after its initializer. Until then,
             // an outer variable or helper of the same name remains visible.
-            self.declare(name.clone(), ty, Qual::Local)?;
-        }
-        Ok((name, expr))
+            self.declare(name, ty, Qual::Local)?
+        } else { self.local(&name).map_or(name.clone(),|binding|binding.key.clone()) };
+        if self.function_name.is_none() && self.shader.symbols.contains_key(&target) { self.shader.writes.insert(target.clone()); }
+        Ok((target, expr))
     }
     fn function(&mut self, name: String, result_type: Ty) -> Result<(), String> {
         if self.functions.len() >= MAX_FUNCTIONS {
@@ -810,7 +904,10 @@ impl Parser {
         // Reuse global identifier validation without making a function a variable.
         self.declare(name.clone(), result_type, Qual::Uniform)?;
         self.shader.symbols.remove(&name);
-        self.locals = Some(BTreeMap::new());
+        self.locals = BTreeMap::new();
+        self.scopes = vec![BTreeMap::new()];
+        self.result_type = Some(result_type);
+        self.statement_count = 0;
         self.function_globals = Some(BTreeSet::new());
         self.function_name = Some(name.clone());
         self.function_depth = 1;
@@ -830,12 +927,12 @@ impl Parser {
                 }
                 self.eat_id("in");
                 let ty = self.ty()?;
-                if !matches!(ty, Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
-                    return Err("function parameters require float or vector types".into());
+                if !matches!(ty, Ty::Bool | Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+                    return Err("function parameters require bool, float or vector types".into());
                 }
                 let parameter = self.id()?;
-                self.declare(parameter.clone(), ty, Qual::Local)?;
-                parameters.push((parameter, ty));
+                let key = self.declare(parameter, ty, Qual::Local)?;
+                parameters.push((key, ty));
                 if self.eat(')') {
                     break;
                 }
@@ -846,26 +943,12 @@ impl Parser {
             return Err("function prototypes are unsupported; define helpers before use".into());
         }
         self.expect(Tok::P('{'))?;
-        let mut statements = Vec::new();
-        let result = loop {
-            if self.eat_id("return") {
-                let result = self.expr(0)?;
-                if result.ty != result_type {
-                    return Err(format!("return type mismatch in {name}"));
-                }
-                self.expect(Tok::P(';'))?;
-                self.expect(Tok::P('}'))?;
-                break result;
-            }
-            if self.eat('}') {
-                return Err("user function requires one final return expression".into());
-            }
-            if statements.len() >= 128 {
-                return Err("too many function statements".into());
-            }
-            statements.push(self.assignment()?);
-        };
-        let locals = self.locals.take().unwrap();
+        let statements = self.statements()?;
+        if !statements.last().is_some_and(Statement::returns) {
+            return Err("user function must return a value on every path".into());
+        }
+        let locals = std::mem::take(&mut self.locals);
+        self.scopes.clear();
         let globals = self.function_globals.take().unwrap();
         let cost = self.shader.cost + parameters.len() + locals.len() + globals.len() + 1;
         if cost > 512 {
@@ -873,6 +956,7 @@ impl Parser {
         }
         let call_depth = self.function_depth;
         self.function_name = None;
+        self.result_type = None;
         self.function_depth = 0;
         self.shader.cost = outer_cost;
         self.functions.insert(
@@ -883,12 +967,64 @@ impl Parser {
                 locals,
                 globals,
                 statements,
-                result,
                 cost,
                 call_depth,
             }),
         );
         Ok(())
+    }
+    fn statements(&mut self) -> Result<Vec<Statement>,String> {
+        let mut statements = Vec::new();
+        while !self.eat('}') {
+            if statements.last().is_some_and(Statement::returns) {
+                return Err("statements after an unconditional return are unsupported".into());
+            }
+            statements.push(self.statement()?);
+        }
+        Ok(statements)
+    }
+    fn branch(&mut self) -> Result<Vec<Statement>,String> {
+        self.scopes.push(BTreeMap::new());
+        let statement = self.statement()?;
+        self.scopes.pop();
+        Ok(vec![statement])
+    }
+    fn statement(&mut self) -> Result<Statement,String> {
+        self.statement_depth += 1;
+        self.statement_count += 1;
+        self.shader.cost += 1;
+        if self.statement_depth > 16 { return Err("statement nesting exceeds 16".into()); }
+        if self.statement_count > 128 { return Err("too many shader statements".into()); }
+        if self.shader.cost > 512 { return Err("shader exceeds expression budget".into()); }
+        let statement = if self.eat('{') {
+            self.scopes.push(BTreeMap::new());
+            let body = self.statements()?;
+            self.scopes.pop();
+            Statement::Block(body)
+        } else if self.eat_id("if") {
+            self.expect(Tok::P('('))?;
+            let condition = self.expr(0)?;
+            if condition.ty != Ty::Bool { return Err("if requires a scalar bool condition".into()); }
+            self.expect(Tok::P(')'))?;
+            let yes = self.branch()?;
+            let no = if self.eat_id("else") { self.branch()? } else { Vec::new() };
+            Statement::If(condition,yes,no)
+        } else if self.eat_id("return") {
+            let value = if let Some(ty) = self.result_type {
+                let expression = self.expr(0)?;
+                if expression.ty != ty { return Err("return type mismatch".into()); }
+                Some(expression)
+            } else {None};
+            self.expect(Tok::P(';'))?;
+            Statement::Return(value)
+        } else if self.eat(';') {
+            Statement::Block(Vec::new())
+        } else {
+            let (name,expression) = self.assignment()?;
+            Statement::Assign(name,expression)
+        };
+        self.statement_depth -= 1;
+        Ok(statement)
     }
     fn expr(&mut self, min_prec: u8) -> Result<Expr, String> {
         self.depth += 1;
@@ -905,9 +1041,9 @@ impl Parser {
                 kind: ExprKind::Number(n),
             },
             Tok::P('-') => {
-                let e = self.expr(3)?;
-                if e.ty == Ty::Sampler2D {
-                    return Err("samplers cannot be negated".into());
+                let e = self.expr(8)?;
+                if matches!(e.ty,Ty::Sampler2D | Ty::Bool) {
+                    return Err("unary minus requires a numeric value".into());
                 }
                 Expr {
                     ty: e.ty,
@@ -915,11 +1051,16 @@ impl Parser {
                 }
             }
             Tok::P('+') => {
-                let e = self.expr(3)?;
-                if e.ty == Ty::Sampler2D {
-                    return Err("samplers are opaque".into());
+                let e = self.expr(8)?;
+                if matches!(e.ty,Ty::Sampler2D | Ty::Bool) {
+                    return Err("unary plus requires a numeric value".into());
                 }
                 e
+            }
+            Tok::P('!') => {
+                let expr = self.expr(8)?;
+                if expr.ty != Ty::Bool { return Err("logical not requires bool".into()); }
+                Expr {ty:Ty::Bool,kind:ExprKind::Not(Box::new(expr))}
             }
             Tok::P('(') => {
                 let e = self.expr(0)?;
@@ -927,7 +1068,9 @@ impl Parser {
                 e
             }
             Tok::Id(name) => {
-                if (name == "texture2D" || name == "texture") && *self.peek() == Tok::P('(') {
+                if name == "true" || name == "false" {
+                    Expr {ty:Ty::Bool,kind:ExprKind::Boolean(name=="true")}
+                } else if (name == "texture2D" || name == "texture") && *self.peek() == Tok::P('(') {
                     if self.variable(&name).is_some() {
                         return Err(format!("{name} is a variable, not a callable function"));
                     }
@@ -1003,6 +1146,10 @@ impl Parser {
                         }
                     }
                     self.expect(Tok::P(')'))?;
+                    if ty == Ty::Bool && (args.len()!=1 || args[0].ty != Ty::Bool)
+                        || ty != Ty::Bool && args.iter().any(|arg| arg.ty == Ty::Bool) {
+                        return Err("numeric/bool constructor conversions are unsupported".into());
+                    }
                     let total: usize = args.iter().map(|e| e.ty.n()).sum();
                     let scalar =
                         args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::IntLiteral);
@@ -1083,17 +1230,15 @@ impl Parser {
                         .variable(&name)
                         .ok_or_else(|| format!("unknown variable {name}"))?;
                     let ty = sym.ty;
-                    let global = self
-                        .locals
-                        .as_ref()
-                        .is_some_and(|locals| !locals.contains_key(&name));
+                    let local = self.local(&name).map(|binding|binding.key.clone());
+                    let global = self.function_name.is_some() && local.is_none();
                     self.read_name(&name)?;
                     Expr {
                         ty,
                         kind: if global {
                             ExprKind::Global(name)
                         } else {
-                            ExprKind::Name(name)
+                            ExprKind::Name(local.unwrap_or(name))
                         },
                     }
                 }
@@ -1104,7 +1249,7 @@ impl Parser {
             if self.eat('.') {
                 if matches!(
                     left.ty,
-                    Ty::Mat4 | Ty::Float | Ty::IntLiteral | Ty::Sampler2D
+                    Ty::Mat4 | Ty::Float | Ty::IntLiteral | Ty::Sampler2D | Ty::Bool
                 ) {
                     return Err("swizzles require a vector".into());
                 }
@@ -1136,43 +1281,53 @@ impl Parser {
                 };
                 continue;
             }
-            let op = match self.peek() {
-                Tok::P(c @ ('+' | '-' | '*' | '/')) => *c,
+            let (op,prec) = match self.peek() {
+                Tok::P(c @ ('+' | '-')) => (c.to_string(),6),
+                Tok::P(c @ ('*' | '/')) => (c.to_string(),7),
+                Tok::P(c @ ('<' | '>')) => (c.to_string(),5),
+                Tok::Op(op) => (op.clone(),match op.as_str() {
+                    "||"=>1,"^^"=>2,"&&"=>3,"=="|"!="=>4,"<="|">="=>5,_=>unreachable!(),
+                }),
                 _ => break,
             };
-            let prec = if op == '+' || op == '-' { 1 } else { 2 };
-            if prec < min_prec {
-                break;
-            }
+            if prec < min_prec { break; }
             self.pos += 1;
-            let right = self.expr(prec + 1)?;
-            if left.ty == Ty::Sampler2D || right.ty == Ty::Sampler2D {
-                return Err("samplers are opaque".into());
-            }
-            if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
-                return Err(
-                    "integer arithmetic and implicit integer-to-float conversion are unsupported"
-                        .into(),
-                );
-            }
-            let ty = if op == '*'
-                && ((left.ty == Ty::Mat4 && right.ty == Ty::Vec4)
-                    || (left.ty == Ty::Vec4 && right.ty == Ty::Mat4))
-            {
-                Ty::Vec4
-            } else if left.ty == right.ty {
-                left.ty
-            } else if left.ty == Ty::Float {
-                right.ty
-            } else if right.ty == Ty::Float {
-                left.ty
+            let right = self.expr(prec+1)?;
+            let kind;
+            let ty;
+            if matches!(op.as_str(),"&&"|"||"|"^^") {
+                if left.ty != Ty::Bool || right.ty != Ty::Bool {
+                    return Err("logical operators require two bool operands".into());
+                }
+                let op=match op.as_str() {"&&"=>Logical::And,"||"=>Logical::Or,_=>Logical::Xor};
+                ty=Ty::Bool;
+                kind=ExprKind::Logical(op,Box::new(left),Box::new(right));
+            } else if matches!(op.as_str(),"<"|"<="|">"|">="|"=="|"!=") {
+                if matches!(op.as_str(),"=="|"!=") {
+                    if left.ty != right.ty || matches!(left.ty,Ty::IntLiteral|Ty::Sampler2D) {
+                        return Err("equality requires matching bool, float, vector or matrix operands".into());
+                    }
+                } else if left.ty != Ty::Float || right.ty != Ty::Float {
+                    return Err("relational comparisons require two scalar float operands".into());
+                }
+                let op=match op.as_str() {"<"=>Compare::Less,"<="=>Compare::LessEqual,">"=>Compare::Greater,">="=>Compare::GreaterEqual,"=="=>Compare::Equal,_=>Compare::NotEqual};
+                ty=Ty::Bool;
+                kind=ExprKind::Compare(op,Box::new(left),Box::new(right));
             } else {
-                return Err("binary operand types do not match".into());
-            };
-            left = Expr {
-                ty,
-                kind: ExprKind::Binary(op, Box::new(left), Box::new(right)),
-            };
+                if matches!(left.ty,Ty::Sampler2D|Ty::Bool) || matches!(right.ty,Ty::Sampler2D|Ty::Bool) {
+                    return Err("arithmetic requires numeric operands".into());
+                }
+                if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
+                    return Err("integer arithmetic and implicit integer-to-float conversion are unsupported".into());
+                }
+                ty = if op == "*" && ((left.ty==Ty::Mat4 && right.ty==Ty::Vec4) || (left.ty==Ty::Vec4 && right.ty==Ty::Mat4)) {Ty::Vec4}
+                    else if left.ty==right.ty {left.ty}
+                    else if left.ty==Ty::Float {right.ty}
+                    else if right.ty==Ty::Float {left.ty}
+                    else {return Err("binary operand types do not match".into());};
+                kind=ExprKind::Binary(op.as_bytes()[0] as char,Box::new(left),Box::new(right));
+            }
+            left=Expr {ty,kind};
         }
         self.depth -= 1;
         Ok(left)
@@ -1209,7 +1364,11 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         },
         depth: 0,
         functions: BTreeMap::new(),
-        locals: None,
+        locals: BTreeMap::new(),
+        scopes: Vec::new(),
+        result_type: None,
+        statement_depth: 0,
+        statement_count: 0,
         function_globals: None,
         function_name: None,
         function_depth: 0,
@@ -1270,15 +1429,15 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         }
         if matches!(
             n.as_str(),
-            "float" | "vec2" | "vec3" | "vec4" | "lowp" | "mediump" | "highp"
+            "bool" | "float" | "vec2" | "vec3" | "vec4" | "lowp" | "mediump" | "highp"
         ) {
             if location.is_some() {
                 return Err("layout cannot qualify a user function".into());
             }
             p.pos -= 1;
             let result_type = p.ty()?;
-            if !matches!(result_type, Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
-                return Err("functions must return float or vector types".into());
+            if !matches!(result_type, Ty::Bool | Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+                return Err("functions must return bool, float or vector types".into());
             }
             let name = p.id()?;
             p.function(name, result_type)?;
@@ -1318,6 +1477,9 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             );
         }
         let ty = p.ty()?;
+        if ty == Ty::Bool {
+            return Err("bool interfaces are unsupported; use bool only in locals or helpers".into());
+        }
         if ty == Ty::Mat4 && qual != Qual::Uniform {
             return Err("mat4 is supported only for uniforms and locals".into());
         }
@@ -1343,17 +1505,41 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
     if p.shader.output.is_empty() {
         return Err("GLSL ES 3.00 fragment shaders require one vec4 output".into());
     }
-    while !p.eat('}') {
-        if p.shader.statements.len() >= 128 {
-            return Err("too many shader statements".into());
-        }
-        let (name, expr) = p.assignment()?;
-        p.shader.writes.insert(name.clone());
-        p.shader.statements.push((name, expr));
-    }
+    p.scopes.push(BTreeMap::new());
+    p.statement_count=0;
+    p.shader.statements=p.statements()?;
     p.expect(Tok::End)?;
-    if !p.shader.writes.contains(&p.shader.output) {
-        return Err(format!("shader must write {}", p.shader.output));
+    if output_paths(&p.shader.statements,&p.shader.output,false)? == Some(false) {
+        return Err(format!("shader must write {} on every path",p.shader.output));
     }
+    p.shader.symbols.extend(p.locals);
     Ok(p.shader)
+}
+
+#[cfg(test)]
+mod control_flow_evaluation {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn logical_short_circuit_and_early_returns_skip_actual_sampler_execution() {
+        for version in [100,300] {
+            let sample=if version==300 {"texture"} else {"texture2D"};
+            let output=if version==300 {"pixel"} else {"gl_FragColor"};
+            let prefix=if version==300 {"#version 300 es\nprecision mediump float;out vec4 pixel;"} else {"precision mediump float;"};
+            for (expression,expected_calls,expected_red) in [
+                ("false&&touched()",0,false), ("true||touched()",0,true),
+                ("true&&touched()",1,true), ("false||touched()",1,true),
+                ("false^^touched()",1,true), ("true^^touched()",1,false),
+                ("route(true)",0,true), ("route(false)",1,true),
+            ] {
+                let source=format!("{prefix}uniform sampler2D image;bool touched(){{return {sample}(image,vec2(0.5)).r>0.0;}}bool route(bool flag){{if(flag){{{{return true;}}}}return touched();}}void main(){{if({expression}){{{output}=vec4(1.0,0.0,0.0,1.0);}}else{{{output}=vec4(0.0,1.0,0.0,1.0);}}}}");
+                let shader=compile(&source,false,version).unwrap();
+                let calls=Cell::new(0);
+                let result=shader.run_with_sampler(BTreeMap::new(),&|_,_| {calls.set(calls.get()+1);[1.,0.,0.,1.]});
+                assert_eq!(calls.get(),expected_calls,"{version}: {expression}");
+                assert_eq!(result[output].v[0],if expected_red {1.}else{0.},"{version}: {expression}");
+            }
+        }
+    }
 }

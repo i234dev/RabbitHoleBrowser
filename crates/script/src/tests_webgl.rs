@@ -1,6 +1,36 @@
 //! WebGL bindings exercise the real software backend through JavaScript.
 use crate::tests::{run, setup};
 
+
+#[test]
+fn webgl_boolean_selection_block_scopes_and_early_returns_draw_real_pixels() {
+    let (mut env,mut host)=setup("<canvas id=a width=2 height=1></canvas><canvas id=b width=2 height=1></canvas>");
+    let out=run(&mut env,&mut host,r#"
+      for(const [id,version] of [['a',1],['b',2]]) {
+        const gl=document.getElementById(id).getContext(version===2?'webgl2':'webgl',{preserveDrawingBuffer:true,premultipliedAlpha:false});
+        const prefix=version===2?'#version 300 es\n':'';
+        const target=version===2?'pixel':'gl_FragColor';
+        const vs=prefix+(version===2?'in':'attribute')+' vec2 position;vec4 project(vec2 p){if(p.x<0.0)return vec4(p,0.0,1.0);return vec4(p,0.0,1.0);}void main(){gl_Position=project(position);}';
+        const fs=prefix+'precision mediump float;'+(version===2?'out vec4 pixel;':'')+'uniform float gain;bool isLeft(float x){return x<gain;}vec4 shade(bool selected){if(selected){vec4 value=vec4(1.0,0.0,0.0,1.0);{vec4 value=vec4(0.0,1.0,0.0,1.0);}return value;}else return vec4(0.0,1.0,0.0,1.0);}void main(){bool gain=isLeft(gl_FragCoord.x);'+target+'=shade(gain);if(gain)return;'+target+'=shade(gain);}';
+        function compile(kind,source){const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+        const p=gl.createProgram();gl.attachShader(p,compile(gl.VERTEX_SHADER,vs));gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs));gl.linkProgram(p);
+        if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));gl.useProgram(p);
+        const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+        const position=gl.getAttribLocation(p,'position');gl.vertexAttribPointer(position,2,gl.FLOAT,false,0,0);gl.enableVertexAttribArray(position);
+        const gain=gl.getUniformLocation(p,'gain');gl.uniform1f(gain,1);gl.drawArrays(gl.TRIANGLES,0,3);
+        const bytes=new Uint8Array(8);gl.readPixels(0,0,2,1,gl.RGBA,gl.UNSIGNED_BYTE,bytes);console.log(version,gain!==null,Array.from(bytes).join(','));
+        for(const extra of ['uniform bool unsupported;','']) {
+          const bad=gl.createShader(gl.FRAGMENT_SHADER);
+          const body=extra?'': 'if(1.0){}';
+          gl.shaderSource(bad,prefix+'precision mediump float;'+(version===2?'out vec4 pixel;':'')+extra+'void main(){'+body+target+'=vec4(1.0);}');gl.compileShader(bad);
+          console.log(!gl.getShaderParameter(bad,gl.COMPILE_STATUS),gl.getShaderInfoLog(bad).includes('bool'),gl.getError());
+        }
+      }
+    "#);
+    assert_eq!(out,["1 true 255,0,0,255,0,255,0,255","true true 0","true true 0","2 true 255,0,0,255,0,255,0,255","true true 0","true true 0"]);
+    assert!(env.errors().is_empty(),"{:?}",env.errors());
+}
+
 #[test]
 fn webgl_user_shader_helpers_preserve_scopes_types_and_pixel_results() {
     let (mut env, mut host) =

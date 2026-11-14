@@ -118,6 +118,7 @@ fn active_info(name: &str, ty: Ty) -> ActiveInfo {
         name: name.into(),
         size: 1,
         kind: match ty {
+            Ty::Bool => 0x8B56, // GL_BOOL; boolean interfaces are rejected by the parser.
             Ty::IntLiteral => unreachable!("literal types are not interface variables"),
             Ty::Sampler2D => gl::SAMPLER_2D,
             Ty::Float => gl::FLOAT,
