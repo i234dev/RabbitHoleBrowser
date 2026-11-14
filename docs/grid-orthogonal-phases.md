@@ -219,3 +219,60 @@ existing work budget before installing a result. Three additional controls
 cover max-only size preservation, rejection of changed-min reuse and failure
 before a fresh retained result is installed. This state is not activated in
 the layout traversal and has not yet been compiled or executed.
+
+## Single-axis dispatcher and prerequisites: review checkpoint
+
+The next private `grid::pass` dispatcher runs one requested parent-axis pass.
+Its caller supplies a collector for actual traversal/hoisting; the legacy
+renderer has no hook to it yet. This checkpoint has not been compiled or run.
+It is not an implementation claim for orthogonal002.
+
+Inputs distinguish this grid's own available/intrinsic spaces from its real
+containing-block bases in local axes and the original inline reference for
+percentage margins/padding. Wrapper traversal swaps the first two arrays;
+the edge reference remains in its original containing-block coordinate space.
+A standalone target's completion constraint must agree with its own available
+space, with an explicit max-content rule for an automatic indefinite target.
+No containing-block base is derived from the content width later realized.
+
+The perpendicular axis is supplied as fresh definite inherited geometry, an
+earlier completed axis with its actual producer, or an initial fixed-maximum
+estimate. The latter never exposes zero placement bases as used geometry.
+Used geometry comes only from CompletedAxis, and its definite completion
+space controls distribution. Same track count does not make old geometry
+fresh: new entries supply the new spaces, containing bases, gaps and sources.
+
+The dispatcher completes only the requested standalone axis, or records only
+a projection for an inherited target. During an adjustment, an unchanged
+min-content observation retains the earlier completion and its original
+producer instead of maximizing again for a max-only change. A newly created
+virtual slot without an earlier completion can first size its requested axis
+at the current parent point; it does not fabricate a prior producer.
+
+A layout child can also be entered for the first time in the parent's second
+pass, after earlier min/max contributions were collected in different child
+operations. An unresolved independent axis whose initial pass is already
+due can be bootstrapped before the requested axis. This work records the
+**current** parent point, its explicit local axis and a Prerequisite role.
+It is not relabeled as work done in an earlier parent pass. The parent order
+determines which axis is due: orthogonal wrappers invert the local order.
+Prerequisites are rejected in the first parent pass for a later axis, after
+the same point's requested work, for the requested axis itself, or when the
+axis already has completed geometry. They cannot bypass min-only adjustment
+by repeatedly dimensioning the opposite axis.
+
+Nine dispatcher controls exercise rows-first mapping through an orthogonal
+wrapper, real min/max/definite completion, retained max-only geometry and
+growth limits, fresh same-shape distribution, actual inherited geometry,
+collector-budget unwind, new virtual slots, prerequisite order in both
+orientations and rejection of premature/repeated prerequisite sizing. Numeric
+130/110/148 sizes in these controls arise from explicit test constraints and
+the actual track solver; they are not substituted into any WPT or renderer.
+
+The remaining consumer must connect actual recursive projection and ordinary
+item measurement, preserve true min-content probes, and handle a lanes
+stacking range as its own typed result rather than fabricating tracks. The
+IntrinsicMin replaced-item opposite minimum transfer and the external fixture
+failures remain gates before activation, followed by unchanged Grid26, own
+pairs, orthogonal002/mix2 and the wider agreed corpus. These controls and this
+dispatcher do not justify integration by themselves.

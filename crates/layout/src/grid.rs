@@ -20,6 +20,8 @@ mod phases;
 mod percentages;
 #[allow(dead_code)]
 mod estimate;
+#[allow(dead_code)]
+mod pass;
 pub(crate) mod subgrid;
 #[cfg(test)]
 mod tests;
