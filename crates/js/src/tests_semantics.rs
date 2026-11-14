@@ -146,3 +146,47 @@ fn duplicate_parameter_last_missing_argument_overwrites_earlier_value() {
     }
     assert_eq!(evaluate("(function(x,a,b,x){x=5;return [x,arguments[0],arguments.length].join(':');})(1,2)"), "5:1:2");
 }
+
+#[test]
+fn anonymous_class_static_fields_resolve_the_outer_binding_in_its_tdz() {
+    for reference in ["Outer", "eval('Outer')"] {
+        let source = format!(r#"
+          (function() {{
+            try {{ let Outer=class {{static field={reference};}}; return 'no error'; }}
+            catch(e) {{ return e.name; }}
+          }})()
+        "#);
+        assert_eq!(evaluate(&source), "ReferenceError", "reference={reference}");
+    }
+}
+
+#[test]
+fn inferred_class_names_preserve_outer_closures_and_explicit_class_bindings() {
+    for reference in ["Outer", "eval('Outer')"] {
+        let source = format!(r#"
+          (function() {{
+            let Outer=class {{static read=()=>{reference};}};
+            const Original=Outer, name=Outer.name;
+            Outer=null;
+            return [name,Original.read()===null].join(':');
+          }})()
+        "#);
+        assert_eq!(evaluate(&source), "Outer:true", "reference={reference}");
+    }
+    assert_eq!(evaluate(r#"
+      (function(){
+        let Outer=class Inner {static read=()=>Inner;};
+        const Original=Outer, name=Outer.name;
+        Outer=null;
+        return [name,Original.read()===Original].join(':');
+      })()
+    "#), "Inner:true");
+    assert_eq!(evaluate(r#"
+      (function(){
+        class Outer {static read=()=>Outer;}
+        const Original=Outer;
+        Outer=null;
+        return Original.read()===Original;
+      })()
+    "#), "true");
+}

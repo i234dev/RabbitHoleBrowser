@@ -3273,9 +3273,9 @@ impl Compiler {
                 Ok(())
             }
             (ExprKind::Class(c), Some(n)) if c.name.is_none() => {
-                let mut c2 = (**c).clone();
-                c2.name = Some(n.into());
-                self.compile_class_expr(&c2, true)
+                // NamedEvaluation sets the constructor's display name;
+                // only an explicit class name introduces an inner binding.
+                self.compile_class_expr(c, Some(n))
             }
             _ => self.compile_expr(e),
         }
@@ -3399,7 +3399,7 @@ impl Compiler {
                 let idx = self.compile_function_rc(f, None)?;
                 self.emit(Op::MakeClosure(idx));
             }
-            ExprKind::Class(c) => self.compile_class_expr(c, true)?,
+            ExprKind::Class(c) => self.compile_class_expr(c, None)?,
             ExprKind::Unary { op, operand } => match op {
                 UnaryOp::Typeof => {
                     if let ExprKind::Identifier(n) = &operand.kind {
@@ -4675,7 +4675,7 @@ impl Compiler {
     // -------------------------------------------------------------- classes
 
     fn compile_class(&mut self, c: &Class) -> CResult<()> {
-        self.compile_class_expr(c, false)
+        self.compile_class_expr(c, None)
     }
 
     fn resolve_private(&mut self, name: &str) -> CResult<(u16, u16)> {
@@ -4693,7 +4693,7 @@ impl Compiler {
     }
 
     /// Leaves the constructor on the stack.
-    fn compile_class_expr(&mut self, c: &Class, _is_expr: bool) -> CResult<()> {
+    fn compile_class_expr(&mut self, c: &Class, inferred_name: Option<&str>) -> CResult<()> {
         self.set_pos(c.pos);
         // Class scope: name binding + private names + computed field keys.
         let mut decls: Vec<(String, BindKind)> = Vec::new();
@@ -4758,8 +4758,8 @@ impl Compiler {
         };
         // The class's source text is its constructor's toString().
         ctor_fn.span = c.span;
-        let class_name = c.name.clone().unwrap_or_default();
-        let ctor_idx = self.compile_function_with(&ctor_fn, Some(&class_name), move |fl| {
+        let class_name = c.name.as_deref().or(inferred_name).unwrap_or("");
+        let ctor_idx = self.compile_function_with(&ctor_fn, Some(class_name), move |fl| {
             fl.is_class_constructor = true;
             fl.is_derived = has_super;
         })?;
