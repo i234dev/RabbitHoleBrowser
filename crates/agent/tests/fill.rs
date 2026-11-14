@@ -417,3 +417,41 @@ fn fill_focus_document_open_with_reattached_node_stops_values_and_submit() {
     ok(&mut a, "fill", json!({"ref":fresh_ref,"value":"fresh"}));
     assert_eq!(control_value(&a, "first"), "fresh");
 }
+
+#[test]
+fn fill_input_change_and_timer_document_replacement_stop_pending_fields() {
+    for phase in ["input", "change", "timer"] {
+        let srv = serve(Box::new(move |path| {
+            if path != "/" {
+                return html("<html><body><h1>Wrong submission</h1></body></html>");
+            }
+            let replace = "var saved=document.getElementById('original-form');document.open();document.write('&lt;html>&lt;body>&lt;h1>Replacement document&lt;/h1>&lt;/body>&lt;/html>');document.close();document.body.appendChild(saved);document.getElementById('first').value='replacement-keep'";
+            let (input, change) = match phase {
+                "input" => (replace.to_string(), "this.value='wrong-change'".to_string()),
+                "change" => (String::new(), replace.to_string()),
+                _ => (format!("setTimeout(function(){{{replace}}},20)"), String::new()),
+            };
+            let body = format!(r#"<html><body><form id="original-form" action="/wrong-submit"><label>First<input id="first" name="a" value="original-keep" oninput="{input}" onchange="{change}"></label><label>Tail<input id="tail" name="z" value="tail-keep"></label><button type="submit">Send</button></form></body></html>"#);
+            Some((200, "text/html; charset=utf-8", body.into_bytes(), vec![]))
+        }));
+        let mut a = agent();
+        let snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
+        let old_ref = ref_of(&snapshot, "textbox \"First\"");
+        assert!(ok(&mut a, "fill", json!({})).contains("@f1 form"));
+        let ti = a.active.unwrap();
+        let old_node = a.tabs[ti].frames[0].page.doc.element_by_id("first").unwrap();
+        let document = a.tabs[ti].frames[0].page.doc.weak_identity();
+        let result = call(&mut a, "fill", &json!({"ref":"@f1","values":{"a":"written-before-callback","z":"must-not-write"},"submit":true}));
+        let page = &a.tabs[ti].frames[0].page;
+        assert!(!document.is_for(&page.doc), "{phase}: replacement callback must run");
+        assert_eq!(page.doc.element_by_id("first"), Some(old_node), "{phase}: preserve the arena ID across replacement");
+        assert!(page.doc.is_connected(old_node));
+        assert_eq!(page.control_text(old_node), "replacement-keep", "{phase}: no later callback may write through the old identity");
+        assert_eq!(page.control_text(page.doc.element_by_id("tail").unwrap()), "tail-keep", "{phase}: stop pending fields");
+        assert!(srv.requests().iter().all(|(path, _)| path != "/wrong-submit"), "{phase}");
+        let output = match result { Ok(out) => out.text, Err(error) => error };
+        assert!(output.contains("document was replaced") && output.contains("Not attempted after document replacement: \"z\"") && output.contains("submit=true was not attempted"), "{phase}: {output}");
+        assert!(err(&mut a, "fill", json!({"ref":old_ref,"value":"late"})).contains("unknown"), "{phase}");
+        assert!(err(&mut a, "fill", json!({"ref":"@f1"})).contains("unknown"), "{phase}");
+    }
+}
