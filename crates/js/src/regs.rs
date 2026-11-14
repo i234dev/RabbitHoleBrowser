@@ -58,6 +58,32 @@ pub struct Translated {
     pub max_depth: u32,
 }
 
+/// Exact operand-slot requirement of straight-line register-only code.
+/// Stack instructions, calls and control flow retain the conservative
+/// frame size, including their interpreter scratch space.
+pub(crate) fn leaf_frame_depth(ops: &[Op], nregs: u32) -> Option<u32> {
+    let mut end = nregs;
+    for &op in ops {
+        let slots = match op {
+            Op::Mov(d, s) | Op::MovRaw(d, s) | Op::MovChecked(d, s)
+            | Op::NotR(d, s) | Op::IncR(d, s) | Op::DecR(d, s)
+            | Op::ToNumericR(d, s) | Op::UnR(_, d, s) => [d, s, s],
+            Op::LoadK(d, _) | Op::LoadThis(d) | Op::CheckInit(d) | Op::ReturnR(d) => [d, d, d],
+            Op::AddRR(d, a, b) | Op::SubRR(d, a, b) | Op::MulRR(d, a, b)
+            | Op::DivRR(d, a, b) | Op::ModRR(d, a, b)
+            | Op::BinRR(_, d, a, b) | Op::CmpRR(_, d, a, b) => [d, a, b],
+            Op::AddRK(d, a, _) | Op::SubRK(d, a, _) | Op::MulRK(d, a, _)
+            | Op::DivRK(d, a, _) | Op::ModRK(d, a, _)
+            | Op::BinRK(_, d, a, _) | Op::CmpRK(_, d, a, _) => [d, a, a],
+            _ => return None,
+        };
+        for slot in slots {
+            end = end.max(slot as u32 + 1);
+        }
+    }
+    Some(end - nregs)
+}
+
 struct Tr<'a> {
     out: Vec<Op>,
     pos: Vec<Pos>,

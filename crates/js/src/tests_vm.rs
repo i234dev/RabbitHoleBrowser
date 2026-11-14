@@ -240,6 +240,34 @@ fn native_callback_receiver_and_fallbacks() {
 }
 
 #[test]
+fn leaf_frames_keep_parameters_and_operand_values() {
+    use crate::heap::ObjectKind;
+    use crate::value::Value;
+
+    // These small leaves have three parameter slots, one parameter plus
+    // one arithmetic result, and two parameters plus one result.
+    let mut realm = Realm::new();
+    for (src, args, expected, slots) in [
+        ("(function(a, b, c) { return a; })", vec![Value::str("a counted string returned without temporary slots")], "a counted string returned without temporary slots", 3),
+        ("(function(x) { return x + 1; })", vec![Value::Number(4.0)], "5", 2),
+        ("(function(a, b) { return a + b; })", vec![Value::str("a counted string "), Value::str("and another")], "a counted string and another", 3),
+    ] {
+        let f = realm.eval(src, "leaf-frame.js").unwrap();
+        let result = realm.call(f.clone(), Value::Undefined, &args).unwrap();
+        assert_eq!(realm.to_string(result).unwrap().to_rust_string(), expected);
+        let ObjectKind::Function(c) = &realm.obj(f.as_object().unwrap()).kind else { panic!("expected closure") };
+        assert!(c.code.call_flags & crate::bytecode::CALL_SIMPLE != 0);
+        assert_eq!(c.code.frame_size(), slots, "{src}");
+    }
+    // Missing and excess arguments cannot change which slots exist.
+    eq("function first(a, b, c) { return a; } [first(), first(4), first(5, 6, 7, 8)].join()", ",4,5");
+    // A slow numeric conversion can reenter JS and grow the value stack
+    // while a compact leaf's other operands still need to survive.
+    eq("function sum(a, b, c) { return a + b + c; } var o = { valueOf() { [1, 2].map(x => x * 2); return 3; } }; var total = 0; for (var i = 0; i < 1500; i++) total += sum(o, 4, 5); total", "18000");
+    eq("function add(a, b) { return a + b; } var caught; try { add(1n, 2); } catch (e) { caught = e instanceof TypeError; } caught + ':' + add('counted ', 'return value')", "true:counted return value");
+}
+
+#[test]
 fn superinstructions_and_fast_paths() {
     // Constant operands with non-number left sides.
     eq("var s = 'a'; s = s + 1; s += 2; s", "a12");
