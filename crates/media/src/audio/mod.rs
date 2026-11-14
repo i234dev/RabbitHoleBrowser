@@ -14,6 +14,10 @@
 //! sound card); [`stats`] counts and checksums the mixed samples.
 
 mod null;
+// Private until the context render graph can execute the effect for both
+// realtime and offline contexts. No public factory is exposed by this core.
+#[allow(dead_code)]
+mod compressor;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod pulse;
 #[cfg(all(unix, not(target_os = "macos")))]
