@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Shared tracks, gap differences, edge layers and orthogonal geometry</title>
+<link rel="match" href="grid-subgrid-inherited-geometry-ref.html">
+<style>
+body{margin:0}.case{display:grid;width:300px;height:80px;grid-template-columns:100px 150px;grid-template-rows:80px;column-gap:50px;margin-bottom:10px}
+.s{display:grid;grid-column:span 2;grid-template-columns:subgrid;grid-template-rows:subgrid;background:purple}.a{grid-column:1;background:green}.b{grid-column:2;background:blue}
+.pad .s{padding:10px;border:5px solid purple;background:yellow}.smallgap .s{column-gap:20px}
+.nested>.s{padding:10px}.n{display:grid;grid-column:span 2;grid-template-columns:subgrid;grid-template-rows:subgrid;padding:20px;background:yellow}
+.ortho .s{grid-template-columns:80px;grid-template-rows:subgrid}.ortho .a{grid-column:1;grid-row:1}.ortho .b{grid-column:1;grid-row:2}
+</style>
+<div class="case"><div class=s><div class=a></div><div class=b></div></div></div>
+<div class="case pad"><div class=s><div class=a></div><div class=b></div></div></div>
+<div class="case smallgap"><div class=s><div class=a></div><div class=b></div></div></div>
+<div class="case nested"><div class=s><div class=n><div class=a></div><div class=b></div></div></div></div>
+<div class="case ortho"><div class=s style="writing-mode:vertical-lr"><div class=a></div><div class=b></div></div></div>
+<div class="case ortho"><div class=s style="writing-mode:vertical-rl"><div class=a></div><div class=b></div></div></div>

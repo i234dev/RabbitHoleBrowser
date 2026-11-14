@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Subgrid descendants size the parent's individual automatic tracks</title>
+<link rel="match" href="grid-subgrid-projected-sizing-ref.html">
+<style>
+body{margin:0}.p{display:grid;width:max-content;grid-template-columns:auto auto;column-gap:10px;margin-bottom:10px}.p>.s{display:grid;grid-column:span 2;grid-template-columns:subgrid;padding:0 5px;width:999px;background:purple}.p .a{grid-column:1;width:30px;height:20px;background:green}.p .b{grid-column:2;width:70px;height:20px;background:blue}
+.r{display:grid;width:80px;grid-template-columns:80px;grid-template-rows:auto auto;row-gap:5px}.r>.s{display:grid;grid-row:span 2;grid-template-rows:subgrid;height:999px;padding:3px 0 7px;background:purple}.r .a{grid-row:1;height:20px;background:green}.r .b{grid-row:2;height:40px;background:blue}
+</style>
+<div class=p><div class=s><div class=a></div><div class=b></div></div></div>
+<div class=r><div class=s><div class=a></div><div class=b></div></div></div>

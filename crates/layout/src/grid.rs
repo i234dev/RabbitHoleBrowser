@@ -25,6 +25,15 @@ enum GridSpace {
     MaxContent,
 }
 
+/// Grid2 §12.1 permits one adjustment after the opposite axis is known.
+/// This phase is carried through subgrid recursion rather than recursively
+/// completing both axes before returning an initial contribution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MeasurePhase {
+    Initial,
+    Adjusted,
+}
+
 /// A track sizing function (§11.1).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Sizing {
@@ -83,7 +92,7 @@ struct Area {
 }
 
 /// An item's contribution to the tracks it spans.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Contribution {
     start: usize,
     end: usize,
@@ -343,12 +352,15 @@ impl Occupancy {
     }
 }
 
+#[derive(Clone, Copy)]
 struct GridItem {
     idx: usize,
     area: Area,
     edges: ItemEdges,
     justify: ItemAlign,
     align: ItemAlign,
+    column_names: bool,
+    row_names: bool,
 }
 
 /// §11.5.1 distribute `extra` space equally among `candidates` (indices),
@@ -668,19 +680,38 @@ impl<'a> Layouter<'a> {
 
         let (mut items, mut cols, mut rows) = self.place_items(b, &style, Some(cbw), cb.height, col_gap, row_gap, content_x, content_y);
 
+        let project=b.children.iter().any(|child|subgrid::requests(child)!=(false,false));
+        let col_stretch=matches!(style.justify_content,ContentDistribution::Stretch|ContentDistribution::FlexStart);
+        let row_stretch=matches!(style.align_content,ContentDistribution::Stretch|ContentDistribution::FlexStart);
+        let mut col_contribs=Vec::new();
+        let mut row_contribs=Vec::new();
         // Column sizing.
         if cols.inherited.is_none() {
-            let col_contribs = self.column_contributions(b, &items, cbw);
-            let col_stretch = matches!(style.justify_content, ContentDistribution::Stretch | ContentDistribution::FlexStart);
+            col_contribs=if project {self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,MeasurePhase::Initial)} else {self.column_contributions(b,&items,cbw)};
             size_tracks(&mut cols.tracks, &col_contribs, Some(cbw), col_gap, col_stretch);
         }
-        let (col_pos, _) = subgrid::positions(&cols, col_gap, Some(cbw), style.justify_content);
+        let (mut col_pos, _) = subgrid::positions(&cols, col_gap, Some(cbw), style.justify_content);
 
         // Row sizing: contributions are item heights at their column width.
         if rows.inherited.is_none() {
-            let row_contribs = self.row_contributions(b, &items, &cols, &col_pos, col_gap, cbw, cb.height);
-            let row_stretch = matches!(style.align_content, ContentDistribution::Stretch | ContentDistribution::FlexStart);
+            row_contribs=if project {self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Initial)} else {self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,cb.height)};
             size_tracks(&mut rows.tracks, &row_contribs, cb.height, row_gap, row_stretch);
+        }
+        // Grid2 §12.1 steps 3-4: at most one adjustment of each axis.
+        // Ordinary grids retain the existing path; subgrid descendants now
+        // observe the used opposite-axis sizes instead of a recursive layout.
+        if project {
+            if cols.inherited.is_none() {
+                let adjusted=self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,cbw,MeasurePhase::Adjusted);
+                if adjusted!=col_contribs {
+                    size_tracks(&mut cols.tracks,&adjusted,Some(cbw),col_gap,col_stretch);
+                    col_pos=subgrid::positions(&cols,col_gap,Some(cbw),style.justify_content).0;
+                }
+            }
+            if rows.inherited.is_none() {
+                let adjusted=self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Adjusted);
+                if adjusted!=row_contribs {size_tracks(&mut rows.tracks,&adjusted,cb.height,row_gap,row_stretch);}
+            }
         }
         let (row_pos, rows_extent) = subgrid::positions(&rows, row_gap, cb.height, style.align_content);
 
@@ -697,11 +728,10 @@ impl<'a> Layouter<'a> {
             let columns=column_request.then(||subgrid::section(&cols,&col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,true));
             let rows=row_request.then(||subgrid::section(&rows,&row_pos,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,true));
             self.with_subgrid(child,columns,rows,cbw,|this,child| {
-                let (justify,align)=(it.justify,it.align);
-                if subgrid::shared(child,false).is_some() {it.justify=ItemAlign::Stretch;}
-                if subgrid::shared(child,true).is_some() {it.align=ItemAlign::Stretch;}
+                let (justify,align,auto)=(it.justify,it.align,it.edges.auto);
+                subgrid::stretch_item(child,it);
                 this.layout_grid_item(child,it,ax+content_x,ay+content_y,aw,ah,cbw);
-                it.justify=justify;it.align=align;
+                it.justify=justify;it.align=align;it.edges.auto=auto;
             });
         }
         // Baseline self-alignment (§10.6): items aligned `baseline` that
@@ -1097,6 +1127,8 @@ impl<'a> Layouter<'a> {
                 edges: ItemEdges::new(&cs, avail_w.unwrap_or(0.0)),
                 justify,
                 align,
+                column_names: true,
+                row_names: true,
             };
             subgrid::item_edges(b,&mut item,col_gap,row_gap);
             items.push(item);
@@ -1105,52 +1137,80 @@ impl<'a> Layouter<'a> {
     }
 
     /// Column contributions: min-/max-content widths incl. margins/padding/border.
-    fn column_contributions(&mut self, b: &mut LayoutBox, items: &[GridItem], cbw: f32) -> Vec<Contribution> {
-        let mut out = Vec::with_capacity(items.len());
+    fn column_contributions(&mut self,b:&mut LayoutBox,items:&[GridItem],cbw:f32)->Vec<Contribution> {
+        items.iter().map(|it|self.column_contribution(&mut b.children[it.idx],it,cbw)).collect()
+    }
+
+    /// Shared-axis items are empty for this sizing pass: their descendants
+    /// contribute at the corresponding parent lines (Grid2 §12.1).
+    #[allow(clippy::too_many_arguments)]
+    fn projected_columns(&mut self,b:&mut LayoutBox,items:&[GridItem],cols:&TrackList,rows:Option<&TrackList>,col_gap:f32,row_gap:f32,cbw:f32,phase:MeasurePhase)->Vec<Contribution> {
+        let mut out=Vec::new();
         for it in items {
-            let child = &mut b.children[it.idx];
-            let bb = child.style.box_sizing == BoxSizing::BorderBox;
-            let extras = it.edges.pb_h + it.edges.margin_sum(Axis::Row);
-            let (min, max) = match resolve_size(child.style.width, Some(cbw), bb, it.edges.pb_h) {
-                Some(w) if !matches!(child.style.width, Length::Percent(_) | Length::Calc(..) | Length::Math(_)) => (w, w),
-                _ => {
-                    if child.kind == BoxKind::Image {
-                        let (w, _) = self.replaced_size(child, Some(cbw), None, it.edges.pb_h);
-                        (w, w)
-                    } else {
-                        let (min, max) = self.intrinsic(child);
-                        // The preferred intrinsic width also constrains the
-                        // contribution to the opposite intrinsic track size.
-                        // A max-content item cannot shrink to min-content,
-                        // and a min-content item does not contribute its
-                        // unconstrained max-content size (§6.2).
-                        match child.style.width {
-                            Length::MinContent => (min, min),
-                            Length::MaxContent => (max, max),
-                            _ => (min, max),
-                        }
-                    }
-                }
-            };
-            // The minimum contribution uses the automatic minimum size,
-            // which is zero for scroll containers, or an explicit
-            // `min-width` (§6.6): `overflow: hidden` / `min-width: 0` items
-            // do not blow `1fr` tracks up to their content (carousels).
-            let min = match child.style.min_width {
-                Length::Px(m) if child.kind != BoxKind::Image => {
-                    let m = if bb { (m - it.edges.pb_h).max(0.0) } else { m };
-                    m.min(min)
-                }
-                Length::Auto if child.kind != BoxKind::Image && crate::flex::is_scroll_container(&child.style) => 0.0,
-                _ => min,
-            };
-            let (min, max) = (min + extras, max.max(min) + extras);
-            out.push(Contribution {
-                start: it.area.col.0.max(0) as usize,
-                end: it.area.col.1.max(1) as usize,
-                min,
-                max,
+            let child=&mut b.children[it.idx];
+            let (column_request,row_request)=subgrid::requests(child);
+            if !column_request&&!row_request {
+                out.push(self.column_contribution(child,it,cbw));
+                continue;
+            }
+            let row_source=rows.map_or(Some(subgrid::AxisInheritance::Stacking),|rows| {
+                if phase==MeasurePhase::Initial {subgrid::fixed_section(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names)}
+                else {let (positions,_)=subgrid::positions(rows,row_gap,None,ContentDistribution::FlexStart);Some(subgrid::section(rows,&positions,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names))}
             });
+            if column_request {
+                let columns=subgrid::sizing_section(cols,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names);
+                let rows=if row_request {row_source} else {None};
+                let mut nested=self.with_subgrid(child,Some(columns),rows,cbw,|this,child|this.subgrid_axis_contributions(child,false,None,phase));
+                for c in &mut nested {c.start+=it.area.col.0 as usize;c.end+=it.area.col.0 as usize;}
+                out.extend(nested);
+            } else if row_request&&row_source.is_some() {
+                let contribution=self.with_subgrid(child,None,row_source,cbw,|this,child|this.column_contribution(child,it,cbw));
+                out.push(contribution);
+            } else {
+                out.extend(self.column_contributions(b,std::slice::from_ref(it),cbw));
+            }
+        }
+        out
+    }
+
+    /// Single ordinary item, after any perpendicular inherited geometry has
+    /// been installed. This shares the same sizing/automatic-minimum rules.
+    fn column_contribution(&mut self,child:&mut LayoutBox,it:&GridItem,cbw:f32)->Contribution {
+        // Keep the ordinary collector and projected collector on one path.
+        let bb=child.style.box_sizing==BoxSizing::BorderBox;
+        let extras=it.edges.pb_h+it.edges.margin_sum(Axis::Row);
+        let (min,max)=match resolve_size(child.style.width,Some(cbw),bb,it.edges.pb_h) {
+            Some(w) if !matches!(child.style.width,Length::Percent(_)|Length::Calc(..)|Length::Math(_))=>(w,w),
+            _ if child.kind==BoxKind::Image=>{let(w,_)=self.replaced_size(child,Some(cbw),None,it.edges.pb_h);(w,w)},
+            _=>{let(min,max)=self.intrinsic(child);match child.style.width {Length::MinContent=>(min,min),Length::MaxContent=>(max,max),_=>(min,max)}}
+        };
+        let min=match child.style.min_width {
+            Length::Px(m) if child.kind!=BoxKind::Image=>if bb {(m-it.edges.pb_h).max(0.).min(min)} else {m.min(min)},
+            Length::Auto if child.kind!=BoxKind::Image&&crate::flex::is_scroll_container(&child.style)=>0.,
+            _=>min,
+        };
+        Contribution{start:it.area.col.0.max(0)as usize,end:it.area.col.1.max(1)as usize,min:min+extras,max:max.max(min)+extras}
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn projected_rows(&mut self,b:&mut LayoutBox,items:&[GridItem],rows:&TrackList,cols:&TrackList,col_pos:&[f32],col_gap:f32,row_gap:f32,cbw:f32,cbh:Option<f32>,phase:MeasurePhase)->Vec<Contribution> {
+        let ordinary:Vec<GridItem>=items.iter().copied().filter(|it|!subgrid::requests(&b.children[it.idx]).1).collect();
+        let mut out=self.row_contributions(b,&ordinary,cols,col_pos,col_gap,cbw,cbh);
+        for it in items {
+            if !subgrid::requests(&b.children[it.idx]).1 {
+                continue;
+            }
+            let (_,aw)=span_size(&cols.tracks,col_pos,it.area.col.0 as usize,it.area.col.1 as usize);
+            let child=&mut b.children[it.idx];
+            let columns=subgrid::requests(child).0.then(||subgrid::section(cols,col_pos,it.area.col.0 as usize,it.area.col.1 as usize,col_gap,it.column_names));
+            let rows=subgrid::sizing_section(rows,it.area.row.0 as usize,it.area.row.1 as usize,row_gap,it.row_names);
+            let mut nested=self.with_subgrid(child,columns,Some(rows),cbw,|this,child| {
+                let mut item=*it;subgrid::stretch_item(child,&mut item);
+                let inner_w=this.grid_item_width(child,&item,aw,cbw);
+                this.subgrid_axis_contributions(child,true,Some(inner_w),phase)
+            });
+            for c in &mut nested {c.start+=it.area.row.0 as usize;c.end+=it.area.row.0 as usize;}
+            out.extend(nested);
         }
         out
     }
@@ -1323,8 +1383,9 @@ impl<'a> Layouter<'a> {
             return (width.max(0.),width.max(0.));
         }
         let col_gap = subgrid::gap(b,false,0.);
-        let (items, mut cols, _rows) = self.place_items(b, &style, None, None, col_gap, 0.0, 0.0, 0.0);
-        let contribs = self.column_contributions(b, &items, 0.0);
+        let row_gap=subgrid::gap(b,true,0.);
+        let (items, mut cols, rows) = self.place_items(b, &style, None, None, col_gap, row_gap, 0.0, 0.0);
+        let contribs = self.projected_columns(b,&items,&cols,Some(&rows),col_gap,row_gap,0.,MeasurePhase::Initial);
         // A max-content minimum sizing function still needs the item's
         // maximum contribution under a min-content constraint.
         let mut min_tracks = cols.tracks.clone();
