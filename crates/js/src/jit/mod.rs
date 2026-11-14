@@ -168,6 +168,9 @@ pub(crate) struct State {
     pub stats: Stats,
     /// Entries into native code.
     pub entries: u64,
+    /// Live calls of Entry, including helpers and nested JS (test evidence only).
+    #[cfg(test)]
+    pub live_entries: u32,
 }
 
 #[derive(Default)]
@@ -193,7 +196,7 @@ impl Default for State {
     fn default() -> State {
         let o = options();
         debug::install_fault_reporter();
-        State { on: o.on, active: o.on || o.stats, threshold: o.threshold, panic: None, stats: Stats { enabled: o.stats, ..Default::default() }, entries: 0 }
+        State { on: o.on, active: o.on || o.stats, threshold: o.threshold, panic: None, stats: Stats { enabled: o.stats, ..Default::default() }, entries: 0, #[cfg(test)] live_entries: 0 }
     }
 }
 

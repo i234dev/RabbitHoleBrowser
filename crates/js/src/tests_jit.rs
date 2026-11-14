@@ -311,6 +311,107 @@ fn native_override_callback_reentry_keeps_values_alive_through_gc() {
     }
 }
 
+
+struct ActiveFrameCanary {
+    expected_native: bool,
+    getter_depth: Cell<u32>,
+    gc_depth: Cell<u32>,
+    getter_calls: Cell<usize>,
+    collections: Cell<usize>,
+}
+
+fn active_frame_collect(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+    let stats = realm.native_data::<ActiveFrameCanary>(realm.current_native().unwrap()).unwrap();
+    let before = realm.jit.live_entries;
+    stats.gc_depth.set(before);
+    assert_eq!(before > 0, stats.expected_native, "GC hook must retain the caller's generated frame");
+    // Prove collection happened, rather than counting a request that could be
+    // deferred: this fresh object has no GC root, and alloc does not collect.
+    let unreachable = realm.new_object();
+    let freed = realm.gc();
+    assert!(freed > 0 && realm.heap.try_get(unreachable).is_none(), "the explicit GC must reclaim its unrooted probe");
+    assert_eq!(realm.jit.live_entries, before);
+    stats.collections.set(stats.collections.get() + 1);
+    Ok(Value::Undefined)
+}
+
+fn active_frame_getter(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let stats = realm.native_data::<ActiveFrameCanary>(realm.current_native().unwrap()).unwrap();
+    let before = realm.jit.live_entries;
+    stats.getter_depth.set(before);
+    // This observation occurs BEFORE reentry can create another native entry.
+    assert_eq!(before > 0, stats.expected_native, "the property helper must still have its generated caller");
+    let held = realm.get(this, crate::PropertyKey::str("kept"))?;
+    realm.native_root(held.clone());
+    let callback = realm.get(Value::Object(realm.global()), crate::PropertyKey::str("activeFrameCallback"))?;
+    let result = realm.call(callback, Value::Undefined, &[held])?;
+    realm.native_root(result.clone());
+    assert_eq!(realm.jit.live_entries, before, "nested entry must restore dynamic depth");
+    stats.getter_calls.set(stats.getter_calls.get() + 1);
+    Ok(result)
+}
+
+#[test]
+fn native_property_getter_keeps_generated_frame_live_during_gc() {
+    const SOURCE: &str = r#"
+        function activeFrameCallback(held) {
+            var allocated = [];
+            for (var j = 0; j < 128; j++) allocated.push({value: j});
+            __activeFrameCollect();
+            if (held.marker !== 'alive' || allocated[127].value !== 127) throw 'getter callback lost roots';
+            return held;
+        }
+        var receiver = {kept: {marker: 'alive', nested: {value: 7}}};
+        Object.defineProperty(receiver, 'value', {get: __activeFrameGetter});
+        function readProperty(o) {
+            var total = 0;
+            for (var i = 0; i < 3; i++) {
+                var held = o.value;
+                if (held !== o.kept || held.marker !== 'alive') throw 'getter lost identity';
+                total += held.nested.value;
+            }
+            return total;
+        }
+        readProperty(receiver) === 21
+    "#;
+    for stress in [crate::realm::GC_STRESS_FULL, crate::realm::GC_STRESS_INCREMENTAL] {
+        for requested in [false, true] {
+            let mut realm = Realm::new();
+            realm.set_jit(requested, 0);
+            realm.gc_enabled = true;
+            realm.gcx.no_gc = false;
+            realm.gcx.stress = stress;
+            realm.gcx.incremental = stress == crate::realm::GC_STRESS_INCREMENTAL;
+            let stats = Rc::new(ActiveFrameCanary {
+                expected_native: requested && rabbithole_jit::supported(),
+                getter_depth: Cell::new(0), gc_depth: Cell::new(0),
+                getter_calls: Cell::new(0), collections: Cell::new(0),
+            });
+            let global = realm.global();
+            for (name, function) in [
+                ("__activeFrameGetter", active_frame_getter as crate::NativeFn),
+                ("__activeFrameCollect", active_frame_collect as crate::NativeFn),
+            ] {
+                let native = realm.new_native_function_full(name, 0, function, Some(stats.clone()), Vec::new(), false);
+                realm.define_property(global, name, Value::Object(native), crate::HIDDEN);
+                realm.mark_gc_safe(global, name);
+            }
+            realm.set_deadline(Some(std::time::Instant::now() + std::time::Duration::from_secs(30)));
+            let outcome = realm.eval(SOURCE, "native-live-frame-gc-canary.js");
+            realm.set_deadline(None);
+            assert_eq!(outcome.unwrap(), Value::Bool(true));
+            assert_eq!(stats.getter_calls.get(), 3, "exercise both initial lookup and cached getter");
+            assert_eq!(stats.collections.get(), 3, "all three GC probes were really reclaimed");
+            assert_eq!(realm.jit.live_entries, 0);
+            assert!(realm.frames.is_empty() && realm.vstack.is_empty() && realm.new_target_stack.is_empty());
+            assert!(realm.native_roots.is_empty());
+            assert_eq!(realm.native_depth, 0);
+            assert_eq!(realm.gc_block, 0);
+            eprintln!("native-canary live-frame target={}-{} requested_override={requested} enabled={} stress={stress} entries={} getter_calls={} verified_collections={} getter_live_depth={} gc_live_depth={} live_entries_after={}", std::env::consts::OS, std::env::consts::ARCH, realm.jit_enabled(), realm.jit_entries(), stats.getter_calls.get(), stats.collections.get(), stats.getter_depth.get(), stats.gc_depth.get(), realm.jit.live_entries);
+        }
+    }
+}
+
 #[test]
 fn recursion_limit_is_the_interpreters() {
     // Calls from native code go through the run loop: the maximum depth is

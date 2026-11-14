@@ -133,10 +133,17 @@ impl Realm {
             // SAFETY: `entry` is the native code of `code` (kept alive by
             // the frame's code), entered at an instruction of it; until it
             // returns, the realm is only used through `ctx.realm`.
+            // Test-only dynamic evidence: a helper may synchronously reenter
+            // JS while this generated call still owns a machine return address.
+            #[cfg(test)]
+            { self.jit.live_entries += 1; }
             let st = unsafe {
                 let f: Entry = std::mem::transmute(entry);
                 f(&mut ctx, pc as u32)
             };
+            // Restore before processing ST_PANIC (which can resume unwinding).
+            #[cfg(test)]
+            { self.jit.live_entries -= 1; }
             match st {
                 // Frames were pushed or popped and the new last frame has
                 // no native code to continue in (the helper's frame switch

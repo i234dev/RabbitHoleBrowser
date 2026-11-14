@@ -1524,3 +1524,20 @@ Un resultado verde de esos canarios no valida unwind de Windows, consulta de
 permisos de página ni errores de `FlushInstructionCache`. Los diagnósticos que
 provoquen panic a través de código generado necesitan un subproceso acotado;
 no se añaden al proceso general de tests sin resolver antes ese riesgo.
+
+
+### Evidencia de frame vivo (sucesor pendiente de CI)
+
+El test `native_property_getter_keeps_generated_frame_live_during_gc` añade
+un contador **sólo en builds de tests** alrededor de la llamada efectiva a
+`Entry`. El getter lo consulta antes de reentrar en JS; el hook de GC lo
+consulta mientras aún sigue viva esa llamada. El contador vuelve a su valor
+anterior al terminar una entrada anidada y se resta antes de procesar
+`ST_PANIC`. No cambia el estado ni el coste del backend de producción.
+
+Cada llamada de GC debe reclamar un objeto de prueba recién creado sin raíces,
+además de conservar las referencias vivas del getter y del callback. Los cuatro
+casos distinguen override apagado/encendido y estrés completo/incremental.
+Un workflow dirigido a la rama de validación Windows conserva `--nocapture`,
+comandos, configuración, revisión y contadores. Sigue pendiente de ejecución;
+no prueba unwind ni habilita el JIT del navegador en Windows.
