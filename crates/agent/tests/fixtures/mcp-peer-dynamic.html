@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dynamic reading contract fixture</title>
+<main id="shell">
+  <h1>Workspace shell</h1>
+  <form><label>Name <input name="name"></label><button>Save</button></form>
+  <button id="append" onclick="appendLive()">Load details</button>
+  <div id="hidden-noise" hidden></div>
+</main>
+<div class="container" id="feed"></div>
+<footer>FOOTER_ONLY navigation and copyright.</footer>
+<script id="source-noise" type="application/json">{"not_readable":"SCRIPT_ONLY"}</script>
+<script>
+document.getElementById('hidden-noise').textContent = 'HIDDEN_ONLY '.repeat(2000);
+function appendLive() {
+  var paragraph = document.createElement('p');
+  paragraph.textContent = 'LIVE_BODY_MARKER ' +
+    'Visible content belongs to the current document, even outside a poor main. '.repeat(12) +
+    ' Unicode sentence: café, 東京, 🙂. LIVE_BODY_END';
+  document.getElementById('feed').appendChild(paragraph);
+}
+</script>

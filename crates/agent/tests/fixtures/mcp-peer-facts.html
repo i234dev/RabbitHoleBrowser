@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Search contract fixture</title>
+<main>
+  <p id="distant"></p>
+  <p id="unicode"></p>
+  <p id="overlap"></p>
+  <p id="dedupe">FACTTOKEN appears in this prose. <a id="short-link" href="#destination">FACTTOKEN</a> <a href="#destination">FACTTOKEN extended link</a></p>
+  <button id="control" onclick="document.body.setAttribute('data-clicked','yes')">FACTTOKEN</button>
+  <div id="destination">Destination remains readable.</div>
+</main>
+<script>
+document.getElementById('distant').textContent =
+  'START ' + 'a'.repeat(180) + ' ALPHA ' + 'b'.repeat(180) +
+  ' BETA ' + 'c'.repeat(180) + ' GAMMA ' + 'd'.repeat(180) +
+  ' DELTA ' + 'e'.repeat(180) + ' END';
+document.getElementById('unicode').textContent =
+  '𐐀'.repeat(100) + ' İx ΟΣ NEEDLE ' + '𐐀'.repeat(100);
+document.getElementById('overlap').textContent =
+  'x'.repeat(100) + ' OVERLAPONE abc OVERLAPTWO ' + 'y'.repeat(100);
+</script>
