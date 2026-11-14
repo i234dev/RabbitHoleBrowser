@@ -203,3 +203,19 @@ distinct from an explicit border-box aspect ratio. A further control includes
 percentage preferred/min/max heights, numeric border-box preferred/minimum
 sizes and both natural/explicit-ratio padding geometry. The global replaced
 sizing helper is unchanged; no complete replaced-size conformance is claimed.
+
+## Fresh observations versus retained completion
+
+The per-axis consumer must test a true min-content change before resizing an
+axis during an adjustment. A max-only observation therefore records fresh
+inputs/contributions while retaining the earlier completed geometry. These
+have separate producers: `measurement_point()` identifies the new observation,
+whereas `completion_origin()` retains the point and inputs that actually
+produced the sizes. The latter is not relabeled as newly sized geometry.
+
+Retaining completion is rejected if true min-content probes changed or no
+completed geometry exists. Queries/comparisons and retained copies charge the
+existing work budget before installing a result. Three additional controls
+cover max-only size preservation, rejection of changed-min reuse and failure
+before a fresh retained result is installed. This state is not activated in
+the layout traversal and has not yet been compiled or executed.
