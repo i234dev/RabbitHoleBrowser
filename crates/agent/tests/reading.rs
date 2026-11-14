@@ -99,3 +99,36 @@ fn summary_keeps_dialog_actions_and_essential_landmark_refs(){
     assert!(text.starts_with("⚠ [dialog \"Notice\"] @e"),"{text}");
     assert!(text.contains("\"Close\" @e")&&text.contains("[main] @e")&&text.contains("[search \"Lookup\"] @e"),"{text}");
 }
+
+#[test]
+fn plain_links_preserve_real_source_boundaries_instead_of_trimming_or_inventing_spaces(){
+    for (source,expected) in [
+        ("<p>A<a href='/x'> B </a>C</p>","A B C"),
+        ("<p>A<a href='/x'>B</a>C</p>","ABC"),
+        ("<p>A<a href='/x'> </a>C</p>","A C"),
+        ("<div>A<a href='/x'> B </a>C</div>","A B C"),
+        ("<div>A<a href='/x'>B</a>C</div>","ABC"),
+        ("<p>A<a href='/x'><span> B </span></a>C</p>","A B C"),
+        ("<p>A<a href='/x'><span>B</span></a>C</p>","ABC"),
+        ("<p>A<a href='/x'><strong> B </strong></a>C</p>","A **B** C"),
+        ("<p>A<a href='/x'><strong>B</strong></a>C</p>","A**B**C"),
+        ("<p>A<a href='/x'><code>B</code></a>C</p>","A`B`C"),
+        ("<ul><li>A<a href='/x'> B </a>C<ul><li>N</li></ul></li></ul>","- A B C\n  - N"),
+        ("<ul><li>A<a href='/x'>B</a>C<ul><li>N</li></ul></li></ul>","- ABC\n  - N"),
+    ] {
+        let page=page(&format!("<!doctype html><main>{source}</main>"));
+        let result=read::read_with_options(&page,&mut RefMap::default(),0,false,false);
+        assert_eq!(result,expected,"{source}");
+    }
+}
+
+#[test]
+fn absolute_nested_sup_citation_and_explicit_citation_ref_obey_the_same_flag(){
+    let page=page("<!doctype html><main><p>Start<sup><span><strong><a id='absolute' href='https://reader.example.test/article#note'>[9]</a></strong></span></sup>End</p></main>");
+    let root=element(&page,"absolute");let mut refs=RefMap::default();
+    let normal=read::read_with_options(&page,&mut refs,0,false,false);
+    assert_eq!(normal,"StartEnd");
+    assert!(read::read_subtree_with_options(&page,&mut refs,0,root,false,false).is_empty());
+    assert_eq!(read::read_subtree_with_options(&page,&mut refs,0,root,false,true),"[9]");
+    assert!(read::read_with_options(&page,&mut refs,0,false,true).contains("[9]"));
+}
