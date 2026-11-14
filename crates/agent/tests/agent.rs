@@ -660,18 +660,18 @@ fn find_any_terms_returns_document_order_and_only_reports_absence_after_all_elem
     let lines = find_result_lines(&found);
     assert_eq!(lines.len(), 3, "{found}");
     assert!(lines[0].contains("Guido before main") && lines[1].contains("1989 in the article") && lines[2].contains("CWI later"), "{found}");
-    assert_eq!(found.lines().find(|line| line.starts_with("No matches for")), Some("No matches for \"diciembre de 1989\""));
+    assert_eq!(found.lines().find(|line| line.starts_with("No matches for:")), Some("No matches for: \"diciembre de 1989\""));
     let limited = ok(&mut a, "find", json!({"text":terms,"limit":1}));
     assert_eq!(find_result_lines(&limited).len(), 1, "{limited}");
     assert!(limited.contains("Guido before main") && limited.contains("(2 more matches; raise limit)"), "{limited}");
-    assert_eq!(limited.lines().find(|line| line.starts_with("No matches for")), Some("No matches for \"diciembre de 1989\""));
+    assert_eq!(limited.lines().find(|line| line.starts_with("No matches for:")), Some("No matches for: \"diciembre de 1989\""));
     let filtered = ok(&mut a, "find", json!({"text":["Guido","CWI"],"role":"link"}));
-    assert_eq!(filtered.lines().find(|line| line.starts_with("No matches for")), Some("No matches for \"CWI\""));
+    assert_eq!(filtered.lines().find(|line| line.starts_with("No matches for:")), Some("No matches for: \"CWI\""));
     ok(&mut a, "open", json!({"url":srv.url("/same")}));
     let same = ok(&mut a, "find", json!({"text":["CWI","1989","Guido"],"limit":1}));
     assert_eq!(find_result_lines(&same).len(), 1, "{same}");
     assert!(same.contains("[text: \"CWI\", \"1989\", \"Guido\"]") && !same.contains("more in this element"), "{same}");
-    assert!(!same.contains("more matches") && !same.contains("No matches for"), "{same}");
+    assert!(!same.contains("more matches") && !same.contains("No matches for:"), "{same}");
 }
 
 #[test]
@@ -700,7 +700,7 @@ fn find_distinct_term_windows_obey_request_priority_and_report_only_unshown_occu
     assert!(!snippet.contains('A') && snippet.contains('B') && snippet.contains('C') && snippet.contains('D'), "{found}");
     assert!(snippet.find('B') < snippet.find('C') && snippet.find('C') < snippet.find('D'), "{found}");
     assert!(snippet.chars().count() <= 120 && line.contains("(+1 more in this element)"), "{found}");
-    assert!(found.contains("No matches for \"absent\"") && !found.contains("No matches for \"A\""), "a capped present term is not absent: {found}");
+    assert!(found.contains("No matches for: \"absent\"") && !found.contains("No matches for: \"A\""), "a capped present term is not absent: {found}");
     let alias = ok(&mut a, "find", json!({"text":["A","B"],"context":40,"limit":1}));
     let canonical = ok(&mut a, "find", json!({"text":["A","B"],"window":40,"limit":1}));
     assert_eq!(find_result_lines(&alias), find_result_lines(&canonical));
@@ -802,7 +802,7 @@ fn find_groups_text_runs_and_inserts_child_documents_at_the_iframe() {
     assert!(limited.contains("(2 more matches; raise limit)"), "{limited}");
     ok(&mut a, "open", json!({"url":srv.url("/split")}));
     let nonexistent = ok(&mut a, "find", json!({"text":"Guido 1989"}));
-    assert!(find_result_lines(&nonexistent).is_empty() && nonexistent.contains("No matches for"), "{nonexistent}");
+    assert!(find_result_lines(&nonexistent).is_empty() && nonexistent.contains("No matches for:"), "{nonexistent}");
     let contiguous = ok(&mut a, "find", json!({"text":"Guido CWI 1989"}));
     assert_eq!(find_result_lines(&contiguous).len(), 1, "{contiguous}");
     assert!(contiguous.contains("text \"Guido CWI 1989\""), "{contiguous}");
@@ -884,7 +884,7 @@ fn search_plain_linked_prose_keeps_visibility_secrets_normal_snapshots_and_node_
     let snippet = find_result_lines(&long)[0].split('"').nth(1).unwrap();
     assert!(snippet.contains("TAILEND 1989") && snippet.chars().count() <= 240 && !snippet.contains("@e"), "{long}");
     let hidden = ok(&mut a, "find", json!({"text":["HIDDEN_VISIBILITY","HIDDEN_OPACITY","HIDDEN_CONTRAST","HIDDEN_LINK","TOP_SECRET_TOKEN"]}));
-    assert!(find_result_lines(&hidden).is_empty() && hidden.contains("No matches for"), "{hidden}");
+    assert!(find_result_lines(&hidden).is_empty() && hidden.contains("No matches for:"), "{hidden}");
     let literal = ok(&mut a, "find", json!({"text":"[CWI]@e123"}));
     assert!(literal.contains("literal [CWI]@e123"), "{literal}");
     let link = ok(&mut a, "find", json!({"text":"CWI","role":"link"}));

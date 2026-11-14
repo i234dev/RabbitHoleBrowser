@@ -61,7 +61,7 @@ pub fn definitions() -> Vec<Value> {
                 "ref": r.clone(), "max_tokens": { "type": "integer", "description": "Default 4000" }, "offset": { "type": "integer", "description": "Character offset to continue from" },
                 "links": { "type": "boolean", "default": true }, "cites": { "type": "boolean", "default": false }
             } } }),
-        json!({ "name": "find", "description": "Find text with context, role/name, or CSS selector. Returns document-order refs, matching terms and absent terms.",
+        json!({ "name": "find", "description": "Find any text terms with context; cheaper than read for facts. Also role/name or CSS selector; returns refs and absent terms.",
             "inputSchema": { "type": "object", "properties": {
                 "text": { "type": ["string", "array"], "items": { "type": "string" } }, "role": { "type": "string" }, "name": { "type": "string" }, "selector": { "type": "string" }, "limit": { "type": "integer" },
                 "window": { "type": "integer", "minimum": 0, "maximum": 4096, "description": "Chars per passage; default 240, total up to 3x; 0: first 120" },
@@ -610,7 +610,7 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
     let mut body = if lines.is_empty() { "No matches.".to_string() } else { lines.join("\n") };
     if let Some(terms) = terms {
         let missing: Vec<_> = terms.iter().zip(seen).filter(|(_, seen)| !seen).map(|(term, _)| format!("\"{}\"", esc(term))).collect();
-        if !missing.is_empty() { body.push_str(&format!("\nNo matches for {}", missing.join(", "))); }
+        if !missing.is_empty() { body.push_str(&format!("\nNo matches for: {}", missing.join(", "))); }
     }
     if total > lines.len() { body.push_str(&format!("\n({} more matches; raise limit)", total - lines.len())); }
     if omitted_links > 0 { body.push_str(&format!("\n({omitted_links} redundant links omitted; use role=link to include)")); }
