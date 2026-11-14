@@ -1335,7 +1335,8 @@ impl Parser {
 }
 pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Shader, String> {
     let token_limit = if max_version >= 300 { 1024 } else { 256 };
-    let (tokens, version) = lex(source, token_limit)?;
+    let source = crate::preprocessor::preprocess(source, token_limit)?;
+    let (tokens, version) = lex(&source, token_limit)?;
     if version > max_version {
         return Err(format!(
             "this context permits GLSL ES {max_version}, not {version}"

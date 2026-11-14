@@ -39,6 +39,10 @@ operations must be rejected by the bindings instead of reporting fake success.
 
 ## GLSL subset
 
+The bounded [token preprocessor](../../docs/glsl-preprocessor.md) supports object/function
+macros and conditional source selection before the existing grammar and type checks.
+Its resource limits and explicitly deferred directives are described separately.
+
 One `void main()` with whole-variable assignments, initialized local declarations,
 blocks, bounded `if`/`else` selection and `return;`. Global `attribute` (vertex only), `varying`, and `uniform`
 declarations; scalar `float`, `vec2/3/4`, and uniform/local `mat4` types. Precision
@@ -167,7 +171,7 @@ Literal `layout(location=N)` is supported for vertex inputs at 0..15 and the
 single fragment output at location 0. Explicit source locations override
 `bind_attrib_location`; aliasing active inputs fails linking. Other layouts,
 multiple fragment outputs/MRT, non-vec4 outputs and newer language versions fail
-explicitly. The existing arithmetic, texture, no-control-flow and resource
+explicitly. The existing arithmetic, texture and resource
 limits remain in effect. Precision declarations for float, int and sampler2D
 are recognized; integer variables/arithmetic remain unsupported.
 

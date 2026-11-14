@@ -3,6 +3,7 @@
 mod blend;
 mod framebuffer;
 pub mod gl;
+mod preprocessor;
 mod raster;
 mod shader;
 mod texture;
