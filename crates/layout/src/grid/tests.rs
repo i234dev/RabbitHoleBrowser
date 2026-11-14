@@ -1,5 +1,5 @@
-use super::{auto_track, size_tracks, size_tracks_with_constraint, Contribution, Sizing, SizingConstraint, Track};
-use rabbithole_style::{Length, TrackSize};
+use super::{auto_track, expand_tracks, repeat_fixed_size, size_tracks, size_tracks_with_constraint, Contribution, Sizing, SizingConstraint, Track};
+use rabbithole_style::{Length, TrackListItem, TrackSize};
 
 fn intrinsic_sizes(tracks: &[Track], contributions: &[Contribution]) -> (Vec<f32>, Vec<f32>) {
     let mut min = tracks.to_vec();
@@ -74,4 +74,18 @@ fn auto_track_patterns_resolve_percentages_against_the_axis() {
     assert_eq!(auto_track(&sizes, -1, Some(200.0)).min, Sizing::Fixed(50.0));
     assert_eq!(auto_track(&sizes, 0, None).min, Sizing::Auto);
     assert_eq!(auto_track(&[], -1, None).max, Sizing::Auto);
+}
+
+#[test]
+fn auto_repeat_floors_a_definite_maximum_by_the_definite_minimum() {
+    for (minimum, maximum) in [(50.0, 25.0), (25.0, 50.0)] {
+        let size = TrackSize::MinMax(Box::new(TrackSize::Length(Length::Px(minimum))), Box::new(TrackSize::Length(Length::Px(maximum))));
+        assert_eq!(repeat_fixed_size(&size, Some(100.0)), 50.0);
+        let list = [TrackListItem::Repeat {
+            count: None,
+            auto_fit: false,
+            tracks: vec![TrackListItem::Track { names: vec![], size }],
+        }];
+        assert_eq!(expand_tracks(&list, Some(100.0), 0.0).tracks.len(), 2);
+    }
 }

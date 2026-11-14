@@ -153,12 +153,12 @@ fn auto_track(sizes: &[TrackSize], index: i32, avail: Option<f32>) -> Track {
 /// Fixed size of a track for `repeat(auto-fill)` computations (§7.2.3.2).
 fn repeat_fixed_size(ts: &TrackSize, avail: Option<f32>) -> f32 {
     let (min, max) = sizing_of(ts, avail);
-    match max {
-        Sizing::Fixed(v) => v,
-        _ => match min {
-            Sizing::Fixed(v) => v,
-            _ => 0.0,
-        },
+    match (min, max) {
+        // A minmax() maximum smaller than its minimum is floored by that
+        // minimum when counting repetitions, just as when sizing the track.
+        (Sizing::Fixed(min), Sizing::Fixed(max)) => max.max(min),
+        (_, Sizing::Fixed(v)) | (Sizing::Fixed(v), _) => v,
+        _ => 0.0,
     }
 }
 
