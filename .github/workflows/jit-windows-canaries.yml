@@ -6,7 +6,7 @@ on:
       source_revision:
         description: Exact 40-hex source commit; workflow and source revisions are recorded separately
         required: true
-        default: dbbd3ac01df2a4a3ef6bb194828d623a3e47cbe7
+        default: 4c466e801f05889c2682fcccc41d20b19f92d505
 
 permissions:
   contents: read
@@ -77,9 +77,10 @@ jobs:
                       "return_status_switches_to_interpreter_entries_and_constructor_errors"]
           write("catalog.json", {"new_groups": groups, "previous_canaries": previous,
                                  "pure_unwind": "jit::windows_unwind::tests::",
-                                 "shared_backend": "rabbithole-jit (all unit tests)"})
+                                 "shared_backend": "rabbithole-jit (10 Windows unit tests)",
+                                 "expected_pure_unwind_tests": 6, "expected_shared_backend_tests": 10})
           records = []
-          def run_case(selector, package, test=None, exact=False):
+          def run_case(selector, package, test=None, exact=False, expected_count=None):
               name = test or "all"
               index = len(records)
               stem = f"{index:02d}-{selector}-{package}-{name.replace('::', '_')}"
@@ -103,6 +104,8 @@ jobs:
               valid = result.returncode == 0 and count is not None and int(count[1]) > 0
               if exact:
                   valid = valid and count is not None and int(count[1]) == 1 and bool(re.search(r"(?m)^test " + re.escape(name) + r" \.\.\. ok\s*$", text))
+              if expected_count is not None:
+                  valid = valid and count is not None and int(count[1]) == expected_count
               combined = text + "\n" + errors
               evidence = []
               if name.endswith("cached_simple_witness_is_per_invocation_and_collection_invalidates_it"):
@@ -124,6 +127,7 @@ jobs:
               valid = valid and bool(binaries)
               records.append({"selector": selector, "command": argv, "test": name,
                               "exit_code": result.returncode, "passed": int(count[1]) if count else None,
+                              "expected_passed": 1 if exact else expected_count,
                               "validated": bool(valid), "native_marker_matches": evidence,
                               "files": [{"path": str(stdout), "sha256": sha(stdout)},
                                         {"path": str(stderr), "sha256": sha(stderr)}],
@@ -134,8 +138,8 @@ jobs:
           for selector in ["off", "on"]:
               for name in groups: run_case(selector, "rabbithole-js", "tests_jit_cached_simple::" + name, True)
               for name in previous: run_case(selector, "rabbithole-js", "tests_jit::" + name, True)
-              run_case(selector, "rabbithole-js", "jit::windows_unwind::tests::")
-              run_case(selector, "rabbithole-jit")
+              run_case(selector, "rabbithole-js", "jit::windows_unwind::tests::", expected_count=6)
+              run_case(selector, "rabbithole-jit", expected_count=10)
           after = source_manifest()
           write("source-after.json", after)
           unchanged = before == after and not git("status", "--porcelain", "--untracked-files=no")
