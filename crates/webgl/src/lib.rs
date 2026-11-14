@@ -121,6 +121,9 @@ fn active_info(name: &str, ty: Ty) -> ActiveInfo {
         size: 1,
         kind: match ty {
             Ty::Bool => gl::BOOL,
+            Ty::BVec2 => gl::BOOL_VEC2,
+            Ty::BVec3 => gl::BOOL_VEC3,
+            Ty::BVec4 => gl::BOOL_VEC4,
             Ty::IntLiteral => unreachable!("literal types are not interface variables"),
             Ty::Sampler2D => gl::SAMPLER_2D,
             Ty::Float => gl::FLOAT,

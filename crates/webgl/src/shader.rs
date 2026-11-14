@@ -41,6 +41,9 @@ pub(crate) enum Ty {
     // used in arithmetic as if they were floating-point values.
     IntLiteral,
     Bool,
+    BVec2,
+    BVec3,
+    BVec4,
     Sampler2D,
     Float,
     Vec2,
@@ -56,6 +59,9 @@ impl Ty {
             "sampler2D" => Self::Sampler2D,
             "float" => Self::Float,
             "bool" => Self::Bool,
+            "bvec2" => Self::BVec2,
+            "bvec3" => Self::BVec3,
+            "bvec4" => Self::BVec4,
             "vec2" => Self::Vec2,
             "vec3" => Self::Vec3,
             "vec4" => Self::Vec4,
@@ -68,9 +74,9 @@ impl Ty {
     pub fn n(self) -> usize {
         match self {
             Self::IntLiteral | Self::Bool | Self::Sampler2D | Self::Float => 1,
-            Self::Vec2 => 2,
-            Self::Vec3 => 3,
-            Self::Vec4 => 4,
+            Self::Vec2 | Self::BVec2 => 2,
+            Self::Vec3 | Self::BVec3 => 3,
+            Self::Vec4 | Self::BVec4 => 4,
             Self::Mat2 => 4,
             Self::Mat3 => 9,
             Self::Mat4 => 16,
@@ -84,6 +90,8 @@ impl Ty {
             _ => None,
         }
     }
+    fn is_bool(self) -> bool { matches!(self, Self::Bool | Self::BVec2 | Self::BVec3 | Self::BVec4) }
+    fn bool_vector(n: usize) -> Self { [Self::Bool, Self::BVec2, Self::BVec3, Self::BVec4][n-1] }
     fn vector(n: usize) -> Self {
         [Self::Float, Self::Vec2, Self::Vec3, Self::Vec4][n - 1]
     }
@@ -273,6 +281,8 @@ enum Builtin {
     Dot,
     Normalize,
     Cross,
+    LessThan, LessThanEqual, GreaterThan, GreaterThanEqual, Equal, NotEqual,
+    Any, All, Not,
 }
 impl Builtin {
     fn parse(name: &str) -> Option<Self> {
@@ -309,11 +319,25 @@ impl Builtin {
             "dot" => Self::Dot,
             "normalize" => Self::Normalize,
             "cross" => Self::Cross,
+            "lessThan" => Self::LessThan, "lessThanEqual" => Self::LessThanEqual,
+            "greaterThan" => Self::GreaterThan, "greaterThanEqual" => Self::GreaterThanEqual,
+            "equal" => Self::Equal, "notEqual" => Self::NotEqual,
+            "any" => Self::Any, "all" => Self::All, "not" => Self::Not,
             _ => return None,
         })
     }
     fn result_type(self, args: &[Expr]) -> Result<Ty, String> {
         let types: Vec<Ty> = args.iter().map(|e| e.ty).collect();
+        if matches!(self, Self::LessThan | Self::LessThanEqual | Self::GreaterThan | Self::GreaterThanEqual | Self::Equal | Self::NotEqual | Self::Any | Self::All | Self::Not) {
+            let result = match (self, types.as_slice()) {
+                (Self::Any | Self::All, [a]) if a.is_bool() && a.n() > 1 => Some(Ty::Bool),
+                (Self::Not, [a]) if a.is_bool() && a.n() > 1 => Some(*a),
+                (Self::LessThan | Self::LessThanEqual | Self::GreaterThan | Self::GreaterThanEqual | Self::Equal | Self::NotEqual, [a,b]) if a == b && matches!(a, Ty::Vec2 | Ty::Vec3 | Ty::Vec4) => Some(Ty::bool_vector(a.n())),
+                (Self::Equal | Self::NotEqual, [a,b]) if a == b && a.is_bool() && a.n() > 1 => Some(*a),
+                _ => None,
+            };
+            return result.ok_or_else(|| format!("no supported {self:?} overload for {types:?}"));
+        }
         if types
             .iter()
             .any(|ty| !matches!(ty, Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4))
@@ -361,6 +385,21 @@ impl Builtin {
         let a = args[0];
         let mut result = Value::zero(ty);
         match self {
+            Self::Any => result.v[0] = u8::from(a.v[..a.ty.n()].iter().any(|x| *x != 0.)) as f32,
+            Self::All => result.v[0] = u8::from(a.v[..a.ty.n()].iter().all(|x| *x != 0.)) as f32,
+            Self::Not | Self::LessThan | Self::LessThanEqual | Self::GreaterThan | Self::GreaterThanEqual | Self::Equal | Self::NotEqual => {
+                for i in 0..ty.n() {
+                    let x = a.v[i];
+                    let value = match self {
+                        Self::Not => x == 0.,
+                        Self::LessThan => x < args[1].v[i], Self::LessThanEqual => x <= args[1].v[i],
+                        Self::GreaterThan => x > args[1].v[i], Self::GreaterThanEqual => x >= args[1].v[i],
+                        Self::Equal => x == args[1].v[i], Self::NotEqual => x != args[1].v[i],
+                        _ => false,
+                    };
+                    result.v[i] = u8::from(value) as f32;
+                }
+            }
             Self::Length | Self::Distance | Self::Dot => {
                 result.v[0] = (0..a.ty.n())
                     .map(|i| match self {
@@ -564,7 +603,7 @@ impl Expr {
             ExprKind::Construct(args) => {
                 let values: Vec<_> = args.iter().map(|a| a.eval(env, globals, sample)).collect();
                 let mut r = Value::zero(self.ty);
-                if values.len() == 1 && matches!(values[0].ty, Ty::Float | Ty::IntLiteral) {
+                if values.len() == 1 && matches!(values[0].ty, Ty::Float | Ty::IntLiteral | Ty::Bool) {
                     if let Some(n) = self.ty.matrix_dim() {
                         for i in 0..n {
                             r.v[i * (n + 1)] = values[0].v[0];
@@ -592,6 +631,9 @@ impl Expr {
                             }
                         }
                     }
+                }
+                if self.ty.is_bool() {
+                    for value in &mut r.v[..self.ty.n()] { *value = u8::from(*value != 0.) as f32; }
                 }
                 r
             }
@@ -846,8 +888,8 @@ impl Parser {
             n = self.id()?;
         }
         let ty = Ty::parse(&n).ok_or_else(|| format!("unsupported type {n}"))?;
-        if precision.is_some() && ty == Ty::Bool { return Err("bool cannot have a precision qualifier".into()); }
-        let key = match ty { Ty::Sampler2D => Some("sampler2D"), Ty::Bool => None, _ => Some("float") };
+        if precision.is_some() && ty.is_bool() { return Err("bool cannot have a precision qualifier".into()); }
+        let key = match ty { Ty::Sampler2D => Some("sampler2D"), ty if ty.is_bool() => None, _ => Some("float") };
         let precision = precision.or_else(|| key.and_then(|key| self.shader.precision_defaults.get(key).copied()));
         if key.is_some() && precision.is_none() { return Err(format!("no default precision for {n}")); }
         Ok((ty, precision))
@@ -1026,7 +1068,7 @@ impl Parser {
                 }
                 self.eat_id("in");
                 let ty = self.ty()?;
-                if !matches!(ty, Ty::Bool | Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+                if !matches!(ty, Ty::Bool | Ty::BVec2 | Ty::BVec3 | Ty::BVec4 | Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
                     return Err("function parameters require bool, float or vector types".into());
                 }
                 let parameter = self.id()?;
@@ -1126,7 +1168,7 @@ impl Parser {
         Ok(statement)
     }
     fn arithmetic(&mut self, op: char, left: Expr, right: Expr) -> Result<Expr, String> {
-        if matches!(left.ty, Ty::Sampler2D | Ty::Bool) || matches!(right.ty, Ty::Sampler2D | Ty::Bool) {
+        if left.ty == Ty::Sampler2D || right.ty == Ty::Sampler2D || left.ty.is_bool() || right.ty.is_bool() {
             return Err("arithmetic requires numeric operands".into());
         }
         if left.ty == Ty::IntLiteral || right.ty == Ty::IntLiteral {
@@ -1161,7 +1203,7 @@ impl Parser {
             },
             Tok::P('-') => {
                 let e = self.expr(8)?;
-                if matches!(e.ty,Ty::Sampler2D | Ty::Bool) {
+                if (e.ty == Ty::Sampler2D || e.ty.is_bool()) {
                     return Err("unary minus requires a numeric value".into());
                 }
                 Expr {
@@ -1171,7 +1213,7 @@ impl Parser {
             }
             Tok::P('+') => {
                 let e = self.expr(8)?;
-                if matches!(e.ty,Ty::Sampler2D | Ty::Bool) {
+                if (e.ty == Ty::Sampler2D || e.ty.is_bool()) {
                     return Err("unary plus requires a numeric value".into());
                 }
                 e
@@ -1265,13 +1307,12 @@ impl Parser {
                         }
                     }
                     self.expect(Tok::P(')'))?;
-                    if ty == Ty::Bool && (args.len()!=1 || args[0].ty != Ty::Bool)
-                        || ty != Ty::Bool && args.iter().any(|arg| arg.ty == Ty::Bool) {
-                        return Err("numeric/bool constructor conversions are unsupported".into());
+                    if ty.matrix_dim().is_some() && args.iter().any(|arg| arg.ty.is_bool()) {
+                        return Err("Boolean components in matrix constructors are unsupported".into());
                     }
                     let total: usize = args.iter().map(|e| e.ty.n()).sum();
                     let scalar =
-                        args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::IntLiteral);
+                        args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::IntLiteral | Ty::Bool);
                     let conversion = ty.matrix_dim().is_some()
                         && args.len() == 1 && args[0].ty.matrix_dim().is_some();
                     let trunc = args.len() == 1
@@ -1283,8 +1324,8 @@ impl Parser {
                     if !scalar && !conversion && !trunc && !matrix_components && total != ty.n() {
                         return Err("constructor component count mismatch".into());
                     }
-                    if ty == Ty::Float && !scalar {
-                        return Err("float constructors require a scalar argument".into());
+                    if matches!(ty, Ty::Float | Ty::Bool) && !scalar {
+                        return Err("scalar constructors currently require one scalar argument".into());
                     }
                     if args.iter().any(|a| a.ty == Ty::Sampler2D) {
                         return Err("samplers cannot be converted".into());
@@ -1376,7 +1417,7 @@ impl Parser {
         };
         loop {
             if self.eat('.') {
-                if !matches!(left.ty, Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+                if !matches!(left.ty, Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::BVec2 | Ty::BVec3 | Ty::BVec4) {
                     return Err("swizzles require a vector".into());
                 }
                 let s = self.id()?;
@@ -1402,7 +1443,7 @@ impl Parser {
                     ix.push(i);
                 }
                 left = Expr {
-                    ty: Ty::vector(ix.len()),
+                    ty: if left.ty.is_bool() { Ty::bool_vector(ix.len()) } else { Ty::vector(ix.len()) },
                     kind: ExprKind::Swizzle(Box::new(left), ix),
                 };
                 continue;
@@ -1556,14 +1597,14 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         }
         if matches!(
             n.as_str(),
-            "bool" | "float" | "vec2" | "vec3" | "vec4" | "lowp" | "mediump" | "highp"
+            "bool" | "bvec2" | "bvec3" | "bvec4" | "float" | "vec2" | "vec3" | "vec4" | "lowp" | "mediump" | "highp"
         ) {
             if location.is_some() {
                 return Err("layout cannot qualify a user function".into());
             }
             p.pos -= 1;
             let result_type = p.ty()?;
-            if !matches!(result_type, Ty::Bool | Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
+            if !matches!(result_type, Ty::Bool | Ty::BVec2 | Ty::BVec3 | Ty::BVec4 | Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4) {
                 return Err("functions must return bool, float or vector types".into());
             }
             let name = p.id()?;
@@ -1604,7 +1645,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
             );
         }
         let (ty, precision) = p.qualified_type()?;
-        if ty == Ty::Bool && qual != Qual::Uniform {
+        if (ty == Ty::Bool && qual != Qual::Uniform) || (ty.is_bool() && ty != Ty::Bool) {
             return Err("bool interfaces other than uniforms are unsupported".into());
         }
         if ty.matrix_dim().is_some() && qual != Qual::Uniform {
@@ -1648,6 +1689,41 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
 mod control_flow_evaluation {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn boolean_vectors_relations_swizzles_and_explicit_constructors_keep_types_and_values() {
+        for version in [100,300] {
+            let (prefix,output)=if version==300 {("#version 300 es\nprecision highp float;out vec4 pixel;","pixel")}else{("precision highp float;","gl_FragColor")};
+            for (expression, expected) in [
+                ("vec4(vec3(lessThanEqual(vec3(0.0,0.5,1.0),vec3(0.5))),1.0)",[1.,1.,0.,1.]),
+                ("vec4(vec3(greaterThan(vec3(0.0,0.5,1.0),vec3(0.5))),1.0)",[0.,0.,1.,1.]),
+                ("vec4(vec2(lessThan(vec2(0.0,1.0),vec2(0.5))),vec2(greaterThanEqual(vec2(0.0,1.0),vec2(0.5))))",[1.,0.,0.,1.]),
+                ("vec4(vec2(equal(bvec2(true,false),bvec2(false))),vec2(notEqual(vec2(0.5),vec2(0.5,0.75))))",[0.,1.,0.,1.]),
+                ("vec4(vec3(not(bvec3(true,false,true)).zyx),float(all(bvec3(true))))",[0.,1.,0.,1.]),
+                ("vec4(float(any(bvec2(false,true))),float(bool(-0.0)),float(bool(-2.0)),float(true))",[1.,0.,1.,1.]),
+                ("vec4(vec3(bvec3(vec3(-0.0,-2.0,3.0))),1.0)",[0.,1.,1.,1.]),
+                ("vec4(vec3(true),1.0)",[1.,1.,1.,1.]),
+            ] {
+                let source=format!("{prefix}void main(){{{output}={expression};}}");
+                let shader=compile(&source,false,version).unwrap();
+                let result=shader.run_with_sampler(BTreeMap::new(),&|_,_|panic!("no sampler"));
+                assert_eq!(result[output].v[..4],expected,"{version} {expression}");
+            }
+            for body in [
+                "bvec3 b=lessThanEqual(vec3(0.0),vec2(0.0));", "bool b=lessThanEqual(0.0,1.0);",
+                "bvec3 b=lessThanEqual(bvec3(true),bvec3(false));", "vec3 v=sin(bvec3(true));",
+                "bvec3 b=bvec3(true);b+=bvec3(false);", "bvec3 b=bvec3(true);vec3 v=-b;",
+                "bool b=all(vec3(1.0));", "bvec3 b=any(vec3(0.0),vec3(1.0));",
+                "bool b=bvec2(true)&&bvec2(false);", "lowp bvec3 b=bvec3(true);",
+                "if(bvec3(true)){}", "vec3 v=bvec3(true)?vec3(0.0):vec3(1.0);",
+            ] {
+                let source=format!("{prefix}void main(){{{body}{output}=vec4(1.0);}}");
+                assert!(compile(&source,false,version).is_err(),"{body}");
+            }
+            let source=format!("{prefix}uniform bvec3 unsupported;void main(){{{output}=vec4(1.0);}}");
+            assert!(compile(&source,false,version).is_err(),"Boolean vector interfaces remain unsupported");
+        }
+    }
 
     #[test]
     fn compound_rhs_samples_once_and_matrix_operations_share_binary_rules() {
