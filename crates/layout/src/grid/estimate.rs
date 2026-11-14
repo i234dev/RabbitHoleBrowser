@@ -90,6 +90,68 @@ pub(super) struct RowItemEstimate {
     pub(super) baseline:f32,
 }
 
+fn vertical_edges(style:&ComputedStyle)->f32 {
+    style.padding.top.resolve_or_zero(0.)+style.padding.bottom.resolve_or_zero(0.)+style.border_width.top+style.border_width.bottom
+}
+
+fn image_height_value(style:&ComputedStyle,value:Length,basis:AvailableSpace,padding_border:f32,intrinsic:f32)->Option<f32> {
+    match value {
+        Length::Auto=>None,
+        Length::MinContent|Length::MaxContent|Length::FitContent=>Some(intrinsic),
+        value=>value.resolve_definite(basis.definite()).map(|value|if style.box_sizing==BoxSizing::BorderBox {(value-padding_border).max(0.)} else {value.max(0.)}),
+    }
+}
+
+fn clamp_image_height(style:&ComputedStyle,height:f32,basis:AvailableSpace,padding_border:f32,intrinsic:f32)->f32 {
+    let max=image_height_value(style,style.max_height,basis,padding_border,intrinsic);
+    let min=image_height_value(style,style.min_height,basis,padding_border,intrinsic).unwrap_or(0.);
+    max.map_or(height,|max|height.min(max)).max(min).max(0.)
+}
+
+/// Keep explicit aspect-ratio's box-sizing convention distinct from a
+/// natural image ratio, which relates content-box dimensions.
+struct ImageMetrics {
+    width:f32,
+    height:f32,
+    ratio:Option<f32>,
+    border_ratio:bool,
+}
+impl ImageMetrics {
+    fn of(node:&LayoutBox)->Self {
+        let (mut width,mut height)=node.image.as_ref().filter(|image|!image.broken).map(|image|image.natural_size()).unwrap_or((node.attr_size.0.unwrap_or(0.),node.attr_size.1.unwrap_or(0.)));
+        let explicit=node.style.aspect_ratio.filter(|ratio|*ratio>0.&&ratio.is_finite());
+        let ratio=explicit.or_else(||(width>0.&&height>0.).then(||width/height));
+        if let Some(ratio)=ratio {
+            if width>0.&&height<=0. {height=width/ratio;}
+            else if height>0.&&width<=0. {width=height*ratio;}
+        }
+        Self{width,height,ratio,border_ratio:explicit.is_some()&&node.style.box_sizing==BoxSizing::BorderBox}
+    }
+    fn width_from_height(&self,height:f32,pb_h:f32,pb_v:f32)->f32 {
+        self.ratio.map_or(self.width,|ratio|if self.border_ratio {((height+pb_v)*ratio-pb_h).max(0.)} else {height*ratio})
+    }
+    fn height_from_width(&self,width:f32,pb_h:f32,pb_v:f32)->f32 {
+        self.ratio.map_or(self.height,|ratio|if self.border_ratio {((width+pb_h)/ratio-pb_v).max(0.)} else {width/ratio})
+    }
+}
+
+fn image_content_width(node:&LayoutBox,bases:[AvailableSpace;2])->f32 {
+    let style=&node.style;let metrics=ImageMetrics::of(node);
+    let pb_h=crate::block::horizontal_extras(style,0.);let pb_v=vertical_edges(style);
+    let natural=if node.ratio_only {bases[0].definite().map(|width|(width-pb_h).max(0.)).unwrap_or(300.)} else {metrics.width};
+    let natural_height=metrics.height_from_width(natural,pb_h,pb_v);
+    let preferred=image_height_value(style,style.height,bases[1],pb_v,natural_height);
+    let height=clamp_image_height(style,preferred.unwrap_or(natural_height),bases[1],pb_v,natural_height);
+    if preferred.is_some()||height!=natural_height {metrics.width_from_height(height,pb_h,pb_v)} else {natural}
+}
+
+fn image_used_height(node:&LayoutBox,width:f32,bases:[AvailableSpace;2],pb_h:f32,pb_v:f32)->f32 {
+    let style=&node.style;let metrics=ImageMetrics::of(node);
+    let automatic=metrics.height_from_width(width,pb_h,pb_v);
+    let preferred=image_height_value(style,style.height,bases[1],pb_v,automatic);
+    clamp_image_height(style,preferred.unwrap_or(automatic),bases[1],pb_v,automatic)
+}
+
 impl<'a> Layouter<'a> {
     /// The content oracle excludes this box's preferred/min/max inline
     /// sizes, including the corresponding logical block properties behind
@@ -97,6 +159,9 @@ impl<'a> Layouter<'a> {
     /// see intrinsic(node)'s early (width,width) numeric preferred shortcut.
     fn estimated_inline_content(&mut self,child:&mut LayoutBox,bases:[AvailableSpace;2])->(f32,f32) {
         let scope=Scope::inline_content(child,&mut self.grid_work);
+        if scope.node.kind==BoxKind::Image {
+            let width=image_content_width(scope.node,bases);return (width,width);
+        }
         if !scope.node.wm_wrapper {return self.intrinsic(scope.node);}
         // The generic wrapper intrinsic helper uses the viewport height.
         // Here a real perpendicular CB size, if present, takes precedence.
@@ -144,8 +209,15 @@ impl<'a> Layouter<'a> {
             // scoped preferred width, including explicit stretch, so the
             // reported estimate and executed content width stay coherent.
             self.grid_work.charge(1);
+            let height=image_used_height(scope.node,inline.content(),spaces,edges.pb_h,edges.pb_v);
             let mut execution=(*style).clone();
-            execution.width=Length::Px(inline.content()+if style.box_sizing==BoxSizing::BorderBox {edges.pb_h} else {0.});
+            // Both dimensions are already content sizes with local bounds
+            // applied. Avoid the old replaced helper's independent clamp
+            // and border-box conventions applying those constraints twice.
+            execution.box_sizing=BoxSizing::ContentBox;
+            execution.width=Length::Px(inline.content());execution.height=Length::Px(height);
+            execution.min_width=Length::ZERO;execution.max_width=Length::Auto;
+            execution.min_height=Length::ZERO;execution.max_height=Length::Auto;
             scope.node.style=Rc::new(execution);
         }
         let cb=Cb{x:0.,width:proxy,height:spaces[1].definite()};
@@ -456,5 +528,24 @@ mod tests {
         let mut root=LayoutBox::new(BoxKind::Block,None,style);root.children.push(wrapper);
         let selected=find_mut(&mut root,7).unwrap();
         assert!(selected.wm_wrapper);assert!(selected.node.is_none());assert_eq!(selected.children[0].node,Some(7));
+    }
+
+    #[test]
+    fn image_measurement_uses_real_block_bases_and_applies_border_box_bounds_only_once() {
+        let html="<img id=probe><div id=reference></div>";
+        for (source,reference,block) in [
+            ("height:50%","width:80px;height:40px",AvailableSpace::Definite(80.)),
+            ("box-sizing:border-box;width:10px;min-width:30px;padding:0 5px","width:20px;height:10px;padding:0 5px",AvailableSpace::Indefinite),
+            ("box-sizing:border-box;height:30px;padding:5px 0","width:40px;height:20px;padding:5px 0",AvailableSpace::Indefinite),
+            ("box-sizing:border-box;height:30px;padding:5px 0;aspect-ratio:2","width:60px;height:20px;padding:5px 0",AvailableSpace::Indefinite),
+            ("max-height:10px","width:20px;height:10px",AvailableSpace::Indefinite),
+            ("min-height:50%","width:80px;height:40px",AvailableSpace::Definite(80.)),
+            ("max-height:50%","width:20px;height:10px",AvailableSpace::Definite(20.)),
+        ] {
+            let css=format!("#probe{{{source}}}#reference{{{reference}}}");
+            let (measured,expected)=measured_case(html,&css,[AvailableSpace::Definite(100.),block],AvailableSpace::Definite(100.),ItemAlign::Normal);
+            assert!((measured.inline.content()-expected.0).abs()<0.02,"{source}: {} != {}",measured.inline.content(),expected.0);
+            assert!((measured.outer_block-expected.1).abs()<0.02,"{source}: {} != {}",measured.outer_block,expected.1);
+        }
     }
 }
