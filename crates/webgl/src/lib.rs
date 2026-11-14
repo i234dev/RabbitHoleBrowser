@@ -8,6 +8,8 @@ mod raster;
 mod shader;
 mod texture;
 mod vertex_array;
+#[cfg(test)]
+mod tests_typed_values;
 use shader::{Qual, Shader, Ty, Value};
 use std::collections::BTreeMap;
 pub use texture::MAX_TEXTURE_UNITS;
@@ -25,6 +27,9 @@ pub enum Error {
     InvalidOperation,
     InvalidFramebufferOperation,
     OutOfMemory,
+}
+impl From<shader::EvalError> for Error {
+    fn from(_: shader::EvalError) -> Self { Self::InvalidOperation }
 }
 impl Error {
     pub fn code(self) -> u32 {
@@ -121,6 +126,10 @@ fn active_info(name: &str, ty: Ty) -> ActiveInfo {
         kind: match ty {
             Ty::Bool => gl::BOOL,
             Ty::IntLiteral => unreachable!("literal types are not interface variables"),
+            Ty::Int => gl::INT,
+            Ty::IVec2 => gl::INT_VEC2,
+            Ty::IVec3 => gl::INT_VEC3,
+            Ty::IVec4 => gl::INT_VEC4,
             Ty::Sampler2D => gl::SAMPLER_2D,
             Ty::Float => gl::FLOAT,
             Ty::Vec2 => gl::FLOAT_VEC2,
@@ -752,7 +761,7 @@ impl Context {
     }
     pub fn get_uniform(&self, id: u32, location: i32) -> Result<Vec<f32>> {
         let u = self.uniform(id, location)?;
-        Ok(u.value.v[..u.ty.n()].to_vec())
+        Ok(u.value.floats()?[..u.ty.n()].to_vec())
     }
     pub fn get_uniform_kind(&self, id: u32, location: i32) -> Result<u32> {
         let u = self.uniform(id, location)?;
@@ -780,7 +789,7 @@ impl Context {
         }
         u.value = if u.ty == Ty::Bool {
             Value::from(Ty::Bool, &[u8::from(values[0] != 0.) as f32])
-        } else { Value::from(u.ty, values) };
+        } else { Value::from(u.ty, values) }?;
         Ok(())
     }
     pub fn uniform_f32_components(
@@ -832,7 +841,7 @@ impl Context {
         if u.ty != ty || values.len() != ty.n() {
             return Err(Error::InvalidOperation);
         }
-        u.value = Value::from(u.ty, values);
+        u.value = Value::from(u.ty, values)?;
         Ok(())
     }
     fn uniform_mut(&mut self, location: i32) -> Result<&mut Uniform> {
@@ -1143,7 +1152,7 @@ impl Context {
         }
         Ok(())
     }
-    fn attribute_value(&self, index: u32, vertex: u32, instance: u32, ty: Ty) -> Value {
+    fn attribute_value(&self, index: u32, vertex: u32, instance: u32, ty: Ty) -> Result<Value> {
         let a = self.attributes[index as usize];
         let mut v = self.attribute_constants[index as usize];
         if a.enabled {
@@ -1200,7 +1209,7 @@ impl Context {
                 };
             }
         }
-        Value::from(ty, &v[..ty.n()])
+        Value::from(ty, &v[..ty.n()]).map_err(Into::into)
     }
 }
 fn scalar_size(kind: u32) -> Result<usize> {

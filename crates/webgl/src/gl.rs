@@ -33,6 +33,9 @@ pub const RGBA: u32 = 0x1908;
 pub const FLOAT_VEC2: u32 = 0x8B50;
 pub const FLOAT_VEC3: u32 = 0x8B51;
 pub const FLOAT_VEC4: u32 = 0x8B52;
+pub const INT_VEC2: u32 = 0x8B53;
+pub const INT_VEC3: u32 = 0x8B54;
+pub const INT_VEC4: u32 = 0x8B55;
 pub const FLOAT_MAT2: u32 = 0x8B5A;
 pub const FLOAT_MAT3: u32 = 0x8B5B;
 pub const FLOAT_MAT4: u32 = 0x8B5C;
@@ -80,6 +83,7 @@ pub const BLEND_SRC_RGB: u32 = 0x80C9;
 pub const BLEND_DST_ALPHA: u32 = 0x80CA;
 pub const BLEND_SRC_ALPHA: u32 = 0x80CB;
 
+pub const INT: u32 = 0x1404;
 pub const UNSIGNED_INT: u32 = 0x1405;
 pub const VERTEX_ARRAY_BINDING: u32 = 0x85B5;
 

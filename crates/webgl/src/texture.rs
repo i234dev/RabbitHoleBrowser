@@ -233,13 +233,13 @@ impl Context {
             }
             _ => return Err(Error::InvalidOperation),
         };
-        u.value = Value::from(u.ty, &[value]);
+        u.value = Value::from(u.ty, &[value])?;
         Ok(())
     }
     pub(super) fn validate_samplers(&self, e: &Executable) -> Result<()> {
         for u in &e.uniforms {
             if u.ty == Ty::Sampler2D {
-                let unit = u.value.v[0] as usize;
+                let unit = u.value.floats()?[0] as usize;
                 let Some(&id) = self.bound_textures.get(unit) else {
                     return Err(Error::InvalidOperation);
                 };

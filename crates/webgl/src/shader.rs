@@ -12,6 +12,10 @@ pub(crate) enum Ty {
     // Integer literals can be converted by constructors, not assigned or
     // used in arithmetic as if they were floating-point values.
     IntLiteral,
+    Int,
+    IVec2,
+    IVec3,
+    IVec4,
     Bool,
     Sampler2D,
     Float,
@@ -39,10 +43,10 @@ impl Ty {
     }
     pub fn n(self) -> usize {
         match self {
-            Self::IntLiteral | Self::Bool | Self::Sampler2D | Self::Float => 1,
-            Self::Vec2 => 2,
-            Self::Vec3 => 3,
-            Self::Vec4 => 4,
+            Self::IntLiteral | Self::Int | Self::Bool | Self::Sampler2D | Self::Float => 1,
+            Self::Vec2 | Self::IVec2 => 2,
+            Self::Vec3 | Self::IVec3 => 3,
+            Self::Vec4 | Self::IVec4 => 4,
             Self::Mat2 => 4,
             Self::Mat3 => 9,
             Self::Mat4 => 16,
@@ -59,20 +63,55 @@ impl Ty {
     fn vector(n: usize) -> Self {
         [Self::Float, Self::Vec2, Self::Vec3, Self::Vec4][n - 1]
     }
+    pub fn is_integer(self) -> bool {
+        matches!(self, Self::Int | Self::IVec2 | Self::IVec3 | Self::IVec4)
+    }
 }
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Value {
-    pub ty: Ty,
-    pub v: [f32; 16],
+pub(crate) enum Value {
+    Floats(Ty, [f32; 16]),
+    Integers(Ty, [i32; 4]),
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvalError { Type, Shape, MissingReturn }
+pub(crate) type EvalResult<T> = Result<T, EvalError>;
 impl Value {
     pub fn zero(ty: Ty) -> Self {
-        Self { ty, v: [0.; 16] }
+        if ty.is_integer() { Self::Integers(ty, [0; 4]) } else { Self::Floats(ty, [0.; 16]) }
     }
-    pub fn from(ty: Ty, src: &[f32]) -> Self {
-        let mut r = Self::zero(ty);
-        r.v[..src.len()].copy_from_slice(src);
-        r
+    pub fn ty(&self) -> Ty {
+        match self { Self::Floats(ty, _) | Self::Integers(ty, _) => *ty }
+    }
+    pub fn floats(&self) -> EvalResult<&[f32; 16]> {
+        match self { Self::Floats(_, values) => Ok(values), Self::Integers(_, _) => Err(EvalError::Type) }
+    }
+    pub fn floats_mut(&mut self) -> EvalResult<&mut [f32; 16]> {
+        match self { Self::Floats(_, values) => Ok(values), Self::Integers(_, _) => Err(EvalError::Type) }
+    }
+    pub fn integers(&self) -> EvalResult<&[i32; 4]> {
+        match self { Self::Integers(_, values) => Ok(values), Self::Floats(_, _) => Err(EvalError::Type) }
+    }
+    pub fn from(ty: Ty, src: &[f32]) -> EvalResult<Self> {
+        if ty.is_integer() { return Err(EvalError::Type); }
+        if src.len() != ty.n() { return Err(EvalError::Shape); }
+        let mut values = [0.; 16];
+        values[..src.len()].copy_from_slice(src);
+        Ok(Self::Floats(ty, values))
+    }
+    pub fn from_i32(ty: Ty, src: &[i32]) -> EvalResult<Self> {
+        if !ty.is_integer() { return Err(EvalError::Type); }
+        if src.len() != ty.n() { return Err(EvalError::Shape); }
+        let mut values = [0; 4];
+        values[..src.len()].copy_from_slice(src);
+        Ok(Self::Integers(ty, values))
+    }
+    fn validate(&self, expected: Ty) -> EvalResult<()> {
+        if self.ty() != expected { return Err(EvalError::Type); }
+        match self {
+            Self::Integers(ty, _) if ty.is_integer() => Ok(()),
+            Self::Floats(ty, _) if !ty.is_integer() => Ok(()),
+            _ => Err(EvalError::Type),
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,21 +174,21 @@ impl Statement {
     }
 }
 enum Flow { Next, Return(Option<Value>) }
-fn execute(statements: &[Statement], env: &mut BTreeMap<String,Value>, globals: &BTreeMap<String,Value>, sample: &dyn Fn(i32,[f32;2])->[f32;4]) -> Flow {
+fn execute(statements: &[Statement], env: &mut BTreeMap<String,Value>, globals: &BTreeMap<String,Value>, sample: &dyn Fn(i32,[f32;2])->EvalResult<[f32;4]>) -> EvalResult<Flow> {
     for statement in statements {
         let flow = match statement {
             Statement::Assign(name, expr) => {
-                let value = expr.eval(env, globals, sample);
+                let value = expr.eval(env, globals, sample)?;
                 env.insert(name.clone(), value);
                 Flow::Next
             }
-            Statement::Block(body) => execute(body,env,globals,sample),
-            Statement::If(condition, yes, no) => execute(if condition.eval(env,globals,sample).v[0] != 0. { yes } else { no }, env,globals,sample),
-            Statement::Return(expr) => Flow::Return(expr.as_ref().map(|expr| expr.eval(env,globals,sample))),
+            Statement::Block(body) => execute(body,env,globals,sample)?,
+            Statement::If(condition, yes, no) => execute(if condition.eval(env,globals,sample)?.floats()?[0] != 0. { yes } else { no }, env,globals,sample)?,
+            Statement::Return(expr) => Flow::Return(expr.as_ref().map(|expr| expr.eval(env,globals,sample)).transpose()?),
         };
-        if !matches!(flow, Flow::Next) { return flow; }
+        if !matches!(flow, Flow::Next) { return Ok(flow); }
     }
-    Flow::Next
+    Ok(Flow::Next)
 }
 
 /// Every reachable return and fallthrough in main must have written its output.
@@ -192,18 +231,20 @@ impl Function {
         &self,
         globals: &BTreeMap<String, Value>,
         values: &[Value],
-        sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
-    ) -> Value {
+        sample: &dyn Fn(i32, [f32; 2]) -> EvalResult<[f32; 4]>,
+    ) -> EvalResult<Value> {
+        if values.len() != self.parameters.len() { return Err(EvalError::Shape); }
         let mut env = BTreeMap::new();
         for (name, symbol) in &self.locals {
             env.insert(name.clone(), Value::zero(symbol.ty));
         }
-        for ((name, _), value) in self.parameters.iter().zip(values) {
+        for ((name, ty), value) in self.parameters.iter().zip(values) {
+            value.validate(*ty)?;
             env.insert(name.clone(), *value);
         }
-        match execute(&self.statements, &mut env, globals, sample) {
-            Flow::Return(Some(value)) => value,
-            _ => unreachable!("helpers have typed returns on every path"),
+        match execute(&self.statements, &mut env, globals, sample)? {
+            Flow::Return(Some(value)) => Ok(value),
+            _ => Err(EvalError::MissingReturn),
         }
     }
 }
@@ -328,42 +369,45 @@ impl Builtin {
         };
         result.ok_or_else(|| format!("no supported {self:?} overload for {types:?}"))
     }
-    fn eval(self, ty: Ty, args: &[Value]) -> Value {
-        let a = args[0];
+    fn eval(self, ty: Ty, args: &[Value]) -> EvalResult<Value> {
+        let a = args.first().ok_or(EvalError::Shape)?;
+        if args.len() > 3 { return Err(EvalError::Shape); }
+        let mut input = [&[0.; 16]; 3];
+        for (i, arg) in args.iter().enumerate() { input[i] = arg.floats()?; }
         let mut result = Value::zero(ty);
+        let output = result.floats_mut()?;
         match self {
             Self::Length | Self::Distance | Self::Dot => {
-                result.v[0] = (0..a.ty.n())
+                output[0] = (0..a.ty().n())
                     .map(|i| match self {
-                        Self::Dot => a.v[i] * args[1].v[i],
-                        Self::Distance => (a.v[i] - args[1].v[i]).powi(2),
-                        _ => a.v[i] * a.v[i],
+                        Self::Dot => input[0][i] * input[1][i],
+                        Self::Distance => (input[0][i] - input[1][i]).powi(2),
+                        _ => input[0][i] * input[0][i],
                     })
                     .sum::<f32>();
                 if !matches!(self, Self::Dot) {
-                    result.v[0] = result.v[0].sqrt();
+                    output[0] = output[0].sqrt();
                 }
             }
             Self::Normalize => {
-                let length = a.v[..a.ty.n()].iter().map(|x| x * x).sum::<f32>().sqrt();
-                for i in 0..a.ty.n() {
-                    result.v[i] = a.v[i] / length;
+                let length = input[0][..a.ty().n()].iter().map(|x| x * x).sum::<f32>().sqrt();
+                for i in 0..a.ty().n() {
+                    output[i] = input[0][i] / length;
                 }
             }
             Self::Cross => {
-                let b = args[1];
-                result.v[..3].copy_from_slice(&[
-                    a.v[1] * b.v[2] - a.v[2] * b.v[1],
-                    a.v[2] * b.v[0] - a.v[0] * b.v[2],
-                    a.v[0] * b.v[1] - a.v[1] * b.v[0],
+                output[..3].copy_from_slice(&[
+                    input[0][1] * input[1][2] - input[0][2] * input[1][1],
+                    input[0][2] * input[1][0] - input[0][0] * input[1][2],
+                    input[0][0] * input[1][1] - input[0][1] * input[1][0],
                 ]);
             }
             _ => {
                 for i in 0..ty.n() {
                     let at =
-                        |arg: usize| args[arg].v[if args[arg].ty == Ty::Float { 0 } else { i }];
+                        |arg: usize| input[arg][if args[arg].ty() == Ty::Float { 0 } else { i }];
                     let x = at(0);
-                    result.v[i] = match self {
+                    output[i] = match self {
                         Self::Radians => x.to_radians(),
                         Self::Degrees => x.to_degrees(),
                         Self::Sin => x.sin(),
@@ -415,7 +459,7 @@ impl Builtin {
                 }
             }
         }
-        result
+        Ok(result)
     }
 }
 #[derive(Clone, Debug)]
@@ -431,16 +475,37 @@ pub(crate) struct Shader {
     pub cost: usize,
 }
 impl Shader {
-    pub fn run(&self, env: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    /// Values supplied by the context must match both the declared type and the
+    /// payload variant. Missing locals are initialized by run_with_sampler.
+    pub fn validate_inputs(&self, env: &BTreeMap<String, Value>) -> EvalResult<()> {
+        for (name, symbol) in &self.symbols {
+            if let Some(value) = env.get(name) { value.validate(symbol.ty)?; }
+            else if symbol.qual == Qual::Uniform && self.reads.contains(name) { return Err(EvalError::Type); }
+        }
+        Ok(())
+    }
+    fn validate_program(&self) -> EvalResult<()> {
+        if self.symbols.get(&self.output).is_none_or(|symbol| symbol.ty != Ty::Vec4) { return Err(EvalError::Type); }
+        let globals: BTreeMap<_, _> = self.function_globals.iter().map(|name| {
+            let symbol = self.symbols.get(name).ok_or(EvalError::Type)?;
+            if symbol.qual == Qual::Local { return Err(EvalError::Type); }
+            Ok((name.clone(), symbol.ty))
+        }).collect::<EvalResult<_>>()?;
+        let locals: BTreeMap<_, _> = self.symbols.iter().map(|(name,s)| (name.clone(),s.ty)).collect();
+        let mut budget = 4096;
+        validate_statements(&self.statements, &locals, &globals, None, &mut budget)
+    }
+    pub fn run(&self, env: BTreeMap<String, Value>) -> EvalResult<BTreeMap<String, Value>> {
         self.run_with_sampler(env, &|_, _| {
-            unreachable!("vertex shaders cannot sample textures")
+            Err(EvalError::Type)
         })
     }
     pub fn run_with_sampler(
         &self,
         mut env: BTreeMap<String, Value>,
-        sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
-    ) -> BTreeMap<String, Value> {
+        sample: &dyn Fn(i32, [f32; 2]) -> EvalResult<[f32; 4]>,
+    ) -> EvalResult<BTreeMap<String, Value>> {
+        self.validate_inputs(&env)?;
         for (name, sym) in &self.symbols {
             env.entry(name.clone())
                 .or_insert_with(|| Value::zero(sym.ty));
@@ -450,140 +515,265 @@ impl Shader {
         let globals = self
             .function_globals
             .iter()
-            .map(|name| (name.clone(), env[name]))
-            .collect();
-        execute(&self.statements, &mut env, &globals, sample);
-        env
+            .map(|name| Ok((name.clone(), *env.get(name).ok_or(EvalError::Type)?)))
+            .collect::<EvalResult<_>>()?;
+        execute(&self.statements, &mut env, &globals, sample)?;
+        Ok(env)
+    }
+}
+fn validation_step(budget: &mut usize) -> EvalResult<()> {
+    *budget = budget.checked_sub(1).ok_or(EvalError::Shape)?;
+    Ok(())
+}
+fn validate_statements(body: &[Statement], locals: &BTreeMap<String, Ty>, globals: &BTreeMap<String, Ty>, result: Option<Ty>, budget: &mut usize) -> EvalResult<()> {
+    for statement in body {
+        validation_step(budget)?;
+        match statement {
+            Statement::Assign(name, expr) => {
+                expr.validate(locals, globals, budget)?;
+                if locals.get(name) != Some(&expr.ty) { return Err(EvalError::Type); }
+            }
+            Statement::Block(body) => validate_statements(body, locals, globals, result, budget)?,
+            Statement::If(condition, yes, no) => {
+                condition.validate(locals, globals, budget)?;
+                if condition.ty != Ty::Bool { return Err(EvalError::Type); }
+                validate_statements(yes, locals, globals, result, budget)?;
+                validate_statements(no, locals, globals, result, budget)?;
+            }
+            Statement::Return(expr) => match (result, expr) {
+                (Some(expected), Some(expr)) => {
+                    expr.validate(locals, globals, budget)?;
+                    if expected != expr.ty { return Err(EvalError::Type); }
+                }
+                (None, None) => {}
+                _ => return Err(EvalError::Type),
+            }
+        }
+    }
+    Ok(())
+}
+impl Function {
+    fn validate(&self, globals: &BTreeMap<String, Ty>, budget: &mut usize) -> EvalResult<()> {
+        if self.parameters.len() > MAX_PARAMETERS || self.call_depth > MAX_CALL_DEPTH { return Err(EvalError::Shape); }
+        let locals: BTreeMap<_, _> = self.locals.iter().map(|(name,s)| (name.clone(),s.ty)).collect();
+        for (name, ty) in &self.parameters {
+            if locals.get(name) != Some(ty) { return Err(EvalError::Type); }
+        }
+        if !self.statements.last().is_some_and(Statement::returns) { return Err(EvalError::MissingReturn); }
+        let captures = self.globals.iter().map(|name| Ok((name.clone(), *globals.get(name).ok_or(EvalError::Type)?))).collect::<EvalResult<BTreeMap<_, _>>>()?;
+        validate_statements(&self.statements, &locals, &captures, Some(self.result_type), budget)
     }
 }
 impl Expr {
+    fn validate(&self, locals: &BTreeMap<String, Ty>, globals: &BTreeMap<String, Ty>, budget: &mut usize) -> EvalResult<()> {
+        validation_step(budget)?;
+        // The first checkpoint refactors storage only; integer expressions will
+        // be admitted by a subsequent compiler milestone, with typed rules.
+        if self.ty.is_integer() { return Err(EvalError::Type); }
+        let valid = match &self.kind {
+            ExprKind::Number(_) => matches!(self.ty, Ty::Float | Ty::IntLiteral),
+            ExprKind::Boolean(_) => self.ty == Ty::Bool,
+            ExprKind::Name(name) => locals.get(name) == Some(&self.ty),
+            ExprKind::Global(name) => globals.get(name) == Some(&self.ty),
+            ExprKind::Neg(expr) | ExprKind::Not(expr) => {
+                expr.validate(locals, globals, budget)?;
+                if matches!(self.kind, ExprKind::Not(_)) { self.ty == Ty::Bool && expr.ty == Ty::Bool }
+                else { self.ty == expr.ty && !matches!(self.ty, Ty::Bool | Ty::Sampler2D) }
+            }
+            ExprKind::Logical(_, a, b) => {
+                a.validate(locals, globals, budget)?; b.validate(locals, globals, budget)?;
+                self.ty == Ty::Bool && a.ty == Ty::Bool && b.ty == Ty::Bool
+            }
+            ExprKind::Compare(op, a, b) => {
+                a.validate(locals, globals, budget)?; b.validate(locals, globals, budget)?;
+                self.ty == Ty::Bool && a.ty == b.ty && if matches!(op, Compare::Equal | Compare::NotEqual) {
+                    !matches!(a.ty, Ty::IntLiteral | Ty::Sampler2D)
+                } else { a.ty == Ty::Float }
+            }
+            ExprKind::Swizzle(expr, indices) => {
+                expr.validate(locals, globals, budget)?;
+                !indices.is_empty() && indices.len() <= 4 && matches!(expr.ty, Ty::Vec2 | Ty::Vec3 | Ty::Vec4)
+                    && indices.iter().all(|i| *i < expr.ty.n()) && self.ty == Ty::vector(indices.len())
+            }
+            ExprKind::Texture(unit, uv) => {
+                unit.validate(locals, globals, budget)?; uv.validate(locals, globals, budget)?;
+                self.ty == Ty::Vec4 && unit.ty == Ty::Sampler2D && uv.ty == Ty::Vec2
+            }
+            ExprKind::Builtin(function, args) => {
+                for arg in args { arg.validate(locals, globals, budget)?; }
+                function.result_type(args).is_ok_and(|ty| ty == self.ty)
+            }
+            ExprKind::Call(function, args) => {
+                if args.len() != function.parameters.len() { return Err(EvalError::Shape); }
+                for (arg, (_, ty)) in args.iter().zip(&function.parameters) {
+                    arg.validate(locals, globals, budget)?;
+                    if arg.ty != *ty { return Err(EvalError::Type); }
+                }
+                function.validate(globals, budget)?;
+                self.ty == function.result_type
+            }
+            ExprKind::Construct(args) => {
+                if args.is_empty() || args.len() > 16 { return Err(EvalError::Shape); }
+                for arg in args { arg.validate(locals, globals, budget)?; }
+                let total: usize = args.iter().map(|arg| arg.ty.n()).sum();
+                let scalar = args.len() == 1 && matches!(args[0].ty, Ty::Float | Ty::IntLiteral);
+                let conversion = self.ty.matrix_dim().is_some() && args.len() == 1 && args[0].ty.matrix_dim().is_some();
+                let trunc = args.len() == 1 && args[0].ty.matrix_dim().is_none() && total >= self.ty.n() && self.ty.matrix_dim().is_none();
+                let components = self.ty.matrix_dim().is_some() && total >= self.ty.n() && total - args[args.len()-1].ty.n() < self.ty.n();
+                self.ty != Ty::Sampler2D
+                    && (scalar || conversion || trunc || components || total == self.ty.n())
+                    && (self.ty != Ty::Float || scalar)
+                    && if self.ty == Ty::Bool { args.len() == 1 && args[0].ty == Ty::Bool }
+                    else { args.iter().all(|arg| !matches!(arg.ty, Ty::Bool | Ty::Sampler2D) && (conversion || arg.ty.matrix_dim().is_none())) }
+            }
+            ExprKind::Binary(op, a, b) => {
+                a.validate(locals, globals, budget)?; b.validate(locals, globals, budget)?;
+                if !matches!(op, '+' | '-' | '*' | '/') || matches!(a.ty, Ty::Bool | Ty::Sampler2D | Ty::IntLiteral) || matches!(b.ty, Ty::Bool | Ty::Sampler2D | Ty::IntLiteral) { return Err(EvalError::Type); }
+                let (ad, bd) = (a.ty.matrix_dim(), b.ty.matrix_dim());
+                let expected = if *op == '*' && ad.is_some_and(|n| b.ty == Ty::vector(n)) { Some(b.ty) }
+                    else if *op == '*' && bd.is_some_and(|n| a.ty == Ty::vector(n)) { Some(a.ty) }
+                    else if a.ty == b.ty || b.ty == Ty::Float { Some(a.ty) }
+                    else if a.ty == Ty::Float { Some(b.ty) } else { None };
+                expected == Some(self.ty)
+            }
+        };
+        if valid { Ok(()) } else { Err(EvalError::Type) }
+    }
     fn eval(
         &self,
         env: &BTreeMap<String, Value>,
         globals: &BTreeMap<String, Value>,
-        sample: &dyn Fn(i32, [f32; 2]) -> [f32; 4],
-    ) -> Value {
+        sample: &dyn Fn(i32, [f32; 2]) -> EvalResult<[f32; 4]>,
+    ) -> EvalResult<Value> {
         match &self.kind {
             ExprKind::Boolean(value) => Value::from(Ty::Bool, &[u8::from(*value) as f32]),
-            ExprKind::Not(expr) => Value::from(Ty::Bool, &[u8::from(expr.eval(env,globals,sample).v[0] == 0.) as f32]),
+            ExprKind::Not(expr) => Value::from(Ty::Bool, &[u8::from(expr.eval(env,globals,sample)?.floats()?[0] == 0.) as f32]),
             ExprKind::Logical(op,a,b) => {
-                let a = a.eval(env,globals,sample).v[0] != 0.;
+                let a = a.eval(env,globals,sample)?.floats()?[0] != 0.;
                 let value = match op {
-                    Logical::And => a && b.eval(env,globals,sample).v[0] != 0.,
-                    Logical::Or => a || b.eval(env,globals,sample).v[0] != 0.,
-                    Logical::Xor => a != (b.eval(env,globals,sample).v[0] != 0.),
+                    Logical::And => a && b.eval(env,globals,sample)?.floats()?[0] != 0.,
+                    Logical::Or => a || b.eval(env,globals,sample)?.floats()?[0] != 0.,
+                    Logical::Xor => a != (b.eval(env,globals,sample)?.floats()?[0] != 0.),
                 };
                 Value::from(Ty::Bool,&[u8::from(value) as f32])
             }
             ExprKind::Compare(op,a,b) => {
-                let a=a.eval(env,globals,sample);
-                let b=b.eval(env,globals,sample);
+                let a=a.eval(env,globals,sample)?;
+                let b=b.eval(env,globals,sample)?;
+                let av = a.floats()?;
+                let bv = b.floats()?;
                 let value=match op {
-                    Compare::Less => a.v[0] < b.v[0], Compare::LessEqual => a.v[0] <= b.v[0],
-                    Compare::Greater => a.v[0] > b.v[0], Compare::GreaterEqual => a.v[0] >= b.v[0],
-                    Compare::Equal => a.v[..a.ty.n()] == b.v[..b.ty.n()],
-                    Compare::NotEqual => a.v[..a.ty.n()] != b.v[..b.ty.n()],
+                    Compare::Less => av[0] < bv[0], Compare::LessEqual => av[0] <= bv[0],
+                    Compare::Greater => av[0] > bv[0], Compare::GreaterEqual => av[0] >= bv[0],
+                    Compare::Equal => av[..a.ty().n()] == bv[..b.ty().n()],
+                    Compare::NotEqual => av[..a.ty().n()] != bv[..b.ty().n()],
                 };
                 Value::from(Ty::Bool,&[u8::from(value) as f32])
             }
             ExprKind::Call(function, args) => {
                 let mut values = [Value::zero(Ty::Float); MAX_PARAMETERS];
                 for (i, arg) in args.iter().enumerate() {
-                    values[i] = arg.eval(env, globals, sample);
+                    values[i] = arg.eval(env, globals, sample)?;
                 }
                 function.eval(globals, &values[..args.len()], sample)
             }
             ExprKind::Builtin(function, args) => {
                 let mut values = [Value::zero(Ty::Float); 3];
                 for (i, arg) in args.iter().enumerate() {
-                    values[i] = arg.eval(env, globals, sample);
+                    values[i] = arg.eval(env, globals, sample)?;
                 }
                 function.eval(self.ty, &values[..args.len()])
             }
             ExprKind::Texture(unit, uv) => {
-                let unit = unit.eval(env, globals, sample);
-                let uv = uv.eval(env, globals, sample);
-                Value::from(Ty::Vec4, &sample(unit.v[0] as i32, [uv.v[0], uv.v[1]]))
+                let unit = unit.eval(env, globals, sample)?;
+                let uv = uv.eval(env, globals, sample)?;
+                Value::from(Ty::Vec4, &sample(unit.floats()?[0] as i32, [uv.floats()?[0], uv.floats()?[1]])?)
             }
             ExprKind::Number(n) => Value::from(self.ty, &[*n]),
-            ExprKind::Name(n) => env[n],
-            ExprKind::Global(n) => globals[n],
+            ExprKind::Name(n) => env.get(n).copied().ok_or(EvalError::Type),
+            ExprKind::Global(n) => globals.get(n).copied().ok_or(EvalError::Type),
             ExprKind::Neg(e) => {
-                let mut r = e.eval(env, globals, sample);
-                for v in &mut r.v[..r.ty.n()] {
+                let mut r = e.eval(env, globals, sample)?;
+                let n = r.ty().n();
+                for v in &mut r.floats_mut()?[..n] {
                     *v = -*v;
                 }
-                r
+                Ok(r)
             }
             ExprKind::Swizzle(e, ix) => {
-                let a = e.eval(env, globals, sample);
+                let a = e.eval(env, globals, sample)?;
                 let mut r = Value::zero(self.ty);
                 for (i, &j) in ix.iter().enumerate() {
-                    r.v[i] = a.v[j];
+                    r.floats_mut()?[i] = a.floats()?[j];
                 }
-                r
+                Ok(r)
             }
             ExprKind::Construct(args) => {
-                let values: Vec<_> = args.iter().map(|a| a.eval(env, globals, sample)).collect();
+                let values: Vec<_> = args.iter().map(|a| a.eval(env, globals, sample)).collect::<EvalResult<_>>()?;
+                if values.is_empty() { return Err(EvalError::Shape); }
                 let mut r = Value::zero(self.ty);
-                if values.len() == 1 && matches!(values[0].ty, Ty::Float | Ty::IntLiteral) {
+                let output = r.floats_mut()?;
+                if values.len() == 1 && matches!(values[0].ty(), Ty::Float | Ty::IntLiteral) {
                     if let Some(n) = self.ty.matrix_dim() {
                         for i in 0..n {
-                            r.v[i * (n + 1)] = values[0].v[0];
+                            output[i * (n + 1)] = values[0].floats()?[0];
                         }
                     } else {
-                        r.v[..self.ty.n()].fill(values[0].v[0]);
+                        output[..self.ty.n()].fill(values[0].floats()?[0]);
                     }
-                } else if let (Some(dst), Some(src)) = (self.ty.matrix_dim(), values[0].ty.matrix_dim()) {
+                } else if let (Some(dst), Some(src)) = (self.ty.matrix_dim(), values[0].ty().matrix_dim()) {
                     // Matrix constructors preserve the common upper-left block;
                     // components outside it come from the identity matrix.
                     for col in 0..dst {
                         for row in 0..dst {
-                            r.v[col * dst + row] = if col < src && row < src {
-                                values[0].v[col * src + row]
+                            output[col * dst + row] = if col < src && row < src {
+                                values[0].floats()?[col * src + row]
                             } else { u8::from(col == row) as f32 };
                         }
                     }
                 } else {
                     let mut i = 0;
                     for v in values {
-                        for j in 0..v.ty.n() {
+                        for j in 0..v.ty().n() {
                             if i < self.ty.n() {
-                                r.v[i] = v.v[j];
+                                output[i] = v.floats()?[j];
                                 i += 1;
                             }
                         }
                     }
                 }
-                r
+                Ok(r)
             }
             ExprKind::Binary(op, a, b) => {
-                let (a, b) = (a.eval(env, globals, sample), b.eval(env, globals, sample));
+                let (a, b) = (a.eval(env, globals, sample)?, b.eval(env, globals, sample)?);
+                let av = a.floats()?;
+                let bv = b.floats()?;
                 let mut r = Value::zero(self.ty);
-                let (ad, bd) = (a.ty.matrix_dim(), b.ty.matrix_dim());
-                if *op == '*' && ad.is_some() && bd.is_none() && b.ty != Ty::Float {
+                let output = r.floats_mut()?;
+                let (ad, bd) = (a.ty().matrix_dim(), b.ty().matrix_dim());
+                if *op == '*' && ad.is_some() && bd.is_none() && b.ty() != Ty::Float {
                     let n = ad.unwrap();
                     for row in 0..n {
-                        r.v[row] = (0..n).map(|col| a.v[col * n + row] * b.v[col]).sum();
+                        output[row] = (0..n).map(|col| av[col * n + row] * bv[col]).sum();
                     }
-                } else if *op == '*' && bd.is_some() && ad.is_none() && a.ty != Ty::Float {
+                } else if *op == '*' && bd.is_some() && ad.is_none() && a.ty() != Ty::Float {
                     let n = bd.unwrap();
                     for col in 0..n {
-                        r.v[col] = (0..n).map(|row| a.v[row] * b.v[col * n + row]).sum();
+                        output[col] = (0..n).map(|row| av[row] * bv[col * n + row]).sum();
                     }
                 } else if *op == '*' && ad.is_some() && bd.is_some() {
                     let n = ad.unwrap();
                     for col in 0..n {
                         for row in 0..n {
-                            r.v[col * n + row] =
-                                (0..n).map(|k| a.v[k * n + row] * b.v[col * n + k]).sum();
+                            output[col * n + row] =
+                                (0..n).map(|k| av[k * n + row] * bv[col * n + k]).sum();
                         }
                     }
                 } else {
                     for i in 0..self.ty.n() {
-                        let x = a.v[if a.ty == Ty::Float { 0 } else { i }];
-                        let y = b.v[if b.ty == Ty::Float { 0 } else { i }];
-                        r.v[i] = match op {
+                        let x = av[if a.ty() == Ty::Float { 0 } else { i }];
+                        let y = bv[if b.ty() == Ty::Float { 0 } else { i }];
+                        output[i] = match op {
                             '+' => x + y,
                             '-' => x - y,
                             '*' => x * y,
@@ -592,7 +782,7 @@ impl Expr {
                         };
                     }
                 }
-                r
+                Ok(r)
             }
         }
     }
@@ -1560,6 +1750,7 @@ pub(crate) fn compile(source: &str, vertex: bool, max_version: u32) -> Result<Sh
         return Err(format!("shader must write {} on every path",p.shader.output));
     }
     p.shader.symbols.extend(p.locals);
+    p.shader.validate_program().map_err(|error| format!("shader invariant validation failed: {error:?}"))?;
     Ok(p.shader)
 }
 
@@ -1583,9 +1774,113 @@ mod control_flow_evaluation {
                 let source=format!("{prefix}uniform sampler2D image;bool touched(){{return {sample}(image,vec2(0.5)).r>0.0;}}bool route(bool flag){{if(flag){{{{return true;}}}}return touched();}}void main(){{if({expression}){{{output}=vec4(1.0,0.0,0.0,1.0);}}else{{{output}=vec4(0.0,1.0,0.0,1.0);}}}}");
                 let shader=compile(&source,false,version).unwrap();
                 let calls=Cell::new(0);
-                let result=shader.run_with_sampler(BTreeMap::new(),&|_,_| {calls.set(calls.get()+1);[1.,0.,0.,1.]});
+                let env = BTreeMap::from([("image".into(), Value::zero(Ty::Sampler2D))]);
+                let result=shader.run_with_sampler(env,&|_,_| {calls.set(calls.get()+1);Ok([1.,0.,0.,1.])}).unwrap();
                 assert_eq!(calls.get(),expected_calls,"{version}: {expression}");
-                assert_eq!(result[output].v[0],if expected_red {1.}else{0.},"{version}: {expression}");
+                assert_eq!(result[output].floats().unwrap()[0],if expected_red {1.}else{0.},"{version}: {expression}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod typed_value_contract {
+    use super::*;
+    use std::cell::Cell;
+    use std::mem::size_of;
+
+    #[test]
+    fn value_storage_does_not_exceed_the_previous_float_layout() {
+        #[allow(dead_code)]
+        struct PreviousValue { ty: Ty, values: [f32; 16] }
+        assert!(size_of::<Value>() <= size_of::<PreviousValue>(), "new={} previous={}", size_of::<Value>(), size_of::<PreviousValue>());
+    }
+
+    #[test]
+    fn typed_payloads_reject_wrong_views_tags_and_component_counts() {
+        let source = [i32::MIN, i32::MAX, 16_777_217, -16_777_217];
+        let value = Value::from_i32(Ty::IVec4, &source).unwrap();
+        assert_eq!(value.integers().unwrap(), &source);
+        assert_eq!(value.floats().unwrap_err(), EvalError::Type);
+        assert_eq!(Value::from(Ty::Int, &[1.]).unwrap_err(), EvalError::Type);
+        assert_eq!(Value::from_i32(Ty::Float, &[1]).unwrap_err(), EvalError::Type);
+        assert_eq!(Value::from_i32(Ty::IVec3, &[1, 2]).unwrap_err(), EvalError::Shape);
+        assert_eq!(Value::from(Ty::Vec4, &[1., 2., 3.]).unwrap_err(), EvalError::Shape);
+        assert_eq!(Value::Integers(Ty::Float, [0; 4]).validate(Ty::Float), Err(EvalError::Type));
+        assert_eq!(Value::Floats(Ty::Int, [0.; 16]).validate(Ty::Int), Err(EvalError::Type));
+    }
+
+    #[test]
+    fn float_payload_copies_preserve_nan_infinity_and_negative_zero_bits() {
+        let source = [f32::from_bits(0x7fc01234), f32::INFINITY, f32::NEG_INFINITY, -0.];
+        let value = Value::from(Ty::Vec4, &source).unwrap();
+        assert_eq!(value.floats().unwrap()[..4].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), source.map(f32::to_bits));
+        assert_eq!(value.integers().unwrap_err(), EvalError::Type);
+    }
+
+    fn source() -> &'static str {
+        "precision mediump float;uniform sampler2D image;vec4 inner(){return texture2D(image,vec2(0.5));}vec4 outer(){return inner();}void main(){if(false){gl_FragColor=outer();}else{gl_FragColor=vec4(0.0,1.0,0.0,1.0);}}"
+    }
+    fn branch_expr(shader: &mut Shader) -> &mut Expr {
+        let Statement::If(_, yes, _) = &mut shader.statements[0] else { panic!("fixture if"); };
+        let Statement::Assign(_, expr) = &mut yes[0] else { panic!("fixture assignment"); };
+        expr
+    }
+    fn inner_function(shader: &mut Shader) -> &mut Function {
+        let ExprKind::Call(outer, _) = &mut branch_expr(shader).kind else { panic!("fixture outer call"); };
+        let Statement::Return(Some(expr)) = &mut Arc::make_mut(outer).statements[0] else { panic!("fixture outer return"); };
+        let ExprKind::Call(inner, _) = &mut expr.kind else { panic!("fixture inner call"); };
+        Arc::make_mut(inner)
+    }
+
+    #[test]
+    fn invariant_validation_checks_untaken_branches_and_transitive_helpers_before_sampling() {
+        let original = compile(source(), false, 100).unwrap();
+        for case in 0..4 {
+            let mut invalid = original.clone();
+            let expected = match case {
+                0 => {
+                    let ExprKind::Call(_, args) = &mut branch_expr(&mut invalid).kind else { panic!("fixture call"); };
+                    args.push(Expr { ty: Ty::Float, kind: ExprKind::Number(1.) });
+                    EvalError::Shape
+                }
+                1 => { inner_function(&mut invalid).statements.clear(); EvalError::MissingReturn }
+                2 => {
+                    let original = branch_expr(&mut invalid).clone();
+                    branch_expr(&mut invalid).kind = ExprKind::Swizzle(Box::new(original), vec![4, 0, 1, 2]);
+                    EvalError::Type
+                }
+                _ => { branch_expr(&mut invalid).kind = ExprKind::Construct(vec![]); EvalError::Shape }
+            };
+            let calls = Cell::new(0);
+            let outcome = (|| {
+                invalid.validate_program()?;
+                invalid.run_with_sampler(BTreeMap::from([("image".into(), Value::zero(Ty::Sampler2D))]), &|_, _| { calls.set(calls.get()+1); Ok([1.,0.,0.,1.]) })
+            })();
+            assert_eq!(outcome.unwrap_err(), expected, "case={case}");
+            assert_eq!(calls.get(), 0, "case={case}");
+        }
+        let valid = compile(&source().replace("if(false)", "if(true)"), false, 100).unwrap();
+        let calls = Cell::new(0);
+        let result = valid.run_with_sampler(BTreeMap::from([("image".into(), Value::zero(Ty::Sampler2D))]), &|_, _| { calls.set(calls.get()+1); Ok([1.,0.,0.,1.]) }).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(&result["gl_FragColor"].floats().unwrap()[..4], &[1.,0.,0.,1.]);
+    }
+
+    #[test]
+    fn vertex_entry_rejects_texture_execution_instead_of_panicking_or_faking_a_texel() {
+        let shader = compile(&source().replace("if(false)", "if(true)"), false, 100).unwrap();
+        assert_eq!(shader.run(BTreeMap::from([("image".into(), Value::zero(Ty::Sampler2D))])).unwrap_err(), EvalError::Type);
+    }
+
+    #[test]
+    fn integer_spellings_are_still_rejected_in_this_storage_only_checkpoint() {
+        for version in [100, 300] {
+            for ty in ["int", "ivec2", "ivec3", "ivec4"] {
+                let prefix = if version == 300 { "#version 300 es\nprecision mediump float;out vec4 pixel;" } else { "precision mediump float;" };
+                let output = if version == 300 { "pixel" } else { "gl_FragColor" };
+                let shader = format!("{prefix}uniform {ty} value;void main(){{{output}=vec4(1.0);}}");
+                assert!(compile(&shader, false, version).is_err(), "{shader}");
             }
         }
     }

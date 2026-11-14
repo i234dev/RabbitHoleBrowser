@@ -106,6 +106,10 @@ impl Context {
         for u in &executable.uniforms {
             uniforms.insert(u.name.clone(), u.value);
         }
+        // The compiler verifies every AST path. Check context-owned payloads
+        // before preparing geometry or committing any depth/color fragment.
+        executable.vertex.validate_inputs(&uniforms)?;
+        executable.fragment.validate_inputs(&uniforms)?;
         let vertex_work = indices
             .len()
             .checked_mul(instances as usize)
@@ -133,15 +137,16 @@ impl Context {
                     let ty = executable.vertex.symbols[name].ty;
                     env.insert(
                         name.clone(),
-                        self.attribute_value(location, index, instance, ty),
+                        self.attribute_value(location, index, instance, ty)?,
                     );
                 }
-                let env = executable.vertex.run(env);
+                let env = executable.vertex.run(env)?;
                 let value = env["gl_Position"];
-                let position = std::array::from_fn(|i| value.v[i] as f64);
+                let components = value.floats()?;
+                let position = std::array::from_fn(|i| components[i] as f64);
                 let mut varyings = Vec::new();
                 for (name, ty) in &executable.varyings {
-                    varyings.extend(env[name].v[..ty.n()].iter().map(|v| *v as f64));
+                    varyings.extend(env[name].floats()?[..ty.n()].iter().map(|v| *v as f64));
                 }
                 vertices.push(Vertex { position, varyings });
             }
@@ -325,7 +330,7 @@ impl Context {
                 for (name, ty) in &e.varyings {
                     let mut value = Value::zero(*ty);
                     for j in 0..ty.n() {
-                        value.v[j] = (bary
+                        value.floats_mut()?[j] = (bary
                             .iter()
                             .zip(v)
                             .map(|(b, v)| b * v.varyings[offset + j] * v.inverse_w)
@@ -337,14 +342,15 @@ impl Context {
                 }
                 env.insert(
                     "gl_FragCoord".into(),
-                    Value::from(Ty::Vec4, &[px as f32, py as f32, depth, iw as f32]),
+                    Value::from(Ty::Vec4, &[px as f32, py as f32, depth, iw as f32])?,
                 );
                 let out = e
                     .fragment
-                    .run_with_sampler(env, &|unit, uv| self.sample_texture(unit, uv));
+                    .run_with_sampler(env, &|unit, uv| Ok(self.sample_texture(unit, uv)))?;
                 // Blend normalized source and destination before applying write masks.
                 // Buffer bytes stay raw RGBA; canvas premultiplication is separate.
-                let source = std::array::from_fn(|k| clamp(out[&e.fragment.output].v[k]));
+                let components = out[&e.fragment.output].floats()?;
+                let source = std::array::from_fn(|k| clamp(components[k]));
                 let destination = std::array::from_fn(|k| self.rgba[at * 4 + k] as f32 / 255.);
                 let mut color = self.blend.apply(source, destination);
                 if !self.alpha_channel {
