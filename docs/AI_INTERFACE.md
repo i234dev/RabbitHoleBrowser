@@ -552,7 +552,9 @@ still accepted and mean the default.
   `Promise still pending after N ms`.
 * `timeout=N` is a positive integer in milliseconds, defaulting to the configured
   auto-wait cap. It limits JS execution and observation, including VM work,
-  microtasks, callbacks and ready-response polling. It does not wait for an
+  microtasks, callbacks and ready-response polling. An execution watchdog may
+  stop work before this cap and report `Error: Console evaluation deadline expired`.
+  It does not wait for an
   unfinished background HTTP request to complete. Existing synchronous native
   I/O cannot always be interrupted, so this is not a wall-clock guarantee for
   arbitrary page code.

@@ -143,8 +143,11 @@ fn debug_cancels_replaced_document_and_bounds_runaway_microtasks() {
     assert!(result.contains("document was replaced"), "{result}");
     let started = Instant::now();
     let result = eval(&mut agent, "globalThis.haltDebugLoop=false; Promise.resolve().then(function recur(){if(!haltDebugLoop) Promise.resolve().then(recur)}); new Promise(()=>{})", 200);
-    assert!(result.contains("Promise still pending after 200 ms"), "{result}");
-    assert!(started.elapsed() < Duration::from_secs(1));
+    // The timeout is an upper bound: the CPU watchdog may abort the runaway
+    // work before the wall cap, without claiming that all 200 ms elapsed.
+    let message = result.lines().nth(2).unwrap_or("");
+    assert!(matches!(message, "Promise still pending after 200 ms" | "Error: Console evaluation deadline expired"), "{result}");
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}: {result}", started.elapsed());
     assert!(eval(&mut agent, "haltDebugLoop=true; 23", 500).contains("\n23\n"));
 }
 
