@@ -116,12 +116,13 @@ fn isolated_group_restores_overflow_ink_and_preserves_allowed_shadow_and_outline
     group(&mut parent, &mut budget, &alpha, 1.0, |child, _| {
         // The nominal border box is 12,10,8,8; ink deliberately extends out.
         child.draw_box_shadow(Rect::new(12.0, 10.0, 8.0, 8.0), [(0.0, 0.0); 4], (0.0, 0.0), 0.0, 4.0, Color::BLACK, false);
-        child.stroke_rect(Rect::new(10.0, 8.0, 12.0, 12.0), [2.0; 4], [Color::BLACK; 4], [3; 4], 0.0);
+        child.stroke_rect(Rect::new(6.0, 6.0, 24.0, 20.0), [2.0; 4], [Color::rgb(0, 0, 255); 4], [3; 4], 0.0);
         child.fill_rect(Rect::new(12.0, 10.0, 8.0, 8.0), Color::rgb(255, 0, 0));
         child.fill_rect(Rect::new(0.0, 0.0, 40.0, 3.0), Color::BLACK);
         Ok(())
     }).unwrap();
-    assert_eq!(parent.data[10 * 40 + 9], Color::BLACK.to_u32(), "shadow/outline outside border survives inside clip");
+    assert_eq!(parent.data[10 * 40 + 9], Color::BLACK.to_u32(), "shadow outside border survives inside clip");
+    assert_eq!(parent.data[14 * 40 + 7], 0x0000ff, "outline pixel outside both border and shadow survives");
     assert_eq!(parent.data[14 * 40 + 15], Color::rgb(255, 0, 0).to_u32());
     assert_eq!(parent.data[1], Color::WHITE.to_u32(), "overflow writes outside clip restored");
     assert_eq!(budget.live, 0);
