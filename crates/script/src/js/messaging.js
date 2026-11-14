@@ -127,7 +127,7 @@
   const send = (id, msg) => N.workerSend(id, JSON.stringify(msg));
   function bridgeTo(id, port, b) {
     workerBridges.set(b, port);
-    port.onmessage = (ev) => send(id, { t: 'port', b, d: C.serialize(ev.data) });
+    port.onmessage = (ev) => send(id, { t: 'port', b, d: C.serialize(ev.data), ports: outgoingWorkerPorts(id, ev.ports) });
   }
   function transferredPorts(transfer) {
     const list = Array.isArray(transfer) ? transfer : transfer && transfer.transfer ? Array.from(transfer.transfer) : [];
@@ -135,13 +135,27 @@
     for (const p of ports) if (p[S].detached) throw domError('Port at index 0 is already neutered.', 'DataCloneError');
     return ports;
   }
+  function outgoingWorkerPorts(id, transfer) {
+    return transferredPorts(transfer).map((p) => {
+      const b = 'o' + nextWorkerBridge++;
+      bridgeTo(id, p, b);
+      return b;
+    });
+  }
+  function incomingWorkerPorts(id, bridges) {
+    return (bridges || []).map((b) => {
+      const ch = new MessageChannel();
+      bridgeTo(id, ch.port2, b);
+      return ch.port1;
+    });
+  }
   function baseURL() { return (g.document && g.document.baseURI) || g.location.href; }
   N.registerProto('__worker_deliver', function deliver(id, text) {
     let m;
     try { m = JSON.parse(text); } catch (e) { return; }
     if (m.t === 'port') {
       const p = workerBridges.get(m.b);
-      if (p) p.postMessage(C.deserialize(m.d));
+      if (p) p.postMessage(C.deserialize(m.d), incomingWorkerPorts(id, m.ports));
       return;
     }
     const w = workerObjects.get(id);
@@ -154,7 +168,7 @@
     if (m.t === 'msg') {
       let data;
       try { data = C.deserialize(m.d); } catch (e) { w.dispatchEvent(new g.MessageEvent('messageerror', {})); return; }
-      const ports = (m.ports || []).map((b) => { const ch = new MessageChannel(); bridgeTo(id, ch.port2, b); return ch.port1; });
+      const ports = incomingWorkerPorts(id, m.ports);
       w.dispatchEvent(new g.MessageEvent('message', { data, ports }));
     }
   });
@@ -172,7 +186,7 @@
       const st = this[S];
       if (st.terminated) return;
       const d = C.serialize(message);
-      const ports = transferredPorts(transfer).map((p) => { const b = 'o' + nextWorkerBridge++; bridgeTo(st.id, p, b); return b; });
+      const ports = outgoingWorkerPorts(st.id, transfer);
       send(st.id, { t: 'msg', d, ports });
     }
     terminate() {
