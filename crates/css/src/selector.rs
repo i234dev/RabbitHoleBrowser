@@ -185,6 +185,45 @@ impl Selector {
         }
         true
     }
+    /// :has() cannot be nested, including through an implicit :is(parent).
+    fn contains_has(&self) -> bool {
+        self.compounds.iter().any(|c| c.pseudos.iter().any(|p| match p {
+            Pseudo::Has(_) => true,
+            Pseudo::Nesting(list) => list.iter().any(Selector::contains_has),
+            Pseudo::Is(list) | Pseudo::Where(list) | Pseudo::Not(list)
+            | Pseudo::Host(list) | Pseudo::HostContext(list) | Pseudo::Slotted(list)
+            | Pseudo::NthChildOf(_, _, list) | Pseudo::NthLastChildOf(_, _, list) => list.iter().any(Selector::contains_has),
+            _ => false,
+        }))
+    }
+
+    /// Apply :has()'s contextual restrictions to an implicit :is() parent.
+    /// Logical forgiving lists can retain their other valid alternatives;
+    /// strict argument lists invalidate their containing selector instead.
+    fn in_has_context(&self) -> Option<Self> {
+        if self.pseudo_element.is_some() { return None; }
+        let mut selector = self.clone();
+        for compound in &mut selector.compounds {
+            for pseudo in &mut compound.pseudos {
+                match pseudo {
+                    Pseudo::Has(_) => return None,
+                    Pseudo::Is(list) | Pseudo::Where(list) => {
+                        *list = list.iter().filter_map(Selector::in_has_context).collect();
+                    }
+                    Pseudo::Nesting(list) => {
+                        *list = Arc::new(list.iter().filter_map(Selector::in_has_context).collect());
+                    }
+                    Pseudo::Not(list) | Pseudo::Host(list) | Pseudo::HostContext(list) | Pseudo::Slotted(list)
+                    | Pseudo::NthChildOf(_, _, list) | Pseudo::NthLastChildOf(_, _, list) => {
+                        *list = list.iter().map(Selector::in_has_context).collect::<Option<Vec<_>>>()?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some(selector)
+    }
+
     pub fn specificity(&self) -> Specificity {
         let mut s = Specificity(0, 0, 0);
         for c in &self.compounds {
@@ -238,7 +277,7 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
                 }
             }
             Pseudo::Nesting(list) => {
-                if let Some(m) = list.iter().map(Selector::specificity).max() {
+                if let Some(m) = list.iter().filter(|s| s.pseudo_element.is_none()).map(Selector::specificity).max() {
                     s.0 += m.0; s.1 += m.1; s.2 += m.2;
                 }
             }
@@ -254,25 +293,33 @@ fn add_compound_specificity(c: &Compound, s: &mut Specificity) {
 pub struct SelectorParser<'a> {
     parent: Option<Arc<Vec<Selector>>>,
     implicit_parent: bool,
+    in_has: bool,
     toks: &'a [Token],
     pos: usize,
 }
 
 impl<'a> SelectorParser<'a> {
     pub fn new(toks: &'a [Token]) -> Self {
-        SelectorParser { toks, pos: 0, parent: None, implicit_parent: false }
+        SelectorParser { toks, pos: 0, parent: None, implicit_parent: false, in_has: false }
     }
 
     pub(crate) fn nested(toks: &'a [Token], parent: Arc<Vec<Selector>>) -> Self {
-        Self { toks, pos: 0, parent: Some(parent), implicit_parent: true }
+        Self { toks, pos: 0, parent: Some(parent), implicit_parent: true, in_has: false }
     }
 
     fn subparser(&self, toks: &'a [Token]) -> Self {
-        Self { toks, pos: 0, parent: self.parent.clone(), implicit_parent: false }
+        Self { toks, pos: 0, parent: self.parent.clone(), implicit_parent: false, in_has: self.in_has }
     }
 
     fn nesting(&self) -> Pseudo {
-        self.parent.as_ref().map(|p| Pseudo::Nesting(p.clone()))
+        self.parent.as_ref().map(|parent| {
+            // The nesting parent acts as a forgiving :is() list: contextual
+            // restrictions on :has() flow through &, discarding only invalid
+            // alternatives, not the other valid parent selectors.
+            if self.in_has && parent.iter().any(Selector::contains_has) {
+                Pseudo::Nesting(Arc::new(parent.iter().filter_map(Selector::in_has_context).collect()))
+            } else { Pseudo::Nesting(parent.clone()) }
+        })
             .unwrap_or_else(|| Pseudo::Where(vec![Selector { compounds: vec![Compound { pseudos: vec![Pseudo::Scope], ..Compound::default() }], combinators: vec![], pseudo_element: None }]))
     }
 
@@ -609,7 +656,8 @@ impl<'a> SelectorParser<'a> {
                     "not" | "is" | "where" | "matches" | "-webkit-any" | "-moz-any" => {
                         let mut sub = self.subparser(inner);
                         // Forgiving selector list: drop invalid parts.
-                        let list = sub.parse_list_forgiving();
+                        let mut list = sub.parse_list_forgiving();
+                        if lname != "not" { list.retain(|s| s.pseudo_element.is_none()); }
                         match lname.as_str() {
                             "not" => Pseudo::Not(list),
                             "where" => Pseudo::Where(list),
@@ -645,6 +693,7 @@ impl<'a> SelectorParser<'a> {
                     }
                     "has" => {
                         let mut sub = self.subparser(inner);
+                        sub.in_has = true;
                         Pseudo::Has(sub.parse_relative_list())
                     }
                     "lang" => Pseudo::Lang(

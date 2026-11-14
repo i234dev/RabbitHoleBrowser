@@ -922,6 +922,37 @@ mod tests {
     }
 
     #[test]
+    fn nesting_context_invalid_pseudo_elements_have_zero_specificity() {
+        let sheet = parse_stylesheet("*, ::before { & * {color:red} }");
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let mut rules = Vec::new(); sheet.active_rules(&env, &mut rules);
+        assert_eq!(rules[0].selectors[0].specificity(), Specificity(0, 0, 0));
+        let tokens = Tokenizer::tokenize(":is(*, ::before) *");
+        let list = selector::SelectorParser::new(&tokens).parse_list().unwrap();
+        assert_eq!(list[0].specificity(), Specificity(0, 0, 0));
+    }
+
+    #[test]
+    fn nesting_ampersand_inside_has_excludes_parent_has_alternatives() {
+        let sheet = parse_stylesheet("li:has(strong) {display:none; :has(> &) {color:red} }");
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let mut rules = Vec::new(); sheet.active_rules(&env, &mut rules);
+        let doc = rabbithole_html::parse("<ul><li><strong></strong></li><li class=box></li></ul>");
+        let ul = doc.find_element("ul").unwrap();
+        assert!(matches(&rules[0].selectors[0], &doc, doc.find_element("li").unwrap()));
+        assert!(!matches(&rules[1].selectors[0], &doc, ul));
+        assert_eq!(rules[1].selectors[0].specificity(), Specificity(0, 0, 0));
+        let mixed = parse_stylesheet("li:has(strong), .box { :has(> &) {color:green} }");
+        let mut rules = Vec::new(); mixed.active_rules(&env, &mut rules);
+        assert!(matches(&rules[0].selectors[0], &doc, ul));
+        assert_eq!(rules[0].selectors[0].specificity(), Specificity(0, 1, 0));
+        let logical = parse_stylesheet(".box:is(.box, :has(strong)) { :has(> &) {color:green} }");
+        let mut rules = Vec::new(); logical.active_rules(&env, &mut rules);
+        assert!(matches(&rules[0].selectors[0], &doc, ul));
+        assert_eq!(rules[0].selectors[0].specificity(), Specificity(0, 2, 0));
+    }
+
+    #[test]
     fn media_queries_color_features() {
         let env = MediaEnv { width: 0.0, height: 0.0, screen: true, scripting: true };
         let m = |q: &str| parse_media_query(q).evaluate(&env);
