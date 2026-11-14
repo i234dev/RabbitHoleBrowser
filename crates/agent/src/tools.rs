@@ -76,9 +76,9 @@ pub fn definitions() -> Vec<Value> {
                 "ref": r.clone(), "text": { "type": "string" }, "key": { "type": "string" }, "clear": { "type": "boolean", "description": "Replace the current value (default false: append)" },
                 "submit": { "type": "boolean", "description": "Press Enter afterwards" }, "dialog": dialog
             } } }),
-        json!({ "name": "fill", "description": "Forms as a unit. No args: list forms. ref=@fN: list its fields. values={label|name|@eN: value} fills; submit=true validates and submits.",
+        json!({ "name": "fill", "description": "List forms, fill fields, or submit=true. Follows input/change navigation and stops pending fields. values needs ref, @eN keys, or one form.",
             "inputSchema": { "type": "object", "properties": {
-                "ref": r.clone(), "values": { "type": "object", "description": "Field → value (text, true/false for checkboxes, option label for selects/radios)" },
+                "ref": r.clone(), "values": { "type": "object", "description": "Name/label/@eN → text, checkbox boolean, or option label; no ref requires @eN keys or one form" },
                 "value": { "description": "Value for a single field ref" }, "submit": { "type": "boolean" }, "dialog": dialog
             } } }),
         json!({ "name": "scroll", "description": "Scroll the page or an element into view; until=@eN|text scrolls until visible; load_more=true loads infinite lists.",
@@ -714,132 +714,274 @@ fn type_(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     Ok(Out::text(agent.finish_action(ti, frame, before, outcome, request, &desc, target)?))
 }
 
-fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
-    let ti = agent.tab_index()?;
-    agent.ensure_loaded(ti)?;
-    let values = a.get("values").and_then(Value::as_object).cloned();
-    let submit = b(a, "submit").unwrap_or(false);
-    let single = a.get("value").cloned();
-    let Some(r) = s(a, "ref").map(|s| s.to_string()) else {
-        if values.is_some() {
-            return Err("fill with values needs ref (the form @fN or a field @eN); call fill without arguments to list forms".into());
+#[derive(Clone)]
+enum FillTarget {
+    Ref(String),
+    InForm { form: String, key: String },
+}
+
+struct FillOperation {
+    key: String,
+    value: Value,
+    target: FillTarget,
+}
+
+fn fill_forms(agent: &mut Agent, ti: usize) -> (Vec<(String, usize, NodeId)>, String) {
+    let tab = &mut agent.tabs[ti];
+    let mut forms = Vec::new();
+    let mut lines = Vec::new();
+    for frame in 0..tab.frames.len() {
+        for node in crate::forms::forms(&tab.frames[frame].page) {
+            let reference = format!("@f{}", tab.refs.assign_form(frame, node));
+            forms.push((reference, frame, node));
+            lines.extend(crate::forms::describe(&tab.frames[frame].page, frame, node, &mut tab.refs));
         }
-        // List every form.
-        let tab = &mut agent.tabs[ti];
-        let mut lines = Vec::new();
-        for fi in 0..tab.frames.len() {
-            let forms = crate::forms::forms(&tab.frames[fi].page);
-            for f in forms {
-                let page = &tab.frames[fi].page;
-                lines.extend(crate::forms::describe(page, fi, f, &mut tab.refs));
-            }
-        }
-        if lines.is_empty() {
-            return Ok(Out::text("No forms on this page (controls outside forms are in the snapshot)."));
-        }
-        return Ok(Out::text(fence(&lines.join("\n"))));
-    };
-    let (frame, node) = agent.resolve(ti, &r)?;
-    let is_form = agent.tabs[ti].frames[frame].page.doc.is_element(node, "form");
-    let form = if is_form { Some(node) } else { agent.tabs[ti].frames[frame].page.form_of(node) };
-    // Describe only.
-    if values.is_none() && single.is_none() && !submit {
-        let f = form.ok_or_else(|| format!("{r} is not in a form"))?;
-        let tab = &mut agent.tabs[ti];
-        let lines = crate::forms::describe(&tab.frames[frame].page, frame, f, &mut tab.refs);
-        return Ok(Out::text(fence(&lines.join("\n"))));
     }
-    let before = agent.before_state(ti);
-    let mut done = Vec::new();
-    let mut errors = Vec::new();
-    {
-        let tab = &mut agent.tabs[ti];
-        if let Some(v) = &single {
-            // A single field.
-            let page = &tab.frames[frame].page;
-            let scope = form.unwrap_or(node);
-            let fields = if is_form { crate::forms::fields(page, scope) } else { single_field(page, node, form) };
-            let idx = fields.iter().position(|f| f.node == node).ok_or_else(|| format!("{r} is not a fillable field"))?;
-            match crate::forms::set_field(&agent.engine, &mut tab.frames[frame].page, &fields, idx, v) {
-                Ok(d) => done.push(d),
-                Err(e) => errors.push(e),
+    let listing = if lines.is_empty() {
+        "No forms on this page (controls outside forms are in the snapshot).".to_string()
+    } else {
+        fence(&lines.join("\n"))
+    };
+    (forms, listing)
+}
+
+fn sole_fill_form(agent: &mut Agent, ti: usize) -> Result<String, String> {
+    let (forms, listing) = fill_forms(agent, ti);
+    if forms.len() == 1 {
+        return Ok(forms[0].0.clone());
+    }
+    Err(format!("fill without ref needs exactly one form for name/label keys or submit (found {}). Pass ref=@fN or use only @eN keys.\n{listing}", forms.len()))
+}
+
+fn fill_fields(agent: &mut Agent, ti: usize, target: &FillTarget) -> Result<(usize, Vec<crate::forms::Field>, usize), String> {
+    match target {
+        FillTarget::Ref(reference) => {
+            let (frame, node) = agent.resolve(ti, reference)?;
+            let page = &agent.tabs[ti].frames[frame].page;
+            if !matches!(page.doc.tag(node), Some("input" | "select" | "textarea")) {
+                return Err(format!("{reference} is not a fillable field; use values for a form"));
             }
+            let fields = single_field(page, node, page.form_of(node));
+            let index = fields.iter().position(|field| field.node == node).ok_or_else(|| format!("{reference} is not a fillable field"))?;
+            Ok((frame, fields, index))
         }
-        if let Some(vals) = &values {
-            let scope = form.ok_or_else(|| format!("{r} is not a form or inside one; fill single fields with ref=@eN value=…"))?;
-            let fields = crate::forms::fields(&tab.frames[frame].page, scope);
-            for (k, v) in vals {
-                let idx = {
-                    let page = &tab.frames[frame].page;
-                    // Radio groups by name.
-                    crate::forms::match_field(page, &fields, k, &tab.refs, frame).or_else(|| fields.iter().position(|f| f.kind == rabbithole_engine::ControlKind::Radio && f.name.eq_ignore_ascii_case(k)))
-                };
-                match idx {
-                    Some(i) => match crate::forms::set_field(&agent.engine, &mut tab.frames[frame].page, &fields, i, v) {
-                        Ok(d) => done.push(d),
-                        Err(e) => errors.push(format!("{k}: {e}")),
-                    },
-                    None => {
-                        let names: Vec<String> = fields.iter().filter(|f| f.role != "button").map(|f| if f.label.is_empty() { f.name.clone() } else { f.label.clone() }).collect();
-                        errors.push(format!("no field matches \"{k}\" (fields: {})", names.join(", ")));
-                    }
+        FillTarget::InForm { form, key } => {
+            // Resolve both refs against the current document, not an old fields
+            // vector captured before a previous callback changed the page.
+            let (frame, node) = agent.resolve(ti, form)?;
+            let explicit = if key.trim().starts_with('@') && matches!(Ref::parse(key), Some(Ref::Element(_))) {
+                Some(agent.resolve(ti, key)?)
+            } else {
+                None
+            };
+            let tab = &agent.tabs[ti];
+            let page = &tab.frames[frame].page;
+            let fields = crate::forms::fields(page, node);
+            let index = if let Some((field_frame, field_node)) = explicit {
+                fields.iter().position(|field| field_frame == frame && field.node == field_node)
+            } else {
+                crate::forms::match_field(page, &fields, key, &tab.refs, frame)
+                    .or_else(|| fields.iter().position(|field| field.kind == rabbithole_engine::ControlKind::Radio && field.name.eq_ignore_ascii_case(key)))
+            };
+            match index {
+                Some(index) => Ok((frame, fields, index)),
+                None => {
+                    let names: Vec<String> = fields.iter().filter(|field| field.role != "button").map(|field| if field.label.is_empty() { field.name.clone() } else { field.label.clone() }).collect();
+                    Err(format!("no field matches \"{}\" (fields: {})", esc(key), names.join(", ")))
                 }
             }
         }
     }
+}
+
+fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
+    let ti = agent.tab_index()?;
+    agent.ensure_loaded(ti)?;
+    let values = match a.get("values") {
+        Some(Value::Object(values)) => Some(values.clone()),
+        Some(_) => return Err("fill values must be an object of field keys and values".into()),
+        None => None,
+    };
+    let submit = b(a, "submit").unwrap_or(false);
+    let single = a.get("value").cloned();
+    let reference = s(a, "ref").map(str::to_string);
+    let mut form = None;
+    if let Some(reference) = &reference {
+        let (frame, node) = agent.resolve(ti, reference)?;
+        let page = &agent.tabs[ti].frames[frame].page;
+        let owner = if page.doc.is_element(node, "form") { Some(node) } else { page.form_of(node) };
+        if let Some(node) = owner {
+            form = Some(format!("@f{}", agent.tabs[ti].refs.assign_form(frame, node)));
+        }
+    }
+    if values.is_none() && single.is_none() && !submit {
+        if reference.is_none() {
+            return Ok(Out::text(fill_forms(agent, ti).1));
+        }
+        let reference = reference.as_ref().unwrap();
+        let form = form.ok_or_else(|| format!("{reference} is not in a form"))?;
+        let (frame, node) = agent.resolve(ti, &form)?;
+        let tab = &mut agent.tabs[ti];
+        let lines = crate::forms::describe(&tab.frames[frame].page, frame, node, &mut tab.refs);
+        return Ok(Out::text(fence(&lines.join("\n"))));
+    }
+    if single.is_some() && reference.is_none() {
+        return Err("fill value needs a field ref; use values for field-key/value pairs".into());
+    }
+    let reference_keys = reference.is_none() && values.as_ref().is_some_and(|values| {
+        !values.is_empty() && values.keys().all(|key| key.trim().starts_with('@') && matches!(Ref::parse(key), Some(Ref::Element(_))))
+    });
+    if reference.is_none() && !reference_keys {
+        form = Some(sole_fill_form(agent, ti)?);
+    }
+    if values.is_some() && !reference_keys && form.is_none() {
+        return Err("the ref is not a form or inside one; use values with @eN keys and no ref for independent fields".into());
+    }
+    if reference_keys && submit {
+        let mut owner = None;
+        for key in values.as_ref().unwrap().keys() {
+            let (frame, node) = agent.resolve(ti, key)?;
+            let node = agent.tabs[ti].frames[frame].page.form_of(node).ok_or("submit needs fields belonging to one form, or an explicit form ref")?;
+            if owner.is_some_and(|owner| owner != (frame, node)) {
+                return Err("submit with field refs from multiple forms is ambiguous; pass one form ref and its values".into());
+            }
+            owner = Some((frame, node));
+        }
+        let (frame, node) = owner.ok_or("nothing to submit")?;
+        form = Some(format!("@f{}", agent.tabs[ti].refs.assign_form(frame, node)));
+    }
+    if submit && form.is_none() {
+        return Err("nothing to submit: the ref is not in a form".into());
+    }
+    let mut operations = Vec::new();
+    if let Some(value) = single {
+        let reference = reference.as_ref().unwrap().clone();
+        let target = FillTarget::Ref(reference.clone());
+        // Preserve the single-field preflight error instead of treating a form
+        // or unrelated element as a field and then continuing with values.
+        fill_fields(agent, ti, &target)?;
+        operations.push(FillOperation { key: reference, value, target });
+    }
+    if let Some(values) = values {
+        for (key, value) in values {
+            let target = if reference_keys {
+                FillTarget::Ref(key.clone())
+            } else {
+                FillTarget::InForm { form: form.as_ref().unwrap().clone(), key: key.clone() }
+            };
+            operations.push(FillOperation { key, value, target });
+        }
+    }
+    let before = agent.before_state(ti);
+    let mut done = Vec::new();
+    let mut errors = Vec::new();
+    let mut notes = Vec::new();
     let mut outcome = ScriptOutcome::default();
-    let mut request = None;
+    let mut frame = 0;
+    let mut field_navigation = false;
+    for (index, operation) in operations.iter().enumerate() {
+        let (field_frame, fields, field_index) = match fill_fields(agent, ti, &operation.target) {
+            Ok(fields) => fields,
+            Err(error) => {
+                errors.push(format!("{}: {error}", esc(&operation.key)));
+                continue;
+            }
+        };
+        frame = field_frame;
+        let result = crate::forms::set_field_with_outcome(&agent.engine, &mut agent.tabs[ti].frames[frame].page, &fields, field_index, &operation.value);
+        match result {
+            Ok((description, result)) => {
+                if let Some(error) = result.error {
+                    errors.push(format!("{}: {error}", esc(&operation.key)));
+                } else if result.value_applied {
+                    done.push(description);
+                } else {
+                    notes.push(format!("{} was not changed: navigation was requested while focusing the field.", esc(&operation.key)));
+                }
+                crate::actions::merge(&mut outcome, result.outcome);
+            }
+            Err(error) => {
+                errors.push(format!("{}: {error}", esc(&operation.key)));
+                continue;
+            }
+        }
+        if outcome.navigation.is_none() {
+            // The same settle routine as click, before touching another field:
+            // timers/XHR from this callback may request navigation as well.
+            let log = agent.tabs[ti].netlog.clone();
+            let settled = crate::wait::settle(&agent.engine, &mut agent.tabs[ti].frames[frame].page, Some(&log), agent.cfg.settle_cap);
+            if let Some(pending) = &settled.pending {
+                notes.push(format!("{} did not settle within the wait cap: {pending}", esc(&operation.key)));
+            }
+            crate::actions::merge(&mut outcome, ScriptOutcome { navigation: settled.navigation, new_windows: settled.new_windows, dialogs: settled.dialogs, relayout: settled.changed, ..ScriptOutcome::default() });
+        }
+        if outcome.navigation.is_some() {
+            field_navigation = true;
+            let pending: Vec<String> = operations[index + 1..].iter().map(|operation| format!("\"{}\"", esc(&operation.key))).collect();
+            if !pending.is_empty() {
+                notes.push(format!("Not attempted after navigation: {}. Take a new snapshot before filling remaining fields; old document refs are obsolete.", pending.join(", ")));
+            }
+            if submit {
+                notes.push("submit=true was not attempted after the field requested navigation.".into());
+            }
+            break;
+        }
+    }
     let mut what = if done.is_empty() { String::new() } else { format!("Filled: {}", done.join("; ")) };
     if !errors.is_empty() {
-        if what.is_empty() {
-            what = "Nothing filled".into();
-        }
+        if what.is_empty() { what = "Nothing filled".into(); }
         what.push_str(&format!("\nNot filled: {}", errors.join("; ")));
     }
-    if submit {
-        let f = form.ok_or("nothing to submit: the ref is not in a form")?;
-        let tab = &mut agent.tabs[ti];
-        let page = &mut tab.frames[frame].page;
-        let invalid = crate::forms::validate(&agent.engine, page, f);
-        if !invalid.is_empty() {
-            tab.invalid = invalid.iter().map(|i| (frame, i.node)).collect();
-            let list: Vec<String> = invalid
-                .iter()
-                .map(|i| {
-                    let rr = tab.refs.assign(frame, i.node, "textbox", &i.label);
-                    format!("@e{rr} \"{}\": {}", esc(&i.label), i.reason)
-                })
-                .collect();
-            let mut msg = String::new();
-            if !what.is_empty() {
-                msg.push_str(&what);
-                msg.push('\n');
+    let mut request = None;
+    let mut submit_error = false;
+    if submit && !field_navigation {
+        let resolved = agent.resolve(ti, form.as_ref().unwrap());
+        match resolved {
+            Err(error) => {
+                submit_error = true;
+                notes.push(format!("Not submitted: {error}"));
             }
-            msg.push_str(&format!("Not submitted: {} invalid field(s):\n- {}", list.len(), list.join("\n- ")));
-            return Err(msg);
+            Ok((form_frame, node)) => {
+                frame = form_frame;
+                let tab = &mut agent.tabs[ti];
+                let invalid = crate::forms::validate(&agent.engine, &mut tab.frames[frame].page, node);
+                if !invalid.is_empty() {
+                    submit_error = true;
+                    tab.invalid = invalid.iter().map(|invalid| (frame, invalid.node)).collect();
+                    let list: Vec<String> = invalid.iter().map(|invalid| {
+                        let reference = tab.refs.assign(frame, invalid.node, "textbox", &invalid.label);
+                        format!("@e{reference} \"{}\": {}", esc(&invalid.label), invalid.reason)
+                    }).collect();
+                    notes.push(format!("Not submitted: {} invalid field(s):\n- {}", list.len(), list.join("\n- ")));
+                } else {
+                    tab.invalid.clear();
+                    let page = &mut tab.frames[frame].page;
+                    let mut submitted = ScriptOutcome::default();
+                    request = match page.default_submitter(node) {
+                        Some(submitter) => {
+                            let (action, event) = agent.engine.click_element(page, submitter, None, rabbithole_engine::Modifiers::default());
+                            submitted = event;
+                            crate::actions::click_request(&agent.engine, page, action, &mut submitted)
+                        }
+                        None => crate::actions::submit_request(&agent.engine, page, node, None, &mut submitted),
+                    };
+                    let description = if request.is_none() && submitted.default_prevented { "Not submitted: the submit or click event was cancelled" } else { "Submitted the form" };
+                    if !what.is_empty() { what.push('\n'); }
+                    what.push_str(description);
+                    crate::actions::merge(&mut outcome, submitted);
+                }
+            }
         }
-        tab.invalid.clear();
-        // Submit by clicking the default submit button (so handlers run),
-        // else fire submit on the form.
-        let page = &mut tab.frames[frame].page;
-        match page.default_submitter(f) {
-            Some(sub) => {
-                let (action, o) = agent.engine.click_element(page, sub, None, rabbithole_engine::Modifiers::default());
-                let mut o = o;
-                request = crate::actions::click_request(&agent.engine, page, action, &mut o);
-                outcome = o;
-            }
-            None => {
-                let mut o = ScriptOutcome::default();
-                request = crate::actions::submit_request(&agent.engine, page, f, None, &mut o);
-                outcome = o;
-            }
-        }
-        what = if what.is_empty() { "Submitted the form".into() } else { format!("{what}\nSubmitted the form") };
     }
-    let target = Some((frame, node));
-    let text = agent.finish_action(ti, frame, before, outcome, request, &what, if submit { None } else { target })?;
-    if !errors.is_empty() && done.is_empty() && !submit {
+    if what.is_empty() { what = if field_navigation { "Fill" } else { "Nothing filled" }.into(); }
+    // A callback may have removed/replaced its field. Do not dereference an
+    // old target when finish_action follows a frame navigation or reports diff.
+    let mut text = agent.finish_action(ti, frame, before, outcome, request, &what, None)?;
+    if !notes.is_empty() {
+        text.push('\n');
+        text.push_str(&notes.join("\n"));
+    }
+    if submit_error || (!errors.is_empty() && done.is_empty() && !submit && !field_navigation) {
         return Err(text);
     }
     Ok(Out::text(text))

@@ -21,17 +21,43 @@ pub fn merge(into: &mut ScriptOutcome, o: ScriptOutcome) {
     }
 }
 
-/// Set a control's value as a user would (typing, toggling, choosing an
-/// option) and fire `input`/`change`.
-pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &str) -> Result<(), String> {
-    match page.control_kind(control) {
+/// A value action and all callbacks it ran. A focus callback can navigate or
+/// remove/change the control before its value is applied.
+#[derive(Debug, Default)]
+pub struct FillOutcome {
+    pub outcome: ScriptOutcome,
+    pub value_applied: bool,
+    pub error: Option<String>,
+}
+
+fn check_fill_control(page: &Page, control: NodeId) -> Result<(), String> {
+    if !page.doc.is_connected(control) {
+        return Err("the field no longer exists; take a new snapshot".into());
+    }
+    if crate::ax::states_of(page, control, "", false).iter().any(|state| state == "disabled") {
+        return Err("the field is disabled".into());
+    }
+    if page.doc.attr(control, "readonly").is_some() && matches!(page.control_kind(control), ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other) {
+        return Err("the field is read-only".into());
+    }
+    Ok(())
+}
+
+/// Set a value and fire input/change, retaining the same script outcomes used
+/// by click. Navigation from focus/input stops this sequence immediately.
+pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &str) -> Result<FillOutcome, String> {
+    check_fill_control(page, control)?;
+    let mut result = FillOutcome::default();
+    let kind = page.control_kind(control);
+    match kind {
         ControlKind::Checkbox | ControlKind::Radio => {
             let want = matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes" | "checked");
             let is = page.doc.is_checked(control);
             if want != is {
                 page.toggle_control(control);
             } else {
-                return Ok(());
+                result.value_applied = true;
+                return Ok(result);
             }
         }
         ControlKind::Select => {
@@ -54,16 +80,30 @@ pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &s
             page.select_option(control, idx);
         }
         ControlKind::Text | ControlKind::Password | ControlKind::TextArea | ControlKind::Other => {
-            let o = engine.focus_element(page, Some(control));
-            let _ = o;
+            merge(&mut result.outcome, engine.focus_element(page, Some(control)));
+            if result.outcome.navigation.is_some() {
+                return Ok(result);
+            }
+            if let Err(error) = check_fill_control(page, control) {
+                result.error = Some(error);
+                return Ok(result);
+            }
+            if page.control_kind(control) != kind {
+                result.error = Some("the field changed type while receiving focus; take a new snapshot".into());
+                return Ok(result);
+            }
             page.set_control_text(control, value);
         }
         other => return Err(format!("cannot fill a {other:?} control")),
     }
+    result.value_applied = true;
     engine.restyle(page);
-    let _ = engine.dispatch_event(page, control, "input", input_init(Some(value)));
-    let _ = engine.dispatch_event(page, control, "change", plain_init(false));
-    Ok(())
+    merge(&mut result.outcome, engine.dispatch_event(page, control, "input", input_init(Some(value))));
+    if result.outcome.navigation.is_some() || !page.doc.is_connected(control) {
+        return Ok(result);
+    }
+    merge(&mut result.outcome, engine.dispatch_event(page, control, "change", plain_init(false)));
+    Ok(result)
 }
 
 /// Map a key name ("Enter", "a", "ArrowDown") to (key, code).

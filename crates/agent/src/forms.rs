@@ -185,6 +185,16 @@ pub fn match_field(page: &Page, fields: &[Field], key: &str, refs: &RefMap, fram
 /// Set one field from a JSON-ish value. Returns a description of what was
 /// done, or an error.
 pub fn set_field(engine: &Engine, page: &mut Page, fields: &[Field], idx: usize, value: &serde_json::Value) -> Result<String, String> {
+    let (description, result) = set_field_with_outcome(engine, page, fields, idx, value)?;
+    match result.error {
+        Some(error) => Err(error),
+        None => Ok(description),
+    }
+}
+
+/// The same field conversion as set_field, with callback outcomes retained so
+/// the agent can follow navigation before touching another field or submitting.
+pub fn set_field_with_outcome(engine: &Engine, page: &mut Page, fields: &[Field], idx: usize, value: &serde_json::Value) -> Result<(String, crate::actions::FillOutcome), String> {
     let f = &fields[idx];
     let as_text = match value {
         serde_json::Value::String(s) => s.clone(),
@@ -197,8 +207,8 @@ pub fn set_field(engine: &Engine, page: &mut Page, fields: &[Field], idx: usize,
                 serde_json::Value::Bool(b) => *b,
                 _ => matches!(as_text.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes" | "checked" | "sí" | "si"),
             };
-            crate::actions::fill_control(engine, page, f.node, if want { "true" } else { "false" })?;
-            Ok(format!("{} \"{}\" {}", f.role, esc(&f.label), if want { "checked" } else { "unchecked" }))
+            let outcome = crate::actions::fill_control(engine, page, f.node, if want { "true" } else { "false" })?;
+            Ok((format!("{} \"{}\" {}", f.role, esc(&f.label), if want { "checked" } else { "unchecked" }), outcome))
         }
         ControlKind::Radio => {
             // Pick the radio of the group whose label/value matches.
@@ -217,19 +227,19 @@ pub fn set_field(engine: &Engine, page: &mut Page, fields: &[Field], idx: usize,
                 })?;
             let node = pick.node;
             let label = pick.label.clone();
-            crate::actions::fill_control(engine, page, node, "true")?;
-            Ok(format!("radio \"{}\" checked", esc(&label)))
+            let outcome = crate::actions::fill_control(engine, page, node, "true")?;
+            Ok((format!("radio \"{}\" checked", esc(&label)), outcome))
         }
         ControlKind::Select => {
-            crate::actions::fill_control(engine, page, f.node, &as_text)?;
-            Ok(format!("combobox \"{}\" = \"{}\"", esc(&f.label), esc(&as_text)))
+            let outcome = crate::actions::fill_control(engine, page, f.node, &as_text)?;
+            Ok((format!("combobox \"{}\" = \"{}\"", esc(&f.label), esc(&as_text)), outcome))
         }
         ControlKind::File => Err(format!("file input \"{}\": file uploads are not supported by the agent interface", f.label)),
         ControlKind::Submit | ControlKind::Reset | ControlKind::Button => Err(format!("\"{}\" is a button; use submit or click", f.label)),
         _ => {
-            crate::actions::fill_control(engine, page, f.node, &as_text)?;
+            let outcome = crate::actions::fill_control(engine, page, f.node, &as_text)?;
             let shown = if f.kind == ControlKind::Password { format!("({} chars)", as_text.chars().count()) } else { format!("\"{}\"", esc(&clip_text(&as_text, 60))) };
-            Ok(format!("textbox \"{}\" = {shown}", esc(&f.label)))
+            Ok((format!("textbox \"{}\" = {shown}", esc(&f.label)), outcome))
         }
     }
 }
