@@ -1,0 +1,1433 @@
+{
+  "schema": "rabbithole-test262-measurement-v1",
+  "source_revision": "baca2a7bda017e3690adbe118e6cae8ab2486ceb",
+  "source_tree_sha1": "486d8f74e3c22185bb953c0487a0f43ff1e33382",
+  "version": "0.1.11",
+  "corpus_revision": "2e58f87d8350ad51224617a041c6e041d52f8444",
+  "corpus_tree_sha1": "9951aa070b76ce434a9dd430f03cd49e72d244f7",
+  "corpus_tree_manifest_sha256": "102b15a691398c480cfade9e91a245a1bc3432ef4a911d7952871aebc7ce13de",
+  "measurement_date": "2026-11-14",
+  "TZ": "Europe/Madrid",
+  "started_at_utc": "2026-11-14T15:45:26.272918+00:00",
+  "finished_at_utc": "2026-11-14T15:52:10.637151+00:00",
+  "started_at_europe_madrid": "2026-11-14T16:45:26.272918+01:00",
+  "finished_at_europe_madrid": "2026-11-14T16:52:10.637151+01:00",
+  "workers": 1,
+  "cpu_timeout_per_mode_seconds": 10,
+  "wall_timeout_per_test_seconds": 120,
+  "worker_address_space_limit_MiB": 2000,
+  "compiler": "Rust 1.99.1 (58cf8f9c3, 2026-10-13)",
+  "profile": "ci",
+  "platform": "Linux-6.8.0-147-generic-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "virtualization": "KVM",
+  "available_cpu_affinity_count": 3,
+  "exit_code": 0,
+  "counts": {
+    "CRASH": 0,
+    "FAIL": 586,
+    "PASS": 45262,
+    "SKIP": 7830,
+    "TIMEOUT": 0,
+    "executed": 45848,
+    "pass_percent_executed": 98.72186354911882,
+    "total_files": 53678,
+    "pass_percent_display": "98.72"
+  },
+  "without_intl402": {
+    "CRASH": 0,
+    "FAIL": 54,
+    "PASS": 44693,
+    "SKIP": 5537,
+    "TIMEOUT": 0,
+    "executed": 44747,
+    "pass_percent_executed": 99.87932151876103,
+    "total_files": 50284,
+    "pass_percent_display": "99.88"
+  },
+  "without_intl402_filter": "Exclude only paths beginning intl402/, exactly as runner summary_text.",
+  "runtime_duration_seconds": 385.1552833188325,
+  "peak_sampled_runner_worker_rss_kib": 741388,
+  "conditions": {
+    "jit": "off",
+    "gc": "normal",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "test_mode": "Both sloppy/strict where applicable",
+    "corpus_clean_before_and_after": true,
+    "source_runner_baseline_unchanged_before_and_after": true
+  },
+  "comparison_with_previous_published_baseline": {
+    "published_source_revision": "4f8717910d698949fd3e39477e67bef633da900b",
+    "measurement_source_revision": "cc90fae11a11925dee60f3295a5c6ccab584549e",
+    "baseline_sha256": "22bf1874b4a2047f5603e0a6d60534ae7f093eadc46350c1fd04c0d2e0be6069",
+    "previous_full_results_sha256": "222ee57b70b4bc4f1d7a7003d8b5dc0d1c04dfb0d1e4f7d314afaa7c5ae2a733",
+    "same_complete_path_set": true,
+    "newly_passing": 3,
+    "regressions": 0,
+    "new_skips": 0,
+    "status_changes": [
+      {
+        "path": "built-ins/Function/internals/Construct/base-ctor-revoked-proxy.js",
+        "old_status": "FAIL",
+        "new_status": "PASS"
+      },
+      {
+        "path": "intl402/Segmenter/ctor-custom-get-prototype-poison-throws.js",
+        "old_status": "FAIL",
+        "new_status": "PASS"
+      },
+      {
+        "path": "staging/sm/Proxy/revoked-get-function-realm-typeerror.js",
+        "old_status": "FAIL",
+        "new_status": "PASS"
+      }
+    ]
+  },
+  "runner": {
+    "sha256": "355e92473b9a1e82778fbdc0825b8c90738435ba511014f91e837093bf27ef6f",
+    "sha256_after": "355e92473b9a1e82778fbdc0825b8c90738435ba511014f91e837093bf27ef6f",
+    "build_profile": "ci",
+    "build_command": [
+      "cargo",
+      "build",
+      "--profile",
+      "ci",
+      "--features",
+      "jit",
+      "--locked",
+      "-p",
+      "rabbithole-js",
+      "--example",
+      "test262"
+    ],
+    "build_provenance_sha256": "c777adf58c9be9ccaa135a2027c4cb94276a7d62c8a115b9af0a91dab90dd81c"
+  },
+  "native_serializer_control": {
+    "counts": {
+      "CRASH": 0,
+      "FAIL": 1,
+      "PASS": 2,
+      "SKIP": 1,
+      "TIMEOUT": 0,
+      "executed": 3,
+      "pass_percent_executed": 66.66666666666667,
+      "total_files": 4
+    },
+    "payload_matches_native_baseline_text": true,
+    "payload_sha256": "164b17a8953814f9af7fdb09a75818d4d28894eeb9e628aaaea3c788e0ce42cb",
+    "record_sha256": "dfbfbb071b2c410ffdc616075ee1c62e6cce27e4638d33faed03ac986dcb6cb1"
+  },
+  "baseline_sha256": "c333a5d65e84e3ba3d9b07a3a9844533909f3bb40c071ea6e35f6cdbdd9a4c5d",
+  "evidence_hashes": {
+    "raw_results_sha256": "87267912a315cb85d26c05fb8cf791e2c3eacbe5d7b27a9725b1b96a01de470e",
+    "raw_summary_sha256": "91217276b69edc5d000d4260522b9c9393d4948b66fd670d75371febd577dded",
+    "measurement_record_sha256": "a08edb22383bd9ea0bc82ccc62578a5d8670e6ed065bad2ad171c4a78689abe6",
+    "root_data_validation_sha256": "fe3be4d8468253de2063d1f72fbc059b829dc5c35e3b9aabd33921ce50d2516f",
+    "runtime_virtualization_probe_sha256": "88bcbc6bf26cf732c1ec07c64c3b7ddf2ea8adef6f170628e7f7c2162f540f4e"
+  },
+  "counts_by_directory": {
+    "annexB/built-ins": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 241,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 241,
+      "pass_percent_executed": 100.0,
+      "total_files": 241
+    },
+    "annexB/language": {
+      "CRASH": 0,
+      "FAIL": 1,
+      "PASS": 844,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 845,
+      "pass_percent_executed": 99.88165680473372,
+      "total_files": 845
+    },
+    "built-ins/AbstractModuleSource": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 0,
+      "SKIP": 8,
+      "TIMEOUT": 0,
+      "executed": 0,
+      "pass_percent_executed": 0,
+      "total_files": 8
+    },
+    "built-ins/AggregateError": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 25,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 25,
+      "pass_percent_executed": 100.0,
+      "total_files": 25
+    },
+    "built-ins/Array": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 3083,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 3083,
+      "pass_percent_executed": 100.0,
+      "total_files": 3083
+    },
+    "built-ins/ArrayBuffer": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 221,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 221,
+      "pass_percent_executed": 100.0,
+      "total_files": 221
+    },
+    "built-ins/ArrayIteratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 27,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 27,
+      "pass_percent_executed": 100.0,
+      "total_files": 27
+    },
+    "built-ins/AsyncDisposableStack": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 104,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 104,
+      "pass_percent_executed": 100.0,
+      "total_files": 104
+    },
+    "built-ins/AsyncFromSyncIteratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 38,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 38,
+      "pass_percent_executed": 100.0,
+      "total_files": 38
+    },
+    "built-ins/AsyncFunction": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 18,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 18,
+      "pass_percent_executed": 100.0,
+      "total_files": 18
+    },
+    "built-ins/AsyncGeneratorFunction": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 23,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 23,
+      "pass_percent_executed": 100.0,
+      "total_files": 23
+    },
+    "built-ins/AsyncGeneratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 48,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 48,
+      "pass_percent_executed": 100.0,
+      "total_files": 48
+    },
+    "built-ins/AsyncIteratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 13,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 13,
+      "pass_percent_executed": 100.0,
+      "total_files": 13
+    },
+    "built-ins/Atomics": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 270,
+      "SKIP": 119,
+      "TIMEOUT": 0,
+      "executed": 270,
+      "pass_percent_executed": 100.0,
+      "total_files": 389
+    },
+    "built-ins/BigInt": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 77,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 77,
+      "pass_percent_executed": 100.0,
+      "total_files": 77
+    },
+    "built-ins/Boolean": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 51,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 51,
+      "pass_percent_executed": 100.0,
+      "total_files": 51
+    },
+    "built-ins/DataView": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 560,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 560,
+      "pass_percent_executed": 100.0,
+      "total_files": 560
+    },
+    "built-ins/Date": {
+      "CRASH": 0,
+      "FAIL": 3,
+      "PASS": 599,
+      "SKIP": 8,
+      "TIMEOUT": 0,
+      "executed": 602,
+      "pass_percent_executed": 99.5016611295681,
+      "total_files": 610
+    },
+    "built-ins/DisposableStack": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 93,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 93,
+      "pass_percent_executed": 100.0,
+      "total_files": 93
+    },
+    "built-ins/Error": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 58,
+      "SKIP": 35,
+      "TIMEOUT": 0,
+      "executed": 58,
+      "pass_percent_executed": 100.0,
+      "total_files": 93
+    },
+    "built-ins/FinalizationRegistry": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 47,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 47,
+      "pass_percent_executed": 100.0,
+      "total_files": 47
+    },
+    "built-ins/Function": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 509,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 509,
+      "pass_percent_executed": 100.0,
+      "total_files": 509
+    },
+    "built-ins/GeneratorFunction": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 23,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 23,
+      "pass_percent_executed": 100.0,
+      "total_files": 23
+    },
+    "built-ins/GeneratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 61,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 61,
+      "pass_percent_executed": 100.0,
+      "total_files": 61
+    },
+    "built-ins/Infinity": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 6,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 6,
+      "pass_percent_executed": 100.0,
+      "total_files": 6
+    },
+    "built-ins/Iterator": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 666,
+      "SKIP": 18,
+      "TIMEOUT": 0,
+      "executed": 666,
+      "pass_percent_executed": 100.0,
+      "total_files": 684
+    },
+    "built-ins/JSON": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 166,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 166,
+      "pass_percent_executed": 100.0,
+      "total_files": 166
+    },
+    "built-ins/Map": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 204,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 204,
+      "pass_percent_executed": 100.0,
+      "total_files": 204
+    },
+    "built-ins/MapIteratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 11,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 11,
+      "pass_percent_executed": 100.0,
+      "total_files": 11
+    },
+    "built-ins/Math": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 327,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 327,
+      "pass_percent_executed": 100.0,
+      "total_files": 327
+    },
+    "built-ins/NaN": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 6,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 6,
+      "pass_percent_executed": 100.0,
+      "total_files": 6
+    },
+    "built-ins/NativeErrors": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 94,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 94,
+      "pass_percent_executed": 100.0,
+      "total_files": 94
+    },
+    "built-ins/Number": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 340,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 340,
+      "pass_percent_executed": 100.0,
+      "total_files": 340
+    },
+    "built-ins/Object": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 3411,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 3411,
+      "pass_percent_executed": 100.0,
+      "total_files": 3411
+    },
+    "built-ins/Promise": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 643,
+      "SKIP": 89,
+      "TIMEOUT": 0,
+      "executed": 643,
+      "pass_percent_executed": 100.0,
+      "total_files": 732
+    },
+    "built-ins/Proxy": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 310,
+      "SKIP": 1,
+      "TIMEOUT": 0,
+      "executed": 310,
+      "pass_percent_executed": 100.0,
+      "total_files": 311
+    },
+    "built-ins/Reflect": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 153,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 153,
+      "pass_percent_executed": 100.0,
+      "total_files": 153
+    },
+    "built-ins/RegExp": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 1879,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 1879,
+      "pass_percent_executed": 100.0,
+      "total_files": 1879
+    },
+    "built-ins/RegExpStringIteratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 17,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 17,
+      "pass_percent_executed": 100.0,
+      "total_files": 17
+    },
+    "built-ins/Set": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 383,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 383,
+      "pass_percent_executed": 100.0,
+      "total_files": 383
+    },
+    "built-ins/SetIteratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 11,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 11,
+      "pass_percent_executed": 100.0,
+      "total_files": 11
+    },
+    "built-ins/ShadowRealm": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 0,
+      "SKIP": 64,
+      "TIMEOUT": 0,
+      "executed": 0,
+      "pass_percent_executed": 0,
+      "total_files": 64
+    },
+    "built-ins/SharedArrayBuffer": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 104,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 104,
+      "pass_percent_executed": 100.0,
+      "total_files": 104
+    },
+    "built-ins/String": {
+      "CRASH": 0,
+      "FAIL": 1,
+      "PASS": 1222,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 1223,
+      "pass_percent_executed": 99.9182338511856,
+      "total_files": 1223
+    },
+    "built-ins/StringIteratorPrototype": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 7,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 7,
+      "pass_percent_executed": 100.0,
+      "total_files": 7
+    },
+    "built-ins/SuppressedError": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 22,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 22,
+      "pass_percent_executed": 100.0,
+      "total_files": 22
+    },
+    "built-ins/Symbol": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 98,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 98,
+      "pass_percent_executed": 100.0,
+      "total_files": 98
+    },
+    "built-ins/Temporal": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 0,
+      "SKIP": 4616,
+      "TIMEOUT": 0,
+      "executed": 0,
+      "pass_percent_executed": 0,
+      "total_files": 4616
+    },
+    "built-ins/ThrowTypeError": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 14,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 14,
+      "pass_percent_executed": 100.0,
+      "total_files": 14
+    },
+    "built-ins/TypedArray": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 1453,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 1453,
+      "pass_percent_executed": 100.0,
+      "total_files": 1453
+    },
+    "built-ins/TypedArrayConstructors": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 738,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 738,
+      "pass_percent_executed": 100.0,
+      "total_files": 738
+    },
+    "built-ins/Uint8Array": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 70,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 70,
+      "pass_percent_executed": 100.0,
+      "total_files": 70
+    },
+    "built-ins/WeakMap": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 141,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 141,
+      "pass_percent_executed": 100.0,
+      "total_files": 141
+    },
+    "built-ins/WeakRef": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 29,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 29,
+      "pass_percent_executed": 100.0,
+      "total_files": 29
+    },
+    "built-ins/WeakSet": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 85,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 85,
+      "pass_percent_executed": 100.0,
+      "total_files": 85
+    },
+    "built-ins/decodeURI": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 55,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 55,
+      "pass_percent_executed": 100.0,
+      "total_files": 55
+    },
+    "built-ins/decodeURIComponent": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 56,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 56,
+      "pass_percent_executed": 100.0,
+      "total_files": 56
+    },
+    "built-ins/encodeURI": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 31,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 31,
+      "pass_percent_executed": 100.0,
+      "total_files": 31
+    },
+    "built-ins/encodeURIComponent": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 31,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 31,
+      "pass_percent_executed": 100.0,
+      "total_files": 31
+    },
+    "built-ins/eval": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 10,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 10,
+      "pass_percent_executed": 100.0,
+      "total_files": 10
+    },
+    "built-ins/global": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 29,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 29,
+      "pass_percent_executed": 100.0,
+      "total_files": 29
+    },
+    "built-ins/isFinite": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 15,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 15,
+      "pass_percent_executed": 100.0,
+      "total_files": 15
+    },
+    "built-ins/isNaN": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 15,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 15,
+      "pass_percent_executed": 100.0,
+      "total_files": 15
+    },
+    "built-ins/parseFloat": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 54,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 54,
+      "pass_percent_executed": 100.0,
+      "total_files": 54
+    },
+    "built-ins/parseInt": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 55,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 55,
+      "pass_percent_executed": 100.0,
+      "total_files": 55
+    },
+    "built-ins/undefined": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 8,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 8,
+      "pass_percent_executed": 100.0,
+      "total_files": 8
+    },
+    "intl402": {
+      "CRASH": 0,
+      "FAIL": 7,
+      "PASS": 15,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 22,
+      "pass_percent_executed": 68.18181818181819,
+      "total_files": 22
+    },
+    "intl402/Array": {
+      "CRASH": 0,
+      "FAIL": 2,
+      "PASS": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 2,
+      "pass_percent_executed": 0.0,
+      "total_files": 2
+    },
+    "intl402/BigInt": {
+      "CRASH": 0,
+      "FAIL": 1,
+      "PASS": 10,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 11,
+      "pass_percent_executed": 90.9090909090909,
+      "total_files": 11
+    },
+    "intl402/Collator": {
+      "CRASH": 0,
+      "FAIL": 16,
+      "PASS": 49,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 65,
+      "pass_percent_executed": 75.38461538461539,
+      "total_files": 65
+    },
+    "intl402/Date": {
+      "CRASH": 0,
+      "FAIL": 2,
+      "PASS": 10,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 12,
+      "pass_percent_executed": 83.33333333333333,
+      "total_files": 12
+    },
+    "intl402/DateTimeFormat": {
+      "CRASH": 0,
+      "FAIL": 89,
+      "PASS": 87,
+      "SKIP": 70,
+      "TIMEOUT": 0,
+      "executed": 176,
+      "pass_percent_executed": 49.43181818181818,
+      "total_files": 246
+    },
+    "intl402/DisplayNames": {
+      "CRASH": 0,
+      "FAIL": 27,
+      "PASS": 30,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 57,
+      "pass_percent_executed": 52.63157894736842,
+      "total_files": 57
+    },
+    "intl402/DurationFormat": {
+      "CRASH": 0,
+      "FAIL": 104,
+      "PASS": 0,
+      "SKIP": 6,
+      "TIMEOUT": 0,
+      "executed": 104,
+      "pass_percent_executed": 0.0,
+      "total_files": 110
+    },
+    "intl402/FallbackSymbol": {
+      "CRASH": 0,
+      "FAIL": 2,
+      "PASS": 0,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 2,
+      "pass_percent_executed": 0.0,
+      "total_files": 2
+    },
+    "intl402/Intl": {
+      "CRASH": 0,
+      "FAIL": 33,
+      "PASS": 32,
+      "SKIP": 1,
+      "TIMEOUT": 0,
+      "executed": 65,
+      "pass_percent_executed": 49.23076923076923,
+      "total_files": 66
+    },
+    "intl402/ListFormat": {
+      "CRASH": 0,
+      "FAIL": 26,
+      "PASS": 55,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 81,
+      "pass_percent_executed": 67.90123456790124,
+      "total_files": 81
+    },
+    "intl402/Locale": {
+      "CRASH": 0,
+      "FAIL": 66,
+      "PASS": 47,
+      "SKIP": 77,
+      "TIMEOUT": 0,
+      "executed": 113,
+      "pass_percent_executed": 41.5929203539823,
+      "total_files": 190
+    },
+    "intl402/Number": {
+      "CRASH": 0,
+      "FAIL": 1,
+      "PASS": 6,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 7,
+      "pass_percent_executed": 85.71428571428571,
+      "total_files": 7
+    },
+    "intl402/NumberFormat": {
+      "CRASH": 0,
+      "FAIL": 79,
+      "PASS": 84,
+      "SKIP": 88,
+      "TIMEOUT": 0,
+      "executed": 163,
+      "pass_percent_executed": 51.533742331288344,
+      "total_files": 251
+    },
+    "intl402/PluralRules": {
+      "CRASH": 0,
+      "FAIL": 10,
+      "PASS": 32,
+      "SKIP": 11,
+      "TIMEOUT": 0,
+      "executed": 42,
+      "pass_percent_executed": 76.19047619047619,
+      "total_files": 53
+    },
+    "intl402/RelativeTimeFormat": {
+      "CRASH": 0,
+      "FAIL": 29,
+      "PASS": 51,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 80,
+      "pass_percent_executed": 63.75,
+      "total_files": 80
+    },
+    "intl402/Segmenter": {
+      "CRASH": 0,
+      "FAIL": 29,
+      "PASS": 50,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 79,
+      "pass_percent_executed": 63.29113924050633,
+      "total_files": 79
+    },
+    "intl402/String": {
+      "CRASH": 0,
+      "FAIL": 9,
+      "PASS": 10,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 19,
+      "pass_percent_executed": 52.63157894736842,
+      "total_files": 19
+    },
+    "intl402/Temporal": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 0,
+      "SKIP": 2040,
+      "TIMEOUT": 0,
+      "executed": 0,
+      "pass_percent_executed": 0,
+      "total_files": 2040
+    },
+    "intl402/TypedArray": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 1,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "language/arguments-object": {
+      "CRASH": 0,
+      "FAIL": 2,
+      "PASS": 261,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 263,
+      "pass_percent_executed": 99.23954372623574,
+      "total_files": 263
+    },
+    "language/asi": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 102,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 102,
+      "pass_percent_executed": 100.0,
+      "total_files": 102
+    },
+    "language/block-scope": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 145,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 145,
+      "pass_percent_executed": 100.0,
+      "total_files": 145
+    },
+    "language/comments": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 52,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 52,
+      "pass_percent_executed": 100.0,
+      "total_files": 52
+    },
+    "language/computed-property-names": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 48,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 48,
+      "pass_percent_executed": 100.0,
+      "total_files": 48
+    },
+    "language/destructuring": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 19,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 19,
+      "pass_percent_executed": 100.0,
+      "total_files": 19
+    },
+    "language/directive-prologue": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 62,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 62,
+      "pass_percent_executed": 100.0,
+      "total_files": 62
+    },
+    "language/eval-code": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 347,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 347,
+      "pass_percent_executed": 100.0,
+      "total_files": 347
+    },
+    "language/export": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 3,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 3,
+      "pass_percent_executed": 100.0,
+      "total_files": 3
+    },
+    "language/expressions": {
+      "CRASH": 0,
+      "FAIL": 3,
+      "PASS": 10738,
+      "SKIP": 415,
+      "TIMEOUT": 0,
+      "executed": 10741,
+      "pass_percent_executed": 99.97206963969835,
+      "total_files": 11156
+    },
+    "language/function-code": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 217,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 217,
+      "pass_percent_executed": 100.0,
+      "total_files": 217
+    },
+    "language/future-reserved-words": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 55,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 55,
+      "pass_percent_executed": 100.0,
+      "total_files": 55
+    },
+    "language/global-code": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 42,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 42,
+      "pass_percent_executed": 100.0,
+      "total_files": 42
+    },
+    "language/identifier-resolution": {
+      "CRASH": 0,
+      "FAIL": 1,
+      "PASS": 13,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 14,
+      "pass_percent_executed": 92.85714285714286,
+      "total_files": 14
+    },
+    "language/identifiers": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 268,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 268,
+      "pass_percent_executed": 100.0,
+      "total_files": 268
+    },
+    "language/import": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 16,
+      "SKIP": 113,
+      "TIMEOUT": 0,
+      "executed": 16,
+      "pass_percent_executed": 100.0,
+      "total_files": 129
+    },
+    "language/keywords": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 25,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 25,
+      "pass_percent_executed": 100.0,
+      "total_files": 25
+    },
+    "language/line-terminators": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 41,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 41,
+      "pass_percent_executed": 100.0,
+      "total_files": 41
+    },
+    "language/literals": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 536,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 536,
+      "pass_percent_executed": 100.0,
+      "total_files": 536
+    },
+    "language/module-code": {
+      "CRASH": 0,
+      "FAIL": 4,
+      "PASS": 591,
+      "SKIP": 4,
+      "TIMEOUT": 0,
+      "executed": 595,
+      "pass_percent_executed": 99.32773109243698,
+      "total_files": 599
+    },
+    "language/punctuators": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 11,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 11,
+      "pass_percent_executed": 100.0,
+      "total_files": 11
+    },
+    "language/reserved-words": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 27,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 27,
+      "pass_percent_executed": 100.0,
+      "total_files": 27
+    },
+    "language/rest-parameters": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 11,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 11,
+      "pass_percent_executed": 100.0,
+      "total_files": 11
+    },
+    "language/source-text": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 1,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "language/statementList": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 80,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 80,
+      "pass_percent_executed": 100.0,
+      "total_files": 80
+    },
+    "language/statements": {
+      "CRASH": 0,
+      "FAIL": 2,
+      "PASS": 9363,
+      "SKIP": 34,
+      "TIMEOUT": 0,
+      "executed": 9365,
+      "pass_percent_executed": 99.9786438868126,
+      "total_files": 9399
+    },
+    "language/types": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 113,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 113,
+      "pass_percent_executed": 100.0,
+      "total_files": 113
+    },
+    "language/white-space": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 67,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 67,
+      "pass_percent_executed": 100.0,
+      "total_files": 67
+    },
+    "staging": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 4,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 4,
+      "pass_percent_executed": 100.0,
+      "total_files": 4
+    },
+    "staging/Temporal": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 0,
+      "SKIP": 2,
+      "TIMEOUT": 0,
+      "executed": 0,
+      "pass_percent_executed": 0,
+      "total_files": 2
+    },
+    "staging/Uint8Array": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 1,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    },
+    "staging/built-ins": {
+      "CRASH": 0,
+      "FAIL": 3,
+      "PASS": 5,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 8,
+      "pass_percent_executed": 62.5,
+      "total_files": 8
+    },
+    "staging/decorators": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 0,
+      "SKIP": 7,
+      "TIMEOUT": 0,
+      "executed": 0,
+      "pass_percent_executed": 0,
+      "total_files": 7
+    },
+    "staging/explicit-resource-management": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 53,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 53,
+      "pass_percent_executed": 100.0,
+      "total_files": 53
+    },
+    "staging/set-methods": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 3,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 3,
+      "pass_percent_executed": 100.0,
+      "total_files": 3
+    },
+    "staging/sm": {
+      "CRASH": 0,
+      "FAIL": 34,
+      "PASS": 1370,
+      "SKIP": 2,
+      "TIMEOUT": 0,
+      "executed": 1404,
+      "pass_percent_executed": 97.57834757834758,
+      "total_files": 1406
+    },
+    "staging/source-phase-imports": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 0,
+      "SKIP": 2,
+      "TIMEOUT": 0,
+      "executed": 0,
+      "pass_percent_executed": 0,
+      "total_files": 2
+    },
+    "staging/top-level-await": {
+      "CRASH": 0,
+      "FAIL": 0,
+      "PASS": 1,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 1,
+      "pass_percent_executed": 100.0,
+      "total_files": 1
+    }
+  },
+  "counts_by_top_level": {
+    "annexB": {
+      "CRASH": 0,
+      "FAIL": 1,
+      "PASS": 1085,
+      "SKIP": 0,
+      "TIMEOUT": 0,
+      "executed": 1086,
+      "pass_percent_executed": 99.90791896869244,
+      "total_files": 1086
+    },
+    "built-ins": {
+      "CRASH": 0,
+      "FAIL": 4,
+      "PASS": 18917,
+      "SKIP": 4958,
+      "TIMEOUT": 0,
+      "executed": 18921,
+      "pass_percent_executed": 99.97885946831563,
+      "total_files": 23879
+    },
+    "intl402": {
+      "CRASH": 0,
+      "FAIL": 532,
+      "PASS": 569,
+      "SKIP": 2293,
+      "TIMEOUT": 0,
+      "executed": 1101,
+      "pass_percent_executed": 51.6802906448683,
+      "total_files": 3394
+    },
+    "language": {
+      "CRASH": 0,
+      "FAIL": 12,
+      "PASS": 23254,
+      "SKIP": 566,
+      "TIMEOUT": 0,
+      "executed": 23266,
+      "pass_percent_executed": 99.94842259090518,
+      "total_files": 23832
+    },
+    "staging": {
+      "CRASH": 0,
+      "FAIL": 37,
+      "PASS": 1437,
+      "SKIP": 13,
+      "TIMEOUT": 0,
+      "executed": 1474,
+      "pass_percent_executed": 97.48982360922659,
+      "total_files": 1487
+    }
+  },
+  "review": {
+    "accepted": true,
+    "scope": "Coordinator accepted the complete measured data, serializer control and baseline proposal before integration; final release validation remains separate."
+  },
+  "notes": [
+    "Percentages use executed files; all 53,678 corpus files remain accounted for, including 7,830 skips and 586 known failures.",
+    "This is the exact measured source/version/profile and local VM; later packaging does not imply another corpus execution.",
+    "The published cc90 record remains historical at test262-2026-11-14.json.",
+    "No authenticated website, full-browser timing or performance-comparison claim follows from this conformance run."
+  ]
+}

@@ -1,7 +1,7 @@
-# RabbitHole test262 baseline (serialized from measured CI runner results)
-# Source: cc90fae11a11925dee60f3295a5c6ccab584549e; date: 2026-11-14; TZ: Europe/Madrid; JIT: off; GC: normal; workers: 1.
+# RabbitHole test262 baseline (serialized from measured runner results)
+# Source: baca2a7bda017e3690adbe118e6cae8ab2486ceb; date: 2026-11-14; TZ: Europe/Madrid; JIT: off; GC: normal; workers: 1.
 commit 2e58f87d8350ad51224617a041c6e041d52f8444
-total 45259 589 7830 98.72
+total 45262 586 7830 98.72
 dir annexB/built-ins 241 0 0
 dir annexB/language 844 1 0
 dir built-ins/AbstractModuleSource 0 0 8
@@ -23,7 +23,7 @@ dir built-ins/Date 599 3 8
 dir built-ins/DisposableStack 93 0 0
 dir built-ins/Error 58 0 35
 dir built-ins/FinalizationRegistry 47 0 0
-dir built-ins/Function 508 1 0
+dir built-ins/Function 509 0 0
 dir built-ins/GeneratorFunction 23 0 0
 dir built-ins/GeneratorPrototype 61 0 0
 dir built-ins/Infinity 6 0 0
@@ -84,7 +84,7 @@ dir intl402/Number 6 1 0
 dir intl402/NumberFormat 84 79 88
 dir intl402/PluralRules 32 10 11
 dir intl402/RelativeTimeFormat 51 29 0
-dir intl402/Segmenter 49 30 0
+dir intl402/Segmenter 50 29 0
 dir intl402/String 10 9 0
 dir intl402/Temporal 0 0 2040
 dir intl402/TypedArray 1 0 0
@@ -123,14 +123,13 @@ dir staging/built-ins 5 3 0
 dir staging/decorators 0 0 7
 dir staging/explicit-resource-management 53 0 0
 dir staging/set-methods 3 0 0
-dir staging/sm 1369 35 2
+dir staging/sm 1370 34 2
 dir staging/source-phase-imports 0 0 2
 dir staging/top-level-await 1 0 0
 fail annexB/language/function-code/block-decl-func-skip-arguments.js
 fail built-ins/Date/prototype/toISOString/15.9.5.43-0-10.js
 fail built-ins/Date/prototype/toISOString/15.9.5.43-0-8.js
 fail built-ins/Date/prototype/toISOString/15.9.5.43-0-9.js
-fail built-ins/Function/internals/Construct/base-ctor-revoked-proxy.js
 fail built-ins/String/prototype/localeCompare/15.5.4.9_CE.js
 fail intl402/Array/prototype/toLocaleString/calls-toLocaleString-number-elements.js
 fail intl402/Array/prototype/toLocaleString/invoke-element-tolocalestring.js
@@ -634,7 +633,6 @@ fail intl402/Segmenter/constructor/supportedLocalesOf/locales-invalid.js
 fail intl402/Segmenter/constructor/supportedLocalesOf/options-localeMatcher-invalid.js
 fail intl402/Segmenter/constructor/supportedLocalesOf/options-null.js
 fail intl402/Segmenter/constructor/supportedLocalesOf/options-toobject.js
-fail intl402/Segmenter/ctor-custom-get-prototype-poison-throws.js
 fail intl402/Segmenter/prototype/segment/containing/branding.js
 fail intl402/Segmenter/prototype/segment/containing/breakable-input.js
 fail intl402/Segmenter/prototype/segment/containing/iswordlike.js
@@ -686,7 +684,6 @@ fail staging/sm/Function/constructor-binding.js
 fail staging/sm/Function/invalid-parameter-list.js
 fail staging/sm/Math/atanh-approx.js
 fail staging/sm/PrivateName/constructor-args.js
-fail staging/sm/Proxy/revoked-get-function-realm-typeerror.js
 fail staging/sm/Reflect/defineProperty.js
 fail staging/sm/RegExp/unicode-back-reference.js
 fail staging/sm/String/string-upper-lower-mapping.js

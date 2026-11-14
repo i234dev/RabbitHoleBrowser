@@ -29,7 +29,7 @@ code unless noted in [Dependencies](#dependencies).
 
 | Suite | Result | Notes |
 |---|---|---|
-| **test262** (ECMAScript) | **98.72 %** (45,259 / 45,848 run) | 2026-11-14, source `cc90fae`, JIT off; 99.87 % excluding Intl; 7,830 skipped files; [measurement](docs/benchmarks/test262-2026-11-14.json) and `crates/js/tests/test262_baseline.txt` |
+| **test262** (ECMAScript) | **98.72 %** (45,262 / 45,848 run) | 2026-11-14, v0.1.11 source `baca2a7`, JIT off/normal GC, one worker, profile ci on a Linux VM; 99.88 % excluding Intl; 7,830 skipped files; [measurement](docs/benchmarks/test262-2026-11-14-v0.1.11.json) and `crates/js/tests/test262_baseline.txt` |
 | **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
 | **WPT CSS reftests** (pixel comparison) | **61.1 %** (11,983 / 19,627) | committed baseline in `crates/engine/tests/wpt-css-baseline.txt`; CSS2 79.6 %, color 79.4 %, css-ui 91.1 %, css-text-decor 75.5 %, flexbox 61.2 % |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
@@ -37,8 +37,8 @@ code unless noted in [Dependencies](#dependencies).
 | WHATWG URL tests | 899 / 899 (+ 278 / 278 setters) | |
 | Acid2 | **0 pixels** different from the reference | |
 | Acid3 | 96 / 100 | |
-| Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 in both modes | functional DOM/input checks on 2026-11-14 (Europe/Madrid), v0.1.10 (`6646f49`), Linux x86-64; JIT off/on with threshold 0 and incremental-GC stress, profile ci; not a timing benchmark |
-| Speedometer 3.1 | **2.19 ± 0.065** | 2026-11-14 (Europe/Madrid); 20 default workloads, 3 iterations; headless release v0.1.7, JIT off, i7-12700H/WSL2, CPU 0; [method and scope](docs/benchmarks/speedometer-2026-11-14.md) |
+| Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 in both modes | functional DOM/input checks on 2026-11-14 (Europe/Madrid), v0.1.11 source `b88c8ff`, WSL2/Linux x86-64; JIT off/on with threshold 0 and incremental-GC stress, profile ci; [measurement](docs/benchmarks/frameworks-2026-11-14-v0.1.11.json), not a timing benchmark |
+| Speedometer 3.1 | **2.37 ± 0.094** | 2026-11-14 (Europe/Madrid); 20 default workloads, 3 iterations; headless release v0.1.11 source `baca2a7`, JIT off, i7-12700H/WSL2, CPU 0; [method and scope](docs/benchmarks/speedometer-2026-11-14-v0.1.11.md) |
 
 The built-in start page shows the complete compiled version and the latest
 dated results from the committed records. Baseline-derived counts refresh at

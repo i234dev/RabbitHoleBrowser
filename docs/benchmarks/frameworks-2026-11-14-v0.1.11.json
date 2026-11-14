@@ -1,0 +1,140 @@
+{
+  "schema": "rabbithole-framework-functional-measurement-v1",
+  "source_revision": "b88c8ff7390fa687f3a74771b32fd6057c16be3f",
+  "corpus_revision": "b88c8ff7390fa687f3a74771b32fd6057c16be3f",
+  "version": "0.1.11",
+  "measurement_date": "2026-11-14",
+  "timezone": "Europe/Madrid",
+  "platform": "Linux x86-64, WSL2",
+  "compiler": "Rust 1.99 series, root-confirmed WSL toolchain",
+  "profile": "ci",
+  "command": "cargo test --workspace --profile ci --features jit --locked --no-fail-fast",
+  "fixture_source": "crates/agent/tests/frameworks.rs",
+  "fixture_source_sha256": "2c4fd228c5db870c3aee17f75ac34cf99be6ec6785eb0500d7df31eaf2fc8511",
+  "scope": "All 66 functional DOM/input framework fixtures extracted from the complete b88 workspace runs. This is not a timing benchmark, an authenticated website test or execution of a later source.",
+  "modes": {
+    "off": {
+      "passed": 66,
+      "failed": 0,
+      "ignored": 0,
+      "requested_environment": {
+        "RABBITHOLE_JIT": "off",
+        "RH_GC_STRESS": "inc"
+      },
+      "group": "tests/frameworks.rs [frameworks]",
+      "started_utc": "2026-11-14T15:08:24.305884+00:00",
+      "finished_utc": "2026-11-14T15:12:22.814855+00:00"
+    },
+    "on": {
+      "passed": 66,
+      "failed": 0,
+      "ignored": 0,
+      "requested_environment": {
+        "RABBITHOLE_JIT": "on",
+        "RH_GC_STRESS": "inc",
+        "RABBITHOLE_JIT_THRESHOLD": "0"
+      },
+      "group": "tests/frameworks.rs [frameworks]",
+      "started_utc": "2026-11-14T15:13:12.524793+00:00",
+      "finished_utc": "2026-11-14T15:14:31.393650+00:00"
+    }
+  },
+  "workspace_context": {
+    "groups": 107,
+    "passed": 1390,
+    "failed": 0,
+    "ignored": 13,
+    "outcome_multiset_sha256": "412abe849149fcbd9ec3f78f8bb865ce83951c4fc17516a170b8c6772ad87545"
+  },
+  "test_names": [
+    "alpine::counter",
+    "alpine::fetch",
+    "alpine::form",
+    "alpine::router",
+    "alpine::todo",
+    "alpine::transition",
+    "htmx::counter",
+    "htmx::fetch",
+    "htmx::form",
+    "htmx::router",
+    "htmx::todo",
+    "htmx::transition",
+    "jquery::counter",
+    "jquery::fetch",
+    "jquery::form",
+    "jquery::router",
+    "jquery::todo",
+    "jquery::transition",
+    "lit::counter",
+    "lit::fetch",
+    "lit::form",
+    "lit::router",
+    "lit::ssr",
+    "lit::todo",
+    "lit::transition",
+    "preact::counter",
+    "preact::fetch",
+    "preact::form",
+    "preact::router",
+    "preact::ssr",
+    "preact::todo",
+    "preact::transition",
+    "react18::counter",
+    "react18::fetch",
+    "react18::form",
+    "react18::router",
+    "react18::ssr",
+    "react18::todo",
+    "react18::transition",
+    "react19::counter",
+    "react19::fetch",
+    "react19::form",
+    "react19::router",
+    "react19::ssr",
+    "react19::todo",
+    "react19::transition",
+    "solid::counter",
+    "solid::fetch",
+    "solid::form",
+    "solid::router",
+    "solid::todo",
+    "solid::transition",
+    "svelte::counter",
+    "svelte::fetch",
+    "svelte::form",
+    "svelte::router",
+    "svelte::ssr",
+    "svelte::todo",
+    "svelte::transition",
+    "vue::counter",
+    "vue::fetch",
+    "vue::form",
+    "vue::router",
+    "vue::ssr",
+    "vue::todo",
+    "vue::transition"
+  ],
+  "evidence_files": [
+    {
+      "file": "workspace-b88c8ff-off.log",
+      "sha256": "781fee4c735659e1e728f08edefcca799f0bef762a6044854d090b8f52d00657"
+    },
+    {
+      "file": "workspace-b88c8ff-off.stderr.log",
+      "sha256": "d662bd4f40d04466a841f9dfc476c29644c1f5afdf72a20197b41c9337927997"
+    },
+    {
+      "file": "workspace-b88c8ff-on.log",
+      "sha256": "d639818adec5f96cfd12e4174cf6deb801c45b8aedde823332807f2e4473f3e2"
+    },
+    {
+      "file": "workspace-b88c8ff-on.stderr.log",
+      "sha256": "bb2c86792bb452df3feca9cc1071dcbcd8fd2c4a88fe6053b2048ca49263640c"
+    }
+  ],
+  "functional_measurement_record_sha256": "6fcd81939d31077d57efd2a6738c98b7bacce2a760dc235d409b41e6091871c1",
+  "notes": [
+    "Requested JIT on with threshold 0 does not prove native execution of every framework operation.",
+    "The version 0.1.10 record at frameworks-2026-11-14-v0.1.10.json remains historical."
+  ]
+}

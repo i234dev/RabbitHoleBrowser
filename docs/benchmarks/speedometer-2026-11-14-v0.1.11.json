@@ -1,0 +1,146 @@
+{
+  "schema": "rabbithole-speedometer-measurement-v1",
+  "source_revision": "baca2a7bda017e3690adbe118e6cae8ab2486ceb",
+  "version": "0.1.11",
+  "measurement_date": "2026-11-14",
+  "timezone": "Europe/Madrid",
+  "started_utc": "2026-11-14T15:55:38.095444+00:00",
+  "finished_utc": "2026-11-14T15:56:43.412788+00:00",
+  "started_europe_madrid": "2026-11-14T16:55:38.095444+01:00",
+  "finished_europe_madrid": "2026-11-14T16:56:43.412788+01:00",
+  "score": {
+    "name": "Score",
+    "unit": "score",
+    "description": "Scaled inverse of the Geomean",
+    "mean": 2.3684989807849735,
+    "delta": 0.09412541346152012,
+    "percentDelta": 3.97405336566051,
+    "sum": 7.10549694235492,
+    "min": 2.3321082391922774,
+    "max": 2.4077295876718297,
+    "values": [
+      2.3656591154908138,
+      2.4077295876718297,
+      2.3321082391922774
+    ]
+  },
+  "geomean": {
+    "name": "Geomean",
+    "unit": "ms",
+    "description": "Geomean of test totals",
+    "mean": 422.28025618020274,
+    "delta": 16.75374956123651,
+    "percentDelta": 3.9674479959790165,
+    "sum": 1266.8407685406082,
+    "min": 415.3290324296578,
+    "max": 428.7965640678619,
+    "values": [
+      422.7151720430885,
+      415.3290324296578,
+      428.7965640678619
+    ]
+  },
+  "display_score": "2.37",
+  "display_confidence": "\u00b10.094",
+  "suite": {
+    "name": "Speedometer 3.1",
+    "revision": "1386415be8fef2f6b6bbdbe1828872471c5d802a",
+    "workload_count": 20,
+    "subtest_count": 58,
+    "iterations": 3,
+    "metric_count": 199,
+    "corpus_file_count": 1118,
+    "corpus_files_manifest_sha256": "089c45497bd05baabf4aca89d5af46a2f20550dfa1163adc20bea1e80ccdde05",
+    "workload_contract_sha256": "e99f821a9a974732a01055a8f0123f38c0dc3a2027b92c42cf67f9dc3a503011"
+  },
+  "harness": {
+    "kind": "headless shot",
+    "profile": "release",
+    "compiler": "Rust 1.99.1 (58cf8f9c3, 2026-10-13)",
+    "source_file": "crates/engine/examples/shot.rs",
+    "source_sha256": "bcc597adff5718edad5c768e3a21a649e9c8ebfa6545db5e57efca7c8165048c",
+    "binary_sha256_before": "6ac2f66794099f2ba6532111c171aa00e1976bfb77e7d07e427820e06f92a473",
+    "binary_sha256_after": "6ac2f66794099f2ba6532111c171aa00e1976bfb77e7d07e427820e06f92a473",
+    "viewport": [
+      1280,
+      900
+    ]
+  },
+  "host": {
+    "cpu_model": "12th Gen Intel(R) Core(TM) i7-12700H",
+    "kernel": "6.18.58.1-microsoft-standard-WSL2",
+    "machine": "x86_64",
+    "child_cpu_affinity": [
+      0
+    ],
+    "windows_desktop_idle_claimed": false
+  },
+  "conditions": {
+    "jit": "off",
+    "iterations": 3,
+    "default_workloads": 20,
+    "substeps_per_iteration": 58,
+    "measured_substeps_total": 174,
+    "exported_metric_count": 199,
+    "LANG": "C",
+    "LC_ALL": "C",
+    "served_from": "Unmodified official static suite on loopback",
+    "project_quiet_window": "No project Cargo/conformance work on the WSL benchmark host; project locks held. Host desktop/background idleness was not asserted."
+  },
+  "process": {
+    "exit_code": 0,
+    "timed_out": false,
+    "cancelled": false,
+    "owned_child_reaped": true,
+    "user_cpu_s": 61.503516,
+    "system_cpu_s": 2.5320270000000002,
+    "peak_rss_kib": 1356248
+  },
+  "external_clock_checks": {
+    "valid": true,
+    "anomalies": [],
+    "realtime_adjustments": [],
+    "realtime_adjustments_do_not_replace_monotonic_timing": true,
+    "sample_count": 66,
+    "elapsed_monotonic_seconds": 64.309508487,
+    "elapsed_boottime_seconds": 64.309509101,
+    "wrapper_cpu_seconds": 0.207919917
+  },
+  "performance_now_clock": "std::time::Instant",
+  "source_unchanged": true,
+  "corpus_unchanged": true,
+  "completion": {
+    "valid": true,
+    "section": "summary",
+    "workload_count": 20,
+    "subtest_count": 58,
+    "iterations": 3,
+    "metric_count": 199,
+    "all_values_finite": true,
+    "all_totals_consistent": true,
+    "geomeans_and_scores_recomputed": true,
+    "confidence_recomputed": true
+  },
+  "tools_sha256": {
+    "run.py": "e1eea8afdd48d7b68bcd891b1ab9008f35aed300adeca86817091e62d992feb2",
+    "validate.py": "af7130752580606dc08b7a83f7aafb35e8e027eed19a9b8ca185ce566a0886a1",
+    "workload-contract.json": "e99f821a9a974732a01055a8f0123f38c0dc3a2027b92c42cf67f9dc3a503011"
+  },
+  "evidence_hashes": {
+    "raw_benchmark_sha256": "590969e762424934ad6c0be1520f1a02354cd6327ce0770bb913e7f4f59d2c5e",
+    "raw_log_sha256": "e9b8f72a3137c7066af939096a7116d0f519c590e8e47a36ece6d67000cd8fcf",
+    "summary_png_sha256": "12916f460fbe06b3e4511aede7859382752648e7726ee215ae460b23a26ec22b",
+    "measurement_summary_sha256": "3430242510f7f4969e4118f7e9fd1e1645b9c738307a281a49edb35a7a327910",
+    "root_data_validation_sha256": "cd83c2bd3b9c7a49577c7a967573aea211feb373540cd2bb47f7fdac190aa752",
+    "build_receipt_sha256": "c176d4689a5ae8a5b253a0d2d8205a45613f22749cbb92980c5d7c328024c12f"
+  },
+  "review": {
+    "accepted": true,
+    "scope": "Coordinator independently checked raw 199 metrics, source/corpus/clocks and the score screenshot before accepting this measurement."
+  },
+  "notes": [
+    "This configured three-iteration headless result is scoped to the stated source, binary, workload and machine conditions.",
+    "Historical 0.1.7 measurement remains at speedometer-2026-11-14.md; these records do not establish a causal speed change or a comparison with Chrome/V8.",
+    "This record does not claim a rerun on later packaging/final-source revisions."
+  ]
+}
