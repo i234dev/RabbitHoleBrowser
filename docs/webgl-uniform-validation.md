@@ -1,6 +1,8 @@
 # Uniform sequence validation
 
-This candidate is based on `e917dd06b854ac0943f86722f3695c3e25bb3c8d`.
+This successor is based on final 0.1.10
+`4f8717910d698949fd3e39477e67bef633da900b` and replays the isolated uniform
+changes from `e901c61324e0095c9ff9da30bebdf0e688ef20e7` with two review fixes.
 Tests described here are written but have not been executed for this candidate.
 
 ## Rules checked against primary sources
@@ -45,6 +47,9 @@ or array-length cap changes sequence semantics. Typed arrays use their captured
 intrinsic length getter rather than an overridable page property. Conversion
 and validation finish before a native command can write a uniform; native copies
 receive at most one supported element. Scalar wrappers do not iterate arrays.
+The native bridge is invoked with captured `Reflect.apply` and an array-like
+argument list; the retained sequence is copied using its already computed size.
+Both operations avoid consulting a public iterator or typed-array length getter.
 
 GLSL uniform arrays, integer vector types, and WebGL 2 source-offset/source-length
 overloads remain unsupported. The `uniform2iv`–`uniform4iv` wrappers perform
@@ -70,5 +75,9 @@ Three new backend tests and the Script/Engine fixture exercise both context
 versions. Every supported family checks initial pixels, rejected writes and
 readback. Other controls cover conversion after element 17, exact long lengths,
 iterator caching, null/undefined, Symbol/BigInt, location brands, relink/foreign
-locations, and scalar argument order. Run Script tests with GC stress both off
+locations, and scalar argument order. Causal controls poison `Array.iterator`
+and `%TypedArray%.prototype.length`, restore both in `finally`, and require
+different native readback and pixel values. An explicit throwing-spread control
+prevents a broken VM optimization from hiding the native-call regression.
+Run Script tests with GC stress both off
 and on. No CTS suite or full WebGL conformance result is claimed.

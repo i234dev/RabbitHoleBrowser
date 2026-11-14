@@ -61,7 +61,10 @@
   const call = (s, command, ...args) => {
     syncSize(s);
     if (s.lost) return { error: GL.CONTEXT_LOST_WEBGL, value: null };
-    const result = N.webglCall(s.surface.id, command, ...args);
+    // Native invocation consumes an array-like list, never a page iterator.
+    const nativeArgs = { 0: s.surface.id, 1: command, length: args.length + 2 };
+    for (let i = 0; i < args.length; ++i) nativeArgs[i + 2] = args[i];
+    const result = invoke(N.webglCall, N, nativeArgs);
     if (result.error) flag(s, result.error);
     return result;
   };
@@ -174,8 +177,9 @@
       if (length < 16) head[length] = converted;
       ++length;
     }
-    const data = new ArrayType(length < 16 ? length : 16);
-    for (let i = 0; i < data.length; ++i) data[i] = head[i];
+    const storedLength = length < 16 ? length : 16;
+    const data = new ArrayType(storedLength);
+    for (let i = 0; i < storedLength; ++i) data[i] = head[i];
     return { data, length };
   }
   function matrix(s, location, transpose, data, dimension) {
