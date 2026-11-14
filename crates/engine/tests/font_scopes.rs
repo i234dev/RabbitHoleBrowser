@@ -220,3 +220,37 @@ fn layout_autospace_uses_document_ic_after_style_scope_has_ended() {
     assert!((gap(&a) - expected).abs() < 0.02);
     engine.check_incremental(&mut a).unwrap();
 }
+
+fn canvas_font_pixels(engine: &Engine, page: &mut Page, font: &str, stroke: bool) -> Vec<u8> {
+    let operation = if stroke { "strokeText" } else { "fillText" };
+    let code = format!(
+        "(()=>{{let c=document.getElementById('canvas'),x=c.getContext('2d');x.clearRect(0,0,200,40);x.font=`{font}`;x.{operation}('WWWiii',0,25);return true}})()"
+    );
+    assert_eq!(engine.eval_in_page(page, &code), "true");
+    let canvas = page.doc.element_by_id("canvas").unwrap();
+    page.images.get(&canvas).expect("Canvas text pixels").pixels().to_vec()
+}
+
+#[test]
+fn canvas_named_font_fill_and_stroke_keep_order_quotes_and_retained_context() {
+    let engine = make_engine();
+    let html = "<!doctype html><canvas id=canvas width=200 height=40></canvas>";
+    let mut a = page(&engine, html, "Scoped", MONO);
+    let named_fill = canvas_font_pixels(&engine, &mut a, "20px Scoped", false);
+    let generic_fill = canvas_font_pixels(&engine, &mut a, "20px sans-serif", false);
+    assert_ne!(named_fill, generic_fill, "fillText must select the named font");
+    let named_stroke = canvas_font_pixels(&engine, &mut a, "20px Scoped", true);
+    assert_ne!(named_stroke, canvas_font_pixels(&engine, &mut a, "20px sans-serif", true), "strokeText must select the named font");
+    assert_eq!(named_fill, canvas_font_pixels(&engine, &mut a, "20px Missing, Scoped, serif", false));
+    assert_eq!(canvas_font_pixels(&engine, &mut a, "20px serif", false), canvas_font_pixels(&engine, &mut a, "20px Missing, serif, Scoped", false));
+    a.fonts.add_font_data("serif", 400, false, MONO).unwrap();
+    assert_eq!(named_fill, canvas_font_pixels(&engine, &mut a, "20px 'serif'", false));
+    assert_ne!(named_fill, canvas_font_pixels(&engine, &mut a, "20px serif", false));
+    // Keep the actual Canvas context and its font state in A's live realm.
+    assert_eq!(engine.eval_in_page(&mut a, "globalThis.kept=document.getElementById('canvas').getContext('2d');kept.font='20px Scoped';globalThis.oldWidth=kept.measureText('WWWiii').width;true"), "true");
+    let mut b = page(&engine, html, "Scoped", SANS);
+    assert_ne!(named_fill, canvas_font_pixels(&engine, &mut b, "20px Scoped", false));
+    assert_eq!(engine.eval_in_page(&mut a, "kept.clearRect(0,0,200,40);kept.fillText('WWWiii',0,25);kept.measureText('WWWiii').width===oldWidth"), "true");
+    let canvas = a.doc.element_by_id("canvas").unwrap();
+    assert_eq!(a.images[&canvas].pixels(), named_fill.as_slice());
+}

@@ -581,7 +581,7 @@
         if (k === 'lineDashOffset' || k === 'shadowOffsetX' || k === 'shadowOffsetY') { v = +v; if (isFinite(v)) st[k] = v; return; }
         if (k === 'imageSmoothingEnabled') { st[k] = !!v; return; }
         if (k === 'shadowColor') { const c = parseColor(v); if (c) { st[k] = serializeColor(c); st.shadow = c; } return; }
-        if (k === 'font') { if (/\d/.test(String(v))) st[k] = String(v).trim(); return; }
+        if (k === 'font') { v = String(v).trim(); if (N.canvasValidFont(v)) st[k] = v; return; }
         st[k] = String(v);
       },
       configurable: true, enumerable: true,

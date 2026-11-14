@@ -58,3 +58,19 @@ font scope; full/incremental passes, unrendered style queries, verification and
 animation keyframes enter their document's scope. Layout retains a guard too,
 including text-autospace measurements that occur after styling. An unchanged style flush
 returns before collecting font descriptors or entering a new scope.
+
+## Canvas font selection
+
+Canvas `measureText`, `fillText` and `strokeText` resolve the same parsed CSS
+font shorthand through the owning document's view. Family entries retain their
+order. A quoted name such as `"serif"` is a literal registered name; unquoted
+`serif` selects the generic family. Missing named entries fall through to the
+next family, while a generic entry selects the host's generic immediately.
+The font setter keeps its previous value when shorthand resolution fails.
+
+The shared shorthand resolver takes an explicit parent and length context.
+Canvas currently supplies its fixed 16px relative/root base, zero viewport
+metrics and fixed relative glyph metrics (ch/ex=0.5, ic=1). It does not derive
+these from the canvas element's computed font or another document's TLS.
+This change addresses named-family selection, without adding element-relative
+font inheritance or claiming full CSS font-shorthand conformance.

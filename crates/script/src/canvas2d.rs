@@ -757,55 +757,43 @@ impl ImageSrc {
 }
 
 /// Parse a CSS `font` shorthand: (size px, family, weight, italic).
-fn parse_font(font: &str) -> (f32, rabbithole_gfx::Family, u16, bool) {
-    let mut size = 10.0;
-    let mut weight = 400;
-    let mut italic = false;
-    let mut family = rabbithole_gfx::Family::Sans;
-    let lower = font.to_ascii_lowercase();
-    let mut rest = lower.as_str();
-    for tok in lower.split_whitespace() {
-        match tok {
-            "italic" | "oblique" => italic = true,
-            "bold" | "bolder" => weight = 700,
-            "lighter" => weight = 300,
-            t if t.len() == 3 && t.chars().all(|c| c.is_ascii_digit()) => weight = t.parse().unwrap_or(400),
-            t if t.contains("px") || t.contains("pt") || t.contains("em") => {
-                let sz = t.split('/').next().unwrap_or(t);
-                let n: f32 = sz.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%').parse().unwrap_or(10.0);
-                size = if sz.ends_with("pt") { n * 4.0 / 3.0 } else if sz.ends_with("rem") || sz.ends_with("em") { n * 16.0 } else { n };
-                if let Some(i) = lower.find(tok) {
-                    rest = &lower[i + tok.len()..];
-                }
-                break;
-            }
-            _ => {}
-        }
+fn parse_font(font: &str) -> Option<rabbithole_style::cascade::ResolvedFontShorthand> {
+    // Match the existing Canvas base: em/% use 16px, rem uses 16px and
+    // viewport units have no viewport here. Element-relative font resolution
+    // is a separate feature; do not borrow another document's unit TLS.
+    let parent = rabbithole_style::ComputedStyle::initial();
+    let context = rabbithole_style::values::LengthContext {
+        font_size: 16.0, root_font_size: 16.0, viewport_w: 0.0, viewport_h: 0.0,
+        ch: 0.5, ex: 0.5, ic: 1.0,
+    };
+    let tokens = rabbithole_css::Tokenizer::tokenize(font);
+    rabbithole_style::cascade::resolve_font_shorthand(&tokens, &parent, &context)
+}
+
+pub(crate) fn resolve_font(fc: &FontContext, font: &str) -> Option<(f32, rabbithole_gfx::FontId)> {
+    use rabbithole_style::cascade::FontFamilyName;
+    let parsed = parse_font(font)?;
+    for family in &parsed.families {
+        let selected = match family {
+            FontFamilyName::Named(name) => fc.select_exact_family(name, parsed.weight, parsed.italic),
+            FontFamilyName::Generic(name) => Some(fc.select_family(std::slice::from_ref(name), rabbithole_gfx::Family::Sans, parsed.weight, parsed.italic)),
+        };
+        if let Some(font) = selected { return Some((parsed.size, font)); }
     }
-    for fam in rest.split(',') {
-        let f = fam.trim().trim_matches(|c| c == '"' || c == '\'');
-        if f.contains("mono") || f.contains("courier") || f.contains("consol") {
-            family = rabbithole_gfx::Family::Mono;
-            break;
-        }
-        if f == "serif" || f.contains("times") || f.contains("georgia") || (f.contains("serif") && !f.contains("sans")) {
-            family = rabbithole_gfx::Family::Serif;
-            break;
-        }
-        if !f.is_empty() {
-            break;
-        }
-    }
-    (size.max(0.0), family, weight, italic)
+    Some((parsed.size, fc.select(rabbithole_gfx::Family::Sans, parsed.weight, parsed.italic)))
+}
+
+fn canvas_valid_font(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
+    let font = arg_str(realm, args, 0)?;
+    Ok(Value::Bool(parse_font(&font).is_some()))
 }
 
 /// `canvasMeasureText(text, font)` → { width, ascent, descent, fontAscent, fontDescent }.
 fn canvas_measure(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let text = arg_str(realm, args, 0)?;
     let font = arg_str(realm, args, 1)?;
-    let (size, family, weight, italic) = parse_font(&font);
     let fc = fonts();
-    let fid = fc.select(family, weight, italic);
+    let (size, fid) = resolve_font(&fc, &font).ok_or_else(|| realm.throw_type_error("invalid Canvas font shorthand"))?;
     let glyphs = fc.shape(fid, size, &text, 0.0);
     let width = glyphs.last().map(|g| g.x + g.advance).unwrap_or(0.0);
     let lm = fc.metrics(fid, size);
@@ -827,11 +815,10 @@ fn canvas_fill_text(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult
     let m = read_matrix(realm, &arg(args, 6))?;
     let src = read_paint(realm, &arg(args, 5), m)?;
     let stroke_w = num(realm, args, 8).unwrap_or(0.0);
-    let (size, family, weight, italic) = parse_font(&font);
+    let fc = fonts();
+    let (size, fid) = resolve_font(&fc, &font).ok_or_else(|| realm.throw_type_error("invalid Canvas font shorthand"))?;
     let scale = (m[0] * m[3] - m[1] * m[2]).abs().sqrt().max(0.01);
     let dev_size = (size as f64 * scale) as f32;
-    let fc = fonts();
-    let fid = fc.select(family, weight, italic);
     let glyphs = fc.shape(fid, dev_size, &text, 0.0);
     with_surface(realm, &arg(args, 0), |realm, s| {
         let p = read_params(realm, s, &arg(args, 7))?;
@@ -951,6 +938,7 @@ pub(crate) fn install(realm: &mut Realm, o: rabbithole_js::ObjectId) {
     realm.define_method(o, "canvasGetImageData", 5, canvas_get);
     realm.define_method(o, "canvasPutImageData", 10, canvas_put);
     realm.define_method(o, "canvasDrawImage", 9, canvas_draw_image);
+    realm.define_method(o, "canvasValidFont", 1, canvas_valid_font);
     realm.define_method(o, "canvasMeasureText", 2, canvas_measure);
     realm.define_method(o, "canvasFillText", 9, canvas_fill_text);
     realm.define_method(o, "canvasPresent", 2, canvas_present);

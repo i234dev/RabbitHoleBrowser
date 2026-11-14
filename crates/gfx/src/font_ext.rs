@@ -201,7 +201,9 @@ impl FontContext {
         self.select(generic, weight, italic)
     }
 
-    fn select_exact_family(&self, family_lower: &str, weight: u16, italic: bool) -> Option<FontId> {
+    /// Select a literal family name without interpreting generic keywords.
+    /// A quoted CSS family such as `"serif"` uses this path.
+    pub fn select_exact_family(&self, family_lower: &str, weight: u16, italic: bool) -> Option<FontId> {
         let ids = self.family_faces(&family_lower.to_ascii_lowercase())?;
         let idx = self.best_of(&ids, weight, italic)?;
         // Make sure the face actually loads.

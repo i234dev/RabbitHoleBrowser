@@ -2005,6 +2005,90 @@ fn line_height_of(c: &[Token], font_size: f32, ctx: &LengthContext) -> Option<Op
     }
 }
 
+/// Ordered family entries from a font shorthand. Quoted names stay named,
+/// including names such as `"serif"` that would be generic when unquoted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontFamilyName {
+    Named(String),
+    Generic(String),
+}
+
+/// Font fields needed by text consumers outside the document cascade.
+#[derive(Debug, Clone)]
+pub struct ResolvedFontShorthand {
+    pub size: f32,
+    pub weight: u16,
+    pub italic: bool,
+    pub families: Vec<FontFamilyName>,
+}
+
+/// Resolve the existing CSS font-shorthand grammar against an explicit base.
+/// The caller supplies relative-unit/root/viewport metrics in `context`;
+/// this does not consult or change a document's thread-local font-unit view.
+/// Family order and quoted-vs-generic identity are retained for consumers
+/// such as Canvas; the document cascade's family selection is unchanged.
+pub fn resolve_font_shorthand(value: &[Token], parent: &ComputedStyle, context: &LengthContext) -> Option<ResolvedFontShorthand> {
+    let parsed = parse_font_shorthand(value)?;
+    let size = parsed.size.as_ref()?;
+    if values::parse_length(size).is_some_and(|length| match length.resolve(context) {
+        Length::Px(value) | Length::Percent(value) => !value.is_finite() || value < 0.0,
+        _ => true,
+    }) {
+        return None;
+    }
+    let mut computed = parent.clone();
+    computed.font_size = f32::NAN;
+    apply_font_size(size, &mut computed, parent, context);
+    if !computed.font_size.is_finite() || computed.font_size < 0.0 {
+        return None;
+    }
+    if let Some(line) = parsed.line_height.as_deref() {
+        if matches!(line, [Token::Number(value)] | [Token::Dimension(value, _)] | [Token::Percentage(value)] if !value.is_finite() || *value < 0.0)
+            || line_height_of(line, computed.font_size, context).is_none()
+        {
+            return None;
+        }
+    }
+    let components = values::components(&parsed.family);
+    let mut families = Vec::new();
+    for family in values::split_commas(&components) {
+        let entry = match family.as_slice() {
+            [[Token::String(name)]] if !name.is_empty() => FontFamilyName::Named(name.clone()),
+            tokens if !tokens.is_empty() && tokens.iter().all(|token| matches!(token, [Token::Ident(_)])) => {
+                let words: Vec<_> = tokens.iter().filter_map(|token| match token {
+                    [Token::Ident(word)] => Some(word.as_str()),
+                    _ => None,
+                }).collect();
+                if words.iter().any(|word| matches!(word.to_ascii_lowercase().as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "default")) {
+                    return None;
+                }
+                let name = words.join(" ");
+                let generic = |name: &str| matches!(name,
+                    "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui" |
+                    "ui-serif" | "ui-sans-serif" | "ui-monospace" | "ui-rounded" | "emoji" | "math" | "fangsong");
+                if words.len() > 1 && words.iter().any(|word| generic(&word.to_ascii_lowercase())) {
+                    return None;
+                }
+                if generic(&name.to_ascii_lowercase()) { FontFamilyName::Generic(name) }
+                else { FontFamilyName::Named(name) }
+            }
+            _ => return None,
+        };
+        families.push(entry);
+    }
+    if families.is_empty() { return None; }
+    let weight = match parsed.weight.as_deref() {
+        Some(weight) => weight_of(weight, parent)?,
+        None => 400,
+    };
+    Ok(ResolvedFontShorthand {
+        size: computed.font_size,
+        weight,
+        italic: matches!(parsed.style, Some(FontStyle::Italic)),
+        families,
+    })
+}
+
 struct FontShorthand {
     style: Option<FontStyle>,
     small_caps: bool,
