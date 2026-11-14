@@ -52,8 +52,9 @@ overloads, with checked argument counts, types and expression budgets:
   `clamp`, `mix`, `step`, `smoothstep`.
 - Geometry: `length`, `distance`, `dot`, `normalize`, `cross`.
 
-User helpers support scalar `bool`, `float` and `vec2/3/4` results and up to eight named
-parameters of those types, copied by value with ordinary or `in` syntax. Helpers
+User helpers support scalar `bool`, `float`, `vec2/3/4` and `bvec2/3/4` results and up to eight named
+parameters of those types, copied by value with ordinary, `in` or read-only
+`const in` syntax. Helpers
 may execute local declarations and typed compound assignments, local/parameter assignments, blocks,
 selection and typed early returns. Every helper path must return; every main
 exit path must write its stage output. Definitions precede callers and `main`; nested calls to earlier
@@ -63,7 +64,7 @@ Helpers cannot write globals or read mutable outputs.
 
 The evaluator shares helper bodies and charges every call site, argument and
 transitive body against its expression budget. There are at most 16 helpers and
-16 nested calls. Recursion, forward calls, prototypes, overloading, `out`/`inout`/
+16 nested calls. Recursion, forward calls, prototypes, overloading, `out`/`inout` parameters and
 statements after an unconditional return are rejected. `const in` parameters
 are read-only; local `const` declarations require constant-expression initializers. See [the backend limits](../crates/webgl/README.md#glsl-subset).
 Scalar bool operations include `!`, short-circuiting `&&`/`||`, `^^`, scalar float

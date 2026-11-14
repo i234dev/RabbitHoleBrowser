@@ -77,7 +77,7 @@ boolean uniforms start at false.
 The evaluator also supports 32 typed float/vector math built-ins, with checked
 argument counts, types and expression costs. See
 [the supported functions](../../docs/webgl.md#shader-language-subset).
-User helpers may return scalar `bool`, `float` or `vec2/3/4`, take up to eight
+User helpers may return scalar `bool`, `float`, `vec2/3/4` or `bvec2/3/4`, take up to eight
 named parameters of those types by value (ordinary, `in` or read-only `const in`
 parameters), and use
 initialized locals, nested blocks, `if`/`else` and typed early returns. Every
