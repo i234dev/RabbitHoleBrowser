@@ -7,7 +7,7 @@ fn computed(declarations: &str) -> ComputedStyle {
     let tree = style_tree(&doc, &sheets, &MediaEnv {
         width: 800., height: 600., screen: true, scripting: true,
     });
-    tree.get(doc.element_by_id("target").unwrap()).unwrap().clone()
+    tree.get(doc.element_by_id("target").unwrap()).unwrap().as_ref().clone()
 }
 
 #[test]
