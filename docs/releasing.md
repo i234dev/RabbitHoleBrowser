@@ -22,6 +22,13 @@ Python 3.11+ and Cargo are required. Verification uses only
 dependencies. If verification fails, the helper restores the files it changed.
 An existing lockfile and locally available dependency metadata are required.
 
+Before advancing `main`, push the prepared revision to a `release/<version>`
+branch. CI runs the same build, complete default test targets and headless smoke
+checks on Linux, macOS and Windows for these branches. Wait for all three jobs
+to succeed, then advance `main` to that exact tested revision and publish its
+matching artifacts. Preparation continues to use the previous published
+`origin/main` until that delivery is complete.
+
 Run relevant regression and integration checks, then check the final version:
 
 ```sh
