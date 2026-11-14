@@ -125,10 +125,27 @@ fn optional_string(realm: &mut Realm, args: &[Value], index: usize, default: &st
 
 fn feature(features: &str, name: &str) -> bool {
     let mut enabled = false;
-    for token in features.split(|c: char| c == ',' || c.is_ascii_whitespace()).filter(|s| !s.is_empty()) {
-        let (key, value) = token.split_once('=').unwrap_or((token, ""));
+    let bytes = features.as_bytes();
+    let mut index = 0;
+    let separator = |byte: u8| byte == b',' || byte == b'=' || byte.is_ascii_whitespace();
+    while index < bytes.len() {
+        while index < bytes.len() && separator(bytes[index]) { index += 1; }
+        let start = index;
+        while index < bytes.len() && !separator(bytes[index]) { index += 1; }
+        let key = &features[start..index];
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() { index += 1; }
+        let mut value = "";
+        if index < bytes.len() && bytes[index] == b'=' {
+            index += 1;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() { index += 1; }
+            let start = index;
+            while index < bytes.len() && !separator(bytes[index]) { index += 1; }
+            value = &features[start..index];
+        }
         if key.eq_ignore_ascii_case(name) {
-            enabled = value.is_empty() || value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("true") || value.parse::<i64>().map(|n| n != 0).unwrap_or(false);
+            let integer = value.strip_prefix('+').or_else(|| value.strip_prefix('-')).unwrap_or(value);
+            let nonzero = integer.bytes().take_while(u8::is_ascii_digit).any(|byte| byte != b'0');
+            enabled = value.is_empty() || value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("true") || nonzero;
         }
     }
     enabled
@@ -281,4 +298,21 @@ pub(crate) fn deliver(realm: &mut Realm, message: &WindowMessage) -> JsResult<()
     unroot_value(realm, &source);
     unroot_value(realm, &data);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::feature;
+
+    #[test]
+    fn popup_features_preserve_boolean_values_and_separators() {
+        for features in ["noopener", "NOOPENER=yes", "noopener=true", "noopener = -2", "noopener=1suffix"] {
+            assert!(feature(features, "noopener"), "{features}");
+        }
+        for features in ["", "width=500", "noopener=0", "noopener = no", "noopener=false", "noopener=1,noopener=0"] {
+            assert!(!feature(features, "noopener"), "{features}");
+        }
+        assert!(feature("width=500, noreferrer = yes, noopener=0", "noreferrer"));
+        assert!(!feature("width=500, noreferrer = yes, noopener=0", "noopener"));
+    }
 }

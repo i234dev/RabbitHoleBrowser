@@ -28,7 +28,7 @@
       },
       getPrototypeOf() { return null; },
       setPrototypeOf() { return false; },
-      defineProperty() { throw new DOMException('Cannot redefine a remote Location.', 'NotSupportedError'); },
+      defineProperty() { if (!same(id)) security(); throw new DOMException('Cannot redefine a remote Location.', 'NotSupportedError'); },
       preventExtensions() { return false; },
     });
     const close = () => info(id, 'close');
