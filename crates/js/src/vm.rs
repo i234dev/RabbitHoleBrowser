@@ -98,6 +98,15 @@ pub(crate) enum ArgSrc<'a> {
     Slice(&'a [Value]),
 }
 
+/// Closure metadata and receiver binding needed to push a plain call.
+/// Owned values let the caller release its heap borrow before pushing.
+struct PlainCall {
+    code: std::ptr::NonNull<FunctionCode>,
+    scope: Option<ObjectId>,
+    this: Value,
+    new_target: Value,
+}
+
 impl Default for Value {
     fn default() -> Value {
         Value::Undefined
@@ -189,7 +198,17 @@ impl Realm {
                 if flags.is_generator || flags.is_async {
                     return self.start_generator_like(id, this, args);
                 }
-                if !self.push_plain_call(id, &this, args, 0, true)? {
+                // The closure was just looked up above. Reuse its metadata
+                // rather than looking up the same callback a second time.
+                let plain = self.plain_call_target(c, &this);
+                let lazy = c.code.lazy.is_some();
+                let pushed = if let Some(p) = plain {
+                    self.push_closure_frame(id, p.code, p.scope, ArgSrc::Slice(args), args.len(), p.this, p.new_target, 0, false, true)?;
+                    true
+                } else {
+                    lazy && self.push_plain_call(id, &this, args, 0, true)?
+                };
+                if !pushed {
                     let frame = self.prepare_frame(id, this, args, Value::Undefined, false)?;
                     self.push_frame(frame, true)?;
                 }
@@ -793,17 +812,28 @@ impl Realm {
     pub(crate) fn push_plain_call(&mut self, id: ObjectId, this: &Value, args: &[Value], ret_slot: u32, entry: bool) -> JsResult<bool> {
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
         let ObjectKind::Function(c) = &obj.kind else { return Ok(false) };
-        let cf = c.code.call_flags;
-        if cf & CALL_PLAIN == 0 {
+        let Some(p) = self.plain_call_target(c, this) else {
             if c.code.lazy.is_some() {
                 self.ensure_compiled(id)?;
                 return self.push_plain_call(id, this, args, ret_slot, entry);
             }
             return Ok(false);
+        };
+        self.push_closure_frame(id, p.code, p.scope, ArgSrc::Slice(args), args.len(), p.this, p.new_target, ret_slot, false, entry)?;
+        Ok(true)
+    }
+
+    /// Resolve a plain closure call using an existing heap lookup. This
+    /// never calls JS or allocates a heap object.
+    #[inline(always)]
+    fn plain_call_target(&self, c: &Closure, this: &Value) -> Option<PlainCall> {
+        let cf = c.code.call_flags;
+        if cf & CALL_PLAIN == 0 {
+            return None;
         }
         let (this, new_target) = if cf & CALL_ARROW != 0 {
             if c.arguments.is_some() {
-                return Ok(false);
+                return None;
             }
             (c.this_value.clone().unwrap_or(Value::Undefined), c.new_target.clone().unwrap_or(Value::Undefined))
         } else if cf & CALL_STRICT != 0 {
@@ -812,13 +842,10 @@ impl Realm {
             match this.v() {
                 V::Undefined | V::Null | V::Empty => (Value::Object(self.realm_global(c.code.realm.get())), Value::Undefined),
                 V::Object(o) => (Value::Object(o), Value::Undefined),
-                _ => return Ok(false),
+                _ => return None,
             }
         };
-        let code = std::ptr::NonNull::from(&*c.code);
-        let parent_scope = c.scope;
-        self.push_closure_frame(id, code, parent_scope, ArgSrc::Slice(args), args.len(), this, new_target, ret_slot, false, entry)?;
-        Ok(true)
+        Some(PlainCall { code: std::ptr::NonNull::from(&*c.code), scope: c.scope, this, new_target })
     }
 
     /// Compile closure `id`'s function if it is still lazy (once per
