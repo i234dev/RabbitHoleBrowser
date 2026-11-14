@@ -1978,6 +1978,21 @@ impl Compiler {
         let mut vars = Vec::new();
         Self::collect_var_names(body_stmts, &mut vars);
         let lex = Self::collect_lexical(body_stmts, true);
+        let has_parameter_expressions = f.params.iter().any(|p| Self::pattern_contains_expression(&p.pattern));
+        // A var declaration reuses the implicit arguments binding; it does
+        // not initialize a new undefined binding at function entry. For a
+        // separate body environment, its initial value is copied below.
+        if !f.is_arrow && vars.iter().any(|n| n == "arguments") && (has_parameter_expressions || !lex.iter().any(|(n, _)| n == "arguments")) {
+            let mut parameter_names = Vec::new();
+            for p in &f.params {
+                Self::collect_pattern_names(&p.pattern, &mut parameter_names);
+            }
+            if !parameter_names.iter().any(|n| n == "arguments") {
+                let loc = self.declare("arguments", BindKind::Var);
+                self.fs().arguments_loc = Some(loc);
+                self.fs().flags.uses_arguments = true;
+            }
+        }
         // With parameter expressions the body's vars live in an
         // environment of their own (closures in defaults do not see them).
         let separate_vars = !f.params.iter().all(|p| matches!(p.pattern, Pattern::Identifier(_)) && !p.rest) && matches!(f.body, FunctionBody::Block(_));
@@ -2002,7 +2017,6 @@ impl Compiler {
             // Annex B excludes parameter bindings, including an implicit
             // arguments object. A body declaration only suppresses that
             // object when the formal parameters contain no expressions.
-            let has_parameter_expressions = f.params.iter().any(|p| Self::pattern_contains_expression(&p.pattern));
             if !f.is_arrow && (has_parameter_expressions || !lex.iter().any(|(n, _)| n == "arguments")) {
                 outer.push("arguments".to_string());
             }

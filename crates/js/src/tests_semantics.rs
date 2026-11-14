@@ -190,3 +190,20 @@ fn inferred_class_names_preserve_outer_closures_and_explicit_class_bindings() {
       })()
     "#), "true");
 }
+
+#[test]
+fn var_arguments_reuses_the_implicit_object_before_its_initializer() {
+    assert_eq!(evaluate("(function(){return typeof arguments;var arguments='later';})(1,2)"), "object");
+    assert_eq!(evaluate("(function(){var arguments;return ()=>arguments[0];})(42)()"), "42");
+    assert_eq!(evaluate("(function(a=1){var arguments;return arguments.length;})(1,2)"), "2");
+    assert_eq!(evaluate("(function(a){var arguments;arguments[0]=7;return a;})(1)"), "7");
+    assert_eq!(evaluate("(function(){var arguments=['replacement'];return arguments[0];})(42)"), "replacement");
+}
+
+#[test]
+fn var_arguments_respects_explicit_parameter_and_body_bindings() {
+    assert_eq!(evaluate("(function(arguments){var arguments;return arguments;})('parameter')"), "parameter");
+    assert_eq!(evaluate("(function({arguments}){var arguments;return arguments;})({arguments:'pattern'})"), "pattern");
+    assert_eq!(evaluate("(function(){var arguments;function arguments(){return 'function';}return arguments();})()"), "function");
+    assert_eq!(evaluate("(function(){const original=arguments;return [((arguments)=>{var arguments;return arguments;})('arrow'),arguments===original].join(':');})(1)"), "arrow:true");
+}
