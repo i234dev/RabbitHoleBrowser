@@ -666,16 +666,16 @@ impl Agent {
     /// that navigate): landmarks, heading outline, forms, overlays, counts.
     pub fn summary_text(&mut self, ti: usize) -> Result<String, String> {
         let (root, _, overlays) = self.tree(ti, false);
-        Ok(self.page_overview_text(ti, &root, &overlays, true))
+        Ok(self.page_overview_text(ti, &root, &overlays, true, None))
     }
 
     /// Search during navigation keeps the page header and covering-layer
     /// warnings; the regular overview is opt-in via `summary=true`.
-    pub(crate) fn search_header_text(&mut self, ti: usize, root: &Ax, overlays: &[Overlay], summary: bool) -> String {
-        self.page_overview_text(ti, root, overlays, summary)
+    pub(crate) fn search_results_text(&mut self, ti: usize, root: &Ax, overlays: &[Overlay], summary: bool, results: &str) -> String {
+        self.page_overview_text(ti, root, overlays, summary, Some(results))
     }
 
-    fn page_overview_text(&mut self, ti: usize, root: &Ax, overlays: &[Overlay], summary: bool) -> String {
+    fn page_overview_text(&mut self, ti: usize, root: &Ax, overlays: &[Overlay], summary: bool, results: Option<&str>) -> String {
         let header = self.page_line(ti);
         let tab = &mut self.tabs[ti];
         let mut lines = crate::summary::render(&tab.frames[0].page, root, &mut tab.refs, overlays);
@@ -686,6 +686,10 @@ impl Agent {
         let mut body = header;
         body.push('\n');
         body.push_str(&lines.join("\n"));
+        if let Some(results) = results {
+            body.push('\n');
+            body.push_str(results);
+        }
         let mut out = fence(&body);
         let mut notes = Vec::new();
         if empty {

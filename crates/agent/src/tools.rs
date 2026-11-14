@@ -31,14 +31,16 @@ pub fn definitions() -> Vec<Value> {
     let r = json!({ "type": "string", "description": "Element @e12 or form @f1 ref" });
     let dialog = json!({ "type": "string", "description": "Dialog answer: accept, dismiss (default), or prompt text" });
     vec![
-        json!({ "name": "open", "description": "Load URL (or back/forward/reload). Default: short summary. find: fact search in one call; summary=true adds overview. snapshot=true: full tree. bot=true: RabbitHoleBot + robots.txt.",
+        json!({ "name": "open", "description": "Load URL (or back/forward/reload). Default: summary. find returns fact passages; summary=true adds overview; snapshot=true returns tree.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "Absolute URL, or back | forward | reload" },
                 "new_tab": { "type": "boolean" },
-                "context": { "type": "string", "description": "Isolated context (cookies, storage) to use; created on demand" },
-                "snapshot": { "type": "boolean", "description": "Return the full semantic snapshot instead of the short summary (alias: full)" },
+                "context": { "type": "string", "description": "Isolated cookies/storage session; created on demand" },
+                "snapshot": { "type": "boolean", "description": "Return full semantic tree (alias: full)" },
                 "full": { "type": "boolean", "description": "Alias of snapshot" },
-                "find": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Any term; returns context instead of overview" },
+                "find": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Any term; returns passages instead of overview" },
+                "window": { "type": "integer", "minimum": 0, "maximum": 4096, "description": "Chars per passage; default 240, total up to 3x; 0: first 120" },
+                "limit": { "type": "integer" },
                 "summary": { "type": "boolean", "description": "Include overview with find" },
                 "max_tokens": { "type": "integer", "description": "Full-snapshot budget (default 2500; implies snapshot=true)" },
                 "bot": { "type": "boolean", "description": "RabbitHoleBot headers + robots.txt; default false (browser headers)" },
@@ -59,10 +61,11 @@ pub fn definitions() -> Vec<Value> {
                 "ref": r.clone(), "max_tokens": { "type": "integer", "description": "Default 4000" }, "offset": { "type": "integer", "description": "Character offset to continue from" },
                 "links": { "type": "boolean", "default": true }, "cites": { "type": "boolean", "default": false }
             } } }),
-        json!({ "name": "find", "description": "Search any text term with surrounding context; cheaper than read for a fact. Also role/name or CSS selector. Returns refs in document order, matching terms and absent terms.",
+        json!({ "name": "find", "description": "Find text with context, role/name, or CSS selector. Returns document-order refs, matching terms and absent terms.",
             "inputSchema": { "type": "object", "properties": {
                 "text": { "type": ["string", "array"], "items": { "type": "string" } }, "role": { "type": "string" }, "name": { "type": "string" }, "selector": { "type": "string" }, "limit": { "type": "integer" },
-                "context": { "type": "integer", "minimum": 0, "maximum": 4096, "default": 240, "description": "Total chars; 0: legacy first 120" }
+                "window": { "type": "integer", "minimum": 0, "maximum": 4096, "description": "Chars per passage; default 240, total up to 3x; 0: first 120" },
+                "context": { "type": "integer", "description": "Alias of window; window wins" }
             } } }),
         json!({ "name": "click", "description": "Click an element (or hover=true). Waits until the page settles and returns what changed. ref=\"cookies\" rejects a cookie banner.",
             "inputSchema": { "type": "object", "properties": {
@@ -135,12 +138,26 @@ fn search_terms(a: &Value, key: &str) -> Result<Option<Vec<String>>, String> {
 }
 
 fn find_context(a: &Value) -> Result<usize, String> {
-    let Some(value) = a.get("context") else { return Ok(FIND_CONTEXT) };
-    let context = value.as_u64().ok_or("context needs an integer between 0 and 4096")?;
+    let key = if a.get("window").is_some() { "window" } else { "context" };
+    search_window(a.get(key), key)
+}
+
+fn search_window(value: Option<&Value>, key: &str) -> Result<usize, String> {
+    let Some(value) = value else { return Ok(FIND_CONTEXT) };
+    let error = || format!("{key} needs an integer between 0 and 4096");
+    let context = value.as_u64().ok_or_else(error)?;
     if context > MAX_FIND_CONTEXT as u64 {
-        return Err("context needs an integer between 0 and 4096".into());
+        return Err(error());
     }
     Ok(context as usize)
+}
+
+fn open_context(a: &Value) -> Result<Option<&str>, String> {
+    let Some(value) = a.get("context") else { return Ok(None) };
+    let error = "context is the isolated-session name; use window for the snippet size";
+    let name = value.as_str().ok_or(error)?.trim();
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) { return Err(error.into()); }
+    Ok((!name.is_empty()).then_some(name))
 }
 
 /// Dialog policy from a `dialog` argument.
@@ -242,7 +259,10 @@ fn dispatch(agent: &mut Agent, name: &str, a: &Value) -> Result<Out, String> {
 fn open(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let url = s(a, "url").ok_or("open needs url")?.to_string();
     // Validate search arguments before changing the current page.
+    let context_name = open_context(a)?;
     let terms = search_terms(a, "find")?;
+    let window = search_window(a.get("window"), "window")?;
+    let limit = n(a, "limit").map(|x| x as usize).unwrap_or(20).max(1);
     if let Some(bot) = b(a, "bot") {
         agent.set_bot(bot);
     } else if let Some(bh) = b(a, "browser_headers") {
@@ -259,7 +279,7 @@ fn open(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         agent.engine.scripting = js;
         agent.engine.loader.load_scripts = js;
     }
-    let ctx = match s(a, "context") {
+    let ctx = match context_name {
         Some(c) => agent.context_index(c),
         None => agent.active.map(|t| agent.tabs[t].ctx).unwrap_or(0),
     };
@@ -302,9 +322,8 @@ fn open(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let full = b(a, "snapshot").or(b(a, "full")).unwrap_or(agent.cfg.full_snapshot_on_open) || n(a, "max_tokens").is_some();
     if let Some(terms) = terms {
         let (root, _, overlays) = agent.search_tree(ti);
-        text.push_str(&agent.search_header_text(ti, &root, &overlays, b(a, "summary").unwrap_or(false)));
-        text.push('\n');
-        text.push_str(&find_elements(agent, ti, &root, Some(&terms), None, None, 20, FIND_CONTEXT));
+        let results = find_elements(agent, ti, &root, Some(&terms), None, None, limit, window);
+        text.push_str(&agent.search_results_text(ti, &root, &overlays, b(a, "summary").unwrap_or(false), &results));
     } else if full {
         let max = n(a, "max_tokens").map(|x| x as usize).unwrap_or(SNAPSHOT_TOKENS).max(100);
         text.push_str(&agent.snapshot_text(ti, max, None, false, false)?);
@@ -388,21 +407,96 @@ fn match_context(name: &str, first: Option<(usize, usize)>, context: usize) -> S
     if context == 1 {
         return "…".into();
     }
-    let width = context - 2;
-    let center = first.map(|(start, end)| start + (end - start) / 2).unwrap_or(0);
-    let mut start = center.saturating_sub(width / 2).min(chars.len() - width);
-    let mut end = start + width;
-    // At an edge, spend the unused ellipsis character on the passage.
-    if start == 0 {
-        end = context - 1;
-    } else if end == chars.len() {
-        start = chars.len() - (context - 1);
-    }
+    let (start, end) = window_bounds(chars.len(), first, context);
     let mut snippet = String::new();
     if start > 0 { snippet.push('…'); }
     snippet.extend(chars[start..end].iter());
     if end < chars.len() { snippet.push('…'); }
     snippet
+}
+
+fn window_bounds(len: usize, first: Option<(usize, usize)>, window: usize) -> (usize, usize) {
+    if len <= window { return (0, len); }
+    let width = window - 2;
+    let center = first.map(|(start, end)| start + (end - start) / 2).unwrap_or(0);
+    let mut start = center.saturating_sub(width / 2).min(len - width);
+    let mut end = start + width;
+    // Spend a missing edge ellipsis on one more original character.
+    if start == 0 { end = window - 1; }
+    else if end == len { start = len - (window - 1); }
+    (start, end)
+}
+
+#[derive(Clone, Copy)]
+struct SearchWindow { passage: usize, start: usize, end: usize }
+
+fn merge_windows(mut windows: Vec<SearchWindow>) -> Vec<SearchWindow> {
+    windows.sort_unstable_by_key(|w| (w.passage, w.start, w.end));
+    let mut merged: Vec<SearchWindow> = Vec::new();
+    for window in windows {
+        if let Some(last) = merged.last_mut() {
+            if last.passage == window.passage && window.start <= last.end {
+                last.end = last.end.max(window.end);
+                continue;
+            }
+        }
+        merged.push(window);
+    }
+    merged
+}
+
+fn windows_len(windows: &[SearchWindow], passages: &[Vec<char>]) -> usize {
+    let Some(first) = windows.first() else { return 0 };
+    let last = windows.last().unwrap();
+    windows.iter().map(|w| w.end - w.start).sum::<usize>() + windows.len() - 1
+        + usize::from(first.start > 0) + usize::from(last.end < passages[last.passage].len())
+}
+
+/// The first occurrence of each requested term gets a window, in request
+/// priority order. Admit its union only if the final text (ellipses included)
+/// fits three windows; emit the selected regions in their original order.
+fn search_snippet(passages: &[String], hits: &[Vec<Vec<(usize, usize)>>], window: usize) -> (String, usize) {
+    let first = hits.iter().enumerate().find_map(|(i, terms)| {
+        terms.iter().flatten().copied().min().map(|hit| (i, hit))
+    });
+    if window <= 1 {
+        let passage = first.map_or(0, |(i, _)| i);
+        let text = match_context(&passages[passage], first.map(|(_, hit)| hit), window);
+        let len = passages[passage].chars().count();
+        let visible = if window == 0 { if len <= 120 { len } else { 119 } }
+            else if len <= 1 { len } else { 0 };
+        let shown = hits[passage].iter().flatten().filter(|&&(start, end)| start < end && end <= visible).count();
+        return (text, shown);
+    }
+    let chars: Vec<Vec<char>> = passages.iter().map(|p| p.chars().collect()).collect();
+    let mut windows = Vec::new();
+    for term in 0..hits.first().map_or(0, Vec::len) {
+        let Some((passage, hit)) = hits.iter().enumerate().find_map(|(i, terms)| terms[term].first().map(|&hit| (i, hit))) else { continue };
+        let (start, end) = window_bounds(chars[passage].len(), Some(hit), window);
+        let mut proposed = windows.clone();
+        proposed.push(SearchWindow { passage, start, end });
+        let proposed = merge_windows(proposed);
+        if windows_len(&proposed, &chars) <= window * 3 { windows = proposed; }
+    }
+    if windows.is_empty() {
+        let (start, end) = window_bounds(chars[0].len(), None, window);
+        windows.push(SearchWindow { passage: 0, start, end });
+    }
+    let mut text = String::new();
+    for (i, w) in windows.iter().enumerate() {
+        if i > 0 || w.start > 0 { text.push('…'); }
+        text.extend(chars[w.passage][w.start..w.end].iter());
+    }
+    let last = windows.last().unwrap();
+    if last.end < chars[last.passage].len() { text.push('…'); }
+    let shown = hits.iter().enumerate().map(|(passage, terms)| terms.iter().flatten().filter(|&&(start, end)| {
+        windows.iter().any(|w| w.passage == passage && w.start <= start && end <= w.end)
+    }).count()).sum();
+    (text, shown)
+}
+
+fn normalized_name(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
 /// Flatten composed DOM order, inserting child documents at their iframe.
@@ -455,8 +549,21 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
     });
     candidates.sort_by_key(|(f, nd, _, _, _)| order.get(&(*f, *nd)).copied().unwrap_or(usize::MAX));
     let mut seen = vec![false; terms.map_or(0, |terms| terms.len())];
+    let mut prose = vec![false; seen.len()];
+    if role.is_none() {
+        if let Some(terms) = terms {
+            for (_, _, candidate_role, passages, _) in &candidates {
+                if candidate_role != "text" || !name.as_ref().map(|n| passages.iter().any(|p| p.to_lowercase().contains(n.as_str()))).unwrap_or(true) { continue; }
+                for passage in passages {
+                    for (present, hits) in prose.iter_mut().zip(text_matches(passage, terms)) { *present |= !hits.is_empty(); }
+                }
+            }
+        }
+    }
+    let normalized_terms: Vec<_> = terms.unwrap_or_default().iter().map(|t| normalized_name(t)).collect();
     let mut lines = Vec::new();
     let mut total = 0;
+    let mut omitted_links = 0;
     for (frame, node, role_name, passages, reference) in candidates {
         let ok_role = role.as_ref().map(|r| role_name == *r || (r == "textbox" && role_name == "searchbox")).unwrap_or(true);
         let ok_name = name.as_ref().map(|n| passages.iter().any(|p| p.to_lowercase().contains(n.as_str()))).unwrap_or(true);
@@ -469,6 +576,13 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
         for (seen, count) in seen.iter_mut().zip(&counts) { *seen |= *count > 0; }
         let count: usize = counts.iter().sum();
         if terms.is_some() && count == 0 { continue; }
+        if role.is_none() && role_name == "link" {
+            let label = normalized_name(&passages.join(" "));
+            if normalized_terms.iter().zip(&prose).any(|(term, present)| *present && *term == label) {
+                omitted_links += 1;
+                continue;
+            }
+        }
         total += 1;
         if lines.len() >= limit { continue; }
         let reference = reference.unwrap_or_else(|| tab.refs.assign(frame, node, &role_name, &clip_text(&passages[0], 60)));
@@ -479,33 +593,28 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
                 if vy < 0.0 { " (above viewport)" } else if vy > page.viewport.height { " (below viewport)" } else { "" }
             }).unwrap_or("")
         };
-        let first = passage_hits.iter().enumerate().find_map(|(i, hits)| {
-            hits.iter().flatten().copied().min_by_key(|&(start, end)| (start, end)).map(|hit| (i, hit))
-        }).or_else(|| {
-            let term = name.as_ref()?;
-            passages.iter().enumerate().find_map(|(i, p)| {
-                text_matches(p, std::slice::from_ref(term)).into_iter().next()?.into_iter().next().map(|hit| (i, hit))
-            })
-        });
-        let passage = first.map_or(0, |(i, _)| i);
-        let snippet = match_context(&passages[passage], first.map(|(_, hit)| hit), context);
+        let name_hits;
+        let snippet_hits = if terms.is_none() {
+            name_hits = passages.iter().map(|p| name.as_ref().map(|term| text_matches(p, std::slice::from_ref(term))).unwrap_or_default()).collect::<Vec<_>>();
+            &name_hits
+        } else { &passage_hits };
+        let (snippet, shown) = search_snippet(&passages, snippet_hits, context);
         let mut line = format!("@e{reference} {role_name} \"{}\"{position}", esc(&snippet));
         if let Some(terms) = terms {
             let labels: Vec<_> = terms.iter().zip(&counts).filter(|(_, count)| **count > 0).map(|(term, _)| format!("\"{}\"", esc(term))).collect();
             line.push_str(&format!(" [text: {}]", labels.join(", ")));
         }
-        if count > 1 { line.push_str(&format!(" (+{} más en este elemento)", count - 1)); }
+        if count > shown { line.push_str(&format!(" (+{} more in this element)", count - shown)); }
         lines.push(line);
     }
     let mut body = if lines.is_empty() { "No matches.".to_string() } else { lines.join("\n") };
     if let Some(terms) = terms {
         let missing: Vec<_> = terms.iter().zip(seen).filter(|(_, seen)| !seen).map(|(term, _)| format!("\"{}\"", esc(term))).collect();
-        if !missing.is_empty() { body.push_str(&format!("\nSin coincidencias: {}", missing.join(", "))); }
+        if !missing.is_empty() { body.push_str(&format!("\nNo matches for {}", missing.join(", "))); }
     }
-    // Search terms and passage text both remain inside the untrusted fence.
-    let mut output = fence(&body);
-    if total > lines.len() { output.push_str(&format!("\n({} more matches; raise limit)", total - lines.len())); }
-    output
+    if total > lines.len() { body.push_str(&format!("\n({} more matches; raise limit)", total - lines.len())); }
+    if omitted_links > 0 { body.push_str(&format!("\n({omitted_links} redundant links omitted; use role=link to include)")); }
+    body
 }
 
 fn find(agent: &mut Agent, a: &Value) -> Result<Out, String> {
@@ -543,7 +652,8 @@ fn find(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         return Err("find needs text, role/name or selector".into());
     }
     let (root, _, _) = agent.search_tree(ti);
-    Ok(Out::text(find_elements(agent, ti, &root, terms.as_deref(), role, name, limit, context)))
+    // All search terms and page-derived snippets share one untrusted fence.
+    Ok(Out::text(fence(&find_elements(agent, ti, &root, terms.as_deref(), role, name, limit, context))))
 }
 
 fn type_(agent: &mut Agent, a: &Value) -> Result<Out, String> {
@@ -1270,6 +1380,60 @@ mod tests {
         }
         for value in [json!(-1), json!(1.5), json!(4097), json!("240")] {
             assert!(find_context(&json!({"context":value})).is_err());
+        }
+    }
+
+    #[test]
+    fn search_windows_show_distant_terms_merge_touching_regions_and_count_only_hidden_hits() {
+        fn snippet(len: usize, entries: &[(usize, char)], terms: &[&str], window: usize) -> (String, usize) {
+            let mut chars = vec!['.'; len];
+            for &(index, c) in entries { chars[index] = c; }
+            let passage: String = chars.into_iter().collect();
+            let terms: Vec<_> = terms.iter().map(|s| s.to_string()).collect();
+            let hits = text_matches(&passage, &terms);
+            search_snippet(&[passage], &[hits], window)
+        }
+        let (text, shown) = snippet(800, &[(30, 'A'), (600, 'B')], &["A", "B"], 240);
+        assert!(text.contains('A') && text.contains('B'), "{text}");
+        assert!(text.chars().count() <= 720);
+        assert_eq!(shown, 2);
+        let (text, shown) = snippet(2000, &[(100, 'A'), (600, 'B'), (1100, 'C'), (1600, 'D')], &["D", "C", "B", "A"], 40);
+        assert!(!text.contains('A') && text.contains('B') && text.contains('C') && text.contains('D'), "{text}");
+        assert!(text.find('B') < text.find('C') && text.find('C') < text.find('D'));
+        assert!(text.chars().count() <= 120);
+        assert_eq!(shown, 3);
+        let (text, shown) = snippet(300, &[(100, 'A'), (138, 'B')], &["A", "B"], 40);
+        assert!(text.contains('A') && text.contains('B'), "{text}");
+        assert_eq!(text.matches('…').count(), 2, "touching windows share one region: {text}");
+        assert_eq!(shown, 2);
+        let (_, shown) = snippet(800, &[(30, 'A'), (40, 'A'), (600, 'A')], &["A"], 40);
+        assert_eq!(shown, 2, "the later occurrence is the only omitted hit");
+        let (_, shown) = snippet(800, &[(30, 'A'), (40, 'A'), (600, 'A')], &["A"], 0);
+        assert_eq!(shown, 2, "legacy clipping still counts visible hits");
+    }
+
+    #[test]
+    fn search_windows_keep_unicode_hit_coverage_and_tiny_budgets_honest() {
+        let passage = format!("{}İx{}ΟΣ{}", "𐐀".repeat(100), "-".repeat(400), "尾".repeat(100));
+        let terms = ["i", "ος", "\u{307}"].map(str::to_string);
+        let hits = text_matches(&passage, &terms);
+        let (text, shown) = search_snippet(std::slice::from_ref(&passage), std::slice::from_ref(&hits), 40);
+        assert!(text.contains("İx") && text.contains("ΟΣ"), "{text}");
+        assert!(text.chars().count() <= 120);
+        assert_eq!(shown, 3, "overlapping folded i and combining-dot hits are both visible");
+        for window in [1, 2, 3, 4] {
+            let (text, shown) = search_snippet(std::slice::from_ref(&passage), std::slice::from_ref(&hits), window);
+            assert!(text.chars().count() <= window * 3, "{window}: {text}");
+            assert!(shown <= 3);
+        }
+        let hits = text_matches("--LONGTERM--", &["LONGTERM".into()]);
+        let (text, shown) = search_snippet(&["--LONGTERM--".into()], &[hits], 4);
+        assert_eq!(shown, 0, "a clipped occurrence is not reported as shown: {text}");
+        assert_eq!(find_context(&json!({"window":40,"context":8})).unwrap(), 40);
+        assert_eq!(find_context(&json!({"window":40,"context":"session"})).unwrap(), 40);
+        assert_eq!(find_context(&json!({"context":40})).unwrap(), 40);
+        for value in [json!(-1), json!(1.5), json!(4097), json!("240")] {
+            assert!(find_context(&json!({"window":value})).is_err());
         }
     }
 

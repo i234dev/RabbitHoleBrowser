@@ -626,7 +626,7 @@ fn find_centres_long_text_and_unclipped_accessible_names_with_unicode_and_legacy
     assert!(snippet.starts_with('…') && snippet.ends_with('…') && snippet.contains("NEEDLE"), "{found}");
     assert!(snippet.contains("'quoted' /path"), "{found}");
     assert_eq!(snippet.chars().count(), 240, "{found}");
-    assert!(found.contains("(+2 más en este elemento)"), "{found}");
+    assert!(!found.contains("more in this element"), "all three occurrences are visible: {found}");
     assert!(found.contains("⟦page ") && found.contains("⟦/page "), "{found}");
     let reference = lines[0].split_whitespace().next().unwrap();
     let legacy = ok(&mut a, "find", json!({"text":"needle","context":0}));
@@ -660,18 +660,94 @@ fn find_any_terms_returns_document_order_and_only_reports_absence_after_all_elem
     let lines = find_result_lines(&found);
     assert_eq!(lines.len(), 3, "{found}");
     assert!(lines[0].contains("Guido before main") && lines[1].contains("1989 in the article") && lines[2].contains("CWI later"), "{found}");
-    assert_eq!(found.lines().find(|line| line.starts_with("Sin coincidencias:")), Some("Sin coincidencias: \"diciembre de 1989\""));
+    assert_eq!(found.lines().find(|line| line.starts_with("No matches for")), Some("No matches for \"diciembre de 1989\""));
     let limited = ok(&mut a, "find", json!({"text":terms,"limit":1}));
     assert_eq!(find_result_lines(&limited).len(), 1, "{limited}");
     assert!(limited.contains("Guido before main") && limited.contains("(2 more matches; raise limit)"), "{limited}");
-    assert_eq!(limited.lines().find(|line| line.starts_with("Sin coincidencias:")), Some("Sin coincidencias: \"diciembre de 1989\""));
+    assert_eq!(limited.lines().find(|line| line.starts_with("No matches for")), Some("No matches for \"diciembre de 1989\""));
     let filtered = ok(&mut a, "find", json!({"text":["Guido","CWI"],"role":"link"}));
-    assert_eq!(filtered.lines().find(|line| line.starts_with("Sin coincidencias:")), Some("Sin coincidencias: \"CWI\""));
+    assert_eq!(filtered.lines().find(|line| line.starts_with("No matches for")), Some("No matches for \"CWI\""));
     ok(&mut a, "open", json!({"url":srv.url("/same")}));
     let same = ok(&mut a, "find", json!({"text":["CWI","1989","Guido"],"limit":1}));
     assert_eq!(find_result_lines(&same).len(), 1, "{same}");
-    assert!(same.contains("[text: \"CWI\", \"1989\", \"Guido\"]") && same.contains("(+2 más en este elemento)"), "{same}");
-    assert!(!same.contains("more matches") && !same.contains("Sin coincidencias"), "{same}");
+    assert!(same.contains("[text: \"CWI\", \"1989\", \"Guido\"]") && !same.contains("more in this element"), "{same}");
+    assert!(!same.contains("more matches") && !same.contains("No matches for"), "{same}");
+}
+
+#[test]
+fn find_distinct_term_windows_obey_request_priority_and_report_only_unshown_occurrences() {
+    let mut chars = vec!['.'; 800];
+    chars[30] = 'A';
+    chars[600] = 'B';
+    let distant: String = chars.into_iter().collect();
+    let mut chars = vec!['.'; 2000];
+    for (index, term) in [(100, 'A'), (600, 'B'), (1100, 'C'), (1600, 'D')] { chars[index] = term; }
+    let capped: String = chars.into_iter().collect();
+    let page: &'static str = Box::leak(format!("<title>Term windows</title><main><p id=distant>{distant}</p><p id=capped>{capped}</p></main>").into_boxed_str());
+    let srv = serve(Box::new(move |_| html(page)));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let found = ok(&mut a, "find", json!({"text":["A","B"],"limit":1}));
+    let line = find_result_lines(&found)[0];
+    let snippet = line.split('"').nth(1).unwrap();
+    assert!(snippet.contains('A') && snippet.contains('B') && snippet.chars().count() <= 720, "{found}");
+    assert!(!line.contains("more in this element"), "both occurrences are shown: {found}");
+    let reference = line.split_whitespace().next().unwrap();
+    assert!(ok(&mut a, "read", json!({"ref":reference})).contains(&distant));
+    let found = ok(&mut a, "find", json!({"text":["D","C","B","A","absent"],"window":40,"context":8}));
+    let line = find_result_lines(&found).into_iter().find(|line| line.contains("\"D\"")).unwrap();
+    let snippet = line.split('"').nth(1).unwrap();
+    assert!(!snippet.contains('A') && snippet.contains('B') && snippet.contains('C') && snippet.contains('D'), "{found}");
+    assert!(snippet.find('B') < snippet.find('C') && snippet.find('C') < snippet.find('D'), "{found}");
+    assert!(snippet.chars().count() <= 120 && line.contains("(+1 more in this element)"), "{found}");
+    assert!(found.contains("No matches for \"absent\"") && !found.contains("No matches for \"A\""), "a capped present term is not absent: {found}");
+    let alias = ok(&mut a, "find", json!({"text":["A","B"],"context":40,"limit":1}));
+    let canonical = ok(&mut a, "find", json!({"text":["A","B"],"window":40,"limit":1}));
+    assert_eq!(find_result_lines(&alias), find_result_lines(&canonical));
+}
+
+#[test]
+fn find_deduplicates_only_exact_named_links_when_matching_prose_exists_and_no_role_is_requested() {
+    let srv = serve(Box::new(|_| html("<title>Link search</title><nav><a href=/one>Guido</a><a href=/two>GUIDO</a><a href=/three>Guido biography</a><a href=/cwi>CWI</a></nav><main><p>Guido began Python in 1989.</p><button>Guido</button></main>")));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let found = ok(&mut a, "find", json!({"text":"guido"}));
+    let lines = find_result_lines(&found);
+    assert_eq!(lines.iter().filter(|line| line.contains(" link ")).count(), 1, "the longer label stays: {found}");
+    assert!(lines.iter().any(|line| line.contains("button \"Guido\"")), "buttons stay: {found}");
+    assert!(lines.iter().any(|line| line.contains("Guido began Python")) && found.contains("(2 redundant links omitted; use role=link to include)"), "{found}");
+    let links = ok(&mut a, "find", json!({"text":"guido","role":"link"}));
+    assert_eq!(find_result_lines(&links).len(), 3, "{links}");
+    assert!(!links.contains("redundant links omitted"), "{links}");
+    let reference = find_result_lines(&links)[0].split_whitespace().next().unwrap();
+    assert!(ok(&mut a, "read", json!({"ref":reference})).contains("Guido"));
+    let cwi = ok(&mut a, "find", json!({"text":"CWI"}));
+    assert!(find_result_lines(&cwi).iter().any(|line| line.contains(" link ")) && !cwi.contains("redundant links omitted"), "a link without matching prose stays: {cwi}");
+}
+
+#[test]
+fn open_search_passes_window_and_limit_and_rejects_numeric_context_before_session_creation() {
+    let page: &'static str = Box::leak(format!("<title>Open windows</title><main><p>{}NEEDLE{}</p><p>NEEDLE second result</p></main>", ".".repeat(400), ".".repeat(400)).into_boxed_str());
+    let srv = serve(Box::new(move |_| html(page)));
+    let mut a = agent();
+    for context in [json!(240), json!(1.5), json!("240"), json!(" 000 ")] {
+        let contexts = a.contexts.len();
+        let tabs = a.tabs.len();
+        let requests = srv.requests().len();
+        let error = err(&mut a, "open", json!({"url":srv.url("/"),"find":"NEEDLE","window":40,"context":context}));
+        assert_eq!(error, "context is the isolated-session name; use window for the snippet size");
+        assert_eq!(a.contexts.len(), contexts);
+        assert_eq!(a.tabs.len(), tabs);
+        assert_eq!(srv.requests().len(), requests);
+    }
+    let found = ok(&mut a, "open", json!({"url":srv.url("/"),"find":"NEEDLE","window":40,"limit":1,"context":"research"}));
+    let lines = find_result_lines(&found);
+    assert_eq!(lines.len(), 1, "{found}");
+    assert_eq!(lines[0].split('"').nth(1).unwrap().chars().count(), 40, "{found}");
+    assert!(found.contains("(1 more matches; raise limit)"), "{found}");
+    assert_eq!(found.matches("⟦page ").count(), 1, "{found}");
+    assert_eq!(found.matches("⟦/page ").count(), 1, "{found}");
+    assert!(a.contexts.iter().any(|c| c.name == "research"));
 }
 
 #[test]
@@ -688,14 +764,17 @@ fn open_can_find_a_fact_in_one_short_call_with_optional_overview_and_overlay_war
     assert!(found.chars().count() < 600, "{} chars: {found}", found.chars().count());
     assert!(!found.contains("landmarks:") && !found.contains("outline:") && !found.contains("forms:") && !found.contains("Summary only:"), "{found}");
     assert!(found.contains("⟦page ") && found.contains("⟦/page "), "{found}");
+    assert_eq!(found.matches("⟦page ").count(), 1, "header and results share a fence: {found}");
     let reference = find_result_lines(&found)[0].split_whitespace().next().unwrap();
     assert!(ok(&mut a, "read", json!({"ref":reference})).contains("December 1989"));
     let both = ok(&mut a, "open", json!({"url":srv.url("/"),"find":"December 1989","summary":true}));
     assert!(both.contains("landmarks:") && both.contains("outline:") && both.contains("forms:") && both.contains("December 1989"), "{both}");
+    assert_eq!(both.matches("⟦page ").count(), 1, "{both}");
     let default = ok(&mut a, "open", json!({"url":srv.url("/")}));
     assert!(default.contains("outline:") && default.contains("open … find=") && default.contains("read without ref starts at the article beginning"), "{default}");
     let overlay = ok(&mut a, "open", json!({"url":srv.url("/overlay"),"find":"December 1989"}));
     assert!(overlay.contains("⚠ [dialog") && overlay.contains("Reject all") && overlay.contains("December 1989"), "{overlay}");
+    assert_eq!(overlay.matches("⟦page ").count(), 1, "{overlay}");
     assert!(!overlay.contains("outline:") && !overlay.contains("forms:"), "{overlay}");
     let search_over_snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"find":"December 1989","snapshot":true}));
     assert!(!search_over_snapshot.contains("outline:") && find_result_lines(&search_over_snapshot).len() == 1, "{search_over_snapshot}");
@@ -716,20 +795,20 @@ fn find_groups_text_runs_and_inserts_child_documents_at_the_iframe() {
     let found = ok(&mut a, "find", json!({"text":"NEEDLE"}));
     let lines = find_result_lines(&found);
     assert_eq!(lines.len(), 3, "{found}");
-    assert!(lines[0].contains("first") && lines[0].contains("repeated in first") && lines[0].contains("(+1 más en este elemento)"), "{found}");
+    assert!(lines[0].contains("first") && lines[0].contains("repeated in first") && !lines[0].contains("more in this element"), "{found}");
     assert!(lines[1].contains("child document") && lines[1].contains("(in frame)") && lines[2].contains("last"), "{found}");
     let limited = ok(&mut a, "find", json!({"text":"NEEDLE","limit":1}));
     assert_eq!(find_result_lines(&limited).len(), 1, "{limited}");
     assert!(limited.contains("(2 more matches; raise limit)"), "{limited}");
     ok(&mut a, "open", json!({"url":srv.url("/split")}));
     let nonexistent = ok(&mut a, "find", json!({"text":"Guido 1989"}));
-    assert!(find_result_lines(&nonexistent).is_empty() && nonexistent.contains("Sin coincidencias:"), "{nonexistent}");
+    assert!(find_result_lines(&nonexistent).is_empty() && nonexistent.contains("No matches for"), "{nonexistent}");
     let contiguous = ok(&mut a, "find", json!({"text":"Guido CWI 1989"}));
     assert_eq!(find_result_lines(&contiguous).len(), 1, "{contiguous}");
     assert!(contiguous.contains("text \"Guido CWI 1989\""), "{contiguous}");
     let grouped = ok(&mut a, "find", json!({"text":["Guido","1989"]}));
     assert_eq!(find_result_lines(&grouped).len(), 1, "{grouped}");
-    assert!(grouped.contains("[text: \"Guido\", \"1989\"]") && grouped.contains("(+1 más en este elemento)"), "{grouped}");
+    assert!(grouped.contains("[text: \"Guido\", \"1989\"]") && !grouped.contains("more in this element"), "{grouped}");
     let second_run = ok(&mut a, "find", json!({"text":"1989"}));
     assert!(find_result_lines(&second_run)[0].starts_with(&format!("{} text \"Guido CWI 1989\"", find_result_lines(&grouped)[0].split_whitespace().next().unwrap())), "{second_run}");
 }
@@ -805,7 +884,7 @@ fn search_plain_linked_prose_keeps_visibility_secrets_normal_snapshots_and_node_
     let snippet = find_result_lines(&long)[0].split('"').nth(1).unwrap();
     assert!(snippet.contains("TAILEND 1989") && snippet.chars().count() <= 240 && !snippet.contains("@e"), "{long}");
     let hidden = ok(&mut a, "find", json!({"text":["HIDDEN_VISIBILITY","HIDDEN_OPACITY","HIDDEN_CONTRAST","HIDDEN_LINK","TOP_SECRET_TOKEN"]}));
-    assert!(find_result_lines(&hidden).is_empty() && hidden.contains("Sin coincidencias:"), "{hidden}");
+    assert!(find_result_lines(&hidden).is_empty() && hidden.contains("No matches for"), "{hidden}");
     let literal = ok(&mut a, "find", json!({"text":"[CWI]@e123"}));
     assert!(literal.contains("literal [CWI]@e123"), "{literal}");
     let link = ok(&mut a, "find", json!({"text":"CWI","role":"link"}));
