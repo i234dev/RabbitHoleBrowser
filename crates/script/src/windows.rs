@@ -161,7 +161,9 @@ pub(crate) fn open(realm: &mut Realm, args: &[Value]) -> JsResult<Value> {
     let url = if raw.is_empty() { None } else {
         Some(crate::host::resolve_url(&raw).ok_or_else(|| crate::misc::dom_exception(realm, "SyntaxError", "Invalid URL passed to window.open."))?)
     };
-    if matches!(name.to_ascii_lowercase().as_str(), "_self" | "_parent" | "_top") {
+    let local_target = matches!(name.to_ascii_lowercase().as_str(), "_self" | "_parent" | "_top");
+    let context = with_env(|env| env.window_context());
+    if local_target && context.is_none() {
         let own = with_env(|env| env.frame_id());
         let mut target = own;
         if !name.eq_ignore_ascii_case("_self") {
@@ -176,7 +178,7 @@ pub(crate) fn open(realm: &mut Realm, args: &[Value]) -> JsResult<Value> {
         }
         return crate::frames::window_for(realm, Some(target));
     }
-    let Some(context) = with_env(|env| env.window_context()) else {
+    let Some(context) = context else {
         if let Some(url) = url { with_env(|env| env.open_window(url)); }
         return Ok(Value::Null);
     };
@@ -187,7 +189,7 @@ pub(crate) fn open(realm: &mut Realm, args: &[Value]) -> JsResult<Value> {
         source_base_url: env.base_url(), url, name, noopener, noreferrer,
     });
     match context.host.open(request) {
-        Some(id) if !noopener => match window_for(realm, id) {
+        Some(id) if !noopener || local_target => match window_for(realm, id) {
             Ok(proxy) => Ok(proxy),
             Err(error) => { context.host.close(context.id, id); Err(error) }
         },
