@@ -41,11 +41,15 @@ still leave native code and use the VM's unwind path. No new persistent pointer,
 GC edge, code owner, call IC or frame field is introduced. Test-only counters
 record successful pushes and errors; they are absent from production layouts.
 
-Five new test groups cover exact per-invocation hit/miss evidence across GC and
+Six new test groups cover exact per-invocation hit/miss evidence across GC and
 closure identity changes, eight independent differential fixtures in off/0/3
 and ordinary/full/incremental GC modes, actual warm-push stack growth, a failed
-maximum-depth push followed by catch/finally/success, and a watchdog interruption
-that must execute this new path. Existing native-callback/getter GC, panic,
+maximum-depth push followed by catch/finally/success, a watchdog interruption
+that must execute this new path, and a direct method-call control distinguishing
+warm strict primitive receivers from sloppy primitive boxing with exactly one
+callee execution. Full/incremental labels also require actual GC work during
+each fixture, after resetting its tick countdown. Stack growth is witnessed by
+capacity or pointer change; an in-place realloc is not reported as relocation. Existing native-callback/getter GC, panic,
 counted/wide return, cross-realm and Windows override canaries remain required.
 Windows pure unwind encoding is not OS unwind-registration or stack-walk proof;
 the machine-stack recipe is not changed by this prototype.
