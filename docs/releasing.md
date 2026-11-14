@@ -24,10 +24,20 @@ An existing lockfile and locally available dependency metadata are required.
 
 Before advancing `main`, push the prepared revision to a `release/<version>`
 branch. CI runs the same build, complete default test targets and headless smoke
-checks on Linux, macOS and Windows for these branches. Wait for all three jobs
+checks on Linux, macOS and Windows for these branches. Tests execute with
+incremental GC stress in both interpreter and forced baseline-JIT modes; their
+complete recorded outcomes must match, including duplicate test names and
+ignored tests. On architectures without a native JIT backend, forcing the JIT
+still tests the interpreter fallback and does not prove native code execution.
+Wait for all three jobs
 to succeed, then advance `main` to that exact tested revision and publish its
 matching artifacts. Preparation continues to use the previous published
 `origin/main` until that delivery is complete.
+
+`validation/**` branches and manual workflow runs provide the same checks for
+unpublished integration snapshots. Passing a validation branch does not publish
+a version or advance `main`. CI retains test logs, the home-page capture and the
+release executable under artifact names containing the exact source revision.
 
 Run relevant regression and integration checks, then check the final version:
 
