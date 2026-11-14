@@ -3,7 +3,7 @@
 //! ```text
 //! wpt_reftest [--wpt DIR] [--jobs N] [--timeout SECS] [--mem-kb KB] [--out FILE]
 //!             [--baseline FILE [--update-baseline | --compare]] [--filter SUBSTR]
-//!             [--list FILE] [DIR ...]
+//!             [--list FILE] [--mouse-actions] [DIR ...]
 //! ```
 //!
 //! Serves the WPT checkout (default `$RH_WPT_DIR`, else
@@ -38,7 +38,7 @@ const DEFAULT_DIRS: &[&str] = &[
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--worker") {
-        worker(&args[2], Path::new(&args[3]));
+        worker(&args[2], Path::new(&args[3]), reftest::Options { mouse_actions: args.get(4).map(String::as_str) == Some("--mouse-actions") });
         return;
     }
     let mut wpt = std::env::var("RH_WPT_DIR").unwrap_or_else(|_| "/mnt/hdd5tb/rabbithole/suites/wpt".into());
@@ -49,6 +49,7 @@ fn main() {
     let mut baseline: Option<String> = None;
     let mut update = false;
     let mut compare = false;
+    let mut options = reftest::Options::default();
     let mut filter: Option<String> = None;
     let mut list: Option<String> = None;
     let mut dirs: Vec<String> = Vec::new();
@@ -70,6 +71,7 @@ fn main() {
             "--list" => list = Some(val()),
             "--update-baseline" => update = true,
             "--compare" => compare = true,
+            "--mouse-actions" => options.mouse_actions = true,
             _ => dirs.push(a.trim_end_matches('/').to_string()),
         }
         i += 1;
@@ -78,7 +80,7 @@ fn main() {
         dirs = DEFAULT_DIRS.iter().map(|s| s.to_string()).collect();
     }
     let root = PathBuf::from(&wpt);
-    let base = reftest::serve_dir(root.clone()).expect("bind localhost");
+    let base = reftest::serve_dir_with_options(root.clone(), options).expect("bind localhost");
 
     // Collect tests.
     let mut tests: Vec<(String, String)> = Vec::new(); // (group, path)
@@ -103,7 +105,7 @@ fn main() {
             tests.push((d.clone(), t));
         }
     }
-    eprintln!("{} reftests in {} directories; {jobs} worker(s), {timeout}s timeout", tests.len(), dirs.len());
+    eprintln!("{} reftests in {} directories; {jobs} worker(s), {timeout}s timeout; mouse-actions={}", tests.len(), dirs.len(), options.mouse_actions);
 
     // Run them.
     let (res_tx, res_rx) = mpsc::channel::<(usize, String, String)>();
@@ -124,7 +126,7 @@ fn main() {
                 let Some(idx) = queue.lock().unwrap().pop_front() else { break };
                 let path = &paths[idx];
                 if w.is_none() {
-                    w = Worker::spawn(&exe, &base, &root, mem_kb);
+                    w = Worker::spawn(&exe, &base, &root, mem_kb, options);
                 }
                 let Some(wk) = w.as_mut() else {
                     let _ = res_tx.send((idx, "CRASH".into(), "cannot start worker".into()));
@@ -210,6 +212,7 @@ fn main() {
         println!("{:<28} {:>6} {:>6} {:>6.1}%", d, p, t, pct(*p, *t));
     }
     println!("{:<28} {:>6} {:>6} {:>6.1}%", "TOTAL", tp, tt, pct(tp, tt));
+    eprintln!("WPT run profile: mouse-actions={}", options.mouse_actions);
     if let Some(o) = &out {
         let _ = std::fs::write(o, lines);
     }
@@ -281,17 +284,19 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn(exe: &Path, base: &str, root: &Path, mem_kb: u64) -> Option<Worker> {
+    fn spawn(exe: &Path, base: &str, root: &Path, mem_kb: u64, options: reftest::Options) -> Option<Worker> {
         let mut cmd = if cfg!(unix) && mem_kb > 0 {
             // Bound the worker's address space (`ulimit -v`).
             let mut c = Command::new("sh");
-            c.arg("-c").arg(format!("ulimit -v {mem_kb}; exec \"$0\" --worker \"$1\" \"$2\"")).arg(exe).arg(base).arg(root);
+            c.arg("-c").arg(format!("ulimit -v {mem_kb}; exec \"$0\" --worker \"$1\" \"$2\" \"$3\"")).arg(exe).arg(base).arg(root);
             c
         } else {
             let mut c = Command::new(exe);
             c.arg("--worker").arg(base).arg(root);
             c
         };
+        // The shell wrapper forwards its fourth positional argument too.
+        cmd.arg(if options.mouse_actions { "--mouse-actions" } else { "--no-mouse-actions" });
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).env("RH_HTTP_CACHE", "0");
         let mut child = cmd.spawn().ok()?;
         let stdin = child.stdin.take()?;
@@ -311,7 +316,7 @@ impl Worker {
 
 /// Worker process: read test paths from stdin, print one `RESULT` line per
 /// test.
-fn worker(base: &str, root: &Path) {
+fn worker(base: &str, root: &Path, options: reftest::Options) {
     let dump = std::env::var("RH_REFTEST_DUMP").ok().map(PathBuf::from);
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
@@ -332,7 +337,7 @@ fn worker(base: &str, root: &Path) {
         let src = std::fs::read_to_string(root.join(&path)).unwrap_or_default();
         let url = format!("{base}{path}");
         let dump_dir = dump.as_ref().map(|d| d.join(&path));
-        let outcome = reftest::run_test(&mut engine, &url, &src, Duration::from_secs(5), dump_dir.as_deref());
+        let outcome = reftest::run_test_with_options(&mut engine, &url, &src, Duration::from_secs(5), dump_dir.as_deref(), options);
         let (status, detail) = match outcome {
             reftest::Outcome::Pass => ("PASS", String::new()),
             reftest::Outcome::Fail { pixels, max_delta } => ("FAIL", format!("{pixels}px maxdiff {max_delta}")),
