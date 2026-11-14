@@ -208,6 +208,9 @@ pub struct App {
     /// Where the next page context menu opens (physical px).
     pub(crate) context_pos: (f32, f32),
     pub(crate) clipboard: Option<arboard::Clipboard>,
+    /// Headless tests observe the central clipboard path without using the OS.
+    #[cfg(test)]
+    pub(crate) clipboard_test: Option<Result<Vec<String>, ()>>,
     pub(crate) start_urls: Vec<String>,
     pub(crate) ui_font: FontId,
     pub(crate) ui_font_bold: FontId,
@@ -313,6 +316,8 @@ impl App {
             last_click: None,
             context_pos: (0.0, 0.0),
             clipboard: None,
+            #[cfg(test)]
+            clipboard_test: None,
             start_urls,
             ui_font,
             ui_font_bold,
@@ -1954,16 +1959,25 @@ impl App {
     // ------------------------------------------------------------ clipboard
 
     pub(crate) fn clipboard_set(&mut self, text: &str) {
+        let copied = self.clipboard_write(text);
+        self.set_status(if copied { "Copied to clipboard" } else { "Clipboard unavailable" });
+    }
+
+    fn clipboard_write(&mut self, text: &str) -> bool {
+        #[cfg(test)]
+        if let Some(sink) = self.clipboard_test.as_mut() {
+            return match sink {
+                Ok(writes) => {
+                    writes.push(text.to_string());
+                    true
+                }
+                Err(()) => false,
+            };
+        }
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new().ok();
         }
-        if let Some(cb) = self.clipboard.as_mut() {
-            if cb.set_text(text.to_string()).is_ok() {
-                self.set_status("Copied to clipboard");
-                return;
-            }
-        }
-        self.set_status("Clipboard unavailable");
+        self.clipboard.as_mut().is_some_and(|cb| cb.set_text(text.to_string()).is_ok())
     }
 
     pub(crate) fn clipboard_get(&mut self) -> Option<String> {

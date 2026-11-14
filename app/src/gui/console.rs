@@ -19,7 +19,8 @@ const ROW_H: f32 = 18.0;
 
 fn console_log_area(chrome: &Chrome) -> Rect {
     let body = chrome.devtools_body();
-    Rect::new(body.x, body.y + 2.0 * chrome.s, body.w, (chrome.console_input().y - body.y - 6.0 * chrome.s).max(0.0))
+    let top = chrome.console_toolbar().bottom() + 2.0 * chrome.s;
+    Rect::new(body.x, top, body.w, (chrome.console_input().y - top - 4.0 * chrome.s).max(0.0))
 }
 
 /// Borrow the stored text; only the visible rows need owned display labels.
@@ -117,6 +118,10 @@ pub fn resource_type(ev: &rabbithole_engine::net::NetEvent) -> &'static str {
 }
 
 impl App {
+    fn console_copy_all_enabled(&self) -> bool {
+        self.tab().is_some_and(|tab| !tab.console.is_empty())
+    }
+
     fn console_visible_rows(&self) -> usize {
         (console_log_area(&self.chrome()).h / (ROW_H * self.ui_scale())).floor().max(0.0) as usize
     }
@@ -202,6 +207,18 @@ impl App {
         let size = 12.0 * s;
         let line_h = ROW_H * s;
         let input = chrome.console_input();
+        let toolbar = chrome.console_toolbar();
+        let copy = chrome.console_copy_all();
+        let enabled = self.console_copy_all_enabled();
+        let hovered = copy.contains(self.cursor.x as f32, self.cursor.y as f32);
+        self.canvas.fill_rect(toolbar, p.chrome_bg);
+        self.canvas.fill_rounded_rect(copy, 4.0 * s, if enabled && hovered { p.hover_bg } else { p.field_bg });
+        self.canvas.stroke_rect(copy, [1.0; 4], [p.field_border; 4], [0; 4], 4.0 * s);
+        draw_centered(&mut self.canvas, &fonts, self.ui_font, size, "Copy all", copy, if enabled { p.text } else { p.text_disabled });
+        let count = self.tab().map(|tab| tab.console.len()).unwrap_or(0);
+        let count = if count == 1 { "1 message".to_string() } else { format!("{count} messages") };
+        let baseline = baseline_in(&fonts, self.ui_font, size, toolbar);
+        self.canvas.draw_text(&fonts, self.ui_font, size, &count, toolbar.x + 8.0 * s, baseline, p.text_muted);
         let log_area = console_log_area(&chrome);
         let rows = (log_area.h / line_h).floor().max(0.0) as usize;
         if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -423,6 +440,16 @@ impl App {
                 return;
             }
         }
+        if self.panel == Panel::Console && chrome.console_copy_all().contains(x, y) {
+            if self.console_copy_all_enabled() {
+                if let Some(text) = self.tab().and_then(|tab| tab.console_copy_all_text()) {
+                    self.clipboard_set(&text);
+                }
+            }
+            // Copying the log does not move focus or change either selection.
+            self.request_redraw();
+            return;
+        }
         let line_h = ROW_H * chrome.s;
         match self.panel {
             Panel::Console => {
@@ -570,11 +597,13 @@ impl App {
                 self.request_redraw();
                 return;
             }
-            // Copy and scrolling act on the log. Editing keys and typing
-            // return to the input, preserving its own selection.
-            let log_key = matches!(key, Key::Named(NamedKey::Escape | NamedKey::PageUp | NamedKey::PageDown))
-                || (ctrl && matches!(key, Key::Character(c) if matches!(c.to_lowercase().as_str(), "c" | "l")));
-            if !log_key {
+            // Only actual input editing returns to the field. In particular,
+            // Control/Shift/Alt/Meta events arrive before shortcut characters
+            // and must preserve the selected message for Ctrl+C.
+            let edits_input = matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Home | NamedKey::End | NamedKey::ArrowUp))
+                || (ctrl && matches!(key, Key::Character(c) if matches!(c.to_lowercase().as_str(), "a" | "v")))
+                || (!ctrl && text.is_some_and(|text| !text.is_empty()));
+            if edits_input {
                 tab.console_selected = None;
             }
         }
@@ -636,6 +665,7 @@ impl App {
 mod tests {
     use super::*;
     use super::super::snapshots::{headless_app, lock, save_png};
+    use super::super::input::TextBuffer;
     use super::super::tab::Tab;
     use crate::scripting::ConsoleLog;
 
@@ -645,12 +675,191 @@ mod tests {
         app.devtools_open = true;
         app.panel = Panel::Console;
         app.settings.show_bookmarks_bar = false;
+        app.clipboard_test = Some(Ok(Vec::new()));
         app
     }
 
     fn click_log_row(app: &mut App, row: usize) {
         let area = console_log_area(&app.chrome());
         app.devtools_click(area.x + 40.0, area.y + (row as f32 + 0.5) * ROW_H);
+    }
+
+    fn click_copy_all(app: &mut App) {
+        let r = app.chrome().console_copy_all();
+        app.devtools_click(r.x + r.w / 2.0, r.y + r.h / 2.0);
+    }
+
+    fn copied(app: &App) -> &[String] {
+        app.clipboard_test.as_ref().unwrap().as_ref().unwrap()
+    }
+
+    fn console_state(app: &App) -> (Option<u64>, BTreeSet<u64>, usize, TextBuffer) {
+        let tab = &app.tabs[app.active];
+        (tab.console_selected, tab.console_expanded.clone(), tab.console_scroll, tab.console_input.clone())
+    }
+
+    #[test]
+    fn console_control_press_then_c_copies_selected_message_without_losing_focus() {
+        let _guard = lock();
+        let mut app = console_app("console-control-copy");
+        let original = "TypeError: café 🐇\r\n    at página.js:12:3\n\n";
+        app.tabs[0].console.push("error", original);
+        app.tabs[0].console_input.set_text("input e\u{301} 🐇");
+        app.tabs[0].console_input.select_all();
+        click_log_row(&mut app, 0);
+        let before = console_state(&app);
+        let focus = app.ui_focus;
+
+        // handle_console_key forwards every pressed logical key to this App
+        // handler. Control itself arrives before the shortcut's C event.
+        for ctrl in [false, true] {
+            app.console_key(&Key::Named(NamedKey::Control), None, ctrl, false);
+            assert_eq!(console_state(&app), before, "Control must not focus the input");
+            assert!(app.ui_focus == focus);
+        }
+        assert!(copied(&app).is_empty());
+        app.console_key(&Key::Character("c".into()), None, true, false);
+        assert_eq!(copied(&app), &[original.to_string()]);
+        assert_eq!(console_state(&app), before);
+        assert!(app.ui_focus == focus);
+
+        for key in [NamedKey::Shift, NamedKey::Alt, NamedKey::Meta, NamedKey::Super, NamedKey::F1] {
+            app.console_key(&Key::Named(key), None, false, false);
+            assert_eq!(console_state(&app), before, "non-editing keys must preserve log selection");
+            assert!(app.ui_focus == focus);
+        }
+        let input = app.chrome().console_input();
+        app.devtools_click(input.x + 20.0, input.y + input.h / 2.0);
+        let before_input = app.tabs[0].console_input.clone();
+        app.console_key(&Key::Named(NamedKey::Control), None, true, false);
+        app.console_key(&Key::Character("c".into()), None, true, false);
+        assert_eq!(copied(&app).last().unwrap(), "input e\u{301} 🐇");
+        assert_eq!(app.tabs[0].console_input, before_input);
+    }
+
+    #[test]
+    fn console_copy_all_click_includes_folded_offscreen_messages_and_only_current_tab() {
+        let _guard = lock();
+        let mut app = console_app("console-copy-all");
+        let entries = [("log", "first e\u{301} 🐇\n"), ("error", "TypeError: 東京\r\n  at página.js:12:3\n\n"), ("warn", "warning\tmañana"), ("input", "> 1 + 1"), ("result", "2")];
+        let mut payloads = Vec::new();
+        for (level, text) in entries {
+            app.tabs[0].console.push(level, text);
+            payloads.push(text.to_string());
+        }
+        let error_id = app.tabs[0].console.entries().nth(1).unwrap().0;
+        let visible = app.console_visible_rows();
+        for i in 0..visible + 12 {
+            let text = format!("later message {i} 🐇");
+            app.tabs[0].console.push("log", text.clone());
+            payloads.push(text);
+        }
+        let expected = payloads.join("\n");
+        app.tabs[0].console_input.set_text("selected input 🐇");
+        app.tabs[0].console_input.select_all();
+        for _ in 0..20 {
+            app.scroll_devtools(-1.0);
+        }
+        click_log_row(&mut app, 1);
+        click_log_row(&mut app, 1);
+        assert_eq!(app.tabs[0].console_selected, Some(error_id));
+        assert!(!app.tabs[0].console_expanded.contains(&error_id));
+        app.paint(1200, 800);
+        save_png(&app.canvas, "devtools-console-copy-all.png");
+        let button = app.chrome().console_copy_all();
+        assert!(button.bottom() <= console_log_area(&app.chrome()).y);
+        for _ in 0..20 {
+            app.scroll_devtools(1.0);
+        }
+        let layout = app.console_rows();
+        let window = console_window(layout.len(), visible, app.tabs[0].console_scroll);
+        assert!(layout[window].iter().all(|row| row.id != error_id));
+        drop(layout);
+        assert_eq!(app.chrome().console_copy_all(), button, "copy stays above the scrolling log");
+        let before = console_state(&app);
+        let focus = app.ui_focus;
+        click_copy_all(&mut app);
+        assert_eq!(copied(&app)[0].as_bytes(), expected.as_bytes());
+        assert_eq!(console_state(&app), before);
+        assert!(app.ui_focus == focus);
+        app.paint(1200, 800);
+        save_png(&app.canvas, "devtools-console-copy-all-scrolled.png");
+
+        // No selected entry is required, and clicking the button must retain
+        // the input field's caret and selection instead of focusing the log.
+        let input = app.chrome().console_input();
+        app.devtools_click(input.x + 20.0, input.y + input.h / 2.0);
+        assert_eq!(app.tabs[0].console_selected, None);
+        let before = console_state(&app);
+        click_copy_all(&mut app);
+        assert_eq!(copied(&app)[1].as_bytes(), expected.as_bytes());
+        assert_eq!(console_state(&app), before);
+        assert!(app.ui_focus == UiFocus::Console);
+        app.tabs.push(Tab::new(2));
+        app.tabs[1].console.push("error", "OTHER TAB\n終わり\r\n");
+        app.active = 1;
+        click_copy_all(&mut app);
+        assert_eq!(copied(&app)[2], "OTHER TAB\n終わり\r\n");
+        app.active = 0;
+        assert_eq!(console_state(&app), before);
+    }
+
+    #[test]
+    fn console_copy_all_uses_retained_messages_and_is_disabled_when_empty() {
+        let _guard = lock();
+        let mut app = console_app("console-copy-all-empty");
+        app.ui_focus = UiFocus::Console;
+        app.tabs[0].console_input.set_text("keep input selection");
+        app.tabs[0].console_input.select_all();
+        let before = console_state(&app);
+        assert!(!app.console_copy_all_enabled());
+        app.paint(1200, 800);
+        save_png(&app.canvas, "devtools-console-copy-all-empty.png");
+        click_copy_all(&mut app);
+        assert!(copied(&app).is_empty());
+        assert!(app.status.is_none());
+        assert_eq!(console_state(&app), before);
+        assert!(app.ui_focus == UiFocus::Console);
+
+        app.tabs[0].console.push("log", "");
+        assert!(app.console_copy_all_enabled(), "an empty payload is still a retained message");
+        click_copy_all(&mut app);
+        assert_eq!(copied(&app), &[String::new()]);
+        app.tabs[0].clear_console();
+        let capacity = crate::scripting::CONSOLE_CAPACITY;
+        let mut expected = Vec::new();
+        for i in 0..capacity + 3 {
+            let text = format!("message {i}: café 🐇\r\n\t");
+            app.tabs[0].console.push(if i % 2 == 0 { "error" } else { "warn" }, text.clone());
+            if i >= 3 {
+                expected.push(text);
+            }
+        }
+        let button = app.chrome().console_copy_all();
+        app.devtools_click(button.x - 1.0, button.y + button.h / 2.0);
+        assert_eq!(copied(&app).len(), 1, "outside the shared hit rectangle must not copy");
+        click_copy_all(&mut app);
+        assert_eq!(copied(&app)[1].as_bytes(), expected.join("\n").as_bytes());
+        assert_eq!(app.tabs[0].console.len(), capacity);
+        assert_eq!(console_state(&app), before);
+    }
+
+    #[test]
+    fn console_copy_all_clipboard_failure_is_honest_and_preserves_selection() {
+        let _guard = lock();
+        let mut app = console_app("console-copy-all-failure");
+        app.tabs[0].console.push("error", "TypeError\n  trace 🐇");
+        app.tabs[0].console_input.set_text("preserve input");
+        app.tabs[0].console_input.select_all();
+        click_log_row(&mut app, 0);
+        let before = console_state(&app);
+        let focus = app.ui_focus;
+        app.clipboard_test = Some(Err(()));
+        click_copy_all(&mut app);
+        assert_eq!(app.status.as_ref().unwrap().0, "Clipboard unavailable");
+        assert_eq!(console_state(&app), before);
+        assert!(app.ui_focus == focus);
+        assert!(matches!(app.clipboard_test.as_ref(), Some(Err(()))));
     }
 
     #[test]

@@ -226,6 +226,15 @@ impl Tab {
         }
     }
 
+    /// Snapshot every retained message in order, preserving each raw payload.
+    /// A single LF separates messages; existing newlines are not normalized.
+    pub fn console_copy_all_text(&self) -> Option<String> {
+        if self.console.is_empty() {
+            return None;
+        }
+        Some(self.console.lines().map(|(_, text)| text.as_str()).collect::<Vec<_>>().join("\n"))
+    }
+
     /// Record a network request (oldest dropped past the limit).
     pub fn log_request(&mut self, ev: rabbithole_engine::net::NetEvent) {
         self.inspector.network.push(ev);

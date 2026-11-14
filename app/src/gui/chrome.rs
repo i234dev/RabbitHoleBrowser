@@ -488,6 +488,19 @@ impl Chrome {
         Rect::new(p.x, h.bottom(), p.w, (p.bottom() - h.bottom()).max(0.0))
     }
 
+    /// Console actions remain visible above the scrolling log.
+    pub fn console_toolbar(&self) -> Rect {
+        let body = self.devtools_body();
+        Rect::new(body.x, body.y, body.w, 28.0 * self.s)
+    }
+
+    /// Shared paint/hit-test rectangle for copying the current tab's log.
+    pub fn console_copy_all(&self) -> Rect {
+        let toolbar = self.console_toolbar();
+        let width = (90.0 * self.s).min((toolbar.w - 12.0 * self.s).max(0.0));
+        Rect::new(toolbar.right() - width - 6.0 * self.s, toolbar.y + 2.0 * self.s, width, toolbar.h - 4.0 * self.s)
+    }
+
     /// The console input line at the bottom of the pane.
     pub fn console_input(&self) -> Rect {
         let p = self.devtools_pane();
