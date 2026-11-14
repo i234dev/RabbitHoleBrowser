@@ -208,4 +208,55 @@ mod tests {
         assert!(host.start_console_evaluation(&mut env, "42", Instant::now() + Duration::from_secs(1)).is_err());
         host.realm.set_deadline(None);
     }
+
+    fn force_console_cpu_abort(realm: &mut rabbithole_js::Realm, _: rabbithole_js::Value, _: &[rabbithole_js::Value]) -> rabbithole_js::JsResult<rabbithole_js::Value> {
+        // Force the CPU deadline independently of timer granularity or work
+        // speed. The enclosing console wall cap remains well in the future.
+        realm.set_deadline(Some(Instant::now() - Duration::from_secs(1)));
+        realm.check_watchdog()?;
+        Ok(rabbithole_js::Value::Undefined)
+    }
+
+    #[test]
+    fn console_cpu_abort_in_a_microtask_is_reported_before_the_wall_cap() {
+        let (mut env, mut host) = setup("<p>console</p>");
+        host.mark_loaded();
+        let original = host.realm.save_watchdog();
+        host.realm.set_deadline(Some(Instant::now() + Duration::from_secs(20)));
+        let previous_deadline = host.realm.deadline;
+        let previous_budget = host.realm.task_budget;
+        let previous_wall = host.realm.wall_deadline();
+        let global = host.realm.global();
+        host.realm.define_method(global, "__forceConsoleCpuAbort", 0, force_console_cpu_abort);
+        let wall = Instant::now() + Duration::from_secs(10);
+        let handle = host.start_console_evaluation(&mut env, "queueMicrotask(__forceConsoleCpuAbort); new Promise(()=>{})", wall).unwrap();
+        let aborts = host.realm.watchdog_abort_count();
+        let result = host.pump_console_tasks(&mut env, 1000.0, wall);
+        // Establish that the queued callback actually aborted, not merely that
+        // a wall timeout, missing work or an unrelated error made this fail.
+        assert_eq!(host.realm.watchdog_abort_count(), aborts + 1);
+        assert!(Instant::now() < wall, "the CPU abort must precede the console wall cap");
+        assert_eq!(host.realm.deadline, previous_deadline);
+        assert_eq!(host.realm.task_budget, previous_budget);
+        assert_eq!(host.realm.wall_deadline(), previous_wall);
+        assert!(!host.realm.timed_out(), "the caller's non-aborted state must be restored");
+        assert_eq!(result, Err("Console evaluation deadline expired".into()));
+        assert_eq!(host.poll_console_evaluation(&mut env, &handle, wall).unwrap(), ConsolePoll::Pending);
+        drop(handle);
+        assert_eq!(evaluate(&mut host, &mut env, "6"), ConsolePoll::Resolved("6".into()));
+
+        // A callback that already explains its failure keeps that error even
+        // when it also consumed its CPU allowance inside the same scope.
+        let error: Result<(), String> = host.console_deadline(wall, |host| {
+            host.realm.set_deadline(Some(Instant::now() - Duration::from_secs(1)));
+            assert!(host.realm.check_watchdog().is_err());
+            Err("callback-error-marker".into())
+        });
+        assert_eq!(error, Err("callback-error-marker".into()));
+        assert_eq!(host.realm.deadline, previous_deadline);
+        assert_eq!(host.realm.task_budget, previous_budget);
+        assert_eq!(host.realm.wall_deadline(), previous_wall);
+        assert!(!host.realm.timed_out());
+        host.realm.restore_watchdog(original);
+    }
 }
