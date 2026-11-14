@@ -3047,6 +3047,25 @@ mod subject_cover_tests {
     }
 
     #[test]
+    fn indexed_nesting_matches_the_complete_rule_scan() {
+        let doc = rabbithole_html::parse("<article class=a><div class='target x' id=target></div><span class=y></span></article><div class=b data-hit></div><em></em>");
+        let sheets = vec![parse_stylesheet("article > .target, #target { & {color:red} } .a, .b { & {color:green} } .missing, * { & {background:blue} } :where(.x,.y) { & {border:1px solid} } .a { :is(&, [data-hit]) {padding:1px} } div::before { & {color:purple} }")];
+        let env = MediaEnv { width: 100., height: 100., screen: true, scripting: true };
+        let index = ScopeIndex::build(&sheets, &env);
+        let state = Default::default();
+        let mut candidates = Vec::new();
+        for node in doc.descendants(0).filter(|&n| doc.element(n).is_some()) {
+            index.doc.candidates(&doc, node, &mut candidates);
+            let expected: Vec<_> = index.doc.rules.iter().enumerate()
+                .filter(|(_, r)| !r.is_ua && rabbithole_css::matches_with(&r.selector, &doc, node, &state))
+                .map(|(i, _)| i).collect();
+            let actual: Vec<_> = candidates.iter().copied()
+                .filter(|&i| !index.doc.rules[i].is_ua && rabbithole_css::matches_with(&index.doc.rules[i].selector, &doc, node, &state)).collect();
+            assert_eq!(actual, expected, "node={node}");
+        }
+    }
+
+    #[test]
     fn many_nesting_rules_do_not_enter_every_elements_candidate_set() {
         let css: String = (0..1000).map(|i| format!(".scope{i} {{ & {{color:green}} }}")).collect();
         let sheets = vec![parse_stylesheet(&css)];
