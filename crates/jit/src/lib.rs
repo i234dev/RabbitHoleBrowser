@@ -458,6 +458,9 @@ mod tests {
         let m2 = ExecMem::new(&a.buf, |_, _| {}).expect("map");
         let g: extern "sysv64" fn(u64) -> u64 = unsafe { std::mem::transmute(m2.ptr()) };
         assert_eq!(g(35), 42);
+        #[cfg(windows)]
+        assert_eq!(has_rwx_mapping(), Some(false), "Windows must complete the query and find no RWX mapping");
+        #[cfg(not(windows))]
         if let Some(rwx) = has_rwx_mapping() {
             assert!(!rwx, "a writable+executable mapping exists");
         }
