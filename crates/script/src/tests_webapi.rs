@@ -662,7 +662,7 @@ fn platform_apis() {
             "locks 1:L:exclusive,2",
             "sched 5 user-blocking true",
             "tt &lt;b> true true",
-            "storage true true",
+            "storage true false",
             "sw TypeError body! 1",
             "dt drag text/plain 1",
             "misc true application/pdf number landscape-primary false denied true undefined true false true true",

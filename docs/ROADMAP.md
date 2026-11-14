@@ -130,8 +130,12 @@ Stop and superseding navigation propagate abort to `event.request.signal` and
 discard stale delivery without replacing the old page before commit. See
 [the lifecycle, cache and navigation scope](service-workers.md).
 
-Next: interception for POST, frames and other resource loaders, then disk
-persistence and restart tests. Initially uncontrolled navigation still uses the
+Cache Storage now enforces configurable encoded-data budgets, with atomic
+`put()`/`addAll()` rejection on quota overflow. StorageManager persistence requests
+report the volatile backend honestly; shelf-wide estimation remains incomplete.
+
+Next: common storage accounting and opt-in Cache Storage persistence with restart
+tests, plus interception for POST, frames and other resource loaders. Initially uncontrolled navigation still uses the
 existing loader, including redirects into a registered scope. Registrations and
 Cache Storage remain memory-only within one Engine and are not shared across
 independent tabs; the separate HTTP cache's disk storage does not persist Service

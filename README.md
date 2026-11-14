@@ -142,7 +142,10 @@ See [measurement sources and updates](tools/metrics/README.md).
   into a registered scope. POST, frames, image/style/script loaders and XHR are
   outside this interception scope. Registrations and Cache API entries remain in
   memory per Engine, without disk persistence or sharing across tabs. Module
-  Service Workers, messaging and client enumeration remain open. Aborts propagate
+  Service Workers, messaging and client enumeration remain open. Cache Storage
+  enforces encoded-data quotas with atomic writes; StorageManager persistence
+  requests return false, and shelf-wide storage estimation remains incomplete.
+  Aborts propagate
   to `event.request.signal`; existing HTTP transport is not physically canceled.
 - Complex sign-in screens, including Google Account pages, still have layout
   and interaction gaps; a complete authenticated sign-in has not been validated.

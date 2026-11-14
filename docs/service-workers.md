@@ -100,8 +100,8 @@ and client remain until a new page commits. Already launched HTTP/resource loads
 are not physically interrupted. Worker callbacks retain the existing JavaScript
 watchdog and can occupy the content thread; the UI thread stays independent.
 Intercepted responses and downloads are buffered; network reads retain the
-fetcher's body limit. Synthetic responses and Cache Storage have no separate
-quota enforcement yet.
+fetcher's body limit. Synthetic responses in transit have no separate quota;
+Cache Storage writes enforce the data budgets described below.
 
 Navigation interception starts only when the initial URL has an active matching
 registration. An initially uncontrolled navigation keeps the existing loader,
@@ -120,10 +120,38 @@ opening that name again creates a new cache. Request matching supports `Vary`,
 `ignoreVary`, `ignoreSearch`, and `ignoreMethod`. Invalid writes (non-GET, non-HTTP,
 partial responses, and `Vary: *`) reject without changing stored entries.
 
-Cache Storage is also memory-only, without disk persistence, quota accounting,
-eviction, or storage partitioning beyond origin. Deleted cache handles retain
-their byte storage until the Engine is dropped. HTTP cache policy remains
-separate from the explicit Cache API.
+Cache Storage is memory-only. Its default budgets are 64 MiB per Engine and
+16 MiB per origin, with at most 16,384 entries and 256 cache records. These limits
+charge encoded UTF-8 keys, names, origin strings and response records (including
+JSON-encoded body bytes); they are not raw response sizes or a heap estimate.
+Embedders can configure `Engine::set_cache_storage_limits()` and inspect
+`Engine::cache_storage_usage()`. An over-budget `put()` or `addAll()` rejects with
+`QuotaExceededError` without replacing earlier entries; `addAll()` commits its
+batch atomically. Deleting an entry releases its charge. Deleting a cache's name
+keeps its handle and bytes alive until the Engine is dropped, and those records
+still count against the limits.
+
+There is no disk persistence, eviction, or partitioning beyond origin. The
+separate HTTP cache's disk policy does not persist this Cache Storage.
+
+### StorageManager limits
+
+`navigator.storage.persist()` and `persisted()` resolve asynchronously to `false`:
+there is no persistent origin-wide storage bucket. The `persistent-storage`
+permission reports `denied`. A localStorage file configured by an embedder does
+not grant persistence to Cache Storage or IndexedDB. Opaque and untrustworthy
+origins reject these two methods asynchronously with `TypeError`. The
+[Storage Standard](https://storage.spec.whatwg.org/#dom-storagemanager-persisted)
+requires a promise rejection when an origin cannot obtain its storage shelf.
+The interfaces remain exposed more broadly than the standard secure-context
+IDL requires; ancestry and inherited origins are not fully modeled here.
+
+`estimate()` remains incomplete: its legacy 1 GiB quota and localStorage-only
+usage do not describe the Cache Storage budget or the storage shelf's capacity.
+Applications must not treat that number as a persistence grant or a guarantee
+that a Cache write will fit. A common accounting model for localStorage,
+IndexedDB and Cache Storage is still needed before reporting a shelf-wide quota;
+the Cache-only limits above are not a replacement for it.
 
 Validation uses local HTTP fixtures in `crates/engine/tests/service_workers.rs`,
 the actual `ContentHandle` protocol in

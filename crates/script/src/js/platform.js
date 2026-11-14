@@ -20,7 +20,7 @@
   const acc = (C, name, get, set) => { if (C && !Object.prototype.hasOwnProperty.call(C.prototype, name)) Object.defineProperty(C.prototype, name, { get, set, configurable: true, enumerable: true }); };
 
   // ----------------------------------------------------------- Permissions
-  const PERMS = { geolocation: 'denied', notifications: 'denied', push: 'denied', midi: 'denied', camera: 'denied', microphone: 'denied', 'background-fetch': 'denied', 'background-sync': 'granted', 'persistent-storage': 'granted', 'screen-wake-lock': 'denied', 'storage-access': 'granted', 'clipboard-read': 'denied', 'clipboard-write': 'granted', 'local-fonts': 'denied', 'idle-detection': 'denied', 'window-management': 'denied', accelerometer: 'granted', gyroscope: 'granted', magnetometer: 'granted', 'payment-handler': 'denied', 'display-capture': 'denied' };
+  const PERMS = { geolocation: 'denied', notifications: 'denied', push: 'denied', midi: 'denied', camera: 'denied', microphone: 'denied', 'background-fetch': 'denied', 'background-sync': 'granted', 'persistent-storage': 'denied', 'screen-wake-lock': 'denied', 'storage-access': 'granted', 'clipboard-read': 'denied', 'clipboard-write': 'granted', 'local-fonts': 'denied', 'idle-detection': 'denied', 'window-management': 'denied', accelerometer: 'granted', gyroscope: 'granted', magnetometer: 'granted', 'payment-handler': 'denied', 'display-capture': 'denied' };
   class PermissionStatus extends g.EventTarget {
     constructor() { super(); ILLEGAL(); }
     get state() { return this[S].state; }
@@ -67,8 +67,9 @@
   class StorageManager {
     constructor() { ILLEGAL(); }
     estimate() { let usage = 0; try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); usage += (k.length + (localStorage.getItem(k) || '').length) * 2; } } catch (e) {} return Promise.resolve({ quota: 1073741824, usage, usageDetails: {} }); }
-    persist() { return Promise.resolve(true); }
-    persisted() { return Promise.resolve(true); }
+    // No origin-wide persistent bucket is backed by this volatile Engine store.
+    persist() { return Promise.resolve().then(() => N.storagePersisted()); }
+    persisted() { return Promise.resolve().then(() => N.storagePersisted()); }
     getDirectory() { return Promise.reject(domError('The Origin Private File System is not available.', 'SecurityError')); }
   }
   tag(StorageManager, 'StorageManager');

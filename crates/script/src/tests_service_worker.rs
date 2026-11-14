@@ -463,3 +463,33 @@ fn cache_add_all_over_quota_is_atomic_and_deletion_reclaims_entry_budget() {
     assert_eq!(after.entries,0);assert!(after.total_bytes<before.total_bytes);
     assert_eq!(run(&mut env,&mut host,"quotaCache.put('small',new Response('fits')).then(()=>quotaCache.match('small')).then(r=>r.text()).then(console.log);"),["fits"]);
 }
+
+#[test]
+fn storage_manager_reports_volatile_persistence_asynchronously_and_denies_persistence_permission() {
+    let (mut env, mut host) = setup("<body></body>");
+    let output = run(&mut env, &mut host, r#"
+      let synchronous=true;
+      const persisted=navigator.storage.persisted(), persist=navigator.storage.persist();
+      console.log(persisted instanceof Promise,persist instanceof Promise);
+      Promise.all([persisted,persist,navigator.permissions.query({name:'persistent-storage'})])
+        .then(values=>console.log(synchronous,values[0],values[1],values[2].state));
+      synchronous=false;
+    "#);
+    assert_eq!(output,["true true","false false false denied"]);
+}
+
+#[test]
+fn storage_manager_rejects_opaque_and_untrustworthy_origins_through_promises() {
+    for input in ["data:text/html,opaque", "http://insecure.example.test/page"] {
+        let (mut env, mut host)=setup("<body></body>");
+        env.url=rabbithole_net::Url::parse_absolute(input).unwrap();
+        let output=run(&mut env,&mut host,r#"
+          let synchronous=true;
+          Promise.all(['persist','persisted'].map(method=>navigator.storage[method]()
+            .then(()=> 'unexpected success',error=>error.name+':'+synchronous)))
+            .then(values=>console.log(values.join(',')));
+          synchronous=false;
+        "#);
+        assert_eq!(output,["TypeError:false,TypeError:false"],"{input}");
+    }
+}

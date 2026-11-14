@@ -393,6 +393,7 @@ pub(crate) fn install_natives(realm: &mut Realm, n: rabbithole_js::ObjectId) {
     realm.define_method(n, "swFetchFallback", 1, fetch_fallback);
     realm.define_method(n, "swFetchDone", 1, fetch_done);
     realm.define_method(n, "cacheOperation", 4, cache_operation);
+    realm.define_method(n, "storagePersisted", 0, storage_persisted);
     realm.define_method(n, "cacheBatchOperation", 4, cache_batch_operation);
     realm.define_method(n, "swRegister", 4, register);
     realm.define_method(n, "swUnregister", 1, unregister);
@@ -635,6 +636,15 @@ fn cache_batch_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResul
 
 // Serialized response records cross realms without retaining any foreign GC
 // values. Cache objects keep their storage identity even after name deletion.
+/// No persistent storage bucket exists in this Engine's memory-only registry.
+/// A separate localStorage file is not a persistent origin-wide storage grant.
+fn storage_persisted(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+    let url = with_env(|env| env.document_url());
+    if !trustworthy(&url) { return Err(realm.throw_type_error("Storage is unavailable for this origin")); }
+    registry(realm)?;
+    Ok(Value::Bool(false))
+}
+
 fn cache_operation(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
     let op = arg_str(realm, args, 0)?;
     let key = arg_str(realm, args, 2)?;
