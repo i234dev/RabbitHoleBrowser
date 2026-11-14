@@ -41,6 +41,59 @@ fn last_frame(rx: &Received, window: Duration) -> Option<Frame> {
     last
 }
 
+/// Await the evaluation without losing a frame that arrived before its reply,
+/// then drain later frames using the same observation window as before.
+fn eval_result_and_last_frame(rx: &Received, window: Duration) -> (String, Option<Frame>) {
+    let mut before_reply = None;
+    let (_, reply) = wait_for(rx, 1, Duration::from_secs(10), |message| {
+        if let FromContent::Frame(frame) = message {
+            before_reply = Some(frame.clone());
+        }
+        matches!(message, FromContent::EvalResult(_))
+    }).expect("eval result");
+    let FromContent::EvalResult(result) = reply else { unreachable!() };
+    let frame = last_frame(rx, window).or(before_reply);
+    (result.trim().trim_matches(|c| c == '\'' || c == '"').to_string(), frame)
+}
+
+fn protocol_frame(seq: u64) -> Frame {
+    Frame {
+        seq, canvas: Arc::new(Pixels::default()), origin: (0., 0.), scale: 1.,
+        scroll: (0., 0.), content: (0., 0.), background: rabbithole_engine::gfx::Color::WHITE,
+        scroll_containers: Arc::new(Vec::new()),
+    }
+}
+
+#[test]
+fn material_frame_collector_preserves_frames_before_eval_result() {
+    let (sink, rx) = sink();
+    sink(1, 1, FromContent::Frame(protocol_frame(1)));
+    sink(1, 1, FromContent::Frame(protocol_frame(2)));
+    sink(1, 1, FromContent::EvalResult("'ready'".into()));
+    let (result, frame) = eval_result_and_last_frame(&rx, Duration::ZERO);
+    assert_eq!(result, "ready");
+    assert_eq!(frame.expect("queued frame before reply").seq, 2);
+}
+
+#[test]
+fn material_frame_collector_prefers_newer_frames_after_eval_result() {
+    for before_reply in [false, true] {
+        let (sink, rx) = sink();
+        if before_reply { sink(1, 1, FromContent::Frame(protocol_frame(1))); }
+        sink(1, 1, FromContent::EvalResult("\"ready\"".into()));
+        sink(1, 1, FromContent::Frame(protocol_frame(2)));
+        sink(1, 1, FromContent::Frame(protocol_frame(3)));
+        let (result, frame) = eval_result_and_last_frame(&rx, Duration::ZERO);
+        assert_eq!(result, "ready");
+        assert_eq!(frame.expect("queued frame after reply").seq, 3);
+    }
+    let (sink, rx) = sink();
+    sink(1, 1, FromContent::EvalResult("'ready'".into()));
+    let (result, frame) = eval_result_and_last_frame(&rx, Duration::ZERO);
+    assert_eq!(result, "ready");
+    assert!(frame.is_none(), "a reply alone must not fabricate a frame");
+}
+
 /// Pixels of `f` inside the viewport rect `r` darker than `max` in every
 /// channel (the frame is painted at scroll 0, scale 1).
 fn dark_pixels(f: &Frame, r: (f32, f32, f32, f32), max: u32) -> usize {
@@ -100,8 +153,10 @@ fn typing_into_a_material_outlined_field_is_visible() {
     assert_eq!(eval(&h, &rx, &format!("document.elementFromPoint({cx}, {cy}).id")), "identifierId");
     click(&h, cx, cy);
     type_text(&h, "hello");
-    assert_eq!(eval(&h, &rx, "document.activeElement.id + ':' + document.getElementById('identifierId').value"), "identifierId:hello");
-    let f = last_frame(&rx, Duration::from_millis(400)).expect("frame after typing");
+    h.send(ToContent::Eval("document.activeElement.id + ':' + document.getElementById('identifierId').value".into()));
+    let (state, frame) = eval_result_and_last_frame(&rx, Duration::from_millis(400));
+    assert_eq!(state, "identifierId:hello");
+    let f = frame.expect("frame after typing");
     // The typed text is painted inside the field (the floating label moved
     // away; nothing covers the input): dark glyph pixels, color #1f1f1f.
     let inner = (r.0 + 10.0, r.1 + 8.0, r.2 - 20.0, r.3 - 16.0);
