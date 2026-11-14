@@ -97,3 +97,61 @@ Primary references: [Grid2 sizing overview §12.1](https://drafts.csswg.org/css-
 [Grid2 sizing terms §12.2](https://drafts.csswg.org/css-grid-2/#algo-terms),
 [Grid3 containing block](https://drafts.csswg.org/css-grid-3/#containing-block)
 and [Writing Modes orthogonal flows](https://drafts.csswg.org/css-writing-modes-3/#orthogonal-flows).
+
+## Finite estimated item measurement: preparatory consumer
+
+The next isolated checkpoint adds helpers in `grid::percentages` and
+`grid::estimate`. They are still **not connected to the layout traversal**;
+neither the parent-axis order nor orthogonal002 behavior has changed. This
+checkpoint itself has not been compiled or executed. The separate interface
+snapshot remains unchanged.
+
+The ordinary-item row estimator performs finite layout under the original
+tagged available space, without completing perpendicular Grid tracks. Auto
+in infinite space realizes a finite max-content width for execution, while
+explicit min-content, max-content, fit-content and numeric preferred sizes
+keep their own rules. Fit-content under a min-content constraint uses its
+minimum; definite available space keeps fit and stretch distinct. Numeric
+border-box bounds subtract padding/border once, and minimum wins a min/max
+conflict. The numeric proxy never becomes a definite percentage base.
+
+Before executing ordinary layout, a temporary style applies the percentage
+rules per property and axis. Non-replaced cyclic preferred/max sizes use their
+initial value; cyclic minimum/edge/gap expressions retain their absolute term
+with a zero percentage term. The replaced-element min-content distinction is
+preserved for the contributing axis. Definite bases, including definite zero,
+remain definite. This follows [CSS Sizing3 §5.2.1](https://drafts.csswg.org/css-sizing-3/#cyclic-percentage-contribution)
+and the [fit-content definition](https://drafts.csswg.org/css-sizing-3/#fit-content-size).
+
+Margin/padding bases are supplied separately from a box's local inline and
+block spaces. Their original containing-block inline reference crosses an
+orthogonal wrapper without being swapped. Before passing a numeric proxy to
+the ordinary block layouter, edge percentages with a real base are frozen
+against that original base. Padding is nonnegative; negative margins and
+auto margins retain their separate behavior. The scoped style walk swaps
+local axes/spaces along wrapper chains and restores all original `Rc` styles
+on unwind, invalidating intrinsic/layout caches before and after measurement.
+It precharges each scoped style layer and the existing subtree invalidation
+walk. These charges do not claim to measure allocation bytes of ComputedStyle.
+
+The item helper rejects active subgrid requests: those must remain inside the
+future per-axis traversal, rather than entering generic whole-box layout.
+Ordinary independent descendants can use their existing layout code after
+their own box has realized its content width. The helper retains hypothetical
+inherited margin layers separately from normalized own percentage edges.
+
+The state now isolates a child's intrinsic-min and intrinsic-max histories in
+the same projected slot. An opposite-axis history can be inspected only with
+the active operation identity, and retains its old producer/input provenance;
+it is not a fresh result of the current entry. Same-writing-mode descendants
+preserve the root point's local mapping and supply fresh spaces and edge bases.
+
+Twenty-two additional written controls cover those state extensions, percentage
+policies, finite realization, scope restoration/precharge and two ordinary-item
+layout comparisons against separate Block references. They make thirty-four
+controls in the three new modules, plus the pure split's two controls. They
+have not been executed. The parent-axis traversal, changed-min probes from
+real projected descendants, mixed fixed/infinite span transport and full
+orthogonal orientation/relayout visual controls remain required before
+activation, followed by the unchanged 26-case and wider gates. No reference or
+baseline is changed to make this preparatory checkpoint pass.

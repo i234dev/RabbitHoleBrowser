@@ -16,6 +16,10 @@ mod lanes;
 // before the corresponding orthogonal traversal is enabled.
 #[allow(dead_code)]
 mod phases;
+#[allow(dead_code)]
+mod percentages;
+#[allow(dead_code)]
+mod estimate;
 pub(crate) mod subgrid;
 #[cfg(test)]
 mod tests;
