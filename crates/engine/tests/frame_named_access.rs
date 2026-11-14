@@ -54,7 +54,25 @@ fn named_child_precedes_element_ids_and_uses_the_native_window_getter() {
         if (window.chat !== w || window.same !== document.getElementById('same').contentWindow) return false;
         if (window.idOnly !== document.getElementById('idOnly') || window.ordinaryForm.tagName !== 'FORM') return false;
         Object.defineProperty(f, 'contentWindow', {value: 17, configurable: true});
-        return f.contentWindow === 17 && window.chat === w && frames.chat === w;
+        // Named-window resolution must not use a page-modified function
+        // .call, Reflect.apply, or the iframe's public type properties.
+        var calls = 0, originalApply = Reflect.apply;
+        var methods = [
+            Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get,
+            Object.getOwnPropertyDescriptor(Element.prototype, 'localName').get,
+            Object.getOwnPropertyDescriptor(Element.prototype, 'namespaceURI').get,
+            Document.prototype.getElementsByName, Document.prototype.getElementById
+        ];
+        for (var method of methods) Object.defineProperty(method, 'call', {configurable: true, value: function () { calls++; throw new Error('page call'); }});
+        Reflect.apply = function () { calls++; throw new Error('page apply'); };
+        Object.defineProperty(f, 'localName', {value: 'div', configurable: true});
+        Object.defineProperty(f, 'namespaceURI', {get: function () { calls++; throw new Error('page namespace'); }, configurable: true});
+        try {
+            return f.contentWindow === 17 && window.chat === w && frames.chat === w && window.idOnly === document.querySelector('#idOnly') && calls === 0;
+        } finally {
+            Reflect.apply = originalApply;
+            for (var method of methods) delete method.call;
+        }
     })()"#);
 }
 
