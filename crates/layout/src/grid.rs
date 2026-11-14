@@ -12,6 +12,10 @@ use std::collections::HashSet;
 use rabbithole_gfx::Rect;
 
 mod lanes;
+// Interface checkpoint: the following private state is compiled and tested
+// before the corresponding orthogonal traversal is enabled.
+#[allow(dead_code)]
+mod phases;
 pub(crate) mod subgrid;
 #[cfg(test)]
 mod tests;
@@ -182,6 +186,7 @@ fn repeat_fixed_size(ts: &TrackSize, avail: Option<f32>) -> f32 {
     }
 }
 
+#[derive(Clone)]
 struct TrackList {
     tracks: Vec<Track>,
     /// Line names; `names[i]` are the names of line `i` (0-based), length = tracks + 1.
