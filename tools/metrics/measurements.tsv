@@ -3,7 +3,7 @@
 # test262/css/wpt/dom counts always come from their baseline files. If counts
 # change without updating this record, the page shows the new counts with an
 # unrecorded date rather than attributing them to an older run.
-test262	JavaScript / test262	45243/45848	2026-11-13	Executed ECMAScript cases	crates/js/tests/test262_baseline.txt	computed
+test262	JavaScript / test262	45259/45848	2026-11-14 (Europe/Madrid)	Executed ECMAScript cases; source cc90fae; JIT off, normal GC; corpus 2e58f87	crates/js/tests/test262_baseline.txt	computed
 css	CSS / WPT pixel tests	11983/19627	2026-11-13	Reference-image comparisons across the committed CSS corpus	crates/engine/tests/wpt-css-baseline.txt	computed
 dom	DOM / WPT dom/*	55772/65775	2026-11-13	DOM directory and its subdirectories; other web APIs are counted below	tools/wpt/summary.txt	computed
 wpt	Web platform / WPT	107993/131464	2026-11-13	DOM, HTML, URL, Encoding, IndexedDB and other tested APIs	tools/wpt/summary.txt	computed

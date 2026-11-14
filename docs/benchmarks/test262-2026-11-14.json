@@ -1,0 +1,67 @@
+{
+  "schema": "rabbithole-test262-measurement-v1",
+  "source_revision": "cc90fae11a11925dee60f3295a5c6ccab584549e",
+  "corpus_revision": "2e58f87d8350ad51224617a041c6e041d52f8444",
+  "corpus_tree_sha1": "9951aa070b76ce434a9dd430f03cd49e72d244f7",
+  "corpus_tree_manifest_sha256": "102b15a691398c480cfade9e91a245a1bc3432ef4a911d7952871aebc7ce13de",
+  "measurement_date": "2026-11-14",
+  "TZ": "Europe/Madrid",
+  "started_at_utc": "2026-11-14T10:52:01.499174+00:00",
+  "finished_at_utc": "2026-11-14T10:58:31.563988+00:00",
+  "workers": 1,
+  "cpu_timeout_per_mode_seconds": 10,
+  "wall_timeout_per_test_seconds": 120,
+  "worker_address_space_limit_MiB": 2000,
+  "platform": "Linux-6.8.0-147-generic-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "exit_code": 0,
+  "counts": {
+    "PASS": 45259,
+    "FAIL": 589,
+    "SKIP": 7830,
+    "CRASH": 0,
+    "TIMEOUT": 0,
+    "total_files": 53678,
+    "executed": 45848,
+    "pass_percent_executed": 98.71532,
+    "pass_percent_all_files": 84.315735
+  },
+  "without_intl402": {
+    "PASS": 44691,
+    "FAIL": 56,
+    "SKIP": 5537,
+    "CRASH": 0,
+    "TIMEOUT": 0,
+    "total_files": 50284,
+    "executed": 44747,
+    "pass_percent_executed": 99.874852,
+    "pass_percent_display": "99.87"
+  },
+  "without_intl402_filter": "exclude only paths beginning intl402/, exactly as runner summary_text",
+  "runtime_duration_seconds": 390.063,
+  "conditions": {
+    "profile": "ci",
+    "jit": "off",
+    "gc": "normal",
+    "test_mode": "both sloppy/strict where applicable",
+    "corpus_clean_before_and_after": true
+  },
+  "comparison_with_previous_published_baseline": {
+    "source_revision": "d81b54f33740a5672faece1c9c04990c850d4672",
+    "newly_passing": 16,
+    "regressions": 0,
+    "skips_unchanged": true
+  },
+  "runner": {
+    "sha256": "eb16fcb479ff4e98a9cde836d92b5020d75878e238c40c6844692924c1f6664b",
+    "sha256_after": "eb16fcb479ff4e98a9cde836d92b5020d75878e238c40c6844692924c1f6664b",
+    "ci_run": 43584096026,
+    "artifact_zip_sha256": "d2401885a84d6b0bfd04aec43ec08cfbbb472e1bbbf091145d86eb8aea199ece"
+  },
+  "baseline_sha256": "22bf1874b4a2047f5603e0a6d60534ae7f093eadc46350c1fd04c0d2e0be6069",
+  "notes": [
+    "Percentages use executed files; all 53,678 corpus files remain accounted for.",
+    "This records the stated source revision; subsequent packaging does not imply a benchmark rerun.",
+    "No authenticated website compatibility or browser timing claim follows from this test262 run."
+  ]
+}

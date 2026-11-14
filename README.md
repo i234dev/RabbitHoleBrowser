@@ -29,7 +29,7 @@ code unless noted in [Dependencies](#dependencies).
 
 | Suite | Result | Notes |
 |---|---|---|
-| **test262** (ECMAScript) | **98.7 %** (45,243 / 45,848 run) | 99.8 % excluding Intl; committed baseline in `crates/js/tests/test262_baseline.txt`; Temporal and other unfinished proposals skipped |
+| **test262** (ECMAScript) | **98.72 %** (45,259 / 45,848 run) | 2026-11-14, source `cc90fae`, JIT off; 99.87 % excluding Intl; 7,830 skipped files; [measurement](docs/benchmarks/test262-2026-11-14.json) and `crates/js/tests/test262_baseline.txt` |
 | **WPT testharness** (DOM, HTML, URL, Encoding, IndexedDB, …) | **82.1 %** (107,993 / 131,464 subtests, 2,843 pages) | committed baseline in `tools/wpt/` |
 | **WPT CSS reftests** (pixel comparison) | **61.1 %** (11,983 / 19,627) | committed baseline in `crates/engine/tests/wpt-css-baseline.txt`; CSS2 79.6 %, color 79.4 %, css-ui 91.1 %, css-text-decor 75.5 %, flexbox 61.2 % |
 | **WebAssembly spec testsuite** | **99.99 %** (66,747 / 66,757) | every proposal at 100 % except two outdated threads/descriptor cases |
