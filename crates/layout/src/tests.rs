@@ -100,6 +100,33 @@ fn text_of(b: &LayoutBox) -> String {
 }
 
 #[test]
+fn replaced_boxes_use_their_outer_display_when_joining_lines() {
+    for (tag, element) in [("canvas", "<canvas width=4 height=4></canvas>"), ("img", "<img width=4 height=4>")] {
+        let html = format!("<!doctype html>{element}{element}");
+        for display in ["block", "inline", "inline-block"] {
+            let fx = Fixture::new(&html, &format!("body{{margin:0}}{tag}{{display:{display}}}"));
+            let tree = fx.layout();
+            let boxes = fx.find(&tree, tag);
+            assert_eq!(boxes.len(), 2, "{tag} {display}");
+            for b in &boxes {
+                assert_eq!(b.kind, BoxKind::Image);
+                assert_eq!(b.rect.w, 4.0, "{tag} {display}");
+                assert_eq!(b.rect.h, 4.0, "{tag} {display}");
+                assert_eq!(b.is_inline_level(), display != "block", "{tag} {display}");
+            }
+            if display == "block" {
+                assert_eq!(boxes[0].rect, Rect::new(0.0, 0.0, 4.0, 4.0), "{tag}");
+                assert_eq!(boxes[1].rect, Rect::new(0.0, 4.0, 4.0, 4.0), "{tag}");
+            } else {
+                assert_eq!(boxes[0].rect.x, 0.0, "{tag} {display}");
+                assert_eq!(boxes[1].rect.x, 4.0, "{tag} {display}");
+                assert_eq!(boxes[0].rect.y, boxes[1].rect.y, "{tag} {display}");
+            }
+        }
+    }
+}
+
+#[test]
 fn body_width_and_margins() {
     let fx = Fixture::new("<p>Hello</p>", "");
     let t = fx.layout();
