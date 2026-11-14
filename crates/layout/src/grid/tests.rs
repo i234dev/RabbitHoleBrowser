@@ -1,4 +1,5 @@
-use super::{size_tracks, size_tracks_with_constraint, Contribution, Sizing, SizingConstraint, Track};
+use super::{auto_track, size_tracks, size_tracks_with_constraint, Contribution, Sizing, SizingConstraint, Track};
+use rabbithole_style::{Length, TrackSize};
 
 fn intrinsic_sizes(tracks: &[Track], contributions: &[Contribution]) -> (Vec<f32>, Vec<f32>) {
     let mut min = tracks.to_vec();
@@ -55,4 +56,22 @@ fn max_content_constraint_respects_fit_content_and_collapsed_tracks() {
     let (min, max) = intrinsic_sizes(&tracks, &contributions);
     assert_eq!(min, vec![40.0, 0.0]);
     assert_eq!(max, vec![80.0, 0.0]);
+}
+
+#[test]
+fn auto_track_patterns_repeat_forward_and_backward() {
+    let sizes = [TrackSize::Length(Length::Px(20.0)), TrackSize::Length(Length::Px(30.0)), TrackSize::Length(Length::Px(40.0))];
+    for (index, expected) in [(-4, 40.0), (-3, 20.0), (-2, 30.0), (-1, 40.0), (0, 20.0), (1, 30.0), (2, 40.0), (3, 20.0)] {
+        let track = auto_track(&sizes, index, None);
+        assert_eq!(track.min, Sizing::Fixed(expected));
+        assert_eq!(track.max, Sizing::Fixed(expected));
+    }
+}
+
+#[test]
+fn auto_track_patterns_resolve_percentages_against_the_axis() {
+    let sizes = [TrackSize::Length(Length::Percent(25.0))];
+    assert_eq!(auto_track(&sizes, -1, Some(200.0)).min, Sizing::Fixed(50.0));
+    assert_eq!(auto_track(&sizes, 0, None).min, Sizing::Auto);
+    assert_eq!(auto_track(&[], -1, None).max, Sizing::Auto);
 }

@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Grid auto track sizes apply to named areas and leading implicit tracks</title>
+<link rel="match" href="grid-auto-track-pattern-ref.html">
+<style>
+.grid { display: grid; width: max-content; margin-bottom: 10px; }
+.a { background: green; }
+.b { background: blue; }
+.c { background: purple; }
+.d { background: orange; }
+#areas { grid-template-columns: 40px 40px; grid-template-areas: "a b" "c d"; grid-auto-rows: 20px 30px; }
+#areas .a { grid-area: a; }
+#areas .b { grid-area: b; }
+#areas .c { grid-area: c; }
+#areas .d { grid-area: d; }
+#before { grid-template-columns: 40px; grid-template-rows: 20px; grid-auto-columns: 20px 30px; }
+#before .a { grid-column: -4; }
+#before .b { grid-column: -3; }
+#before .c { grid-column: 1; }
+#after { grid-template-columns: 40px; grid-template-rows: 20px; grid-template-areas: "a b"; grid-auto-columns: 20px 30px; }
+#after .a { grid-area: a; }
+#after .b { grid-area: b; }
+#after .c { grid-column: 3; }
+</style>
+<div class="grid" id="areas"><div class="a"></div><div class="b"></div><div class="c"></div><div class="d"></div></div>
+<div class="grid" id="before"><div class="a"></div><div class="b"></div><div class="c"></div></div>
+<div class="grid" id="after"><div class="a"></div><div class="b"></div><div class="c"></div></div>

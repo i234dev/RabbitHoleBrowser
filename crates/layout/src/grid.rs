@@ -140,6 +140,16 @@ fn sizing_of(ts: &TrackSize, avail: Option<f32>) -> (Sizing, Sizing) {
     }
 }
 
+/// Repeat the auto-track pattern after explicitly sized tracks, and backwards
+/// before the explicit grid (§7.6). The track immediately before it has index -1.
+fn auto_track(sizes: &[TrackSize], index: i32, avail: Option<f32>) -> Track {
+    let Some(size) = sizes.get(index.rem_euclid(sizes.len().max(1) as i32) as usize) else {
+        return Track::new(Sizing::Auto, Sizing::Auto);
+    };
+    let (min, max) = sizing_of(size, avail);
+    Track::new(min, max)
+}
+
 /// Fixed size of a track for `repeat(auto-fill)` computations (§7.2.3.2).
 fn repeat_fixed_size(ts: &TrackSize, avail: Option<f32>) -> f32 {
     let (min, max) = sizing_of(ts, avail);
@@ -758,17 +768,19 @@ impl<'a> Layouter<'a> {
     fn place_items(&mut self, b: &mut LayoutBox, style: &ComputedStyle, avail_w: Option<f32>, avail_h: Option<f32>, col_gap: f32, row_gap: f32, content_x: f32, content_y: f32) -> (Vec<GridItem>, TrackList, TrackList) {
         let mut cols = expand_tracks(&style.grid_template_columns, avail_w, col_gap);
         let mut rows = expand_tracks(&style.grid_template_rows, avail_h, row_gap);
+        let sized_cols = cols.tracks.len();
+        let sized_rows = rows.tracks.len();
         // Named areas → implicit line names (§7.3).
         let areas = &style.grid_template_areas;
         if !areas.is_empty() {
             let n_area_rows = areas.len();
             let n_area_cols = areas.iter().map(|r| r.len()).max().unwrap_or(0);
             while cols.tracks.len() < n_area_cols {
-                cols.tracks.push(Track::new(Sizing::Auto, Sizing::Auto));
+                cols.tracks.push(auto_track(&style.grid_auto_columns, (cols.tracks.len() - sized_cols) as i32, avail_w));
                 cols.names.push(Vec::new());
             }
             while rows.tracks.len() < n_area_rows {
-                rows.tracks.push(Track::new(Sizing::Auto, Sizing::Auto));
+                rows.tracks.push(auto_track(&style.grid_auto_rows, (rows.tracks.len() - sized_rows) as i32, avail_h));
                 rows.names.push(Vec::new());
             }
             let mut seen: HashSet<String> = HashSet::new();
@@ -846,12 +858,12 @@ impl<'a> Layouter<'a> {
                 p.col = Ok((s + col_off, e + col_off));
             }
         }
-        for _ in 0..row_off {
-            rows.tracks.insert(0, Track::new(Sizing::Auto, Sizing::Auto));
+        for distance in 1..=row_off {
+            rows.tracks.insert(0, auto_track(&style.grid_auto_rows, -distance, avail_h));
             rows.names.insert(0, Vec::new());
         }
-        for _ in 0..col_off {
-            cols.tracks.insert(0, Track::new(Sizing::Auto, Sizing::Auto));
+        for distance in 1..=col_off {
+            cols.tracks.insert(0, auto_track(&style.grid_auto_columns, -distance, avail_w));
             cols.names.insert(0, Vec::new());
         }
 
@@ -999,21 +1011,17 @@ impl<'a> Layouter<'a> {
             max_row = max_row.max(a.row.1);
             max_col = max_col.max(a.col.1);
         }
-        let auto_cols = &style.grid_auto_columns;
-        let auto_rows = &style.grid_auto_rows;
-        let mut ci = 0usize;
+        // Tracks introduced by grid-template-areas already consumed entries
+        // of the forward auto-size pattern; implicit tracks continue it.
+        let mut ci = cols.tracks.len() - col_off as usize - sized_cols;
         while (cols.tracks.len() as i32) < max_col {
-            let ts = auto_cols.get(ci % auto_cols.len().max(1)).cloned().unwrap_or(TrackSize::Length(Length::Auto));
-            let (min, max) = sizing_of(&ts, avail_w);
-            cols.tracks.push(Track::new(min, max));
+            cols.tracks.push(auto_track(&style.grid_auto_columns, ci as i32, avail_w));
             cols.names.push(Vec::new());
             ci += 1;
         }
-        let mut ri = 0usize;
+        let mut ri = rows.tracks.len() - row_off as usize - sized_rows;
         while (rows.tracks.len() as i32) < max_row {
-            let ts = auto_rows.get(ri % auto_rows.len().max(1)).cloned().unwrap_or(TrackSize::Length(Length::Auto));
-            let (min, max) = sizing_of(&ts, avail_h);
-            rows.tracks.push(Track::new(min, max));
+            rows.tracks.push(auto_track(&style.grid_auto_rows, ri as i32, avail_h));
             rows.names.push(Vec::new());
             ri += 1;
         }
