@@ -1,6 +1,7 @@
 //! Per-tab state on the UI thread. The page itself lives on the tab's
 //! content thread; the UI keeps what it needs to draw and route input.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::gui::content::{ContentHandle, DomRow, Frame, NodeDetails, PageState, ToContent, ViewSize};
@@ -64,8 +65,11 @@ pub struct Tab {
     pub console: ConsoleLog,
     /// Console input line.
     pub console_input: TextBuffer,
-    /// Console scroll offset in lines from the bottom.
+    /// Console scroll offset in visual rows from the bottom.
     pub console_scroll: usize,
+    /// A selected log message takes keyboard focus from the input field.
+    pub console_selected: Option<u64>,
+    pub console_expanded: BTreeSet<u64>,
     pub favicon: Option<Arc<Image>>,
     /// Input routing hints from the page.
     pub state: PageState,
@@ -104,6 +108,8 @@ impl Tab {
             console: ConsoleLog::default(),
             console_input: TextBuffer::default(),
             console_scroll: 0,
+            console_selected: None,
+            console_expanded: BTreeSet::new(),
             favicon: None,
             state: PageState::default(),
             cursor: "default",
@@ -182,8 +188,7 @@ impl Tab {
         self.find.count = 0;
         self.find.current = 0;
         self.scroll = (0.0, 0.0);
-        self.console.clear();
-        self.console_scroll = 0;
+        self.clear_console();
         self.favicon = None;
         self.state = PageState::default();
         self.cursor = "default";
@@ -192,6 +197,33 @@ impl Tab {
         self.inspector.details = NodeDetails::default();
         self.inspector.selected = None;
         self.inspector.scroll = 0;
+    }
+
+    pub fn clear_console(&mut self) {
+        self.console.clear();
+        self.console_scroll = 0;
+        self.console_selected = None;
+        self.console_expanded.clear();
+    }
+
+    /// Drop UI references to messages removed by the bounded log or clear.
+    pub fn prune_console_state(&mut self) {
+        let console = &self.console;
+        self.console_expanded.retain(|id| console.get(*id).is_some());
+        if self.console_selected.is_some_and(|id| self.console.get(id).is_none()) {
+            self.console_selected = None;
+        }
+        if self.console.is_empty() {
+            self.console_scroll = 0;
+        }
+    }
+
+    /// Copy the original message, including newlines, or the input selection.
+    pub fn console_copy_text(&self) -> Option<&str> {
+        match self.console_selected {
+            Some(id) => self.console.get(id).map(|(_, text)| text.as_str()),
+            None => self.console_input.selected_text(),
+        }
     }
 
     /// Record a network request (oldest dropped past the limit).
@@ -211,6 +243,45 @@ impl Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_selection_survives_append_and_clears_after_eviction_or_navigation() {
+        let mut t = Tab::new(1);
+        t.console.push("error", "original\nstack");
+        let id = t.console.entries().next().unwrap().0;
+        t.console_selected = Some(id);
+        t.console_expanded.insert(id);
+        t.console_input.set_text("input selection");
+        t.console_input.select_all();
+        t.console.push("log", "next");
+        t.prune_console_state();
+        assert_eq!(t.console_copy_text(), Some("original\nstack"));
+        assert!(t.console_expanded.contains(&id));
+        for _ in 0..crate::scripting::CONSOLE_CAPACITY {
+            t.console.push("log", "duplicate\nmessage");
+        }
+        t.prune_console_state();
+        assert_eq!(t.console_selected, None);
+        assert!(t.console_expanded.is_empty());
+        assert_eq!(t.console_copy_text(), Some("input selection"));
+        let id = t.console.entries().next().unwrap().0;
+        t.console_selected = Some(id);
+        t.console_expanded.insert(id);
+        t.console_scroll = 12;
+        t.reset_page_state();
+        assert!(t.console.is_empty());
+        assert_eq!(t.console_selected, None);
+        assert!(t.console_expanded.is_empty());
+        assert_eq!(t.console_scroll, 0);
+        t.console.push("error", "new document\nstack");
+        assert!(t.console.entries().next().unwrap().0 > id);
+        t.console_selected = Some(t.console.entries().next().unwrap().0);
+        t.console_expanded.insert(t.console_selected.unwrap());
+        t.clear_console();
+        assert_eq!(t.console_selected, None);
+        assert!(t.console_expanded.is_empty());
+        assert_eq!(t.console_scroll, 0);
+    }
 
     #[test]
     fn history_push() {

@@ -22,7 +22,7 @@ use crate::settings::Settings;
 /// one at a time.
 static THEME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn lock() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn lock() -> std::sync::MutexGuard<'static, ()> {
     THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -39,7 +39,7 @@ pub fn save_png(c: &Canvas, name: &str) -> PathBuf {
     path
 }
 
-fn headless_app(tag: &str) -> App {
+pub(super) fn headless_app(tag: &str) -> App {
     let dir = std::env::temp_dir().join(format!("rh-snap-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let profile = Profile::at(&dir);

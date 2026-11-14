@@ -1091,6 +1091,7 @@ impl App {
             }
             UiFocus::Console => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.console_selected = None;
                     tab.console_input.insert(text, None);
                 }
                 self.request_redraw();
