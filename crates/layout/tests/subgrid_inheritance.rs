@@ -147,3 +147,29 @@ fn automatic_items_in_a_fixed_row_lanes_subgrid_use_the_largest_edge_mbp() {
         close(by_id(&d,&t,"p").content_rect.h,expected);
     }
 }
+
+#[test]
+fn percentage_subgrid_edges_use_the_grid_area_instead_of_the_whole_container() {
+    for (margin,expected_width,expected_x) in [(0.,80.,10.),(10.,60.,20.)] {
+        let(d,t)=render("<section id=p><div id=s><i id=x></i></div></section>",
+            &format!("section{{display:grid;width:300px;grid-template-columns:100px 200px;grid-template-rows:50px}}#s{{display:grid;grid-column:1;grid-row:1;grid-template-columns:subgrid;grid-template-rows:subgrid;padding:10%;margin-left:{margin}%;margin-right:{margin}%}}"));
+        let p=by_id(&d,&t,"p");let s=by_id(&d,&t,"s");let x=by_id(&d,&t,"x");
+        close(s.content_rect.w,expected_width);close(x.content_rect.w,expected_width);close(x.content_rect.h,30.);close(x.rect.x-p.content_rect.x,expected_x);close(x.rect.y-p.content_rect.y,10.);
+    }
+}
+
+#[test]
+fn percentages_in_an_independent_axis_still_use_the_subgrids_area() {
+    let(d,t)=render("<section id=p><div id=s><i id=x></i></div></section>",
+        "section{display:grid;width:300px;grid-template-columns:100px 200px;grid-template-rows:50px}#s{display:grid;grid-column:1;grid-row:1;grid-template-rows:subgrid;width:50px;padding:10%}");
+    let p=by_id(&d,&t,"p");let s=by_id(&d,&t,"s");let x=by_id(&d,&t,"x");close(s.content_rect.w,50.);close(x.content_rect.w,50.);close(x.content_rect.h,30.);close(x.rect.x-p.content_rect.x,10.);
+}
+
+#[test]
+fn percentage_edges_keep_the_same_area_reference_through_orthogonal_wrappers() {
+    for mode in ["vertical-lr","vertical-rl"] {
+        let(d,t)=render("<section><div id=s><i id=x></i></div></section>",
+            &format!("section{{display:grid;width:300px;grid-template-columns:100px 200px;grid-template-rows:80px}}#s{{display:grid;writing-mode:{mode};grid-column:1;grid-template-columns:40px;grid-template-rows:subgrid;padding:10%;height:80px}}"));
+        close(by_id(&d,&t,"x").content_rect.h,80.);
+    }
+}

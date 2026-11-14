@@ -8,8 +8,10 @@ The implementation transports immutable parent track sizes, positions, collapsed
 state, names and gaps to a requested subgrid axis. Orthogonal wrappers map and
 reverse those axes. Scoped installation restores computed styles and invalidates
 caches, including when a measurement unwinds. Automatic spans use the number of compact local line-name groups; explicit
-spans and distinct start/end lines keep their specified span. Shared axes
-ignore preferred/min/max sizes and self alignment, cannot
+spans and distinct start/end lines keep their specified span. Percentage edge references distinguish placement-only intrinsic geometry from
+used areas. Scoped percentage margins/padding resolve in the grid area once,
+including through orthogonal wrappers; styles are restored afterwards. Shared
+axes ignore preferred/min/max sizes and self alignment, cannot
 append implicit tracks, and retain ancestor edge/gap layers through nesting.
 
 Descendants contribute to the corresponding parent tracks. An automatically
@@ -26,7 +28,7 @@ min/max maxima. Row-lanes measurement receives definite inherited geometry
 before computing inline contributions; explicit intrinsic preferred sizes remain
 in force in an independent axis. Stretch relayout keeps inherited geometry.
 
-Written, not executed: eighteen geometry/compaction/unwind/budget unit tests, fourteen layout tests,
+Written, not executed: twenty-one geometry/compaction/unwind/budget unit tests, seventeen layout tests,
 two new visual reftest pairs and the seven prior GridSpace tests. The original
 four deferred intrinsic constraint fixtures are preserved byte-for-byte. Style
 metadata/gap tests are in the dependency commits.
