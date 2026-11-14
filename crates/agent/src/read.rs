@@ -206,8 +206,10 @@ fn tick_run(input: &str) -> usize {
 
 fn inline_code(input: &str) -> String {
     let input = esc_md(input);
+    if input.is_empty() { return String::new(); }
     let delimiter = "`".repeat(tick_run(&input) + 1);
-    let padding = if input.starts_with('`') || input.ends_with('`') { " " } else { "" };
+    let padded_spaces = input.starts_with(' ') && input.ends_with(' ') && input.chars().any(|ch| ch != ' ');
+    let padding = if input.starts_with('`') || input.ends_with('`') || padded_spaces { " " } else { "" };
     format!("{delimiter}{padding}{input}{padding}{delimiter}")
 }
 
@@ -308,31 +310,25 @@ impl Md<'_> {
             }
             match el.tag.as_str() {
                 "a" if el.attr("href").is_some() => {
-                    let text = self.inline(c);
-                    if text.is_empty() {
-                        continue;
-                    }
                     if self.omit_citation(c) { continue; }
                     if self.links {
+                        let text = self.inline(c);
+                        if text.is_empty() { continue; }
                         let r = self.refs.assign(self.frame, c, "link", &text);
                         s.push_str(&format!(" [{text}](@e{r}) "));
-                    } else { s.push_str(&text); }
-                }
-                "strong" | "b" => {
-                    let t = self.inline(c);
-                    if !t.is_empty() {
-                        s.push_str(&format!(" **{t}** "));
+                    } else {
+                        // Keep the source edges until the containing prose is
+                        // normalized, including whitespace-only anchors.
+                        self.inline_into(c, s);
                     }
                 }
-                "em" | "i" => {
-                    let t = self.inline(c);
-                    if !t.is_empty() {
-                        s.push_str(&format!(" *{t}* "));
-                    }
-                }
+                "strong" | "b" => self.marked_inline(c, "**", s),
+                "em" | "i" => self.marked_inline(c, "*", s),
                 "code" | "kbd" | "samp" => {
                     let t = doc.text_content(c);
-                    s.push_str(&format!(" {} ", inline_code(&t)));
+                    if self.links { s.push(' '); }
+                    s.push_str(&inline_code(&t));
+                    if self.links { s.push(' '); }
                 }
                 "br" => s.push('\n'),
                 "img" => {
@@ -341,16 +337,26 @@ impl Md<'_> {
                     }
                 }
                 "sup" | "sub" => {
-                    let t = self.inline(c);
-                    s.push_str(&t);
+                    if self.links { s.push_str(&self.inline(c)); }
+                    else { self.inline_into(c, s); }
                 }
                 _ => {
-                    s.push(' ');
+                    if self.links { s.push(' '); }
                     self.inline_into(c, s);
-                    s.push(' ');
+                    if self.links { s.push(' '); }
                 }
             }
         }
+    }
+
+    fn marked_inline(&mut self, node: NodeId, marker: &str, out: &mut String) {
+        let mut raw = String::new();
+        self.inline_into(node, &mut raw);
+        let text = clean_inline(&raw);
+        if text.is_empty() { if !self.links { out.push_str(&raw); } return; }
+        if self.links || raw.chars().next().is_some_and(char::is_whitespace) { out.push(' '); }
+        out.push_str(marker); out.push_str(&text); out.push_str(marker);
+        if self.links || raw.chars().next_back().is_some_and(char::is_whitespace) { out.push(' '); }
     }
 
     fn omit_citation(&self, n: NodeId) -> bool {
@@ -380,6 +386,7 @@ impl Md<'_> {
         let doc = &self.page.doc;
         for c in doc.flat_children(n) {
             if let Some(t) = doc.text(c) {
+                if !self.links { self.out.push_str(&esc_md(t)); continue; }
                 let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
                 if !t.is_empty() {
                     self.out.push_str(&esc_md(&t));
@@ -434,9 +441,9 @@ impl Md<'_> {
                                 if let Some(t) = doc.text(cc) {
                                     head.push_str(&esc_md(t));
                                 } else if doc.element(cc).is_some() && visible(self.page, self.geo, cc) {
-                                    head.push(' ');
+                                    if self.links { head.push(' '); }
                                     self.inline_one(cc, &mut head);
-                                    head.push(' ');
+                                    if self.links { head.push(' '); }
                                 }
                             }
                             let head = clean_inline(&head);
@@ -530,8 +537,8 @@ impl Md<'_> {
                         t
                     };
                     s.push_str(&tmp);
-                    self.out.push_str(s.trim());
-                    self.out.push(' ');
+                    if self.links { self.out.push_str(s.trim()); self.out.push(' '); }
+                    else { self.out.push_str(&s); }
                 }
                 _ => {
                     // Generic containers: recurse, separating blocks.
@@ -575,30 +582,20 @@ impl Md<'_> {
         let Some(el) = doc.element(n) else { return };
         match el.tag.as_str() {
             "a" if el.attr("href").is_some() => {
-                let text = self.inline(n);
-                if !text.is_empty() {
-                    if self.omit_citation(n) { return; }
-                    if self.links {
+                if self.omit_citation(n) { return; }
+                if self.links {
+                    let text = self.inline(n);
+                    if !text.is_empty() {
                         let r = self.refs.assign(self.frame, n, "link", &text);
                         s.push_str(&format!("[{text}](@e{r})"));
-                    } else { s.push_str(&text); }
-                }
+                    }
+                } else { self.inline_into(n, s); }
             }
-            "strong" | "b" => {
-                let t = self.inline(n);
-                if !t.is_empty() {
-                    s.push_str(&format!("**{t}**"));
-                }
-            }
-            "em" | "i" => {
-                let t = self.inline(n);
-                if !t.is_empty() {
-                    s.push_str(&format!("*{t}*"));
-                }
-            }
+            "strong" | "b" => self.marked_inline(n, "**", s),
+            "em" | "i" => self.marked_inline(n, "*", s),
             "code" => s.push_str(&inline_code(&doc.text_content(n))),
             "br" => s.push('\n'),
-            _ => s.push_str(&self.inline(n)),
+            _ => if self.links { s.push_str(&self.inline(n)); } else { self.inline_into(n, s); },
         }
     }
 }
@@ -634,6 +631,7 @@ pub fn read_subtree(page: &Page, refs: &mut RefMap, frame: usize, root: NodeId) 
 pub fn read_subtree_with_options(page: &Page, refs: &mut RefMap, frame: usize, root: NodeId, links: bool, cites: bool) -> String {
     let geo = GeoMap::build(page);
     let mut md = Md { page, geo: &geo, refs, frame, links, cites, out: String::new() };
+    if page.doc.is_element(root, "a") && md.omit_citation(root) { return String::new(); }
     md.block(root, 0);
     clean_blocks(&md.out)
 }
@@ -670,6 +668,9 @@ mod tests {
     fn prose_cleanup_preserves_markdown_links_and_code_contents(){
         assert_eq!(clean_inline("  A\u{a0}\u{a0} [link](@e12) , **bold** ; `x  , y` . ( tail )  "),"A [link](@e12), **bold**; `x  , y`. ( tail)");
         assert_eq!(clean_inline(&inline_code("`a  b`")),"`` `a  b` ``");
+        assert_eq!(inline_code(" a "),"`  a  `");
+        assert_eq!(inline_code("   "),"`   `");
+        assert_eq!(inline_code(""),"");
         assert_eq!(clean_blocks("- one  , two\n  - nested   item\n\n\nend"),"- one, two\n  - nested item\n\nend");
         assert_eq!(clean_blocks("before `a  \n\n b  ` , after ."),"before `a  \n\n b  `, after.");
     }
