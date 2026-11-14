@@ -31,12 +31,12 @@ Design goals, in order:
 | `find`       | Search `text` (string or string array, any term), `role` + `name`, or CSS `selector`. Returns element refs in document order. `window` (default 240 characters; `context` is an alias) selects passages around the first occurrence of each term, capped at three windows per element. Zero keeps the legacy first 120. `limit` counts elements (default 20). |
 | `click`      | Click by ref (real hit-tested pointer sequence). `hover=true` only hovers. `force=true` dispatches even if covered/invisible. `ref="cookies"` rejects a cookie banner. |
 | `type`       | Type `text` into a field with per-key events (`clear=true` replaces), and/or press a `key` (`Enter`, `Tab`, `Escape`, `ArrowDown`, `Backspace`, …). `submit=true` presses Enter afterwards (implicit submission). |
-| `fill`       | Forms as a unit. No arguments: list the forms. `ref=@fN`: list its fields. `values={label|name|id|@eN: value}` fills (text, `true`/`false` for checkboxes, option label/value for selects and radios). `submit=true` runs constraint validation and submits. A single field: `ref=@eN value=…`. |
+| `fill`       | No arguments: list forms. `ref=@fN`: list its fields. `values={label|name|id|@eN: value}` fills text, checkbox booleans and select/radio options. Without `ref`, use only `@eN` keys or a page with one form. Stops remaining fields after navigation or document replacement. `submit=true` validates and submits. A single field: `ref=@eN value=…`. |
 | `scroll`     | `direction` (`down`/`up`/`top`/`bottom`, `pages`), `ref` (scroll into view), `until=@eN` or `until="text"` (scroll until visible), `load_more=true` (scroll to the end until the page stops growing, clicking a "load more" button when found). |
 | `screenshot` | PNG of the viewport, the `full` page or one element (`ref`), with set-of-marks: every visible interactive element boxed and labelled with its ref, plus a text legend. Only on demand. |
 | `network`    | The tab's requests: `#id METHOD STATUS type content-type size time path`, with API hints. `id=N` shows a response body (JSON pretty-printed). `filter`, `type`, `all` (include images/fonts/CSS), `limit`. |
 | `tabs`       | `action=list|switch|new|close` tabs (popups appear here), `download` (save an offered download to `path`), `save`/`load` a session (cookies, localStorage, open tabs) to/from a directory, `context` for isolated contexts. |
-| `debug`      | `eval` JavaScript in the page, `console=true` (console + JS errors), `clear`, `log=script|json` (export the action log as a replayable script or a test), `live=true` (watch the tab in a browser). |
+| `debug`      | `eval` JavaScript, returned Promises or top-level `await`; optional `timeout` in milliseconds and `follow=true` for script navigation. `console=true`, `clear`, `log=script|json`, `live=true`. |
 
 Every action (`open`, `click`, `type`, `fill`, `scroll`) accepts `dialog`:
 the answer to `alert`/`confirm`/`prompt` raised during that call — `accept`,
@@ -423,12 +423,30 @@ Errors are sentences an agent can act on:
 Keys of `values` match, in order: a ref (`@e5`), the `name`, the `id`, the
 label (case- and whitespace-insensitive), the placeholder, then a substring
 of the label. Radio groups are addressed by group name with the option's
-label or value. `submit=true` runs HTML constraint validation (`required`,
+label or value.
+
+Without `ref`, a map containing only `@eN` keys resolves each field directly;
+the fields may belong to different forms or frames. With `submit=true`, they
+must share one form. A map using names, labels or a mixture of key types needs
+one unambiguous form in the tab; if there are several, the error lists them
+so the next call can supply `ref=@fN`.
+
+Each field waits for its focus/input/change work before the next field. A
+navigation requested by focus stops before assigning the value; one requested
+by input stops before dispatching change. Navigation or document replacement
+during any of these steps, including settling timers or responses, stops the
+remaining fields and explicit submit. The result reports what was not attempted
+and requests a new snapshot. A document replacement invalidates that frame's
+old refs even if the same node was reattached. A navigation uses the same
+navigation result and page summary as `click`; remaining fields need fresh refs.
+
+`submit=true` runs HTML constraint validation (`required`,
 `type=email|url|number`, `min`/`max`, `minlength`/`maxlength`, `pattern`
 evaluated with the page's own RegExp engine; `novalidate` respected); invalid
 fields are reported and marked `invalid` in later snapshots. Valid forms are
 submitted by clicking the default submit button (so page handlers run), or
-by firing `submit` when there is none.
+by firing `submit` when there is none. Cancellation by the click or submit
+handler is reported as `Not submitted`.
 
 ## Network
 
@@ -525,7 +543,23 @@ still accepted and mean the default.
 
 * `debug console=true` shows console output and JS errors; new errors are
   also announced as events.
-* `debug eval="…"` evaluates JavaScript in the page.
+* `debug eval="…"` evaluates JavaScript in the page and observes a returned
+  Promise. Top-level `await` is detected from syntax; there is no `await` flag.
+  Await-enabled evaluations have invocation-local bindings; ordinary evaluations
+  keep their existing global behavior. Module imports/exports are unsupported.
+  Resolved values are inspected, rejections report `Uncaught (in promise) …`,
+  and a Promise still pending at the deadline reports
+  `Promise still pending after N ms`.
+* `timeout=N` is a positive integer in milliseconds, defaulting to the configured
+  auto-wait cap. It limits JS execution and observation, including VM work,
+  microtasks, callbacks and ready-response polling. It does not wait for an
+  unfinished background HTTP request to complete. Existing synchronous native
+  I/O cannot always be interrupted, so this is not a wall-clock guarantee for
+  arbitrary page code.
+* `follow=false` is the default: script navigation, dialogs and new windows are
+  reported without following them. `follow=true` uses the normal `click` action
+  handling after evaluation, including form POSTs and navigation errors. That
+  navigation has its own network/settling limits and can outlast the JS timeout.
 * Every mutating call is logged. `debug log=script` exports it in CLI syntax
   (replay with `rabbithole agent --script FILE`); `debug log=json` exports a
   test (`{"steps":[{"tool","args","expect_url"}]}`) that `rabbithole agent
