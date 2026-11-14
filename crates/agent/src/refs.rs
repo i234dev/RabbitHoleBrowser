@@ -146,4 +146,39 @@ mod tests {
         assert_eq!(Ref::parse("x"), None);
         assert_eq!(Ref::Element(4).to_string(), "@e4");
     }
+
+    #[test]
+    fn drop_frame_invalidates_old_element_refs_when_node_ids_are_reused() {
+        let mut refs = RefMap::default();
+        let neighbor = refs.assign(0, 10, "button", "neighbor");
+        let old = refs.assign(1, 10, "button", "old document");
+        let generation = refs.generation;
+        refs.drop_frame(1);
+        let new = refs.assign(1, 10, "button", "new document, reused node id");
+        assert_ne!(new, old, "a frame reload must assign a fresh ref even for the same NodeId");
+        assert!(refs.get(old).is_none(), "resolve_in must not recover an old entry against a connected node of the new frame document");
+        assert_eq!(refs.get(new).unwrap().name, "new document, reused node id");
+        assert_eq!(refs.get(neighbor).unwrap().name, "neighbor");
+        assert_eq!(refs.lookup(0, 10), Some(neighbor));
+        assert_eq!(refs.lookup(1, 10), Some(new));
+        assert_eq!(refs.generation, generation, "other frames keep their refs");
+    }
+
+    #[test]
+    fn drop_frame_invalidates_old_form_refs_when_node_ids_are_reused() {
+        let mut refs = RefMap::default();
+        let neighbor = refs.assign_form(0, 20);
+        let old = refs.assign_form(1, 20);
+        let generation = refs.generation;
+        refs.drop_frame(1);
+        let new = refs.assign_form(1, 20);
+        assert_ne!(new, old);
+        assert!(refs.get_form(old).is_none(), "a ref from the old frame document must not resolve to the replacement form");
+        assert_eq!(refs.get_form(new), Some((1, 20, generation)));
+        assert_eq!(refs.get_form(neighbor), Some((0, 20, generation)));
+        refs.drop_frame(1);
+        assert!(refs.get_form(new).is_none());
+        assert_eq!(refs.assign_form(0, 20), neighbor);
+        assert_eq!(refs.generation, generation);
+    }
 }
