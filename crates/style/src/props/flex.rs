@@ -255,15 +255,19 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
             }
         }
         "gap" => {
-            let vals: Vec<Length> = comps.iter().filter_map(|c| gap_value(c, ctx)).collect();
+            let vals: Vec<(Length,bool)> = comps.iter().filter_map(|c| gap_value(c, ctx).map(|value| (value, values::is_ident(c,"normal")))).collect();
             match vals.len() {
                 1 => {
-                    style.row_gap = vals[0];
-                    style.column_gap = vals[0];
+                    style.row_gap = vals[0].0;
+                    style.column_gap = vals[0].0;
+                    style.row_gap_normal = vals[0].1;
+                    style.column_gap_normal = vals[0].1;
                 }
                 2 => {
-                    style.row_gap = vals[0];
-                    style.column_gap = vals[1];
+                    style.row_gap = vals[0].0;
+                    style.column_gap = vals[1].0;
+                    style.row_gap_normal = vals[0].1;
+                    style.column_gap_normal = vals[1].1;
                 }
                 _ => {}
             }
@@ -271,11 +275,13 @@ pub fn apply(name: &str, comps: &[&[Token]], style: &mut ComputedStyle, parent: 
         "row-gap" => {
             if let Some(v) = gap_value(c0, ctx) {
                 style.row_gap = v;
+                style.row_gap_normal = values::is_ident(c0,"normal");
             }
         }
         "column-gap" => {
             if let Some(v) = gap_value(c0, ctx) {
                 style.column_gap = v;
+                style.column_gap_normal = values::is_ident(c0,"normal");
             }
         }
         // Legacy WebKit box model.
