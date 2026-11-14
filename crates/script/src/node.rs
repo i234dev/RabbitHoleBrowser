@@ -1337,31 +1337,50 @@ fn n_has_child_nodes(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Va
 
 fn n_normalize(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "normalize")?;
-    with_doc(n.doc, |doc| {
-        let nodes: Vec<NodeId> = doc.descendants(n.node).collect();
-        for id in nodes {
-            if !doc.is_text(id) {
-                continue;
+    // Only descendant exclusive Text nodes participate, not the receiver
+    // itself or CDATASection nodes. The snapshot may include siblings that
+    // a preceding merge removes; skip those when reached.
+    let nodes: Vec<NodeId> = with_doc(n.doc, |doc| doc.descendants(n.node).skip(1).collect());
+    for id in nodes {
+        let group = with_doc(n.doc, |doc| {
+            if !doc.is_text(id) || doc.is_cdata(id) || doc.parent(id).is_none() {
+                return None;
             }
-            if doc.node(id).parent.is_none() {
-                continue;
+            let length = doc.text(id).unwrap().encode_utf16().count();
+            if length == 0 {
+                return Some((0, String::new(), Vec::new()));
             }
-            // Merge following text siblings into this one.
-            loop {
-                let Some(next) = doc.next_sibling(id) else { break };
-                if !doc.is_text(next) {
+            let mut following = Vec::new();
+            let mut data = String::new();
+            let mut next = doc.next_sibling(id);
+            while let Some(sibling) = next {
+                if !doc.is_text(sibling) || doc.is_cdata(sibling) {
                     break;
                 }
-                let t = doc.text(next).unwrap_or("").to_string();
-                let cur = doc.text(id).unwrap_or("").to_string();
-                doc.set_text(id, &format!("{cur}{t}"));
-                doc.detach(next);
+                let text = doc.text(sibling).unwrap();
+                following.push((sibling, text.encode_utf16().count()));
+                data.push_str(text);
+                next = doc.next_sibling(sibling);
             }
-            if doc.text(id).map(|t| t.is_empty()).unwrap_or(false) {
-                doc.detach(id);
-            }
+            Some((length, data, following))
+        });
+        let Some((mut length, data, following)) = group else { continue };
+        let text = NodeRef { doc: n.doc, node: id };
+        if length == 0 {
+            remove_node(text);
+            continue;
         }
-    });
+        // Appending preserves boundaries already in the surviving node and
+        // queues the single characterData record required for this group.
+        replace_character_data(text, length, 0, &data);
+        for &(sibling, added) in &following {
+            with_doc(n.doc, |doc| doc.live_before_merge_text(id, sibling, length));
+            length += added;
+        }
+        for (sibling, _) in following {
+            remove_node(NodeRef { doc: n.doc, node: sibling });
+        }
+    }
     Ok(Value::Undefined)
 }
 

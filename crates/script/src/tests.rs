@@ -1236,6 +1236,99 @@ fn live_ranges_follow_mutations() {
 }
 
 #[test]
+fn live_ranges_identical_character_data_still_replaces_offsets() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const t = document.body.appendChild(document.createTextNode('A😀éZ'));
+        const r = document.createRange();
+        r.setStart(t, 2); r.setEnd(t, 3);
+        const sel = getSelection();
+        sel.removeAllRanges(); sel.addRange(r);
+        t.replaceData(1, 2, '😀');
+        console.log('span', t.data, r.startOffset, r.endOffset, sel.anchorOffset, sel.focusOffset);
+        for (const key of ['data', 'nodeValue', 'textContent']) {
+            r.setStart(t, 1); r.setEnd(t, 5);
+            t[key] = t[key];
+            console.log(key, r.collapsed, r.startOffset, r.endOffset, sel.isCollapsed);
+        }
+        const c = document.createComment('é•');
+        r.setStart(c, 1); r.setEnd(c, 2);
+        c.data = c.data;
+        console.log('comment', c.data, r.startOffset, r.endOffset);
+    "#);
+    assert_eq!(out, [
+        "span A😀éZ 1 1 1 1", "data true 0 0 true",
+        "nodeValue true 0 0 true", "textContent true 0 0 true", "comment é• 0 0",
+    ]);
+}
+
+#[test]
+fn live_ranges_normalize_preserves_utf16_selection_and_observer_records() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const p = document.body.appendChild(document.createElement('p'));
+        const empty = p.appendChild(document.createTextNode(''));
+        const a = p.appendChild(document.createTextNode('A😀'));
+        p.appendChild(document.createTextNode(''));
+        const b = p.appendChild(document.createTextNode('é•'));
+        const c = p.appendChild(document.createTextNode('Z'));
+        const r = document.createRange();
+        r.setStart(a, 2); r.setEnd(b, 1);
+        const indices = document.createRange();
+        indices.setStart(p, 3); indices.setEnd(p, 4);
+        const sel = getSelection();
+        sel.removeAllRanges(); sel.addRange(r);
+        const observer = new MutationObserver(() => {});
+        observer.observe(p, { subtree: true, characterData: true, characterDataOldValue: true, childList: true });
+        p.normalize();
+        console.log('text', p.childNodes.length, p.firstChild === a, a.data, empty.parentNode === null, b.data, c.data);
+        console.log('range', r.startContainer === a, r.endContainer === a, r.startOffset, r.endOffset);
+        console.log('indices', indices.startContainer === a, indices.endContainer === a, indices.startOffset, indices.endOffset);
+        console.log('selection', sel.anchorNode === a, sel.focusNode === a, sel.anchorOffset, sel.focusOffset);
+        const records = observer.takeRecords();
+        console.log('records', records.map(x => x.type).join(','), records[1].target === a, records[1].oldValue === 'A😀');
+        // A later split and merge must retain code-unit offsets, too.
+        sel.setBaseAndExtent(a, 4, a, 2);
+        const tail = a.splitText(3);
+        console.log('split', a.data, tail.data, r.startContainer === a, r.endContainer === tail, r.endOffset);
+        console.log('backward split', sel.anchorNode === tail, sel.focusNode === a, sel.anchorOffset, sel.focusOffset, sel.direction);
+        p.normalize();
+        console.log('merged', r.startOffset, r.endOffset, r.endContainer === a);
+        console.log('backward merged', sel.anchorNode === a, sel.focusNode === a, sel.anchorOffset, sel.focusOffset, sel.direction);
+    "#);
+    assert_eq!(out, [
+        "text 1 true A😀é•Z true é• Z", "range true true 2 4",
+        "indices true true 3 5", "selection true true 2 4",
+        "records childList,characterData,childList,childList,childList true true",
+        "split A😀 é•Z true true 1", "backward split true true 1 2 backward",
+        "merged 2 4 true", "backward merged true true 4 2 backward",
+    ]);
+}
+
+#[test]
+fn normalize_respects_text_receiver_empty_nodes_and_cdata_boundaries() {
+    let (mut env, mut host) = setup("<body></body>");
+    let out = run(&mut env, &mut host, r#"
+        const p = document.createElement('p');
+        const a = p.appendChild(document.createTextNode('A'));
+        const b = p.appendChild(document.createTextNode('B'));
+        a.normalize();
+        console.log('receiver', p.childNodes.length, a.data, b.data);
+        const empty = p.insertBefore(document.createTextNode(''), a);
+        p.normalize();
+        console.log('empty', p.childNodes.length, p.firstChild === a, a.data, empty.parentNode === null, b.data);
+        const xml = new DOMParser().parseFromString('<root/>', 'text/xml');
+        const root = xml.documentElement;
+        const x = root.appendChild(xml.createTextNode('é'));
+        const cdata = root.appendChild(xml.createCDATASection(''));
+        const y = root.appendChild(xml.createTextNode('•'));
+        root.normalize();
+        console.log('cdata', root.childNodes.length, x.data, cdata.parentNode === root, cdata.nodeType, y.data);
+    "#);
+    assert_eq!(out, ["receiver 2 A B", "empty 1 true AB true B", "cdata 3 é true 4 •"]);
+}
+
+#[test]
 fn node_iterator_survives_removal_by_its_filter() {
     let (mut env, mut host) = setup("<body></body>");
     let out = run(&mut env, &mut host, r#"

@@ -179,6 +179,26 @@ impl Document {
         }
     }
 
+    /// Normalization steps before removing a following Text sibling.
+    /// Its data has already been appended to `into`; `offset` is the
+    /// UTF-16 length of the preceding text, excluding this sibling's data.
+    /// Boundaries inside the sibling or immediately before it follow the
+    /// data into the surviving node rather than the ordinary removal point.
+    pub fn live_before_merge_text(&mut self, into: NodeId, from: NodeId, offset: usize) {
+        if self.live_points.is_empty() {
+            return;
+        }
+        let parent = self.nodes[from].parent;
+        let index = self.index_of(from);
+        for p in self.live_points.iter_mut().flatten() {
+            if p.node == from {
+                *p = BoundaryPoint { node: into, offset: offset + p.offset };
+            } else if Some(p.node) == parent && p.offset == index {
+                *p = BoundaryPoint { node: into, offset };
+            }
+        }
+    }
+
     // ------------------------------------------------- character data
 
     /// Character data of a text or comment node.
@@ -203,13 +223,14 @@ impl Document {
         out.extend(data.encode_utf16());
         out.extend_from_slice(&units[offset + count..]);
         let new = String::from_utf16_lossy(&out);
-        if new == old {
-            return Some(old);
+        if new != old {
+            if let NodeData::Text(t) | NodeData::Comment(t) = &mut self.nodes[id].data {
+                *t = new;
+            }
+            self.record(Mutation::Text { node: id });
         }
-        if let NodeData::Text(t) | NodeData::Comment(t) = &mut self.nodes[id].data {
-            *t = new;
-        }
-        self.record(Mutation::Text { node: id });
+        // Replacing a span with identical data still runs the live-range
+        // replacement steps. Only the rendering invalidation is elided.
         if !self.live_points.is_empty() {
             self.live_replace_data(id, offset, count, data.encode_utf16().count());
         }
@@ -295,6 +316,24 @@ mod tests {
         assert_eq!(d.live_point(c), Some(BoundaryPoint { node: body, offset: 3 }));
         d.replace_data(new, 0, 1, "xyz");
         assert_eq!(d.live_point(b), Some(BoundaryPoint { node: new, offset: 0 }));
+    }
+
+    #[test]
+    fn identical_character_data_still_replaces_live_boundary_offsets() {
+        let (mut d, body) = setup();
+        let text = d.create_text("A😀éZ");
+        d.append_child(body, text);
+        let inside = d.add_live_point(BoundaryPoint { node: text, offset: 2 });
+        let at_end = d.add_live_point(BoundaryPoint { node: text, offset: 3 });
+        let after = d.add_live_point(BoundaryPoint { node: text, offset: 5 });
+        d.replace_data(text, 1, 2, "😀");
+        assert_eq!(d.char_data(text), Some("A😀éZ"));
+        assert_eq!(d.live_point(inside).unwrap().offset, 1);
+        assert_eq!(d.live_point(at_end).unwrap().offset, 1);
+        assert_eq!(d.live_point(after).unwrap().offset, 5);
+        d.set_char_data(text, "A😀éZ");
+        assert_eq!(d.live_point(inside).unwrap().offset, 0);
+        assert_eq!(d.live_point(after).unwrap().offset, 0);
     }
 
     #[test]
