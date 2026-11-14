@@ -1593,7 +1593,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         "visibility" => to.visibility = from.visibility,
         "z-index" => to.z_index = from.z_index,
         "cursor" => to.cursor = from.cursor,
-        "flex" => {
+        "flex" | "-webkit-flex" | "-ms-flex" => {
             to.flex_grow = from.flex_grow;
             to.flex_shrink = from.flex_shrink;
             to.flex_basis = from.flex_basis;
@@ -1601,7 +1601,7 @@ fn copy_property(prop: &str, from: &ComputedStyle, to: &mut ComputedStyle) {
         }
         "flex-grow" => to.flex_grow = from.flex_grow,
         "flex-shrink" => to.flex_shrink = from.flex_shrink,
-        "flex-basis" => {
+        "flex-basis" | "-webkit-flex-basis" | "-ms-flex-preferred-size" => {
             to.flex_basis = from.flex_basis;
             to.flex_basis_content = from.flex_basis_content;
         }
