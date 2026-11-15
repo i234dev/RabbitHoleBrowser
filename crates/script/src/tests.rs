@@ -264,6 +264,35 @@ fn window_replaceable_sloppy_assignment_keeps_the_exact_value() {
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
 
+
+#[test]
+fn window_replaceable_setters_use_bootstrap_intrinsics_after_site_monkeypatch() {
+    let (mut env, mut host) = setup("<p>intrinsics</p>");
+    let out = run(&mut env, &mut host, r#"
+        'use strict';
+        const define = Object.defineProperty;
+        let intercepted = 0;
+        const target = window;
+        const names = ['event', 'innerWidth', 'self', 'performance', 'screen', 'visualViewport',
+            'locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar',
+            'external', 'navigation', 'parent', 'frames', 'length'];
+        Object.defineProperty = function() { intercepted++; throw new Error('site defineProperty was called'); };
+        try {
+            for (const name of names) {
+                const marker = {name};
+                target[name] = marker;
+                const d = Object.getOwnPropertyDescriptor(target, name);
+                if (target[name] !== marker || d.value !== marker || !d.writable
+                    || !d.enumerable || !d.configurable || 'get' in d || 'set' in d)
+                    throw new Error(name + ': intrinsic replacement failed');
+            }
+        } finally { Object.defineProperty = define; }
+        console.log('intrinsics', names.length, intercepted);
+    "#);
+    assert_eq!(out, ["intrinsics 17 0"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
 #[test]
 fn window_replaceable_event_tracks_native_and_nested_dispatch_before_assignment() {
     let (mut env, mut host) = setup("<button>go</button>");

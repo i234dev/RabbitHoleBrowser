@@ -7,6 +7,16 @@
   'use strict';
   const g = globalThis;
   const N = g.__rhNative;
+  const defineWindowProperty = Object.defineProperty;
+  // Window [Replaceable] setters create an own data property (Web IDL).
+  const replaceableWindowValue = (name, value) => defineWindowProperty(g, name, {
+    get() { return value; },
+    set(value) {
+      if (this !== g) throw new TypeError('Illegal invocation');
+      defineWindowProperty(this, name, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
+    },
+    configurable: true, enumerable: true,
+  });
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
@@ -374,7 +384,7 @@
   define('VisualViewport', VisualViewport);
   const vv = make(VisualViewport);
   try { delete g.visualViewport; } catch (e) {}
-  Object.defineProperty(g, 'visualViewport', { get() { return vv; }, configurable: true, enumerable: true });
+  replaceableWindowValue('visualViewport', vv);
   g.addEventListener('resize', () => vv.dispatchEvent(new Event('resize')));
   g.addEventListener('scroll', () => vv.dispatchEvent(new Event('scroll')));
   hidden(g, 'moveBy', function moveBy() {});
@@ -421,15 +431,6 @@
   }
 
   // ------------------------------------------------------------ BarProp etc.
-  // Window [Replaceable] setters create an own data property (Web IDL).
-  const replaceableWindowValue = (name, value) => Object.defineProperty(g, name, {
-    get() { return value; },
-    set(value) {
-      if (this !== g) throw new TypeError('Illegal invocation');
-      Object.defineProperty(this, name, { value, writable: true, enumerable: true, configurable: true });
-    },
-    configurable: true, enumerable: true,
-  });
   class BarProp { constructor() { ILLEGAL(); } get visible() { return true; } }
   tag(BarProp, 'BarProp');
   define('BarProp', BarProp);

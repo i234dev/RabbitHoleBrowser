@@ -6,6 +6,7 @@
   'use strict';
   const g = globalThis;
   const N = g.__rhNative;
+  const defineWindowProperty = Object.defineProperty;
   const define = (name, value) => Object.defineProperty(g, name, { value, writable: true, configurable: true });
   const hidden = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
   const tag = (C, name) => Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
@@ -245,11 +246,11 @@
     if (type === 'reload') location.reload(); else if (type === 'replace') location.replace(url); else location.assign(url);
     return { committed, finished };
   }
-  Object.defineProperty(g, 'navigation', {
+  defineWindowProperty(g, 'navigation', {
     get() { return navigation; },
     set(value) {
       if (this !== g) throw new TypeError('Illegal invocation');
-      Object.defineProperty(this, 'navigation', { value, writable: true, enumerable: true, configurable: true });
+      defineWindowProperty(this, 'navigation', { __proto__: null, value, writable: true, enumerable: true, configurable: true });
     },
     configurable: true, enumerable: true,
   });

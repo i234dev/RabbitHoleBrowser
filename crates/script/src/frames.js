@@ -280,11 +280,11 @@
     top: () => windowFor(info(SELF, 'top', 0)) || g,
     length: () => info(SELF, 'length', 0),
   };
-  const replaceableOwn = (name, get) => Object.defineProperty(g, name, {
+  const replaceableOwn = (name, get) => defineData(g, name, {
     get,
     set(value) {
       if (this !== g) throw new TypeError('Illegal invocation');
-      Object.defineProperty(this, name, { value, writable: true, enumerable: true, configurable: true });
+      defineData(this, name, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
     },
     configurable: true, enumerable: true,
   });
