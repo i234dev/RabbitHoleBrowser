@@ -29,7 +29,7 @@ Design goals, in order:
 | `snapshot`   | The semantic tree of the page. `ref` expands one element (a truncated list, a collapsed landmark); `max_tokens` (default 2500); `hidden=true` also lists hidden content, marked; `urls=true` shows link targets. |
 | `read`       | Main content as Markdown, without nav/footer/related; without `ref`, starts at the article beginning. Optional `ref` reads that subtree. `max_tokens` defaults to 4000; `offset` counts characters. `links=true` keeps link refs; `links=false` uses plain text. `cites=false` omits same-page superscript citation links; `cites=true` includes them. Use `find` for a particular fact. |
 | `find`       | Search `text` (string or string array, any term), `role` + `name`, or CSS `selector`. Returns element refs; text searches rank whole-word matches first, then actionable controls, retaining document order within each rank. `window` (default 240 characters; `context` is an alias) selects passages around the first occurrence of each term, capped at three windows per element. Zero keeps the legacy first 120. `limit` counts elements (default 20). |
-| `click`      | Click by ref (real hit-tested pointer sequence). `hover=true` only hovers. `force=true` dispatches even if covered/invisible. `ref="cookies"` rejects a cookie banner. |
+| `click`      | Click by ref or `selector` (real hit-tested pointer sequence). `double=true` double-clicks; `hover=true` only hovers. `force=true` permits a normal click even if covered/invisible; double-click requires a real pointer point. `ref="cookies"` rejects a cookie banner. |
 | `type`       | Type `text` into a field with per-key events (`clear=true` replaces), and/or press a `key` (`Enter`, `Tab`, `Escape`, `ArrowDown`, `Backspace`, …). `submit=true` presses Enter afterwards (implicit submission). |
 | `fill`       | No arguments: list forms. `ref=@fN`: list its fields. `values={label|name|id|@eN: value}` fills text, checkbox booleans and select/radio options. Without `ref`, use only `@eN` keys or a page with one form. Stops remaining fields after navigation or document replacement. `submit=true` validates and submits. A single field: `ref=@eN value=…`. |
 | `scroll`     | `direction` (`down`/`up`/`top`/`bottom`, `pages`), `ref` (scroll into view), `until=@eN` or `until="text"` (scroll until visible), `load_more=true` (scroll to the end until the page stops growing, clicking a "load more" button when found). |
@@ -346,6 +346,23 @@ The normal visibility, disabled, form and navigation checks still apply.
 For example, `fill selector="#email" value="name@example.test"` fills one field;
 `fill selector="#checkout" values={...}` selects a form. Without either target,
 `type` still uses the focused element and `fill` retains its form-list behavior.
+
+`click double=true` sends two real pointer cycles: mouse down/up/click with
+`detail=1`, then mouse down/up/click with `detail=2`, followed by `dblclick`
+with `detail=2`. It reports `Double-clicked` when that sequence completes.
+`double` cannot be combined with hover-only or the cookies shortcut. If the
+document/target changes, a dialog or navigation interrupts the sequence, or
+the target becomes disabled, it returns an error describing how many clicks
+actually completed, followed by the normal action report. Completed effects
+are retained; `batch` stops at this incomplete step.
+
+GET links that only change the current resource's fragment keep the document,
+realm and refs. Click and Enter report `→ same-document navigation to …` and
+the action diff; `open` retains its usual summary options. Hash changes and
+same-document back/forward deliver their native events and scroll to a named
+anchor. Explicit reload, POST, another resource/origin and a new tab still use
+the document-loading path. See [fragment navigation](mcp-fragment-navigation.md)
+for the bounded history and frame scope.
 
 For explicit observation, `find wait=5000 text="ready"` waits for a matching
 result; `gone=true` waits for no matches. `wait` accepts 0–30000 milliseconds.
