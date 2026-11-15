@@ -35,6 +35,11 @@ enum GridSpace {
     Definite(f32),
     MinContent,
     MaxContent,
+    /// Compatibility completion for the unresolved inherited/orthogonal
+    /// route, whose parent-axis consumer is not implemented yet. This is
+    /// the shipped indefinite algorithm, including flexible-track sizing;
+    /// it is not an intrinsic constraint or a completed per-axis result.
+    LegacyIndefinite,
 }
 
 /// Grid2 §12.1 permits one adjustment after the opposite axis is known.
@@ -615,7 +620,7 @@ fn complete_track_sizing(tracks: &mut [Track], contribs: &[Contribution], space:
                 }
                 fr
             }
-            GridSpace::MaxContent => {
+            GridSpace::MaxContent | GridSpace::LegacyIndefinite => {
                 let mut fr: f32 = 0.0;
                 for &i in &flex_idx {
                     let f = factor(&tracks[i]);
@@ -759,7 +764,8 @@ impl<'a> Layouter<'a> {
             // Row sizing: contributions are item heights at their column width.
             if rows.inherited.is_none() {
                 row_contribs=if project {self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Initial)} else {self.row_contributions(b,&items,&cols,&col_pos,col_gap,cbw,cb.height)};
-                size_tracks(&mut rows.tracks, &row_contribs, cb.height, row_gap, row_stretch);
+                let space=subgrid::standalone_space(b,true,cb.height);
+                size_tracks_with_space(&mut rows.tracks, &row_contribs, space, row_gap, row_stretch);
             }
             // Grid2 §12.1 steps 3-4: at most one adjustment of each axis.
             // Ordinary grids retain the existing path; subgrid descendants now
@@ -774,7 +780,10 @@ impl<'a> Layouter<'a> {
                 }
                 if rows.inherited.is_none() {
                     let adjusted=self.projected_rows(b,&items,&rows,&cols,&col_pos,col_gap,row_gap,cbw,cb.height,MeasurePhase::Adjusted);
-                    if adjusted!=row_contribs {size_tracks(&mut rows.tracks,&adjusted,cb.height,row_gap,row_stretch);}
+                    if adjusted!=row_contribs {
+                        let space=subgrid::standalone_space(b,true,cb.height);
+                        size_tracks_with_space(&mut rows.tracks,&adjusted,space,row_gap,row_stretch);
+                    }
                 }
             }
         }
@@ -1501,7 +1510,8 @@ impl<'a> Layouter<'a> {
         let n_vis = min_tracks.iter().filter(|t| !t.collapsed).count();
         let gaps = col_gap * n_vis.saturating_sub(1) as f32;
         let min: f32 = min_tracks.iter().map(|t| t.base).sum::<f32>() + gaps;
-        size_tracks_with_space(&mut cols.tracks, &contribs, GridSpace::MaxContent, col_gap, false);
+        let max_space=subgrid::standalone_space(b,false,None);
+        size_tracks_with_space(&mut cols.tracks, &contribs, max_space, col_gap, false);
         let max: f32 = cols.tracks.iter().map(|t| t.base).sum::<f32>() + gaps;
         (min, max.max(min))
     }

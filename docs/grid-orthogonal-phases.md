@@ -1,5 +1,39 @@
 # Orthogonal Grid phases: interface checkpoint
 
+## Isolated compatibility candidate for unresolved orthogonal inheritance
+
+The corrective candidate based on `8121a7674164654ed97d64219d324a2f95d20da6`
+keeps the shipped indefinite-track finalization at one unsupported boundary:
+an inherited axis has crossed an odd number of writing-mode wrappers, its
+geometry remains placement-only, and the perpendicular standalone axis has no
+available size. `SharedTracks` carries this provenance through nested sections
+and reversals. A second crossing restores the original axis mapping. Definite
+geometry, a real available size (including zero), aligned inheritance and
+ordinary grids retain normal sizing.
+
+`LegacyIndefinite` is explicitly a compatibility mode, not an intrinsic
+constraint. It preserves the old indefinite finalization, including flexible
+track expansion and collapsed-track handling, without the new maximization
+of non-flex tracks to their growth limits. It is intentionally different from
+MinContent. It cannot be stored as `CompletedAxis`. This does not implement the
+missing inherited-axis dispatcher or establish Grid2 conformance for this
+combination.
+
+The same selection helper is used by perpendicular subgrid contribution
+measurement, intrinsic maximum measurement, and initial/adjusted standalone
+row layout. Available final column geometry follows the existing definite
+path. No available size is fabricated and no partially sized track list is
+published as a completed result. The provenance is scoped with the existing
+inherited sources and does not survive the operation in a global cache.
+
+Three written unit controls distinguish legacy flexible sizing from both
+intrinsic constraints, test the structural guard across all three wrapper
+orientations and completed/definite/absent sources, and reject publication of
+legacy sizing as a completed axis. These controls and the unchanged official
+orthogonal001/002, retained Grid26 and wider gates remain **unexecuted for this
+candidate**. In particular, the known 55,117-pixel loss on the base candidate
+is not considered resolved until the unchanged oracle actually passes.
+
 This successor is **SIN VALIDAR**. The new `grid::phases` module is included
 in compilation and unit controls, but has not been built or executed and no
 layout caller uses it yet. It does not fix the real

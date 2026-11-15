@@ -82,6 +82,9 @@ pub(crate) struct SharedTracks {
     pub(super) gap: f32,
     /// Placement-only geometry must not resolve cyclic percentage edges.
     pub(super) definite: bool,
+    /// Parent and local sizing axes differ after an odd number of WM
+    /// wrappers. Preserve provenance separately from placement geometry.
+    crossed_axes: bool,
     /// Accumulated ancestor edge layers at internal track boundaries. A
     /// nested subgrid must retain its parent's own gap adjustments as well.
     edge_before: Vec<f32>,
@@ -123,8 +126,14 @@ fn reverse(source: Option<AxisInheritance>) -> Option<AxisInheritance> {
 
 /// Express parent-space sources in an orthogonal wrapper's inner space.
 pub(super) fn through_wrapper(columns: Option<AxisInheritance>, rows: Option<AxisInheritance>, kind: WmKind) -> (Option<AxisInheritance>,Option<AxisInheritance>) {
-    let inner_columns=if kind==WmKind::Ccw {reverse(rows)} else {rows};
-    let inner_rows=if kind==WmKind::Cw {reverse(columns)} else {columns};
+    let crossed=|source:Option<AxisInheritance>|source.map(|mut source| {
+        if let AxisInheritance::Tracks(axis)=&mut source {
+            let axis=Arc::make_mut(axis);axis.crossed_axes=!axis.crossed_axes;
+        }
+        source
+    });
+    let inner_columns=crossed(if kind==WmKind::Ccw {reverse(rows)} else {rows});
+    let inner_rows=crossed(if kind==WmKind::Cw {reverse(columns)} else {columns});
     (inner_columns,inner_rows)
 }
 
@@ -193,6 +202,7 @@ pub(super) fn section(list:&TrackList, positions:&[f32], start:usize, end:usize,
         collapsed:list.tracks[start..end].iter().map(|t|t.collapsed).collect(),
         gap,
         definite:list.inherited.as_ref().is_none_or(|parent|parent.definite),
+        crossed_axes:list.inherited.as_ref().is_some_and(|parent|parent.crossed_axes),
         edge_before:(start..end).map(|i|if i==start {0.} else {before(i)}).collect(),
         edge_after:(start..end).map(|i|if i+1==end {0.} else {after(i)}).collect(),
         inset_start:if start<end {before(start)} else {0.},
@@ -294,6 +304,17 @@ pub(super) fn sizing_section_aligned(list:&TrackList,start:usize,end:usize,gap:f
 
 pub(super) fn scope_reference(columns:&Option<AxisInheritance>,fallback:f32)->f32 {
     match columns {Some(AxisInheritance::Tracks(axis))=>if axis.definite {axis.extent()} else {0.},_=>fallback}
+}
+
+/// Keep the shipped indefinite completion only at the unsupported
+/// inherited + orthogonal + unresolved boundary. A genuine available size,
+/// aligned inheritance, or completed inherited geometry uses normal sizing.
+/// Neither placement bases nor this compatibility result enter CompletedAxis.
+pub(super) fn standalone_space(b:&LayoutBox,rows:bool,available:Option<f32>)->GridSpace {
+    if let Some(size)=available {return GridSpace::Definite(size);}
+    if shared(b,rows).is_none()&&shared(b,!rows).is_some_and(|axis|axis.crossed_axes&&!axis.definite) {
+        GridSpace::LegacyIndefinite
+    } else {GridSpace::MaxContent}
 }
 
 pub(super) fn known_block_size(b:&LayoutBox,reference:f32)->Option<f32> {
@@ -537,7 +558,7 @@ impl<'a> Layouter<'a> {
         } else {
             if cols.inherited.is_none() {
                 let contributions=self.projected_columns(b,&items,&cols,Some(&row_tracks),col_gap,row_gap,inline_size.unwrap_or(0.),geometry,phase);
-                let space=inline_size.map(GridSpace::Definite).unwrap_or(GridSpace::MaxContent);
+                let space=standalone_space(b,false,inline_size);
                 size_tracks_with_space(&mut cols.tracks,&contributions,space,col_gap,false);
             }
             let (positions,_)=positions(&cols,col_gap,inline_size,style.justify_content);
@@ -613,6 +634,41 @@ mod tests {
         let (_,rows)=through_wrapper(Some(source),None,WmKind::Reflect);
         let Some(AxisInheritance::Tracks(rows))=rows else {panic!("missing mapped rows")};
         assert_eq!(rows.sizes,[100.,150.]);assert_eq!(rows.starts,[0.,150.]);
+    }
+
+    #[test]
+    fn legacy_completion_requires_unresolved_inheritance_across_writing_modes() {
+        let unresolved=TrackList{tracks:vec![Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![]],inherited:None};
+        let source=sizing_section(&unresolved,0,1,0.,true);
+        let mut b=child();
+        b.grid_rows=Some(source.clone());
+        assert_eq!(standalone_space(&b,false,None),GridSpace::MaxContent,"aligned inherited axis");
+        for kind in [WmKind::Cw,WmKind::Ccw,WmKind::Reflect] {
+            let (_,mapped)=through_wrapper(Some(source.clone()),None,kind);
+            b.grid_rows=mapped;
+            assert_eq!(standalone_space(&b,false,None),GridSpace::LegacyIndefinite);
+            assert_eq!(standalone_space(&b,false,Some(0.)),GridSpace::Definite(0.));
+            assert_eq!(standalone_space(&b,false,Some(130.)),GridSpace::Definite(130.));
+            assert_eq!(standalone_space(&b,true,None),GridSpace::MaxContent,"the inherited axis itself is not standalone");
+            // Propagation through another subgrid retains the source state.
+            let nested=tracks(&b,true,None,0.);
+            let (starts,_)=positions(&nested,0.,None,ContentDistribution::FlexStart);
+            let nested=section(&nested,&starts,0,1,0.,true);
+            b.grid_rows=Some(nested);
+            assert_eq!(standalone_space(&b,false,None),GridSpace::LegacyIndefinite);
+            let (aligned,_)=through_wrapper(None,b.grid_rows.take(),kind);
+            b.grid_columns=aligned;
+            assert_eq!(standalone_space(&b,true,None),GridSpace::MaxContent,"two crossings restore the original axes");
+            b.grid_columns=None;
+            // Replacing placement geometry with a completed source ends the
+            // fallback even though the writing modes still differ.
+            let used=parent();let used=section(&used,&[0.,150.],0,2,50.,true);
+            let (_,completed)=through_wrapper(Some(used),None,kind);
+            b.grid_rows=completed;
+            assert_eq!(standalone_space(&b,false,None),GridSpace::MaxContent);
+        }
+        b.grid_rows=None;
+        assert_eq!(standalone_space(&b,false,None),GridSpace::MaxContent,"no inherited source");
     }
 
     #[test]

@@ -187,6 +187,7 @@ pub(super) struct CompletedAxis {
 }
 impl CompletedAxis {
     pub(super) fn standalone(mut tracks:TrackList,contributions:&[Contribution],space:GridSpace,gap:f32,stretch:bool,budget:&mut WorkBudget)->Self {
+        assert!(space!=GridSpace::LegacyIndefinite,"Legacy compatibility sizing is not a completed Grid axis");
         assert!(tracks.inherited.is_none(),"Standalone completion of an inherited Grid axis");
         budget.charge(tracks.tracks.len().saturating_add(contributions.len()).saturating_mul(3));
         super::size_tracks_with_space(&mut tracks.tracks,contributions,space,gap,stretch);
@@ -426,6 +427,18 @@ mod tests {
 
     fn tracks(source:&Option<AxisInheritance>)->&subgrid::SharedTracks {
         let Some(AxisInheritance::Tracks(axis))=source else {panic!("Missing tracks")};axis
+    }
+
+    #[test]
+    fn legacy_compatibility_cannot_be_published_as_a_completed_axis() {
+        let mut budget=WorkBudget::default();
+        let rejected=catch_unwind(AssertUnwindSafe(||CompletedAxis::standalone(
+            list(&[(Sizing::Auto,Sizing::Auto)]),&[contribution(10.,40.)],
+            GridSpace::LegacyIndefinite,0.,false,&mut budget,
+        )));
+        assert!(rejected.is_err());
+        let completed=completed(&[contribution(10.,40.)],&mut budget);
+        assert_eq!(completed.tracks().tracks[0].base,40.);
     }
 
     #[test]

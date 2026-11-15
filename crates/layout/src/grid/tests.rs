@@ -121,3 +121,22 @@ fn completing_staged_tracks_still_expands_flexible_tracks_from_spanning_content(
     complete_track_sizing(&mut tracks,&contributions,GridSpace::MaxContent,0.,false);
     assert_eq!([tracks[0].base,tracks[1].base],[270.,30.]);
 }
+
+#[test]
+fn legacy_indefinite_completion_keeps_flexible_track_expansion() {
+    let original=[Track::new(Sizing::Auto,Sizing::Auto),Track::new(Sizing::Fixed(0.),Sizing::Flex(1.))];
+    let contributions=[Contribution{start:0,end:1,min:10.,max:40.},Contribution{start:1,end:2,min:0.,max:90.}];
+    for (space,expected) in [
+        (GridSpace::LegacyIndefinite,[10.,90.]),
+        (GridSpace::MinContent,[10.,0.]),
+        (GridSpace::MaxContent,[40.,90.]),
+    ] {
+        let mut tracks=original.clone();
+        size_tracks_with_space(&mut tracks,&contributions,space,0.,false);
+        assert_eq!([tracks[0].base,tracks[1].base],expected);
+    }
+    // The ordinary automatic-size caller keeps the strict MaxContent path.
+    let mut automatic=original.clone();
+    size_tracks(&mut automatic,&contributions,None,0.,false);
+    assert_eq!([automatic[0].base,automatic[1].base],[40.,90.]);
+}
