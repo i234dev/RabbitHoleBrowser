@@ -35,12 +35,12 @@ inspected 2026-11-15.
 Targeted test (written, not executed during candidate preparation):
 
 ```sh
-cargo test --profile ci --features jit --locked -p rabbithole-agent --test fragment_navigation
+cargo test --profile ci --features jit --locked -p rabbithole-agent --test agent fragment_navigation::
 ```
 
-Run with off+GCinc and on/threshold0+GCinc. The six loopback tests check document
+Run with off+GCinc and on/threshold0+GCinc. The seven loopback tests check document
 identity and JS memory, refs, exact event count/type/trust/URLs/order, DOM diff,
 anchor scroll, GET counts, explicit reload, POST, cross-document traversal,
-resource/origin changes, new-tab isolation and a child frame. They do not run
-authenticated sites or the RH005 model benchmark. JIT flags alone are not proof
+resource/origin changes, new-tab isolation, a child frame and hashchange-requested
+navigation. They do not run authenticated sites or the RH005 model benchmark. JIT flags alone are not proof
 of native-code entry.

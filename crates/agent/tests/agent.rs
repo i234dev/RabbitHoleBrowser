@@ -975,3 +975,6 @@ fn rh003_fill_reports_event_handlers_that_replace_the_requested_value() {
 }
 #[path = "support/batch_actions.rs"]
 mod batch_actions;
+
+#[path = "support/fragment_navigation.rs"]
+mod fragment_navigation;
