@@ -87,6 +87,12 @@ fn blocking(log: &NetLog) -> Vec<(String, Duration)> {
 
 /// Run timers/microtasks/network completions until settled or `cap`.
 pub fn settle(engine: &Engine, page: &mut Page, log: Option<&NetLog>, cap: Duration) -> Settled {
+    settle_with_quiet_period(engine, page, log, cap, Duration::from_millis(QUIET_MS))
+}
+
+// The public path retains its fixed quiet period. Unit regressions use zero
+// here to reach an already-quiet state without sleeps or racing wall clocks.
+fn settle_with_quiet_period(engine: &Engine, page: &mut Page, log: Option<&NetLog>, cap: Duration, quiet_period: Duration) -> Settled {
     let start = Instant::now();
     let mut s = Settled::default();
     // Side effects already queued on the page (from loading or the action).
@@ -105,15 +111,21 @@ pub fn settle(engine: &Engine, page: &mut Page, log: Option<&NetLog>, cap: Durat
         let now_ms = engine.start.elapsed().as_secs_f64() * 1000.0;
         let due = page.next_script_due();
         let timer_soon = due.map(|d| d - now_ms <= TIMER_HORIZON_MS).unwrap_or(false);
-        if net.is_empty() && !timer_soon {
+        // The request log can finish before a child is built/installed by a
+        // later tick. Those frame polls are load work, not a quiet animation.
+        let frames_loading = page.frames_loading();
+        if net.is_empty() && !timer_soon && !frames_loading {
             break;
         }
         // Only timers left (polling, animations): settled once quiet.
-        if net.is_empty() && now.duration_since(last_change) >= Duration::from_millis(QUIET_MS) && now.duration_since(start) >= Duration::from_millis(QUIET_MS) {
+        if net.is_empty() && !frames_loading && now.duration_since(last_change) >= quiet_period && now.duration_since(start) >= quiet_period {
             break;
         }
         if now.duration_since(start) >= cap {
             let mut what: Vec<String> = net.iter().map(|(r, d)| format!("{r} ({:.1} s)", d.as_secs_f32())).collect();
+            if frames_loading {
+                what.push("frame documents still loading".into());
+            }
             if what.is_empty() && timer_soon {
                 what.push("timers that keep changing the page (animation or polling)".into());
             }
@@ -247,6 +259,53 @@ fn observe(agent: &mut crate::browser::Agent, ti: usize, timeout: Duration, mut 
 mod tests {
     use super::*;
     use rabbithole_engine::Viewport;
+
+    fn pending_frame_page(engine: &mut Engine) -> Page {
+        // No network is needed: srcdoc still crosses the normal asynchronous
+        // loader/installation seam, including a nested document. Its completed
+        // receiver cannot install a Page until the engine is ticked.
+        let html = r#"<!doctype html><title>Frames settle</title>
+            <iframe srcdoc='<p>LEFT</p>'></iframe>
+            <iframe srcdoc='<iframe srcdoc="&lt;p&gt;NESTED&lt;/p&gt;"></iframe>'></iframe>
+            <iframe srcdoc='<p>RIGHT</p>'></iframe>"#;
+        let page = engine.load_html(html, Url::parse("about:blank").unwrap(), Viewport { width: 800.0, height: 600.0 });
+        assert_eq!(page.frames.children.len(), 3);
+        assert!(page.frames_loading());
+        assert!(page.frames.children.iter().all(|child| child.page.is_none()), "fixture must start before frame installation");
+        page
+    }
+
+    #[test]
+    fn quiet_root_without_network_waits_for_pending_frame_installations() {
+        let mut engine = Engine::new_bundled_fonts_only();
+        let mut page = pending_frame_page(&mut engine);
+        let root_before = dom_signature(&page);
+        // An eligible quiet exit used to return before the first tick, since
+        // only the root DOM signature is observed. All real child documents
+        // must finish within the existing cap instead.
+        let settled = settle_with_quiet_period(&engine, &mut page, None, Duration::from_secs(3), Duration::ZERO);
+        assert!(settled.pending.is_none(), "{:?}", settled.pending);
+        assert!(!page.frames_loading());
+        let mut documents = Vec::new();
+        page.for_each_frame_page(&mut |child| documents.push(child.doc.text_content(rabbithole_engine::dom::Document::ROOT)));
+        assert_eq!(documents.len(), 5, "root, three children and a grandchild must all be installed");
+        for word in ["LEFT", "NESTED", "RIGHT"] {
+            assert!(documents.iter().any(|document| document.contains(word)), "missing {word}: {documents:?}");
+        }
+        assert_eq!(dom_signature(&page), root_before, "child installation does not require a root DOM mutation");
+    }
+
+    #[test]
+    fn pending_frame_deadline_reports_load_work_without_a_timer_only_success() {
+        let mut engine = Engine::new_bundled_fonts_only();
+        let mut page = pending_frame_page(&mut engine);
+        let settled = settle_with_quiet_period(&engine, &mut page, None, Duration::ZERO, Duration::ZERO);
+        let pending = settled.pending.as_deref().expect("an expired cap cannot declare pending frames settled");
+        assert!(pending.contains("frame documents still loading"), "{pending}");
+        assert!(!pending.contains("animation or polling"), "a frame installation is not an animation: {pending}");
+        assert!(page.frames_loading(), "the deadline must not drain work after it expires");
+        assert!(page.frames.children.iter().all(|child| child.page.is_none()));
+    }
 
     #[test]
     fn waits_for_short_timers_but_not_long_ones() {
