@@ -170,9 +170,127 @@ fn dialog_policy(a: &Value) -> Option<DialogPolicy> {
     })
 }
 
+/// Presence uses the same visible AX names/passages as find; CSS presence,
+/// like ordinary find(selector), includes DOM matches marked hidden.
+enum WaitQuery {
+    Search { terms: Option<Vec<String>>, role: Option<String>, name: Option<String> },
+    Css(Vec<rabbithole_engine::css::Selector>),
+}
+
+impl WaitQuery {
+    fn css(selector: &str) -> Result<Self, String> {
+        let tokens = Tokenizer::tokenize(selector);
+        let list = SelectorParser::new(&tokens).parse_list().filter(|list| !list.is_empty())
+            .ok_or_else(|| format!("invalid selector: {selector}"))?;
+        Ok(Self::Css(list))
+    }
+
+    fn present(&self, agent: &mut Agent, ti: usize) -> bool {
+        match self {
+            Self::Css(list) => agent.tabs[ti].frames.iter().any(|frame| {
+                let doc = &frame.page.doc;
+                doc.descendants(Document::ROOT).any(|node| doc.element(node).is_some() && list.iter().any(|selector| matches(selector, doc, node)))
+            }),
+            Self::Search { terms, role, name } => {
+                let (root, _, _) = agent.search_tree(ti);
+                let mut elements: HashMap<(usize, NodeId), (String, Vec<String>)> = HashMap::new();
+                root.visit(&mut |x, _| {
+                    if !matches!(x.kind, Kind::Control | Kind::Heading | Kind::Text | Kind::Image | Kind::Landmark | Kind::Dialog | Kind::Form | Kind::Frame) { return; }
+                    let full = if x.kind == Kind::Text { x.name.clone() } else {
+                        let full = crate::ax::accessible_name(&agent.tabs[ti].frames[x.frame].page, x.node, &x.role);
+                        if full.is_empty() { x.name.clone() } else { full }
+                    };
+                    if !full.is_empty() {
+                        elements.entry((x.frame, x.node)).or_insert_with(|| (x.role.clone(), Vec::new())).1.push(full);
+                    }
+                });
+                elements.values().any(|(candidate_role, passages)| {
+                    role.as_ref().map(|role| candidate_role == role || (role == "textbox" && candidate_role == "searchbox")).unwrap_or(true)
+                        && name.as_ref().map(|name| passages.iter().any(|p| p.to_lowercase().contains(name.as_str()))).unwrap_or(true)
+                        && terms.as_ref().map(|terms| passages.iter().any(|p| text_matches(p, terms).iter().any(|hits| !hits.is_empty()))).unwrap_or(true)
+                })
+            }
+        }
+    }
+}
+
+fn wait_duration(a: &Value, key: &str, default: Duration) -> Result<Duration, String> {
+    match a.get(key) {
+        None => Ok(default.min(Duration::from_secs(30))),
+        Some(value) => value.as_u64().filter(|ms| *ms <= 30_000).map(Duration::from_millis)
+            .ok_or_else(|| format!("{key} needs an integer from 0 to 30000 milliseconds")),
+    }
+}
+
+struct ActionWait { query: WaitQuery, timeout: Duration }
+
+fn action_wait(name: &str, a: &Value, default: Duration) -> Result<Option<ActionWait>, String> {
+    if !matches!(name, "click" | "type" | "fill") { return Ok(None); }
+    let Some(until) = a.get("until") else {
+        if a.get("timeout").is_some() { return Err("timeout needs until={text:...} or until={selector:...}".into()); }
+        return Ok(None);
+    };
+    let object = until.as_object().filter(|object| object.len() == 1)
+        .ok_or("until needs exactly one nonempty text or selector string")?;
+    let query = match object.iter().next() {
+        Some((key, value)) if key == "text" => {
+            let text = value.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("until.text needs a nonempty string")?;
+            WaitQuery::Search { terms: Some(vec![text.to_string()]), role: None, name: None }
+        }
+        Some((key, value)) if key == "selector" => {
+            let selector = value.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("until.selector needs a nonempty string")?;
+            WaitQuery::css(selector)?
+        }
+        _ => return Err("until needs exactly one nonempty text or selector string".into()),
+    };
+    let timeout = wait_duration(a, "timeout", default)?;
+    if name == "fill" && a.get("value").is_none() && a.get("values").is_none() && !b(a, "submit").unwrap_or(false) {
+        return Err("fill until needs value, values or submit=true".into());
+    }
+    Ok(Some(ActionWait { query, timeout }))
+}
+
+fn wait_status(observation: &crate::wait::Observation, absent: bool) -> String {
+    let status = if observation.matched {
+        format!("Wait satisfied{} after {} ms.", if absent { " (gone)" } else { "" }, observation.elapsed.as_millis())
+    } else if let Some(reason) = &observation.interrupted {
+        format!("Wait stopped after {} ms: {reason}.", observation.elapsed.as_millis())
+    } else {
+        format!("Wait timed out after {} ms; condition not met.", observation.elapsed.as_millis())
+    };
+    let mut lines = observation.reports.clone();
+    lines.push(status);
+    if !observation.matched { lines.push(format!("Pending: {}.", observation.pending)); }
+    lines.join("\n")
+}
+
+fn dispatch_with_wait(agent: &mut Agent, name: &str, a: &Value, explicit: Option<ActionWait>) -> Result<Out, String> {
+    let Some(explicit) = explicit else { return dispatch(agent, name, a); };
+    let ti = agent.tab_index()?;
+    agent.ensure_loaded(ti)?;
+    let before = agent.items(ti);
+    agent.without_auto_settle(|agent| {
+        let mut out = dispatch(agent, name, a)?;
+        if out.failed { return Ok(out); }
+        let observation = crate::wait::until(agent, ti, explicit.timeout, |agent| explicit.query.present(agent, ti));
+        out.failed = !observation.matched;
+        out.text.push('\n');
+        out.text.push_str(&wait_status(&observation, false));
+        let after = agent.items(ti);
+        let delta = crate::snapshot::diff(&before, &after, 40);
+        if !delta.is_empty() {
+            out.text.push_str("\nChanges from before the action through the wait:\n");
+            out.text.push_str(&fence(&delta.lines.join("\n")));
+        }
+        Ok(out)
+    })
+}
+
 /// Run a tool. Errors are user-facing messages.
 pub fn call(agent: &mut Agent, name: &str, args: &Value) -> Result<Out, String> {
     let args = if args.is_null() { json!({}) } else { args.clone() };
+    // Validate the condition before even the normal background task pump.
+    let explicit = action_wait(name, &args, agent.cfg.settle_cap)?;
     // Per-call dialog policy.
     let saved_policy = agent.active.map(|ti| agent.tabs[ti].dialog_policy.clone());
     if let (Some(p), Some(ti)) = (dialog_policy(&args), agent.active) {
@@ -180,7 +298,7 @@ pub fn call(agent: &mut Agent, name: &str, args: &Value) -> Result<Out, String> 
     }
     advance_background(agent);
     let mutating = matches!(name, "open" | "click" | "type" | "fill" | "scroll" | "tabs") || (name == "debug" && b(&args, "follow").unwrap_or(false) && args.get("eval").is_some());
-    let r = dispatch(agent, name, &args);
+    let r = dispatch_with_wait(agent, name, &args, explicit);
     if let (Some(p), Some(ti)) = (saved_policy, agent.active) {
         if ti < agent.tabs.len() {
             agent.tabs[ti].dialog_policy = p;
@@ -642,6 +760,32 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
 }
 
 fn find(agent: &mut Agent, a: &Value) -> Result<Out, String> {
+    let timeout = wait_duration(a, "wait", Duration::ZERO)?;
+    let gone = match a.get("gone") {
+        None => false,
+        Some(value) => value.as_bool().ok_or("gone needs a boolean")?,
+    };
+    // Preserve the immediate path, output and allocation cost without options.
+    if a.get("wait").is_none() && !gone { return find_now(agent, a); }
+    let terms = search_terms(a, "text")?;
+    find_context(a)?;
+    let query = if let Some(selector) = s(a, "selector") { WaitQuery::css(selector)? } else {
+        let role = s(a, "role").map(str::to_lowercase);
+        let name = s(a, "name").map(str::to_lowercase);
+        if terms.is_none() && role.is_none() && name.is_none() { return Err("find needs text, role/name or selector".into()); }
+        WaitQuery::Search { terms, role, name }
+    };
+    let ti = agent.tab_index()?;
+    agent.ensure_loaded(ti)?;
+    let observation = crate::wait::until(agent, ti, timeout, |agent| query.present(agent, ti) != gone);
+    let mut out = find_now(agent, a)?;
+    out.text.push('\n');
+    out.text.push_str(&wait_status(&observation, gone));
+    out.failed = !observation.matched;
+    Ok(out)
+}
+
+fn find_now(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let ti = agent.tab_index()?;
     agent.ensure_loaded(ti)?;
     let limit = n(a, "limit").map(|x| x as usize).unwrap_or(20).max(1);

@@ -149,6 +149,99 @@ pub fn settle(engine: &Engine, page: &mut Page, log: Option<&NetLog>, cap: Durat
     s
 }
 
+/// An explicit condition is distinct from auto-settle: distant timers and quiet
+/// pages remain eligible until the condition or the caller's deadline.
+#[derive(Debug)]
+pub struct Observation {
+    pub matched: bool,
+    pub elapsed: Duration,
+    pub pending: String,
+    pub interrupted: Option<String>,
+    pub reports: Vec<String>,
+}
+
+/// Describe real work at the deadline, including timers beyond auto-settle's
+/// horizon. One tab shares a network log; report requests only once.
+fn pending(agent: &crate::browser::Agent, ti: usize) -> String {
+    let tab = &agent.tabs[ti];
+    let mut what: Vec<_> = blocking(&tab.netlog).into_iter()
+        .map(|(request, elapsed)| format!("{} ({:.1} s)", crate::ax::esc(&request), elapsed.as_secs_f32()))
+        .collect();
+    let now_ms = agent.engine.start.elapsed().as_secs_f64() * 1000.0;
+    for (frame, f) in tab.frames.iter().enumerate() {
+        if let Some(due) = f.page.next_script_due() {
+            what.push(format!("timer in {:.0} ms (frame {frame})", (due - now_ms).max(0.0)));
+        }
+        if let Some(navigation) = &f.page.script.pending_navigation {
+            what.push(format!("navigation to {} (frame {frame})", crate::ax::esc(&short_url(&navigation.request.url.to_string()))));
+        }
+    }
+    if what.is_empty() { "no pending timers or requests".into() } else { what.join(", ") }
+}
+
+/// Observe a tab, pumping the engine's bounded task path rather than evaluating
+/// JS or sleeping until a guessed quiet period. Page-requested navigation uses
+/// the normal navigation/ref path. The deadline bounds observation and JS
+/// pumping, not synchronous navigation I/O; it is never reset after navigation.
+pub fn until(agent: &mut crate::browser::Agent, ti: usize, timeout: Duration, condition: impl FnMut(&mut crate::browser::Agent) -> bool) -> Observation {
+    agent.without_auto_settle(|agent| observe(agent, ti, timeout, condition))
+}
+
+fn observe(agent: &mut crate::browser::Agent, ti: usize, timeout: Duration, mut condition: impl FnMut(&mut crate::browser::Agent) -> bool) -> Observation {
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut matched = condition(agent);
+    let mut interrupted = None;
+    let mut reports = Vec::new();
+    while !matched && Instant::now() < deadline {
+        agent.prepare(ti);
+        let mut navigated = false;
+        for frame in 0..agent.tabs[ti].frames.len() {
+            if Instant::now() >= deadline { break; }
+            let (result, mut outcome) = {
+                let page = &mut agent.tabs[ti].frames[frame].page;
+                if let Some(navigation) = page.script.pending_navigation.take() {
+                    (Ok(()), rabbithole_engine::ScriptOutcome { navigation: Some(navigation), ..Default::default() })
+                } else {
+                    agent.engine.pump_console_tasks(page, deadline)
+                }
+            };
+            // Side effects must be delivered once, even when a callback times
+            // out or a later frame replaces the tab's frame collection.
+            let effects = Settled {
+                new_windows: std::mem::take(&mut outcome.new_windows),
+                dialogs: std::mem::take(&mut outcome.dialogs),
+                ..Settled::default()
+            };
+            agent.collect_events(ti, &effects);
+            if outcome.navigation.is_some() {
+                match agent.finish_action(ti, frame, Vec::new(), outcome, None, "While waiting", None) {
+                    Ok(report) => reports.push(report),
+                    Err(error) => interrupted = Some(error),
+                }
+                navigated = true;
+                break;
+            }
+            if let Err(error) = result {
+                if Instant::now() < deadline { interrupted = Some(format!("page task stopped: {}", crate::ax::esc(&error))); }
+                break;
+            }
+        }
+        agent.drain_all_consoles(ti);
+        // Check before deciding timeout: a callback can satisfy the condition
+        // on its final allowed tick. Do not discard those completed effects.
+        matched = condition(agent);
+        if matched || interrupted.is_some() || Instant::now() >= deadline { break; }
+        if navigated { continue; }
+        let now_ms = agent.engine.start.elapsed().as_secs_f64() * 1000.0;
+        let delay = agent.tabs[ti].frames.iter().filter_map(|f| f.page.next_script_due())
+            .map(|due| Duration::from_secs_f64(((due - now_ms).max(0.0) / 1000.0).min(0.01)))
+            .min().unwrap_or(Duration::from_millis(10));
+        std::thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+    }
+    Observation { matched, elapsed: start.elapsed(), pending: pending(agent, ti), interrupted, reports }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

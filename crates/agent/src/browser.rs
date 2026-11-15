@@ -207,6 +207,8 @@ pub struct Agent {
     pub action_log: Vec<(String, Value, String)>,
     pub live: Option<crate::live::Live>,
     fonts_loaded: bool,
+    /// An explicit action condition owns the subsequent event-loop wait.
+    pub(crate) defer_settle: bool,
 }
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -246,6 +248,7 @@ impl Agent {
             action_log: Vec::new(),
             live: None,
             fonts_loaded,
+            defer_settle: false,
         };
         a.activate_ctx(0);
         a
@@ -280,6 +283,20 @@ impl Agent {
         let policy = self.tabs[ti].dialog_policy.clone();
         for f in &mut self.tabs[ti].frames {
             f.page.script.dialog_policy = policy.clone();
+        }
+    }
+
+    /// Defer automatic quiet-period waits while an explicit condition owns the
+    /// deadline. Nested batch steps restore their parent's mode, including when
+    /// an action unwinds; the panic itself is never converted to tool success.
+    pub(crate) fn without_auto_settle<T>(&mut self, run: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.defer_settle;
+        self.defer_settle = true;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
+        self.defer_settle = saved;
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
         }
     }
 
@@ -377,7 +394,16 @@ impl Agent {
                 Loaded::Page(p) => {
                     let mut page = self.engine.build_page(p, vp);
                     // Page-requested redirects (script, meta refresh).
-                    let s = wait::settle(&self.engine, &mut page, Some(&self.tabs[ti].netlog), self.cfg.settle_cap);
+                    let s = if self.defer_settle {
+                        Settled {
+                            navigation: page.script.pending_navigation.take(),
+                            new_windows: std::mem::take(&mut page.script.new_windows),
+                            dialogs: std::mem::take(&mut page.script.dialogs),
+                            ..Settled::default()
+                        }
+                    } else {
+                        wait::settle(&self.engine, &mut page, Some(&self.tabs[ti].netlog), self.cfg.settle_cap)
+                    };
                     self.collect_events(ti, &s);
                     if let Some(nav) = s.navigation {
                         if hops < 6 {
@@ -463,7 +489,9 @@ impl Agent {
                     continue;
                 };
                 let mut page = page;
-                let _ = wait::settle(&self.engine, &mut page, Some(&self.tabs[ti].netlog), Duration::from_millis(1500));
+                if !self.defer_settle {
+                    let _ = wait::settle(&self.engine, &mut page, Some(&self.tabs[ti].netlog), Duration::from_millis(1500));
+                }
                 self.drain_console(ti, &mut page);
                 self.tabs[ti].frames.push(Frame { page, parent: Some((i, node)) });
             }
@@ -471,7 +499,7 @@ impl Agent {
         }
     }
 
-    fn collect_events(&mut self, ti: usize, s: &Settled) {
+    pub(crate) fn collect_events(&mut self, ti: usize, s: &Settled) {
         self.collect_side_effects(ti, &s.dialogs, &s.new_windows);
     }
 
@@ -516,7 +544,7 @@ impl Agent {
         }
     }
 
-    fn drain_all_consoles(&mut self, ti: usize) {
+    pub(crate) fn drain_all_consoles(&mut self, ti: usize) {
         let mut lines = Vec::new();
         for f in &mut self.tabs[ti].frames {
             lines.extend(f.page.take_console());
@@ -805,7 +833,7 @@ impl Agent {
         self.collect_side_effects(ti, &dialogs, &windows);
         let mut request = request.or(outcome.navigation.take().map(|n| n.request));
         let mut settled = None;
-        if request.is_none() {
+        if request.is_none() && !self.defer_settle {
             let s = {
                 let tab = &mut self.tabs[ti];
                 let log = tab.netlog.clone();
@@ -839,7 +867,9 @@ impl Agent {
             match self.engine.loader.load_request(&req, vp) {
                 Ok(Loaded::Page(p)) => {
                     let mut page = self.engine.build_page(p, vp);
-                    let _ = wait::settle(&self.engine, &mut page, Some(&self.tabs[ti].netlog), self.cfg.settle_cap);
+                    if !self.defer_settle {
+                        let _ = wait::settle(&self.engine, &mut page, Some(&self.tabs[ti].netlog), self.cfg.settle_cap);
+                    }
                     lines.push(format!("{what} → frame navigated to {}", esc(&page.url.to_string())));
                     self.tabs[ti].frames[frame].page = page;
                     self.tabs[ti].refs.drop_frame(frame);
@@ -847,6 +877,11 @@ impl Agent {
                 Ok(Loaded::Download(s)) => lines.push(format!("{what} → frame download {} (not saved)", esc(&s.suggested_filename()))),
                 Err(e) => lines.push(format!("{what} → frame navigation failed: {e}")),
             }
+        }
+        if self.defer_settle {
+            // The caller reports the full before-action → condition delta.
+            lines.push(what.to_string());
+            return Ok(lines.join("\n"));
         }
         self.drain_all_consoles(ti);
         let after = self.items(ti);
@@ -1202,5 +1237,27 @@ pub fn human_size(n: u64) -> String {
         format!("{:.1} KB", n as f64 / 1024.0)
     } else {
         format!("{:.1} MB", n as f64 / 1048576.0)
+    }
+}
+
+#[cfg(test)]
+mod explicit_wait_scope_tests {
+    use super::*;
+
+    #[test]
+    fn deferred_wait_mode_restores_after_nested_scope_and_unwind() {
+        let mut agent = Agent::new(Config::default());
+        assert!(!agent.defer_settle);
+        agent.without_auto_settle(|agent| {
+            assert!(agent.defer_settle);
+            agent.without_auto_settle(|agent| assert!(agent.defer_settle));
+            assert!(agent.defer_settle);
+        });
+        assert!(!agent.defer_settle);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            agent.without_auto_settle(|_| panic!("test action unwound"));
+        }));
+        assert!(panic.is_err());
+        assert!(!agent.defer_settle);
     }
 }
