@@ -286,7 +286,9 @@ mod tests {
         let tools = reply["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, rabbithole_agent::TOOLS);
-        assert!(tools.len() <= 12);
+        assert_eq!(tools.len(), 13, "the compact tool set includes batch");
+        let result = serde_json::to_string(&reply["result"]).unwrap();
+        assert!(result.chars().count() <= 7500, "tools/list exceeds its context budget");
     }
 
     #[test]
