@@ -107,6 +107,60 @@ fn debug_waits_for_loopback_fetch_timers_rejection_and_top_level_await() {
 }
 
 #[test]
+fn debug_eval_lexical_scope_is_fresh_and_explicit_globals_persist() {
+    let server = Server::new();
+    let mut agent = server.agent();
+    for (source, expected) in [
+        ("const s = 1; s", "1"),
+        ("const s = 2; s", "2"),
+        ("let local = 3; local += 1; local", "4"),
+        ("let local = 5; local", "5"),
+        ("class Local { value(){return 6} }; new Local().value()", "6"),
+        ("class Local { value(){return 7} }; new Local().value()", "7"),
+        ("[typeof s, typeof local, typeof Local].join('|')", "'undefined|undefined|undefined'"),
+        ("var sharedDebugVar = 10; globalThis.sharedDebugValue = 20; sharedDebugVar + sharedDebugValue", "30"),
+        ("sharedDebugVar += 1; sharedDebugValue += 2; sharedDebugVar + sharedDebugValue", "33"),
+        ("const s = 40; globalThis.savedDebugScope = () => s; savedDebugScope()", "40"),
+        ("const s = 2; savedDebugScope() + s", "42"),
+        ("'use strict'; var strictDebugVar = 12; let local = 1; strictDebugVar + local", "13"),
+        ("strictDebugVar", "12"),
+        ("{ const nested = 8; nested + 1; }; const after = 1", "9"),
+        ("let asyncLocal = 9; Promise.resolve().then(() => asyncLocal)", "9"),
+    ] {
+        let result = eval(&mut agent, source, 500);
+        assert!(result.contains(&format!("\n{expected}\n")), "{source}: {result}");
+    }
+    assert!(eval(&mut agent, "const failedScope = 1; throw new Error('scope-marker')", 500).contains("scope-marker"));
+    assert!(eval(&mut agent, "const failedScope = 2; failedScope", 500).contains("\n2\n"));
+}
+
+#[test]
+fn debug_eval_await_keeps_scope_completion_and_global_vars() {
+    let server = Server::new();
+    let mut agent = server.agent();
+    for (source, expected) in [
+        ("const s = await Promise.resolve(1); s", "1"),
+        ("const s = await Promise.resolve(2); s; const after = 0", "2"),
+        ("let local = await Promise.resolve(3); local", "3"),
+        ("let local = await Promise.resolve(4); local", "4"),
+        ("class Local { [await Promise.resolve('value')](){return 5} }; new Local().value()", "5"),
+        ("class Local { [await Promise.resolve('value')](){return 6} }; new Local().value()", "6"),
+        ("[typeof s, typeof local, typeof Local].join('|')", "'undefined|undefined|undefined'"),
+        ("var asyncDebugVar = await Promise.resolve(7); globalThis.asyncDebugValue = 8; asyncDebugVar + asyncDebugValue", "15"),
+        ("asyncDebugVar + asyncDebugValue", "15"),
+        ("'use strict'; var strictAsyncDebugVar = await Promise.resolve(9); strictAsyncDebugVar", "9"),
+        ("strictAsyncDebugVar", "9"),
+        ("const s = await Promise.resolve(40); globalThis.savedAsyncScope = () => s; s", "40"),
+        ("const s = 2; savedAsyncScope() + s", "42"),
+        ("try { await 0; 11; } finally { 12; }", "11"),
+        ("await 0; this === globalThis", "true"),
+    ] {
+        let result = eval(&mut agent, source, 500);
+        assert!(result.contains(&format!("\n{expected}\n")), "{source}: {result}");
+    }
+}
+
+#[test]
 fn debug_old_fetch_advances_on_later_tools_after_observation_timeout() {
     let server = Server::new();
     let mut agent = server.agent();
