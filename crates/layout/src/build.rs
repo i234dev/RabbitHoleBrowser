@@ -562,6 +562,14 @@ impl<'a> Builder<'a> {
         }
         let mut b = LayoutBox::new(BoxKind::Image, Some(node), style.clone());
         b.image = image;
+        if tag == "img" && b.image.is_none() {
+            // Loading may be disabled or still pending. Keep a replaced box
+            // so CSS/attribute dimensions apply, with alt text as its fallback
+            // intrinsic content rather than an invented decoded image size.
+            if let Some(alt) = doc.attr(node, "alt").map(str::trim).filter(|s| !s.is_empty()) {
+                b.text = Some(Rc::from(alt));
+            }
+        }
         b.attr_size = (attr_w, attr_h);
         if tag == "img" && broken && doc.attr(node, "alt").is_none() && b.attr_size == (None, None) {
             // No alt at all: a 16×16 broken-image icon.

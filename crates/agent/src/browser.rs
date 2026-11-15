@@ -10,6 +10,7 @@ use std::time::Duration;
 use rabbithole_engine::dom::{Document, NodeId};
 use rabbithole_engine::net::{CookieJar, HeaderProfile, NetLog, Request, Url};
 use rabbithole_engine::scripting::ScriptOutcome;
+use rabbithole_engine::style::{Display, Visibility};
 use rabbithole_engine::{DialogPolicy, Engine, Loaded, LocalStorage, Modifiers, Page, Viewport};
 use serde_json::Value;
 
@@ -976,14 +977,28 @@ impl Agent {
         let label = self.describe_ref(ti, frame, node);
         let before = self.items(ti);
         self.prepare(ti);
+        let requested = node;
+        if !hover_only && crate::ax::states_of(&self.tabs[ti].frames[frame].page, requested, "", false).iter().any(|s| s == "disabled") {
+            return Err(format!("@{rr} {label} is disabled."));
+        }
+        let geo = GeoMap::build(&self.tabs[ti].frames[frame].page);
+        let fallback = if force { None } else {
+            let page = &self.tabs[ti].frames[frame].page;
+            boxless_pointer_ancestor(page, &geo, requested)
+        };
+        let node = fallback.unwrap_or(requested);
+        let fallback_note = fallback.map(|ancestor| {
+            let description = self.describe_ref(ti, frame, ancestor);
+            let reference = self.tabs[ti].refs.assign(frame, ancestor, "ancestor", "");
+            format!("@{rr} {label} has no usable layout box; using nearest visible ancestor @e{reference} {description} for the pointer action.")
+        });
         let tab = &mut self.tabs[ti];
         let page = &mut tab.frames[frame].page;
         // Disabled controls.
-        if crate::ax::states_of(page, node, "", false).iter().any(|s| s == "disabled") && !hover_only {
+        if node != requested && !hover_only && crate::ax::states_of(page, node, "", false).iter().any(|s| s == "disabled") {
             return Err(format!("@{rr} {label} is disabled."));
         }
         // Scroll into view (main frame) and find a point that hits it.
-        let geo = GeoMap::build(page);
         if frame == 0 {
             if let Some(g) = geo.get(node) {
                 if !g.fixed {
@@ -1000,7 +1015,10 @@ impl Agent {
             }
         }
         let geo = GeoMap::build(page);
-        let reach = if frame == 0 { overlay::reach(page, &geo, node) } else { Reach::Ancestor(0.0, 0.0) };
+        let reach = if frame == 0 || fallback.is_some() { overlay::reach(page, &geo, node) } else { Reach::Ancestor(0.0, 0.0) };
+        if fallback.is_some() && !matches!(&reach, Reach::Covered(_)) && !safe_ancestor_pointer_hit(page, node, &reach) {
+            return Err(format!("@{rr} {label} has no usable layout box, and its nearest visible ancestor has no safe pointer point (another control or pointer-inert content would be targeted)."));
+        }
         // Painted state right before the pointer action (after scrolling).
         tab.before_frame = Some(self.engine.snapshot(&tab.frames[0].page));
         let page = &mut tab.frames[frame].page;
@@ -1036,7 +1054,11 @@ impl Agent {
                 outcome = o;
             }
         }
-        self.finish_action(ti, frame, before, outcome, request, &format!("{verb} @{rr} {label}"), Some((frame, node)))
+        let result = self.finish_action(ti, frame, before, outcome, request, &format!("{verb} @{rr} {label}"), Some((frame, node)))?;
+        Ok(match fallback_note {
+            Some(note) => format!("{note}\n{result}"),
+            None => result,
+        })
     }
 
     /// The cookie-banner shortcut: always chooses REJECT.
@@ -1181,6 +1203,62 @@ impl Agent {
         let pages: u64 = s.split_whitespace().nth(1)?.parse().ok()?;
         Some(pages * 4)
     }
+}
+
+/// Only missing/zero geometry may borrow an ancestor's pointer area. Hidden
+/// controls and clipped boxes keep the ordinary invisible/covered failure.
+fn boxless_pointer_ancestor(page: &Page, geo: &GeoMap, node: NodeId) -> Option<NodeId> {
+    let doc = &page.doc;
+    if matches!(doc.tag(node), Some("input" | "button" | "select" | "textarea" | "option" | "optgroup")) {
+        return None;
+    }
+    if let Some(g) = geo.get(node) {
+        if !g.raw.w.is_finite() || !g.raw.h.is_finite() || (g.raw.w > 0.0 && g.raw.h > 0.0) {
+            return None;
+        }
+    }
+    let mut current = Some(node);
+    while let Some(n) = current {
+        if n == Document::ROOT { break; }
+        let style = page.styles.get(n)?;
+        if style.display == Display::None || style.visibility != Visibility::Visible || style.opacity <= 0.0 || doc.attr(n, "inert").is_some() {
+            return None;
+        }
+        current = doc.parent(n);
+    }
+    let mut current = doc.parent(node);
+    while let Some(n) = current {
+        if n == Document::ROOT { break; }
+        if let Some(g) = geo.get(n) {
+            if g.raw.w > 0.0 && g.raw.h > 0.0 {
+                // Do not escape an overflow clip by climbing beyond it.
+                return (g.rect.w >= 1.0 && g.rect.h >= 1.0).then_some(n);
+            }
+        }
+        current = doc.parent(n);
+    }
+    None
+}
+
+/// A parent-sized point must not silently click/hover a different control in
+/// that parent. Require a real hit; never synthesize an event through a
+/// pointer-events:none ancestor just because it has a layout rectangle.
+fn safe_ancestor_pointer_hit(page: &Page, ancestor: NodeId, reach: &Reach) -> bool {
+    let Reach::Point(x, y) = reach else { return false };
+    let doc = &page.doc;
+    let mut current = page.node_at_viewport(*x, *y);
+    while let Some(n) = current {
+        if n == ancestor { return true; }
+        let control = matches!(doc.tag(n), Some("a" | "button" | "input" | "select" | "textarea" | "option" | "summary"));
+        let custom = doc.attr(n, "tabindex").is_some()
+            || doc.attr(n, "contenteditable").is_some_and(|value| !value.eq_ignore_ascii_case("false"))
+            || doc.attr(n, "role").is_some_and(|role| role.split_whitespace().any(|r| matches!(r, "button" | "link" | "checkbox" | "radio" | "textbox" | "menuitem" | "option" | "switch" | "tab")));
+        let listens = doc.attr(n, "onclick").is_some()
+            || page.script.host.as_ref().is_some_and(|host| host.element_has_any_listener(n));
+        if control || custom || listens { return false; }
+        current = doc.parent(n);
+    }
+    false
 }
 
 /// Name of a covering element for messages.

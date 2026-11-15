@@ -956,11 +956,20 @@ impl<'a> Layouter<'a> {
         // Natural size: the decoded image (in CSS px), else the `width` /
         // `height` attributes (which also give the aspect ratio before the
         // image arrives, so loading causes no layout shift).
-        let (iw, ih) = match b.image.as_ref().filter(|i| !i.broken) {
-            Some(img) => img.natural_size(),
-            None => (b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0)),
+        let natural = b.image.as_ref().filter(|i| !i.broken).map(|img| img.natural_size());
+        let fallback = if let Some(text) = b.text.as_deref().filter(|_| b.image.is_none()) {
+            let font = self.ctx.fonts.select_family(&style.font_family_list, style.font_family, style.font_weight, style.is_italic());
+            let width = self.ctx.fonts.shape(font, style.font_size, text, style.letter_spacing).last().map(|g| g.x + g.advance).unwrap_or(0.0);
+            (width, style.line_height_px())
+        } else {
+            (0.0, 0.0)
         };
-        let ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()).or(if ih > 0.0 && iw > 0.0 { Some(iw / ih) } else { None });
+        let (iw, ih) = natural.unwrap_or((b.attr_size.0.unwrap_or(fallback.0), b.attr_size.1.unwrap_or(fallback.1)));
+        // The shape of an alternative label is not an image aspect ratio.
+        // Only decoded dimensions, a pair of attributes or explicit CSS may
+        // couple the axes; height:40px must not stretch the label's width.
+        let ratio_size = natural.unwrap_or((b.attr_size.0.unwrap_or(0.0), b.attr_size.1.unwrap_or(0.0)));
+        let ratio = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()).or(if ratio_size.0 > 0.0 && ratio_size.1 > 0.0 { Some(ratio_size.0 / ratio_size.1) } else { None });
         let adj_w = |v: f32| if style.box_sizing == BoxSizing::BorderBox { (v - pb_h).max(0.0) } else { v };
         // `width`/`height` attributes arrive as presentational hints in the
         // computed style; an explicit `auto` (e.g. `height: auto`) must

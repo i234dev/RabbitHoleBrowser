@@ -27,6 +27,19 @@ fn snapshot(agent: &mut Agent) -> String {
     call(agent, "snapshot", &json!({})).unwrap().text
 }
 
+fn assert_ancestor_note(agent: &Agent, id: &str, result: &str) {
+    let doc = &agent.tabs[0].frames[0].page.doc;
+    let node = doc.descendants(Document::ROOT).find(|&n| doc.attr(n, "id") == Some(id)).unwrap();
+    let reference = agent.tabs[0].refs.lookup(0, node).expect("fallback ancestor gets a stable ref");
+    assert!(result.contains(&format!("nearest visible ancestor @e{reference}")), "{result}");
+}
+
+fn assert_untouched(agent: &Agent) {
+    let doc = &agent.tabs[0].frames[0].page.doc;
+    let result = doc.descendants(Document::ROOT).find(|&n| doc.attr(n, "id") == Some("result")).unwrap();
+    assert_eq!(doc.text_content(result), "Untouched", "an inaccessible target must not activate its parent or another control");
+}
+
 #[test]
 fn unloaded_image_hover_uses_its_alt_box_and_reveals_heading_and_link() {
     let mut agent = fixture("<!doctype html><style>img{font-size:16px;line-height:20px}.tip{display:none}img:hover+.tip{display:block}</style><main><img id=trigger src=unfetched.svg alt='Navigation preview'><section class=tip><h2>Preview details</h2><a href=about:blank>Open preview</a></section></main>");
@@ -52,7 +65,7 @@ fn boxless_image_hover_uses_the_nearest_visible_ancestor_and_explains_it() {
     let target = reference(&mut agent, "trigger");
     assert!(!snapshot(&mut agent).contains("Menu details"));
     let result = call(&mut agent, "click", &json!({"ref":target,"hover":true})).unwrap().text;
-    assert!(result.contains("nearest visible ancestor") && result.contains("<div>"), "{result}");
+    assert_ancestor_note(&agent, "menu", &result);
     let after = snapshot(&mut agent);
     assert!(after.contains("heading") && after.contains("Menu details"), "{result}\n{after}");
     assert!(after.contains("link") && after.contains("Menu destination"), "{result}\n{after}");
@@ -63,7 +76,7 @@ fn boxless_image_click_uses_the_visible_link_ancestor() {
     let mut agent = fixture("<!doctype html><main><h1 id=result>Before click</h1><a id=link href=about:blank style='display:block;width:180px;height:40px' onclick=\"event.preventDefault();document.getElementById('result').textContent='Activated destination'\"><img id=trigger width=0 height=0 alt=''></a></main>");
     let target = reference(&mut agent, "trigger");
     let result = call(&mut agent, "click", &json!({"ref":target})).unwrap().text;
-    assert!(result.contains("nearest visible ancestor") && result.contains("<a>"), "{result}");
+    assert_ancestor_note(&agent, "link", &result);
     let after = snapshot(&mut agent);
     assert!(after.contains("heading") && after.contains("Activated destination"), "{result}\n{after}");
 }
@@ -80,17 +93,19 @@ fn boxless_fallback_does_not_activate_hidden_or_disabled_controls() {
         let mut agent = fixture(&html);
         let target = reference(&mut agent, "trigger");
         assert!(call(&mut agent, "click", &json!({"ref":target})).is_err(), "must reject {element}");
-        assert!(!snapshot(&mut agent).contains("Wrong action"), "must not retarget {element}");
+        assert_untouched(&agent);
     }
 }
 
 #[test]
 fn boxless_fallback_does_not_escape_clipping_or_click_an_unrelated_control() {
     for body in ["<div style='overflow:hidden;width:0;height:0'><img id=trigger width=40 height=20 alt='Clipped'></div>",
-                 "<div style='position:relative;width:180px;height:40px'><img id=trigger width=0 height=0 alt=''><button style='position:absolute;inset:0' onclick=\"document.getElementById('result').textContent='Wrong action'\">Other button</button></div>"] {
+                 "<div style='position:relative;width:180px;height:40px'><img id=trigger width=0 height=0 alt=''><button style='position:absolute;inset:0' onclick=\"document.getElementById('result').textContent='Wrong action'\">Other button</button></div>",
+                 "<div style='width:180px;height:40px;pointer-events:none' onclick=\"document.getElementById('result').textContent='Wrong action'\"><img id=trigger width=0 height=0 alt=''></div>",
+                 "<div style='width:180px;height:40px' onclick=\"document.getElementById('result').textContent='Wrong action'\"><img id=trigger width=0 height=0 alt=''></div><div style='position:fixed;inset:0;background:#ccc;z-index:999'>Covering overlay</div>"] {
         let mut agent = fixture(&format!("<!doctype html><main><h1 id=result>Untouched</h1>{body}</main>"));
         let target = reference(&mut agent, "trigger");
         assert!(call(&mut agent, "click", &json!({"ref":target})).is_err(), "must not bypass the target's hit testing: {body}");
-        assert!(!snapshot(&mut agent).contains("Wrong action"));
+        assert_untouched(&agent);
     }
 }

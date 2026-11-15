@@ -974,6 +974,7 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
         match &b.image {
             Some(img) if img.broken => self.paint_broken_image(b),
             Some(img) => self.paint_image_content(b, img.clone()),
+            None if b.text.is_some() => self.paint_pending_image_alt(b),
             None => {}
         }
         if is_media {
@@ -989,6 +990,30 @@ impl<'l, 't, 'a> Painter<'l, 't, 'a> {
                 }
             }
         }
+    }
+
+    /// The image is unfetched/pending, not a failed resource. Show its label
+    /// in the ordinary box without drawing a broken-resource icon.
+    fn paint_pending_image_alt(&mut self, b: &LayoutBox) {
+        let Some(text) = b.text.as_deref() else { return };
+        let r = b.content_rect;
+        let st = &b.style;
+        let font = self.ctx.fonts.select_family(&st.font_family_list, st.font_family, st.font_weight, st.is_italic());
+        let metrics = self.ctx.fonts.metrics(font, st.font_size);
+        self.list.push(DisplayItem::PushClip(r));
+        self.list.push(DisplayItem::Text {
+            x: r.x,
+            y: r.y + metrics.ascent,
+            font,
+            size: st.font_size,
+            color: st.color,
+            text: text.to_string(),
+            letter_spacing: st.letter_spacing,
+            shadows: Vec::new(),
+            small_caps: false,
+            oblique: false,
+        });
+        self.list.push(DisplayItem::PopClip);
     }
 
     /// Broken image: light frame, the broken-image icon and the alt text
