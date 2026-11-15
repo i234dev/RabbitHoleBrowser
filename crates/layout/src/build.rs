@@ -308,7 +308,21 @@ impl<'a> Builder<'a> {
         // (unknown type, failed load, plugin content) renders its fallback
         // content instead, as an ordinary element (HTML §4.8.7).
         let object_fallback = tag == "object" && !self.ctx.images.get(&node).map(|i| !i.broken).unwrap_or(false);
-        if REPLACED.contains(&tag) && !object_fallback {
+        let image_alt = if tag == "img"
+            && self.ctx.images.get(&node).is_some_and(|image| image.broken)
+            && doc.attr(node, "width").and_then(parse_dimension_attr).is_none()
+            && doc.attr(node, "height").and_then(parse_dimension_attr).is_none()
+            && style.width.is_auto()
+            && style.height.is_auto()
+        {
+            doc.attr(node, "alt").map(str::trim).filter(|alt| !alt.is_empty())
+        } else {
+            None
+        };
+        // Failed, unsized images represent their alt as non-replaced text.
+        // Keep the element around that text, so inline fragments, hit tests
+        // and :hover belong to the image rather than its parent.
+        if REPLACED.contains(&tag) && !object_fallback && image_alt.is_none() {
             if let Some(b) = self.build_replaced(node, tag, &style) {
                 out.push(b);
             }
@@ -395,7 +409,7 @@ impl<'a> Builder<'a> {
             "input" => !matches!(input_type(doc, node).as_str(), "checkbox" | "radio"),
             _ => false,
         };
-        let no_generated = no_generated || style.content_visibility_hidden;
+        let no_generated = no_generated || style.content_visibility_hidden || image_alt.is_some();
         let before = if no_generated { None } else { self.build_pseudo(node, PseudoElement::Before, kind == BoxKind::TableRow) };
         let mut children = match tag {
             "input" => self.build_input(node, &style),
@@ -430,6 +444,7 @@ impl<'a> Builder<'a> {
             }
             // `content-visibility: hidden`: no contents at all.
             _ if style.content_visibility_hidden => Vec::new(),
+            "img" => image_alt.into_iter().map(|alt| Self::text_box(style.clone(), alt)).collect(),
             _ => self.build_children(node, &style, kind == BoxKind::TableRow),
         };
         let after = if no_generated { None } else { self.build_pseudo(node, PseudoElement::After, kind == BoxKind::TableRow) };
@@ -551,15 +566,6 @@ impl<'a> Builder<'a> {
         let attr_w = doc.attr(node, "width").and_then(parse_dimension_attr);
         let attr_h = doc.attr(node, "height").and_then(parse_dimension_attr);
         let broken = image.as_ref().map(|i| i.broken).unwrap_or(false);
-        if tag == "img" && broken && attr_w.is_none() && attr_h.is_none() && style.width.is_auto() && style.height.is_auto() {
-            // Failed image without a size: render the alt text inline.
-            let alt = doc.attr(node, "alt").unwrap_or("").trim();
-            if !alt.is_empty() {
-                let mut t = LayoutBox::new(BoxKind::Text, Some(node), style.clone());
-                t.text = Some(Rc::from(alt));
-                return Some(t);
-            }
-        }
         let mut b = LayoutBox::new(BoxKind::Image, Some(node), style.clone());
         b.image = image;
         if tag == "img" && b.image.is_none() {

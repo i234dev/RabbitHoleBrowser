@@ -40,23 +40,48 @@ fn assert_untouched(agent: &Agent) {
     assert_eq!(doc.text_content(result), "Untouched", "an inaccessible target must not activate its parent or another control");
 }
 
-#[test]
-fn unloaded_image_hover_uses_its_alt_box_and_reveals_heading_and_link() {
-    let mut agent = fixture("<!doctype html><style>img{font-size:16px;line-height:20px}.tip{display:none}img:hover+.tip{display:block}</style><main><img id=trigger src=unfetched.svg alt='Navigation preview'><section class=tip><h2>Preview details</h2><a href=about:blank>Open preview</a></section></main>");
+fn assert_alt_hover_reveals_heading_and_link(mut agent: Agent, disabled_source: bool) {
     let target = reference(&mut agent, "trigger");
     let page = &agent.tabs[0].frames[0].page;
     let node = page.doc.descendants(Document::ROOT).find(|&n| page.doc.attr(n, "id") == Some("trigger")).unwrap();
-    assert!(!page.images.contains_key(&node), "the fixture must exercise the unfetched image path");
+    if disabled_source {
+        assert!(page.images.get(&node).is_some_and(|image| image.broken), "disabled loading must retain the engine's broken marker for an actual src");
+    } else {
+        assert!(!page.images.contains_key(&node), "an image without a source must exercise the pending intrinsic path");
+    }
     let geometry = GeoMap::build(page);
-    let rect = geometry.get(node).unwrap().rect;
-    assert!(rect.w > 30.0 && rect.h >= 20.0, "the image needs a real alt box before hovering: {rect:?}");
+    let rect = geometry.get(node).expect("the alt fragments must belong to the image itself").rect;
+    if disabled_source {
+        // A failed, unsized image is non-replaced inline text: its content
+        // box uses font metrics, rather than the enclosing line's leading.
+        assert!(rect.w > 30.0 && rect.h >= 16.0, "the disabled image needs its own alt text geometry: {rect:?}");
+    } else {
+        assert!(rect.w > 30.0 && rect.h >= 20.0, "the image needs a real alt box before hovering: {rect:?}");
+    }
     assert!(!snapshot(&mut agent).contains("Preview details"));
     let result = call(&mut agent, "click", &json!({"ref":target,"hover":true})).unwrap().text;
     let after = snapshot(&mut agent);
     assert!(after.contains("heading") && after.contains("Preview details"), "{result}\n{after}");
     assert!(after.contains("link") && after.contains("Open preview"), "{result}\n{after}");
     assert!(!result.contains("nearest visible ancestor"), "the real alt box should be used: {result}");
-    assert!(!agent.tabs[0].frames[0].page.images.contains_key(&node));
+    let image = agent.tabs[0].frames[0].page.images.get(&node);
+    if disabled_source {
+        assert!(image.is_some_and(|image| image.broken));
+    } else {
+        assert!(image.is_none());
+    }
+}
+
+#[test]
+fn unloaded_image_hover_uses_its_alt_box_and_reveals_heading_and_link() {
+    let agent = fixture("<!doctype html><style>img{font-size:16px;line-height:20px}.tip{display:none}img:hover+.tip{display:block}</style><main><img id=trigger alt='Navigation preview'><section class=tip><h2>Preview details</h2><a href=about:blank>Open preview</a></section></main>");
+    assert_alt_hover_reveals_heading_and_link(agent, false);
+}
+
+#[test]
+fn disabled_image_source_hover_keeps_its_alt_box_and_reveals_heading_and_link() {
+    let agent = fixture("<!doctype html><style>img{font-size:16px;line-height:20px}.tip{display:none}img:hover+.tip{display:block}</style><main><img id=trigger src=unfetched.svg alt='Navigation preview'><section class=tip><h2>Preview details</h2><a href=about:blank>Open preview</a></section></main>");
+    assert_alt_hover_reveals_heading_and_link(agent, true);
 }
 
 #[test]
