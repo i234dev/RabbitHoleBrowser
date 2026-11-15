@@ -134,7 +134,7 @@ pub struct Download {
 pub struct Tab {
     pub id: u32,
     pub ctx: usize,
-    pub frames: Vec<Frame>,
+    pub frames: crate::frame_set::FrameSet,
     pub refs: RefMap,
     history: Vec<Request>,
     hist_pos: usize,
@@ -161,7 +161,7 @@ impl Tab {
         Tab {
             id,
             ctx,
-            frames: Vec::new(),
+            frames: crate::frame_set::FrameSet::default(),
             refs: RefMap::default(),
             history: Vec::new(),
             hist_pos: 0,
@@ -180,7 +180,7 @@ impl Tab {
     }
 
     pub fn page(&self) -> Option<&Page> {
-        self.frames.first().map(|f| &f.page)
+        self.frames.root()
     }
 }
 
@@ -282,9 +282,7 @@ impl Agent {
         self.engine.loader.fetcher.log = Some(self.tabs[ti].netlog.clone());
         self.engine.dialog_policy = self.tabs[ti].dialog_policy.clone();
         let policy = self.tabs[ti].dialog_policy.clone();
-        for f in &mut self.tabs[ti].frames {
-            f.page.script.dialog_policy = policy.clone();
-        }
+        self.tabs[ti].frames.visit_mut(|page| page.script.dialog_policy=policy.clone());
     }
 
     /// Defer automatic quiet-period waits while an explicit condition owns the
@@ -425,7 +423,7 @@ impl Agent {
         self.drain_console(ti, &mut page);
         let tab = &mut self.tabs[ti];
         tab.status = page.status;
-        tab.frames = vec![Frame { page, parent: None }];
+        tab.frames = crate::frame_set::FrameSet::from_page(page);
         tab.refs.new_document();
         tab.invalid.clear();
         tab.pending = None;
@@ -440,63 +438,14 @@ impl Agent {
         Ok(report)
     }
 
-    /// Load the iframes of a tab (same- and cross-origin), depth ≤ 3.
-    fn load_frames(&mut self, ti: usize) {
-        let mut i = 0;
-        while i < self.tabs[ti].frames.len() && self.tabs[ti].frames.len() < 12 {
-            let depth = {
-                let mut d = 0;
-                let mut cur = self.tabs[ti].frames[i].parent;
-                while let Some((p, _)) = cur {
-                    d += 1;
-                    cur = self.tabs[ti].frames[p].parent;
-                }
-                d
-            };
-            if depth >= 3 {
-                i += 1;
-                continue;
-            }
-            let (iframes, base, geo) = {
-                let page = &self.tabs[ti].frames[i].page;
-                let doc = &page.doc;
-                let list: Vec<(NodeId, Option<String>, Option<String>)> = doc
-                    .descendants(Document::ROOT)
-                    .filter(|&n| matches!(doc.tag(n), Some("iframe" | "frame")) && crate::ax::displayed(page, n))
-                    .map(|n| (n, doc.attr(n, "src").map(|s| s.to_string()), doc.is_element(n, "iframe").then(|| doc.attr(n, "srcdoc").map(|s| s.to_string())).flatten()))
-                    .collect();
-                (list, page.url.clone(), GeoMap::build(page))
-            };
-            for (node, src, srcdoc) in iframes {
-                if self.tabs[ti].frames.len() >= 12 {
-                    break;
-                }
-                let size = geo.get(node).map(|g| g.raw).filter(|r| r.w > 10.0 && r.h > 10.0);
-                let Some(size) = size else { continue };
-                let vp = Viewport { width: size.w, height: size.h };
-                let page = if let Some(html) = srcdoc {
-                    self.engine.load_html(&html, Url::parse("about:srcdoc").unwrap_or(base.clone()), vp)
-                } else if let Some(src) = src {
-                    let Some(url) = base.join(src.trim()) else { continue };
-                    if !url.is_http() && url.scheme != "data" || !self.allowed(&url) {
-                        continue;
-                    }
-                    let req = Request::get(url).with_referer(base.clone());
-                    match self.engine.loader.load_request(&req, vp) {
-                        Ok(Loaded::Page(p)) => self.engine.build_page(p, vp),
-                        _ => continue,
-                    }
-                } else {
-                    continue;
-                };
-                let mut page = page;
-                if !self.defer_settle {
-                    let _ = wait::settle(&self.engine, &mut page, Some(&self.tabs[ti].netlog), Duration::from_millis(1500));
-                }
-                self.drain_console(ti, &mut page);
-                self.tabs[ti].frames.push(Frame { page, parent: Some((i, node)) });
-            }
-            i += 1;
+    /// The engine alone loads/owns nested contexts; the agent exposes a
+    /// bounded index over those same documents, never a second download.
+    pub(crate) fn load_frames(&mut self, ti:usize) {
+        let changed=self.tabs[ti].frames.refresh(&self.cfg.allowlist);
+        let tab=&mut self.tabs[ti];
+        for frame in changed {
+            tab.refs.drop_frame(frame);
+            tab.invalid.retain(|(index,_)| *index!=frame);
         }
     }
 
@@ -547,9 +496,7 @@ impl Agent {
 
     pub(crate) fn drain_all_consoles(&mut self, ti: usize) {
         let mut lines = Vec::new();
-        for f in &mut self.tabs[ti].frames {
-            lines.extend(f.page.take_console());
-        }
+        self.tabs[ti].frames.visit_mut(|page| lines.extend(page.take_console()));
         let tab = &mut self.tabs[ti];
         for l in lines {
             if tab.console.len() >= 500 {
@@ -571,17 +518,18 @@ impl Agent {
         if let Some(u) = self.tabs[ti].pending.take() {
             self.navigate(ti, Request::get(u), true)?;
         }
+        self.load_frames(ti);
         Ok(())
     }
 
     // ------------------------------------------------------------ the tree
 
-    pub(crate) fn frame_views(frames: &[Frame]) -> Vec<FrameView<'_>> {
+    pub(crate) fn frame_views(frames: &crate::frame_set::FrameSet) -> Vec<FrameView<'_>> {
         frames
             .iter()
             .enumerate()
             .map(|(i, f)| FrameView {
-                page: &f.page,
+                page: f.page,
                 children: frames.iter().enumerate().filter_map(|(j, g)| g.parent.filter(|(p, _)| *p == i).map(|(_, n)| (n, j))).collect(),
             })
             .collect()
@@ -597,8 +545,9 @@ impl Agent {
     }
 
     fn tree_mode(&mut self, ti: usize, include_hidden: bool, search: bool) -> (Ax, BuildStats, Vec<Overlay>) {
+        self.load_frames(ti);
         let tab = &mut self.tabs[ti];
-        let page = &tab.frames[0].page;
+        let page = &tab.frames[0];
         let geo = ax::geometry(page);
         let overlays = overlay::detect(page, &geo);
         let main = if page.doc.descendants(Document::ROOT).any(|n| page.doc.is_element(n, "main") || page.doc.attr(n, "role") == Some("main")) {
@@ -648,7 +597,7 @@ impl Agent {
     /// Render a snapshot of the active tab.
     pub fn snapshot_text(&mut self, ti: usize, max_tokens: usize, focus: Option<&str>, include_hidden: bool, urls: bool) -> Result<String, String> {
         let (root, stats, overlays) = self.tree(ti, include_hidden);
-        let page = &self.tabs[ti].frames[0].page;
+        let page = &self.tabs[ti].frames[0];
         let viewport = rabbithole_engine::gfx::Rect::new(page.page_scroll.0, page.page_scroll.1, page.viewport.width, page.viewport.height);
         let notes: HashMap<NodeId, String> = overlays.iter().map(|o| (o.node, o.note())).collect();
         let header = self.page_line(ti);
@@ -710,7 +659,7 @@ impl Agent {
     fn page_overview_text(&mut self, ti: usize, root: &Ax, overlays: &[Overlay], summary: bool, results: Option<&str>) -> String {
         let header = self.page_line(ti);
         let tab = &mut self.tabs[ti];
-        let mut lines = crate::summary::render(&tab.frames[0].page, root, &mut tab.refs, overlays);
+        let mut lines = crate::summary::render(&tab.frames[0], root, &mut tab.refs, overlays);
         if !summary {
             lines.retain(|line| line.starts_with("⚠ "));
         }
@@ -783,6 +732,7 @@ impl Agent {
 
     /// Resolve a ref of the active tab, with helpful errors.
     pub fn resolve(&mut self, ti: usize, r: &str) -> Result<(usize, NodeId), String> {
+        self.load_frames(ti);
         let tab = &self.tabs[ti];
         match resolve_in(&tab.refs, r, &tab.frames) {
             Ok(x) => Ok(x),
@@ -828,6 +778,7 @@ impl Agent {
     /// Run the follow-up of an action: navigation, popups, dialogs,
     /// settle, then report the diff (or the new page).
     pub fn finish_action(&mut self, ti: usize, frame: usize, before: Vec<((usize, NodeId, u16, bool), String)>, mut outcome: ScriptOutcome, request: Option<Request>, what: &str, target: Option<(usize, NodeId)>) -> Result<String, String> {
+        let target_document=target.and_then(|(frame,_)|self.tabs[ti].frames.document(frame));
         let mut lines = Vec::new();
         let dialogs = std::mem::take(&mut outcome.dialogs);
         let windows = std::mem::take(&mut outcome.new_windows);
@@ -838,7 +789,7 @@ impl Agent {
             let s = {
                 let tab = &mut self.tabs[ti];
                 let log = tab.netlog.clone();
-                wait::settle(&self.engine, &mut tab.frames[frame].page, Some(&log), self.cfg.settle_cap)
+                wait::settle(&self.engine, &mut tab.frames[0], Some(&log), self.cfg.settle_cap)
             };
             self.collect_events(ti, &s);
             request = s.navigation.as_ref().map(|n| n.request.clone());
@@ -846,13 +797,13 @@ impl Agent {
         }
         if let Some(req) = request {
             if frame == 0 {
-                let from = self.tabs[ti].frames[0].page.url.clone();
+                let from = self.tabs[ti].frames[0].url.clone();
                 let report = self.navigate(ti, req, true)?;
                 if report.starts_with("Download #") {
                     lines.push(format!("{what}: {report}"));
                     return Ok(lines.join("\n"));
                 }
-                let page = &self.tabs[ti].frames[0].page;
+                let page = &self.tabs[ti].frames[0];
                 let same_doc = page.url.without_fragment() == from.without_fragment();
                 lines.push(format!("{what} → navigated to {} (status {}){}", esc(&page.url.to_string()), page.status, if same_doc { " (same URL reloaded)" } else { "" }));
                 if !report.trim().is_empty() {
@@ -865,23 +816,29 @@ impl Agent {
                 }
                 return Ok(lines.join("\n"));
             }
-            // Navigation inside an iframe: reload that frame.
-            let vp = self.tabs[ti].frames[frame].page.viewport;
+            // Keep the engine's canonical child ID and parent/origin metadata.
             self.prepare(ti);
-            match self.engine.loader.load_request(&req, vp) {
-                Ok(Loaded::Page(p)) => {
-                    let mut page = self.engine.build_page(p, vp);
-                    if !self.defer_settle {
-                        let _ = wait::settle(&self.engine, &mut page, Some(&self.tabs[ti].netlog), self.cfg.settle_cap);
-                    }
-                    lines.push(format!("{what} → frame navigated to {}", esc(&page.url.to_string())));
-                    self.tabs[ti].frames[frame].page = page;
+            if !self.allowed(&req.url) { return Err("Frame navigation blocked by the domain allowlist".into()); }
+            let viewport=self.tabs[ti].frames.get(frame).ok_or("the target frame is gone")?.page.viewport;
+            match self.engine.loader.load_request(&req,viewport) {
+                Ok(loaded@Loaded::Page(_)) => {
+                    let outcome=self.tabs[ti].frames.install(&self.engine,frame,loaded)?;
+                    self.collect_side_effects(ti,&outcome.dialogs,&outcome.new_windows);
                     self.tabs[ti].refs.drop_frame(frame);
+                    if !self.defer_settle {
+                        let tab=&mut self.tabs[ti];let log=tab.netlog.clone();
+                        let settled=wait::settle(&self.engine,&mut tab.frames[0],Some(&log),self.cfg.settle_cap);
+                        self.collect_events(ti,&settled);
+                    }
+                    if let Some(frame)=self.tabs[ti].frames.get(frame) {
+                        lines.push(format!("{what} → frame navigated to {}",esc(&frame.page.url.to_string())));
+                    } else { lines.push(format!("{what} → frame was removed during navigation")); }
                 }
-                Ok(Loaded::Download(s)) => lines.push(format!("{what} → frame download {} (not saved)", esc(&s.suggested_filename()))),
-                Err(e) => lines.push(format!("{what} → frame navigation failed: {e}")),
+                Ok(Loaded::Download(download)) => lines.push(format!("{what} → frame download {} (not saved)",esc(&download.suggested_filename()))),
+                Err(error) => lines.push(format!("{what} → frame navigation failed: {error}")),
             }
         }
+        self.load_frames(ti);
         if self.defer_settle {
             // The caller reports the full before-action → condition delta.
             lines.push(what.to_string());
@@ -910,8 +867,10 @@ impl Agent {
             // Silent failure detection.
             let focus_changed = !d.is_empty();
             let mut why = vec!["no DOM change".to_string(), "no navigation".to_string()];
-            if let Some((f, n)) = target {
-                let page = &self.tabs[ti].frames[f].page;
+            if let Some((f, n)) = target.filter(|(frame,node)|self.tabs[ti].frames.get(*frame).is_some_and(|current| {
+                *node<current.page.doc.nodes.len() && target_document.as_ref().is_some_and(|document|document.is_for(&current.page.doc))
+            })) {
+                let page = &self.tabs[ti].frames[f];
                 let listens = page.doc.ancestor_or_self(n, |a| {
                     page.script.host.as_ref().map(|h| h.element_has_any_listener(a)).unwrap_or(false) || page.doc.attr(a, "onclick").is_some()
                 });
@@ -978,12 +937,12 @@ impl Agent {
         let before = self.items(ti);
         self.prepare(ti);
         let requested = node;
-        if !hover_only && crate::ax::states_of(&self.tabs[ti].frames[frame].page, requested, "", false).iter().any(|s| s == "disabled") {
+        if !hover_only && crate::ax::states_of(&self.tabs[ti].frames[frame], requested, "", false).iter().any(|s| s == "disabled") {
             return Err(format!("@{rr} {label} is disabled."));
         }
-        let geo = GeoMap::build(&self.tabs[ti].frames[frame].page);
+        let geo = GeoMap::build(&self.tabs[ti].frames[frame]);
         let fallback = if force { None } else {
-            let page = &self.tabs[ti].frames[frame].page;
+            let page = &self.tabs[ti].frames[frame];
             boxless_pointer_ancestor(page, &geo, requested)
         };
         let node = fallback.unwrap_or(requested);
@@ -992,68 +951,74 @@ impl Agent {
             let reference = self.tabs[ti].refs.assign(frame, ancestor, "ancestor", "");
             format!("@{rr} {label} has no usable layout box; using nearest visible ancestor @e{reference} {description} for the pointer action.")
         });
-        let tab = &mut self.tabs[ti];
-        let page = &mut tab.frames[frame].page;
-        // Disabled controls.
-        if node != requested && !hover_only && crate::ax::states_of(page, node, "", false).iter().any(|s| s == "disabled") {
-            return Err(format!("@{rr} {label} is disabled."));
-        }
-        // Scroll into view (main frame) and find a point that hits it.
-        if frame == 0 {
-            if let Some(g) = geo.get(node) {
-                if !g.fixed {
-                    let vh = page.viewport.height;
-                    let visible = g.rect.y >= page.page_scroll.1 && g.rect.bottom() <= page.page_scroll.1 + vh;
-                    if !visible {
-                        let max = (page.content_height() - vh).max(0.0);
-                        let y = (g.rect.y + g.rect.h / 2.0 - vh / 2.0).clamp(0.0, max);
-                        self.engine.set_page_scroll(page, page.page_scroll.0, y);
-                        let o = self.engine.dispatch_window_event(page, "scroll");
-                        drop(o);
+        self.capture_frame(ti);
+        let engine=&self.engine;
+        let tab=&mut self.tabs[ti];
+        let refs=&mut tab.refs;
+        let before_frame=&mut tab.before_frame;
+        let result=tab.frames.with_page(engine,frame,|page| -> Result<_,String> {
+            // Disabled controls.
+            if node != requested && !hover_only && crate::ax::states_of(page, node, "", false).iter().any(|s| s == "disabled") {
+                return Err(format!("@{rr} {label} is disabled."));
+            }
+            // Scroll into view (main frame) and find a point that hits it.
+            if frame == 0 {
+                if let Some(g) = geo.get(node) {
+                    if !g.fixed {
+                        let vh = page.viewport.height;
+                        let visible = g.rect.y >= page.page_scroll.1 && g.rect.bottom() <= page.page_scroll.1 + vh;
+                        if !visible {
+                            let max = (page.content_height() - vh).max(0.0);
+                            let y = (g.rect.y + g.rect.h / 2.0 - vh / 2.0).clamp(0.0, max);
+                            engine.set_page_scroll(page, page.page_scroll.0, y);
+                            let o = engine.dispatch_window_event(page, "scroll");
+                            drop(o);
+                        }
                     }
                 }
             }
-        }
-        let geo = GeoMap::build(page);
-        let reach = if frame == 0 || fallback.is_some() { overlay::reach(page, &geo, node) } else { Reach::Ancestor(0.0, 0.0) };
-        if fallback.is_some() && !matches!(&reach, Reach::Covered(_)) && !safe_ancestor_pointer_hit(page, node, &reach) {
-            return Err(format!("@{rr} {label} has no usable layout box, and its nearest visible ancestor has no safe pointer point (another control or pointer-inert content would be targeted)."));
-        }
-        // Painted state right before the pointer action (after scrolling).
-        tab.before_frame = Some(self.engine.snapshot(&tab.frames[0].page));
-        let page = &mut tab.frames[frame].page;
-        let outcome;
-        let mut request = None;
-        let verb = if hover_only { "Hovered" } else { "Clicked" };
-        match reach {
-            Reach::Covered(c) if !force => {
-                let cr = tab.refs.assign(frame, c, "overlay", "");
-                let name = cover_name(page, c);
-                return Err(format!("@{rr} {label} is not clickable: covered by @e{cr} ({name}). Close or dismiss it first{}, or pass force=true.", if overlay::is_cookie_text(&page.doc.text_content(c)) { " (click ref=\"cookies\" rejects cookies)" } else { "" }));
+            let geo = GeoMap::build(page);
+            let reach = if frame == 0 || fallback.is_some() { overlay::reach(page, &geo, node) } else { Reach::Ancestor(0.0, 0.0) };
+            if fallback.is_some() && !matches!(&reach, Reach::Covered(_)) && !safe_ancestor_pointer_hit(page, node, &reach) {
+                return Err(format!("@{rr} {label} has no usable layout box, and its nearest visible ancestor has no safe pointer point (another control or pointer-inert content would be targeted)."));
             }
-            Reach::Invisible if !force => {
-                return Err(format!("@{rr} {label} is not visible (no box, zero size or hidden). Pass force=true to dispatch the event anyway."));
+            // Painted state right before the pointer action (after scrolling).
+            if frame==0 { *before_frame=Some(engine.snapshot(page)); }
+            let outcome;
+            let mut request = None;
+            match reach {
+                Reach::Covered(c) if !force => {
+                    let cr=refs.assign(frame,c,"overlay","");
+                    let name = cover_name(page, c);
+                    return Err(format!("@{rr} {label} is not clickable: covered by @e{cr} ({name}). Close or dismiss it first{}, or pass force=true.", if overlay::is_cookie_text(&page.doc.text_content(c)) { " (click ref=\"cookies\" rejects cookies)" } else { "" }));
+                }
+                Reach::Invisible if !force => {
+                    return Err(format!("@{rr} {label} is not visible (no box, zero size or hidden). Pass force=true to dispatch the event anyway."));
+                }
+                Reach::Point(x, y) if !hover_only => {
+                    let up = engine.click_at(page, x, y, Modifiers::default());
+                    let mut o = up.outcome;
+                    request = crate::actions::click_request(engine, page, up.action, &mut o);
+                    outcome = o;
+                }
+                Reach::Point(x, y) | Reach::Ancestor(x, y) if hover_only => {
+                    outcome = engine.pointer_move(page, x, y, Modifiers::default());
+                }
+                _ if hover_only => {
+                    let o = engine.dispatch_event(page, node, "mouseover", rabbithole_engine::scripting::mouse_init(0.0, 0.0, 0, false, false, false, false));
+                    outcome = o;
+                }
+                _ => {
+                    let (action, o) = engine.click_element(page, node, None, Modifiers::default());
+                    let mut o = o;
+                    request = crate::actions::click_request(engine, page, action, &mut o);
+                    outcome = o;
+                }
             }
-            Reach::Point(x, y) if !hover_only => {
-                let up = self.engine.click_at(page, x, y, Modifiers::default());
-                let mut o = up.outcome;
-                request = crate::actions::click_request(&self.engine, page, up.action, &mut o);
-                outcome = o;
-            }
-            Reach::Point(x, y) | Reach::Ancestor(x, y) if hover_only => {
-                outcome = self.engine.pointer_move(page, x, y, Modifiers::default());
-            }
-            _ if hover_only => {
-                let o = self.engine.dispatch_event(page, node, "mouseover", rabbithole_engine::scripting::mouse_init(0.0, 0.0, 0, false, false, false, false));
-                outcome = o;
-            }
-            _ => {
-                let (action, o) = self.engine.click_element(page, node, None, Modifiers::default());
-                let mut o = o;
-                request = crate::actions::click_request(&self.engine, page, action, &mut o);
-                outcome = o;
-            }
-        }
+            Ok((outcome,request))
+        })?;
+        let (outcome,request)=result?;
+        let verb=if hover_only { "Hovered" } else { "Clicked" };
         let result = self.finish_action(ti, frame, before, outcome, request, &format!("{verb} @{rr} {label}"), Some((frame, node)))?;
         Ok(match fallback_note {
             Some(note) => format!("{note}\n{result}"),
@@ -1066,13 +1031,13 @@ impl Agent {
         let (root, _, overlays) = self.tree(ti, false);
         // The shared consent detector (vendor CMPs, raised boxes, frames)
         // first, then the overlay found by hit testing.
-        let detected = rabbithole_engine::consent::detect(&self.tabs[ti].frames[0].page).filter(|d| d.frames.is_empty()).map(|d| d.root);
+        let detected = rabbithole_engine::consent::detect(&self.tabs[ti].frames[0]).filter(|d| d.frames.is_empty()).map(|d| d.root);
         let banner = detected.or_else(|| overlays.iter().find(|o| o.cookie).map(|o| o.node));
         // Candidate buttons: inside the banner if found, else any control
         // in a cookie-ish container. Names are matched by the shared
         // multilingual matcher; only "reject" buttons qualify.
         let is_reject = |name: &str| rabbithole_engine::consent::classify_button(name) == Some(rabbithole_engine::consent::ButtonKind::Reject);
-        let page = &self.tabs[ti].frames[0].page;
+        let page = &self.tabs[ti].frames[0];
         let doc = &page.doc;
         let mut found: Option<(u32, String)> = None;
         root.visit(&mut |a, _| {
@@ -1115,7 +1080,7 @@ impl Agent {
     }
 
     pub fn describe_ref(&mut self, ti: usize, frame: usize, node: NodeId) -> String {
-        let page = &self.tabs[ti].frames[frame].page;
+        let page = &self.tabs[ti].frames[frame];
         let role = self.tabs[ti].refs.lookup(frame, node).and_then(|r| self.tabs[ti].refs.get(r)).map(|e| (e.role.clone(), e.name.clone()));
         match role {
             Some((role, name)) if !name.is_empty() => format!("{role} \"{}\"", esc(&clip_text(&name, 60))),
@@ -1282,7 +1247,7 @@ fn cover_name(page: &Page, c: NodeId) -> String {
 }
 
 /// Resolve a ref string against a tab's refs and frames.
-fn resolve_in(refs: &RefMap, r: &str, frames: &[Frame]) -> Result<(usize, NodeId), String> {
+fn resolve_in(refs: &RefMap, r: &str, frames: &crate::frame_set::FrameSet) -> Result<(usize, NodeId), String> {
     let parsed = Ref::parse(r).ok_or_else(|| format!("\"{r}\" is not a ref (expected @e12 or @f1)."))?;
     let (frame, node, generation, desc) = match parsed {
         Ref::Element(n) => {

@@ -109,7 +109,7 @@ fn ref_of(text: &str, needle: &str) -> String {
 }
 
 fn control_value(a: &Agent, id: &str) -> String {
-    let page = &a.tabs[a.active.unwrap()].frames[0].page;
+    let page = &a.tabs[a.active.unwrap()].frames[0];
     page.control_text(page.doc.element_by_id(id).unwrap())
 }
 
@@ -127,7 +127,7 @@ fn fill_select_change_follows_form_submit_and_returns_settled_summary() {
     let mut a = agent();
     ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
     let ti = a.active.unwrap();
-    let node = a.tabs[ti].frames[0].page.doc.element_by_id("choice").unwrap();
+    let node = a.tabs[ti].frames[0].doc.element_by_id("choice").unwrap();
     let field = format!("@e{}", a.tabs[ti].refs.lookup(0, node).unwrap());
     let output = ok(&mut a, "fill", json!({"ref":field,"value":"New"}));
     assert!(output.contains("→ navigated to") && output.contains("pick=new"), "{output}");
@@ -244,7 +244,7 @@ fn fill_focus_replacement_does_not_write_through_a_detached_ref() {
     let ti = a.active.unwrap();
     assert!(a.resolve(ti, &old).is_err());
     let snapshot = ok(&mut a, "snapshot", json!({}));
-    let node = a.tabs[ti].frames[0].page.doc.element_by_id("replacement").unwrap();
+    let node = a.tabs[ti].frames[0].doc.element_by_id("replacement").unwrap();
     let new = format!("@e{}", a.tabs[ti].refs.lookup(0, node).unwrap_or_else(|| panic!("replacement has no ref in {snapshot}")));
     ok(&mut a, "fill", json!({"ref":new,"value":"fresh value"}));
     assert_eq!(control_value(&a, "replacement"), "fresh value");
@@ -266,15 +266,15 @@ fn fill_rechecks_later_fields_after_input_callbacks_change_them() {
     for path in ["/disabled", "/readonly", "/removed", "/type"] {
         ok(&mut a, "open", json!({"url":srv.url(path)}));
         let ti = a.active.unwrap();
-        let form = a.tabs[ti].frames[0].page.doc.descendants(rabbithole_engine::dom::Document::ROOT).find(|&node| a.tabs[ti].frames[0].page.doc.is_element(node, "form")).unwrap();
+        let form = a.tabs[ti].frames[0].doc.descendants(rabbithole_engine::dom::Document::ROOT).find(|&node| a.tabs[ti].frames[0].doc.is_element(node, "form")).unwrap();
         let form = format!("@f{}", a.tabs[ti].refs.assign_form(0, form));
-        let tail = a.tabs[ti].frames[0].page.doc.element_by_id("tail").unwrap();
+        let tail = a.tabs[ti].frames[0].doc.element_by_id("tail").unwrap();
         let output = ok(&mut a, "fill", json!({"ref":form,"values":{"a":"first applied","z":"must-not-write"}}));
         assert!(output.contains("Not filled"), "{path}: {output}");
         if path == "/removed" {
-            assert!(!a.tabs[ti].frames[0].page.doc.is_connected(tail));
+            assert!(!a.tabs[ti].frames[0].doc.is_connected(tail));
         } else {
-            assert_eq!(a.tabs[ti].frames[0].page.control_text(tail), "keep", "{path}: {output}");
+            assert_eq!(a.tabs[ti].frames[0].control_text(tail), "keep", "{path}: {output}");
         }
     }
 }
@@ -294,18 +294,18 @@ fn fill_frame_navigation_rejects_old_element_and_form_refs_with_reused_node_ids(
     let ti = a.active.unwrap();
     let child = a.tabs[ti].frames.iter().position(|frame| frame.page.url.path == "/a").unwrap();
     let neighbor = a.tabs[ti].frames.iter().position(|frame| frame.page.url.path == "/c").unwrap();
-    let select = a.tabs[ti].frames[child].page.doc.element_by_id("choice").unwrap();
-    let form = a.tabs[ti].frames[child].page.doc.element_by_id("child-form").unwrap();
-    let parent = a.tabs[ti].frames[0].page.doc.element_by_id("parent-field").unwrap();
-    let other = a.tabs[ti].frames[neighbor].page.doc.element_by_id("neighbor-field").unwrap();
+    let select = a.tabs[ti].frames[child].doc.element_by_id("choice").unwrap();
+    let form = a.tabs[ti].frames[child].doc.element_by_id("child-form").unwrap();
+    let parent = a.tabs[ti].frames[0].doc.element_by_id("parent-field").unwrap();
+    let other = a.tabs[ti].frames[neighbor].doc.element_by_id("neighbor-field").unwrap();
     let old = format!("@e{}", a.tabs[ti].refs.lookup(child, select).unwrap());
     let old_form = format!("@f{}", a.tabs[ti].refs.assign_form(child, form));
     let parent_ref = format!("@e{}", a.tabs[ti].refs.lookup(0, parent).unwrap());
     let neighbor_ref = format!("@e{}", a.tabs[ti].refs.lookup(neighbor, other).unwrap());
     let output = ok(&mut a, "fill", json!({"ref":old,"value":"Two"}));
     assert!(output.contains("frame navigated to") && output.contains("/b?pick=two"), "{output}");
-    assert_eq!(a.tabs[ti].frames[child].page.doc.element_by_id("choice"), Some(select), "control must exercise a reused NodeId");
-    assert_eq!(a.tabs[ti].frames[child].page.doc.element_by_id("child-form"), Some(form), "form must exercise a reused NodeId");
+    assert_eq!(a.tabs[ti].frames[child].doc.element_by_id("choice"), Some(select), "control must exercise a reused NodeId");
+    assert_eq!(a.tabs[ti].frames[child].doc.element_by_id("child-form"), Some(form), "form must exercise a reused NodeId");
     assert!(err(&mut a, "fill", json!({"ref":old,"value":"One"})).contains("unknown"));
     assert!(err(&mut a, "fill", json!({"ref":old_form,"values":{"pick":"One"},"submit":true})).contains("unknown"));
     assert_eq!(a.resolve(ti, &parent_ref).unwrap(), (0, parent));
@@ -368,10 +368,10 @@ fn fill_focus_document_open_keeps_new_controls_untouched() {
     let snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
     let old_ref = ref_of(&snapshot, "textbox \"Original\"");
     let ti = a.active.unwrap();
-    let old_node = a.tabs[ti].frames[0].page.doc.element_by_id("original").unwrap();
-    let document = a.tabs[ti].frames[0].page.doc.weak_identity();
+    let old_node = a.tabs[ti].frames[0].doc.element_by_id("original").unwrap();
+    let document = a.tabs[ti].frames[0].doc.weak_identity();
     let result = call(&mut a, "fill", &json!({"ref":old_ref,"value":"must-not-write"}));
-    let page = &a.tabs[ti].frames[0].page;
+    let page = &a.tabs[ti].frames[0];
     assert!(!document.is_for(&page.doc), "focus must really replace the document incarnation");
     let replacement = page.doc.element_by_id("replacement").unwrap();
     assert_ne!(replacement, old_node, "ordinary document.write appends arena nodes");
@@ -387,10 +387,10 @@ fn fill_focus_document_open_reused_node_is_not_overwritten() {
     let snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
     let old_ref = ref_of(&snapshot, "textbox \"Original\"");
     let ti = a.active.unwrap();
-    let old_node = a.tabs[ti].frames[0].page.doc.element_by_id("target").unwrap();
-    let document = a.tabs[ti].frames[0].page.doc.weak_identity();
+    let old_node = a.tabs[ti].frames[0].doc.element_by_id("target").unwrap();
+    let document = a.tabs[ti].frames[0].doc.weak_identity();
     let result = call(&mut a, "fill", &json!({"ref":old_ref,"value":"must-not-write"}));
-    let page = &a.tabs[ti].frames[0].page;
+    let page = &a.tabs[ti].frames[0];
     assert!(!document.is_for(&page.doc), "focus must really replace the document incarnation");
     assert_eq!(page.doc.element_by_id("target"), Some(old_node), "the callback reattaches the same arena node");
     assert!(page.doc.is_connected(old_node));
@@ -413,10 +413,10 @@ fn fill_focus_document_open_with_reattached_node_stops_values_and_submit() {
     let old_ref = ref_of(&snapshot, "textbox \"First\"");
     assert!(ok(&mut a, "fill", json!({})).contains("@f1 form"));
     let ti = a.active.unwrap();
-    let old_node = a.tabs[ti].frames[0].page.doc.element_by_id("first").unwrap();
-    let document = a.tabs[ti].frames[0].page.doc.weak_identity();
+    let old_node = a.tabs[ti].frames[0].doc.element_by_id("first").unwrap();
+    let document = a.tabs[ti].frames[0].doc.weak_identity();
     let result = call(&mut a, "fill", &json!({"ref":"@f1","values":{"a":"must-not-write","z":"must-not-write"},"submit":true}));
-    let page = &a.tabs[ti].frames[0].page;
+    let page = &a.tabs[ti].frames[0];
     assert!(!document.is_for(&page.doc), "focus must really replace the document incarnation");
     let replacement = page.doc.element_by_id("first").unwrap();
     assert_eq!(replacement, old_node, "the callback reattaches the same arena node in the new incarnation");
@@ -459,10 +459,10 @@ fn fill_input_change_and_timer_document_replacement_stop_pending_fields() {
         let old_ref = ref_of(&snapshot, "textbox \"First\"");
         assert!(ok(&mut a, "fill", json!({})).contains("@f1 form"));
         let ti = a.active.unwrap();
-        let old_node = a.tabs[ti].frames[0].page.doc.element_by_id("first").unwrap();
-        let document = a.tabs[ti].frames[0].page.doc.weak_identity();
+        let old_node = a.tabs[ti].frames[0].doc.element_by_id("first").unwrap();
+        let document = a.tabs[ti].frames[0].doc.weak_identity();
         let result = call(&mut a, "fill", &json!({"ref":"@f1","values":{"a":"written-before-callback","z":"must-not-write"},"submit":true}));
-        let page = &a.tabs[ti].frames[0].page;
+        let page = &a.tabs[ti].frames[0];
         assert!(!document.is_for(&page.doc), "{phase}: replacement callback must run");
         assert_eq!(page.doc.element_by_id("first"), Some(old_node), "{phase}: preserve the arena ID across replacement");
         assert!(page.doc.is_connected(old_node));
@@ -491,7 +491,7 @@ fn fill_select_preserves_dirty_selection_through_onchange_default_edits_and_rese
     let snapshot = ok(&mut a, "snapshot", json!({}));
     assert!(snapshot.contains("value=\"Gamma\""), "{snapshot}");
     let ti = a.active.unwrap();
-    let page = &mut a.tabs[ti].frames[0].page;
+    let page = &mut a.tabs[ti].frames[0];
     let node = page.doc.element_by_id("choice").unwrap();
     let options = page.doc.select_options(node);
     assert!(page.doc.is_option_selected(options[2]));

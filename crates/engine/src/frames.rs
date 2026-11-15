@@ -274,12 +274,13 @@ impl Engine {
     /// with `page` on the ancestor stack (so scripts in the child can reach
     /// their parent's document). The child is put back afterwards.
     pub(crate) fn with_child<R>(&self, page: &mut Page, i: usize, f: impl FnOnce(&mut Page) -> R) -> Option<R> {
+        let id = page.frames.children.get(i)?.id;
         let mut child = page.frames.children.get_mut(i)?.page.take()?;
         let r = {
             let _g = AncestorGuard::push(page);
             f(&mut child)
         };
-        if let Some(c) = page.frames.children.get_mut(i) {
+        if let Some(c) = page.frames.children.iter_mut().find(|c| c.id == id) {
             if c.page.is_none() {
                 c.page = Some(child);
             }
@@ -290,6 +291,37 @@ impl Engine {
             self.restyle(page);
         }
         Some(r)
+    }
+
+    /// Run an embedder operation in the existing browsing context, retaining
+    /// the ancestor guard used by normal frame input and script dispatch.
+    /// Returns None when the context was removed; no Page pointer is retained.
+    pub fn with_browsing_context<R>(&self, page: &mut Page, id: u64, run: impl FnOnce(&mut Page) -> R) -> Option<R> {
+        if page.frame_id == id { return Some(run(page)); }
+        let mut run = Some(run);
+        self.with_frame(page, id, &mut |child| run.take().expect("frame callback runs once")(child))
+    }
+
+    /// Install a request already loaded by an embedder into an existing child.
+    /// The normal frame installer owns ID/origin/realm and parent load events.
+    pub fn install_browsing_context(&self, page: &mut Page, id: u64, loaded: Loaded) -> Option<ScriptOutcome> {
+        fn owner(page: &Page, id: u64) -> Option<(u64, NodeId)> {
+            for child in &page.frames.children {
+                if child.id == id { return Some((page.frame_id, child.node)); }
+                if let Some(found) = child.page.as_deref().and_then(|page| owner(page, id)) { return Some(found); }
+            }
+            None
+        }
+        let (parent, node) = owner(page, id)?;
+        self.with_browsing_context(page, parent, |page| {
+            let index=page.frames.children.iter().position(|child|child.id==id && child.node==node)?;
+            // An older in-flight request must not overwrite this navigation.
+            page.frames.children[index].pending=None;
+            page.frames.children[index].stale=false;
+            let mut outcome=ScriptOutcome::default();
+            self.install_frame(page,index,Ok(loaded),&mut outcome);
+            Some(outcome)
+        }).flatten()
     }
 
     /// Run `f` on the page of descendant frame `id` of `page` (detached
@@ -866,6 +898,9 @@ impl Engine {
             self.finish_page_load(&mut child);
         }
         let nav = child.script.pending_navigation.take();
+        // A child's load script can remove its own container via parent.
+        // Never publish it into a shifted sibling slot after that callback.
+        let Some(i) = page.frames.children.iter().position(|frame| frame.id == id) else { return };
         if let Some(old) = page.frames.children[i].page.replace(Box::new(child)) {
             let mut reg = self.frames.borrow_mut();
             for g in &old.frames.children {

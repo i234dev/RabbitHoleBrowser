@@ -208,7 +208,7 @@ impl WaitQuery {
                 root.visit(&mut |x, _| {
                     if !matches!(x.kind, Kind::Control | Kind::Heading | Kind::Text | Kind::Image | Kind::Landmark | Kind::Dialog | Kind::Form | Kind::Frame) { return; }
                     let full = if x.kind == Kind::Text { x.name.clone() } else {
-                        let full = crate::ax::accessible_name(&agent.tabs[ti].frames[x.frame].page, x.node, &x.role);
+                        let full = crate::ax::accessible_name(&agent.tabs[ti].frames[x.frame], x.node, &x.role);
                         if full.is_empty() { x.name.clone() } else { full }
                     };
                     if !full.is_empty() {
@@ -504,7 +504,7 @@ fn action_ref(agent: &mut Agent, ti: usize, a: &Value) -> Result<Option<String>,
     let nodes = selector_nodes(agent, ti, selector)?;
     if nodes.len() != 1 { return Err(format!("selector matched {} elements; expected exactly one; use find to inspect refs", nodes.len())); }
     let (frame, node) = nodes[0];
-    let page = &agent.tabs[ti].frames[frame].page;
+    let page = &agent.tabs[ti].frames[frame];
     let is_form = page.doc.is_element(node, "form");
     let role = page.doc.tag(node).unwrap_or("").to_string();
     let name = clip_text(&crate::ax::content_text(page, node), 60);
@@ -612,11 +612,11 @@ fn read(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     // Reading the frame element itself means reading its hosted document,
     // with refs and the URL attributed to that child context.
     let (frame, root) = if let Some(node) = root {
-        if matches!(tab.frames[frame].page.doc.tag(node), Some("iframe" | "frame")) {
+        if matches!(tab.frames[frame].doc.tag(node), Some("iframe" | "frame")) {
             tab.frames.iter().enumerate().find(|(_,f)| f.parent == Some((frame,node))).map(|(child,_)|(child,None)).unwrap_or((frame,root))
         } else { (frame,root) }
     } else { (frame,root) };
-    let page = &tab.frames[frame].page;
+    let page = &tab.frames[frame];
     let md = match root {
         Some(node) => crate::read::read_subtree_with_options(page, &mut tab.refs, frame, node, b(a, "links").unwrap_or(true), b(a, "cites").unwrap_or(false)),
         None if page.doc.body().is_some_and(|body| page.doc.is_element(body,"frameset")) => {
@@ -641,7 +641,7 @@ fn agent_resolve(tab: &crate::browser::Tab, r: &str) -> Result<(usize, NodeId), 
         Ref::Element(n) => tab.refs.get(n).map(|e| (e.frame, e.node, e.generation)).ok_or_else(|| format!("{parsed} is unknown"))?,
         Ref::Form(n) => tab.refs.get_form(n).ok_or_else(|| format!("{parsed} is unknown"))?,
     };
-    if generation != tab.refs.generation || f >= tab.frames.len() || !tab.frames[f].page.doc.is_connected(node) {
+    if generation != tab.refs.generation || f >= tab.frames.len() || !tab.frames[f].doc.is_connected(node) {
         return Err(format!("{parsed} no longer exists; take a new snapshot."));
     }
     Ok((f, node))
@@ -791,7 +791,7 @@ fn search_order(tab: &crate::browser::Tab) -> HashMap<(usize, NodeId), usize> {
     while let Some((frame, node)) = stack.pop() {
         if order.contains_key(&(frame, node)) { continue; }
         order.insert((frame, node), order.len());
-        let doc = &tab.frames[frame].page.doc;
+        let doc = &tab.frames[frame].doc;
         stack.extend(doc.flat_children(node).into_iter().rev().map(|n| (frame, n)));
         if let Some(&child) = children.get(&(frame, node)) {
             stack.push((child, Document::ROOT));
@@ -814,7 +814,7 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
         // AX labels are clipped for snapshots. Search full accessible names;
         // text runs already retain their complete, normalized content.
         let full_name = if x.kind == Kind::Text { x.name.clone() } else {
-            let full = crate::ax::accessible_name(&tab.frames[x.frame].page, x.node, &x.role);
+            let full = crate::ax::accessible_name(&tab.frames[x.frame], x.node, &x.role);
             if full.is_empty() { x.name.clone() } else { full }
         };
         if full_name.is_empty() { return; }
@@ -873,7 +873,7 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
         total += 1;
         if lines.len() >= limit { continue; }
         let reference = reference.unwrap_or_else(|| tab.refs.assign(frame, node, &role_name, &clip_text(&passages[0], 60)));
-        let page = &tab.frames[frame].page;
+        let page = &tab.frames[frame];
         let position = if frame != 0 { " (in frame)" } else {
             page.rect_of(node).map(|rc| {
                 let vy = rc.y - page.page_scroll.1;
@@ -986,7 +986,7 @@ fn type_(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let target = match reference.as_deref() {
         Some(r) => Some(agent.resolve(ti, r)?),
         None => {
-            let f = agent.tabs[ti].frames[0].page.state.focused;
+            let f = agent.tabs[ti].frames[0].state.focused;
             if text.is_some() && f.is_none() {
                 return Err("type needs ref (no element has focus)".into());
             }
@@ -996,28 +996,30 @@ fn type_(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let frame = target.map(|t| t.0).unwrap_or(0);
     let label = target.map(|(f, nd)| agent.describe_ref(ti, f, nd)).unwrap_or_else(|| "the page".into());
     let before = agent.before_state(ti);
-    let tab = &mut agent.tabs[ti];
-    let page = &mut tab.frames[frame].page;
-    let mut outcome = ScriptOutcome::default();
-    let mut request = None;
-    let mut what = Vec::new();
-    if let Some(t) = &text {
-        let (_, node) = target.ok_or("no target")?;
-        let o = crate::actions::type_text(&agent.engine, page, node, t, clear)?;
-        crate::actions::merge(&mut outcome, o);
-        let shown = if page.control_kind(node) == rabbithole_engine::ControlKind::Password { format!("{} chars", t.chars().count()) } else { format!("\"{}\"", esc(&clip_text(t, 60))) };
-        what.push(format!("Typed {shown} into {label}"));
-    }
-    let keys: Vec<String> = key.into_iter().chain(if submit { Some("Enter".to_string()) } else { None }).collect();
-    for k in keys {
-        if request.is_some() || outcome.navigation.is_some() {
-            break;
+    let engine=&agent.engine;
+    let (outcome,request,what)=agent.tabs[ti].frames.with_page(engine,frame,|page| -> Result<_,String> {
+        let mut outcome = ScriptOutcome::default();
+        let mut request = None;
+        let mut what = Vec::new();
+        if let Some(t) = &text {
+            let (_, node) = target.ok_or("no target")?;
+            let o = crate::actions::type_text(engine, page, node, t, clear)?;
+            crate::actions::merge(&mut outcome, o);
+            let shown = if page.control_kind(node) == rabbithole_engine::ControlKind::Password { format!("{} chars", t.chars().count()) } else { format!("\"{}\"", esc(&clip_text(t, 60))) };
+            what.push(format!("Typed {shown} into {label}"));
         }
-        let r = crate::actions::press_key(&agent.engine, page, target.map(|t| t.1), &k);
-        crate::actions::merge(&mut outcome, r.outcome);
-        request = r.request;
-        what.push(format!("pressed {k}{}", r.action.map(|x| format!(" ({x})")).unwrap_or_default()));
-    }
+        let keys: Vec<String> = key.into_iter().chain(if submit { Some("Enter".to_string()) } else { None }).collect();
+        for k in keys {
+            if request.is_some() || outcome.navigation.is_some() {
+                break;
+            }
+            let r = crate::actions::press_key(engine, page, target.map(|t| t.1), &k);
+            crate::actions::merge(&mut outcome, r.outcome);
+            request = r.request;
+            what.push(format!("pressed {k}{}", r.action.map(|x| format!(" ({x})")).unwrap_or_default()));
+        }
+        Ok((outcome,request,what))
+    })??;
     let desc = what.join(", ");
     Ok(Out::text(agent.finish_action(ti, frame, before, outcome, request, &desc, target)?))
 }
@@ -1039,10 +1041,10 @@ fn fill_forms(agent: &mut Agent, ti: usize) -> (Vec<(String, usize, NodeId)>, St
     let mut forms = Vec::new();
     let mut lines = Vec::new();
     for frame in 0..tab.frames.len() {
-        for node in crate::forms::forms(&tab.frames[frame].page) {
+        for node in crate::forms::forms(&tab.frames[frame]) {
             let reference = format!("@f{}", tab.refs.assign_form(frame, node));
             forms.push((reference, frame, node));
-            lines.extend(crate::forms::describe(&tab.frames[frame].page, frame, node, &mut tab.refs));
+            lines.extend(crate::forms::describe(&tab.frames[frame], frame, node, &mut tab.refs));
         }
     }
     let listing = if lines.is_empty() {
@@ -1065,7 +1067,7 @@ fn fill_fields(agent: &mut Agent, ti: usize, target: &FillTarget) -> Result<(usi
     match target {
         FillTarget::Ref(reference) => {
             let (frame, node) = agent.resolve(ti, reference)?;
-            let page = &agent.tabs[ti].frames[frame].page;
+            let page = &agent.tabs[ti].frames[frame];
             if !matches!(page.doc.tag(node), Some("input" | "select" | "textarea")) {
                 return Err(format!("{reference} is not a fillable field; use values for a form"));
             }
@@ -1083,7 +1085,7 @@ fn fill_fields(agent: &mut Agent, ti: usize, target: &FillTarget) -> Result<(usi
                 None
             };
             let tab = &agent.tabs[ti];
-            let page = &tab.frames[frame].page;
+            let page = &tab.frames[frame];
             let fields = crate::forms::fields(page, node);
             let index = if let Some((field_frame, field_node)) = explicit {
                 fields.iter().position(|field| field_frame == frame && field.node == field_node)
@@ -1116,7 +1118,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let mut form = None;
     if let Some(reference) = &reference {
         let (frame, node) = agent.resolve(ti, reference)?;
-        let page = &agent.tabs[ti].frames[frame].page;
+        let page = &agent.tabs[ti].frames[frame];
         let owner = if page.doc.is_element(node, "form") { Some(node) } else { page.form_of(node) };
         if let Some(node) = owner {
             form = Some(format!("@f{}", agent.tabs[ti].refs.assign_form(frame, node)));
@@ -1130,7 +1132,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         let form = form.ok_or_else(|| format!("{reference} is not in a form"))?;
         let (frame, node) = agent.resolve(ti, &form)?;
         let tab = &mut agent.tabs[ti];
-        let lines = crate::forms::describe(&tab.frames[frame].page, frame, node, &mut tab.refs);
+        let lines = crate::forms::describe(&tab.frames[frame], frame, node, &mut tab.refs);
         return Ok(Out::text(fence(&lines.join("\n"))));
     }
     if single.is_some() && reference.is_none() {
@@ -1149,7 +1151,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         let mut owner = None;
         for key in values.as_ref().unwrap().keys() {
             let (frame, node) = agent.resolve(ti, key)?;
-            let node = agent.tabs[ti].frames[frame].page.form_of(node).ok_or("submit needs fields belonging to one form, or an explicit form ref")?;
+            let node = agent.tabs[ti].frames[frame].form_of(node).ok_or("submit needs fields belonging to one form, or an explicit form ref")?;
             if owner.is_some_and(|owner| owner != (frame, node)) {
                 return Err("submit with field refs from multiple forms is ambiguous; pass one form ref and its values".into());
             }
@@ -1197,8 +1199,8 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
             }
         };
         frame = field_frame;
-        let document = agent.tabs[ti].frames[frame].page.doc.weak_identity();
-        let result = crate::forms::set_field_with_outcome(&agent.engine, &mut agent.tabs[ti].frames[frame].page, &fields, field_index, &operation.value);
+        let document = agent.tabs[ti].frames[frame].doc.weak_identity();
+        let result = agent.tabs[ti].frames.with_page(&agent.engine,frame,|page| crate::forms::set_field_with_outcome(&agent.engine,page,&fields,field_index,&operation.value)).and_then(|result|result);
         match result {
             Ok((description, result)) => {
                 if let Some(error) = result.error {
@@ -1219,13 +1221,13 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
             // The same settle routine as click, before touching another field:
             // timers/XHR from this callback may request navigation as well.
             let log = agent.tabs[ti].netlog.clone();
-            let settled = crate::wait::settle(&agent.engine, &mut agent.tabs[ti].frames[frame].page, Some(&log), agent.cfg.settle_cap);
+            let settled = crate::wait::settle(&agent.engine, &mut agent.tabs[ti].frames[0], Some(&log), agent.cfg.settle_cap);
             if let Some(pending) = &settled.pending {
                 notes.push(format!("{} did not settle within the wait cap: {pending}", esc(&operation.key)));
             }
             crate::actions::merge(&mut outcome, ScriptOutcome { navigation: settled.navigation, new_windows: settled.new_windows, dialogs: settled.dialogs, relayout: settled.changed, ..ScriptOutcome::default() });
         }
-        if !document.is_for(&agent.tabs[ti].frames[frame].page.doc) {
+        if agent.tabs[ti].frames.get(frame).is_none_or(|frame|!document.is_for(&frame.page.doc)) {
             // document.open may reattach the same control/form NodeIds. Their
             // old refs still belong to the replaced document incarnation.
             agent.tabs[ti].refs.drop_frame(frame);
@@ -1272,7 +1274,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
             Ok((form_frame, node)) => {
                 frame = form_frame;
                 let tab = &mut agent.tabs[ti];
-                let invalid = crate::forms::validate(&agent.engine, &mut tab.frames[frame].page, node);
+                let invalid = tab.frames.with_page(&agent.engine,frame,|page| crate::forms::validate(&agent.engine,page,node))?;
                 if !invalid.is_empty() {
                     submit_error = true;
                     tab.invalid = invalid.iter().map(|invalid| (frame, invalid.node)).collect();
@@ -1283,16 +1285,19 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
                     notes.push(format!("Not submitted: {} invalid field(s):\n- {}", list.len(), list.join("\n- ")));
                 } else {
                     tab.invalid.clear();
-                    let page = &mut tab.frames[frame].page;
-                    let mut submitted = ScriptOutcome::default();
-                    request = match page.default_submitter(node) {
-                        Some(submitter) => {
-                            let (action, event) = agent.engine.click_element(page, submitter, None, rabbithole_engine::Modifiers::default());
-                            submitted = event;
-                            crate::actions::click_request(&agent.engine, page, action, &mut submitted)
-                        }
-                        None => crate::actions::submit_request(&agent.engine, page, node, None, &mut submitted),
-                    };
+                    let (submission_request,submitted)=tab.frames.with_page(&agent.engine,frame,|page| {
+                        let mut submitted = ScriptOutcome::default();
+                        let request = match page.default_submitter(node) {
+                            Some(submitter) => {
+                                let (action, event) = agent.engine.click_element(page, submitter, None, rabbithole_engine::Modifiers::default());
+                                submitted = event;
+                                crate::actions::click_request(&agent.engine, page, action, &mut submitted)
+                            }
+                            None => crate::actions::submit_request(&agent.engine, page, node, None, &mut submitted),
+                        };
+                        (request,submitted)
+                    })?;
+                    request=submission_request;
                     submit_cancelled = request.is_none() && submitted.default_prevented;
                     let description = if submit_cancelled { "Not submitted: the submit or click event was cancelled" } else { "Submitted the form" };
                     if !what.is_empty() { what.push('\n'); }
@@ -1350,13 +1355,16 @@ fn scroll(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     if let (Some(r), None) = (s(a, "ref"), s(a, "until")) {
         let (frame, node) = agent.resolve(ti, r)?;
         let label = agent.describe_ref(ti, frame, node);
-        let page = &mut agent.tabs[ti].frames[frame].page;
-        let rect = page.rect_of(node).ok_or_else(|| format!("{r} has no box"))?;
-        let vh = page.viewport.height;
-        let max = (page.content_height() - vh).max(0.0);
-        let y = (rect.y + rect.h / 2.0 - vh / 2.0).clamp(0.0, max);
-        agent.engine.set_page_scroll(page, page.page_scroll.0, y);
-        outcome = agent.engine.dispatch_window_event(page, "scroll");
+        let (scrolled,y)=agent.tabs[ti].frames.with_page(&agent.engine,frame,|page| -> Result<_,String> {
+            let rect = page.rect_of(node).ok_or_else(|| format!("{r} has no box"))?;
+            let vh = page.viewport.height;
+            let max = (page.content_height() - vh).max(0.0);
+            let y = (rect.y + rect.h / 2.0 - vh / 2.0).clamp(0.0, max);
+            agent.engine.set_page_scroll(page, page.page_scroll.0, y);
+            let outcome = agent.engine.dispatch_window_event(page, "scroll");
+            Ok((outcome,y))
+        })??;
+        outcome=scrolled;
         what = format!("Scrolled {label} into view (scroll={})", y.round());
         let t = Some((frame, node));
         let _ = t;
@@ -1367,7 +1375,7 @@ fn scroll(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let dir = s(a, "direction").unwrap_or("down").to_ascii_lowercase();
     let pages = n(a, "pages").unwrap_or(1.0) as f32;
     if until.is_none() && !load_more {
-        let page = &mut agent.tabs[ti].frames[0].page;
+        let page = &mut agent.tabs[ti].frames[0];
         let vh = page.viewport.height;
         let max = (page.content_height() - vh).max(0.0);
         let cur = page.page_scroll.1;
@@ -1387,7 +1395,7 @@ fn scroll(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let mut steps = 0;
     let mut grew = 0;
     let mut found = false;
-    let mut last_height = agent.tabs[ti].frames[0].page.content_height();
+    let mut last_height = agent.tabs[ti].frames[0].content_height();
     while steps < max_steps {
         steps += 1;
         if let Some(u) = &until {
@@ -1398,7 +1406,7 @@ fn scroll(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         }
         let tab = &mut agent.tabs[ti];
         let log = tab.netlog.clone();
-        let page = &mut tab.frames[0].page;
+        let page = &mut tab.frames[0];
         let vh = page.viewport.height;
         let max = (page.content_height() - vh).max(0.0);
         let y = if load_more { max } else { (page.page_scroll.1 + vh * 0.85).min(max) };
@@ -1450,7 +1458,7 @@ fn click_load_more(agent: &mut Agent, ti: usize, outcome: &mut ScriptOutcome) ->
         }
     });
     let Some(node) = target else { return false };
-    let page = &mut agent.tabs[ti].frames[0].page;
+    let page = &mut agent.tabs[ti].frames[0];
     let (action, o) = agent.engine.click_element(page, node, None, rabbithole_engine::Modifiers::default());
     let mut o = o;
     if let Some(req) = crate::actions::click_request(&agent.engine, page, action, &mut o) {
@@ -1462,14 +1470,14 @@ fn click_load_more(agent: &mut Agent, ti: usize, outcome: &mut ScriptOutcome) ->
 
 /// Is the target (a ref, or text) inside the viewport?
 fn visible_target(agent: &mut Agent, ti: usize, u: &str) -> Result<bool, String> {
-    let page = &agent.tabs[ti].frames[0].page;
+    let page = &agent.tabs[ti].frames[0];
     let vp = (page.page_scroll.1, page.page_scroll.1 + page.viewport.height);
     if u.starts_with('@') {
         let (f, node) = agent.resolve(ti, u)?;
         if f != 0 {
             return Ok(true);
         }
-        let page = &agent.tabs[ti].frames[0].page;
+        let page = &agent.tabs[ti].frames[0];
         return Ok(page.rect_of(node).map(|r| r.y < vp.1 && r.bottom() > vp.0).unwrap_or(false));
     }
     let needle = u.to_lowercase();
@@ -1494,14 +1502,14 @@ fn screenshot(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     agent.ensure_fonts();
     // System faces can arrive after this page was built. Refresh its own
     // font view and geometry before computing the capture region or marks.
-    agent.engine.restyle(&mut agent.tabs[ti].frames[0].page);
+    agent.engine.restyle(&mut agent.tabs[ti].frames[0]);
     let scale = n(a, "scale").unwrap_or(1.0).clamp(0.25, 3.0) as f32;
     let marks = b(a, "marks").unwrap_or(true);
     // Images were skipped while loading: fetch them now (bounded wait).
     if !agent.engine.loader.load_images {
         agent.engine.loader.load_images = true;
         let tab = &mut agent.tabs[ti];
-        let page = &mut tab.frames[0].page;
+        let page = &mut tab.frames[0];
         agent.engine.restyle(page);
         let deadline = std::time::Instant::now() + Duration::from_secs(4);
         while page.images_in_flight() > 0 && std::time::Instant::now() < deadline {
@@ -1516,14 +1524,14 @@ fn screenshot(agent: &mut Agent, a: &Value) -> Result<Out, String> {
             if f != 0 {
                 return Err(format!("{r} is inside a frame; screenshot the page instead"));
             }
-            let rect = agent.tabs[ti].frames[0].page.rect_of(node).ok_or_else(|| format!("{r} has no box"))?;
+            let rect = agent.tabs[ti].frames[0].rect_of(node).ok_or_else(|| format!("{r} has no box"))?;
             crate::shot::Area::Region(rect)
         }
         None if b(a, "full").unwrap_or(false) => crate::shot::Area::Full,
         None => crate::shot::Area::Viewport,
     };
     let root = if marks { Some(agent.tree(ti, false).0) } else { None };
-    let page = &agent.tabs[ti].frames[0].page;
+    let page = &agent.tabs[ti].frames[0];
     let (mut canvas, region) = crate::shot::render(&agent.engine, page, area, scale);
     let legend = match &root {
         Some(r) => crate::shot::draw_marks(&agent.engine, &mut canvas, r, region, scale, page),
@@ -1655,17 +1663,18 @@ fn advance_background(agent: &mut Agent) {
     agent.prepare(ti);
     let deadline = Instant::now() + Duration::from_millis(10);
     let mut events = Vec::new();
-    for frame in &mut agent.tabs[ti].frames {
-        if Instant::now() >= deadline { break; }
-        if frame.page.script.pending_navigation.is_some() { continue; }
-        let (_, mut out) = agent.engine.pump_console_tasks(&mut frame.page, deadline);
-        if let Some(nav) = &out.navigation {
-            events.push(format!("Background script requested navigation to {}; follow with debug follow=true.", nav.request.url));
+    if let Some(page)=agent.tabs[ti].frames.root_mut() {
+        if page.script.pending_navigation.is_none() && Instant::now()<deadline {
+            let (_,mut out)=agent.engine.pump_console_tasks(page,deadline);
+            if let Some(nav)=&out.navigation {
+                events.push(format!("Background script requested navigation to {}; follow with debug follow=true.",nav.request.url));
+            }
+            page.script.pending_navigation=out.navigation.take();
+            page.script.new_windows.append(&mut out.new_windows);
+            page.script.dialogs.append(&mut out.dialogs);
         }
-        frame.page.script.pending_navigation = out.navigation.take();
-        frame.page.script.new_windows.append(&mut out.new_windows);
-        frame.page.script.dialogs.append(&mut out.dialogs);
     }
+    agent.load_frames(ti);
     agent.tabs[ti].events.extend(events);
 }
 
@@ -1681,7 +1690,7 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<(Stri
     let deadline = Instant::now().checked_add(timeout).ok_or("timeout is too large")?;
     let follow = b(args, "follow").unwrap_or(false);
     let before = follow.then(|| agent.before_state(ti));
-    let (started, mut outcome) = agent.engine.start_console_evaluation(&mut agent.tabs[ti].frames[0].page, source, deadline);
+    let (started, mut outcome) = agent.engine.start_console_evaluation(&mut agent.tabs[ti].frames[0], source, deadline);
     let mut failed = false;
     let result = match started {
         Err(error) => { failed = true; format!("Error: {error}") }
@@ -1695,7 +1704,7 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<(Stri
                     failed = true;
                     break if pending { format!("Promise still pending after {} ms", timeout.as_millis()) } else { format!("Evaluation timed out after {} ms", timeout.as_millis()) };
                 }
-                let (polled, out) = agent.engine.poll_console_evaluation(&mut agent.tabs[ti].frames[0].page, &evaluation, deadline);
+                let (polled, out) = agent.engine.poll_console_evaluation(&mut agent.tabs[ti].frames[0], &evaluation, deadline);
                 merge_outcome(&mut outcome, out);
                 if outcome.navigation.is_some() { continue; }
                 match polled {
@@ -1705,7 +1714,7 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<(Stri
                     Err(error) => { failed = true; break format!("Error: {error}"); }
                     Ok(ConsolePoll::Pending) => pending = true,
                 }
-                let (pumped, out) = agent.engine.pump_console_tasks(&mut agent.tabs[ti].frames[0].page, deadline);
+                let (pumped, out) = agent.engine.pump_console_tasks(&mut agent.tabs[ti].frames[0], deadline);
                 merge_outcome(&mut outcome, out);
                 if outcome.navigation.is_some() { continue; }
                 if let Err(error) = pumped {
@@ -1715,7 +1724,7 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<(Stri
                 }
                 let now = Instant::now();
                 if now < deadline {
-                    let page = &agent.tabs[ti].frames[0].page;
+                    let page = &agent.tabs[ti].frames[0];
                     let now_ms = agent.engine.start.elapsed().as_secs_f64() * 1000.0;
                     let delay = page.next_script_due().map(|due| Duration::from_secs_f64(((due - now_ms).max(0.0) / 1000.0).min(0.01))).unwrap_or(Duration::from_millis(10));
                     // Poll after a checkpoint before waiting, so a resolved
@@ -1734,6 +1743,7 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<(Stri
     } else if outcome.navigation.is_some() || !outcome.dialogs.is_empty() || !outcome.new_windows.is_empty() {
         text.push_str("\n(the script requested navigation, a dialog or a new window; it was not followed; use follow=true)");
     }
+    agent.load_frames(ti);
     Ok((text, failed))
 }
 
@@ -1755,9 +1765,7 @@ fn debug(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     if b(a, "console").unwrap_or(false) || b(a, "clear").unwrap_or(false) {
         let ti = agent.tab_index()?;
         let mut lines = Vec::new();
-        for f in &mut agent.tabs[ti].frames {
-            lines.extend(f.page.take_console());
-        }
+        agent.tabs[ti].frames.visit_mut(|page|lines.extend(page.take_console()));
         let tab = &mut agent.tabs[ti];
         tab.console.extend(lines);
         if b(a, "console").unwrap_or(false) {

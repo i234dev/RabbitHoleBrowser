@@ -207,3 +207,24 @@ fn nested_frame_selectors_and_parent_script_reads_use_the_same_grandchild() {
     let state = ok(&mut a, "debug", json!({"eval":format!("{path}.value")}));
     assert!(state.contains("from nested agent"), "nested selector fill must reach the parent's actual grandchild: {state}");
 }
+
+#[test]
+fn a_child_event_removing_its_container_does_not_restore_it_into_a_sibling() {
+    let srv=serve(Box::new(|path|match path {
+        "/"=>html("<!doctype html><html><body><iframe id='remove' src='/remove'></iframe><iframe id='keep' src='/keep'></iframe></body></html>"),
+        "/remove"=>html(r#"<!doctype html><html><body><input id="remove-self" aria-label="Remove self" oninput="if(this.value==='detach')parent.document.getElementById('remove').remove()"></body></html>"#),
+        "/keep"=>html("<!doctype html><html><body><input id='kept' value='neighbor'></body></html>"),
+        _=>None,
+    }));
+    let mut a=agent();
+    ok(&mut a,"open",json!({"url":srv.url("/")}));
+    let view=ok(&mut a,"snapshot",json!({}));
+    let old=ref_of(&view,"textbox \"Remove self\"");
+    ok(&mut a,"type",json!({"ref":old,"text":"detach","clear":true}));
+    let state=ok(&mut a,"debug",json!({"eval":"frames.length+'|'+document.getElementById('keep').contentDocument.getElementById('kept').value+'|'+(document.getElementById('remove')===null)"}));
+    assert!(state.contains("1|neighbor|true"),"a detached page must not replace the next child slot: {state}");
+    assert!(call(&mut a,"type",&json!({"ref":old,"text":"stale"})).is_err());
+    ok(&mut a,"type",json!({"selector":"#kept","text":"kept-updated","clear":true}));
+    let state=ok(&mut a,"debug",json!({"eval":"document.getElementById('keep').contentDocument.getElementById('kept').value"}));
+    assert!(state.contains("kept-updated"),"the surviving context must remain live: {state}");
+}

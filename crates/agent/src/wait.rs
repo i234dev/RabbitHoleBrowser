@@ -196,10 +196,10 @@ fn observe(agent: &mut crate::browser::Agent, ti: usize, timeout: Duration, mut 
     while !matched && Instant::now() < deadline {
         agent.prepare(ti);
         let mut navigated = false;
-        for frame in 0..agent.tabs[ti].frames.len() {
+        for frame in 0..usize::from(!agent.tabs[ti].frames.is_empty()) {
             if Instant::now() >= deadline { break; }
             let (result, mut outcome) = {
-                let page = &mut agent.tabs[ti].frames[frame].page;
+                let page = &mut agent.tabs[ti].frames[frame];
                 if let Some(navigation) = page.script.pending_navigation.take() {
                     (Ok(()), rabbithole_engine::ScriptOutcome { navigation: Some(navigation), ..Default::default() })
                 } else {
@@ -227,6 +227,7 @@ fn observe(agent: &mut crate::browser::Agent, ti: usize, timeout: Duration, mut 
                 break;
             }
         }
+        agent.load_frames(ti);
         agent.drain_all_consoles(ti);
         // Check before deciding timeout: a callback can satisfy the condition
         // on its final allowed tick. Do not discard those completed effects.

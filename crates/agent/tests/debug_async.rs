@@ -182,10 +182,10 @@ fn debug_follow_is_explicit_and_preserves_form_post_navigation() {
     let mut agent = server.agent();
     let result = eval(&mut agent, "Promise.resolve().then(()=>location.href='/next')", 500);
     assert!(result.contains("not followed"), "{result}");
-    assert_eq!(agent.tabs[agent.active.unwrap()].frames[0].page.url.to_string(), server.url("/"));
+    assert_eq!(agent.tabs[agent.active.unwrap()].frames[0].url.to_string(), server.url("/"));
     let result = call(&mut agent, "debug", &json!({"eval":"new Promise(r=>setTimeout(()=>{document.getElementById('form').submit();r(1)},10))","timeout":500,"follow":true})).unwrap().text;
     assert!(result.contains("navigated to") && result.contains("/submit"), "{result}");
-    assert_eq!(agent.tabs[agent.active.unwrap()].frames[0].page.url.to_string(), server.url("/submit"));
+    assert_eq!(agent.tabs[agent.active.unwrap()].frames[0].url.to_string(), server.url("/submit"));
     assert!(server.requests.lock().unwrap().iter().any(|(method,path,body)|method=="POST" && path=="/submit" && body=="message=causal"));
 }
 

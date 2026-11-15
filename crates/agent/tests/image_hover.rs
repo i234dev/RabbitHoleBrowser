@@ -18,7 +18,7 @@ fn fixture(html: &str) -> Agent {
 
 fn reference(agent: &mut Agent, id: &str) -> String {
     let tab = agent.active.unwrap();
-    let doc = &agent.tabs[tab].frames[0].page.doc;
+    let doc = &agent.tabs[tab].frames[0].doc;
     let node = doc.descendants(Document::ROOT).find(|&n| doc.attr(n, "id") == Some(id)).unwrap();
     format!("@e{}", agent.tabs[tab].refs.assign(0, node, "fixture", id))
 }
@@ -28,21 +28,21 @@ fn snapshot(agent: &mut Agent) -> String {
 }
 
 fn assert_ancestor_note(agent: &Agent, id: &str, result: &str) {
-    let doc = &agent.tabs[0].frames[0].page.doc;
+    let doc = &agent.tabs[0].frames[0].doc;
     let node = doc.descendants(Document::ROOT).find(|&n| doc.attr(n, "id") == Some(id)).unwrap();
     let reference = agent.tabs[0].refs.lookup(0, node).expect("fallback ancestor gets a stable ref");
     assert!(result.contains(&format!("nearest visible ancestor @e{reference}")), "{result}");
 }
 
 fn assert_untouched(agent: &Agent) {
-    let doc = &agent.tabs[0].frames[0].page.doc;
+    let doc = &agent.tabs[0].frames[0].doc;
     let result = doc.descendants(Document::ROOT).find(|&n| doc.attr(n, "id") == Some("result")).unwrap();
     assert_eq!(doc.text_content(result), "Untouched", "an inaccessible target must not activate its parent or another control");
 }
 
 fn assert_alt_hover_reveals_heading_and_link(mut agent: Agent, disabled_source: bool) {
     let target = reference(&mut agent, "trigger");
-    let page = &agent.tabs[0].frames[0].page;
+    let page = &agent.tabs[0].frames[0];
     let node = page.doc.descendants(Document::ROOT).find(|&n| page.doc.attr(n, "id") == Some("trigger")).unwrap();
     if disabled_source {
         assert!(page.images.get(&node).is_some_and(|image| image.broken), "disabled loading must retain the engine's broken marker for an actual src");
@@ -64,7 +64,7 @@ fn assert_alt_hover_reveals_heading_and_link(mut agent: Agent, disabled_source: 
     assert!(after.contains("heading") && after.contains("Preview details"), "{result}\n{after}");
     assert!(after.contains("link") && after.contains("Open preview"), "{result}\n{after}");
     assert!(!result.contains("nearest visible ancestor"), "the real alt box should be used: {result}");
-    let image = agent.tabs[0].frames[0].page.images.get(&node);
+    let image = agent.tabs[0].frames[0].images.get(&node);
     if disabled_source {
         assert!(image.is_some_and(|image| image.broken));
     } else {
