@@ -195,6 +195,142 @@ pub(crate) fn find(env: &MockEnv, tag: &str) -> NodeId {
     env.doc.find_element(tag).unwrap()
 }
 
+
+#[test]
+fn window_replaceable_strict_representatives_and_viewport_value() {
+    let (mut env, mut host) = setup("<button>go</button>");
+    let out = run(&mut env, &mut host, r#"
+        'use strict';
+        for (const name of ['event', 'innerWidth', 'self', 'performance', 'screen']) {
+            const saved = window[name];
+            window[name] = saved;
+            console.log(name, window[name] === saved);
+        }
+        window.innerWidth = 500;
+        console.log('width', window.innerWidth);
+    "#);
+    assert_eq!(out, ["event true", "innerWidth true", "self true", "performance true", "screen true", "width 500"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn window_replaceable_all_reported_attributes_and_existing_idl_attributes() {
+    let (mut env, mut host) = setup("<p>attributes</p>");
+    let out = run(&mut env, &mut host, r#"
+        'use strict';
+        const target = window;
+        const names = ['event', 'innerWidth', 'innerHeight', 'outerWidth', 'outerHeight',
+            'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset', 'screenX', 'screenY',
+            'screenLeft', 'screenTop', 'origin', 'self', 'performance', 'screen',
+            'locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar',
+            'external', 'visualViewport', 'clientInformation',
+            'devicePixelRatio', 'frames', 'length', 'parent', 'navigation'];
+        for (const name of names) {
+            const before = Object.getOwnPropertyDescriptor(target, name);
+            if (!before || typeof before.get !== 'function' || typeof before.set !== 'function'
+                || !before.enumerable || !before.configurable) throw new Error(name + ': accessor');
+            const original = target[name];
+            target[name] = original;
+            const d = Object.getOwnPropertyDescriptor(target, name);
+            if (!Object.prototype.hasOwnProperty.call(d, 'value') || d.value !== original
+                || !d.writable || !d.enumerable || !d.configurable || 'get' in d || 'set' in d)
+                throw new Error(name + ': replacement descriptor');
+            const marker = {name};
+            target[name] = marker;
+            if (target[name] !== marker) throw new Error(name + ': second assignment');
+            before.set.call(target, 500);
+            if (target[name] !== 500) throw new Error(name + ': saved setter');
+        }
+        console.log('replaced', names.length);
+    "#);
+    assert_eq!(out, ["replaced 31"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn window_replaceable_event_tracks_native_and_nested_dispatch_before_assignment() {
+    let (mut env, mut host) = setup("<button>go</button>");
+    let out = run(&mut env, &mut host, r#"
+        'use strict';
+        console.log('initial', window.event === undefined);
+        const button = document.querySelector('button');
+        const eventOrder = [];
+        button.addEventListener('click', function(e) {
+            eventOrder.push(window.event === e);
+            button.dispatchEvent(new Event('nested'));
+            eventOrder.push(window.event === e);
+        });
+        button.addEventListener('nested', e => eventOrder.push(window.event === e));
+    "#);
+    assert_eq!(out, ["initial true"]);
+    let button = find(&env, "button");
+    host.dispatch_event(&mut env, button, "click", EventInit::simple(true, true));
+    let out = run(&mut env, &mut host, "console.log(eventOrder.join(','), window.event === undefined, typeof Object.getOwnPropertyDescriptor(window, 'event').set)");
+    assert_eq!(out, ["true,true,true true function"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn window_replaceable_event_react_style_restore_and_own_value_survive_dispatch() {
+    let (mut env, mut host) = setup("<button>go</button>");
+    let out = run(&mut env, &mut host, r#"
+        'use strict';
+        const button = document.querySelector('button');
+        const getter = Object.getOwnPropertyDescriptor(window, 'event').get;
+        const order = [];
+        function guardedDispatch(event) {
+            const saved = window.event;
+            try { button.dispatchEvent(event); } finally { window.event = saved; }
+        }
+        button.addEventListener('outer', function(e) {
+            order.push(window.event === e);
+            guardedDispatch(new Event('inner'));
+            order.push(window.event === e);
+        });
+        button.addEventListener('inner', e => order.push(window.event === e));
+        guardedDispatch(new Event('outer'));
+        const d = Object.getOwnPropertyDescriptor(window, 'event');
+        console.log(order.join(','), window.event === undefined, 'value' in d, d.writable);
+        const marker = {kept: true};
+        window.event = marker;
+        button.addEventListener('later', e => console.log('later', window.event === marker, getter.call(window) === e));
+        button.dispatchEvent(new Event('later'));
+        console.log('after', window.event === marker, getter.call(window) === undefined);
+    "#);
+    assert_eq!(out, ["true,true,true true true true", "later true true", "after true true"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn window_replaceable_setter_checks_descriptor_and_receiver_without_relaxing_readonly() {
+    let (mut env, mut host) = setup("<p>readonly</p>");
+    let out = run(&mut env, &mut host, r#"
+        'use strict';
+        for (const name of ['event', 'innerWidth', 'screen', 'locationbar', 'external', 'navigation']) {
+            const setter = Object.getOwnPropertyDescriptor(window, name).set;
+            if (typeof setter !== 'function') throw new Error(name + ': missing setter');
+            const receiver = {};
+            let rejected = false;
+            try { setter.call(receiver, 1); } catch (e) { rejected = e instanceof TypeError; }
+            if (!rejected || Object.prototype.hasOwnProperty.call(receiver, name)) throw new Error(name + ': receiver');
+        }
+        Object.defineProperty(window, 'innerWidth', {configurable: false});
+        let rejected = false;
+        try { window.innerWidth = 500; } catch (e) { rejected = e instanceof TypeError; }
+        console.log('locked', rejected, window.innerWidth === 1000);
+        for (const name of ['window', 'top', 'document', 'navigator', 'isSecureContext']) {
+            const saved = window[name];
+            let rejected = false;
+            try { window[name] = 500; } catch (e) { rejected = e instanceof TypeError; }
+            if (!rejected || window[name] !== saved) throw new Error(name + ': readonly changed');
+        }
+        const location = Object.getOwnPropertyDescriptor(window, 'location');
+        console.log('readonly', typeof location.get, typeof location.set);
+    "#);
+    assert_eq!(out, ["locked true true", "readonly function function"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
 #[test]
 fn query_and_basic_properties() {
     let (mut env, mut host) = setup(r#"<div id="a" class="x y"><p class="p1">one</p><p class="p2" data-foo-bar="baz">two</p><span>three</span></div>"#);
