@@ -153,3 +153,57 @@ fn selectors_reject_ambiguous_conflicting_and_invalid_targets_and_reach_child_fr
     let state = ok(&mut a, "debug", json!({"eval":"typeof batchCount"}));
     assert!(state.contains("undefined"), "{state}");
 }
+
+fn coherence_setup() -> (Server, Agent) {
+    let srv = serve(Box::new(|path| match path {
+        "/" => html(r#"<!doctype html><html><body>
+            <p id="parent-status">none</p>
+            <iframe id="child" src="/child" style="width:420px;height:180px"></iframe>
+            <iframe id="outer" src="/nested" style="width:420px;height:260px"></iframe>
+            </body></html>"#),
+        "/child" => html(r#"<!doctype html><html><body>
+            <input id="coherent" aria-label="Coherent field" value="initial"
+             oninput="parent.document.getElementById('parent-status').textContent=this.value">
+            </body></html>"#),
+        "/nested" => html(r#"<!doctype html><html><body>
+            <iframe id="inner" src="/leaf" style="width:350px;height:160px"></iframe>
+            </body></html>"#),
+        "/leaf" => html("<!doctype html><html><body><input id='grand' aria-label='Grandchild field' value='initial-grand'></body></html>"),
+        _ => None,
+    }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    (srv, a)
+}
+
+#[test]
+fn frame_dom_is_shared_between_parent_script_snapshots_and_ref_typing() {
+    let (_srv, mut a) = coherence_setup();
+    ok(&mut a, "debug", json!({"eval":"document.getElementById('child').contentDocument.getElementById('coherent').value='from parent script'"}));
+    let view = ok(&mut a, "snapshot", json!({}));
+    assert!(view.contains("value=\"from parent script\""), "parent JS must update the document exposed by the agent: {view}");
+    let reference = ref_of(&view, "textbox \"Coherent field\"");
+    ok(&mut a, "type", json!({"ref":reference,"text":"from ref action","clear":true}));
+    let state = ok(&mut a, "debug", json!({"eval":"document.getElementById('child').contentDocument.getElementById('coherent').value"}));
+    assert!(state.contains("from ref action"), "ref typing must update the same document parent JS reads: {state}");
+}
+
+#[test]
+fn selector_typing_in_a_child_runs_events_against_the_real_parent_context() {
+    let (_srv, mut a) = coherence_setup();
+    ok(&mut a, "type", json!({"selector":"#coherent","text":"event-value","clear":true}));
+    let state = ok(&mut a, "debug", json!({"eval":"document.getElementById('parent-status').textContent+'|'+document.getElementById('child').contentDocument.getElementById('coherent').value"}));
+    assert!(state.contains("event-value|event-value"), "child input and its parent event effect must share the canonical frame tree: {state}");
+}
+
+#[test]
+fn nested_frame_selectors_and_parent_script_reads_use_the_same_grandchild() {
+    let (_srv, mut a) = coherence_setup();
+    let path = "document.getElementById('outer').contentDocument.getElementById('inner').contentDocument.getElementById('grand')";
+    ok(&mut a, "debug", json!({"eval":format!("{path}.value='from nested parent'")}));
+    let view = ok(&mut a, "snapshot", json!({}));
+    assert!(view.contains("value=\"from nested parent\""), "nested parent mutation must reach the flattened grandchild: {view}");
+    ok(&mut a, "fill", json!({"selector":"#grand","value":"from nested agent"}));
+    let state = ok(&mut a, "debug", json!({"eval":format!("{path}.value")}));
+    assert!(state.contains("from nested agent"), "nested selector fill must reach the parent's actual grandchild: {state}");
+}
