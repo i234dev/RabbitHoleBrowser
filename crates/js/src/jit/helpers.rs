@@ -684,6 +684,8 @@ pub(crate) unsafe extern "sysv64" fn h_unr(ctx: *mut Ctx, pc: u32) -> usize {
 
 /// `x % y` for numbers (pure).
 pub(crate) extern "sysv64" fn h_mod(x: f64, y: f64) -> f64 {
+    #[cfg(test)]
+    super::emit::record_mod_helper();
     crate::vm::js_mod(x, y)
 }
 
