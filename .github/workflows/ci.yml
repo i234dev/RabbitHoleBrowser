@@ -64,6 +64,9 @@ jobs:
         run: python scripts/compare-test-runs.py tests-off.log tests-on.log
       - name: Headless smoke test
         run: cargo run --release --locked -p rabbithole -- screenshot about:home -o home.png --width 1000 --height 700
+      - name: Release JIT CLI smoke test
+        if: runner.arch == 'X64'
+        run: cargo test -p rabbithole --release --features jit --locked --test jit_cli -- --nocapture --test-threads=1
       - uses: actions/upload-artifact@v4
         if: always()
         with:

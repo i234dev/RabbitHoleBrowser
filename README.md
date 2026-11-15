@@ -17,13 +17,22 @@ It can be used three ways:
 
 _Both images were produced by RabbitHole's renderer: every pixel comes from its own rasterizer._
 
-## Status (v0.1.17)
+## Status (v0.1.18)
 
 RabbitHole is young but already runs real, heavy sites: Google search,
 YouTube (playback with sound and AV1/VP9 video), Wikipedia, GitHub,
 Reddit (infinite scroll), BBC, Hacker News, the Svelte playground (WebAssembly
 bundler in a Worker) and Speedometer 3.1 end to end. Everything below is our own
 code unless noted in [Dependencies](#dependencies).
+
+Windows x64 now supports explicitly enabling the JavaScript JIT with
+`rabbithole.exe --jit=on`. Native mappings register unwind metadata and remain
+alive through nested callbacks. The JIT stays off by default while its global
+performance gate remains open; see the [JIT design and status](docs/jit-design.md).
+
+This delivery also includes named Grid line placement, used Grid track values
+in CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
+33/33 on the tested CSS revision; this is not a new full WPT coverage result.
 
 ### Conformance and benchmarks
 

@@ -97,6 +97,13 @@ Visual C++ runtime DLL is not required. Run the native Windows smoke test on
 that executable, alongside the checks above. Rust documents this option under
 [static and dynamic C runtimes](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes).
 
+On x64 runners, CI also runs `jit_cli` with the production `release` profile
+before uploading browser artifacts. The test launches the real executable in
+separate processes with `--jit=off` and `--jit=on`, verifies their identical
+JavaScript result, and requires named compilation and positive native entries
+only in the enabled process. This validates the normal selector without a
+`Realm::set_jit` override. ARM fallback does not prove native JIT execution.
+
 The expected CI time saving has not been measured. Compare complete GitHub
 runs before claiming an improvement; a changed profile also creates a separate
 artifact cache on its first run. See the Cargo references for

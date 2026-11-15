@@ -1653,3 +1653,25 @@ y `off`, sin `Realm::set_jit`; ya pasó en Linux en `a7d8fcc8`. Su ejecución
 Windows y la regresión completa con el selector abierto siguen pendientes de
 validación. El JIT permanece apagado por defecto y el rendimiento global de la
 fase 8 sigue siendo una puerta independiente.
+
+### Recarga de SLOTS: experimento descartado (2026-11-15)
+
+La candidata `d8edab6cfb529a7c6d9d24ab89862b21eb65fcbc`, sobre la versión
+publicada `2a6cce4`, aplazó una recarga de SLOTS hasta conocer la continuación
+del helper. Pasó las tres CI y cuatro controles nuevos de movimiento de
+`vstack`, reentrada, GC, saltos y salida por error. El protocolo diferencial
+completó 22.144 comparaciones sin diferencias; esa cifra incluye repeticiones
+y no constituye conformidad completa.
+
+La medición conservó los 27 casos, ocho bloques equilibrados y cuatro brazos
+fuente/modo: 864 observaciones válidas, con el mismo compilador y perfil de
+release, CPU 0 y el umbral normal de JIT en las mediciones. Aparecieron 13
+señales de regresión según el criterio fijado y dos casos inconclusos
+(`push_objects` y `array_map`). En `calls` no demostró mejora: la mediana de
+CPU con JIT fue aproximadamente un 2,4 % mayor, un resultado descriptivo que
+no alcanzó el umbral de regresión de ese caso. No se ejecutó Speedometer.
+
+Se descartó el cambio y se conservan las recargas anteriores. No se mezcló
+con el registro de unwind ni con la habilitación explícita de Windows. La
+puerta de rendimiento global sigue abierta; quitar una instrucción no basta
+para afirmar una mejora del motor.
