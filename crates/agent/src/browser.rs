@@ -441,12 +441,12 @@ impl Agent {
     /// The engine alone loads/owns nested contexts; the agent exposes a
     /// bounded index over those same documents, never a second download.
     pub(crate) fn load_frames(&mut self, ti:usize) {
-        let changed=self.tabs[ti].frames.refresh(&self.cfg.allowlist);
+        let remap=self.tabs[ti].frames.refresh(&self.cfg.allowlist);
         let tab=&mut self.tabs[ti];
-        for frame in changed {
-            tab.refs.drop_frame(frame);
-            tab.invalid.retain(|(index,_)| *index!=frame);
-        }
+        tab.refs.remap_frames(&remap);
+        tab.invalid=tab.invalid.iter().filter_map(|(frame,node)| {
+            remap.get(*frame).copied().flatten().map(|frame|(frame,*node))
+        }).collect();
     }
 
     pub(crate) fn collect_events(&mut self, ti: usize, s: &Settled) {

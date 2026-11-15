@@ -199,7 +199,7 @@ fn observe(agent: &mut crate::browser::Agent, ti: usize, timeout: Duration, mut 
         for frame in 0..usize::from(!agent.tabs[ti].frames.is_empty()) {
             if Instant::now() >= deadline { break; }
             let (result, mut outcome) = {
-                let page = &mut agent.tabs[ti].frames[frame];
+                let page = &mut agent.tabs[ti].frames[0];
                 if let Some(navigation) = page.script.pending_navigation.take() {
                     (Ok(()), rabbithole_engine::ScriptOutcome { navigation: Some(navigation), ..Default::default() })
                 } else {

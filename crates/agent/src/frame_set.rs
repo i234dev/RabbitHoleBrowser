@@ -65,8 +65,8 @@ impl FrameSet {
     }
 
     /// Rebuild only metadata; loading, DOM and script ownership remain in Engine.
-    /// A changed frame/document order invalidates old flat refs before reuse.
-    pub fn refresh(&mut self, allowlist: &[String]) -> Vec<usize> {
+    /// Return old-index mappings only for the same live context/document.
+    pub fn refresh(&mut self, allowlist: &[String]) -> Vec<Option<usize>> {
         let mut entries=Vec::new();
         if let Some(root)=self.root.as_ref() {
             entries.push(Entry { id:root.frame_id,parent:None,document:root.doc.weak_identity() });
@@ -96,15 +96,15 @@ impl FrameSet {
                 index+=1;
             }
         }
-        let changed=(0..self.entries.len().max(entries.len())).filter(|&index| {
-            match (self.entries.get(index),entries.get(index)) {
-                (Some(old),Some(new)) => old.id!=new.id || old.parent!=new.parent || self.root.as_ref()
-                    .and_then(|root|page_by_id(root,new.id)).is_none_or(|page|!old.document.is_for(&page.doc)),
-                _ => true,
-            }
+        // Keep refs attached to a context/document even when another frame
+        // was removed and the compact accessibility indices shifted.
+        let remap=self.entries.iter().map(|old| {
+            let index=entries.iter().position(|new|new.id==old.id)?;
+            let current=self.root.as_ref().and_then(|root|page_by_id(root,old.id))?;
+            old.document.is_for(&current.doc).then_some(index)
         }).collect();
         self.entries=entries;
-        changed
+        remap
     }
 
     /// The engine detaches the selected child while retaining every ancestor

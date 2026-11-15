@@ -122,6 +122,27 @@ impl RefMap {
         self.form_entries.retain(|_, entry| entry.0 != frame);
     }
 
+    /// Remap compact frame indices atomically by canonical context/document
+    /// identity. Missing mappings mean the old document was removed/replaced.
+    /// Rebuild lookup maps, so an index shift cannot collide with an old key.
+    pub(crate) fn remap_frames(&mut self, remap: &[Option<usize>]) {
+        let generation=self.generation;
+        self.entries.retain(|_,entry|entry.generation!=generation || remap.get(entry.frame).is_some_and(Option::is_some));
+        for entry in self.entries.values_mut().filter(|entry|entry.generation==generation) {
+            if let Some(frame)=remap.get(entry.frame).copied().flatten() {entry.frame=frame;}
+        }
+        self.form_entries.retain(|_,entry|entry.2!=generation || remap.get(entry.0).is_some_and(Option::is_some));
+        for entry in self.form_entries.values_mut().filter(|entry|entry.2==generation) {
+            if let Some(frame)=remap.get(entry.0).copied().flatten() {entry.0=frame;}
+        }
+        self.by_node=std::mem::take(&mut self.by_node).into_iter().filter_map(|((frame,node),reference)| {
+            remap.get(frame).copied().flatten().map(|frame|((frame,node),reference))
+        }).collect();
+        self.forms=std::mem::take(&mut self.forms).into_iter().filter_map(|((frame,node),reference)| {
+            remap.get(frame).copied().flatten().map(|frame|((frame,node),reference))
+        }).collect();
+    }
+
     /// Forget a node's ref (it was removed from the document).
     pub fn forget(&mut self, frame: usize, node: NodeId) {
         self.by_node.remove(&(frame, node));
@@ -131,6 +152,31 @@ impl RefMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_compaction_preserves_neighbor_element_and_form_refs() {
+        let mut refs=RefMap::default();
+        let root=refs.assign(0,7,"button","root");
+        let removed=refs.assign(1,7,"button","removed");
+        let neighbor=refs.assign(2,7,"button","neighbor");
+        let removed_form=refs.assign_form(1,9);
+        let neighbor_form=refs.assign_form(2,9);
+        refs.assign(2,11,"button","forgotten");
+        refs.forget(2,11);
+        refs.remap_frames(&[Some(0),None,Some(1)]);
+        assert_eq!(refs.lookup(0,7),Some(root));
+        assert!(refs.get(removed).is_none());
+        assert!(refs.get_form(removed_form).is_none());
+        assert_eq!(refs.get(neighbor).unwrap().frame,1);
+        assert_eq!(refs.lookup(1,7),Some(neighbor));
+        assert!(refs.lookup(1,11).is_none(),"refresh must not revive a forgotten lookup");
+        assert_eq!(refs.get_form(neighbor_form),Some((1,9,refs.generation)));
+        assert_eq!(refs.assign_form(1,9),neighbor_form);
+        refs.remap_frames(&[Some(0),None]);
+        assert!(refs.get(neighbor).is_none());
+        assert!(refs.get_form(neighbor_form).is_none());
+        assert_eq!(refs.lookup(0,7),Some(root));
+    }
 
     #[test]
     fn stable_and_generational() {
