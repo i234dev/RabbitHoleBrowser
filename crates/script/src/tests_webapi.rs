@@ -618,6 +618,51 @@ fn performance_timeline_and_idle_callbacks() {
     assert_eq!(out, vec!["perf 1 true true true true number true", "po mark:a,measure:a-to-now", "idle true true false"]);
 }
 
+
+#[test]
+fn user_activation_uses_captured_clock_without_queued_expiry_timers() {
+    let (mut env, mut host) = setup("<button>Activate</button>");
+    let button = env.doc.find_element("button").unwrap();
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.hasBeenActive,navigator.userActivation.isActive)"), vec!["false false"]);
+    run(&mut env, &mut host, "document.querySelector('button').dispatchEvent(new MouseEvent('mousedown',{bubbles:true})); performance.now=function(){return 1e12}");
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.hasBeenActive,navigator.userActivation.isActive)"), vec!["false false"]);
+    assert!(host.next_due().is_none());
+    host.dispatch_event(&mut env, button, "mousedown", crate::EventInit::simple(true, true));
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.hasBeenActive,navigator.userActivation.isActive)"), vec!["true true"]);
+    assert!(host.next_due().is_none(), "activation expiry must not schedule a page timer");
+    env.now = 5999.0; // 4999 ms since the gesture at the mock clock's 1000 ms.
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.isActive)"), vec!["true"]);
+    env.now = 6000.0;
+    // No event-loop tick is needed to observe expiry at exactly five seconds.
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.hasBeenActive,navigator.userActivation.isActive)"), vec!["true false"]);
+    run(&mut env, &mut host, "document.querySelector('button').dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))");
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.isActive)"), vec!["false"]);
+    assert!(host.next_due().is_none());
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn user_activation_renews_from_latest_trusted_input_without_hiding_page_timers() {
+    let (mut env, mut host) = setup("<button>Activate</button>");
+    let button = env.doc.find_element("button").unwrap();
+    host.dispatch_event(&mut env, button, "mousedown", crate::EventInit::simple(true, true));
+    run(&mut env, &mut host, "setTimeout(function(){console.log('real page timer')},5000)");
+    assert_eq!(host.next_due(), Some(6000.0), "a genuine 5 s page timer stays observable");
+    env.now = 5000.0;
+    host.dispatch_event(&mut env, button, "keydown", crate::EventInit::simple(true, true));
+    assert_eq!(host.next_due(), Some(6000.0));
+    env.now = 6001.0;
+    assert!(host.run_timers(&mut env, 6001.0));
+    assert!(env.logs.iter().any(|(level, message)| level == "log" && message == "real page timer"));
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.hasBeenActive,navigator.userActivation.isActive)"), vec!["true true"], "the first gesture's old expiry must not cancel the second");
+    assert!(host.next_due().is_none());
+    env.now = 9999.0;
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.isActive)"), vec!["true"]);
+    env.now = 10000.0;
+    assert_eq!(run(&mut env, &mut host, "console.log(navigator.userActivation.hasBeenActive,navigator.userActivation.isActive)"), vec!["true false"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
 #[test]
 fn platform_apis() {
     let out = logs_of(

@@ -465,12 +465,16 @@
   method(g.Navigator, 'requestMediaKeySystemAccess', function () { return Promise.reject(domError('Unsupported keySystem or supportedConfigurations.', 'NotSupportedError')); });
   acc(g.Navigator, 'oscpu', function () { return undefined; });
 
-  class UserActivation { constructor() { ILLEGAL(); } get hasBeenActive() { return this[S].been; } get isActive() { return this[S].active; } }
+  // Capture the monotonic clock before page scripts can replace it. Expiry is
+  // state, not a queued task: it must not keep an otherwise idle page pending,
+  // and a later gesture must extend activation beyond an earlier one's expiry.
+  const activationNow = g.performance.now.bind(g.performance);
+  class UserActivation { constructor() { ILLEGAL(); } get hasBeenActive() { return this[S].been; } get isActive() { return this[S].expiresAt > activationNow(); } }
   tag(UserActivation, 'UserActivation');
   define('UserActivation', UserActivation);
-  const ua = make(UserActivation, { been: false, active: false });
+  const ua = make(UserActivation, { been: false, expiresAt: 0 });
   setNav('userActivation', ua);
-  for (const t of ['keydown', 'mousedown', 'pointerdown', 'pointerup', 'touchend']) g.addEventListener(t, (e) => { if (e.isTrusted) { ua[S].been = true; ua[S].active = true; setTimeout(() => { ua[S].active = false; }, 5000); } }, true);
+  for (const t of ['keydown', 'mousedown', 'pointerdown', 'pointerup', 'touchend']) g.addEventListener(t, (e) => { if (e.isTrusted) { ua[S].been = true; ua[S].expiresAt = activationNow() + 5000; } }, true);
 
   // ------------------------------------------------------------------ Origin
   class Origin {
