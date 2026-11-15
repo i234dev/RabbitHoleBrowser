@@ -256,7 +256,7 @@ impl<'a> Builder<'a> {
             out.push(b);
             return;
         }
-        if let Some(r) = self.reuse {
+        if let Some(r) = self.reuse.filter(|_| !matches!(doc.tag(node),Some("frame"|"frameset"))) {
             if let Some(b) = r.take(node, &style) {
                 if !b.counter_touch {
                     out.push(b);
@@ -300,8 +300,9 @@ impl<'a> Builder<'a> {
     /// Build a fresh box for an element (after the reuse check).
     fn build_element_inner(&self, node: NodeId, style: &Rc<ComputedStyle>, _in_table_row: bool, out: &mut Vec<LayoutBox>) {
         let doc = self.doc();
-        let style = style.clone();
         let tag = doc.tag(node).unwrap_or("");
+        let style = crate::frameset::style(doc,node,style,(self.ctx.viewport_width,self.ctx.viewport_height))
+            .map(Rc::new).unwrap_or_else(||style.clone());
         self.apply_counters(&style);
 
         // Replaced elements. An `<object>` whose resource cannot be shown
@@ -405,7 +406,7 @@ impl<'a> Builder<'a> {
         // Text fields, text areas and menus show no generated content (like
         // Blink: only buttons, checkboxes and radios render it).
         let no_generated = match tag {
-            "textarea" | "select" => true,
+            "textarea" | "select" | "frameset" => true,
             "input" => !matches!(input_type(doc, node).as_str(), "checkbox" | "radio"),
             _ => false,
         };
@@ -445,6 +446,15 @@ impl<'a> Builder<'a> {
             // `content-visibility: hidden`: no contents at all.
             _ if style.content_visibility_hidden => Vec::new(),
             "img" => image_alt.into_iter().map(|alt| Self::text_box(style.clone(), alt)).collect(),
+            "frameset" => {
+                let mut children=Vec::new();
+                for child in doc.child_elements(node)
+                    .filter(|&child|matches!(doc.tag(child),Some("frame"|"frameset")))
+                    .take(crate::frameset::capacity(&style)) {
+                    self.build_element(child,&style,false,&mut children);
+                }
+                children
+            }
             _ => self.build_children(node, &style, kind == BoxKind::TableRow),
         };
         let after = if no_generated { None } else { self.build_pseudo(node, PseudoElement::After, kind == BoxKind::TableRow) };
@@ -542,7 +552,7 @@ impl<'a> Builder<'a> {
             _ => {
                 if matches!(style.display, Display::Flex | Display::InlineFlex) {
                     self.finish_flex(&mut b, children);
-                } else if matches!(style.display, Display::Grid | Display::InlineGrid) {
+                } else if tag=="frameset" || matches!(style.display, Display::Grid | Display::InlineGrid) {
                     self.finish_grid(&mut b, children);
                 } else if crate::table::is_row_group(&b) {
                     self.finish_row_group(&mut b, children);
