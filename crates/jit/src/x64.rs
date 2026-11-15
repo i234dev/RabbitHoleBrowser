@@ -512,6 +512,15 @@ impl Asm {
         self.op_rr(None, false, &[0x0f, 0xaf], dst, src);
         self.note(at, || format!("imul {}, {}", r32(dst), r32(src)));
     }
+    /// Unsigned `div r32`: EDX:EAX / divisor -> EAX quotient, EDX remainder.
+    /// The caller must exclude zero/overflow; flags are undefined. EAX/EDX
+    /// writes zero-extend into RAX/RDX. No other register is modified.
+    pub fn div_r32(&mut self, divisor: u8) {
+        debug_assert!(divisor < 16);
+        let at = self.pos();
+        self.op_rr(None, false, &[0xf7], 6, divisor);
+        self.note(at, || format!("div {}", r32(divisor)));
+    }
 
     // ------------------------------------------------------------ SSE2
 
@@ -689,5 +698,51 @@ mod tests {
         // imul rax, rdx, 0x100 ; imul r9, r10, 24
         assert_eq!(enc(|a| a.imul_rri64(RAX, RDX, 0x100)), [0x48, 0x69, 0xc2, 0x00, 0x01, 0x00, 0x00]);
         assert_eq!(enc(|a| a.imul_rri64(R9, R10, 24)), [0x4d, 0x69, 0xca, 0x18, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn unsigned_divide_encodes_each_32_bit_register_without_rex_w() {
+        // Intel SDM Vol.2A DIV: F7 /6, mod=11, REX.B only for r8d..r15d.
+        for reg in 0..16 {
+            let mut expected = Vec::new();
+            if reg >= 8 { expected.push(0x41); }
+            expected.extend_from_slice(&[0xf7, 0xf0 | (reg & 7)]);
+            assert_eq!(enc(|a| a.div_r32(reg)), expected, "divisor register {reg}");
+        }
+        let mut a = Asm::new(true);
+        a.div_r32(RCX);
+        assert!(a.listing().unwrap().contains("div ecx"));
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn unsigned_divide_executes_sysv64_operands_and_preserves_other_registers() {
+        if !crate::supported() { return; }
+        let mut a = Asm::new(false);
+        // Leaf SysV64 stub, also called with that explicit ABI on Windows:
+        // RDI/RSI are inputs, RDX points to four u64 output cells. Only the
+        // volatile RAX,RCX,RDX,R8 are written; no stack or saved GPR changes.
+        a.mov_rr64(R8, RDX);
+        a.mov_rr64(RAX, RDI);
+        a.mov_rr64(RCX, RSI);
+        a.alu_rr32(Alu::Xor, RDX, RDX);
+        a.div_r32(RCX);
+        a.store64(Mem::base(R8, 0), RDX);
+        a.store64(Mem::base(R8, 8), RCX);
+        a.store64(Mem::base(R8, 16), RDI);
+        a.store64(Mem::base(R8, 24), RSI);
+        a.ret();
+        let mem = crate::ExecMem::new(&a.buf, |_, _| {}).expect("executable DIV stub");
+        let f: unsafe extern "sysv64" fn(u64, u64, *mut u64) -> u64 = unsafe { std::mem::transmute(mem.ptr()) };
+        for (dividend, divisor) in [(0u32,1u32),(1,1),(31,7),(u32::MAX,1),(u32::MAX,3),(u32::MAX,u32::MAX)] {
+            // High halves distinguish DIV32 from an accidental REX.W DIV64
+            // and prove that both result registers are zero-extended.
+            let x = 0xdead_beef_0000_0000 | u64::from(dividend);
+            let y = 0xcafe_babe_0000_0000 | u64::from(divisor);
+            let mut out = [u64::MAX;4];
+            let quotient = unsafe { f(x,y,out.as_mut_ptr()) };
+            assert_eq!(quotient,u64::from(dividend/divisor));
+            assert_eq!(out,[u64::from(dividend%divisor),y,x,y]);
+        }
     }
 }
