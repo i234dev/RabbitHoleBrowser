@@ -516,7 +516,7 @@ impl Engine {
     fn click_element_depth(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers, depth: u32, count: u8, dispatched: &mut bool) -> (ClickAction, ScriptOutcome) {
         let mut out = ScriptOutcome::default();
         let document = page.doc.weak_identity();
-        if !page.doc.is_connected(target) || chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n)) {
+        if chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n)) {
             return (ClickAction::None, out);
         }
         let (x, y) = at.unwrap_or_else(|| {

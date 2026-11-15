@@ -232,3 +232,25 @@ fn double_click_on_label_keeps_forwarded_control_activation_and_counts() {
     assert!(result.starts_with("Double-clicked @e"), "{result}");
     assert_eq!(text(&a, "out"), "label:1 box:1 label:2 box:2 dblclick:2 checked=false");
 }
+
+#[test]
+fn programmatic_click_on_detached_button_fires_without_submitting_a_detached_form() {
+    let srv = serve(Box::new(|path| if path == "/wrong" { html("<p id=out>WRONG navigation</p>") } else { html(r#"<!doctype html><p id=out>Before</p><script>
+        var clicks=0,submitClicks=0,submits=0,detachedAtClick=false;
+        var button=document.createElement('button');
+        button.textContent='Appended after click';
+        button.addEventListener('click',function(){clicks++;detachedAtClick=!button.isConnected});
+        button.click();
+        document.body.appendChild(button);
+        var form=document.createElement('form'),submit=document.createElement('button');
+        form.action='/wrong';submit.type='submit';form.appendChild(submit);
+        form.addEventListener('submit',function(){submits++});
+        submit.addEventListener('click',function(){submitClicks++});
+        submit.click();
+        document.getElementById('out').textContent=[clicks,submitClicks,submits,detachedAtClick,submit.isConnected].join('|');
+        </script>"#) }));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    assert_eq!(text(&a, "out"), "1|1|0|true|false");
+    assert!(!srv.requests().iter().any(|(path,_)|path=="/wrong"));
+}
