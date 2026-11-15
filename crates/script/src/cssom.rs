@@ -346,7 +346,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         // final-layout query; the other existing frame values use style.
         let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
         let s = with_env(|env| env.frame_computed_style(frame, n.node))?;
-        if let Some(rows) = grid::axis(prop) {
+        if let Some(rows) = grid::axis(prop).filter(|_| matches!(s.display, Display::Grid | Display::InlineGrid)) {
             if let Some(tracks) = with_env(|env| env.frame_used_grid_tracks(frame, n.node, rows)) {
                 return Some(grid::used(&tracks));
             }
@@ -395,7 +395,12 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
         s
     };
     if let Some(rows) = grid::axis(prop) {
-        return Some(with_env(|env| env.used_grid_tracks(n.node, rows))
+        // Legacy internal layout (for example frameset) may use Grid boxes
+        // without making the element a CSS grid container.
+        let used = if matches!(s.display, Display::Grid | Display::InlineGrid) {
+            with_env(|env| env.used_grid_tracks(n.node, rows))
+        } else { None };
+        return Some(used
             .map(|tracks| grid::used(&tracks))
             .unwrap_or_else(|| grid::computed(if rows { &s.grid_template_rows } else { &s.grid_template_columns })));
     }
