@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rabbithole_engine::dom::{Document, NodeId};
+use rabbithole_engine::dom::{Document, DocumentWeak, NodeId};
 use rabbithole_engine::net::{CookieJar, HeaderProfile, NetLog, Request, Url};
 use rabbithole_engine::scripting::ScriptOutcome;
 use rabbithole_engine::style::{Display, Visibility};
@@ -131,12 +131,18 @@ pub struct Download {
     request: Request,
 }
 
+#[derive(Clone)]
+struct HistoryEntry {
+    request: Request,
+    document: DocumentWeak,
+}
+
 pub struct Tab {
     pub id: u32,
     pub ctx: usize,
     pub frames: crate::frame_set::FrameSet,
     pub refs: RefMap,
-    history: Vec<Request>,
+    history: Vec<HistoryEntry>,
     hist_pos: usize,
     pub netlog: Arc<NetLog>,
     pub console: VecDeque<(String, String)>,
@@ -338,9 +344,51 @@ impl Agent {
     /// Load a request into a tab's top frame (or a child frame). Returns a
     /// short report of what happened (navigation, download, error).
     pub fn navigate(&mut self, ti: usize, req: Request, push_history: bool) -> Result<String, String> {
+        self.navigate_request(ti, req, push_history, true, false, 6)
+    }
+
+    fn navigate_request(&mut self, ti: usize, req: Request, push_history: bool, allow_fragment: bool, traversal: bool, remaining: u8) -> Result<String, String> {
         self.prepare(ti);
         if !self.allowed(&req.url) {
             return Err(format!("Navigation blocked: {} is not in the domain allowlist.", req.url.host));
+        }
+        if allow_fragment && self.fragment_request(ti, 0, &req, traversal) {
+            let old_url = self.tabs[ti].frames[0].url.clone();
+            let push = push_history && old_url != req.url;
+            let applied = self.tabs[ti].frames.with_page(&self.engine, 0, |page| {
+                self.engine.navigate_fragment(page, req.url.clone(), push, traversal)
+            })?;
+            if applied.is_none() { return Err("The document changed before fragment navigation".into()); }
+            if push {
+                let tab = &mut self.tabs[ti];
+                tab.history.truncate(tab.hist_pos + if tab.history.is_empty() { 0 } else { 1 });
+                tab.history.push(HistoryEntry { request: req.clone(), document: tab.frames[0].doc.weak_identity() });
+                tab.hist_pos = tab.history.len() - 1;
+            }
+            let mut report = format!("same-document navigation to {}", esc(&req.url.to_string()));
+            if !self.defer_settle {
+                let settled = {
+                    let tab = &mut self.tabs[ti];
+                    let log = tab.netlog.clone();
+                    wait::settle(&self.engine, &mut tab.frames[0], Some(&log), self.cfg.settle_cap)
+                };
+                self.collect_events(ti, &settled);
+                if let Some(pending) = &settled.pending {
+                    report.push_str(&format!("\nNote: page not fully settled after {:.1} s: waiting for {pending}", settled.elapsed.as_secs_f32()));
+                }
+                if let Some(nav) = settled.navigation {
+                    if remaining > 0 {
+                        let next = self.navigate_request(ti, nav.request, !nav.replace, true, false, remaining - 1)?;
+                        if !next.is_empty() { report.push_str(&format!("\n{next}")); }
+                    } else {
+                        self.tabs[ti].frames[0].script.pending_navigation = Some(nav);
+                        report.push_str("\nNavigation chain limit reached; navigation remains pending.");
+                    }
+                }
+            }
+            self.load_frames(ti);
+            self.drain_all_consoles(ti);
+            return Ok(report);
         }
         let vp = self.cfg.viewport;
         let mut req = req;
@@ -430,12 +478,22 @@ impl Agent {
         tab.load_net_id = tab.netlog.last_id();
         if push_history {
             tab.history.truncate(tab.hist_pos + if tab.history.is_empty() { 0 } else { 1 });
-            tab.history.push(req.clone());
+            tab.history.push(HistoryEntry { request: req.clone(), document: tab.frames[0].doc.weak_identity() });
             tab.hist_pos = tab.history.len() - 1;
+        } else if let Some(entry) = tab.history.get_mut(tab.hist_pos) {
+            entry.document = tab.frames[0].doc.weak_identity();
+            entry.request = req.clone();
         }
         self.load_frames(ti);
         self.contexts[self.tabs[ti].ctx].save_cookies();
         Ok(report)
+    }
+
+    fn fragment_request(&self, ti: usize, frame: usize, req: &Request, traversal: bool) -> bool {
+        let Some(current) = self.tabs[ti].frames.get(frame) else { return false };
+        req.method == "GET" && req.body.is_none()
+            && current.page.url.without_fragment() == req.url.without_fragment()
+            && (traversal || req.url.fragment.is_some() || current.page.url.fragment != req.url.fragment)
     }
 
     /// The engine alone loads/owns nested contexts; the agent exposes a
@@ -778,6 +836,8 @@ impl Agent {
     /// Run the follow-up of an action: navigation, popups, dialogs,
     /// settle, then report the diff (or the new page).
     pub fn finish_action(&mut self, ti: usize, frame: usize, before: Vec<((usize, NodeId, u16, bool), String)>, mut outcome: ScriptOutcome, request: Option<Request>, what: &str, target: Option<(usize, NodeId)>) -> Result<String, String> {
+        let mut what = what.to_string();
+        let mut same_document_navigation = false;
         let target_document=target.and_then(|(frame,_)|self.tabs[ti].frames.document(frame));
         let mut lines = Vec::new();
         let dialogs = std::mem::take(&mut outcome.dialogs);
@@ -798,44 +858,67 @@ impl Agent {
         if let Some(req) = request {
             if frame == 0 {
                 let from = self.tabs[ti].frames[0].url.clone();
+                let document = self.tabs[ti].frames[0].doc.weak_identity();
                 let report = self.navigate(ti, req, true)?;
                 if report.starts_with("Download #") {
                     lines.push(format!("{what}: {report}"));
                     return Ok(lines.join("\n"));
                 }
                 let page = &self.tabs[ti].frames[0];
-                let same_doc = page.url.without_fragment() == from.without_fragment();
-                lines.push(format!("{what} → navigated to {} (status {}){}", esc(&page.url.to_string()), page.status, if same_doc { " (same URL reloaded)" } else { "" }));
-                if !report.trim().is_empty() {
-                    lines.push(report.trim().to_string());
-                }
-                let snap = if self.cfg.full_snapshot_on_open { self.snapshot_text(ti, 1500, None, false, false)? } else { self.summary_text(ti)? };
-                lines.push(snap);
-                if !self.defer_settle {
-                    if let Some(pending) = wait::pending(self, ti) { lines.push(format!("Pending: {pending}.")); }
-                }
-                return Ok(lines.join("\n"));
-            }
-            // Keep the engine's canonical child ID and parent/origin metadata.
-            self.prepare(ti);
-            if !self.allowed(&req.url) { return Err("Frame navigation blocked by the domain allowlist".into()); }
-            let viewport=self.tabs[ti].frames.get(frame).ok_or("the target frame is gone")?.page.viewport;
-            match self.engine.loader.load_request(&req,viewport) {
-                Ok(loaded@Loaded::Page(_)) => {
-                    let outcome=self.tabs[ti].frames.install(&self.engine,frame,loaded)?;
-                    self.collect_side_effects(ti,&outcome.dialogs,&outcome.new_windows);
-                    self.tabs[ti].refs.drop_frame(frame);
-                    if !self.defer_settle {
-                        let tab=&mut self.tabs[ti];let log=tab.netlog.clone();
-                        let settled=wait::settle(&self.engine,&mut tab.frames[0],Some(&log),self.cfg.settle_cap);
-                        self.collect_events(ti,&settled);
+                if document.is_for(&page.doc) {
+                    same_document_navigation = true;
+                    what.push_str(&format!(" → {report}"));
+                } else {
+                    let same_doc = page.url.without_fragment() == from.without_fragment();
+                    lines.push(format!("{what} → navigated to {} (status {}){}", esc(&page.url.to_string()), page.status, if same_doc { " (same URL reloaded)" } else { "" }));
+                    if !report.trim().is_empty() {
+                        lines.push(report.trim().to_string());
                     }
-                    if let Some(frame)=self.tabs[ti].frames.get(frame) {
-                        lines.push(format!("{what} → frame navigated to {}",esc(&frame.page.url.to_string())));
-                    } else { lines.push(format!("{what} → frame was removed during navigation")); }
+                    let snap = if self.cfg.full_snapshot_on_open { self.snapshot_text(ti, 1500, None, false, false)? } else { self.summary_text(ti)? };
+                    lines.push(snap);
+                    if !self.defer_settle {
+                        if let Some(pending) = wait::pending(self, ti) { lines.push(format!("Pending: {pending}.")); }
+                    }
+                    return Ok(lines.join("\n"));
                 }
-                Ok(Loaded::Download(download)) => lines.push(format!("{what} → frame download {} (not saved)",esc(&download.suggested_filename()))),
-                Err(error) => lines.push(format!("{what} → frame navigation failed: {error}")),
+            } else {
+                // Keep the engine's canonical child ID and parent/origin metadata.
+                self.prepare(ti);
+                if !self.allowed(&req.url) { return Err("Frame navigation blocked by the domain allowlist".into()); }
+                let viewport=self.tabs[ti].frames.get(frame).ok_or("the target frame is gone")?.page.viewport;
+                if self.fragment_request(ti, frame, &req, false) {
+                    let push = self.tabs[ti].frames.get(frame).unwrap().page.url != req.url;
+                    self.tabs[ti].frames.with_page(&self.engine, frame, |page| {
+                        self.engine.navigate_fragment(page, req.url.clone(), push, false)
+                    })?.ok_or("the frame document changed before fragment navigation")?;
+                    same_document_navigation = true;
+                    what.push_str(&format!(" → same-document navigation to {}", esc(&req.url.to_string())));
+                    if !self.defer_settle {
+                        let tab = &mut self.tabs[ti];
+                        let log = tab.netlog.clone();
+                        let s = wait::settle(&self.engine, &mut tab.frames[0], Some(&log), self.cfg.settle_cap);
+                        self.collect_events(ti, &s);
+                        settled = Some(s);
+                    }
+                } else {
+                    match self.engine.loader.load_request(&req,viewport) {
+                        Ok(loaded@Loaded::Page(_)) => {
+                            let outcome=self.tabs[ti].frames.install(&self.engine,frame,loaded)?;
+                            self.collect_side_effects(ti,&outcome.dialogs,&outcome.new_windows);
+                            self.tabs[ti].refs.drop_frame(frame);
+                            if !self.defer_settle {
+                                let tab=&mut self.tabs[ti];let log=tab.netlog.clone();
+                                let settled=wait::settle(&self.engine,&mut tab.frames[0],Some(&log),self.cfg.settle_cap);
+                                self.collect_events(ti,&settled);
+                            }
+                            if let Some(frame)=self.tabs[ti].frames.get(frame) {
+                                lines.push(format!("{what} → frame navigated to {}",esc(&frame.page.url.to_string())));
+                            } else { lines.push(format!("{what} → frame was removed during navigation")); }
+                        }
+                        Ok(Loaded::Download(download)) => lines.push(format!("{what} → frame download {} (not saved)",esc(&download.suggested_filename()))),
+                        Err(error) => lines.push(format!("{what} → frame navigation failed: {error}")),
+                    }
+                }
             }
         }
         self.load_frames(ti);
@@ -909,6 +992,8 @@ impl Agent {
                 }
                 m.push_str(" (a style-only change; screenshot to see it).");
                 lines.push(m);
+            } else if same_document_navigation {
+                lines.push("No change in the page content.".into());
             } else if !has_events {
                 lines.push(format!("⚠ The action had no visible effect{}: {}.", if focus_changed { " (the element only received focus)" } else { "" }, why.join(", ")));
             } else {
@@ -1143,15 +1228,16 @@ impl Agent {
         if pos < 0 || pos as usize >= tab.history.len() {
             return Err(if delta < 0 { "No previous page in history.".into() } else { "No next page in history.".into() });
         }
-        let req = tab.history[pos as usize].clone();
+        let entry = tab.history[pos as usize].clone();
+        let same_document = tab.page().is_some_and(|page| entry.document.is_for(&page.doc));
         self.tabs[ti].hist_pos = pos as usize;
-        self.navigate(ti, req, false)
+        self.navigate_request(ti, entry.request, false, same_document, same_document, 6)
     }
 
     pub fn reload(&mut self, ti: usize) -> Result<String, String> {
         let tab = &self.tabs[ti];
-        let req = tab.history.get(tab.hist_pos).cloned().or_else(|| tab.page().map(|p| Request::get(p.url.clone()))).ok_or("nothing to reload")?;
-        self.navigate(ti, req, false)
+        let req = tab.history.get(tab.hist_pos).map(|entry| entry.request.clone()).or_else(|| tab.page().map(|p| Request::get(p.url.clone()))).ok_or("nothing to reload")?;
+        self.navigate_request(ti, req, false, false, false, 6)
     }
 
     /// Download offered earlier, saved explicitly.

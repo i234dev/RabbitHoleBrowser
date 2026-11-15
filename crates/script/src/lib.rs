@@ -589,6 +589,12 @@ impl ScriptHost {
         self.enter(env, |realm| events::dispatch(realm, TargetKey::Window, event_type, EventInit::simple(false, false), true))
     }
 
+    /// Apply an embedder fragment navigation to the existing realm. Events are
+    /// queued as tasks, exactly like the Location.hash setter; no JS is evaluated.
+    pub fn navigate_fragment(&mut self, env: &mut dyn HostEnv, old_url: &str, new_url: &str, push: bool, traversal: bool) {
+        self.enter(env, |realm| window::navigate_fragment(realm, old_url, new_url, push, traversal));
+    }
+
     /// Deliver a message another frame posted to this window (`data` is
     /// the serialized structured clone, `origin` the sender's origin,
     /// `source` the sender's frame id).

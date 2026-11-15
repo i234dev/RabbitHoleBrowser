@@ -1016,6 +1016,35 @@ impl Engine {
         out
     }
 
+    /// Navigate an existing document to a fragment without replacing DOM,
+    /// realm, child contexts or service-worker client. The embedder chooses
+    /// history push/traversal; this method refuses a different resource URL.
+    pub fn navigate_fragment(&self, page: &mut Page, url: Url, push: bool, traversal: bool) -> Option<ScriptOutcome> {
+        if page.url.without_fragment() != url.without_fragment() { return None; }
+        let old = page.url.to_string();
+        if self.scripting {
+            self.ensure_script_host(page);
+            if page.script.host.is_none() { return None; }
+        }
+        page.url = url.clone();
+        if self.scripting {
+            if let Some(mut host) = page.script.host.take() {
+                {
+                    let mut env = EngineEnv { engine: self, page };
+                    host.realm().begin_task();
+                    host.navigate_fragment(&mut env, &old, &url.to_string(), push, traversal);
+                    host.realm().set_deadline(None);
+                }
+                page.script.host = Some(host);
+            }
+        }
+        self.sync_frames(page);
+        if let Some(y) = page.fragment_scroll(url.fragment.as_deref().unwrap_or("")) {
+            self.set_page_scroll(page, 0.0, y);
+        }
+        Some(ScriptOutcome::default())
+    }
+
     /// Dispatch a window-level event (`resize`, `scroll`, `hashchange`, ...).
     pub fn dispatch_window_event(&self, page: &mut Page, event_type: &str) -> ScriptOutcome {
         let Some(mut host) = page.script.host.take() else {

@@ -99,10 +99,12 @@ fn scroll_to_fragment(frag: &str) {
 fn fire_hashchange(realm: &mut Realm, old: &str, new: &str) {
     let init = crate::EventInit::simple(false, false);
     let id = crate::events::create_event(realm, "HashChangeEvent", "hashchange", &init, true);
+    let event_root = realm.native_root(Value::Object(id));
     realm.define_property(id, "oldURL", Value::str(old), ACC);
     realm.define_property(id, "newURL", Value::str(new), ACC);
     let f = realm.new_native_function("hashchange", 1, deliver_hashchange);
     add_timer(realm, Value::Object(f), 0.0, vec![Value::Object(id)], false);
+    realm.native_roots.truncate(event_root);
 }
 
 fn deliver_hashchange(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
@@ -110,6 +112,31 @@ fn deliver_hashchange(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResu
         crate::events::dispatch_object(realm, TargetKey::Window, id, None);
     }
     Ok(Value::Undefined)
+}
+
+/// Native embedder entry, called outside a running script stack.
+pub(crate) fn navigate_fragment(realm: &mut Realm, old_url: &str, new_url: &str, push: bool, traversal: bool) {
+    // A script may already have changed location.hash/pushState. Its override
+    // is the actual previous location, not a stale embedder URL.
+    let old = state().borrow().location_override.clone().unwrap_or_else(|| old_url.to_string());
+    {
+        let st = state();
+        let mut st = st.borrow_mut();
+        st.location_override = Some(new_url.to_string());
+        if push { st.history_len += 1; }
+    }
+    if traversal {
+        let id = crate::events::create_event(realm, "PopStateEvent", "popstate", &crate::EventInit::simple(false, false), true);
+        let event_root = realm.native_root(Value::Object(id));
+        let value = state().borrow().history_state.clone();
+        realm.define_property(id, "state", value, ACC);
+        let deliver = realm.new_native_function("popstate", 1, deliver_hashchange);
+        add_timer(realm, Value::Object(deliver), 0.0, vec![Value::Object(id)], false);
+        realm.native_roots.truncate(event_root);
+    }
+    let old_fragment = Url::parse_absolute(&old).and_then(|u| u.fragment);
+    let new_fragment = Url::parse_absolute(new_url).and_then(|u| u.fragment);
+    if old_fragment != new_fragment { fire_hashchange(realm, &old, new_url); }
 }
 
 pub(crate) fn navigate_to(u: Url, replace: bool) {
