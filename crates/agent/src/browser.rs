@@ -64,11 +64,14 @@ impl Default for Config {
 pub struct Out {
     pub text: String,
     pub png: Option<Vec<u8>>,
+    /// Known operation failure, independent of page-controlled output text.
+    /// Standalone callers retain their existing Result/MCP error policy.
+    pub failed: bool,
 }
 
 impl Out {
     pub fn text(t: impl Into<String>) -> Out {
-        Out { text: t.into(), png: None }
+        Out { text: t.into(), png: None, failed: false }
     }
 }
 

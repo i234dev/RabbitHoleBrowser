@@ -1239,7 +1239,7 @@ fn screenshot(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         text.push('\n');
         text.push_str(&fence(&legend.join("\n")));
     }
-    Ok(Out { text, png: Some(png) })
+    Ok(Out { text, png: Some(png), failed: false })
 }
 
 fn tabs(agent: &mut Agent, a: &Value) -> Result<Out, String> {
