@@ -11,6 +11,11 @@ authors.workspace = true
 name = "rabbithole"
 path = "src/main.rs"
 
+[[test]]
+name = "jit_cli"
+path = "tests/jit_cli.rs"
+required-features = ["jit"]
+
 [features]
 # The baseline JavaScript compiler is built in, and off at run time
 # unless --jit=on / RABBITHOLE_JIT=on.
