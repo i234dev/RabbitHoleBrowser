@@ -28,7 +28,7 @@ Design goals, in order:
 | `open`       | Load a URL (or `back` / `forward` / `reload`); default: short [page summary](#the-page-summary). `find` (string or string array) returns the header, covering-layer warnings and matching passages; `window` and `limit` adjust that search, and `summary=true` adds the overview. Without `find`, `snapshot=true` (alias `full=true`, or any `max_tokens`) returns the full snapshot. Other options: `new_tab`, `context` (isolated-session name), `bot`, `robots`, `allowlist`, `javascript`, `dialog`. |
 | `snapshot`   | The semantic tree of the page. `ref` expands one element (a truncated list, a collapsed landmark); `max_tokens` (default 2500); `hidden=true` also lists hidden content, marked; `urls=true` shows link targets. |
 | `read`       | Main content as Markdown, without nav/footer/related; without `ref`, starts at the article beginning. Optional `ref` reads that subtree. `max_tokens` defaults to 4000; `offset` counts characters. `links=true` keeps link refs; `links=false` uses plain text. `cites=false` omits same-page superscript citation links; `cites=true` includes them. Use `find` for a particular fact. |
-| `find`       | Search `text` (string or string array, any term), `role` + `name`, or CSS `selector`. Returns element refs in document order. `window` (default 240 characters; `context` is an alias) selects passages around the first occurrence of each term, capped at three windows per element. Zero keeps the legacy first 120. `limit` counts elements (default 20). |
+| `find`       | Search `text` (string or string array, any term), `role` + `name`, or CSS `selector`. Returns element refs; text searches rank whole-word matches first, then actionable controls, retaining document order within each rank. `window` (default 240 characters; `context` is an alias) selects passages around the first occurrence of each term, capped at three windows per element. Zero keeps the legacy first 120. `limit` counts elements (default 20). |
 | `click`      | Click by ref (real hit-tested pointer sequence). `hover=true` only hovers. `force=true` dispatches even if covered/invisible. `ref="cookies"` rejects a cookie banner. |
 | `type`       | Type `text` into a field with per-key events (`clear=true` replaces), and/or press a `key` (`Enter`, `Tab`, `Escape`, `ArrowDown`, `Backspace`, …). `submit=true` presses Enter afterwards (implicit submission). |
 | `fill`       | No arguments: list forms. `ref=@fN`: list its fields. `values={label|name|id|@eN: value}` fills text, checkbox booleans and select/radio options. Without `ref`, use only `@eN` keys or a page with one form. Stops remaining fields after navigation or document replacement. `submit=true` validates and submits. A single field: `ref=@eN value=…`. |
@@ -166,7 +166,7 @@ before navigation or context creation; use `window` for the passage size.
 
 On a loaded page, `find {"text":["Guido","1989","CWI"],"limit":10}` searches
 all eligible elements once, returning an element when any term matches. Results
-follow document order, including child documents at their iframe. Multiple text
+rank whole-word matches first and actionable controls second, then follow document order within each rank, including child documents at their iframe. Multiple text
 runs belonging to one element count as one result. `role` and `name` restrict the
 eligible elements before matching. CSS selector search keeps its existing format.
 Search excludes hidden content, as before.
@@ -211,7 +211,7 @@ role search retains its usual matching elements; a distinct link label is kept.
 
 `limit` truncates returned elements, not the scan: a term found later is never
 listed as absent just because its element was omitted. The final
-`No matches for:` line reports terms absent from the entire eligible selection.
+`No matches for:` line reports terms absent from the entire eligible selection. If all terms are absent, this is the only absence message; `No matches.` is reserved for other empty searches.
 Search results and this line remain inside the untrusted-content fences; refs
 remain usable with `read`, `snapshot` and actions.
 
@@ -605,3 +605,12 @@ opt-in (whole tool output, fences and notes included; measured 2026-11-11):
 
 Page load time is dominated by the engine (script execution and full
 restyles on large pages); the auto-wait adds at most its cap.
+
+### Action feedback
+
+Dialog summaries include ordinary elements with scripted click handlers, such as
+`clickable "Close" @e12`, alongside buttons. After filling, synchronous input/change
+handlers are checked against the applied value. If a handler replaces it, the
+action reports `value is still …` instead of claiming that field was filled.
+Password feedback reports only the character count. Navigation retains its
+existing outcome and is followed before reusing document references.
