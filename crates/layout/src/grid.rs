@@ -305,6 +305,54 @@ fn find_line(names: &[Vec<String>], name: &str, is_end: bool) -> Option<i32> {
     None
 }
 
+/// Count distinct lines with this name, then continue into the implicit grid
+/// on the searched side (Grid2 §8.3). Multiple copies of a name on one line
+/// still identify that same line once.
+fn named_line(names: &[Vec<String>], name: &str, occurrence: i32) -> i32 {
+    let mut left = occurrence.unsigned_abs().max(1) as i64;
+    if occurrence >= 0 {
+        for (i, line) in names.iter().enumerate() {
+            if line.iter().any(|n| n == name) {
+                left -= 1;
+                if left == 0 { return i as i32; }
+            }
+        }
+        (names.len().saturating_sub(1) as i64 + left).min(i32::MAX as i64) as i32
+    } else {
+        for (i, line) in names.iter().enumerate().rev() {
+            if line.iter().any(|n| n == name) {
+                left -= 1;
+                if left == 0 { return i as i32; }
+            }
+        }
+        (-left).max(i32::MIN as i64) as i32
+    }
+}
+
+/// Resolve a named span from its opposite edge, excluding the edge itself.
+/// Only implicit lines on the search-direction side have the missing name;
+/// an anchor beyond the other side must not count those intervening lines.
+fn named_span_line(names: &[Vec<String>], name: &str, count: i32, anchor: i32, forward: bool) -> i32 {
+    let mut left = i64::from(count.max(1));
+    if forward {
+        for (i, line) in names.iter().enumerate() {
+            if i as i64 > i64::from(anchor) && line.iter().any(|n| n == name) {
+                left -= 1;
+                if left == 0 { return i as i32; }
+            }
+        }
+        (i64::from(anchor).max(names.len().saturating_sub(1) as i64) + left).min(i32::MAX as i64) as i32
+    } else {
+        for (i, line) in names.iter().enumerate().rev() {
+            if (i as i64) < i64::from(anchor) && line.iter().any(|n| n == name) {
+                left -= 1;
+                if left == 0 { return i as i32; }
+            }
+        }
+        (i64::from(anchor).min(0) - left).max(i32::MIN as i64) as i32
+    }
+}
+
 fn line_spec(l: &GridLine, names: &[Vec<String>], n_lines: i32, is_end: bool) -> LineSpec {
     match l {
         GridLine::Auto => LineSpec::Auto,
@@ -322,13 +370,34 @@ fn line_spec(l: &GridLine, names: &[Vec<String>], n_lines: i32, is_end: bool) ->
             if *span {
                 LineSpec::Span(1)
             } else {
-                match find_line(names, name, is_end) {
-                    Some(i) => LineSpec::Line(i),
-                    None => LineSpec::Auto,
-                }
+                LineSpec::Line(find_line(names, name, is_end).unwrap_or_else(|| named_line(names, name, 1)))
             }
         }
+        GridLine::NamedNth(name, occurrence, false) => LineSpec::Line(named_line(names, name, *occurrence)),
+        // Without an opposite line a named span becomes a span of one.
+        // line_specs resolves anchored named spans before placement.
+        GridLine::NamedNth(_, _, true) => LineSpec::Span(1),
     }
+}
+
+fn named_span(line: &GridLine) -> Option<(&str, i32)> {
+    match line {
+        GridLine::Named(name, true) => Some((name.as_str(), 1)),
+        GridLine::NamedNth(name, count, true) => Some((name.as_str(), *count)),
+        _ => None,
+    }
+}
+
+fn line_specs(start: &GridLine, end: &GridLine, names: &[Vec<String>], n_lines: i32) -> (LineSpec, LineSpec) {
+    let mut a = line_spec(start, names, n_lines, false);
+    let mut z = line_spec(end, names, n_lines, true);
+    if let (Some((name, count)), LineSpec::Line(anchor)) = (named_span(start), z) {
+        a = LineSpec::Line(named_span_line(names, name, count, anchor, false));
+    }
+    if let (Some((name, count)), LineSpec::Line(anchor)) = (named_span(end), a) {
+        z = LineSpec::Line(named_span_line(names, name, count, anchor, true));
+    }
+    (a, z)
 }
 
 /// §8.3.1: resolve a start/end pair to either a definite [start, end) or a
@@ -856,16 +925,17 @@ impl<'a> Layouter<'a> {
                 let Some(node) = c.node else { continue };
                 let s = c.style.clone();
                 let axis = |start: &rabbithole_style::GridLine, end: &rabbithole_style::GridLine, names: &[Vec<String>], n: i32| -> (Option<i32>, Option<i32>) {
-                    let a = match line_spec(start, names, n, false) {
+                    let (start, end) = line_specs(start, end, names, n);
+                    let a = match start {
                         LineSpec::Line(l) => Some(l),
                         _ => None,
                     };
-                    let e = match line_spec(end, names, n, true) {
+                    let e = match end {
                         LineSpec::Line(l) => Some(l),
                         LineSpec::Span(k) => a.map(|a| a + k),
                         LineSpec::Auto => None,
                     };
-                    let a = match (a, line_spec(start, names, n, false)) {
+                    let a = match (a, start) {
                         (None, LineSpec::Span(k)) => e.map(|e| e - k),
                         (a, _) => a,
                     };
@@ -958,10 +1028,8 @@ impl<'a> Layouter<'a> {
         let mut pending: Vec<Pending> = Vec::new();
         for &(_, idx) in &order {
             let s = &b.children[idx].style;
-            let rs = line_spec(&s.grid_row_start, &rows.names, n_row_lines, false);
-            let re = line_spec(&s.grid_row_end, &rows.names, n_row_lines, true);
-            let cs = line_spec(&s.grid_column_start, &cols.names, n_col_lines, false);
-            let ce = line_spec(&s.grid_column_end, &cols.names, n_col_lines, true);
+            let (rs, re) = line_specs(&s.grid_row_start, &s.grid_row_end, &rows.names, n_row_lines);
+            let (cs, ce) = line_specs(&s.grid_column_start, &s.grid_column_end, &cols.names, n_col_lines);
             let (mut row,mut col)=(self.item_pair(&b.children[idx],true,rs,re),self.item_pair(&b.children[idx],false,cs,ce));
             if cols.inherited.is_some() {col=subgrid::clamp_placement(col,cols.tracks.len());}
             if rows.inherited.is_some() {row=subgrid::clamp_placement(row,rows.tracks.len());}

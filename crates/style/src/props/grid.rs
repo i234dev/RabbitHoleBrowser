@@ -274,6 +274,9 @@ fn parse_areas(comps: &[&[Token]]) -> Option<Vec<Vec<String>>> {
 
 /// `<grid-line>`: auto | <integer> [name] | span <n|name> | name
 fn parse_grid_line(comps: &[&[Token]]) -> Option<GridLine> {
+    if comps.len() == 1 && values::is_ident(comps[0], "auto") {
+        return Some(GridLine::Auto);
+    }
     let mut span = false;
     let mut num: Option<i32> = None;
     let mut name: Option<String> = None;
@@ -282,20 +285,26 @@ fn parse_grid_line(comps: &[&[Token]]) -> Option<GridLine> {
         // the keywords are matched case-insensitively.
         if let [Token::Ident(raw)] = c {
             match raw.to_ascii_lowercase().as_str() {
-                "auto" => return Some(GridLine::Auto),
-                "span" => span = true,
-                _ => name = Some(raw.clone()),
+                "span" if !span => span = true,
+                "auto" | "span" | "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default" => return None,
+                _ if name.is_none() => name = Some(raw.clone()),
+                _ => return None,
             }
-        } else if let Some(n) = values::number(c) {
-            num = Some(n as i32);
+        } else if let [Token::Number(n)] = c {
+            if num.is_some() || !n.is_finite() || n.fract() != 0. || *n == 0. || *n < i32::MIN as f32 || *n >= i32::MAX as f32 {
+                return None;
+            }
+            num = Some(*n as i32);
         } else {
             return None;
         }
     }
+    if span && num.is_some_and(|n| n < 0) { return None; }
     Some(match (span, num, name) {
-        (true, Some(n), _) => GridLine::Span(n.max(1) as u32),
+        (s, Some(n), Some(name)) => GridLine::NamedNth(name, n, s),
+        (true, Some(n), None) => GridLine::Span(n as u32),
         (true, None, Some(n)) => GridLine::Named(n, true),
-        (false, Some(n), _) => GridLine::Line(n),
+        (false, Some(n), None) => GridLine::Line(n),
         (false, None, Some(n)) => GridLine::Named(n, false),
         _ => return None,
     })

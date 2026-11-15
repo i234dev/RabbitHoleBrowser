@@ -1,6 +1,51 @@
 use super::{auto_track, complete_track_sizing, expand_tracks, repeat_fixed_size, resolve_intrinsic_tracks, size_tracks, size_tracks_with_space, Contribution, GridSpace, Sizing, Track};
 use rabbithole_style::{Length, TrackListItem, TrackSize};
 
+fn named_test_lines() -> Vec<Vec<String>> {
+    ["A", "B", "C", "A", "B", "C", "A", "B", "C"].into_iter().map(|name| vec![name.into()]).collect()
+}
+
+#[test]
+fn named_line_indices_count_matching_lines_in_both_directions() {
+    let mut names = named_test_lines();
+    names[2].push("C".into());
+    for (occurrence, expected) in [(1, 2), (2, 5), (3, 8), (4, 9), (-1, 8), (-2, 5), (-3, 2), (-4, -1)] {
+        assert_eq!(super::named_line(&names, "C", occurrence), expected);
+    }
+    assert_eq!(super::named_line(&names, "missing", 1), 9);
+    assert_eq!(super::named_line(&names, "missing", -1), -1);
+    // The identifier remains case-sensitive.
+    assert_eq!(super::named_line(&names, "c", 1), 9);
+}
+
+#[test]
+fn indexed_names_do_not_use_the_bare_names_implicit_area_suffix() {
+    use rabbithole_style::GridLine;
+    let names = vec![vec!["area-start".into()], vec!["area".into()], vec!["area-end".into()]];
+    assert_eq!(super::line_spec(&GridLine::Named("area".into(), false), &names, 3, false), super::LineSpec::Line(0));
+    assert_eq!(super::line_spec(&GridLine::Named("area".into(), false), &names, 3, true), super::LineSpec::Line(2));
+    assert_eq!(super::line_spec(&GridLine::NamedNth("area".into(), 1, false), &names, 3, false), super::LineSpec::Line(1));
+}
+
+#[test]
+fn named_spans_search_from_the_opposite_line_and_respect_the_implicit_side() {
+    use rabbithole_style::GridLine;
+    use super::LineSpec::{Line, Span};
+    let names = named_test_lines();
+    let indexed = |count| GridLine::NamedNth("C".into(), count, true);
+    assert_eq!(super::line_specs(&GridLine::Line(3), &indexed(2), &names, 9), (Line(2), Line(8)));
+    assert_eq!(super::line_specs(&indexed(2), &GridLine::Line(9), &names, 9), (Line(2), Line(8)));
+    assert_eq!(super::line_specs(&GridLine::Auto, &indexed(2), &names, 9), (super::LineSpec::Auto, Span(1)));
+    assert_eq!(super::line_specs(&indexed(2), &indexed(3), &names, 9), (Span(1), Span(1)));
+    let unnamed = vec![vec![], vec![]];
+    // Grid2 §8.3's `span foo / 4` example skips end-side implicit lines
+    // while searching for a start-side named span.
+    assert_eq!(super::named_span_line(&unnamed, "foo", 1, 3, false), -1);
+    assert_eq!(super::named_span_line(&unnamed, "foo", 1, -2, true), 2);
+    assert_eq!(super::named_span_line(&unnamed, "foo", 2, 4, true), 6);
+    assert_eq!(super::named_span_line(&unnamed, "foo", 2, -2, false), -4);
+}
+
 fn intrinsic_sizes(tracks: &[Track], contributions: &[Contribution]) -> (Vec<f32>, Vec<f32>) {
     let mut min = tracks.to_vec();
     let mut max = tracks.to_vec();
