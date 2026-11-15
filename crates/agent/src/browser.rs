@@ -993,7 +993,7 @@ impl Agent {
                     return Err(format!("@{rr} {label} is not clickable: covered by @e{cr} ({name}). Close or dismiss it first{}, or pass force=true.", if overlay::is_cookie_text(&page.doc.text_content(c)) { " (click ref=\"cookies\" rejects cookies)" } else { "" }));
                 }
                 Reach::Invisible if !force => {
-                    return Err(format!("@{rr} {label} is not visible (no box, zero size or hidden). Pass force=true to dispatch the event anyway."));
+                    return Err(format!("@{rr} {label} is not visible (no box, zero size or hidden). Try hovering its container first (click … hover=true), or pass force=true to dispatch the event anyway."));
                 }
                 Reach::Point(x, y) if !hover_only => {
                     let up = engine.click_at(page, x, y, Modifiers::default());

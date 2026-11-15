@@ -444,7 +444,7 @@ Errors are sentences an agent can act on:
 | Covered   | `@e11 button "votar" is not clickable: covered by @e200 (dialog 'Aceptar cookies'). Close or dismiss it first (click ref="cookies" rejects cookies), or pass force=true.` |
 | Stale ref | `@e11 (button "votar") no longer exists (page re-rendered). Similar candidate: @e87 button "votar"` |
 | Old page  | `@e11 (…) belongs to a previous page; the tab has navigated since. Take a new snapshot.` |
-| Invisible | `@e7 link "Menú" is not visible (no box, zero size or hidden). Pass force=true to dispatch the event anyway.` |
+| Invisible | `@e7 link "Menú" is not visible (no box, zero size or hidden). Try hovering its container first (click … hover=true), or pass force=true to dispatch the event anyway.` |
 | Disabled  | `@e9 button "Enviar" is disabled.` |
 | HTTP      | `Navigation to URL failed: HTTP error 403. The site refused the request (login required or bot blocked).` |
 | Bot wall  | note `HTTP status 403: the page looks like a captcha/bot-check wall; an automated agent cannot pass it.` |
