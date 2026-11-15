@@ -398,6 +398,12 @@ pub struct DoubleClickOutcome {
     pub stopped: Option<&'static str>,
 }
 
+fn disabled_pointer_target(page: &Page, node: NodeId) -> bool {
+    page.doc.ancestor_or_self(node, |ancestor| {
+        crate::ax::states_of(page, ancestor, "", false).iter().any(|state| state == "disabled")
+    }).is_some()
+}
+
 pub fn double_click_at(engine: &Engine, page: &mut Page, requested: NodeId, x: f32, y: f32) -> DoubleClickOutcome {
     let mut result = DoubleClickOutcome::default();
     let document = page.doc.weak_identity();
@@ -420,7 +426,7 @@ pub fn double_click_at(engine: &Engine, page: &mut Page, requested: NodeId, x: f
             None => hit.is_some_and(|n| n == requested || page.doc.is_ancestor(requested, n)),
         };
         if !valid_hit { result.stopped = Some("the pointer point no longer hits the same target"); break; }
-        if crate::ax::states_of(page, hit.unwrap(), "", false).iter().any(|s| s == "disabled") {
+        if disabled_pointer_target(page, hit.unwrap()) {
             result.stopped = Some("the target is disabled"); break;
         }
         let down = engine.pointer_down_counted(page, x, y, 0, mods, count);
@@ -429,7 +435,7 @@ pub fn double_click_at(engine: &Engine, page: &mut Page, requested: NodeId, x: f
         if down.target != hit || page.node_at_viewport(x, y) != hit {
             result.stopped = Some("the target changed during the press"); break;
         }
-        if crate::ax::states_of(page, hit.unwrap(), "", false).iter().any(|s| s == "disabled") {
+        if disabled_pointer_target(page, hit.unwrap()) {
             result.stopped = Some("the target became disabled during the press"); break;
         }
         let up = engine.pointer_up_counted(page, x, y, 0, mods, count);
@@ -442,7 +448,7 @@ pub fn double_click_at(engine: &Engine, page: &mut Page, requested: NodeId, x: f
         }
         clicked = up.clicked;
         if count == 2 {
-            if crate::ax::states_of(page, clicked.unwrap(), "", false).iter().any(|s| s == "disabled") {
+            if disabled_pointer_target(page, clicked.unwrap()) {
                 result.stopped = Some("the target became disabled after click"); break;
             }
             let init = EventInit { bubbles: true, cancelable: true, detail: Some(EventDetail::MouseClick {

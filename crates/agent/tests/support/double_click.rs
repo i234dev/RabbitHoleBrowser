@@ -161,28 +161,36 @@ fn interruption_after_second_click_does_not_claim_that_dblclick_was_delivered() 
 #[test]
 fn default_action_callbacks_cannot_apply_old_ids_to_a_replacement_document() {
     for kind in ["input", "submit", "reset"] {
-        let fresh = if kind == "input" {
-            "<!doctype html><form id=form action=/wrong><input id=t type=checkbox onchange=\"document.getElementById('out').textContent='WRONG'\"><button type=button>Other</button><p id=out>Fresh</p></form>".to_string()
-        } else {
-            format!("<!doctype html><form id=form action=/wrong><input id=field value=baseline><button id=t type={kind}>Action</button><p id=out>Fresh</p></form><script>document.getElementById('field').value='kept'</script>")
-        };
-        let handler = format!("document.open();document.write({});document.close()", serde_json::to_string(&fresh).unwrap())
-            .replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
-        let body = if kind == "input" {
-            format!("<!doctype html><form id=form action=/wrong><input id=t type=checkbox oninput=\"{handler}\"><button type=button>Other</button><p id=out>Before</p></form>")
-        } else {
-            format!("<!doctype html><form id=form action=/wrong on{kind}=\"{handler}\"><input id=field value=baseline><button id=t type={kind}>Action</button><p id=out>Before</p></form>")
-        };
+        let controls = if kind == "input" { "<input id=t type=checkbox><button type=button>Other</button>".to_string() }
+            else { format!("<input id=field value=baseline><button id=t type={kind}>Action</button>") };
+        let fresh = format!("<!doctype html><form id=form action=/wrong>{controls}</form><p id=out>Fresh</p>");
+        let body = format!("<!doctype html><form id=form action=/wrong>{controls}</form><p id=out>Before</p>");
         let body: &'static str = Box::leak(body.into_boxed_str());
         let srv = serve(Box::new(move |path| if path == "/wrong" { html("<p id=out>WRONG navigation</p>") } else { html(body) }));
         let mut a = agent();
         ok(&mut a, "open", json!({"url":srv.url("/")}));
-        let old = a.tabs[a.active.unwrap()].frames[0].doc.element_by_id("t").unwrap();
+        // open() keeps detached nodes in the arena rather than recycling its
+        // numeric slots. Reattach the old form into the replacement document:
+        // the old IDs are now connected again, so connection checks alone
+        // cannot prevent an obsolete change/reset/submit default action.
+        let after_adoption = if kind == "input" {
+            "document.getElementById('t').setAttribute('onchange',\"document.getElementById('out').textContent='WRONG'\");"
+        } else if kind == "reset" { "document.getElementById('field').value='kept';" } else { "" };
+        let handler = format!("document.getElementById('{}').addEventListener('{kind}',function(){{var saved=document.getElementById('form');document.open();document.write({});document.close();document.body.replaceChild(saved,document.getElementById('form'));{after_adoption}}});'handler installed'",
+            if kind == "input" { "t" } else { "form" }, serde_json::to_string(&fresh).unwrap());
+        ok(&mut a, "debug", json!({"eval":handler}));
+        let (old, old_form, document) = {
+            let page = &a.tabs[a.active.unwrap()].frames[0];
+            (page.doc.element_by_id("t").unwrap(), page.doc.element_by_id("form").unwrap(), page.doc.weak_identity())
+        };
         let result = err(&mut a, "click", json!({"selector":"#t","double":true}));
         assert!(result.contains("only one click completed") && result.contains("the document was replaced"), "{kind}: {result}");
         let page = &a.tabs[a.active.unwrap()].frames[0];
-        assert_eq!(page.doc.element_by_id("t"), Some(old), "fixture must actually recycle the target ID: {kind}");
-        assert_eq!(text(&a, "out"), "Fresh", "{kind}: the old input/change callback must not reach new nodes");
+        assert!(!document.is_for(&page.doc), "the fixture must really replace the document: {kind}");
+        assert_eq!(page.doc.element_by_id("t"), Some(old), "the old target ID must really be reused in the new document: {kind}");
+        assert_eq!(page.doc.element_by_id("form"), Some(old_form));
+        assert!(page.doc.is_connected(old) && page.doc.is_connected(old_form));
+        assert_eq!(text(&a, "out"), "Fresh", "{kind}: the obsolete default action must not reach the replacement document");
         if kind == "reset" {
             assert_eq!(page.control_text(page.doc.element_by_id("field").unwrap()), "kept", "the old reset must not reset a new form");
         }
@@ -253,4 +261,24 @@ fn programmatic_click_on_detached_button_fires_without_submitting_a_detached_for
     ok(&mut a, "open", json!({"url":srv.url("/")}));
     assert_eq!(text(&a, "out"), "1|1|0|true|false");
     assert!(!srv.requests().iter().any(|(path,_)|path=="/wrong"));
+}
+
+#[test]
+fn disabling_button_after_second_click_on_its_visible_span_does_not_emit_dblclick() {
+    let srv = serve(Box::new(|_| html(r#"<!doctype html><style>
+        #t{padding:8px}#inner{display:block;width:160px;height:32px}
+        </style><button id=t type=button><span id=inner>Child hit target</span></button><p id=out>Before</p>
+        <script>
+        var log=[],button=document.getElementById('t');
+        ['mousedown','mouseup','click','dblclick'].forEach(function(type){
+            button.addEventListener(type,function(e){log.push(type+':'+e.detail+':'+e.target.id);document.getElementById('out').textContent=log.join(' ')});
+        });
+        button.addEventListener('click',function(e){if(e.detail===2)button.disabled=true});
+        </script>"#)));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let result = err(&mut a, "click", json!({"selector":"#t","double":true}));
+    assert!(result.starts_with("Double-click incomplete: two clicks completed, but dblclick was not dispatched."), "{result}");
+    assert_eq!(text(&a, "out"), "mousedown:1:inner mouseup:1:inner click:1:inner mousedown:2:inner mouseup:2:inner click:2:inner");
+    assert!(!result.contains("Double-clicked"), "{result}");
 }
