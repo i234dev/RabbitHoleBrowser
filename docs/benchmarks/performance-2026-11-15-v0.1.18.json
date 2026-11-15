@@ -1,0 +1,1223 @@
+{
+  "schema": "rabbithole-performance-comparison-v1",
+  "version": "0.1.18",
+  "source_revision": "dae023e7cc14d17501c18e39d6aafda2c4611902",
+  "measurement_date": "2026-11-15",
+  "timezone": "Europe/Madrid",
+  "scope": "Historical measurement of the stated 0.1.18 source when included in later builds. JIT off/on are modes of the same source, not two browser revisions.",
+  "conditions": {
+    "profile": "release",
+    "compiler": "Rust 1.99.1 (58cf8f9c3, 2026-10-13), LLVM 23.1.1",
+    "target": "x86_64-unknown-linux-gnu",
+    "host": {
+      "cpu_model": "12th Gen Intel(R) Core(TM) i7-12700H",
+      "kernel": "6.18.58.1-microsoft-standard-WSL2",
+      "machine": "x86_64",
+      "child_affinity": [
+        0
+      ],
+      "windows_desktop_idle_claimed": false
+    },
+    "jit_modes": [
+      "off",
+      "on"
+    ],
+    "jit_threshold": "Runtime default; RABBITHOLE_JIT_THRESHOLD not set in timed runs.",
+    "gc": "Normal; RH_GC_STRESS not set in timed runs.",
+    "locale": {
+      "LANG": "C",
+      "LC_ALL": "C"
+    },
+    "quiet_window": "Project CPU0 quiet window with build/conformance work excluded; Windows desktop/background idleness not asserted."
+  },
+  "measurement_artifacts": [
+    {
+      "kind": "perf",
+      "profile": "release",
+      "source_revision": "dae023e7cc14d17501c18e39d6aafda2c4611902",
+      "binary_sha256": "9908b6715b87de19afbc27243e656da8ec9e92514981d273ca6897f5c50fa70e",
+      "command": [
+        "cargo",
+        "build",
+        "--profile",
+        "release",
+        "--features",
+        "jit",
+        "--locked",
+        "-p",
+        "rabbithole-js",
+        "--example",
+        "perf"
+      ],
+      "exit_code": 0,
+      "build_receipt_sha256": "e81d94be3cda9e51d7474cce478e497c960373be93c89886fb5adc076a208027"
+    },
+    {
+      "kind": "jitdiff",
+      "profile": "release",
+      "source_revision": "dae023e7cc14d17501c18e39d6aafda2c4611902",
+      "binary_sha256": "788a17daa6cd7037bc9564ed3b316d579aa52f707a1607a78dbbf66aef5cf28b",
+      "command": [
+        "cargo",
+        "build",
+        "--profile",
+        "release",
+        "--features",
+        "jit",
+        "--locked",
+        "-p",
+        "rabbithole-js",
+        "--example",
+        "jitdiff"
+      ],
+      "exit_code": 0,
+      "build_receipt_sha256": "bd7813b58915e43414e5692dd195c3da65b1b78008a3e92db2ae83f694942448"
+    },
+    {
+      "kind": "shot",
+      "profile": "release",
+      "source_revision": "dae023e7cc14d17501c18e39d6aafda2c4611902",
+      "binary_sha256": "2e34d982e7bc4c6eef7844db40e40829c5e5f7e919f5d88c8b85159d30a0b2c8",
+      "command": [
+        "cargo",
+        "build",
+        "--profile",
+        "release",
+        "--features",
+        "jit",
+        "--locked",
+        "-p",
+        "rabbithole-engine",
+        "--example",
+        "shot"
+      ],
+      "exit_code": 0,
+      "build_receipt_sha256": "ca87081e45609234a88b8f743195ea5351cbe72856579f16574619e112a5ae69"
+    }
+  ],
+  "speedometer": {
+    "suite": {
+      "name": "Speedometer 3.1",
+      "revision": "1386415be8fef2f6b6bbdbe1828872471c5d802a",
+      "workload_count": 20,
+      "subtest_count": 58,
+      "iterations": 3,
+      "metric_count": 199,
+      "corpus_file_count": 1118,
+      "corpus_files_manifest_sha256": "089c45497bd05baabf4aca89d5af46a2f20550dfa1163adc20bea1e80ccdde05",
+      "workload_contract_sha256": "e99f821a9a974732a01055a8f0123f38c0dc3a2027b92c42cf67f9dc3a503011"
+    },
+    "timed_runs": 16,
+    "runs_per_mode": 8,
+    "paired_blocks": 8,
+    "started_utc": "2026-11-15T21:46:48.100246+00:00",
+    "finished_utc": "2026-11-15T22:06:52.243072+00:00",
+    "score_means": {
+      "description": "Arithmetic mean of the eight per-run Speedometer scores in each mode; not the median of paired ratios.",
+      "off": 2.0820037774124547,
+      "on": 2.1022003202961144
+    },
+    "runs": [
+      {
+        "block": 1,
+        "order": 1,
+        "jit": "off",
+        "score": 2.133840563839759,
+        "started_utc": "2026-11-15T21:46:48.100246+00:00",
+        "finished_utc": "2026-11-15T21:48:02.418929+00:00",
+        "raw_benchmark_sha256": "751d5fc2b9fa597d59f66a28790b2e9bd616c0efeffacde49f0ac37bae0abd1f",
+        "summary_png_sha256": "436c7353c335f4c962cecfdc05a8ea389eb72c746f3bd4815d79f90550e1365e"
+      },
+      {
+        "block": 1,
+        "order": 2,
+        "jit": "on",
+        "score": 2.130777641698564,
+        "started_utc": "2026-11-15T21:48:02.523390+00:00",
+        "finished_utc": "2026-11-15T21:49:16.760795+00:00",
+        "raw_benchmark_sha256": "34f9d84af833521f7747d503a14142968be99e645b92b6f7c5a568e0c64c6135",
+        "summary_png_sha256": "f6fa9716a5ba6ca0119230185f39ad6f80e2833495339e5f9da0ffbb2d29a318"
+      },
+      {
+        "block": 2,
+        "order": 3,
+        "jit": "on",
+        "score": 2.1678820677368793,
+        "started_utc": "2026-11-15T21:49:16.881952+00:00",
+        "finished_utc": "2026-11-15T21:50:29.691342+00:00",
+        "raw_benchmark_sha256": "252070a840c51445f5ee40da05fc2c61c05b1e2aaf0a14bfd6373495dc1903dd",
+        "summary_png_sha256": "0cb3e09bafa103fc1b3cb659eb7b163c4ab219f1912f32b95fd0b3589380ba75"
+      },
+      {
+        "block": 2,
+        "order": 4,
+        "jit": "off",
+        "score": 2.090760073173216,
+        "started_utc": "2026-11-15T21:50:29.810711+00:00",
+        "finished_utc": "2026-11-15T21:51:44.990425+00:00",
+        "raw_benchmark_sha256": "96a47d34d865a8a9f77a5d0fd6cda7964e8e618fbf380757c6de408e1d9cb6b3",
+        "summary_png_sha256": "ef42d54caed5d9b2043ee9b4bdfbe624f4b8e22053ec2bc99d612e13ca276b5b"
+      },
+      {
+        "block": 3,
+        "order": 5,
+        "jit": "off",
+        "score": 2.1123361177144315,
+        "started_utc": "2026-11-15T21:51:45.127983+00:00",
+        "finished_utc": "2026-11-15T21:52:59.794604+00:00",
+        "raw_benchmark_sha256": "a2c5dbabb413b5d8deb92769232adfc8290a9a2cf94ac0cdad3c294e95ca9a3f",
+        "summary_png_sha256": "da0acb4e95e26177a94cca1267e782caf87693991d2e1b0aeb6729d6161aacab"
+      },
+      {
+        "block": 3,
+        "order": 6,
+        "jit": "on",
+        "score": 2.1351956220134176,
+        "started_utc": "2026-11-15T21:52:59.920163+00:00",
+        "finished_utc": "2026-11-15T21:54:13.683493+00:00",
+        "raw_benchmark_sha256": "0d31d9c139200ac6fb47be58c0d78aa3f7f7a4d92abdb37acf1156d0a4c73601",
+        "summary_png_sha256": "b00b113fb4532857c38c905a5eee8a9e98585d7ff178511376b49d1322f68ce2"
+      },
+      {
+        "block": 4,
+        "order": 7,
+        "jit": "on",
+        "score": 2.0110211710699115,
+        "started_utc": "2026-11-15T21:54:13.816361+00:00",
+        "finished_utc": "2026-11-15T21:55:31.842365+00:00",
+        "raw_benchmark_sha256": "1b3cb261d2edab3a60873bc9f28fe47db21eb967df50ca4ad991627f561a364d",
+        "summary_png_sha256": "d7a9d8f807cf38390d95e61082adcff67433a4da081f5fe12cb852f35926c9e4"
+      },
+      {
+        "block": 4,
+        "order": 8,
+        "jit": "off",
+        "score": 2.0306693758330256,
+        "started_utc": "2026-11-15T21:55:31.969449+00:00",
+        "finished_utc": "2026-11-15T21:56:48.999592+00:00",
+        "raw_benchmark_sha256": "5552b9143b22e8ea6b2b4a7bb885742f27079633b559ac45b0d30abd4757c7a1",
+        "summary_png_sha256": "96062023fd3f1dbd314130dd696f9cd80c80a7c2e177203e575ea74cb9ff7d20"
+      },
+      {
+        "block": 5,
+        "order": 9,
+        "jit": "off",
+        "score": 2.0974496403335703,
+        "started_utc": "2026-11-15T21:56:49.150170+00:00",
+        "finished_utc": "2026-11-15T21:58:04.255614+00:00",
+        "raw_benchmark_sha256": "9411c13abc8980aef0ca07427ffa102c8fd9adace1060b14cb2951f17fe459bc",
+        "summary_png_sha256": "38fc2687a19cda06b1562f08182e17a2920f4ce1b51af35afce7a7ccafb78705"
+      },
+      {
+        "block": 5,
+        "order": 10,
+        "jit": "on",
+        "score": 2.091261903503748,
+        "started_utc": "2026-11-15T21:58:04.400522+00:00",
+        "finished_utc": "2026-11-15T21:59:19.683290+00:00",
+        "raw_benchmark_sha256": "87b5245c16d8e71d614dfe952e10b6c4b5662bd34cc68793aab1c2b07e40eef0",
+        "summary_png_sha256": "5402231266088d0b4ec4576e2c4d469d5befb5c619717cea6d3916877a71b0d6"
+      },
+      {
+        "block": 6,
+        "order": 11,
+        "jit": "on",
+        "score": 2.0931911216303027,
+        "started_utc": "2026-11-15T21:59:19.835620+00:00",
+        "finished_utc": "2026-11-15T22:00:34.688747+00:00",
+        "raw_benchmark_sha256": "eab5c4b13ede0399150b54ec9b336ddb31034258e3168416da47b3dfab1bdd37",
+        "summary_png_sha256": "ebb5dc54b689c65dda94da5b3fdb1ff453961e5b9ecc9f8ec286411241bbe938"
+      },
+      {
+        "block": 6,
+        "order": 12,
+        "jit": "off",
+        "score": 2.047624852270831,
+        "started_utc": "2026-11-15T22:00:34.844148+00:00",
+        "finished_utc": "2026-11-15T22:01:51.294566+00:00",
+        "raw_benchmark_sha256": "7217aef2c34d7a08fcae6840fa897a5ee89babc3179a735a745222dee297106e",
+        "summary_png_sha256": "f9036e85b84ae1125a2e811051adaf358e1c1c63f7270c4b9a7916e451fbb18e"
+      },
+      {
+        "block": 7,
+        "order": 13,
+        "jit": "off",
+        "score": 2.0611188649840546,
+        "started_utc": "2026-11-15T22:01:51.442814+00:00",
+        "finished_utc": "2026-11-15T22:03:06.836038+00:00",
+        "raw_benchmark_sha256": "fca998c4e9d82a79f927b2375733a0dd43d46617ddd040e8bc85ad03f1a42852",
+        "summary_png_sha256": "46f0c2306f7d1a9c9ae0af8e9c3048a2e67d12dfbf92ba69680e505eb51b6fb7"
+      },
+      {
+        "block": 7,
+        "order": 14,
+        "jit": "on",
+        "score": 2.1019141848031704,
+        "started_utc": "2026-11-15T22:03:07.000619+00:00",
+        "finished_utc": "2026-11-15T22:04:21.704071+00:00",
+        "raw_benchmark_sha256": "a7fdfa061cc001242b53041a4026860df637655da5ebeec9d43834a5502b4022",
+        "summary_png_sha256": "b5420a38350b95602eeb56f099e6cc437443e51f1cdd27bfcdb26db35a209d56"
+      },
+      {
+        "block": 8,
+        "order": 15,
+        "jit": "on",
+        "score": 2.0863588499129215,
+        "started_utc": "2026-11-15T22:04:21.870612+00:00",
+        "finished_utc": "2026-11-15T22:05:37.171380+00:00",
+        "raw_benchmark_sha256": "f2eb58fabf1bc18ddb7632896c6d9f3b45ab5de664e43e62f459574dee517dd3",
+        "summary_png_sha256": "b890a51f3a1013763ea68e235985af1c09610621fbe25b297f6c1347cc7d2a05"
+      },
+      {
+        "block": 8,
+        "order": 16,
+        "jit": "off",
+        "score": 2.0822307311507497,
+        "started_utc": "2026-11-15T22:05:37.345572+00:00",
+        "finished_utc": "2026-11-15T22:06:52.243072+00:00",
+        "raw_benchmark_sha256": "348eec82210b301719fc82419c727fd828cacd96b9686652dc3e99eb26b46fb8",
+        "summary_png_sha256": "3f0491430a58da27af7ab11f13d98b33c3c146e2dd5da3091c17d4cb529e2f41"
+      }
+    ],
+    "pairs": [
+      {
+        "block": 1,
+        "order": [
+          "off",
+          "on"
+        ],
+        "off_score": 2.133840563839759,
+        "on_score": 2.130777641698564,
+        "on_off_score_ratio": 0.9985645965340151
+      },
+      {
+        "block": 2,
+        "order": [
+          "on",
+          "off"
+        ],
+        "off_score": 2.090760073173216,
+        "on_score": 2.1678820677368793,
+        "on_off_score_ratio": 1.036887061099561
+      },
+      {
+        "block": 3,
+        "order": [
+          "off",
+          "on"
+        ],
+        "off_score": 2.1123361177144315,
+        "on_score": 2.1351956220134176,
+        "on_off_score_ratio": 1.0108219066593058
+      },
+      {
+        "block": 4,
+        "order": [
+          "on",
+          "off"
+        ],
+        "off_score": 2.0306693758330256,
+        "on_score": 2.0110211710699115,
+        "on_off_score_ratio": 0.9903242718893842
+      },
+      {
+        "block": 5,
+        "order": [
+          "off",
+          "on"
+        ],
+        "off_score": 2.0974496403335703,
+        "on_score": 2.091261903503748,
+        "on_off_score_ratio": 0.9970498758535923
+      },
+      {
+        "block": 6,
+        "order": [
+          "on",
+          "off"
+        ],
+        "off_score": 2.047624852270831,
+        "on_score": 2.0931911216303027,
+        "on_off_score_ratio": 1.0222532312542203
+      },
+      {
+        "block": 7,
+        "order": [
+          "off",
+          "on"
+        ],
+        "off_score": 2.0611188649840546,
+        "on_score": 2.1019141848031704,
+        "on_off_score_ratio": 1.0197928030800065
+      },
+      {
+        "block": 8,
+        "order": [
+          "on",
+          "off"
+        ],
+        "off_score": 2.0822307311507497,
+        "on_score": 2.0863588499129215,
+        "on_off_score_ratio": 1.001982546266566
+      }
+    ],
+    "paired_score_on_off": {
+      "all_eight": [
+        0.9985645965340151,
+        1.036887061099561,
+        1.0108219066593058,
+        0.9903242718893842,
+        0.9970498758535923,
+        1.0222532312542203,
+        1.0197928030800065,
+        1.001982546266566
+      ],
+      "median": 1.006402226462936,
+      "minimum": 0.9903242718893842,
+      "maximum": 1.036887061099561,
+      "above_one": 5,
+      "below_one": 3,
+      "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim.",
+      "positive_pairs_required": 6,
+      "global_gate_passed": false
+    },
+    "interpretation": "The consistency criterion was not met: five of eight paired scores improved, six were required. Descriptive near-parity; no statistically established global gain or slowdown. Phase 8 remains open and the JIT remains off by default.",
+    "native_diagnostic": {
+      "separate_run": true,
+      "included_in_timed_results": false,
+      "positive_entry_reports": 64,
+      "maximum_reported_entries": 350618,
+      "scope": "separate diagnostic run, not timed-run coverage"
+    },
+    "clocks": {
+      "performance_now": "std::time::Instant",
+      "external_sources": [
+        "CLOCK_MONOTONIC",
+        "CLOCK_BOOTTIME"
+      ],
+      "all_recorded_checks_valid": true,
+      "realtime_adjustments_retained_not_used_for_durations": true
+    },
+    "harness_sha256": {
+      "run.py": "fea08ff09508aa690f4aed5089175bb29f714ee23466cf89e693a79c7197a51d",
+      "validate.py": "af7130752580606dc08b7a83f7aafb35e8e027eed19a9b8ca185ce566a0886a1",
+      "workload-contract.json": "e99f821a9a974732a01055a8f0123f38c0dc3a2027b92c42cf67f9dc3a503011"
+    }
+  },
+  "microbenchmarks": {
+    "case_source": "crates/js/examples/perf.rs: CASES, evaluated with -e in a fresh process for each observation",
+    "case_source_sha256": "b24b7ca6e31b486ee382e073b7e7aacb99c400adcff556b57e7a36a6f9063cb7",
+    "clock": "CLOCK_THREAD_CPUTIME_ID; evaluation CPU milliseconds reported by perf -e",
+    "cases": 27,
+    "paired_blocks_per_case": 8,
+    "observations": 432,
+    "ratio_definition": "Off evaluation time / on evaluation time; values above 1 mean greater throughput with JIT on. No overall speedup is aggregated.",
+    "micro_gate_passed": true,
+    "gate_note": "Passing the recorded micro gate does not mean every case speeds up, or that the browser-wide performance gate passed.",
+    "results": [
+      {
+        "case": "empty_loop",
+        "program_sha256": "6473fec738ac9ee712f98adc7a971ace1a2372ddd3a0cffe0af48c07037632c2",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            2.1122881355932206,
+            2.107011070110701,
+            2.112928759894459,
+            2.1119363395225466,
+            2.08377239199157,
+            2.0894736842105264,
+            2.1143462149285335,
+            2.1010582010582013
+          ],
+          "median": 2.109473704816624,
+          "minimum": 2.08377239199157,
+          "maximum": 2.1143462149285335,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "global_loop",
+        "program_sha256": "0a901f5259aabd94c20354b1b77d830b1787ec7750d57f1d16d96ea77111b9cb",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            2.2008196721311473,
+            2.275474349964863,
+            2.282303370786517,
+            2.128476821192053,
+            2.2603508771929826,
+            2.2733050847457625,
+            2.2577030812324934,
+            2.3364022662889523
+          ],
+          "median": 2.2668279809693725,
+          "minimum": 2.128476821192053,
+          "maximum": 2.3364022662889523,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "local_loop",
+        "program_sha256": "5d31a45980de1afdc67f8ccb7fb07c9399abb74472c7a072995cae2ec5137a74",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.7356746765249538,
+            1.6992753623188408,
+            1.6684587813620073,
+            1.6889692585895117,
+            1.720292504570384,
+            1.7261029411764706,
+            1.703499079189687,
+            1.6859205776173285
+          ],
+          "median": 1.7013872207542637,
+          "minimum": 1.6684587813620073,
+          "maximum": 1.7356746765249538,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "let_loop",
+        "program_sha256": "3129f85180e06cfdffbb31001a3ae58ceed4a92fadc5e8157c6cb7bc11591dc5",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.9285714285714286,
+            1.994845360824742,
+            1.988074957410562,
+            1.9456342668863262,
+            1.9932088285229204,
+            2.0844827586206898,
+            2.020304568527919,
+            1.9383333333333335
+          ],
+          "median": 1.990641892966741,
+          "minimum": 1.9285714285714286,
+          "maximum": 2.0844827586206898,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "push_objects",
+        "program_sha256": "72e9e0941064e0657898834939d53f4386364260f96d27aeff658882841d54c6",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.041874084919473,
+            1.0210494203782794,
+            1.026032315978456,
+            0.9984820886460232,
+            1.0355457691097831,
+            1.001834862385321,
+            0.9953902888752305,
+            0.9876543209876542
+          ],
+          "median": 1.0114421413818002,
+          "minimum": 0.9876543209876542,
+          "maximum": 1.041874084919473,
+          "above_one": 5,
+          "below_one": 3,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "calls",
+        "program_sha256": "573add043cd5d5cffc5ca873c331280ee24bdb273394d3ecaadbae58b91be5c3",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.2207931404072885,
+            1.0970970970970972,
+            1.2171552660152007,
+            1.2707182320441988,
+            1.2326350606394707,
+            1.1948331539289558,
+            1.1527196652719665,
+            1.0923694779116466
+          ],
+          "median": 1.2059942099720784,
+          "minimum": 1.0923694779116466,
+          "maximum": 1.2707182320441988,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "closure_calls",
+        "program_sha256": "e97fec430f70eccb6dcd4a60e85ff0b086f6eb895f2b1b6d49295d6f2ca2e412",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.5094850948509486,
+            1.5087557603686637,
+            1.5484764542936287,
+            1.5159525979945303,
+            1.5404178019981836,
+            1.521933751119069,
+            1.5909926470588234,
+            1.5463458110516934
+          ],
+          "median": 1.5311757765586262,
+          "minimum": 1.5087557603686637,
+          "maximum": 1.5909926470588234,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "method_calls",
+        "program_sha256": "6e2953fa9e206509b87304149c3cac21473c4ec5676ef96085e4763176846180",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.418342719227675,
+            1.4803754266211604,
+            1.5172124265323257,
+            1.4490818030050083,
+            1.52135231316726,
+            1.5148683092608326,
+            1.5307557117750439,
+            1.6016260162601625
+          ],
+          "median": 1.5160403678965793,
+          "minimum": 1.418342719227675,
+          "maximum": 1.6016260162601625,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "new_objects",
+        "program_sha256": "243122620a2061b873b16097f6ce32574f758edb0b352935a14fe9df980cfefb",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.1579524680073126,
+            1.2639419404125287,
+            1.205652658981034,
+            1.2584103512014786,
+            1.24653428250281,
+            1.2520568436798802,
+            1.2188808526836696,
+            1.2039691289966923
+          ],
+          "median": 1.23270756759324,
+          "minimum": 1.1579524680073126,
+          "maximum": 1.2639419404125287,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "props",
+        "program_sha256": "a31676165c54cb2a5d3107ad17e5724b75e5b736ca259fc8b9f7cefde37a4c7c",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            3.0206489675516224,
+            2.9302325581395348,
+            2.942222222222222,
+            2.9502923976608186,
+            2.9533527696793005,
+            3.0072674418604652,
+            2.8701298701298703,
+            2.778254649499285
+          ],
+          "median": 2.9462573099415206,
+          "minimum": 2.778254649499285,
+          "maximum": 3.0206489675516224,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "prop_set",
+        "program_sha256": "2e46725c0a33052f30f6040f750355bd8e53f1696c4abdedcb9e4f6468762e44",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            2.3870967741935485,
+            2.3931535269709543,
+            2.2874371859296487,
+            2.323857868020305,
+            2.413721413721414,
+            2.3779608650875383,
+            2.4233193277310927,
+            2.4270833333333335
+          ],
+          "median": 2.3901251505822514,
+          "minimum": 2.2874371859296487,
+          "maximum": 2.4270833333333335,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "array_rw",
+        "program_sha256": "fbe22bab283eaeb42d8966288a898bd76435ca02c5715501f7d3864cb63a154a",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.9896373056994818,
+            1.9852008456659618,
+            2.008230452674897,
+            1.9821802935010484,
+            2.0127388535031847,
+            1.993743482794578,
+            1.9486910994764395,
+            1.9694736842105265
+          ],
+          "median": 1.987419075682722,
+          "minimum": 1.9486910994764395,
+          "maximum": 2.0127388535031847,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "strings",
+        "program_sha256": "8db1bc44089b57b1877932b0a6490dcee036a5ac90a32e08ef74651172ebfd8e",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.0189035916824196,
+            1.081140350877193,
+            1.0669546436285098,
+            1.0772626931567328,
+            1.097130242825607,
+            1.1158129175946547,
+            1.0041407867494823,
+            1.0681318681318683
+          ],
+          "median": 1.0726972806443005,
+          "minimum": 1.0041407867494823,
+          "maximum": 1.1158129175946547,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "string_ops",
+        "program_sha256": "016323c8549cedb76da77cedb30f21279330a84109bab37365a6650ffc74c4a6",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.107970342910102,
+            1.0304822565969063,
+            1.032490974729242,
+            1.0519721577726218,
+            1.0582479030754892,
+            1.0630252100840336,
+            1.0586319218241043,
+            1.055011655011655
+          ],
+          "median": 1.0566297790435721,
+          "minimum": 1.0304822565969063,
+          "maximum": 1.107970342910102,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "array_map",
+        "program_sha256": "7d88d5b333b3d80aba36a334a78a2d00baa0667fb0411463c09ab31b21451fde",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            0.9507389162561576,
+            1.0219985085756897,
+            1.0067189249720045,
+            0.992117117117117,
+            0.9664804469273742,
+            0.9870274277242401,
+            0.9548762736535662,
+            1.00187265917603
+          ],
+          "median": 0.9895722724206786,
+          "minimum": 0.9507389162561576,
+          "maximum": 1.0219985085756897,
+          "above_one": 3,
+          "below_one": 5,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "fib",
+        "program_sha256": "b4c7254500ce386883988795e3ab33c9938f50ed6bce383a09a1eaf299b8bf22",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.20694259012016,
+            1.1835357624831309,
+            1.148684210526316,
+            1.1696065128900948,
+            1.1794871794871795,
+            1.160377358490566,
+            1.1655266757865936,
+            1.1736770691994574
+          ],
+          "median": 1.171641791044776,
+          "minimum": 1.148684210526316,
+          "maximum": 1.20694259012016,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "json",
+        "program_sha256": "ee49c9f40ef8b4426b680623a8c199ed16d93feca3f43b7c2df692cb42362c6e",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            0.9899229401304089,
+            1.0175169022741242,
+            0.9890011890606422,
+            1.008249312557287,
+            1.0124280084874204,
+            1.0149344711978054,
+            1.0012165450121655,
+            1.009993943064809
+          ],
+          "median": 1.009121627811048,
+          "minimum": 0.9890011890606422,
+          "maximum": 1.0175169022741242,
+          "above_one": 6,
+          "below_one": 2,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "for_in",
+        "program_sha256": "3cab85cac1455db2f45fbecbb6dc0a7b4e2090916e62897b1be22fd3605619d0",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.1110515021459229,
+            1.0430721328489883,
+            1.0925925925925926,
+            1.098228663446055,
+            1.109961894393032,
+            1.089881593110872,
+            1.0625,
+            1.0899299946149703
+          ],
+          "median": 1.0912612936037815,
+          "minimum": 1.0430721328489883,
+          "maximum": 1.1110515021459229,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "try_catch",
+        "program_sha256": "bcda714b6ec19caf520723d7afa8c1ca0d47ff7d58d874679230e2d79d018f43",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.8440677966101695,
+            1.8695652173913042,
+            1.8033898305084746,
+            1.7043189368770766,
+            1.744107744107744,
+            1.778877887788779,
+            1.8127090301003344,
+            1.7591973244147154
+          ],
+          "median": 1.7911338591486268,
+          "minimum": 1.7043189368770766,
+          "maximum": 1.8695652173913042,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "arguments",
+        "program_sha256": "2dbb55ba0c040cb99e56e29235fb77fb6bac405551356aafa11e1f5a8780b6f0",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.1366412213740458,
+            1.1728971962616823,
+            1.1234472049689441,
+            1.1329746348962337,
+            1.1195065535851965,
+            1.1381987577639752,
+            1.108880308880309,
+            1.1221964423820572
+          ],
+          "median": 1.128210919932589,
+          "minimum": 1.108880308880309,
+          "maximum": 1.1728971962616823,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "switch",
+        "program_sha256": "d3a33117975a8514a4f29815779423b301c018dd8a87023770240242a4a3a53d",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            2.503037667071689,
+            2.4642438452520516,
+            2.5615763546798034,
+            2.559363525091799,
+            2.5791411042944783,
+            2.528763769889841,
+            2.6351183063511834,
+            2.59875
+          ],
+          "median": 2.5604699398858015,
+          "minimum": 2.4642438452520516,
+          "maximum": 2.6351183063511834,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "hot_numeric",
+        "program_sha256": "138e4889e2d2fcf0e9805f5a7aa78dedd2a3ebbb8d35c4bba94a93cbd8f07f7c",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.2789217521527516,
+            1.3090490797546013,
+            1.3140115163147792,
+            1.3087504776461596,
+            1.3088743757203227,
+            1.3096972019931008,
+            1.3117082533589253,
+            1.3102652825836216
+          ],
+          "median": 1.3093731408738511,
+          "minimum": 1.2789217521527516,
+          "maximum": 1.3140115163147792,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "hot_7ops",
+        "program_sha256": "ada1966454cb85fa28d68f4c0b5e82c1030214b8ceb3fe4c02c7d2445ff96b68",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            2.1448427212874908,
+            2.206360946745562,
+            2.172209903917221,
+            2.1686303387334314,
+            2.161029411764706,
+            2.167651403249631,
+            2.1630996309963098,
+            2.1306569343065695
+          ],
+          "median": 2.1653755171229703,
+          "minimum": 2.1306569343065695,
+          "maximum": 2.206360946745562,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "hot_bits",
+        "program_sha256": "256abe00c51ab99733b7bb8256f5bcaa80f8620947655e42571e12cb21111812",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.7582467239042023,
+            1.767925808640579,
+            1.7273735581188998,
+            1.7614949037372594,
+            1.7506756756756758,
+            1.7573977863112715,
+            1.7618833070511375,
+            1.762065095398429
+          ],
+          "median": 1.7598708138207309,
+          "minimum": 1.7273735581188998,
+          "maximum": 1.767925808640579,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "hot_array",
+        "program_sha256": "37812d02a19dced5b20125efe3a112a25bf58bc7fc7db4fde80a5b003574a553",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.6482164821648215,
+            1.8847583643122676,
+            1.658446362515413,
+            1.634567901234568,
+            1.667887667887668,
+            1.6541822721598003,
+            1.6216867469879517,
+            1.6322981366459626
+          ],
+          "median": 1.6511993771623108,
+          "minimum": 1.6216867469879517,
+          "maximum": 1.8847583643122676,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "hot_props",
+        "program_sha256": "80246c99885f877ecb119d3b016c4dd5996847ad32bc409356b06f768ab94426",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            1.3688524590163933,
+            1.3558528428093646,
+            1.3513862024500323,
+            1.5076513639387892,
+            1.3823724320742212,
+            1.4321404456448346,
+            1.4081632653061225,
+            1.3683501683501684
+          ],
+          "median": 1.3756124455453071,
+          "minimum": 1.3513862024500323,
+          "maximum": 1.5076513639387892,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      },
+      {
+        "case": "hot_branchy",
+        "program_sha256": "18bb482f1d7db4cf96307de9a2b691a17f2a93461a45b0ea43c2442ee2df1986",
+        "on_off_speed_ratio": {
+          "all_eight": [
+            2.016293279022403,
+            1.8807157057654076,
+            2.028125,
+            1.9060887512899896,
+            1.9177083333333333,
+            1.957112970711297,
+            1.8888888888888888,
+            1.9084362139917694
+          ],
+          "median": 1.9130722736625514,
+          "minimum": 1.8807157057654076,
+          "maximum": 2.028125,
+          "above_one": 8,
+          "below_one": 0,
+          "uncertainty": "Eight balanced paired blocks; range retained, descriptive decision, no significance claim."
+        },
+        "recorded_micro_gate": "pass"
+      }
+    ],
+    "semantic_comparisons": {
+      "count": 11072,
+      "performance_measurement": false
+    }
+  },
+  "directed_css": {
+    "source_revision": "37cb93d454c91e805210d350bad5dcc2bad88613",
+    "profile": "ci",
+    "measurement_date": "2026-11-15",
+    "started_utc": "2026-11-15T21:16:25.880336+00:00",
+    "finished_utc": "2026-11-15T21:16:38.466170+00:00",
+    "runner_sha256": "60e2b3c6ee13ded708ae2233e4f1411888a305f8fda37cda9904e132f929ea00",
+    "passed": 33,
+    "total": 33,
+    "wpt_cases": 31,
+    "local_controls": 2,
+    "scope": "Selected pixel controls only, executed on the bootstrap source shown above. Not a new global CSS/WPT percentage, and not an execution of the final release binary.",
+    "css_code_equivalent_to_source_revision": "dae023e7cc14d17501c18e39d6aafda2c4611902",
+    "identical_component_git_tree_sha1": {
+      "crates/css": "7241ee690b06f9b8bbc17d74d01e1e9b947bb7f2",
+      "crates/style": "3ae1058f15793ec881a9276b3c9e0296f1905c53",
+      "crates/layout": "94bb02235807049828f8dfa94ffa5bd058c33581",
+      "crates/gfx": "83b7e42f123f6da3dcca8891814e0b9919adbb0f"
+    },
+    "inputs_manifest_sha256": "04dd476fc9679d8264f760d031cb96237bcdd6c3331d9ef0468db99c0ace24dc",
+    "helper_sha256": "a9e7a8e5f738067dcb8c43a5b509edf2118997069a7ccbe526abd2542da55416",
+    "no_oracle_changes": true,
+    "cases": [
+      {
+        "case": "css/css-grid/grid-definition/flex-item-grid-container-auto-repeat-002.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-definition/grid-auto-fit-implicit-and-spanning-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-definition/grid-auto-repeat-minmax.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-flex-spanning-items-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-item-non-auto-height-stretch-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-item-non-auto-height-stretch-002.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-item-non-auto-height-stretch-003.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-item-non-auto-height-stretch-004.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/alignment/row-fill-reverse-align-content-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/alignment/row-fill-reverse-align-content-002.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/alignment/row-fill-reverse-align-content-indefinite-size-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/intrinsic-sizing/column-intrinsic-inline-container-size.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-intrinsic-sizing-cols-002-fr.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-intrinsic-sizing-cols-002-mix1.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-intrinsic-sizing-cols-004-auto.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-model/grid-inline-first-letter-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-model/grid-inline-first-letter-002.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-model/grid-inline-first-line-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-model/grid-inline-first-line-002.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-model/grid-inline-margins-no-collapse-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-model/grid-max-content-size-with-max-content-item.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/layout-algorithm/grid-intrinsic-size-nested-baseline-grid-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/placement/grid-placement-using-named-grid-lines-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/placement/grid-template-areas-must-keep-named-columns-order-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/subgrid/grid-lanes-subgridded-to-grid-lanes/row/grid-lanes-subgrid-005a.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/column-subgrid-orthogonal-writing-mode-002.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/intrinsic-sizing/grid-lanes-intrinsic-sizing-cols-004-mix2.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/column-subgrid-auto-fit-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/track-sizing/row-subgrid-auto-fit-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/subgrid/parent-repeat-auto-fit-001.html",
+        "status": "PASS"
+      },
+      {
+        "case": "css/css-grid/subgrid/parent-repeat-auto-fit-002.html",
+        "status": "PASS"
+      },
+      {
+        "case": "wrapper-definite-perpendicular.html",
+        "status": "PASS"
+      },
+      {
+        "case": "cyclic-inline-percentage.html",
+        "status": "PASS"
+      }
+    ]
+  },
+  "evidence_sha256": {
+    "micro_complete_summary": "a88c0ea1a66f5ea7b3b1743d494907dcda5eae0ee7cba873dfd1e9664ce2465e",
+    "micro_root_observation": "27eaa724e82c6c0e5a1245c0ef30e5da636dab582f746a97563508e89ce39917",
+    "speedometer_complete_summary": "65f4dea72ee083c3dcf793238164e2e0dd53915aeca8e249ce0353a74fd5692e",
+    "speedometer_root_observation": "67805ce13b246e0276035bf92f2799cc8a65af1bbb01024bf1f389a4a0d898c6",
+    "measurement_build_receipt": "26081dae746542cb8abe0a88406d35526bfbf8297c15e79beee45a8d93eb39b7",
+    "directed_css_root_observation": "030033a2a9dbfed05ae369926d23ace64fe82844d72a45bb8433aff2c5585b7c"
+  },
+  "review": {
+    "root_observed": true,
+    "global_jit_performance_accepted": false,
+    "raw_results_and_hashes_reviewed_by": "Project coordinator; root-observation hashes identify the accepted review."
+  },
+  "limitations": [
+    "No measurement of version 0.1.19 or of later source revisions.",
+    "No same-machine Chrome/V8 comparison, no causal performance change between browser versions, and no Windows/ARM timing claim.",
+    "Three iterations per Speedometer run; not the default higher-iteration configuration.",
+    "The native-entry diagnostic is separate from the 16 timed runs and does not establish native coverage for every workload.",
+    "Global test262, CSS, DOM and other WPT corpora were not rerun for this record.",
+    "Complete raw logs, PNGs, resources and per-process observations remain in the private evidence archive; the public record contains portable summaries and hashes."
+  ]
+}

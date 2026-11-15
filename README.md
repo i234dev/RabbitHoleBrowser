@@ -47,7 +47,9 @@ in CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
 | Acid2 | **0 pixels** different from the reference | |
 | Acid3 | 96 / 100 | |
 | Framework suite (React 18/19, Vue 3, Svelte 5, Lit 3, Preact, Solid, Alpine, htmx, jQuery) | 66 / 66 in both modes | functional DOM/input checks on 2026-11-14 (Europe/Madrid), v0.1.11 source `b88c8ff`, WSL2/Linux x86-64; JIT off/on with threshold 0 and incremental-GC stress, profile ci; [measurement](docs/benchmarks/frameworks-2026-11-14-v0.1.11.json), not a timing benchmark |
-| Speedometer 3.1 | **2.37 ± 0.094** | 2026-11-14 (Europe/Madrid); 20 default workloads, 3 iterations; headless release v0.1.11 source `baca2a7`, JIT off, i7-12700H/WSL2, CPU 0; [method and scope](docs/benchmarks/speedometer-2026-11-14-v0.1.11.md) |
+| Speedometer 3.1 | **JIT off 2.082; on 2.102** (mean scores) | 2026-11-15 (Europe/Madrid), v0.1.18 source `dae023e`; 8 runs/mode, 20 workloads × 3 iterations, headless release/Rust 1.99.1, i7-12700H/WSL2 x86-64/CPU 0. Paired on/off median 1.0064×; 5/8 improve, 6 required: no consistent global gain. [Record and scope](docs/benchmarks/performance-2026-11-15-v0.1.18.md) |
+| JavaScript microbenchmarks | 27 cases, 432 observations | 2026-11-15, same v0.1.18 source and release/CPU conditions; individual medians/ranges, no aggregate speedup. `array_map` is **0.990×**. [All cases](docs/benchmarks/performance-2026-11-15-v0.1.18.md#individual-javascript-microbenchmarks) |
+| Directed CSS pixel controls | 33 / 33 | 2026-11-15, bootstrap source `37cb93d`, profile ci; CSS code identical to final 0.1.18. 31 WPT cases and 2 local controls; no fresh global CSS/WPT percentage. [Scope](docs/benchmarks/performance-2026-11-15-v0.1.18.md#directed-css-controls) |
 
 The built-in start page shows the complete compiled version and the latest
 dated results from the committed records. Baseline-derived counts refresh at
@@ -163,10 +165,12 @@ reports agent-task results supplied by the project owner for v0.1.15 on
 - Complex sign-in screens, including Google Account pages, still have layout
   and interaction gaps; a complete authenticated sign-in has not been validated.
 - No Temporal API; Intl is partial.
-- The JIT is off by default while compatibility and performance acceptance
-  gates remain open, and disabled on Windows until tested there.
+- The JIT is off by default while global performance acceptance remains open.
+  The 0.1.18 paired Speedometer run improved in 5/8 pairs; its consistency
+  criterion required 6/8. This is not an established global gain or slowdown.
 - A same-machine Speedometer comparison with Chrome has not been measured.
-  The recorded score covers the documented headless, three-iteration setup.
+  The recorded scores cover the documented headless, eight-pair setup with
+  three iterations per run.
 - H.264/HE-AAC video needs Windows (Media Foundation).
 
 ## Building
