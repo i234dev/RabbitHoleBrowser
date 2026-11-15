@@ -89,8 +89,10 @@ pub fn options() -> &'static Options {
         let list = |k: &str| var(k).map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
         let on = matches!(var("RABBITHOLE_JIT").as_deref(), Some("on" | "1" | "true" | "yes"));
         Options {
-            // Native code is only generated where it has been tested.
-            on: on && rabbithole_jit::supported() && cfg!(not(windows)),
+            // Windows mappings register unwind metadata before publication and
+            // remain alive through nested generated entries. The CLI canary
+            // exercises this selector without a Realm::set_jit override.
+            on: on && rabbithole_jit::supported(),
             threshold: var("RABBITHOLE_JIT_THRESHOLD").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_THRESHOLD),
             trace: var("RABBITHOLE_JIT_TRACE").is_some(),
             dump: var("RABBITHOLE_JIT_DUMP"),

@@ -25,6 +25,12 @@ caminos del motor; ese número no describe el avance global.
 
 La funcionalidad de una fase y sus criterios de cierre son cosas distintas.
 El JIT sigue apagado por defecto: quedan objetivos medidos sin cumplir.
+La selección explícita `--jit=on` / `RABBITHOLE_JIT=on` admite también Windows
+x64 con las tablas de unwind registradas y la retirada diferida descritas al
+final de este documento. No activa el backend ARM64 ni registra código Wasm.
+La prueba `jit_cli` ejecuta el binario real en procesos separados, comprueba la
+precedencia del argumento sobre el entorno y exige entradas nativas del probe
+con `on`, ninguna con `off`, y el mismo resultado JavaScript.
 Los siguientes pasos son cerrar la validación de lo recuperado, reducir el
 coste de llamadas/reanudación y después la asignación de memoria ejecutable.
 Activarlo requiere paridad funcional y una mejora global demostrada; no
@@ -1575,7 +1581,7 @@ El selector Windows, el ABI y las tablas de unwind permanecen fuera de este
 cambio.
 
 
-### Fase pura del descriptor de unwind Windows (candidato sin ejecutar)
+### Fase pura del descriptor de unwind Windows (estado histórico)
 
 La fase inicial de `jit/windows_unwind.rs` fue un prototipo privado bajo
 `cfg(test, x86_64)`:
@@ -1585,17 +1591,21 @@ JS y deriva sus offsets antes de serializar `UNWIND_INFO` V1 y los tres RVA de
 en `+40` y el final ejecutable separado del padding, la tabla de saltos y xdata.
 Rechaza otras recetas, rangos solapados, desalineados o fuera de la imagen.
 
-Los controles escritos son puros: no asignan `ExecMem`, llaman APIs Windows,
-registran tablas ni publican entradas. Quedan pendientes de compilación/CI.
-Los dos `jmp RAX` actuales sin REX.W también necesitan un control posterior
-con el scanner real de `RtlVirtualUnwind`; una descripción estructural de la
-pila no demuestra cómo interpreta el SO esos PCs. Ownership, leases,
-registro/borrado, Wasm y retirada del guard pertenecen a fases posteriores.
+En esta fase inicial los controles eran puros: no asignaban `ExecMem`, llamaban
+APIs Windows ni registraban tablas. La descripción estructural no demostraba
+cómo interpretaba el SO los dos `jmp RAX` sin REX.W. El registro, la retirada y
+el scanner real se validaron después, como se detalla a continuación; Wasm
+sigue fuera de ese alcance.
 
 
-### Registro Windows y retiro de código JS (implementación pendiente de ejecución)
+### Registro Windows y retiro de código JS (validación del 15 de noviembre de 2026)
 
-El sucesor desde `2a6cce4` conserva el selector normal de Windows deshabilitado.
+La revisión `3a400c87f99a967894a2ff44b9520be7ba4783f3`, con el selector normal
+aún bloqueado, pasó la CI `43758216435` en Linux, macOS y Windows. En Windows
+se ejecutaron los seis controles específicos siguientes en ambas pasadas,
+con los mismos resultados: 1.770 pruebas pasadas y 13 ignoradas por modo.
+Esto acredita el registro y las entradas forzadas de los tests, no el selector
+normal. El sucesor abre ahora la selección explícita y añade el canario CLI.
 En x86-64 Windows, el emisor JS añade la xdata al mapping y registra una tabla
 `RUNTIME_FUNCTION` estable con `RtlAddFunctionTable` antes de publicar la entrada.
 Reutiliza el asignador RW→RX y su comprobación de `FlushInstructionCache`.
@@ -1618,7 +1628,7 @@ adquirir su contador. Los mappings retirados o cuyo borrado falla siguen
 contando contra el límite de mappings de 16 MiB. Este límite no representa RSS
 ni incluye el pequeño propietario/tabla en el heap.
 
-Los seis controles Windows nuevos, aún sin ejecutar, usan las APIs reales del
+Los seis controles Windows nuevos usan las APIs reales del
 SO: lookup y `RtlVirtualUnwind` sobre una imagen compilada por el emisor de
 producción en doce fronteras del prólogo, entrada `+40`, ambos `FF E0` de
 dispatch/status y ocho fronteras del epílogo; ausencia de rangos de datos y
@@ -1635,9 +1645,11 @@ no se sustituyen por mocks. Los seis controles puros anteriores se conservan.
 cargo test -p rabbithole-js --profile ci --features jit --locked jit::windows_unwind:: -- --nocapture
 ```
 
-Esto cubre únicamente el propietario del JIT de JavaScript. No registra código
-Wasm, no demuestra una búsqueda completa de toda la pila del navegador y no
-habilita `--jit=on` en Windows. Quedan pendientes la ejecución Windows de estos
-controles y de los canarios nativos de watchdog, GC y reentrada existentes,
-además de la regresión JS y del asignador. Un `RABBITHOLE_JIT=on` verde mientras
-el selector está bloqueado no constituye evidencia de activación nativa normal.
+Esto cubre únicamente el propietario del JIT de JavaScript: no registra código
+Wasm ni demuestra una búsqueda completa de toda la pila del navegador. La CI
+anterior incluye la regresión del workspace, asignador y canarios de entrada
+forzada. La prueba `jit_cli` del sucesor ejecuta procesos reales con `--jit=on`
+y `off`, sin `Realm::set_jit`; ya pasó en Linux en `a7d8fcc8`. Su ejecución
+Windows y la regresión completa con el selector abierto siguen pendientes de
+validación. El JIT permanece apagado por defecto y el rendimiento global de la
+fase 8 sigue siendo una puerta independiente.
