@@ -30,6 +30,32 @@ pub struct FillOutcome {
     pub error: Option<String>,
 }
 
+#[derive(PartialEq)]
+enum FilledValue {
+    Checked(bool),
+    Selected(Vec<String>),
+    Text(String),
+}
+
+fn filled_value(page: &Page, control: NodeId, kind: ControlKind) -> FilledValue {
+    match kind {
+        ControlKind::Checkbox | ControlKind::Radio => FilledValue::Checked(page.doc.is_checked(control)),
+        ControlKind::Select => FilledValue::Selected(page.select_options(control).into_iter().filter(|o| o.2).map(|o| o.1).collect()),
+        _ => FilledValue::Text(page.control_text(control)),
+    }
+}
+
+impl FilledValue {
+    fn describe(&self, password: bool) -> String {
+        match self {
+            Self::Checked(value) => value.to_string(),
+            Self::Selected(values) => serde_json::to_string(values).unwrap(),
+            Self::Text(value) if password => format!("({} chars hidden)", value.chars().count()),
+            Self::Text(value) => format!("\"{}\"", crate::ax::esc(&crate::ax::clip_text(value, 80))),
+        }
+    }
+}
+
 fn check_fill_control(page: &Page, control: NodeId) -> Result<(), String> {
     if !page.doc.is_connected(control) {
         return Err("the field no longer exists; take a new snapshot".into());
@@ -102,6 +128,9 @@ pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &s
         other => return Err(format!("cannot fill a {other:?} control")),
     }
     result.value_applied = true;
+    // Record the value actually applied (an option label may resolve to a
+    // different value). Event handlers can synchronously replace it again.
+    let expected = filled_value(page, control, kind);
     engine.restyle(page);
     merge(&mut result.outcome, engine.dispatch_event(page, control, "input", input_init(Some(value))));
     if !document.is_for(&page.doc) {
@@ -112,6 +141,12 @@ pub fn fill_control(engine: &Engine, page: &mut Page, control: NodeId, value: &s
         return Ok(result);
     }
     merge(&mut result.outcome, engine.dispatch_event(page, control, "change", plain_init(false)));
+    if result.outcome.navigation.is_none() && document.is_for(&page.doc) && page.doc.is_connected(control) {
+        let actual = filled_value(page, control, kind);
+        if actual != expected {
+            result.error = Some(format!("value is still {} after input/change", actual.describe(kind == ControlKind::Password)));
+        }
+    }
     Ok(result)
 }
 

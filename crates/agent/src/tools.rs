@@ -397,6 +397,14 @@ fn text_matches(name: &str, terms: &[String]) -> Vec<Vec<(usize, usize)>> {
     }).collect()
 }
 
+fn has_whole_word_match(text: &str, terms: &[String]) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    text_matches(text, terms).iter().flatten().any(|&(start, end)| {
+        (start == 0 || !word(chars[start - 1])) && (end == chars.len() || !word(chars[end]))
+    })
+}
+
 fn match_context(name: &str, first: Option<(usize, usize)>, context: usize) -> String {
     if context == 0 {
         return clip_text(name, 120);
@@ -556,7 +564,11 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
             candidates.push((x.frame, x.node, x.role.clone(), vec![full_name], x.reference));
         }
     });
-    candidates.sort_by_key(|(f, nd, _, _, _)| order.get(&(*f, *nd)).copied().unwrap_or(usize::MAX));
+    candidates.sort_by_key(|(f, nd, role, passages, _)| {
+        let whole = terms.is_some_and(|terms| passages.iter().any(|p| has_whole_word_match(p, terms)));
+        let actionable = terms.is_some() && matches!(role.as_str(), "button" | "link" | "clickable" | "checkbox" | "radio" | "combobox" | "textbox" | "searchbox");
+        (!whole, !actionable, order.get(&(*f, *nd)).copied().unwrap_or(usize::MAX))
+    });
     let mut seen = vec![false; terms.map_or(0, |terms| terms.len())];
     let mut prose = vec![false; seen.len()];
     if role.is_none() {
@@ -619,7 +631,10 @@ fn find_elements(agent: &mut Agent, ti: usize, root: &crate::ax::Ax, terms: Opti
     let mut body = if lines.is_empty() { "No matches.".to_string() } else { lines.join("\n") };
     if let Some(terms) = terms {
         let missing: Vec<_> = terms.iter().zip(seen).filter(|(_, seen)| !seen).map(|(term, _)| format!("\"{}\"", esc(term))).collect();
-        if !missing.is_empty() { body.push_str(&format!("\nNo matches for: {}", missing.join(", "))); }
+        if !missing.is_empty() {
+            let absent = format!("No matches for: {}", missing.join(", "));
+            if lines.is_empty() { body = absent; } else { body.push_str(&format!("\n{absent}")); }
+        }
     }
     if total > lines.len() { body.push_str(&format!("\n({} more matches; raise limit)", total - lines.len())); }
     if omitted_links > 0 { body.push_str(&format!("\n({omitted_links} redundant links omitted; use role=link to include)")); }

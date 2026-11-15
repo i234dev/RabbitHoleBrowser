@@ -917,3 +917,59 @@ fn search_plain_linked_prose_keeps_visibility_secrets_normal_snapshots_and_node_
     let clicked = ok(&mut a, "click", json!({"ref":link_before}));
     assert!(clicked.contains("navigated to") && clicked.contains("Arrived"), "{clicked}");
 }
+
+
+#[test]
+fn rh003_find_prioritizes_whole_words_then_actionable_controls() {
+    let srv = serve(Box::new(|_| html("<title>Search</title><p>The entry was closed yesterday.</p><p>Close this paragraph.</p><button>Close</button><button>Disclose</button><p>Éclosion</p><button>Éclos</button>")));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let found = ok(&mut a, "find", json!({"text":"Close"}));
+    let lines = find_result_lines(&found);
+    assert!(lines[0].contains(" button \"Close\""), "{found}");
+    let paragraph = lines.iter().position(|l| l.contains("Close this paragraph")).unwrap();
+    let partial = lines.iter().position(|l| l.contains("closed yesterday")).unwrap();
+    assert!(paragraph < partial, "{found}");
+    let limited = ok(&mut a, "find", json!({"text":"Close","limit":1}));
+    assert!(find_result_lines(&limited)[0].contains(" button \"Close\""), "{limited}");
+    let unicode = ok(&mut a, "find", json!({"text":"Éclos"}));
+    assert!(find_result_lines(&unicode)[0].contains(" button \"Éclos\""), "{unicode}");
+}
+
+#[test]
+fn rh003_find_missing_terms_has_one_absence_message() {
+    let srv = serve(Box::new(|_| html("<p>Present text.</p>")));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let found = ok(&mut a, "find", json!({"text":["Absent","Missing"]}));
+    assert!(!found.contains("No matches."), "{found}");
+    assert_eq!(found.matches("No matches for:").count(), 1, "{found}");
+    assert!(found.contains("\"Absent\", \"Missing\""), "{found}");
+}
+
+#[test]
+fn rh003_summary_exposes_scripted_dialog_close_control() {
+    let srv = serve(Box::new(|_| html("<p>Background</p><div role='dialog' aria-label='Entry' style='position:fixed;inset:0;background:white;z-index:1000'><p>Entry advertisement</p><p onclick='this.parentNode.remove()'>Close</p></div>")));
+    let mut a = agent();
+    let opened = ok(&mut a, "open", json!({"url":srv.url("/")}));
+    assert!(opened.contains("⚠ [dialog") && opened.contains("clickable \"Close\" @e"), "{opened}");
+    let close = ref_of(&opened, "clickable \"Close\"");
+    ok(&mut a, "click", json!({"ref":close}));
+    let after = ok(&mut a, "snapshot", json!({}));
+    assert!(!after.contains("Entry advertisement"), "{after}");
+}
+
+#[test]
+fn rh003_fill_reports_event_handlers_that_replace_the_requested_value() {
+    let srv = serve(Box::new(|_| html("<label>Name<input id='name' onchange=\"this.value='original'\"></label><label>Choice<select id='choice' onchange=\"this.value='1'\"><option value='1'>First</option><option value='2'>Second</option></select></label><label>Secret<input id='secret' type='password' onchange=\"this.value='restored-secret'\"></label><label>Check<input id='check' type='checkbox' onchange=\"this.checked=false\"></label>")));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    for (selector, value, expected) in [("#name", json!("changed"), "original"), ("#choice", json!("Second"), "1"), ("#secret", json!("private"), "chars hidden"), ("#check", json!(true), "false")] {
+        let found = ok(&mut a, "find", json!({"selector":selector}));
+        let reference = find_result_lines(&found)[0].split_whitespace().next().unwrap().to_string();
+        let filled = ok(&mut a, "fill", json!({"ref":reference,"value":value}));
+        assert!(filled.contains("value is still") && filled.contains(expected), "{selector}: {filled}");
+        assert!(!filled.contains("Filled:"), "{selector}: {filled}");
+        assert!(!filled.contains("restored-secret"), "password leaked: {filled}");
+    }
+}

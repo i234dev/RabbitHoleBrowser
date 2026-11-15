@@ -98,12 +98,13 @@ pub fn render(page: &Page, root: &Ax, refs: &mut RefMap, overlays: &[Overlay]) -
             s.push(' ');
             s.push_str(n);
         }
-        // The buttons of a small dialog (accept / reject / close).
+        // Scripted close controls are often ordinary paragraphs or spans.
         let mut buttons = Vec::new();
         d.visit(&mut |x, _| {
-            if x.kind == Kind::Control && x.role == "button" && !x.name.is_empty() {
+            if x.kind == Kind::Control && matches!(x.role.as_str(), "button" | "clickable") && !x.name.is_empty() {
                 if let Some(r) = x.reference {
-                    buttons.push(format!("\"{}\" @e{r}", esc(&clip_text(&x.name, 30))));
+                    let role = if x.role == "clickable" { "clickable " } else { "" };
+                    buttons.push(format!("{role}\"{}\" @e{r}", esc(&clip_text(&x.name, 30))));
                 }
             }
         });
