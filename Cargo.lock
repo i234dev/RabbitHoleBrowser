@@ -1632,6 +1632,7 @@ name = "rabbithole-js"
 version = "0.1.17"
 dependencies = [
  "rabbithole-jit",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

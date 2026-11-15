@@ -104,6 +104,12 @@ impl Realm {
     /// the new last frame has none (the native stack does not grow).
     #[inline(never)]
     pub(crate) fn jit_run(&mut self, code: &FunctionCode, entry: usize, pc: usize) -> Ctl {
+        #[cfg(windows)]
+        let Some(lease) = super::windows_unwind::EntryLease::new() else {
+            // TLS teardown/reentrant bookkeeping cannot safely admit a new
+            // generated activation. Interpret this frame instead.
+            return Ctl::Next;
+        };
         let code: *const FunctionCode = code;
         {
             self.jit.entries += 1;
@@ -141,9 +147,12 @@ impl Realm {
                 let f: Entry = std::mem::transmute(entry);
                 f(&mut ctx, pc as u32)
             };
-            // Restore before processing ST_PANIC (which can resume unwinding).
+            // Generated frames have returned, including on ST_PANIC. Restore
+            // the witness and release the lease before resume_unwind.
             #[cfg(test)]
             { self.jit.live_entries -= 1; }
+            #[cfg(windows)]
+            drop(lease);
             match st {
                 // Frames were pushed or popped and the new last frame has
                 // no native code to continue in (the helper's frame switch

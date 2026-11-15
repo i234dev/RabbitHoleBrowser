@@ -38,7 +38,7 @@ pub(crate) const PHASE: u8 = 0;
 mod debug;
 #[cfg(target_arch = "x86_64")]
 mod helpers;
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(all(any(test, windows), target_arch = "x86_64"))]
 mod windows_unwind;
 #[cfg(target_arch = "x86_64")]
 mod layout;
@@ -155,8 +155,13 @@ pub struct Slot {
 /// Native code of one function.
 pub struct JitCode {
     #[allow(dead_code)]
-    mem: rabbithole_jit::ExecMem,
+    mem: CodeMem,
 }
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+type CodeMem = windows_unwind::RegisteredCode;
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+type CodeMem = rabbithole_jit::ExecMem;
 
 /// Per-realm state.
 pub(crate) struct State {
@@ -262,6 +267,8 @@ pub fn code_bytes() -> usize {
     CODE_BYTES.with(|c| c.get())
 }
 
+// Windows accounts at actual unregistration/free, including retired mappings.
+#[cfg(not(all(windows, target_arch = "x86_64")))]
 impl Drop for JitCode {
     fn drop(&mut self) {
         let n = self.mem.mapped_len();
@@ -352,6 +359,8 @@ pub(crate) fn compile(code: &FunctionCode, stats: &mut Stats) {
         Ok((mem, listing)) => {
             let bytes = mem.mapped_len();
             CODE_BYTES.with(|c| c.set(c.get() + bytes));
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            mem.account();
             COMPILED_COUNT.with(|c| c.set(c.get() + 1));
             stats.compiled += 1;
             stats.code_bytes += mem.len();
@@ -379,7 +388,7 @@ pub(crate) fn compile(code: &FunctionCode, stats: &mut Stats) {
 }
 
 /// Generate the native code of `code` (and its listing when dumping).
-fn build(code: &FunctionCode) -> Result<(rabbithole_jit::ExecMem, Option<String>), String> {
+fn build(code: &FunctionCode) -> Result<(CodeMem, Option<String>), String> {
     #[cfg(target_arch = "x86_64")]
     {
         let o = options();

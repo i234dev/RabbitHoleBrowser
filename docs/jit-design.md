@@ -1577,7 +1577,8 @@ cambio.
 
 ### Fase pura del descriptor de unwind Windows (candidato sin ejecutar)
 
-`jit/windows_unwind.rs` es un prototipo privado bajo `cfg(test, x86_64)`:
+La fase inicial de `jit/windows_unwind.rs` fue un prototipo privado bajo
+`cfg(test, x86_64)`:
 valida los bytes de los mismos helpers de prolog/epílogo usados por el emisor
 JS y deriva sus offsets antes de serializar `UNWIND_INFO` V1 y los tres RVA de
 `RUNTIME_FUNCTION`. Mantiene `FrameRegister=0`, la forma completa de 56 bytes
@@ -1590,3 +1591,53 @@ Los dos `jmp RAX` actuales sin REX.W también necesitan un control posterior
 con el scanner real de `RtlVirtualUnwind`; una descripción estructural de la
 pila no demuestra cómo interpreta el SO esos PCs. Ownership, leases,
 registro/borrado, Wasm y retirada del guard pertenecen a fases posteriores.
+
+
+### Registro Windows y retiro de código JS (implementación pendiente de ejecución)
+
+El sucesor desde `2a6cce4` conserva el selector normal de Windows deshabilitado.
+En x86-64 Windows, el emisor JS añade la xdata al mapping y registra una tabla
+`RUNTIME_FUNCTION` estable con `RtlAddFunctionTable` antes de publicar la entrada.
+Reutiliza el asignador RW→RX y su comprobación de `FlushInstructionCache`.
+Si falla el registro, rechaza la compilación y libera la asignación; el programa
+puede continuar interpretado. No cambia el ABI `sysv64` ni los bytes emitidos
+para Unix.
+
+Un contador TLS abarca cada llamada real a `Entry`, incluidas las entradas
+anidadas desde callbacks. Cuando muere un `JitCode` con alguna entrada viva,
+el propietario completo se retira hasta que vuelva la última entrada. Así no
+basta con conservar sólo el código señalado por `ctx.code`, que cambia al
+llamar y retornar. La cola se drena fuera del préstamo TLS y antes de procesar
+`ST_PANIC`/`resume_unwind`. No hay búsqueda ni clon por cambio de frame.
+
+`RtlDeleteFunctionTable` precede a la liberación. Un fallo conserva tabla,
+xdata y mapping juntos para reintentar en la próxima salida de la última
+entrada. Si el TLS ya no está disponible o está prestado de forma reentrante,
+se retiene la asignación completa; una entrada nueva se interpreta si no puede
+adquirir su contador. Los mappings retirados o cuyo borrado falla siguen
+contando contra el límite de mappings de 16 MiB. Este límite no representa RSS
+ni incluye el pequeño propietario/tabla en el heap.
+
+Los seis controles Windows nuevos, aún sin ejecutar, usan las APIs reales del
+SO: lookup y `RtlVirtualUnwind` sobre una imagen compilada por el emisor de
+producción en doce fronteras del prólogo, entrada `+40`, ambos `FF E0` de
+dispatch/status y ocho fronteras del epílogo; ausencia de rangos de datos y
+lookup vacío tras liberar; fallo de registro sin publicación; fallo de borrado
+con presupuesto retenido y posterior reintento; retiro de `FunctionCode` real
+compilado pero no ejecutado desde callback mientras otro frame generado sigue
+vivo, con reentrada JS y GC que reclama un objeto sin raíces; pánico de un
+hook dentro del helper guardado, con retorno normal del frame generado antes
+de reanudar el pánico en Rust; y rechazo de una entrada con TLS prestado.
+Los fallos de registro/borrado se inyectan sólo en tests; el scanner y lookup
+no se sustituyen por mocks. Los seis controles puros anteriores se conservan.
+
+```text
+cargo test -p rabbithole-js --profile ci --features jit --locked jit::windows_unwind:: -- --nocapture
+```
+
+Esto cubre únicamente el propietario del JIT de JavaScript. No registra código
+Wasm, no demuestra una búsqueda completa de toda la pila del navegador y no
+habilita `--jit=on` en Windows. Quedan pendientes la ejecución Windows de estos
+controles y de los canarios nativos de watchdog, GC y reentrada existentes,
+además de la regresión JS y del asignador. Un `RABBITHOLE_JIT=on` verde mientras
+el selector está bloqueado no constituye evidencia de activación nativa normal.

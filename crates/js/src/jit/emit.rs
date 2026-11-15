@@ -1398,7 +1398,7 @@ pub(super) fn emit_epilogue(a: &mut Asm) {
 }
 
 /// Compile `code` (validated here) into native code.
-pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Option<String>), String> {
+pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem, Option<String>), String> {
     for op in &code.ops {
         if let Class::Reject(why) = classify(op) {
             return Err(format!("{why} ({op:?})"));
@@ -1410,6 +1410,8 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     let labels: Vec<Label> = (0..n).map(|_| a.label()).collect();
     let (status, dispatch, epilogue, table, interp) = (a.label(), a.label(), a.label(), a.label(), a.label());
     emit_prologue(&mut a);
+    #[cfg(windows)]
+    let prologue_end = a.pos();
     a.load64(SLOTS, Mem::base(CTX, CTX_SLOTS));
     a.load64(CONSTS, Mem::base(CTX, CTX_CONSTS));
     a.alu_rr32(Alu::Or, RSI, RSI); // zero-extend the pc
@@ -1419,6 +1421,8 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     a.lea_label(RAX, table);
     a.movsxd(RCX, Mem::index(RAX, RSI, 4, 0));
     a.alu_rr64(Alu::Add, RAX, RCX);
+    #[cfg(windows)]
+    let dispatch_jump = a.pos();
     a.jmp_r(RAX);
 
     let mut g = Gen { a, code, labels, stubs: Vec::new(), status, rc: super::rc_inline(), lay: if super::rc_inline() { super::layout::get() } else { None } };
@@ -1507,11 +1511,17 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     a.jmp(dispatch);
     a.bind(addr);
     a.load32(RSI, Mem::base(CTX, CTX_PC));
+    #[cfg(windows)]
+    let status_jump = a.pos();
     a.jmp_r(RAX);
     a.bind(interp);
     a.mov_imm32(RAX, ST_INTERP as u32);
     a.bind(epilogue);
+    #[cfg(windows)]
+    let epilogue_start = a.pos();
     emit_epilogue(&mut a);
+    #[cfg(windows)]
+    let function_end = a.pos();
     // Entry table: offset of each instruction from the table.
     a.align(4);
     a.bind(table);
@@ -1520,6 +1530,19 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
         let off = a.label_offset(*l).expect("instruction label") as i64 - base;
         a.d32(off as i32);
     }
+    #[cfg(windows)]
+    let unwind_layout = {
+        let table_end = a.pos();
+        a.align(4);
+        let unwind_info = a.pos();
+        // Seven unwind codes, header and alignment for the fixed JS frame.
+        a.buf.resize(unwind_info + 20, 0);
+        super::windows_unwind::Layout {
+            begin: 0, prologue_end, inner_entry: INNER_ENTRY, epilogue_start,
+            end: function_end, table_start: base as usize, table_end, unwind_info,
+            dispatch_jump, status_jump,
+        }
+    };
     a.finish_labels();
     let listing = a.listing();
     // The final function must fit as well: checking only the current
@@ -1529,7 +1552,10 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
         return Err("code memory limit".into());
     }
     let t = std::time::Instant::now();
+    #[cfg(not(windows))]
     let mem = ExecMem::new(&a.buf, |_, _| {}).ok_or("executable memory unavailable")?;
+    #[cfg(windows)]
+    let mem = super::windows_unwind::RegisteredCode::new(a.buf, unwind_layout)?;
     super::MAP_NS.with(|m| m.set(m.get() + t.elapsed().as_nanos() as u64));
     Ok((mem, listing))
 }
