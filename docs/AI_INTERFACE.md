@@ -1,7 +1,7 @@
 # RabbitHole for AI agents
 
 RabbitHole can be driven by LLM agents over **MCP** (`rabbithole mcp`, JSON-RPC
-2.0 on stdio) or from a shell (`rabbithole agent`). Both use the same twelve
+2.0 on stdio) or from a shell (`rabbithole agent`). Both use the same thirteen
 tools, implemented in `crates/agent`. This document is the specification of
 that interface: the tools, the snapshot grammar, the auto-wait and diff
 semantics, the error messages, and the safety rules.
@@ -37,13 +37,14 @@ Design goals, in order:
 | `network`    | The tab's requests: `#id METHOD STATUS type content-type size time path`, with API hints. `id=N` shows a response body (JSON pretty-printed). `filter`, `type`, `all` (include images/fonts/CSS), `limit`. |
 | `tabs`       | `action=list|switch|new|close` tabs (popups appear here), `download` (save an offered download to `path`), `save`/`load` a session (cookies, localStorage, open tabs) to/from a directory, `context` for isolated contexts. |
 | `debug`      | `eval` JavaScript, returned Promises or top-level `await`; optional `timeout` in milliseconds and `follow=true` for script navigation. `console=true`, `clear`, `log=script|json`, `live=true`. |
+| `batch`      | Run 1–20 `{tool, args}` steps sequentially, stopping at the first failure. Earlier results are summarized below 200 characters each; the last result is full. `full=true` retains all text. |
 
 Every action (`open`, `click`, `type`, `fill`, `scroll`) accepts `dialog`:
 the answer to `alert`/`confirm`/`prompt` raised during that call — `accept`,
 `dismiss` (the default) or the text to answer a prompt with.
 
 The tool-budget test checks the compact `tools/list` result object,
-`{"tools":[…]}`, at at most 6,900 Unicode scalar values, with each tool description
+`{"tools":[…]}`, at at most 7,500 Unicode scalar values, with each tool description
 under 200 UTF-8 bytes. This is a catalogue-size gate, separate from model tokens,
 page output and the surrounding JSON-RPC envelope.
 
@@ -338,6 +339,26 @@ order) into one-line summaries `[footer] @e99 collapsed (34 links, 2 texts)`.
 
 ## Actions: auto-wait and diffs
 
+`click`, `type` and `fill` accept `selector` instead of `ref`, using the same
+CSS grammar as `find`. Exactly one element must match across the loaded frames;
+zero or multiple matches are errors. Use `find` to inspect ambiguous targets.
+The normal visibility, disabled, form and navigation checks still apply.
+For example, `fill selector="#email" value="name@example.test"` fills one field;
+`fill selector="#checkout" values={...}` selects a form. Without either target,
+`type` still uses the focused element and `fill` retains its form-list behavior.
+
+For explicit observation, `find wait=5000 text="ready"` waits for a matching
+result; `gone=true` waits for no matches. `wait` accepts 0–30000 milliseconds.
+Text/role/name use the visible semantic tree; CSS uses DOM existence as in
+ordinary selector search, including hidden matches marked in the output.
+Actions accept `until="ready"`, `until={"text":"ready"}` or
+`until={"selector":"#result"}`, with `timeout` from 0–30000 milliseconds
+(default: the configured auto-wait cap, limited to 30 seconds). This observes
+the condition after the action and preserves one deadline through followed
+navigation. A timeout returns a normal result explaining pending work; a batch
+stops at that unmet condition. Synchronous page loads/native I/O keep their
+existing network limits, so this is not a hard wall-clock cap for all work.
+
 After `open` and every action the page runs until **settled**, capped by
 `--timeout` (default 5 s):
 
@@ -387,6 +408,32 @@ topmost. `type` dispatches `keydown`/`keypress`/`input`/`keyup` per
 character (respecting `maxlength` and handlers that rewrite the value) and
 `change` at the end. `Enter` in a text field performs implicit form
 submission through the default button.
+
+## Batches
+
+```json
+{"steps":[
+  {"tool":"click","args":{"selector":"#edit"}},
+  {"tool":"fill","args":{"selector":"#name","value":"Alice"}},
+  {"tool":"click","args":{"selector":"#save","until":"Saved","timeout":5000}}
+]}
+```
+
+The batch validates its descriptor shape, tool names and no-nesting rule before
+executing any step. Tool arguments and current targets are checked when their
+step runs, so selectors can find controls created by an earlier action. A runtime
+failure stops the batch and reports attempted, succeeded, failed and pending
+counts with the full failing result. Earlier successful actions and fields that
+were applied remain; a batch does not roll them back. A partial fill or failed
+evaluation stops execution using explicit failure state, never by interpreting
+page text that happens to contain words such as `Error`.
+
+The last attempted result is returned in full. Earlier summaries contain fewer
+than 200 Unicode characters per step inside a page-content fence. `full=true`
+returns every attempted result's full text. Only the last step's PNG is returned;
+earlier PNG omissions are explicitly reported, so put a screenshot last when its
+image is needed. Each step uses the ordinary dialog, navigation, event and wait
+handling of its tool. A batch step cannot itself call `batch`.
 
 ## Errors
 
@@ -545,8 +592,10 @@ still accepted and mean the default.
   also announced as events.
 * `debug eval="…"` evaluates JavaScript in the page and observes a returned
   Promise. Top-level `await` is detected from syntax; there is no `await` flag.
-  Await-enabled evaluations have invocation-local bindings; ordinary evaluations
-  keep their existing global behavior. Module imports/exports are unsupported.
+  Every invocation has its own `const`, `let` and `class` bindings, including
+  evaluations without await. Returned closures/Promises retain that scope while
+  alive. Explicit `globalThis` assignments, top-level `var` and function
+  declarations persist across calls. Module imports/exports are unsupported.
   Resolved values are inspected, rejections report `Uncaught (in promise) …`,
   and a Promise still pending at the deadline reports
   `Promise still pending after N ms`.

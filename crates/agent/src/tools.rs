@@ -24,22 +24,25 @@ const FIND_CONTEXT: usize = 240;
 const MAX_FIND_CONTEXT: usize = 4096;
 
 /// Tool names, in the order they are listed.
-pub const TOOLS: &[&str] = &["open", "snapshot", "read", "find", "click", "type", "fill", "scroll", "screenshot", "network", "tabs", "debug"];
+pub const TOOLS: &[&str] = &["open", "snapshot", "read", "find", "click", "type", "fill", "scroll", "screenshot", "network", "tabs", "debug", "batch"];
 
 /// JSON schemas of the tools (MCP `tools/list`).
 pub fn definitions() -> Vec<Value> {
-    let r = json!({ "type": "string", "description": "Element @e12 or form @f1 ref" });
-    let dialog = json!({ "type": "string", "description": "Dialog answer: accept, dismiss (default), or prompt text" });
+    let r = json!({ "type": "string", "description": "@eN or @fN" });
+    let selector = json!({ "type": "string", "description": "Unique CSS, instead of ref" });
+    let dialog = json!({ "type": "string", "description": "accept|dismiss|text" });
+    let until = json!({ "type": ["string", "object"], "properties": { "text": { "type": "string" }, "selector": { "type": "string" } }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false });
+    let timeout = json!({ "type": "integer", "minimum": 0, "maximum": 30000 });
     vec![
-        json!({ "name": "open", "description": "Load URL (or back/forward/reload). Default: summary. find returns fact passages; summary=true adds overview; snapshot=true returns tree.",
+        json!({ "name": "open", "description": "Load URL/history; default summary. find returns passages; summary=true adds overview; snapshot/full returns tree.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "Absolute URL, or back | forward | reload" },
+                "url": { "type": "string", "description": "URL|back|forward|reload" },
                 "new_tab": { "type": "boolean" },
-                "context": { "type": "string", "description": "Isolated cookies/storage session; created on demand" },
+                "context": { "type": "string", "description": "Isolated cookies/storage" },
                 "snapshot": { "type": "boolean", "description": "Return full semantic tree (alias: full)" },
-                "full": { "type": "boolean", "description": "Alias of snapshot" },
+                "full": { "type": "boolean" },
                 "find": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Any term; returns passages instead of overview" },
-                "window": { "type": "integer", "minimum": 0, "maximum": 4096, "description": "Chars per passage; default 240, total up to 3x; 0: first 120" },
+                "window": { "type": "integer", "minimum": 0, "maximum": 4096, "description": "Passage chars: default 240, cap 3x; 0: first 120" },
                 "limit": { "type": "integer" },
                 "summary": { "type": "boolean", "description": "Include overview with find" },
                 "max_tokens": { "type": "integer", "description": "Full-snapshot budget (default 2500; implies snapshot=true)" },
@@ -49,14 +52,14 @@ pub fn definitions() -> Vec<Value> {
                 "javascript": { "type": "boolean" },
                 "dialog": dialog
             }, "required": ["url"] } }),
-        json!({ "name": "snapshot", "description": "Compact semantic tree of the page with stable refs (@eN). Main content first; long lists truncated.",
+        json!({ "name": "snapshot", "description": "Semantic tree with stable @eN refs; main content first; long lists truncated.",
             "inputSchema": { "type": "object", "properties": {
                 "ref": { "type": "string", "description": "Expand only this element (e.g. a collapsed list or landmark)" },
                 "max_tokens": { "type": "integer" },
                 "hidden": { "type": "boolean", "description": "Also list hidden content, marked" },
                 "urls": { "type": "boolean", "description": "Show link targets" }
             } } }),
-        json!({ "name": "read", "description": "Main text as Markdown; without ref, starts at article beginning. For a particular fact, find is cheaper. Links use refs by default.",
+        json!({ "name": "read", "description": "Main text as Markdown; default article beginning. find is cheaper for facts; links use refs.",
             "inputSchema": { "type": "object", "properties": {
                 "ref": r.clone(), "max_tokens": { "type": "integer", "description": "Default 4000" }, "offset": { "type": "integer", "description": "Character offset to continue from" },
                 "links": { "type": "boolean", "default": true }, "cites": { "type": "boolean", "default": false }
@@ -64,29 +67,30 @@ pub fn definitions() -> Vec<Value> {
         json!({ "name": "find", "description": "Find any text terms with context; cheaper than read for facts. Also role/name or CSS selector; returns refs and absent terms.",
             "inputSchema": { "type": "object", "properties": {
                 "text": { "type": ["string", "array"], "items": { "type": "string" } }, "role": { "type": "string" }, "name": { "type": "string" }, "selector": { "type": "string" }, "limit": { "type": "integer" },
-                "window": { "type": "integer", "minimum": 0, "maximum": 4096, "description": "Chars per passage; default 240, total up to 3x; 0: first 120" },
-                "context": { "type": "integer", "description": "Alias of window; window wins" }
+                "window": { "type": "integer", "minimum": 0, "maximum": 4096, "description": "Passage chars: default 240, cap 3x; 0: first 120" },
+                "context": { "type": "integer", "description": "Window alias" },
+                "wait": { "type": "integer", "minimum": 0, "maximum": 30000 }, "gone": { "type": "boolean" }
             } } }),
-        json!({ "name": "click", "description": "Click an element (or hover=true). Waits until the page settles and returns what changed. ref=\"cookies\" rejects a cookie banner.",
+        json!({ "name": "click", "description": "Click/hover ref or unique CSS selector; returns changes. ref=\"cookies\" rejects consent. until: text or {selector:CSS}; timeout ms≤30000.",
             "inputSchema": { "type": "object", "properties": {
-                "ref": r.clone(), "hover": { "type": "boolean" }, "force": { "type": "boolean", "description": "Dispatch even if covered or invisible" }, "dialog": dialog
-            }, "required": ["ref"] } }),
-        json!({ "name": "type", "description": "Type text into a field with key events and/or press a key (Enter, Tab, Escape, ArrowDown…). Returns what changed.",
-            "inputSchema": { "type": "object", "properties": {
-                "ref": r.clone(), "text": { "type": "string" }, "key": { "type": "string" }, "clear": { "type": "boolean", "description": "Replace the current value (default false: append)" },
-                "submit": { "type": "boolean", "description": "Press Enter afterwards" }, "dialog": dialog
+                "ref": r.clone(), "selector": selector.clone(), "hover": { "type": "boolean" }, "force": { "type": "boolean", "description": "Bypass visibility" }, "dialog": dialog, "until": until.clone(), "timeout": timeout.clone()
             } } }),
-        json!({ "name": "fill", "description": "List forms, fill fields, or submit=true. Follows input/change navigation and stops pending fields. values needs ref, @eN keys, or one form.",
+        json!({ "name": "type", "description": "Type text/key at ref, unique CSS selector or focus; returns changes.",
             "inputSchema": { "type": "object", "properties": {
-                "ref": r.clone(), "values": { "type": "object", "description": "Name/label/@eN → text, checkbox boolean, or option label; no ref requires @eN keys or one form" },
-                "value": { "description": "Value for a single field ref" }, "submit": { "type": "boolean" }, "dialog": dialog
+                "ref": r.clone(), "selector": selector.clone(), "text": { "type": "string" }, "key": { "type": "string" }, "clear": { "type": "boolean", "description": "Replace the current value (default false: append)" },
+                "submit": { "type": "boolean", "description": "Press Enter" }, "dialog": dialog, "until": until.clone(), "timeout": timeout.clone()
+            } } }),
+        json!({ "name": "fill", "description": "List/fill forms or submit; stops remaining fields after field navigation.",
+            "inputSchema": { "type": "object", "properties": {
+                "ref": r.clone(), "selector": selector, "values": { "type": "object", "description": "Name/label/@eN values; no ref: @eN keys or one form" },
+                "value": { "description": "Single field value" }, "submit": { "type": "boolean" }, "dialog": dialog, "until": until, "timeout": timeout
             } } }),
         json!({ "name": "scroll", "description": "Scroll the page or an element into view; until=@eN|text scrolls until visible; load_more=true loads infinite lists.",
             "inputSchema": { "type": "object", "properties": {
                 "ref": r.clone(), "direction": { "type": "string", "enum": ["down", "up", "top", "bottom"] }, "pages": { "type": "number" },
                 "until": { "type": "string" }, "load_more": { "type": "boolean" }, "max_steps": { "type": "integer" }
             } } }),
-        json!({ "name": "screenshot", "description": "PNG of the viewport (or full page / one element) with refs drawn over interactive elements.",
+        json!({ "name": "screenshot", "description": "PNG viewport/full page/element; refs marked by default.",
             "inputSchema": { "type": "object", "properties": {
                 "ref": r.clone(), "full": { "type": "boolean" }, "marks": { "type": "boolean", "description": "Draw refs (default true)" }, "scale": { "type": "number" }
             } } }),
@@ -102,6 +106,13 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "eval": { "type": "string" }, "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds; default auto-wait cap" }, "follow": { "type": "boolean", "default": false }, "console": { "type": "boolean" }, "clear": { "type": "boolean" }, "log": { "type": "string" }, "live": { "type": "boolean" }, "stats": { "type": "boolean" }
             } } }),
+        json!({ "name": "batch", "description": "Run 1–20 tools in order; no nesting. Stops at first failure with counts. Earlier results <200 chars, last full; full=true keeps all text.",
+            "inputSchema": { "type": "object", "properties": {
+                "steps": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "object", "properties": {
+                    "tool": { "type": "string" }, "args": { "type": "object" }
+                }, "required": ["tool"], "additionalProperties": false } },
+                "full": { "type": "boolean" }
+            }, "required": ["steps"], "additionalProperties": false } }),
     ]
 }
 
@@ -297,6 +308,9 @@ pub fn call(agent: &mut Agent, name: &str, args: &Value) -> Result<Out, String> 
     let args = if args.is_null() { json!({}) } else { args.clone() };
     // Validate the condition before even the normal background task pump.
     let explicit = action_wait(name, &args, agent.cfg.settle_cap)?;
+    // Each inner call applies its own policies/events/waits. Reject an invalid
+    // batch before even advancing background page work on its behalf.
+    if name == "batch" { return batch(agent, &args); }
     // Per-call dialog policy.
     let saved_policy = agent.active.map(|ti| agent.tabs[ti].dialog_policy.clone());
     if let (Some(p), Some(ti)) = (dialog_policy(&args), agent.active) {
@@ -360,7 +374,7 @@ fn dispatch(agent: &mut Agent, name: &str, a: &Value) -> Result<Out, String> {
         "click" => {
             let ti = agent.tab_index()?;
             agent.ensure_loaded(ti)?;
-            let r = s(a, "ref").ok_or("click needs ref (e.g. @e12, or \"cookies\")")?.to_string();
+            let r = action_ref(agent, ti, a)?.ok_or("click needs ref or selector")?;
             Ok(Out::text(agent.click(ti, &r, b(a, "hover").unwrap_or(false), b(a, "force").unwrap_or(false))?))
         }
         "type" => type_(agent, a),
@@ -379,6 +393,115 @@ fn dispatch(agent: &mut Agent, name: &str, a: &Value) -> Result<Out, String> {
         "debug" => debug(agent, a),
         other => Err(format!("unknown tool: {other} (tools: {})", TOOLS.join(", "))),
     }
+}
+
+fn batch(agent: &mut Agent, a: &Value) -> Result<Out, String> {
+    let object = a.as_object().ok_or("batch needs an object; no steps executed")?;
+    if object.keys().any(|key| !matches!(key.as_str(), "steps" | "full")) {
+        return Err("batch accepts only steps and full; no steps executed".into());
+    }
+    let full = match a.get("full") {
+        Some(value) => value.as_bool().ok_or("batch full needs a boolean; no steps executed")?,
+        None => false,
+    };
+    let steps = a.get("steps").and_then(Value::as_array).ok_or("batch steps needs an array; no steps executed")?;
+    if !(1..=20).contains(&steps.len()) {
+        return Err("batch needs 1–20 steps; no steps executed".into());
+    }
+    let mut checked = Vec::with_capacity(steps.len());
+    for (index, step) in steps.iter().enumerate() {
+        let error = |reason: &str| format!("batch step {}: {reason}; no steps executed", index + 1);
+        let step = step.as_object().ok_or_else(|| error("needs an object"))?;
+        if step.keys().any(|key| !matches!(key.as_str(), "tool" | "args")) {
+            return Err(error("accepts only tool and args"));
+        }
+        let tool = step.get("tool").and_then(Value::as_str).ok_or_else(|| error("tool needs a string"))?;
+        if tool == "batch" { return Err(error("nested batch is not allowed")); }
+        if !TOOLS.contains(&tool) { return Err(error("unknown tool")); }
+        let args = match step.get("args") {
+            Some(value) if value.is_object() => value.clone(),
+            Some(_) => return Err(error("args needs an object")),
+            None => json!({}),
+        };
+        checked.push((tool, args));
+    }
+    let mut results: Vec<(&str, Out)> = Vec::with_capacity(checked.len());
+    let mut succeeded = 0;
+    let mut failed = false;
+    let mut omitted_png = false;
+    for (tool, args) in checked {
+        let output = match call(agent, tool, &args) {
+            Ok(output) => output,
+            Err(error) => Out { failed: true, ..Out::text(error) },
+        };
+        failed = output.failed;
+        if !failed { succeeded += 1; }
+        // Out carries one PNG. Release the preceding image as soon as a later
+        // result exists, retaining its text and an explicit omission notice.
+        if let Some((_, previous)) = results.last_mut() {
+            if previous.png.take().is_some() {
+                omitted_png = true;
+                previous.text.push_str("\n[PNG only returned for last step]");
+            }
+        }
+        results.push((tool, output));
+        if failed { break; }
+    }
+    let attempted = results.len();
+    let last = attempted - 1;
+    let mut text = format!("Batch: attempted {attempted}/{}, succeeded {succeeded}, failed {}, pending {}.", steps.len(), usize::from(failed), steps.len() - attempted);
+    if omitted_png {
+        text.push_str("\nOnly the last step's PNG is returned; earlier PNGs are omitted.");
+    }
+    if !full && last > 0 {
+        let summaries: Vec<String> = results[..last].iter().enumerate().map(|(index, (tool, output))| {
+            let body = output.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let line = format!("{}. {tool}: {body}{}", index + 1, if output.png.is_some() { " [PNG only returned for last step]" } else { "" });
+            clip_text(&line, 199)
+        }).collect();
+        text.push_str(&format!("\nEarlier steps:\n{}", fence(&summaries.join("\n"))));
+    }
+    let start = if full { 0 } else { last };
+    for (index, (tool, output)) in results.iter().enumerate().skip(start) {
+        text.push_str(&format!("\nStep {} ({tool}{}):\n{}", index + 1, if output.failed { ", failed" } else { "" }, output.text));
+        if index != last && output.png.is_some() { text.push_str("\n[PNG only returned for last step]"); }
+    }
+    if failed { return Err(text); }
+    Ok(Out { text, png: results.pop().and_then(|(_, output)| output.png), failed: false })
+}
+
+/// The same CSS grammar and frame traversal as find, without choosing a match.
+pub(crate) fn selector_nodes(agent: &Agent, ti: usize, selector: &str) -> Result<Vec<(usize, NodeId)>, String> {
+    let tokens = Tokenizer::tokenize(selector);
+    let list = SelectorParser::new(&tokens).parse_list().filter(|list| !list.is_empty()).ok_or_else(|| format!("invalid selector: {selector}"))?;
+    let mut nodes = Vec::new();
+    for (frame, data) in agent.tabs[ti].frames.iter().enumerate() {
+        let doc = &data.page.doc;
+        for node in doc.descendants(Document::ROOT) {
+            if doc.element(node).is_some() && list.iter().any(|selector| matches(selector, doc, node)) { nodes.push((frame, node)); }
+        }
+    }
+    Ok(nodes)
+}
+
+fn action_ref(agent: &mut Agent, ti: usize, a: &Value) -> Result<Option<String>, String> {
+    if a.get("ref").is_some() && a.get("selector").is_some() {
+        return Err("use ref or selector, not both".into());
+    }
+    if let Some(value) = a.get("ref") {
+        return value.as_str().map(str::trim).filter(|r| !r.is_empty()).map(|r| Some(r.to_string())).ok_or_else(|| "ref needs a nonempty string".into());
+    }
+    let Some(value) = a.get("selector") else { return Ok(None) };
+    let selector = value.as_str().map(str::trim).filter(|selector| !selector.is_empty()).ok_or("selector needs a nonempty string")?;
+    let nodes = selector_nodes(agent, ti, selector)?;
+    if nodes.len() != 1 { return Err(format!("selector matched {} elements; expected exactly one; use find to inspect refs", nodes.len())); }
+    let (frame, node) = nodes[0];
+    let page = &agent.tabs[ti].frames[frame].page;
+    let is_form = page.doc.is_element(node, "form");
+    let role = page.doc.tag(node).unwrap_or("").to_string();
+    let name = clip_text(&crate::ax::content_text(page, node), 60);
+    let refs = &mut agent.tabs[ti].refs;
+    Ok(Some(if is_form { format!("@f{}", refs.assign_form(frame, node)) } else { format!("@e{}", refs.assign(frame, node, &role, &name)) }))
 }
 
 fn open(agent: &mut Agent, a: &Value) -> Result<Out, String> {
@@ -851,7 +974,8 @@ fn type_(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     if text.is_none() && key.is_none() && !submit {
         return Err("type needs text and/or key".into());
     }
-    let target = match s(a, "ref") {
+    let reference = action_ref(agent, ti, a)?;
+    let target = match reference.as_deref() {
         Some(r) => Some(agent.resolve(ti, r)?),
         None => {
             let f = agent.tabs[ti].frames[0].page.state.focused;
@@ -980,7 +1104,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     };
     let submit = b(a, "submit").unwrap_or(false);
     let single = a.get("value").cloned();
-    let reference = s(a, "ref").map(str::to_string);
+    let reference = action_ref(agent, ti, a)?;
     let mut form = None;
     if let Some(reference) = &reference {
         let (frame, node) = agent.resolve(ti, reference)?;
@@ -1002,7 +1126,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         return Ok(Out::text(fence(&lines.join("\n"))));
     }
     if single.is_some() && reference.is_none() {
-        return Err("fill value needs a field ref; use values for field-key/value pairs".into());
+        return Err("fill value needs a field ref or selector; use values for field-key/value pairs".into());
     }
     let reference_keys = reference.is_none() && values.as_ref().is_some_and(|values| {
         !values.is_empty() && values.keys().all(|key| key.trim().starts_with('@') && matches!(Ref::parse(key), Some(Ref::Element(_))))
@@ -1129,6 +1253,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     }
     let mut request = None;
     let mut submit_error = false;
+    let mut submit_cancelled = false;
     if submit && !field_navigation && !field_document_replaced {
         let resolved = agent.resolve(ti, form.as_ref().unwrap());
         match resolved {
@@ -1160,7 +1285,8 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
                         }
                         None => crate::actions::submit_request(&agent.engine, page, node, None, &mut submitted),
                     };
-                    let description = if request.is_none() && submitted.default_prevented { "Not submitted: the submit or click event was cancelled" } else { "Submitted the form" };
+                    submit_cancelled = request.is_none() && submitted.default_prevented;
+                    let description = if submit_cancelled { "Not submitted: the submit or click event was cancelled" } else { "Submitted the form" };
                     if !what.is_empty() { what.push('\n'); }
                     what.push_str(description);
                     crate::actions::merge(&mut outcome, submitted);
@@ -1169,6 +1295,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         }
     }
     if what.is_empty() { what = if field_navigation { "Fill" } else { "Nothing filled" }.into(); }
+    let failed = !errors.is_empty() || field_document_replaced || submit_cancelled;
     // A callback may have removed/replaced its field. Do not dereference an
     // old target when finish_action follows a frame navigation or reports diff.
     let mut text = agent.finish_action(ti, frame, before, outcome, request, &what, None)?;
@@ -1179,7 +1306,7 @@ fn fill(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     if submit_error || (!errors.is_empty() && done.is_empty() && (!submit || field_document_replaced) && !field_navigation) {
         return Err(text);
     }
-    Ok(Out::text(text))
+    Ok(Out { failed, ..Out::text(text) })
 }
 
 fn single_field(page: &rabbithole_engine::Page, node: NodeId, form: Option<NodeId>) -> Vec<crate::forms::Field> {
@@ -1534,7 +1661,7 @@ fn advance_background(agent: &mut Agent) {
     agent.tabs[ti].events.extend(events);
 }
 
-fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<String, String> {
+fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<(String, bool), String> {
     use rabbithole_engine::script::ConsolePoll;
     let ti = agent.tab_index()?;
     agent.ensure_loaded(ti)?;
@@ -1547,8 +1674,9 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<Strin
     let follow = b(args, "follow").unwrap_or(false);
     let before = follow.then(|| agent.before_state(ti));
     let (started, mut outcome) = agent.engine.start_console_evaluation(&mut agent.tabs[ti].frames[0].page, source, deadline);
+    let mut failed = false;
     let result = match started {
-        Err(error) => format!("Error: {error}"),
+        Err(error) => { failed = true; format!("Error: {error}") }
         Ok(evaluation) => {
             let mut pending = false;
             let result = loop {
@@ -1556,6 +1684,7 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<Strin
                 // poll, and the handle drops before finish_action replaces it.
                 if outcome.navigation.is_some() { break "Evaluation cancelled: script requested navigation".to_string(); }
                 if Instant::now() >= deadline {
+                    failed = true;
                     break if pending { format!("Promise still pending after {} ms", timeout.as_millis()) } else { format!("Evaluation timed out after {} ms", timeout.as_millis()) };
                 }
                 let (polled, out) = agent.engine.poll_console_evaluation(&mut agent.tabs[ti].frames[0].page, &evaluation, deadline);
@@ -1563,9 +1692,9 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<Strin
                 if outcome.navigation.is_some() { continue; }
                 match polled {
                     Ok(ConsolePoll::Resolved(value)) => break value,
-                    Ok(ConsolePoll::Rejected(error)) => break format!("Uncaught (in promise) {error}"),
-                    Err(_error) if Instant::now() >= deadline && pending => break format!("Promise still pending after {} ms", timeout.as_millis()),
-                    Err(error) => break format!("Error: {error}"),
+                    Ok(ConsolePoll::Rejected(error)) => { failed = true; break format!("Uncaught (in promise) {error}"); }
+                    Err(_error) if Instant::now() >= deadline && pending => { failed = true; break format!("Promise still pending after {} ms", timeout.as_millis()); }
+                    Err(error) => { failed = true; break format!("Error: {error}"); }
                     Ok(ConsolePoll::Pending) => pending = true,
                 }
                 let (pumped, out) = agent.engine.pump_console_tasks(&mut agent.tabs[ti].frames[0].page, deadline);
@@ -1573,6 +1702,7 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<Strin
                 if outcome.navigation.is_some() { continue; }
                 if let Err(error) = pumped {
                     if Instant::now() >= deadline { continue; }
+                    failed = true;
                     break format!("Error: {error}");
                 }
                 let now = Instant::now();
@@ -1596,11 +1726,12 @@ fn debug_evaluate(agent: &mut Agent, args: &Value, source: &str) -> Result<Strin
     } else if outcome.navigation.is_some() || !outcome.dialogs.is_empty() || !outcome.new_windows.is_empty() {
         text.push_str("\n(the script requested navigation, a dialog or a new window; it was not followed; use follow=true)");
     }
-    Ok(text)
+    Ok((text, failed))
 }
 
 fn debug(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     let mut parts = Vec::new();
+    let mut failed = false;
     if b(a, "live").unwrap_or(false) {
         if agent.live.is_none() {
             agent.live = Some(crate::live::Live::start(0)?);
@@ -1609,7 +1740,9 @@ fn debug(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         parts.push(format!("Live view: {} (updates after every action)", agent.live.as_ref().map(|l| l.url.clone()).unwrap_or_default()));
     }
     if let Some(js) = a.get("eval").and_then(Value::as_str) {
-        parts.push(debug_evaluate(agent, a, js)?);
+        let (text, eval_failed) = debug_evaluate(agent, a, js)?;
+        parts.push(text);
+        failed |= eval_failed;
     }
     if b(a, "console").unwrap_or(false) || b(a, "clear").unwrap_or(false) {
         let ti = agent.tab_index()?;
@@ -1643,7 +1776,7 @@ fn debug(agent: &mut Agent, a: &Value) -> Result<Out, String> {
     if parts.is_empty() {
         return Err("debug needs eval, console, log, stats or live".into());
     }
-    Ok(Out::text(parts.join("\n")))
+    Ok(Out { failed, ..Out::text(parts.join("\n")) })
 }
 
 /// Export the action log as a replayable script (CLI syntax) or JSON test.
@@ -1775,14 +1908,14 @@ mod tests {
     #[test]
     fn tool_budget() {
         let d = definitions();
-        assert!(d.len() <= 12, "{} tools", d.len());
+        assert!(d.len() <= 13, "{} tools", d.len());
         for t in &d {
             assert!(t["description"].as_str().unwrap().len() < 200, "{}", t["name"]);
         }
         let names: Vec<&str> = d.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, TOOLS);
         let catalogue = serde_json::to_string(&json!({ "tools": d })).unwrap();
-        assert!(catalogue.chars().count() <= 6900, "tools/list: {} chars", catalogue.chars().count());
+        assert!(catalogue.chars().count() <= 7500, "tools/list: {} chars", catalogue.chars().count());
         eprintln!("tools/list ({} chars): {catalogue}", catalogue.chars().count());
     }
 

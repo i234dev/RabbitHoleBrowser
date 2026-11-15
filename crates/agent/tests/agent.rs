@@ -973,3 +973,5 @@ fn rh003_fill_reports_event_handlers_that_replace_the_requested_value() {
         assert!(!filled.contains("restored-secret"), "password leaked: {filled}");
     }
 }
+#[path = "support/batch_actions.rs"]
+mod batch_actions;
