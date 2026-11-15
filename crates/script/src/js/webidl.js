@@ -50,6 +50,8 @@
     const apply = Reflect.apply;
     const frameWindow = g.HTMLIFrameElement && Object.getOwnPropertyDescriptor(g.HTMLIFrameElement.prototype, 'contentWindow');
     const getFrameWindow = frameWindow && frameWindow.get;
+    const legacyFrameWindow = g.HTMLFrameElement && Object.getOwnPropertyDescriptor(g.HTMLFrameElement.prototype, 'contentWindow');
+    const getLegacyFrameWindow = legacyFrameWindow && legacyFrameWindow.get;
     const getLocalName = Object.getOwnPropertyDescriptor(g.Element.prototype, 'localName').get;
     const getNamespace = Object.getOwnPropertyDescriptor(g.Element.prototype, 'namespaceURI').get;
     const NAMED = new Set(['embed', 'form', 'img', 'object']);
@@ -67,11 +69,13 @@
       // A named child navigable wins over a matching element id. Use the
       // native getter captured at startup, not a page-defined property,
       // and query the live document so rename/removal need no refresh.
-      if (list && getFrameWindow) {
+      if (list && (getFrameWindow || getLegacyFrameWindow)) {
         for (let i = 0; i < list.length; i++) {
           const e = list[i];
-          if (apply(getLocalName, e, []) === 'iframe' && apply(getNamespace, e, []) === 'http://www.w3.org/1999/xhtml') {
-            const w = apply(getFrameWindow, e, []);
+          const tag = apply(getLocalName, e, []);
+          const getter = tag === 'iframe' ? getFrameWindow : tag === 'frame' ? getLegacyFrameWindow : null;
+          if (getter && apply(getNamespace, e, []) === 'http://www.w3.org/1999/xhtml') {
+            const w = apply(getter, e, []);
             if (w !== null) return w;
           }
         }

@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-const REPLACED: &[&str] = &["img", "svg", "video", "canvas", "iframe", "embed", "object", "audio"];
+const REPLACED: &[&str] = &["img", "svg", "video", "canvas", "iframe", "frame", "embed", "object", "audio"];
 
 pub(crate) struct Builder<'a> {
     ctx: &'a LayoutContext<'a>,
@@ -547,7 +547,7 @@ impl<'a> Builder<'a> {
     fn build_replaced(&self, node: NodeId, tag: &str, style: &Rc<ComputedStyle>) -> Option<LayoutBox> {
         let doc = self.doc();
         // `<video>` shows its poster image (stored under the node too).
-        let image = if matches!(tag, "img" | "svg" | "input" | "video" | "canvas" | "object" | "iframe") { self.ctx.images.get(&node).cloned() } else { None };
+        let image = if matches!(tag, "img" | "svg" | "input" | "video" | "canvas" | "object" | "iframe" | "frame") { self.ctx.images.get(&node).cloned() } else { None };
         let attr_w = doc.attr(node, "width").and_then(parse_dimension_attr);
         let attr_h = doc.attr(node, "height").and_then(parse_dimension_attr);
         let broken = image.as_ref().map(|i| i.broken).unwrap_or(false);
@@ -569,7 +569,7 @@ impl<'a> Builder<'a> {
         }
         b.ratio_only = tag == "svg" && attr_w.is_none() && attr_h.is_none() && b.image.is_some() && (doc.attr(node, "viewBox").is_some() || doc.attr(node, "viewbox").is_some());
         let has_media = b.image.as_ref().map(|i| !i.broken).unwrap_or(false);
-        if matches!(tag, "iframe" | "video" | "object" | "embed" | "canvas") && !has_media {
+        if matches!(tag, "iframe" | "frame" | "video" | "object" | "embed" | "canvas") && !has_media {
             if b.attr_size.0.is_none() {
                 b.attr_size.0 = Some(300.0);
             }

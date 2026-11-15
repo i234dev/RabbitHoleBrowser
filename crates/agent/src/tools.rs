@@ -478,9 +478,20 @@ fn read(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         }
         None => (0, None),
     };
+    // Reading the frame element itself means reading its hosted document,
+    // with refs and the URL attributed to that child context.
+    let (frame, root) = if let Some(node) = root {
+        if matches!(tab.frames[frame].page.doc.tag(node), Some("iframe" | "frame")) {
+            tab.frames.iter().enumerate().find(|(_,f)| f.parent == Some((frame,node))).map(|(child,_)|(child,None)).unwrap_or((frame,root))
+        } else { (frame,root) }
+    } else { (frame,root) };
     let page = &tab.frames[frame].page;
     let md = match root {
         Some(node) => crate::read::read_subtree_with_options(page, &mut tab.refs, frame, node, b(a, "links").unwrap_or(true), b(a, "cites").unwrap_or(false)),
+        None if page.doc.body().is_some_and(|body| page.doc.is_element(body,"frameset")) => {
+            let views = Agent::frame_views(&tab.frames);
+            crate::read::read_frameset_with_options(&views, &mut tab.refs, frame, b(a,"links").unwrap_or(true), b(a,"cites").unwrap_or(false))
+        }
         None => crate::read::read_with_options(page, &mut tab.refs, frame, b(a, "links").unwrap_or(true), b(a, "cites").unwrap_or(false)),
     };
     let total = md.chars().count();

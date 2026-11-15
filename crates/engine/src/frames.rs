@@ -473,7 +473,7 @@ impl Engine {
             // With scripting on, `<noscript>` content is inert.
             page.doc
                 .descendants(Document::ROOT)
-                .filter(|&n| page.doc.is_element(n, "iframe") && !(self.scripting && crate::in_noscript(&page.doc, n)))
+                .filter(|&n| matches!(page.doc.tag(n), Some("iframe" | "frame")) && !(self.scripting && crate::in_noscript(&page.doc, n)))
                 .take(MAX_FRAMES_PER_PAGE)
                 .collect()
         };
@@ -631,7 +631,7 @@ impl Engine {
     /// the next sync.
     pub(crate) fn create_blank_frame(&self, page: &mut Page, node: NodeId) -> Option<u64> {
         let existing = page.frames.children.iter().position(|c| c.node == node);
-        if existing.is_none() && (!page.doc.is_element(node, "iframe") || !page.doc.is_connected(node) || page.frame_depth >= MAX_DEPTH || page.frames.children.len() >= MAX_FRAMES_PER_PAGE) {
+        if existing.is_none() && (!matches!(page.doc.tag(node), Some("iframe" | "frame")) || !page.doc.is_connected(node) || page.frame_depth >= MAX_DEPTH || page.frames.children.len() >= MAX_FRAMES_PER_PAGE) {
             return None;
         }
         let id = existing.map(|i| page.frames.children[i].id).unwrap_or_else(new_frame_id);
@@ -1185,8 +1185,8 @@ pub(crate) struct FrameContext {
 }
 
 fn frame_source(page: &Page, node: NodeId) -> FrameSource {
-    if let Some(s) = page.doc.attr(node, "srcdoc") {
-        return FrameSource::Srcdoc(s.to_string());
+    if page.doc.is_element(node, "iframe") {
+        if let Some(s) = page.doc.attr(node, "srcdoc") { return FrameSource::Srcdoc(s.to_string()); }
     }
     let src = page.doc.attr(node, "src").map(str::trim).unwrap_or("");
     if src.is_empty() || src.eq_ignore_ascii_case("about:blank") {

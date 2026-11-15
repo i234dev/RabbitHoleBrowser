@@ -165,6 +165,11 @@ pub trait HostEnv {
     fn frame_of_element(&self, _node: NodeId) -> Option<u64> {
         None
     }
+    /// A frame element in a same-origin owner document, including a nested
+    /// document reached through contentDocument. Existing iframe policies apply.
+    fn ensure_frame_in(&mut self, owner: u64, node: NodeId) -> Option<u64> {
+        if owner == self.frame_id() { self.ensure_frame(node) } else { None }
+    }
     /// The document of frame `id`, when this document may script it (same
     /// origin); scripts here then read and change it directly.
     fn frame_document(&mut self, _id: u64) -> Option<&mut Document> {

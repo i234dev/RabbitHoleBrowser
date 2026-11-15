@@ -82,7 +82,7 @@ fn body_visible(page: &Page) -> bool {
 // Keep main-content selection and the body fallback on the same exclusions.
 // Explicit read(ref) still starts at the requested node, as before.
 fn omitted_block(doc: &Document, n: NodeId) -> bool {
-    matches!(doc.tag(n), Some("script" | "style" | "noscript" | "template" | "nav" | "aside" | "footer" | "form" | "button" | "select" | "input" | "textarea" | "iframe" | "dialog" | "svg" | "menu"))
+    matches!(doc.tag(n), Some("script" | "style" | "noscript" | "template" | "nav" | "aside" | "footer" | "form" | "button" | "select" | "input" | "textarea" | "iframe" | "frame" | "dialog" | "svg" | "menu"))
         || is_junk(doc, n)
         || matches!(doc.attr(n, "role"), Some("navigation" | "complementary" | "contentinfo" | "dialog" | "alertdialog"))
 }
@@ -761,6 +761,37 @@ pub fn read_subtree_with_options(page: &Page, refs: &mut RefMap, frame: usize, r
 /// Main content as Markdown.
 pub fn read(page: &Page, refs: &mut RefMap, frame: usize) -> String {
     read_with_options(page, refs, frame, true, false)
+}
+
+/// A frameset is a document composed of child documents rather than prose in
+/// its own body. Preserve document/frame order and assign links to each actual
+/// child context so refs remain usable by actions. Ordinary article reads keep
+/// their existing readability exclusions.
+pub(crate) fn read_frameset_with_options(frames: &[crate::ax::FrameView<'_>], refs: &mut RefMap, root: usize, links: bool, cites: bool) -> String {
+    fn visit(frames: &[crate::ax::FrameView<'_>], refs: &mut RefMap, frame: usize, links: bool, cites: bool, seen: &mut [bool], out: &mut String) {
+        let Some(view) = frames.get(frame) else { return };
+        if seen[frame] { return; }
+        seen[frame] = true;
+        if !body_visible(view.page) { return; }
+        let is_frameset = view.page.doc.body().is_some_and(|body| view.page.doc.is_element(body, "frameset"));
+        if is_frameset {
+            for &(node, child) in &view.children {
+                let label = view.page.doc.attr(node,"title").or_else(|| view.page.doc.attr(node,"name")).unwrap_or("frame");
+                out.push_str(&format!("## Frame: {}\n\n", esc_md(label)));
+                visit(frames, refs, child, links, cites, seen, out);
+            }
+        } else {
+            out.push_str(&read_with_options(view.page, refs, frame, links, cites));
+            out.push_str("\n\n");
+        }
+    }
+    let mut out = String::new();
+    if let Some(view) = frames.get(root) {
+        if !body_visible(view.page) { return out; }
+        if !view.page.title.trim().is_empty() { out.push_str(&format!("# {}\n\n", esc_md(view.page.title.trim()))); }
+    }
+    visit(frames, refs, root, links, cites, &mut vec![false;frames.len()], &mut out);
+    clean_blocks(&out)
 }
 
 pub fn read_with_options(page: &Page, refs: &mut RefMap, frame: usize, links: bool, cites: bool) -> String {

@@ -673,10 +673,6 @@
     method(g.HTMLObjectElement, 'getSVGDocument', function () { return null; });
   }
   for (const C of [g.HTMLEmbedElement, g.HTMLIFrameElement, g.HTMLFrameElement].filter(Boolean)) method(C, 'getSVGDocument', function () { return null; });
-  if (g.HTMLFrameElement) {
-    acc(g.HTMLFrameElement, 'contentDocument', function () { return null; });
-    acc(g.HTMLFrameElement, 'contentWindow', function () { return null; });
-  }
   function labelsFor(el) {
     const out = [];
     for (const l of document.querySelectorAll('label')) if (l.control === el) out.push(l);

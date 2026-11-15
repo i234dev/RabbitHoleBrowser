@@ -490,6 +490,16 @@ impl HostEnv for EngineEnv<'_> {
     fn frame_of_element(&self, node: NodeId) -> Option<u64> {
         self.page.frames.get(node).map(|c| c.id)
     }
+    fn ensure_frame_in(&mut self, owner: u64, node: NodeId) -> Option<u64> {
+        if owner == self.page.frame_id { return self.ensure_frame(node); }
+        let origin = crate::frames::page_origin(self.page);
+        let engine = self.engine;
+        let owner_page = if let Some(ancestor) = crate::frames::ancestor_page(owner) { ancestor }
+            else { crate::frames::find_frame_page_mut(self.page, owner)? };
+        if crate::frames::page_origin(owner_page) != origin { return None; }
+        if let Some(child) = owner_page.frames.get(node) { return Some(child.id); }
+        engine.create_blank_frame(owner_page, node)
+    }
     fn frame_document(&mut self, id: u64) -> Option<&mut Document> {
         let origin = crate::frames::page_origin(self.page);
         if let Some(anc) = crate::frames::ancestor_page(id) {

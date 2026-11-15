@@ -475,7 +475,7 @@ fn after_insert_connected(realm: &mut Realm, inserted: &[NodeRef]) -> JsResult<(
                 for d in doc.shadow_including_descendants(n.node) {
                     if doc.is_element(d, "script") && !st.ran_scripts.contains(&d) {
                         scripts.push(d);
-                    } else if doc.is_element(d, "iframe") && doc.attr(d, "src").is_none() && doc.attr(d, "srcdoc").is_none() {
+                    } else if matches!(doc.tag(d), Some("iframe" | "frame")) && doc.attr(d, "src").is_none() && (!doc.is_element(d, "iframe") || doc.attr(d, "srcdoc").is_none()) {
                         frames.push(d);
                     }
                 }

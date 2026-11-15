@@ -1337,7 +1337,7 @@ impl Document {
 
     pub fn body(&self) -> Option<NodeId> {
         let html = self.html_element()?;
-        self.child_elements(html).find(|&n| self.is_element(n, "body"))
+        self.child_elements(html).find(|&n| self.is_element(n, "body") || self.is_element(n, "frameset"))
     }
 
     pub fn head(&self) -> Option<NodeId> {

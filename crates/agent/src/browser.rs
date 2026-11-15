@@ -461,8 +461,8 @@ impl Agent {
                 let doc = &page.doc;
                 let list: Vec<(NodeId, Option<String>, Option<String>)> = doc
                     .descendants(Document::ROOT)
-                    .filter(|&n| doc.is_element(n, "iframe") && crate::ax::displayed(page, n))
-                    .map(|n| (n, doc.attr(n, "src").map(|s| s.to_string()), doc.attr(n, "srcdoc").map(|s| s.to_string())))
+                    .filter(|&n| matches!(doc.tag(n), Some("iframe" | "frame")) && crate::ax::displayed(page, n))
+                    .map(|n| (n, doc.attr(n, "src").map(|s| s.to_string()), doc.is_element(n, "iframe").then(|| doc.attr(n, "srcdoc").map(|s| s.to_string())).flatten()))
                     .collect();
                 (list, page.url.clone(), GeoMap::build(page))
             };
@@ -575,7 +575,7 @@ impl Agent {
 
     // ------------------------------------------------------------ the tree
 
-    fn frame_views(frames: &[Frame]) -> Vec<FrameView<'_>> {
+    pub(crate) fn frame_views(frames: &[Frame]) -> Vec<FrameView<'_>> {
         frames
             .iter()
             .enumerate()

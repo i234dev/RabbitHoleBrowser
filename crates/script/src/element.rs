@@ -2429,20 +2429,18 @@ fn media_can_play_type(_realm: &mut Realm, _this: Value, _: &[Value]) -> JsResul
 
 fn iframe_content_window(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let Some(n) = node_of(realm, &this) else { return Ok(Value::Null) };
-    if n.doc != 0 {
-        return Ok(Value::Null);
-    }
-    let id = with_env(|env| env.ensure_frame(n.node));
+    let id = with_env(|env| if n.doc == 0 { env.ensure_frame(n.node) }
+        else if n.doc & FRAME_DOC != 0 { env.ensure_frame_in((n.doc & !FRAME_DOC) as u64, n.node) }
+        else { None });
     crate::frames::window_for(realm, id)
 }
 
 /// The frame's document, when it is same-origin (null otherwise).
 fn iframe_content_document(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let Some(n) = node_of(realm, &this) else { return Ok(Value::Null) };
-    if n.doc != 0 {
-        return Ok(Value::Null);
-    }
-    let Some(id) = with_env(|env| env.ensure_frame(n.node)) else { return Ok(Value::Null) };
+    let Some(id) = with_env(|env| if n.doc == 0 { env.ensure_frame(n.node) }
+        else if n.doc & FRAME_DOC != 0 { env.ensure_frame_in((n.doc & !FRAME_DOC) as u64, n.node) }
+        else { None }) else { return Ok(Value::Null) };
     Ok(crate::frames::frame_document_value(realm, id))
 }
 
@@ -2835,6 +2833,21 @@ pub(crate) fn install(realm: &mut Realm) {
         reflect(realm, iframe, p, at, Reflect::Str);
     }
     reflect(realm, iframe, "allowFullscreen", "allowfullscreen", Reflect::Bool);
+    let frame = { state().borrow().protos.get("HTMLFrameElement").copied() };
+    if let Some(frame) = frame {
+        realm.define_accessor(frame, "contentWindow", Some(iframe_content_window), None, ACC);
+        realm.define_accessor(frame, "contentDocument", Some(iframe_content_document), None, ACC);
+        reflect(realm, frame, "src", "src", Reflect::Url);
+        for (property, attribute) in [("name","name"),("scrolling","scrolling"),("frameBorder","frameborder")] {
+            reflect(realm, frame, property, attribute, Reflect::Str);
+        }
+        reflect(realm, frame, "noResize", "noresize", Reflect::Bool);
+    }
+    let frameset = { state().borrow().protos.get("HTMLFrameSetElement").copied() };
+    if let Some(frameset) = frameset {
+        reflect(realm, frameset, "rows", "rows", Reflect::Str);
+        reflect(realm, frameset, "cols", "cols", Reflect::Str);
+    }
     // --- HTMLCanvasElement
     let canvas = define_class(realm, "HTMLCanvasElement", Some("HTMLElement"), crate::host::html_element_ctor);
     realm.define_method(canvas, "getContext", 1, canvas_get_context);
