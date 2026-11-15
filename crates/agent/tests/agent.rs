@@ -967,7 +967,7 @@ fn rh003_fill_reports_event_handlers_that_replace_the_requested_value() {
     for (selector, value, expected) in [("#name", json!("changed"), "original"), ("#choice", json!("Second"), "1"), ("#secret", json!("private"), "chars hidden"), ("#check", json!(true), "false")] {
         let found = ok(&mut a, "find", json!({"selector":selector}));
         let reference = find_result_lines(&found)[0].split_whitespace().next().unwrap().to_string();
-        let filled = ok(&mut a, "fill", json!({"ref":reference,"value":value}));
+        let filled = err(&mut a, "fill", json!({"ref":reference,"value":value}));
         assert!(filled.contains("value is still") && filled.contains(expected), "{selector}: {filled}");
         assert!(!filled.contains("Filled:"), "{selector}: {filled}");
         assert!(!filled.contains("restored-secret"), "password leaked: {filled}");
