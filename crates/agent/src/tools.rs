@@ -425,11 +425,19 @@ fn batch(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         };
         checked.push((tool, args));
     }
-    let mut results: Vec<(&str, Out)> = Vec::with_capacity(checked.len());
+    let mut results: Vec<(&str, String, Out)> = Vec::with_capacity(checked.len());
     let mut succeeded = 0;
     let mut failed = false;
     let mut omitted_png = false;
     for (tool, args) in checked {
+        // Describe the target or operation, never typed/form values or JS.
+        let principal = match tool {
+            "debug" => ["eval", "console", "log", "stats", "live", "clear"].into_iter().find(|key| args.get(*key).is_some()).unwrap_or("debug").to_string(),
+            "type" => s(&args, "selector").or_else(|| s(&args, "ref")).or_else(|| s(&args, "key")).unwrap_or("focused field").to_string(),
+            "fill" => s(&args, "selector").or_else(|| s(&args, "ref")).unwrap_or(if args.get("values").is_some() { "values" } else if b(&args, "submit").unwrap_or(false) { "submit" } else { "forms" }).to_string(),
+            _ => ["url", "selector", "ref", "key", "text", "action", "id", "direction", "filter", "role", "name"].into_iter().find_map(|key| args.get(key)).map(|value| value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())).unwrap_or_else(|| "page".to_string()),
+        };
+        let principal = clip_text(&principal.split_whitespace().collect::<Vec<_>>().join(" "), 64);
         let output = match call(agent, tool, &args) {
             Ok(output) => output,
             Err(error) => Out { failed: true, ..Out::text(error) },
@@ -438,13 +446,13 @@ fn batch(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         if !failed { succeeded += 1; }
         // Out carries one PNG. Release the preceding image as soon as a later
         // result exists, retaining its text and an explicit omission notice.
-        if let Some((_, previous)) = results.last_mut() {
+        if let Some((_, _, previous)) = results.last_mut() {
             if previous.png.take().is_some() {
                 omitted_png = true;
                 previous.text.push_str("\n[PNG only returned for last step]");
             }
         }
-        results.push((tool, output));
+        results.push((tool, principal, output));
         if failed { break; }
     }
     let attempted = results.len();
@@ -454,20 +462,20 @@ fn batch(agent: &mut Agent, a: &Value) -> Result<Out, String> {
         text.push_str("\nOnly the last step's PNG is returned; earlier PNGs are omitted.");
     }
     if !full && last > 0 {
-        let summaries: Vec<String> = results[..last].iter().enumerate().map(|(index, (tool, output))| {
+        let summaries: Vec<String> = results[..last].iter().enumerate().map(|(index, (tool, principal, output))| {
             let body = output.text.split_whitespace().collect::<Vec<_>>().join(" ");
-            let line = format!("{}. {tool}: {body}{}", index + 1, if output.png.is_some() { " [PNG only returned for last step]" } else { "" });
+            let line = format!("{}. {tool} {principal}: {body}{}", index + 1, if output.png.is_some() { " [PNG only returned for last step]" } else { "" });
             clip_text(&line, 199)
         }).collect();
         text.push_str(&format!("\nEarlier steps:\n{}", fence(&summaries.join("\n"))));
     }
     let start = if full { 0 } else { last };
-    for (index, (tool, output)) in results.iter().enumerate().skip(start) {
+    for (index, (tool, _, output)) in results.iter().enumerate().skip(start) {
         text.push_str(&format!("\nStep {} ({tool}{}):\n{}", index + 1, if output.failed { ", failed" } else { "" }, output.text));
         if index != last && output.png.is_some() { text.push_str("\n[PNG only returned for last step]"); }
     }
     if failed { return Err(text); }
-    Ok(Out { text, png: results.pop().and_then(|(_, output)| output.png), failed: false })
+    Ok(Out { text, png: results.pop().and_then(|(_, _, output)| output.png), failed: false })
 }
 
 /// The same CSS grammar and frame traversal as find, without choosing a match.

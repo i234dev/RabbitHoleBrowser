@@ -35,6 +35,7 @@ fn batch_uses_sequential_click_type_and_fill_selectors_without_a_snapshot() {
     ]})).unwrap();
     assert!(!result.failed);
     assert!(result.text.contains("attempted 4/4, succeeded 4, failed 0, pending 0"), "{}", result.text);
+    assert!(result.text.contains("1. click #first:"), "summary must include its explicit target: {}", result.text);
     assert!(result.text.contains("1|á🧪|value"), "{}", result.text);
 }
 
