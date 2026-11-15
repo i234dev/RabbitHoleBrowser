@@ -618,6 +618,9 @@ pub enum GridLine {
     Span(u32),
     /// `<custom-ident>` or `span <ident>` (name, span)
     Named(String, bool),
+    /// An explicitly indexed named line or span (name, occurrence, span).
+    /// Keep it distinct from a bare name, which first matches an area edge.
+    NamedNth(String, i32, bool),
 }
 
 /// `grid-lanes-direction: normal | [ row | column ] [ fill-reverse || track-reverse ]?`
