@@ -1,0 +1,11 @@
+<!doctype html><html><body>
+<label id="t">Doble clic aquí</label>
+<p id="out">sin eventos</p>
+<script>
+// Un doble clic debe producir: mousedown, mouseup, click (detail 1), mousedown, mouseup, click (detail 2), dblclick (detail 2).
+// RabbitHole 0.1.17: dos llamadas seguidas a click dan dos click con detail 1 y ningún dblclick; la herramienta no tiene opción de doble clic.
+var log = [];
+['mousedown', 'mouseup', 'click', 'dblclick'].forEach(function (n) {
+  document.getElementById('t').addEventListener(n, function (e) { log.push(n + ':' + e.detail); document.getElementById('out').textContent = log.join(' '); });
+});
+</script></body></html>

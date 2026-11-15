@@ -142,6 +142,8 @@ pub const TICK_SLICE: std::time::Duration = std::time::Duration::from_millis(100
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventDetail {
     Mouse { x: f32, y: f32, button: u8, ctrl: bool, shift: bool, alt: bool, meta: bool },
+    /// Mouse input with an explicit consecutive-click count.
+    MouseClick { x: f32, y: f32, button: u8, ctrl: bool, shift: bool, alt: bool, meta: bool, count: u8 },
     /// `wheel` (WheelEvent): pointer position and scroll deltas in CSS px
     /// (`deltaMode` 0).
     Wheel { x: f32, y: f32, dx: f32, dy: f32, ctrl: bool, shift: bool, alt: bool, meta: bool },

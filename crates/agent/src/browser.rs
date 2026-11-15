@@ -1013,7 +1013,14 @@ impl Agent {
 
     /// Click (or hover) an element like a user.
     pub fn click(&mut self, ti: usize, r: &str, hover_only: bool, force: bool) -> Result<String, String> {
+        self.click_with_options(ti, r, hover_only, force, false)
+    }
+
+    /// Double clicks use two pointer cycles at the same hit-tested point.
+    pub fn click_with_options(&mut self, ti: usize, r: &str, hover_only: bool, force: bool, double: bool) -> Result<String, String> {
+        if double && hover_only { return Err("double and hover cannot be combined".into()); }
         if r.trim().eq_ignore_ascii_case("cookies") || r.trim().eq_ignore_ascii_case("@cookies") {
+            if double { return Err("double-click needs an element ref or selector".into()); }
             return self.reject_cookies(ti);
         }
         let (frame, node) = self.resolve(ti, r)?;
@@ -1063,7 +1070,7 @@ impl Agent {
                 }
             }
             let geo = GeoMap::build(page);
-            let reach = if frame == 0 || fallback.is_some() { overlay::reach(page, &geo, node) } else { Reach::Ancestor(0.0, 0.0) };
+            let reach = if frame == 0 || fallback.is_some() || double { overlay::reach(page, &geo, node) } else { Reach::Ancestor(0.0, 0.0) };
             if fallback.is_some() && !matches!(&reach, Reach::Covered(_)) && !safe_ancestor_pointer_hit(page, node, &reach) {
                 return Err(format!("@{rr} {label} has no usable layout box, and its nearest visible ancestor has no safe pointer point (another control or pointer-inert content would be targeted)."));
             }
@@ -1071,6 +1078,8 @@ impl Agent {
             if frame==0 { *before_frame=Some(engine.snapshot(page)); }
             let outcome;
             let mut request = None;
+            let mut double_completed = false;
+            let mut stopped = None;
             match reach {
                 Reach::Covered(c) if !force => {
                     let cr=refs.assign(frame,c,"overlay","");
@@ -1081,10 +1090,18 @@ impl Agent {
                     return Err(format!("@{rr} {label} is not visible (no box, zero size or hidden). Try hovering its container first (click … hover=true), or pass force=true to dispatch the event anyway."));
                 }
                 Reach::Point(x, y) if !hover_only => {
-                    let up = engine.click_at(page, x, y, Modifiers::default());
-                    let mut o = up.outcome;
-                    request = crate::actions::click_request(engine, page, up.action, &mut o);
-                    outcome = o;
+                    if double {
+                        let result = crate::actions::double_click_at(engine, page, node, x, y);
+                        request = result.request;
+                        double_completed = result.completed;
+                        stopped = result.stopped;
+                        outcome = result.outcome;
+                    } else {
+                        let up = engine.click_at(page, x, y, Modifiers::default());
+                        let mut o = up.outcome;
+                        request = crate::actions::click_request(engine, page, up.action, &mut o);
+                        outcome = o;
+                    }
                 }
                 Reach::Point(x, y) | Reach::Ancestor(x, y) if hover_only => {
                     outcome = engine.pointer_move(page, x, y, Modifiers::default());
@@ -1094,17 +1111,19 @@ impl Agent {
                     outcome = o;
                 }
                 _ => {
+                    if double { return Err("double-click needs a visible pointer point; reveal the element first".into()); }
                     let (action, o) = engine.click_element(page, node, None, Modifiers::default());
                     let mut o = o;
                     request = crate::actions::click_request(engine, page, action, &mut o);
                     outcome = o;
                 }
             }
-            Ok((outcome,request))
+            Ok((outcome,request,double_completed,stopped))
         })?;
-        let (outcome,request)=result?;
-        let verb=if hover_only { "Hovered" } else { "Clicked" };
-        let result = self.finish_action(ti, frame, before, outcome, request, &format!("{verb} @{rr} {label}"), Some((frame, node)))?;
+        let (outcome,request,double_completed,stopped)=result?;
+        let verb=if hover_only { "Hovered" } else if double_completed { "Double-clicked" } else { "Clicked" };
+        let note = stopped.map(|why| format!(" (double-click stopped: {why})")).unwrap_or_default();
+        let result = self.finish_action(ti, frame, before, outcome, request, &format!("{verb} @{rr} {label}{note}"), Some((frame, node)))?;
         Ok(match fallback_note {
             Some(note) => format!("{note}\n{result}"),
             None => result,

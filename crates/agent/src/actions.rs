@@ -3,7 +3,7 @@
 
 use rabbithole_engine::dom::{Document, NodeId};
 use rabbithole_engine::net::Request;
-use rabbithole_engine::script::EventInit;
+use rabbithole_engine::script::{EventDetail, EventInit};
 use rabbithole_engine::scripting::{input_init, key_init, plain_init, ScriptOutcome};
 use rabbithole_engine::{ClickAction, ControlKind, Engine, Modifiers, Page};
 
@@ -382,6 +382,77 @@ pub fn click_request(engine: &Engine, page: &mut Page, action: ClickAction, out:
         ClickAction::Submit { form, submitter } => submit_request(engine, page, form, submitter, out),
         _ => None,
     }
+}
+
+/// Two real pointer cycles, keeping the first click's side effects if the
+/// document or hit target changes before the second click can be delivered.
+#[derive(Default)]
+pub struct DoubleClickOutcome {
+    pub outcome: ScriptOutcome,
+    pub request: Option<Request>,
+    pub completed: bool,
+    pub stopped: Option<&'static str>,
+}
+
+pub fn double_click_at(engine: &Engine, page: &mut Page, requested: NodeId, x: f32, y: f32) -> DoubleClickOutcome {
+    let mut result = DoubleClickOutcome::default();
+    let document = page.doc.weak_identity();
+    let mods = Modifiers::default();
+    merge(&mut result.outcome, engine.pointer_move(page, x, y, mods));
+    let interrupted = |page: &Page, result: &DoubleClickOutcome| {
+        if !document.is_for(&page.doc) { Some("the document was replaced") }
+        else if result.request.is_some() || result.outcome.navigation.is_some() { Some("navigation was requested") }
+        else if !result.outcome.new_windows.is_empty() { Some("a new window was opened") }
+        else if !result.outcome.dialogs.is_empty() { Some("a dialog was opened") }
+        else if !page.doc.is_connected(requested) { Some("the target was removed") }
+        else { None }
+    };
+    let mut clicked = None;
+    for count in [1, 2] {
+        if let Some(reason) = interrupted(page, &result) { result.stopped = Some(reason); break; }
+        let hit = page.node_at_viewport(x, y);
+        let valid_hit = match clicked {
+            Some(first) => hit == Some(first) && page.doc.is_connected(first),
+            None => hit.is_some_and(|n| n == requested || page.doc.is_ancestor(requested, n)),
+        };
+        if !valid_hit { result.stopped = Some("the pointer point no longer hits the same target"); break; }
+        if crate::ax::states_of(page, hit.unwrap(), "", false).iter().any(|s| s == "disabled") {
+            result.stopped = Some("the target is disabled"); break;
+        }
+        let down = engine.pointer_down_counted(page, x, y, 0, mods, count);
+        merge(&mut result.outcome, down.outcome);
+        if let Some(reason) = interrupted(page, &result) { result.stopped = Some(reason); break; }
+        if down.target != hit || page.node_at_viewport(x, y) != hit {
+            result.stopped = Some("the target changed during the press"); break;
+        }
+        let up = engine.pointer_up_counted(page, x, y, 0, mods, count);
+        merge(&mut result.outcome, up.outcome);
+        result.request = click_request(engine, page, up.action, &mut result.outcome);
+        if let Some(reason) = interrupted(page, &result) { result.stopped = Some(reason); break; }
+        if up.clicked != hit || !page.doc.is_connected(hit.unwrap()) {
+            result.stopped = Some("the click target was removed or changed"); break;
+        }
+        clicked = up.clicked;
+        if count == 2 {
+            let init = EventInit { bubbles: true, cancelable: true, detail: Some(EventDetail::MouseClick {
+                x, y, button: 0, ctrl: false, shift: false, alt: false, meta: false, count: 2,
+            }) };
+            merge(&mut result.outcome, engine.dispatch_event(page, clicked.unwrap(), "dblclick", init));
+            result.request = click_request(engine, page, ClickAction::None, &mut result.outcome);
+            result.completed = true;
+        }
+    }
+    if !result.completed {
+        // An interrupted sequence must not leave a press/active state behind.
+        page.pointer.down = None;
+        page.pointer.frame_press = None;
+        page.pointer.suppress_mouse = false;
+        if page.state.active.take().is_some() && page.has_dynamic_rules {
+            engine.restyle(page);
+            result.outcome.relayout = true;
+        }
+    }
+    result
 }
 
 /// Plain focus/blur events helper.

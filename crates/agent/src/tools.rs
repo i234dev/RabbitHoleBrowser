@@ -73,7 +73,7 @@ pub fn definitions() -> Vec<Value> {
             } } }),
         json!({ "name": "click", "description": "Click/hover ref or unique CSS selector; returns changes. ref=\"cookies\" rejects consent. until: text or {selector:CSS}; timeout ms≤30000.",
             "inputSchema": { "type": "object", "properties": {
-                "ref": r.clone(), "selector": selector.clone(), "hover": { "type": "boolean" }, "force": { "type": "boolean", "description": "Bypass visibility" }, "dialog": dialog, "until": until.clone(), "timeout": timeout.clone()
+                "ref": r.clone(), "selector": selector.clone(), "hover": { "type": "boolean" }, "double": { "type": "boolean" }, "force": { "type": "boolean", "description": "Bypass visibility" }, "dialog": dialog, "until": until.clone(), "timeout": timeout.clone()
             } } }),
         json!({ "name": "type", "description": "Type text/key at ref, unique CSS selector or focus; returns changes.",
             "inputSchema": { "type": "object", "properties": {
@@ -375,7 +375,7 @@ fn dispatch(agent: &mut Agent, name: &str, a: &Value) -> Result<Out, String> {
             let ti = agent.tab_index()?;
             agent.ensure_loaded(ti)?;
             let r = action_ref(agent, ti, a)?.ok_or("click needs ref or selector")?;
-            Ok(Out::text(agent.click(ti, &r, b(a, "hover").unwrap_or(false), b(a, "force").unwrap_or(false))?))
+            Ok(Out::text(agent.click_with_options(ti, &r, b(a, "hover").unwrap_or(false), b(a, "force").unwrap_or(false), b(a, "double").unwrap_or(false))?))
         }
         "type" => type_(agent, a),
         "fill" => fill(agent, a),
@@ -1930,6 +1930,8 @@ mod tests {
         }
         let names: Vec<&str> = d.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, TOOLS);
+        let click = d.iter().find(|tool| tool["name"] == "click").unwrap();
+        assert_eq!(click["inputSchema"]["properties"]["double"]["type"], "boolean");
         let catalogue = serde_json::to_string(&json!({ "tools": d })).unwrap();
         assert!(catalogue.chars().count() <= 7500, "tools/list: {} chars", catalogue.chars().count());
         eprintln!("tools/list ({} chars): {catalogue}", catalogue.chars().count());

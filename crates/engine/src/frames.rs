@@ -1030,7 +1030,7 @@ impl Engine {
     }
 
     /// A press over a frame: focus the iframe and press inside the child.
-    pub(crate) fn frame_pointer_down(&self, page: &mut Page, x: f32, y: f32, button: u8, m: crate::Modifiers) -> Option<crate::pointer::PointerDown> {
+    pub(crate) fn frame_pointer_down(&self, page: &mut Page, x: f32, y: f32, button: u8, m: crate::Modifiers, count: u8) -> Option<crate::pointer::PointerDown> {
         let (node, cx, cy) = page.frame_at_viewport(x, y)?;
         let mut out = ScriptOutcome::default();
         page.pointer.pointer_modality = true;
@@ -1040,7 +1040,7 @@ impl Engine {
         page.pointer.frame_press = Some(node);
         page.pointer.down = None;
         let i = Self::child_index(page, node)?;
-        let mut d = self.with_child(page, i, |child| self.pointer_down(child, cx, cy, button, m))?;
+        let mut d = self.with_child(page, i, |child| self.pointer_down_counted(child, cx, cy, button, m, count))?;
         let o = std::mem::take(&mut d.outcome);
         page.frames.children[i].dirty = true;
         self.frame_side_effects(page, node, o, &mut out);
@@ -1052,13 +1052,13 @@ impl Engine {
 
     /// Release after a press that started in a frame: released in the
     /// child (activation behaviour runs there).
-    pub(crate) fn frame_pointer_up(&self, page: &mut Page, x: f32, y: f32, button: u8, m: crate::Modifiers) -> Option<crate::pointer::PointerUp> {
+    pub(crate) fn frame_pointer_up(&self, page: &mut Page, x: f32, y: f32, button: u8, m: crate::Modifiers, count: u8) -> Option<crate::pointer::PointerUp> {
         let node = page.pointer.frame_press.take()?;
         let r = page.frame_content_rect(node)?;
         let (cx, cy) = (x + page.page_scroll.0 - r.x, y + page.page_scroll.1 - r.y);
         let mut out = ScriptOutcome::default();
         let i = Self::child_index(page, node)?;
-        let mut up = self.with_child(page, i, |child| self.pointer_up(child, cx, cy, button, m))?;
+        let mut up = self.with_child(page, i, |child| self.pointer_up_counted(child, cx, cy, button, m, count))?;
         let o = std::mem::take(&mut up.outcome);
         page.frames.children[i].dirty = true;
         let action = match up.action {

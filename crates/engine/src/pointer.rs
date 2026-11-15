@@ -106,6 +106,13 @@ fn mouse(x: f32, y: f32, button: u8, m: Modifiers, bubbles: bool, cancelable: bo
     }
 }
 
+fn counted_mouse(x: f32, y: f32, button: u8, m: Modifiers, count: u8) -> EventInit {
+    if count <= 1 { return mouse(x, y, button, m, true, true); }
+    EventInit { bubbles: true, cancelable: true, detail: Some(EventDetail::MouseClick {
+        x, y, button, ctrl: m.ctrl, shift: m.shift, alt: m.alt, meta: m.meta, count,
+    }) }
+}
+
 /// Inclusive ancestors of `n`, innermost first.
 fn chain(doc: &Document, n: NodeId) -> Vec<NodeId> {
     let mut v = vec![n];
@@ -368,8 +375,13 @@ impl Engine {
     /// `mousedown`, then (unless cancelled, primary button) focus moves to
     /// the nearest focusable ancestor of the target, or is cleared.
     pub fn pointer_down(&self, page: &mut Page, x: f32, y: f32, button: u8, m: Modifiers) -> PointerDown {
+        self.pointer_down_counted(page, x, y, button, m, 1)
+    }
+
+    /// A pointer press with an embedder-supplied consecutive-click count.
+    pub fn pointer_down_counted(&self, page: &mut Page, x: f32, y: f32, button: u8, m: Modifiers, count: u8) -> PointerDown {
         page.pointer.frame_press = None;
-        if let Some(d) = self.frame_pointer_down(page, x, y, button, m) {
+        if let Some(d) = self.frame_pointer_down(page, x, y, button, m, count) {
             return d;
         }
         let mut out = ScriptOutcome::default();
@@ -377,6 +389,7 @@ impl Engine {
             page.pointer.down = None;
             return PointerDown::default();
         };
+        let document = page.doc.weak_identity();
         let disabled = chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n));
         let mut prevented = false;
         page.pointer.pointer_modality = true;
@@ -385,8 +398,16 @@ impl Engine {
             page.pointer.suppress_mouse = true;
             prevented = true;
         }
-        if !page.pointer.suppress_mouse && !disabled && self.dispatch_into(page, &mut out, target, "mousedown", mouse(x, y, button, m, true, true)) {
+        if !document.is_for(&page.doc) || !page.doc.is_connected(target) {
+            page.pointer.down = None;
+            return PointerDown { target: None, prevented: true, outcome: out };
+        }
+        if !page.pointer.suppress_mouse && !disabled && self.dispatch_into(page, &mut out, target, "mousedown", counted_mouse(x, y, button, m, count)) {
             prevented = true;
+        }
+        if !document.is_for(&page.doc) || !page.doc.is_connected(target) {
+            page.pointer.down = None;
+            return PointerDown { target: None, prevented: true, outcome: out };
         }
         page.pointer.down = Some((target, button));
         if button == BUTTON_PRIMARY {
@@ -408,10 +429,16 @@ impl Engine {
     /// the common ancestor of the press and release targets, followed by
     /// the activation behaviour when not cancelled.
     pub fn pointer_up(&self, page: &mut Page, x: f32, y: f32, button: u8, m: Modifiers) -> PointerUp {
-        if let Some(up) = self.frame_pointer_up(page, x, y, button, m) {
+        self.pointer_up_counted(page, x, y, button, m, 1)
+    }
+
+    /// A pointer release belonging to the supplied consecutive-click count.
+    pub fn pointer_up_counted(&self, page: &mut Page, x: f32, y: f32, button: u8, m: Modifiers, count: u8) -> PointerUp {
+        if let Some(up) = self.frame_pointer_up(page, x, y, button, m, count) {
             return up;
         }
         let mut out = ScriptOutcome::default();
+        let document = page.doc.weak_identity();
         let target = page.node_at_viewport(x, y);
         let down = page.pointer.down.take();
         if page.state.active.take().is_some() && page.has_dynamic_rules {
@@ -422,8 +449,14 @@ impl Engine {
         if let Some(t) = target {
             let disabled = chain(&page.doc, t).into_iter().any(|n| is_disabled_control(&page.doc, n));
             self.dispatch_into(page, &mut out, t, "pointerup", mouse(x, y, button, m, true, true));
+            if !document.is_for(&page.doc) || !page.doc.is_connected(t) {
+                return PointerUp { target: None, clicked: None, action: ClickAction::None, outcome: out };
+            }
             if !suppress && !disabled {
-                self.dispatch_into(page, &mut out, t, "mouseup", mouse(x, y, button, m, true, true));
+                self.dispatch_into(page, &mut out, t, "mouseup", counted_mouse(x, y, button, m, count));
+            }
+            if !document.is_for(&page.doc) || !page.doc.is_connected(t) {
+                return PointerUp { target: None, clicked: None, action: ClickAction::None, outcome: out };
             }
         }
         // The click goes to the nearest common inclusive ancestor of the
@@ -438,7 +471,7 @@ impl Engine {
         let mut action = ClickAction::None;
         if let Some(c) = clicked {
             if button == BUTTON_PRIMARY {
-                let (a, o) = self.click_element(page, c, Some((x, y)), m);
+                let (a, o) = self.click_element_counted(page, c, Some((x, y)), m, count);
                 action = a;
                 out.merge(o);
             } else if button == BUTTON_AUXILIARY {
@@ -468,11 +501,17 @@ impl Engine {
     /// it was not cancelled. `at` = viewport coordinates of the pointer
     /// (None for synthetic clicks: the element's centre is used).
     pub fn click_element(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers) -> (ClickAction, ScriptOutcome) {
-        self.click_element_depth(page, target, at, m, 0)
+        self.click_element_depth(page, target, at, m, 0, 1)
     }
 
-    fn click_element_depth(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers, depth: u32) -> (ClickAction, ScriptOutcome) {
+    /// Run the same activation behaviour, with an explicit MouseEvent.detail.
+    pub fn click_element_counted(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers, count: u8) -> (ClickAction, ScriptOutcome) {
+        self.click_element_depth(page, target, at, m, 0, count.max(1))
+    }
+
+    fn click_element_depth(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers, depth: u32, count: u8) -> (ClickAction, ScriptOutcome) {
         let mut out = ScriptOutcome::default();
+        let document = page.doc.weak_identity();
         if chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n)) {
             return (ClickAction::None, out);
         }
@@ -504,7 +543,10 @@ impl Engine {
             self.restyle(page);
             out.relayout = true;
         }
-        let prevented = self.dispatch_into(page, &mut out, target, "click", mouse(x, y, BUTTON_PRIMARY, m, true, true));
+        let prevented = self.dispatch_into(page, &mut out, target, "click", counted_mouse(x, y, BUTTON_PRIMARY, m, count));
+        // Do not apply old activation nodes or roll back their checked state
+        // into a replacement document with recycled NodeIds.
+        if !document.is_for(&page.doc) { return (ClickAction::None, out); }
         if prevented {
             if !saved.is_empty() {
                 for (n, checked) in saved {
@@ -565,7 +607,7 @@ impl Engine {
                                 ClickAction::FocusControl(c)
                             }
                             _ => {
-                                let (act, o) = self.click_element_depth(page, c, None, m, depth + 1);
+                                let (act, o) = self.click_element_depth(page, c, None, m, depth + 1, count);
                                 out.merge(o);
                                 act
                             }

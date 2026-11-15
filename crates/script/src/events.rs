@@ -100,7 +100,9 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
         None => init.detail.as_ref(),
     };
     match detail {
-        Some(EventDetail::Mouse { x, y, button, ctrl, shift, alt, meta }) => {
+        Some(EventDetail::Mouse { x, y, button, ctrl, shift, alt, meta })
+        | Some(EventDetail::MouseClick { x, y, button, ctrl, shift, alt, meta, .. }) => {
+            let count = match detail { Some(EventDetail::MouseClick { count, .. }) => *count as f64, _ => 1.0 };
             let (sx, sy) = with_env(|env| env.scroll());
             for (k, v) in [
                 ("clientX", Value::Number(*x as f64)),
@@ -122,7 +124,7 @@ pub(crate) fn create_event(realm: &mut Realm, class: &str, ty: &str, init: &Even
                 ("altKey", Value::Bool(*alt)),
                 ("metaKey", Value::Bool(*meta)),
                 ("relatedTarget", Value::Null),
-                ("detail", Value::Number(if wheel.is_some() { 0.0 } else { 1.0 })),
+                ("detail", Value::Number(if wheel.is_some() { 0.0 } else { count })),
                 ("pointerId", Value::Number(1.0)),
                 ("pointerType", Value::str("mouse")),
                 ("isPrimary", Value::Bool(true)),
@@ -883,7 +885,7 @@ pub(crate) fn dispatch(realm: &mut Realm, key: TargetKey, event_type: &str, init
 /// target's padding edge.
 fn set_mouse_offset(realm: &mut Realm, key: TargetKey, eid: ObjectId, init: &EventInit) {
     let (x, y) = match &init.detail {
-        Some(EventDetail::Mouse { x, y, .. }) | Some(EventDetail::Wheel { x, y, .. }) => (x, y),
+        Some(EventDetail::Mouse { x, y, .. }) | Some(EventDetail::MouseClick { x, y, .. }) | Some(EventDetail::Wheel { x, y, .. }) => (x, y),
         _ => return,
     };
     let TargetKey::Node(n) = key else { return };
@@ -904,7 +906,7 @@ fn set_mouse_offset(realm: &mut Realm, key: TargetKey, eid: ObjectId, init: &Eve
 
 fn event_class_for(ty: &str, init: &EventInit) -> &'static str {
     match &init.detail {
-        Some(EventDetail::Mouse { .. }) => {
+        Some(EventDetail::Mouse { .. }) | Some(EventDetail::MouseClick { .. }) => {
             if ty.starts_with("pointer") {
                 "PointerEvent"
             } else if ty == "wheel" {

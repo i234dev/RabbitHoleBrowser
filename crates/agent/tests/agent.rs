@@ -978,3 +978,5 @@ mod batch_actions;
 
 #[path = "support/fragment_navigation.rs"]
 mod fragment_navigation;
+#[path = "support/double_click.rs"]
+mod double_click;
