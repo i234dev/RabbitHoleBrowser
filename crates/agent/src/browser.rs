@@ -1079,6 +1079,7 @@ impl Agent {
             let outcome;
             let mut request = None;
             let mut double_completed = false;
+            let mut clicks = 0;
             let mut stopped = None;
             match reach {
                 Reach::Covered(c) if !force => {
@@ -1094,6 +1095,7 @@ impl Agent {
                         let result = crate::actions::double_click_at(engine, page, node, x, y);
                         request = result.request;
                         double_completed = result.completed;
+                        clicks = result.clicks;
                         stopped = result.stopped;
                         outcome = result.outcome;
                     } else {
@@ -1118,16 +1120,25 @@ impl Agent {
                     outcome = o;
                 }
             }
-            Ok((outcome,request,double_completed,stopped))
+            Ok((outcome,request,double_completed,stopped,clicks))
         })?;
-        let (outcome,request,double_completed,stopped)=result?;
-        let verb=if hover_only { "Hovered" } else if double_completed { "Double-clicked" } else { "Clicked" };
+        let (outcome,request,double_completed,stopped,clicks)=result?;
+        let verb=if hover_only { "Hovered" } else if double_completed { "Double-clicked" } else if double { "Double-click stopped" } else { "Clicked" };
         let note = stopped.map(|why| format!(" (double-click stopped: {why})")).unwrap_or_default();
         let result = self.finish_action(ti, frame, before, outcome, request, &format!("{verb} @{rr} {label}{note}"), Some((frame, node)))?;
-        Ok(match fallback_note {
+        let result = match fallback_note {
             Some(note) => format!("{note}\n{result}"),
             None => result,
-        })
+        };
+        if double && !double_completed {
+            let progress = match clicks {
+                0 => "no clicks completed",
+                1 => "only one click completed",
+                _ => "two clicks completed, but dblclick was not dispatched",
+            };
+            return Err(format!("Double-click incomplete: {progress}.\n{result}"));
+        }
+        Ok(result)
     }
 
     /// The cookie-banner shortcut: always chooses REJECT.

@@ -352,6 +352,7 @@ pub fn press_key(engine: &Engine, page: &mut Page, target: Option<NodeId>, key: 
 
 /// Fire `submit` (cancelable) and build the submission request.
 pub fn submit_request(engine: &Engine, page: &mut Page, form: NodeId, submitter: Option<NodeId>, out: &mut ScriptOutcome) -> Option<Request> {
+    let document = page.doc.weak_identity();
     let o = engine.dispatch_event(page, form, "submit", plain_init(true));
     let prevented = o.default_prevented;
     let nav = o.navigation.clone();
@@ -359,7 +360,9 @@ pub fn submit_request(engine: &Engine, page: &mut Page, form: NodeId, submitter:
     if let Some(n) = nav {
         return Some(n.request);
     }
-    if prevented {
+    // Preserve explicit script navigation, but never build the old form's
+    // default request from recycled IDs in a replacement document.
+    if prevented || !document.is_for(&page.doc) {
         return None;
     }
     page.submit_request(form, submitter, &|_| Vec::new())
@@ -391,6 +394,7 @@ pub struct DoubleClickOutcome {
     pub outcome: ScriptOutcome,
     pub request: Option<Request>,
     pub completed: bool,
+    pub clicks: u8,
     pub stopped: Option<&'static str>,
 }
 
@@ -425,7 +429,11 @@ pub fn double_click_at(engine: &Engine, page: &mut Page, requested: NodeId, x: f
         if down.target != hit || page.node_at_viewport(x, y) != hit {
             result.stopped = Some("the target changed during the press"); break;
         }
+        if crate::ax::states_of(page, hit.unwrap(), "", false).iter().any(|s| s == "disabled") {
+            result.stopped = Some("the target became disabled during the press"); break;
+        }
         let up = engine.pointer_up_counted(page, x, y, 0, mods, count);
+        if up.clicked == hit { result.clicks += 1; }
         merge(&mut result.outcome, up.outcome);
         result.request = click_request(engine, page, up.action, &mut result.outcome);
         if let Some(reason) = interrupted(page, &result) { result.stopped = Some(reason); break; }

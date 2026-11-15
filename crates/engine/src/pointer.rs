@@ -621,7 +621,9 @@ impl Engine {
                     let changed = saved.first().map(|&(n, was)| page.doc.is_checked(n) != was).unwrap_or(false);
                     if changed {
                         self.dispatch_into(page, &mut out, a, "input", crate::scripting::input_init(None));
+                        if !document.is_for(&page.doc) { return (ClickAction::None, out); }
                         self.dispatch_into(page, &mut out, a, "change", plain_init(false));
+                        if !document.is_for(&page.doc) { return (ClickAction::None, out); }
                     }
                     ClickAction::Changed
                 }
@@ -632,6 +634,7 @@ impl Engine {
                 ControlKind::Reset => match page.form_of(a) {
                     Some(form) => {
                         let prevented = self.dispatch_into(page, &mut out, form, "reset", plain_init(true));
+                        if !document.is_for(&page.doc) { return (ClickAction::None, out); }
                         if !prevented {
                             page.reset_form(form);
                             self.restyle(page);
