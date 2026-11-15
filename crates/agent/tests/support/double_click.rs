@@ -117,7 +117,7 @@ fn first_click_dialog_and_target_replacement_stop_the_second_cycle() {
 }
 
 #[test]
-fn document_replacement_at_each_pointer_phase_never_dispatches_into_recycled_nodes() {
+fn document_replacement_at_each_pointer_phase_stops_activation_on_retained_nodes() {
     for phase in ["pointerdown","mousedown","pointerup","mouseup","click"] {
         let body = format!(r#"<!doctype html><button id=t on{phase}="document.open();document.write('&lt;button onclick=&quot;document.getElementById(\'out\').textContent=\'WRONG\'&quot;&gt;New&lt;/button&gt;&lt;p id=out&gt;Fresh&lt;/p&gt;');document.close()">Replace document</button>"#);
         let body: &'static str = Box::leak(body.into_boxed_str());

@@ -30,9 +30,16 @@ Windows x64 now supports explicitly enabling the JavaScript JIT with
 alive through nested callbacks. The JIT stays off by default while its global
 performance gate remains open; see the [JIT design and status](docs/jit-design.md).
 
-This delivery also includes named Grid line placement, used Grid track values
-in CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
-33/33 on the tested CSS revision; this is not a new full WPT coverage result.
+Version 0.1.19 fixes React-compatible assignments to replaceable Window
+attributes, keeps fragment navigation within the same document in the MCP,
+and adds real double-click interaction with `click double=true`. Hidden-control
+errors also suggest hovering the container. The ten-step TodoMVC flow was
+verified directly through MCP, including editing and persistence after reload;
+this is a functional check, not a new model benchmark.
+
+Version 0.1.18 included named Grid line placement, used Grid track values in
+CSSOM, and bounded legacy frameset geometry. Directed visual checks passed
+33/33 on that tested CSS revision; this is not a new full WPT coverage result.
 
 ### Conformance and benchmarks
 
