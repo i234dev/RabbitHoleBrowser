@@ -273,14 +273,16 @@ impl Gen<'_> {
     }
 
     /// Call `helper(ctx, arg)` inline; on a non-zero status leave through
-    /// the status stub; reload the slot base.
+    /// the status stub. Reload slots only where this frame continues:
+    /// here for ST_NEXT, in the status stub for ST_JUMP. A native frame
+    /// switch reloads them at INNER_ENTRY instead.
     fn call_helper(&mut self, helper: usize, name: &str, arg: u32) {
         self.a.mov_rr64(RDI, CTX);
         self.a.mov_imm32(RSI, arg);
         self.a.call_abs(helper, name);
-        self.a.load64(SLOTS, Mem::base(CTX, CTX_SLOTS));
         self.a.test_rr64(RAX, RAX);
         self.a.jcc(CC_NE, self.status);
+        self.a.load64(SLOTS, Mem::base(CTX, CTX_SLOTS));
     }
 
     /// A jump to an out-of-line call of `helper(ctx, pc)` that continues
@@ -1503,6 +1505,9 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(ExecMem, Optio
     a.alu_ri32(Alu::Cmp, RAX, ST_JUMP as i32);
     a.jcc(CC_NE, epilogue);
     a.bind(jump);
+    // A helper may have moved vstack even when it jumped within this frame.
+    // Frame switches load SLOTS at INNER_ENTRY; exits do not read them.
+    a.load64(SLOTS, Mem::base(CTX, CTX_SLOTS));
     a.load32(RSI, Mem::base(CTX, CTX_PC));
     a.jmp(dispatch);
     a.bind(addr);

@@ -547,3 +547,200 @@ for (var j = 0; j < 100; j++) out[4] = counted(bridge(j));
 out.join('|')
 "#, "3|6|3:4:5|TypeError|v:101");
 }
+
+#[cfg(target_arch = "x86_64")]
+mod status_slot_reload {
+    use super::*;
+    use crate::bytecode::Op;
+
+    struct Relocation {
+        native: bool,
+        moves: Cell<usize>,
+        collections: Cell<usize>,
+        reentries: Cell<usize>,
+        branch_helpers: Cell<usize>,
+    }
+
+    fn state(realm: &Realm) -> Rc<Relocation> {
+        realm.native_data(realm.current_native().unwrap()).unwrap()
+    }
+
+    fn relocate_and_collect(realm: &mut Realm, state: &Relocation) {
+        assert_eq!(realm.jit.live_entries > 0, state.native, "observe the suspended generated caller before reentry");
+        assert!(!realm.vstack.is_empty());
+        let before = realm.vstack.as_ptr();
+        // Allocate while the old buffer is still live: unlike reserve(), this
+        // guarantees a different address on every allocator. Move ownership of
+        // the real frame values, without cloning roots or fabricating a status.
+        let mut moved = Vec::with_capacity(realm.vstack.capacity());
+        moved.append(&mut realm.vstack);
+        let old = std::mem::replace(&mut realm.vstack, moved);
+        assert_ne!(realm.vstack.as_ptr(), before);
+        drop(old);
+        state.moves.set(state.moves.get() + 1);
+        let garbage = realm.new_object();
+        assert!(realm.gc() > 0);
+        assert!(realm.heap.try_get(garbage).is_none(), "the explicit collection really ran");
+        state.collections.set(state.collections.get() + 1);
+    }
+
+    fn reenter_then_relocate(realm: &mut Realm, _: Value, args: &[Value]) -> JsResult<Value> {
+        let state = state(realm);
+        assert_eq!(realm.jit.live_entries > 0, state.native);
+        let depth = realm.frames.len();
+        let value = realm.call(args[0].clone(), Value::Undefined, &args[1..])?;
+        assert_eq!(realm.frames.len(), depth, "the host returns to the same CallR frame (ST_NEXT)");
+        realm.native_root(value.clone());
+        state.reentries.set(state.reentries.get() + 1);
+        relocate_and_collect(realm, &state);
+        Ok(value)
+    }
+
+    fn comparison_relocate(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+        let state = state(realm);
+        let frame = realm.frames.last().unwrap();
+        assert!(matches!(frame.code().ops[frame.pc - 1], Op::JumpUnlessLtRR(..) | Op::JumpUnlessLtRK(..)),
+            "valueOf must run inside the actual conditional helper, not a preceding CallR");
+        state.branch_helpers.set(state.branch_helpers.get() + 1);
+        relocate_and_collect(realm, &state);
+        // The source compares with zero, so the conditional helper takes its
+        // forward jump and returns ST_JUMP after the stack has moved.
+        Ok(Value::Number(7.0))
+    }
+
+    fn relocate_then_throw(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+        let state = state(realm);
+        relocate_and_collect(realm, &state);
+        Err(Value::Number(73.0))
+    }
+
+    fn prepare(requested: bool, stress: u8) -> (Realm, Rc<Relocation>, u64) {
+        let mut realm = Realm::new();
+        realm.set_jit(requested, 0);
+        realm.gc_enabled = true;
+        realm.gcx.no_gc = false;
+        realm.gcx.stress = stress;
+        realm.gcx.incremental = stress == crate::realm::GC_STRESS_INCREMENTAL;
+        let state = Rc::new(Relocation {
+            native: realm.jit_enabled(), moves: Cell::new(0), collections: Cell::new(0),
+            reentries: Cell::new(0), branch_helpers: Cell::new(0),
+        });
+        let global = realm.global();
+        for (name, arity, function) in [
+            ("__reloadReenter", 2, reenter_then_relocate as crate::NativeFn),
+            ("__reloadNumber", 0, comparison_relocate as crate::NativeFn),
+            ("__reloadThrow", 0, relocate_then_throw as crate::NativeFn),
+        ] {
+            let native = realm.new_native_function_full(name, arity, function, Some(state.clone()), Vec::new(), false);
+            realm.define_property(global, name, Value::Object(native), crate::HIDDEN);
+            realm.mark_gc_safe(global, name);
+        }
+        let entries = realm.jit_entries();
+        (realm, state, entries)
+    }
+
+    fn assert_finished(realm: &Realm, state: &Relocation, entries: u64, moves: usize) {
+        assert_eq!(state.moves.get(), moves);
+        assert_eq!(state.collections.get(), moves);
+        assert_eq!(realm.jit.live_entries, 0);
+        assert!(realm.frames.is_empty() && realm.vstack.is_empty());
+        assert!(realm.native_roots.is_empty() && realm.new_target_stack.is_empty());
+        assert_eq!(realm.native_depth, 0);
+        assert_eq!(realm.gc_block, 0);
+        if state.native { assert!(realm.jit_entries() > entries); }
+        else { assert_eq!(realm.jit_entries(), entries); }
+    }
+
+    #[test]
+    fn next_refreshes_slots_after_host_reentry_relocation_and_gc() {
+        for stress in [crate::realm::GC_STRESS_FULL, crate::realm::GC_STRESS_INCREMENTAL] {
+            for requested in [false, true] {
+                let (mut realm, state, entries) = prepare(requested, stress);
+                let value = realm.eval(r#"
+                    function callback(kept) {
+                        var sum = 0;
+                        for (var i = 0; i < 8; i++) sum += i;
+                        return {kept: kept, sum: sum};
+                    }
+                    function outer() {
+                        var kept = {marker: 'alive', value: 7}, total = 0;
+                        for (var i = 0; i < 3; i++) {
+                            var result = __reloadReenter(callback, kept);
+                            if (result.kept !== kept || kept.marker !== 'alive') throw 'lost root';
+                            total += result.sum + kept.value;
+                        }
+                        return total;
+                    }
+                    outer()
+                "#, "slots-next.js").unwrap();
+                assert_eq!(value, Value::Number(105.0));
+                assert_eq!(state.reentries.get(), 3);
+                assert_finished(&realm, &state, entries, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn jump_refreshes_slots_after_comparison_helper_relocation_and_gc() {
+        for stress in [crate::realm::GC_STRESS_FULL, crate::realm::GC_STRESS_INCREMENTAL] {
+            for requested in [false, true] {
+                let (mut realm, state, entries) = prepare(requested, stress);
+                let value = realm.eval(r#"
+                    function outer() {
+                        var item = {valueOf: __reloadNumber, kept: {value: 9}}, total = 0;
+                        for (var i = 0; i < 3; i++) {
+                            if (item < 0) { throw 'wrong branch'; }
+                            else { total += item.kept.value + i; }
+                        }
+                        return total;
+                    }
+                    outer()
+                "#, "slots-jump.js").unwrap();
+                assert_eq!(value, Value::Number(30.0));
+                assert_eq!(state.branch_helpers.get(), 3);
+                assert_finished(&realm, &state, entries, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn native_call_return_chain_reloads_destination_slots_and_constants() {
+        for requested in [false, true] {
+            let (mut realm, state, entries) = prepare(requested, crate::realm::GC_STRESS_INCREMENTAL);
+            realm.jit.stats.enabled = state.native;
+            let switches = realm.jit.stats.switches;
+            let value = realm.eval(r#"
+                function alpha(n) { if (n === 0) return 'seed'; return 'a' + beta(n - 1); }
+                function beta(n) { if (n === 0) return 'other'; return 'b' + alpha(n - 1); }
+                function outer() { var result; for (var i = 0; i < 2; i++) result = alpha(40); return result; }
+                outer()
+            "#, "slots-call-return.js").unwrap();
+            assert_eq!(realm.to_string(value).unwrap().to_rust_string(), format!("{}seed", "ab".repeat(20)));
+            if state.native {
+                assert!(realm.jit.stats.switches > switches + 80, "actual native call and return switches must run");
+            }
+            assert_finished(&realm, &state, entries, 0);
+        }
+    }
+
+    #[test]
+    fn exit_ignores_old_slots_after_relocation_and_realm_remains_usable() {
+        for requested in [false, true] {
+            let (mut realm, state, entries) = prepare(requested, crate::realm::GC_STRESS_INCREMENTAL);
+            let error = realm.eval(r#"
+                function outer() {
+                    var kept = {value: 5};
+                    for (var i = 0; i < 2; i++) kept.value += i;
+                    __reloadThrow();
+                    return kept.value;
+                }
+                outer()
+            "#, "slots-exit.js").expect_err("the host error must leave generated code (ST_DONE)");
+            assert_eq!(error, Value::Number(73.0));
+            assert_finished(&realm, &state, entries, 1);
+            let value = realm.eval("function again() { var n=1; for(var i=0;i<3;i++) n+=i; return n; } again()", "slots-reuse.js").unwrap();
+            assert_eq!(value, Value::Number(4.0));
+            assert_finished(&realm, &state, entries, 1);
+        }
+    }
+}
