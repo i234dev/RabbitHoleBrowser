@@ -1099,6 +1099,46 @@ fn make_crypto(realm: &mut Realm) -> ObjectId {
     o
 }
 
+// Web IDL [Replaceable]: CreateDataPropertyOrThrow on the Window receiver,
+// rather than mutating a host slot or making readonly properties writable.
+// https://webidl.spec.whatwg.org/#Replaceable
+fn win_replaceable_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let V::Object(receiver) = this.v() else {
+        return Err(realm.throw_type_error("Illegal invocation"));
+    };
+    if receiver != realm.global() {
+        return Err(realm.throw_type_error("Illegal invocation"));
+    }
+    let name = native_data::<String>(realm).expect("replaceable attribute name");
+    realm.define_property_or_throw(receiver, name.as_str().into(), rabbithole_js::descriptor::PropDesc {
+        value: Some(arg(args, 0)), writable: Some(true), enumerable: Some(true), configurable: Some(true),
+        ..Default::default()
+    })?;
+    Ok(Value::Undefined)
+}
+
+fn win_replaceable_value(realm: &mut Realm, _this: Value, _: &[Value]) -> JsResult<Value> {
+    Ok(native_captures(realm).into_iter().next().unwrap_or(Value::Undefined))
+}
+
+fn replaceable_accessor(realm: &mut Realm, name: &str, get: Value) {
+    let data = std::rc::Rc::new(name.to_string());
+    let set = realm.new_native_function_full(&format!("set {name}"), 1, win_replaceable_set, Some(data), vec![], false);
+    let global = realm.global();
+    realm.define_accessor_values(global, name, Some(get), Some(Value::Object(set)), ACC);
+}
+
+fn replaceable_native(realm: &mut Realm, name: &str, getter: rabbithole_js::NativeFn) {
+    let get = realm.new_native_function(&format!("get {name}"), 0, getter);
+    replaceable_accessor(realm, name, Value::Object(get));
+}
+
+fn replaceable_value(realm: &mut Realm, name: &str, value: Value) {
+    // Captures are traced by GC; native Any data would not root an object value.
+    let get = realm.new_native_function_full(&format!("get {name}"), 0, win_replaceable_value, None, vec![value], false);
+    replaceable_accessor(realm, name, Value::Object(get));
+}
+
 // -------------------------------------------------------------- install
 
 /// Build the window object (the global) and all its members.
@@ -1110,9 +1150,10 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.set_class_name(g, "Window");
     state().borrow_mut().window = g;
     state().borrow_mut().protos.insert("__window", g);
-    for name in ["window", "self", "top", "parent", "frames", "globalThis"] {
+    for name in ["window", "top", "globalThis"] {
         realm.define_accessor(g, name, Some(win_self), None, ACC);
     }
+    for name in ["self", "parent", "frames"] { replaceable_native(realm, name, win_self); }
     realm.define_accessor(g, "document", Some(win_document), None, ACC);
     let loc = make_location(realm);
     let lg = realm.new_native_function("get location", 0, location_getter);
@@ -1123,31 +1164,31 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_property(g, "history", Value::Object(hist), ACC);
     let nav = make_navigator(realm);
     realm.define_property(g, "navigator", Value::Object(nav.clone_id()), ACC);
-    realm.define_property(g, "clientInformation", Value::Object(nav), ACC);
+    replaceable_value(realm, "clientInformation", Value::Object(nav));
     let screen = make_screen(realm);
-    realm.define_property(g, "screen", Value::Object(screen), ACC);
-    realm.define_accessor(g, "innerWidth", Some(win_inner_width), None, ACC);
-    realm.define_accessor(g, "innerHeight", Some(win_inner_height), None, ACC);
-    realm.define_accessor(g, "outerWidth", Some(win_inner_width), None, ACC);
-    realm.define_accessor(g, "outerHeight", Some(win_inner_height), None, ACC);
-    realm.define_accessor(g, "scrollX", Some(win_scroll_x), None, ACC);
-    realm.define_accessor(g, "scrollY", Some(win_scroll_y), None, ACC);
-    realm.define_accessor(g, "pageXOffset", Some(win_scroll_x), None, ACC);
-    realm.define_accessor(g, "pageYOffset", Some(win_scroll_y), None, ACC);
-    realm.define_accessor(g, "event", Some(win_event), None, ACC);
-    realm.define_accessor(g, "origin", Some(win_origin), None, ACC);
+    replaceable_value(realm, "screen", Value::Object(screen));
+    replaceable_native(realm, "innerWidth", win_inner_width);
+    replaceable_native(realm, "innerHeight", win_inner_height);
+    replaceable_native(realm, "outerWidth", win_inner_width);
+    replaceable_native(realm, "outerHeight", win_inner_height);
+    replaceable_native(realm, "scrollX", win_scroll_x);
+    replaceable_native(realm, "scrollY", win_scroll_y);
+    replaceable_native(realm, "pageXOffset", win_scroll_x);
+    replaceable_native(realm, "pageYOffset", win_scroll_y);
+    replaceable_native(realm, "event", win_event);
+    replaceable_native(realm, "origin", win_origin);
     realm.define_accessor(g, "isSecureContext", Some(win_is_secure), None, ACC);
-    realm.define_property(g, "devicePixelRatio", Value::Number(1.0), ALL);
+    replaceable_value(realm, "devicePixelRatio", Value::Number(1.0));
     realm.define_property(g, "name", Value::str(""), ALL);
     realm.define_property(g, "status", Value::str(""), ALL);
     realm.define_property(g, "closed", Value::Bool(false), ACC);
-    realm.define_property(g, "length", Value::Number(0.0), ACC);
+    replaceable_value(realm, "length", Value::Number(0.0));
     realm.define_property(g, "opener", Value::Null, ALL);
     realm.define_accessor(g, "frameElement", Some(win_frame_element), None, ACC);
-    realm.define_property(g, "screenX", Value::Number(0.0), ACC);
-    realm.define_property(g, "screenY", Value::Number(0.0), ACC);
-    realm.define_property(g, "screenLeft", Value::Number(0.0), ACC);
-    realm.define_property(g, "screenTop", Value::Number(0.0), ACC);
+    replaceable_value(realm, "screenX", Value::Number(0.0));
+    replaceable_value(realm, "screenY", Value::Number(0.0));
+    replaceable_value(realm, "screenLeft", Value::Number(0.0));
+    replaceable_value(realm, "screenTop", Value::Number(0.0));
     realm.define_property(g, "speechSynthesis", Value::Undefined, ALL);
     realm.define_method(g, "scrollTo", 2, win_scroll_to);
     realm.define_method(g, "scroll", 2, win_scroll_to);
@@ -1190,7 +1231,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_property(g, "localStorage", ls, ACC);
     realm.define_property(g, "sessionStorage", ss, ACC);
     let perf = make_performance(realm);
-    realm.define_property(g, "performance", Value::Object(perf), ACC);
+    replaceable_value(realm, "performance", Value::Object(perf));
     let crypto = make_crypto(realm);
     realm.define_property(g, "crypto", Value::Object(crypto), ACC);
     let vv = object_from(realm, vec![("offsetLeft", Value::Number(0.0)), ("offsetTop", Value::Number(0.0)), ("pageLeft", Value::Number(0.0)), ("pageTop", Value::Number(0.0)), ("scale", Value::Number(1.0))]);
@@ -1200,7 +1241,7 @@ pub(crate) fn install(realm: &mut Realm) {
         realm.define_method(v, "addEventListener", 2, noop);
         realm.define_method(v, "removeEventListener", 2, noop);
     }
-    realm.define_property(g, "visualViewport", vv, ACC);
+    replaceable_value(realm, "visualViewport", vv);
     let _ = HIDDEN;
 }
 

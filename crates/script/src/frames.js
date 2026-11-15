@@ -280,26 +280,25 @@
     top: () => windowFor(info(SELF, 'top', 0)) || g,
     length: () => info(SELF, 'length', 0),
   };
-  for (const k of Object.keys(own)) {
-    Object.defineProperty(g, k, { get: own[k], set(v) { Object.defineProperty(g, k, { value: v, writable: true, configurable: true }); }, configurable: true });
-  }
+  const replaceableOwn = (name, get) => Object.defineProperty(g, name, {
+    get,
+    set(value) {
+      if (this !== g) throw new TypeError('Illegal invocation');
+      Object.defineProperty(this, name, { value, writable: true, enumerable: true, configurable: true });
+    },
+    configurable: true, enumerable: true,
+  });
+  replaceableOwn('parent', own.parent);
+  // top is not [Replaceable]; the old shared loop incorrectly gave it a setter.
+  Object.defineProperty(g, 'top', { get: own.top, set: undefined, configurable: true, enumerable: true });
   // Own-frame named access is handled by Window's named properties
   // object (webidl.js), using the live document instead of stale own
   // getters installed as a side effect of reading frames or length.
   const framesDesc = Object.getOwnPropertyDescriptor(g, 'frames');
   if (!framesDesc || framesDesc.configurable) {
-    Object.defineProperty(g, 'frames', {
-      get() { return g; },
-      set(v) { Object.defineProperty(g, 'frames', { value: v, writable: true, configurable: true }); },
-      configurable: true,
-    });
+    replaceableOwn('frames', () => g);
   }
-  const lengthGet = own.length;
-  Object.defineProperty(g, 'length', {
-    get() { return lengthGet(); },
-    set(v) { Object.defineProperty(g, 'length', { value: v, writable: true, configurable: true }); },
-    configurable: true,
-  });
+  replaceableOwn('length', own.length);
   for (let i = 0; i < 16; i++) {
     Object.defineProperty(g, String(i), {
       get() { const c = info(SELF, 'child', i); return c < 0 ? undefined : windowFor(c); },

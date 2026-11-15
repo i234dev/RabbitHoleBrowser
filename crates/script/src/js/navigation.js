@@ -245,7 +245,14 @@
     if (type === 'reload') location.reload(); else if (type === 'replace') location.replace(url); else location.assign(url);
     return { committed, finished };
   }
-  Object.defineProperty(g, 'navigation', { get() { return navigation; }, configurable: true, enumerable: true });
+  Object.defineProperty(g, 'navigation', {
+    get() { return navigation; },
+    set(value) {
+      if (this !== g) throw new TypeError('Illegal invocation');
+      Object.defineProperty(this, 'navigation', { value, writable: true, enumerable: true, configurable: true });
+    },
+    configurable: true, enumerable: true,
+  });
 
   // NotRestoredReasons (bfcache diagnostics on the navigation entry).
   class NotRestoredReasonDetails { constructor() { ILLEGAL(); } get reason() { return this[S].reason; } toJSON() { return { reason: this[S].reason }; } }

@@ -421,15 +421,24 @@
   }
 
   // ------------------------------------------------------------ BarProp etc.
+  // Window [Replaceable] setters create an own data property (Web IDL).
+  const replaceableWindowValue = (name, value) => Object.defineProperty(g, name, {
+    get() { return value; },
+    set(value) {
+      if (this !== g) throw new TypeError('Illegal invocation');
+      Object.defineProperty(this, name, { value, writable: true, enumerable: true, configurable: true });
+    },
+    configurable: true, enumerable: true,
+  });
   class BarProp { constructor() { ILLEGAL(); } get visible() { return true; } }
   tag(BarProp, 'BarProp');
   define('BarProp', BarProp);
-  for (const k of ['locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar']) { const b = make(BarProp); Object.defineProperty(g, k, { get() { return b; }, configurable: true, enumerable: true }); }
+  for (const k of ['locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar']) replaceableWindowValue(k, make(BarProp));
   class External { constructor() { ILLEGAL(); } AddSearchProvider() {} IsSearchProviderInstalled() { return 0; } }
   tag(External, 'External');
   define('External', External);
   const external = make(External);
-  Object.defineProperty(g, 'external', { get() { return external; }, configurable: true, enumerable: true });
+  replaceableWindowValue('external', external);
   Object.defineProperty(g, 'originAgentCluster', { get() { return false; }, configurable: true, enumerable: true });
   Object.defineProperty(g, 'crossOriginIsolated', { get() { return false; }, configurable: true, enumerable: true });
   hidden(g, 'reportError', function reportError(e) {

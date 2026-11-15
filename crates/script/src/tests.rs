@@ -240,10 +240,27 @@ fn window_replaceable_all_reported_attributes_and_existing_idl_attributes() {
             if (target[name] !== marker) throw new Error(name + ': second assignment');
             before.set.call(target, 500);
             if (target[name] !== 500) throw new Error(name + ': saved setter');
+            if (before.get.call(target) !== original) throw new Error(name + ': host value changed');
         }
         console.log('replaced', names.length);
     "#);
     assert_eq!(out, ["replaced 31"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+
+#[test]
+fn window_replaceable_sloppy_assignment_keeps_the_exact_value() {
+    let (mut env, mut host) = setup("<p>sloppy</p>");
+    let out = run(&mut env, &mut host, r#"
+        const marker = {value: 500};
+        for (const name of ['event', 'innerWidth', 'self', 'performance', 'screen', 'locationbar', 'navigation']) {
+            window[name] = marker;
+            if (window[name] !== marker) throw new Error(name + ': sloppy assignment ignored');
+        }
+        console.log('sloppy', window.innerWidth === marker, window.performance === marker);
+    "#);
+    assert_eq!(out, ["sloppy true true"]);
     assert!(env.errors().is_empty(), "{:?}", env.errors());
 }
 
@@ -306,7 +323,7 @@ fn window_replaceable_setter_checks_descriptor_and_receiver_without_relaxing_rea
     let (mut env, mut host) = setup("<p>readonly</p>");
     let out = run(&mut env, &mut host, r#"
         'use strict';
-        for (const name of ['event', 'innerWidth', 'screen', 'locationbar', 'external', 'navigation']) {
+        for (const name of ['event', 'innerWidth', 'screen', 'locationbar', 'external', 'navigation', 'parent', 'frames', 'length']) {
             const setter = Object.getOwnPropertyDescriptor(window, name).set;
             if (typeof setter !== 'function') throw new Error(name + ': missing setter');
             const receiver = {};
