@@ -227,21 +227,27 @@ struct ActionWait { query: WaitQuery, timeout: Duration }
 fn action_wait(name: &str, a: &Value, default: Duration) -> Result<Option<ActionWait>, String> {
     if !matches!(name, "click" | "type" | "fill") { return Ok(None); }
     let Some(until) = a.get("until") else {
-        if a.get("timeout").is_some() { return Err("timeout needs until={text:...} or until={selector:...}".into()); }
+        if a.get("timeout").is_some() { return Err("timeout needs until=text, until={text:...} or until={selector:...}".into()); }
         return Ok(None);
     };
-    let object = until.as_object().filter(|object| object.len() == 1)
-        .ok_or("until needs exactly one nonempty text or selector string")?;
-    let query = match object.iter().next() {
-        Some((key, value)) if key == "text" => {
-            let text = value.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("until.text needs a nonempty string")?;
-            WaitQuery::Search { terms: Some(vec![text.to_string()]), role: None, name: None }
+    let query = if let Some(text) = until.as_str() {
+        let text = text.trim();
+        if text.is_empty() { return Err("until needs nonempty text".into()); }
+        WaitQuery::Search { terms: Some(vec![text.to_string()]), role: None, name: None }
+    } else {
+        let object = until.as_object().filter(|object| object.len() == 1)
+            .ok_or("until needs text or exactly one nonempty text/selector field")?;
+        match object.iter().next() {
+            Some((key, value)) if key == "text" => {
+                let text = value.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("until.text needs a nonempty string")?;
+                WaitQuery::Search { terms: Some(vec![text.to_string()]), role: None, name: None }
+            }
+            Some((key, value)) if key == "selector" => {
+                let selector = value.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("until.selector needs a nonempty string")?;
+                WaitQuery::css(selector)?
+            }
+            _ => return Err("until needs text or exactly one nonempty text/selector field".into()),
         }
-        Some((key, value)) if key == "selector" => {
-            let selector = value.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("until.selector needs a nonempty string")?;
-            WaitQuery::css(selector)?
-        }
-        _ => return Err("until needs exactly one nonempty text or selector string".into()),
     };
     let timeout = wait_duration(a, "timeout", default)?;
     if name == "fill" && a.get("value").is_none() && a.get("values").is_none() && !b(a, "submit").unwrap_or(false) {

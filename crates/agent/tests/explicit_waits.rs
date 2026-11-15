@@ -15,7 +15,7 @@ const PAGE: &str = r#"<!doctype html><title>Explicit waits</title><main>
 <button id="request" onclick="fetch('/slow').then(function(r){return r.text()}).then(function(t){document.getElementById('result').textContent=t})">Request</button>
 <input id="typed" aria-label="Typed" oninput="setTimeout(function(){document.getElementById('result').textContent='Typed completion'},70)">
 <label>Filled<input id="filled" oninput="setTimeout(function(){var p=document.createElement('p');p.id='filled-done';p.textContent='Filled completion';document.getElementById('result').appendChild(p)},70)"></label>
-<button id="microtask" onclick="Promise.resolve().then(function(){document.getElementById('result').textContent='Microtask completion'})">Microtask</button>
+<button id="microtask" onclick="Promise.resolve().then(function(){document.getElementById('result').textContent='listo'})">Microtask</button>
 <button id="count" onclick="document.getElementById('state').textContent='MUTATED'">Count</button>
 </main>"#;
 
@@ -99,7 +99,7 @@ fn explicit_click_wait_returns_the_complete_action_to_condition_delta() {
     let mut agent = server.agent();
     let button = element(&mut agent, "#insert");
     let start = Instant::now();
-    let output = run(&mut agent, "click", json!({"ref":button,"until":{"text":"Late pingüino 🐇"},"timeout":3000}));
+    let output = run(&mut agent, "click", json!({"ref":button,"until":"Late pingüino 🐇","timeout":3000}));
     assert!(!output.failed && output.text.contains("Wait satisfied"), "{}", output.text);
     assert!(output.text.contains("Initial state") && output.text.contains("Immediate change") && output.text.contains("Late pingüino 🐇"), "both immediate and late deltas: {}", output.text);
     assert!(start.elapsed() >= Duration::from_millis(1700), "must actually wait for the 2 s insertion");
@@ -145,8 +145,8 @@ fn explicit_type_fill_and_microtask_conditions_use_the_same_observer() {
     let filled = run(&mut agent, "fill", json!({"ref":input,"value":"y","until":{"selector":"#filled-done"},"timeout":1000}));
     assert!(!filled.failed && filled.text.contains("Filled completion"), "{}", filled.text);
     let button = element(&mut agent, "#microtask");
-    let microtask = run(&mut agent, "click", json!({"ref":button,"until":{"text":"Microtask completion"},"timeout":1000}));
-    assert!(!microtask.failed && microtask.text.contains("Microtask completion"), "{}", microtask.text);
+    let microtask = run(&mut agent, "click", json!({"ref":button,"until":"listo","timeout":1000}));
+    assert!(!microtask.failed && microtask.text.contains("listo"), "{}", microtask.text);
 }
 
 #[test]
@@ -167,7 +167,7 @@ fn explicit_wait_validation_precedes_action_and_errors_restore_auto_wait() {
     let server = Server::start();
     let mut agent = server.agent();
     let button = element(&mut agent, "#count");
-    for options in [json!({"until":"bad"}), json!({"until":{"text":"x","selector":"p"}}), json!({"until":{"text":" "}}), json!({"until":{"selector":"["}}), json!({"until":{"text":"x"},"timeout":30001}), json!({"until":{"text":"x"},"timeout":-1}), json!({"until":{"text":"x"},"timeout":0.5}), json!({"timeout":300})] {
+    for options in [json!({"until":" "}), json!({"until":7}), json!({"until":{"text":"x","selector":"p"}}), json!({"until":{"text":" "}}), json!({"until":{"selector":"["}}), json!({"until":{"text":"x"},"timeout":30001}), json!({"until":{"text":"x"},"timeout":-1}), json!({"until":{"text":"x"},"timeout":0.5}), json!({"timeout":300})] {
         let mut args = options;
         args["ref"] = json!(button);
         assert!(call(&mut agent, "click", &args).is_err(), "{args}");
@@ -200,4 +200,19 @@ fn explicit_wait_pumps_child_frame_and_delivers_dialog_and_popup_once() {
     assert_eq!(agent.active, Some(0));
     let next = run(&mut agent, "find", json!({"text":"Frame completion","wait":0}));
     assert!(!next.failed && !next.text.contains("New tab t") && !next.text.contains("Dialog alert("), "{}", next.text);
+}
+
+#[test]
+fn ordinary_click_reports_a_real_distant_timer_without_until() {
+    let server = Server::start();
+    let mut agent = server.agent();
+    let button = element(&mut agent, "#insert");
+    let output = run(&mut agent, "click", json!({"ref":button}));
+    assert!(!output.failed && output.text.contains("Immediate change") && output.text.contains("Pending: timer in"), "{}", output.text);
+    assert!(!output.text.contains("Late pingüino 🐇"), "must report pending work, not silently consume the 2 s timer: {}", output.text);
+    let completed = run(&mut agent, "find", json!({"text":"Late pingüino 🐇","wait":3000}));
+    assert!(!completed.failed && completed.text.contains("Wait satisfied"), "{}", completed.text);
+    let button = element(&mut agent, "#count");
+    let quiet = run(&mut agent, "click", json!({"ref":button}));
+    assert!(!quiet.text.contains("Pending:"), "no invented pending work: {}", quiet.text);
 }

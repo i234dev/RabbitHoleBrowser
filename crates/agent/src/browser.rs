@@ -859,6 +859,9 @@ impl Agent {
                 }
                 let snap = if self.cfg.full_snapshot_on_open { self.snapshot_text(ti, 1500, None, false, false)? } else { self.summary_text(ti)? };
                 lines.push(snap);
+                if !self.defer_settle {
+                    if let Some(pending) = wait::pending(self, ti) { lines.push(format!("Pending: {pending}.")); }
+                }
                 return Ok(lines.join("\n"));
             }
             // Navigation inside an iframe: reload that frame.
@@ -893,6 +896,7 @@ impl Agent {
             }
         }
         lines.push(head);
+        if let Some(pending) = wait::pending(self, ti) { lines.push(format!("Pending: {pending}.")); }
         // Only focus moved (the clicked control gained focus): judge the
         // effect like an unchanged page, then say where focus went.
         let focus_only = d.added == 0

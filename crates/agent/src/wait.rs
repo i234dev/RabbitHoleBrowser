@@ -162,7 +162,7 @@ pub struct Observation {
 
 /// Describe real work at the deadline, including timers beyond auto-settle's
 /// horizon. One tab shares a network log; report requests only once.
-fn pending(agent: &crate::browser::Agent, ti: usize) -> String {
+pub(crate) fn pending(agent: &crate::browser::Agent, ti: usize) -> Option<String> {
     let tab = &agent.tabs[ti];
     let mut what: Vec<_> = blocking(&tab.netlog).into_iter()
         .map(|(request, elapsed)| format!("{} ({:.1} s)", crate::ax::esc(&request), elapsed.as_secs_f32()))
@@ -176,7 +176,7 @@ fn pending(agent: &crate::browser::Agent, ti: usize) -> String {
             what.push(format!("navigation to {} (frame {frame})", crate::ax::esc(&short_url(&navigation.request.url.to_string()))));
         }
     }
-    if what.is_empty() { "no pending timers or requests".into() } else { what.join(", ") }
+    if what.is_empty() { None } else { Some(what.join(", ")) }
 }
 
 /// Observe a tab, pumping the engine's bounded task path rather than evaluating
@@ -239,7 +239,7 @@ fn observe(agent: &mut crate::browser::Agent, ti: usize, timeout: Duration, mut 
             .min().unwrap_or(Duration::from_millis(10));
         std::thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
     }
-    Observation { matched, elapsed: start.elapsed(), pending: pending(agent, ti), interrupted, reports }
+    Observation { matched, elapsed: start.elapsed(), pending: pending(agent, ti).unwrap_or_else(|| "no pending timers or requests".into()), interrupted, reports }
 }
 
 #[cfg(test)]
