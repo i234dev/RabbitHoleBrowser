@@ -158,8 +158,6 @@ pub fn form_data_set(
                     fields.push((name.clone(), v));
                 }
             }
-            ControlKind::Select => self.doc.select_options(node).into_iter().find(|&o| self.doc.is_option_selected(o))
-                .map(|o| self.doc.attr(o, "value").map(str::to_string).unwrap_or_else(|| self.doc.text_content(o).trim().to_string())).unwrap_or_default(),
             ControlKind::TextArea => {
                 if name.is_empty() {
                     continue;
@@ -265,6 +263,8 @@ impl Page {
     /// Current text of a text-like control.
     pub fn control_text(&self, node: NodeId) -> String {
         match control_kind(&self.doc, node) {
+            ControlKind::Select => self.doc.select_options(node).into_iter().find(|&o| self.doc.is_option_selected(o))
+                .map(|o| self.doc.attr(o, "value").map(str::to_string).unwrap_or_else(|| self.doc.text_content(o).trim().to_string())).unwrap_or_default(),
             ControlKind::TextArea => self.doc.control_value(node).map(|v| v.to_string()).unwrap_or_else(|| self.doc.text_content(node)),
             _ => self.doc.control_value(node).unwrap_or("").to_string(),
         }
