@@ -2055,11 +2055,38 @@ pub fn resolve_font_shorthand(value: &[Token], parent: &ComputedStyle, context: 
             return None;
         }
     }
-    let components = values::components(&parsed.family);
+    let families = parse_font_families(&values::components(&parsed.family))?;
+    // Preserve this consumer's existing selection subset. Valid document
+    // family syntax must not inherit Canvas's rejection of empty names or
+    // functional generics that its selector does not implement.
+    if families.iter().any(|family| match family {
+        FontFamilyName::Named(name) => name.is_empty(),
+        FontFamilyName::Generic(name) => name.starts_with("generic("),
+    }) {
+        return None;
+    }
+    let weight = match parsed.weight.as_deref() {
+        Some(weight) => weight_of(weight, parent)?,
+        None => 400,
+    };
+    Some(ResolvedFontShorthand {
+        size: computed.font_size,
+        weight,
+        italic: matches!(parsed.style, Some(FontStyle::Italic)),
+        families,
+    })
+}
+
+/// Validate the family production before any shorthand field is applied.
+/// Numeric components after a zero size are not another size or weight.
+fn parse_font_families(components: &[&[Token]]) -> Option<Vec<FontFamilyName>> {
     let mut families = Vec::new();
-    for family in values::split_commas(&components) {
+    for family in values::split_commas(components) {
         let entry = match family.as_slice() {
-            [[Token::String(name)]] if !name.is_empty() => FontFamilyName::Named(name.clone()),
+            [[Token::String(name)]] => FontFamilyName::Named(name.clone()),
+            [function] if matches!(function.first(), Some(Token::Function(_))) => {
+                FontFamilyName::Generic(css_generic_font_family(function)?)
+            }
             tokens if !tokens.is_empty() && tokens.iter().all(|token| matches!(token, [Token::Ident(_)])) => {
                 let words: Vec<_> = tokens.iter().filter_map(|token| match token {
                     [Token::Ident(word)] => Some(word.as_str()),
@@ -2083,16 +2110,20 @@ pub fn resolve_font_shorthand(value: &[Token], parent: &ComputedStyle, context: 
         families.push(entry);
     }
     if families.is_empty() { return None; }
-    let weight = match parsed.weight.as_deref() {
-        Some(weight) => weight_of(weight, parent)?,
-        None => 400,
-    };
-    Some(ResolvedFontShorthand {
-        size: computed.font_size,
-        weight,
-        italic: matches!(parsed.style, Some(FontStyle::Italic)),
-        families,
-    })
+    Some(families)
+}
+
+/// CSS Fonts 4 functional generic syntax. Selection remains with the
+/// existing document family resolver; this only validates the production.
+fn css_generic_font_family(component: &[Token]) -> Option<String> {
+    let Token::Function(function) = component.first()? else { return None; };
+    if !function.eq_ignore_ascii_case("generic") || !matches!(component.last(), Some(Token::CloseParen)) {
+        return None;
+    }
+    let arguments = values::components(&component[1..component.len() - 1]);
+    let [argument] = arguments.as_slice() else { return None; };
+    let name = values::ident(argument)?;
+    matches!(name.as_str(), "fangsong" | "kai" | "khmer-mul" | "nastaliq").then(|| format!("generic({name})"))
 }
 
 struct FontShorthand {
@@ -2112,6 +2143,7 @@ fn is_size_component(c: &[Token]) -> bool {
         );
     }
     matches!(c, [Token::Dimension(..)] | [Token::Percentage(_)] | [Token::Function(_), ..])
+        || matches!(c, [Token::Number(value)] if *value == 0.0)
 }
 
 fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
@@ -2123,17 +2155,21 @@ fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
         if is_size_component(c) {
             break;
         }
+        // Four optional slots: style, variant, weight and width. `normal`
+        // can occupy any remaining slot, but repeated non-normal fields
+        // cannot be rescued by a later zero size.
+        if i == 4 { return None; }
         if let Some(kw) = values::ident(c) {
             match kw.as_str() {
-                "italic" | "oblique" => out.style = Some(FontStyle::Italic),
+                "italic" | "oblique" if out.style.is_none() => out.style = Some(FontStyle::Italic),
                 "normal" => {}
-                "bold" | "bolder" | "lighter" => out.weight = Some(c.to_vec()),
-                "small-caps" => out.small_caps = true,
+                "bold" | "bolder" | "lighter" if out.weight.is_none() => out.weight = Some(c.to_vec()),
+                "small-caps" if !out.small_caps => out.small_caps = true,
                 "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar" => return None,
                 _ => return None,
             }
         } else if let Some(n) = values::number(c) {
-            if (1.0..=1000.0).contains(&n) {
+            if out.weight.is_none() && (1.0..=1000.0).contains(&n) {
                 out.weight = Some(c.to_vec());
             } else {
                 return None;
@@ -2148,9 +2184,16 @@ fn parse_font_shorthand(value: &[Token]) -> Option<FontShorthand> {
     i += 1;
     if let Some([Token::Delim('/')]) = comps.get(i) {
         let lh = comps.get(i + 1)?;
+        let valid = values::is_ident(lh, "normal")
+            || values::number(lh).is_some_and(|number| number.is_finite() && number >= 0.0)
+            || (non_negative(lh) && values::parse_length(lh).is_some_and(|length| !matches!(length, values::LengthValue::Auto)));
+        if !valid { return None; }
         out.line_height = Some(lh.to_vec());
         i += 2;
     }
+    // Missing or malformed families invalidate the whole declaration before
+    // pass 1 changes font-size (including a newly accepted unitless zero).
+    parse_font_families(&comps[i..])?;
     // Family: remaining tokens (keep commas) — rebuild token list.
     let mut fam = Vec::new();
     for c in &comps[i..] {
