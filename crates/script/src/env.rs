@@ -49,6 +49,9 @@ pub trait HostEnv {
         None
     }
     fn computed_style(&mut self, node: NodeId) -> Option<Rc<ComputedStyle>>;
+    /// Final Grid axis metadata after bringing this document's layout up to
+    /// date. None for no box, a stacking axis or an unsupported completion.
+    fn used_grid_tracks(&mut self, _node: NodeId, _rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> { None }
     /// Scroll state of an element's box (after layout): (scroll offset,
     /// scroll size). `None` = no box / not supported.
     fn element_scroll(&mut self, _node: NodeId) -> Option<((f32, f32), (f32, f32))> {
@@ -184,6 +187,8 @@ pub trait HostEnv {
     fn frame_computed_style(&mut self, _id: u64, _node: NodeId) -> Option<Rc<ComputedStyle>> {
         None
     }
+    /// As used_grid_tracks, in the identified same-origin document.
+    fn frame_used_grid_tracks(&mut self, _id: u64, _node: NodeId, _rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> { None }
     /// Border box of a node of a same-origin frame's document (frame
     /// coordinates), after bringing the frame's layout up to date.
     fn frame_node_rect(&mut self, _id: u64, _node: NodeId) -> Option<Rect> {

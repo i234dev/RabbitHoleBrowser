@@ -62,6 +62,8 @@ pub struct LayoutDamage {
 /// Inputs and outputs of a box's last `layout_contents`.
 #[derive(Debug, Clone)]
 pub(crate) struct LayoutCache {
+    /// A measurement cache cannot stand in for final layout and vice versa.
+    pub grid_publication: bool,
     pub inner_w: f32,
     pub inner_h: Option<f32>,
     pub top_collapsible: bool,

@@ -8,6 +8,8 @@ use rabbithole_css::{parse_declaration_list, Declaration, Token};
 use rabbithole_js::{JsResult, ObjectId, Realm, Value};
 use rabbithole_style::{ComputedStyle, Display, Length, Position};
 
+mod grid;
+
 /// Serialize CSS tokens back to text.
 pub(crate) fn tokens_to_css(tokens: &[Token]) -> String {
     let mut out = String::new();
@@ -340,9 +342,15 @@ fn display_css(d: Display) -> &'static str {
 /// Computed value of `prop` for a node, as a CSS string.
 pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     if n.doc & crate::host::FRAME_DOC != 0 {
-        // A same-origin frame's document: style values (no layout boxes).
+        // A same-origin frame's document. Grid templates have a dedicated
+        // final-layout query; the other existing frame values use style.
         let frame = (n.doc & !crate::host::FRAME_DOC) as u64;
         let s = with_env(|env| env.frame_computed_style(frame, n.node))?;
+        if let Some(rows) = grid::axis(prop) {
+            if let Some(tracks) = with_env(|env| env.frame_used_grid_tracks(frame, n.node, rows)) {
+                return Some(grid::used(&tracks));
+            }
+        }
         return Some(computed_from_style(&s, prop, Default::default(), Default::default()));
     }
     if n.doc != 0 {
@@ -355,6 +363,7 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     let s: std::rc::Rc<ComputedStyle> = style?;
     let pct = |l: &rabbithole_style::Length| matches!(l, rabbithole_style::Length::Percent(_) | rabbithole_style::Length::Calc(..) | rabbithole_style::Length::Math(_));
     let needs_box = match prop {
+        "grid-template-columns" | "grid-template-rows" => true,
         "width" | "height" | "inline-size" | "block-size" => true,
         "transform" => !s.transform.is_empty(),
         "margin-top" => pct(&s.margin.top),
@@ -385,6 +394,11 @@ pub(crate) fn computed_value(n: NodeRef, prop: &str) -> Option<String> {
     } else {
         s
     };
+    if let Some(rows) = grid::axis(prop) {
+        return Some(with_env(|env| env.used_grid_tracks(n.node, rows))
+            .map(|tracks| grid::used(&tracks))
+            .unwrap_or_else(|| grid::computed(if rows { &s.grid_template_rows } else { &s.grid_template_columns })));
+    }
     let r = if needs_box { with_env(|env| env.node_rect(n.node)).unwrap_or_default() } else { Default::default() };
     let pct_padding = [&s.padding.top, &s.padding.right, &s.padding.bottom, &s.padding.left].into_iter().any(|l| pct(l));
     let cb = if needs_box && prop != "transform" && (!matches!(prop, "width" | "height" | "inline-size" | "block-size") || pct_padding) {
@@ -440,6 +454,8 @@ fn containing_block(node: rabbithole_dom::NodeId, s: &ComputedStyle) -> rabbitho
 /// containing block `cb`, for values that depend on layout).
 fn computed_from_style(s: &ComputedStyle, prop: &str, r: rabbithole_gfx::Rect, cb: rabbithole_gfx::Rect) -> String {
     match prop {
+        "grid-template-columns" => grid::computed(&s.grid_template_columns),
+        "grid-template-rows" => grid::computed(&s.grid_template_rows),
         "display" => display_css(s.display).to_string(),
         "position" => match s.position {
             Position::Static => "static",

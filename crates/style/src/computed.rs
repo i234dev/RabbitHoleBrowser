@@ -608,6 +608,16 @@ pub enum TrackListItem {
     Subgrid { line_names: Vec<SubgridLineNames> },
 }
 
+/// Final layout's contribution to the CSSOM resolved value of a grid
+/// template axis. Shared by layout and script without a dependency between
+/// those crates. An intrinsic estimate is never a value of this type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsedGridTrackList {
+    Standalone { sizes: Vec<f32>, line_names: Vec<Vec<String>> },
+    /// Only names explicitly defined on this subgrid, including empty lines.
+    Subgrid { line_names: Vec<Vec<String>> },
+}
+
 /// `grid-row-start` etc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GridLine {
