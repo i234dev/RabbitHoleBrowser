@@ -864,28 +864,15 @@ pub(crate) fn forms_data_set(doc: &Document, form: NodeId) -> (Vec<(String, Stri
             }
             "textarea" => fields.push((name, doc.control_value(n).map(|v| v.to_string()).unwrap_or_else(|| doc.text_content(n)))),
             "select" => {
-                let multiple = el.attr("multiple").is_some();
-                let mut first: Option<String> = None;
-                let mut any = false;
-                for o in doc.descendants(n).skip(1).filter(|&o| doc.is_element(o, "option")) {
-                    let v = doc.attr(o, "value").map(|v| v.to_string()).unwrap_or_else(|| doc.text_content(o).trim().to_string());
-                    if first.is_none() {
-                        first = Some(v.clone());
-                    }
-                    if doc.attr(o, "selected").is_some() {
-                        fields.push((name.clone(), v));
-                        any = true;
-                        if !multiple {
-                            break;
-                        }
-                    }
-                }
-                if !any && !multiple {
-                    if let Some(f) = first {
-                        fields.push((name, f));
+                for o in doc.select_options(n) {
+                    if doc.is_option_selected(o) && !doc.option_disabled(o) {
+                        let value = doc.attr(o, "value").map(str::to_string)
+                            .unwrap_or_else(|| doc.text_content(o).split_whitespace().collect::<Vec<_>>().join(" "));
+                        fields.push((name.clone(), value));
                     }
                 }
             }
+
             _ => {}
         }
     }

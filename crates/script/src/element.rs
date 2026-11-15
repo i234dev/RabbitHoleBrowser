@@ -1961,7 +1961,7 @@ fn input_set_custom_validity(realm: &mut Realm, this: Value, _: &[Value]) -> JsR
 // select / option ---------------------------------------------------------------
 
 fn options_of(n: NodeRef) -> Vec<NodeId> {
-    with_doc(n.doc, |doc| doc.descendants(n.node).skip(1).filter(|&d| doc.is_element(d, "option")).collect())
+    with_doc(n.doc, |doc| doc.select_options(n.node))
 }
 
 fn option_value(n: NodeRef) -> String {
@@ -1969,26 +1969,14 @@ fn option_value(n: NodeRef) -> String {
 }
 
 fn select_value(n: NodeRef) -> String {
-    let opts = options_of(n);
-    for o in &opts {
-        if get_attribute(NodeRef { doc: n.doc, node: *o }, "selected").is_some() {
-            return option_value(NodeRef { doc: n.doc, node: *o });
-        }
-    }
-    if get_attribute(n, "multiple").is_none() {
-        if let Some(o) = opts.first() {
-            return option_value(NodeRef { doc: n.doc, node: *o });
-        }
-    }
-    String::new()
+    let option = with_doc(n.doc, |doc| doc.select_options(n.node).into_iter().find(|&o| doc.is_option_selected(o)));
+    option.map(|o| option_value(NodeRef { doc: n.doc, node: o })).unwrap_or_default()
 }
 
 fn set_select_value(n: NodeRef, v: &str) {
-    for o in options_of(n) {
-        let or = NodeRef { doc: n.doc, node: o };
-        let sel = option_value(or) == v;
-        set_attribute(or, "selected", if sel { Some("") } else { None });
-    }
+    let index = options_of(n).iter().position(|&o| option_value(NodeRef { doc: n.doc, node: o }) == v);
+    with_doc(n.doc, |doc| doc.set_select_index(n.node, index));
+    if n.doc == 0 { mark_dirty(); }
 }
 
 fn select_options(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
@@ -1999,27 +1987,23 @@ fn select_options(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value
 
 fn select_selected_options(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "selectedOptions")?;
-    let opts: Vec<NodeRef> = options_of(n).into_iter().map(|o| NodeRef { doc: n.doc, node: o }).filter(|o| get_attribute(*o, "selected").is_some()).collect();
+    let opts: Vec<NodeRef> = options_of(n).into_iter().map(|o| NodeRef { doc: n.doc, node: o }).filter(|o| with_doc(o.doc, |doc| doc.is_option_selected(o.node))).collect();
     Ok(node::html_collection(realm, opts))
 }
 
 fn select_selected_index_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "selectedIndex")?;
-    let opts = options_of(n);
-    let idx = opts.iter().position(|o| get_attribute(NodeRef { doc: n.doc, node: *o }, "selected").is_some());
-    Ok(Value::Number(match idx {
-        Some(i) => i as f64,
-        None if !opts.is_empty() && get_attribute(n, "multiple").is_none() => 0.0,
-        None => -1.0,
-    }))
+    let index = with_doc(n.doc, |doc| doc.select_options(n.node).iter().position(|&o| doc.is_option_selected(o)));
+    Ok(Value::Number(index.map(|i| i as f64).unwrap_or(-1.0)))
 }
 
 fn select_selected_index_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "selectedIndex")?;
-    let i = realm.to_number(arg(args, 0))?;
-    for (k, o) in options_of(n).into_iter().enumerate() {
-        set_attribute(NodeRef { doc: n.doc, node: o }, "selected", if k as f64 == i { Some("") } else { None });
-    }
+    let value = realm.to_number(arg(args, 0))?;
+    // Web IDL long conversion, including NaN/infinity -> 0 and modulo 2^32.
+    let i = if value.is_finite() { value.trunc().rem_euclid(4294967296.0) as u32 as i32 } else { 0 };
+    with_doc(n.doc, |doc| doc.set_select_index(n.node, usize::try_from(i).ok()));
+    if n.doc == 0 { mark_dirty(); }
     Ok(Value::Undefined)
 }
 
@@ -2080,27 +2064,26 @@ fn option_value_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Val
 
 fn option_selected_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "selected")?;
-    Ok(Value::Bool(get_attribute(n, "selected").is_some()))
+    Ok(Value::Bool(with_doc(n.doc, |doc| doc.is_option_selected(n.node))))
 }
 
 fn option_selected_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
     let n = this_node(realm, &this, "selected")?;
-    let b = realm.to_boolean(&arg(args, 0));
-    if b {
-        // single selects: deselect siblings
-        let sel = with_doc(n.doc, |doc| doc.ancestor_or_self(n.node, |a| doc.is_element(a, "select")));
-        if let Some(s) = sel {
-            let sr = NodeRef { doc: n.doc, node: s };
-            if get_attribute(sr, "multiple").is_none() {
-                for o in options_of(sr) {
-                    if o != n.node {
-                        set_attribute(NodeRef { doc: n.doc, node: o }, "selected", None);
-                    }
-                }
-            }
-        }
-    }
-    set_attribute(n, "selected", if b { Some("") } else { None });
+    let selected = realm.to_boolean(&arg(args, 0));
+    with_doc(n.doc, |doc| doc.set_option_selected(n.node, selected));
+    if n.doc == 0 { mark_dirty(); }
+    Ok(Value::Undefined)
+}
+
+fn option_default_selected_get(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "defaultSelected")?;
+    Ok(Value::Bool(get_attribute(n, "selected").is_some()))
+}
+
+fn option_default_selected_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
+    let n = this_node(realm, &this, "defaultSelected")?;
+    let selected = realm.to_boolean(&arg(args, 0));
+    set_attribute(n, "selected", if selected { Some("") } else { None });
     Ok(Value::Undefined)
 }
 
@@ -2114,16 +2097,18 @@ fn option_index(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> 
 fn option_ctor(realm: &mut Realm, _this: Value, args: &[Value]) -> JsResult<Value> {
     let text = arg_str_opt(realm, args, 0)?.unwrap_or_default();
     let value = arg_str_opt(realm, args, 1)?;
+    let default_selected = args.get(2).map(|v| realm.to_boolean(v)).unwrap_or(false);
     let selected = args.get(3).map(|v| realm.to_boolean(v)).unwrap_or(false);
     let node = with_doc(0, |doc| {
         let mut attrs = Vec::new();
         if let Some(v) = &value {
             attrs.push(("value".to_string(), v.clone()));
         }
-        if selected {
+        if default_selected {
             attrs.push(("selected".to_string(), String::new()));
         }
         let o = doc.create_element("option", attrs);
+        doc.initialize_option_selected(o, selected);
         if !text.is_empty() {
             let t = doc.create_text(&text);
             doc.append_child(o, t);
@@ -2182,7 +2167,10 @@ fn form_reset(realm: &mut Realm, this: Value, _: &[Value]) -> JsResult<Value> {
         let cr = NodeRef { doc: n.doc, node: c };
         let tag = tag_of(cr).unwrap_or_default();
         match tag.as_str() {
-            "select" => {}
+            "select" => {
+                with_doc(cr.doc, |doc| doc.reset_select(cr.node));
+                if cr.doc == 0 { mark_dirty(); }
+            }
             _ => {
                 let ty = get_attribute(cr, "type").map(|t| t.to_ascii_lowercase()).unwrap_or_default();
                 if matches!(ty.as_str(), "checkbox" | "radio") {
@@ -2773,7 +2761,7 @@ pub(crate) fn install(realm: &mut Realm) {
     realm.define_accessor(opt, "text", Some(option_text_get), Some(option_text_set), ACC);
     realm.define_accessor(opt, "label", Some(option_text_get), Some(e_noop), ACC);
     realm.define_accessor(opt, "selected", Some(option_selected_get), Some(option_selected_set), ACC);
-    realm.define_accessor(opt, "defaultSelected", Some(option_selected_get), Some(option_selected_set), ACC);
+    realm.define_accessor(opt, "defaultSelected", Some(option_default_selected_get), Some(option_default_selected_set), ACC);
     realm.define_accessor(opt, "index", Some(option_index), None, ACC);
     realm.define_accessor(opt, "form", Some(input_form), None, ACC);
     reflect(realm, opt, "disabled", "disabled", Reflect::Bool);

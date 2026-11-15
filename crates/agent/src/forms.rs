@@ -134,7 +134,7 @@ pub fn describe(page: &Page, frame: usize, form: NodeId, refs: &mut RefMap) -> V
             }
             ControlKind::Select => {
                 let opts = page.select_options(f.node);
-                let sel = opts.iter().find(|o| o.2).or(opts.first()).map(|o| o.0.clone()).unwrap_or_default();
+                let sel = opts.iter().find(|o| o.2).map(|o| o.0.clone()).unwrap_or_default();
                 l.push_str(&format!(" value=\"{}\"", esc(&clip_text(&sel, 40))));
                 let list: Vec<String> = opts.iter().take(12).map(|o| esc(&clip_text(&o.0, 30))).collect();
                 l.push_str(&format!(" options=[{}{}]", list.join("|"), if opts.len() > 12 { format!("|… {} more", opts.len() - 12) } else { String::new() }));
@@ -293,7 +293,7 @@ pub fn validate(engine: &Engine, page: &mut Page, form: NodeId) -> Vec<Invalid> 
             ControlKind::Select => {
                 if required {
                     let opts = page.select_options(f.node);
-                    let sel = opts.iter().find(|o| o.2).or(opts.first());
+                    let sel = opts.iter().find(|o| o.2);
                     if sel.map(|o| o.1.is_empty()).unwrap_or(true) {
                         reason = Some("an option must be selected (required)".into());
                     }

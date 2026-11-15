@@ -685,7 +685,7 @@ impl<'a> Builder<'a> {
     /// longest option and the arrow.
     fn build_select(&self, node: NodeId, style: &Rc<ComputedStyle>) -> (Vec<LayoutBox>, Option<f32>) {
         let doc = self.doc();
-        let options: Vec<NodeId> = doc.descendants(node).filter(|&n| doc.is_element(n, "option")).collect();
+        let options = doc.select_options(node);
         let label = |o: NodeId| -> String {
             let t = doc.attr(o, "label").map(str::to_string).unwrap_or_else(|| doc.text_content(o));
             t.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -706,7 +706,7 @@ impl<'a> Builder<'a> {
                     bottom: rabbithole_style::Length::Px(1.0),
                     left: rabbithole_style::Length::Px(2.0),
                 };
-                if doc.attr(o, "selected").is_some() {
+                if doc.is_option_selected(o) {
                     s.background_color = Color::rgb(206, 206, 206);
                 }
                 if doc.attr(o, "disabled").is_some() {
@@ -731,7 +731,7 @@ impl<'a> Builder<'a> {
             }
             return (rows, Some(w));
         }
-        let chosen = options.iter().copied().rev().find(|&o| doc.attr(o, "selected").is_some()).or_else(|| options.first().copied());
+        let chosen = options.iter().copied().rev().find(|&o| doc.is_option_selected(o));
         let text = chosen.map(label).unwrap_or_default();
         let t = Self::text_box(style.clone(), if text.is_empty() { "\u{200B}" } else { &text });
         if !style.width.is_auto() {

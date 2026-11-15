@@ -475,3 +475,30 @@ fn fill_input_change_and_timer_document_replacement_stop_pending_fields() {
         assert!(err(&mut a, "fill", json!({"ref":"@f1"})).contains("unknown"), "{phase}");
     }
 }
+
+#[test]
+fn fill_select_preserves_dirty_selection_through_onchange_default_edits_and_reset() {
+    let srv = serve(Box::new(|path| {
+        if path == "/" {
+            return html(r#"<!doctype html><form id="f"><label>Choice<select id="choice" name="pick" onchange="this.options[2].setAttribute('selected','');this.options[2].removeAttribute('selected')"><option value="a" selected>Alpha</option><option value="b">Beta</option><option value="c">Gamma</option></select></label></form>"#);
+        }
+        None
+    }));
+    let mut a = agent();
+    let snapshot = ok(&mut a, "open", json!({"url":srv.url("/"),"snapshot":true}));
+    let choice = ref_of(&snapshot, "combobox \"Choice\"");
+    ok(&mut a, "fill", json!({"ref":choice,"value":"c"}));
+    let snapshot = ok(&mut a, "snapshot", json!({}));
+    assert!(snapshot.contains("value=\"Gamma\""), "{snapshot}");
+    let ti = a.active.unwrap();
+    let page = &mut a.tabs[ti].frames[0].page;
+    let node = page.doc.element_by_id("choice").unwrap();
+    let options = page.doc.select_options(node);
+    assert!(page.doc.is_option_selected(options[2]));
+    assert!(page.doc.attr(options[0], "selected").is_some());
+    assert!(page.doc.attr(options[2], "selected").is_none());
+    let form = page.doc.element_by_id("f").unwrap();
+    page.reset_form(form);
+    assert!(page.select_options(node)[0].2);
+    assert!(!page.select_options(node)[2].2);
+}

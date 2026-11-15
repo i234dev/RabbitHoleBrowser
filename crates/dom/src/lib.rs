@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 mod live;
+mod select;
 mod xmlser;
 pub use xmlser::{XML_NS, XMLNS_NS};
 pub use live::{BoundaryPoint, IteratorPosition};
@@ -284,6 +285,8 @@ pub struct Document {
     /// script (HTML "dirty checkedness"); the `checked` attribute stays the
     /// default.
     pub checkedness: HashMap<NodeId, bool>,
+    /// Live option selectedness and dirtiness, independent of default attributes.
+    option_states: HashMap<NodeId, select::OptionState>,
     /// Playback state of `<audio>` / `<video>` elements for their native
     /// controls (set by the media bindings, read when painting).
     pub media_ui: HashMap<NodeId, MediaUi>,
@@ -362,6 +365,7 @@ impl Document {
             control_values: HashMap::new(),
             control_selections: HashMap::new(),
             checkedness: HashMap::new(),
+            option_states: HashMap::new(),
             media_ui: HashMap::new(),
             character_set: "UTF-8".to_string(),
             content_type: "text/html".to_string(),
@@ -517,6 +521,7 @@ impl Document {
         }
         self.nodes[parent].last_child = Some(child);
         self.record(Mutation::Children { parent, child });
+        self.select_tree_changed(parent, child, true);
     }
 
     pub fn node(&self, id: NodeId) -> &Node {
@@ -553,6 +558,7 @@ impl Document {
         c.prev_sibling = None;
         c.next_sibling = None;
         self.record(Mutation::Children { parent, child });
+        self.select_tree_changed(parent, child, false);
     }
 
     /// Insert `child` into `parent` before `reference` (append when None).
@@ -583,6 +589,7 @@ impl Document {
                     None => self.nodes[parent].first_child = Some(child),
                 }
                 self.record(Mutation::Children { parent, child });
+                self.select_tree_changed(parent, child, true);
             }
         }
     }
@@ -685,6 +692,9 @@ impl Document {
         let copy = self.create(data);
         self.copy_attr_namespaces_from(None, root, copy);
         self.copy_node_kind(None, root, copy);
+        if let Some(state) = self.option_states.get(&root).copied() {
+            self.option_states.insert(copy, state);
+        }
         if let Some(v) = self.control_values.get(&root).cloned() {
             self.control_values.insert(copy, v);
         }
@@ -716,6 +726,9 @@ impl Document {
         let copy = self.create(other.nodes[root].data.clone());
         self.copy_attr_namespaces_from(Some(other), root, copy);
         self.copy_node_kind(Some(other), root, copy);
+        if let Some(state) = other.option_states.get(&root).copied() {
+            self.option_states.insert(copy, state);
+        }
         if let Some(v) = other.control_values.get(&root) {
             self.control_values.insert(copy, v.clone());
         }
@@ -812,6 +825,7 @@ impl Document {
                 None => return,
             },
         };
+        self.select_attribute_changed(id, &name, old.is_some(), value.is_some());
         self.record(Mutation::Attr { node: id, name, old });
     }
 

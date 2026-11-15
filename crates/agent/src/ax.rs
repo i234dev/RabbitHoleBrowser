@@ -678,7 +678,7 @@ pub fn states_of(page: &Page, n: NodeId, role: &str, invalid: bool) -> Vec<Strin
         "textbox" | "searchbox" | "spinbutton" | "combobox" | "slider" if is_input => {
             if doc.tag(n) == Some("select") {
                 let opts = page.select_options(n);
-                let sel = opts.iter().find(|o| o.2).or(opts.first());
+                let sel = opts.iter().find(|o| o.2);
                 if let Some(o) = sel {
                     s.push(format!("value=\"{}\"", esc(&clip_text(&o.0, 60))));
                 }
@@ -749,7 +749,7 @@ pub fn states_of(page: &Page, n: NodeId, role: &str, invalid: bool) -> Vec<Strin
             }
         }
     }
-    if attr("aria-selected") == Some("true") || (doc.tag(n) == Some("option") && attr("selected").is_some()) {
+    if attr("aria-selected") == Some("true") || (doc.tag(n) == Some("option") && doc.is_option_selected(n)) {
         s.push("selected".into());
     }
     if attr("aria-current").is_some_and(|v| v != "false") {

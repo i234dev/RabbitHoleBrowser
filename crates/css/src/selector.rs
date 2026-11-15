@@ -1207,7 +1207,7 @@ fn match_compound_cached<'s>(c: &'s Compound, doc: &Document, node: NodeId, stat
             // selectedness.
             Pseudo::Checked => match el.tag.as_str() {
                 "input" => el.attr("type").map(|t| t.eq_ignore_ascii_case("checkbox") || t.eq_ignore_ascii_case("radio")).unwrap_or(false) && doc.is_checked(node),
-                "option" => el.attr("selected").is_some(),
+                "option" => doc.is_option_selected(node),
                 _ => false,
             },
             Pseudo::Indeterminate => match el.tag.as_str() {
@@ -1418,12 +1418,12 @@ fn is_invalid_control(doc: &Document, node: NodeId) -> bool {
         "textarea" => el.attr("required").is_some() && control_value_of(doc, node).is_empty(),
         "select" => {
             if el.attr("required").is_none() || el.attr("multiple").is_some() {
-                return el.attr("required").is_some() && !doc.descendants(node).any(|o| doc.is_element(o, "option") && doc.attr(o, "selected").is_some());
+                return el.attr("required").is_some() && !doc.select_options(node).into_iter().any(|o| doc.is_option_selected(o));
             }
             // A required single select showing its placeholder option
             // (first option, empty value) is invalid.
-            let options: Vec<NodeId> = doc.descendants(node).filter(|&o| doc.is_element(o, "option")).collect();
-            let shown = options.iter().copied().rev().find(|&o| doc.attr(o, "selected").is_some()).or_else(|| options.first().copied());
+            let options = doc.select_options(node);
+            let shown = options.iter().copied().find(|&o| doc.is_option_selected(o));
             let size = parse_num(el.attr("size")).unwrap_or(1.0);
             match shown {
                 None => true,

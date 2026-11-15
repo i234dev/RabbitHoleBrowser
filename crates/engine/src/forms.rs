@@ -98,36 +98,10 @@ fn is_disabled(doc: &Document, node: NodeId) -> bool {
 
 /// Value of a `<select>`: selected options (respecting `multiple`).
 fn select_values(doc: &Document, select: NodeId) -> Vec<String> {
-    let multiple = doc.attr(select, "multiple").is_some();
-    let mut out = Vec::new();
-    let mut first: Option<String> = None;
-    for n in doc.descendants(select) {
-        if !doc.is_element(n, "option") {
-            continue;
-        }
-        if doc.attr(n, "disabled").is_some() {
-            continue;
-        }
-        let value = doc.attr(n, "value").map(|v| v.to_string()).unwrap_or_else(|| doc.text_content(n).trim().to_string());
-        if first.is_none() {
-            first = Some(value.clone());
-        }
-        if doc.attr(n, "selected").is_some() {
-            out.push(value);
-            if !multiple {
-                break;
-            }
-        }
-    }
-    if out.is_empty() && !multiple {
-        if let Some(f) = first {
-            // Single selects always have a selected option (the first).
-            if doc.attr(select, "size").and_then(|s| s.parse::<u32>().ok()).unwrap_or(1) <= 1 {
-                out.push(f);
-            }
-        }
-    }
-    out
+    doc.select_options(select).into_iter()
+        .filter(|&o| doc.is_option_selected(o) && !doc.option_disabled(o))
+        .map(|o| doc.attr(o, "value").map(str::to_string).unwrap_or_else(|| doc.text_content(o).split_whitespace().collect::<Vec<_>>().join(" ")))
+        .collect()
 }
 
 /// Build the form data set (HTML §4.10.21.4) as (name, value) pairs plus
@@ -184,6 +158,8 @@ pub fn form_data_set(
                     fields.push((name.clone(), v));
                 }
             }
+            ControlKind::Select => self.doc.select_options(node).into_iter().find(|&o| self.doc.is_option_selected(o))
+                .map(|o| self.doc.attr(o, "value").map(str::to_string).unwrap_or_else(|| self.doc.text_content(o).trim().to_string())).unwrap_or_default(),
             ControlKind::TextArea => {
                 if name.is_empty() {
                     continue;
@@ -329,12 +305,12 @@ impl Page {
     /// Options of a `<select>` as (label, value, selected, disabled).
     pub fn select_options(&self, select: NodeId) -> Vec<(String, String, bool, bool)> {
         self.doc
-            .descendants(select)
-            .filter(|&n| self.doc.is_element(n, "option"))
+            .select_options(select)
+            .into_iter()
             .map(|n| {
                 let label = self.doc.attr(n, "label").map(|l| l.to_string()).unwrap_or_else(|| self.doc.text_content(n).trim().to_string());
-                let value = self.doc.attr(n, "value").map(|v| v.to_string()).unwrap_or_else(|| label.clone());
-                (label, value, self.doc.attr(n, "selected").is_some(), self.doc.attr(n, "disabled").is_some())
+                let value = self.doc.attr(n, "value").map(|v| v.to_string()).unwrap_or_else(|| self.doc.text_content(n).trim().to_string());
+                (label, value, self.doc.is_option_selected(n), self.doc.option_disabled(n))
             })
             .collect()
     }
@@ -342,15 +318,13 @@ impl Page {
     /// Select the option at `index` (single select semantics unless
     /// `multiple`, where it toggles).
     pub fn select_option(&mut self, select: NodeId, index: usize) {
-        let multiple = self.doc.attr(select, "multiple").is_some();
-        let options: Vec<NodeId> = self.doc.descendants(select).filter(|&n| self.doc.is_element(n, "option")).collect();
-        for (i, &o) in options.iter().enumerate() {
-            if i == index {
-                let already = self.doc.attr(o, "selected").is_some();
-                set_attr(&mut self.doc, o, "selected", if multiple && already { None } else { Some("") });
-            } else if !multiple {
-                set_attr(&mut self.doc, o, "selected", None);
-            }
+        let options = self.doc.select_options(select);
+        let Some(&option) = options.get(index) else { return };
+        if self.doc.attr(select, "multiple").is_some() {
+            let selected = !self.doc.is_option_selected(option);
+            self.doc.set_option_selected(option, selected);
+        } else {
+            self.doc.set_select_index(select, Some(index));
         }
     }
 
@@ -363,6 +337,7 @@ impl Page {
             match control_kind(&self.doc, n) {
                 ControlKind::Text | ControlKind::Password | ControlKind::Other | ControlKind::TextArea => self.doc.set_control_value(n, None),
                 ControlKind::Checkbox | ControlKind::Radio => self.doc.set_checked(n, None),
+                ControlKind::Select => self.doc.reset_select(n),
                 _ => {}
             }
         }
