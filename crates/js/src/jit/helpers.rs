@@ -75,6 +75,11 @@ impl Realm {
             }
             return self.jit_hot(code);
         }
+        // Statistics can keep this hook active after set_jit(false).
+        // Retain cached code for re-enabling, but do not enter it while off.
+        if !self.jit.on {
+            return Ctl::Next;
+        }
         if pc == 0 && !s.from_interp.get() {
             // A short loop-free function called from interpreted code.
             return Ctl::Next;
@@ -332,6 +337,11 @@ pub(crate) unsafe extern "sysv64" fn h_access(ctx: *mut Ctx, pc: u32) -> usize {
 #[inline(always)]
 unsafe fn switch_frame(ctx: *mut Ctx) -> usize {
     let r = &mut *(*ctx).realm;
+    // A host callback may have disabled execution while this native entry
+    // was live. Neither enter cached code nor compile the new frame then.
+    if !r.jit.on {
+        return 0;
+    }
     let Some(f) = r.frames.last() else { return 0 };
     let (pc, base) = (f.pc, f.base as usize);
     // SAFETY: the frame's code outlives the frame (see `Frame::code`).
