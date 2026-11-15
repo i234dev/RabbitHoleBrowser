@@ -158,18 +158,18 @@ mod tests {
         test(&mut Layouter::new(&ctx));
     }
     fn list(sizes:&[(Sizing,Sizing)])->TrackList {
-        TrackList{tracks:sizes.iter().map(|&(min,max)|Track::new(min,max)).collect(),names:(0..=sizes.len()).map(|i|vec![format!("line-{i}")]).collect(),inherited:None}
+        TrackList{tracks:sizes.iter().map(|&(min,max)|Track::new(min,max)).collect(),names:(0..=sizes.len()).map(|i|vec![format!("line-{i}")]).collect(),css_names:Default::default(),inherited:None}
     }
     fn automatic(count:usize)->TrackList {list(&vec![(Sizing::Auto,Sizing::Auto);count])}
     fn shared()->TrackList {
         let original=automatic(1);
         let AxisInheritance::Tracks(source)=subgrid::sizing_section_aligned(&original,0,1,0.,true,None,ContentDistribution::FlexStart) else {panic!("missing source")};
-        TrackList{tracks:vec![Track::new(Sizing::Fixed(0.),Sizing::Fixed(0.))],names:source.names.clone(),inherited:Some(source)}
+        TrackList{tracks:vec![Track::new(Sizing::Fixed(0.),Sizing::Fixed(0.))],names:source.names.clone(),css_names:Default::default(),inherited:Some(source)}
     }
     fn inherited(size:f32)->TrackList {
         let mut original=list(&[(Sizing::Fixed(size),Sizing::Fixed(size))]);original.tracks[0].base=size;
         let AxisInheritance::Tracks(source)=subgrid::section(&original,&[0.],0,1,0.,true) else {panic!("missing source")};
-        TrackList{tracks:original.tracks,names:source.names.clone(),inherited:Some(source)}
+        TrackList{tracks:original.tracks,names:source.names.clone(),css_names:Default::default(),inherited:Some(source)}
     }
     fn inputs(spaces:[AvailableSpace;2])->MeasureInputs {
         MeasureInputs::new(spaces,[AvailableSpace::Definite(300.),AvailableSpace::Definite(200.)],[0.,0.],[AxisLayout::new(ContentDistribution::FlexStart,false);2],AvailableSpace::Definite(300.),None,None)

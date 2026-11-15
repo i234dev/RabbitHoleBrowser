@@ -395,6 +395,7 @@ mod tests {
 
     fn list(sizes:&[(Sizing,Sizing)])->TrackList {
         TrackList {
+            css_names:Default::default(),
             tracks:sizes.iter().map(|&(min,max)|Track::new(min,max)).collect(),
             names:(0..=sizes.len()).map(|i|vec![format!("line-{i}")]).collect(),
             inherited:None,
@@ -513,7 +514,7 @@ mod tests {
         assert_eq!(max.tracks().tracks[0].base,48.);
         let placement=subgrid::sizing_section_aligned(&list(&[(Sizing::Auto,Sizing::Auto)]),0,1,0.,true,None,ContentDistribution::FlexStart);
         let AxisInheritance::Tracks(axis)=placement else {panic!("Missing placement")};
-        let estimated=TrackList{tracks:vec![Track::new(Sizing::Fixed(0.),Sizing::Fixed(0.))],names:axis.names.clone(),inherited:Some(axis)};
+        let estimated=TrackList{tracks:vec![Track::new(Sizing::Fixed(0.),Sizing::Fixed(0.))],names:axis.names.clone(),css_names:Default::default(),inherited:Some(axis)};
         assert!(catch_unwind(AssertUnwindSafe(||CompletedAxis::inherited(estimated,&mut budget))).is_err());
     }
 

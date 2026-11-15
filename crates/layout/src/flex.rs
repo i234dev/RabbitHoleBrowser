@@ -519,6 +519,7 @@ impl<'a> Layouter<'a> {
 
     /// (min-content, max-content) sizes of an item along the main axis.
     fn flex_content_sizes(&mut self, b: &mut LayoutBox, idx: usize, axis: Axis, cbw: f32, cbh: Option<f32>) -> (f32, f32) {
+        let _probe = self.grid_publication.probe();
         let child = &mut b.children[idx];
         // Content suggestions and content flex bases measure the item's
         // contents, not its own preferred/min/max main size (Flex §4.5, §9.2).

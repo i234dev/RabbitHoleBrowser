@@ -268,6 +268,8 @@ pub struct LayoutBox {
     /// Used per-axis subgrid inputs. Computed styles retain the CSS request.
     pub(crate) grid_columns: Option<crate::grid::subgrid::AxisInheritance>,
     pub(crate) grid_rows: Option<crate::grid::subgrid::AxisInheritance>,
+    /// CSSOM data from final layout, in this Grid box's own logical axes.
+    pub(crate) used_grid_tracks: [Option<Rc<rabbithole_style::UsedGridTrackList>>; 2],
     /// `position: relative` offset currently applied to the box.
     pub(crate) rel_applied: (f32, f32),
     /// The last layout translated the contents from the cache (descendants
@@ -351,6 +353,7 @@ impl LayoutBox {
             layout_cache: None,
             grid_columns: None,
             grid_rows: None,
+            used_grid_tracks: [None, None],
             rel_applied: (0.0, 0.0),
             reused_layout: false,
             no_abs_below: false,
@@ -690,6 +693,12 @@ pub struct LayoutTree {
 }
 
 impl LayoutTree {
+    /// Final Grid template value for the element's actual box. Anonymous
+    /// writing-mode wrappers do not own it; box_of follows their inner node.
+    pub fn used_grid_tracks(&self, doc: &rabbithole_dom::Document, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
+        self.box_of(doc, node)?.used_grid_tracks[usize::from(rows)].clone()
+    }
+
     /// An empty tree (placeholder before the first layout).
     pub fn empty() -> LayoutTree {
         LayoutTree {

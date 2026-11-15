@@ -332,6 +332,7 @@ impl<'a> Layouter<'a> {
     /// (min-content, max-content) width of a table's content box
     /// (columns plus border spacing).
     pub(crate) fn table_intrinsic(&mut self, table: &mut LayoutBox) -> (f32, f32) {
+        let _probe = self.grid_publication.probe();
         let g = build_grid(table, self.ctx.doc);
         if table.style.border_collapse {
             self.resolve_collapsed_borders(table);

@@ -213,7 +213,7 @@ pub(super) fn section(list:&TrackList, positions:&[f32], start:usize, end:usize,
 
 /// Expand only as far as the inherited line count; repeats remain bounded
 /// even when their specified count is huge.
-fn local_names(spec:&[SubgridLineNames], count:usize)->Vec<Vec<String>> {
+pub(super) fn local_names(spec:&[SubgridLineNames], count:usize)->Vec<Vec<String>> {
     let fixed:usize=spec.iter().map(|part|match part {
         SubgridLineNames::Names(_)=>1,
         SubgridLineNames::Repeat{count:Some(n),names}=>names.len().saturating_mul(*n as usize),
@@ -246,7 +246,7 @@ pub(super) fn tracks(b:&LayoutBox,rows:bool,avail:Option<f32>,gap:f32)->TrackLis
         let mut track=Track::new(Sizing::Fixed(size),Sizing::Fixed(size));
         track.base=if collapsed {0.} else {size};track.limit=Some(track.base);track.collapsed=collapsed;track
     }).collect();
-    TrackList{tracks,names,inherited:Some(inherited)}
+    TrackList{tracks,names,css_names:Default::default(),inherited:Some(inherited)}
 }
 
 /// Grid2 §12.1's initial opposite-axis estimate uses definite maximum track
@@ -271,7 +271,7 @@ pub(super) fn fixed_section_aligned(list:&TrackList,start:usize,end:usize,gap:f3
         };
         if t.collapsed {t.base=0.;}t.limit=Some(t.base);t
     }).collect();
-    let fixed=TrackList{tracks,names:list.names.clone(),inherited:None};
+    let fixed=TrackList{tracks,names:list.names.clone(),css_names:list.css_names.clone(),inherited:None};
     let available=if list.tracks.iter().all(|t|matches!(t.max,Sizing::Fixed(_))) {available} else {None};
     let (positions,_)=positions(&fixed,gap,available,align);
     Some(section(&fixed,&positions,start,end,gap,names))
@@ -291,7 +291,7 @@ pub(super) fn sizing_section_aligned(list:&TrackList,start:usize,end:usize,gap:f
         if t.collapsed {t.base=0.;}
         t
     }).collect();
-    let probe=TrackList{tracks,names:list.names.clone(),inherited:list.inherited.clone()};
+    let probe=TrackList{tracks,names:list.names.clone(),css_names:list.css_names.clone(),inherited:list.inherited.clone()};
     let available=if list.tracks.iter().all(|t|matches!((t.min,t.max),(Sizing::Fixed(a),Sizing::Fixed(b)) if a==b)) {available} else {None};
     let (positions,_)=positions(&probe,gap,available,align);
     let mut source=section(&probe,&positions,start,end,gap,names);
@@ -535,6 +535,7 @@ impl<'a> Layouter<'a> {
     /// The caller has supplied only placement geometry for that axis. Its
     /// descendants, rather than the subgrid's preferred size, size the parent.
     pub(super) fn subgrid_axis_contributions(&mut self,b:&mut LayoutBox,rows:bool,inline_size:Option<f32>,phase:MeasurePhase)->Vec<Contribution> {
+        let _probe = self.grid_publication.probe();
         let _depth=self.grid_work.enter(b.children.len().saturating_add(1));
         if b.wm_wrapper {
             let reverse=if rows {b.wm_kind==WmKind::Ccw} else {b.wm_kind==WmKind::Cw};
@@ -579,7 +580,7 @@ mod tests {
 
     fn parent()->TrackList {
         let tracks=[100.,150.].into_iter().map(|size|{let mut t=Track::new(Sizing::Fixed(size),Sizing::Fixed(size));t.base=size;t.limit=Some(size);t}).collect();
-        TrackList{tracks,names:vec![vec!["first".into()],vec!["middle".into()],vec!["last".into()]],inherited:None}
+        TrackList{tracks,names:vec![vec!["first".into()],vec!["middle".into()],vec!["last".into()]],css_names:Default::default(),inherited:None}
     }
     fn child()->LayoutBox {
         let mut style=ComputedStyle::initial();
@@ -639,7 +640,7 @@ mod tests {
 
     #[test]
     fn legacy_completion_requires_indefinite_standalone_axis_across_writing_modes() {
-        let unresolved=TrackList{tracks:vec![Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![]],inherited:None};
+        let unresolved=TrackList{tracks:vec![Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![]],css_names:Default::default(),inherited:None};
         let source=sizing_section(&unresolved,0,1,0.,true);
         let mut b=child();
         b.grid_rows=Some(source.clone());
@@ -690,7 +691,7 @@ mod tests {
         let ctx=crate::LayoutContext{doc:&doc,styles:&styles,fonts:&fonts,images:&images,background_images:&backgrounds,scroll_offsets:&scrolls,viewport_width:800.,viewport_height:600.,page_scroll:(0.,0.)};
         let mut root=crate::build::Builder::new(&ctx,None).build_root();
         let probe=find_mut(&mut root,doc.element_by_id("probe").unwrap()).unwrap();
-        let mut tracks=TrackList{tracks:vec![Track::new(Sizing::Fixed(20.),Sizing::Fixed(20.))],names:vec![vec![],vec![]],inherited:None};
+        let mut tracks=TrackList{tracks:vec![Track::new(Sizing::Fixed(20.),Sizing::Fixed(20.))],names:vec![vec![],vec![]],css_names:Default::default(),inherited:None};
         tracks.tracks[0].base=20.;
         // This is the real final-layout producer: section(), not the
         // placement-only sizing_section(). Its opposite axis is definite.
@@ -747,7 +748,7 @@ mod tests {
 
     #[test]
     fn initial_cross_axis_estimate_uses_the_definite_maximum() {
-        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(10.),Sizing::Fixed(100.)),Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![],vec![]],inherited:None};
+        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(10.),Sizing::Fixed(100.)),Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![],vec![]],css_names:Default::default(),inherited:None};
         let Some(AxisInheritance::Tracks(axis))=fixed_section(&list,0,1,0.,true) else {panic!("missing definite maximum")};
         assert_eq!(axis.sizes,[100.]);
         assert!(fixed_section(&list,0,2,0.,true).is_none());
@@ -853,7 +854,7 @@ mod tests {
 
     #[test]
     fn placement_only_tracks_do_not_resolve_percentage_edges() {
-        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(10.),Sizing::Auto)],names:vec![vec![],vec![]],inherited:None};
+        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(10.),Sizing::Auto)],names:vec![vec![],vec![]],css_names:Default::default(),inherited:None};
         let source=Some(sizing_section(&list,0,1,0.,true));assert_eq!(scope_reference(&source,300.),0.);
         let list=parent();let source=Some(sizing_section(&list,0,1,50.,true));assert_eq!(scope_reference(&source,300.),100.);
     }
@@ -881,7 +882,7 @@ mod tests {
     #[test]
     fn initial_and_used_geometry_keep_definite_distributed_gaps() {
         let tracks=vec![Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.));2];
-        let mut list=TrackList{tracks,names:vec![vec![],vec![],vec![]],inherited:None};
+        let mut list=TrackList{tracks,names:vec![vec![],vec![],vec![]],css_names:Default::default(),inherited:None};
         let Some(AxisInheritance::Tracks(initial))=fixed_section_aligned(&list,0,2,0.,true,Some(300.),ContentDistribution::SpaceBetween) else {panic!("missing initial geometry")};
         assert_eq!(initial.starts,[0.,250.]);assert_eq!(initial.extent(),300.);
         let AxisInheritance::Tracks(sizing)=sizing_section_aligned(&list,0,2,0.,true,Some(300.),ContentDistribution::SpaceBetween) else {panic!("missing sizing geometry")};
@@ -894,7 +895,7 @@ mod tests {
 
     #[test]
     fn an_indefinite_track_outside_the_span_prevents_initial_distribution() {
-        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.)),Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.)),Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![],vec![],vec![]],inherited:None};
+        let list=TrackList{tracks:vec![Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.)),Track::new(Sizing::Fixed(50.),Sizing::Fixed(50.)),Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![],vec![],vec![]],css_names:Default::default(),inherited:None};
         let Some(AxisInheritance::Tracks(initial))=fixed_section_aligned(&list,0,2,0.,true,Some(300.),ContentDistribution::SpaceBetween) else {panic!("missing fixed section")};
         assert_eq!(initial.starts,[0.,50.]);assert_eq!(initial.extent(),100.);
     }

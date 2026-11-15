@@ -342,6 +342,7 @@ impl<'a> Layouter<'a> {
     /// Intrinsic widths of a vertical subtree's wrapper: its block size
     /// when laid out in the viewport height.
     pub(crate) fn wm_wrapper_intrinsic(&mut self, w: &mut LayoutBox) -> (f32, f32) {
+        let _probe = self.grid_publication.probe();
         let vp_h = self.ctx.viewport_height.max(1.0);
         let Some(r) = w.children.first_mut() else { return (0.0, 0.0) };
         let lcb = Cb { x: 0.0, width: vp_h, height: None };

@@ -183,7 +183,7 @@ mod tests {
         let mut grid=grid(vec![wrapper(node(BoxKind::Block))]);
         let original=grid.children[0].style.clone();grid.children[0].intrinsic_cache=Some((42.,42.));
         let item=GridItem{idx:0,area:super::super::Area{col:(0,1),row:(0,1)},edges:crate::flex::ItemEdges::new(&original,1.),justify:ItemAlign::FlexStart,align:ItemAlign::FlexStart,column_names:true,row_names:true,parent_lanes_auto:false};
-        let templates=||TrackList{tracks:vec![super::super::Track::new(super::super::Sizing::Fixed(1.),super::super::Sizing::Fixed(1.))],names:vec![vec![],vec![]],inherited:None};
+        let templates=||TrackList{tracks:vec![super::super::Track::new(super::super::Sizing::Fixed(1.),super::super::Sizing::Fixed(1.))],names:vec![vec![],vec![]],css_names:Default::default(),inherited:None};
         let inputs=ordinary_inputs(&grid,[AvailableSpace::Definite(1.);2],[0.;2]);
         let mut guards=Vec::new();
         for _ in 0..128 {guards.push(layouter.grid_work.enter_sizing_operation());}

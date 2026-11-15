@@ -57,6 +57,7 @@ pub(crate) struct Layouter<'a> {
     pub(crate) clamp: Option<(usize, Option<f32>)>,
     /// Bounds only the new recursive subgrid contribution/transport work.
     pub(crate) grid_work: crate::grid::subgrid::WorkBudget,
+    pub(crate) grid_publication: crate::grid::resolved::Publication,
 }
 
 pub(crate) fn resolve_edges(e: &Edges<Length>, base: f32) -> Edges<f32> {
@@ -188,6 +189,7 @@ impl<'a> Layouter<'a> {
             cb_rtl: false,
             clamp: None,
             grid_work: Default::default(),
+            grid_publication: Default::default(),
         }
     }
 
@@ -526,6 +528,7 @@ impl<'a> Layouter<'a> {
         let had_cache = prev_cache.is_some();
         let reuse = prev_cache.filter(|c| {
             cacheable
+                && c.grid_publication == self.grid_publication.enabled()
                 && c.inner_w == inner_cb.width
                 && c.inner_h == inner_cb.height
                 && c.top_collapsible == top_collapsible
@@ -553,6 +556,7 @@ impl<'a> Layouter<'a> {
             };
             let float_extent = if b.bfc_root && !local_bfc.is_empty() { Some(local_bfc.max_bottom() - content_y) } else { None };
             b.layout_cache = cacheable.then(|| crate::incremental::LayoutCache {
+                grid_publication: self.grid_publication.enabled(),
                 inner_w: inner_cb.width,
                 inner_h: inner_cb.height,
                 top_collapsible,

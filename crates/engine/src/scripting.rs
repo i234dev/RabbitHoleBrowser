@@ -279,6 +279,10 @@ impl HostEnv for EngineEnv<'_> {
         }
         r
     }
+    fn used_grid_tracks(&mut self, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
+        self.ensure_layout();
+        self.page.layout.used_grid_tracks(&self.page.doc, node, rows)
+    }
     fn element_scroll(&mut self, node: NodeId) -> Option<((f32, f32), (f32, f32))> {
         self.ensure_layout();
         self.engine.element_scroll(self.page, node)
@@ -553,6 +557,21 @@ impl HostEnv for EngineEnv<'_> {
         }
         self.engine.flush_layout(child);
         child.layout_rect_of(node)
+    }
+    fn frame_used_grid_tracks(&mut self, id: u64, node: NodeId, rows: bool) -> Option<Rc<rabbithole_style::UsedGridTrackList>> {
+        if id == self.page.frame_id { return self.used_grid_tracks(node, rows); }
+        self.ensure_layout();
+        self.engine.update_frame_viewport(self.page, id);
+        let origin = crate::frames::page_origin(self.page);
+        if let Some(anc) = crate::frames::ancestor_page(id) {
+            if crate::frames::page_origin(anc) != origin { return None; }
+            self.engine.flush_layout(anc);
+            return anc.layout.used_grid_tracks(&anc.doc, node, rows);
+        }
+        let child = crate::frames::find_frame_page_mut(self.page, id)?;
+        if crate::frames::page_origin(child) != origin { return None; }
+        self.engine.flush_layout(child);
+        child.layout.used_grid_tracks(&child.doc, node, rows)
     }
     fn ensure_frame(&mut self, node: NodeId) -> Option<u64> {
         if let Some(c) = self.page.frames.get(node) {

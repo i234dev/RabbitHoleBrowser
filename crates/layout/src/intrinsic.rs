@@ -20,6 +20,7 @@ pub(crate) fn extras_px(style: &rabbithole_style::ComputedStyle) -> f32 {
 impl<'a> Layouter<'a> {
     /// (min-content, max-content) widths of the box's content area.
     pub(crate) fn intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
+        let _probe = self.grid_publication.probe();
         if let Some(c) = b.intrinsic_cache {
             return c;
         }

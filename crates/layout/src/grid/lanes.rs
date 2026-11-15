@@ -233,6 +233,7 @@ impl<'a> Layouter<'a> {
         for _ in 0..-min_line {
             tl.tracks.insert(0, Track::new(Sizing::Auto, Sizing::Auto));
             tl.names.insert(0, Vec::new());
+            std::rc::Rc::make_mut(&mut tl.css_names).insert(0, Vec::new());
         }
         let mut max_end = tl.tracks.len() as i32;
         for (_, p) in placements.iter_mut() {
@@ -254,6 +255,7 @@ impl<'a> Layouter<'a> {
             let (min, max) = sizing_of(&ts, avail);
             tl.tracks.push(Track::new(min, max));
             tl.names.push(Vec::new());
+            std::rc::Rc::make_mut(&mut tl.css_names).push(Vec::new());
             ai += 1;
         }
         // repeat(auto-fit): explicitly occupied tracks stay, then as many
@@ -368,6 +370,7 @@ impl<'a> Layouter<'a> {
 
     /// Outer height of a row-lane item laid out `inner_w` wide.
     fn lane_item_height(&mut self, child: &mut LayoutBox, it: &LaneItem, inner_w: f32, cbw: f32) -> f32 {
+        let _probe = self.grid_publication.probe();
         let bb = child.style.box_sizing == BoxSizing::BorderBox;
         let mv = it.edges.margin_sum(Axis::Column);
         if let Some(h) = resolve_size(child.style.height, None, bb, it.edges.pb_v) {
@@ -384,6 +387,7 @@ impl<'a> Layouter<'a> {
     /// inline contribution. Unresolved row tracks wait for the row pass.
     #[allow(clippy::too_many_arguments)]
     fn row_lane_widths(&mut self,b:&mut LayoutBox,tl:&TrackList,items:&[LaneItem],row_gap:f32,row_available:Option<f32>,cbw:f32,available:Option<f32>,phase:MeasurePhase)->Vec<f32> {
+        let _probe = self.grid_publication.probe();
         let align=b.style.align_content;
         items.iter().map(|it| {
             let child=&mut b.children[it.idx];
@@ -405,6 +409,7 @@ impl<'a> Layouter<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn lane_row_contributions(&mut self,b:&mut LayoutBox,tl:&TrackList,items:&[LaneItem],widths:&[f32],gap:f32,row_available:Option<f32>,cbw:f32,phase:MeasurePhase)->Vec<Contribution> {
+        let _probe = self.grid_publication.probe();
         let align=b.style.align_content;
         let mut contribs = Vec::new();
         for (it, &w) in items.iter().zip(widths) {
@@ -441,6 +446,7 @@ impl<'a> Layouter<'a> {
 
     /// Lay out a grid lanes container's items; returns the content height.
     pub(crate) fn layout_grid_lanes(&mut self, b: &mut LayoutBox, cb: &Cb) -> f32 {
+        if self.grid_publication.enabled() { b.used_grid_tracks = [None, None]; }
         let style = b.style.clone();
         let rows = row_lanes(b);
         let cbw = cb.width;
@@ -507,6 +513,9 @@ impl<'a> Layouter<'a> {
                 let child = &mut b.children[it.idx];
                 let (nx, ny) = (cx + x, cy + y + child.margin.top);
                 child.translate(nx - child.rect.x, ny - child.rect.y);
+            }
+            if self.grid_publication.enabled() {
+                b.used_grid_tracks[0] = resolved::capture(b, false, &tl, GridSpace::Definite(cbw), &mut self.grid_work);
             }
             return pl.range;
         }
@@ -581,6 +590,9 @@ impl<'a> Layouter<'a> {
             let (nx, ny) = (cx + x + child.margin.left, cy + y);
             child.translate(nx - child.rect.x, ny - child.rect.y);
         }
+        if self.grid_publication.enabled() {
+            b.used_grid_tracks[1] = resolved::capture(b, true, &tl, subgrid::standalone_space(b, true, avail), &mut self.grid_work);
+        }
         rows_extent.max(0.0)
     }
 
@@ -620,6 +632,7 @@ impl<'a> Layouter<'a> {
 
     /// Intrinsic (min-content, max-content) widths of a grid lanes container.
     pub(crate) fn grid_lanes_intrinsic(&mut self, b: &mut LayoutBox) -> (f32, f32) {
+        let _probe = self.grid_publication.probe();
         let style = b.style.clone();
         if let Some(axis)=subgrid::shared(b,false) {
             let width=(axis.extent()-axis.inset_start-axis.inset_end).max(0.);
@@ -628,7 +641,7 @@ impl<'a> Layouter<'a> {
         let col_gap = subgrid::gap(b,false,0.);
         if !row_lanes(b) {
             let (tl, items) = self.lanes_setup(b, &style, false, None, col_gap, 0.0, (0.0, 0.0));
-            let mut min_t = TrackList { tracks: tl.tracks.clone(), names: tl.names.clone(), inherited: tl.inherited.clone() };
+            let mut min_t = TrackList { tracks: tl.tracks.clone(), names: tl.names.clone(), css_names: tl.css_names.clone(), inherited: tl.inherited.clone() };
             self.size_column_lanes(b, &mut min_t, &items, GridSpace::MinContent, col_gap, 0.0, false);
             let mut max_t = tl;
             self.size_column_lanes(b, &mut max_t, &items, GridSpace::MaxContent, col_gap, 0.0, false);
