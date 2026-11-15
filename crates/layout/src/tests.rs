@@ -127,6 +127,59 @@ fn replaced_boxes_use_their_outer_display_when_joining_lines() {
 }
 
 #[test]
+fn unloaded_images_preserve_css_and_attribute_dimensions() {
+    let fx = Fixture::new(
+        "<img width=80 height=30 alt='Attribute size'><img width=80 height=30 style='width:44px;height:22px' alt='CSS wins'><img width=80 height=40 style='width:60px;height:auto' alt='Attribute ratio'>",
+        "body{margin:0}img{display:block}",
+    );
+    let tree = fx.layout();
+    let boxes = fx.find(&tree, "img");
+    assert_eq!(boxes.len(), 3);
+    for (b, expected) in boxes.iter().zip([(80.0, 30.0), (44.0, 22.0), (60.0, 30.0)]) {
+        assert_eq!(b.kind, BoxKind::Image);
+        assert!(b.image.is_none());
+        assert_eq!((b.content_rect.w, b.content_rect.h), expected);
+    }
+}
+
+#[test]
+fn unloaded_images_alt_has_a_box_without_a_natural_image_ratio() {
+    let fx = Fixture::new(
+        "<img alt='Navigation preview'><img alt='Navigation preview' style='height:40px'><img alt='Navigation preview' style='width:13px'>",
+        "body{margin:0}img{display:block;font-family:monospace;font-size:16px;line-height:20px}",
+    );
+    let tree = fx.layout();
+    let boxes = fx.find(&tree, "img");
+    assert_eq!(boxes.len(), 3);
+    assert!(boxes[0].content_rect.w > 30.0, "alt text must contribute intrinsic width");
+    assert_eq!(boxes[0].content_rect.h, 20.0);
+    assert_eq!(boxes[1].content_rect.w, boxes[0].content_rect.w, "height must not scale alt text as an image ratio");
+    assert_eq!(boxes[1].content_rect.h, 40.0);
+    assert_eq!((boxes[2].content_rect.w, boxes[2].content_rect.h), (13.0, 20.0));
+    assert_eq!(boxes[1].rect.y, boxes[0].rect.bottom());
+    assert_eq!(boxes[2].rect.y, boxes[1].rect.bottom());
+    let list = fx.display_list();
+    assert_eq!(list.items.iter().filter(|item| matches!(item, DisplayItem::Text { text, .. } if text == "Navigation preview")).count(), 3);
+}
+
+#[test]
+fn unloaded_images_empty_alt_stays_zero_and_decoded_size_wins() {
+    let fx = Fixture::new("<img alt=''><img alt='A long alternative label'>", "body{margin:0}img{display:block}");
+    let empty = HashMap::new();
+    let bgs = HashMap::new();
+    let pending = layout(&fx.ctx(&empty, &bgs));
+    let pending_boxes = fx.find(&pending, "img");
+    assert_eq!((pending_boxes[0].rect.w, pending_boxes[0].rect.h), (0.0, 0.0));
+    let loaded_node = pending_boxes[1].node.unwrap();
+    let mut images = HashMap::new();
+    images.insert(loaded_node, Arc::new(Image::new(7, 11, vec![255; 7 * 11 * 4])));
+    let loaded = layout(&fx.ctx(&images, &bgs));
+    let loaded_boxes = fx.find(&loaded, "img");
+    assert_eq!((loaded_boxes[1].content_rect.w, loaded_boxes[1].content_rect.h), (7.0, 11.0));
+    assert!(loaded_boxes[1].text.is_none(), "a decoded image must not keep the pending alt intrinsic size");
+}
+
+#[test]
 fn body_width_and_margins() {
     let fx = Fixture::new("<p>Hello</p>", "");
     let t = fx.layout();
