@@ -33,6 +33,8 @@ use std::cell::{Cell, OnceCell};
 mod emit;
 #[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) use emit::PHASE;
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) use emit::{modrk_witness,reset_modrk_witness};
 #[cfg(all(test, not(target_arch = "x86_64")))]
 pub(crate) const PHASE: u8 = 0;
 mod debug;

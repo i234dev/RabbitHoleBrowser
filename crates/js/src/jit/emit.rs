@@ -48,6 +48,31 @@ const EMPTY: i32 = 2;
 const FALSE: i32 = 4;
 const TRUE: i32 = 5;
 
+// Test-only execution witnesses. The generated fast branch increments its
+// thread's Cell directly: no helper, allocation, safe point or ABI call is
+// added to that branch. FunctionCode/Realm are thread-local (Rc-owned).
+#[cfg(test)]
+thread_local! {
+    static MODRK_FAST_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static MOD_HELPER_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_modrk_witness() {
+    MODRK_FAST_HITS.with(|n| n.set(0));
+    MOD_HELPER_HITS.with(|n| n.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn modrk_witness() -> (u64,u64) {
+    (MODRK_FAST_HITS.with(std::cell::Cell::get),MOD_HELPER_HITS.with(std::cell::Cell::get))
+}
+
+#[cfg(test)]
+pub(super) fn record_mod_helper() {
+    MOD_HELPER_HITS.with(|n| n.set(n.get()+1));
+}
+
 fn slot(i: u16) -> Mem {
     Mem::base(SLOTS, i as i32 * 8)
 }
@@ -507,6 +532,58 @@ impl Gen<'_> {
             None => self.a.call_abs(h_mod as *const () as usize, "h_mod"),
         }
         self.store_xmm0(d, slow);
+    }
+
+    /// `Number % positive-constant-int32` for exact, nonnegative int32
+    /// dividends. Everything outside that subset keeps the existing helper.
+    fn mod_const(&mut self, pc: usize, d: u16, a: u16, k: u32) {
+        let eligible = self.code.constants[k as usize].as_number().is_some_and(|v|
+            (1.0..=f64::from(i32::MAX)).contains(&v) && v==f64::from(v as i32));
+        if !eligible {
+            self.arith(pc,None,d,a,Err(k));
+            return;
+        }
+        let slow = self.exec_slow(pc);
+        let fallback = self.a.label();
+        let done = self.a.label();
+        if !self.operands(a,Err(k),slow) { unreachable!("eligible Number constant"); }
+        // XMM0/1 retain both original operands until every guard passes.
+        // RAX initially holds the dividend bits: rejecting its sign bit
+        // excludes ALL negatives, including -0, before integer conversion.
+        self.a.test_rr64(RAX,RAX);
+        self.a.jcc(CC_S,fallback);
+        self.a.cvttsd2si64(RAX,XMM0);
+        // Unsigned comparison also rejects the conversion's indefinite
+        // i64::MIN result for NaN/infinity/out-of-range inputs.
+        self.a.alu_ri64(Alu::Cmp,RAX,i32::MAX);
+        self.a.jcc(CC_A,fallback);
+        self.a.cvtsi2sd64(XMM2,RAX);
+        self.a.ucomisd(XMM0,XMM2);
+        self.a.jcc(CC_P,fallback);
+        self.a.jcc(CC_NE,fallback);
+        // The validated constant is still read from the constant pool,
+        // never embedded as attacker-controlled instruction immediates.
+        self.a.cvttsd2si64(RCX,XMM1);
+        self.a.alu_rr32(Alu::Xor,RDX,RDX);
+        // EDX:EAX <= i32::MAX and ECX >= 1: divisor is nonzero and
+        // quotient fits in uint32, so DIV cannot raise #DE here.
+        // Scratch: RAX,RCX,RDX,XMM0..2; fixed/saved GPRs and RSP stay put.
+        self.a.div_r32(RCX);
+        self.a.cvtsi2sd32(XMM0,RDX);
+        self.store_xmm0(d,slow);
+        #[cfg(test)]
+        {
+            let counter = MODRK_FAST_HITS.with(std::cell::Cell::as_ptr);
+            self.a.mov_imm64(R8,counter as u64);
+            self.a.alu_mi64(Alu::Add,Mem::base(R8,0),1);
+        }
+        self.a.jmp(done);
+        self.a.bind(fallback);
+        // Pure SysV64 helper, including on Windows: original XMM0/1 in,
+        // XMM0 out. No source slot, frame, PC or safe point was changed.
+        self.a.call_abs(h_mod as *const () as usize,"h_mod");
+        self.store_xmm0(d,slow);
+        self.a.bind(done);
     }
 
     fn bitop(&mut self, pc: usize, kd: u8, d: u16, a: u16, b: Result<u16, u32>) {
@@ -1121,7 +1198,7 @@ impl Gen<'_> {
             Op::SubRK(d, a, c) => self.arith(pc, Some(SSE_SUB), d, a, Err(c as u32)),
             Op::MulRK(d, a, c) => self.arith(pc, Some(SSE_MUL), d, a, Err(c as u32)),
             Op::DivRK(d, a, c) => self.arith(pc, Some(SSE_DIV), d, a, Err(c as u32)),
-            Op::ModRK(d, a, c) => self.arith(pc, None, d, a, Err(c as u32)),
+            Op::ModRK(d, a, c) => self.mod_const(pc,d,a,c as u32),
             Op::BinRR(kd, d, a, b) => self.bitop(pc, kd, d, a, Ok(b)),
             Op::BinRK(kd, d, a, c) => self.bitop(pc, kd, d, a, Err(c as u32)),
             Op::CmpRR(kd, d, a, b) => self.cmp(pc, kd, d, a, Ok(b)),
