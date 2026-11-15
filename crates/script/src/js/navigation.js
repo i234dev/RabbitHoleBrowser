@@ -249,8 +249,9 @@
   defineWindowProperty(g, 'navigation', {
     get() { return navigation; },
     set(value) {
-      if (this !== g) throw new TypeError('Illegal invocation');
-      defineWindowProperty(this, 'navigation', { __proto__: null, value, writable: true, enumerable: true, configurable: true });
+      const receiver = this === null || this === undefined ? g : this;
+      if (receiver !== g) throw new TypeError('Illegal invocation');
+      defineWindowProperty(receiver, 'navigation', { __proto__: null, value, writable: true, enumerable: true, configurable: true });
     },
     configurable: true, enumerable: true,
   });

@@ -12,8 +12,9 @@
   const replaceableWindowValue = (name, value) => defineWindowProperty(g, name, {
     get() { return value; },
     set(value) {
-      if (this !== g) throw new TypeError('Illegal invocation');
-      defineWindowProperty(this, name, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
+      const receiver = this === null || this === undefined ? g : this;
+      if (receiver !== g) throw new TypeError('Illegal invocation');
+      defineWindowProperty(receiver, name, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
     },
     configurable: true, enumerable: true,
   });

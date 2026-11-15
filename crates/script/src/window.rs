@@ -1130,8 +1130,11 @@ fn make_crypto(realm: &mut Realm) -> ObjectId {
 // rather than mutating a host slot or making readonly properties writable.
 // https://webidl.spec.whatwg.org/#Replaceable
 fn win_replaceable_set(realm: &mut Realm, this: Value, args: &[Value]) -> JsResult<Value> {
-    let V::Object(receiver) = this.v() else {
-        return Err(realm.throw_type_error("Illegal invocation"));
+    // Web IDL attribute setters use their realm's global for null/undefined.
+    let receiver = match this.v() {
+        V::Null | V::Undefined => realm.global(),
+        V::Object(receiver) => receiver,
+        _ => return Err(realm.throw_type_error("Illegal invocation")),
     };
     if receiver != realm.global() {
         return Err(realm.throw_type_error("Illegal invocation"));

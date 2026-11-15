@@ -265,6 +265,35 @@ fn window_replaceable_sloppy_assignment_keeps_the_exact_value() {
 }
 
 
+
+#[test]
+fn window_replaceable_nullish_setter_receiver_uses_its_realm_global() {
+    let (mut env, mut host) = setup("<p>nullish receiver</p>");
+    let out = run(&mut env, &mut host, r#"
+        'use strict';
+        const names = ['event', 'innerWidth', 'screen', 'locationbar', 'visualViewport', 'navigation', 'frames'];
+        for (const name of names) {
+            const setter = Object.getOwnPropertyDescriptor(window, name).set;
+            for (const receiver of [null, undefined]) {
+                const marker = {name, receiver};
+                setter.call(receiver, marker);
+                const d = Object.getOwnPropertyDescriptor(window, name);
+                if (window[name] !== marker || d.value !== marker || !d.writable
+                    || !d.enumerable || !d.configurable || 'get' in d || 'set' in d)
+                    throw new Error(name + ': nullish receiver');
+            }
+            for (const receiver of [{}, 0, true, 'not a Window']) {
+                let rejected = false;
+                try { setter.call(receiver, 500); } catch (e) { rejected = e instanceof TypeError; }
+                if (!rejected) throw new Error(name + ': invalid receiver accepted');
+            }
+        }
+        console.log('nullish', names.length * 2);
+    "#);
+    assert_eq!(out, ["nullish 14"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
 #[test]
 fn window_replaceable_setters_use_bootstrap_intrinsics_after_site_monkeypatch() {
     let (mut env, mut host) = setup("<p>intrinsics</p>");
