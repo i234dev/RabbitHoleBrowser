@@ -2,14 +2,24 @@
 
 ## Isolated compatibility candidate for unresolved orthogonal inheritance
 
-The corrective candidate based on `8121a7674164654ed97d64219d324a2f95d20da6`
-keeps the shipped indefinite-track finalization at one unsupported boundary:
-an inherited axis has crossed an odd number of writing-mode wrappers, its
-geometry remains placement-only, and the perpendicular standalone axis has no
-available size. `SharedTracks` carries this provenance through nested sections
-and reversals. A second crossing restores the original axis mapping. Definite
-geometry, a real available size (including zero), aligned inheritance and
-ordinary grids retain normal sizing.
+The first corrective candidate based on
+`8121a7674164654ed97d64219d324a2f95d20da6` was measured after composition as
+`79b995f2e6c4302a5be8849ea21ba5a271ee435e`. Official orthogonal002 still
+failed with 54,945 differing pixels (the previous candidate differed by
+55,117). Its guard incorrectly required the *opposite inherited axis* to be
+placement-only. Final layout produces used geometry with `section()` and then
+remeasures the perpendicular standalone intrinsic size inside that scope;
+that intrinsic available size is still indefinite even though the opposite
+axis correctly has `definite=true` for percentages.
+
+The isolated successor therefore keeps the shipped indefinite-track
+finalization when an inherited axis has crossed an odd number of writing-mode
+wrappers and the perpendicular standalone axis has no available size.
+`SharedTracks` carries the provenance through nested sections and reversals.
+A second crossing restores the original axis mapping. A real available size
+(including zero), aligned inheritance and ordinary grids retain normal sizing.
+The opposite axis's `definite` flag remains unchanged; it is not a substitute
+for a standalone available-size input.
 
 `LegacyIndefinite` is explicitly a compatibility mode, not an intrinsic
 constraint. It preserves the old indefinite finalization, including flexible
@@ -26,13 +36,17 @@ path. No available size is fabricated and no partially sized track list is
 published as a completed result. The provenance is scoped with the existing
 inherited sources and does not survive the operation in a global cache.
 
-Three written unit controls distinguish legacy flexible sizing from both
-intrinsic constraints, test the structural guard across all three wrapper
-orientations and completed/definite/absent sources, and reject publication of
-legacy sizing as a completed axis. These controls and the unchanged official
-orthogonal001/002, retained Grid26 and wider gates remain **unexecuted for this
-candidate**. In particular, the known 55,117-pixel loss on the base candidate
-is not considered resolved until the unchanged oracle actually passes.
+The existing three unit controls distinguish legacy flexible sizing from
+both intrinsic constraints, test the structural guard across all three wrapper
+orientations and used/definite/absent sources, and reject publication as a
+completed axis. A fourth control follows the real Block consumer:
+`section()` used geometry, wrapper mapping, scoped inheritance, intrinsic
+sizing and shrink-to-fit final layout. Two breakable 20px atomic inlines in an
+auto column next to a fixed 100px column must keep the legacy 120px width;
+then a real 130px standalone allocation must produce a 30px auto column.
+These controls and the unchanged official orthogonal001/002, retained Grid26
+and wider gates remain **unexecuted for the successor**. The unchanged official
+oracle, not the static diagnosis or helper tests, must establish recovery.
 
 This successor is **SIN VALIDAR**. The new `grid::phases` module is included
 in compilation and unit controls, but has not been built or executed and no

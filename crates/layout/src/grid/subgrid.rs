@@ -307,12 +307,13 @@ pub(super) fn scope_reference(columns:&Option<AxisInheritance>,fallback:f32)->f3
 }
 
 /// Keep the shipped indefinite completion only at the unsupported
-/// inherited + orthogonal + unresolved boundary. A genuine available size,
-/// aligned inheritance, or completed inherited geometry uses normal sizing.
+/// inherited + orthogonal boundary while the standalone axis is indefinite.
+/// A definite opposite inherited axis is not a definite standalone axis. A
+/// genuine available size or aligned inheritance uses normal sizing.
 /// Neither placement bases nor this compatibility result enter CompletedAxis.
 pub(super) fn standalone_space(b:&LayoutBox,rows:bool,available:Option<f32>)->GridSpace {
     if let Some(size)=available {return GridSpace::Definite(size);}
-    if shared(b,rows).is_none()&&shared(b,!rows).is_some_and(|axis|axis.crossed_axes&&!axis.definite) {
+    if shared(b,rows).is_none()&&shared(b,!rows).is_some_and(|axis|axis.crossed_axes) {
         GridSpace::LegacyIndefinite
     } else {GridSpace::MaxContent}
 }
@@ -637,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_completion_requires_unresolved_inheritance_across_writing_modes() {
+    fn legacy_completion_requires_indefinite_standalone_axis_across_writing_modes() {
         let unresolved=TrackList{tracks:vec![Track::new(Sizing::Auto,Sizing::Auto)],names:vec![vec![],vec![]],inherited:None};
         let source=sizing_section(&unresolved,0,1,0.,true);
         let mut b=child();
@@ -660,15 +661,57 @@ mod tests {
             b.grid_columns=aligned;
             assert_eq!(standalone_space(&b,true,None),GridSpace::MaxContent,"two crossings restore the original axes");
             b.grid_columns=None;
-            // Replacing placement geometry with a completed source ends the
-            // fallback even though the writing modes still differ.
+            // Used opposite-axis geometry does not resolve this axis. Final
+            // layout invokes intrinsic sizing again inside this scope.
             let used=parent();let used=section(&used,&[0.,150.],0,2,50.,true);
             let (_,completed)=through_wrapper(Some(used),None,kind);
             b.grid_rows=completed;
-            assert_eq!(standalone_space(&b,false,None),GridSpace::MaxContent);
+            assert!(shared(&b,true).unwrap().definite,"percentage geometry remains definite");
+            assert_eq!(standalone_space(&b,false,None),GridSpace::LegacyIndefinite);
+            assert_eq!(standalone_space(&b,false,Some(130.)),GridSpace::Definite(130.));
         }
         b.grid_rows=None;
         assert_eq!(standalone_space(&b,false,None),GridSpace::MaxContent,"no inherited source");
+    }
+
+    #[test]
+    fn used_orthogonal_rows_do_not_remaximize_a_standalone_shrink_to_fit_width() {
+        use crate::block::{Cb,WidthMode};
+        use crate::float::Bfc;
+        use std::collections::HashMap;
+        fn find_mut(node:&mut LayoutBox,id:usize)->Option<&mut LayoutBox> {
+            if node.node==Some(id)&&node.kind!=BoxKind::Text {return Some(node);}
+            node.children.iter_mut().find_map(|child|find_mut(child,id))
+        }
+        let doc=rabbithole_html::parse("<!doctype html><div id=probe><i></i><div id=wrapping><b></b> <b></b></div></div>");
+        let sheets=[rabbithole_css::parse_stylesheet("*{font-size:0;line-height:0;margin:0;padding:0}#probe{display:grid;grid-template-columns:100px auto;grid-template-rows:subgrid}i{height:10px}b{display:inline-block;width:20px;height:10px;vertical-align:top}")];
+        let styles=rabbithole_style::style_tree(&doc,&sheets,&rabbithole_css::MediaEnv{width:800.,height:600.,screen:true,scripting:true});
+        let fonts=rabbithole_gfx::FontContext::new();let images=HashMap::new();let backgrounds=HashMap::new();let scrolls=HashMap::new();
+        let ctx=crate::LayoutContext{doc:&doc,styles:&styles,fonts:&fonts,images:&images,background_images:&backgrounds,scroll_offsets:&scrolls,viewport_width:800.,viewport_height:600.,page_scroll:(0.,0.)};
+        let mut root=crate::build::Builder::new(&ctx,None).build_root();
+        let probe=find_mut(&mut root,doc.element_by_id("probe").unwrap()).unwrap();
+        let mut tracks=TrackList{tracks:vec![Track::new(Sizing::Fixed(20.),Sizing::Fixed(20.))],names:vec![vec![],vec![]],inherited:None};
+        tracks.tracks[0].base=20.;
+        // This is the real final-layout producer: section(), not the
+        // placement-only sizing_section(). Its opposite axis is definite.
+        let used=section(&tracks,&[0.],0,1,0.,true);
+        let (_,rows)=through_wrapper(Some(used),None,WmKind::Reflect);
+        let mut layouter=Layouter::new(&ctx);
+        layouter.with_subgrid(probe,None,rows,500.,|this,probe| {
+            assert!(shared(probe,true).unwrap().definite);
+            let (min,max)=this.intrinsic(probe);
+            assert_eq!((min,max),(120.,120.));
+            this.layout_block(probe,&Cb{x:0.,width:500.,height:None},0.,&mut Bfc::new(),WidthMode::ShrinkToFit);
+            assert_eq!(probe.rect.w,120.);
+            let wrapping=find_mut(probe,doc.element_by_id("wrapping").unwrap()).unwrap();
+            assert_eq!(wrapping.rect.w,20.);
+            assert_eq!(wrapping.rect.h,20.);
+            // A real standalone allocation still controls used layout;
+            // knowing the opposite inherited extent cannot replace it.
+            this.layout_block(probe,&Cb{x:0.,width:130.,height:None},0.,&mut Bfc::new(),WidthMode::Fixed(130.));
+            assert_eq!(probe.rect.w,130.);
+            assert_eq!(find_mut(probe,doc.element_by_id("wrapping").unwrap()).unwrap().rect.w,30.);
+        });
     }
 
     #[test]

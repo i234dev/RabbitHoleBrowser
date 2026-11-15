@@ -35,7 +35,7 @@ enum GridSpace {
     Definite(f32),
     MinContent,
     MaxContent,
-    /// Compatibility completion for the unresolved inherited/orthogonal
+    /// Compatibility completion for an indefinite standalone axis in the inherited/orthogonal
     /// route, whose parent-axis consumer is not implemented yet. This is
     /// the shipped indefinite algorithm, including flexible-track sizing;
     /// it is not an intrinsic constraint or a completed per-axis result.
