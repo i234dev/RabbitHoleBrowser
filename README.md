@@ -45,6 +45,10 @@ dated results from the committed records. Baseline-derived counts refresh at
 build time; performance results retain their measurement context.
 See [measurement sources and updates](tools/metrics/README.md).
 
+[MCP benchmark: RabbitHole vs Chrome + Playwright](docs/benchmarks/mcp-2026-11-15-v0.1.15.md)
+reports agent-task results supplied by the project owner for v0.1.15 on
+15 November 2026, with three runs per task and browser.
+
 ## Features
 
 **Parsing & styling**
