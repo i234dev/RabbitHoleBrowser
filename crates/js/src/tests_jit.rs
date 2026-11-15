@@ -547,3 +547,170 @@ for (var j = 0; j < 100; j++) out[4] = counted(bridge(j));
 out.join('|')
 "#, "3|6|3:4:5|TypeError|v:101");
 }
+
+#[cfg(target_arch = "x86_64")]
+mod disable_cached_execution {
+    use super::*;
+    use crate::heap::ObjectKind;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct NativeCounts {
+        entries: u64,
+        switches: u64,
+        compiled: u32,
+    }
+
+    fn counts(realm: &Realm) -> NativeCounts {
+        NativeCounts {
+            entries: realm.jit_entries(), switches: realm.jit.stats.switches,
+            compiled: realm.jit.stats.compiled,
+        }
+    }
+
+    fn realm_with_statistics() -> Realm {
+        let mut realm = Realm::new();
+        // Configure statistics per realm, without mutating process-wide env.
+        realm.jit.stats.enabled = true;
+        realm.set_jit(true, 0);
+        assert!(realm.jit_enabled());
+        realm
+    }
+
+    fn function(realm: &mut Realm, name: &str) -> Value {
+        realm.get(Value::Object(realm.global()), crate::PropertyKey::str(name)).unwrap()
+    }
+
+    fn entry(realm: &Realm, function: &Value) -> usize {
+        match &realm.obj(function.as_object().unwrap()).kind {
+            ObjectKind::Function(closure) => closure.code.jit.s.entry.get(),
+            _ => panic!("expected a JavaScript function"),
+        }
+    }
+
+    fn assert_drained(realm: &Realm) {
+        assert!(realm.frames.is_empty() && realm.vstack.is_empty());
+        assert!(realm.native_roots.is_empty() && realm.new_target_stack.is_empty());
+        assert_eq!(realm.native_depth, 0);
+        assert_eq!(realm.jit.live_entries, 0);
+    }
+
+    struct DisableAtHost {
+        expected_frame: &'static str,
+        after_off: Cell<Option<NativeCounts>>,
+    }
+
+    fn disable_from_host(realm: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+        let state = realm.native_data::<DisableAtHost>(realm.current_native().unwrap()).unwrap();
+        assert!(realm.jit.live_entries > 0, "disable while generated code is actually live");
+        let frame = realm.frames.last().unwrap();
+        assert_eq!(frame.code().name.to_rust_string(), state.expected_frame);
+        assert!(realm.jit_enabled() && realm.jit.stats.enabled);
+        realm.set_jit(false, 0);
+        assert!(!realm.jit_enabled());
+        assert!(realm.jit.active, "statistics retain the instrumented run loop");
+        assert!(state.after_off.replace(Some(counts(realm))).is_none(), "the callback runs exactly once");
+        Ok(Value::Undefined)
+    }
+
+    fn install_disabler(realm: &mut Realm, expected_frame: &'static str) -> Rc<DisableAtHost> {
+        let state = Rc::new(DisableAtHost { expected_frame, after_off: Cell::new(None) });
+        let native = realm.new_native_function_full("__disableJit", 0, disable_from_host, Some(state.clone()), Vec::new(), false);
+        realm.define_property(realm.global(), "__disableJit", Value::Object(native), crate::HIDDEN);
+        state
+    }
+
+    #[test]
+    fn disabling_with_statistics_stops_cached_entries_and_preserves_code_for_reenable() {
+        let mut realm = realm_with_statistics();
+        realm.eval(r#"
+            function warmed(x) { for (var i = 0; i < 4; i++) x += i; return x; }
+        "#, "jit-disable-warm.js").unwrap();
+        let warmed = function(&mut realm, "warmed");
+        let before_warm = counts(&realm);
+        assert_eq!(realm.call(warmed.clone(), Value::Undefined, &[Value::Number(5.0)]).unwrap(), Value::Number(11.0));
+        assert!(realm.jit_entries() > before_warm.entries, "the retained function really ran natively");
+        let cached_entry = entry(&realm, &warmed);
+        assert_ne!(cached_entry, 0);
+        realm.set_jit(false, 0);
+        assert!(!realm.jit_enabled() && realm.jit.active);
+        let after_off = counts(&realm);
+        for x in [10.0, 20.0, 30.0] {
+            assert_eq!(realm.call(warmed.clone(), Value::Undefined, &[Value::Number(x)]).unwrap(), Value::Number(x + 6.0));
+            assert_eq!(counts(&realm), after_off, "off forbids cached entries, switches and compilation even with statistics");
+            assert_eq!(entry(&realm, &warmed), cached_entry, "disabling must not free the retained mapping");
+            assert_drained(&realm);
+        }
+        realm.set_jit(true, 0);
+        assert_eq!(realm.call(warmed.clone(), Value::Undefined, &[Value::Number(40.0)]).unwrap(), Value::Number(46.0));
+        assert!(realm.jit_entries() > after_off.entries);
+        assert_eq!(realm.jit.stats.compiled, after_off.compiled, "re-enabling reuses the compiled function");
+        assert_eq!(entry(&realm, &warmed), cached_entry);
+        assert_drained(&realm);
+    }
+
+    #[test]
+    fn disabling_in_host_before_calls_stops_new_compilation_and_cached_frame_switches() {
+        let mut realm = realm_with_statistics();
+        let state = install_disabler(&mut realm, "dispatchAfterOff");
+        realm.eval(r#"
+            function cachedAfterOff(x) { for (var j = 0; j < 3; j++) x += j; return x; }
+            function coldAfterOff(x) { for (var j = 0; j < 3; j++) x *= 2; return x; }
+            function dispatchAfterOff(stop, x) {
+                for (var i = 0; i < 2; i++) x += i;
+                if (stop) { __disableJit(); x = coldAfterOff(x); }
+                return cachedAfterOff(x) + 10;
+            }
+        "#, "jit-disable-before-call.js").unwrap();
+        let dispatch = function(&mut realm, "dispatchAfterOff");
+        let cached = function(&mut realm, "cachedAfterOff");
+        let cold = function(&mut realm, "coldAfterOff");
+        assert_eq!(realm.call(dispatch.clone(), Value::Undefined, &[Value::Bool(false), Value::Number(1.0)]).unwrap(), Value::Number(15.0));
+        assert_ne!(entry(&realm, &dispatch), 0);
+        let cached_entry = entry(&realm, &cached);
+        assert_ne!(cached_entry, 0);
+        assert_eq!(entry(&realm, &cold), 0, "the cold destination was not warmed");
+        assert!(state.after_off.get().is_none());
+        assert_eq!(realm.call(dispatch, Value::Undefined, &[Value::Bool(true), Value::Number(1.0)]).unwrap(), Value::Number(29.0));
+        let after_off = state.after_off.get().expect("the host disabled a live native activation");
+        assert_eq!(counts(&realm), after_off, "neither a cold call nor a cached call may enter/compile/switch after off");
+        assert_eq!(entry(&realm, &cold), 0);
+        assert_eq!(entry(&realm, &cached), cached_entry);
+        assert!(!realm.jit_enabled() && realm.jit.active);
+        assert_drained(&realm);
+    }
+
+    #[test]
+    fn disabling_in_native_callee_prevents_native_return_and_caller_reentry() {
+        let mut realm = realm_with_statistics();
+        let state = install_disabler(&mut realm, "leafReturnsAfterOff");
+        realm.eval(r#"
+            function leafReturnsAfterOff(stop, x) {
+                for (var i = 0; i < 2; i++) x += i;
+                if (stop) __disableJit();
+                return x + 5;
+            }
+            function callerAfterOff(stop, x) {
+                for (var j = 0; j < 2; j++) x += j;
+                var result = leafReturnsAfterOff(stop, x);
+                return result + 20;
+            }
+        "#, "jit-disable-before-return.js").unwrap();
+        let caller = function(&mut realm, "callerAfterOff");
+        let leaf = function(&mut realm, "leafReturnsAfterOff");
+        assert_eq!(realm.call(caller.clone(), Value::Undefined, &[Value::Bool(false), Value::Number(1.0)]).unwrap(), Value::Number(28.0));
+        let caller_entry = entry(&realm, &caller);
+        let leaf_entry = entry(&realm, &leaf);
+        assert_ne!(caller_entry, 0);
+        assert_ne!(leaf_entry, 0);
+        let before_call = counts(&realm);
+        assert_eq!(realm.call(caller.clone(), Value::Undefined, &[Value::Bool(true), Value::Number(1.0)]).unwrap(), Value::Number(28.0));
+        let after_off = state.after_off.get().expect("the callee host callback disabled native execution");
+        assert!(after_off.entries > before_call.entries);
+        assert!(after_off.switches > before_call.switches, "the callee was entered by an actual native frame switch before off");
+        assert_eq!(counts(&realm), after_off, "return must go through the interpreter without a native switch or cached caller reentry");
+        assert_eq!(entry(&realm, &caller), caller_entry);
+        assert_eq!(entry(&realm, &leaf), leaf_entry);
+        assert!(!realm.jit_enabled() && realm.jit.active);
+        assert_drained(&realm);
+    }
+}
