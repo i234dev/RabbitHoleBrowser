@@ -106,7 +106,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "eval": { "type": "string" }, "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds; default auto-wait cap" }, "follow": { "type": "boolean", "default": false }, "console": { "type": "boolean" }, "clear": { "type": "boolean" }, "log": { "type": "string" }, "live": { "type": "boolean" }, "stats": { "type": "boolean" }
             } } }),
-        json!({ "name": "batch", "description": "Run 1–20 tools in order; no nesting. Stops at first failure with counts. Earlier results <200 chars, last full; full=true keeps all text.",
+        json!({ "name": "batch", "description": "Prefer batch for 1–20 predictable steps in one call. Inspect results, refs or waits separately when the next step is uncertain. Verify targets; keep required checks.",
             "inputSchema": { "type": "object", "properties": {
                 "steps": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "object", "properties": {
                     "tool": { "type": "string" }, "args": { "type": "object" }
