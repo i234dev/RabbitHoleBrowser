@@ -145,6 +145,53 @@ mod tests {
     }
 
     #[test]
+    fn console_lexical_scope_shadows_page_bindings_without_replacing_them() {
+        let (mut env, mut host) = setup("<p>console</p>");
+        host.mark_loaded();
+        run(&mut env, &mut host, "let pageLexical = 10; var pageVar = 20");
+        for (source, expected) in [
+            ("const pageLexical = 2; pageLexical + pageVar", "22"),
+            ("let pageLexical = 3; pageLexical", "3"),
+            ("pageLexical", "10"),
+            ("class ScopedClass {}; typeof ScopedClass", "'function'"),
+            ("class ScopedClass {}; typeof ScopedClass", "'function'"),
+            ("typeof ScopedClass", "'undefined'"),
+            ("'use strict'; var consoleVar = 4; globalThis.consoleGlobal = 5; consoleVar + consoleGlobal", "9"),
+            ("consoleVar + consoleGlobal", "9"),
+            ("Object.getOwnPropertyDescriptor(globalThis, 'consoleVar').configurable", "false"),
+            ("const captured = 7; function consoleFunction(){return captured}; consoleFunction()", "7"),
+            ("consoleFunction()", "7"),
+        ] {
+            assert_eq!(evaluate(&mut host, &mut env, source), ConsolePoll::Resolved(expected.into()), "{source}");
+        }
+        for source in [
+            "globalThis.consoleShouldNotRun=1; var pageLexical=2",
+            "globalThis.consoleShouldNotRun=1; const duplicate=1; const duplicate=2",
+            "globalThis.consoleShouldNotRun=1; function invalid(){return import.meta}",
+        ] {
+            assert!(host.start_console_evaluation(&mut env, source, deadline()).is_err(), "{source}");
+        }
+        assert_eq!(evaluate(&mut host, &mut env, "typeof consoleShouldNotRun"), ConsolePoll::Resolved("'undefined'".into()));
+        assert!(host.start_console_evaluation(&mut env, "let tdz = tdz", deadline()).is_err());
+        assert_eq!(evaluate(&mut host, &mut env, "let tdz = 8; tdz"), ConsolePoll::Resolved("8".into()));
+    }
+
+    #[test]
+    fn console_lexical_scope_survives_other_evaluations_and_gc_while_pending() {
+        let (mut env, mut host) = setup("<p>console</p>");
+        host.mark_loaded();
+        let cap = deadline();
+        let handle = host.start_console_evaluation(&mut env, "const s=21; new Promise(resolve=>setTimeout(()=>resolve(s*2),10))", cap).unwrap();
+        assert_eq!(evaluate(&mut host, &mut env, "const s=99; s"), ConsolePoll::Resolved("99".into()));
+        host.gc();
+        env.now += 20.0;
+        let now = env.now;
+        host.pump_console_tasks(&mut env, now, cap).unwrap();
+        assert_eq!(host.poll_console_evaluation(&mut env, &handle, cap).unwrap(), ConsolePoll::Resolved("42".into()));
+        assert_eq!(evaluate(&mut host, &mut env, "typeof s"), ConsolePoll::Resolved("'undefined'".into()));
+    }
+
+    #[test]
     fn console_observation_is_rooted_and_rejects_foreign_or_replaced_documents() {
         let (mut env, mut host) = setup("<p>console</p>");
         host.mark_loaded();

@@ -465,9 +465,9 @@ pub fn compile_program_with(program: &Program, filename: &str, source: &str, com
     Ok(code)
 }
 
-/// Compile an async console scope while retaining the script completion
-/// rules (including blocks/branches and declarations after an expression).
-pub(crate) fn compile_console_await(program: &Program, source: &str) -> CResult<Rc<FunctionCode>> {
+/// Console-only lexical environment with persistent script vars/functions.
+/// The async wrapper retains completion rules without rewriting source text.
+pub(crate) fn compile_console(program: &Program, source: &str, asynchronous: bool) -> CResult<Rc<FunctionCode>> {
     let mut c = Compiler { completion: true, fns: Vec::new(), filename: Rc::from("console"),
         source: Rc::from(source), pending_tweak: None, chain_stack: Vec::new(), loose_chain_exits: Vec::new(),
         module: None, captures: crate::captures::analyze_program(&program.body), internal_error: None,
@@ -475,10 +475,21 @@ pub(crate) fn compile_console_await(program: &Program, source: &str) -> CResult<
     let mut outer = FnState::new("", CodeFlags { is_script: true, ..Default::default() }, true, c.filename.clone());
     outer.scopes[0].materialized = false;
     c.fns.push(outer);
-    let function = Function { name: None, params: Vec::new(), body: FunctionBody::Block(program.body.clone()),
-        is_arrow: true, is_async: true, is_generator: false, strict: program.strict,
-        pos: program.body.first().map(|s| s.pos).unwrap_or_default(), span: (0, 0), self_binding: false };
-    let index = c.compile_function_completion(&function, None, true)?;
+    let flags = CodeFlags { is_arrow: true, is_async: asynchronous, is_strict: program.strict,
+        has_simple_params: true, is_script: !asynchronous, ..Default::default() };
+    let mut body = FnState::new("", flags, false, c.filename.clone());
+    body.is_eval = true;
+    body.source = Some(c.source.clone());
+    body.scopes[0].is_function = false;
+    body.captured = c.captures.get(&std::ptr::null()).cloned().unwrap_or_default();
+    body.force_heap = body.captured.contains(crate::captures::EVAL_ALL);
+    c.fns.push(body);
+    c.compile_eval_body(program, program.strict, false, true)?;
+    c.check_internal()?;
+    let code = Rc::new(finish(c.fns.pop().unwrap(), None));
+    if !asynchronous { return Ok(code); }
+    let index = c.fs().functions.len() as u32;
+    c.fs().functions.push(code);
     c.emit(Op::MakeClosure(index));
     c.emit(Op::Undefined);
     c.emit(Op::Call(0, crate::bytecode::NO_DESC));
@@ -530,7 +541,7 @@ pub fn compile_eval(program: &Program, site: &EvalSite, source: &str) -> CResult
     // Sloppy eval code has no variable environment of its own.
     fs.scopes[0].is_function = strict;
     c.fns.push(fs);
-    c.compile_eval_body(program, strict, site.in_params)?;
+    c.compile_eval_body(program, strict, site.in_params, false)?;
     c.check_internal()?;
     let fs = c.fns.pop().unwrap();
     Ok(Rc::new(finish(fs, None)))
@@ -1643,7 +1654,7 @@ impl Compiler {
     // ----------------------------------------------------------------- eval
 
     /// The body of direct eval code (see [`compile_eval`]).
-    fn compile_eval_body(&mut self, program: &Program, strict: bool, site_in_params: bool) -> CResult<()> {
+    fn compile_eval_body(&mut self, program: &Program, strict: bool, site_in_params: bool, console_globals: bool) -> CResult<()> {
         let body = &program.body;
         let mut vars = Vec::new();
         Self::collect_var_names(body, &mut vars);
@@ -1662,7 +1673,7 @@ impl Compiler {
             }
         }
         self.check_duplicates(&lex, &var_like)?;
-        if strict {
+        if strict && !console_globals {
             for v in &vars {
                 self.declare(v, BindKind::Var);
             }
@@ -1686,12 +1697,14 @@ impl Compiler {
             }
             let lex_names: Vec<String> = lex.iter().map(|(n, _)| n.clone()).collect();
             let mut annexb_names = Vec::new();
-            for (n, ptr) in Self::collect_annexb(body, lex_names) {
-                if self.eval_var_conflict(&n) {
-                    continue;
+            if !strict {
+                for (n, ptr) in Self::collect_annexb(body, lex_names) {
+                    if self.eval_var_conflict(&n) {
+                        continue;
+                    }
+                    self.fs().annexb.insert(ptr);
+                    annexb_names.push(n);
                 }
-                self.fs().annexb.insert(ptr);
-                annexb_names.push(n);
             }
             self.eval_scope_entry();
             let global_env = self.eval_var_env_is_global();
@@ -1712,7 +1725,12 @@ impl Compiler {
             for n in var_like.iter().chain(annexb_names.iter()) {
                 if !declared.contains(&n) {
                     declared.push(n);
-                    self.emit_declare_eval_var(n);
+                    if console_globals {
+                        let i = self.const_str(n);
+                        self.emit(Op::DeclareGlobalVar(i));
+                    } else {
+                        self.emit_declare_eval_var(n);
+                    }
                 }
             }
             for f in &funcs {
@@ -1721,7 +1739,7 @@ impl Compiler {
                 self.emit(Op::MakeClosure(idx));
                 if global_env {
                     let i = self.const_str(&name);
-                    self.emit(Op::DeclareEvalGlobalFunction(i));
+                    self.emit(if console_globals { Op::DeclareGlobalFunction(i) } else { Op::DeclareEvalGlobalFunction(i) });
                 } else {
                     self.emit_store_eval_var(&name)?;
                 }

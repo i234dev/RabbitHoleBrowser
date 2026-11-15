@@ -1,4 +1,4 @@
-//! Console-only top-level await. Normal scripts retain global eval semantics.
+//! Console evaluations own their lexical scope; explicit globals persist.
 use crate::ast::*;
 use crate::{Realm, Value};
 
@@ -7,11 +7,13 @@ impl Realm {
         let escaped = crate::value::escape_source(source);
         // Prefer a real top-level Await node even for `await(p)`, whose
         // spelling also parses as a call to an identifier in classic Script.
-        let program = match crate::parser::parse_console_await(&escaped) {
-            Ok(program) if program.body.iter().any(stmt_await) => program,
-            _ => return self.eval(source, "console"),
+        let (program, asynchronous) = match crate::parser::parse_console(&escaped, true) {
+            Ok(program) if program.body.iter().any(stmt_await) => (program, true),
+            _ => (crate::parser::parse_console(&escaped, false).map_err(|e| {
+                self.new_error("SyntaxError", &format!("{} (console:{}:{})", e.message, e.line, e.column))
+            })?, false),
         };
-        let code = crate::compiler::compile_console_await(&program, &escaped)
+        let code = crate::compiler::compile_console(&program, &escaped, asynchronous)
             .map_err(|e| self.new_error("SyntaxError", &e.message))?;
         self.adopt_code(&code);
         self.run_script(code)

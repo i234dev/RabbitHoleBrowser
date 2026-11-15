@@ -55,9 +55,9 @@ pub fn parse_program_in(source: &str, is_module: bool, ctx: &crate::early::Early
 
 /// Console top-level await keeps script grammar/strictness and rejects
 /// module-only forms. Parse all bodies before executing any fallback code.
-pub(crate) fn parse_console_await(source: &str) -> Result<Program, ParseError> {
+pub(crate) fn parse_console(source: &str, allow_await: bool) -> Result<Program, ParseError> {
     let mut parser = Parser::new(source, false)?;
-    parser.ctx.in_async = true;
+    parser.ctx.in_async = allow_await;
     parser.lazy = false;
     let program = parser.parse_program()?;
     crate::early::check_program(&program, &crate::early::EarlyContext::default())?;
