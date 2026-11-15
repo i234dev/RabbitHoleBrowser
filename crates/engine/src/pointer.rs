@@ -461,7 +461,7 @@ impl Engine {
         }
         // The click goes to the nearest common inclusive ancestor of the
         // press and release targets.
-        let clicked = match (down, target) {
+        let mut clicked = match (down, target) {
             (Some((d, b)), Some(t)) if b == button && page.doc.is_connected(d) => {
                 let dc = chain(&page.doc, d);
                 chain(&page.doc, t).into_iter().find(|n| dc.contains(n))
@@ -471,7 +471,11 @@ impl Engine {
         let mut action = ClickAction::None;
         if let Some(c) = clicked {
             if button == BUTTON_PRIMARY {
-                let (a, o) = self.click_element_counted(page, c, Some((x, y)), m, count);
+                let mut dispatched = false;
+                let (a, o) = self.click_element_depth(page, c, Some((x, y)), m, 0, count.max(1), &mut dispatched);
+                // mouseup may have disabled the candidate. Report an actual
+                // click, not merely the common press/release ancestor.
+                if !dispatched { clicked = None; }
                 action = a;
                 out.merge(o);
             } else if button == BUTTON_AUXILIARY {
@@ -501,18 +505,18 @@ impl Engine {
     /// it was not cancelled. `at` = viewport coordinates of the pointer
     /// (None for synthetic clicks: the element's centre is used).
     pub fn click_element(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers) -> (ClickAction, ScriptOutcome) {
-        self.click_element_depth(page, target, at, m, 0, 1)
+        self.click_element_depth(page, target, at, m, 0, 1, &mut false)
     }
 
     /// Run the same activation behaviour, with an explicit MouseEvent.detail.
     pub fn click_element_counted(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers, count: u8) -> (ClickAction, ScriptOutcome) {
-        self.click_element_depth(page, target, at, m, 0, count.max(1))
+        self.click_element_depth(page, target, at, m, 0, count.max(1), &mut false)
     }
 
-    fn click_element_depth(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers, depth: u32, count: u8) -> (ClickAction, ScriptOutcome) {
+    fn click_element_depth(&self, page: &mut Page, target: NodeId, at: Option<(f32, f32)>, m: Modifiers, depth: u32, count: u8, dispatched: &mut bool) -> (ClickAction, ScriptOutcome) {
         let mut out = ScriptOutcome::default();
         let document = page.doc.weak_identity();
-        if chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n)) {
+        if !page.doc.is_connected(target) || chain(&page.doc, target).into_iter().any(|n| is_disabled_control(&page.doc, n)) {
             return (ClickAction::None, out);
         }
         let (x, y) = at.unwrap_or_else(|| {
@@ -543,6 +547,7 @@ impl Engine {
             self.restyle(page);
             out.relayout = true;
         }
+        *dispatched = true;
         let prevented = self.dispatch_into(page, &mut out, target, "click", counted_mouse(x, y, BUTTON_PRIMARY, m, count));
         // Do not apply old activation nodes or roll back their checked state
         // into a replacement document with recycled NodeIds.
@@ -607,7 +612,7 @@ impl Engine {
                                 ClickAction::FocusControl(c)
                             }
                             _ => {
-                                let (act, o) = self.click_element_depth(page, c, None, m, depth + 1, count);
+                                let (act, o) = self.click_element_depth(page, c, None, m, depth + 1, count, dispatched);
                                 out.merge(o);
                                 act
                             }

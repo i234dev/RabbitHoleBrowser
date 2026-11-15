@@ -189,3 +189,46 @@ fn default_action_callbacks_cannot_apply_old_ids_to_a_replacement_document() {
         assert!(!srv.requests().iter().any(|(path,_)| path=="/wrong"), "the old submit must not submit a new form");
     }
 }
+
+#[test]
+fn mouseup_disabling_suppresses_click_but_click_disabling_keeps_the_delivered_count() {
+    for (phase, count, progress, expected) in [
+        ("mouseup", "1", "no clicks completed", "mousedown:1 mouseup:1"),
+        ("mouseup", "2", "only one click completed", "mousedown:1 mouseup:1 click:1 mousedown:2 mouseup:2"),
+        ("click", "1", "only one click completed", "mousedown:1 mouseup:1 click:1"),
+        ("click", "2", "two clicks completed, but dblclick was not dispatched", "mousedown:1 mouseup:1 click:1 mousedown:2 mouseup:2 click:2"),
+    ] {
+        let body = r#"<!doctype html><button id=t type=button>Disable during input</button><p id=out>Before</p>
+            <script>
+            var log=[],button=document.getElementById('t');
+            ['mousedown','mouseup','click','dblclick'].forEach(function(type){
+                button.addEventListener(type,function(e){log.push(type+':'+e.detail);document.getElementById('out').textContent=log.join(' ')});
+            });
+            button.addEventListener('PHASE',function(e){if(e.detail===COUNT)button.disabled=true});
+            </script>"#.replace("PHASE",phase).replace("COUNT",count);
+        let body: &'static str = Box::leak(body.into_boxed_str());
+        let srv = serve(Box::new(move |_| html(body)));
+        let mut a = agent();
+        ok(&mut a, "open", json!({"url":srv.url("/")}));
+        let result = err(&mut a, "click", json!({"selector":"#t","double":true}));
+        assert!(result.starts_with(&format!("Double-click incomplete: {progress}.")), "{phase}/{count}: {result}");
+        assert!(!result.contains("Double-clicked"), "{result}");
+        assert_eq!(text(&a, "out"), expected, "{phase}/{count}: never invent click or dblclick");
+    }
+}
+
+#[test]
+fn double_click_on_label_keeps_forwarded_control_activation_and_counts() {
+    let srv = serve(Box::new(|_| html(r#"<!doctype html><label id=t for=box>Toggle twice</label><input id=box type=checkbox><p id=out>Before</p>
+        <script>
+        var log=[],label=document.getElementById('t'),box=document.getElementById('box');
+        label.addEventListener('click',function(e){log.push('label:'+e.detail)});
+        box.addEventListener('click',function(e){log.push('box:'+e.detail)});
+        label.addEventListener('dblclick',function(e){log.push('dblclick:'+e.detail);document.getElementById('out').textContent=log.join(' ')+' checked='+box.checked});
+        </script>"#)));
+    let mut a = agent();
+    ok(&mut a, "open", json!({"url":srv.url("/")}));
+    let result = ok(&mut a, "click", json!({"selector":"#t","double":true}));
+    assert!(result.starts_with("Double-clicked @e"), "{result}");
+    assert_eq!(text(&a, "out"), "label:1 box:1 label:2 box:2 dblclick:2 checked=false");
+}

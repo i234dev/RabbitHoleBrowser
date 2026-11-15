@@ -438,10 +438,13 @@ pub fn double_click_at(engine: &Engine, page: &mut Page, requested: NodeId, x: f
         result.request = click_request(engine, page, up.action, &mut result.outcome);
         if let Some(reason) = interrupted(page, &result) { result.stopped = Some(reason); break; }
         if up.clicked != hit || !page.doc.is_connected(hit.unwrap()) {
-            result.stopped = Some("the click target was removed or changed"); break;
+            result.stopped = Some("the click was not delivered to the same target"); break;
         }
         clicked = up.clicked;
         if count == 2 {
+            if crate::ax::states_of(page, clicked.unwrap(), "", false).iter().any(|s| s == "disabled") {
+                result.stopped = Some("the target became disabled after click"); break;
+            }
             let init = EventInit { bubbles: true, cancelable: true, detail: Some(EventDetail::MouseClick {
                 x, y, button: 0, ctrl: false, shift: false, alt: false, meta: false, count: 2,
             }) };
