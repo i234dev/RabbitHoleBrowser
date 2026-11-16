@@ -1,0 +1,16 @@
+{
+  "browser_version": "0.1.20",
+  "source_revision_before_documentation_commit": "aed117af1ad17cdba5418c0ab9223235680064dc",
+  "profile": "ci",
+  "jit": "off",
+  "viewport_css_px": [
+    1100,
+    780
+  ],
+  "captured_utc": "2026-11-16T22:00:19.496422+00:00",
+  "binary_sha256": "d983085e7debe77fea10b3392f7b5ccee625071d44f60ddaa2f582c5486a63f8",
+  "png_sha256": "4225381c0f35fa796ef6cc17b2f12a4ba1bb9581fe655d80081cb1403eaad0af",
+  "performance_measurement": false,
+  "scope": "Internal about:home screenshot from the browser CLI. Compatibility/performance rows retain their own measurement source and date; this capture is not a fresh benchmark.",
+  "root_visual_review": "Actual0.1.20 badge and source-dated metrics visible; no clipping of header/table at viewport width."
+}
