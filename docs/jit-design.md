@@ -42,6 +42,29 @@ También se ha medido la rama de la "ronda 4 de la VM" (`worktree-agent-ac8f2d59
 asignador por clases de tamaño, latch de bucle fusionado), porque el JIT se
 construirá sobre la representación que exista cuando se empiece.
 
+## Candidata 0.1.21: dimensiones de frame en llamadas simples
+
+La caché de llamada conserva `simple_frame_size: u32` y
+`simple_nparams: u16` en el relleno disponible de `CallIc`: sigue ocupando
+32 bytes en plataformas de 64 bits. Se rellenan para funciones `CALL_SIMPLE`
+con scope presente y tamaños representables; el centinela conserva el camino
+general cuando esos datos no sirven.
+
+El helper nativo `h_call` usa `call_r::<true>`. En un acierto válido de la
+caché puede construir el frame con esas dimensiones sin releerlas del código
+de la función. El intérprete usa `call_r::<false>` y mantiene el cálculo del
+constructor habitual en sus aciertos. Ambos comparten la construcción del
+frame, el límite de profundidad, las reservas y el movimiento de argumentos;
+se conservan las validaciones de callee, época de GC, realm y scope.
+El relleno en frío calcula metadatos para los dos modos: no se presupone
+coste cero para el intérprete sólo por revisar el ensamblador.
+
+La variante preparatoria sobre 0.1.19 pasó las pruebas completas x64 en ambos
+modos y los canarios de ejecución nativa; macOS no consiguió runner en esa
+revisión. Eso no valida esta candidata sobre 0.1.20. Antes de medir se vuelve
+a fijar la revisión, los binarios, las pruebas y la base publicada exactas.
+La fase 8 sigue abierta y esta implementación no activa el JIT por defecto.
+
 ## Validación de la recuperación
 
 - 947 pruebas del workspace en ambos modos, JIT apagado y forzado a umbral 0,

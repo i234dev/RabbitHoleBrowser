@@ -17,7 +17,7 @@ It can be used three ways:
 
 _Both images were produced by RabbitHole's renderer: every pixel comes from its own rasterizer._
 
-## Status (v0.1.20)
+## Status (v0.1.21)
 
 RabbitHole is young but already runs real, heavy sites: Google search,
 YouTube (playback with sound and AV1/VP9 video), Wikipedia,
@@ -29,6 +29,10 @@ Windows x64 now supports explicitly enabling the JavaScript JIT with
 `rabbithole.exe --jit=on`. Native mappings register unwind metadata and remain
 alive through nested callbacks. The JIT stays off by default while its global
 performance gate remains open; see the [JIT design and status](docs/jit-design.md).
+
+Version 0.1.21 adds cached frame dimensions to the native simple-call path.
+Its performance validation is pending; the JIT stays off by default and the
+recorded benchmark results retain their original source and date.
 
 Version 0.1.20 adds mouse interaction with the page scrollbar and **Copy all**
 in DevTools Elements, exporting the current main document as HTML. It also
