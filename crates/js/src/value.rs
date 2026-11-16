@@ -345,26 +345,6 @@ impl JsStr {
             return other.clone();
         }
         let len = self.len() + other.len();
-        self.concat_nonempty(other, len)
-    }
-    /// Concatenation for JavaScript `+`: check the limit and reuse the
-    /// measured lengths, without flattening ropes to inspect their size.
-    pub(crate) fn concat_checked(&self, other: &JsStr) -> Option<JsStr> {
-        let left = self.len();
-        let right = other.len();
-        let len = left.checked_add(right)?;
-        if len > MAX_STRING_LEN {
-            return None;
-        }
-        if right == 0 {
-            return Some(self.clone());
-        }
-        if left == 0 {
-            return Some(other.clone());
-        }
-        Some(self.concat_nonempty(other, len))
-    }
-    fn concat_nonempty(&self, other: &JsStr, len: usize) -> JsStr {
         if len < ROPE_MIN {
             let mut v = Vec::with_capacity(len);
             v.extend_from_slice(self.as_units());
@@ -1429,63 +1409,6 @@ pub fn to_integer(n: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn checked_concat_preserves_empty_utf16_and_flat_rope_boundaries() {
-        let empty = JsStr::empty();
-        let units = [0x0061, 0xd800, 0x0062, 0xdc00, 0xd83d, 0xde00];
-        let text = JsStr::from_slice(&units);
-        assert_eq!(text.concat_checked(&empty).unwrap().bits(), text.bits());
-        assert_eq!(empty.concat_checked(&text).unwrap().bits(), text.bits());
-        assert_eq!(empty.concat_checked(&empty).unwrap().len(), 0);
-        let pair = JsStr::from_slice(&[0xd83d]).concat_checked(&JsStr::from_slice(&[0xde00])).unwrap();
-        assert_eq!(pair.as_units(), &[0xd83d, 0xde00]);
-        for len in [ROPE_MIN - 1, ROPE_MIN, ROPE_MIN + 1] {
-            let right = JsStr::from_slice(&vec![0x007a; len - units.len()]);
-            let joined = text.concat_checked(&right).unwrap();
-            let mut expected = units.to_vec();
-            expected.resize(len, 0x007a);
-            assert_eq!(joined.len(), len);
-            assert_eq!(matches!(joined.inner(), StrInner::Rope { .. }), len >= ROPE_MIN);
-            assert_eq!(joined.as_units(), expected.as_slice());
-            assert_eq!(text.concat(&right).as_units(), expected.as_slice());
-            // A second concat also accepts a rope input, including a cached
-            // flat rope, without interpreting surrogate units as UTF-8.
-            expected.extend_from_slice(&units);
-            assert_eq!(joined.concat_checked(&text).unwrap().as_units(), expected.as_slice());
-        }
-    }
-
-    #[test]
-    fn checked_concat_limits_shared_virtual_ropes_without_flattening() {
-        fn power_of_two(exponent: u32) -> JsStr {
-            let mut s = JsStr::new("x");
-            for _ in 0..exponent { s = s.concat(&s); }
-            s
-        }
-        let one = JsStr::new("x");
-        let empty = JsStr::empty();
-        let mut below = empty.clone();
-        assert!(MAX_STRING_LEN.is_power_of_two());
-        for _ in 0..MAX_STRING_LEN.trailing_zeros() { below = below.concat(&below).concat(&one); }
-        assert_eq!(below.len(), MAX_STRING_LEN - 1);
-        let at_limit = below.concat_checked(&one).unwrap();
-        assert_eq!(at_limit.len(), MAX_STRING_LEN);
-        assert_eq!(at_limit.concat_checked(&empty).unwrap().bits(), at_limit.bits());
-        assert_eq!(empty.concat_checked(&at_limit).unwrap().bits(), at_limit.bits());
-        assert!(at_limit.concat_checked(&one).is_none());
-        // The public unchecked API keeps its existing over-limit behavior.
-        let over = at_limit.concat(&one);
-        assert_eq!(over.len(), MAX_STRING_LEN + 1);
-        assert_eq!(over.concat(&empty).bits(), over.bits());
-        assert!(over.concat_checked(&empty).is_none());
-        assert!(empty.concat_checked(&over).is_none());
-        let high = power_of_two(usize::BITS - 1);
-        assert!(high.concat_checked(&high).is_none(), "length addition must not overflow");
-        for s in [&below, &at_limit, &over, &high] {
-            assert!(matches!(s.inner(), StrInner::Rope { flat, .. } if flat.get().is_none()), "virtual strings must stay unflattened");
-        }
-    }
 
     #[test]
     fn number_formatting() {

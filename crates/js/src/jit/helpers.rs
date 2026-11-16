@@ -418,13 +418,10 @@ pub(crate) unsafe extern "sysv64" fn h_add(ctx: *mut Ctx, pc: u32) -> usize {
             _ => return false,
         };
         match (a.v(), b.v()) {
-            (crate::value::V::String(x), crate::value::V::String(y)) => {
-                if let Some(r) = x.concat_checked(y) {
-                    *slots.add(d as usize) = Value::String(r);
-                    true
-                } else {
-                    false
-                }
+            (crate::value::V::String(x), crate::value::V::String(y)) if x.len() + y.len() <= crate::value::MAX_STRING_LEN => {
+                let r = x.concat(y);
+                *slots.add(d as usize) = Value::String(r);
+                true
             }
             _ => false,
         }

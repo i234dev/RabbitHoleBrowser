@@ -498,6 +498,8 @@ pub const NO_DESC: u32 = u32::MAX;
 
 /// `CallR` without a call site cache (more sites than indices).
 pub const NO_CALL_IC: u16 = u16::MAX;
+/// A call cache without a representable, scope-backed simple frame shape.
+pub(crate) const NO_SIMPLE_FRAME: u32 = u32::MAX;
 
 /// Call site cache: the closure last called from a `CallR` site and what
 /// its frame needs, valid while that closure cannot have been freed (no
@@ -512,15 +514,22 @@ pub struct CallIc {
     pub scope: u32,
     /// The closure's compiled code (owned by the closure).
     pub code: *const FunctionCode,
+    /// Immutable simple-frame sizes; `NO_SIMPLE_FRAME` keeps the general path.
+    pub simple_frame_size: u32,
+    pub simple_nparams: u16,
     /// Strict mode code (no `this` coercion).
     pub strict: bool,
 }
 
 impl Default for CallIc {
     fn default() -> Self {
-        CallIc { callee: 0, epoch: 0, scope: u32::MAX, code: std::ptr::null(), strict: false }
+        CallIc { callee: 0, epoch: 0, scope: u32::MAX, code: std::ptr::null(), simple_frame_size: NO_SIMPLE_FRAME, simple_nparams: 0, strict: false }
     }
 }
+
+// The shape uses existing padding rather than growing every call-site cache.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<CallIc>() == 32);
 
 /// Location of a parameter-like binding: frame register or function scope slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
