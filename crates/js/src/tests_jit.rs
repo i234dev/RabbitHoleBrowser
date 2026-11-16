@@ -714,3 +714,179 @@ mod disable_cached_execution {
         assert_drained(&realm);
     }
 }
+
+mod cached_frame_shape {
+    use super::*;
+    use crate::bytecode::{CallIc, FunctionCode, Op, CALL_SIMPLE, NO_SIMPLE_FRAME};
+
+    const SOURCE: &str = r#"
+        function triple(a,b,c){for(var w=0;w<2;w++){}return (a===undefined?1:0)+(b===undefined?2:0)+(c===undefined?4:0)}
+        function noParams(){"use strict";for(var w=0;w<2;w++){}return this===undefined}
+        function noScope(a){for(var w=0;w<2;w++){}return a}
+        function captured(a){for(var w=0;w<2;w++){}var read=function(){return a};return read()}
+        function zero(f){for(var w=0;w<2;w++){}return f()}
+        function one(f,a){for(var w=0;w<2;w++){}return f(a)}
+        function extra(f,a,b,c,d){for(var w=0;w<2;w++){}return f(a,b,c,d)}
+        function scopeDriver(f,a){for(var w=0;w<2;w++){}return f(a)}
+        function capturedDriver(f,a){for(var w=0;w<2;w++){}return f(a)}
+        function foreignDriver(f){for(var w=0;w<2;w++){}return f()}
+    "#;
+
+    fn realm(requested: bool) -> Realm {
+        let mut realm = Realm::new();
+        realm.set_jit(requested, 0);
+        // Hold an epoch stable between calls, including under ambient stress.
+        // gc() below still performs a real collection while automatic GC is off.
+        realm.gc_enabled = false;
+        realm.eval(SOURCE, "cached-frame-shape.js").unwrap();
+        realm
+    }
+
+    fn global(realm: &mut Realm, name: &str) -> Value {
+        realm.get(Value::Object(realm.global()), crate::PropertyKey::str(name)).unwrap()
+    }
+
+    fn code(realm: &Realm, function: &Value) -> Rc<FunctionCode> {
+        match &realm.obj(function.as_object().unwrap()).kind {
+            crate::ObjectKind::Function(c) => c.code.clone(),
+            _ => panic!("fixture needs a JavaScript closure"),
+        }
+    }
+
+    fn cache(realm: &mut Realm, caller: &str) -> CallIc {
+        let function = global(realm, caller);
+        let code = code(realm, &function);
+        let site = code.ops.iter().find_map(|op| match *op {
+            Op::CallR(_, _, site, _) => Some(site),
+            _ => None,
+        }).unwrap_or_else(|| panic!("caller must have a real CallR: {:?}", code.ops));
+        code.call_ics[site as usize].get()
+    }
+
+    fn invoke(realm: &mut Realm, caller: &str, args: &[Value]) -> (JsResult<Value>, u64) {
+        let function = global(realm, caller);
+        let entries = realm.jit_entries();
+        crate::vm::CACHED_FRAME_SHAPE_HITS.with(|hits| hits.set(0));
+        let result = realm.call(function, Value::Undefined, args);
+        let hits = crate::vm::CACHED_FRAME_SHAPE_HITS.with(Cell::get);
+        if realm.jit_enabled() { assert!(realm.jit_entries() > entries, "{caller} must really enter native code"); }
+        else { assert_eq!(realm.jit_entries(), entries); }
+        assert!(realm.frames.is_empty() && realm.vstack.is_empty());
+        assert!(realm.native_roots.is_empty() && realm.new_target_stack.is_empty());
+        assert_eq!(realm.native_depth, 0);
+        (result, hits)
+    }
+
+    #[test]
+    fn warm_shapes_preserve_missing_extra_arguments_refcounts_and_gc_epoch() {
+        for requested in [false, true] {
+            let mut realm = realm(requested);
+            let target = global(&mut realm, "triple");
+            let initial = code(&realm, &target);
+            let tracked = Rc::new(crate::bigint::BigInt::from_i64(91));
+            for (caller, args, expected) in [
+                ("zero", vec![target.clone()], 7.0),
+                ("one", vec![target.clone(), Value::BigInt(tracked.clone())], 6.0),
+                ("extra", vec![target.clone(), Value::BigInt(tracked.clone()), Value::Number(2.0), Value::Number(3.0), Value::BigInt(tracked.clone())], 0.0),
+            ] {
+                let references = Rc::strong_count(&tracked);
+                for expected_hits in [0, 1] {
+                    let (result, hits) = invoke(&mut realm, caller, &args);
+                    assert_eq!(result.unwrap(), Value::Number(expected));
+                    assert_eq!(hits, expected_hits, "cold fill then a real cached-shape push");
+                    assert_eq!(Rc::strong_count(&tracked), references, "moved and extra arguments must drain");
+                }
+                let compiled = code(&realm, &target);
+                assert!(compiled.lazy.is_none());
+                assert_ne!(compiled.call_flags & CALL_SIMPLE, 0);
+                if initial.lazy.is_some() { assert!(!Rc::ptr_eq(&initial, &compiled)); }
+                let record = cache(&mut realm, caller);
+                assert_eq!(record.callee, target.bits());
+                assert_eq!(record.code, Rc::as_ptr(&compiled));
+                assert_eq!(record.simple_frame_size as usize, compiled.frame_size());
+                assert_eq!(record.simple_nparams, 3);
+                let epoch = realm.heap.collections;
+                assert_eq!(record.epoch, epoch);
+                realm.gc();
+                assert_ne!(realm.heap.collections, epoch, "an actual collection invalidates cached code/scope");
+                assert_eq!(cache(&mut realm, caller).epoch, epoch, "the old record is stale rather than silently refreshed");
+                let (result, hits) = invoke(&mut realm, caller, &args);
+                assert_eq!(result.unwrap(), Value::Number(expected));
+                assert_eq!(hits, 0, "stale epochs must use the existing miss path");
+                assert_eq!(cache(&mut realm, caller).epoch, realm.heap.collections);
+                let (result, hits) = invoke(&mut realm, caller, &args);
+                assert_eq!(result.unwrap(), Value::Number(expected));
+                assert_eq!(hits, 1);
+                assert_eq!(Rc::strong_count(&tracked), references);
+            }
+            assert_eq!(Rc::strong_count(&tracked), 1);
+        }
+    }
+
+    #[test]
+    fn absent_scope_non_simple_and_foreign_code_keep_original_paths() {
+        for requested in [false, true] {
+            let mut realm = realm(requested);
+            let target = global(&mut realm, "noScope");
+            // Exercise the existing supported closure state without inventing
+            // a new FunctionCode or calling a constructor in isolation.
+            match &mut realm.obj_mut(target.as_object().unwrap()).kind {
+                crate::ObjectKind::Function(c) => c.scope = None,
+                _ => unreachable!(),
+            }
+            for value in [7.0, 8.0] {
+                let (result, hits) = invoke(&mut realm, "scopeDriver", &[target.clone(), Value::Number(value)]);
+                assert_eq!(result.unwrap(), Value::Number(value));
+                assert_eq!(hits, 0);
+            }
+            assert_ne!(code(&realm, &target).call_flags & CALL_SIMPLE, 0);
+            let record = cache(&mut realm, "scopeDriver");
+            assert_eq!(record.callee, target.bits());
+            assert_eq!(record.scope, u32::MAX);
+            assert_eq!(record.simple_frame_size, NO_SIMPLE_FRAME);
+
+            let captured = global(&mut realm, "captured");
+            for value in [9.0, 10.0] {
+                let (result, hits) = invoke(&mut realm, "capturedDriver", &[captured.clone(), Value::Number(value)]);
+                assert_eq!(result.unwrap(), Value::Number(value));
+                assert_eq!(hits, 0);
+            }
+            assert_eq!(code(&realm, &captured).call_flags & CALL_SIMPLE, 0);
+            assert_eq!(cache(&mut realm, "capturedDriver").simple_frame_size, NO_SIMPLE_FRAME);
+
+            let other = realm.create_realm();
+            let foreign = realm.in_realm(other, |r| r.eval("function foreign(){for(var w=0;w<2;w++){}return this===globalThis}foreign", "foreign-shape.js")).unwrap();
+            for _ in 0..2 {
+                let (result, hits) = invoke(&mut realm, "foreignDriver", &[foreign.clone()]);
+                assert_eq!(result.unwrap(), Value::Bool(true));
+                assert_eq!(hits, 0);
+                assert_eq!(realm.current_realm, 0);
+                assert_eq!(cache(&mut realm, "foreignDriver").callee, 0, "foreign code must not fill the local-realm shortcut");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_parameter_shapes_keep_strict_this_and_stack_limit_errors() {
+        for requested in [false, true] {
+            let mut realm = realm(requested);
+            let target = global(&mut realm, "noParams");
+            for expected_hits in [0, 1] {
+                let (result, hits) = invoke(&mut realm, "zero", &[target.clone()]);
+                assert_eq!(result.unwrap(), Value::Bool(true));
+                assert_eq!(hits, expected_hits);
+            }
+            let record = cache(&mut realm, "zero");
+            assert!(record.strict);
+            assert_eq!(record.simple_nparams, 0);
+            assert_ne!(record.simple_frame_size, NO_SIMPLE_FRAME);
+            realm.max_frames = 1; // The driver fits, its callee must not.
+            let (result, hits) = invoke(&mut realm, "zero", &[target]);
+            let error = result.err().expect("the cached constructor must retain the stack limit");
+            assert_eq!(hits, 0, "failed pushes are not completed cached-shape calls");
+            assert_eq!(realm.get(error.clone(), crate::PropertyKey::str("name")).unwrap().as_str().unwrap().to_rust_string(), "RangeError");
+            assert_eq!(realm.get(error.clone(), crate::PropertyKey::str("message")).unwrap().as_str().unwrap().to_rust_string(), "Maximum call stack size exceeded");
+            assert!(realm.get(error, crate::PropertyKey::str("stack")).unwrap().as_str().unwrap().to_rust_string().contains("zero"));
+        }
+    }
+}

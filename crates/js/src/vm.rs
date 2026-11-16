@@ -1,12 +1,18 @@
 //! The bytecode interpreter: frames, calls, generators, async and exceptions.
 
-use crate::bytecode::{FunctionCode, Op, VarLoc, CALL_ARGS_DIRECT, CALL_ARROW, CALL_PARAMS_IN_REGS, CALL_PLAIN, CALL_PLAIN_CONSTRUCT, CALL_SIMPLE, CALL_STRICT};
+use crate::bytecode::{FunctionCode, Op, VarLoc, CALL_ARGS_DIRECT, CALL_ARROW, CALL_PARAMS_IN_REGS, CALL_PLAIN, CALL_PLAIN_CONSTRUCT, CALL_SIMPLE, CALL_STRICT, NO_SIMPLE_FRAME};
 use crate::value::V;
 use crate::heap::*;
 use crate::interop::{Hint, JsResult};
 use crate::realm::*;
 use crate::value::*;
 use std::rc::Rc;
+
+#[cfg(test)]
+thread_local! {
+    /// Completed real cache-shape calls; absent from production builds.
+    pub(crate) static CACHED_FRAME_SHAPE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// An activation record. Its value slots (registers, then the operand
 /// stack) live in [`Realm::vstack`] from `base` on; code using
@@ -549,7 +555,7 @@ impl Realm {
         let cr: &FunctionCode = unsafe { &*code.as_ptr() };
         let cf = cr.call_flags;
         if let (true, Some(scope)) = (cf & CALL_SIMPLE != 0, parent_scope) {
-            return self.push_simple_frame(id, cr, scope, args, argc, this, new_target, ret_slot, is_construct, entry);
+            return self.push_simple_frame(id, code, scope, args, argc, cr.frame_size(), cr.param_locs.len(), this, new_target, ret_slot, is_construct, entry);
         }
         if self.frames.len() >= self.max_frames {
             return self.range_error("Maximum call stack size exceeded");
@@ -711,15 +717,19 @@ impl Realm {
     /// [`Realm::push_closure_frame`] for [`CALL_SIMPLE`] code with the
     /// arguments in the caller's slots: undefined registers, the arguments
     /// moved into the parameter registers, the closure's scope.
+    /// Sizes are exact compiled metadata, supplied directly or by a matching
+    /// call cache; this constructor does not dereference `code`.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn push_simple_frame(
         &mut self,
         id: ObjectId,
-        cr: &FunctionCode,
+        code: std::ptr::NonNull<FunctionCode>,
         scope: ObjectId,
         src: ArgSrc,
         argc: usize,
+        fsize: usize,
+        nparams: usize,
         this: Value,
         new_target: Value,
         ret_slot: u32,
@@ -730,13 +740,12 @@ impl Realm {
         if n >= self.max_frames {
             return self.range_error("Maximum call stack size exceeded");
         }
-        let fsize = cr.frame_size();
         self.vstack.reserve(fsize);
         if n == self.frames.capacity() {
             self.frames.reserve(1);
         }
         let base = self.vstack.len();
-        let nargs = argc.min(cr.param_locs.len());
+        let nargs = argc.min(nparams);
         // SAFETY: capacities reserved above; the source slots (caller's
         // operand stack, below `base`) and the new slots do not overlap;
         // every new slot / the frame is written before the length grows.
@@ -766,7 +775,7 @@ impl Realm {
             std::ptr::write(
                 self.frames.as_mut_ptr().add(n),
                 Frame {
-                    code: std::ptr::NonNull::from(cr),
+                    code,
                     pc: 0,
                     base: base as u32,
                     argc: 0,
@@ -2673,7 +2682,13 @@ impl Realm {
                     let scope = if rec.scope == u32::MAX { None } else { Some(ObjectId(rec.scope)) };
                     // SAFETY: the closure owning the code is alive (it is in slot `b`).
                     let code_ptr = unsafe { std::ptr::NonNull::new_unchecked(rec.code as *mut FunctionCode) };
-                    self.push_closure_frame(ObjectId(callee as u32), code_ptr, scope, ArgSrc::Stack(cb + 2), argc as usize, this, Value::Undefined, b as u32, false, false)?;
+                    if rec.simple_frame_size != NO_SIMPLE_FRAME && rec.scope != u32::MAX {
+                        self.push_simple_frame(ObjectId(callee as u32), code_ptr, ObjectId(rec.scope), ArgSrc::Stack(cb + 2), argc as usize, rec.simple_frame_size as usize, rec.simple_nparams as usize, this, Value::Undefined, b as u32, false, false)?;
+                        #[cfg(test)]
+                        CACHED_FRAME_SHAPE_HITS.with(|hits| hits.set(hits.get() + 1));
+                    } else {
+                        self.push_closure_frame(ObjectId(callee as u32), code_ptr, scope, ArgSrc::Stack(cb + 2), argc as usize, this, Value::Undefined, b as u32, false, false)?;
+                    }
                     return Ok(Flow::Reload);
                 }
             }
@@ -5260,11 +5275,21 @@ impl Realm {
         if c.code.call_flags & (CALL_PLAIN | CALL_ARROW) != CALL_PLAIN || c.code.realm.get() != self.current_realm {
             return;
         }
+        let (simple_frame_size, simple_nparams) = if c.scope.is_some() && c.code.call_flags & CALL_SIMPLE != 0 {
+            match (u32::try_from(c.code.frame_size()), u16::try_from(c.code.param_locs.len())) {
+                (Ok(size), Ok(params)) if size != NO_SIMPLE_FRAME => (size, params),
+                _ => (NO_SIMPLE_FRAME, 0),
+            }
+        } else {
+            (NO_SIMPLE_FRAME, 0)
+        };
         cell.set(crate::bytecode::CallIc {
             callee,
             epoch: self.heap.collections,
             scope: c.scope.map(|s| s.0).unwrap_or(u32::MAX),
             code: &*c.code as *const FunctionCode,
+            simple_frame_size,
+            simple_nparams,
             strict: c.code.call_flags & CALL_STRICT != 0,
         });
     }
