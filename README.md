@@ -32,7 +32,9 @@ performance gate remains open; see the [JIT design and status](docs/jit-design.m
 
 Version 0.1.20 adds mouse interaction with the page scrollbar and **Copy all**
 in DevTools Elements, exporting the current main document as HTML. It also
-preserves incremental paint damage when iframe images change at the same size.
+preserves incremental paint damage when iframe images change at the same size,
+queues script-requested scroll events to avoid recursive dispatch, and stops
+resource `load` events at Document so they cannot multiply Window load callbacks.
 Open desktop reports include a blank view after Gmail sign-in and GitHub pages
 becoming unresponsive; these flows still need verification.
 
