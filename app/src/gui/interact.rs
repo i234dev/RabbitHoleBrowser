@@ -12,13 +12,25 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::CursorIcon;
 
-use super::chrome::{field_shift, Action, FieldView, Menu, MenuItem, ToolButton};
-use super::content::{KeyInput, ToContent};
+use super::chrome::{field_shift, Action, FieldView, Menu, MenuItem, PageScrollbar, ToolButton};
+use super::content::{KeyInput, ToContent, ViewSize};
 use super::omnibox;
 use super::tabstrip::{self, TabDrag};
 use super::{App, MouseDown, Panel, UiFocus};
 
 const LINE_SCROLL: f32 = 40.0;
+
+/// A press owned by the page scrollbar, not by page DOM input. The tab and
+/// view identity prevent a resize, zoom or tab switch from reusing the grab.
+#[derive(Clone, Copy)]
+pub(crate) struct ScrollbarDrag {
+    tab_id: u64,
+    epoch: Option<u64>,
+    view: ViewSize,
+    area: Rect,
+    /// Thumb grab offset; a track press pages once and only captures release.
+    grab: Option<f32>,
+}
 
 fn button_code(button: MouseButton) -> u8 {
     match button {
@@ -31,7 +43,68 @@ fn button_code(button: MouseButton) -> u8 {
 impl App {
     // ---------------------------------------------------------------- mouse
 
+    pub(crate) fn page_scrollbar(&self) -> Option<PageScrollbar> {
+        let tab = self.tab()?;
+        PageScrollbar::new(self.chrome().page_area(), self.ui_scale(), tab.content_size().1, self.css_viewport().height, tab.scroll.1)
+    }
+
+    /// Called before forwarding a page press. The whole track owns input,
+    /// including non-primary clicks, so it cannot activate an element below it.
+    fn press_page_scrollbar(&mut self, button: MouseButton, x: f32, y: f32) -> bool {
+        let Some(bar) = self.page_scrollbar().filter(|bar| bar.track.contains(x, y)) else { return false };
+        if button == MouseButton::Left {
+            let tab = self.tab().unwrap();
+            let drag = ScrollbarDrag {
+                tab_id: tab.id,
+                epoch: tab.content.as_ref().map(|content| content.epoch),
+                view: self.view_for(self.active),
+                area: self.chrome().page_area(),
+                grab: bar.thumb.contains(x, y).then_some(y - bar.thumb.y),
+            };
+            let (sx, sy) = tab.scroll;
+            self.scrollbar_drag = Some(drag);
+            self.mouse_down = None;
+            self.scroll_anim = None;
+            if drag.grab.is_none() {
+                let step = self.css_viewport().height * if y < bar.thumb.y { -1.0 } else { 1.0 };
+                self.set_scroll(sx, sy + step);
+            }
+            self.apply_cursor();
+        }
+        true
+    }
+
+    /// A logical pointer capture: CursorLeft does not release it. Winit's
+    /// pressed-button stream keeps delivering motion/release outside the page.
+    fn move_page_scrollbar(&mut self) -> bool {
+        let Some(drag) = self.scrollbar_drag else { return false };
+        let same_tab = self.tab().is_some_and(|tab| tab.id == drag.tab_id && tab.content.as_ref().map(|content| content.epoch) == drag.epoch);
+        if !same_tab || self.view_for(self.active) != drag.view || self.chrome().page_area() != drag.area {
+            self.scrollbar_drag = None;
+            return true;
+        }
+        let Some(bar) = self.page_scrollbar() else {
+            self.scrollbar_drag = None;
+            return true;
+        };
+        if let Some(grab) = drag.grab {
+            let x = self.tab().unwrap().scroll.0;
+            self.set_scroll(x, bar.scroll_at(self.cursor.y as f32 - grab));
+        }
+        self.apply_cursor();
+        true
+    }
+
+    fn release_page_scrollbar(&mut self, button: MouseButton) -> bool {
+        if button != MouseButton::Left || self.scrollbar_drag.is_none() { return false; }
+        self.move_page_scrollbar();
+        self.scrollbar_drag = None;
+        self.update_hover();
+        true
+    }
+
     pub(crate) fn handle_cursor_moved(&mut self) {
+        if self.move_page_scrollbar() { return; }
         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
         // Popup hover.
         let mut popup_hover_changed = false;
@@ -145,7 +218,7 @@ impl App {
         let popup_open = self.menu.is_some() || self.context_menu.is_some() || self.dropdown.is_some();
         let over_hang = self.hang_bar().map(|(b, _, _)| b.contains(x, y)).unwrap_or(false);
         match self.to_css(self.cursor) {
-            Some(css) if !popup_open && !over_hang => {
+            Some(css) if !popup_open && !over_hang && self.scrollbar_drag.is_none() && !self.page_scrollbar().is_some_and(|bar| bar.track.contains(x, y)) => {
                 let mods = self.pointer_modifiers();
                 self.send_active(ToContent::PointerMove { x: css.0, y: css.1, mods });
             }
@@ -426,6 +499,8 @@ impl App {
             }
         }
 
+        if self.press_page_scrollbar(button, x, y) { return; }
+
         // Page.
         self.blur_url_field();
         if matches!(self.ui_focus, UiFocus::Console | UiFocus::Find | UiFocus::Prompt) {
@@ -491,6 +566,7 @@ impl App {
     }
 
     pub(crate) fn handle_mouse_up(&mut self, button: MouseButton, _event_loop: &ActiveEventLoop) {
+        if self.release_page_scrollbar(button) { return; }
         if button == MouseButton::Left {
             if let Some(d) = self.tab_drag.take() {
                 if d.dragging {
@@ -1402,5 +1478,138 @@ fn key_name(key: &Key) -> String {
             other => format!("{other:?}"),
         },
         _ => "Unidentified".into(),
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+    use std::sync::Arc;
+    use rabbithole_engine::gfx::Color;
+    use super::super::content::{Frame, Pixels};
+    use super::super::snapshots::{headless_app, lock};
+    use super::super::tab::Tab;
+
+    fn app(tag: &str, zoom: f32) -> App {
+        let mut app = headless_app(tag);
+        app.canvas.resize(1000, 800);
+        app.settings.show_bookmarks_bar = false;
+        app.settings.smooth_scrolling = true;
+        for id in [1, 2] {
+            let mut tab = Tab::new(id);
+            tab.zoom = zoom;
+            tab.frame = Some(Frame {
+                seq: 1, canvas: Arc::new(Pixels::default()), origin: (0.0, 0.0),
+                scale: zoom, scroll: (0.0, 0.0), content: (3000.0, 5000.0),
+                background: Color::WHITE, scroll_containers: Arc::new(Vec::new()),
+            });
+            app.tabs.push(tab);
+        }
+        app.sync_view(0);
+        app
+    }
+
+    fn move_to(app: &mut App, x: f32, y: f32) {
+        app.cursor = winit::dpi::PhysicalPosition::new(x as f64, y as f64);
+        app.handle_cursor_moved();
+    }
+
+    fn grab_thumb(app: &mut App) -> (PageScrollbar, f32) {
+        let bar = app.page_scrollbar().unwrap();
+        let grab = bar.thumb.h / 3.0;
+        let (x, y) = (bar.thumb.x + bar.thumb.w / 2.0, bar.thumb.y + grab);
+        app.cursor = winit::dpi::PhysicalPosition::new(x as f64, y as f64);
+        assert!(app.press_page_scrollbar(MouseButton::Left, x, y));
+        assert!(app.scrollbar_drag.is_some());
+        assert!(app.mouse_down.is_none(), "the press cannot become page selection/click input");
+        (bar, grab)
+    }
+
+    #[test]
+    fn page_scrollbar_drag_maps_device_pixels_to_css_and_clamps_outside_page() {
+        let _guard = lock();
+        for zoom in [0.75, 1.0, 2.0] {
+            let mut app = app("scrollbar-drag", zoom);
+            app.set_scroll(37.0, 500.0);
+            app.scroll_by_smooth(0.0, 100.0);
+            assert!(app.scroll_anim.is_some());
+            let (bar, grab) = grab_thumb(&mut app);
+            assert!(app.scroll_anim.is_none(), "drag must cancel a pending smooth target");
+            let quarter = bar.track.y + (bar.track.h - bar.thumb.h) / 4.0 + grab;
+            move_to(&mut app, -150.0, quarter);
+            assert!((app.tabs[0].scroll.1 - bar.max_scroll / 4.0).abs() < 0.01);
+            assert_eq!(app.tabs[0].scroll.0, 37.0);
+            assert!(app.scrollbar_drag.is_some(), "leaving the page must retain the grab");
+            move_to(&mut app, 1400.0, -100.0);
+            assert_eq!(app.tabs[0].scroll.1, 0.0);
+            move_to(&mut app, -150.0, bar.track.bottom() + 300.0);
+            assert_eq!(app.tabs[0].scroll.1, bar.max_scroll);
+            // Another button's release must not end the primary-button drag.
+            assert!(!app.release_page_scrollbar(MouseButton::Right));
+            assert!(app.scrollbar_drag.is_some());
+            assert!(app.release_page_scrollbar(MouseButton::Left));
+            assert!(app.scrollbar_drag.is_none());
+            move_to(&mut app, bar.thumb.x, bar.track.y);
+            assert_eq!(app.tabs[0].scroll.1, bar.max_scroll, "release ends capture");
+        }
+    }
+
+    #[test]
+    fn page_scrollbar_track_pages_once_without_sending_a_page_press() {
+        let _guard = lock();
+        let mut app = app("scrollbar-track", 1.5);
+        let viewport = app.css_viewport().height;
+        let bar = app.page_scrollbar().unwrap();
+        let x = bar.thumb.x + bar.thumb.w / 2.0;
+        assert!(!app.press_page_scrollbar(MouseButton::Left, bar.track.x - 1.0, bar.track.y));
+        assert!(app.press_page_scrollbar(MouseButton::Right, x, bar.track.y));
+        assert!(app.scrollbar_drag.is_none());
+        assert_eq!(app.tabs[0].scroll.1, 0.0);
+        app.cursor = winit::dpi::PhysicalPosition::new(x as f64, (bar.track.bottom() - 1.0) as f64);
+        assert!(app.press_page_scrollbar(MouseButton::Left, x, bar.track.bottom() - 1.0));
+        assert_eq!(app.tabs[0].scroll.1, viewport);
+        assert!(app.mouse_down.is_none());
+        move_to(&mut app, x, bar.track.bottom() + 100.0);
+        assert_eq!(app.tabs[0].scroll.1, viewport, "track press pages once, it is not a thumb drag");
+        app.release_page_scrollbar(MouseButton::Left);
+        assert!(app.press_page_scrollbar(MouseButton::Left, x, bar.track.y));
+        assert_eq!(app.tabs[0].scroll.1, 0.0);
+        app.release_page_scrollbar(MouseButton::Left);
+        app.set_scroll(0.0, bar.max_scroll - 10.0);
+        let y = bar.track.bottom() - 0.01;
+        assert!(!app.page_scrollbar().unwrap().thumb.contains(x, y), "fixture must hit the track below the thumb");
+        assert!(app.press_page_scrollbar(MouseButton::Left, x, y));
+        assert_eq!(app.tabs[0].scroll.1, bar.max_scroll, "last page is clamped");
+    }
+
+    #[test]
+    fn page_scrollbar_capture_cancels_on_resize_tab_document_or_missing_overflow() {
+        let _guard = lock();
+        let mut app = app("scrollbar-cancel", 1.0);
+        app.set_scroll(0.0, 500.0);
+        grab_thumb(&mut app);
+        // Opening Find resizes the CSS viewport through the same sync_view
+        // path as a window resize, without constructing a native window.
+        app.tabs[0].find.open = true;
+        app.sync_view(0);
+        assert!(app.scrollbar_drag.is_none(), "viewport resize invalidates the old thumb geometry");
+        move_to(&mut app, 0.0, 0.0);
+        assert_eq!(app.tabs[0].scroll.1, 500.0);
+        grab_thumb(&mut app);
+        app.activate_tab(1);
+        assert!(app.scrollbar_drag.is_none());
+        move_to(&mut app, 0.0, 2000.0);
+        assert_eq!(app.tabs[1].scroll.1, 0.0, "a captured drag must not scroll the new tab");
+        assert_eq!(app.tabs[0].scroll.1, 500.0);
+        grab_thumb(&mut app);
+        app.on_committed(1, super::super::about_url(), "replacement".into(), true);
+        assert!(app.scrollbar_drag.is_none(), "committing a document cancels capture");
+        app.activate_tab(0);
+        grab_thumb(&mut app);
+        app.tabs[0].frame.as_mut().unwrap().content.1 = app.css_viewport().height;
+        move_to(&mut app, 0.0, 2000.0);
+        assert!(app.scrollbar_drag.is_none(), "content no longer overflows");
+        assert!(app.page_scrollbar().is_none());
+        assert!(!app.press_page_scrollbar(MouseButton::Left, 995.0, 200.0));
     }
 }

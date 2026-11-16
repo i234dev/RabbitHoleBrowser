@@ -179,6 +179,7 @@ pub struct App {
     pub(crate) next_epoch: u64,
     pub(crate) closed: ClosedTabs,
     pub(crate) tab_drag: Option<TabDrag>,
+    pub(crate) scrollbar_drag: Option<interact::ScrollbarDrag>,
     pub(crate) window: Option<Rc<Window>>,
     pub(crate) surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     pub(crate) sink: Sink,
@@ -290,6 +291,7 @@ impl App {
             next_epoch: 1,
             closed: ClosedTabs::default(),
             tab_drag: None,
+            scrollbar_drag: None,
             window: None,
             surface: None,
             sink,
@@ -409,6 +411,7 @@ impl App {
         let view = self.view_for(idx);
         let Some(tab) = self.tabs.get_mut(idx) else { return };
         if tab.view != Some(view) {
+            if idx == self.active { self.scrollbar_drag = None; }
             tab.view = Some(view);
             tab.send(ToContent::Resize(view));
         }
@@ -687,6 +690,7 @@ impl App {
         if idx >= self.tabs.len() {
             return;
         }
+        self.scrollbar_drag = None;
         if idx != self.active {
             if let Some(old) = self.tabs.get(self.active) {
                 old.send(ToContent::SetActive(false));
@@ -713,6 +717,7 @@ impl App {
         if idx >= self.tabs.len() {
             return;
         }
+        self.scrollbar_drag = None;
         // Dropping the tab's handle shuts its content thread down.
         let tab = self.tabs.remove(idx);
         self.closed.push(ClosedTab { history: tab.history_strings(), index: tab.index, pinned: tab.pinned, title: tab.title.clone(), position: idx });
@@ -884,6 +889,7 @@ impl App {
         if idx >= self.tabs.len() {
             return;
         }
+        if idx == self.active { self.scrollbar_drag = None; }
         let url = req.url.clone();
         if url.scheme == "rabbithole" {
             self.handle_internal_action(idx, &url);
@@ -1216,6 +1222,7 @@ impl App {
 
     /// A new document was committed on a tab's content thread.
     fn on_committed(&mut self, idx: usize, url: Url, title: String, push_history: bool) {
+        if idx == self.active { self.scrollbar_drag = None; }
         let host = url.host.clone();
         let url_str = url.to_string();
         let zoom = self.zoom_for_host(&host);
@@ -1792,7 +1799,8 @@ impl App {
 
     /// The window cursor for the pointer position.
     pub(crate) fn apply_cursor(&mut self) {
-        let over_page = self.to_css(self.cursor).is_some() && self.menu.is_none() && self.context_menu.is_none() && self.dropdown.is_none();
+        let over_scrollbar = self.scrollbar_drag.is_some() || self.page_scrollbar().is_some_and(|bar| bar.track.contains(self.cursor.x as f32, self.cursor.y as f32));
+        let over_page = !over_scrollbar && self.to_css(self.cursor).is_some() && self.menu.is_none() && self.context_menu.is_none() && self.dropdown.is_none();
         let chrome_icon = self.chrome_cursor();
         let icon = if over_page && self.hang_bar().map(|(b, _, _)| !b.contains(self.cursor.x as f32, self.cursor.y as f32)).unwrap_or(true) {
             match self.tab().map(|t| t.cursor).unwrap_or("default") {
@@ -2204,7 +2212,10 @@ impl ApplicationHandler<UserEvent> for App {
         };
         match event {
             WindowEvent::CloseRequested => self.shutdown(event_loop),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.request_redraw(),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                self.scrollbar_drag = None;
+                self.request_redraw();
+            }
             WindowEvent::ThemeChanged(theme) => {
                 self.os_dark = theme == winit::window::Theme::Dark;
                 if self.settings.theme == ThemeChoice::System {
@@ -2241,6 +2252,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(false) => {
                 self.mouse_down = None;
                 self.tab_drag = None;
+                self.scrollbar_drag = None;
             }
             WindowEvent::DroppedFile(path) => {
                 let url = format!("file://{}", path.display().to_string().replace('\\', "/"));

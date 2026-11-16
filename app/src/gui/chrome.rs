@@ -777,18 +777,42 @@ pub fn draw_ring(canvas: &mut Canvas, center: (f32, f32), radius: f32, fraction:
     }
 }
 
+/// Shared device-pixel geometry for painting and interacting with the page
+/// scrollbar. Scroll positions and the range remain in CSS pixels.
+#[derive(Debug, Clone, Copy)]
+pub struct PageScrollbar {
+    pub track: Rect,
+    pub thumb: Rect,
+    pub max_scroll: f32,
+}
+
+impl PageScrollbar {
+    pub fn new(area: Rect, s: f32, content_h: f32, viewport_h: f32, scroll_y: f32) -> Option<Self> {
+        if !content_h.is_finite() || !viewport_h.is_finite() || content_h <= viewport_h || viewport_h <= 0.0 || area.h <= 0.0 {
+            return None;
+        }
+        let thumb_h = (area.h * viewport_h / content_h).max(20.0 * s).min(area.h);
+        let max_scroll = content_h - viewport_h;
+        let thumb_y = area.y + (scroll_y / max_scroll).clamp(0.0, 1.0) * (area.h - thumb_h);
+        let w = SCROLLBAR_W * s;
+        let track = Rect::new(area.right() - w - 4.0 * s, area.y, w + 4.0 * s, area.h);
+        let thumb = Rect::new(track.x + 2.0 * s, thumb_y, w, thumb_h);
+        Some(Self { track, thumb, max_scroll })
+    }
+
+    /// Position the thumb's top at `y` (device px), clamped to both ends.
+    pub fn scroll_at(&self, y: f32) -> f32 {
+        let travel = self.track.h - self.thumb.h;
+        if travel <= 0.0 { return 0.0; }
+        ((y - self.track.y) / travel).clamp(0.0, 1.0) * self.max_scroll
+    }
+}
+
 /// Vertical scrollbar for the page area.
 pub fn draw_scrollbar(canvas: &mut Canvas, area: Rect, s: f32, content_h: f32, viewport_h: f32, scroll_y: f32) {
-    if content_h <= viewport_h || viewport_h <= 0.0 {
-        return;
+    if let Some(bar) = PageScrollbar::new(area, s, content_h, viewport_h, scroll_y) {
+        canvas.fill_rounded_rect(bar.thumb, bar.thumb.w / 2.0, pal().scroll_thumb);
     }
-    let track_h = area.h;
-    let thumb_h = (track_h * viewport_h / content_h).max(20.0 * s).min(track_h);
-    let max_scroll = (content_h - viewport_h).max(1.0);
-    let thumb_y = area.y + (scroll_y / max_scroll).clamp(0.0, 1.0) * (track_h - thumb_h);
-    let w = SCROLLBAR_W * s;
-    let x = area.right() - w - 2.0 * s;
-    canvas.fill_rounded_rect(Rect::new(x, thumb_y, w, thumb_h), w / 2.0, pal().scroll_thumb);
 }
 
 /// Byte range of the host in a URL string (for emphasis).
