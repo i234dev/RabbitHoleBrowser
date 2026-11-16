@@ -1789,13 +1789,10 @@ impl Realm {
                             continue;
                         }
                         if let (V::String(x), V::String(y)) = (sl!(a).v(), sl!(b).v()) {
-                            if x.len() + y.len() > crate::value::MAX_STRING_LEN {
-                                slow!();
+                            if let Some(r) = x.concat_checked(y) {
+                                *sl!(d) = Value::String(r);
                                 continue;
                             }
-                            let r = x.concat(y);
-                            *sl!(d) = Value::String(r);
-                            continue;
                         }
                         slow!();
                     }
@@ -1805,13 +1802,10 @@ impl Realm {
                             continue;
                         }
                         if let (V::String(x), V::String(y)) = (sl!(a).v(), k!(c).v()) {
-                            if x.len() + y.len() > crate::value::MAX_STRING_LEN {
-                                slow!();
+                            if let Some(r) = x.concat_checked(y) {
+                                *sl!(d) = Value::String(r);
                                 continue;
                             }
-                            let r = x.concat(y);
-                            *sl!(d) = Value::String(r);
-                            continue;
                         }
                         slow!();
                     }
@@ -4815,10 +4809,10 @@ impl Realm {
 
     /// String concatenation of `+`: a RangeError past the maximum length.
     fn concat(&mut self, x: &JsStr, y: &JsStr) -> JsResult<Value> {
-        if x.len() + y.len() > crate::value::MAX_STRING_LEN {
-            return self.range_error("Invalid string length");
+        match x.concat_checked(y) {
+            Some(s) => Ok(Value::String(s)),
+            None => self.range_error("Invalid string length"),
         }
-        Ok(Value::String(x.concat(y)))
     }
 
     /// A binary operator on two values (the slow path of the register

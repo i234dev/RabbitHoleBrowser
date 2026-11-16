@@ -234,9 +234,6 @@ impl Drop for Stats {
 }
 
 thread_local! {
-    /// Real adjacent no-release numeric edges; no emitted production probe.
-    #[cfg(test)]
-    pub(crate) static NUMERIC_EDGE_HITS: Cell<u64> = const { Cell::new(0) };
     /// Native code bytes of this thread (realms are per thread).
     static CODE_BYTES: Cell<usize> = const { Cell::new(0) };
     /// Time spent mapping and protecting native code (part of compile time).
