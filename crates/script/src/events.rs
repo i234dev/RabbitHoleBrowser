@@ -804,7 +804,7 @@ pub(crate) fn event_parent(doc: &Document, node: NodeId, composed: bool, target_
 
 /// The propagation path for a target: [(key, invocation target,
 /// shadow-adjusted target)] from the target to the document and window.
-fn build_path(realm: &mut Realm, key: TargetKey, composed: bool) -> Vec<(TargetKey, Value, Value)> {
+fn build_path(realm: &mut Realm, key: TargetKey, composed: bool, event_type: &str) -> Vec<(TargetKey, Value, Value)> {
     let mut path = Vec::new();
     match key {
         TargetKey::Window => {
@@ -836,8 +836,11 @@ fn build_path(realm: &mut Realm, key: TargetKey, composed: bool) -> Vec<(TargetK
                 let t = if adjusted == c { v.clone() } else { wrap(realm, NodeRef { doc: n.doc, node: adjusted }) };
                 path.push((TargetKey::Node(r), v, t));
             }
-            // Only main-document paths that reach the document reach the window.
-            if n.doc == 0 && reaches_document {
+            // DOM Document "get the parent": load has no parent, even in
+            // capture and even when a synthetic load is marked bubbling.
+            // Resource loads still reach their ancestors and Document; only
+            // Window is excluded. A load targeted at Window keeps its path.
+            if n.doc == 0 && reaches_document && event_type != "load" {
                 let w = window_value(realm);
                 let doc_target = path.last().map(|(_, _, t)| t.clone()).unwrap_or(Value::Null);
                 path.push((TargetKey::Window, w, doc_target));
@@ -1094,8 +1097,11 @@ fn clear_targets(realm: &mut Realm, eid: ObjectId, path: &[(TargetKey, Value, Va
 
 /// Dispatch an existing Event object.
 pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, target_override: Option<Value>) -> DispatchResult {
-    let composed = realm.host_data::<EventData>(eid).map(|d| d.composed).unwrap_or(false);
-    let mut path = build_path(realm, key, composed);
+    let (composed, ty) = {
+        let d = realm.host_data::<EventData>(eid).expect("event data");
+        (d.composed, d.ty.clone())
+    };
+    let mut path = build_path(realm, key, composed, &ty);
     if let Some(t) = target_override {
         // dispatchEvent on a non-node target object (keep its identity).
         if !matches!(key, TargetKey::Node(_)) {
@@ -1105,12 +1111,12 @@ pub(crate) fn dispatch_object(realm: &mut Realm, key: TargetKey, eid: ObjectId, 
         }
     }
     let target_value = path.first().map(|(_, _, t)| t.clone()).unwrap_or(Value::Null);
-    let (ty, bubbles) = {
+    let bubbles = {
         let d = realm.host_data_mut::<EventData>(eid).expect("event data");
         d.dispatching = true;
         d.target = target_value.clone();
         d.path = path.iter().map(|(_, v, _)| v.clone()).collect();
-        (d.ty.clone(), d.bubbles)
+        d.bubbles
     };
     let default_action = default_action_for(realm, key, &ty);
     // Synthetic clicks: the activation target and its legacy
