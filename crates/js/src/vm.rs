@@ -555,7 +555,7 @@ impl Realm {
         let cr: &FunctionCode = unsafe { &*code.as_ptr() };
         let cf = cr.call_flags;
         if let (true, Some(scope)) = (cf & CALL_SIMPLE != 0, parent_scope) {
-            return self.push_simple_frame(id, code, scope, args, argc, cr.frame_size(), cr.param_locs.len(), this, new_target, ret_slot, is_construct, entry);
+            return self.push_simple_frame::<false>(id, cr, scope, args, argc, (0, 0), this, new_target, ret_slot, is_construct, entry);
         }
         if self.frames.len() >= self.max_frames {
             return self.range_error("Maximum call stack size exceeded");
@@ -717,19 +717,18 @@ impl Realm {
     /// [`Realm::push_closure_frame`] for [`CALL_SIMPLE`] code with the
     /// arguments in the caller's slots: undefined registers, the arguments
     /// moved into the parameter registers, the closure's scope.
-    /// Sizes are exact compiled metadata, supplied directly or by a matching
-    /// call cache; this constructor does not dereference `code`.
+    /// Only the native call-site hit uses cached sizes. The ordinary instance
+    /// reads each immutable size at its original point after the relevant checks.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn push_simple_frame(
+    fn push_simple_frame<const CACHED: bool>(
         &mut self,
         id: ObjectId,
-        code: std::ptr::NonNull<FunctionCode>,
+        cr: &FunctionCode,
         scope: ObjectId,
         src: ArgSrc,
         argc: usize,
-        fsize: usize,
-        nparams: usize,
+        shape: (usize, usize),
         this: Value,
         new_target: Value,
         ret_slot: u32,
@@ -740,12 +739,13 @@ impl Realm {
         if n >= self.max_frames {
             return self.range_error("Maximum call stack size exceeded");
         }
+        let fsize = if CACHED { shape.0 } else { cr.frame_size() };
         self.vstack.reserve(fsize);
         if n == self.frames.capacity() {
             self.frames.reserve(1);
         }
         let base = self.vstack.len();
-        let nargs = argc.min(nparams);
+        let nargs = argc.min(if CACHED { shape.1 } else { cr.param_locs.len() });
         // SAFETY: capacities reserved above; the source slots (caller's
         // operand stack, below `base`) and the new slots do not overlap;
         // every new slot / the frame is written before the length grows.
@@ -775,7 +775,7 @@ impl Realm {
             std::ptr::write(
                 self.frames.as_mut_ptr().add(n),
                 Frame {
-                    code,
+                    code: std::ptr::NonNull::from(cr),
                     pc: 0,
                     base: base as u32,
                     argc: 0,
@@ -2226,7 +2226,7 @@ impl Realm {
                     }
                     Op::CallR(b, argc, cic, _) => {
                         tick!();
-                        out!(self.call_r(pc, b, argc, cic));
+                        out!(self.call_r::<false>(pc, b, argc, cic));
                     }
                     Op::NewR(b, argc) => {
                         tick!();
@@ -2647,14 +2647,15 @@ impl Realm {
     /// `CallR`: call-site cache hit, plain closures, bound/`call`/`apply`
     /// targets and natives without leaving the loop's frame model; the
     /// general case through [`Realm::exec_op`].
+    /// The interpreter selects `false`; only the native `h_call` selects `true`.
     #[inline(always)]
-    pub(crate) fn call_r(&mut self, pc: usize, b: u16, argc: u16, cic: u16) -> Ctl {
-        let r = self.call_r_impl(pc, b, argc, cic);
+    pub(crate) fn call_r<const NATIVE: bool>(&mut self, pc: usize, b: u16, argc: u16, cic: u16) -> Ctl {
+        let r = self.call_r_impl::<NATIVE>(pc, b, argc, cic);
         self.ctl(r)
     }
 
     #[inline(always)]
-    fn call_r_impl(&mut self, pc: usize, b: u16, argc: u16, cic: u16) -> JsResult<Flow> {
+    fn call_r_impl<const NATIVE: bool>(&mut self, pc: usize, b: u16, argc: u16, cic: u16) -> JsResult<Flow> {
         let fi = self.frames.len() - 1;
         // SAFETY: `fi` is the running frame.
         let f = unsafe { self.frames.get_unchecked_mut(fi) };
@@ -2681,13 +2682,13 @@ impl Realm {
                 if let Some(this) = this {
                     let scope = if rec.scope == u32::MAX { None } else { Some(ObjectId(rec.scope)) };
                     // SAFETY: the closure owning the code is alive (it is in slot `b`).
-                    let code_ptr = unsafe { std::ptr::NonNull::new_unchecked(rec.code as *mut FunctionCode) };
-                    if rec.simple_frame_size != NO_SIMPLE_FRAME && rec.scope != u32::MAX {
-                        self.push_simple_frame(ObjectId(callee as u32), code_ptr, ObjectId(rec.scope), ArgSrc::Stack(cb + 2), argc as usize, rec.simple_frame_size as usize, rec.simple_nparams as usize, this, Value::Undefined, b as u32, false, false)?;
+                    let cr = unsafe { &*rec.code };
+                    if NATIVE && rec.simple_frame_size != NO_SIMPLE_FRAME && rec.scope != u32::MAX {
+                        self.push_simple_frame::<true>(ObjectId(callee as u32), cr, ObjectId(rec.scope), ArgSrc::Stack(cb + 2), argc as usize, (rec.simple_frame_size as usize, rec.simple_nparams as usize), this, Value::Undefined, b as u32, false, false)?;
                         #[cfg(test)]
                         CACHED_FRAME_SHAPE_HITS.with(|hits| hits.set(hits.get() + 1));
                     } else {
-                        self.push_closure_frame(ObjectId(callee as u32), code_ptr, scope, ArgSrc::Stack(cb + 2), argc as usize, this, Value::Undefined, b as u32, false, false)?;
+                        self.push_closure_frame(ObjectId(callee as u32), std::ptr::NonNull::from(cr), scope, ArgSrc::Stack(cb + 2), argc as usize, this, Value::Undefined, b as u32, false, false)?;
                     }
                     return Ok(Flow::Reload);
                 }

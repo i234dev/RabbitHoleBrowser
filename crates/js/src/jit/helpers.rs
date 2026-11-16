@@ -303,7 +303,7 @@ pub(crate) unsafe extern "sysv64" fn h_return(ctx: *mut Ctx, slot: u32) -> usize
 /// synchronization, unwind status and frame switch remain shared with the VM.
 pub(crate) unsafe extern "sysv64" fn h_call(ctx: *mut Ctx, pc: u32, args: u64) -> usize {
     guard(ctx, |r, ctx| {
-        let c = r.call_r(pc as usize + 1, args as u16, (args >> 16) as u16, (args >> 32) as u16);
+        let c = r.call_r::<true>(pc as usize + 1, args as u16, (args >> 16) as u16, (args >> 32) as u16);
         status(r, ctx, c, pc)
     })
 }

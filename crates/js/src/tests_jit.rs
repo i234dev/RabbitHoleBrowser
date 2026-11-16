@@ -793,7 +793,7 @@ mod cached_frame_shape {
                 for expected_hits in [0, 1] {
                     let (result, hits) = invoke(&mut realm, caller, &args);
                     assert_eq!(result.unwrap(), Value::Number(expected));
-                    assert_eq!(hits, expected_hits, "cold fill then a real cached-shape push");
+                    assert_eq!(hits, if realm.jit_enabled() { expected_hits } else { 0 }, "only native CallR uses the cached shape");
                     assert_eq!(Rc::strong_count(&tracked), references, "moved and extra arguments must drain");
                 }
                 let compiled = code(&realm, &target);
@@ -816,7 +816,7 @@ mod cached_frame_shape {
                 assert_eq!(cache(&mut realm, caller).epoch, realm.heap.collections);
                 let (result, hits) = invoke(&mut realm, caller, &args);
                 assert_eq!(result.unwrap(), Value::Number(expected));
-                assert_eq!(hits, 1);
+                assert_eq!(hits, if realm.jit_enabled() { 1 } else { 0 });
                 assert_eq!(Rc::strong_count(&tracked), references);
             }
             assert_eq!(Rc::strong_count(&tracked), 1);
@@ -874,7 +874,7 @@ mod cached_frame_shape {
             for expected_hits in [0, 1] {
                 let (result, hits) = invoke(&mut realm, "zero", &[target.clone()]);
                 assert_eq!(result.unwrap(), Value::Bool(true));
-                assert_eq!(hits, expected_hits);
+                assert_eq!(hits, if realm.jit_enabled() { expected_hits } else { 0 });
             }
             let record = cache(&mut realm, "zero");
             assert!(record.strict);
