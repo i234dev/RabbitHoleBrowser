@@ -1772,3 +1772,102 @@ fn document_open_write_close_replaces_the_document() {
     "#);
     assert_eq!(out[0], "2 -//W3C//DTD HTML 4.0 Transitional//EN BackCompat SPAN");
 }
+
+#[test]
+fn load_event_connected_elements_capture_at_ancestors_and_document_not_window() {
+    let (mut env, mut host) = setup("<section id=outer><script id=resource type=text/plain></script><img id=image></section>");
+    run(&mut env, &mut host, r#"
+        window.loadPath=[];window.loadPathsHaveWindow=[];
+        window.addEventListener('load',()=>loadPath.push('window'),true);
+        document.addEventListener('load',e=>{loadPath.push('document:'+e.target.id+':'+e.eventPhase);loadPathsHaveWindow.push(e.composedPath().includes(window));},true);
+        document.getElementById('outer').addEventListener('load',e=>loadPath.push('ancestor:'+e.target.id+':'+e.eventPhase),true);
+        for(const id of ['resource','image'])document.getElementById(id).addEventListener('load',e=>loadPath.push(id+':'+e.eventPhase));
+    "#);
+    let resource = env.doc.element_by_id("resource").unwrap();
+    host.dispatch_event(&mut env, resource, "load", EventInit::simple(false, false));
+    let out = run(&mut env, &mut host, r#"
+        document.getElementById('image').dispatchEvent(new Event('load'));
+        console.log(loadPath.join(','));console.log(loadPathsHaveWindow.join(','));
+    "#);
+    assert_eq!(out, ["document:resource:1,ancestor:resource:1,resource:2,document:image:1,ancestor:image:1,image:2", "false,false"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn load_event_dispatched_at_document_stops_before_window_even_if_bubbling() {
+    let (mut env, mut host) = setup("<p>document load</p>");
+    let out = run(&mut env, &mut host, r#"
+        const order=[];
+        window.addEventListener('load',()=>order.push('window-capture'),true);
+        window.addEventListener('load',()=>order.push('window-bubble'));
+        document.addEventListener('load',e=>order.push('document-capture:'+e.eventPhase),true);
+        document.addEventListener('load',e=>order.push('document-bubble:'+e.eventPhase));
+        const event=new Event('load',{bubbles:true,composed:true});
+        document.dispatchEvent(event);
+        console.log(order.join(','));
+        console.log(event.target===document);
+    "#);
+    assert_eq!(out, ["document-capture:2,document-bubble:2", "true"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn load_event_direct_window_dispatch_keeps_window_capture_and_target_listeners() {
+    let (mut env, mut host) = setup("<p>window load</p>");
+    run(&mut env, &mut host, r#"
+        window.loadCapture=0;window.loadBubble=0;window.loadDocument=0;window.loadTrusted=false;window.loadTarget=false;
+        window.addEventListener('load',e=>{loadCapture++;loadTrusted=e.isTrusted;loadTarget=e.target===window&&e.currentTarget===window&&e.eventPhase===2&&e.composedPath().length===1;},true);
+        window.addEventListener('load',()=>loadBubble++);
+        document.addEventListener('load',()=>loadDocument++,true);
+    "#);
+    host.dispatch_window_event(&mut env, "load");
+    let out = run(&mut env, &mut host, "console.log(loadCapture,loadBubble,loadDocument,loadTrusted,loadTarget)");
+    assert_eq!(out, ["1 1 0 true true"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn load_event_exception_preserves_other_event_capture_and_case_sensitive_types() {
+    let (mut env, mut host) = setup("<div id=outer><span id=target>target</span></div>");
+    let out = run(&mut env, &mut host, r#"
+        const path=[];
+        window.addEventListener('probe',e=>path.push('window:'+e.eventPhase),true);
+        document.addEventListener('probe',e=>path.push('document:'+e.eventPhase),true);
+        document.getElementById('outer').addEventListener('probe',e=>path.push('ancestor:'+e.eventPhase),true);
+        const target=document.getElementById('target');
+        target.addEventListener('probe',e=>path.push('target:'+e.eventPhase));
+        target.dispatchEvent(new Event('probe'));
+        let upper=0;window.addEventListener('LOAD',()=>upper++,true);
+        target.dispatchEvent(new Event('LOAD'));
+        console.log(path.join(','),upper);
+    "#);
+    assert_eq!(out, ["window:1,document:1,ancestor:1,target:2 1"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
+
+#[test]
+fn load_event_resource_rearms_do_not_amplify_a_window_ready_callback() {
+    let (mut env, mut host) = setup("<script id=resource type=text/plain></script>");
+    let before = run(&mut env, &mut host, r#"
+        window.readyRearms=0;window.readyFinished=0;window.resourceWindowLoads=0;window.readyResult='';
+        function whenComplete(callback){
+          if(document.readyState!=='complete')addEventListener('load',()=>{readyRearms++;whenComplete(callback);},true);
+          else setTimeout(callback);
+        }
+        addEventListener('load',()=>resourceWindowLoads++,true);
+        whenComplete(()=>{readyFinished++;readyResult=document.readyState;});
+        const resource=document.getElementById('resource');
+        for(let i=0;i<8;i++)resource.dispatchEvent(new Event('load'));
+        console.log(document.readyState,readyRearms,readyFinished,resourceWindowLoads);
+    "#);
+    // Eight unrelated resource loads must not be mistaken for Window.load.
+    // The old path predicts 255 rearms and 256 pending readiness callbacks.
+    host.document_ready(&mut env);
+    host.run_timers(&mut env, 2000.0);
+    host.run_jobs(&mut env);
+    let after = run(&mut env, &mut host, "console.log(readyRearms,readyFinished,resourceWindowLoads,readyResult)");
+    eprintln!("resource-load ready fixture before={before:?}, after={after:?}");
+    assert_eq!(before, ["loading 0 0 0"]);
+    assert_eq!(after, ["1 1 1 complete"]);
+    assert!(env.errors().is_empty(), "{:?}", env.errors());
+}
