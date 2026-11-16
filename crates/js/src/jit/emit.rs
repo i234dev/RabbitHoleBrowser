@@ -4,9 +4,12 @@
 //! `ctx.slots` after every helper), `r13` = `TAG_MIN` (first non-number
 //! bit pattern, also `undefined`), `r14` = `TAG_BIGINT` (first reference
 //! counted pattern), `r15` = constants, `rbp` = frame pointer. Values are
-//! never kept in registers across instructions: every instruction reads
-//! its operands from the frame and writes its result back, so any
-//! instruction boundary is a valid entry or exit point.
+//! materialized by ordinary templates at each instruction boundary. A
+//! guarded pair of adjacent pure arithmetic ops may keep its intermediate
+//! in a register (omitting its store when both destinations are the same).
+//! Guards fail before writes; required results are materialized before
+//! continuing. Each public bytecode PC retains its independent ordinary
+//! entry, without facts carried across a helper, branch or safe point.
 //!
 //! Every instruction is classified by an exhaustive `match` (no wildcard):
 //! a native fast path that falls back to a helper when the types do not
@@ -343,7 +346,8 @@ impl Gen<'_> {
         self.a.movq_r_x(RAX,XMM0);
         self.canon();
         self.a.store64(slot(second.d),RAX);
-        self.a.jmp(self.lbl(pc+2));
+        let next = self.lbl(pc+2);
+        self.a.jmp(next);
         self.a.bind(ordinary);
     }
 

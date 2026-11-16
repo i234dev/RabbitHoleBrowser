@@ -714,3 +714,149 @@ mod disable_cached_execution {
         assert_drained(&realm);
     }
 }
+
+mod numeric_pair {
+    use super::*;
+    use crate::bytecode::{FunctionCode, Op};
+    use crate::ObjectKind;
+
+    const SOURCE: &str = r#"
+        function left(a,b,c){for(var w=0;w<2;w++){}return (a+b)*c}
+        function right(a,b,c){for(var w=0;w<2;w++){}return c/(a-b)}
+        function firstK(a,b){for(var w=0;w<2;w++){}return (a+2)/b}
+        function secondK(a,b){for(var w=0;w<2;w++){}return (a-b)*2}
+        function both(a,b){for(var w=0;w<2;w++){}var t=a+b;return t*t}
+        function inPlace(a,b,c){for(var w=0;w<2;w++){}a=a+b;a=a*c;return a}
+        function materialized(a,b,c){for(var w=0;w<2;w++){}var t=a+b;var out=t*c;return t}
+        function rounded(a,b){for(var w=0;w<2;w++){}return (a+b)-a}
+        function oldFirst(a,b,c,t){for(var w=0;w<2;w++){}t=a+b;return t*c}
+        function oldLast(a,b,c,out){for(var w=0;w<2;w++){}a=a+b;out=a*c;return out}
+        function branch(flag,a,b,c,t){for(var w=0;w<2;w++){}if(flag)t=a+b;return t*c}
+        function osr(a,b,c,n){var t=a+b;do{t=t*c;n--}while(n>0);return t}
+    "#;
+
+    fn realm(requested: bool) -> Realm {
+        let mut realm = Realm::new();
+        realm.set_jit(requested,0);
+        realm.eval(SOURCE,"numeric-pair-definitions.js").unwrap();
+        realm
+    }
+
+    fn hits() -> u64 { crate::jit::NUMERIC_PAIR_HITS.with(Cell::get) }
+    fn reset_hits() { crate::jit::NUMERIC_PAIR_HITS.with(|hits|hits.set(0)); }
+
+    fn invoke(realm: &mut Realm, name: &str, args: &[Value]) -> (Value,Rc<FunctionCode>,u64) {
+        let function = realm.get(Value::Object(realm.global()),crate::PropertyKey::str(name)).unwrap();
+        let entries = realm.jit_entries();
+        reset_hits();
+        let value = realm.call(function.clone(),Value::Undefined,args).unwrap();
+        let count = hits();
+        let code = match &realm.obj(function.as_object().unwrap()).kind {
+            ObjectKind::Function(closure) => closure.code.clone(),
+            _ => panic!("expected JavaScript function"),
+        };
+        if realm.jit_enabled() { assert!(realm.jit_entries()>entries,"{name} must really enter native code"); }
+        else { assert_eq!(realm.jit_entries(),entries); assert_eq!(count,0); }
+        assert!(realm.frames.is_empty() && realm.vstack.is_empty());
+        (value,code,count)
+    }
+
+    fn slots(op: Op) -> Option<(u16,u16,Option<u16>)> {
+        match op {
+            Op::AddRR(d,a,b)|Op::SubRR(d,a,b)|Op::MulRR(d,a,b)|Op::DivRR(d,a,b) => Some((d,a,Some(b))),
+            Op::AddRK(d,a,_)|Op::SubRK(d,a,_)|Op::MulRK(d,a,_)|Op::DivRK(d,a,_) => Some((d,a,None)),
+            _ => None,
+        }
+    }
+
+    fn pair(code: &FunctionCode) -> (usize,u16,u16,u16,Option<u16>) {
+        code.ops.windows(2).enumerate().find_map(|(pc,ops)| {
+            let first=slots(ops[0])?;let second=slots(ops[1])?;
+            (second.1==first.0 || second.2==Some(first.0)).then_some((pc,first.0,second.0,second.1,second.2))
+        }).unwrap_or_else(||panic!("fixture needs adjacent producer/consumer ops: {:?}",code.ops))
+    }
+
+    #[test]
+    fn fused_hits_preserve_aliases_rounding_signed_zero_and_nan_bits() {
+        let mut vm=realm(false);let mut native=realm(true);
+        let signal=f64::from_bits(0xfff1_ffff_0000_0001);
+        for (name,args,expected) in [
+            ("left",vec![2.0,3.0,4.0],20.0),
+            ("right",vec![8.0,2.0,24.0],4.0),
+            ("firstK",vec![4.0,3.0],2.0),
+            ("secondK",vec![9.0,3.0],12.0),
+            ("both",vec![2.0,3.0],25.0),
+            ("inPlace",vec![2.0,3.0,4.0],20.0),
+            ("materialized",vec![2.0,3.0,4.0],5.0),
+            ("rounded",vec![9007199254740992.0,1.0],0.0),
+            ("left",vec![-0.0,-0.0,1.0],-0.0),
+            ("right",vec![-0.0,0.0,1.0],f64::NEG_INFINITY),
+            ("left",vec![signal,1.0,2.0],f64::NAN),
+            ("materialized",vec![signal,1.0,2.0],f64::NAN),
+        ] {
+            let args:Vec<Value>=args.into_iter().map(Value::Number).collect();
+            let (reference,_,_)=invoke(&mut vm,name,&args);
+            let (actual,code,count)=invoke(&mut native,name,&args);
+            let (_,d1,d2,a2,b2)=pair(&code);
+            if name=="inPlace" { assert_eq!(d1,d2); }
+            if name=="materialized" { assert_ne!(d1,d2); }
+            if name=="both" { assert_eq!(a2,d1);assert_eq!(b2,Some(d1)); }
+            if name=="right" { assert_eq!(b2,Some(d1));assert_ne!(a2,d1); }
+            assert!(actual.is_number());
+            assert_eq!(actual.bits(),reference.bits(),"{name}: exact Value bits, including NaN tags and -0");
+            if expected.is_nan() { assert!(actual.as_number().unwrap().is_nan()); }
+            else { assert_eq!(actual.bits(),Value::Number(expected).bits(),"{name}"); }
+            if native.jit_enabled() { assert_eq!(count,1,"{name}: the real fused path must run exactly once"); }
+        }
+    }
+
+    #[test]
+    fn counted_destinations_and_non_numeric_inputs_fall_back_before_writes() {
+        for requested in [false,true] {
+            let mut realm=realm(requested);
+            let tracked=Rc::new(crate::bigint::BigInt::from_i64(91));
+            let old=Value::BigInt(tracked.clone());let references=Rc::strong_count(&tracked);
+            for name in ["oldFirst","oldLast"] {
+                let (actual,code,count)=invoke(&mut realm,name,&[Value::Number(2.0),Value::Number(3.0),Value::Number(4.0),old.clone()]);
+                let (_,d1,d2,_,_)=pair(&code);
+                let crate::bytecode::VarLoc::Reg(old_slot)=code.param_locs[3] else {panic!("counted old value needs a register")};
+                assert_eq!(if name=="oldFirst" {d1} else {d2},old_slot);
+                assert_eq!(actual,Value::Number(20.0));assert_eq!(count,0);
+                assert_eq!(Rc::strong_count(&tracked),references,"{name}: the ordinary path must release its counted destination");
+            }
+            // c fails a later numeric guard. If a was written before that
+            // guard, the ordinary first op would add b twice and return 32.
+            let (actual,_,count)=invoke(&mut realm,"inPlace",&[Value::Number(2.0),Value::Number(3.0),Value::str("4")]);
+            assert_eq!(actual,Value::Number(20.0));assert_eq!(count,0);
+            let big=|n|Value::BigInt(Rc::new(crate::bigint::BigInt::from_i64(n)));
+            let (actual,_,count)=invoke(&mut realm,"left",&[big(6),big(2),big(3)]);
+            assert!(actual.is_bigint());assert_eq!(count,0);
+            assert_eq!(realm.to_string(actual).unwrap().to_rust_string(),"24");
+        }
+    }
+
+    #[test]
+    fn second_public_pc_remains_independent_for_branch_and_loop_osr() {
+        let mut native=realm(true);
+        for (flag,expected) in [(true,20.0),(false,36.0)] {
+            let (value,code,count)=invoke(&mut native,"branch",&[Value::Bool(flag),Value::Number(2.0),Value::Number(3.0),Value::Number(4.0),Value::Number(9.0)]);
+            let (pc,_,_,_,_)=pair(&code);
+            assert!(code.ops.iter().any(|op|matches!(*op,Op::JumpIfFalseR(_,t) if t as usize==pc+1)),"branch must target the second bytecode: {:?}",code.ops);
+            assert_eq!(value,Value::Number(expected));
+            if native.jit_enabled() { assert_eq!(count,if flag {1} else {0}); }
+        }
+        if rabbithole_jit::supported() {
+            let mut osr=realm(true);
+            osr.set_jit(true,100);
+            // The host entry consumes one tick; the first loop backedge then
+            // reaches OSR. Only the interpreter executes the producer.
+            osr.tick=2;
+            let (value,code,count)=invoke(&mut osr,"osr",&[Value::Number(2.0),Value::Number(3.0),Value::Number(1.0),Value::Number(5.0)]);
+            let (pc,_,_,_,_)=pair(&code);
+            assert_eq!(value,Value::Number(5.0));assert_eq!(count,0);
+            assert!(code.ops.iter().any(|op|matches!(*op,
+                Op::JumpIfGtRK(_,_,t)|Op::JumpUnlessLtEqRK(_,_,t)|Op::JumpIfTrueR(_,t)|Op::Jump(t) if t as usize==pc+1)),
+                "loop backedge must enter the consumer alone: {:?}",code.ops);
+        }
+    }
+}
