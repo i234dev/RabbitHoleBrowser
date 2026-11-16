@@ -501,6 +501,15 @@ impl Chrome {
         Rect::new(toolbar.right() - width - 6.0 * self.s, toolbar.y + 2.0 * self.s, width, toolbar.h - 4.0 * self.s)
     }
 
+    /// Elements actions use the same fixed toolbar as Console.
+    pub fn elements_toolbar(&self) -> Rect {
+        self.console_toolbar()
+    }
+
+    pub fn elements_copy_all(&self) -> Rect {
+        self.console_copy_all()
+    }
+
     /// The console input line at the bottom of the pane.
     pub fn console_input(&self) -> Rect {
         let p = self.devtools_pane();

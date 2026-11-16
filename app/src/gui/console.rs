@@ -122,6 +122,19 @@ impl App {
         self.tab().is_some_and(|tab| !tab.console.is_empty())
     }
 
+    fn elements_copy_all_enabled(&self) -> bool {
+        self.tab().is_some_and(|tab| tab.content.is_some())
+    }
+
+    /// This reply belongs to the explicit Elements action, never to a pending
+    /// "search selection" request. Keep clipboard errors on the central path.
+    pub(crate) fn copy_elements_result(&mut self, html: Option<String>) {
+        match html {
+            Some(html) => self.clipboard_set(&html),
+            None => self.set_status("No document to copy"),
+        }
+    }
+
     fn console_visible_rows(&self) -> usize {
         (console_log_area(&self.chrome()).h / (ROW_H * self.ui_scale())).floor().max(0.0) as usize
     }
@@ -152,7 +165,7 @@ impl App {
 
     fn devtools_rows(&self) -> usize {
         let body = self.chrome().devtools_body();
-        let reserve = if self.panel == Panel::Console { 34.0 } else { 0.0 };
+        let reserve = match self.panel { Panel::Console => 34.0, Panel::Elements => 28.0, Panel::Network => 0.0 };
         (((body.h - reserve * self.ui_scale()) / (ROW_H * self.ui_scale())).floor().max(1.0)) as usize
     }
 
@@ -275,7 +288,10 @@ impl App {
 
     /// Split of the Elements body: (tree, styles).
     pub(crate) fn elements_split(&self) -> (Rect, Rect) {
-        let body = self.chrome().devtools_body();
+        let chrome = self.chrome();
+        let body = chrome.devtools_body();
+        let toolbar = chrome.elements_toolbar();
+        let body = Rect::new(body.x, toolbar.bottom(), body.w, (body.bottom() - toolbar.bottom()).max(0.0));
         let tree_w = (body.w * 0.58).round();
         (Rect::new(body.x, body.y, tree_w, body.h), Rect::new(body.x + tree_w, body.y, body.w - tree_w, body.h))
     }
@@ -287,6 +303,16 @@ impl App {
         let fonts = self.engine.fonts.clone();
         let size = 12.0 * s;
         let line_h = ROW_H * s;
+        let toolbar = chrome.elements_toolbar();
+        let copy = chrome.elements_copy_all();
+        let enabled = self.elements_copy_all_enabled();
+        let hovered = copy.contains(self.cursor.x as f32, self.cursor.y as f32);
+        self.canvas.fill_rect(toolbar, p.chrome_bg);
+        self.canvas.fill_rounded_rect(copy, 4.0 * s, if enabled && hovered { p.hover_bg } else { p.field_bg });
+        self.canvas.stroke_rect(copy, [1.0; 4], [p.field_border; 4], [0; 4], 4.0 * s);
+        draw_centered(&mut self.canvas, &fonts, self.ui_font, size, "Copy all", copy, if enabled { p.text } else { p.text_disabled });
+        let baseline = baseline_in(&fonts, self.ui_font, size, toolbar);
+        self.canvas.draw_text(&fonts, self.ui_font, size, "DOM as HTML", toolbar.x + 8.0 * s, baseline, p.text_muted);
         let (tree, styles) = self.elements_split();
         self.canvas.fill_rect(Rect::new(styles.x, styles.y, 1.0, styles.h), p.separator);
         let Some(tab) = self.tabs.get(self.active) else { return };
@@ -447,6 +473,14 @@ impl App {
                 }
             }
             // Copying the log does not move focus or change either selection.
+            self.request_redraw();
+            return;
+        }
+        if self.panel == Panel::Elements && chrome.elements_copy_all().contains(x, y) {
+            if self.elements_copy_all_enabled() {
+                self.send_active(ToContent::CopyElements);
+            }
+            // Do not change the inspector selection or an editor's focus.
             self.request_redraw();
             return;
         }
@@ -1034,4 +1068,102 @@ mod tests {
         assert_eq!(console_window(2, 6, 0), 0..2);
         assert_eq!(console_window(2, 0, 0), 2..2);
     }
+
+    #[test]
+    fn elements_copy_all_click_snapshots_live_complete_dom_and_uses_central_clipboard() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::{Duration, Instant};
+        use super::super::content::FromContent;
+
+        let _guard = lock();
+        let mut app = console_app("elements-copy-all");
+        app.panel = Panel::Elements;
+        app.canvas.resize(1000, 750);
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        app.sink = Arc::new(move |id, _, msg| { let _ = tx.lock().unwrap().send((id, msg)); });
+        let wait = |id, pred: fn(&FromContent) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let (tab, msg) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("content reply");
+                if tab == id && pred(&msg) { break msg; }
+            }
+        };
+        let click = |app: &mut App| {
+            let r = app.chrome().elements_copy_all();
+            assert!(app.chrome().elements_toolbar().contains(r.x + r.w / 2.0, r.y + r.h / 2.0));
+            assert!(!app.elements_split().0.contains(r.x + r.w / 2.0, r.y + r.h / 2.0));
+            app.devtools_click(r.x + r.w / 2.0, r.y + r.h / 2.0);
+        };
+        let reply = |app: &mut App, id| {
+            let FromContent::ElementsHtml(html) = wait(id, |m| matches!(m, FromContent::ElementsHtml(_))) else { unreachable!() };
+            app.copy_elements_result(html);
+        };
+        // Without a content thread the always-visible button is disabled.
+        assert!(!app.elements_copy_all_enabled());
+        click(&mut app);
+        assert!(copied(&app).is_empty());
+        app.tabs[0].content = Some(app.spawn_content(1, app.view_for(0)));
+        assert!(app.elements_copy_all_enabled());
+        // A content thread without a document reports that honestly.
+        click(&mut app);
+        reply(&mut app, 1);
+        assert_eq!(app.status.as_ref().unwrap().0, "No document to copy");
+        assert!(copied(&app).is_empty());
+
+        let text = "café 🐇 e\u{301}\n  line two & < > ".repeat(12);
+        let long_attr = "á🐇".repeat(90);
+        let html = format!("<!doctype html><html><head><style>.hidden {{display:none}}</style></head><body><!-- comment 🐇 --><div id='live' data-long='{long_attr}'>{}</div><template><b>template-content</b></template><script type='text/plain'>raw < & script</script>{}<p hidden>last-hidden-node</p></body></html>", text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"), "<i>offscreen</i>".repeat(5005));
+        app.tabs[0].send(ToContent::SetActive(true));
+        app.tabs[0].send(ToContent::LoadHtml { html, url: rabbithole_engine::net::Url::parse("https://example.test/").unwrap(), push_history: true });
+        wait(1, |m| matches!(m, FromContent::Frame(_)));
+        app.tabs[0].send(ToContent::Eval("document.getElementById('live').setAttribute('data-now', 'mutated 🐇')".into()));
+        wait(1, |m| matches!(m, FromContent::EvalResult(_)));
+        // Deliberately stale/short inspector rows and an offscreen selection
+        // cannot limit the exported document, including >5000 actual nodes.
+        app.tabs[0].inspector.dom.clear();
+        app.tabs[0].inspector.scroll = 4000;
+        app.tabs[0].inspector.selected = Some(17);
+        app.tabs[0].console_input.set_text("editor selection");
+        app.tabs[0].console_input.select_all();
+        app.ui_focus = UiFocus::Console;
+        app.pending_search = true;
+        let input = app.tabs[0].console_input.clone();
+        click(&mut app);
+        reply(&mut app, 1);
+        let exported = &copied(&app)[0];
+        assert!(exported.contains(&format!("data-long=\"{long_attr}\"")), "full Unicode attribute");
+        assert!(exported.contains("data-now=\"mutated 🐇\""), "live DOM, not original source");
+        assert!(exported.contains(&text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")), "full text and newlines");
+        assert!(exported.contains("<!-- comment 🐇 -->"));
+        assert!(exported.contains("<style>.hidden {display:none}</style>"));
+        assert!(exported.contains("<script type=\"text/plain\">raw < & script</script>"));
+        assert!(exported.contains("<template><b>template-content</b></template>"));
+        assert!(exported.contains("last-hidden-node"));
+        assert_eq!(exported.matches("<i>offscreen</i>").count(), 5005);
+        assert_eq!(app.status.as_ref().unwrap().0, "Copied to clipboard");
+        assert!(app.pending_search, "copy DOM must not consume a selection-search request");
+        assert_eq!(app.ui_focus, UiFocus::Console);
+        assert_eq!(app.tabs[0].console_input, input);
+        assert_eq!(app.tabs[0].inspector.selected, Some(17));
+        assert_eq!(app.tabs[0].inspector.scroll, 4000);
+
+        app.tabs.push(Tab::new(2));
+        app.tabs[1].content = Some(app.spawn_content(2, app.view_for(1)));
+        app.tabs[1].send(ToContent::SetActive(true));
+        app.tabs[1].send(ToContent::LoadHtml { html: "<p>other-tab-only</p>".into(), url: rabbithole_engine::net::Url::parse("https://other.test/").unwrap(), push_history: true });
+        wait(2, |m| matches!(m, FromContent::Frame(_)));
+        app.activate_tab(1);
+        click(&mut app);
+        reply(&mut app, 2);
+        assert_eq!(copied(&app).len(), 2);
+        assert!(copied(&app)[1].contains("other-tab-only"));
+        assert!(!copied(&app)[1].contains("last-hidden-node"));
+
+        app.clipboard_test = Some(Err(()));
+        click(&mut app);
+        reply(&mut app, 2);
+        assert_eq!(app.status.as_ref().unwrap().0, "Clipboard unavailable");
+    }
+
 }

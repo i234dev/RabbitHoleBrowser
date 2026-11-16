@@ -169,6 +169,8 @@ pub enum ToContent {
     PrintPdf(PathBuf),
     /// Send the DOM tree (devtools Elements view).
     InspectTree,
+    /// Snapshot the complete current document as HTML for Elements Copy all.
+    CopyElements,
     /// Send the details of a node (and outline it on the page).
     InspectNode(Option<NodeId>),
     /// Inspect the element at a viewport point (context menu "Inspect").
@@ -238,6 +240,8 @@ pub enum FromContent {
     /// A finished network request of this tab.
     Network(rabbithole_engine::net::NetEvent),
     DomTree(Vec<DomRow>),
+    /// A dedicated reply: unlike Clipboard this must not start a selection search.
+    ElementsHtml(Option<String>),
     NodeDetails(NodeDetails),
     /// A cookie-consent dialog was handled automatically (or found and
     /// left alone).

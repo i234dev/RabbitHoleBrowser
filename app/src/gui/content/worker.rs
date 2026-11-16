@@ -562,6 +562,13 @@ impl Worker {
             ToContent::Settings(s) => self.apply_settings(s),
             ToContent::PrintPdf(path) => self.print_pdf(path),
             ToContent::InspectTree => self.send_dom_tree(),
+            ToContent::CopyElements => {
+                // The inspector rows are a shortened view, not the document.
+                // Serialize on demand, including hidden/script/style/template
+                // contents, attributes and text without any UI row/length cap.
+                let html = self.page.as_ref().map(|page| page.doc.serialize(rabbithole_engine::dom::Document::ROOT, false));
+                self.send(FromContent::ElementsHtml(html));
+            }
             ToContent::InspectNode(node) => self.inspect_node(node),
             ToContent::InspectAt { x, y } => {
                 let node = self.page.as_ref().and_then(|p| p.node_at_viewport(x, y));

@@ -1618,6 +1618,7 @@ impl App {
                     self.request_redraw();
                 }
             }
+            FromContent::ElementsHtml(html) => self.copy_elements_result(html),
             FromContent::DomTree(rows) => {
                 self.tabs[idx].inspector.dom = rows;
                 if active {
