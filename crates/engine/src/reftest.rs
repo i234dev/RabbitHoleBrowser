@@ -604,6 +604,7 @@ mod tests {
               document.documentElement.addEventListener('TestRendered',()=>{
                 const spin=()=>{
                   document.documentElement.classList.remove('reftest-wait');
+                  expireReftestWatchdog();
                   while(true){}
                 };
                 if(MICROTASK)Promise.resolve().then(spin);else spin();
@@ -615,9 +616,18 @@ mod tests {
                 rabbithole_net::Url::parse("https://example.test/").unwrap(),
                 Viewport { width: WIDTH, height: HEIGHT },
             );
-            // A short budget belongs only to this test page, not the browser default.
-            let test_budget = Some(Duration::from_millis(10));
-            page.script.host.as_mut().unwrap().realm().set_task_budget(test_budget);
+            // Reach the partial-completion state before expiring the real
+            // watchdog. A 10ms task budget could abort before the callback
+            // removed the wait marker, especially while compiling under JIT.
+            // Only this test realm exposes the explicit expiration helper.
+            let test_budget = Some(Duration::from_secs(2));
+            let realm = page.script.host.as_mut().unwrap().realm();
+            realm.set_task_budget(test_budget);
+            let expire = realm.new_native_function("expireReftestWatchdog", 0, |realm, _, _| {
+                realm.set_deadline(Some(Instant::now()));
+                Ok(rabbithole_script::js::Value::Undefined)
+            });
+            realm.define_global("expireReftestWatchdog", rabbithole_script::js::Value::Object(expire));
             let error = finish_render(&engine, &mut page, Duration::from_secs(2)).unwrap_err();
             assert!(!waiting(&page), "microtask={microtask}");
             assert!(page.script.watchdog_abort_count() > 0, "microtask={microtask}");
