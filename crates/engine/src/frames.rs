@@ -753,11 +753,19 @@ impl Engine {
                     // keeps its pixel size (its source rectangle is in raster
                     // pixels); a resized frame needs a new display list.
                     if let Some(old) = old.as_ref().filter(|o| o.width == img.width && o.height == img.height) {
-                        for it in page.display_list.items.iter_mut() {
-                            if let rabbithole_layout::DisplayItem::Image { image, .. } = it {
-                                if Arc::ptr_eq(image, old) {
-                                    *image = img.clone();
-                                    patched = true;
+                        let first = page.display_list.items.iter().position(|it| {
+                            matches!(it, rabbithole_layout::DisplayItem::Image { image, .. } if Arc::ptr_eq(image, old))
+                        });
+                        if let Some(first) = first {
+                            // The cached canvas still contains the old image.
+                            // Save it before patching, once per painted list.
+                            page.incr.display_list_will_change(&page.display_list);
+                            for it in &mut page.display_list.items[first..] {
+                                if let rabbithole_layout::DisplayItem::Image { image, .. } = it {
+                                    if Arc::ptr_eq(image, old) {
+                                        *image = img.clone();
+                                        patched = true;
+                                    }
                                 }
                             }
                         }

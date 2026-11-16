@@ -165,6 +165,15 @@ impl IncrementalState {
         self.scroll_seen.insert(node, offset);
     }
 
+    /// Preserve the painted list before an in-place image update. Further
+    /// updates before painting must keep that first snapshot, not the last
+    /// intermediate list; unknown canvases already require a full repaint.
+    pub(crate) fn display_list_will_change(&mut self, old: &rabbithole_layout::DisplayList) {
+        if matches!(self.canvas, CanvasSync::Current(_)) {
+            self.display_list_replaced(old.clone());
+        }
+    }
+
     /// A new display list replaced `old`.
     pub(crate) fn display_list_replaced(&mut self, old: rabbithole_layout::DisplayList) {
         if let CanvasSync::Current(s) = self.canvas {
