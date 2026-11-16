@@ -532,12 +532,6 @@ impl Asm {
         self.op_mem(Some(0xf2), false, &[0x0f, 0x10], x, m);
         self.note(at, || format!("movsd xmm{x}, {}", mem_str(m)));
     }
-    /// `movsd xmm_dst, xmm_src` (copy the low 64 bits).
-    pub fn movsd_rr(&mut self, dst: u8, src: u8) {
-        let at = self.pos();
-        self.op_rr(Some(0xf2), false, &[0x0f, 0x10], dst, src);
-        self.note(at, || format!("movsd xmm{dst}, xmm{src}"));
-    }
     /// `addsd/subsd/mulsd/divsd dst, src`
     pub fn sse_rr(&mut self, op: u8, dst: u8, src: u8) {
         let at = self.pos();
@@ -679,10 +673,6 @@ mod tests {
         assert_eq!(enc(|a| a.cmp_rr64(RAX, R13)), [0x4c, 0x39, 0xe8]);
         assert_eq!(enc(|a| a.movq_x_r(XMM0, RAX)), [0x66, 0x48, 0x0f, 0x6e, 0xc0]);
         assert_eq!(enc(|a| a.movq_r_x(RCX, XMM1)), [0x66, 0x48, 0x0f, 0x7e, 0xc9]);
-        assert_eq!(enc(|a| a.movsd_rr(XMM0, XMM1)), [0xf2, 0x0f, 0x10, 0xc1]);
-        assert_eq!(enc(|a| a.movsd_rr(8, 9)), [0xf2, 0x45, 0x0f, 0x10, 0xc1]);
-        assert_eq!(enc(|a| a.movsd_rr(8, 1)), [0xf2, 0x44, 0x0f, 0x10, 0xc1]);
-        assert_eq!(enc(|a| a.movsd_rr(1, 8)), [0xf2, 0x41, 0x0f, 0x10, 0xc8]);
         assert_eq!(enc(|a| a.sse_rr(SSE_ADD, XMM0, XMM1)), [0xf2, 0x0f, 0x58, 0xc1]);
         assert_eq!(enc(|a| a.ucomisd(XMM0, XMM1)), [0x66, 0x0f, 0x2e, 0xc1]);
         assert_eq!(enc(|a| a.load64(RAX, Mem::index(RCX, RDX, 4, 0))), [0x48, 0x8b, 0x04, 0x91]);

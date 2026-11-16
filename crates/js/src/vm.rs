@@ -654,6 +654,15 @@ impl Realm {
         let cb = self.frames[fi].base as usize + b;
         let Some(id) = self.vstack[cb].as_object() else { return Ok(false) };
         let Some(obj) = self.heap.try_get(id) else { return Ok(false) };
+        // An empty buffer needs no take/clear/restore for a non-indirect
+        // callee. Keep the original clearing path when it contains values.
+        if self.arg_buf.is_empty() {
+            match &obj.kind {
+                ObjectKind::Bound(_) => {}
+                ObjectKind::Native(n) if n.intrinsic == INTRINSIC_FN_CALL || n.intrinsic == INTRINSIC_FN_APPLY => {}
+                _ => return Ok(false),
+            }
+        }
         let mut buf = std::mem::take(&mut self.arg_buf);
         buf.clear();
         let (target, this) = match &obj.kind {

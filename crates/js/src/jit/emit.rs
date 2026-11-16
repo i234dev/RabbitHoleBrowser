@@ -4,12 +4,9 @@
 //! `ctx.slots` after every helper), `r13` = `TAG_MIN` (first non-number
 //! bit pattern, also `undefined`), `r14` = `TAG_BIGINT` (first reference
 //! counted pattern), `r15` = constants, `rbp` = frame pointer. Values are
-//! materialized by ordinary templates at each instruction boundary. A
-//! guarded pair of adjacent pure arithmetic ops may keep its intermediate
-//! in a register (omitting its store when both destinations are the same).
-//! Guards fail before writes; required results are materialized before
-//! continuing. Each public bytecode PC retains its independent ordinary
-//! entry, without facts carried across a helper, branch or safe point.
+//! never kept in registers across instructions: every instruction reads
+//! its operands from the frame and writes its result back, so any
+//! instruction boundary is a valid entry or exit point.
 //!
 //! Every instruction is classified by an exhaustive `match` (no wildcard):
 //! a native fast path that falls back to a helper when the types do not
@@ -45,21 +42,6 @@ const IC_MID_SHAPE: i32 = std::mem::offset_of!(crate::bytecode::PropIc, mid_shap
 const CANON_NAN: u64 = 0x7FF8_0000_0000_0000;
 const ONE: u64 = 0x3FF0_0000_0000_0000;
 const SIGN: u64 = 0x8000_0000_0000_0000;
-
-/// Exactly one pure arithmetic bytecode; no generic operators or helpers.
-#[derive(Clone, Copy)]
-struct NumericStep { sse: u8, d: u16, a: u16, b: Result<u16, u32> }
-
-fn numeric_step(op: Op) -> Option<NumericStep> {
-    let (sse,d,a,b) = match op {
-        Op::AddRR(d,a,b) => (SSE_ADD,d,a,Ok(b)), Op::AddRK(d,a,k) => (SSE_ADD,d,a,Err(k as u32)),
-        Op::SubRR(d,a,b) => (SSE_SUB,d,a,Ok(b)), Op::SubRK(d,a,k) => (SSE_SUB,d,a,Err(k as u32)),
-        Op::MulRR(d,a,b) => (SSE_MUL,d,a,Ok(b)), Op::MulRK(d,a,k) => (SSE_MUL,d,a,Err(k as u32)),
-        Op::DivRR(d,a,b) => (SSE_DIV,d,a,Ok(b)), Op::DivRK(d,a,k) => (SSE_DIV,d,a,Err(k as u32)),
-        _ => return None,
-    };
-    Some(NumericStep { sse,d,a,b })
-}
 /// Offsets from `TAG_MIN` of the special values.
 const NULL: i32 = 1;
 const EMPTY: i32 = 2;
@@ -288,74 +270,6 @@ struct Gen<'a> {
 impl Gen<'_> {
     fn lbl(&self, pc: usize) -> Label {
         self.labels[pc]
-    }
-
-    /// A standalone guarded pair before the ordinary first template. All
-    /// failures reach that template without changing a slot. Both public
-    /// bytecode entries remain independently usable by dispatch and OSR.
-    fn numeric_pair(&mut self, pc: usize) {
-        if pc + 2 >= self.code.ops.len() { return; }
-        let (Some(first),Some(second)) = (numeric_step(self.code.ops[pc]),numeric_step(self.code.ops[pc+1])) else { return };
-        if second.a != first.d && second.b != Ok(first.d) { return; }
-        for step in [first,second] {
-            if let Err(k) = step.b {
-                if !self.code.constants[k as usize].is_number() { return; }
-            }
-        }
-        let mut inputs = vec![first.a];
-        if let Ok(b) = first.b { inputs.push(b); }
-        if second.a != first.d { inputs.push(second.a); }
-        if let Ok(b) = second.b { if b != first.d { inputs.push(b); } }
-        inputs.sort_unstable();
-        inputs.dedup();
-        let ordinary = self.a.label();
-        for &input in &inputs {
-            self.load_num(RAX,input,ordinary);
-            if input==first.a { self.a.movq_x_r(XMM0,RAX); }
-            if first.b==Ok(input) { self.a.movq_x_r(XMM1,RAX); }
-            // A dependent binary consumer has at most one external slot.
-            if input!=first.d && (second.a==input || second.b==Ok(input)) {
-                self.a.movq_x_r(XMM2,RAX);
-            }
-        }
-        // A counted old destination requires the original store/release path.
-        // Objects and other uncounted values can be overwritten: no callback
-        // or collection occurs before both final slot values are materialized.
-        for (i,d) in [first.d,second.d].into_iter().enumerate() {
-            if inputs.contains(&d) || (i==1 && d==first.d) { continue; }
-            self.a.load64(RAX,slot(d));
-            self.a.cmp_rr64(RAX,RCMIN);
-            self.a.jcc(CC_AE,ordinary);
-        }
-        #[cfg(test)]
-        {
-            // The test witness is a direct TLS increment, after every guard
-            // with checked operands held in XMM. RDX is scratch; no ABI call occurs.
-            let counter = super::NUMERIC_PAIR_HITS.with(|hits| hits.as_ptr());
-            self.a.mov_imm64(RDX,counter as usize as u64);
-            self.a.alu_mi64(Alu::Add,Mem::base(RDX,0),1);
-        }
-        if let Err(k)=first.b { self.a.movsd_load(XMM1,konst(k)); }
-        if let Err(k)=second.b { self.a.movsd_load(XMM2,konst(k)); }
-        self.a.sse_rr(first.sse,XMM0,XMM1);
-        self.a.movq_r_x(RAX,XMM0);
-        self.canon();
-        if first.d != second.d { self.a.store64(slot(first.d),RAX); }
-        // A consumer reading d1 must see the canonical NEW result, not the
-        // pre-pair slot. XMM2 retains its checked external operand or constant.
-        if second.a == first.d { self.a.movq_x_r(XMM0,RAX); }
-        else { self.a.movsd_rr(XMM0,XMM2); }
-        match second.b {
-            Ok(b) if b==first.d => self.a.movq_x_r(XMM1,RAX),
-            _ => self.a.movsd_rr(XMM1,XMM2),
-        }
-        self.a.sse_rr(second.sse,XMM0,XMM1);
-        self.a.movq_r_x(RAX,XMM0);
-        self.canon();
-        self.a.store64(slot(second.d),RAX);
-        let next = self.lbl(pc+2);
-        self.a.jmp(next);
-        self.a.bind(ordinary);
     }
 
     /// Call `helper(ctx, arg)` inline; on a non-zero status leave through
@@ -1517,7 +1431,6 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
         if g.a.listing_enabled() {
             g.a.comment(|| format!("{pc}: {op:?}"));
         }
-        g.numeric_pair(pc);
         g.emit(pc, *op);
     }
     // Defensive: execution never reaches here (validated).
