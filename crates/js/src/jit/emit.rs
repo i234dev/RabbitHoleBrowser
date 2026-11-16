@@ -309,7 +309,15 @@ impl Gen<'_> {
         inputs.sort_unstable();
         inputs.dedup();
         let ordinary = self.a.label();
-        for &input in &inputs { self.load_num(RAX,input,ordinary); }
+        for &input in &inputs {
+            self.load_num(RAX,input,ordinary);
+            if input==first.a { self.a.movq_x_r(XMM0,RAX); }
+            if first.b==Ok(input) { self.a.movq_x_r(XMM1,RAX); }
+            // A dependent binary consumer has at most one external slot.
+            if input!=first.d && (second.a==input || second.b==Ok(input)) {
+                self.a.movq_x_r(XMM2,RAX);
+            }
+        }
         // A counted old destination requires the original store/release path.
         // Objects and other uncounted values can be overwritten: no callback
         // or collection occurs before both final slot values are materialized.
@@ -322,25 +330,24 @@ impl Gen<'_> {
         #[cfg(test)]
         {
             // The test witness is a direct TLS increment, after every guard
-            // and before loading operands. RDX is scratch; no ABI call occurs.
+            // with checked operands held in XMM. RDX is scratch; no ABI call occurs.
             let counter = super::NUMERIC_PAIR_HITS.with(|hits| hits.as_ptr());
             self.a.mov_imm64(RDX,counter as usize as u64);
             self.a.alu_mi64(Alu::Add,Mem::base(RDX,0),1);
         }
-        self.a.movsd_load(XMM0,slot(first.a));
-        self.a.movsd_load(XMM1,match first.b { Ok(b)=>slot(b),Err(k)=>konst(k) });
+        if let Err(k)=first.b { self.a.movsd_load(XMM1,konst(k)); }
+        if let Err(k)=second.b { self.a.movsd_load(XMM2,konst(k)); }
         self.a.sse_rr(first.sse,XMM0,XMM1);
         self.a.movq_r_x(RAX,XMM0);
         self.canon();
         if first.d != second.d { self.a.store64(slot(first.d),RAX); }
         // A consumer reading d1 must see the canonical NEW result, not the
-        // pre-pair slot. RAX survives the other operand's memory load.
+        // pre-pair slot. XMM2 retains its checked external operand or constant.
         if second.a == first.d { self.a.movq_x_r(XMM0,RAX); }
-        else { self.a.movsd_load(XMM0,slot(second.a)); }
+        else { self.a.movsd_rr(XMM0,XMM2); }
         match second.b {
             Ok(b) if b==first.d => self.a.movq_x_r(XMM1,RAX),
-            Ok(b) => self.a.movsd_load(XMM1,slot(b)),
-            Err(k) => self.a.movsd_load(XMM1,konst(k)),
+            _ => self.a.movsd_rr(XMM1,XMM2),
         }
         self.a.sse_rr(second.sse,XMM0,XMM1);
         self.a.movq_r_x(RAX,XMM0);
