@@ -18,6 +18,7 @@ mod focus;
 mod font_scopes;
 mod popups;
 mod service_workers;
+mod scroll_events;
 
 /// Messages received by the fake UI: (when, tab id, message).
 type Received = Receiver<(Instant, u64, FromContent)>;
