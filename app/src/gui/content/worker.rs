@@ -1030,7 +1030,11 @@ impl Worker {
         }
         self.dirty = true;
         self.send(FromContent::ScrollTo { x, y });
-        self.dispatch_scroll_event();
+        // Coordinates change now; scroll is an event-loop notification. A
+        // handler can request another position after >16ms: dispatching here
+        // would recursively enter it again from apply_outcome, before input,
+        // painting or load-time script continuation can get another turn.
+        self.scroll_event_pending = true;
     }
 
     fn dispatch_scroll_event(&mut self) {
