@@ -506,7 +506,16 @@ impl Gen<'_> {
             Some(op) => self.a.sse_rr(op, XMM0, XMM1),
             None => self.a.call_abs(h_mod as *const () as usize, "h_mod"),
         }
-        self.store_xmm0(d, slow);
+        if sse.is_some() && (d == a || b == Ok(d)) {
+            // The aliased slot passed load_num, and this SSE path has no
+            // intervening helper or slot write. Its old value needs no Rc
+            // release. Keep the result canonical and materialized as usual.
+            self.a.movq_r_x(RAX, XMM0);
+            self.canon();
+            self.a.store64(slot(d), RAX);
+        } else {
+            self.store_xmm0(d, slow);
+        }
     }
 
     fn bitop(&mut self, pc: usize, kd: u8, d: u16, a: u16, b: Result<u16, u32>) {
