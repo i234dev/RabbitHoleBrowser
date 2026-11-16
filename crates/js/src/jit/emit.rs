@@ -4,9 +4,9 @@
 //! `ctx.slots` after every helper), `r13` = `TAG_MIN` (first non-number
 //! bit pattern, also `undefined`), `r14` = `TAG_BIGINT` (first reference
 //! counted pattern), `r15` = constants, `rbp` = frame pointer. Values are
-//! never kept in registers across instructions: every instruction reads
-//! its operands from the frame and writes its result back, so any
-//! instruction boundary is a valid entry or exit point.
+//! materialized in the frame at every instruction boundary. Adjacent
+//! SSE arithmetic may also forward its canonical result over a private,
+//! helper-free edge; every public entry still reads and checks its slots.
 //!
 //! Every instruction is classified by an exhaustive `match` (no wildcard):
 //! a native fast path that falls back to a helper when the types do not
@@ -54,6 +54,15 @@ fn slot(i: u16) -> Mem {
 
 fn konst(i: u32) -> Mem {
     Mem::base(CONSTS, i as i32 * 8)
+}
+
+/// Only these scalar SSE templates may share an adjacent numeric edge.
+fn numeric_step(op: Op) -> Option<(u16, u16, Result<u16, u32>)> {
+    match op {
+        Op::AddRR(d, a, b) | Op::SubRR(d, a, b) | Op::MulRR(d, a, b) | Op::DivRR(d, a, b) => Some((d, a, Ok(b))),
+        Op::AddRK(d, a, k) | Op::SubRK(d, a, k) | Op::MulRK(d, a, k) | Op::DivRK(d, a, k) => Some((d, a, Err(k as u32))),
+        _ => None,
+    }
 }
 
 /// What an instruction compiles to.
@@ -258,6 +267,8 @@ struct Gen<'a> {
     a: Asm,
     code: &'a FunctionCode,
     labels: Vec<Label>,
+    /// Consumer slot and private entry; never used by the public PC table.
+    numeric_edges: Vec<Option<(u16, Label)>>,
     stubs: Vec<Stub>,
     /// Shared: non-zero helper status (exit or internal jump).
     status: Label,
@@ -498,7 +509,7 @@ impl Gen<'_> {
         } else {
             self.exec_slow(pc)
         };
-        if !self.operands(a, b, slow) {
+        if !self.arith_operands(pc, a, b, slow) {
             self.a.jmp(slow);
             return;
         }
@@ -506,7 +517,71 @@ impl Gen<'_> {
             Some(op) => self.a.sse_rr(op, XMM0, XMM1),
             None => self.a.call_abs(h_mod as *const () as usize, "h_mod"),
         }
-        self.store_xmm0(d, slow);
+        self.a.movq_r_x(RAX, XMM0);
+        self.canon();
+        self.arith_store(pc, d, slow);
+    }
+
+    /// The private entry skips only the produced slot's numeric loads.
+    /// RAX (and RCX when it is the right operand) contains canonical bits.
+    fn arith_operands(&mut self, pc: usize, a: u16, b: Result<u16, u32>, slow: Label) -> bool {
+        let Some((source, entry)) = self.numeric_edges[pc] else {
+            return self.operands(a, b, slow);
+        };
+        match b {
+            Ok(b) => {
+                if a == source {
+                    self.load_num(RAX, a, slow);
+                    if b == source { self.load_num(RCX, b, slow); }
+                    self.a.bind(entry);
+                    if b != source { self.load_num(RCX, b, slow); }
+                } else {
+                    self.load_num(RCX, b, slow);
+                    self.a.bind(entry);
+                    self.load_num(RAX, a, slow);
+                }
+                self.a.movq_x_r(XMM0, RAX);
+                self.a.movq_x_r(XMM1, RCX);
+            }
+            Err(k) => {
+                self.load_num(RAX, a, slow);
+                self.a.bind(entry);
+                if !self.load_knum(XMM1, k) { return false; }
+                self.a.movq_x_r(XMM0, RAX);
+            }
+        }
+        true
+    }
+
+    /// Always materialize the first result. Counted destinations, including
+    /// releases that do not need h_drop, resume at the next public PC.
+    fn arith_store(&mut self, pc: usize, d: u16, slow: Label) {
+        let Some((_, entry)) = self.numeric_edges.get(pc + 1).copied().flatten() else {
+            self.store(d, slow);
+            return;
+        };
+        self.a.load64(RDX, slot(d));
+        if self.rc {
+            self.a.store64(slot(d), RAX);
+            let from = self.a.label();
+            self.a.cmp_rr64(RDX, RCMIN);
+            self.a.jcc(CC_AE, from);
+            self.stubs.push(Stub::Release { from, reg: RDX, resume: self.lbl(pc + 1) });
+        } else {
+            self.a.cmp_rr64(RDX, RCMIN);
+            self.a.jcc(CC_AE, slow);
+            self.a.store64(slot(d), RAX);
+        }
+        #[cfg(test)]
+        super::NUMERIC_EDGE_HITS.with(|hits| {
+            // RAX/RCX carry values; RDX is dead on this no-release edge.
+            self.a.mov_imm64(RDX, hits.as_ptr() as usize as u64);
+            self.a.alu_mi64(Alu::Add, Mem::base(RDX, 0), 1);
+        });
+        if numeric_step(self.code.ops[pc + 1]).unwrap().2 == Ok(d) {
+            self.a.mov_rr64(RCX, RAX);
+        }
+        self.a.jmp(entry);
     }
 
     fn bitop(&mut self, pc: usize, kd: u8, d: u16, a: u16, b: Result<u16, u32>) {
@@ -1408,6 +1483,15 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
     let n = code.ops.len();
     let mut a = Asm::new(dump);
     let labels: Vec<Label> = (0..n).map(|_| a.label()).collect();
+    let mut numeric_edges = vec![None; n];
+    for pc in 1..n {
+        if let (Some((d, _, first_b)), Some((_, second_a, second_b))) = (numeric_step(code.ops[pc - 1]), numeric_step(code.ops[pc])) {
+            let numeric_constant = |b: Result<u16, u32>| b.map(|_| true).unwrap_or_else(|k| code.constants[k as usize].is_number());
+            if (second_a == d || second_b == Ok(d)) && numeric_constant(first_b) && numeric_constant(second_b) {
+                numeric_edges[pc] = Some((d, a.label()));
+            }
+        }
+    }
     let (status, dispatch, epilogue, table, interp) = (a.label(), a.label(), a.label(), a.label(), a.label());
     emit_prologue(&mut a);
     #[cfg(windows)]
@@ -1425,7 +1509,7 @@ pub(super) fn compile(code: &FunctionCode, dump: bool) -> Result<(super::CodeMem
     let dispatch_jump = a.pos();
     a.jmp_r(RAX);
 
-    let mut g = Gen { a, code, labels, stubs: Vec::new(), status, rc: super::rc_inline(), lay: if super::rc_inline() { super::layout::get() } else { None } };
+    let mut g = Gen { a, code, labels, numeric_edges, stubs: Vec::new(), status, rc: super::rc_inline(), lay: if super::rc_inline() { super::layout::get() } else { None } };
     for (pc, op) in code.ops.iter().enumerate() {
         g.a.bind(g.labels[pc]);
         if g.a.listing_enabled() {
